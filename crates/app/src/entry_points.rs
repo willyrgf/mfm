@@ -222,7 +222,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn app_launch_concurrent_duplicates_admit_once_and_attach_rest() {
+    async fn evm_portfolio_launch_requires_runtime_config_before_admission() {
+        let fixture = EntryPointRunFixture::in_memory().await;
+        let prepared = fixture.prepare_sample_portfolio(None);
+        let run_id = prepared.request.run_id.clone();
+        let runners = crate::production_runner_registry(
+            crate::artifact_read_provider_from_retained(fixture.store.clone()),
+            None,
+        )
+        .expect("runners");
+        let services = crate::make_run_services_with_certification_registry(
+            runners,
+            fixture.store.clone(),
+            fixture.store.clone(),
+            fixture.prep.certification_registry.clone(),
+        );
+
+        let error = services
+            .launch_run(prepared.request)
+            .await
+            .expect_err("missing runtime config rejects EVM portfolio before admission");
+
+        assert_eq!(error.code, "LaunchRunnerUnavailable");
+        assert!(fixture
+            .store
+            .load_run_stream(&run_id)
+            .await
+            .expect("run stream")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn app_launch_concurrent_duplicates_admit_once_and_dedupe_rest() {
         const LAUNCHERS: usize = 8;
 
         let fixture = EntryPointRunFixture::in_memory().await;
@@ -257,7 +288,10 @@ mod tests {
         assert_eq!(
             statuses
                 .iter()
-                .filter(|status| **status == crate::RunLaunchOutcomeStatus::Attached)
+                .filter(|status| {
+                    **status == crate::RunLaunchOutcomeStatus::Attached
+                        || **status == crate::RunLaunchOutcomeStatus::AlreadyDriving
+                })
                 .count(),
             LAUNCHERS - 1
         );
@@ -514,39 +548,25 @@ mod tests {
         ) -> crate::PreparedEntryPointRunLaunch {
             self.prepare_portfolio_launch(sample_portfolio_config_json(), distinct_run_key)
         }
-
-        fn services(
-            &self,
-            store: mfm_store::v1::AsyncInMemoryRunStore,
-        ) -> crate::RunServices<
-            mfm_store::v1::AsyncInMemoryRunStore,
-            mfm_store::v1::AsyncInMemoryRunStore,
-        > {
-            let runners = crate::production_runner_registry(
-                crate::artifact_read_provider_from_retained(store.clone()),
-            )
-            .expect("runners");
-            crate::make_run_services_with_certification_registry(
-                runners,
-                store.clone(),
-                store,
-                self.certification_registry.clone(),
-            )
-        }
     }
 
     struct EntryPointRunFixture {
         prep: EntryPointPrepFixture,
         store: mfm_store::v1::AsyncInMemoryRunStore,
+        _runtime_config_dir: tempfile::TempDir,
+        runtime_config_path: std::path::PathBuf,
     }
 
     impl EntryPointRunFixture {
         async fn in_memory() -> Self {
             let store = mfm_store::v1::AsyncInMemoryRunStore::default();
             let trust_scope_id = store.load_trust_scope_id().await.expect("trust scope");
+            let (runtime_config_dir, runtime_config_path) = test_runtime_config();
             Self {
                 prep: EntryPointPrepFixture::with_trust_scope_id(trust_scope_id),
                 store,
+                _runtime_config_dir: runtime_config_dir,
+                runtime_config_path,
             }
         }
 
@@ -563,7 +583,17 @@ mod tests {
             mfm_store::v1::AsyncInMemoryRunStore,
             mfm_store::v1::AsyncInMemoryRunStore,
         > {
-            self.prep.services(self.store.clone())
+            let runners = crate::production_runner_registry(
+                crate::artifact_read_provider_from_retained(self.store.clone()),
+                Some(&self.runtime_config_path),
+            )
+            .expect("runners");
+            crate::make_run_services_with_certification_registry(
+                runners,
+                self.store.clone(),
+                self.store.clone(),
+                self.prep.certification_registry.clone(),
+            )
         }
 
         async fn run_admitted_count(&self, run_id: &mfm_ids::RunId) -> usize {
@@ -580,6 +610,23 @@ mod tests {
                 })
                 .count()
         }
+    }
+
+    fn test_runtime_config() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("runtime config tempdir");
+        let path = dir.path().join("runtime.toml");
+        std::fs::write(
+            &path,
+            r#"
+[evm.sources."ethereum-mainnet"]
+rpc_url = "http://127.0.0.1:1"
+
+[evm.routes."ethereum-mainnet"]
+source_ref = "ethereum-mainnet"
+"#,
+        )
+        .expect("write runtime config");
+        (dir, path)
     }
 
     fn sample_portfolio_config_json() -> String {

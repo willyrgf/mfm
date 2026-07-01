@@ -59,7 +59,7 @@ Use Cargo and focused checks while developing:
 
 For parity tests that need Postgres, Reth, or other live services, start those services manually and
 run the focused Cargo test with explicit environment variables such as `DATABASE_URL`,
-`RETH_HTTP_PORT`, or `MFM_EVM_RPC_SOURCES_JSON`.
+`RETH_HTTP_PORT`, or `MFM_RUNTIME_CONFIG_FILE`.
 
 Before each commit, run the Nixfied managed gates:
 

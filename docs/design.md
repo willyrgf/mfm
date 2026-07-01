@@ -105,6 +105,7 @@ Domain and product crates sit outside the kernel:
 | `crates/ops/*` | Typed operation planners that assemble state programs |
 | `crates/adapters/*` | Runner bindings from state intent to capabilities, evidence phases, and domain replay verifiers |
 | `crates/transports/*` | Live and replay capability backend implementations |
+| `crates/runtime-config` | Runtime-only config parsing, value-source resolution, validation, and redaction |
 | `crates/storages/*` | Implementations of typed store and typed artifact contracts |
 | `crates/app` | Assembly of registries, stores, artifacts, start/resume/replay, and public output |
 | `bin/cli`, `bin/rest-api` | Transport-only user surfaces |

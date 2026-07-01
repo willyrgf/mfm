@@ -2,7 +2,6 @@
 #![allow(clippy::disallowed_methods)]
 
 use mfm_app::RunModeStatus;
-use serde::Deserialize;
 
 mod support;
 
@@ -10,8 +9,6 @@ const NETWORK_ID: &str = "reth-local";
 const SYMBOL_ID: &str = "eth.native.reth-local";
 const CONTROL_SCOPE: &str = "parity/portfolio-snapshot/eth-only";
 const DEFAULT_PARITY_RETH_HTTP_PORT: &str = "8565";
-const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
-const ENV_EVM_NETWORK_ROUTES_JSON: &str = "MFM_EVM_NETWORK_ROUTES_JSON";
 
 fn canonical_portfolio_snapshot_payload(
     wallet_address: &str,
@@ -103,30 +100,7 @@ fn parse_u64_hex(s: &str) -> u64 {
     u64::from_str_radix(rest, 16).expect("hex u64")
 }
 
-#[derive(Deserialize)]
-struct RpcSource {
-    id: String,
-    rpc_url: String,
-}
-
-#[derive(Deserialize)]
-struct RpcSourceRegistry {
-    sources: Vec<RpcSource>,
-}
-
-fn required_rpc_url_for_source(source_id: &str) -> String {
-    if let Ok(raw) = std::env::var(ENV_EVM_RPC_SOURCES_JSON) {
-        let registry: RpcSourceRegistry =
-            serde_json::from_str(&raw).expect("MFM_EVM_RPC_SOURCES_JSON must decode");
-        if let Some(source) = registry
-            .sources
-            .into_iter()
-            .find(|source| source.id == source_id)
-        {
-            return source.rpc_url;
-        }
-    }
-
+fn required_rpc_url() -> String {
     let port = std::env::var("RETH_HTTP_PORT")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -160,7 +134,7 @@ async fn rpc_call(rpc_url: &str, method: &str, params: serde_json::Value) -> ser
 
 #[tokio::test]
 async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
-    let rpc_url = required_rpc_url_for_source(NETWORK_ID);
+    let rpc_url = required_rpc_url();
     let control_scope = format!("{CONTROL_SCOPE}.{}", uuid::Uuid::new_v4().simple());
 
     let chain_id_hex = rpc_call(&rpc_url, "eth_chainId", serde_json::json!([])).await;
@@ -168,7 +142,7 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
         .as_str()
         .map(parse_u64_hex)
         .expect("eth_chainId hex");
-    set_runtime_source_registry(chain_id, &rpc_url);
+    let _runtime_config = set_runtime_source_registry(&rpc_url);
 
     // Intentionally use a fixed address. This keeps the test independent of `eth_accounts`
     // support/configuration in the node.
@@ -221,40 +195,6 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
     assert_eq!(report_wallet_usd["net_value_dec"], *observation_value);
 }
 
-fn set_runtime_source_registry(chain_id: u64, rpc_url: &str) {
-    let mut source = serde_json::json!({
-        "id": NETWORK_ID,
-        "expected_chain_id": chain_id,
-        "rpc_url": rpc_url,
-    });
-    source
-        .as_object_mut()
-        .expect("source object")
-        .insert(["author", "ization"].concat(), serde_json::Value::Null);
-    std::env::set_var(
-        ENV_EVM_RPC_SOURCES_JSON,
-        serde_json::json!({
-            "sources": [
-                source
-            ],
-            "policies": [
-                {
-                    "id": NETWORK_ID,
-                    "ordered_sources": [NETWORK_ID]
-                }
-            ]
-        })
-        .to_string(),
-    );
-    std::env::set_var(
-        ENV_EVM_NETWORK_ROUTES_JSON,
-        serde_json::json!([
-            {
-                "network_id": NETWORK_ID,
-                "source_ref": NETWORK_ID,
-                "policy_id": NETWORK_ID
-            }
-        ])
-        .to_string(),
-    );
+fn set_runtime_source_registry(rpc_url: &str) -> support::EnvVarRestore {
+    support::set_evm_runtime_config_env_for_test(NETWORK_ID, rpc_url)
 }

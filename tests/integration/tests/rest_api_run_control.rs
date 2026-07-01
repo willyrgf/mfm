@@ -208,7 +208,16 @@ async fn start_rejects_raw_run_id_field_as_unknown_json() {
 
 #[tokio::test]
 async fn start_distinct_run_key_derives_separate_run_without_persisting_raw_key() {
-    let state = in_memory_state();
+    let rpc_url = test_support::start_portfolio_rpc_mock(31337).await;
+    let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
+    let runtime_config_path = test_support::write_evm_runtime_config_for_test(
+        runtime_config_dir.path(),
+        PORTFOLIO_NETWORK_ID,
+        &rpc_url,
+        None,
+    );
+    let mut state = in_memory_state();
+    state.runtime_config_path = Some(runtime_config_path);
     let app = mfm_rest_api::make_app(state.clone());
     let raw_key = "distinct-alpha";
     let first_run_id = test_support::prepare_portfolio_launch_for_store(
@@ -312,7 +321,7 @@ async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attemp
     let _env_guard = RPC_ENV_LOCK.lock().await;
     let rpc_url = test_support::start_portfolio_rpc_mock(31337).await;
     let _env_restore =
-        test_support::set_evm_rpc_sources_env_for_test(PORTFOLIO_NETWORK_ID, 31337, rpc_url);
+        test_support::set_evm_runtime_config_env_for_test(PORTFOLIO_NETWORK_ID, &rpc_url);
     let state = in_memory_state();
     let config = portfolio_snapshot_config();
     let app = mfm_rest_api::make_app(state.clone());

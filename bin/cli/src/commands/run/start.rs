@@ -35,6 +35,10 @@ pub(crate) struct StartArgs {
     #[arg(long, value_name = "KEY")]
     pub distinct_run_key: Option<String>,
 
+    /// Runtime configuration file for live capabilities (default: $MFM_RUNTIME_CONFIG_FILE).
+    #[arg(long, value_name = "PATH")]
+    pub runtime_config: Option<PathBuf>,
+
     /// Storage configuration for certified typed run events and artifacts.
     #[command(flatten)]
     pub stores: RunStoresArgs,
@@ -103,7 +107,7 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
     let authored_config = AuthoredConfig::new(args.config_format.into(), config_bytes)?;
     let entry_point_registry = mfm_app::production_entry_point_op_registry()?;
     let certification_registry = mfm_app::production_certification_registry()?;
-    let services = connect_run_services(&args.stores).await?;
+    let services = connect_run_services(&args.stores, args.runtime_config.as_deref()).await?;
     let trust_scope_id = services.load_trust_scope_id().await?;
     let prepared = mfm_app::prepare_entry_point_run_launch(EntryPointRunLaunchInput {
         entry_point_registry: &entry_point_registry,
@@ -227,6 +231,7 @@ mod tests {
             op_version: None,
             config_format: ConfigFormatArg::Json,
             distinct_run_key: None,
+            runtime_config: None,
             stores,
         }
     }

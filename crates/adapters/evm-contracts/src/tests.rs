@@ -2,7 +2,7 @@ use super::*;
 use mfm_evm_capabilities::{
     EvmBlockReadResponse, EvmCallReadResponse, EvmCapabilityFuture, EvmChainIdentityResponse,
     EvmFeeReadResponse, EvmGasEstimateResponse, EvmLogsReadResponse, EvmNonceReadResponse,
-    EvmReceiptReadResponse, RedactedEvmSourceEvidence,
+    EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef, RedactedEvmSourceEvidence,
 };
 use mfm_evm_signing::{
     primitive_signature_from_bytes, recover_signing_address,
@@ -15,18 +15,13 @@ use mfm_signing::{
 use serde_json::json;
 use std::sync::Mutex;
 
-fn route() -> EvmContractRuntimeRoute {
-    EvmContractRuntimeRoute::new(
-        EvmSourceRef::new("local").expect("source"),
-        EvmSourcePolicyId::new("test").expect("policy"),
-    )
-}
-
-fn evidence() -> RedactedEvmSourceEvidence {
+fn evidence_for_guard(guard: &EvmChainGuard) -> RedactedEvmSourceEvidence {
     RedactedEvmSourceEvidence {
-        source_ref: route().source_ref().clone(),
-        policy_id: route().policy_id().clone(),
-        chain_id: 1,
+        network_id: guard.network_id().clone(),
+        expected_chain_id: guard.expected_chain_id(),
+        observed_chain_id: guard.expected_chain_id(),
+        source_ref: EvmSourceRef::new("local").expect("source"),
+        policy_id: EvmSourcePolicyId::new("test").expect("policy"),
     }
 }
 
@@ -92,7 +87,6 @@ fn deploy_intent(config: &ValidatedConfig<DeployPhaseConfig>) -> ContractDeployI
 }
 
 struct DeployPreparationFixture {
-    route: EvmContractRuntimeRoute,
     providers: TestEvmProviders,
     config: ValidatedConfig<DeployPhaseConfig>,
     intent: ContractDeployIntent,
@@ -100,12 +94,10 @@ struct DeployPreparationFixture {
 
 impl DeployPreparationFixture {
     fn new(style: &str) -> Self {
-        let route = route();
         let providers = TestEvmProviders::preparation();
         let config = validated_deploy_config(style);
         let intent = deploy_intent(&config);
         Self {
-            route,
             providers,
             config,
             intent,
@@ -113,7 +105,7 @@ impl DeployPreparationFixture {
     }
 
     fn adapter(&self) -> EvmContractLifecycleAdapter<'_> {
-        adapter(&self.route, &self.providers)
+        adapter(&self.providers)
     }
 
     async fn prepare(&self) -> PreparedContractMutation {
@@ -196,14 +188,11 @@ impl TestEvmProviders {
     }
 }
 
-fn runtime_from_provider(
-    route: EvmContractRuntimeRoute,
-    provider: TestEvmProviders,
-) -> EvmContractRuntime {
+fn runtime_from_provider(provider: TestEvmProviders) -> EvmContractRuntime {
     let provider = Arc::new(provider);
     let evm: Arc<dyn EvmContractProvider> = provider.clone();
     let signer: Arc<dyn SigningProvider> = provider;
-    EvmContractRuntime::new(route, evm, signer)
+    EvmContractRuntime::new(evm, signer)
 }
 
 fn unexpected_evm_call<'a, T>(capability: &'static str) -> EvmCapabilityFuture<'a, T> {
@@ -217,13 +206,13 @@ fn unexpected_signing_call<'a>() -> mfm_signing::SigningFuture<'a> {
 impl EvmChainIdentityProvider for TestEvmProviders {
     fn chain_identity<'a>(
         &'a self,
-        _request: &'a EvmChainIdentityRequest,
+        request: &'a EvmChainIdentityRequest,
     ) -> EvmCapabilityFuture<'a, EvmChainIdentityResponse> {
         match self.mode {
             TestEvmProviderMode::Preparation => Box::pin(async {
                 Ok(EvmChainIdentityResponse {
-                    evidence: evidence(),
-                    chain_id: 1,
+                    evidence: evidence_for_guard(&request.guard),
+                    chain_id: request.guard.expected_chain_id(),
                     client_version: Some("test-client".to_owned()),
                 })
             }),
@@ -235,12 +224,12 @@ impl EvmChainIdentityProvider for TestEvmProviders {
 impl EvmBlockReadProvider for TestEvmProviders {
     fn read_block<'a>(
         &'a self,
-        _request: &'a EvmBlockReadRequest,
+        request: &'a EvmBlockReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmBlockReadResponse> {
         match self.mode {
             TestEvmProviderMode::Finality => Box::pin(async {
                 Ok(EvmBlockReadResponse {
-                    evidence: evidence(),
+                    evidence: evidence_for_guard(&request.guard),
                     block_number: 64,
                     block_hash: B256::from([0x64; 32]),
                 })
@@ -258,7 +247,7 @@ impl EvmNonceReadProvider for TestEvmProviders {
         match self.mode {
             TestEvmProviderMode::Preparation => Box::pin(async {
                 Ok(EvmNonceReadResponse {
-                    evidence: evidence(),
+                    evidence: evidence_for_guard(&request.guard),
                     nonce: 7,
                 })
             }),
@@ -266,7 +255,7 @@ impl EvmNonceReadProvider for TestEvmProviders {
                 assert_eq!(request.block, EvmBlockSelector::Pending);
                 Box::pin(async move {
                     Ok(EvmNonceReadResponse {
-                        evidence: evidence(),
+                        evidence: evidence_for_guard(&request.guard),
                         nonce: pending_nonce,
                     })
                 })
@@ -279,12 +268,12 @@ impl EvmNonceReadProvider for TestEvmProviders {
 impl EvmFeeReadProvider for TestEvmProviders {
     fn read_fee<'a>(
         &'a self,
-        _request: &'a EvmFeeReadRequest,
+        request: &'a EvmFeeReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmFeeReadResponse> {
         match self.mode {
             TestEvmProviderMode::Preparation => Box::pin(async {
                 Ok(EvmFeeReadResponse {
-                    evidence: evidence(),
+                    evidence: evidence_for_guard(&request.guard),
                     base_fee_per_gas: Some(5),
                     priority_fee_per_gas: Some(3),
                     max_fee_per_gas: Some(11),
@@ -299,12 +288,12 @@ impl EvmFeeReadProvider for TestEvmProviders {
 impl EvmGasEstimateProvider for TestEvmProviders {
     fn estimate_gas<'a>(
         &'a self,
-        _request: &'a EvmGasEstimateRequest,
+        request: &'a EvmGasEstimateRequest,
     ) -> EvmCapabilityFuture<'a, EvmGasEstimateResponse> {
         match self.mode {
             TestEvmProviderMode::Preparation => Box::pin(async {
                 Ok(EvmGasEstimateResponse {
-                    evidence: evidence(),
+                    evidence: evidence_for_guard(&request.guard),
                     gas_limit: 21_000,
                 })
             }),
@@ -322,20 +311,22 @@ impl EvmTransactionSubmitProvider for TestEvmProviders {
             TestEvmProviderMode::Recovery { .. } => {
                 let submit_count = Arc::clone(&self.submit_count);
                 let transaction_hash = request.signed_payload.transaction_hash();
+                let evidence = evidence_for_guard(&request.guard);
                 Box::pin(async move {
                     *submit_count.lock().expect("submit count") += 1;
                     Ok(mfm_evm_capabilities::EvmTransactionSubmitResponse {
-                        evidence: evidence(),
+                        evidence,
                         transaction_hash,
                     })
                 })
             }
             TestEvmProviderMode::SubmitHashMismatch { returned_hash } => {
                 let submit_count = Arc::clone(&self.submit_count);
+                let evidence = evidence_for_guard(&request.guard);
                 Box::pin(async move {
                     *submit_count.lock().expect("submit count") += 1;
                     Ok(mfm_evm_capabilities::EvmTransactionSubmitResponse {
-                        evidence: evidence(),
+                        evidence,
                         transaction_hash: returned_hash,
                     })
                 })
@@ -353,10 +344,11 @@ impl EvmReceiptReadProvider for TestEvmProviders {
         match self.mode {
             TestEvmProviderMode::Recovery { receipt_mode, .. } => {
                 let transaction_hash = request.transaction_hash;
+                let evidence = evidence_for_guard(&request.guard);
                 Box::pin(async move {
                     match receipt_mode {
                         RecoveryReceiptMode::Landed => Ok(EvmReceiptReadResponse {
-                            evidence: evidence(),
+                            evidence,
                             transaction_hash,
                             block_number: 42,
                             status: true,
@@ -391,17 +383,18 @@ impl EvmNonceOccupancyReadProvider for TestEvmProviders {
         match self.mode {
             TestEvmProviderMode::Recovery { occupancy_mode, .. } => {
                 let nonce = request.nonce;
+                let evidence = evidence_for_guard(&request.guard);
                 Box::pin(async move {
                     match occupancy_mode {
                         RecoveryOccupancyMode::Unknown => {
                             Ok(mfm_evm_capabilities::EvmNonceOccupancyReadResponse {
-                                evidence: evidence(),
+                                evidence,
                                 outcome: EvmNonceOccupancy::Unknown,
                             })
                         }
                         RecoveryOccupancyMode::Occupied { transaction_hash } => {
                             Ok(mfm_evm_capabilities::EvmNonceOccupancyReadResponse {
-                                evidence: evidence(),
+                                evidence,
                                 outcome: EvmNonceOccupancy::Occupied {
                                     transaction_hash,
                                     block_number: Some(43 + nonce),
@@ -513,12 +506,8 @@ fn expected_test_signer_address(style: &str) -> String {
     format!("{recovered:?}")
 }
 
-fn adapter<'a>(
-    route: &'a EvmContractRuntimeRoute,
-    providers: &'a TestEvmProviders,
-) -> EvmContractLifecycleAdapter<'a> {
+fn adapter(providers: &TestEvmProviders) -> EvmContractLifecycleAdapter<'_> {
     EvmContractLifecycleAdapter::new(
-        route,
         EvmContractMutationProviders {
             chain_identity: providers,
             block: providers,
@@ -691,15 +680,12 @@ async fn recovery_observes_landed_anchor_without_resubmitting() {
     let fixture = DeployPreparationFixture::new("eip1559");
     let prepared = fixture.prepare().await;
     let submit_count = Arc::new(Mutex::new(0_u32));
-    let runtime = runtime_from_provider(
-        fixture.route,
-        TestEvmProviders::recovery(
-            RecoveryReceiptMode::Landed,
-            7,
-            RecoveryOccupancyMode::Unknown,
-            Arc::clone(&submit_count),
-        ),
-    );
+    let runtime = runtime_from_provider(TestEvmProviders::recovery(
+        RecoveryReceiptMode::Landed,
+        7,
+        RecoveryOccupancyMode::Unknown,
+        Arc::clone(&submit_count),
+    ));
 
     let decision = submit_or_recover_contract_submission(
         &runtime,
@@ -726,15 +712,12 @@ async fn recovery_rebroadcasts_unlanded_anchor_after_resign_match() {
     let fixture = DeployPreparationFixture::new("eip1559");
     let prepared = fixture.prepare().await;
     let submit_count = Arc::new(Mutex::new(0_u32));
-    let runtime = runtime_from_provider(
-        fixture.route,
-        TestEvmProviders::recovery(
-            RecoveryReceiptMode::Pending,
-            7,
-            RecoveryOccupancyMode::Unknown,
-            Arc::clone(&submit_count),
-        ),
-    );
+    let runtime = runtime_from_provider(TestEvmProviders::recovery(
+        RecoveryReceiptMode::Pending,
+        7,
+        RecoveryOccupancyMode::Unknown,
+        Arc::clone(&submit_count),
+    ));
 
     let decision = submit_or_recover_contract_submission(
         &runtime,
@@ -768,15 +751,12 @@ async fn recovery_does_not_rebroadcast_when_resign_hash_mismatches_anchor() {
         .reconstruct_deploy_invocation(&fixture.config, &fixture.intent, &evidence)
         .expect("reconstructed");
     let submit_count = Arc::new(Mutex::new(0_u32));
-    let runtime = runtime_from_provider(
-        fixture.route,
-        TestEvmProviders::recovery(
-            RecoveryReceiptMode::Pending,
-            7,
-            RecoveryOccupancyMode::Unknown,
-            Arc::clone(&submit_count),
-        ),
-    );
+    let runtime = runtime_from_provider(TestEvmProviders::recovery(
+        RecoveryReceiptMode::Pending,
+        7,
+        RecoveryOccupancyMode::Unknown,
+        Arc::clone(&submit_count),
+    ));
 
     let decision = submit_or_recover_contract_submission(
         &runtime,
@@ -809,10 +789,10 @@ async fn fresh_submit_records_ambiguity_when_provider_returns_mismatched_hash() 
     let prepared = fixture.prepare().await;
     let submit_count = Arc::new(Mutex::new(0_u32));
     let mismatched_hash = B256::from([0x11; 32]);
-    let runtime = runtime_from_provider(
-        fixture.route,
-        TestEvmProviders::submit_hash_mismatch(mismatched_hash, Arc::clone(&submit_count)),
-    );
+    let runtime = runtime_from_provider(TestEvmProviders::submit_hash_mismatch(
+        mismatched_hash,
+        Arc::clone(&submit_count),
+    ));
 
     let decision = submit_or_recover_contract_submission(
         &runtime,
@@ -848,15 +828,12 @@ async fn recovery_keeps_advanced_nonce_unknown_without_occupancy_proof() {
     let fixture = DeployPreparationFixture::new("eip1559");
     let prepared = fixture.prepare().await;
     let submit_count = Arc::new(Mutex::new(0_u32));
-    let runtime = runtime_from_provider(
-        fixture.route,
-        TestEvmProviders::recovery(
-            RecoveryReceiptMode::Pending,
-            8,
-            RecoveryOccupancyMode::Unknown,
-            Arc::clone(&submit_count),
-        ),
-    );
+    let runtime = runtime_from_provider(TestEvmProviders::recovery(
+        RecoveryReceiptMode::Pending,
+        8,
+        RecoveryOccupancyMode::Unknown,
+        Arc::clone(&submit_count),
+    ));
 
     let decision = submit_or_recover_contract_submission(
         &runtime,
@@ -886,17 +863,14 @@ async fn recovery_proves_not_submitted_when_foreign_transaction_occupies_nonce()
     let occupying_hash = "0x2222222222222222222222222222222222222222222222222222222222222222"
         .parse::<B256>()
         .expect("occupying hash");
-    let runtime = runtime_from_provider(
-        fixture.route,
-        TestEvmProviders::recovery(
-            RecoveryReceiptMode::Pending,
-            8,
-            RecoveryOccupancyMode::Occupied {
-                transaction_hash: occupying_hash,
-            },
-            Arc::clone(&submit_count),
-        ),
-    );
+    let runtime = runtime_from_provider(TestEvmProviders::recovery(
+        RecoveryReceiptMode::Pending,
+        8,
+        RecoveryOccupancyMode::Occupied {
+            transaction_hash: occupying_hash,
+        },
+        Arc::clone(&submit_count),
+    ));
 
     let decision = submit_or_recover_contract_submission(
         &runtime,
@@ -929,15 +903,12 @@ async fn recovery_records_unknown_on_transient_anchor_read_failure() {
     let fixture = DeployPreparationFixture::new("eip1559");
     let prepared = fixture.prepare().await;
     let submit_count = Arc::new(Mutex::new(0_u32));
-    let runtime = runtime_from_provider(
-        fixture.route,
-        TestEvmProviders::recovery(
-            RecoveryReceiptMode::ProviderFailure,
-            7,
-            RecoveryOccupancyMode::Unknown,
-            Arc::clone(&submit_count),
-        ),
-    );
+    let runtime = runtime_from_provider(TestEvmProviders::recovery(
+        RecoveryReceiptMode::ProviderFailure,
+        7,
+        RecoveryOccupancyMode::Unknown,
+        Arc::clone(&submit_count),
+    ));
 
     let decision = submit_or_recover_contract_submission(
         &runtime,
@@ -1048,10 +1019,7 @@ fn replay_verifier_uses_contract_namespace() {
 #[tokio::test]
 async fn receipt_polling_does_not_retry_permanent_capability_failures() {
     let reads = Arc::new(Mutex::new(0_u32));
-    let runtime = runtime_from_provider(
-        route(),
-        TestEvmProviders::receipt_failure(Arc::clone(&reads)),
-    );
+    let runtime = runtime_from_provider(TestEvmProviders::receipt_failure(Arc::clone(&reads)));
     let transaction_hash = "0x1111111111111111111111111111111111111111111111111111111111111111";
     let prepared = PreparedContractInvocation {
         prepared_version: 1,
@@ -1098,7 +1066,7 @@ async fn receipt_polling_does_not_retry_permanent_capability_failures() {
 
 #[tokio::test]
 async fn finality_confirmation_requires_certified_depth() {
-    let runtime = runtime_from_provider(route(), TestEvmProviders::finality());
+    let runtime = runtime_from_provider(TestEvmProviders::finality());
     let receipt = ContractTransactionReceipt {
         receipt_version: 1,
         transaction_hash: "0x1111111111111111111111111111111111111111111111111111111111111111"
@@ -1108,15 +1076,26 @@ async fn finality_confirmation_requires_certified_depth() {
         receipt_evidence: None,
     };
 
-    let confirmations =
-        verified_finality_confirmations(&runtime, 1, std::slice::from_ref(&receipt), 2)
-            .await
-            .expect("sufficient confirmations");
+    let confirmations = verified_finality_confirmations(
+        &runtime,
+        "ethereum-mainnet",
+        1,
+        std::slice::from_ref(&receipt),
+        2,
+    )
+    .await
+    .expect("sufficient confirmations");
     assert_eq!(confirmations, 2);
 
-    let error = verified_finality_confirmations(&runtime, 1, std::slice::from_ref(&receipt), 3)
-        .await
-        .expect_err("insufficient confirmations");
+    let error = verified_finality_confirmations(
+        &runtime,
+        "ethereum-mainnet",
+        1,
+        std::slice::from_ref(&receipt),
+        3,
+    )
+    .await
+    .expect_err("insufficient confirmations");
     assert!(matches!(error, mfm_runtime::RuntimeError::Blocked(_)));
 }
 

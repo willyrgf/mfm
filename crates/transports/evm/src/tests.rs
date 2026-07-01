@@ -16,11 +16,14 @@ async fn selects_source_by_policy_and_records_redacted_evidence() {
     let client = client_for(&server.url, "primary", "mainnet", 1);
 
     let response = client
-        .chain_identity(&chain_request("primary", "mainnet"))
+        .chain_identity(&chain_request("mainnet", 1))
         .await
         .expect("chain identity");
 
     assert_eq!(response.chain_id, 1);
+    assert_eq!(response.evidence.network_id.as_str(), "mainnet");
+    assert_eq!(response.evidence.expected_chain_id, 1);
+    assert_eq!(response.evidence.observed_chain_id, 1);
     assert_eq!(response.evidence.source_ref.as_str(), "primary");
     assert_eq!(response.evidence.policy_id.as_str(), "mainnet");
     assert!(!format!("{:?}", response.evidence).contains(&server.url));
@@ -32,7 +35,7 @@ async fn rejects_chain_id_mismatch_without_leaking_source_details() {
     let client = client_for(&server.url, "primary", "mainnet", 1);
 
     let error = client
-        .chain_identity(&chain_request("primary", "mainnet"))
+        .chain_identity(&chain_request("mainnet", 1))
         .await
         .expect_err("chain mismatch");
 
@@ -45,15 +48,13 @@ async fn rejects_chain_id_mismatch_without_leaking_source_details() {
 async fn supports_core_evm_json_rpc_calls() {
     let server = TestRpcServer::spawn("0x1").await;
     let client = client_for(&server.url, "primary", "mainnet", 1);
-    let source_ref = EvmSourceRef::new("primary").expect("source");
-    let policy_id = EvmSourcePolicyId::new("mainnet").expect("policy");
+    let guard = guard("mainnet", 1);
     let address = address!("0x1111111111111111111111111111111111111111");
     let hash = HASH_HEX.parse::<B256>().expect("hash");
 
     let block = client
         .read_block(&EvmBlockReadRequest {
-            source_ref: source_ref.clone(),
-            policy_id: policy_id.clone(),
+            guard: guard.clone(),
             block: EvmBlockSelector::Latest,
         })
         .await
@@ -62,8 +63,7 @@ async fn supports_core_evm_json_rpc_calls() {
 
     let balance = client
         .read_balance(&EvmBalanceReadRequest {
-            source_ref: source_ref.clone(),
-            policy_id: policy_id.clone(),
+            guard: guard.clone(),
             account: address,
             block: EvmBlockSelector::Latest,
         })
@@ -76,8 +76,7 @@ async fn supports_core_evm_json_rpc_calls() {
 
     let call = client
         .read_call(&EvmCallReadRequest {
-            source_ref: source_ref.clone(),
-            policy_id: policy_id.clone(),
+            guard: guard.clone(),
             to: address,
             calldata: vec![0xab, 0xcd],
             block: EvmBlockSelector::Latest,
@@ -88,8 +87,7 @@ async fn supports_core_evm_json_rpc_calls() {
 
     let logs = client
         .read_logs(&EvmLogsReadRequest {
-            source_ref: source_ref.clone(),
-            policy_id: policy_id.clone(),
+            guard: guard.clone(),
             from_block: EvmBlockSelector::Latest,
             to_block: EvmBlockSelector::Latest,
             address: Some(address),
@@ -101,8 +99,7 @@ async fn supports_core_evm_json_rpc_calls() {
 
     let nonce = client
         .read_nonce(&EvmNonceReadRequest {
-            source_ref: source_ref.clone(),
-            policy_id: policy_id.clone(),
+            guard: guard.clone(),
             account: address,
             block: EvmBlockSelector::Latest,
         })
@@ -112,8 +109,7 @@ async fn supports_core_evm_json_rpc_calls() {
 
     let fee = client
         .read_fee(&EvmFeeReadRequest {
-            source_ref: source_ref.clone(),
-            policy_id: policy_id.clone(),
+            guard: guard.clone(),
         })
         .await
         .expect("fee");
@@ -124,8 +120,7 @@ async fn supports_core_evm_json_rpc_calls() {
 
     let gas = client
         .estimate_gas(&EvmGasEstimateRequest {
-            source_ref: source_ref.clone(),
-            policy_id: policy_id.clone(),
+            guard: guard.clone(),
             from: Some(address),
             to: Some(address),
             value_wei: 0,
@@ -137,8 +132,7 @@ async fn supports_core_evm_json_rpc_calls() {
 
     let submit = client
         .submit_transaction(&EvmTransactionSubmitRequest {
-            source_ref: source_ref.clone(),
-            policy_id: policy_id.clone(),
+            guard: guard.clone(),
             signed_payload: SignedEvmPayload::from_verified_bytes(vec![0x01], hash)
                 .expect("payload"),
         })
@@ -148,8 +142,7 @@ async fn supports_core_evm_json_rpc_calls() {
 
     let receipt = client
         .read_receipt(&EvmReceiptReadRequest {
-            source_ref,
-            policy_id,
+            guard,
             transaction_hash: hash,
         })
         .await
@@ -169,8 +162,7 @@ async fn pending_receipt_is_typed_capability_error() {
     let client = client_for(&server.url, "primary", "mainnet", 1);
     let error = client
         .read_receipt(&EvmReceiptReadRequest {
-            source_ref: EvmSourceRef::new("primary").expect("source"),
-            policy_id: EvmSourcePolicyId::new("mainnet").expect("policy"),
+            guard: guard("mainnet", 1),
             transaction_hash: HASH_HEX.parse::<B256>().expect("hash"),
         })
         .await
@@ -185,8 +177,7 @@ async fn nonce_occupancy_read_proves_non_anchor_transaction() {
     let client = client_for(&server.url, "primary", "mainnet", 1);
     let response = client
         .read_nonce_occupancy(&EvmNonceOccupancyReadRequest {
-            source_ref: EvmSourceRef::new("primary").expect("source"),
-            policy_id: EvmSourcePolicyId::new("mainnet").expect("policy"),
+            guard: guard("mainnet", 1),
             account: address!("0x1111111111111111111111111111111111111111"),
             nonce: 7,
             excluded_transaction_hash: HASH_HEX.parse::<B256>().expect("anchor hash"),
@@ -194,7 +185,7 @@ async fn nonce_occupancy_read_proves_non_anchor_transaction() {
         .await
         .expect("nonce occupancy");
 
-    assert_eq!(response.evidence.chain_id, 1);
+    assert_eq!(response.evidence.observed_chain_id, 1);
     assert_eq!(
         response.outcome,
         EvmNonceOccupancy::Occupied {
@@ -210,8 +201,7 @@ async fn nonce_occupancy_read_does_not_prove_recorded_anchor() {
     let client = client_for(&server.url, "primary", "mainnet", 1);
     let response = client
         .read_nonce_occupancy(&EvmNonceOccupancyReadRequest {
-            source_ref: EvmSourceRef::new("primary").expect("source"),
-            policy_id: EvmSourcePolicyId::new("mainnet").expect("policy"),
+            guard: guard("mainnet", 1),
             account: address!("0x1111111111111111111111111111111111111111"),
             nonce: 7,
             excluded_transaction_hash: OCCUPYING_HASH_HEX.parse::<B256>().expect("anchor hash"),
@@ -229,8 +219,7 @@ async fn supports_legacy_fee_source_without_eip1559_methods() {
 
     let fee = client
         .read_fee(&EvmFeeReadRequest {
-            source_ref: EvmSourceRef::new("primary").expect("source"),
-            policy_id: EvmSourcePolicyId::new("mainnet").expect("policy"),
+            guard: guard("mainnet", 1),
         })
         .await
         .expect("legacy fee response");
@@ -242,26 +231,19 @@ async fn supports_legacy_fee_source_without_eip1559_methods() {
 }
 
 #[tokio::test]
-async fn parses_ordered_fallback_policy_and_redacts_runtime_sources() {
+async fn runtime_sources_redact_url_and_authorization() {
     let server = TestRpcServer::spawn("0x1").await;
-    let raw = serde_json::json!({
-        "sources": [
-            {
-                "id": "primary",
-                "expected_chain_id": 1,
-                "rpc_url": server.url,
-                "authorization": "Bearer top-secret"
-            }
-        ],
-        "policies": [
-            {
-                "id": "mainnet",
-                "ordered_sources": ["primary"]
-            }
-        ]
-    })
-    .to_string();
-    let registry = EvmSourceRegistry::from_json_str(&raw).expect("registry");
+    let source = EvmRuntimeSource::new(
+        EvmSourceRef::new("primary").expect("source"),
+        &server.url,
+        Some("Bearer top-secret".to_owned()),
+    )
+    .expect("source");
+    let registry = EvmSourceRegistry::single_source(
+        source,
+        EvmSourcePolicyId::new("mainnet").expect("policy"),
+    )
+    .expect("registry");
     let rendered = format!("{registry:?}");
 
     assert!(!rendered.contains(&server.url));
@@ -274,14 +256,12 @@ async fn ordered_policy_falls_back_after_request_failure() {
     let healthy = TestRpcServer::spawn("0x1").await;
     let primary = EvmRuntimeSource::new(
         EvmSourceRef::new("primary").expect("source"),
-        1,
         &failing.url,
         None,
     )
     .expect("primary source");
     let secondary = EvmRuntimeSource::new(
         EvmSourceRef::new("secondary").expect("source"),
-        1,
         &healthy.url,
         None,
     )
@@ -296,10 +276,16 @@ async fn ordered_policy_falls_back_after_request_failure() {
     .expect("policy");
     let client = EvmJsonRpcClient::new(
         EvmSourceRegistry::new([primary, secondary], [policy]).expect("registry"),
+        EvmRouteRegistry::new([EvmRoute::new(
+            EvmNetworkId::new("mainnet").expect("network"),
+            EvmSourceRef::new("primary").expect("source"),
+            EvmSourcePolicyId::new("mainnet").expect("policy"),
+        )])
+        .expect("routes"),
     );
 
     let response = client
-        .chain_identity(&chain_request("primary", "mainnet"))
+        .chain_identity(&chain_request("mainnet", 1))
         .await
         .expect("fallback response");
 
@@ -311,11 +297,10 @@ fn client_for(
     url: &str,
     source_id: &str,
     policy_id: &str,
-    expected_chain_id: u64,
+    _expected_chain_id: u64,
 ) -> EvmJsonRpcClient {
     let source = EvmRuntimeSource::new(
         EvmSourceRef::new(source_id).expect("source"),
-        expected_chain_id,
         url,
         Some("Bearer top-secret".to_owned()),
     )
@@ -325,14 +310,26 @@ fn client_for(
         EvmSourcePolicyId::new(policy_id).expect("policy"),
     )
     .expect("registry");
-    EvmJsonRpcClient::new(registry)
+    let routes = EvmRouteRegistry::new([EvmRoute::new(
+        EvmNetworkId::new(policy_id).expect("network"),
+        EvmSourceRef::new(source_id).expect("source"),
+        EvmSourcePolicyId::new(policy_id).expect("policy"),
+    )])
+    .expect("routes");
+    EvmJsonRpcClient::new(registry, routes)
 }
 
-fn chain_request(source_id: &str, policy_id: &str) -> EvmChainIdentityRequest {
+fn chain_request(network_id: &str, expected_chain_id: u64) -> EvmChainIdentityRequest {
     EvmChainIdentityRequest {
-        source_ref: EvmSourceRef::new(source_id).expect("source"),
-        policy_id: EvmSourcePolicyId::new(policy_id).expect("policy"),
+        guard: guard(network_id, expected_chain_id),
     }
+}
+
+fn guard(network_id: &str, expected_chain_id: u64) -> EvmChainGuard {
+    EvmChainGuard::new(
+        EvmNetworkId::new(network_id).expect("network"),
+        expected_chain_id,
+    )
 }
 
 struct TestRpcServer {

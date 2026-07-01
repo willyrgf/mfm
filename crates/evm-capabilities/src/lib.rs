@@ -9,13 +9,11 @@
 //! ```rust
 //! use mfm_capabilities::CapabilitySpec;
 //! use mfm_evm_capabilities::{
-//!     EvmFeeReadCapability, EvmSourcePolicyId, EvmSourceRef,
+//!     EvmChainGuard, EvmFeeReadCapability, EvmNetworkId,
 //! };
 //!
-//! let source_ref = EvmSourceRef::new("ethereum-mainnet")?;
-//! let policy_id = EvmSourcePolicyId::new("local")?;
-//! assert_eq!(source_ref.as_str(), "ethereum-mainnet");
-//! assert_eq!(policy_id.as_str(), "local");
+//! let guard = EvmChainGuard::new(EvmNetworkId::new("ethereum-mainnet")?, 1);
+//! assert_eq!(guard.network_id().as_str(), "ethereum-mainnet");
 //! assert_eq!(EvmFeeReadCapability::name(), "mfm.evm.fee.read");
 //! # Ok::<(), mfm_evm_capabilities::EvmCapabilityError>(())
 //! ```
@@ -287,6 +285,51 @@ impl From<EvmSourceRef> for String {
     }
 }
 
+/// Semantic EVM network id from authored workflow config.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EvmNetworkId(LocalPublicId);
+
+impl EvmNetworkId {
+    /// Creates a checked semantic EVM network id.
+    pub fn new(value: impl AsRef<str>) -> Result<Self> {
+        let value = LocalPublicId::new(value).map_err(invalid_identifier)?;
+        Ok(Self(value))
+    }
+
+    /// Returns the checked network id string.
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl fmt::Display for EvmNetworkId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for EvmNetworkId {
+    type Err = EvmCapabilityError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for EvmNetworkId {
+    type Error = EvmCapabilityError;
+
+    fn try_from(value: String) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl From<EvmNetworkId> for String {
+    fn from(value: EvmNetworkId) -> Self {
+        value.0.into_string()
+    }
+}
+
 /// Process-local EVM source policy id.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EvmSourcePolicyId(LocalPublicId);
@@ -332,15 +375,46 @@ impl From<EvmSourcePolicyId> for String {
     }
 }
 
+/// Semantic EVM chain guard derived from workflow config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvmChainGuard {
+    network_id: EvmNetworkId,
+    expected_chain_id: u64,
+}
+
+impl EvmChainGuard {
+    /// Creates a semantic chain guard.
+    pub const fn new(network_id: EvmNetworkId, expected_chain_id: u64) -> Self {
+        Self {
+            network_id,
+            expected_chain_id,
+        }
+    }
+
+    /// Returns the semantic network id.
+    pub const fn network_id(&self) -> &EvmNetworkId {
+        &self.network_id
+    }
+
+    /// Returns the expected EVM chain id.
+    pub const fn expected_chain_id(&self) -> u64 {
+        self.expected_chain_id
+    }
+}
+
 /// Redacted EVM source evidence attached to provider responses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedactedEvmSourceEvidence {
+    /// Semantic network id from the request guard.
+    pub network_id: EvmNetworkId,
+    /// Expected EVM chain id from the request guard.
+    pub expected_chain_id: u64,
+    /// Observed EVM chain id.
+    pub observed_chain_id: u64,
     /// Process-local source reference.
     pub source_ref: EvmSourceRef,
     /// Source policy id used by the provider.
     pub policy_id: EvmSourcePolicyId,
-    /// EVM chain id observed by the provider.
-    pub chain_id: u64,
 }
 
 /// EVM block selector.
@@ -359,10 +433,8 @@ pub enum EvmBlockSelector {
 /// Request for chain identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmChainIdentityRequest {
-    /// Source reference.
-    pub source_ref: EvmSourceRef,
-    /// Source policy id.
-    pub policy_id: EvmSourcePolicyId,
+    /// Semantic chain guard.
+    pub guard: EvmChainGuard,
 }
 
 /// Response for chain identity.
@@ -379,10 +451,8 @@ pub struct EvmChainIdentityResponse {
 /// Request for an EVM block summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmBlockReadRequest {
-    /// Source reference.
-    pub source_ref: EvmSourceRef,
-    /// Source policy id.
-    pub policy_id: EvmSourcePolicyId,
+    /// Semantic chain guard.
+    pub guard: EvmChainGuard,
     /// Block selector.
     pub block: EvmBlockSelector,
 }
@@ -401,10 +471,8 @@ pub struct EvmBlockReadResponse {
 /// Request for an EVM account balance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmBalanceReadRequest {
-    /// Source reference.
-    pub source_ref: EvmSourceRef,
-    /// Source policy id.
-    pub policy_id: EvmSourcePolicyId,
+    /// Semantic chain guard.
+    pub guard: EvmChainGuard,
     /// Account address.
     pub account: Address,
     /// Block selector.
@@ -423,10 +491,8 @@ pub struct EvmBalanceReadResponse {
 /// Request for a read-only EVM call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmCallReadRequest {
-    /// Source reference.
-    pub source_ref: EvmSourceRef,
-    /// Source policy id.
-    pub policy_id: EvmSourcePolicyId,
+    /// Semantic chain guard.
+    pub guard: EvmChainGuard,
     /// Destination contract address.
     pub to: Address,
     /// ABI-encoded call data.
@@ -447,10 +513,8 @@ pub struct EvmCallReadResponse {
 /// Request for EVM logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmLogsReadRequest {
-    /// Source reference.
-    pub source_ref: EvmSourceRef,
-    /// Source policy id.
-    pub policy_id: EvmSourcePolicyId,
+    /// Semantic chain guard.
+    pub guard: EvmChainGuard,
     /// Start block selector.
     pub from_block: EvmBlockSelector,
     /// End block selector.
@@ -490,10 +554,8 @@ pub struct EvmLogsReadResponse {
 /// Request for an account nonce.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmNonceReadRequest {
-    /// Source reference.
-    pub source_ref: EvmSourceRef,
-    /// Source policy id.
-    pub policy_id: EvmSourcePolicyId,
+    /// Semantic chain guard.
+    pub guard: EvmChainGuard,
     /// Account address.
     pub account: Address,
     /// Block selector.
@@ -512,10 +574,8 @@ pub struct EvmNonceReadResponse {
 /// Request for EVM fee-market data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmFeeReadRequest {
-    /// Source reference.
-    pub source_ref: EvmSourceRef,
-    /// Source policy id.
-    pub policy_id: EvmSourcePolicyId,
+    /// Semantic chain guard.
+    pub guard: EvmChainGuard,
 }
 
 /// Response for EVM fee-market data.
@@ -536,10 +596,8 @@ pub struct EvmFeeReadResponse {
 /// Request for an EVM gas estimate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmGasEstimateRequest {
-    /// Source reference.
-    pub source_ref: EvmSourceRef,
-    /// Source policy id.
-    pub policy_id: EvmSourcePolicyId,
+    /// Semantic chain guard.
+    pub guard: EvmChainGuard,
     /// Sender address, when required by the provider.
     pub from: Option<Address>,
     /// Destination address, or none for contract creation.
@@ -603,10 +661,8 @@ impl fmt::Debug for SignedEvmPayload {
 /// Request for EVM transaction submission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmTransactionSubmitRequest {
-    /// Source reference.
-    pub source_ref: EvmSourceRef,
-    /// Source policy id.
-    pub policy_id: EvmSourcePolicyId,
+    /// Semantic chain guard.
+    pub guard: EvmChainGuard,
     /// Transient signed payload.
     pub signed_payload: SignedEvmPayload,
 }
@@ -623,10 +679,8 @@ pub struct EvmTransactionSubmitResponse {
 /// Request for an EVM transaction receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmReceiptReadRequest {
-    /// Source reference.
-    pub source_ref: EvmSourceRef,
-    /// Source policy id.
-    pub policy_id: EvmSourcePolicyId,
+    /// Semantic chain guard.
+    pub guard: EvmChainGuard,
     /// Transaction hash.
     pub transaction_hash: B256,
 }
@@ -647,10 +701,8 @@ pub struct EvmReceiptReadResponse {
 /// Request for account nonce occupancy investigation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmNonceOccupancyReadRequest {
-    /// Source reference.
-    pub source_ref: EvmSourceRef,
-    /// Source policy id.
-    pub policy_id: EvmSourcePolicyId,
+    /// Semantic chain guard.
+    pub guard: EvmChainGuard,
     /// Sender account whose nonce is being investigated.
     pub account: Address,
     /// Sender nonce being investigated.

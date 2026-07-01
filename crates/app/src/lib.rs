@@ -11,7 +11,9 @@
 //! this crate, while tests can use explicit test-support stores.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,12 +45,14 @@ pub use mfm_stream_store_postgres::PostgresSchema as ProductionPostgresSchema;
 mod entry_point;
 mod entry_points;
 mod evm_contracts;
-mod evm_runtime_routes;
 
 pub use entry_point::{
     EntryPointOpId, EntryPointOpPlan, EntryPointOpRegistry, EntryPointOpResolveError,
     EntryPointPlannerAdapter, LaunchableOp, OpLaunchError, OpVersion, PublicOpName,
 };
+
+/// Environment variable that selects the live runtime config file.
+pub const MFM_RUNTIME_CONFIG_FILE: &str = "MFM_RUNTIME_CONFIG_FILE";
 
 /// Shared observability configuration used by typed binaries.
 pub mod observability;
@@ -334,9 +338,13 @@ pub async fn connect_production_run_store(
 /// Builds production typed run services backed by the Postgres run store.
 pub async fn connect_production_run_services(
     database_url: Option<&str>,
+    runtime_config_path: Option<&Path>,
 ) -> Result<ProductionRunServices, AppError> {
     let store = connect_production_run_store(database_url).await?;
-    let runners = production_runner_registry(artifact_read_provider_from_retained(store.clone()))?;
+    let runners = production_runner_registry(
+        artifact_read_provider_from_retained(store.clone()),
+        runtime_config_path,
+    )?;
     let certification_registry = production_certification_registry()?;
     Ok(make_run_services_with_certification_registry(
         runners,
@@ -365,25 +373,192 @@ pub async fn connect_production_run_read_services(
 /// domain runners register here as certified typed descriptor bindings.
 pub fn production_runner_registry(
     artifacts: Arc<dyn ArtifactReadProvider>,
+    runtime_config_path: Option<&Path>,
 ) -> Result<ErasedRunnerRegistry, AppError> {
     let mut registry = ErasedRunnerRegistry::new();
+    let runtime_config = RuntimeConfigLoader::from_path_or_env(runtime_config_path);
     let portfolio_artifacts: Arc<dyn mfm_artifact_capabilities::ArtifactReadProvider> =
         artifacts.clone();
+    let portfolio_runtime = Arc::new(RuntimeConfigPortfolioEvm::new(runtime_config.clone()));
     let portfolio_evm: Arc<dyn mfm_adapters_portfolio::PortfolioEvmProvider> =
-        match mfm_transports_evm::EvmJsonRpcClient::from_env() {
-            Ok(client) => Arc::new(client),
-            Err(_) => Arc::new(mfm_adapters_portfolio::UnavailablePortfolioEvmProvider),
-        };
-    let evm_routes = evm_runtime_routes::EvmRuntimeRoutes::from_env()?;
+        portfolio_runtime.clone();
+    let portfolio_runtime: Arc<dyn mfm_adapters_portfolio::PortfolioRuntimeValidator> =
+        portfolio_runtime;
     let portfolio_capabilities = mfm_adapters_portfolio::PortfolioRunnerCapabilities::new(
         portfolio_artifacts,
         portfolio_evm,
-        evm_routes.portfolio_routes()?,
+        portfolio_runtime,
     );
     mfm_adapters_portfolio::register_portfolio_runners(&mut registry, portfolio_capabilities)?;
-    evm_contracts::register_contract_lifecycle_runners(&mut registry, artifacts, evm_routes)?;
+    evm_contracts::register_contract_lifecycle_runners(&mut registry, artifacts, runtime_config)?;
     mfm_transports_proof::register_deterministic_proof_runners(&mut registry)?;
     Ok(registry)
+}
+
+#[derive(Clone)]
+struct RuntimeConfigPortfolioEvm {
+    runtime_config: RuntimeConfigLoader,
+}
+
+impl RuntimeConfigPortfolioEvm {
+    fn new(runtime_config: RuntimeConfigLoader) -> Self {
+        Self { runtime_config }
+    }
+
+    fn client(&self) -> mfm_runtime::Result<mfm_transports_evm::EvmJsonRpcClient> {
+        self.runtime_config.load_evm().and_then(evm_json_rpc_client)
+    }
+}
+
+impl mfm_adapters_portfolio::PortfolioRuntimeValidator for RuntimeConfigPortfolioEvm {
+    fn validate_evm_guard(
+        &self,
+        guard: &mfm_evm_capabilities::EvmChainGuard,
+    ) -> mfm_runtime::Result<()> {
+        self.client()?
+            .validate_guard(guard)
+            .map_err(runtime_evm_transport_error)
+    }
+}
+
+impl mfm_evm_capabilities::EvmBlockReadProvider for RuntimeConfigPortfolioEvm {
+    fn read_block<'a>(
+        &'a self,
+        request: &'a mfm_evm_capabilities::EvmBlockReadRequest,
+    ) -> mfm_evm_capabilities::EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmBlockReadResponse>
+    {
+        Box::pin(async move {
+            let client = self
+                .client()
+                .map_err(portfolio_runtime_config_capability_error)?;
+            mfm_evm_capabilities::EvmBlockReadProvider::read_block(&client, request).await
+        })
+    }
+}
+
+impl mfm_evm_capabilities::EvmBalanceReadProvider for RuntimeConfigPortfolioEvm {
+    fn read_balance<'a>(
+        &'a self,
+        request: &'a mfm_evm_capabilities::EvmBalanceReadRequest,
+    ) -> mfm_evm_capabilities::EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmBalanceReadResponse>
+    {
+        Box::pin(async move {
+            let client = self
+                .client()
+                .map_err(portfolio_runtime_config_capability_error)?;
+            mfm_evm_capabilities::EvmBalanceReadProvider::read_balance(&client, request).await
+        })
+    }
+}
+
+impl mfm_evm_capabilities::EvmCallReadProvider for RuntimeConfigPortfolioEvm {
+    fn read_call<'a>(
+        &'a self,
+        request: &'a mfm_evm_capabilities::EvmCallReadRequest,
+    ) -> mfm_evm_capabilities::EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmCallReadResponse>
+    {
+        Box::pin(async move {
+            let client = self
+                .client()
+                .map_err(portfolio_runtime_config_capability_error)?;
+            mfm_evm_capabilities::EvmCallReadProvider::read_call(&client, request).await
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct RuntimeConfigLoader {
+    path: Option<PathBuf>,
+}
+
+impl RuntimeConfigLoader {
+    fn from_path_or_env(path: Option<&Path>) -> Self {
+        let path = path
+            .map(Path::to_path_buf)
+            .or_else(|| env::var_os(MFM_RUNTIME_CONFIG_FILE).map(PathBuf::from));
+        Self { path }
+    }
+
+    pub(crate) fn load_evm(&self) -> mfm_runtime::Result<mfm_runtime_config::EvmRuntimeConfig> {
+        let path = self.path.as_ref().ok_or_else(|| {
+            mfm_runtime::RuntimeError::RunnerBinding("missing runtime config file".to_owned())
+        })?;
+        let config = mfm_runtime_config::RuntimeConfig::load_path_with_requirements(
+            path,
+            mfm_runtime_config::RuntimeConfigRequirement::evm(),
+        )
+        .map_err(runtime_config_error)?;
+        config.evm().cloned().ok_or_else(|| {
+            mfm_runtime::RuntimeError::RunnerBinding("missing EVM runtime config".to_owned())
+        })
+    }
+}
+
+fn evm_json_rpc_client(
+    evm: mfm_runtime_config::EvmRuntimeConfig,
+) -> mfm_runtime::Result<mfm_transports_evm::EvmJsonRpcClient> {
+    let sources = evm
+        .sources()
+        .iter()
+        .map(|(source_ref, source)| {
+            mfm_transports_evm::EvmRuntimeSource::new(
+                source_ref.clone(),
+                source.rpc_url().expose_secret().to_owned(),
+                source
+                    .auth_header()
+                    .map(|value| value.expose_secret().to_owned()),
+            )
+            .map_err(runtime_evm_transport_error)
+        })
+        .collect::<mfm_runtime::Result<Vec<_>>>()?;
+    let policies = evm
+        .policies()
+        .iter()
+        .map(|(policy_id, policy)| {
+            mfm_transports_evm::EvmSourcePolicy::new(
+                policy_id.clone(),
+                policy.ordered_sources().to_vec(),
+            )
+            .map_err(runtime_evm_transport_error)
+        })
+        .collect::<mfm_runtime::Result<Vec<_>>>()?;
+    let routes = evm
+        .routes()
+        .iter()
+        .map(|(network_id, route)| {
+            mfm_transports_evm::EvmRoute::new(
+                network_id.clone(),
+                route.source_ref().clone(),
+                route.policy_id().clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let source_registry = mfm_transports_evm::EvmSourceRegistry::new(sources, policies)
+        .map_err(runtime_evm_transport_error)?;
+    let route_registry =
+        mfm_transports_evm::EvmRouteRegistry::new(routes).map_err(runtime_evm_transport_error)?;
+    Ok(mfm_transports_evm::EvmJsonRpcClient::new(
+        source_registry,
+        route_registry,
+    ))
+}
+
+fn runtime_config_error(
+    error: mfm_runtime_config::RuntimeConfigError,
+) -> mfm_runtime::RuntimeError {
+    mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
+}
+
+fn runtime_evm_transport_error(
+    error: mfm_transports_evm::EvmTransportError,
+) -> mfm_runtime::RuntimeError {
+    mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
+}
+
+fn portfolio_runtime_config_capability_error(
+    _error: mfm_runtime::RuntimeError,
+) -> mfm_evm_capabilities::EvmCapabilityError {
+    mfm_evm_capabilities::EvmCapabilityError::redacted_provider_failure("runtime config")
 }
 
 /// Builds an adapter-facing artifact read provider from a retained artifact reader.

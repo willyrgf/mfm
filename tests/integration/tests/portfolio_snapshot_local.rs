@@ -19,7 +19,7 @@ static RPC_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 async fn portfolio_snapshot_starts_to_completion() {
     let _env_guard = RPC_ENV_LOCK.lock().await;
     let rpc_url = start_rpc_mock().await;
-    set_rpc_env(rpc_url);
+    let _runtime_config = set_rpc_env(rpc_url);
 
     let result = support::resume_portfolio_snapshot(portfolio_payload()).await;
     assert_eq!(result.started.run_mode, RunModeStatus::Completed);
@@ -65,7 +65,7 @@ async fn portfolio_snapshot_starts_to_completion() {
 async fn rest_portfolio_snapshot_matches_public_output() {
     let _env_guard = RPC_ENV_LOCK.lock().await;
     let rpc_url = start_rpc_mock().await;
-    set_rpc_env(rpc_url);
+    let _runtime_config = set_rpc_env(rpc_url);
 
     let expected = support::run_portfolio_snapshot(portfolio_payload()).await;
     let expected_public_output = expected
@@ -111,7 +111,7 @@ async fn rest_portfolio_snapshot_matches_public_output() {
 async fn rest_portfolio_snapshot_defaults_toml_and_renders_public_output() {
     let _env_guard = RPC_ENV_LOCK.lock().await;
     let rpc_url = start_rpc_mock().await;
-    set_rpc_env(rpc_url);
+    let _runtime_config = set_rpc_env(rpc_url);
 
     let state = support::in_memory_rest_app_state();
     let store = state.store.clone();
@@ -151,7 +151,7 @@ async fn rest_portfolio_snapshot_defaults_toml_and_renders_public_output() {
 async fn portfolio_runner_output_summary_matches_golden() {
     let _env_guard = RPC_ENV_LOCK.lock().await;
     let rpc_url = start_rpc_mock().await;
-    set_rpc_env(rpc_url);
+    let _runtime_config = set_rpc_env(rpc_url);
 
     let state = support::in_memory_rest_app_state();
     let store = state.store.clone();
@@ -211,38 +211,8 @@ async fn local_portfolio_snapshot_post(
     body
 }
 
-fn set_rpc_env(rpc_url: String) {
-    std::env::set_var(
-        "MFM_EVM_RPC_SOURCES_JSON",
-        json!({
-            "sources": [
-                {
-                    "id": NETWORK_ID,
-                    "expected_chain_id": 31337,
-                    "rpc_url": rpc_url,
-                    "authorization": null
-                }
-            ],
-            "policies": [
-                {
-                    "id": NETWORK_ID,
-                    "ordered_sources": [NETWORK_ID]
-                }
-            ]
-        })
-        .to_string(),
-    );
-    std::env::set_var(
-        "MFM_EVM_NETWORK_ROUTES_JSON",
-        json!([
-            {
-                "network_id": NETWORK_ID,
-                "source_ref": NETWORK_ID,
-                "policy_id": NETWORK_ID
-            }
-        ])
-        .to_string(),
-    );
+fn set_rpc_env(rpc_url: String) -> support::EnvVarRestore {
+    support::set_evm_runtime_config_env_for_test(NETWORK_ID, &rpc_url)
 }
 
 fn rest_test_app() -> axum::Router {

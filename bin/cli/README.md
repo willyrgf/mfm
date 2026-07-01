@@ -292,6 +292,8 @@ mfm_cli run start --op <NAME> --config <PATH> [OPTIONS]
 - `--framework-version <VALUE>`: Framework version evidence recorded in `RunAdmitted`.
 - `--source-revision <VALUE>`: Source revision evidence recorded in `RunAdmitted` (or `MFM_SOURCE_REVISION`).
 - `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
+- `--runtime-config <PATH>`: Runtime config file for live capabilities (default:
+  `$MFM_RUNTIME_CONFIG_FILE`). Read-only commands do not use this option.
 
 Examples:
 
@@ -344,6 +346,12 @@ mfm_cli run resume <RUN_ID> [OPTIONS]
 ```
 
 It rejects non-typed run ids before storage access.
+
+Key live options:
+
+- `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
+- `--runtime-config <PATH>`: Runtime config file for live capabilities (default:
+  `$MFM_RUNTIME_CONFIG_FILE`)
 
 Manual `run resume <RUN_ID>` is the v1 recovery trigger for a run left with an open execution claim,
 side-effect uncertainty, or a resumable frontier. Automatic dead-driver takeover and background
@@ -505,52 +513,29 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   mfm_cli run status "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   ```
 
-- **`MFM_EVM_RPC_SOURCES_JSON`**: Optional JSON source registry used by typed EVM RPC
-  backends. It is runtime-only and never persisted. The registry contains endpoint-bearing
-  `sources` and ordered fallback `policies`; workflow configs carry semantic network intent only.
-  ```sh
-  export MFM_EVM_RPC_SOURCES_JSON='{
-    "sources": [
-      {"id":"reth-local","expected_chain_id":31337,"rpc_url":"http://127.0.0.1:8545","authorization":null},
-      {"id":"publicnode-ethereum-mainnet","expected_chain_id":1,"rpc_url":"https://ethereum-rpc.publicnode.com","authorization":null}
-    ],
-    "policies": [
-      {"id":"reth-local","ordered_sources":["reth-local"]},
-      {"id":"publicnode-ethereum-mainnet","ordered_sources":["publicnode-ethereum-mainnet"]}
-    ]
-  }'
+- **`MFM_RUNTIME_CONFIG_FILE`**: Runtime-only TOML or JSON config file used by live capability
+  drivers. Live `run start` and `run resume` may also pass `--runtime-config <PATH>`, which takes
+  precedence over this environment variable. Read-only run commands do not load runtime config.
+
+  ```toml
+  [evm.sources.reth-local]
+  rpc_url = "http://127.0.0.1:8545"
+
+  [evm.routes.reth-dev]
+  source_ref = "reth-local"
+
+  [evm.signers.deployer]
+  provider = "keystore"
+  entry_id = "<uuid>"
+  keystore_path = "/run/mfm/deployer.keystore"
+  unlock_file = "/run/mfm/deployer.password"
   ```
 
-- **`MFM_EVM_NETWORK_ROUTES_JSON`**: Optional runtime route map from semantic config
-  `network_id` values to process-local EVM source and policy ids.
-  ```sh
-  export MFM_EVM_NETWORK_ROUTES_JSON='[
-    {"network_id":"ethereum-mainnet","source_ref":"publicnode-ethereum-mainnet","policy_id":"publicnode-ethereum-mainnet"},
-    {"network_id":"reth-dev","source_ref":"reth-local","policy_id":"reth-local"}
-  ]'
-  ```
-
-- **`MFM_EVM_SIGNERS_JSON`**: Optional runtime signer registry consumed by typed EVM contract
-  workflows. Signer provider entries resolve non-secret `signer_ref` values from config to
-  process-local providers without exposing private keys in typed values or outputs.
-  ```sh
-  export MFM_EVM_SIGNERS_JSON='[
-    {
-      "signer_ref": "deployer",
-      "entry_id": "<uuid>",
-      "keystore_env": "MFM_KEYSTORE_PATH",
-      "unlock_file_env": "MFM_KEYSTORE_PASSWORD_FILE"
-    }
-  ]'
-  ```
-
-- Typed EVM RPC source configuration requires `expected_chain_id` on every configured source and at
-  least one policy with an ordered source list.
-- Typed EVM contract requests use semantic `network_id` plus `expected_chain_id`; the app runtime
-  resolves `network_id` through `MFM_EVM_NETWORK_ROUTES_JSON` before using
-  `MFM_EVM_RPC_SOURCES_JSON`.
-- Typed EVM contract requests use non-secret `signer_ref`; the app runtime resolves it against
-  `MFM_EVM_SIGNERS_JSON`.
+- Typed EVM contract requests use semantic `network_id` plus `expected_chain_id`; transports
+  resolve `network_id` through the runtime config route registry and verify the observed chain id
+  for every guarded live request.
+- Typed EVM contract requests use non-secret `signer_ref`; app assembly resolves it against the
+  runtime config signer registry when mutation workflows require signing.
 - Portfolio configs may also use `control_scope` when source-selection partitioning is part of the
   domain request identity.
 
