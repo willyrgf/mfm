@@ -424,8 +424,9 @@ before appending lane evidence.
 each entry has `node_id`, `attempt_id`, `disposition` (`started`, `completed`, `failed`, or
 `interrupted`), and status-specific fields such as `attempt_no`, `retryable`, or `output_cell_id`.
 `scheduler_status` is read-only `observed` for `run status`; start/resume responses set it to
-`advanced`, `blocked`, `public_output_projected`, `execution_claim_busy`, or
-`execution_claim_lost` according to the app dispatch loop and claim-coordination outcome. Manual
+`observed` when an already-terminal run needs no scheduler dispatch, otherwise `advanced`,
+`blocked`, `public_output_projected`, `execution_claim_busy`, or `execution_claim_lost` according
+to the app dispatch loop and claim-coordination outcome. Manual
 authorization requirements include the required evidence schema, signing scheme, authority id,
 allowed operator public identities or a safe summary, and quorum. They never expose signer runtime
 sources, keystore paths, password paths, passwords, or other secrets.
