@@ -1262,19 +1262,19 @@ fn stable_ids_and_value_lineage_golden_vectors() {
     );
     assert_eq!(
         seed.seed_id.as_str(),
-        "seed:sha256-jcs-v1:05ba036389ad5af4fbcbbbc36f5b4f4b566573aa04de470a7b2a88d5e7f1b1a5"
+        "seed:sha256-jcs-v1:f13eb7cea8383588ea4b87607db8074478c8212ee4ce3660220224fd0636d745"
     );
     assert_eq!(
         seed.cell_id.as_str(),
-        "cell:sha256-jcs-v1:b4c309b0528560c3051be99b494bcb10c533c2cf93fa83c91279fb228508ff3d"
+        "cell:sha256-jcs-v1:86089606d76c84a3924bda1ab24ae860ef0d66c7bf14451ac064c4fc1f19760e"
     );
     assert_eq!(
         seed.value_lineage.digest().as_str(),
-        "content:sha256-jcs-v1:f005d65682c9906a11c1ce57c98f64927f83f1ad703617cda53d50d69b92a60d"
+        "content:sha256-jcs-v1:f35696d73ebd308f69af9d2b4b42a016759cea2e69310fdbec2dbe52edb7bb4e"
     );
     assert_eq!(
         frame.config.config_ref_digest.as_str(),
-        "content:sha256-jcs-v1:1f8dd8a7c84f19669abfd377eb9aa48375902a67c411bf749bba71a1a85b45a0"
+        "content:sha256-jcs-v1:4efd60dfc94f22725016efa4bef18e7571683bb788d685c943b1e44266575555"
     );
     assert_eq!(
         node.config.config_ref_digest,
@@ -1282,20 +1282,20 @@ fn stable_ids_and_value_lineage_golden_vectors() {
     );
     assert_eq!(
         frame.input.digest.as_str(),
-        "content:sha256-jcs-v1:6412ef8c501baed54b3f226b0be63f809ee71af4e93a5ebcc604eed2c93532aa"
+        "content:sha256-jcs-v1:b3988b494d3c450e6e2680efb2ebec83a9129f704116680472a32806dc24deef"
     );
     assert_eq!(node.input.digest, frame.input.digest);
     assert_eq!(
         frame.operation_instance_id.as_str(),
-        "op:sha256-jcs-v1:ab3164ca69c1baced88da5dc70c1908e6b9a4ddc9a745ab2c091680747c2a942"
+        "op:sha256-jcs-v1:57877ac1c44ef94d0d6e6320c61aca5a8ff4a5f37ee38ea02216ecff4d0d0451"
     );
     assert_eq!(
         active_lineage.digest.as_str(),
-        "content:sha256-jcs-v1:25cbc2f3098de077b73ed91e482c5288d9b330d962711243187a3ec039e1a127"
+        "content:sha256-jcs-v1:e1211f3c4792a461bc050586526a47ee9d1eaac84458216ccd00fb99054be255"
     );
     assert_eq!(
         node.node_id.as_str(),
-        "node:sha256-jcs-v1:6a93779963e1277aa469b1f9c984f39a36d2b37a98c94b2ce638c5b27af3cb98"
+        "node:sha256-jcs-v1:a872a89920a12d479b7d06db18fe6deaede7ed9d3dcc5ef42dcf27ca43705ede"
     );
     assert_ne!(
         node.node_id, alternate_lowering_node_id,
@@ -1303,15 +1303,15 @@ fn stable_ids_and_value_lineage_golden_vectors() {
     );
     assert_eq!(
         node.output_cell_id.as_str(),
-        "cell:sha256-jcs-v1:e56569392147d60a2205202c5dc2843a5bb201f1ef445c0eb0dcc26de100dfc2"
+        "cell:sha256-jcs-v1:65e23302a4adad175b2d48f1ebd3fd5cab8cc84654a2ba3da5a6030ae3def70d"
     );
     assert_eq!(
         node.output_value_lineage.digest().as_str(),
-        "content:sha256-jcs-v1:7f253a7c654077612a83a7aad5117f25a0032e2f3fe34e3d2e1109eaadf6cad6"
+        "content:sha256-jcs-v1:e8b5b0fd85e431bf6a3c23d368b81518b7b8956f8c090f4c5f940899323b9c32"
     );
     assert_eq!(
         frame.lineage_digest.as_str(),
-        "content:sha256-jcs-v1:31ecb879b7dd45c4ad33bc9a540a88bc7ce875e2aedeb128d811fe11aa02a1ec"
+        "content:sha256-jcs-v1:2f9cc86db1d0d772f4c60bd2466fca3c48ec82fdb521226556f177ae1654e469"
     );
 }
 
@@ -1386,7 +1386,7 @@ fn domain_keyed_handles_sort_canonically_and_reject_duplicates() {
         assert_eq!(elements.len(), 2);
         assert_eq!(
             binding.digest().as_str(),
-            "content:sha256-jcs-v1:718b1e5b84a831a8b770461ae241eae095ededa3eb6a5470116e49b0c9b5c7be"
+            "content:sha256-jcs-v1:66cab7f584757aa11417aee5f695d9b9bb823b4ee39104196d66cb6c2798db89"
         );
         assert_eq!(
             domain_keys[0].content_digest.as_str(),

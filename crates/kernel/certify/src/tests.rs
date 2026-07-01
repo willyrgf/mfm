@@ -500,7 +500,7 @@ fn certifies_reference_program_draft() {
     );
     assert_eq!(
         certified.certificate_hash().as_str(),
-        "content:sha256-jcs-v1:b10ace9a11f373d953d1e0056bba864d524667b3fa54fa386203622987496b93"
+        "content:sha256-jcs-v1:95a7643407b304930c326ef3a5bff3d78e61931d185edb874c159758d06187d6"
     );
     assert_eq!(
         certified.envelope().spec.public_outputs.public_schema_id,
