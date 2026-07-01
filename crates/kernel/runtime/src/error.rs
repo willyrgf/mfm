@@ -1,6 +1,28 @@
 use std::fmt;
 
 use mfm_store::v1 as store;
+use serde_json::Value;
+
+/// Structured redaction-safe diagnostic details for runtime-owned failure evidence.
+///
+/// Callers must supply only closed, non-secret fields that are safe to retain in runtime
+/// diagnostic artifacts. Runtime uses this value only for retained diagnostics and never as the
+/// public safe message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeDiagnosticDetails {
+    value: Value,
+}
+
+impl RuntimeDiagnosticDetails {
+    /// Creates diagnostic details from redaction-reviewed JSON.
+    pub fn from_json(value: Value) -> Self {
+        Self { value }
+    }
+
+    pub(crate) const fn value(&self) -> &Value {
+        &self.value
+    }
+}
 
 /// Runtime failure.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -29,6 +51,14 @@ pub enum RuntimeError {
     /// Runner output violated certified node or capability authority.
     #[error("invalid runner output: {0}")]
     InvalidRunnerOutput(String),
+    /// Runner output failed with structured redaction-safe diagnostic details.
+    #[error("invalid runner output: {message}")]
+    InvalidRunnerOutputDiagnostic {
+        /// Redaction-safe summary for internal error propagation.
+        message: String,
+        /// Structured redaction-safe diagnostic details for retained runtime evidence.
+        details: RuntimeDiagnosticDetails,
+    },
     /// Runtime validation failed inside a valid started attempt.
     #[error("runtime validation failed: {0}")]
     RuntimeValidation(String),

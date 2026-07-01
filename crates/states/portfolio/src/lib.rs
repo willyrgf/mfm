@@ -139,6 +139,8 @@ pub struct PortfolioReadError {
     pub code: String,
     /// Redacted human-readable message.
     pub message: String,
+    /// Optional closed redacted diagnostic details for retained runtime evidence.
+    pub redacted_details: Option<serde_json::Value>,
 }
 
 impl PortfolioReadError {
@@ -147,7 +149,14 @@ impl PortfolioReadError {
         Self {
             code: code.into(),
             message: message.into(),
+            redacted_details: None,
         }
+    }
+
+    /// Attaches closed redacted diagnostic details.
+    pub fn with_redacted_details(mut self, details: serde_json::Value) -> Self {
+        self.redacted_details = Some(details);
+        self
     }
 }
 

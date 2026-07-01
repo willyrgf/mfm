@@ -49,7 +49,7 @@ pub use binding::{
     BoundRuntimeContext, BoundRuntimeContextLoader,
 };
 pub use commit::{PreparedRunLaunch, RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell};
-pub use error::RuntimeError;
+pub use error::{RuntimeDiagnosticDetails, RuntimeError};
 pub use history::{
     VerifiedRunContext, VerifiedRunContextLoader, VerifiedRunHistory, VerifiedRunHistoryView,
 };

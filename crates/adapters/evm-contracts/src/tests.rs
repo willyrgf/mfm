@@ -1145,7 +1145,7 @@ async fn finality_rejects_mismatched_guard_evidence() {
 
     assert!(matches!(
         error,
-        mfm_runtime::RuntimeError::InvalidRunnerOutput(_)
+        mfm_runtime::RuntimeError::InvalidRunnerOutputDiagnostic { .. }
     ));
     assert!(error.to_string().contains("EVM source chain id"));
 }

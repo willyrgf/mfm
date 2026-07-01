@@ -16,7 +16,8 @@ use crate::invocation::{
 use crate::side_effect_lifecycle::SideEffectLifecycle;
 use crate::transition::TransitionAttempt;
 use crate::{
-    attempt_id, canonical_json, CertifiedRuntimeSpec, ErasedRunnerOutput, Result, RuntimeError,
+    attempt_id, canonical_json, CertifiedRuntimeSpec, ErasedRunnerOutput, Result,
+    RuntimeDiagnosticDetails, RuntimeError,
 };
 
 /// Result of running one ordinary attempt lifecycle.
@@ -478,7 +479,7 @@ pub(crate) async fn terminalize_observed_failure<S: store::RunEventStore + ?Size
         view,
         retryability,
     } = context;
-    let Some(error_info) = observed_attempt_failure_info(&error, retryability)? else {
+    let Some(failure_info) = observed_attempt_failure_info(&error, retryability)? else {
         return Err(error);
     };
     if !can_terminalize_observed_failure(runtime_spec, run_id, node, attempt_id, view)? {
@@ -489,7 +490,8 @@ pub(crate) async fn terminalize_observed_failure<S: store::RunEventStore + ?Size
         run_id,
         node,
         attempt_id,
-        &error_info,
+        &failure_info.error,
+        failure_info.details.as_ref(),
     )?;
     let failure = CommitPlanner::prepare_attempt_failure(AttemptFailureCommitInput {
         runtime_spec,
@@ -497,7 +499,7 @@ pub(crate) async fn terminalize_observed_failure<S: store::RunEventStore + ?Size
         node,
         attempt_id,
         view,
-        error: error_info,
+        error: failure_info.error,
         diagnostic_artifact: Some(diagnostic_artifact),
     })?;
     let bundle = prepared_commit_bundle(failure.commit, failure.artifact_admissions)?;
@@ -548,10 +550,15 @@ fn can_terminalize_observed_failure(
     Ok(true)
 }
 
+struct ObservedAttemptFailureInfo {
+    error: events::MfmErrorInfo,
+    details: Option<RuntimeDiagnosticDetails>,
+}
+
 fn observed_attempt_failure_info(
     error: &RuntimeError,
     retryability: ObservedFailureRetryabilityPolicy,
-) -> Result<Option<events::MfmErrorInfo>> {
+) -> Result<Option<ObservedAttemptFailureInfo>> {
     let Some(failure_class) = observed_failure_class(error) else {
         return Ok(None);
     };
@@ -576,14 +583,31 @@ fn observed_attempt_failure_info(
             "runtime validation failed while handling attempt",
         )?,
     };
-    Ok(Some(failure))
+    let details = observed_failure_diagnostic_details(error).cloned();
+    let error = if let Some(details) = &details {
+        let details_digest = canonical_json(details.value().clone())?.content_digest();
+        failure.with_public_details(events::RedactedJson::new(details_digest))?
+    } else {
+        failure
+    };
+    Ok(Some(ObservedAttemptFailureInfo { error, details }))
 }
 
 fn observed_failure_class(error: &RuntimeError) -> Option<ObservedFailureClass> {
     match error {
         RuntimeError::InputMaterialization(_) => Some(ObservedFailureClass::InputMaterialization),
-        RuntimeError::InvalidRunnerOutput(_) => Some(ObservedFailureClass::InvalidRunnerOutput),
+        RuntimeError::InvalidRunnerOutput(_)
+        | RuntimeError::InvalidRunnerOutputDiagnostic { .. } => {
+            Some(ObservedFailureClass::InvalidRunnerOutput)
+        }
         RuntimeError::RuntimeValidation(_) => Some(ObservedFailureClass::RuntimeValidation),
+        _ => None,
+    }
+}
+
+fn observed_failure_diagnostic_details(error: &RuntimeError) -> Option<&RuntimeDiagnosticDetails> {
+    match error {
+        RuntimeError::InvalidRunnerOutputDiagnostic { details, .. } => Some(details),
         _ => None,
     }
 }
@@ -594,6 +618,7 @@ fn redacted_attempt_failure_diagnostic_artifact(
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
     error: &events::MfmErrorInfo,
+    details: Option<&RuntimeDiagnosticDetails>,
 ) -> Result<PreparedStagedArtifact> {
     let bytes = canonical_json(serde_json::json!({
         "attempt_id": attempt_id.as_str(),
@@ -602,6 +627,7 @@ fn redacted_attempt_failure_diagnostic_artifact(
         "diagnostic_schema": "mfm.runtime.redacted_attempt_failure_diagnostic",
         "diagnostic_schema_version": "1",
         "node_id": node.node_id.as_str(),
+        "public_details": details.map(RuntimeDiagnosticDetails::value),
         "retryable": error.retryable,
         "run_id": run_id.as_str(),
         "safe_message": &error.safe_message,
@@ -634,6 +660,7 @@ fn redacted_attempt_failure_diagnostic_schema_id() -> Result<SchemaId> {
             "diagnostic_schema",
             "diagnostic_schema_version",
             "node_id",
+            "public_details",
             "retryable",
             "run_id",
             "safe_message",

@@ -11,6 +11,7 @@ category = "capability-contract"
 
 [dependencies]
 alloy-primitives = { workspace = true, features = ["serde"] }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 mfm-canonical = { path = "../kernel/canonical" }

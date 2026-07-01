@@ -423,6 +423,28 @@ pub struct RedactedEvmSourceEvidence {
 }
 
 impl RedactedEvmSourceEvidence {
+    /// Returns evidence for the same source selection with a supplied observed chain id.
+    pub fn with_observed_chain_id(&self, observed_chain_id: u64) -> Self {
+        Self {
+            network_id: self.network_id.clone(),
+            expected_chain_id: self.expected_chain_id,
+            observed_chain_id,
+            source_ref: self.source_ref.clone(),
+            policy_id: self.policy_id.clone(),
+        }
+    }
+
+    /// Returns closed redacted chain-mismatch diagnostic details.
+    pub fn chain_mismatch_diagnostic_details(&self) -> serde_json::Value {
+        serde_json::json!({
+            "network_id": self.network_id.to_string(),
+            "expected_chain_id": self.expected_chain_id,
+            "observed_chain_id": self.observed_chain_id,
+            "source_ref": self.source_ref.to_string(),
+            "policy_id": self.policy_id.to_string(),
+        })
+    }
+
     /// Verifies that provider evidence matches the semantic request guard.
     pub fn verify_guard(&self, guard: &EvmChainGuard) -> Result<()> {
         if &self.network_id == guard.network_id()
