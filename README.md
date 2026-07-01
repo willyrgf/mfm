@@ -86,7 +86,6 @@ when a parity test needs them, then run the targeted test against those live end
 cargo fmt --all -- --check
 cargo test --workspace
 cargo test -p mfm-integration-tests --test cargo_metadata_contract
-cargo test -p mfm-integration-tests --test architecture_namespace_contract
 ```
 
 Useful focused parity examples:

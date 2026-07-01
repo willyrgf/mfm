@@ -10,7 +10,7 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 - Do not introduce hacks, monkey patches, partial workarounds, or fragile schema shims.
 - If the requested change needs missing underlying support, add that support properly or report the blocker honestly.
 - Use focused Cargo verification while developing. Prefer targeted `cargo test`, `cargo check`,
-  `cargo metadata`, namespace scans, schema checks, and manually started service parity tests.
+  `cargo metadata`, schema checks, and manually started service parity tests.
 - Before each commit, run `nix run .#check`, `nix run .#test`, and `nix run .#test-db`.
 - Run `nix run .#ci` after major work or for final merge-readiness validation.
 - Write commit subjects in lower case. Examples: `mfm-core bump to 0.1.30`, `fix nix task wrappers to preserve caller cwd`, `docs: refresh repo map for typed crates`, `docs: publish umbrella earlier with live links only`, `docs: point crate metadata at mfm repo`.
@@ -54,8 +54,7 @@ Use Cargo and focused checks while developing:
 - `cargo check --workspace`
 - `cargo test --workspace`
 - `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
-- `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
-- `rg` namespace/config scans for architecture guardrails
+- targeted schema, metadata, and parity checks for touched surfaces
 
 For parity tests that need Postgres, Reth, or other live services, start those services manually and
 run the focused Cargo test with explicit environment variables such as `DATABASE_URL`,
