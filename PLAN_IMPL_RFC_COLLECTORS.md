@@ -31,6 +31,10 @@ The current repository already has an older fact surface:
 The RFC is intentionally a destructive event-contract reset. The plan assumes no migration of old
 fact events, projections, or artifacts.
 
+This plan follows [`docs/code-quality.md`](docs/code-quality.md): correctness, clarity, and
+maintainability take priority over preserving previous behavior. Breaking changes are allowed and
+expected when they remove an old or flawed contract.
+
 ## Implementation Principles
 
 1. `FactRecorded` is the only fact event. Do not add `CollectedFactRecorded` or any collector-only
@@ -61,6 +65,16 @@ fact events, projections, or artifacts.
     reusable facts service, not in bins.
 15. The first collector should prove the model with one narrow bounded cycle, not a general
     collector scheduler.
+16. Do not maintain backward compatibility with old fact contracts. Old code paths, fixtures,
+    tests, projections, schema objects, public DTOs, and docs must be deleted or rewritten when the
+    new contract replaces them.
+17. Do not create fallbacks, feature flags, dual decoders, dual writers, deprecated compatibility
+    routes, hidden old modules, fragile schema shims, or "safe" adapters that preserve old behavior.
+    If old behavior is needed later, recover it from git history and reintroduce it deliberately
+    under the new contract.
+18. Before executing implementation work for a gate or PR, divide the work into intended commits
+    with scope, touched files/crates, and verification for each commit. Adjust the commit plan as new
+    facts emerge, but do not start coding from an undivided blob of work.
 
 ## Proposed Crate Ownership
 
@@ -94,14 +108,19 @@ This is a destructive development reset, matching the RFC.
 1. Update event/store/schema baselines in the same gate that makes old facts invalid.
 2. Replace old `FactRecorded` payload parsing/encoding with the normalized payload. Do not support
    a compatibility decoder for historical fact events in production paths.
-3. Remove or rewrite tests and fixtures that construct old flat `FactKey` facts.
-4. Replace the old simple fact projection in `mfm-store` and Postgres with descriptor/index/term
+3. Delete old fact recorder helpers, old projection structs, old decode/encode branches, old schema
+   objects, old public DTOs, and old docs in the same PR that replaces their contract. Do not leave
+   dead or hidden compatibility code.
+4. Remove or rewrite tests and fixtures that construct old flat `FactKey` facts.
+5. Replace the old simple fact projection in `mfm-store` and Postgres with descriptor/index/term
    projections.
-5. Reset Postgres baseline `0001_run_store.sql` rather than adding compatibility migrations for old
+6. Reset Postgres baseline `0001_run_store.sql` rather than adding compatibility migrations for old
    fact tables or rows.
-6. Reset any dev artifacts or snapshots that encode old fact events.
-7. Document in implementation PRs that existing development stores must be recreated.
-8. Do not edit the RFC unless a blocking ambiguity prevents implementation. Record questions in
+7. Reset any dev artifacts or snapshots that encode old fact events.
+8. Document in implementation PRs that existing development stores must be recreated.
+9. If a deletion removes code that later proves useful, recover it from git history instead of
+   keeping compatibility scaffolding in the live tree.
+10. Do not edit the RFC unless a blocking ambiguity prevents implementation. Record questions in
    this plan and resolve through a follow-up RFC edit only if necessary.
 
 ## Gate 1: Facts Kernel Types And Canonical Contracts
@@ -1041,28 +1060,274 @@ CLI and REST changes are public contracts and must update docs in the same PR.
 - Keep output examples in docs free of secrets, internal ids, raw event coordinates, and artifact
   evidence.
 
+## Per-Commit Execution Discipline
+
+Before editing code for any gate, write a short commit plan for that gate or PR. Use the sequence
+below as the default commit plan. If implementation discoveries require changing it, update the
+commit plan first, then continue.
+
+Each planned commit should state:
+
+- objective and why it exists
+- files/crates expected to change
+- old code to delete, not hide
+- new public contracts introduced or removed
+- focused verification for that commit
+- whether docs or rustdoc must change in the same commit
+
+Commit plans should keep each commit reviewable and coherent. Prefer commits that compile and pass
+their focused tests independently. When a destructive contract reset is too intertwined to make
+every intermediate commit buildable, keep the unbuildable intermediate states local and commit only
+coherent checkpoints.
+
+## Proposed Commit Sequence
+
+These commits are the intended order before implementation starts. PRs may group adjacent commits
+when review remains practical, but each commit should keep this scope and verification discipline.
+
+### Gate 1 Commits
+
+1. `add facts kernel crate`
+   - Scope: add `crates/kernel/facts`, workspace membership, crate metadata, empty module layout,
+     rustdoc skeleton, and cargo metadata allow-list updates.
+   - Delete: none.
+   - Verify: `cargo test -p mfm-facts`; `cargo test -p mfm-integration-tests --test cargo_metadata_contract`.
+
+2. `add fact descriptor contracts`
+   - Scope: add `FactKind`, descriptor, field, accessor, operator, exposure, unit/scale, ordering,
+     visibility, audience, and scope types with validating constructors.
+   - Delete: none.
+   - Verify: `cargo test -p mfm-facts`.
+
+3. `add fact canonical identity`
+   - Scope: add subject namespace/material types, canonical bytes, descriptor hash, subject
+     namespace hash, subject material hash, `FactKey`, and `FactClaimId`.
+   - Delete: none.
+   - Verify: `cargo test -p mfm-facts`.
+
+4. `add fact extraction validation`
+   - Scope: add v1 canonical value path extraction, scalar normalization, type/unit/scale checks,
+     size bounds, and descriptor validation errors.
+   - Delete: none.
+   - Verify: `cargo test -p mfm-facts`.
+
+5. `add fact query evidence types`
+   - Scope: add kernel/replay data shapes for canonical query plans, receipts, selection evidence,
+     read frontier, receipt auth metadata, returned summaries, and result cardinality. Keep query
+     execution out of `mfm-facts`.
+   - Delete: none.
+   - Verify: `cargo test -p mfm-facts`.
+
+6. `add fact canonical goldens`
+   - Scope: add descriptor, subject namespace/material, `FactKey`, `FactClaimId`, query plan,
+     receipt body, and query evidence hash golden tests plus perturbation tests.
+   - Delete: any temporary fixtures created while building the preceding commits.
+   - Verify: `cargo test -p mfm-facts`; `cargo test -p mfm-canonical`; `cargo test -p mfm-values`.
+
+### Gate 2 Commits
+
+7. `add mfm fact derive surface`
+   - Scope: add `MfmFactType` authoring trait and `#[derive(MfmFactType)]` support with subject and
+     response accessors.
+   - Delete: any temporary hand-written production fact descriptor helper used during development.
+   - Verify: `cargo test -p mfm-program-derive --test derive_ui`.
+
+8. `add fact descriptor artifact role`
+   - Scope: add `ArtifactRole::FactDescriptor`, closed role contract, role parse/roundtrip tests,
+     event schema descriptors, and Postgres role tag decoding tests.
+   - Delete: no old role aliases or compatibility tags.
+   - Verify: `cargo test -p mfm-events`; `cargo test -p mfm-store`; `cargo test -p mfm-stream-store-postgres`.
+
+9. `certify fact descriptor allow lists`
+   - Scope: add per-producing-node descriptor allow-lists to program/spec/certify authority and make
+     them hash-defining certified spec material.
+   - Delete: any registry-time mutable policy path that would authorize facts outside certified
+     spec material.
+   - Verify: `cargo test -p mfm-program`; `cargo test -p mfm-certify`; targeted spec hash tests.
+
+10. `add fact derive certification tests`
+    - Scope: add derive pass/fail tests, descriptor artifact emission tests, and certification
+      tests proving allow-list changes alter certified spec hashes.
+    - Delete: any derive fixture that bypasses descriptor admission.
+    - Verify: `cargo test -p mfm-program-derive`; `cargo test -p mfm-certify`.
+
+### Gate 3 Commits
+
+11. `replace fact recorded event contract`
+    - Scope: delete old flat `FactRecorded` fields and add normalized `FactRecordedPayload`,
+      `FactClaim`, subject evidence, request evidence, response evidence, visibility, producer
+      provenance, event codec, and schema descriptors in one coherent event-contract commit.
+    - Delete: old event fields, old `FactKey` event construction, old codec branches, old schema
+      descriptors, and any old fact JSON decoder.
+    - Verify: `cargo test -p mfm-events`; `cargo check -p mfm-store -p mfm-runtime`.
+
+12. `rewrite fact event fixtures`
+    - Scope: rewrite store/runtime/Postgres fixtures and tests that constructed old flat
+      `FactRecorded` values so they use normalized claims and descriptor authority.
+    - Delete: old-shape fact fixtures and snapshots instead of preserving compatibility fixtures.
+    - Verify: `cargo test -p mfm-store`; `cargo test -p mfm-runtime`.
+
+13. `replace runtime fact recorder`
+    - Scope: replace `RunnerArtifactBuilder::fact_recorded` and related paths with typed
+      `record_fact<T: MfmFactType>` staging that derives subject material and response artifacts
+      from one typed value.
+    - Delete: caller-supplied `FactKey` recorder helpers.
+    - Verify: `cargo test -p mfm-runtime`.
+
+14. `replace store fact projection contracts`
+    - Scope: replace old `FactProjection` and logical keys with descriptor/index/term projection
+      contracts, `FactClaimId` mapping, and append validation hooks in `mfm-store`.
+    - Delete: old fact projection structs, JSON encoders, parsers, and tests.
+    - Verify: `cargo test -p mfm-store --test commit_contract --features test-support`.
+
+15. `reset postgres fact schema`
+    - Scope: reset `0001_run_store.sql` for `fact_descriptor_index`, `fact_index`, and
+      `fact_index_terms`; add constraints, indexes, stale-object checks, and schema validation.
+    - Delete: retired old fact projection tables, columns, indexes, triggers, and schema checks.
+    - Verify: `cargo test -p mfm-stream-store-postgres`.
+
+16. `project facts during append`
+    - Scope: insert descriptor/index/term rows in the same Postgres append transaction as events and
+      artifact admissions.
+    - Delete: any post-append repair or fallback projection path.
+    - Verify: `cargo test -p mfm-stream-store-postgres`; focused rollback/idempotency tests.
+
+17. `add fact projection rebuild`
+    - Scope: add internal/test-only rebuild and validation from run stream plus retained artifacts.
+    - Delete: no public operator command until a maintenance contract is designed.
+    - Verify: `cargo test -p mfm-stream-store-postgres`; projection rebuild parity tests.
+
+### Gate 4 Commits
+
+18. `add fact query compiler`
+    - Scope: add descriptor resolution input, field filter parsing, exposure/operator checks,
+      canonical query plan building, and explicit ordering normalization.
+    - Delete: any parser/compiler duplicated in CLI, REST, app, or tests.
+    - Verify: `cargo test -p mfm-facts`.
+
+19. `add postgres fact query executor`
+    - Scope: execute one-descriptor v1 plans against `fact_index` and `fact_index_terms` with
+      audience/scope filtering and deterministic ordering.
+    - Delete: any JSONB-only or SQL-trigger extraction shortcut.
+    - Verify: `cargo test -p mfm-stream-store-postgres`.
+
+20. `add fact receipt authentication`
+    - Scope: add local receipt hash/authentication, store read frontier, projection generation,
+      descriptor catalog watermark, and trust-root verification.
+    - Delete: unauthenticated receipt mode.
+    - Verify: `cargo test -p mfm-store`; `cargo test -p mfm-stream-store-postgres`.
+
+21. `record fact query evidence`
+    - Scope: add `ArtifactRole::FactQueryEvidence`, query evidence artifact staging, private
+      `ArtifactReferenced` emission, and retention edges.
+    - Delete: any live query result reuse path that is not pinned as evidence.
+    - Verify: `cargo test -p mfm-events`; `cargo test -p mfm-runtime`; `cargo test -p mfm-store`.
+
+22. `verify fact query replay`
+    - Scope: add replay verification for plans, receipts, returned refs, summaries, selection
+      evidence, retained source facts, and no-live-store replay.
+    - Delete: live-store replay shortcuts and current-index replay reads.
+    - Verify: `cargo test -p mfm-replay`; `cargo test -p mfm-app`.
+
+### Gate 5 Commits
+
+23. `add app fact query services`
+    - Scope: add evidence-only app services for public Platform queries, internal Control queries,
+      descriptor discovery, exact public ref lookup, and public DTO construction.
+    - Delete: any app path that exposes `InternalFactRef` publicly.
+    - Verify: `cargo test -p mfm-app`.
+
+24. `add cli facts commands`
+    - Scope: add `mfm facts kinds/describe/explain/query/latest/history/top/show`, output structs,
+      stable errors, and CLI docs.
+    - Delete: any CLI-owned query compiler or descriptor parser.
+    - Verify: `cargo test -p mfm --test cli_tests`; `cargo test -p mfm --test json_output_integration`.
+
+25. `add rest facts routes`
+    - Scope: add `/v1/facts/...` routes, response/error envelopes, exact ref lookup, and REST docs.
+    - Delete: any REST-owned query compiler or descriptor parser.
+    - Verify: `cargo test -p mfm-rest-api`.
+
+26. `add public fact privacy tests`
+    - Scope: add end-to-end tests proving public surfaces do not expose Control/RunPrivate facts,
+      internal refs, artifact ids, subject hashes, run/event coordinates, or response artifacts.
+    - Delete: stale output snapshots that expose internal fields.
+    - Verify: `cargo test -p mfm-app`; CLI and REST focused tests.
+
+### Gate 6 Commits
+
+27. `add bitcoin fact capability contracts`
+    - Scope: add `crates/btc-capabilities` for typed Bitcoin read requests/evidence and redacted
+      capability errors.
+    - Delete: no live IO or workflow topology in the capability crate.
+    - Verify: `cargo test -p mfm-btc-capabilities`; cargo metadata boundary tests.
+
+28. `add bitcoin fact states`
+    - Scope: add reusable bounded Bitcoin read/normalize/checkpoint state contracts and
+      `MfmFactType` facts for `chain.head` and `collector.checkpoint`.
+    - Delete: no process-local runtime source routing in typed state config.
+    - Verify: `cargo test -p mfm-states-btc`; state boundary tests.
+
+29. `add bitcoin jsonrpc adapter`
+    - Scope: bind Bitcoin states to capability calls and evidence recording through the existing
+      redacted JSON-RPC transport or a properly renamed transport crate.
+    - Delete: any workflow-specific protocol IO from state or op crates.
+    - Verify: `cargo test -p mfm-adapters-btc-jsonrpc`; transport replay tests.
+
+30. `add bitcoin chain head collector op`
+    - Scope: add deterministic one-cycle collector operation with descriptor allow-lists,
+      checkpoint query selection, fact recording, and completion topology.
+    - Delete: no collector daemon/runtime primitive.
+    - Verify: `cargo test -p mfm-op-btc-chain-head-collector`; certification tests.
+
+31. `register bitcoin collector assembly`
+    - Scope: wire app registration, optional entry point, runner factories, and evidence-only query
+      dependencies.
+    - Delete: no live runtime config parsing from evidence-only read paths.
+    - Verify: `cargo test -p mfm-app`.
+
+32. `add collector workflow integration tests`
+    - Scope: prove Platform chain-head facts, Control checkpoint facts, checkpoint query evidence,
+      replay without live Bitcoin RPC, crash/retry behavior, and public API visibility.
+    - Delete: any temporary deterministic-only proof that replaces the external collector target.
+    - Verify: targeted integration/Postgres tests; then `nix run .#check`, `nix run .#test`,
+      `nix run .#test-db`; `nix run .#ci` for merge readiness.
+
 ## Likely PR Breakdown
 
-Suggested PR sequence:
+Suggested PR grouping over the commit sequence:
 
-1. Add `mfm-facts` canonical types, validation, extraction grammar, and goldens.
-2. Add `MfmFactType` derive and descriptor emission with compile-fail tests.
-3. Add certified spec node descriptor allow-lists and certification hash tests.
-4. Add `ArtifactRole::FactDescriptor` and descriptor artifact admission plumbing.
-5. Reset `FactRecorded` event shape in events/store/runtime tests without Postgres projection.
-6. Add Postgres descriptor/index/term schema and append projection.
-7. Add projection validation and rebuild.
-8. Add `ArtifactRole::FactQueryEvidence` and query evidence artifact recording.
-9. Add reusable query compiler and canonical plan tests.
-10. Add Postgres query execution, receipt authentication, and replay verification.
-11. Add app public/internal fact query services and retention edges.
-12. Add CLI `mfm facts` commands and docs.
-13. Add REST `/v1/facts` routes and docs.
-14. Add the first collector capability/state/adapter/op vertical slice.
-15. Run final Nix gates and update any repo maps/docs affected by crate additions.
+1. Gate 1 PR: commits 1-6.
+2. Gate 2 PR: commits 7-10.
+3. Gate 3 event/runtime/store PR: commits 11-14.
+4. Gate 3 Postgres projection PR: commits 15-17.
+5. Gate 4 query/replay PR: commits 18-22.
+6. Gate 5 app/CLI/REST PR: commits 23-26.
+7. Gate 6 collector PR: commits 27-32.
+8. Final merge-readiness PR, if needed: final docs/repo-map cleanup and full Nix gates.
 
 Some adjacent PRs can merge if they stay reviewable, but do not combine infrastructure gates with
 the first collector workflow.
+
+## Architect Escalation Rule
+
+If an architecture or design decision is unclear during implementation, pause that decision and
+spawn or consult an architect-agent before coding around the uncertainty. Pass the architect-agent
+these rules explicitly:
+
+- no backward compatibility with old fact contracts is required or desired
+- breaking changes are allowed when they remove old or flawed contracts
+- old code must be deleted or rewritten, not hidden behind fallbacks, shims, feature flags, or dual
+  paths
+- useful deleted code can be recovered from git history if needed later
+- work must be divided into intended commits before implementation starts
+- `docs/code-quality.md`, `docs/architecture.md`, `docs/design.md`, and `docs/RFC_COLLECTORS.md`
+  remain the review authority
+- the critique threshold is no P0/P1 architecture, privacy, replay, or implementation-readiness
+  issues
+
+Do not use an architect-agent to bless a workaround. If the design needs missing underlying support,
+the implementation must add that support properly or record the blocker honestly.
 
 ## Unresolved Engineering Questions
 
@@ -1105,6 +1370,9 @@ The RFC implementation is ready for merge only when:
 - every gate's acceptance criteria are satisfied or intentionally deferred in docs with RFC-aligned
   scope;
 - no old-shape `FactRecorded` production path remains;
+- old fact compatibility code, fallback decoders, dual writers, retired schema objects, stale tests,
+  and stale fixtures have been deleted or rewritten;
+- each implementation PR/gate had an explicit commit plan before code execution;
 - public APIs cannot reveal `Control` or `RunPrivate` facts;
 - replay of fact queries uses pinned evidence and retained artifacts only;
 - Postgres projection rebuild validates from authoritative run stream and artifacts;
