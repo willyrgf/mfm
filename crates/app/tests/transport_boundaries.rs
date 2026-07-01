@@ -21,8 +21,6 @@ fn production_app_links_only_supported_transport_crates() {
         "mfm-transports-local-fs",
         "mfm-transports-local-keystore",
         "mfm-transports-rpc-control",
-        "mfm-machine",
-        "mfm-sdk",
     ] {
         assert!(
             !manifest.contains(forbidden),
@@ -32,7 +30,7 @@ fn production_app_links_only_supported_transport_crates() {
 }
 
 #[test]
-fn transport_sources_exclude_unsupported_io_surfaces() {
+fn transport_sources_exclude_artifact_write_surfaces() {
     for (name, source) in [
         ("proof", include_str!("../../transports/proof/src/lib.rs")),
         (
@@ -41,13 +39,6 @@ fn transport_sources_exclude_unsupported_io_surfaces() {
         ),
     ] {
         for banned in [
-            concat!("mfm_", "machine"),
-            concat!("Io", "Provider"),
-            concat!("Live", "IoTransport"),
-            concat!("Live", "IoTransportFactory"),
-            concat!("Dyn", "Context"),
-            concat!("Planned", "Op"),
-            concat!("Port", "Key"),
             concat!("request: serde_json::", "Value"),
             "ProofArtifactSink",
             "ProofArtifactSinkFuture",
@@ -59,7 +50,7 @@ fn transport_sources_exclude_unsupported_io_surfaces() {
         ] {
             assert!(
                 !source.contains(banned),
-                "transport {name} must not expose unsupported IO surface {banned}"
+                "transport {name} must not expose artifact write surface {banned}"
             );
         }
     }

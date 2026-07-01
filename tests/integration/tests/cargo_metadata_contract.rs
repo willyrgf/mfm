@@ -430,7 +430,7 @@ fn kernel_dependency_boundary_rejects_non_kernel_path_dependency_fixture() {
         .and_then(Value::as_array_mut)
         .expect("mfm-ids dependencies")
         .push(json!({
-            "name": "mfm-machine",
+            "name": "mfm-app",
             "source": null,
             "req": "*",
             "kind": null,
@@ -440,13 +440,13 @@ fn kernel_dependency_boundary_rejects_non_kernel_path_dependency_fixture() {
             "features": [],
             "target": null,
             "registry": null,
-            "path": root.join("crates/machine").to_string_lossy(),
+            "path": root.join("crates/app").to_string_lossy(),
         }));
 
     let error =
         validate_kernel_dependency_boundary(&metadata, &root).expect_err("fixture must fail");
     assert!(
-        error.contains("mfm-machine") && error.contains("crates/machine"),
+        error.contains("mfm-app") && error.contains("crates/app"),
         "unexpected error: {error}"
     );
 }
