@@ -335,14 +335,17 @@ mod tests {
     async fn app_resume_reports_busy_for_live_execution_claim_without_driving() {
         let fixture = EntryPointRunFixture::in_memory().await;
         let prepared = fixture.prepare_sample_portfolio(None);
-        let run_id = prepared.request.run_id.clone();
         let services = fixture.services();
-        let (_, started) = services
-            .launch_run(prepared.request)
+        let run_id = admit_entry_point_run(&services, prepared).await;
+        let head_seq = fixture
+            .store
+            .load_run_stream(&run_id)
             .await
-            .expect("launch")
-            .into_response_parts();
-        let head_seq = started.head_seq;
+            .expect("run stream")
+            .last()
+            .expect("admitted event")
+            .seq()
+            .as_u64();
         let token = AdmissionToken::new("mfm.test.app.execution_claim.resume_busy")
             .expect("execution claim token");
         assert!(matches!(
@@ -368,9 +371,8 @@ mod tests {
     async fn app_resume_rejects_unavailable_runner_binding_without_claiming() {
         let fixture = EntryPointRunFixture::in_memory().await;
         let prepared = fixture.prepare_sample_portfolio(None);
-        let run_id = prepared.request.run_id.clone();
         let services = fixture.services();
-        services.launch_run(prepared.request).await.expect("launch");
+        let run_id = admit_entry_point_run(&services, prepared).await;
         let incompatible_services = crate::make_run_services_with_certification_registry(
             crate::ErasedRunnerRegistry::new(),
             fixture.store.clone(),
@@ -610,6 +612,39 @@ mod tests {
                 })
                 .count()
         }
+    }
+
+    async fn admit_entry_point_run(
+        services: &crate::RunServices<
+            mfm_store::v1::AsyncInMemoryRunStore,
+            mfm_store::v1::AsyncInMemoryRunStore,
+        >,
+        prepared: crate::PreparedEntryPointRunLaunch,
+    ) -> mfm_ids::RunId {
+        let request = prepared.request;
+        let run_id = request.run_id.clone();
+        let runtime_spec = mfm_runtime::CertifiedRuntimeSpec::new(request.certified_spec.clone())
+            .expect("runtime spec");
+        let expected_next_seq = services
+            .store()
+            .expected_next_seq(&run_id)
+            .await
+            .expect("expected next seq");
+        let launch = services
+            .scheduler
+            .prepare_run_launch(
+                &runtime_spec,
+                request.identity_material,
+                request.evidence,
+                expected_next_seq,
+            )
+            .expect("prepare admitted-only launch");
+        services
+            .scheduler
+            .start_run(services.store(), launch)
+            .await
+            .expect("admit run");
+        run_id
     }
 
     fn test_runtime_config() -> (tempfile::TempDir, std::path::PathBuf) {

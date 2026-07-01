@@ -198,6 +198,88 @@ async fn app_runner_resumes_replays_and_renders_validate_only_lifecycle_run() {
 }
 
 #[tokio::test]
+async fn app_resume_completed_run_is_evidence_only_without_live_runners() {
+    let store = test_run_store();
+    let artifacts = crate::artifact_read_provider_from_retained(store.clone());
+    let config = validate_config();
+    let configured = configured_contract();
+    let mut certification = CertificationRegistry::new();
+    mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
+        &mut certification,
+    )
+    .expect("contract certification descriptors");
+    let mut runners = ErasedRunnerRegistry::new();
+    mfm_adapters_evm_contracts::register_contract_lifecycle_runners_with_factory(
+        &mut runners,
+        Arc::new(TestRuntimeFactory::new(artifacts)),
+    )
+    .expect("contract runners");
+    let launch_services = make_run_services_with_certification_registry(
+        runners,
+        store.clone(),
+        store.clone(),
+        certification.clone(),
+    );
+    let request = prepare_evm_entry_point_request(
+        &launch_services,
+        "evm_contract_validate",
+        json!({
+            "config": config,
+            "configured": configured,
+        }),
+    )
+    .await;
+    let run_id = request.run_id.clone();
+
+    let (_, launched) = launch_services
+        .launch_run(request)
+        .await
+        .expect("launch validate lifecycle")
+        .into_response_parts();
+    assert_eq!(launched.run_mode, RunModeStatus::Completed);
+    assert!(matches!(
+        store
+            .execution_claim_status(&run_id)
+            .await
+            .expect("execution claim status"),
+        ExecutionClaimStatus::Unclaimed
+    ));
+    let completed_stream = store
+        .load_run_stream(&run_id)
+        .await
+        .expect("completed stream");
+
+    let resume_services = make_run_services_with_certification_registry(
+        ErasedRunnerRegistry::new(),
+        store.clone(),
+        store.clone(),
+        certification,
+    );
+    let resumed = resume_services
+        .resume_stored_run(&run_id)
+        .await
+        .expect("terminal resume");
+
+    assert_eq!(resumed.run_mode, RunModeStatus::Completed);
+    assert_eq!(resumed.scheduler_status, "observed");
+    assert_eq!(resumed.head_seq, launched.head_seq);
+    assert!(matches!(
+        store
+            .execution_claim_status(&run_id)
+            .await
+            .expect("execution claim status"),
+        ExecutionClaimStatus::Unclaimed
+    ));
+    assert_eq!(
+        store
+            .load_run_stream(&run_id)
+            .await
+            .expect("stream after terminal resume"),
+        completed_stream
+    );
+}
+
+#[tokio::test]
 async fn app_resume_missing_runtime_config_fails_before_claim_or_attempt() {
     assert_resume_runtime_config_ingress_failure(None).await;
 }

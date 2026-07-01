@@ -665,6 +665,7 @@ pub fn production_entry_point_op_registry() -> Result<EntryPointOpRegistry, AppE
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DriveStatus {
+    Observed,
     Scheduler(SchedulerStatus),
     ExecutionClaimBusy,
     ExecutionClaimLost,
@@ -673,6 +674,7 @@ enum DriveStatus {
 impl DriveStatus {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Observed => "observed",
             Self::Scheduler(status) => scheduler_status_str(status),
             Self::ExecutionClaimBusy => "execution_claim_busy",
             Self::ExecutionClaimLost => "execution_claim_lost",
@@ -1097,8 +1099,9 @@ pub struct RunResponse {
     pub attempt_dispositions: Vec<AttemptDispositionStatus>,
     /// Last scheduler status observed by the app dispatch loop.
     ///
-    /// Read-only status reports `observed`; start/resume dispatch reports scheduler progress or
-    /// execution-claim coordination.
+    /// Read-only status reports `observed`. Start/resume dispatch reports scheduler progress or
+    /// execution-claim coordination, and already-terminal resume reports `observed` because no
+    /// scheduler dispatch is needed.
     pub scheduler_status: String,
     /// Current typed run-stream head sequence.
     pub head_seq: u64,
@@ -1907,6 +1910,14 @@ where
         run_id: &RunId,
     ) -> Result<DriveStatus, AppError> {
         let context = self.load_verified_status_read_context(run_id).await?;
+        if run_projection_has_terminal_completion(
+            run_id,
+            context.runtime_spec(),
+            context.projection(),
+        )? {
+            self.reap_expired_execution_claim_if_present(run_id).await?;
+            return Ok(DriveStatus::Observed);
+        }
         self.scheduler
             .validate_admitted_run_binding(runtime_spec, context.read.view().run_admitted())?;
         let launch_evidence = stored_launch_evidence_from_run_admitted(
@@ -1933,8 +1944,13 @@ where
             if step.claim_lost {
                 return Ok(DriveStatus::ExecutionClaimLost);
             }
-            let terminal = self.run_is_terminal(run_id).await?;
-            if terminal || step.status == SchedulerStatus::PublicOutputProjected {
+            let context = self.load_verified_status_read_context(run_id).await?;
+            if run_projection_has_terminal_completion(
+                run_id,
+                context.runtime_spec(),
+                context.projection(),
+            )? || step.status == SchedulerStatus::PublicOutputProjected
+            {
                 self.release_execution_claim_if_holder(run_id, &lease)
                     .await?;
                 return Ok(step.status.into());
@@ -1981,6 +1997,24 @@ where
                 }
             }
         }
+    }
+
+    async fn reap_expired_execution_claim_if_present(
+        &self,
+        run_id: &RunId,
+    ) -> Result<(), AppError> {
+        if let store::ExecutionClaimStatus::Expired(lease) = self
+            .store
+            .execution_claim_status(run_id)
+            .await
+            .map_err(async_app_store_error)?
+        {
+            self.store
+                .reap_expired_execution_claim(run_id, &lease.token)
+                .await
+                .map_err(async_app_store_error)?;
+        }
+        Ok(())
     }
 
     async fn drive_once_with_execution_claim(
@@ -2053,24 +2087,17 @@ where
             .map_err(async_app_store_error)?;
         Ok(())
     }
+}
 
-    async fn run_is_terminal(&self, run_id: &RunId) -> Result<bool, AppError> {
-        let context = self.load_verified_status_read_context(run_id).await?;
-        let terminal_policies =
-            store::SideEffectTerminalPolicies::from_spec(context.runtime_spec().spec())?;
-        let saga = context.projection().derive_saga_projection(
-            run_id,
-            &context.runtime_spec().spec().saga,
-            &terminal_policies,
-        )?;
-        Ok(matches!(
-            saga.run_mode,
-            store::RunMode::Completed
-                | store::RunMode::Compensated
-                | store::RunMode::ManuallyResolved
-                | store::RunMode::FailedWithoutAcdcClaim
-        ))
-    }
+fn run_projection_has_terminal_completion(
+    run_id: &RunId,
+    runtime_spec: &CertifiedRuntimeSpec,
+    projection: &store::ProjectionSnapshot,
+) -> Result<bool, AppError> {
+    let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
+    let saga =
+        projection.derive_saga_projection(run_id, &runtime_spec.spec().saga, &terminal_policies)?;
+    Ok(saga.run_completion.is_some())
 }
 
 enum ExecutionClaimAcquire {
