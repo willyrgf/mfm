@@ -76,6 +76,43 @@ async fn parity_reth_contract_lifecycle_rest_route_completes_and_replays() {
     drop(runtime_config);
     drop(wallet);
 
+    let status = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/runs/{run_id}/status"))
+                .body(Body::empty())
+                .expect("contract lifecycle status request"),
+        )
+        .await
+        .expect("contract lifecycle status response");
+    assert_eq!(status.status(), StatusCode::OK);
+    let status_body = response_json(status).await;
+    assert_eq!(status_body["status"], "success");
+    assert_eq!(status_body["data"]["run_mode"], "completed");
+
+    let stream = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/runs/{run_id}/stream"))
+                .body(Body::empty())
+                .expect("contract lifecycle stream request"),
+        )
+        .await
+        .expect("contract lifecycle stream response");
+    assert_eq!(stream.status(), StatusCode::OK);
+    let stream_body = response_json(stream).await;
+    assert_eq!(stream_body["status"], "success");
+    assert!(
+        stream_body["data"]["events"]
+            .as_array()
+            .is_some_and(|events| !events.is_empty()),
+        "{stream_body}"
+    );
+
     let replay = app
         .clone()
         .oneshot(empty_post(&format!("/v1/runs/{run_id}/replay")))

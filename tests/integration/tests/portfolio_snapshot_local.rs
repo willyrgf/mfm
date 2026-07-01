@@ -14,6 +14,7 @@ mod support;
 use support::{empty_post, json_post, response_json};
 
 const NETWORK_ID: &str = "typed-local-eth";
+const RPC_URL_FILE_ENV: &str = "MFM_TEST_PORTFOLIO_RPC_URL_FILE";
 static RPC_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
@@ -112,7 +113,9 @@ async fn rest_portfolio_snapshot_matches_public_output() {
 async fn read_only_routes_work_after_runtime_config_is_removed() {
     let _env_guard = RPC_ENV_LOCK.lock().await;
     let rpc_url = start_rpc_mock().await;
-    let runtime_config = set_rpc_env(rpc_url);
+    let runtime_config = set_rpc_file_env(rpc_url);
+    let runtime_config_path = runtime_config.runtime_config_path.clone();
+    let rpc_url_path = runtime_config.rpc_url_path.clone();
     let app = rest_test_app();
     let response = local_portfolio_snapshot_post(&app, &portfolio_payload()).await;
     let run_id = response["data"]["run"]["run_id"]
@@ -125,6 +128,22 @@ async fn read_only_routes_work_after_runtime_config_is_removed() {
         .to_owned();
 
     drop(runtime_config);
+    assert!(
+        std::env::var_os(support::ENV_RUNTIME_CONFIG_FILE).is_none(),
+        "runtime config selector must be removed before evidence-only reads"
+    );
+    assert!(
+        std::env::var_os(RPC_URL_FILE_ENV).is_none(),
+        "RPC value file selector must be removed before evidence-only reads"
+    );
+    assert!(
+        !runtime_config_path.exists(),
+        "runtime config file must be removed before evidence-only reads"
+    );
+    assert!(
+        !rpc_url_path.exists(),
+        "RPC value file must be removed before evidence-only reads"
+    );
 
     let status = app
         .clone()
@@ -300,6 +319,70 @@ async fn local_portfolio_snapshot_post(
 
 fn set_rpc_env(rpc_url: String) -> support::EnvVarRestore {
     support::set_evm_runtime_config_env_for_test(NETWORK_ID, &rpc_url)
+}
+
+fn set_rpc_file_env(rpc_url: String) -> RuntimeFileEnvGuard {
+    let temp_dir = tempfile::tempdir().expect("runtime config tempdir");
+    let rpc_url_path = temp_dir.path().join("rpc-url.txt");
+    std::fs::write(&rpc_url_path, rpc_url).expect("write rpc url file");
+    let runtime_config_path = temp_dir.path().join("runtime.toml");
+    std::fs::write(
+        &runtime_config_path,
+        format!(
+            r#"
+[evm.sources.{network}]
+rpc_url_file_env = "{rpc_url_file_env}"
+
+[evm.routes.{network}]
+source_ref = {network}
+"#,
+            network = toml_string(NETWORK_ID),
+            rpc_url_file_env = RPC_URL_FILE_ENV,
+        ),
+    )
+    .expect("write runtime config");
+
+    let previous_runtime_config = std::env::var_os(support::ENV_RUNTIME_CONFIG_FILE);
+    let previous_rpc_url_file = std::env::var_os(RPC_URL_FILE_ENV);
+    std::env::set_var(support::ENV_RUNTIME_CONFIG_FILE, &runtime_config_path);
+    std::env::set_var(RPC_URL_FILE_ENV, &rpc_url_path);
+
+    RuntimeFileEnvGuard {
+        previous_runtime_config,
+        previous_rpc_url_file,
+        runtime_config_path,
+        rpc_url_path,
+        _temp_dir: temp_dir,
+    }
+}
+
+struct RuntimeFileEnvGuard {
+    previous_runtime_config: Option<std::ffi::OsString>,
+    previous_rpc_url_file: Option<std::ffi::OsString>,
+    runtime_config_path: std::path::PathBuf,
+    rpc_url_path: std::path::PathBuf,
+    _temp_dir: tempfile::TempDir,
+}
+
+impl Drop for RuntimeFileEnvGuard {
+    fn drop(&mut self) {
+        restore_env(
+            support::ENV_RUNTIME_CONFIG_FILE,
+            self.previous_runtime_config.as_ref(),
+        );
+        restore_env(RPC_URL_FILE_ENV, self.previous_rpc_url_file.as_ref());
+    }
+}
+
+fn restore_env(name: &str, previous: Option<&std::ffi::OsString>) {
+    match previous {
+        Some(value) => std::env::set_var(name, value),
+        None => std::env::remove_var(name),
+    }
+}
+
+fn toml_string(value: &str) -> String {
+    serde_json::to_string(value).expect("toml-compatible string")
 }
 
 fn rest_test_app() -> axum::Router {
