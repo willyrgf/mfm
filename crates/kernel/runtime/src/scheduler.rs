@@ -130,6 +130,20 @@ impl SerialTypedScheduler {
         }
     }
 
+    /// Validates deployment ingress for an already admitted run from retained launch evidence.
+    ///
+    /// This is the resume-time counterpart to [`Self::prepare_run_launch`]. Callers must build
+    /// `evidence` only from verified `RunAdmitted` retained artifacts, then call this before
+    /// acquiring an execution claim or selecting a transition.
+    pub fn validate_admitted_run_ingress(
+        &self,
+        runtime_spec: &CertifiedRuntimeSpec,
+        evidence: &RunLaunchEvidence,
+    ) -> Result<()> {
+        let bound_context = self.run_contexts.load_bound_context(runtime_spec)?;
+        bound_context.validate_launch_ingress(runtime_spec, evidence)
+    }
+
     /// Appends the prepared typed admission commit through an async typed store.
     pub async fn start_run<S: store::RunEventStore + ?Sized>(
         &self,
