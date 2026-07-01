@@ -480,14 +480,27 @@ impl RuntimeConfigLoader {
     }
 
     pub(crate) fn load_evm(&self) -> mfm_runtime::Result<mfm_runtime_config::EvmRuntimeConfig> {
+        self.load_evm_with_requirements(mfm_runtime_config::RuntimeConfigRequirement::evm())
+    }
+
+    pub(crate) fn load_evm_with_signers(
+        &self,
+    ) -> mfm_runtime::Result<mfm_runtime_config::EvmRuntimeConfig> {
+        self.load_evm_with_requirements(
+            mfm_runtime_config::RuntimeConfigRequirement::evm_with_signers(),
+        )
+    }
+
+    fn load_evm_with_requirements(
+        &self,
+        requirements: mfm_runtime_config::RuntimeConfigRequirement,
+    ) -> mfm_runtime::Result<mfm_runtime_config::EvmRuntimeConfig> {
         let path = self.path.as_ref().ok_or_else(|| {
             mfm_runtime::RuntimeError::RunnerBinding("missing runtime config file".to_owned())
         })?;
-        let config = mfm_runtime_config::RuntimeConfig::load_path_with_requirements(
-            path,
-            mfm_runtime_config::RuntimeConfigRequirement::evm(),
-        )
-        .map_err(runtime_config_error)?;
+        let config =
+            mfm_runtime_config::RuntimeConfig::load_path_with_requirements(path, requirements)
+                .map_err(runtime_config_error)?;
         config.evm().cloned().ok_or_else(|| {
             mfm_runtime::RuntimeError::RunnerBinding("missing EVM runtime config".to_owned())
         })

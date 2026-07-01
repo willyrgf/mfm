@@ -378,6 +378,144 @@ async fn evm_contract_start_requires_capability_before_admission_for_all_entry_p
 }
 
 #[tokio::test]
+async fn evm_contract_validation_ignores_unused_malformed_signers() {
+    let rpc_url = test_support::start_portfolio_rpc_mock(1).await;
+    let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
+    let runtime_config_path = write_evm_runtime_config_with_malformed_signers(
+        runtime_config_dir.path(),
+        "ethereum-mainnet",
+        &rpc_url,
+    );
+    let mut state = in_memory_state();
+    state.runtime_config_path = Some(runtime_config_path);
+    let app = mfm_rest_api::make_app(state.clone());
+
+    let resp = app
+        .oneshot(json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "op": "evm_contract_validate",
+                "op_version": 1,
+                "config_format": "json",
+                "config": evm_validate_entry_config_json(),
+            }),
+        ))
+        .await
+        .expect("validate start response");
+    let status = resp.status();
+    let body = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let run_id = RunId::parse(body["data"]["run"]["run_id"].as_str().expect("run id"))
+        .expect("typed run id");
+    let stream = state.store.load_run_stream(&run_id).await.expect("stream");
+    assert!(
+        stream
+            .iter()
+            .any(|event| matches!(event.payload(), events::KernelEventPayload::RunAdmitted(_))),
+        "validation must pass capability ingress without requiring signer bindings"
+    );
+}
+
+#[tokio::test]
+async fn evm_contract_mutation_requires_signers_before_admission() {
+    let rpc_url = test_support::start_portfolio_rpc_mock(1).await;
+    let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
+    let runtime_config_path = test_support::write_evm_runtime_config_for_test(
+        runtime_config_dir.path(),
+        "ethereum-mainnet",
+        &rpc_url,
+        None,
+    );
+    let mut state = in_memory_state();
+    state.runtime_config_path = Some(runtime_config_path);
+    let app = mfm_rest_api::make_app(state.clone());
+    let prepared = test_support::prepare_entry_point_launch_for_store(
+        &state.store,
+        "evm_contract_deploy",
+        Some(mfm_app::OpVersion::new(1).expect("op version")),
+        &evm_deploy_config_json(),
+        None,
+    )
+    .await;
+    let run_id = prepared.request.run_id.clone();
+
+    let resp = app
+        .oneshot(json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "op": "evm_contract_deploy",
+                "op_version": 1,
+                "config_format": "json",
+                "config": evm_deploy_config_json(),
+            }),
+        ))
+        .await
+        .expect("deploy start response");
+    let status = resp.status();
+    let body = response_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "LaunchRunnerUnavailable");
+    let stream = state
+        .store
+        .load_run_stream(&run_id)
+        .await
+        .expect("run stream");
+    assert!(
+        stream.is_empty(),
+        "missing signer must fail before admission"
+    );
+}
+
+#[tokio::test]
+async fn evm_contract_mutation_rejects_malformed_signers_before_admission() {
+    let rpc_url = test_support::start_portfolio_rpc_mock(1).await;
+    let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
+    let runtime_config_path = write_evm_runtime_config_with_malformed_signers(
+        runtime_config_dir.path(),
+        "ethereum-mainnet",
+        &rpc_url,
+    );
+    let mut state = in_memory_state();
+    state.runtime_config_path = Some(runtime_config_path);
+    let app = mfm_rest_api::make_app(state.clone());
+    let prepared = test_support::prepare_entry_point_launch_for_store(
+        &state.store,
+        "evm_contract_deploy",
+        Some(mfm_app::OpVersion::new(1).expect("op version")),
+        &evm_deploy_config_json(),
+        None,
+    )
+    .await;
+    let run_id = prepared.request.run_id.clone();
+
+    let resp = app
+        .oneshot(json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "op": "evm_contract_deploy",
+                "op_version": 1,
+                "config_format": "json",
+                "config": evm_deploy_config_json(),
+            }),
+        ))
+        .await
+        .expect("deploy start response");
+    let status = resp.status();
+    let body = response_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "LaunchRunnerUnavailable");
+    let stream = state
+        .store
+        .load_run_stream(&run_id)
+        .await
+        .expect("run stream");
+    assert!(
+        stream.is_empty(),
+        "malformed signer config must fail before admission"
+    );
+}
+
+#[tokio::test]
 async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attempts_from_history() {
     let _env_guard = RPC_ENV_LOCK.lock().await;
     let rpc_url = test_support::start_portfolio_rpc_mock(31337).await;
@@ -809,6 +947,26 @@ fn evm_lifecycle_config_json() -> serde_json::Value {
         "configure": evm_configure_config_json(),
         "validate": evm_validate_config_json(),
     })
+}
+
+fn write_evm_runtime_config_with_malformed_signers(
+    dir: &std::path::Path,
+    network_id: &str,
+    rpc_url: &str,
+) -> std::path::PathBuf {
+    let path = test_support::write_evm_runtime_config_for_test(dir, network_id, rpc_url, None);
+    let mut config = std::fs::read_to_string(&path).expect("runtime config");
+    config.push_str(
+        r#"
+[evm.signers.deployer]
+provider = "raw-private-key"
+entry_id = "not-a-uuid"
+keystore_path = "/runtime/keystore.json"
+unlock_file = "/runtime/unlock"
+"#,
+    );
+    std::fs::write(&path, config).expect("write malformed signer runtime config");
+    path
 }
 
 fn evm_deployed_contract_json() -> serde_json::Value {

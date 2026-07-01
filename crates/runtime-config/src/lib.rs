@@ -91,22 +91,41 @@ impl RuntimeConfigFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RuntimeConfigRequirement {
     evm: bool,
+    evm_signers: bool,
 }
 
 impl RuntimeConfigRequirement {
     /// Creates a requirement with no mandatory capability families.
     pub const fn none() -> Self {
-        Self { evm: false }
+        Self {
+            evm: false,
+            evm_signers: false,
+        }
     }
 
-    /// Creates a requirement for the EVM runtime capability family.
+    /// Creates a requirement for EVM routes, sources, and policies.
     pub const fn evm() -> Self {
-        Self { evm: true }
+        Self {
+            evm: true,
+            evm_signers: false,
+        }
+    }
+
+    /// Creates a requirement for EVM routes, sources, policies, and signer bindings.
+    pub const fn evm_with_signers() -> Self {
+        Self {
+            evm: true,
+            evm_signers: true,
+        }
     }
 
     /// Returns whether the EVM runtime family is required.
     pub const fn requires_evm(self) -> bool {
         self.evm
+    }
+
+    const fn parse_evm_signers(self) -> bool {
+        !self.evm || self.evm_signers
     }
 }
 
@@ -161,7 +180,10 @@ impl RuntimeConfig {
     fn from_raw(raw: RawRuntimeConfig, requirements: RuntimeConfigRequirement) -> Result<Self> {
         reject_extra_fields(&raw.extra, RuntimeConfigLocation::Root)?;
         let evm = match raw.evm {
-            Some(evm) => Some(EvmRuntimeConfig::from_raw(evm)?),
+            Some(evm) => Some(EvmRuntimeConfig::from_raw(
+                evm,
+                requirements.parse_evm_signers(),
+            )?),
             None if requirements.requires_evm() => {
                 return Err(RuntimeConfigError::new(
                     RuntimeConfigLocation::Evm,
@@ -204,7 +226,7 @@ impl EvmRuntimeConfig {
         &self.signers
     }
 
-    fn from_raw(raw: RawEvmConfig) -> Result<Self> {
+    fn from_raw(raw: RawEvmConfig, parse_signers: bool) -> Result<Self> {
         reject_extra_fields(&raw.extra, RuntimeConfigLocation::Evm)?;
 
         let mut sources = BTreeMap::new();
@@ -267,22 +289,11 @@ impl EvmRuntimeConfig {
             routes.insert(network_id, route);
         }
 
-        let mut signers = BTreeMap::new();
-        for (raw_signer_ref, raw_signer) in raw.signers {
-            let signer_ref = SignerRef::new(&raw_signer_ref).map_err(|_| {
-                RuntimeConfigError::new(
-                    RuntimeConfigLocation::EvmSigner { signer_ref: None },
-                    RuntimeConfigErrorKind::InvalidIdentifier {
-                        kind: RuntimeConfigIdentifierKind::SignerRef,
-                    },
-                )
-            })?;
-            let location = RuntimeConfigLocation::EvmSigner {
-                signer_ref: Some(signer_ref.to_string()),
-            };
-            let signer = EvmSigner::from_raw(raw_signer, location)?;
-            signers.insert(signer_ref, signer);
-        }
+        let signers = if parse_signers {
+            parse_evm_signers(raw.signers)?
+        } else {
+            BTreeMap::new()
+        };
 
         Ok(Self {
             sources,
@@ -291,6 +302,36 @@ impl EvmRuntimeConfig {
             signers,
         })
     }
+}
+
+fn parse_evm_signers(raw: Option<Value>) -> Result<BTreeMap<SignerRef, EvmSigner>> {
+    let Some(raw) = raw else {
+        return Ok(BTreeMap::new());
+    };
+    let raw_signers =
+        serde_json::from_value::<BTreeMap<String, RawEvmSigner>>(raw).map_err(|_| {
+            RuntimeConfigError::new(
+                RuntimeConfigLocation::Evm.with_field("signers"),
+                RuntimeConfigErrorKind::InvalidSignerConfig,
+            )
+        })?;
+    let mut signers = BTreeMap::new();
+    for (raw_signer_ref, raw_signer) in raw_signers {
+        let signer_ref = SignerRef::new(&raw_signer_ref).map_err(|_| {
+            RuntimeConfigError::new(
+                RuntimeConfigLocation::EvmSigner { signer_ref: None },
+                RuntimeConfigErrorKind::InvalidIdentifier {
+                    kind: RuntimeConfigIdentifierKind::SignerRef,
+                },
+            )
+        })?;
+        let location = RuntimeConfigLocation::EvmSigner {
+            signer_ref: Some(signer_ref.to_string()),
+        };
+        let signer = EvmSigner::from_raw(raw_signer, location)?;
+        signers.insert(signer_ref, signer);
+    }
+    Ok(signers)
 }
 
 /// Runtime EVM JSON-RPC source descriptor.
@@ -828,6 +869,8 @@ pub enum RuntimeConfigErrorKind {
     SameIdPolicyRequiresExplicitPolicyId,
     /// Signer provider was unsupported.
     UnsupportedSignerProvider,
+    /// Signer binding section did not have the expected shape.
+    InvalidSignerConfig,
     /// Keystore entry id was malformed.
     InvalidEntryId,
 }
@@ -865,6 +908,7 @@ impl fmt::Display for RuntimeConfigErrorKind {
                 f.write_str("explicit same-id policy requires explicit policy_id")
             }
             Self::UnsupportedSignerProvider => f.write_str("signer provider is unsupported"),
+            Self::InvalidSignerConfig => f.write_str("signer config is invalid"),
             Self::InvalidEntryId => f.write_str("keystore entry id is invalid"),
         }
     }
@@ -914,7 +958,7 @@ struct RawEvmConfig {
     #[serde(default)]
     routes: BTreeMap<String, RawEvmRoute>,
     #[serde(default)]
-    signers: BTreeMap<String, RawEvmSigner>,
+    signers: Option<Value>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
