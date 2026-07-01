@@ -290,8 +290,24 @@ where
     )
 }
 
+/// Builds evidence-only async app services with an explicit trusted certification registry.
+pub fn make_run_read_services_with_certification_registry<S, A>(
+    store: S,
+    artifacts: A,
+    certification_registry: CertificationRegistry,
+) -> RunReadServices<S, A>
+where
+    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
+    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
+{
+    RunReadServices::new_with_certification_registry(store, artifacts, certification_registry)
+}
+
 /// Production typed run services backed by the Postgres run store.
 pub type ProductionRunServices = RunServices<ProductionRunStore, ProductionRunStore>;
+
+/// Production evidence-only run services backed by the Postgres run store.
+pub type ProductionRunReadServices = RunReadServices<ProductionRunStore, ProductionRunStore>;
 
 /// Connects the production Postgres run store.
 pub async fn connect_production_run_store(
@@ -319,6 +335,19 @@ pub async fn connect_production_run_services(
     let certification_registry = production_certification_registry()?;
     Ok(make_run_services_with_certification_registry(
         runners,
+        store.clone(),
+        store,
+        certification_registry,
+    ))
+}
+
+/// Builds production evidence-only run services backed by the Postgres run store.
+pub async fn connect_production_run_read_services(
+    database_url: Option<&str>,
+) -> Result<ProductionRunReadServices, AppError> {
+    let store = connect_production_run_store(database_url).await?;
+    let certification_registry = production_certification_registry()?;
+    Ok(make_run_read_services_with_certification_registry(
         store.clone(),
         store,
         certification_registry,
@@ -1136,6 +1165,184 @@ impl fmt::Display for ReplayResponse {
             "run {} replay verified spec_hash={} run_mode={} head_seq={} retained_artifacts={}",
             self.run_id, self.spec_hash, self.run_mode, self.head_seq, self.retained_artifacts
         )
+    }
+}
+
+/// Evidence-only application facade for certified typed run reads.
+#[derive(Clone)]
+pub struct RunReadServices<S, A> {
+    store: S,
+    artifacts: A,
+    certification_registry: CertificationRegistry,
+}
+
+impl<S, A> RunReadServices<S, A>
+where
+    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
+    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
+{
+    /// Creates evidence-only app services with an explicit trusted certification registry.
+    pub fn new_with_certification_registry(
+        store: S,
+        artifacts: A,
+        certification_registry: CertificationRegistry,
+    ) -> Self {
+        Self {
+            store,
+            artifacts,
+            certification_registry,
+        }
+    }
+
+    /// Returns the typed artifact store.
+    pub fn artifacts(&self) -> &A {
+        &self.artifacts
+    }
+
+    /// Returns the async typed run store.
+    pub fn store(&self) -> &S {
+        &self.store
+    }
+
+    /// Returns the trusted certification registry used for stored spec verification.
+    pub fn certification_registry(&self) -> &CertificationRegistry {
+        &self.certification_registry
+    }
+
+    /// Loads the store-owned deployment trust scope used to verify run identities.
+    pub async fn load_trust_scope_id(&self) -> Result<TrustScopeId, AppError> {
+        self.store
+            .load_trust_scope_id()
+            .await
+            .map_err(async_app_store_error)
+    }
+
+    /// Returns typed run status by rebuilding projection from the authoritative run stream.
+    pub async fn run_status(&self, run_id: &RunId) -> Result<RunResponse, AppError> {
+        let context = self.load_verified_status_read_context(run_id).await?;
+        run_status_from_projection(
+            run_id,
+            context.runtime_spec(),
+            context.events(),
+            context.projection(),
+        )
+    }
+
+    /// Returns the authoritative typed run stream.
+    pub async fn run_stream(&self, run_id: &RunId) -> Result<RunStreamResponse, AppError> {
+        let context = self.load_verified_run_read_context(run_id).await?;
+        Ok(run_stream_response_from_verified_context(&context))
+    }
+
+    /// Reads one observation-only run list/watch page.
+    pub async fn read_run_observations(
+        &self,
+        query: store::RunObservationQuery,
+    ) -> Result<store::RunObservationPage, AppError>
+    where
+        S: store::RunObservationStore,
+        <S as store::RunObservationStore>::Error:
+            store::StoreErrorInspection + fmt::Display + Send + Sync + 'static,
+    {
+        self.store
+            .read_run_observations(query)
+            .await
+            .map_err(observation_app_store_error)
+    }
+
+    /// Verifies replay authority for a run using retained typed artifact evidence only.
+    pub async fn verify_replay_for_run(&self, run_id: &RunId) -> Result<ReplayResponse, AppError> {
+        let context = self.load_verified_run_read_context(run_id).await?;
+        let authority = replay_read_authority_for_run(context.runtime_spec(), context.view())?;
+        let broker = ReplayBroker::from_read_authority(authority)?;
+        let stream = context.events();
+        mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&broker)?;
+        mfm_transports_proof::verify_deterministic_proof_replay(&broker)?;
+        let projection = broker.projection_snapshot();
+        let terminal_policies =
+            store::SideEffectTerminalPolicies::from_spec(context.runtime_spec().spec())?;
+        let saga = projection.derive_saga_projection(
+            run_id,
+            &context.runtime_spec().spec().saga,
+            &terminal_policies,
+        )?;
+        let retained_artifacts = projection
+            .retention(run_id)
+            .map(|retention| retention.refs.len())
+            .unwrap_or_default();
+        Ok(ReplayResponse {
+            run_id: run_id.as_str().to_owned(),
+            spec_hash: broker.certified_spec().spec_hash.as_str().to_owned(),
+            run_mode: run_mode_status(saga.run_mode),
+            saga: saga_status_with_resources(context.runtime_spec().spec(), projection, &saga),
+            attempt_dispositions: attempt_dispositions(projection),
+            head_seq: stream_head(stream),
+            retained_artifacts,
+        })
+    }
+
+    /// Renders typed public output from store-owned projection and typed artifact bytes.
+    pub async fn public_output(
+        &self,
+        run_id: &RunId,
+        public_schema_id: &SchemaId,
+    ) -> Result<PublicOutputResponse, AppError> {
+        let context = self.load_verified_run_read_context(run_id).await?;
+        let authority = public_output_read_authority_for_run(
+            &self.artifacts,
+            context.runtime_spec(),
+            context.view(),
+            public_schema_id,
+        )
+        .await?;
+        render_public_output(&self.artifacts, &authority).await
+    }
+
+    async fn load_verified_run_read_context(
+        &self,
+        run_id: &RunId,
+    ) -> Result<VerifiedRunReadContext, AppError> {
+        let context = load_async_verified_run_read_context(
+            &self.store,
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+        )
+        .await?;
+        self.validate_identity_material_trust_scope(
+            &context.view().run_admitted().identity_material,
+        )
+        .await?;
+        Ok(context)
+    }
+
+    async fn load_verified_status_read_context(
+        &self,
+        run_id: &RunId,
+    ) -> Result<VerifiedStatusReadContext, AppError> {
+        let context = load_async_verified_status_read_context(
+            &self.store,
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+        )
+        .await?;
+        self.validate_identity_material_trust_scope(
+            &context.read.view().run_admitted().identity_material,
+        )
+        .await?;
+        Ok(context)
+    }
+
+    async fn validate_identity_material_trust_scope(
+        &self,
+        identity_material: &events::RunIdentityMaterialV1,
+    ) -> Result<(), AppError> {
+        let trust_scope_id = self.load_trust_scope_id().await?;
+        if trust_scope_id != identity_material.trust_scope_id {
+            return Err(run_identity_material_mismatch());
+        }
+        Ok(())
     }
 }
 

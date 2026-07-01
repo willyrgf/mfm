@@ -29,7 +29,8 @@ use http::header::HeaderName;
 use mfm_app::{
     AppError, DistinctRunKey, EntryPointRunLaunchInput, ErrorClass, ManualResolutionDecision,
     ManualResolutionRecordRequest, ProductionRunStore, PublicOpName, PublicOutputResponse,
-    PublicSafeMessage, RunLaunchOutcomeStatus, RunResponse, RunServices, RunStreamResponse,
+    PublicSafeMessage, RunLaunchOutcomeStatus, RunReadServices, RunResponse, RunServices,
+    RunStreamResponse,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use mfm_canonical::PlainCanonicalJsonBytes;
@@ -220,13 +221,22 @@ impl<S> RouterState<S>
 where
     S: RunCommandStore,
 {
-    fn services(&self) -> Result<RunServices<S, S>, ApiError> {
+    fn live_services(&self) -> Result<RunServices<S, S>, ApiError> {
         let runners = mfm_app::production_runner_registry(
             mfm_app::artifact_read_provider_from_retained(self.app.store.clone()),
         )?;
         let certification_registry = mfm_app::production_certification_registry()?;
         Ok(mfm_app::make_run_services_with_certification_registry(
             runners,
+            self.app.store.clone(),
+            self.app.store.clone(),
+            certification_registry,
+        ))
+    }
+
+    fn read_services(&self) -> Result<RunReadServices<S, S>, ApiError> {
+        let certification_registry = mfm_app::production_certification_registry()?;
+        Ok(mfm_app::make_run_read_services_with_certification_registry(
             self.app.store.clone(),
             self.app.store.clone(),
             certification_registry,
@@ -497,7 +507,7 @@ where
             "Failed to parse run list query",
         )
     })?;
-    let services = state.services()?;
+    let services = state.read_services()?;
     let page = services
         .read_run_observations(store::RunObservationQuery::new(
             query.cursor,
@@ -517,7 +527,7 @@ where
     S: RunCommandStore,
 {
     let Json(req) = body?;
-    let services = state.services()?;
+    let services = state.live_services()?;
     let trust_scope_id = services.load_trust_scope_id().await?;
     let entry_point_registry = mfm_app::production_entry_point_op_registry()?;
     let public_op_name = PublicOpName::new(&req.op)?;
@@ -556,7 +566,7 @@ where
 {
     let run_id = parse_run_id(&run_id)?;
     let _req: RunResumeBody = parse_optional_body(body)?;
-    let data = state.services()?.resume_stored_run(&run_id).await?;
+    let data = state.live_services()?.resume_stored_run(&run_id).await?;
 
     json_ok(data)
 }
@@ -580,7 +590,7 @@ where
     let proof_bytes =
         canonical_json_value_bytes(&req.authorization_proof, "ManualResolutionProofInvalid")?;
     let data = state
-        .services()?
+        .live_services()?
         .record_manual_resolution(ManualResolutionRecordRequest {
             run_id,
             outcome: req.outcome,
@@ -603,7 +613,7 @@ where
     S: RunCommandStore,
 {
     let run_id = parse_run_id(&run_id)?;
-    let data = state.services()?.run_status(&run_id).await?;
+    let data = state.read_services()?.run_status(&run_id).await?;
 
     json_ok(data)
 }
@@ -631,7 +641,7 @@ where
     validate_sequence_range(query.from_seq, query.to_seq)?;
 
     let run_id = parse_run_id(&run_id)?;
-    let response = state.services()?.run_stream(&run_id).await?;
+    let response = state.read_services()?.run_stream(&run_id).await?;
     let data = RunStreamResponse {
         run_id: response.run_id,
         head_seq: response.head_seq,
@@ -660,7 +670,10 @@ where
     S: RunCommandStore,
 {
     let run_id = parse_run_id(&run_id)?;
-    let data = state.services()?.verify_replay_for_run(&run_id).await?;
+    let data = state
+        .read_services()?
+        .verify_replay_for_run(&run_id)
+        .await?;
 
     json_ok(data)
 }
@@ -679,7 +692,10 @@ where
 {
     let run_id = parse_run_id(&run_id)?;
     let schema_id = parse_schema_id(&schema_id)?;
-    let data = state.services()?.public_output(&run_id, &schema_id).await?;
+    let data = state
+        .read_services()?
+        .public_output(&run_id, &schema_id)
+        .await?;
 
     json_ok(data)
 }

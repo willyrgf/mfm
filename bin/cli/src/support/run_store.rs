@@ -1,6 +1,6 @@
 use crate::commands::result::CommandError;
 use clap::Args;
-use mfm_app::ProductionRunServices;
+use mfm_app::{ProductionRunReadServices, ProductionRunServices};
 use mfm_ids::{RunId, SchemaId};
 
 /// Shared run-store selection arguments.
@@ -16,6 +16,13 @@ pub(crate) async fn connect_run_services(
     args: &RunStoresArgs,
 ) -> Result<ProductionRunServices, CommandError> {
     Ok(mfm_app::connect_production_run_services(args.database_url.as_deref()).await?)
+}
+
+/// Builds evidence-only typed app services for CLI read commands.
+pub(crate) async fn connect_run_read_services(
+    args: &RunStoresArgs,
+) -> Result<ProductionRunReadServices, CommandError> {
+    Ok(mfm_app::connect_production_run_read_services(args.database_url.as_deref()).await?)
 }
 
 /// Parses a typed run id from the persisted typed-kernel identity grammar.
