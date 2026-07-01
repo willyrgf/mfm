@@ -99,12 +99,13 @@ The environment value is only a path. Structured live capability configuration b
 Store configuration remains `DATABASE_URL` or `--database-url`.
 
 CLI live start/resume commands should parse runtime config only when the certified run needs live
-capabilities from it. Non-EVM runs must not require an EVM runtime config file.
+capabilities from it. When live config is needed, ingress validates the required binding surface for
+the whole certified spec. Non-EVM runs must not require an EVM runtime config file.
 
 REST processes should be able to start even when live capability runtime config is missing or
 malformed. Read-only services such as status, stream inspection, replay, public-output rendering, and
 health should remain available. Live start/resume requests should report redacted deployment errors
-only when the requested certified run needs an affected live capability.
+when the requested certified run needs a malformed or missing capability family.
 
 ## Runtime Config Shape
 
@@ -488,7 +489,7 @@ identity, the signing request requires that public identity, and the signer resu
 transient raw signed bytes are materialized. Do not add a separate pre-admission signing challenge for
 this baseline guard.
 
-This design should remove or avoid several older validation structures:
+This design must remove several older validation structures:
 
 - no mandatory operation-planned "validate EVM chain identity" node at the start of every EVM workflow;
 - no pre-`RunAdmitted` live `eth_chainId` readiness gate for user runs;
@@ -568,9 +569,9 @@ retained artifacts, and recorded read/side-effect evidence.
 
 Status, stream inspection, replay, and public-output rendering services must be constructible without
 valid live runtime capability configuration. A malformed or missing runtime config may block live
-start/resume/drive of nodes that need those capabilities, but it must not block evidence-only read or
-replay paths. App assembly should keep evidence-only service construction free of live runtime config
-parsing, live transports, and signer providers.
+start/resume/drive when the whole certified spec needs that capability family, but it must not block
+evidence-only read or replay paths. App assembly should keep evidence-only service construction free of
+live runtime config parsing, live transports, and signer providers.
 
 Recorded EVM evidence may include redacted `selected_source_ref`, `policy_id`, observed `chain_id`,
 semantic `network_id`, and semantic expected chain id as audit provenance. `selected_source_ref`
@@ -654,13 +655,15 @@ Recommended migration:
    source chain metadata instead of accepting it as compatibility input. Request guards remain
    authoritative.
 11. Remove adapter-local EVM route wrappers whose only job is to inject `source_ref` and `policy_id`
-   into capability requests. Route resolution belongs in the guarded provider/transport, and selected
-   route ids appear only as redacted evidence.
+    into capability requests. Route resolution belongs in the guarded provider/transport, and selected
+    route ids appear only as redacted evidence.
 12. Remove existing `--evm-rpc-sources` and EVM environment JSON compatibility inputs rather than
    normalizing them as compatibility shims. Direct values and indirect sources should resolve only
    through the new redacted runtime value types.
-13. Replace direct reads of `MFM_EVM_RPC_SOURCES_JSON`, `MFM_EVM_NETWORK_ROUTES_JSON`, and
-   `MFM_EVM_SIGNERS_JSON` with explicit runtime config plumbing.
+13. Delete the old EVM runtime wiring surfaces: env constants, direct reads of
+   `MFM_EVM_RPC_SOURCES_JSON`, `MFM_EVM_NETWORK_ROUTES_JSON`, and `MFM_EVM_SIGNERS_JSON`, `from_env`
+   constructors, source-level runtime `expected_chain_id` fields/parsers/tests, and old route-table
+   request plumbing that exposes `source_ref` or `policy_id` to adapters/states.
 14. Update Nixfied Reth workflows to generate or pass live capability runtime config files. Generated
    files should be written outside the repository under the active runtime/Nixfied state directory with
    restrictive permissions, atomic write/rename where supported, and secret-bearing file handling.
@@ -668,14 +671,16 @@ Recommended migration:
    validation: ingress failures append no `RunAdmitted`, guarded EVM chain mismatches fail after
    admission as capability/state-attempt failures with replayable redacted evidence, semantic
    validation records replayable evidence after admission, and replay succeeds with live runtime
-   config and signer/RPC environment removed.
+   config path/file, signer/RPC environment, and referenced secret/value files removed.
 16. Add tests that malformed or missing live runtime config does not block REST startup, status,
     stream inspection, replay, or public-output rendering, while live start/resume reports redacted
     deployment errors when the certified run needs a malformed or missing capability family.
 17. Add store authority guard tests for unavailable Postgres, migration/schema incompatibility,
     metadata/trust-scope setup, and redaction of database URLs.
 18. Update docs and tests to use `runtime.toml` or `runtime.json` for EVM/signer capability wiring.
-19. Remove the environment JSON blobs as documented primary APIs.
+19. Remove or rewrite docs that describe the old EVM runtime JSON surfaces, including
+   `docs/evm-rpc-routing.md`, CLI README sections, REST README sections, fixtures, and integration
+   test setup.
 
 Temporary compatibility shims should not be added. MFM is pre-production; remove flawed live runtime
 configuration surfaces deliberately and update docs/tests in the same change.
