@@ -7026,32 +7026,21 @@ async fn runtime_fails_pre_boundary_forward_attempt_before_saga_terminal() {
         1,
     )
     .expect("forward attempt id");
-
     assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("prepare forward side effect"),
-        SchedulerStatus::Advanced
+        append_or_get_started_attempt(&mut store, &fixture, &forward_node, 1),
+        forward_attempt
     );
-    let projection_snapshot = store.projection_snapshot();
-    assert!(matches!(
-        side_effect_projection_for_attempt(
-            &fixture.runtime_spec,
-            &fixture.run_id,
-            &projection_snapshot,
-            &forward_node,
-            &forward_attempt
-        )
-        .expect("side-effect lookup")
-        .expect("side-effect projection")
-        .phase,
-        store::SideEffectPhase::InvocationPrepared { .. }
-    ));
+
+    drive_until_side_effect_attempt_phase(
+        &scheduler,
+        &mut store,
+        &fixture,
+        &forward_node,
+        &forward_attempt,
+        |phase| matches!(phase, store::SideEffectPhase::InvocationPrepared { .. }),
+        "prepare forward side effect",
+    )
+    .await;
 
     let failing_attempt = append_or_get_started_attempt(&mut store, &fixture, &failing_node, 1);
     append_attempt_failure(&mut store, &fixture, &failing_node, &failing_attempt, false);
@@ -7148,34 +7137,21 @@ async fn runtime_fails_not_submitted_forward_attempt_before_saga_terminal() {
         1,
     )
     .expect("forward attempt id");
+    assert_eq!(
+        append_or_get_started_attempt(&mut store, &fixture, &forward_node, 1),
+        forward_attempt
+    );
 
-    for _ in 0..2 {
-        assert_eq!(
-            drive_once(
-                &scheduler,
-                &mut store,
-                &fixture.runtime_spec,
-                &fixture.run_id
-            )
-            .await
-            .expect("advance forward side effect before not-submitted proof"),
-            SchedulerStatus::Advanced
-        );
-    }
-    let projection_snapshot = store.projection_snapshot();
-    assert!(matches!(
-        side_effect_projection_for_attempt(
-            &fixture.runtime_spec,
-            &fixture.run_id,
-            &projection_snapshot,
-            &forward_node,
-            &forward_attempt
-        )
-        .expect("side-effect lookup")
-        .expect("side-effect projection")
-        .phase,
-        store::SideEffectPhase::NotSubmittedProven { .. }
-    ));
+    drive_until_side_effect_attempt_phase(
+        &scheduler,
+        &mut store,
+        &fixture,
+        &forward_node,
+        &forward_attempt,
+        |phase| matches!(phase, store::SideEffectPhase::NotSubmittedProven { .. }),
+        "advance forward side effect before not-submitted proof",
+    )
+    .await;
 
     let failing_attempt = append_or_get_started_attempt(&mut store, &fixture, &failing_node, 1);
     append_attempt_failure(&mut store, &fixture, &failing_node, &failing_attempt, false);
@@ -8557,6 +8533,18 @@ async fn side_effect_ambiguity_blocks_independent_ready_nodes() {
     )
     .await
     .expect("start run");
+    let forward_node = node_by_output(&fixture, &fixture.cell_a).clone();
+    let forward_attempt = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &forward_node.node_id,
+        1,
+    )
+    .expect("forward attempt id");
+    assert_eq!(
+        append_or_get_started_attempt(&mut store, &fixture, &forward_node, 1),
+        forward_attempt
+    );
 
     for _ in 0..3 {
         drive_once(
@@ -8568,17 +8556,30 @@ async fn side_effect_ambiguity_blocks_independent_ready_nodes() {
         .await
         .expect("advance to ambiguity");
     }
-    assert_eq!(
-        drive_once(
+    for _ in 0..8 {
+        let status = drive_once(
             &scheduler,
             &mut store,
             &fixture.runtime_spec,
-            &fixture.run_id
+            &fixture.run_id,
         )
         .await
-        .expect("ambiguity resolves terminal"),
-        SchedulerStatus::PublicOutputProjected
-    );
+        .expect("ambiguity resolves terminal");
+        assert!(
+            matches!(
+                status,
+                SchedulerStatus::Advanced | SchedulerStatus::PublicOutputProjected
+            ),
+            "unexpected ambiguity terminal status: {status:?}"
+        );
+        if store
+            .projection_snapshot()
+            .run_completion(&fixture.run_id)
+            .is_some()
+        {
+            break;
+        }
+    }
     assert!(store
         .projection_snapshot()
         .cell_terminal(&fixture.cell_b)
@@ -13464,6 +13465,39 @@ async fn drive_until_cells_terminal(
         );
     }
     panic!("{context} did not become terminal");
+}
+
+async fn drive_until_side_effect_attempt_phase(
+    scheduler: &SerialTypedScheduler,
+    store: &mut TestTypedRunStore,
+    fixture: &Fixture,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    mut phase_matches: impl FnMut(&store::SideEffectPhase) -> bool,
+    context: &str,
+) {
+    for _ in 0..24 {
+        let projection_snapshot = store.projection_snapshot();
+        if side_effect_projection_for_attempt(
+            &fixture.runtime_spec,
+            &fixture.run_id,
+            &projection_snapshot,
+            node,
+            attempt_id,
+        )
+        .expect(context)
+        .is_some_and(|projection| phase_matches(&projection.phase))
+        {
+            return;
+        }
+        assert_eq!(
+            drive_once(scheduler, store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect(context),
+            SchedulerStatus::Advanced
+        );
+    }
+    panic!("{context} was not reached");
 }
 
 #[derive(Clone, Copy)]

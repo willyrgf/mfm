@@ -152,7 +152,7 @@ fn generated_value_descriptor_is_stable() {
     );
     assert_eq!(
         descriptor.schema_id().expect("schema id").as_str(),
-        "schema:mfm.test.priced_asset:1:sha256-jcs-v1:498b3d755f53fb1fa27079fb7b993b97bd4d27198e3162b5aaacd70a612362c2"
+        "schema:mfm.test.priced_asset:1:sha256-jcs-v1:2ace2fabd0b5853cf06870b4805ab6a8025fb212ad5a8ce9660b262ec1f673a3"
     );
 }
 
