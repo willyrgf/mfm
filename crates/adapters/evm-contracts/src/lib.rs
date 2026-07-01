@@ -9,16 +9,11 @@
 //! process-local provider traits.
 //!
 //! ```rust
-//! use mfm_adapters_evm_contracts::{
-//!     EvmContractRuntimeRoute, replay_verifier_id,
-//! };
-//! use mfm_evm_capabilities::{EvmSourcePolicyId, EvmSourceRef};
+//! use mfm_adapters_evm_contracts::replay_verifier_id;
+//! use mfm_evm_capabilities::{EvmChainGuard, EvmNetworkId};
 //!
-//! let route = EvmContractRuntimeRoute::new(
-//!     EvmSourceRef::new("local")?,
-//!     EvmSourcePolicyId::new("dev")?,
-//! );
-//! assert_eq!(route.source_ref().as_str(), "local");
+//! let guard = EvmChainGuard::new(EvmNetworkId::new("reth-dev")?, 31337);
+//! assert_eq!(guard.expected_chain_id(), 31337);
 //! assert_eq!(replay_verifier_id()?.as_str(), "mfm.evm.contract.replay.v1");
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
@@ -37,12 +32,12 @@ use mfm_capabilities::CapabilitySpec;
 use mfm_events::v1::{self as events, side_effect};
 use mfm_evm_capabilities::{
     EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockSelector, EvmCallReadCapability,
-    EvmCallReadProvider, EvmCallReadRequest, EvmCapabilityError, EvmChainIdentityCapability,
-    EvmChainIdentityProvider, EvmChainIdentityRequest, EvmFeeReadProvider, EvmFeeReadRequest,
-    EvmGasEstimateProvider, EvmGasEstimateRequest, EvmLogsReadCapability, EvmLogsReadProvider,
-    EvmLogsReadRequest, EvmNonceOccupancy, EvmNonceOccupancyReadProvider,
-    EvmNonceOccupancyReadRequest, EvmNonceReadProvider, EvmNonceReadRequest,
-    EvmReceiptReadProvider, EvmReceiptReadRequest, EvmSourcePolicyId, EvmSourceRef,
+    EvmCallReadProvider, EvmCallReadRequest, EvmCapabilityError, EvmChainGuard,
+    EvmChainIdentityCapability, EvmChainIdentityProvider, EvmChainIdentityRequest,
+    EvmFeeReadProvider, EvmFeeReadRequest, EvmGasEstimateProvider, EvmGasEstimateRequest,
+    EvmLogsReadCapability, EvmLogsReadProvider, EvmLogsReadRequest, EvmNetworkId,
+    EvmNonceOccupancy, EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest,
+    EvmNonceReadProvider, EvmNonceReadRequest, EvmReceiptReadProvider, EvmReceiptReadRequest,
     EvmTransactionSubmitCapability, EvmTransactionSubmitProvider, EvmTransactionSubmitRequest,
     SignedEvmPayload,
 };
@@ -100,36 +95,6 @@ const REPLAY_VERIFIER_ID: &str = "mfm.evm.contract.replay.v1";
 
 /// Result type for lifecycle adapter operations.
 pub type Result<T> = std::result::Result<T, EvmContractAdapterError>;
-
-/// Process-local EVM source route used by adapter runners.
-///
-/// The route is intentionally not serializable and must be supplied by the
-/// process wiring live capability providers.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmContractRuntimeRoute {
-    source_ref: EvmSourceRef,
-    policy_id: EvmSourcePolicyId,
-}
-
-impl EvmContractRuntimeRoute {
-    /// Creates a process-local route.
-    pub fn new(source_ref: EvmSourceRef, policy_id: EvmSourcePolicyId) -> Self {
-        Self {
-            source_ref,
-            policy_id,
-        }
-    }
-
-    /// Returns the selected source reference.
-    pub const fn source_ref(&self) -> &EvmSourceRef {
-        &self.source_ref
-    }
-
-    /// Returns the selected source policy id.
-    pub const fn policy_id(&self) -> &EvmSourcePolicyId {
-        &self.policy_id
-    }
-}
 
 /// Capability providers needed for mutation phases.
 #[derive(Clone, Copy)]
@@ -347,47 +312,35 @@ impl fmt::Debug for PreparedContractMutation {
 /// EVM contract lifecycle adapter over explicit capability providers.
 #[derive(Debug, Clone, Copy)]
 pub struct EvmContractLifecycleAdapter<'a> {
-    route: EvmContractRuntimeRouteRef<'a>,
     mutation: EvmContractMutationProviders<'a>,
     reads: EvmContractReadProviders<'a>,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct EvmContractRuntimeRouteRef<'a> {
-    route: &'a EvmContractRuntimeRoute,
-}
-
 impl<'a> EvmContractLifecycleAdapter<'a> {
-    /// Creates an adapter from process-local routing and provider sets.
+    /// Creates an adapter from process-local provider sets.
     pub fn new(
-        route: &'a EvmContractRuntimeRoute,
         mutation: EvmContractMutationProviders<'a>,
         reads: EvmContractReadProviders<'a>,
     ) -> Self {
-        Self {
-            route: EvmContractRuntimeRouteRef { route },
-            mutation,
-            reads,
-        }
-    }
-
-    /// Returns the process-local route used by this adapter.
-    pub const fn route(&self) -> &EvmContractRuntimeRoute {
-        self.route.route
+        Self { mutation, reads }
     }
 
     /// Reads the latest block number for mutation finality checks.
-    pub async fn latest_block_number(&self, expected_chain_id: u64) -> Result<u64> {
+    pub async fn latest_block_number(
+        &self,
+        network_id: &str,
+        expected_chain_id: u64,
+    ) -> Result<u64> {
+        let guard = evm_chain_guard(network_id, expected_chain_id)?;
         let response = self
             .mutation
             .block
             .read_block(&EvmBlockReadRequest {
-                source_ref: self.route.route.source_ref().clone(),
-                policy_id: self.route.route.policy_id().clone(),
+                guard,
                 block: EvmBlockSelector::Latest,
             })
             .await?;
-        if response.evidence.chain_id != expected_chain_id {
+        if response.evidence.observed_chain_id != expected_chain_id {
             return Err(EvmContractAdapterError::ChainMismatch);
         }
         Ok(response.block_number)
@@ -534,6 +487,10 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         &self,
         prepared: &PreparedContractMutation,
     ) -> Result<Vec<ContractTransactionSubmission>> {
+        let guard = evm_chain_guard(
+            &prepared.evidence().network_id,
+            prepared.evidence().expected_chain_id,
+        )?;
         let mut submissions = Vec::with_capacity(prepared.signing_requests.len());
         for (transaction, signing_request) in prepared
             .evidence()
@@ -562,8 +519,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                 .mutation
                 .submit
                 .submit_transaction(&EvmTransactionSubmitRequest {
-                    source_ref: self.route().source_ref().clone(),
-                    policy_id: self.route().policy_id().clone(),
+                    guard: guard.clone(),
                     signed_payload: payload,
                 })
                 .await?;
@@ -582,8 +538,10 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
     /// Reads one confirmed receipt for each submitted transaction.
     pub async fn read_receipts(
         &self,
+        prepared: &PreparedContractInvocation,
         submissions: &[ContractTransactionSubmission],
     ) -> Result<Vec<ContractTransactionReceipt>> {
+        let guard = evm_chain_guard(&prepared.network_id, prepared.expected_chain_id)?;
         let mut receipts = Vec::with_capacity(submissions.len());
         for submission in submissions {
             let transaction_hash = submission
@@ -594,8 +552,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                 .mutation
                 .receipt
                 .read_receipt(&EvmReceiptReadRequest {
-                    source_ref: self.route().source_ref().clone(),
-                    policy_id: self.route().policy_id().clone(),
+                    guard: guard.clone(),
                     transaction_hash,
                 })
                 .await?;
@@ -620,6 +577,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         &self,
         prepared: &PreparedContractInvocation,
     ) -> Result<PreparedSubmissionReconciliation> {
+        let guard = evm_chain_guard(&prepared.network_id, prepared.expected_chain_id)?;
         let anchor_submissions = prepared_anchor_submissions(prepared)?;
         let mut unlanded_transactions = Vec::new();
         for (transaction, submission) in prepared
@@ -635,8 +593,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                 .mutation
                 .receipt
                 .read_receipt(&EvmReceiptReadRequest {
-                    source_ref: self.route().source_ref().clone(),
-                    policy_id: self.route().policy_id().clone(),
+                    guard: guard.clone(),
                     transaction_hash,
                 })
                 .await
@@ -674,8 +631,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             .mutation
             .nonce
             .read_nonce(&EvmNonceReadRequest {
-                source_ref: self.route().source_ref().clone(),
-                policy_id: self.route().policy_id().clone(),
+                guard: guard.clone(),
                 account: expected_signer,
                 block: EvmBlockSelector::Pending,
             })
@@ -697,8 +653,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                 .mutation
                 .nonce_occupancy
                 .read_nonce_occupancy(&EvmNonceOccupancyReadRequest {
-                    source_ref: self.route().source_ref().clone(),
-                    policy_id: self.route().policy_id().clone(),
+                    guard: guard.clone(),
                     account: expected_signer,
                     nonce: transaction.nonce,
                     excluded_transaction_hash: parse_prepared_transaction_hash(
@@ -722,7 +677,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                                 occupying_block_number: block_number,
                                 signer_address: prepared.expected_signer_address.clone(),
                                 nonce: transaction.nonce,
-                                evidence_chain_id: response.evidence.chain_id,
+                                evidence_chain_id: response.evidence.observed_chain_id,
                             },
                         ));
                     }
@@ -757,12 +712,12 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             return Err(EvmContractAdapterError::IntentMismatch);
         }
         let config = config.as_ref();
+        let guard = evm_chain_guard(config.network().network_id(), request.expected_chain_id)?;
         let chain = self
             .reads
             .chain_identity
             .chain_identity(&EvmChainIdentityRequest {
-                source_ref: self.route().source_ref().clone(),
-                policy_id: self.route().policy_id().clone(),
+                guard: guard.clone(),
             })
             .await?;
         if chain.chain_id != request.expected_chain_id {
@@ -772,6 +727,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         let (configuration_read_results, configuration_event_results) = self
             .evaluate_assertions(
                 config.artifact(),
+                &guard,
                 &input.configured.confirmation_read_assertions,
                 &input.configured.confirmation_event_assertions,
                 &input.configured.deployed.contract_address,
@@ -780,6 +736,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         let (read_results, event_results) = self
             .evaluate_assertions(
                 config.artifact(),
+                &guard,
                 &request.read_assertions,
                 &request.event_assertions,
                 &input.configured.deployed.contract_address,
@@ -813,12 +770,12 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             max_receipt_polls,
             tx_inputs,
         } = request;
+        let guard = evm_chain_guard(network_id, expected_chain_id)?;
         let chain = self
             .mutation
             .chain_identity
             .chain_identity(&EvmChainIdentityRequest {
-                source_ref: self.route().source_ref().clone(),
-                policy_id: self.route().policy_id().clone(),
+                guard: guard.clone(),
             })
             .await?;
         if chain.chain_id != expected_chain_id {
@@ -829,8 +786,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             .mutation
             .nonce
             .read_nonce(&EvmNonceReadRequest {
-                source_ref: self.route().source_ref().clone(),
-                policy_id: self.route().policy_id().clone(),
+                guard: guard.clone(),
                 account: expected_signer,
                 block: EvmBlockSelector::Latest,
             })
@@ -840,8 +796,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             .mutation
             .fee
             .read_fee(&EvmFeeReadRequest {
-                source_ref: self.route().source_ref().clone(),
-                policy_id: self.route().policy_id().clone(),
+                guard: guard.clone(),
             })
             .await?;
 
@@ -854,8 +809,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                     self.mutation
                         .gas
                         .estimate_gas(&EvmGasEstimateRequest {
-                            source_ref: self.route().source_ref().clone(),
-                            policy_id: self.route().policy_id().clone(),
+                            guard: guard.clone(),
                             from: Some(expected_signer),
                             to: input.to,
                             value_wei: input.value_wei,
@@ -982,6 +936,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
     async fn evaluate_assertions(
         &self,
         artifact: Option<&mfm_evm_contract_model::ContractArtifactConfig>,
+        guard: &EvmChainGuard,
         read_assertions: &[ReadAssertionConfig],
         event_assertions: &[EventAssertionConfig],
         contract_address: &str,
@@ -1003,8 +958,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                 .reads
                 .call
                 .read_call(&EvmCallReadRequest {
-                    source_ref: self.route().source_ref().clone(),
-                    policy_id: self.route().policy_id().clone(),
+                    guard: guard.clone(),
                     to: address,
                     calldata: hex_to_bytes(&prepared.data_hex)
                         .map_err(EvmContractAdapterError::Model)?,
@@ -1037,8 +991,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                 .reads
                 .logs
                 .read_logs(&EvmLogsReadRequest {
-                    source_ref: self.route().source_ref().clone(),
-                    policy_id: self.route().policy_id().clone(),
+                    guard: guard.clone(),
                     from_block: block_selector(assertion.from_block.as_ref(), false),
                     to_block: block_selector(assertion.to_block.as_ref(), true),
                     address: Some(address),
@@ -1782,33 +1735,25 @@ pub trait EvmContractRuntimeFactory: Send + Sync {
 /// Process-local runtime capability set for one EVM contract lifecycle route.
 #[derive(Clone)]
 pub struct EvmContractRuntime {
-    route: EvmContractRuntimeRoute,
     evm: Arc<dyn EvmContractProvider>,
     signer: Arc<dyn SigningProvider>,
 }
 
 impl fmt::Debug for EvmContractRuntime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("EvmContractRuntime")
-            .field("route", &self.route)
-            .finish_non_exhaustive()
+        f.debug_struct("EvmContractRuntime").finish_non_exhaustive()
     }
 }
 
 impl EvmContractRuntime {
     /// Creates an EVM contract runtime from explicit process-local providers.
-    pub fn new(
-        route: EvmContractRuntimeRoute,
-        evm: Arc<dyn EvmContractProvider>,
-        signer: Arc<dyn SigningProvider>,
-    ) -> Self {
-        Self { route, evm, signer }
+    pub fn new(evm: Arc<dyn EvmContractProvider>, signer: Arc<dyn SigningProvider>) -> Self {
+        Self { evm, signer }
     }
 
     fn adapter(&self) -> EvmContractLifecycleAdapter<'_> {
         let evm = self.evm.as_ref();
         EvmContractLifecycleAdapter::new(
-            &self.route,
             EvmContractMutationProviders {
                 chain_identity: evm,
                 block: evm,
@@ -2510,6 +2455,7 @@ impl SideEffectVerifyCallbacks for DeploySideEffectVerifyCallbacks<'_> {
             let receipt = deploy_receipt_with_evidence(receipt, &receipt_evidence);
             let confirmations = verified_finality_confirmations(
                 &runtime,
+                plan.config.as_ref().network().network_id(),
                 plan.config.as_ref().network().expected_chain_id(),
                 std::slice::from_ref(&receipt.receipt),
                 required_depth,
@@ -2684,6 +2630,7 @@ impl SideEffectVerifyCallbacks for ConfigureSideEffectVerifyCallbacks<'_> {
             let receipt = configure_receipt_with_evidence(receipt, &receipt_evidence);
             let confirmations = verified_finality_confirmations(
                 &runtime,
+                plan.config.as_ref().network().network_id(),
                 plan.config.as_ref().network().expected_chain_id(),
                 &receipt.receipts,
                 required_depth,
@@ -2883,7 +2830,7 @@ async fn read_receipts_with_poll(
     for attempt in 0..max_polls {
         match runtime
             .adapter()
-            .read_receipts(&submissions.transactions)
+            .read_receipts(prepared, &submissions.transactions)
             .await
         {
             Ok(receipts) => return Ok(receipts),
@@ -2926,6 +2873,7 @@ fn finalized_depth_for_submit_node(submit_node: &spec::NodeSpec) -> mfm_runtime:
 
 async fn verified_finality_confirmations(
     runtime: &EvmContractRuntime,
+    network_id: &str,
     expected_chain_id: u64,
     receipts: &[ContractTransactionReceipt],
     required_depth: u64,
@@ -2938,7 +2886,7 @@ async fn verified_finality_confirmations(
     };
     let latest_block = runtime
         .adapter()
-        .latest_block_number(expected_chain_id)
+        .latest_block_number(network_id, expected_chain_id)
         .await
         .map_err(mfm_runtime::RuntimeError::from)?;
     let confirmations = latest_block
@@ -3388,6 +3336,13 @@ fn digest_json(value: serde_json::Value) -> mfm_runtime::Result<ContentDigest> {
 
 fn runtime_capability_error(error: mfm_capabilities::CapabilityError) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+}
+
+fn evm_chain_guard(network_id: &str, expected_chain_id: u64) -> Result<EvmChainGuard> {
+    Ok(EvmChainGuard::new(
+        EvmNetworkId::new(network_id)?,
+        expected_chain_id,
+    ))
 }
 
 fn runtime_artifact_read_error(

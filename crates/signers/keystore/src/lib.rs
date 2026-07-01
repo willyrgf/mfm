@@ -175,21 +175,6 @@ impl KeystoreSignerRegistryEntry {
         self.entry_id
     }
 
-    /// Creates a registry entry from process-local environment source names.
-    pub fn from_env_sources(
-        signer_ref: SignerRef,
-        entry_id: Uuid,
-        keystore_env: impl AsRef<str>,
-        unlock_file_env: impl AsRef<str>,
-    ) -> std::result::Result<Self, SigningError> {
-        Ok(Self::new(
-            signer_ref,
-            entry_id,
-            KeystorePathSource::path_env_var(keystore_env)?,
-            KeystorePasswordSource::file_path_env_var(unlock_file_env)?,
-        ))
-    }
-
     /// Returns the keystore path source.
     pub fn keystore_source(&self) -> &KeystorePathSource {
         &self.keystore_source

@@ -2111,6 +2111,7 @@ dependencies = [
  "mfm-program-derive",
  "mfm-replay",
  "mfm-runtime",
+ "mfm-runtime-config",
  "mfm-signers-keystore",
  "mfm-signing",
  "mfm-spec",

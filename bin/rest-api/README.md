@@ -24,9 +24,7 @@ Environment variables:
 - `MFM_REST_API_ADDR`: bind address (default: `127.0.0.1:3001`)
 - `DATABASE_URL`: Postgres URL for the certified run store (required)
 - `MFM_SOURCE_REVISION`: optional source revision evidence for typed run starts
-- `MFM_EVM_RPC_SOURCES_JSON`: runtime-only EVM source registry for EVM contract entry-point runs
-- `MFM_EVM_NETWORK_ROUTES_JSON`: runtime-only map from semantic network ids to EVM source/policy ids
-- `MFM_EVM_SIGNERS_JSON`: runtime-only signer provider registry for EVM contract entry-point runs
+- `MFM_RUNTIME_CONFIG_FILE`: optional runtime config file path for live capability-backed runs
 
 The REST API validates the PostgreSQL schema on startup and does not create or
 alter tables. Apply the `mfm-stream-store-postgres` migrations before starting
@@ -41,6 +39,9 @@ Use a fresh or explicitly reset database for this typed Postgres baseline. There
 is no downgrade migration; rollback to an older branch requires resetting the
 database or schema to that branch's expected baseline. Old filesystem artifact
 roots are not read or migrated by the REST API.
+
+REST startup does not load or validate `MFM_RUNTIME_CONFIG_FILE`; malformed or missing runtime
+config is reported only when a live start/resume request needs the affected capability family.
 
 ## API
 
@@ -211,11 +212,9 @@ EVM contract lifecycle:
 ```
 
 EVM configs carry semantic network intent, expected chain id, artifact refs, and non-secret signer
-intent. The runtime resolves the config's `network.network_id` through
-`MFM_EVM_NETWORK_ROUTES_JSON`, then resolves the selected source and policy against
-`MFM_EVM_RPC_SOURCES_JSON`. The config's `signer.signer_ref` resolves against
-`MFM_EVM_SIGNERS_JSON`. Process-local RPC endpoints and keystore paths never belong in the
-entry-point config.
+intent. The runtime resolves the config's `network.network_id` and `signer.signer_ref` through
+`MFM_RUNTIME_CONFIG_FILE`. Process-local RPC endpoints, auth headers, keystore paths, unlock files,
+and private material never belong in the entry-point config.
 
 Stable launch error codes:
 

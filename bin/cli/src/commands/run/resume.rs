@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
@@ -14,6 +16,10 @@ pub(crate) struct ResumeArgs {
     /// Storage configuration for certified typed run events and artifacts.
     #[command(flatten)]
     pub stores: RunStoresArgs,
+
+    /// Runtime configuration file for live capabilities (default: $MFM_RUNTIME_CONFIG_FILE).
+    #[arg(long, value_name = "PATH")]
+    pub runtime_config: Option<PathBuf>,
 }
 
 /// Executes the resume command and terminates the process.
@@ -24,7 +30,7 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &ResumeArgs) -> ! {
 
 async fn execute_internal(args: &ResumeArgs) -> CommandResult<RunResponse> {
     let run_id = parse_run_id(&args.run_id)?;
-    let services = connect_run_services(&args.stores).await?;
+    let services = connect_run_services(&args.stores, args.runtime_config.as_deref()).await?;
     let response = services.resume_stored_run(&run_id).await?;
     Ok(CommandOutput::new(response))
 }

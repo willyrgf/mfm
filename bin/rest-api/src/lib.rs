@@ -16,6 +16,7 @@
 //! }
 //! ```
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -176,6 +177,8 @@ pub type DefaultAppState = AppState<ProductionRunStore>;
 pub struct AppState<S = ProductionRunStore> {
     /// Certified typed run-event and artifact authority store.
     pub store: S,
+    /// Optional runtime configuration file path for live capability-backed runs.
+    pub runtime_config_path: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -224,6 +227,7 @@ where
     fn live_services(&self) -> Result<RunServices<S, S>, ApiError> {
         let runners = mfm_app::production_runner_registry(
             mfm_app::artifact_read_provider_from_retained(self.app.store.clone()),
+            self.app.runtime_config_path.as_deref(),
         )?;
         let certification_registry = mfm_app::production_certification_registry()?;
         Ok(mfm_app::make_run_services_with_certification_registry(
@@ -253,6 +257,7 @@ pub async fn make_default_run_store() -> Result<ProductionRunStore, ApiError> {
 pub async fn make_default_app_state() -> Result<DefaultAppState, ApiError> {
     Ok(AppState {
         store: make_default_run_store().await?,
+        runtime_config_path: std::env::var_os(mfm_app::MFM_RUNTIME_CONFIG_FILE).map(PathBuf::from),
     })
 }
 

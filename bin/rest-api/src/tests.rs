@@ -85,12 +85,11 @@ fn run_routes_do_not_import_dynamic_semantic_surfaces() {
 }
 
 #[tokio::test]
-async fn read_only_routes_ignore_malformed_live_evm_runtime_env() {
-    let _env = locked_env([
-        ("MFM_EVM_RPC_SOURCES_JSON", "not-json"),
-        ("MFM_EVM_NETWORK_ROUTES_JSON", "not-json"),
-        ("MFM_EVM_SIGNERS_JSON", "not-json"),
-    ])
+async fn read_only_routes_ignore_malformed_runtime_config_env() {
+    let _env = locked_env([(
+        mfm_app::MFM_RUNTIME_CONFIG_FILE,
+        "/definitely/not/runtime.toml",
+    )])
     .await;
     let app = test_app();
 
@@ -231,6 +230,7 @@ fn remove_env(key: &str) {
 fn test_app() -> axum::Router {
     make_app(AppState {
         store: store::AsyncInMemoryRunStore::default(),
+        runtime_config_path: None,
     })
 }
 

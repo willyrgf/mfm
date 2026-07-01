@@ -474,14 +474,14 @@ fn load_unlocked_keystore_with_input(
 }
 
 fn get_unlock_password(input: &mut dyn SecretInput) -> Result<Zeroizing<String>, CommandError> {
-    if let Some(password) = password_from_env_sources()? {
+    if let Some(password) = password_from_env_config()? {
         return Ok(password);
     }
     input.read_hidden("Enter keystore password: ")
 }
 
 fn get_create_password(input: &mut dyn SecretInput) -> Result<Zeroizing<String>, CommandError> {
-    if let Some(password) = password_from_env_sources()? {
+    if let Some(password) = password_from_env_config()? {
         return Ok(password);
     }
     let password = input.read_hidden("Enter password for new keystore: ")?;
@@ -495,7 +495,7 @@ fn get_create_password(input: &mut dyn SecretInput) -> Result<Zeroizing<String>,
     Ok(password)
 }
 
-fn password_from_env_sources() -> Result<Option<Zeroizing<String>>, CommandError> {
+fn password_from_env_config() -> Result<Option<Zeroizing<String>>, CommandError> {
     if let Ok(password_file) = std::env::var(ENV_KEYSTORE_PASSWORD_FILE) {
         return Ok(Some(read_password_file(&password_file)?));
     }

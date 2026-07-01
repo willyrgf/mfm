@@ -224,17 +224,18 @@ fn evm_contract_lifecycle_runners_live_in_adapter_not_app() {
         );
     }
 
-    for forbidden in [
-        concat!("artifact", "_store", "_fs"),
-        "EvmJsonRpcClient",
-        "KeystoreSignerProvider",
-        "KeystoreSignerRegistryEntry",
-        "MFM_EVM_SIGNERS_JSON",
-        "RuntimeSignerConfig",
-        "from_env_sources",
-    ] {
+    let forbidden_adapter_surfaces = [
+        concat!("artifact", "_store", "_fs").to_owned(),
+        "EvmJsonRpcClient".to_owned(),
+        "KeystoreSignerProvider".to_owned(),
+        "KeystoreSignerRegistryEntry".to_owned(),
+        ["MFM", "_EVM", "_SIGNERS_JSON"].concat(),
+        "RuntimeSignerConfig".to_owned(),
+        ["from", "_env", "_sources"].concat(),
+    ];
+    for forbidden in forbidden_adapter_surfaces {
         assert!(
-            !adapter.contains(forbidden),
+            !adapter.contains(&forbidden),
             "EVM contract adapter must not own concrete process wiring: {forbidden}"
         );
     }

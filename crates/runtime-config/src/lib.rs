@@ -50,8 +50,8 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use mfm_evm_capabilities::{EvmSourcePolicyId, EvmSourceRef};
-use mfm_ids::{CheckedStringError, LocalPublicId, RuntimeEnvName};
+use mfm_evm_capabilities::{EvmNetworkId, EvmSourcePolicyId, EvmSourceRef};
+use mfm_ids::RuntimeEnvName;
 use mfm_signing::SignerRef;
 use serde::Deserialize;
 use serde_json::Value;
@@ -290,28 +290,6 @@ impl EvmRuntimeConfig {
             routes,
             signers,
         })
-    }
-}
-
-/// Semantic EVM network id used as a runtime route key.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EvmNetworkId(LocalPublicId);
-
-impl EvmNetworkId {
-    /// Creates a checked semantic EVM network id.
-    pub fn new(value: impl AsRef<str>) -> std::result::Result<Self, CheckedStringError> {
-        Ok(Self(LocalPublicId::new(value)?))
-    }
-
-    /// Returns the checked network id string.
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-impl fmt::Display for EvmNetworkId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 

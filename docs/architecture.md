@@ -214,7 +214,7 @@ Transports implement reusable protocols and live/replay capability backends.
 
 Transports may:
 
-- parse runtime-only source configuration
+- consume typed runtime source and route descriptors supplied by app assembly
 - select protocol sources by non-secret runtime refs
 - redact endpoints and authorization material
 - execute protocol calls
@@ -231,7 +231,8 @@ Transports must not:
 - open keystores or own signer behavior
 - read password files
 - persist typed semantic events by themselves
-- leak RPC URLs, authorization headers, or local routing details into typed semantic surfaces
+- leak RPC URLs, authorization headers, or secret-bearing local routing details into typed semantic
+  surfaces
 
 If two workflows can use the same protocol behavior, that behavior belongs in a shared transport
 before either workflow lands.

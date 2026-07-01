@@ -154,7 +154,7 @@ impl PortfolioReadError {
 /// Runtime backend used by read portfolio states to observe external chain data.
 pub trait PortfolioReadBackend: Send + Sync {
     /// Reads the current EVM block number for a network.
-    fn evm_block_number<'a>(&'a self, network_id: &'a str) -> PortfolioReadFuture<'a, u64>;
+    fn evm_block_number<'a>(&'a self, network: &'a NetworkConfig) -> PortfolioReadFuture<'a, u64>;
 
     /// Reads a raw wallet/symbol balance and its decimals at a pinned block.
     fn observe_raw_balance<'a>(
@@ -167,11 +167,14 @@ pub trait PortfolioReadBackend: Send + Sync {
 struct UnavailablePortfolioReadBackend;
 
 impl PortfolioReadBackend for UnavailablePortfolioReadBackend {
-    fn evm_block_number<'a>(&'a self, network_id: &'a str) -> PortfolioReadFuture<'a, u64> {
+    fn evm_block_number<'a>(&'a self, network: &'a NetworkConfig) -> PortfolioReadFuture<'a, u64> {
         Box::pin(async move {
             Err(PortfolioReadError::new(
                 "external_read_required",
-                format!("typed portfolio read backend unavailable for network `{network_id}`"),
+                format!(
+                    "typed portfolio read backend unavailable for network `{}`",
+                    network.network_id()
+                ),
             ))
         })
     }
@@ -1233,7 +1236,7 @@ where
     let mut views = Vec::new();
     for network in config.networks() {
         let block_number = match network.family() {
-            NetworkFamilyConfig::Evm => backend.evm_block_number(network.network_id()).await?,
+            NetworkFamilyConfig::Evm => backend.evm_block_number(network).await?,
             NetworkFamilyConfig::Bitcoin => 0,
         };
         views.push(pinned_view_for_network(network, block_number));

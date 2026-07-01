@@ -19,7 +19,7 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
     let _rpc_env_guard = RPC_ENV_LOCK.lock().await;
     let rpc_url = run_control_support::start_portfolio_rpc_mock(1).await;
     let _rpc_restore =
-        run_control_support::set_evm_rpc_sources_env_for_test("ethereum-mainnet", 1, rpc_url);
+        run_control_support::set_evm_runtime_config_env_for_test("ethereum-mainnet", &rpc_url);
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
     let schema = unique_schema();

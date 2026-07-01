@@ -5,7 +5,6 @@
 //! and EVM capability contracts. Concrete artifact stores and live EVM transports are supplied by
 //! app assembly.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use alloy_primitives::{Address, U256};
@@ -15,19 +14,20 @@ use mfm_capabilities::CapabilitySpec;
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
     EvmBalanceReadProvider, EvmBalanceReadRequest, EvmBlockReadProvider, EvmBlockReadRequest,
-    EvmBlockSelector, EvmCallReadProvider, EvmCallReadRequest, EvmCapabilityError,
-    EvmCapabilityFuture, EvmSourcePolicyId, EvmSourceRef,
+    EvmBlockSelector, EvmCallReadProvider, EvmCallReadRequest, EvmCapabilityError, EvmChainGuard,
+    EvmNetworkId,
 };
 use mfm_evm_core::encoding::{encode_erc20_balance_of, encode_erc20_decimals, parse_u8_u256};
 use mfm_evm_core::hex::hex_to_bytes;
 use mfm_ids::ContentDigest;
-use mfm_portfolio_model::ids::NetworkId;
+use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig};
+use mfm_portfolio_model::symbol::BalanceReaderConfig;
 use mfm_program::ValidatedConfig;
 use mfm_runtime::{
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
-    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder, RunnerPayloadBuilder,
-    RunnerRegistrationBuilder,
+    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerIngressContext, RunnerOutputBuilder,
+    RunnerPayloadBuilder, RunnerRegistrationBuilder,
 };
 use mfm_state_portfolio::{
     balance_reader_kind, evm_block_number_for, observe_batch_with_backend, pin_views_with_backend,
@@ -61,43 +61,10 @@ impl<T> PortfolioEvmProvider for T where
 {
 }
 
-/// EVM provider used when portfolio runtime sources are not configured.
-#[derive(Debug, Clone, Default)]
-pub struct UnavailablePortfolioEvmProvider;
-
-impl EvmBlockReadProvider for UnavailablePortfolioEvmProvider {
-    fn read_block<'a>(
-        &'a self,
-        _request: &'a EvmBlockReadRequest,
-    ) -> EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmBlockReadResponse> {
-        unavailable_evm()
-    }
-}
-
-impl EvmBalanceReadProvider for UnavailablePortfolioEvmProvider {
-    fn read_balance<'a>(
-        &'a self,
-        _request: &'a EvmBalanceReadRequest,
-    ) -> EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmBalanceReadResponse> {
-        unavailable_evm()
-    }
-}
-
-impl EvmCallReadProvider for UnavailablePortfolioEvmProvider {
-    fn read_call<'a>(
-        &'a self,
-        _request: &'a EvmCallReadRequest,
-    ) -> EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmCallReadResponse> {
-        unavailable_evm()
-    }
-}
-
-fn unavailable_evm<'a, T>() -> EvmCapabilityFuture<'a, T> {
-    Box::pin(async {
-        Err(EvmCapabilityError::redacted_provider_failure(
-            "portfolio EVM provider unavailable",
-        ))
-    })
+/// Runtime validator for portfolio EVM routes required before run admission.
+pub trait PortfolioRuntimeValidator: Send + Sync {
+    /// Validates that the process can resolve an EVM guard without live network IO.
+    fn validate_evm_guard(&self, guard: &EvmChainGuard) -> mfm_runtime::Result<()>;
 }
 
 /// Runtime capabilities used by portfolio adapter runners.
@@ -105,20 +72,20 @@ fn unavailable_evm<'a, T>() -> EvmCapabilityFuture<'a, T> {
 pub struct PortfolioRunnerCapabilities {
     artifacts: Arc<dyn ArtifactReadProvider>,
     evm: Arc<dyn PortfolioEvmProvider>,
-    evm_routes: PortfolioEvmRoutes,
+    runtime: Arc<dyn PortfolioRuntimeValidator>,
 }
 
 impl PortfolioRunnerCapabilities {
-    /// Creates portfolio runner capabilities from artifact, EVM provider, and explicit routes.
+    /// Creates portfolio runner capabilities from artifact and EVM providers.
     pub fn new(
         artifacts: Arc<dyn ArtifactReadProvider>,
         evm: Arc<dyn PortfolioEvmProvider>,
-        evm_routes: PortfolioEvmRoutes,
+        runtime: Arc<dyn PortfolioRuntimeValidator>,
     ) -> Self {
         Self {
             artifacts,
             evm,
-            evm_routes,
+            runtime,
         }
     }
 
@@ -130,78 +97,8 @@ impl PortfolioRunnerCapabilities {
         Arc::clone(&self.evm)
     }
 
-    fn evm_routes(&self) -> PortfolioEvmRoutes {
-        self.evm_routes.clone()
-    }
-}
-
-/// Runtime EVM route for one semantic portfolio network id.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PortfolioEvmRoute {
-    network_id: NetworkId,
-    source_ref: EvmSourceRef,
-    policy_id: EvmSourcePolicyId,
-}
-
-impl PortfolioEvmRoute {
-    /// Creates an explicit portfolio network to EVM runtime route.
-    pub fn new(
-        network_id: NetworkId,
-        source_ref: EvmSourceRef,
-        policy_id: EvmSourcePolicyId,
-    ) -> Self {
-        Self {
-            network_id,
-            source_ref,
-            policy_id,
-        }
-    }
-
-    /// Returns the semantic portfolio network id.
-    pub fn network_id(&self) -> &NetworkId {
-        &self.network_id
-    }
-
-    /// Returns the EVM runtime source reference.
-    pub fn source_ref(&self) -> &EvmSourceRef {
-        &self.source_ref
-    }
-
-    /// Returns the EVM source policy id.
-    pub fn policy_id(&self) -> &EvmSourcePolicyId {
-        &self.policy_id
-    }
-}
-
-/// Runtime EVM route registry for portfolio network ids.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PortfolioEvmRoutes {
-    routes: BTreeMap<NetworkId, (EvmSourceRef, EvmSourcePolicyId)>,
-}
-
-impl PortfolioEvmRoutes {
-    /// Creates an explicit route registry, rejecting duplicate network ids.
-    pub fn new(routes: impl IntoIterator<Item = PortfolioEvmRoute>) -> mfm_runtime::Result<Self> {
-        let mut by_network = BTreeMap::new();
-        for route in routes {
-            let network_id = route.network_id;
-            if by_network
-                .insert(network_id.clone(), (route.source_ref, route.policy_id))
-                .is_some()
-            {
-                return Err(mfm_runtime::RuntimeError::RunnerBinding(format!(
-                    "duplicate portfolio EVM route for network {}",
-                    network_id.as_str()
-                )));
-            }
-        }
-        Ok(Self { routes: by_network })
-    }
-
-    /// Returns the configured route for `network_id`.
-    pub fn route(&self, network_id: &str) -> Option<(EvmSourceRef, EvmSourcePolicyId)> {
-        let network_id = NetworkId::new(network_id).ok()?;
-        self.routes.get(&network_id).cloned()
+    fn runtime(&self) -> Arc<dyn PortfolioRuntimeValidator> {
+        Arc::clone(&self.runtime)
     }
 }
 
@@ -213,7 +110,7 @@ pub fn register_portfolio_runners(
     let implementation_id = CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?;
     let artifacts = capabilities.artifacts();
     let evm = capabilities.evm();
-    let evm_routes = capabilities.evm_routes();
+    let runtime = capabilities.runtime();
     let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
     let read_factory = events::RunnerFactoryId::new(READ_FACTORY)?;
     let pure_factory = events::RunnerFactoryId::new(PURE_FACTORY)?;
@@ -254,8 +151,8 @@ pub fn register_portfolio_runners(
         executable(read_factory.clone())?,
         Arc::new(PinViewsRunner {
             artifacts: artifacts.clone(),
+            runtime: runtime.clone(),
             evm: evm.clone(),
-            evm_routes: evm_routes.clone(),
         }),
     )?;
     let resolve_valuations =
@@ -279,8 +176,8 @@ pub fn register_portfolio_runners(
         executable(read_factory)?,
         Arc::new(ObserveBatchRunner {
             artifacts: artifacts.clone(),
+            runtime,
             evm,
-            evm_routes,
         }),
     )?;
     let merge_observations =
@@ -385,11 +282,25 @@ impl ErasedNodeRunner for ResolveSubjectsRunner {
 
 struct PinViewsRunner {
     artifacts: Arc<dyn ArtifactReadProvider>,
+    runtime: Arc<dyn PortfolioRuntimeValidator>,
     evm: Arc<dyn PortfolioEvmProvider>,
-    evm_routes: PortfolioEvmRoutes,
 }
 
 impl ErasedNodeRunner for PinViewsRunner {
+    fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
+        let config = load_launch_config::<PinViewsConfig>(&ctx)?;
+        for network in config
+            .as_ref()
+            .networks()
+            .iter()
+            .filter(|network| network.family() == NetworkFamilyConfig::Evm)
+        {
+            let guard = portfolio_evm_guard(network).map_err(portfolio_runtime_binding_error)?;
+            self.runtime.validate_evm_guard(&guard)?;
+        }
+        Ok(())
+    }
+
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
             let config = load_config::<PinViewsConfig>(&ctx, self.artifacts.as_ref()).await?;
@@ -399,8 +310,7 @@ impl ErasedNodeRunner for PinViewsRunner {
                 self.artifacts.as_ref(),
             )
             .await?;
-            let backend =
-                EvmCapabilityPortfolioBackend::new(Arc::clone(&self.evm), self.evm_routes.clone());
+            let backend = EvmCapabilityPortfolioBackend::new(Arc::clone(&self.evm));
             let output = pin_views_with_backend(config, &backend)
                 .await
                 .map_err(portfolio_read_runtime_error)?;
@@ -442,11 +352,21 @@ impl ErasedNodeRunner for ResolveValuationsRunner {
 
 struct ObserveBatchRunner {
     artifacts: Arc<dyn ArtifactReadProvider>,
+    runtime: Arc<dyn PortfolioRuntimeValidator>,
     evm: Arc<dyn PortfolioEvmProvider>,
-    evm_routes: PortfolioEvmRoutes,
 }
 
 impl ErasedNodeRunner for ObserveBatchRunner {
+    fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
+        let config = load_launch_config::<ObserveBatchConfig>(&ctx)?;
+        if observe_batch_requires_evm(config.as_ref()) {
+            let guard = portfolio_evm_guard(config.as_ref().network())
+                .map_err(portfolio_runtime_binding_error)?;
+            self.runtime.validate_evm_guard(&guard)?;
+        }
+        Ok(())
+    }
+
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
             let config = load_config::<ObserveBatchConfig>(&ctx, self.artifacts.as_ref()).await?;
@@ -455,8 +375,7 @@ impl ErasedNodeRunner for ObserveBatchRunner {
                 load_struct_input::<ObserveBatchInput>(ctx.inputs(), self.artifacts.as_ref())
                     .await?;
             let block_number = evm_block_number_for(&input.views, config.network().network_id());
-            let backend =
-                EvmCapabilityPortfolioBackend::new(Arc::clone(&self.evm), self.evm_routes.clone());
+            let backend = EvmCapabilityPortfolioBackend::new(Arc::clone(&self.evm));
             let output = observe_batch_with_backend(config, &input, &backend).await;
             let request = ObservationRequest {
                 wallet_id: config.wallet().wallet_id.to_string(),
@@ -598,6 +517,24 @@ where
     decode_config_bytes(verified.bytes())
 }
 
+fn load_launch_config<T>(ctx: &RunnerIngressContext<'_>) -> mfm_runtime::Result<ValidatedConfig<T>>
+where
+    T: MfmConfig + DeserializeOwned,
+{
+    let artifact = ctx.config_artifact()?;
+    let config: T = serde_json::from_slice(&artifact.bytes).map_err(|error| {
+        mfm_runtime::RuntimeError::RunnerBinding(format!(
+            "launch config for node {} failed to decode: {error}",
+            ctx.node().node_id
+        ))
+    })?;
+    ValidatedConfig::new(config).map_err(|error| {
+        mfm_runtime::RuntimeError::RunnerBinding(format!(
+            "portfolio config failed validation: {error}"
+        ))
+    })
+}
+
 fn decode_config_bytes<T>(bytes: &[u8]) -> mfm_runtime::Result<ValidatedConfig<T>>
 where
     T: MfmConfig + DeserializeOwned,
@@ -609,6 +546,14 @@ where
             "portfolio config failed validation: {error}"
         ))
     })
+}
+
+fn observe_batch_requires_evm(config: &ObserveBatchConfig) -> bool {
+    config.network().family() == NetworkFamilyConfig::Evm
+        && matches!(
+            &config.symbol().balance_reader,
+            BalanceReaderConfig::NativeBalance {} | BalanceReaderConfig::Erc20Balance { .. }
+        )
 }
 
 async fn load_input_cell<T>(
@@ -769,36 +714,41 @@ fn runtime_capability_error(error: mfm_capabilities::CapabilityError) -> mfm_run
     mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
 }
 
+fn portfolio_evm_guard(network: &NetworkConfig) -> Result<EvmChainGuard, PortfolioReadError> {
+    let expected_chain_id = network.chain_id_u64().ok_or_else(|| {
+        PortfolioReadError::new(
+            "network_not_evm",
+            "portfolio EVM read requested a non-EVM network",
+        )
+    })?;
+    let network_id = EvmNetworkId::new(network.network_id().as_str()).map_err(|_| {
+        PortfolioReadError::new(
+            "network_id_invalid",
+            "portfolio network id could not be used as an EVM guard",
+        )
+    })?;
+    Ok(EvmChainGuard::new(network_id, expected_chain_id))
+}
+
 #[derive(Clone)]
 struct EvmCapabilityPortfolioBackend {
     evm: Arc<dyn PortfolioEvmProvider>,
-    routes: PortfolioEvmRoutes,
 }
 
 impl EvmCapabilityPortfolioBackend {
-    fn new(evm: Arc<dyn PortfolioEvmProvider>, routes: PortfolioEvmRoutes) -> Self {
-        Self { evm, routes }
+    fn new(evm: Arc<dyn PortfolioEvmProvider>) -> Self {
+        Self { evm }
     }
 
-    fn route(
+    async fn read_evm_block_number(
         &self,
-        network_id: &str,
-    ) -> Result<(EvmSourceRef, EvmSourcePolicyId), PortfolioReadError> {
-        self.routes.route(network_id).ok_or_else(|| {
-            PortfolioReadError::new(
-                "evm_route_missing",
-                "portfolio EVM runtime route was not configured for network",
-            )
-        })
-    }
-
-    async fn read_evm_block_number(&self, network_id: &str) -> Result<u64, PortfolioReadError> {
-        let (source_ref, policy_id) = self.route(network_id)?;
+        network: &NetworkConfig,
+    ) -> Result<u64, PortfolioReadError> {
+        let guard = portfolio_evm_guard(network)?;
         let response = self
             .evm
             .read_block(&EvmBlockReadRequest {
-                source_ref,
-                policy_id,
+                guard,
                 block: EvmBlockSelector::Latest,
             })
             .await
@@ -814,12 +764,11 @@ impl EvmCapabilityPortfolioBackend {
         match &config.symbol().balance_reader {
             mfm_portfolio_model::symbol::BalanceReaderConfig::NativeBalance {} => {
                 let wallet = wallet_evm_address(config)?;
-                let (source_ref, policy_id) = self.route(config.network().network_id())?;
+                let guard = portfolio_evm_guard(config.network())?;
                 let response = self
                     .evm
                     .read_balance(&EvmBalanceReadRequest {
-                        source_ref,
-                        policy_id,
+                        guard,
                         account: wallet,
                         block: EvmBlockSelector::Number(block_number),
                     })
@@ -831,19 +780,15 @@ impl EvmCapabilityPortfolioBackend {
                 let decimals = match config.symbol().decimals {
                     Some(decimals) => decimals,
                     None => {
-                        self.erc20_decimals(
-                            config.network().network_id(),
-                            token_address,
-                            block_number,
-                        )
-                        .await?
+                        self.erc20_decimals(config.network(), token_address, block_number)
+                            .await?
                     }
                 };
                 let wallet = wallet_evm_address(config)?;
                 let token = parse_address(token_address, "token address")?;
                 let raw = self
                     .evm_call_u256(
-                        config.network().network_id(),
+                        config.network(),
                         token,
                         encode_erc20_balance_of(&wallet),
                         block_number,
@@ -862,13 +807,13 @@ impl EvmCapabilityPortfolioBackend {
 
     async fn erc20_decimals(
         &self,
-        network_id: &str,
+        network: &NetworkConfig,
         token_address: &str,
         block_number: u64,
     ) -> Result<u8, PortfolioReadError> {
         let token = parse_address(token_address, "token address")?;
         let raw = self
-            .evm_call_u256(network_id, token, encode_erc20_decimals(), block_number)
+            .evm_call_u256(network, token, encode_erc20_decimals(), block_number)
             .await?;
         parse_u8_u256(raw).map_err(|_| {
             PortfolioReadError::new(
@@ -880,20 +825,19 @@ impl EvmCapabilityPortfolioBackend {
 
     async fn evm_call_u256(
         &self,
-        network_id: &str,
+        network: &NetworkConfig,
         to: Address,
         calldata_hex: String,
         block_number: u64,
     ) -> Result<U256, PortfolioReadError> {
-        let (source_ref, policy_id) = self.route(network_id)?;
+        let guard = portfolio_evm_guard(network)?;
         let calldata = hex_to_bytes(&calldata_hex).map_err(|_| {
             PortfolioReadError::new("invalid_call_data", "portfolio EVM call data was invalid")
         })?;
         let response = self
             .evm
             .read_call(&EvmCallReadRequest {
-                source_ref,
-                policy_id,
+                guard,
                 to,
                 calldata,
                 block: EvmBlockSelector::Number(block_number),
@@ -905,8 +849,8 @@ impl EvmCapabilityPortfolioBackend {
 }
 
 impl PortfolioReadBackend for EvmCapabilityPortfolioBackend {
-    fn evm_block_number<'a>(&'a self, network_id: &'a str) -> PortfolioReadFuture<'a, u64> {
-        Box::pin(async move { self.read_evm_block_number(network_id).await })
+    fn evm_block_number<'a>(&'a self, network: &'a NetworkConfig) -> PortfolioReadFuture<'a, u64> {
+        Box::pin(async move { self.read_evm_block_number(network).await })
     }
 
     fn observe_raw_balance<'a>(
@@ -962,6 +906,10 @@ fn runtime_artifact_read_error(
 
 fn portfolio_read_runtime_error(error: PortfolioReadError) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+}
+
+fn portfolio_runtime_binding_error(error: PortfolioReadError) -> mfm_runtime::RuntimeError {
+    mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
 }
 
 #[cfg(test)]
