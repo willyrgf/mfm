@@ -2560,6 +2560,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-runtime-config"
+version = "0.1.0"
+dependencies = [
+ "mfm-evm-capabilities",
+ "mfm-ids",
+ "mfm-signing",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "toml 0.8.23",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "mfm-signers-keystore"
 version = "0.1.0"
 dependencies = [
