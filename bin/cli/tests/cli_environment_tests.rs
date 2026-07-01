@@ -2,357 +2,122 @@
 #![allow(clippy::needless_borrows_for_generic_args)]
 
 use assert_cmd::Command;
+use mfm_core::keystore::{Keystore, KeystoreConfig};
 use predicates::prelude::*;
 use tempfile::TempDir;
 
-#[test]
-fn test_environment_variable_configuration() {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let keystore_path = temp_dir.path().join("test_keystore");
-
-    // Set password via environment variable
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.env("MFM_KEYSTORE_PASSWORD", "env_password_123");
-    cmd.env("MFM_INTEGRATION_TEST", "1");
-    cmd.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "privatekey",
-        "--label",
-        "env-test",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-        "--stdin",
-    ]);
-    cmd.write_stdin("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
-
-    cmd.assert().success().stdout(predicate::str::contains(
-        "private key imported successfully",
-    ));
-
-    // Verify we can list with same environment variable
-    let mut list_cmd = Command::cargo_bin("mfm_cli").unwrap();
-    list_cmd.env("MFM_KEYSTORE_PASSWORD", "env_password_123");
-    list_cmd.env("MFM_INTEGRATION_TEST", "1");
-    list_cmd.args(&[
-        "keystore",
-        "list",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-    ]);
-
-    list_cmd
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("env-test"));
-}
+const PASSWORD: &str = "env_password_123";
+const PRIVATE_KEY: &str = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
 
 #[test]
-fn test_wrong_password_environment_variable() {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let keystore_path = temp_dir.path().join("test_keystore");
-
-    // Create keystore with one password
-    let mut create_cmd = Command::cargo_bin("mfm_cli").unwrap();
-    create_cmd.env("MFM_KEYSTORE_PASSWORD", "correct_password");
-    create_cmd.env("MFM_INTEGRATION_TEST", "1");
-    create_cmd.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "privatekey",
-        "--label",
-        "test-key",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-        "--stdin",
-    ]);
-    create_cmd.write_stdin("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
-
-    create_cmd
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "private key imported successfully",
-        ));
-
-    // Try to access with wrong password
-    let mut wrong_cmd = Command::cargo_bin("mfm_cli").unwrap();
-    wrong_cmd.env("MFM_KEYSTORE_PASSWORD", "wrong_password");
-    wrong_cmd.env("MFM_INTEGRATION_TEST", "1");
-    wrong_cmd.args(&[
-        "keystore",
-        "list",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-    ]);
-
-    wrong_cmd
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("invalid credential"));
-}
-
-#[test]
-fn test_keystore_path_environment_variable() {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let keystore_path = temp_dir.path().join("env_keystore");
-
-    // Use environment variable for keystore path
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.env("MFM_KEYSTORE_PASSWORD", "test_password");
-    cmd.env("MFM_KEYSTORE_PATH", keystore_path.to_str().unwrap());
-    cmd.env("MFM_INTEGRATION_TEST", "1");
-    cmd.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "privatekey",
-        "--label",
-        "env-path-test",
-        "--stdin",
-    ]);
-    cmd.write_stdin("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
-
-    cmd.assert().success().stdout(predicate::str::contains(
-        "private key imported successfully",
-    ));
-
-    // Verify keystore was created at environment path
-    assert!(
-        keystore_path.exists(),
-        "Keystore should exist at environment path"
-    );
-
-    // List using environment path
-    let mut list_cmd = Command::cargo_bin("mfm_cli").unwrap();
-    list_cmd.env("MFM_KEYSTORE_PASSWORD", "test_password");
-    list_cmd.env("MFM_KEYSTORE_PATH", keystore_path.to_str().unwrap());
-    list_cmd.env("MFM_INTEGRATION_TEST", "1");
-    list_cmd.args(&["keystore", "list"]);
-
-    list_cmd
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("env-path-test"));
-}
-
-#[test]
-fn test_output_mode_environment_variable() {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let keystore_path = temp_dir.path().join("test_keystore");
-
-    // Create a key first
-    let mut create_cmd = Command::cargo_bin("mfm_cli").unwrap();
-    create_cmd.env("MFM_KEYSTORE_PASSWORD", "test_password");
-    create_cmd.env("MFM_INTEGRATION_TEST", "1");
-    create_cmd.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "privatekey",
-        "--label",
-        "output-test",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-        "--stdin",
-    ]);
-    create_cmd.write_stdin("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
-
-    create_cmd
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "private key imported successfully",
-        ));
-
-    // Test machine output mode via environment
-    let mut list_cmd = Command::cargo_bin("mfm_cli").unwrap();
-    list_cmd.env("MFM_KEYSTORE_PASSWORD", "test_password");
-    list_cmd.env("MFM_OUTPUT_MODE", "machine");
-    list_cmd.env("MFM_INTEGRATION_TEST", "1");
-    list_cmd.args(&[
-        "keystore",
-        "list",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-    ]);
-
-    // When output mode environment variable is implemented, this should produce JSON
-    // For now, this tests that the environment variable doesn't break the command
-    list_cmd
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("output-test"));
-}
-
-#[test]
-fn test_password_file_environment_variable_precedence() {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let keystore_path = temp_dir.path().join("test_keystore");
-    let password_file = temp_dir.path().join("pw.txt");
-    std::fs::write(&password_file, "correct_password_from_file\n").unwrap();
-
-    let mut create_cmd = Command::cargo_bin("mfm_cli").unwrap();
-    create_cmd.env("MFM_KEYSTORE_PASSWORD", "correct_password_from_file");
-    create_cmd.env("MFM_INTEGRATION_TEST", "1");
-    create_cmd.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "privatekey",
-        "--label",
-        "file-priority",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-        "--stdin",
-    ]);
-    create_cmd.write_stdin("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
-    create_cmd.assert().success();
+fn runtime_config_file_env_selects_default_keystore_profile() {
+    let fixture = KeystoreFixture::new("runtime-env-test");
 
     let mut list_cmd = Command::cargo_bin("mfm_cli").unwrap();
     list_cmd.env(
-        "MFM_KEYSTORE_PASSWORD_FILE",
-        password_file.to_str().unwrap(),
+        "MFM_RUNTIME_CONFIG_FILE",
+        fixture.runtime_config.to_str().unwrap(),
     );
-    list_cmd.env("MFM_KEYSTORE_PASSWORD", "wrong_password");
-    list_cmd.env("MFM_INTEGRATION_TEST", "1");
-    list_cmd.args(&[
-        "keystore",
-        "list",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-    ]);
+    list_cmd.args(["keystore", "list"]);
 
     list_cmd
         .assert()
         .success()
-        .stdout(predicate::str::contains("file-priority"));
+        .stdout(predicate::str::contains("runtime-env-test"));
 }
 
 #[test]
-fn test_plain_password_env_emits_warning() {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let keystore_path = temp_dir.path().join("test_keystore");
-
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.env("MFM_KEYSTORE_PASSWORD", "warning_password_123");
-    cmd.env("MFM_INTEGRATION_TEST", "1");
-    cmd.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "privatekey",
-        "--label",
-        "warn-test",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-        "--stdin",
-    ]);
-    cmd.write_stdin("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
-
-    cmd.assert().success().stderr(predicate::str::contains(
-        "Warning: MFM_KEYSTORE_PASSWORD may expose secrets; prefer MFM_KEYSTORE_PASSWORD_FILE.",
-    ));
-}
-
-#[test]
-fn test_password_file_empty_fails_with_explicit_error() {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let keystore_path = temp_dir.path().join("test_keystore");
-    let password_file = temp_dir.path().join("empty_pw.txt");
-    std::fs::write(&password_file, "").unwrap();
-
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.env(
-        "MFM_KEYSTORE_PASSWORD_FILE",
-        password_file.to_str().unwrap(),
-    );
-    cmd.env("MFM_INTEGRATION_TEST", "1");
-    cmd.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "privatekey",
-        "--label",
-        "empty-file",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-        "--stdin",
-    ]);
-    cmd.write_stdin("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
-
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("was empty"));
-}
-
-#[test]
-fn test_password_file_missing_fails() {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let keystore_path = temp_dir.path().join("test_keystore");
-    let missing_path = temp_dir.path().join("does_not_exist_pw.txt");
-
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.env("MFM_KEYSTORE_PASSWORD_FILE", missing_path.to_str().unwrap());
-    cmd.env("MFM_INTEGRATION_TEST", "1");
-    cmd.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "privatekey",
-        "--label",
-        "missing-file",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-        "--stdin",
-    ]);
-    cmd.write_stdin("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
-
-    cmd.assert().failure();
-}
-
-#[test]
-fn test_password_file_precedence_suppresses_plain_env_warning() {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let keystore_path = temp_dir.path().join("test_keystore");
-    let password_file = temp_dir.path().join("pw.txt");
-    std::fs::write(&password_file, "file_pw_123456\n").unwrap();
-
-    let mut create_cmd = Command::cargo_bin("mfm_cli").unwrap();
-    create_cmd.env("MFM_KEYSTORE_PASSWORD", "file_pw_123456");
-    create_cmd.env("MFM_INTEGRATION_TEST", "1");
-    create_cmd.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "privatekey",
-        "--label",
-        "warn-suppress",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-        "--stdin",
-    ]);
-    create_cmd.write_stdin("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
-    create_cmd.assert().success();
+fn runtime_config_cli_arg_overrides_runtime_config_env() {
+    let good = KeystoreFixture::new("runtime-arg-test");
+    let bad_dir = TempDir::new().expect("bad temp dir");
+    let bad_runtime_config = bad_dir.path().join("bad-runtime.toml");
+    std::fs::write(&bad_runtime_config, "[keystores.default]\n").expect("bad runtime config");
 
     let mut list_cmd = Command::cargo_bin("mfm_cli").unwrap();
     list_cmd.env(
-        "MFM_KEYSTORE_PASSWORD_FILE",
-        password_file.to_str().unwrap(),
+        "MFM_RUNTIME_CONFIG_FILE",
+        bad_runtime_config.to_str().unwrap(),
     );
-    list_cmd.env("MFM_KEYSTORE_PASSWORD", "wrong_but_should_not_warn");
-    list_cmd.env("MFM_INTEGRATION_TEST", "1");
-    list_cmd.args(&[
+    list_cmd.args([
         "keystore",
         "list",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
+        "--runtime-config",
+        good.runtime_config.to_str().unwrap(),
     ]);
 
     list_cmd
         .assert()
         .success()
-        .stderr(predicate::str::contains("Warning: MFM_KEYSTORE_PASSWORD").not());
+        .stdout(predicate::str::contains("runtime-arg-test"));
+}
+
+#[test]
+fn runtime_config_empty_unlock_file_fails() {
+    let fixture = KeystoreFixture::new("empty-unlock-file-test");
+    std::fs::write(&fixture.password_file, "").expect("empty password file");
+
+    let mut list_cmd = Command::cargo_bin("mfm_cli").unwrap();
+    list_cmd.args([
+        "keystore",
+        "list",
+        "--runtime-config",
+        fixture.runtime_config.to_str().unwrap(),
+    ]);
+
+    list_cmd
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("credential file was empty"));
+}
+
+struct KeystoreFixture {
+    _dir: TempDir,
+    password_file: std::path::PathBuf,
+    runtime_config: std::path::PathBuf,
+}
+
+impl KeystoreFixture {
+    fn new(label: &str) -> Self {
+        let dir = TempDir::new().expect("temp dir");
+        let keystore_path = dir.path().join("test.keystore");
+        let password_file = dir.path().join("password.txt");
+        let runtime_config = dir.path().join("runtime.toml");
+        std::fs::write(&password_file, format!("{PASSWORD}\n")).expect("password file");
+
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::insecure_integration_test())
+                .expect("keystore");
+        keystore.unlock(PASSWORD).expect("unlock");
+        keystore
+            .import_private_key(Some(label.to_owned()), PRIVATE_KEY)
+            .expect("import key");
+
+        write_runtime_config(&runtime_config, &keystore_path, &password_file);
+        Self {
+            _dir: dir,
+            password_file,
+            runtime_config,
+        }
+    }
+}
+
+fn write_runtime_config(
+    runtime_config: &std::path::Path,
+    keystore_path: &std::path::Path,
+    password_file: &std::path::Path,
+) {
+    let config = format!(
+        r#"
+[keystores.default]
+keystore_path = {keystore_path}
+unlock_file = {password_file}
+"#,
+        keystore_path = toml_string(&keystore_path.display().to_string()),
+        password_file = toml_string(&password_file.display().to_string()),
+    );
+    std::fs::write(runtime_config, config).expect("runtime config");
+}
+
+fn toml_string(value: &str) -> String {
+    serde_json::to_string(value).expect("toml string")
 }

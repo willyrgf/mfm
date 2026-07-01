@@ -114,3 +114,112 @@ fn resource_key_status_redacts_raw_key() {
     assert!(!rendered.contains(raw_key));
     assert!(!rendered.contains("\"key\""));
 }
+
+#[test]
+fn replay_diagnostic_rejects_digest_matched_evm_guard_tampering() {
+    let certified_guard = EvmChainGuard::new(
+        EvmNetworkId::new("rest-control-eth").expect("network id"),
+        31337,
+    )
+    .expect("guard");
+
+    for details in [
+        serde_json::json!({
+            "network_id": "rest-control-eth",
+            "expected_chain_id": 31338,
+            "observed_chain_id": 31339,
+            "source_ref": "primary",
+            "policy_id": "primary",
+        }),
+        serde_json::json!({
+            "network_id": "other-eth",
+            "expected_chain_id": 31337,
+            "observed_chain_id": 31338,
+            "source_ref": "primary",
+            "policy_id": "primary",
+        }),
+    ] {
+        let digest = canonical_value_digest(&details).expect("details digest");
+        let expected = events::RedactedJson::new(digest);
+        let error = verify_replay_public_details(
+            Some(&expected),
+            &details,
+            std::slice::from_ref(&certified_guard),
+        )
+        .expect_err("digest-matched guard tampering must fail replay");
+
+        assert_eq!(error.code, "ReplayDiagnosticInvalid");
+    }
+}
+
+#[tokio::test]
+async fn run_read_services_are_evidence_only() {
+    let source = include_str!("lib.rs");
+    let production_read_constructor = source
+        .split("pub async fn connect_production_run_read_services")
+        .nth(1)
+        .expect("production read constructor is present")
+        .split("/// Builds the production typed runner registry")
+        .next()
+        .expect("production read constructor is bounded");
+    assert!(!production_read_constructor.contains("production_runner_registry"));
+    assert!(!production_read_constructor.contains("std::env"));
+
+    let read_services_impl = source
+        .split("pub struct RunReadServices")
+        .nth(1)
+        .expect("read services are present")
+        .split("/// Application facade for certified typed runtime dispatch.")
+        .next()
+        .expect("read services implementation is bounded");
+    assert!(!read_services_impl.contains("production_runner_registry"));
+    assert!(!read_services_impl.contains("std::env"));
+
+    let store = store::AsyncInMemoryRunStore::default();
+    let services = make_run_read_services_with_certification_registry(
+        store.clone(),
+        store,
+        production_certification_registry().expect("cert registry"),
+    );
+    let run_id = RunId::parse(
+        "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000001",
+    )
+    .expect("run id");
+
+    let status = services
+        .run_status(&run_id)
+        .await
+        .expect_err("missing run should come from store evidence");
+    assert_eq!(status.code, "RunNotFound");
+
+    let observations = services
+        .read_run_observations(store::RunObservationQuery::new(None, 50, 0))
+        .await
+        .expect("list observations does not construct live drivers");
+    assert!(observations.runs.is_empty());
+}
+
+#[tokio::test]
+async fn postgres_store_authority_error_is_redacted_for_public_app_surface() {
+    let database_url = "postgres://mfm_user:super-secret@127.0.0.1:notaport/mfm";
+    let error = match connect_production_run_store(Some(database_url)).await {
+        Ok(_) => panic!("invalid postgres URL should not connect"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.code, "RunStoreAuthorityInvalid");
+    assert_eq!(error.message, "Run store authority could not be validated");
+    let rendered = format!("{error:?}\n{error}");
+    for forbidden in [
+        database_url,
+        "mfm_user",
+        "super-secret",
+        "127.0.0.1",
+        "notaport",
+    ] {
+        assert!(
+            !rendered.contains(forbidden),
+            "app error leaked `{forbidden}` in {rendered}"
+        );
+    }
+}

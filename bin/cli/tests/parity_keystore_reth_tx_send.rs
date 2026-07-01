@@ -2,6 +2,7 @@
 #![cfg(feature = "parity-tests")]
 
 use assert_cmd::Command;
+use mfm_core::keystore::{Keystore, KeystoreConfig};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -240,10 +241,11 @@ fn run_import_private_key(
     private_key_hex: &str,
 ) -> Output {
     let artifact_root = test_artifact_root(keystore_path);
+    ensure_fast_keystore_exists(keystore_path, password_file);
+    let runtime_config = write_runtime_config(keystore_path, password_file);
     let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
     sanitize_machine_readable_cli_env(&mut cmd)
-        .env("MFM_INTEGRATION_TEST", "1")
-        .env("MFM_KEYSTORE_PASSWORD_FILE", password_file)
+        .env("MFM_RUNTIME_CONFIG_FILE", &runtime_config)
         .env("MFM_ARTIFACT_ROOT", artifact_root)
         .args([
             "--output-format",
@@ -254,8 +256,6 @@ fn run_import_private_key(
             "privatekey",
             "--label",
             label,
-            "--keystore",
-            keystore_path.to_str().expect("path"),
             "--stdin",
         ])
         .write_stdin(private_key_hex)
@@ -309,10 +309,10 @@ fn run_tx_sign_with_selector(
     out: &Path,
 ) -> Output {
     let artifact_root = test_artifact_root(keystore_path);
+    let runtime_config = write_runtime_config(keystore_path, password_file);
     let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
     sanitize_machine_readable_cli_env(&mut cmd)
-        .env("MFM_INTEGRATION_TEST", "1")
-        .env("MFM_KEYSTORE_PASSWORD_FILE", password_file)
+        .env("MFM_RUNTIME_CONFIG_FILE", &runtime_config)
         .env("MFM_ARTIFACT_ROOT", artifact_root)
         .args([
             "--output-format",
@@ -335,8 +335,6 @@ fn run_tx_sign_with_selector(
             gas_limit,
             "--out",
             out.to_str().expect("path"),
-            "--keystore",
-            keystore_path.to_str().expect("path"),
         ]);
     if let Some(label) = by_label {
         cmd.args(["--by-label", label]);
@@ -351,6 +349,37 @@ fn write_password_file(dir: &Path, password: &str) -> PathBuf {
     let path = dir.join(format!("password-{}.txt", uuid::Uuid::new_v4()));
     std::fs::write(&path, password).expect("write password file");
     path
+}
+
+fn ensure_fast_keystore_exists(path: &Path, password_file: &Path) {
+    if path.exists() {
+        return;
+    }
+    let password = std::fs::read_to_string(password_file).expect("read password file");
+    let mut keystore = Keystore::new_with_config(path, KeystoreConfig::insecure_integration_test())
+        .expect("create fast keystore");
+    keystore
+        .unlock(password.trim_end())
+        .expect("unlock keystore");
+}
+
+fn write_runtime_config(keystore_path: &Path, password_file: &Path) -> PathBuf {
+    let runtime_config = keystore_path.with_extension("runtime.toml");
+    let config = format!(
+        r#"
+[keystores.default]
+keystore_path = {keystore_path}
+unlock_file = {password_file}
+"#,
+        keystore_path = toml_string(&keystore_path.display().to_string()),
+        password_file = toml_string(&password_file.display().to_string()),
+    );
+    std::fs::write(&runtime_config, config).expect("write runtime config");
+    runtime_config
+}
+
+fn toml_string(value: &str) -> String {
+    serde_json::to_string(value).expect("toml string")
 }
 
 fn random_private_key_hex() -> String {

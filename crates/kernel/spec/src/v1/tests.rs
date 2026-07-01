@@ -611,36 +611,6 @@ fn saga_policy_and_remediations_are_hash_defining() {
     );
 }
 
-#[test]
-fn old_manual_operator_identity_spec_json_rejects() {
-    let mut spec = test_spec();
-    spec.saga = SagaPolicySpec::ManualResolution {
-        manual: ManualResolutionEvidenceSpec {
-            evidence_schema: schema("mfm.spec.test.manual_evidence", 0xa1),
-            authorization: manual_authorization(0xa2),
-        },
-    };
-    let mut json: serde_json::Value =
-        serde_json::from_str(spec.canonical_json().expect("canonical").as_str()).expect("json");
-    let manual = json["saga"]["manual"]
-        .as_object_mut()
-        .expect("manual object");
-    manual.remove("authorization");
-    manual.insert(
-        "operator_identity_ref_schema".to_owned(),
-        serde_json::json!(schema("mfm.spec.test.operator_ref", 0xa3).as_str()),
-    );
-    let input = serde_json::to_string(&json).expect("json string");
-    let err =
-        TypedExecutionSpec::from_json_str(&input).expect_err("old manual operator field rejects");
-    assert!(
-        err.to_string().contains("authorization")
-            || err.to_string().contains("unknown")
-            || err.to_string().contains("non-normalized"),
-        "{err}"
-    );
-}
-
 fn manual_authorization(byte: u8) -> ManualResolutionAuthorizationSpec {
     ManualResolutionAuthorizationSpec {
         verifier_id: ManualAuthorizationVerifierId::new(format!("mfm.test.manual.verifier.{byte}"))
@@ -869,24 +839,4 @@ fn persisted_spec_json_rejects_unknown_fields() {
     let err = TypedExecutionSpec::from_json_str(&input).expect_err("unknown field rejects");
 
     assert!(matches!(err, SpecError::Json(message) if message.contains("unknown")));
-}
-
-#[test]
-fn obsolete_state_program_and_outputs_shapes_reject() {
-    assert!(matches!(
-        TypedExecutionSpec::validate_persisted_json_shape(
-            r#"{"state_program":{"nodes":[]},"public_outputs":{}}"#,
-        ),
-        Err(SpecError::ObsoleteSketchShape(_))
-    ));
-    assert!(matches!(
-        TypedExecutionSpec::validate_persisted_json_shape(
-            r#"{"spec_version":"mfm.typed.execution_spec.v1","outputs":[]}"#,
-        ),
-        Err(SpecError::ObsoleteSketchShape(_))
-    ));
-    assert!(TypedExecutionSpec::validate_persisted_json_shape(
-        r#"{"spec_version":"mfm.typed.execution_spec.v1","public_outputs":{"outputs":[]}}"#,
-    )
-    .is_ok());
 }

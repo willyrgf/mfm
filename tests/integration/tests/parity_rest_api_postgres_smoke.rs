@@ -85,7 +85,10 @@ async fn parity_rest_postgres_smoke() {
     create_schema(&database_url, &schema).await;
     let scoped_database_url = schema_scoped_database_url(&database_url, &schema);
     let store = connect_postgres_with_retry(&scoped_database_url, 20, 250).await;
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState { store });
+    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
+        store,
+        runtime_config_path: None,
+    });
 
     let ready = app
         .clone()

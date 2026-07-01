@@ -251,25 +251,19 @@ The CLI validates the PostgreSQL schema on connect and does not create or alter
 tables. Apply the `mfm-stream-store-postgres` migrations against a fresh or
 explicitly reset local database before running typed run commands.
 There is no downgrade migration for the current typed Postgres baseline; rolling
-back to an older branch requires resetting the database or schema to that
-branch's expected baseline. Old filesystem artifact roots are not read or
-migrated by typed run commands.
+back to another branch requires resetting the database or schema to that
+branch's expected baseline. Filesystem artifact roots outside the typed run
+store are not read or migrated by typed run commands.
 
-Run ids use the typed identity format `run:<algorithm>:<digest>`. Old UUID dynamic run ids are not
-accepted by the typed CLI run surface. Normal `run start` derives the typed run id from certified
-run identity material: certified spec hash, store trust scope, and an optional distinct-run key
-digest.
+Run ids use the typed identity format `run:<algorithm>:<digest>`. Normal `run start` derives the
+typed run id from certified run identity material: certified spec hash, store trust scope, and an
+optional distinct-run key digest.
 
-Old dynamic op launch, pipeline launch, context snapshots, and generic artifact reads have been
-removed from the `run` subcommand. The CLI starts only through registered entry-point ops that app
-assembly plans and certifies into typed execution specs, and it resumes/replays only from stored
-typed run streams.
-
-Old dynamic runs are not silently migrated into certified typed runs. Historical dynamic run data can
-only be inspected through explicit operational tooling outside this typed run surface.
+The CLI starts only through registered entry-point ops that app assembly plans and certifies into
+typed execution specs, and it resumes/replays only from stored typed run streams.
 
 Keystore tx commands are direct CLI helpers over the keystore and EVM libraries. They do not submit
-or resume certified typed runs, and they do not route through the removed legacy app bridge.
+or resume certified typed runs.
 
 ### `run start`
 
@@ -292,6 +286,8 @@ mfm_cli run start --op <NAME> --config <PATH> [OPTIONS]
 - `--framework-version <VALUE>`: Framework version evidence recorded in `RunAdmitted`.
 - `--source-revision <VALUE>`: Source revision evidence recorded in `RunAdmitted` (or `MFM_SOURCE_REVISION`).
 - `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
+- `--runtime-config <PATH>`: Runtime config file for live capabilities (default:
+  `$MFM_RUNTIME_CONFIG_FILE`). Read-only commands do not use this option.
 
 Examples:
 
@@ -319,8 +315,7 @@ used by registered entry-point ops.
 
 JSON and text output include `launch_outcome`. Fresh admissions report `admitted`. A duplicate start
 for the same certified run identity reports `attached` without driving; if another process holds a
-live execution claim it reports `already_driving`; if this process cannot match the admitted runner
-executable evidence it reports `incompatible_executable`.
+live execution claim it reports `already_driving`.
 
 Stable launch errors include:
 
@@ -344,6 +339,12 @@ mfm_cli run resume <RUN_ID> [OPTIONS]
 ```
 
 It rejects non-typed run ids before storage access.
+
+Key live options:
+
+- `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
+- `--runtime-config <PATH>`: Runtime config file for live capabilities (default:
+  `$MFM_RUNTIME_CONFIG_FILE`)
 
 Manual `run resume <RUN_ID>` is the v1 recovery trigger for a run left with an open execution claim,
 side-effect uncertainty, or a resumable frontier. Automatic dead-driver takeover and background
@@ -423,9 +424,9 @@ before appending lane evidence.
 each entry has `node_id`, `attempt_id`, `disposition` (`started`, `completed`, `failed`, or
 `interrupted`), and status-specific fields such as `attempt_no`, `retryable`, or `output_cell_id`.
 `scheduler_status` is read-only `observed` for `run status`; start/resume responses set it to
-`advanced`, `blocked`, `public_output_projected`, `execution_claim_busy`,
-`execution_claim_lost`, or `incompatible_executable` according to the app dispatch loop and
-claim-coordination outcome. Manual
+`observed` when an already-terminal run needs no scheduler dispatch, otherwise `advanced`,
+`blocked`, `public_output_projected`, `execution_claim_busy`, or `execution_claim_lost` according
+to the app dispatch loop and claim-coordination outcome. Manual
 authorization requirements include the required evidence schema, signing scheme, authority id,
 allowed operator public identities or a safe summary, and quorum. They never expose signer runtime
 sources, keystore paths, password paths, passwords, or other secrets.
@@ -476,27 +477,13 @@ mfm_cli run replay <RUN_ID> [OPTIONS]
 
 ## Configuration
 
-The CLI's behavior can be modified using environment variables, which is ideal for CI/CD pipelines and automated scripts.
+The CLI's process-level configuration is intentionally narrow.
 
 - **`MFM_OUTPUT_FORMAT`**: Sets the default output format for all commands. Valid values are `text` and `json`. Command-line `--output-format` flag takes precedence.
   ```sh
   export MFM_OUTPUT_FORMAT="json"
   mfm_cli keystore list  # Will output JSON
   ```
-
-- **`MFM_KEYSTORE_PATH`**: Default keystore path used by keystore CLI commands when `--keystore` is not provided. The CLI resolves this before launching the underlying op.
-  ```sh
-  export MFM_KEYSTORE_PATH="/etc/mfm/prod.keystore"
-  mfm_cli keystore list
-  ```
-
-- **`MFM_KEYSTORE_PASSWORD`**: Provides the keystore password non-interactively. If this is set, the CLI will not prompt for a password.
-  ```sh
-  export MFM_KEYSTORE_PASSWORD="my-super-secret-password"
-  mfm_cli keystore list
-  ```
-
-- **`MFM_INTEGRATION_TEST`**: When set to `1`, the CLI uses a faster, less secure KDF configuration for the keystore. **This should only be used for testing purposes.**
 
 - **`DATABASE_URL`**: PostgreSQL connection string used by `run` commands (unless `--database-url` is provided).
   ```sh
@@ -505,52 +492,36 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   mfm_cli run status "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   ```
 
-- **`MFM_EVM_RPC_SOURCES_JSON`**: Optional JSON source registry used by typed EVM RPC
-  backends. It is runtime-only and never persisted. The registry contains endpoint-bearing
-  `sources` and ordered fallback `policies`; workflow configs carry semantic network intent only.
-  ```sh
-  export MFM_EVM_RPC_SOURCES_JSON='{
-    "sources": [
-      {"id":"reth-local","expected_chain_id":31337,"rpc_url":"http://127.0.0.1:8545","authorization":null},
-      {"id":"publicnode-ethereum-mainnet","expected_chain_id":1,"rpc_url":"https://ethereum-rpc.publicnode.com","authorization":null}
-    ],
-    "policies": [
-      {"id":"reth-local","ordered_sources":["reth-local"]},
-      {"id":"publicnode-ethereum-mainnet","ordered_sources":["publicnode-ethereum-mainnet"]}
-    ]
-  }'
+- **`MFM_RUNTIME_CONFIG_FILE`**: Runtime-only TOML or JSON config file used by live capability
+  drivers. Live `run start` and `run resume` may also pass `--runtime-config <PATH>`, which takes
+  precedence over this environment variable. Read-only run commands do not load runtime config.
+
+  ```toml
+  [evm.sources.reth-local]
+  rpc_url = "http://127.0.0.1:8545"
+
+  [evm.routes.reth-dev]
+  source_ref = "reth-local"
+
+  [keystores.default]
+  keystore_path = "/run/mfm/deployer.keystore"
+  unlock_file = "/run/mfm/deployer.password"
+
+  [signers.deployer]
+  provider = "keystore"
+  keystore_ref = "default"
+  entry_id = "<uuid>"
   ```
 
-- **`MFM_EVM_NETWORK_ROUTES_JSON`**: Optional runtime route map from semantic config
-  `network_id` values to process-local EVM source and policy ids.
-  ```sh
-  export MFM_EVM_NETWORK_ROUTES_JSON='[
-    {"network_id":"ethereum-mainnet","source_ref":"publicnode-ethereum-mainnet","policy_id":"publicnode-ethereum-mainnet"},
-    {"network_id":"reth-dev","source_ref":"reth-local","policy_id":"reth-local"}
-  ]'
-  ```
-
-- **`MFM_EVM_SIGNERS_JSON`**: Optional runtime signer registry consumed by typed EVM contract
-  workflows. Signer provider entries resolve non-secret `signer_ref` values from config to
-  process-local providers without exposing private keys in typed values or outputs.
-  ```sh
-  export MFM_EVM_SIGNERS_JSON='[
-    {
-      "signer_ref": "deployer",
-      "entry_id": "<uuid>",
-      "keystore_env": "MFM_KEYSTORE_PATH",
-      "unlock_file_env": "MFM_KEYSTORE_PASSWORD_FILE"
-    }
-  ]'
-  ```
-
-- Typed EVM RPC source configuration requires `expected_chain_id` on every configured source and at
-  least one policy with an ordered source list.
-- Typed EVM contract requests use semantic `network_id` plus `expected_chain_id`; the app runtime
-  resolves `network_id` through `MFM_EVM_NETWORK_ROUTES_JSON` before using
-  `MFM_EVM_RPC_SOURCES_JSON`.
-- Typed EVM contract requests use non-secret `signer_ref`; the app runtime resolves it against
-  `MFM_EVM_SIGNERS_JSON`.
+- Direct keystore commands use either `--keystore <PATH>`, which prompts locally for credentials,
+  or a runtime-config keystore profile selected by `--runtime-config <PATH>` or
+  `MFM_RUNTIME_CONFIG_FILE`. `--keystore-ref <REF>` defaults to `default` for runtime-config
+  selection.
+- Typed EVM contract requests use semantic `network_id` plus `expected_chain_id`; transports
+  resolve `network_id` through the runtime config route registry and verify the observed chain id
+  for every guarded live request.
+- Typed EVM contract requests use non-secret `signer_ref`; app assembly resolves it against the
+  runtime config signer registry when mutation workflows require signing.
 - Portfolio configs may also use `control_scope` when source-selection partitioning is part of the
   domain request identity.
 
@@ -559,8 +530,10 @@ The CLI's behavior can be modified using environment variables, which is ideal f
 
 ## Best Practices
 
-- **For interactive use**, rely on the built-in prompts for passwords and confirmations.
-- **For scripting and automation**, use a combination of environment variables (`MFM_KEYSTORE_PASSWORD`, `MFM_KEYSTORE_PATH`), the `--stdin` flag for input, and the `--yes` flag to bypass confirmations.
+- **For interactive use**, pass `--keystore <PATH>` and rely on the built-in prompts for passwords
+  and confirmations.
+- **For scripting and automation**, use runtime-config keystore profiles with unlock files, the
+  `--stdin` flag for import material, and `--yes` to bypass confirmations where supported.
 - **For AI agents and programmatic use**, use `--output-format json` to get structured, machine-readable responses with predictable error codes.
 - **Secure your environment**: When using environment variables, ensure the security of your shell history and environment.
 - **Backup your keystore file**: The CLI manages keys, but you are responsible for securely backing up the keystore file itself.
@@ -571,7 +544,7 @@ The CLI is designed to be AI-friendly with consistent JSON output that makes it 
 
 - Parse command results reliably using the standardized `{"status": "success", "data": {...}}` format
 - Handle errors gracefully with structured error responses containing stable error codes
-- Integrate with automation pipelines using environment variables and non-interactive modes
+- Integrate with automation pipelines using runtime config and non-interactive modes
 - Process keystore operations programmatically without human intervention
 
 **Example AI workflow:**

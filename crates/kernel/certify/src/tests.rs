@@ -11,11 +11,18 @@ use mfm_program::{
 use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs};
 use serde::{Deserialize, Serialize};
 
-fn certify_raw_typed_spec(
+fn certify_untrusted_typed_spec(
     typed: spec::TypedExecutionSpec,
     registry: &CertificationRegistry,
 ) -> Result<CertifiedTypedSpec> {
     certify_typed_spec(spec::UntrustedTypedSpec::from_raw_spec(typed), registry)
+}
+
+macro_rules! assert_rejection_cases {
+    ($fixture:ident, $($expected:expr => $mutate:expr),+ $(,)?) => {{
+        let (registry, base) = $fixture();
+        $(assert_rejects(&registry, &base, $expected, $mutate);)+
+    }};
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
@@ -57,42 +64,64 @@ struct TestOperationOutputs<'p, 's> {
     result: mfm_program::Handle<'p, 's, TestValue>,
 }
 
+macro_rules! impl_test_state_spec {
+    (
+        $state:ty,
+        effect = $effect:ty,
+        caps = $caps:ty,
+        kind = $kind:literal,
+        version = $version:literal,
+        name = $name:literal,
+        digest = $digest:literal $(,)?
+    ) => {
+        impl StateSpec for $state {
+            type Config = TestConfig;
+            type Input = TestValue;
+            type Output = TestValue;
+            type Effect = $effect;
+            type Caps = $caps;
+
+            fn kind() -> program::Result<StateKind> {
+                StateKind::new(
+                    "mfm.certify.test",
+                    $kind,
+                    DigestAlgorithm::Sha256JcsV1,
+                    digest_byte($digest),
+                )
+                .map_err(|error| program::PlanError::Key(error.to_string()))
+            }
+
+            fn version() -> program::Result<StateVersion> {
+                StateVersion::new($version)
+                    .map_err(|error| program::PlanError::Key(error.to_string()))
+            }
+
+            fn name() -> &'static str {
+                $name
+            }
+
+            fn new(config: program::ValidatedConfig<Self::Config>) -> program::Result<Self> {
+                Ok(Self {
+                    config: config.into_inner(),
+                })
+            }
+        }
+    };
+}
+
 struct MultiplyState {
     config: TestConfig,
 }
 
-impl StateSpec for MultiplyState {
-    type Config = TestConfig;
-    type Input = TestValue;
-    type Output = TestValue;
-    type Effect = Pure;
-    type Caps = NoCaps;
-
-    fn kind() -> program::Result<StateKind> {
-        StateKind::new(
-            "mfm.certify.test",
-            "multiply",
-            DigestAlgorithm::Sha256JcsV1,
-            digest_byte(0x11),
-        )
-        .map_err(|error| program::PlanError::Key(error.to_string()))
-    }
-
-    fn version() -> program::Result<StateVersion> {
-        StateVersion::new("mfm.certify.test.multiply.v1")
-            .map_err(|error| program::PlanError::Key(error.to_string()))
-    }
-
-    fn name() -> &'static str {
-        "mfm.certify.test.multiply"
-    }
-
-    fn new(config: program::ValidatedConfig<Self::Config>) -> program::Result<Self> {
-        Ok(Self {
-            config: config.into_inner(),
-        })
-    }
-}
+impl_test_state_spec!(
+    MultiplyState,
+    effect = Pure,
+    caps = NoCaps,
+    kind = "multiply",
+    version = "mfm.certify.test.multiply.v1",
+    name = "mfm.certify.test.multiply",
+    digest = 0x11,
+);
 
 impl PureState for MultiplyState {
     fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
@@ -131,38 +160,15 @@ struct MutatingState {
     config: TestConfig,
 }
 
-impl StateSpec for MutatingState {
-    type Config = TestConfig;
-    type Input = TestValue;
-    type Output = TestValue;
-    type Effect = ApplySideEffect;
-    type Caps = (MutationCap,);
-
-    fn kind() -> program::Result<StateKind> {
-        StateKind::new(
-            "mfm.certify.test",
-            "mutating",
-            DigestAlgorithm::Sha256JcsV1,
-            digest_byte(0x62),
-        )
-        .map_err(|error| program::PlanError::Key(error.to_string()))
-    }
-
-    fn version() -> program::Result<StateVersion> {
-        StateVersion::new("mfm.certify.test.mutating.v1")
-            .map_err(|error| program::PlanError::Key(error.to_string()))
-    }
-
-    fn name() -> &'static str {
-        "mfm.certify.test.mutating"
-    }
-
-    fn new(config: program::ValidatedConfig<Self::Config>) -> program::Result<Self> {
-        Ok(Self {
-            config: config.into_inner(),
-        })
-    }
-}
+impl_test_state_spec!(
+    MutatingState,
+    effect = ApplySideEffect,
+    caps = (MutationCap,),
+    kind = "mutating",
+    version = "mfm.certify.test.mutating.v1",
+    name = "mfm.certify.test.mutating",
+    digest = 0x62,
+);
 
 impl SideEffectState for MutatingState {
     type Intent = TestValue;
@@ -500,7 +506,7 @@ fn certifies_reference_program_draft() {
     );
     assert_eq!(
         certified.certificate_hash().as_str(),
-        "content:sha256-jcs-v1:b10ace9a11f373d953d1e0056bba864d524667b3fa54fa386203622987496b93"
+        "content:sha256-jcs-v1:95a7643407b304930c326ef3a5bff3d78e61931d185edb874c159758d06187d6"
     );
     assert_eq!(
         certified.envelope().spec.public_outputs.public_schema_id,
@@ -620,22 +626,12 @@ fn parsed_persisted_parts_are_untrusted_until_verifier_succeeds() {
 
 #[test]
 fn typed_certification_rejects_problem_taxonomy() {
-    let draft = reference_draft();
-    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-    let base = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
-
-    assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
-        spec.cells.push(spec.cells[0].clone());
-    });
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidInterfaceWiring,
-        |spec| {
+    assert_rejection_cases!(
+        reference_registry_and_spec,
+        ProblemClass::InvalidTopology => |spec| {
+            spec.cells.push(spec.cells[0].clone());
+        },
+        ProblemClass::InvalidInterfaceWiring => |spec| {
             let node = spec
                 .nodes
                 .iter_mut()
@@ -661,36 +657,26 @@ fn typed_certification_rejects_problem_taxonomy() {
                 content_digest_json(input_node_json(&node.input_bindings.root))
                     .expect("input digest");
         },
-    );
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidSemanticTransition,
-        |spec| {
+        ProblemClass::InvalidSemanticTransition => |spec| {
             spec.nodes[0].effect_kind = ApplySideEffect::descriptor()
                 .expect("side effect descriptor")
                 .kind;
         },
-    );
-    assert_rejects(&registry, &base, ProblemClass::InvalidDataShape, |spec| {
-        spec.config_refs.clear();
-    });
-    assert_rejects(&registry, &base, ProblemClass::InvalidDataMeaning, |spec| {
-        let seed_lineage = spec
-            .value_lineages
-            .iter_mut()
-            .find(|lineage| matches!(lineage.producer, spec::CellProducer::Seed(_)))
-            .expect("seed lineage");
-        seed_lineage.config_ref_digest = Some(ContentDigest::from_digest(
-            DigestAlgorithm::Sha256JcsV1,
-            digest_byte(0x55),
-        ));
-    });
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidTerminalShape,
-        |spec| {
+        ProblemClass::InvalidDataShape => |spec| {
+            spec.config_refs.clear();
+        },
+        ProblemClass::InvalidDataMeaning => |spec| {
+            let seed_lineage = spec
+                .value_lineages
+                .iter_mut()
+                .find(|lineage| matches!(lineage.producer, spec::CellProducer::Seed(_)))
+                .expect("seed lineage");
+            seed_lineage.config_ref_digest = Some(ContentDigest::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                digest_byte(0x55),
+            ));
+        },
+        ProblemClass::InvalidTerminalShape => |spec| {
             spec.public_outputs.outputs.clear();
         },
     );
@@ -704,7 +690,7 @@ fn typed_spec_requires_registry_authority() {
         .spec()
         .clone();
     let error =
-        certify_raw_typed_spec(spec, &CertificationRegistry::new()).expect_err("must reject");
+        certify_untrusted_typed_spec(spec, &CertificationRegistry::new()).expect_err("must reject");
     assert_eq!(
         error.problem_class(),
         Some(ProblemClass::InvalidSemanticTransition)
@@ -713,51 +699,31 @@ fn typed_spec_requires_registry_authority() {
 
 #[test]
 fn certification_rejects_forged_framework_descriptor_bypass() {
-    let draft = reference_draft();
-    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-    let base = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
-
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidSemanticTransition,
-        |spec| {
-            let mut forged = spec
-                .descriptor_identities
-                .iter()
-                .find_map(|descriptor| match descriptor {
-                    spec::DescriptorIdentity::State(state) => Some(state.as_ref().clone()),
-                    _ => None,
-                })
-                .expect("state descriptor");
-            forged.name = "mfm.framework.forged".to_owned();
-            forged.state_kind =
-                state_kind_json("forged", serde_json::json!({ "framework": "forged" }))
-                    .expect("state kind");
-            forged.state_version =
-                StateVersion::new("mfm.framework.state.forged.v1").expect("state version");
-            forged.descriptor_id = state_descriptor_id_from_spec(&forged).expect("descriptor id");
-            spec.descriptor_identities
-                .push(spec::DescriptorIdentity::State(Box::new(forged)));
-        },
-    );
+    assert_reference_rejects(ProblemClass::InvalidSemanticTransition, |spec| {
+        let mut forged = spec
+            .descriptor_identities
+            .iter()
+            .find_map(|descriptor| match descriptor {
+                spec::DescriptorIdentity::State(state) => Some(state.as_ref().clone()),
+                _ => None,
+            })
+            .expect("state descriptor");
+        forged.name = "mfm.framework.forged".to_owned();
+        forged.state_kind = state_kind_json("forged", serde_json::json!({ "framework": "forged" }))
+            .expect("state kind");
+        forged.state_version =
+            StateVersion::new("mfm.framework.state.forged.v1").expect("state version");
+        forged.descriptor_id = state_descriptor_id_from_spec(&forged).expect("descriptor id");
+        spec.descriptor_identities
+            .push(spec::DescriptorIdentity::State(Box::new(forged)));
+    });
 }
 
 #[test]
 fn certification_accepts_valid_lifecycle_framework_node_shapes() {
-    let draft = reference_draft();
-    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-    let spec = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
+    let (registry, spec) = reference_registry_and_spec();
 
-    certify_raw_typed_spec(spec, &registry).expect("lifecycle framework nodes certify");
+    certify_untrusted_typed_spec(spec, &registry).expect("lifecycle framework nodes certify");
 }
 
 #[test]
@@ -805,15 +771,7 @@ fn certification_mints_descriptor_set_and_lifecycle_views() {
 
 #[test]
 fn certification_rejects_missing_retention_lifecycle_node() {
-    let draft = reference_draft();
-    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-    let base = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
-
-    assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
+    assert_reference_rejects(ProblemClass::InvalidTopology, |spec| {
         spec.nodes.retain(|node| {
             !matches!(
                 node.framework,
@@ -825,89 +783,55 @@ fn certification_rejects_missing_retention_lifecycle_node() {
 
 #[test]
 fn certification_rejects_forged_lifecycle_framework_variant() {
-    let draft = reference_draft();
-    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-    let base = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
-
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidSemanticTransition,
-        |spec| {
-            let forged = spec
-                .nodes
-                .iter()
-                .find_map(|node| match &node.framework {
-                    Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(retention)) => {
-                        Some(retention.clone())
-                    }
-                    _ => None,
-                })
-                .expect("retention metadata");
-            let node = spec
-                .nodes
-                .iter_mut()
-                .find(|node| node.framework.is_none())
-                .expect("user node");
-            node.framework = Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(forged));
-        },
-    );
+    assert_reference_rejects(ProblemClass::InvalidSemanticTransition, |spec| {
+        let forged = spec
+            .nodes
+            .iter()
+            .find_map(|node| match &node.framework {
+                Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(retention)) => {
+                    Some(retention.clone())
+                }
+                _ => None,
+            })
+            .expect("retention metadata");
+        let node = spec
+            .nodes
+            .iter_mut()
+            .find(|node| node.framework.is_none())
+            .expect("user node");
+        node.framework = Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(forged));
+    });
 }
 
 #[test]
 fn certification_rejects_lifecycle_descriptor_mismatch() {
-    let draft = reference_draft();
-    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-    let base = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
-
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidSemanticTransition,
-        |spec| {
-            let mut forged = spec
-                .descriptor_identities
-                .iter()
-                .find_map(|descriptor| match descriptor {
-                    spec::DescriptorIdentity::State(state) => Some(state.as_ref().clone()),
-                    _ => None,
-                })
-                .expect("state descriptor");
-            forged.name = "mfm.framework.complete_run".to_owned();
-            forged.state_kind = state_kind_json(
-                "complete_run",
-                serde_json::json!({ "framework": "complete_run" }),
-            )
-            .expect("complete state kind");
-            forged.state_version = StateVersion::new("mfm.framework.state.complete_run.v1")
-                .expect("complete state version");
-            forged.runner = "forged".to_owned();
-            forged.descriptor_id = state_descriptor_id_from_spec(&forged).expect("descriptor id");
-            spec.descriptor_identities
-                .push(spec::DescriptorIdentity::State(Box::new(forged)));
-        },
-    );
+    assert_reference_rejects(ProblemClass::InvalidSemanticTransition, |spec| {
+        let mut forged = spec
+            .descriptor_identities
+            .iter()
+            .find_map(|descriptor| match descriptor {
+                spec::DescriptorIdentity::State(state) => Some(state.as_ref().clone()),
+                _ => None,
+            })
+            .expect("state descriptor");
+        forged.name = "mfm.framework.complete_run".to_owned();
+        forged.state_kind = state_kind_json(
+            "complete_run",
+            serde_json::json!({ "framework": "complete_run" }),
+        )
+        .expect("complete state kind");
+        forged.state_version = StateVersion::new("mfm.framework.state.complete_run.v1")
+            .expect("complete state version");
+        forged.runner = "forged".to_owned();
+        forged.descriptor_id = state_descriptor_id_from_spec(&forged).expect("descriptor id");
+        spec.descriptor_identities
+            .push(spec::DescriptorIdentity::State(Box::new(forged)));
+    });
 }
 
 #[test]
 fn certification_rejects_invalid_lifecycle_ordering() {
-    let draft = reference_draft();
-    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-    let base = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
-
-    assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
+    assert_reference_rejects(ProblemClass::InvalidTopology, |spec| {
         let public_cell = spec
             .public_outputs
             .outputs
@@ -921,123 +845,64 @@ fn certification_rejects_invalid_lifecycle_ordering() {
 
 #[test]
 fn certification_rejects_lifecycle_framework_permissions() {
-    let draft = reference_draft();
-    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-    let base = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
+    assert_reference_rejects(ProblemClass::InvalidSemanticTransition, |spec| {
+        let node = find_lifecycle_node_mut::<spec::ProjectRetentionManifestNodeSpec>(spec);
+        node.adapter_bindings.push(spec::AdapterBinding {
+            adapter_kind: AdapterKind::new(
+                "mfm.certify.test",
+                "forged-adapter",
+                DigestAlgorithm::Sha256JcsV1,
+                digest_byte(0xa1),
+            )
+            .expect("adapter kind"),
+            adapter_version: AdapterVersion::new("mfm.certify.test.adapter.v1")
+                .expect("adapter version"),
+            binding_digest: None,
+        });
+    });
+}
 
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidSemanticTransition,
-        |spec| {
-            let node = find_lifecycle_node_mut::<spec::ProjectRetentionManifestNodeSpec>(spec);
-            node.adapter_bindings.push(spec::AdapterBinding {
-                adapter_kind: AdapterKind::new(
-                    "mfm.certify.test",
-                    "forged-adapter",
-                    DigestAlgorithm::Sha256JcsV1,
-                    digest_byte(0xa1),
-                )
-                .expect("adapter kind"),
-                adapter_version: AdapterVersion::new("mfm.certify.test.adapter.v1")
-                    .expect("adapter version"),
-                binding_digest: None,
-            });
+#[test]
+fn certification_rejects_user_consumers_of_lifecycle_receipts() {
+    assert_rejection_cases!(
+        reference_registry_and_spec,
+        ProblemClass::InvalidTopology => |spec| {
+            let render_receipt = lifecycle_render_receipt_cell(spec);
+            append_user_receipt_consumer(spec, render_receipt, "user/render-receipt");
+        },
+        ProblemClass::InvalidTopology => |spec| {
+            let retention_receipt = lifecycle_retention_receipt_cell(spec);
+            append_user_receipt_consumer(spec, retention_receipt, "user/retention-receipt");
         },
     );
 }
 
 #[test]
-fn certification_rejects_user_consumers_of_lifecycle_receipts() {
-    let draft = reference_draft();
-    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-    let base = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
-
-    assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
-        let render_receipt = lifecycle_render_receipt_cell(spec);
-        append_user_receipt_consumer(spec, render_receipt, "user/render-receipt");
-    });
-    assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
-        let retention_receipt = lifecycle_retention_receipt_cell(spec);
-        append_user_receipt_consumer(spec, retention_receipt, "user/retention-receipt");
-    });
-}
-
-#[test]
 fn certification_rejects_executable_nodes_outside_lifecycle_tail() {
-    let draft = reference_draft();
-    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-    let base = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
-
-    assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
+    assert_reference_rejects(ProblemClass::InvalidTopology, |spec| {
         append_independent_user_node(spec, "user/outside-lifecycle-tail");
     });
 }
 
 #[test]
 fn certification_rejects_forged_lifecycle_config_ref() {
-    let draft = reference_draft();
-    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-    let base = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
-
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidSemanticTransition,
-        |spec| {
-            let node = find_lifecycle_node_mut::<spec::ProjectRetentionManifestNodeSpec>(spec);
-            node.config_ref.byte_len += 1;
-        },
-    );
+    assert_reference_rejects(ProblemClass::InvalidSemanticTransition, |spec| {
+        let node = find_lifecycle_node_mut::<spec::ProjectRetentionManifestNodeSpec>(spec);
+        node.config_ref.byte_len += 1;
+    });
 }
 
 #[test]
 fn certification_rejects_builtin_lifecycle_descriptors_without_framework_metadata() {
-    let draft = reference_draft();
-    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-    let base = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
-
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidSemanticTransition,
-        |spec| {
+    assert_rejection_cases!(
+        reference_registry_and_spec,
+        ProblemClass::InvalidSemanticTransition => |spec| {
             clear_lifecycle_framework_metadata::<spec::ProjectRetentionManifestNodeSpec>(spec);
         },
-    );
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidSemanticTransition,
-        |spec| {
+        ProblemClass::InvalidSemanticTransition => |spec| {
             clear_lifecycle_framework_metadata::<spec::CompleteRunNodeSpec>(spec);
         },
-    );
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidSemanticTransition,
-        |spec| {
+        ProblemClass::InvalidSemanticTransition => |spec| {
             clear_lifecycle_framework_metadata::<spec::ResolveSagaTerminalNodeSpec>(spec);
         },
     );
@@ -1045,19 +910,9 @@ fn certification_rejects_builtin_lifecycle_descriptors_without_framework_metadat
 
 #[test]
 fn certification_rejects_forged_lifecycle_input_binding() {
-    let draft = reference_draft();
-    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-    let base = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
-
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidInterfaceWiring,
-        |spec| {
+    assert_rejection_cases!(
+        reference_registry_and_spec,
+        ProblemClass::InvalidInterfaceWiring => |spec| {
             let node = find_lifecycle_node_mut::<spec::ProjectRetentionManifestNodeSpec>(spec);
             let current = match &node.input_bindings.root {
                 spec::InputBindingNodeSpec::Cell(cell) => cell.clone(),
@@ -1073,12 +928,7 @@ fn certification_rejects_forged_lifecycle_input_binding() {
                 content_digest_json(input_node_json(&node.input_bindings.root))
                     .expect("input digest");
         },
-    );
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidInterfaceWiring,
-        |spec| {
+        ProblemClass::InvalidInterfaceWiring => |spec| {
             let node = find_lifecycle_node_mut::<spec::CompleteRunNodeSpec>(spec);
             let current = match &node.input_bindings.root {
                 spec::InputBindingNodeSpec::Cell(cell) => cell.clone(),
@@ -1094,12 +944,7 @@ fn certification_rejects_forged_lifecycle_input_binding() {
                 content_digest_json(input_node_json(&node.input_bindings.root))
                     .expect("input digest");
         },
-    );
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidInterfaceWiring,
-        |spec| {
+        ProblemClass::InvalidInterfaceWiring => |spec| {
             let input_cell = spec.cells.first().expect("input cell").clone();
             let node = find_lifecycle_node_mut::<spec::ResolveSagaTerminalNodeSpec>(spec);
             node.input_bindings.root =
@@ -1125,15 +970,7 @@ fn certification_rejects_forged_lifecycle_input_binding() {
 
 #[test]
 fn certification_rejects_operation_input_binding_tampering() {
-    let draft = reference_draft();
-    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-    let base = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
-
-    assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
+    assert_reference_rejects(ProblemClass::InvalidTopology, |spec| {
         let frame = spec
             .planning_lineage
             .first_mut()
@@ -1151,103 +988,84 @@ fn certification_rejects_operation_input_binding_tampering() {
 
 #[test]
 fn certification_rejects_stable_id_and_scope_tampering() {
-    let draft = reference_draft();
-    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-    let base = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
-
-    assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
-        spec.nodes[0].stable_key = spec::StableAuthorKey::new("renamed-node").expect("node key");
-    });
-    assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
-        spec.scopes[0].parent_scope_id = Some(spec.scopes[0].scope_id.clone());
-    });
+    assert_rejection_cases!(
+        reference_registry_and_spec,
+        ProblemClass::InvalidTopology => |spec| {
+            spec.nodes[0].stable_key =
+                spec::StableAuthorKey::new("renamed-node").expect("node key");
+        },
+        ProblemClass::InvalidTopology => |spec| {
+            spec.scopes[0].parent_scope_id = Some(spec.scopes[0].scope_id.clone());
+        },
+    );
 }
 
 #[test]
 fn certification_rejects_framework_lineage_tampering() {
-    let draft = reference_draft();
-    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-    let base = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
-
-    assert_rejects(&registry, &base, ProblemClass::InvalidDataMeaning, |spec| {
-        spec.planning_lineage.clear();
-    });
-    assert_rejects(&registry, &base, ProblemClass::InvalidDataMeaning, |spec| {
-        let lineage = spec
-            .nodes
-            .first_mut()
-            .expect("node with operation planning lineage");
-        lineage.planning_lineage.active_operation_instances =
-            vec![OperationInstanceId::from_digest(
-                DigestAlgorithm::Sha256JcsV1,
-                digest_byte(0x92),
-            )];
-        lineage.planning_lineage.lineage_digest = planning_lineage_digest(
-            &lineage.planning_lineage.active_operation_instances,
-            &lineage.planning_lineage.completed_operation_frames,
-        )
-        .expect("planning lineage digest");
-    });
-    assert_rejects(&registry, &base, ProblemClass::InvalidDataMeaning, |spec| {
-        let render_node_id = spec
-            .nodes
-            .iter()
-            .find(|node| {
-                matches!(
-                    node.framework,
-                    Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
-                )
-            })
-            .expect("render node")
-            .node_id
-            .clone();
-        let lineage = spec
-            .value_lineages
-            .iter_mut()
-            .find(|lineage| lineage.producer == spec::CellProducer::Node(render_node_id.clone()))
-            .expect("render lineage");
-        lineage.input_cells.clear();
-    });
+    assert_rejection_cases!(
+        reference_registry_and_spec,
+        ProblemClass::InvalidDataMeaning => |spec| {
+            spec.planning_lineage.clear();
+        },
+        ProblemClass::InvalidDataMeaning => |spec| {
+            let lineage = spec
+                .nodes
+                .first_mut()
+                .expect("node with operation planning lineage");
+            lineage.planning_lineage.active_operation_instances = vec![
+                OperationInstanceId::from_digest(
+                    DigestAlgorithm::Sha256JcsV1,
+                    digest_byte(0x92),
+                ),
+            ];
+            lineage.planning_lineage.lineage_digest = planning_lineage_digest(
+                &lineage.planning_lineage.active_operation_instances,
+                &lineage.planning_lineage.completed_operation_frames,
+            )
+            .expect("planning lineage digest");
+        },
+        ProblemClass::InvalidDataMeaning => |spec| {
+            let render_node_id = spec
+                .nodes
+                .iter()
+                .find(|node| {
+                    matches!(
+                        node.framework,
+                        Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
+                    )
+                })
+                .expect("render node")
+                .node_id
+                .clone();
+            let lineage = spec
+                .value_lineages
+                .iter_mut()
+                .find(|lineage| {
+                    lineage.producer == spec::CellProducer::Node(render_node_id.clone())
+                })
+                .expect("render lineage");
+            lineage.input_cells.clear();
+        },
+    );
 }
 
 #[test]
 fn certification_rejects_side_effect_contract_mismatch() {
-    let draft = side_effect_draft();
-    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-    let base = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
-
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidSemanticTransition,
-        |spec| {
-            let node = spec
-                .nodes
-                .iter_mut()
-                .find(|node| node.side_effect.is_some())
-                .expect("side-effect node");
-            node.side_effect = Some(spec::SideEffectContractSpec {
-                contract_digest: ContentDigest::from_digest(
-                    DigestAlgorithm::Sha256JcsV1,
-                    digest_byte(0x63),
-                ),
-                resource_claim: spec::ResourceClaimSpec::ManualOnly,
-                verification: spec::SideEffectVerificationSpec::Receipt,
-            });
-        },
-    );
+    assert_side_effect_rejects(ProblemClass::InvalidSemanticTransition, |spec| {
+        let node = spec
+            .nodes
+            .iter_mut()
+            .find(|node| node.side_effect.is_some())
+            .expect("side-effect node");
+        node.side_effect = Some(spec::SideEffectContractSpec {
+            contract_digest: ContentDigest::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                digest_byte(0x63),
+            ),
+            resource_claim: spec::ResourceClaimSpec::ManualOnly,
+            verification: spec::SideEffectVerificationSpec::Receipt,
+        });
+    });
 }
 
 #[test]
@@ -1283,7 +1101,7 @@ fn certification_lowers_side_effect_submit_verify_pair() {
 }
 
 #[test]
-fn persisted_side_effect_verify_specs_reject_obsolete_submit_output_cell_id() {
+fn persisted_side_effect_verify_specs_reject_unknown_submit_output_cell_id() {
     let (_registry, typed) = side_effect_registry_and_spec();
     let submit_output_cell = side_effect_submit_node(&typed).output_cell.clone();
     let mut value: serde_json::Value =
@@ -1305,16 +1123,14 @@ fn persisted_side_effect_verify_specs_reject_obsolete_submit_output_cell_id() {
     let input = serde_json::to_string(&value).expect("JSON");
 
     let error = spec::TypedExecutionSpec::from_json_str(&input)
-        .expect_err("obsolete submit output anchor must reject");
+        .expect_err("unknown submit output anchor must reject");
 
     assert!(error.to_string().contains("unknown or non-normalized"));
 }
 
 #[test]
 fn certification_rejects_missing_side_effect_verify_pair() {
-    let (registry, base) = side_effect_registry_and_spec();
-
-    assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
+    assert_side_effect_rejects(ProblemClass::InvalidTopology, |spec| {
         spec.nodes.retain(|node| {
             !matches!(
                 node.framework,
@@ -1326,18 +1142,14 @@ fn certification_rejects_missing_side_effect_verify_pair() {
 
 #[test]
 fn certification_rejects_orphan_side_effect_verify_pair() {
-    let (registry, base) = side_effect_registry_and_spec();
-
-    assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
+    assert_side_effect_rejects(ProblemClass::InvalidTopology, |spec| {
         spec.nodes.retain(|node| node.side_effect.is_none());
     });
 }
 
 #[test]
 fn certification_rejects_duplicate_side_effect_verify_pair() {
-    let (registry, base) = side_effect_registry_and_spec();
-
-    assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
+    assert_side_effect_rejects(ProblemClass::InvalidTopology, |spec| {
         let duplicate = side_effect_verify_node(spec).0.clone();
         spec.nodes.push(duplicate);
     });
@@ -1345,9 +1157,7 @@ fn certification_rejects_duplicate_side_effect_verify_pair() {
 
 #[test]
 fn certification_rejects_bad_side_effect_verify_output_producer() {
-    let (registry, base) = side_effect_registry_and_spec();
-
-    assert_rejects(&registry, &base, ProblemClass::InvalidDataMeaning, |spec| {
+    assert_side_effect_rejects(ProblemClass::InvalidDataMeaning, |spec| {
         let submit_node_id = side_effect_submit_node(spec).node_id.clone();
         let verify_output_cell = side_effect_verify_node(spec).0.output_cell.clone();
         let cell = spec
@@ -1361,80 +1171,63 @@ fn certification_rejects_bad_side_effect_verify_output_producer() {
 
 #[test]
 fn certification_rejects_public_submit_output_cell() {
-    let (registry, base) = side_effect_registry_and_spec();
-
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidTerminalShape,
-        |spec| {
-            let submit_output_cell = side_effect_submit_node(spec).output_cell.clone();
-            let submit_cell = spec
-                .cells
-                .iter()
-                .find(|cell| cell.cell_id == submit_output_cell)
-                .expect("submit output cell")
-                .clone();
-            let public_output = spec
-                .public_outputs
-                .outputs
-                .first_mut()
-                .expect("public output");
-            public_output.cell_id = submit_cell.cell_id;
-            public_output.producer = submit_cell.producer;
-            public_output.scope_id = submit_cell.scope_id;
-            public_output.semantic_type_id = submit_cell.semantic_type_id;
-            public_output.schema_id = submit_cell.schema_id;
-            public_output.value_lineage = submit_cell.value_lineage;
-        },
-    );
+    assert_side_effect_rejects(ProblemClass::InvalidTerminalShape, |spec| {
+        let submit_output_cell = side_effect_submit_node(spec).output_cell.clone();
+        let submit_cell = spec
+            .cells
+            .iter()
+            .find(|cell| cell.cell_id == submit_output_cell)
+            .expect("submit output cell")
+            .clone();
+        let public_output = spec
+            .public_outputs
+            .outputs
+            .first_mut()
+            .expect("public output");
+        public_output.cell_id = submit_cell.cell_id;
+        public_output.producer = submit_cell.producer;
+        public_output.scope_id = submit_cell.scope_id;
+        public_output.semantic_type_id = submit_cell.semantic_type_id;
+        public_output.schema_id = submit_cell.schema_id;
+        public_output.value_lineage = submit_cell.value_lineage;
+    });
 }
 
 #[test]
 fn certification_rejects_wrong_side_effect_verify_input_cell() {
-    let (registry, base) = side_effect_registry_and_spec();
-
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidInterfaceWiring,
-        |spec| {
-            let submit_output_cell = side_effect_submit_node(spec).output_cell.clone();
-            let wrong_cell = spec
-                .cells
-                .iter()
-                .find(|cell| cell.cell_id != submit_output_cell)
-                .expect("wrong cell")
-                .clone();
-            let wrong_predecessors =
-                predecessors_for_test_inputs(spec, std::slice::from_ref(&wrong_cell.cell_id));
-            let verify_node = spec
-                .nodes
-                .iter_mut()
-                .find(|node| {
-                    matches!(
-                        node.framework,
-                        Some(spec::FrameworkNodeSpec::SideEffectVerify(_))
-                    )
-                })
-                .expect("verify node");
-            verify_node.input_bindings =
-                spec::framework_lifecycle_maybe_skipped_cell_input_binding(
-                    "side_effect_verify",
-                    "submit_output",
-                    &wrong_cell,
+    assert_side_effect_rejects(ProblemClass::InvalidInterfaceWiring, |spec| {
+        let submit_output_cell = side_effect_submit_node(spec).output_cell.clone();
+        let wrong_cell = spec
+            .cells
+            .iter()
+            .find(|cell| cell.cell_id != submit_output_cell)
+            .expect("wrong cell")
+            .clone();
+        let wrong_predecessors =
+            predecessors_for_test_inputs(spec, std::slice::from_ref(&wrong_cell.cell_id));
+        let verify_node = spec
+            .nodes
+            .iter_mut()
+            .find(|node| {
+                matches!(
+                    node.framework,
+                    Some(spec::FrameworkNodeSpec::SideEffectVerify(_))
                 )
-                .expect("wrong verify input binding");
-            verify_node.deterministic_predecessors = wrong_predecessors;
-        },
-    );
+            })
+            .expect("verify node");
+        verify_node.input_bindings = spec::framework_lifecycle_maybe_skipped_cell_input_binding(
+            "side_effect_verify",
+            "submit_output",
+            &wrong_cell,
+        )
+        .expect("wrong verify input binding");
+        verify_node.deterministic_predecessors = wrong_predecessors;
+    });
 }
 
 #[test]
 fn certification_rejects_wrong_side_effect_verify_lineage_input() {
-    let (registry, base) = side_effect_registry_and_spec();
-
-    assert_rejects(&registry, &base, ProblemClass::InvalidDataMeaning, |spec| {
+    assert_side_effect_rejects(ProblemClass::InvalidDataMeaning, |spec| {
         let submit_output_cell = side_effect_submit_node(spec).output_cell.clone();
         let wrong_cell = spec
             .cells
@@ -1465,17 +1258,10 @@ fn certification_rejects_wrong_side_effect_verify_lineage_input() {
 
 #[test]
 fn certification_rejects_non_verify_submit_output_consumer() {
-    let (registry, base) = side_effect_registry_and_spec();
-
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidSemanticTransition,
-        |spec| {
-            let submit_output_cell = side_effect_submit_node(spec).output_cell.clone();
-            append_user_receipt_consumer(spec, submit_output_cell, "user/submit-output");
-        },
-    );
+    assert_side_effect_rejects(ProblemClass::InvalidSemanticTransition, |spec| {
+        let submit_output_cell = side_effect_submit_node(spec).output_cell.clone();
+        append_user_receipt_consumer(spec, submit_output_cell, "user/submit-output");
+    });
 }
 
 #[test]
@@ -1646,13 +1432,7 @@ fn certified_side_effect_contract_validates_remediation_links() {
 
 #[test]
 fn certification_rejects_saga_policy_graph_disagreement() {
-    let draft = side_effect_draft();
-    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-    let side_effecting = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
+    let (registry, side_effecting) = side_effect_registry_and_spec();
 
     assert_rejects(
         &registry,
@@ -1663,13 +1443,7 @@ fn certification_rejects_saga_policy_graph_disagreement() {
         },
     );
 
-    let draft = reference_draft();
-    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-    let pure = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
+    let (registry, pure) = reference_registry_and_spec();
     assert_rejects(
         &registry,
         &pure,
@@ -1682,71 +1456,60 @@ fn certification_rejects_saga_policy_graph_disagreement() {
 
 #[test]
 fn certification_rejects_invalid_remediation_keys_and_coverage() {
-    let (registry, base) = compensating_registry_and_spec();
-    assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
-        let (_, mut remediation) = spec.remediations.pop_first().expect("remediation");
-        remediation.node_id = node_id(0xb1);
-        spec.remediations.insert(node_id(0xb0), remediation);
-    });
-    assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
-        let remediation = spec
-            .remediations
-            .values()
-            .next()
-            .expect("remediation")
-            .clone();
-        let mut cloned = remediation;
-        cloned.node_id = node_id(0xb2);
-        let lifecycle_node = find_lifecycle_node_mut::<spec::PublicOutputRenderNodeSpec>(spec)
-            .node_id
-            .clone();
-        spec.remediations.insert(lifecycle_node, cloned);
-    });
-    assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
-        spec.remediations.clear();
-    });
+    assert_rejection_cases!(
+        compensating_registry_and_spec,
+        ProblemClass::InvalidTopology => |spec| {
+            let (_, mut remediation) = spec.remediations.pop_first().expect("remediation");
+            remediation.node_id = node_id(0xb1);
+            spec.remediations.insert(node_id(0xb0), remediation);
+        },
+        ProblemClass::InvalidTopology => |spec| {
+            let remediation = spec
+                .remediations
+                .values()
+                .next()
+                .expect("remediation")
+                .clone();
+            let mut cloned = remediation;
+            cloned.node_id = node_id(0xb2);
+            let lifecycle_node = find_lifecycle_node_mut::<spec::PublicOutputRenderNodeSpec>(spec)
+                .node_id
+                .clone();
+            spec.remediations.insert(lifecycle_node, cloned);
+        },
+        ProblemClass::InvalidTopology => |spec| {
+            spec.remediations.clear();
+        },
+    );
 }
 
 #[test]
 fn certification_rejects_invalid_remediation_node_shapes() {
-    let (registry, base) = compensating_registry_and_spec();
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidSemanticTransition,
-        |spec| {
+    assert_rejection_cases!(
+        compensating_registry_and_spec,
+        ProblemClass::InvalidSemanticTransition => |spec| {
             spec.saga = spec::SagaPolicySpec::FailWithoutAcdcClaim;
         },
-    );
-    assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
-        let forward_id = spec
-            .remediations
-            .keys()
-            .next()
-            .expect("forward key")
-            .clone();
-        spec.remediations
-            .get_mut(&forward_id)
-            .expect("remediation")
-            .node_id = forward_id.clone();
-    });
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidSemanticTransition,
-        |spec| {
+        ProblemClass::InvalidTopology => |spec| {
+            let forward_id = spec
+                .remediations
+                .keys()
+                .next()
+                .expect("forward key")
+                .clone();
+            spec.remediations
+                .get_mut(&forward_id)
+                .expect("remediation")
+                .node_id = forward_id.clone();
+        },
+        ProblemClass::InvalidSemanticTransition => |spec| {
             spec.remediations
                 .values_mut()
                 .next()
                 .expect("remediation")
                 .side_effect = None;
         },
-    );
-    assert_rejects(
-        &registry,
-        &base,
-        ProblemClass::InvalidSemanticTransition,
-        |spec| {
+        ProblemClass::InvalidSemanticTransition => |spec| {
             spec.remediations
                 .values_mut()
                 .next()
@@ -1759,8 +1522,7 @@ fn certification_rejects_invalid_remediation_node_shapes() {
 
 #[test]
 fn certification_rejects_out_of_scope_remediation_bindings() {
-    let (registry, base) = compensating_registry_and_spec();
-    assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
+    assert_compensating_rejects(ProblemClass::InvalidTopology, |spec| {
         let render_receipt = lifecycle_render_receipt_cell(spec);
         retarget_first_remediation_input(spec, render_receipt);
     });
@@ -1768,49 +1530,7 @@ fn certification_rejects_out_of_scope_remediation_bindings() {
 
 #[test]
 fn certification_rejects_manual_policy_without_schemas_at_decode_boundary() {
-    let draft = side_effect_draft();
-    let mut typed = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
-    let operator_schema = SchemaId::new(
-        "mfm.certify.test.operator_ref",
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        digest_byte(0xc1),
-    )
-    .expect("operator schema");
-    typed.saga = spec::SagaPolicySpec::ManualResolution {
-        manual: spec::ManualResolutionEvidenceSpec {
-            evidence_schema: operator_schema.clone(),
-            authorization: spec::ManualResolutionAuthorizationSpec {
-                verifier_id: spec::ManualAuthorizationVerifierId::new(
-                    "mfm.certify.test.manual.verifier",
-                )
-                .expect("verifier id"),
-                signing_scheme: spec::ManualSigningSchemeSpec::new(
-                    "mfm.manual_resolution.digest_signature.v1",
-                )
-                .expect("signing scheme"),
-                authority: spec::OperatorAuthoritySnapshotSpec {
-                    authority_id: spec::OperatorAuthorityId::new(
-                        "mfm.certify.test.manual.authority",
-                    )
-                    .expect("authority id"),
-                    operators: vec![spec::OperatorAuthorityMemberSpec {
-                        operator_id: spec::OperatorId::new("operator.certify")
-                            .expect("operator id"),
-                        public_identity: spec::OperatorPublicIdentity::new(
-                            "operator-certify-public",
-                        )
-                        .expect("operator public identity"),
-                    }],
-                },
-                quorum: spec::ManualAuthorizationQuorumSpec::new(1).expect("quorum"),
-            },
-        },
-    };
+    let (_, typed) = side_effect_spec_with_manual(manual_resolution_spec(0xc1));
     let mut value: serde_json::Value =
         serde_json::from_str(typed.canonical_json().expect("canonical spec").as_str())
             .expect("spec JSON");
@@ -1830,7 +1550,7 @@ fn certification_records_manual_authority_evidence() {
     let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
     register_manual_authority(&mut registry, &manual);
 
-    let certified = certify_raw_typed_spec(typed, &registry).expect("certified manual spec");
+    let certified = certify_untrusted_typed_spec(typed, &registry).expect("certified manual spec");
 
     assert_eq!(
         certified
@@ -1875,105 +1595,50 @@ fn certification_records_manual_authority_evidence() {
 fn certification_rejects_unknown_manual_evidence_schema() {
     let manual = manual_resolution_spec(0xc2);
     let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
-    registry
-        .register_manual_authorization_verifier(manual.authorization.verifier_id.clone())
-        .expect("register verifier");
-    registry
-        .register_operator_authority_snapshot(manual.authorization.authority.clone())
-        .expect("register authority");
+    register_manual_verifier(&mut registry, &manual);
+    register_manual_authority_snapshot(&mut registry, manual.authorization.authority.clone());
 
-    let error = certify_raw_typed_spec(typed, &registry).expect_err("unknown schema rejects");
-
-    assert_eq!(
-        error.problem_class(),
-        Some(ProblemClass::InvalidSemanticTransition),
-        "{error}"
-    );
-    assert!(error.to_string().contains("unknown manual evidence schema"));
+    assert_manual_certification_rejects(typed, &registry, "unknown manual evidence schema");
 }
 
 #[test]
 fn certification_rejects_manual_schema_with_wrong_role() {
     let manual = manual_resolution_spec(0xc3);
     let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
-    registry
-        .register_schema_role(
-            manual.evidence_schema.clone(),
-            CertifiedSchemaRole::ManualResolutionAuthorization,
-        )
-        .expect("register wrong schema role");
-    registry
-        .register_manual_authorization_verifier(manual.authorization.verifier_id.clone())
-        .expect("register verifier");
-    registry
-        .register_operator_authority_snapshot(manual.authorization.authority.clone())
-        .expect("register authority");
-
-    let error = certify_raw_typed_spec(typed, &registry).expect_err("wrong role rejects");
-
-    assert_eq!(
-        error.problem_class(),
-        Some(ProblemClass::InvalidSemanticTransition),
-        "{error}"
+    register_manual_schema_role(
+        &mut registry,
+        &manual,
+        CertifiedSchemaRole::ManualResolutionAuthorization,
     );
-    assert!(error.to_string().contains("wrong certified role"));
+    register_manual_verifier(&mut registry, &manual);
+    register_manual_authority_snapshot(&mut registry, manual.authorization.authority.clone());
+
+    assert_manual_certification_rejects(typed, &registry, "wrong certified role");
 }
 
 #[test]
 fn certification_rejects_unknown_manual_authorization_verifier() {
     let manual = manual_resolution_spec(0xc4);
     let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
-    registry
-        .register_schema_role(
-            manual.evidence_schema.clone(),
-            CertifiedSchemaRole::ManualResolutionEvidence,
-        )
-        .expect("register schema role");
-    registry
-        .register_operator_authority_snapshot(manual.authorization.authority.clone())
-        .expect("register authority");
+    register_manual_evidence_schema(&mut registry, &manual);
+    register_manual_authority_snapshot(&mut registry, manual.authorization.authority.clone());
 
-    let error = certify_raw_typed_spec(typed, &registry).expect_err("unknown verifier rejects");
-
-    assert_eq!(
-        error.problem_class(),
-        Some(ProblemClass::InvalidSemanticTransition),
-        "{error}"
-    );
-    assert!(error
-        .to_string()
-        .contains("unknown manual authorization verifier"));
+    assert_manual_certification_rejects(typed, &registry, "unknown manual authorization verifier");
 }
 
 #[test]
 fn certification_rejects_operator_authority_snapshot_mismatch() {
     let manual = manual_resolution_spec(0xc5);
     let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
-    registry
-        .register_schema_role(
-            manual.evidence_schema.clone(),
-            CertifiedSchemaRole::ManualResolutionEvidence,
-        )
-        .expect("register schema role");
-    registry
-        .register_manual_authorization_verifier(manual.authorization.verifier_id.clone())
-        .expect("register verifier");
+    register_manual_evidence_schema(&mut registry, &manual);
+    register_manual_verifier(&mut registry, &manual);
     let mut mismatched = manual.authorization.authority.clone();
     mismatched.operators[0].public_identity =
         spec::OperatorPublicIdentity::new("operator-certify-public-mismatch")
             .expect("operator public identity");
-    registry
-        .register_operator_authority_snapshot(mismatched)
-        .expect("register mismatched authority");
+    register_manual_authority_snapshot(&mut registry, mismatched);
 
-    let error = certify_raw_typed_spec(typed, &registry).expect_err("authority mismatch rejects");
-
-    assert_eq!(
-        error.problem_class(),
-        Some(ProblemClass::InvalidSemanticTransition),
-        "{error}"
-    );
-    assert!(error.to_string().contains("does not match registry"));
+    assert_manual_certification_rejects(typed, &registry, "does not match registry");
 }
 
 #[test]
@@ -1983,14 +1648,7 @@ fn certification_rejects_empty_operator_authority() {
     let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
     register_manual_authority(&mut registry, &manual);
 
-    let error = certify_raw_typed_spec(typed, &registry).expect_err("empty authority rejects");
-
-    assert_eq!(
-        error.problem_class(),
-        Some(ProblemClass::InvalidSemanticTransition),
-        "{error}"
-    );
-    assert!(error.to_string().contains("has no operators"));
+    assert_manual_certification_rejects(typed, &registry, "has no operators");
 }
 
 #[test]
@@ -2002,64 +1660,44 @@ fn certification_rejects_unsupported_manual_signing_scheme_and_quorum() {
     let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
     register_manual_authority(&mut registry, &manual);
 
-    let error = certify_raw_typed_spec(typed, &registry).expect_err("signing scheme rejects");
-
-    assert_eq!(
-        error.problem_class(),
-        Some(ProblemClass::InvalidSemanticTransition),
-        "{error}"
-    );
-    assert!(error
-        .to_string()
-        .contains("unsupported manual authorization signing scheme"));
+    let unsupported_scheme = "unsupported manual authorization signing scheme";
+    assert_manual_certification_rejects(typed, &registry, unsupported_scheme);
 
     let mut manual = manual_resolution_spec(0xc8);
     manual.authorization.quorum = spec::ManualAuthorizationQuorumSpec::new(2).expect("quorum");
     let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
     register_manual_authority(&mut registry, &manual);
 
-    let error = certify_raw_typed_spec(typed, &registry).expect_err("quorum rejects");
-
-    assert_eq!(
-        error.problem_class(),
-        Some(ProblemClass::InvalidSemanticTransition),
-        "{error}"
-    );
-    assert!(error.to_string().contains("quorum 2 exceeds"));
+    assert_manual_certification_rejects(typed, &registry, "quorum 2 exceeds");
 }
 
 #[test]
 fn certification_rejects_missing_or_duplicate_resolve_saga_terminal_node() {
-    let draft = reference_draft();
-    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
-    let base = certify_program_draft(&draft)
-        .expect("certified")
-        .validated_spec()
-        .spec()
-        .clone();
-
-    assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
-        spec.nodes.retain(|node| {
-            !matches!(
-                node.framework,
-                Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
-            )
-        });
-    });
-    assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
-        let duplicate = spec
-            .nodes
-            .iter()
-            .find(|node| {
-                matches!(
+    assert_rejection_cases!(
+        reference_registry_and_spec,
+        ProblemClass::InvalidTopology => |spec| {
+            spec.nodes.retain(|node| {
+                !matches!(
                     node.framework,
                     Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
                 )
-            })
-            .expect("resolve node")
-            .clone();
-        spec.nodes.push(duplicate);
-    });
+            });
+        },
+        ProblemClass::InvalidTopology => |spec| {
+            let duplicate = spec
+                .nodes
+                .iter()
+                .find(|node| {
+                    matches!(
+                        node.framework,
+                        Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
+                    )
+                })
+                .expect("resolve node")
+                .clone();
+            spec.nodes.push(duplicate);
+        },
+    );
 }
 
 fn assert_rejects(
@@ -2070,8 +1708,61 @@ fn assert_rejects(
 ) {
     let mut mutated = base.clone();
     mutate(&mut mutated);
-    let error = certify_raw_typed_spec(mutated, registry).expect_err("mutation must reject");
+    let error = certify_untrusted_typed_spec(mutated, registry).expect_err("mutation must reject");
     assert_eq!(error.problem_class(), Some(expected), "{error}");
+}
+
+fn assert_problem_contains(error: CertifyError, expected: ProblemClass, needle: &str) {
+    assert_eq!(error.problem_class(), Some(expected), "{error}");
+    assert!(error.to_string().contains(needle), "{error}");
+}
+
+fn assert_invalid_semantic_contains(error: CertifyError, needle: &str) {
+    assert_problem_contains(error, ProblemClass::InvalidSemanticTransition, needle);
+}
+
+fn assert_manual_certification_rejects(
+    typed: spec::TypedExecutionSpec,
+    registry: &CertificationRegistry,
+    needle: &str,
+) {
+    let error = certify_untrusted_typed_spec(typed, registry).expect_err(needle);
+    assert_invalid_semantic_contains(error, needle);
+}
+
+fn assert_reference_rejects(
+    expected: ProblemClass,
+    mutate: impl FnOnce(&mut spec::TypedExecutionSpec),
+) {
+    let (registry, base) = reference_registry_and_spec();
+    assert_rejects(&registry, &base, expected, mutate);
+}
+
+fn assert_side_effect_rejects(
+    expected: ProblemClass,
+    mutate: impl FnOnce(&mut spec::TypedExecutionSpec),
+) {
+    let (registry, base) = side_effect_registry_and_spec();
+    assert_rejects(&registry, &base, expected, mutate);
+}
+
+fn assert_compensating_rejects(
+    expected: ProblemClass,
+    mutate: impl FnOnce(&mut spec::TypedExecutionSpec),
+) {
+    let (registry, base) = compensating_registry_and_spec();
+    assert_rejects(&registry, &base, expected, mutate);
+}
+
+fn reference_registry_and_spec() -> (CertificationRegistry, spec::TypedExecutionSpec) {
+    let draft = reference_draft();
+    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
+    let spec = certify_program_draft(&draft)
+        .expect("certified")
+        .validated_spec()
+        .spec()
+        .clone();
+    (registry, spec)
 }
 
 fn compensating_registry_and_spec() -> (CertificationRegistry, spec::TypedExecutionSpec) {
@@ -2171,17 +1862,47 @@ fn register_manual_authority(
     registry: &mut CertificationRegistry,
     manual: &spec::ManualResolutionEvidenceSpec,
 ) {
+    register_manual_evidence_schema(registry, manual);
+    register_manual_verifier(registry, manual);
+    register_manual_authority_snapshot(registry, manual.authorization.authority.clone());
+}
+
+fn register_manual_evidence_schema(
+    registry: &mut CertificationRegistry,
+    manual: &spec::ManualResolutionEvidenceSpec,
+) {
+    register_manual_schema_role(
+        registry,
+        manual,
+        CertifiedSchemaRole::ManualResolutionEvidence,
+    );
+}
+
+fn register_manual_schema_role(
+    registry: &mut CertificationRegistry,
+    manual: &spec::ManualResolutionEvidenceSpec,
+    role: CertifiedSchemaRole,
+) {
     registry
-        .register_schema_role(
-            manual.evidence_schema.clone(),
-            CertifiedSchemaRole::ManualResolutionEvidence,
-        )
+        .register_schema_role(manual.evidence_schema.clone(), role)
         .expect("register schema role");
+}
+
+fn register_manual_verifier(
+    registry: &mut CertificationRegistry,
+    manual: &spec::ManualResolutionEvidenceSpec,
+) {
     registry
         .register_manual_authorization_verifier(manual.authorization.verifier_id.clone())
         .expect("register verifier");
+}
+
+fn register_manual_authority_snapshot(
+    registry: &mut CertificationRegistry,
+    authority: spec::OperatorAuthoritySnapshotSpec,
+) {
     registry
-        .register_operator_authority_snapshot(manual.authorization.authority.clone())
+        .register_operator_authority_snapshot(authority)
         .expect("register authority");
 }
 
@@ -2220,8 +1941,8 @@ fn retarget_first_remediation_input(typed: &mut spec::TypedExecutionSpec, cell_i
         .expect("remediation output cell")
         .clone();
     let (
-        old_node_id,
-        old_output_cell,
+        previous_node_id,
+        previous_output_cell,
         node_id,
         output_cell,
         scope_id,
@@ -2229,7 +1950,7 @@ fn retarget_first_remediation_input(typed: &mut spec::TypedExecutionSpec, cell_i
         config_digest,
     ) = {
         let remediation = typed.remediations.values_mut().next().expect("remediation");
-        let old_node_id = remediation.node_id.clone();
+        let previous_node_id = remediation.node_id.clone();
         remediation.input_bindings.root = root;
         remediation.input_bindings.digest = digest;
         remediation.deterministic_predecessors = predecessors;
@@ -2244,7 +1965,7 @@ fn retarget_first_remediation_input(typed: &mut spec::TypedExecutionSpec, cell_i
         )
         .expect("remediation output cell");
         (
-            old_node_id,
+            previous_node_id,
             original_output_cell,
             remediation.node_id.clone(),
             remediation.output_cell.clone(),
@@ -2264,7 +1985,7 @@ fn retarget_first_remediation_input(typed: &mut spec::TypedExecutionSpec, cell_i
     typed
         .cells
         .iter_mut()
-        .find(|cell| cell.cell_id == old_output_cell)
+        .find(|cell| cell.cell_id == previous_output_cell)
         .expect("remediation output cell")
         .cell_id = output_cell.clone();
     let output = typed
@@ -2277,7 +1998,7 @@ fn retarget_first_remediation_input(typed: &mut spec::TypedExecutionSpec, cell_i
     let value_lineage = typed
         .value_lineages
         .iter_mut()
-        .find(|lineage| lineage.producer == spec::CellProducer::Node(old_node_id.clone()))
+        .find(|lineage| lineage.producer == spec::CellProducer::Node(previous_node_id.clone()))
         .expect("remediation value lineage");
     value_lineage.producer = spec::CellProducer::Node(node_id);
     value_lineage.lineage_ref = lineage;

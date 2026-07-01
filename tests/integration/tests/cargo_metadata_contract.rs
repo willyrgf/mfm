@@ -49,6 +49,7 @@ enum CrateCategory {
     Transport,
     SignerContract,
     SignerProvider,
+    RuntimeConfig,
     Storage,
     App,
     Binary,
@@ -69,6 +70,7 @@ impl CrateCategory {
             "transport" => Some(Self::Transport),
             "signer-contract" => Some(Self::SignerContract),
             "signer-provider" => Some(Self::SignerProvider),
+            "runtime-config" => Some(Self::RuntimeConfig),
             "storage" => Some(Self::Storage),
             "app" => Some(Self::App),
             "binary" => Some(Self::Binary),
@@ -90,6 +92,7 @@ impl CrateCategory {
             Self::Transport => "transport",
             Self::SignerContract => "signer-contract",
             Self::SignerProvider => "signer-provider",
+            Self::RuntimeConfig => "runtime-config",
             Self::Storage => "storage",
             Self::App => "app",
             Self::Binary => "binary",
@@ -188,6 +191,65 @@ fn category_dependency_rules_reject_forbidden_state_to_live_transport_edges() {
         error.contains("source_category=state")
             && error.contains("dependency_category=transport")
             && error.contains("mfm-transports-evm"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn category_dependency_rules_reject_transport_runtime_config_edges() {
+    let root = repo_root();
+    let mut metadata = workspace_metadata(&root);
+    push_path_dependency(
+        &mut metadata,
+        "mfm-transports-evm",
+        "mfm-runtime-config",
+        &root.join("crates/runtime-config"),
+    );
+
+    let error =
+        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
+    assert!(
+        error.contains("source_category=transport")
+            && error.contains("dependency_category=runtime-config")
+            && error.contains("mfm-runtime-config"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn category_dependency_rules_reject_ops_and_states_runtime_config_edges() {
+    let root = repo_root();
+    let mut metadata = workspace_metadata(&root);
+    push_path_dependency(
+        &mut metadata,
+        "mfm-state-portfolio",
+        "mfm-runtime-config",
+        &root.join("crates/runtime-config"),
+    );
+
+    let error =
+        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
+    assert!(
+        error.contains("source_category=state")
+            && error.contains("dependency_category=runtime-config")
+            && error.contains("mfm-runtime-config"),
+        "unexpected error: {error}"
+    );
+
+    let mut metadata = workspace_metadata(&root);
+    push_path_dependency(
+        &mut metadata,
+        "mfm-op-portfolio-tracker",
+        "mfm-runtime-config",
+        &root.join("crates/runtime-config"),
+    );
+
+    let error =
+        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
+    assert!(
+        error.contains("source_category=operation")
+            && error.contains("dependency_category=runtime-config")
+            && error.contains("mfm-runtime-config"),
         "unexpected error: {error}"
     );
 }
@@ -368,7 +430,7 @@ fn kernel_dependency_boundary_rejects_non_kernel_path_dependency_fixture() {
         .and_then(Value::as_array_mut)
         .expect("mfm-ids dependencies")
         .push(json!({
-            "name": "mfm-machine",
+            "name": "mfm-app",
             "source": null,
             "req": "*",
             "kind": null,
@@ -378,13 +440,13 @@ fn kernel_dependency_boundary_rejects_non_kernel_path_dependency_fixture() {
             "features": [],
             "target": null,
             "registry": null,
-            "path": root.join("crates/machine").to_string_lossy(),
+            "path": root.join("crates/app").to_string_lossy(),
         }));
 
     let error =
         validate_kernel_dependency_boundary(&metadata, &root).expect_err("fixture must fail");
     assert!(
-        error.contains("mfm-machine") && error.contains("crates/machine"),
+        error.contains("mfm-app") && error.contains("crates/app"),
         "unexpected error: {error}"
     );
 }
@@ -671,6 +733,7 @@ fn validate_category_path(
             )
         }
         CrateCategory::SignerProvider => package.manifest_rel.starts_with("crates/signers/"),
+        CrateCategory::RuntimeConfig => package.manifest_rel == "crates/runtime-config/Cargo.toml",
         CrateCategory::Storage => package.manifest_rel.starts_with("crates/storages/"),
         CrateCategory::App => package.manifest_rel == "crates/app/Cargo.toml",
         CrateCategory::Binary => package.manifest_rel.starts_with("bin/"),
@@ -692,7 +755,8 @@ fn validate_category_path(
 fn category_dependency_allowed(source: CrateCategory, dependency: CrateCategory) -> bool {
     use CrateCategory::{
         Adapter, AdapterContract, App, Binary, CapabilityContract, DomainConfig, DomainModel,
-        Kernel, Operation, SignerContract, SignerProvider, State, Storage, TestSupport, Transport,
+        Kernel, Operation, RuntimeConfig, SignerContract, SignerProvider, State, Storage,
+        TestSupport, Transport,
     };
 
     match source {
@@ -740,11 +804,12 @@ fn category_dependency_allowed(source: CrateCategory, dependency: CrateCategory)
             dependency,
             Kernel | DomainModel | SignerContract | SignerProvider
         ),
+        RuntimeConfig => matches!(dependency, Kernel | CapabilityContract | SignerContract),
         Storage => matches!(dependency, Kernel | CapabilityContract),
         App => !matches!(dependency, Binary | TestSupport),
         Binary => matches!(
             dependency,
-            Kernel | App | Operation | DomainModel | DomainConfig
+            Kernel | App | Operation | DomainModel | DomainConfig | RuntimeConfig
         ),
         TestSupport => true,
     }

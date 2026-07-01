@@ -9,9 +9,6 @@ use mfm_integration_tests::test_support::{self, empty_post, json_post, response_
 
 const NETWORK_ID: &str = "reth-local";
 const DEFAULT_PARITY_RETH_HTTP_PORT: &str = "8565";
-const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
-const ENV_EVM_NETWORK_ROUTES_JSON: &str = "MFM_EVM_NETWORK_ROUTES_JSON";
-const ENV_EVM_SIGNERS_JSON: &str = "MFM_EVM_SIGNERS_JSON";
 static EVM_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
@@ -20,19 +17,7 @@ async fn parity_reth_contract_lifecycle_rest_route_completes_and_replays() {
     let rpc_url = required_rpc_url_for_source(NETWORK_ID);
     let chain_id = rpc_chain_id(&rpc_url).await;
     let wallet = test_support::funded_reth_keystore_wallet(&rpc_url, 0).await;
-    let _restore = EnvRestore::set([
-        (
-            ENV_EVM_RPC_SOURCES_JSON,
-            wallet
-                .runtime_source_registry_json(NETWORK_ID, chain_id, &rpc_url)
-                .to_string(),
-        ),
-        (ENV_EVM_NETWORK_ROUTES_JSON, evm_network_routes_json()),
-        (
-            ENV_EVM_SIGNERS_JSON,
-            wallet.runtime_signer_registry_json().to_string(),
-        ),
-    ]);
+    let runtime_config = wallet.set_runtime_config_env_for_test(NETWORK_ID, &rpc_url);
 
     let app = rest_test_app();
     let config = lifecycle_config(chain_id, wallet.signer_json());
@@ -88,6 +73,45 @@ async fn parity_reth_contract_lifecycle_rest_route_completes_and_replays() {
             && !wallet.rendered_contains_runtime_signer_config(&body.to_string()),
         "runtime responses must not leak signer provider config"
     );
+    drop(runtime_config);
+    drop(wallet);
+
+    let status = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/runs/{run_id}/status"))
+                .body(Body::empty())
+                .expect("contract lifecycle status request"),
+        )
+        .await
+        .expect("contract lifecycle status response");
+    assert_eq!(status.status(), StatusCode::OK);
+    let status_body = response_json(status).await;
+    assert_eq!(status_body["status"], "success");
+    assert_eq!(status_body["data"]["run_mode"], "completed");
+
+    let stream = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/runs/{run_id}/stream"))
+                .body(Body::empty())
+                .expect("contract lifecycle stream request"),
+        )
+        .await
+        .expect("contract lifecycle stream response");
+    assert_eq!(stream.status(), StatusCode::OK);
+    let stream_body = response_json(stream).await;
+    assert_eq!(stream_body["status"], "success");
+    assert!(
+        stream_body["data"]["events"]
+            .as_array()
+            .is_some_and(|events| !events.is_empty()),
+        "{stream_body}"
+    );
 
     let replay = app
         .clone()
@@ -136,19 +160,7 @@ async fn parity_reth_contract_phase_routes_deploy_configure_and_validate_contrac
     let rpc_url = required_rpc_url_for_source(NETWORK_ID);
     let chain_id = rpc_chain_id(&rpc_url).await;
     let wallet = test_support::funded_reth_keystore_wallet(&rpc_url, 1).await;
-    let _restore = EnvRestore::set([
-        (
-            ENV_EVM_RPC_SOURCES_JSON,
-            wallet
-                .runtime_source_registry_json(NETWORK_ID, chain_id, &rpc_url)
-                .to_string(),
-        ),
-        (ENV_EVM_NETWORK_ROUTES_JSON, evm_network_routes_json()),
-        (
-            ENV_EVM_SIGNERS_JSON,
-            wallet.runtime_signer_registry_json().to_string(),
-        ),
-    ]);
+    let _runtime_config = wallet.set_runtime_config_env_for_test(NETWORK_ID, &rpc_url);
 
     let artifact = configurable_contract_artifact();
     let deploy_app = rest_test_app();
@@ -610,39 +622,8 @@ fn network_json(chain_id: u64) -> serde_json::Value {
     })
 }
 
-fn evm_network_routes_json() -> String {
-    serde_json::json!([
-        {
-            "network_id": NETWORK_ID,
-            "source_ref": NETWORK_ID,
-            "policy_id": NETWORK_ID
-        }
-    ])
-    .to_string()
-}
-
 fn required_rpc_url_for_source(source_id: &str) -> String {
-    if let Ok(raw) = std::env::var(ENV_EVM_RPC_SOURCES_JSON) {
-        let registry: serde_json::Value =
-            serde_json::from_str(&raw).expect("MFM_EVM_RPC_SOURCES_JSON must decode");
-        if let Some(source) = registry
-            .get("sources")
-            .and_then(|sources| sources.as_array())
-            .and_then(|sources| {
-                sources.iter().find(|source| {
-                    source
-                        .get("id")
-                        .and_then(|value| value.as_str())
-                        .is_some_and(|id| id == source_id)
-                })
-            })
-            .and_then(|source| source.get("rpc_url"))
-            .and_then(|value| value.as_str())
-        {
-            return source.to_owned();
-        }
-    }
-
+    assert_eq!(source_id, NETWORK_ID);
     let port = std::env::var("RETH_HTTP_PORT")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -664,32 +645,4 @@ fn response_phase(body: &serde_json::Value) -> Option<&str> {
     body["data"]["run"]["run_mode"]
         .as_str()
         .or_else(|| body["data"]["run_mode"].as_str())
-}
-
-struct EnvRestore {
-    previous: Vec<(&'static str, Option<String>)>,
-}
-
-impl EnvRestore {
-    fn set<const N: usize>(values: [(&'static str, String); N]) -> Self {
-        let previous = values
-            .iter()
-            .map(|(name, _)| (*name, std::env::var(name).ok()))
-            .collect::<Vec<_>>();
-        for (name, value) in values {
-            std::env::set_var(name, value);
-        }
-        Self { previous }
-    }
-}
-
-impl Drop for EnvRestore {
-    fn drop(&mut self) {
-        for (name, value) in self.previous.drain(..) {
-            match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
-        }
-    }
 }

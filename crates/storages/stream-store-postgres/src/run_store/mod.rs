@@ -33,6 +33,9 @@ use crate::schema::{connect_pool, validate_pool};
 /// Error returned by the PostgreSQL run store.
 #[derive(Debug, thiserror::Error)]
 pub enum PostgresStoreError {
+    /// PostgreSQL run store authority validation failed.
+    #[error("postgres run store authority validation failed: {0}")]
+    Authority(PostgresStoreAuthorityError),
     /// Typed store contract validation failed.
     #[error("{0}")]
     Store(#[from] StoreError),
@@ -48,7 +51,7 @@ impl StoreErrorInspection for PostgresStoreError {
     fn as_store_error(&self) -> Option<&StoreError> {
         match self {
             Self::Store(error) => Some(error),
-            Self::Database(_) | Self::Corruption(_) => None,
+            Self::Authority(_) | Self::Database(_) | Self::Corruption(_) => None,
         }
     }
 }
@@ -79,6 +82,43 @@ impl From<CodecError> for PostgresStoreError {
 }
 
 pub(crate) type Result<T> = std::result::Result<T, PostgresStoreError>;
+
+/// Closed authority-validation failure category for Postgres run-store setup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum PostgresStoreAuthorityError {
+    /// PostgreSQL could not be reached or the connection string could not be used.
+    #[error("connection validation failed")]
+    Connection,
+    /// The applied SQLx migration ledger does not match the compiled migrations.
+    #[error("migration validation failed")]
+    Migrations,
+    /// Required tables, indexes, triggers, functions, constraints, or stale objects were invalid.
+    #[error("catalog validation failed")]
+    Catalog,
+    /// The singleton store metadata row or contract version was invalid.
+    #[error("metadata validation failed")]
+    Metadata,
+    /// The store-owned deployment trust-scope binding was missing or invalid.
+    #[error("trust-scope validation failed")]
+    TrustScope,
+}
+
+/// Validated Postgres run-store authority loaded during store construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresStoreAuthority {
+    trust_scope_id: TrustScopeId,
+}
+
+impl PostgresStoreAuthority {
+    pub(crate) fn new(trust_scope_id: TrustScopeId) -> Self {
+        Self { trust_scope_id }
+    }
+
+    /// Returns the store-owned deployment trust-scope id validated at construction.
+    pub fn trust_scope_id(&self) -> &TrustScopeId {
+        &self.trust_scope_id
+    }
+}
 
 const CURSOR_VERSION: &str = "mfm.run_observation.cursor.v1";
 const OBSERVATION_NOTIFY_CHANNEL: &str = "mfm_run_observation";
@@ -124,14 +164,22 @@ use self::{
 #[derive(Clone)]
 pub struct PostgresRunStore {
     pub(crate) pool: PgPool,
+    authority: PostgresStoreAuthority,
 }
 
 impl PostgresRunStore {
     /// Connects to PostgreSQL, validates the typed schema, and returns a postgres run store.
     pub async fn connect(database_url: &str) -> Result<Self> {
-        let pool = connect_pool(database_url).await?;
-        validate_pool(&pool).await?;
-        Ok(Self { pool })
+        let pool = connect_pool(database_url)
+            .await
+            .map_err(|_| PostgresStoreError::Authority(PostgresStoreAuthorityError::Connection))?;
+        let authority = validate_pool(&pool).await?;
+        Ok(Self { pool, authority })
+    }
+
+    /// Returns the store authority validated during construction.
+    pub fn store_authority(&self) -> &PostgresStoreAuthority {
+        &self.authority
     }
 }
 

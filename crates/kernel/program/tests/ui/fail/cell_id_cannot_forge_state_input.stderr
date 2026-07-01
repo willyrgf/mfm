@@ -1,5 +1,5 @@
 error[E0277]: the trait bound `Identity<CellIdKind>: IntoStateInput<'static, 'static, Identity<CellIdKind>>` is not satisfied
- --> tests/ui/fail/raw_cell_id_state_input.rs:8:14
+ --> tests/ui/fail/cell_id_cannot_forge_state_input.rs:8:14
   |
 8 |     let _ = <CellId as mfm_program::IntoStateInput<'static, 'static, CellId>>::into_binding(cell);
   |              ^^^^^^ the trait `IntoStateInput<'static, 'static, Identity<CellIdKind>>` is not implemented for `Identity<CellIdKind>`
@@ -16,7 +16,7 @@ error[E0277]: the trait bound `Identity<CellIdKind>: IntoStateInput<'static, 'st
           and $N others
 
 error[E0277]: the trait bound `Identity<CellIdKind>: mfm_values::StateInput` is not satisfied
- --> tests/ui/fail/raw_cell_id_state_input.rs:8:70
+ --> tests/ui/fail/cell_id_cannot_forge_state_input.rs:8:70
   |
 8 |     let _ = <CellId as mfm_program::IntoStateInput<'static, 'static, CellId>>::into_binding(cell);
   |                                                                      ^^^^^^ the trait `mfm_values::MfmValue` is not implemented for `Identity<CellIdKind>`
@@ -40,7 +40,7 @@ note: required by a bound in `into_binding`
   |        ------------ required by a bound in this associated function
 
 error[E0277]: the trait bound `Identity<CellIdKind>: mfm_values::MfmValue` is not satisfied
- --> tests/ui/fail/raw_cell_id_state_input.rs:8:13
+ --> tests/ui/fail/cell_id_cannot_forge_state_input.rs:8:13
   |
 8 |     let _ = <CellId as mfm_program::IntoStateInput<'static, 'static, CellId>>::into_binding(cell);
   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `mfm_values::MfmValue` is not implemented for `Identity<CellIdKind>`

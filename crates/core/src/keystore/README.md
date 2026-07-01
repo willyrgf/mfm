@@ -349,7 +349,7 @@ let low_memory_config = KeystoreConfig {
 };
 ```
 
-## Migration and Compatibility
+## Format Versioning
 
 ### Version 1 (Current)
 - Initial implementation
@@ -358,9 +358,9 @@ let low_memory_config = KeystoreConfig {
 - JSON file format
 
 ### Future Versions
-- Will maintain backward compatibility for reading
-- New features may require version upgrades
-- Migration tools will be provided if breaking changes are needed
+- Version changes may be breaking
+- Old formats fail closed unless support is deliberately reintroduced
+- Migration tools may be provided as explicit operational commands
 
 ## Contributing
 

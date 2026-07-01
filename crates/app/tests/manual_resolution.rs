@@ -30,6 +30,7 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
     let store = store::AsyncInMemoryRunStore::default();
     let runners = mfm_app::production_runner_registry(
         mfm_app::artifact_read_provider_from_retained(store.clone()),
+        None,
     )
     .expect("runners");
     let registry = mfm_app::production_certification_registry().expect("cert registry");

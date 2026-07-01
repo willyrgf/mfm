@@ -1,6 +1,7 @@
 #![allow(clippy::disallowed_methods)]
 
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use axum::{routing::post, Json, Router};
 use mfm_app::{PublicOpName, RunModeStatus};
 use mfm_events::v1 as events;
@@ -10,16 +11,17 @@ use serde_json::json;
 use tower::ServiceExt;
 
 mod support;
-use support::{json_post, response_json};
+use support::{empty_post, json_post, response_json};
 
 const NETWORK_ID: &str = "typed-local-eth";
+const RPC_URL_FILE_ENV: &str = "MFM_TEST_PORTFOLIO_RPC_URL_FILE";
 static RPC_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
 async fn portfolio_snapshot_starts_to_completion() {
     let _env_guard = RPC_ENV_LOCK.lock().await;
     let rpc_url = start_rpc_mock().await;
-    set_rpc_env(rpc_url);
+    let _runtime_config = set_rpc_env(rpc_url);
 
     let result = support::resume_portfolio_snapshot(portfolio_payload()).await;
     assert_eq!(result.started.run_mode, RunModeStatus::Completed);
@@ -65,7 +67,7 @@ async fn portfolio_snapshot_starts_to_completion() {
 async fn rest_portfolio_snapshot_matches_public_output() {
     let _env_guard = RPC_ENV_LOCK.lock().await;
     let rpc_url = start_rpc_mock().await;
-    set_rpc_env(rpc_url);
+    let _runtime_config = set_rpc_env(rpc_url);
 
     let expected = support::run_portfolio_snapshot(portfolio_payload()).await;
     let expected_public_output = expected
@@ -108,10 +110,114 @@ async fn rest_portfolio_snapshot_matches_public_output() {
 }
 
 #[tokio::test]
+async fn read_only_routes_work_without_runtime_config() {
+    let _env_guard = RPC_ENV_LOCK.lock().await;
+    let rpc_url = start_rpc_mock().await;
+    let runtime_config = set_rpc_file_env(rpc_url);
+    let runtime_config_path = runtime_config.runtime_config_path.clone();
+    let rpc_url_path = runtime_config.rpc_url_path.clone();
+    let app = rest_test_app();
+    let response = local_portfolio_snapshot_post(&app, &portfolio_payload()).await;
+    let run_id = response["data"]["run"]["run_id"]
+        .as_str()
+        .expect("run id")
+        .to_owned();
+    let public_schema_id = response["data"]["public_output"]["public_schema_id"]
+        .as_str()
+        .expect("public schema id")
+        .to_owned();
+
+    drop(runtime_config);
+    assert!(
+        std::env::var_os(support::ENV_RUNTIME_CONFIG_FILE).is_none(),
+        "runtime config selector must be absent before evidence-only reads"
+    );
+    assert!(
+        std::env::var_os(RPC_URL_FILE_ENV).is_none(),
+        "RPC value file selector must be absent before evidence-only reads"
+    );
+    assert!(
+        !runtime_config_path.exists(),
+        "runtime config file must be absent before evidence-only reads"
+    );
+    assert!(
+        !rpc_url_path.exists(),
+        "RPC value file must be absent before evidence-only reads"
+    );
+
+    let status = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/runs/{run_id}/status"))
+                .body(Body::empty())
+                .expect("status request"),
+        )
+        .await
+        .expect("status response");
+    assert_eq!(status.status(), StatusCode::OK);
+    let status_body = response_json(status).await;
+    assert_eq!(status_body["status"], "success");
+    assert_eq!(status_body["data"]["run_mode"], "completed");
+
+    let stream = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/runs/{run_id}/stream"))
+                .body(Body::empty())
+                .expect("stream request"),
+        )
+        .await
+        .expect("stream response");
+    assert_eq!(stream.status(), StatusCode::OK);
+    let stream_body = response_json(stream).await;
+    assert_eq!(stream_body["status"], "success");
+    assert!(
+        stream_body["data"]["events"]
+            .as_array()
+            .is_some_and(|events| !events.is_empty()),
+        "{stream_body}"
+    );
+
+    let replay = app
+        .clone()
+        .oneshot(empty_post(&format!("/v1/runs/{run_id}/replay")))
+        .await
+        .expect("replay response");
+    assert_eq!(replay.status(), StatusCode::OK);
+    let replay_body = response_json(replay).await;
+    assert_eq!(replay_body["status"], "success");
+    assert_eq!(replay_body["data"]["run_mode"], "completed");
+
+    let public_output = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/v1/runs/{run_id}/public-output/{public_schema_id}"
+                ))
+                .body(Body::empty())
+                .expect("public output request"),
+        )
+        .await
+        .expect("public output response");
+    assert_eq!(public_output.status(), StatusCode::OK);
+    let public_output_body = response_json(public_output).await;
+    assert_eq!(public_output_body["status"], "success");
+    assert_eq!(
+        public_output_body["data"]["json"]["snapshot"]["portfolio_id"],
+        "typed-local"
+    );
+}
+
+#[tokio::test]
 async fn rest_portfolio_snapshot_defaults_toml_and_renders_public_output() {
     let _env_guard = RPC_ENV_LOCK.lock().await;
     let rpc_url = start_rpc_mock().await;
-    set_rpc_env(rpc_url);
+    let _runtime_config = set_rpc_env(rpc_url);
 
     let state = support::in_memory_rest_app_state();
     let store = state.store.clone();
@@ -151,7 +257,7 @@ async fn rest_portfolio_snapshot_defaults_toml_and_renders_public_output() {
 async fn portfolio_runner_output_summary_matches_golden() {
     let _env_guard = RPC_ENV_LOCK.lock().await;
     let rpc_url = start_rpc_mock().await;
-    set_rpc_env(rpc_url);
+    let _runtime_config = set_rpc_env(rpc_url);
 
     let state = support::in_memory_rest_app_state();
     let store = state.store.clone();
@@ -211,38 +317,72 @@ async fn local_portfolio_snapshot_post(
     body
 }
 
-fn set_rpc_env(rpc_url: String) {
-    std::env::set_var(
-        "MFM_EVM_RPC_SOURCES_JSON",
-        json!({
-            "sources": [
-                {
-                    "id": NETWORK_ID,
-                    "expected_chain_id": 31337,
-                    "rpc_url": rpc_url,
-                    "authorization": null
-                }
-            ],
-            "policies": [
-                {
-                    "id": NETWORK_ID,
-                    "ordered_sources": [NETWORK_ID]
-                }
-            ]
-        })
-        .to_string(),
-    );
-    std::env::set_var(
-        "MFM_EVM_NETWORK_ROUTES_JSON",
-        json!([
-            {
-                "network_id": NETWORK_ID,
-                "source_ref": NETWORK_ID,
-                "policy_id": NETWORK_ID
-            }
-        ])
-        .to_string(),
-    );
+fn set_rpc_env(rpc_url: String) -> support::EnvVarRestore {
+    support::set_evm_runtime_config_env_for_test(NETWORK_ID, &rpc_url)
+}
+
+fn set_rpc_file_env(rpc_url: String) -> RuntimeFileEnvGuard {
+    let temp_dir = tempfile::tempdir().expect("runtime config tempdir");
+    let rpc_url_path = temp_dir.path().join("rpc-url.txt");
+    std::fs::write(&rpc_url_path, rpc_url).expect("write rpc url file");
+    let runtime_config_path = temp_dir.path().join("runtime.toml");
+    std::fs::write(
+        &runtime_config_path,
+        format!(
+            r#"
+[evm.sources.{network}]
+rpc_url_file_env = "{rpc_url_file_env}"
+
+[evm.routes.{network}]
+source_ref = {network}
+"#,
+            network = toml_string(NETWORK_ID),
+            rpc_url_file_env = RPC_URL_FILE_ENV,
+        ),
+    )
+    .expect("write runtime config");
+
+    let previous_runtime_config = std::env::var_os(support::ENV_RUNTIME_CONFIG_FILE);
+    let previous_rpc_url_file = std::env::var_os(RPC_URL_FILE_ENV);
+    std::env::set_var(support::ENV_RUNTIME_CONFIG_FILE, &runtime_config_path);
+    std::env::set_var(RPC_URL_FILE_ENV, &rpc_url_path);
+
+    RuntimeFileEnvGuard {
+        previous_runtime_config,
+        previous_rpc_url_file,
+        runtime_config_path,
+        rpc_url_path,
+        _temp_dir: temp_dir,
+    }
+}
+
+struct RuntimeFileEnvGuard {
+    previous_runtime_config: Option<std::ffi::OsString>,
+    previous_rpc_url_file: Option<std::ffi::OsString>,
+    runtime_config_path: std::path::PathBuf,
+    rpc_url_path: std::path::PathBuf,
+    _temp_dir: tempfile::TempDir,
+}
+
+impl Drop for RuntimeFileEnvGuard {
+    fn drop(&mut self) {
+        restore_env(
+            support::ENV_RUNTIME_CONFIG_FILE,
+            self.previous_runtime_config.as_ref(),
+        );
+        restore_env(RPC_URL_FILE_ENV, self.previous_rpc_url_file.as_ref());
+    }
+}
+
+fn restore_env(name: &str, previous: Option<&std::ffi::OsString>) {
+    match previous {
+        Some(value) => std::env::set_var(name, value),
+        None => std::env::remove_var(name),
+    }
+}
+
+fn toml_string(value: &str) -> String {
+    serde_json::to_string(value).expect("toml-compatible string")
 }
 
 fn rest_test_app() -> axum::Router {

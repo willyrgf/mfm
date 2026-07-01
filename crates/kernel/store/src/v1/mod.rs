@@ -7923,13 +7923,13 @@ fn validate_supported_stream_model(events: &[KernelEventEnvelope]) -> Result<()>
             let Some(start_seq) = started_attempts.get(&key) else {
                 return Err(StoreError::ProjectionConflict {
                     key: format!("stream_model:{node_id}:{attempt_id}"),
-                    message: "unsupported old stream model: attempt-bound payload is not preceded by a StateAttemptStarted commit".to_owned(),
+                    message: "invalid run stream model: attempt-bound payload is not preceded by a StateAttemptStarted commit".to_owned(),
                 });
             };
             if *start_seq >= event.seq() {
                 return Err(StoreError::ProjectionConflict {
                     key: format!("stream_model:{node_id}:{attempt_id}"),
-                    message: "unsupported old stream model: StateAttemptStarted must be committed before attempt-bound terminal payloads".to_owned(),
+                    message: "invalid run stream model: StateAttemptStarted must be committed before attempt-bound terminal payloads".to_owned(),
                 });
             }
         }

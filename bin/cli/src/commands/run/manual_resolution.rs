@@ -72,7 +72,7 @@ async fn execute_internal(args: &ManualResolutionArgs) -> CommandResult<RunRespo
         )
     })?;
     let proof_bytes = read_canonical_proof_json(&args.authorization_proof).await?;
-    let services = connect_run_services(&args.stores).await?;
+    let services = connect_run_services(&args.stores, None).await?;
     let response = services
         .record_manual_resolution(ManualResolutionRecordRequest {
             run_id,

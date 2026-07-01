@@ -118,8 +118,7 @@ Manual resolution is a signed authorization protocol, not a generic escape hatch
 - `authorization.authority`: certified operator authority snapshot;
 - `authorization.quorum`: required number of accepted operator signatures.
 
-The old `operator_identity_ref_schema` manual spec shape and old operator-identity manual event
-shape are invalid. There is no compatibility path for those formats.
+Manual resolution JSON is closed over the certified authorization fields above.
 
 Certification uses the live registry as authority for:
 

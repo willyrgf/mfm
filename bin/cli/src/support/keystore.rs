@@ -14,10 +14,6 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-const ENV_KEYSTORE_PASSWORD_FILE: &str = "MFM_KEYSTORE_PASSWORD_FILE";
-const ENV_KEYSTORE_PASSWORD: &str = "MFM_KEYSTORE_PASSWORD";
-const ENV_INTEGRATION_TEST: &str = "MFM_INTEGRATION_TEST";
-
 /// Supported direct keystore import kinds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ImportKind {
@@ -49,6 +45,41 @@ pub(crate) enum OutputWriteMode {
     Overwrite,
 }
 
+/// Resolved keystore access for direct CLI commands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct KeystoreAccess {
+    path: PathBuf,
+    credential: KeystoreCredentialSource,
+}
+
+impl KeystoreAccess {
+    /// Creates prompt-based access for an explicit keystore path.
+    pub(crate) fn explicit_path(path: PathBuf) -> Self {
+        Self {
+            path,
+            credential: KeystoreCredentialSource::Prompt,
+        }
+    }
+
+    /// Creates file-based access from a runtime-config keystore profile.
+    pub(crate) fn runtime_config_profile(path: PathBuf, unlock_file: PathBuf) -> Self {
+        Self {
+            path,
+            credential: KeystoreCredentialSource::File(unlock_file),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum KeystoreCredentialSource {
+    Prompt,
+    File(PathBuf),
+}
+
 /// Keystore import request built by the CLI parser.
 pub(crate) struct ImportKeyRequest {
     /// Import kind.
@@ -59,8 +90,8 @@ pub(crate) struct ImportKeyRequest {
     pub(crate) derivation_path: String,
     /// Whether secret material is read from stdin.
     pub(crate) stdin: bool,
-    /// Keystore path.
-    pub(crate) keystore_path: PathBuf,
+    /// Keystore access.
+    pub(crate) access: KeystoreAccess,
     /// Optional BIP-39 extra source.
     pub(crate) bip39_extra: Bip39ExtraSource,
 }
@@ -91,8 +122,8 @@ pub(crate) enum ListSortBy {
 
 /// Keystore list request.
 pub(crate) struct ListKeysRequest {
-    /// Keystore path.
-    pub(crate) keystore_path: PathBuf,
+    /// Keystore access.
+    pub(crate) access: KeystoreAccess,
     /// Whether to include addresses.
     pub(crate) show_addresses: bool,
     /// Optional label regex.
@@ -131,8 +162,8 @@ pub(crate) struct DeleteKeyRequest {
     pub(crate) by_label: Option<String>,
     /// Confirmation already granted.
     pub(crate) yes: bool,
-    /// Keystore path.
-    pub(crate) keystore_path: PathBuf,
+    /// Keystore access.
+    pub(crate) access: KeystoreAccess,
 }
 
 /// Keystore delete response.
@@ -169,8 +200,8 @@ pub(crate) struct TxSignRequest {
     pub(crate) out_write_mode: OutputWriteMode,
     /// Calldata hex.
     pub(crate) data: String,
-    /// Keystore path.
-    pub(crate) keystore_path: PathBuf,
+    /// Keystore access.
+    pub(crate) access: KeystoreAccess,
 }
 
 /// Keystore transaction signing response.
@@ -235,7 +266,7 @@ pub(crate) fn import_key(req: ImportKeyRequest) -> Result<ImportedKey, CommandEr
     match req.kind {
         ImportKind::PrivateKey => {
             let normalized = normalize_private_key(&material)?;
-            let mut ks = create_keystore_if_needed(&req.keystore_path, &mut input)?;
+            let mut ks = create_keystore_if_needed(&req.access, &mut input)?;
             let label = req
                 .label
                 .unwrap_or_else(|| format!("imported-key-{}", Utc::now().format("%Y%m%d-%H%M%S")));
@@ -244,7 +275,7 @@ pub(crate) fn import_key(req: ImportKeyRequest) -> Result<ImportedKey, CommandEr
         }
         ImportKind::Mnemonic => {
             validate_mnemonic_basic(&material)?;
-            let mut ks = create_keystore_if_needed(&req.keystore_path, &mut input)?;
+            let mut ks = create_keystore_if_needed(&req.access, &mut input)?;
             let label = req
                 .label
                 .unwrap_or_else(|| format!("imported-hd-{}", Utc::now().format("%Y%m%d-%H%M%S")));
@@ -262,7 +293,7 @@ pub(crate) fn import_key(req: ImportKeyRequest) -> Result<ImportedKey, CommandEr
 
 /// Lists keys directly through `mfm_core::keystore`.
 pub(crate) fn list_keys(req: ListKeysRequest) -> Result<ListedKeys, CommandError> {
-    let keystore = load_unlocked_keystore(&req.keystore_path)?;
+    let keystore = load_unlocked_keystore(&req.access)?;
     let mut keys: Vec<ListedKey> = keystore
         .list_keys()?
         .into_iter()
@@ -299,7 +330,7 @@ pub(crate) fn list_keys(req: ListKeysRequest) -> Result<ListedKeys, CommandError
 
 /// Deletes a key directly through `mfm_core::keystore`.
 pub(crate) fn delete_key(req: DeleteKeyRequest) -> Result<DeletedKey, CommandError> {
-    let mut keystore = load_unlocked_keystore(&req.keystore_path)?;
+    let mut keystore = load_unlocked_keystore(&req.access)?;
     let key_id = resolve_delete_key_id(&keystore, req.id.as_deref(), req.by_label.as_deref())?;
     let key_to_delete = keystore
         .list_keys()?
@@ -331,7 +362,7 @@ pub(crate) fn delete_key(req: DeleteKeyRequest) -> Result<DeletedKey, CommandErr
 
 /// Signs an EIP-1559 transaction and writes the raw signed transaction locally.
 pub(crate) fn sign_transaction(req: TxSignRequest) -> Result<SignedTx, CommandError> {
-    let mut keystore = load_unlocked_keystore(&req.keystore_path)?;
+    let mut keystore = load_unlocked_keystore(&req.access)?;
     let key_id = resolve_key_id(&keystore, req.id.as_deref(), req.by_label.as_deref())?;
     let tx = Eip1559TxToSign {
         to: Some(parse_address(&req.to, "to")?),
@@ -424,11 +455,12 @@ fn imported_key_from_keystore(
 }
 
 fn create_keystore_if_needed(
-    path: &Path,
+    access: &KeystoreAccess,
     input: &mut dyn SecretInput,
 ) -> Result<Keystore, CommandError> {
+    let path = access.path();
     if path.exists() {
-        return load_unlocked_keystore_with_input(path, input);
+        return load_unlocked_keystore_with_input(access, input);
     }
 
     if let Some(parent) = path.parent() {
@@ -437,13 +469,8 @@ fn create_keystore_if_needed(
         })?;
     }
 
-    let password = get_create_password(input)?;
-    let cfg = if std::env::var(ENV_INTEGRATION_TEST).is_ok() {
-        KeystoreConfig::insecure_integration_test()
-    } else {
-        KeystoreConfig::default()
-    };
-    let mut keystore = Keystore::new_with_config(path, cfg)
+    let password = get_create_password(access, input)?;
+    let mut keystore = Keystore::new_with_config(path, KeystoreConfig::default())
         .map_err(|_| CommandError::backend("keystore_error", "Failed to create keystore"))?;
     keystore
         .unlock(password.as_str())
@@ -451,38 +478,45 @@ fn create_keystore_if_needed(
     Ok(keystore)
 }
 
-fn load_unlocked_keystore(path: &Path) -> Result<Keystore, CommandError> {
+fn load_unlocked_keystore(access: &KeystoreAccess) -> Result<Keystore, CommandError> {
     let mut input = ProcessSecretInput;
-    load_unlocked_keystore_with_input(path, &mut input)
+    load_unlocked_keystore_with_input(access, &mut input)
 }
 
 fn load_unlocked_keystore_with_input(
-    path: &Path,
+    access: &KeystoreAccess,
     input: &mut dyn SecretInput,
 ) -> Result<Keystore, CommandError> {
+    let path = access.path();
     if !path.exists() {
         return Err(CommandError::new("keystore_error", "Keystore not found"));
     }
 
     let mut keystore = Keystore::new(path)
         .map_err(|_| CommandError::backend("keystore_error", "Failed to open keystore"))?;
-    let password = get_unlock_password(input)?;
+    let password = get_unlock_password(access, input)?;
     keystore.unlock(password.as_str()).map_err(|_| {
         CommandError::new("keystore_error", "invalid credential for keystore unlock")
     })?;
     Ok(keystore)
 }
 
-fn get_unlock_password(input: &mut dyn SecretInput) -> Result<Zeroizing<String>, CommandError> {
-    if let Some(password) = password_from_env_sources()? {
-        return Ok(password);
+fn get_unlock_password(
+    access: &KeystoreAccess,
+    input: &mut dyn SecretInput,
+) -> Result<Zeroizing<String>, CommandError> {
+    match &access.credential {
+        KeystoreCredentialSource::Prompt => input.read_hidden("Enter keystore password: "),
+        KeystoreCredentialSource::File(path) => read_secret_file(path),
     }
-    input.read_hidden("Enter keystore password: ")
 }
 
-fn get_create_password(input: &mut dyn SecretInput) -> Result<Zeroizing<String>, CommandError> {
-    if let Some(password) = password_from_env_sources()? {
-        return Ok(password);
+fn get_create_password(
+    access: &KeystoreAccess,
+    input: &mut dyn SecretInput,
+) -> Result<Zeroizing<String>, CommandError> {
+    if let KeystoreCredentialSource::File(path) = &access.credential {
+        return read_secret_file(path);
     }
     let password = input.read_hidden("Enter password for new keystore: ")?;
     let confirm_password = input.read_hidden("Confirm password: ")?;
@@ -493,21 +527,6 @@ fn get_create_password(input: &mut dyn SecretInput) -> Result<Zeroizing<String>,
         ));
     }
     Ok(password)
-}
-
-fn password_from_env_sources() -> Result<Option<Zeroizing<String>>, CommandError> {
-    if let Ok(password_file) = std::env::var(ENV_KEYSTORE_PASSWORD_FILE) {
-        return Ok(Some(read_password_file(&password_file)?));
-    }
-
-    if let Ok(password) = std::env::var(ENV_KEYSTORE_PASSWORD) {
-        eprintln!(
-            "Warning: {ENV_KEYSTORE_PASSWORD} may expose secrets; prefer {ENV_KEYSTORE_PASSWORD_FILE}."
-        );
-        return Ok(Some(Zeroizing::new(password)));
-    }
-
-    Ok(None)
 }
 
 fn read_bip39_extra(
@@ -561,10 +580,6 @@ fn read_password(prompt: &str) -> Result<Zeroizing<String>, CommandError> {
     let password = rpassword::read_password()
         .map_err(|_| CommandError::backend("input_error", "Failed to read password"))?;
     Ok(Zeroizing::new(password))
-}
-
-fn read_password_file(path: &str) -> Result<Zeroizing<String>, CommandError> {
-    read_secret_file(Path::new(path))
 }
 
 fn read_secret_file(path: &Path) -> Result<Zeroizing<String>, CommandError> {

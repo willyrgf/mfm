@@ -15,8 +15,9 @@ mod run_control_support;
 pub use run_control_support::{
     admit_portfolio_run_without_driving, assert_framework_started_before_terminal_evidence,
     prepare_entry_point_launch_for_store, prepare_portfolio_launch_for_store,
-    set_evm_rpc_sources_env_for_test, start_portfolio_rpc_mock, EnvVarRestore,
-    ENV_EVM_RPC_SOURCES_JSON,
+    set_evm_runtime_config_env_for_test, set_evm_runtime_config_env_with_signer_for_test,
+    start_portfolio_rpc_mock, write_evm_runtime_config_for_test, EnvVarRestore,
+    RuntimeConfigSignerBinding, ENV_RUNTIME_CONFIG_FILE,
 };
 
 /// In-memory REST app state used by integration tests.
@@ -26,6 +27,7 @@ pub type InMemoryRestAppState = mfm_rest_api::AppState<store::AsyncInMemoryRunSt
 pub fn in_memory_rest_app_state() -> InMemoryRestAppState {
     mfm_rest_api::AppState {
         store: store::AsyncInMemoryRunStore::default(),
+        runtime_config_path: None,
     }
 }
 
@@ -85,8 +87,6 @@ pub async fn rpc_call(rpc_url: &str, method: &str, params: serde_json::Value) ->
 /// Ephemeral funded keystore wallet used by reth-backed EVM parity tests.
 pub struct FundedRethKeystoreWallet {
     temp_dir: tempfile::TempDir,
-    keystore_env: String,
-    password_file_env: String,
     /// Funded sender address derived from the keystore entry.
     pub from: String,
     /// Stable keystore entry id used by EVM signer config fixtures.
@@ -104,53 +104,27 @@ impl FundedRethKeystoreWallet {
         })
     }
 
-    /// Returns the process-local runtime signer registry JSON for this wallet.
-    pub fn runtime_signer_registry_json(&self) -> serde_json::Value {
-        serde_json::json!([
-            {
-                "signer_ref": "deployer",
-                "entry_id": self.entry_id,
-                "keystore_env": self.keystore_env,
-                "unlock_file_env": self.password_file_env,
-            }
-        ])
-    }
-
-    /// Returns the EVM source registry JSON that routes one local source to this reth node.
-    pub fn runtime_source_registry_json(
+    /// Writes and selects runtime config for this wallet and one EVM route.
+    pub fn set_runtime_config_env_for_test(
         &self,
-        source_id: &str,
-        expected_chain_id: u64,
+        network_id: &str,
         endpoint_url: &str,
-    ) -> serde_json::Value {
-        let mut source = serde_json::json!({
-            "id": source_id,
-            "expected_chain_id": expected_chain_id,
-        });
-        let source_object = source.as_object_mut().expect("source object");
-        source_object.insert(
-            ["rpc", "_url"].concat(),
-            serde_json::Value::String(endpoint_url.to_owned()),
-        );
-        source_object.insert(["author", "ization"].concat(), serde_json::Value::Null);
-        serde_json::json!({
-            "sources": [
-                source
-            ],
-            "policies": [
-                {
-                    "id": source_id,
-                    "ordered_sources": [source_id]
-                }
-            ]
-        })
+    ) -> EnvVarRestore {
+        set_evm_runtime_config_env_with_signer_for_test(
+            network_id,
+            endpoint_url,
+            Some(RuntimeConfigSignerBinding {
+                signer_ref: "deployer",
+                entry_id: &self.entry_id,
+                keystore_path: &self.keystore_path,
+                unlock_file: &self.password_file_path,
+            }),
+        )
     }
 
     /// Returns true when `rendered` exposes process-local signer registry details.
     pub fn rendered_contains_runtime_signer_config(&self, rendered: &str) -> bool {
         rendered.contains(&self.entry_id)
-            || rendered.contains(&self.keystore_env)
-            || rendered.contains(&self.password_file_env)
     }
 
     /// Returns true when `rendered` contains test-local secret-bearing file paths.
@@ -162,8 +136,6 @@ impl FundedRethKeystoreWallet {
 
 impl Drop for FundedRethKeystoreWallet {
     fn drop(&mut self) {
-        std::env::remove_var(&self.keystore_env);
-        std::env::remove_var(&self.password_file_env);
         let _ = self.temp_dir.path();
     }
 }
@@ -208,15 +180,6 @@ pub async fn funded_reth_keystore_wallet(
         .expect("imported reth parity key info");
     let from = format!("{:?}", key_info.address);
 
-    let suffix = uuid::Uuid::new_v4()
-        .simple()
-        .to_string()
-        .to_ascii_uppercase();
-    let keystore_env = format!("MFM_EVM_PARITY_KEYSTORE_{suffix}");
-    let password_file_env = format!("MFM_EVM_PARITY_KEYSTORE_PASSWORD_FILE_{suffix}");
-    std::env::set_var(&keystore_env, &keystore_path);
-    std::env::set_var(&password_file_env, &password_file_path);
-
     // Reth dev nodes prefund this deterministic key set, but recent releases do
     // not expose the dev accounts through `eth_accounts`. The balance assertion
     // below is the funding contract these tests actually need.
@@ -234,8 +197,6 @@ pub async fn funded_reth_keystore_wallet(
 
     FundedRethKeystoreWallet {
         temp_dir,
-        keystore_env,
-        password_file_env,
         from,
         entry_id: entry_id.to_string(),
         keystore_path,

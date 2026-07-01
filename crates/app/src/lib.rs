@@ -1,9 +1,8 @@
 #![warn(missing_docs)]
 //! Typed application assembly for certified MFM runs.
 //!
-//! `mfm-app` is the typed boundary used by binaries and process adapters. It does not plan old
-//! dynamic DAGs, own workflow semantics, or expose `mfm-machine`/`mfm-sdk` execution authority.
-//! Callers select a registered entry-point operation and authored config; this crate resolves,
+//! `mfm-app` is the typed boundary used by binaries and process adapters. Callers select a
+//! registered entry-point operation and authored config; this crate resolves,
 //! plans, certifies, stages launch material, and wires typed services for start, resume, replay,
 //! and public-output rendering.
 //!
@@ -11,7 +10,9 @@
 //! this crate, while tests can use explicit test-support stores.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,6 +21,7 @@ use mfm_authored_config::AuthoredConfig;
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_certify::{CertificationRegistry, CertifiedTypedSpec};
 use mfm_events::v1 as events;
+use mfm_evm_capabilities::{EvmChainGuard, EvmNetworkId, EvmSourcePolicyId, EvmSourceRef};
 use mfm_ids::{
     ArtifactId, ContentDigest, DigestAlgorithm, EventId, RunId, SchemaId, SeedId, SemanticTypeId,
     SpecHash, TrustScopeId,
@@ -27,8 +29,8 @@ use mfm_ids::{
 use mfm_replay::v1::{ReplayBroker, ReplayError, ReplayReadAuthority};
 use mfm_runtime::{
     CertifiedRuntimeSpec, ManualResolutionEvidenceArtifact, ManualResolutionRequest,
-    RunAdmittedBindingCompatibility, RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell,
-    SchedulerStatus, SerialTypedScheduler, VerifiedRunHistoryView,
+    RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell, SchedulerStatus, SerialTypedScheduler,
+    VerifiedRunHistoryView,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -43,12 +45,14 @@ pub use mfm_stream_store_postgres::PostgresSchema as ProductionPostgresSchema;
 mod entry_point;
 mod entry_points;
 mod evm_contracts;
-mod evm_runtime_routes;
 
 pub use entry_point::{
     EntryPointOpId, EntryPointOpPlan, EntryPointOpRegistry, EntryPointOpResolveError,
     EntryPointPlannerAdapter, LaunchableOp, OpLaunchError, OpVersion, PublicOpName,
 };
+
+/// Environment variable that selects the live runtime config file.
+pub const MFM_RUNTIME_CONFIG_FILE: &str = "MFM_RUNTIME_CONFIG_FILE";
 
 /// Shared observability configuration used by typed binaries.
 pub mod observability;
@@ -161,6 +165,7 @@ impl From<mfm_runtime::RuntimeError> for AppError {
             | mfm_runtime::RuntimeError::ExecutionClaim(_)
             | mfm_runtime::RuntimeError::InputMaterialization(_)
             | mfm_runtime::RuntimeError::InvalidRunnerOutput(_)
+            | mfm_runtime::RuntimeError::InvalidRunnerOutputDiagnostic { .. }
             | mfm_runtime::RuntimeError::RuntimeValidation(_)
             | mfm_runtime::RuntimeError::Identity(_)
             | mfm_runtime::RuntimeError::Canonical(_) => Self::backend(
@@ -201,6 +206,11 @@ impl From<store::StoreError> for AppError {
 impl From<mfm_stream_store_postgres::PostgresStoreError> for AppError {
     fn from(error: mfm_stream_store_postgres::PostgresStoreError) -> Self {
         match error {
+            mfm_stream_store_postgres::PostgresStoreError::Authority(_) => Self::backend(
+                ErrorClass::Internal,
+                "RunStoreAuthorityInvalid",
+                "Run store authority could not be validated",
+            ),
             mfm_stream_store_postgres::PostgresStoreError::Store(_) => Self::backend(
                 ErrorClass::Conflict,
                 "RunStoreRejected",
@@ -290,8 +300,24 @@ where
     )
 }
 
+/// Builds evidence-only async app services with an explicit trusted certification registry.
+pub fn make_run_read_services_with_certification_registry<S, A>(
+    store: S,
+    artifacts: A,
+    certification_registry: CertificationRegistry,
+) -> RunReadServices<S, A>
+where
+    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
+    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
+{
+    RunReadServices::new_with_certification_registry(store, artifacts, certification_registry)
+}
+
 /// Production typed run services backed by the Postgres run store.
 pub type ProductionRunServices = RunServices<ProductionRunStore, ProductionRunStore>;
+
+/// Production evidence-only run services backed by the Postgres run store.
+pub type ProductionRunReadServices = RunReadServices<ProductionRunStore, ProductionRunStore>;
 
 /// Connects the production Postgres run store.
 pub async fn connect_production_run_store(
@@ -313,12 +339,29 @@ pub async fn connect_production_run_store(
 /// Builds production typed run services backed by the Postgres run store.
 pub async fn connect_production_run_services(
     database_url: Option<&str>,
+    runtime_config_path: Option<&Path>,
 ) -> Result<ProductionRunServices, AppError> {
     let store = connect_production_run_store(database_url).await?;
-    let runners = production_runner_registry(artifact_read_provider_from_retained(store.clone()))?;
+    let runners = production_runner_registry(
+        artifact_read_provider_from_retained(store.clone()),
+        runtime_config_path,
+    )?;
     let certification_registry = production_certification_registry()?;
     Ok(make_run_services_with_certification_registry(
         runners,
+        store.clone(),
+        store,
+        certification_registry,
+    ))
+}
+
+/// Builds production evidence-only run services backed by the Postgres run store.
+pub async fn connect_production_run_read_services(
+    database_url: Option<&str>,
+) -> Result<ProductionRunReadServices, AppError> {
+    let store = connect_production_run_store(database_url).await?;
+    let certification_registry = production_certification_registry()?;
+    Ok(make_run_read_services_with_certification_registry(
         store.clone(),
         store,
         certification_registry,
@@ -331,25 +374,208 @@ pub async fn connect_production_run_services(
 /// domain runners register here as certified typed descriptor bindings.
 pub fn production_runner_registry(
     artifacts: Arc<dyn ArtifactReadProvider>,
+    runtime_config_path: Option<&Path>,
 ) -> Result<ErasedRunnerRegistry, AppError> {
     let mut registry = ErasedRunnerRegistry::new();
+    let runtime_config = RuntimeConfigLoader::from_path_or_env(runtime_config_path);
     let portfolio_artifacts: Arc<dyn mfm_artifact_capabilities::ArtifactReadProvider> =
         artifacts.clone();
+    let portfolio_runtime = Arc::new(RuntimeConfigPortfolioEvm::new(runtime_config.clone()));
     let portfolio_evm: Arc<dyn mfm_adapters_portfolio::PortfolioEvmProvider> =
-        match mfm_transports_evm::EvmJsonRpcClient::from_env() {
-            Ok(client) => Arc::new(client),
-            Err(_) => Arc::new(mfm_adapters_portfolio::UnavailablePortfolioEvmProvider),
-        };
-    let evm_routes = evm_runtime_routes::EvmRuntimeRoutes::from_env()?;
+        portfolio_runtime.clone();
+    let portfolio_runtime: Arc<dyn mfm_adapters_portfolio::PortfolioRuntimeValidator> =
+        portfolio_runtime;
     let portfolio_capabilities = mfm_adapters_portfolio::PortfolioRunnerCapabilities::new(
         portfolio_artifacts,
         portfolio_evm,
-        evm_routes.portfolio_routes()?,
+        portfolio_runtime,
     );
     mfm_adapters_portfolio::register_portfolio_runners(&mut registry, portfolio_capabilities)?;
-    evm_contracts::register_contract_lifecycle_runners(&mut registry, artifacts, evm_routes)?;
+    evm_contracts::register_contract_lifecycle_runners(&mut registry, artifacts, runtime_config)?;
     mfm_transports_proof::register_deterministic_proof_runners(&mut registry)?;
     Ok(registry)
+}
+
+#[derive(Clone)]
+struct RuntimeConfigPortfolioEvm {
+    runtime_config: RuntimeConfigLoader,
+}
+
+impl RuntimeConfigPortfolioEvm {
+    fn new(runtime_config: RuntimeConfigLoader) -> Self {
+        Self { runtime_config }
+    }
+
+    fn client(&self) -> mfm_runtime::Result<mfm_transports_evm::EvmJsonRpcClient> {
+        self.runtime_config.load_evm().and_then(evm_json_rpc_client)
+    }
+}
+
+impl mfm_adapters_portfolio::PortfolioRuntimeValidator for RuntimeConfigPortfolioEvm {
+    fn validate_evm_guard(
+        &self,
+        guard: &mfm_evm_capabilities::EvmChainGuard,
+    ) -> mfm_runtime::Result<()> {
+        self.client()?
+            .validate_guard(guard)
+            .map_err(runtime_evm_transport_error)
+    }
+}
+
+impl mfm_evm_capabilities::EvmBlockReadProvider for RuntimeConfigPortfolioEvm {
+    fn read_block<'a>(
+        &'a self,
+        request: &'a mfm_evm_capabilities::EvmBlockReadRequest,
+    ) -> mfm_evm_capabilities::EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmBlockReadResponse>
+    {
+        Box::pin(async move {
+            let client = self
+                .client()
+                .map_err(portfolio_runtime_config_capability_error)?;
+            mfm_evm_capabilities::EvmBlockReadProvider::read_block(&client, request).await
+        })
+    }
+}
+
+impl mfm_evm_capabilities::EvmBalanceReadProvider for RuntimeConfigPortfolioEvm {
+    fn read_balance<'a>(
+        &'a self,
+        request: &'a mfm_evm_capabilities::EvmBalanceReadRequest,
+    ) -> mfm_evm_capabilities::EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmBalanceReadResponse>
+    {
+        Box::pin(async move {
+            let client = self
+                .client()
+                .map_err(portfolio_runtime_config_capability_error)?;
+            mfm_evm_capabilities::EvmBalanceReadProvider::read_balance(&client, request).await
+        })
+    }
+}
+
+impl mfm_evm_capabilities::EvmCallReadProvider for RuntimeConfigPortfolioEvm {
+    fn read_call<'a>(
+        &'a self,
+        request: &'a mfm_evm_capabilities::EvmCallReadRequest,
+    ) -> mfm_evm_capabilities::EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmCallReadResponse>
+    {
+        Box::pin(async move {
+            let client = self
+                .client()
+                .map_err(portfolio_runtime_config_capability_error)?;
+            mfm_evm_capabilities::EvmCallReadProvider::read_call(&client, request).await
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct RuntimeConfigLoader {
+    path: Option<PathBuf>,
+}
+
+impl RuntimeConfigLoader {
+    fn from_path_or_env(path: Option<&Path>) -> Self {
+        let path = path
+            .map(Path::to_path_buf)
+            .or_else(|| env::var_os(MFM_RUNTIME_CONFIG_FILE).map(PathBuf::from));
+        Self { path }
+    }
+
+    pub(crate) fn load_evm(&self) -> mfm_runtime::Result<mfm_runtime_config::EvmRuntimeConfig> {
+        self.load_runtime_config_with_requirements(
+            mfm_runtime_config::RuntimeConfigRequirement::evm(),
+        )
+        .and_then(|config| {
+            config.evm().cloned().ok_or_else(|| {
+                mfm_runtime::RuntimeError::RunnerBinding("missing EVM runtime config".to_owned())
+            })
+        })
+    }
+
+    pub(crate) fn load_runtime_config_with_signers(
+        &self,
+    ) -> mfm_runtime::Result<mfm_runtime_config::RuntimeConfig> {
+        self.load_runtime_config_with_requirements(
+            mfm_runtime_config::RuntimeConfigRequirement::evm_with_signers(),
+        )
+    }
+
+    fn load_runtime_config_with_requirements(
+        &self,
+        requirements: mfm_runtime_config::RuntimeConfigRequirement,
+    ) -> mfm_runtime::Result<mfm_runtime_config::RuntimeConfig> {
+        let path = self.path.as_ref().ok_or_else(|| {
+            mfm_runtime::RuntimeError::RunnerBinding("missing runtime config file".to_owned())
+        })?;
+        mfm_runtime_config::RuntimeConfig::load_path_with_requirements(path, requirements)
+            .map_err(runtime_config_error)
+    }
+}
+
+fn evm_json_rpc_client(
+    evm: mfm_runtime_config::EvmRuntimeConfig,
+) -> mfm_runtime::Result<mfm_transports_evm::EvmJsonRpcClient> {
+    let sources = evm
+        .sources()
+        .iter()
+        .map(|(source_ref, source)| {
+            mfm_transports_evm::EvmRuntimeSource::new(
+                source_ref.clone(),
+                source.rpc_url().expose_secret().to_owned(),
+                source
+                    .auth_header()
+                    .map(|value| value.expose_secret().to_owned()),
+            )
+            .map_err(runtime_evm_transport_error)
+        })
+        .collect::<mfm_runtime::Result<Vec<_>>>()?;
+    let policies = evm
+        .policies()
+        .iter()
+        .map(|(policy_id, policy)| {
+            mfm_transports_evm::EvmSourcePolicy::new(
+                policy_id.clone(),
+                policy.ordered_sources().to_vec(),
+            )
+            .map_err(runtime_evm_transport_error)
+        })
+        .collect::<mfm_runtime::Result<Vec<_>>>()?;
+    let routes = evm
+        .routes()
+        .iter()
+        .map(|(network_id, route)| {
+            mfm_transports_evm::EvmRoute::new(
+                network_id.clone(),
+                route.source_ref().clone(),
+                route.policy_id().clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let source_registry = mfm_transports_evm::EvmSourceRegistry::new(sources, policies)
+        .map_err(runtime_evm_transport_error)?;
+    let route_registry =
+        mfm_transports_evm::EvmRouteRegistry::new(routes).map_err(runtime_evm_transport_error)?;
+    Ok(mfm_transports_evm::EvmJsonRpcClient::new(
+        source_registry,
+        route_registry,
+    ))
+}
+
+fn runtime_config_error(
+    error: mfm_runtime_config::RuntimeConfigError,
+) -> mfm_runtime::RuntimeError {
+    mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
+}
+
+fn runtime_evm_transport_error(
+    error: mfm_transports_evm::EvmTransportError,
+) -> mfm_runtime::RuntimeError {
+    mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
+}
+
+fn portfolio_runtime_config_capability_error(
+    _error: mfm_runtime::RuntimeError,
+) -> mfm_evm_capabilities::EvmCapabilityError {
+    mfm_evm_capabilities::EvmCapabilityError::redacted_provider_failure("runtime config")
 }
 
 /// Builds an adapter-facing artifact read provider from a retained artifact reader.
@@ -439,19 +665,19 @@ pub fn production_entry_point_op_registry() -> Result<EntryPointOpRegistry, AppE
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DriveStatus {
+    Observed,
     Scheduler(SchedulerStatus),
     ExecutionClaimBusy,
     ExecutionClaimLost,
-    IncompatibleExecutable,
 }
 
 impl DriveStatus {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Observed => "observed",
             Self::Scheduler(status) => scheduler_status_str(status),
             Self::ExecutionClaimBusy => "execution_claim_busy",
             Self::ExecutionClaimLost => "execution_claim_lost",
-            Self::IncompatibleExecutable => "incompatible_executable",
         }
     }
 }
@@ -873,8 +1099,9 @@ pub struct RunResponse {
     pub attempt_dispositions: Vec<AttemptDispositionStatus>,
     /// Last scheduler status observed by the app dispatch loop.
     ///
-    /// Read-only status reports `observed`; start/resume dispatch reports scheduler progress,
-    /// execution-claim coordination, or incompatible executable binding status.
+    /// Read-only status reports `observed`. Start/resume dispatch reports scheduler progress or
+    /// execution-claim coordination, and already-terminal resume reports `observed` because no
+    /// scheduler dispatch is needed.
     pub scheduler_status: String,
     /// Current typed run-stream head sequence.
     pub head_seq: u64,
@@ -900,8 +1127,6 @@ pub enum RunLaunchOutcomeStatus {
     Attached,
     /// The launch request found an already admitted run with an active compatible driver.
     AlreadyDriving,
-    /// The launch request found the same run identity with incompatible executable bindings.
-    IncompatibleExecutable,
 }
 
 impl RunLaunchOutcomeStatus {
@@ -911,7 +1136,6 @@ impl RunLaunchOutcomeStatus {
             Self::Admitted => "admitted",
             Self::Attached => "attached",
             Self::AlreadyDriving => "already_driving",
-            Self::IncompatibleExecutable => "incompatible_executable",
         }
     }
 }
@@ -940,11 +1164,6 @@ pub enum RunLaunchOutcome {
         /// Current run status for the existing run.
         run: RunResponse,
     },
-    /// This launch found the same run identity with incompatible executable bindings.
-    IncompatibleExecutable {
-        /// Current run status for the existing run.
-        run: RunResponse,
-    },
 }
 
 impl RunLaunchOutcome {
@@ -954,17 +1173,13 @@ impl RunLaunchOutcome {
             Self::Admitted { .. } => RunLaunchOutcomeStatus::Admitted,
             Self::Attached { .. } => RunLaunchOutcomeStatus::Attached,
             Self::AlreadyDriving { .. } => RunLaunchOutcomeStatus::AlreadyDriving,
-            Self::IncompatibleExecutable { .. } => RunLaunchOutcomeStatus::IncompatibleExecutable,
         }
     }
 
     /// Returns the run response carried by this outcome.
     pub fn run(&self) -> &RunResponse {
         match self {
-            Self::Admitted { run }
-            | Self::Attached { run }
-            | Self::AlreadyDriving { run }
-            | Self::IncompatibleExecutable { run } => run,
+            Self::Admitted { run } | Self::Attached { run } | Self::AlreadyDriving { run } => run,
         }
     }
 
@@ -974,9 +1189,6 @@ impl RunLaunchOutcome {
             Self::Admitted { run } => (RunLaunchOutcomeStatus::Admitted, run),
             Self::Attached { run } => (RunLaunchOutcomeStatus::Attached, run),
             Self::AlreadyDriving { run } => (RunLaunchOutcomeStatus::AlreadyDriving, run),
-            Self::IncompatibleExecutable { run } => {
-                (RunLaunchOutcomeStatus::IncompatibleExecutable, run)
-            }
         }
     }
 }
@@ -1139,6 +1351,191 @@ impl fmt::Display for ReplayResponse {
     }
 }
 
+/// Evidence-only application facade for certified typed run reads.
+#[derive(Clone)]
+pub struct RunReadServices<S, A> {
+    store: S,
+    artifacts: A,
+    certification_registry: CertificationRegistry,
+}
+
+impl<S, A> RunReadServices<S, A>
+where
+    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
+    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
+{
+    /// Creates evidence-only app services with an explicit trusted certification registry.
+    pub fn new_with_certification_registry(
+        store: S,
+        artifacts: A,
+        certification_registry: CertificationRegistry,
+    ) -> Self {
+        Self {
+            store,
+            artifacts,
+            certification_registry,
+        }
+    }
+
+    /// Returns the typed artifact store.
+    pub fn artifacts(&self) -> &A {
+        &self.artifacts
+    }
+
+    /// Returns the async typed run store.
+    pub fn store(&self) -> &S {
+        &self.store
+    }
+
+    /// Returns the trusted certification registry used for stored spec verification.
+    pub fn certification_registry(&self) -> &CertificationRegistry {
+        &self.certification_registry
+    }
+
+    /// Loads the store-owned deployment trust scope used to verify run identities.
+    pub async fn load_trust_scope_id(&self) -> Result<TrustScopeId, AppError> {
+        self.store
+            .load_trust_scope_id()
+            .await
+            .map_err(async_app_store_error)
+    }
+
+    /// Returns typed run status by rebuilding projection from the authoritative run stream.
+    pub async fn run_status(&self, run_id: &RunId) -> Result<RunResponse, AppError> {
+        let context = self.load_verified_status_read_context(run_id).await?;
+        run_status_from_projection(
+            run_id,
+            context.runtime_spec(),
+            context.events(),
+            context.projection(),
+        )
+    }
+
+    /// Returns the authoritative typed run stream.
+    pub async fn run_stream(&self, run_id: &RunId) -> Result<RunStreamResponse, AppError> {
+        let context = self.load_verified_run_read_context(run_id).await?;
+        Ok(run_stream_response_from_verified_context(&context))
+    }
+
+    /// Reads one observation-only run list/watch page.
+    pub async fn read_run_observations(
+        &self,
+        query: store::RunObservationQuery,
+    ) -> Result<store::RunObservationPage, AppError>
+    where
+        S: store::RunObservationStore,
+        <S as store::RunObservationStore>::Error:
+            store::StoreErrorInspection + fmt::Display + Send + Sync + 'static,
+    {
+        self.store
+            .read_run_observations(query)
+            .await
+            .map_err(observation_app_store_error)
+    }
+
+    /// Verifies replay authority for a run using retained typed artifact evidence only.
+    pub async fn verify_replay_for_run(&self, run_id: &RunId) -> Result<ReplayResponse, AppError> {
+        let context = self.load_verified_run_read_context(run_id).await?;
+        verify_replay_diagnostics_from_recorded_artifacts(
+            &self.artifacts,
+            context.runtime_spec(),
+            run_id,
+            context.events(),
+        )
+        .await?;
+        let authority = replay_read_authority_for_run(context.runtime_spec(), context.view())?;
+        let broker = ReplayBroker::from_read_authority(authority)?;
+        let stream = context.events();
+        mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&broker)?;
+        mfm_transports_proof::verify_deterministic_proof_replay(&broker)?;
+        let projection = broker.projection_snapshot();
+        let terminal_policies =
+            store::SideEffectTerminalPolicies::from_spec(context.runtime_spec().spec())?;
+        let saga = projection.derive_saga_projection(
+            run_id,
+            &context.runtime_spec().spec().saga,
+            &terminal_policies,
+        )?;
+        let retained_artifacts = projection
+            .retention(run_id)
+            .map(|retention| retention.refs.len())
+            .unwrap_or_default();
+        Ok(ReplayResponse {
+            run_id: run_id.as_str().to_owned(),
+            spec_hash: broker.certified_spec().spec_hash.as_str().to_owned(),
+            run_mode: run_mode_status(saga.run_mode),
+            saga: saga_status_with_resources(context.runtime_spec().spec(), projection, &saga),
+            attempt_dispositions: attempt_dispositions(projection),
+            head_seq: stream_head(stream),
+            retained_artifacts,
+        })
+    }
+
+    /// Renders typed public output from store-owned projection and typed artifact bytes.
+    pub async fn public_output(
+        &self,
+        run_id: &RunId,
+        public_schema_id: &SchemaId,
+    ) -> Result<PublicOutputResponse, AppError> {
+        let context = self.load_verified_run_read_context(run_id).await?;
+        let authority = public_output_read_authority_for_run(
+            &self.artifacts,
+            context.runtime_spec(),
+            context.view(),
+            public_schema_id,
+        )
+        .await?;
+        render_public_output(&self.artifacts, &authority).await
+    }
+
+    async fn load_verified_run_read_context(
+        &self,
+        run_id: &RunId,
+    ) -> Result<VerifiedRunReadContext, AppError> {
+        let context = load_async_verified_run_read_context(
+            &self.store,
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+        )
+        .await?;
+        self.validate_identity_material_trust_scope(
+            &context.view().run_admitted().identity_material,
+        )
+        .await?;
+        Ok(context)
+    }
+
+    async fn load_verified_status_read_context(
+        &self,
+        run_id: &RunId,
+    ) -> Result<VerifiedStatusReadContext, AppError> {
+        let context = load_async_verified_status_read_context(
+            &self.store,
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+        )
+        .await?;
+        self.validate_identity_material_trust_scope(
+            &context.read.view().run_admitted().identity_material,
+        )
+        .await?;
+        Ok(context)
+    }
+
+    async fn validate_identity_material_trust_scope(
+        &self,
+        identity_material: &events::RunIdentityMaterialV1,
+    ) -> Result<(), AppError> {
+        let trust_scope_id = self.load_trust_scope_id().await?;
+        if trust_scope_id != identity_material.trust_scope_id {
+            return Err(run_identity_material_mismatch());
+        }
+        Ok(())
+    }
+}
+
 /// Application facade for certified typed runtime dispatch.
 #[derive(Clone)]
 pub struct RunServices<S, A> {
@@ -1244,6 +1641,13 @@ where
     /// Verifies replay authority for a run using retained typed artifact evidence only.
     pub async fn verify_replay_for_run(&self, run_id: &RunId) -> Result<ReplayResponse, AppError> {
         let context = self.load_verified_run_read_context(run_id).await?;
+        verify_replay_diagnostics_from_recorded_artifacts(
+            &self.artifacts,
+            context.runtime_spec(),
+            run_id,
+            context.events(),
+        )
+        .await?;
         let authority = replay_read_authority_for_run(context.runtime_spec(), context.view())?;
         let broker = ReplayBroker::from_read_authority(authority)?;
         let stream = context.events();
@@ -1479,21 +1883,14 @@ where
         if &run_admitted.identity_material != identity_material {
             return Err(run_identity_material_mismatch());
         }
+        self.scheduler
+            .validate_admitted_run_binding(context.runtime_spec(), run_admitted)?;
         let run = run_status_from_projection(
             run_id,
             context.runtime_spec(),
             context.events(),
             context.projection(),
         )?;
-        match self
-            .scheduler
-            .run_admitted_binding_compatibility(context.runtime_spec(), run_admitted)?
-        {
-            RunAdmittedBindingCompatibility::Compatible => {}
-            RunAdmittedBindingCompatibility::IncompatibleExecutable => {
-                return Ok(RunLaunchOutcome::IncompatibleExecutable { run });
-            }
-        }
         match self
             .store
             .execution_claim_status(run_id)
@@ -1512,12 +1909,24 @@ where
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
     ) -> Result<DriveStatus, AppError> {
-        if let Some(status) = self
-            .drive_binding_decline_status(runtime_spec, run_id)
-            .await?
-        {
-            return Ok(status);
+        let context = self.load_verified_status_read_context(run_id).await?;
+        if run_projection_has_terminal_completion(
+            run_id,
+            context.runtime_spec(),
+            context.projection(),
+        )? {
+            self.reap_expired_execution_claim_if_present(run_id).await?;
+            return Ok(DriveStatus::Observed);
         }
+        self.scheduler
+            .validate_admitted_run_binding(runtime_spec, context.read.view().run_admitted())?;
+        let launch_evidence = stored_launch_evidence_from_run_admitted(
+            &self.artifacts,
+            context.read.view().run_admitted(),
+        )
+        .await?;
+        self.scheduler
+            .validate_admitted_run_ingress(runtime_spec, &launch_evidence)?;
         let mut lease = match self.acquire_execution_claim_for_drive(run_id).await? {
             ExecutionClaimAcquire::Acquired(lease) => lease,
             ExecutionClaimAcquire::Busy => return Ok(DriveStatus::ExecutionClaimBusy),
@@ -1535,8 +1944,13 @@ where
             if step.claim_lost {
                 return Ok(DriveStatus::ExecutionClaimLost);
             }
-            let terminal = self.run_is_terminal(run_id).await?;
-            if terminal || step.status == SchedulerStatus::PublicOutputProjected {
+            let context = self.load_verified_status_read_context(run_id).await?;
+            if run_projection_has_terminal_completion(
+                run_id,
+                context.runtime_spec(),
+                context.projection(),
+            )? || step.status == SchedulerStatus::PublicOutputProjected
+            {
                 self.release_execution_claim_if_holder(run_id, &lease)
                     .await?;
                 return Ok(step.status.into());
@@ -1545,23 +1959,6 @@ where
                 SchedulerStatus::Advanced => {}
                 SchedulerStatus::Blocked => return Ok(SchedulerStatus::Blocked.into()),
                 SchedulerStatus::PublicOutputProjected => unreachable!("handled above"),
-            }
-        }
-    }
-
-    async fn drive_binding_decline_status(
-        &self,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-    ) -> Result<Option<DriveStatus>, AppError> {
-        let context = self.load_verified_status_read_context(run_id).await?;
-        let compatibility = self
-            .scheduler
-            .run_admitted_binding_compatibility(runtime_spec, context.read.view().run_admitted())?;
-        match compatibility {
-            RunAdmittedBindingCompatibility::Compatible => Ok(None),
-            RunAdmittedBindingCompatibility::IncompatibleExecutable => {
-                Ok(Some(DriveStatus::IncompatibleExecutable))
             }
         }
     }
@@ -1600,6 +1997,24 @@ where
                 }
             }
         }
+    }
+
+    async fn reap_expired_execution_claim_if_present(
+        &self,
+        run_id: &RunId,
+    ) -> Result<(), AppError> {
+        if let store::ExecutionClaimStatus::Expired(lease) = self
+            .store
+            .execution_claim_status(run_id)
+            .await
+            .map_err(async_app_store_error)?
+        {
+            self.store
+                .reap_expired_execution_claim(run_id, &lease.token)
+                .await
+                .map_err(async_app_store_error)?;
+        }
+        Ok(())
     }
 
     async fn drive_once_with_execution_claim(
@@ -1672,24 +2087,17 @@ where
             .map_err(async_app_store_error)?;
         Ok(())
     }
+}
 
-    async fn run_is_terminal(&self, run_id: &RunId) -> Result<bool, AppError> {
-        let context = self.load_verified_status_read_context(run_id).await?;
-        let terminal_policies =
-            store::SideEffectTerminalPolicies::from_spec(context.runtime_spec().spec())?;
-        let saga = context.projection().derive_saga_projection(
-            run_id,
-            &context.runtime_spec().spec().saga,
-            &terminal_policies,
-        )?;
-        Ok(matches!(
-            saga.run_mode,
-            store::RunMode::Completed
-                | store::RunMode::Compensated
-                | store::RunMode::ManuallyResolved
-                | store::RunMode::FailedWithoutAcdcClaim
-        ))
-    }
+fn run_projection_has_terminal_completion(
+    run_id: &RunId,
+    runtime_spec: &CertifiedRuntimeSpec,
+    projection: &store::ProjectionSnapshot,
+) -> Result<bool, AppError> {
+    let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
+    let saga =
+        projection.derive_saga_projection(run_id, &runtime_spec.spec().saga, &terminal_policies)?;
+    Ok(saga.run_completion.is_some())
 }
 
 enum ExecutionClaimAcquire {
@@ -1826,6 +2234,213 @@ async fn verified_run_read_context_from_events(
     Ok(VerifiedRunReadContext { runtime_spec, view })
 }
 
+async fn verify_replay_diagnostics_from_recorded_artifacts(
+    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    stream: &[store::KernelEventEnvelope],
+) -> Result<(), AppError> {
+    let run_admitted = run_admitted_payload(run_id, stream)?;
+    let launch = stored_launch_evidence_from_run_admitted(artifacts, run_admitted).await?;
+    for event in stream {
+        let events::KernelEventPayload::StateAttemptFailed(payload) = event.payload() else {
+            continue;
+        };
+        let Some(diagnostic_ref) = &payload.error.diagnostic_ref else {
+            continue;
+        };
+        let requirement = diagnostic_artifact_requirement(diagnostic_ref);
+        let artifact = artifacts
+            .read_retained_artifact(&requirement)
+            .await
+            .map_err(async_app_store_error)?;
+        let diagnostic = serde_json::from_slice::<serde_json::Value>(artifact.bytes())
+            .map_err(|_| replay_diagnostic_error())?;
+        let null_details = serde_json::Value::Null;
+        let details = diagnostic.get("public_details").unwrap_or(&null_details);
+        let guards = if is_evm_chain_mismatch_details(details) {
+            certified_evm_chain_guards_for_failed_node(runtime_spec, &launch, &payload.node_id)?
+        } else {
+            Vec::new()
+        };
+        verify_replay_public_details(payload.error.public_details.as_ref(), details, &guards)?;
+    }
+    Ok(())
+}
+
+fn verify_replay_public_details(
+    expected: Option<&events::RedactedJson>,
+    details: &serde_json::Value,
+    certified_guards: &[EvmChainGuard],
+) -> Result<(), AppError> {
+    match (expected, details) {
+        (Some(_), serde_json::Value::Null) => Err(replay_diagnostic_error()),
+        (Some(expected), details) => {
+            let digest = canonical_value_digest(details)?;
+            if digest != expected.content_digest {
+                return Err(replay_diagnostic_error());
+            }
+            if is_evm_chain_mismatch_details(details) {
+                validate_evm_chain_mismatch_details(details, certified_guards)?;
+            }
+            Ok(())
+        }
+        (None, serde_json::Value::Null) => Ok(()),
+        (None, _) => Err(replay_diagnostic_error()),
+    }
+}
+
+fn certified_evm_chain_guards_for_failed_node(
+    runtime_spec: &CertifiedRuntimeSpec,
+    launch: &RunLaunchEvidence,
+    node_id: &mfm_ids::NodeId,
+) -> Result<Vec<EvmChainGuard>, AppError> {
+    let node = certified_evm_guard_node_for_failed_node(runtime_spec, node_id)?;
+    let artifact = launch_config_artifact_for_node(launch, node)?;
+    let mut guards = mfm_adapters_portfolio::evm_chain_guards_from_launch_config(
+        &node.config_ref.schema_id,
+        &artifact.bytes,
+    )
+    .map_err(|_| replay_diagnostic_error())?;
+    guards.extend(
+        mfm_adapters_evm_contracts::evm_chain_guards_from_launch_config(
+            &node.config_ref.schema_id,
+            &artifact.bytes,
+        )
+        .map_err(|_| replay_diagnostic_error())?,
+    );
+    Ok(guards)
+}
+
+fn certified_evm_guard_node_for_failed_node<'a>(
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    node_id: &mfm_ids::NodeId,
+) -> Result<&'a spec::NodeSpec, AppError> {
+    let node = runtime_spec
+        .node(node_id)
+        .ok_or_else(replay_diagnostic_error)?;
+    if let Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) = &node.framework {
+        let submit_node = runtime_spec
+            .node(&verify.submit_node_id)
+            .ok_or_else(replay_diagnostic_error)?;
+        if submit_node.side_effect.is_none() || submit_node.framework.is_some() {
+            return Err(replay_diagnostic_error());
+        }
+        return Ok(submit_node);
+    }
+    Ok(node)
+}
+
+fn launch_config_artifact_for_node<'a>(
+    launch: &'a RunLaunchEvidence,
+    node: &spec::NodeSpec,
+) -> Result<&'a RunLaunchArtifact, AppError> {
+    let config = &node.config_ref;
+    launch
+        .config_artifacts
+        .iter()
+        .find(|artifact| {
+            artifact.evidence.artifact_id == config.artifact_id
+                && artifact.evidence.digest == config.digest
+                && artifact.evidence.byte_len == config.byte_len
+                && artifact.evidence.media_type == config.media_type
+                && artifact.evidence.schema_id.as_ref() == Some(&config.schema_id)
+        })
+        .ok_or_else(replay_diagnostic_error)
+}
+
+fn diagnostic_artifact_requirement(
+    reference: &events::ArtifactEvidenceRef,
+) -> store::EventArtifactRequirement {
+    store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::ArtifactReferenced,
+        artifact_id: reference.artifact_id.clone(),
+        digest: Some(reference.content_digest.clone()),
+        byte_len: Some(reference.byte_len),
+        media_type: Some(reference.media_type.clone()),
+        schema_id: Some(reference.schema_id.clone()),
+        semantic_type_id: reference.semantic_type_id.clone(),
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: Some(reference.role),
+    }
+}
+
+fn is_evm_chain_mismatch_details(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object.contains_key("network_id")
+        || object.contains_key("expected_chain_id")
+        || object.contains_key("observed_chain_id")
+        || object.contains_key("source_ref")
+        || object.contains_key("policy_id")
+}
+
+fn validate_evm_chain_mismatch_details(
+    value: &serde_json::Value,
+    certified_guards: &[EvmChainGuard],
+) -> Result<(), AppError> {
+    let object = value.as_object().ok_or_else(replay_diagnostic_error)?;
+    const FIELDS: [&str; 5] = [
+        "network_id",
+        "expected_chain_id",
+        "observed_chain_id",
+        "source_ref",
+        "policy_id",
+    ];
+    if object.len() != FIELDS.len() || FIELDS.iter().any(|field| !object.contains_key(*field)) {
+        return Err(replay_diagnostic_error());
+    }
+    let network_id = object
+        .get("network_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(replay_diagnostic_error)?;
+    let expected_chain_id = object
+        .get("expected_chain_id")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(replay_diagnostic_error)?;
+    let observed_chain_id = object
+        .get("observed_chain_id")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(replay_diagnostic_error)?;
+    let source_ref = object
+        .get("source_ref")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(replay_diagnostic_error)?;
+    let policy_id = object
+        .get("policy_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(replay_diagnostic_error)?;
+    EvmNetworkId::new(network_id).map_err(|_| replay_diagnostic_error())?;
+    EvmSourceRef::new(source_ref).map_err(|_| replay_diagnostic_error())?;
+    EvmSourcePolicyId::new(policy_id).map_err(|_| replay_diagnostic_error())?;
+    if expected_chain_id == 0 || expected_chain_id == observed_chain_id {
+        return Err(replay_diagnostic_error());
+    }
+    if !certified_guards.iter().any(|guard| {
+        guard.network_id().as_str() == network_id && guard.expected_chain_id() == expected_chain_id
+    }) {
+        return Err(replay_diagnostic_error());
+    }
+    Ok(())
+}
+
+fn canonical_value_digest(value: &serde_json::Value) -> Result<ContentDigest, AppError> {
+    let json = serde_json::to_string(value).map_err(|_| replay_diagnostic_error())?;
+    let canonical =
+        PlainCanonicalJsonBytes::from_json_str(&json).map_err(|_| replay_diagnostic_error())?;
+    Ok(canonical.content_digest())
+}
+
+fn replay_diagnostic_error() -> AppError {
+    AppError::backend(
+        ErrorClass::Internal,
+        "ReplayDiagnosticInvalid",
+        "Replay diagnostic evidence failed verification",
+    )
+}
+
 /// Loads and verifies the certified spec artifact bound by a typed run stream.
 pub async fn load_certified_spec_for_run(
     artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
@@ -1861,6 +2476,93 @@ pub async fn load_certified_spec_for_run(
     )?;
     validate_run_admitted_matches_spec(run_admitted, certified.envelope())?;
     Ok(certified)
+}
+
+async fn stored_launch_evidence_from_run_admitted(
+    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
+    run_admitted: &events::RunAdmitted,
+) -> Result<RunLaunchEvidence, AppError> {
+    let spec_artifact = stored_run_launch_artifact(
+        artifacts,
+        run_artifact_requirement(
+            store::EventArtifactReferenceSource::RunSpec,
+            &run_admitted.spec_artifact,
+            events::ArtifactRole::TypedExecutionSpec,
+        ),
+        |evidence| validate_spec_artifact_evidence(run_admitted, evidence),
+    )
+    .await?;
+    let certificate_artifact = stored_run_launch_artifact(
+        artifacts,
+        run_artifact_requirement(
+            store::EventArtifactReferenceSource::RunCertificate,
+            &run_admitted.certificate_artifact,
+            events::ArtifactRole::TypedSpecCertificate,
+        ),
+        |evidence| validate_certificate_artifact_evidence(run_admitted, evidence),
+    )
+    .await?;
+    let mut config_artifacts = Vec::with_capacity(run_admitted.config_artifacts.len());
+    for config in &run_admitted.config_artifacts {
+        config_artifacts.push(
+            stored_run_launch_artifact(
+                artifacts,
+                run_artifact_requirement(
+                    store::EventArtifactReferenceSource::RunConfig,
+                    config,
+                    events::ArtifactRole::TypedConfig,
+                ),
+                |_| Ok(()),
+            )
+            .await?,
+        );
+    }
+    let mut seed_cells = Vec::with_capacity(run_admitted.seed_cells.len());
+    for cell in &run_admitted.seed_cells {
+        let artifact = artifacts
+            .read_retained_artifact(&seed_cell_artifact_requirement(cell))
+            .await?;
+        let evidence = artifact.evidence().clone();
+        validate_artifact_requirement_for_app(
+            seed_cell_artifact_requirement(cell),
+            &evidence,
+            ErrorClass::Internal,
+            "RunAdmittedSeedArtifactMismatch",
+            "RunAdmitted seed artifact evidence does not match retained bytes",
+        )?;
+        seed_cells.push(RunLaunchSeedCell {
+            bytes: artifact.into_bytes(),
+            cell: cell.clone(),
+        });
+    }
+    Ok(RunLaunchEvidence {
+        entry_point: run_admitted.entry_point.clone(),
+        spec_artifact,
+        certificate_artifact,
+        config_artifacts,
+        seed_cells,
+    })
+}
+
+async fn stored_run_launch_artifact(
+    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
+    requirement: store::EventArtifactRequirement,
+    validate: impl FnOnce(&store::ArtifactEvidenceRef) -> Result<(), AppError>,
+) -> Result<RunLaunchArtifact, AppError> {
+    let artifact = artifacts.read_retained_artifact(&requirement).await?;
+    let evidence = artifact.evidence().clone();
+    validate_artifact_requirement_for_app(
+        requirement,
+        &evidence,
+        ErrorClass::Internal,
+        "RunAdmittedArtifactMismatch",
+        "RunAdmitted artifact evidence does not match retained bytes",
+    )?;
+    validate(&evidence)?;
+    Ok(RunLaunchArtifact {
+        bytes: artifact.into_bytes(),
+        evidence,
+    })
 }
 
 async fn load_runtime_spec_for_run(
@@ -2272,6 +2974,21 @@ fn seed_artifact_requirement(
         producer_node_id: None,
         producer_seed_id: Some(seed_spec.seed_id.clone()),
         artifact_role: Some(events::ArtifactRole::SeedInput),
+    }
+}
+
+fn seed_cell_artifact_requirement(cell: &events::SeedCellRef) -> store::EventArtifactRequirement {
+    store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::SeedCell,
+        artifact_id: cell.seed_artifact.artifact_id.clone(),
+        digest: Some(cell.seed_artifact.content_digest.clone()),
+        byte_len: Some(cell.seed_artifact.byte_len),
+        media_type: Some(cell.seed_artifact.media_type.clone()),
+        schema_id: Some(cell.seed_artifact.schema_id.clone()),
+        semantic_type_id: cell.seed_artifact.semantic_type_id.clone(),
+        producer_node_id: None,
+        producer_seed_id: Some(cell.seed_id.clone()),
+        artifact_role: Some(cell.seed_artifact.role),
     }
 }
 

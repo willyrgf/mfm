@@ -7,10 +7,10 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 
 - Keep changes small and local; prefer 1 logical change per PR/commit.
 - Follow `docs/code-quality.md` for every code, test, documentation, build, and workflow change.
-- Do not introduce hacks, monkey patches, partial workarounds, or fragile compatibility shims.
+- Do not introduce hacks, monkey patches, partial workarounds, or fragile schema shims.
 - If the requested change needs missing underlying support, add that support properly or report the blocker honestly.
 - Use focused Cargo verification while developing. Prefer targeted `cargo test`, `cargo check`,
-  `cargo metadata`, namespace scans, schema checks, and manually started service parity tests.
+  `cargo metadata`, schema checks, and manually started service parity tests.
 - Before each commit, run `nix run .#check`, `nix run .#test`, and `nix run .#test-db`.
 - Run `nix run .#ci` after major work or for final merge-readiness validation.
 - Write commit subjects in lower case. Examples: `mfm-core bump to 0.1.30`, `fix nix task wrappers to preserve caller cwd`, `docs: refresh repo map for typed crates`, `docs: publish umbrella earlier with live links only`, `docs: point crate metadata at mfm repo`.
@@ -54,12 +54,11 @@ Use Cargo and focused checks while developing:
 - `cargo check --workspace`
 - `cargo test --workspace`
 - `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
-- `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
-- `rg` namespace/config scans for architecture guardrails
+- targeted schema, metadata, and parity checks for touched surfaces
 
 For parity tests that need Postgres, Reth, or other live services, start those services manually and
 run the focused Cargo test with explicit environment variables such as `DATABASE_URL`,
-`RETH_HTTP_PORT`, or `MFM_EVM_RPC_SOURCES_JSON`.
+`RETH_HTTP_PORT`, or `MFM_RUNTIME_CONFIG_FILE`.
 
 Before each commit, run the Nixfied managed gates:
 
@@ -144,7 +143,7 @@ These are typical, review-friendly change patterns (focus on a single outcome).
 1. Small bug fixes (1-20 lines)
    - Fix off-by-one / validation edge case
    - Tighten error messages or error variants
-   - Add missing `#[serde(default)]` for backward compatibility
+   - Tighten malformed input rejection
 
 2. Security hardening
    - Strengthen keystore tamper checks
@@ -198,8 +197,8 @@ These are typical, review-friendly change patterns (focus on a single outcome).
 ### Op vs State Placement Contract
 
 - `Operation` (`expand`): planning-only (`config -> graph`), deterministic, no ambient IO.
-    - If code builds `StateNode`/`DependencyEdge`, place it in an op crate.
-- `State` (`handle`): execution-only (runtime behavior through context + `IoProvider` + recorder).
+    - If code builds typed state graph nodes or dependency edges, place it in an op crate.
+- `State` (`handle`): execution-only (runtime behavior through context, explicit capabilities, and recorder).
     - If code implements `State::handle`, place it in a shared-state crate unless it is a justified op-local output/aggregation state.
 
 ### Unsafe
@@ -221,7 +220,7 @@ Rules:
 - Preserve constant-time comparisons where used (`subtle`).
 - Keep the threat model in mind: tamper detection, swap attacks, DoS via file size.
 - Do not make `Keystore` `Send`/`Sync` without a deliberate redesign.
-- Be careful with format compatibility: keystore files are persisted JSON. If you add fields, use `#[serde(default)]` for backwards compatibility.
+- Be careful with format versioning: keystore files are persisted JSON. If you add fields, bump the format deliberately or fail closed.
 - Add unit tests and corruption/tamper tests.
 - Prefer explicit, test-backed behavior over implicit "best effort".
 

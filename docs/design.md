@@ -2,8 +2,7 @@
 
 Status: authoritative typed-core design contract
 
-This document defines the runtime and authoring contract for the current MFM codebase. The typed
-core RFC is now implemented enough that this document, not the removed dynamic model, is the
+This document defines the runtime and authoring contract for the current MFM codebase. It is the
 normative contributor-facing design reference.
 
 The central rule is:
@@ -105,6 +104,7 @@ Domain and product crates sit outside the kernel:
 | `crates/ops/*` | Typed operation planners that assemble state programs |
 | `crates/adapters/*` | Runner bindings from state intent to capabilities, evidence phases, and domain replay verifiers |
 | `crates/transports/*` | Live and replay capability backend implementations |
+| `crates/runtime-config` | Runtime-only config parsing, value-source resolution, validation, and redaction |
 | `crates/storages/*` | Implementations of typed store and typed artifact contracts |
 | `crates/app` | Assembly of registries, stores, artifacts, start/resume/replay, and public output |
 | `bin/cli`, `bin/rest-api` | Transport-only user surfaces |
@@ -219,6 +219,12 @@ supplies replay implementations backed only by recorded facts, typed artifacts, 
 evidence. Adapters translate state-owned intent into capability calls and evidence phases without
 moving protocol IO or signer material into state code.
 
+App assembly keeps evidence-only services separate from live driver services. Status, stream
+inspection, list/watch, replay, and public-output rendering construct only store, artifact, and
+certification/replay authority; they do not parse live runtime config, construct live EVM transports,
+or construct signer providers. Malformed or missing live capability wiring can block live
+start/resume when that run needs it, but it must not affect evidence-only reads.
+
 Runtime admission binds each certified capability descriptor to a registered non-secret
 implementation identity before the run can start or resume. Missing or mismatched implementation
 bindings are deployment/ingress failures, not semantic attempt outcomes.
@@ -331,9 +337,9 @@ trust boundary; callers cannot supply or update it. Observation list/watch rows 
 strict authority at read time. Artifact bytes live in Postgres; production app, CLI, and REST paths
 do not stage, read, or migrate workflow artifacts through filesystem artifact roots. The schema and
 migrations are owned by `crates/storages/stream-store-postgres`; runtime callers validate schema
-compatibility and must not run startup auto-DDL. Because MFM is pre-production, replacing a persisted
-contract shape is a destructive schema change: delete obsolete tables and schema checks instead of
-adding compatibility migrations or dual old/new write paths. Logical-key admission folds
+contract shape and must not run startup auto-DDL. Because MFM is pre-production, replacing a
+persisted contract shape is a destructive schema change that updates the baseline directly.
+Logical-key admission folds
 authoritative `run_events`; there is no logical-key admission index. Admission-lane rows are
 operational coordination only. In v1 they serve single-lane FIFO resource claims and nowait execution
 claims; they can preserve retry order or active-driver liveness, but cannot grant ownership and are
@@ -430,15 +436,14 @@ delegates spec-independent ordering and projection checks to `mfm-store`, then p
 runtime-owned spec-aware validation of seeds, configs, artifacts, completed cells, side-effect
 ledger evidence, public-output events, retention events, and terminal run state. The rebuilt
 projection is derived from the stream; it is not independent semantic authority. Store-owned stream
-validation is also the centralized old-model ingress guard: loaded streams and projection rebuilds
-reject attempt-bound payloads that are not preceded by a separate `StateAttemptStarted` commit, so
-runtime, replay, and Postgres-backed loads fail before trusting old lifecycle rows.
+validation requires attempt-bound payloads to be preceded by a separate `StateAttemptStarted`
+commit before runtime, replay, or Postgres-backed loads trust them.
 
 Read, resume, replay, and status paths must construct a `VerifiedRunHistoryView` from a
-`CommittedRunStream` plus `VerifiedRunArtifactStore` before trusting history. `VerifiedRunHistory`
-wraps that view for compatibility. Replay authority is minted from the verified view and certified
-runtime authority; raw event vectors or retained artifact bytes without committed evidence do not
-cross the runtime/replay boundary. Scheduler drive paths construct `VerifiedRunContext` through
+`CommittedRunStream` plus `VerifiedRunArtifactStore` before trusting history. Replay authority is
+minted from the verified view and certified runtime authority; raw event vectors or retained
+artifact bytes without committed evidence do not cross the runtime/replay boundary. Scheduler drive
+paths construct `VerifiedRunContext` through
 `VerifiedRunContextLoader`, which combines the same committed stream/fold authority with
 `BoundRuntimeContext` runner, capability, and framework-handler authority before any transition is
 selected.
@@ -522,6 +527,15 @@ type-valid frontier.
 Replay loads the stored certified spec and certificate artifacts, verifies them against the compiled
 certification registry, compares the hashes to `RunAdmitted`, rebuilds stream evidence, and uses
 replay adapters only. Live capability construction during replay is a contract violation.
+Replay service construction itself is evidence-only app assembly: it must not construct the live
+runner registry, live transports, signer providers, keystores, or live capability runtime config.
+
+Live EVM chain identity is enforced at each guarded capability call from the semantic network id and
+expected chain id in the certified request. A route that resolves but observes the wrong chain fails
+after `RunAdmitted` as a guarded attempt/capability failure with closed redacted evidence: semantic
+network id, expected chain id, observed chain id when available, selected source ref, and source
+policy id. Replay providers verify that recorded evidence against the same request guard and never
+resolve source refs or policy ids through current runtime config.
 
 Manual-resolution replay additionally verifies that the stream prefix derives `ManualBlocked`, the
 event matches certified policy, evidence and authorization artifacts match certified roles and

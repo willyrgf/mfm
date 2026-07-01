@@ -2,8 +2,7 @@
 //! Typed proof workflow operation.
 //!
 //! The proof workflow is authored through `mfm-program` and lowers to certified typed state
-//! programs. It does not expose the legacy dynamic `PlannedOp`, `PortKey`, context-key, or generic
-//! IO surfaces.
+//! programs.
 //!
 //! # Examples
 //!
@@ -28,11 +27,10 @@ use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion, SchemaId};
 use mfm_program::{
     build_root_with_registries, ManualAuthorizationDraft, ManualAuthorizationVerifierId,
     ManualResolutionPolicyDraft, ManualSigningSchemeSpec, NonEmptyUniqueOperators, Operation,
-    OperationExpansion, OperationKey, OperationRegistryBuilder, OperatorAuthorityId,
-    OperatorAuthorityMemberSpec, OperatorAuthoritySnapshotDraft, OperatorId,
-    OperatorPublicIdentity, PublicOutputKey, ResourceClaim, RootBuilder, ScopeKey,
-    SideEffectSagaPolicy, SideEffectVerificationSpec, StateKey, StateRegistryBuilder,
-    ThresholdQuorum,
+    OperationExpansion, OperationKey, OperatorAuthorityId, OperatorAuthorityMemberSpec,
+    OperatorAuthoritySnapshotDraft, OperatorId, OperatorPublicIdentity, PublicOutputKey,
+    ResourceClaim, RootBuilder, ScopeKey, SideEffectSagaPolicy, SideEffectVerificationSpec,
+    StateKey, ThresholdQuorum,
 };
 
 const PROOF_OPERATION_KIND_NAME: &str = "workflow";
@@ -102,48 +100,13 @@ impl Operation for ProofWorkflowOperation {
     }
 }
 
-fn proof_state_registry() -> mfm_program::Result<mfm_program::StateRegistrySnapshot> {
-    let mut states = StateRegistryBuilder::new();
-    states.register::<ProofReadFactState>()?;
-    states.register::<ProofApplySideEffectState>()?;
-    states.register::<ProofAssembleOutputState>()?;
-    Ok(states.into_snapshot())
-}
-
-fn proof_operation_registry() -> mfm_program::Result<mfm_program::OperationRegistrySnapshot> {
-    let mut operations = OperationRegistryBuilder::new();
-    operations.register::<ProofWorkflowOperation>()?;
-    Ok(operations.into_snapshot())
-}
-
-/// Adds proof workflow descriptors to a trusted certification registry.
-pub fn register_proof_certification_descriptors(
-    registry: &mut mfm_certify::CertificationRegistry,
-) -> mfm_certify::Result<()> {
-    let mut states = StateRegistryBuilder::new();
-    registry.register_state(
-        &states
-            .register::<ProofReadFactState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
-            .register::<ProofApplySideEffectState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
-            .register::<ProofAssembleOutputState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    let mut operations = OperationRegistryBuilder::new();
-    registry.register_operation(
-        &operations
-            .register::<ProofWorkflowOperation>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    register_proof_manual_resolution_authority(registry)?;
-    Ok(())
+mfm_certify::define_program_descriptor_registry! {
+    state_registry: proof_state_registry,
+    operation_registry: proof_operation_registry,
+    certification: pub register_proof_certification_descriptors,
+    states: [ProofReadFactState, ProofApplySideEffectState, ProofAssembleOutputState],
+    operations: [ProofWorkflowOperation],
+    after_registration: register_proof_manual_resolution_authority,
 }
 
 /// Builds a typed proof program draft.
@@ -267,12 +230,14 @@ mod tests {
     fn proof_program_lowers_to_typed_state_contracts() {
         let draft = proof_program_draft(ProofWorkflowConfig::default()).expect("draft");
         assert_eq!(draft.state_nodes().len(), 3);
-        assert!(
-            draft
-                .state_nodes()
-                .iter()
-                .all(|node| !node.state_descriptor_name.contains("DynContext")),
-            "proof state descriptors must not expose dynamic context"
+        let state_keys = draft
+            .state_nodes()
+            .iter()
+            .map(|node| node.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            state_keys,
+            ["read_fact", "apply_side_effect", "assemble_output"]
         );
 
         let certified = mfm_certify::certify_program_draft(&draft).expect("certified proof spec");

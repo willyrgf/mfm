@@ -6,18 +6,15 @@
 //! public account metadata. Decrypted key wrappers never leave this provider.
 //!
 //! ```rust
-//! use mfm_signers_keystore::{
-//!     KeystorePasswordSource, KeystorePathSource, KeystoreSignerProvider,
-//!     KeystoreSignerRegistryEntry,
-//! };
+//! use mfm_signers_keystore::{KeystoreSignerProvider, KeystoreSignerRegistryEntry};
 //! use mfm_signing::SignerRef;
 //! use uuid::Uuid;
 //!
 //! let entry = KeystoreSignerRegistryEntry::new(
 //!     SignerRef::new("deployer")?,
 //!     Uuid::parse_str("67e55044-10b1-426f-9247-bb680e5fe0c8")?,
-//!     KeystorePathSource::path("/run/mfm/wallet.keystore"),
-//!     KeystorePasswordSource::file("/run/mfm/wallet.password"),
+//!     "/run/mfm/wallet.keystore",
+//!     "/run/mfm/wallet.password",
 //! );
 //! let provider = KeystoreSignerProvider::new([entry]);
 //! assert!(provider.contains_signer(&SignerRef::new("deployer")?));
@@ -25,7 +22,6 @@
 //! ```
 
 use std::collections::BTreeMap;
-use std::env;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -36,9 +32,9 @@ use mfm_evm_signing::{
     EVM_SIGNING_ALGORITHM_ID, EVM_TRANSACTION_DOMAIN_ID,
 };
 use mfm_signing::{
-    PublicSigningIdentity, RuntimeSecretSource, SignatureBytes, SignerRef, SigningError,
-    SigningFuture, SigningProvider, SigningRequest, SigningResult,
-    MANUAL_RESOLUTION_SIGNING_DOMAIN_ID, MANUAL_RESOLUTION_SIGNING_PURPOSE_ID,
+    PublicSigningIdentity, SignatureBytes, SignerRef, SigningError, SigningFuture, SigningProvider,
+    SigningRequest, SigningResult, MANUAL_RESOLUTION_SIGNING_DOMAIN_ID,
+    MANUAL_RESOLUTION_SIGNING_PURPOSE_ID,
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -46,107 +42,13 @@ use zeroize::Zeroizing;
 /// Result type for keystore signer provider operations.
 pub type Result<T> = std::result::Result<T, KeystoreSignerError>;
 
-/// Process-local keystore path source.
-#[derive(Clone, PartialEq, Eq)]
-pub struct KeystorePathSource {
-    kind: KeystorePathSourceKind,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-enum KeystorePathSourceKind {
-    Path(PathBuf),
-    EnvPath(RuntimeSecretSource),
-}
-
-impl KeystorePathSource {
-    /// Creates a direct keystore path source.
-    pub fn path(path: impl Into<PathBuf>) -> Self {
-        Self {
-            kind: KeystorePathSourceKind::Path(path.into()),
-        }
-    }
-
-    /// Creates a source that reads the keystore path from an environment variable.
-    pub fn path_env_var(name: impl AsRef<str>) -> std::result::Result<Self, SigningError> {
-        Ok(Self {
-            kind: KeystorePathSourceKind::EnvPath(RuntimeSecretSource::path_env_var(name)?),
-        })
-    }
-}
-
-impl fmt::Debug for KeystorePathSource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.kind {
-            KeystorePathSourceKind::Path(_) => f.write_str("KeystorePathSource::Path(<redacted>)"),
-            KeystorePathSourceKind::EnvPath(source) => f
-                .debug_tuple("KeystorePathSource::EnvPath")
-                .field(source)
-                .finish(),
-        }
-    }
-}
-
-/// Process-local keystore password source.
-#[derive(Clone, PartialEq, Eq)]
-pub struct KeystorePasswordSource {
-    kind: KeystorePasswordSourceKind,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-enum KeystorePasswordSourceKind {
-    EnvVar(RuntimeSecretSource),
-    File(PathBuf),
-    FilePathEnv(RuntimeSecretSource),
-}
-
-impl KeystorePasswordSource {
-    /// Creates a password source backed by an environment variable value.
-    pub fn env_var(name: impl AsRef<str>) -> std::result::Result<Self, SigningError> {
-        Ok(Self {
-            kind: KeystorePasswordSourceKind::EnvVar(RuntimeSecretSource::env_var(name)?),
-        })
-    }
-
-    /// Creates a password source backed by a direct file path.
-    pub fn file(path: impl Into<PathBuf>) -> Self {
-        Self {
-            kind: KeystorePasswordSourceKind::File(path.into()),
-        }
-    }
-
-    /// Creates a password source backed by an environment variable containing a file path.
-    pub fn file_path_env_var(name: impl AsRef<str>) -> std::result::Result<Self, SigningError> {
-        Ok(Self {
-            kind: KeystorePasswordSourceKind::FilePathEnv(RuntimeSecretSource::path_env_var(name)?),
-        })
-    }
-}
-
-impl fmt::Debug for KeystorePasswordSource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.kind {
-            KeystorePasswordSourceKind::EnvVar(source) => f
-                .debug_tuple("KeystorePasswordSource::EnvVar")
-                .field(source)
-                .finish(),
-            KeystorePasswordSourceKind::File(_) => {
-                f.write_str("KeystorePasswordSource::File(<redacted>)")
-            }
-            KeystorePasswordSourceKind::FilePathEnv(source) => f
-                .debug_tuple("KeystorePasswordSource::FilePathEnv")
-                .field(source)
-                .finish(),
-        }
-    }
-}
-
 /// Runtime signer registry entry mapping a signer reference to a keystore entry.
 #[derive(Clone, PartialEq, Eq)]
 pub struct KeystoreSignerRegistryEntry {
     signer_ref: SignerRef,
     entry_id: Uuid,
-    keystore_source: KeystorePathSource,
-    password_source: KeystorePasswordSource,
+    keystore_path: PathBuf,
+    password_file: PathBuf,
 }
 
 impl KeystoreSignerRegistryEntry {
@@ -154,14 +56,14 @@ impl KeystoreSignerRegistryEntry {
     pub fn new(
         signer_ref: SignerRef,
         entry_id: Uuid,
-        keystore_source: KeystorePathSource,
-        password_source: KeystorePasswordSource,
+        keystore_path: impl Into<PathBuf>,
+        password_file: impl Into<PathBuf>,
     ) -> Self {
         Self {
             signer_ref,
             entry_id,
-            keystore_source,
-            password_source,
+            keystore_path: keystore_path.into(),
+            password_file: password_file.into(),
         }
     }
 
@@ -175,29 +77,14 @@ impl KeystoreSignerRegistryEntry {
         self.entry_id
     }
 
-    /// Creates a registry entry from process-local environment source names.
-    pub fn from_env_sources(
-        signer_ref: SignerRef,
-        entry_id: Uuid,
-        keystore_env: impl AsRef<str>,
-        unlock_file_env: impl AsRef<str>,
-    ) -> std::result::Result<Self, SigningError> {
-        Ok(Self::new(
-            signer_ref,
-            entry_id,
-            KeystorePathSource::path_env_var(keystore_env)?,
-            KeystorePasswordSource::file_path_env_var(unlock_file_env)?,
-        ))
+    /// Returns the keystore path.
+    pub fn keystore_path(&self) -> &Path {
+        &self.keystore_path
     }
 
-    /// Returns the keystore path source.
-    pub fn keystore_source(&self) -> &KeystorePathSource {
-        &self.keystore_source
-    }
-
-    /// Returns the password source.
-    pub fn password_source(&self) -> &KeystorePasswordSource {
-        &self.password_source
+    /// Returns the password file path.
+    pub fn password_file(&self) -> &Path {
+        &self.password_file
     }
 }
 
@@ -206,8 +93,8 @@ impl fmt::Debug for KeystoreSignerRegistryEntry {
         f.debug_struct("KeystoreSignerRegistryEntry")
             .field("signer_ref", &self.signer_ref)
             .field("entry_id", &self.entry_id)
-            .field("keystore_source", &self.keystore_source)
-            .field("password_source", &self.password_source)
+            .field("keystore_path", &"<redacted>")
+            .field("password_file", &"<redacted>")
             .finish()
     }
 }
@@ -278,9 +165,10 @@ impl KeystoreSignerProvider {
             }
         })?;
 
-        let keystore_path = entry.keystore_source.resolve_path()?;
-        let password = entry.password_source.resolve_password()?;
-        let mut keystore = Keystore::new_with_config(&keystore_path, self.keystore_config.clone())
+        let keystore_path =
+            checked_runtime_path(&entry.keystore_path, RuntimeSourceKind::KeystorePath)?;
+        let password = password_from_file(&entry.password_file)?;
+        let mut keystore = Keystore::new_with_config(keystore_path, self.keystore_config.clone())
             .map_err(keystore_open_error)?;
         keystore
             .unlock(password.as_str())
@@ -322,53 +210,6 @@ impl SigningProvider for KeystoreSignerProvider {
     }
 }
 
-impl KeystorePathSource {
-    fn resolve_path(&self) -> Result<PathBuf> {
-        match &self.kind {
-            KeystorePathSourceKind::Path(path) => {
-                if path.as_os_str().is_empty() {
-                    Err(KeystoreSignerError::InvalidRuntimeSource {
-                        kind: RuntimeSourceKind::KeystorePath,
-                    })
-                } else {
-                    Ok(path.clone())
-                }
-            }
-            KeystorePathSourceKind::EnvPath(source) => {
-                path_from_env(source, RuntimeSourceKind::KeystorePath)
-            }
-        }
-    }
-}
-
-impl KeystorePasswordSource {
-    fn resolve_password(&self) -> Result<ResolvedPassword> {
-        match &self.kind {
-            KeystorePasswordSourceKind::EnvVar(source) => {
-                let value = env::var(source.name()).map_err(|error| match error {
-                    env::VarError::NotPresent => KeystoreSignerError::MissingRuntimeSource {
-                        kind: RuntimeSourceKind::PasswordEnvVar,
-                    },
-                    env::VarError::NotUnicode(_) => KeystoreSignerError::InvalidRuntimeSource {
-                        kind: RuntimeSourceKind::PasswordEnvVar,
-                    },
-                })?;
-                if value.is_empty() {
-                    return Err(KeystoreSignerError::InvalidRuntimeSource {
-                        kind: RuntimeSourceKind::PasswordEnvVar,
-                    });
-                }
-                Ok(ResolvedPassword(Zeroizing::new(value)))
-            }
-            KeystorePasswordSourceKind::File(path) => password_from_file(path),
-            KeystorePasswordSourceKind::FilePathEnv(source) => {
-                let path = path_from_env(source, RuntimeSourceKind::PasswordFile)?;
-                password_from_file(path)
-            }
-        }
-    }
-}
-
 struct ResolvedPassword(Zeroizing<String>);
 
 impl ResolvedPassword {
@@ -377,17 +218,16 @@ impl ResolvedPassword {
     }
 }
 
-fn path_from_env(source: &RuntimeSecretSource, kind: RuntimeSourceKind) -> Result<PathBuf> {
-    let value =
-        env::var_os(source.name()).ok_or(KeystoreSignerError::MissingRuntimeSource { kind })?;
-    if value.is_empty() {
+fn checked_runtime_path(path: &Path, kind: RuntimeSourceKind) -> Result<&Path> {
+    if path.as_os_str().is_empty() {
         return Err(KeystoreSignerError::InvalidRuntimeSource { kind });
     }
-    Ok(PathBuf::from(value))
+    Ok(path)
 }
 
 fn password_from_file(path: impl AsRef<Path>) -> Result<ResolvedPassword> {
-    let contents = Zeroizing::new(fs::read_to_string(path.as_ref()).map_err(|_| {
+    let path = checked_runtime_path(path.as_ref(), RuntimeSourceKind::PasswordFile)?;
+    let contents = Zeroizing::new(fs::read_to_string(path).map_err(|_| {
         KeystoreSignerError::MissingRuntimeSource {
             kind: RuntimeSourceKind::PasswordFile,
         }
@@ -435,8 +275,6 @@ fn keystore_provider_error_into_signing_error(error: KeystoreSignerError) -> Sig
 pub enum RuntimeSourceKind {
     /// Keystore path source.
     KeystorePath,
-    /// Password environment variable source.
-    PasswordEnvVar,
     /// Password file path source.
     PasswordFile,
 }
@@ -554,8 +392,8 @@ mod tests {
         KeystoreSignerRegistryEntry::new(
             signer_ref(),
             keystore.entry_id,
-            KeystorePathSource::path(&keystore.keystore_path),
-            KeystorePasswordSource::file(&keystore.password_file),
+            &keystore.keystore_path,
+            &keystore.password_file,
         )
     }
 
@@ -643,44 +481,19 @@ mod tests {
     #[test]
     fn password_file_trims_line_endings_and_returns_zeroizing_password() {
         let keystore = test_keystore();
-        let password_source = KeystorePasswordSource::file(&keystore.password_file);
-
-        let resolved = password_source.resolve_password().expect("password");
+        let resolved = password_from_file(&keystore.password_file).expect("password");
         assert_eq!(resolved.as_str(), PASSWORD);
         assert_zeroizing_string(&resolved.0);
 
         let provider = provider(KeystoreSignerRegistryEntry::new(
             signer_ref(),
             keystore.entry_id,
-            KeystorePathSource::path(&keystore.keystore_path),
-            password_source,
+            &keystore.keystore_path,
+            &keystore.password_file,
         ));
         provider
             .sign_request(&signing_request(keystore.address))
             .expect("sign");
-    }
-
-    #[test]
-    fn env_path_source_resolves_keystore_path_process_locally() {
-        let keystore = test_keystore();
-        let env_name = format!(
-            "MFM_TEST_KEYSTORE_PATH_{}",
-            Uuid::new_v4().simple().to_string().to_uppercase()
-        );
-        env::set_var(&env_name, &keystore.keystore_path);
-
-        let entry = KeystoreSignerRegistryEntry::new(
-            signer_ref(),
-            keystore.entry_id,
-            KeystorePathSource::path_env_var(&env_name).expect("path env"),
-            KeystorePasswordSource::file(&keystore.password_file),
-        );
-        let provider = provider(entry);
-        provider
-            .sign_request(&signing_request(keystore.address))
-            .expect("sign");
-
-        env::remove_var(env_name);
     }
 
     #[test]
@@ -744,8 +557,8 @@ mod tests {
         let entry = KeystoreSignerRegistryEntry::new(
             signer_ref(),
             Uuid::new_v4(),
-            KeystorePathSource::path(&secret_path),
-            KeystorePasswordSource::file(&password_file),
+            &secret_path,
+            &password_file,
         );
         let provider = provider(entry);
         let error = provider

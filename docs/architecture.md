@@ -66,7 +66,7 @@ The typed boundary separates data, evidence, authority, and implementation artif
 - `CommittedRunStream` is store-owned append-only stream authority
 - `VerifiedRunArtifactStore` is retained-artifact authority tied to a committed stream
 - `VerifiedRunHistoryView` is runtime/replay read authority over a committed stream plus verified
-  retained artifact evidence; `VerifiedRunHistory` wraps that view for compatibility
+  retained artifact evidence
 - erased runner plans are implementation artifacts
 - rendered public-output JSON is an output/cache surface only
 
@@ -214,7 +214,7 @@ Transports implement reusable protocols and live/replay capability backends.
 
 Transports may:
 
-- parse runtime-only source configuration
+- consume typed runtime source and route descriptors supplied by app assembly
 - select protocol sources by non-secret runtime refs
 - redact endpoints and authorization material
 - execute protocol calls
@@ -231,7 +231,8 @@ Transports must not:
 - open keystores or own signer behavior
 - read password files
 - persist typed semantic events by themselves
-- leak RPC URLs, authorization headers, or local routing details into typed semantic surfaces
+- leak RPC URLs, authorization headers, or secret-bearing local routing details into typed semantic
+  surfaces
 
 If two workflows can use the same protocol behavior, that behavior belongs in a shared transport
 before either workflow lands.
@@ -499,6 +500,10 @@ corruption, or low-level storage contract fixtures.
 `crates/app` must not own workflow planning, state behavior, or adapter runner behavior. It may
 construct concrete process-local resources such as the Postgres run store, protocol clients, and
 signer providers, then pass them into adapter-owned runner factories.
+Evidence-only app services for status, stream inspection, list/watch, replay, and public-output
+rendering must be constructible from store, artifact, and certification/replay authority only. They
+must not construct live EVM transports, signer providers, or live capability runtime config. Live
+start/resume services may construct those live drivers because they are execution authority.
 
 `bin/cli` and `bin/rest-api` may:
 
@@ -508,6 +513,9 @@ signer providers, then pass them into adapter-owned runner factories.
 - start, resume, replay, inspect, and render typed runs
 - read run list/watch observations through the shared app API
 - preserve stable response envelopes
+
+Read-only CLI/REST commands and routes must use evidence-only app services. Live start, resume, and
+manual-resolution drive paths may use live app services that bind runners and capabilities.
 
 `bin/cli` and `bin/rest-api` must not:
 

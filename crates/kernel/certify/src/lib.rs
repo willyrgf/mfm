@@ -130,6 +130,79 @@ impl CertifyError {
     }
 }
 
+impl From<program::RegistryError> for CertifyError {
+    fn from(error: program::RegistryError) -> Self {
+        Self::Lowering(error.to_string())
+    }
+}
+
+/// Defines matching program and certification registry functions from one descriptor inventory.
+#[macro_export]
+macro_rules! define_program_descriptor_registry {
+    (
+        state_registry: $state_vis:vis $state_registry:ident,
+        operation_registry: $operation_vis:vis $operation_registry:ident,
+        certification: $cert_vis:vis $certification:ident,
+        states: [$($state:ty),* $(,)?],
+        operations: [$($operation:ty),* $(,)?] $(,)?
+    ) => {
+        $crate::define_program_descriptor_registry! {
+            state_registry: $state_vis $state_registry,
+            operation_registry: $operation_vis $operation_registry,
+            certification: $cert_vis $certification,
+            states: [$($state),*],
+            operations: [$($operation),*],
+            after_registration:,
+        }
+    };
+    (
+        state_registry: $state_vis:vis $state_registry:ident,
+        operation_registry: $operation_vis:vis $operation_registry:ident,
+        certification: $cert_vis:vis $certification:ident,
+        states: [$($state:ty),* $(,)?],
+        operations: [$($operation:ty),* $(,)?],
+        after_registration: $($after:path)?,
+    ) => {
+        #[doc = "Builds the state registry used for typed authoring and certification."]
+        $state_vis fn $state_registry() -> mfm_program::Result<mfm_program::StateRegistrySnapshot> {
+            let mut states = mfm_program::StateRegistryBuilder::new();
+            $(states.register::<$state>()?;)*
+            Ok(states.into_snapshot())
+        }
+
+        #[doc = "Builds the operation registry used for typed authoring and certification."]
+        $operation_vis fn $operation_registry() -> mfm_program::Result<mfm_program::OperationRegistrySnapshot> {
+            let mut operations = mfm_program::OperationRegistryBuilder::new();
+            $(operations.register::<$operation>()?;)*
+            Ok(operations.into_snapshot())
+        }
+
+        #[doc = "Adds program descriptors to a trusted certification registry."]
+        $cert_vis fn $certification(
+            registry: &mut $crate::CertificationRegistry,
+        ) -> $crate::Result<()> {
+            let mut states = mfm_program::StateRegistryBuilder::new();
+            $(
+                let registered = states
+                    .register::<$state>()
+                    .map_err($crate::CertifyError::from)?;
+                registry.register_state(&registered)?;
+            )*
+
+            let mut operations = mfm_program::OperationRegistryBuilder::new();
+            $(
+                let registered = operations
+                    .register::<$operation>()
+                    .map_err($crate::CertifyError::from)?;
+                registry.register_operation(&registered)?;
+            )*
+
+            $($after(registry)?;)?
+            Ok(())
+        }
+    };
+}
+
 /// Program-lowered typed spec data.
 ///
 /// This is the output of deterministic program lowering. It is still not certification or runtime

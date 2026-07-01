@@ -6,12 +6,13 @@
 //! on workflow lifecycle crates, signer providers, artifact stores, or binaries.
 //!
 //! ```rust
-//! use mfm_evm_capabilities::{EvmSourcePolicyId, EvmSourceRef};
-//! use mfm_transports_evm::{EvmJsonRpcClient, EvmRuntimeSource, EvmSourceRegistry};
+//! use mfm_evm_capabilities::{EvmNetworkId, EvmSourcePolicyId, EvmSourceRef};
+//! use mfm_transports_evm::{
+//!     EvmJsonRpcClient, EvmRoute, EvmRouteRegistry, EvmRuntimeSource, EvmSourceRegistry,
+//! };
 //!
 //! let source = EvmRuntimeSource::new(
 //!     EvmSourceRef::new("local")?,
-//!     1,
 //!     "http://127.0.0.1:8545",
 //!     None,
 //! )?;
@@ -19,7 +20,12 @@
 //!     source,
 //!     EvmSourcePolicyId::new("dev")?,
 //! )?;
-//! let _client = EvmJsonRpcClient::new(registry);
+//! let routes = EvmRouteRegistry::new([EvmRoute::new(
+//!     EvmNetworkId::new("reth-dev")?,
+//!     EvmSourceRef::new("local")?,
+//!     EvmSourcePolicyId::new("dev")?,
+//! )])?;
+//! let _client = EvmJsonRpcClient::new(registry, routes);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -31,23 +37,20 @@ use mfm_evm_capabilities::{
     EvmBalanceReadProvider, EvmBalanceReadRequest, EvmBalanceReadResponse, EvmBlockReadProvider,
     EvmBlockReadRequest, EvmBlockReadResponse, EvmBlockSelector, EvmCallReadProvider,
     EvmCallReadRequest, EvmCallReadResponse, EvmCapabilityError, EvmCapabilityFuture,
-    EvmChainIdentityProvider, EvmChainIdentityRequest, EvmChainIdentityResponse,
+    EvmChainGuard, EvmChainIdentityProvider, EvmChainIdentityRequest, EvmChainIdentityResponse,
     EvmFeeReadProvider, EvmFeeReadRequest, EvmFeeReadResponse, EvmGasEstimateProvider,
     EvmGasEstimateRequest, EvmGasEstimateResponse, EvmLogEntry, EvmLogsReadProvider,
-    EvmLogsReadRequest, EvmLogsReadResponse, EvmNonceOccupancy, EvmNonceOccupancyReadProvider,
-    EvmNonceOccupancyReadRequest, EvmNonceOccupancyReadResponse, EvmNonceReadProvider,
-    EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider, EvmReceiptReadRequest,
-    EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef, EvmTransactionSubmitProvider,
-    EvmTransactionSubmitRequest, EvmTransactionSubmitResponse, RedactedEvmSourceEvidence,
+    EvmLogsReadRequest, EvmLogsReadResponse, EvmNetworkId, EvmNonceOccupancy,
+    EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest, EvmNonceOccupancyReadResponse,
+    EvmNonceReadProvider, EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider,
+    EvmReceiptReadRequest, EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef,
+    EvmTransactionSubmitProvider, EvmTransactionSubmitRequest, EvmTransactionSubmitResponse,
+    RedactedEvmSourceEvidence,
 };
 use mfm_evm_core::encoding::parse_u256_hex;
 use mfm_evm_core::hex::{bytes_to_hex_prefixed, hex_to_bytes};
 use mfm_evm_core::tx::{parse_u128_quantity, parse_u64_quantity};
-use serde::Deserialize;
 use serde_json::{json, Value};
-
-/// Environment variable used by [`EvmJsonRpcClient::from_env`].
-pub const MFM_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
 
 /// Result type for EVM transport setup.
 pub type TransportResult<T> = std::result::Result<T, EvmTransportError>;
@@ -56,7 +59,6 @@ pub type TransportResult<T> = std::result::Result<T, EvmTransportError>;
 #[derive(Clone, PartialEq, Eq)]
 pub struct EvmRuntimeSource {
     id: EvmSourceRef,
-    expected_chain_id: u64,
     rpc_url: String,
     authorization: Option<String>,
 }
@@ -65,7 +67,6 @@ impl EvmRuntimeSource {
     /// Creates a runtime EVM source.
     pub fn new(
         id: EvmSourceRef,
-        expected_chain_id: u64,
         rpc_url: impl Into<String>,
         authorization: Option<String>,
     ) -> TransportResult<Self> {
@@ -75,7 +76,6 @@ impl EvmRuntimeSource {
         }
         Ok(Self {
             id,
-            expected_chain_id,
             rpc_url,
             authorization: authorization.filter(|value| !value.trim().is_empty()),
         })
@@ -85,18 +85,12 @@ impl EvmRuntimeSource {
     pub fn id(&self) -> &EvmSourceRef {
         &self.id
     }
-
-    /// Returns the expected EVM chain id.
-    pub const fn expected_chain_id(&self) -> u64 {
-        self.expected_chain_id
-    }
 }
 
 impl fmt::Debug for EvmRuntimeSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EvmRuntimeSource")
             .field("id", &self.id)
-            .field("expected_chain_id", &self.expected_chain_id)
             .field("rpc_url", &"<redacted>")
             .field(
                 "authorization",
@@ -182,41 +176,6 @@ impl EvmSourceRegistry {
         Self::new([source], [policy])
     }
 
-    /// Parses a runtime source registry JSON object.
-    pub fn from_json_str(raw: &str) -> TransportResult<Self> {
-        let config: RegistryConfig =
-            serde_json::from_str(raw).map_err(|_| EvmTransportError::InvalidRegistry)?;
-        let sources = config
-            .sources
-            .into_iter()
-            .map(|source| {
-                EvmRuntimeSource::new(
-                    EvmSourceRef::new(source.id).map_err(|_| EvmTransportError::InvalidRegistry)?,
-                    source.expected_chain_id,
-                    source.rpc_url,
-                    source.authorization,
-                )
-            })
-            .collect::<TransportResult<Vec<_>>>()?;
-        let policies = config
-            .policies
-            .into_iter()
-            .map(|policy| {
-                let source_ids = policy
-                    .ordered_sources
-                    .into_iter()
-                    .map(|id| EvmSourceRef::new(id).map_err(|_| EvmTransportError::InvalidRegistry))
-                    .collect::<TransportResult<Vec<_>>>()?;
-                EvmSourcePolicy::new(
-                    EvmSourcePolicyId::new(policy.id)
-                        .map_err(|_| EvmTransportError::InvalidRegistry)?,
-                    source_ids,
-                )
-            })
-            .collect::<TransportResult<Vec<_>>>()?;
-        Self::new(sources, policies)
-    }
-
     fn candidates<'a>(
         &'a self,
         policy_id: &EvmSourcePolicyId,
@@ -258,24 +217,71 @@ impl fmt::Debug for EvmSourceRegistry {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct RegistryConfig {
-    sources: Vec<SourceConfig>,
-    policies: Vec<PolicyConfig>,
+/// Runtime route from a semantic EVM network id to a local source policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvmRoute {
+    network_id: EvmNetworkId,
+    source_ref: EvmSourceRef,
+    policy_id: EvmSourcePolicyId,
 }
 
-#[derive(Debug, Deserialize)]
-struct SourceConfig {
-    id: String,
-    expected_chain_id: u64,
-    rpc_url: String,
-    authorization: Option<String>,
+impl EvmRoute {
+    /// Creates a runtime route.
+    pub fn new(
+        network_id: EvmNetworkId,
+        source_ref: EvmSourceRef,
+        policy_id: EvmSourcePolicyId,
+    ) -> Self {
+        Self {
+            network_id,
+            source_ref,
+            policy_id,
+        }
+    }
+
+    /// Returns the semantic network id.
+    pub const fn network_id(&self) -> &EvmNetworkId {
+        &self.network_id
+    }
+
+    /// Returns the preferred source reference.
+    pub const fn source_ref(&self) -> &EvmSourceRef {
+        &self.source_ref
+    }
+
+    /// Returns the source policy id.
+    pub const fn policy_id(&self) -> &EvmSourcePolicyId {
+        &self.policy_id
+    }
 }
 
-#[derive(Debug, Deserialize)]
-struct PolicyConfig {
-    id: String,
-    ordered_sources: Vec<String>,
+/// Runtime EVM route registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvmRouteRegistry {
+    routes: BTreeMap<EvmNetworkId, EvmRoute>,
+}
+
+impl EvmRouteRegistry {
+    /// Creates a runtime route registry, rejecting duplicate semantic network ids.
+    pub fn new(routes: impl IntoIterator<Item = EvmRoute>) -> TransportResult<Self> {
+        let mut by_network = BTreeMap::new();
+        for route in routes {
+            if by_network
+                .insert(route.network_id().clone(), route)
+                .is_some()
+            {
+                return Err(EvmTransportError::InvalidRegistry);
+            }
+        }
+        Ok(Self { routes: by_network })
+    }
+
+    /// Returns the route for a semantic network id.
+    pub fn route(&self, network_id: &EvmNetworkId) -> TransportResult<&EvmRoute> {
+        self.routes
+            .get(network_id)
+            .ok_or(EvmTransportError::RouteUnavailable)
+    }
 }
 
 /// Generic EVM JSON-RPC client.
@@ -283,42 +289,39 @@ struct PolicyConfig {
 pub struct EvmJsonRpcClient {
     client: reqwest::Client,
     registry: EvmSourceRegistry,
+    routes: EvmRouteRegistry,
 }
 
 impl EvmJsonRpcClient {
-    /// Creates a client from a runtime source registry.
-    pub fn new(registry: EvmSourceRegistry) -> Self {
+    /// Creates a client from runtime source and route registries.
+    pub fn new(registry: EvmSourceRegistry, routes: EvmRouteRegistry) -> Self {
         Self {
             client: reqwest::Client::builder()
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             registry,
+            routes,
         }
     }
 
-    /// Creates a client by parsing [`MFM_EVM_RPC_SOURCES_JSON`].
-    pub fn from_env() -> TransportResult<Self> {
-        let raw = std::env::var(MFM_EVM_RPC_SOURCES_JSON)
-            .map_err(|_| EvmTransportError::InvalidRegistry)?;
-        Ok(Self::new(EvmSourceRegistry::from_json_str(&raw)?))
+    /// Validates that a guard can resolve to a source policy without network I/O.
+    pub fn validate_guard(&self, guard: &EvmChainGuard) -> TransportResult<()> {
+        self.validate_route_binding(guard.network_id())
     }
 
-    /// Validates that a source policy can route to the requested source without network I/O.
-    pub fn validate_route(
-        &self,
-        policy_id: &EvmSourcePolicyId,
-        source_ref: &EvmSourceRef,
-    ) -> TransportResult<()> {
-        self.registry.candidates(policy_id, source_ref).map(|_| ())
+    /// Validates that a semantic network route resolves to a source policy without network I/O.
+    pub fn validate_route_binding(&self, network_id: &EvmNetworkId) -> TransportResult<()> {
+        let route = self.routes.route(network_id)?;
+        self.registry
+            .candidates(route.policy_id(), route.source_ref())
+            .map(|_| ())
     }
 
     async fn chain_identity_impl(
         &self,
         request: &EvmChainIdentityRequest,
     ) -> TransportResult<EvmChainIdentityResponse> {
-        let selected = self
-            .verified_source(&request.policy_id, &request.source_ref)
-            .await?;
+        let selected = self.verified_source(&request.guard).await?;
         let client_version = self
             .rpc_call(selected.source, "web3_clientVersion", json!([]))
             .await
@@ -335,9 +338,7 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmBlockReadRequest,
     ) -> TransportResult<EvmBlockReadResponse> {
-        let selected = self
-            .verified_source(&request.policy_id, &request.source_ref)
-            .await?;
+        let selected = self.verified_source(&request.guard).await?;
         let value = match &request.block {
             EvmBlockSelector::Hash(hash) => {
                 self.rpc_call(
@@ -362,6 +363,7 @@ impl EvmJsonRpcClient {
             .ok_or(EvmTransportError::InvalidResponse)
             .and_then(parse_u64)?;
         let block_hash = parse_b256_field(&value, "hash")?;
+        validate_block_identity(&request.block, block_number, block_hash)?;
         Ok(EvmBlockReadResponse {
             evidence: selected.evidence,
             block_number,
@@ -373,9 +375,7 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmCallReadRequest,
     ) -> TransportResult<EvmCallReadResponse> {
-        let selected = self
-            .verified_source(&request.policy_id, &request.source_ref)
-            .await?;
+        let selected = self.verified_source(&request.guard).await?;
         let result = self
             .rpc_call(
                 selected.source,
@@ -397,9 +397,7 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmBalanceReadRequest,
     ) -> TransportResult<EvmBalanceReadResponse> {
-        let selected = self
-            .verified_source(&request.policy_id, &request.source_ref)
-            .await?;
+        let selected = self.verified_source(&request.guard).await?;
         let result = self
             .rpc_call(
                 selected.source,
@@ -421,9 +419,7 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmLogsReadRequest,
     ) -> TransportResult<EvmLogsReadResponse> {
-        let selected = self
-            .verified_source(&request.policy_id, &request.source_ref)
-            .await?;
+        let selected = self.verified_source(&request.guard).await?;
         let mut filter = serde_json::Map::new();
         filter.insert(
             "fromBlock".to_owned(),
@@ -460,6 +456,9 @@ impl EvmJsonRpcClient {
             .iter()
             .map(parse_log_entry)
             .collect::<TransportResult<Vec<_>>>()?;
+        for log in &logs {
+            validate_log_matches_request(request, log)?;
+        }
         Ok(EvmLogsReadResponse {
             evidence: selected.evidence,
             logs,
@@ -470,9 +469,7 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmNonceReadRequest,
     ) -> TransportResult<EvmNonceReadResponse> {
-        let selected = self
-            .verified_source(&request.policy_id, &request.source_ref)
-            .await?;
+        let selected = self.verified_source(&request.guard).await?;
         let result = self
             .rpc_call(
                 selected.source,
@@ -494,9 +491,7 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmFeeReadRequest,
     ) -> TransportResult<EvmFeeReadResponse> {
-        let selected = self
-            .verified_source(&request.policy_id, &request.source_ref)
-            .await?;
+        let selected = self.verified_source(&request.guard).await?;
         let legacy_gas_price = self
             .rpc_call(selected.source, "eth_gasPrice", json!([]))
             .await?
@@ -550,9 +545,7 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmGasEstimateRequest,
     ) -> TransportResult<EvmGasEstimateResponse> {
-        let selected = self
-            .verified_source(&request.policy_id, &request.source_ref)
-            .await?;
+        let selected = self.verified_source(&request.guard).await?;
         let mut call = serde_json::Map::new();
         if let Some(from) = request.from {
             call.insert("from".to_owned(), json!(format!("{from:?}")));
@@ -586,9 +579,7 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmTransactionSubmitRequest,
     ) -> TransportResult<EvmTransactionSubmitResponse> {
-        let selected = self
-            .verified_source(&request.policy_id, &request.source_ref)
-            .await?;
+        let selected = self.verified_source(&request.guard).await?;
         let result = self
             .rpc_call(
                 selected.source,
@@ -610,9 +601,7 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmReceiptReadRequest,
     ) -> TransportResult<EvmReceiptReadResponse> {
-        let selected = self
-            .verified_source(&request.policy_id, &request.source_ref)
-            .await?;
+        let selected = self.verified_source(&request.guard).await?;
         let result = self
             .rpc_call(
                 selected.source,
@@ -624,6 +613,9 @@ impl EvmJsonRpcClient {
             return Err(EvmTransportError::ReceiptPending);
         }
         let transaction_hash = parse_b256_field(&result, "transactionHash")?;
+        if transaction_hash != request.transaction_hash {
+            return Err(EvmTransportError::InvalidResponse);
+        }
         let block_number = result
             .get("blockNumber")
             .and_then(Value::as_str)
@@ -646,9 +638,7 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmNonceOccupancyReadRequest,
     ) -> TransportResult<EvmNonceOccupancyReadResponse> {
-        let selected = self
-            .verified_source(&request.policy_id, &request.source_ref)
-            .await?;
+        let selected = self.verified_source(&request.guard).await?;
         let account = format!("{:?}", request.account).to_ascii_lowercase();
         for block_tag in ["latest", "pending"] {
             let result = self
@@ -703,24 +693,39 @@ impl EvmJsonRpcClient {
 
     async fn verified_source<'a>(
         &'a self,
-        policy_id: &EvmSourcePolicyId,
-        source_ref: &EvmSourceRef,
+        guard: &EvmChainGuard,
     ) -> TransportResult<VerifiedSource<'a>> {
+        let route = self.routes.route(guard.network_id())?;
         let mut last_failure = EvmTransportError::SourceUnavailable;
-        for source in self.registry.candidates(policy_id, source_ref)? {
+        for source in self
+            .registry
+            .candidates(route.policy_id(), route.source_ref())?
+        {
             match self.chain_id_for_source(source).await {
-                Ok(chain_id) if chain_id == source.expected_chain_id => {
+                Ok(chain_id) if chain_id == guard.expected_chain_id() => {
                     return Ok(VerifiedSource {
                         source,
                         chain_id,
                         evidence: RedactedEvmSourceEvidence {
+                            network_id: guard.network_id().clone(),
+                            expected_chain_id: guard.expected_chain_id(),
+                            observed_chain_id: chain_id,
                             source_ref: source.id.clone(),
-                            policy_id: policy_id.clone(),
-                            chain_id,
+                            policy_id: route.policy_id().clone(),
                         },
                     });
                 }
-                Ok(_) => return Err(EvmTransportError::ChainIdMismatch),
+                Ok(chain_id) => {
+                    return Err(EvmTransportError::ChainIdMismatch {
+                        evidence: RedactedEvmSourceEvidence {
+                            network_id: guard.network_id().clone(),
+                            expected_chain_id: guard.expected_chain_id(),
+                            observed_chain_id: chain_id,
+                            source_ref: source.id.clone(),
+                            policy_id: route.policy_id().clone(),
+                        },
+                    });
+                }
                 Err(EvmTransportError::RequestFailed) => {
                     last_failure = EvmTransportError::RequestFailed;
                 }
@@ -777,6 +782,7 @@ impl fmt::Debug for EvmJsonRpcClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EvmJsonRpcClient")
             .field("registry", &self.registry)
+            .field("routes", &self.routes)
             .finish_non_exhaustive()
     }
 }
@@ -882,6 +888,9 @@ impl_provider!(
 fn capability_error_from_transport(error: EvmTransportError) -> EvmCapabilityError {
     match error {
         EvmTransportError::ReceiptPending => EvmCapabilityError::ReceiptPending,
+        EvmTransportError::ChainIdMismatch { evidence } => {
+            EvmCapabilityError::ChainMismatch { evidence }
+        }
         other => EvmCapabilityError::redacted_provider_failure(other),
     }
 }
@@ -964,8 +973,56 @@ fn parse_log_entry(value: &Value) -> TransportResult<EvmLogEntry> {
     })
 }
 
+fn validate_block_identity(
+    selector: &EvmBlockSelector,
+    block_number: u64,
+    block_hash: B256,
+) -> TransportResult<()> {
+    match selector {
+        EvmBlockSelector::Number(expected) if *expected != block_number => {
+            Err(EvmTransportError::InvalidResponse)
+        }
+        EvmBlockSelector::Hash(expected) if *expected != block_hash => {
+            Err(EvmTransportError::InvalidResponse)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_log_matches_request(
+    request: &EvmLogsReadRequest,
+    log: &EvmLogEntry,
+) -> TransportResult<()> {
+    if let Some(expected_address) = request.address {
+        if expected_address != log.address {
+            return Err(EvmTransportError::InvalidResponse);
+        }
+    }
+    for (expected, observed) in request.topics.iter().zip(log.topics.iter()) {
+        if expected != observed {
+            return Err(EvmTransportError::InvalidResponse);
+        }
+    }
+    if log.topics.len() < request.topics.len() {
+        return Err(EvmTransportError::InvalidResponse);
+    }
+    if let Some(block_number) = log.block_number {
+        if let EvmBlockSelector::Number(from_block) = request.from_block {
+            if block_number < from_block {
+                return Err(EvmTransportError::InvalidResponse);
+            }
+        }
+        if let EvmBlockSelector::Number(to_block) = request.to_block {
+            if block_number > to_block {
+                return Err(EvmTransportError::InvalidResponse);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Redaction-safe EVM transport setup/runtime error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EvmTransportError {
     /// Runtime source registry was invalid.
     #[error("EVM source registry was invalid")]
@@ -973,6 +1030,9 @@ pub enum EvmTransportError {
     /// Requested source policy was unavailable.
     #[error("EVM source policy was unavailable")]
     PolicyUnavailable,
+    /// Requested semantic network route was unavailable.
+    #[error("EVM route was unavailable")]
+    RouteUnavailable,
     /// Requested source was unavailable.
     #[error("EVM source was unavailable")]
     SourceUnavailable,
@@ -981,7 +1041,10 @@ pub enum EvmTransportError {
     SourceNotAllowed,
     /// Source chain id did not match the expected chain.
     #[error("EVM source chain id did not match expected chain")]
-    ChainIdMismatch,
+    ChainIdMismatch {
+        /// Closed redacted mismatch evidence.
+        evidence: RedactedEvmSourceEvidence,
+    },
     /// JSON-RPC request failed.
     #[error("EVM JSON-RPC request failed")]
     RequestFailed,

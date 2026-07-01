@@ -8,7 +8,7 @@ streams. It persists append-only commits, canonical event payload bytes,
 artifact blobs/evidence, resource-lane transition authority, and observation
 cursor rows through `mfm-store`.
 It owns the PostgreSQL migrations, crate-local SQLx query metadata, and runtime
-schema compatibility checks for that store.
+schema contract checks for that store.
 
 ## Runtime Contract
 
@@ -18,11 +18,23 @@ callers:
 
 ```rust
 # async fn example() -> Result<(), mfm_stream_store_postgres::PostgresStoreError> {
-mfm_stream_store_postgres::PostgresSchema::migrate_env().await?;
-let _store = mfm_stream_store_postgres::PostgresRunStore::connect_env().await?;
+let database_url = "postgres://postgres:postgres@localhost/mfm";
+mfm_stream_store_postgres::PostgresSchema::migrate(database_url).await?;
+let authority = mfm_stream_store_postgres::PostgresSchema::validate(database_url).await?;
+let store = mfm_stream_store_postgres::PostgresRunStore::connect(database_url).await?;
+assert_eq!(store.store_authority(), &authority);
 # Ok(())
 # }
 ```
+
+`PostgresRunStore::connect` performs the same authority validation before returning
+a store. Authority validation checks that PostgreSQL is reachable, the SQLx
+migration ledger matches the compiled migrations, required catalog objects are
+present with expected contracts, stale retired tables are absent, and the
+singleton `store_metadata` row contains the expected contract version and a
+valid store-owned trust-scope id. These failures are reported through closed
+`PostgresStoreAuthorityError` categories and never include database URLs,
+credentials, schema object definitions, or row contents.
 
 ## Verification
 
@@ -52,17 +64,14 @@ nix shell .#sqlx-cli --command bash -lc \
 
 After regenerating metadata, run `nix run .#test-db`.
 
-## Compatibility
+## Local Database Baseline
 
-The old dynamic stream-store surface and old `typed_*` schema are removed from
-this crate. This is a destructive dev-branch baseline: use a fresh database or
+This crate owns the certified Postgres run-store schema. Use a fresh database or
 drop/recreate the existing local schema before applying migrations.
 
 There is no downgrade migration. Rollback means rolling code back to the target
 branch and resetting the database or schema to that branch's expected baseline.
-Old filesystem artifact roots are not read or migrated by this store; after a
-local reset, developers may delete those roots once no old branch still needs
-them.
+Filesystem artifact roots outside this store are not read or migrated.
 
 ## Operational Constraints
 

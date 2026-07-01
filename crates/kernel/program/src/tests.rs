@@ -155,6 +155,25 @@ struct LaunchPublicOutputs<'p, 's> {
     result: Handle<'p, 's, LaunchValue>,
 }
 
+fn launch_seed(amount: u64, label: &str) -> CanonicalSeed<LaunchValue> {
+    CanonicalSeed::from_value(&LaunchValue {
+        amount,
+        label: label.to_owned(),
+    })
+    .expect("seed")
+}
+
+fn single_seed_public_output_draft(seed: CanonicalSeed<LaunchValue>) -> TypedProgramDraft {
+    build_root(ScopeKey::new("root").expect("scope key"), |root| {
+        let handle = root.seed(SeedKey::new("first")?, seed)?;
+        root.bind_public_outputs(
+            PublicOutputKey::new("terminal")?,
+            &LaunchPublicOutputs { result: handle },
+        )
+    })
+    .expect("root builds")
+}
+
 #[derive(OperationOutputDerive)]
 #[mfm(schema = "mfm.program.test.operation_outputs")]
 struct LaunchOperationOutputs<'p, 's> {
@@ -177,6 +196,26 @@ struct LaunchConfig {
     multiplier: u64,
 }
 
+fn test_state_kind(name: &str, digest: &[u8]) -> Result<StateKind> {
+    StateKind::new(
+        "mfm.program.test.state",
+        name,
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(digest),
+    )
+    .map_err(|error| PlanError::Key(error.to_string()))
+}
+
+fn test_operation_kind(name: &str, digest: &[u8]) -> Result<OperationKind> {
+    OperationKind::new(
+        "mfm.program.test.operation",
+        name,
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(digest),
+    )
+    .map_err(|error| PlanError::Key(error.to_string()))
+}
+
 #[derive(Debug, Clone)]
 struct MultiplyState {
     config: LaunchConfig,
@@ -190,13 +229,7 @@ impl StateSpec for MultiplyState {
     type Caps = NoCaps;
 
     fn kind() -> Result<StateKind> {
-        StateKind::new(
-            "mfm.program.test.state",
-            "multiply",
-            DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(b"mfm.program.test.state:multiply"),
-        )
-        .map_err(|error| PlanError::Key(error.to_string()))
+        test_state_kind("multiply", b"mfm.program.test.state:multiply")
     }
 
     fn version() -> Result<StateVersion> {
@@ -269,13 +302,7 @@ macro_rules! impl_side_effect_state_spec {
             type Caps = (TestMutationCap,);
 
             fn kind() -> Result<StateKind> {
-                StateKind::new(
-                    "mfm.program.test.state",
-                    $kind,
-                    DigestAlgorithm::Sha256JcsV1,
-                    sha256_digest_bytes($digest),
-                )
-                .map_err(|error| PlanError::Key(error.to_string()))
+                test_state_kind($kind, $digest)
             }
 
             fn version() -> Result<StateVersion> {
@@ -370,13 +397,7 @@ impl Operation for MultiplyOperation {
     type Output<'program, 'scope> = LaunchOperationOutputs<'program, 'scope>;
 
     fn kind() -> Result<OperationKind> {
-        OperationKind::new(
-            "mfm.program.test.operation",
-            "multiply",
-            DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(b"mfm.program.test.operation:multiply"),
-        )
-        .map_err(|error| PlanError::Key(error.to_string()))
+        test_operation_kind("multiply", b"mfm.program.test.operation:multiply")
     }
 
     fn version() -> Result<OperationVersion> {
@@ -413,13 +434,7 @@ impl Operation for FailingOperation {
     type Output<'program, 'scope> = LaunchOperationOutputs<'program, 'scope>;
 
     fn kind() -> Result<OperationKind> {
-        OperationKind::new(
-            "mfm.program.test.operation",
-            "failing",
-            DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(b"mfm.program.test.operation:failing"),
-        )
-        .map_err(|error| PlanError::Key(error.to_string()))
+        test_operation_kind("failing", b"mfm.program.test.operation:failing")
     }
 
     fn version() -> Result<OperationVersion> {
@@ -450,15 +465,69 @@ impl Operation for FailingOperation {
     }
 }
 
+fn register_multiply_state(registry: &mut StateRegistryBuilder) -> RegisteredState<MultiplyState> {
+    registry
+        .register::<MultiplyState>()
+        .expect("state registers")
+}
+
+fn multiply_state_registry() -> StateRegistrySnapshot {
+    let mut registry = StateRegistryBuilder::new();
+    register_multiply_state(&mut registry);
+    registry.into_snapshot()
+}
+
+fn register_multiply_operation(
+    registry: &mut OperationRegistryBuilder,
+) -> RegisteredOperation<MultiplyOperation> {
+    registry
+        .register::<MultiplyOperation>()
+        .expect("operation registers")
+}
+
+fn multiply_registries() -> (StateRegistrySnapshot, OperationRegistrySnapshot) {
+    let mut operations = OperationRegistryBuilder::new();
+    register_multiply_operation(&mut operations);
+    (multiply_state_registry(), operations.into_snapshot())
+}
+
+fn register_forward_mutation_state(registry: &mut StateRegistryBuilder) {
+    registry
+        .register::<ForwardMutationState>()
+        .expect("forward registers");
+}
+
+fn register_compensation_mutation_state(registry: &mut StateRegistryBuilder) {
+    registry
+        .register::<CompensationMutationState>()
+        .expect("compensation registers");
+}
+
+fn forward_mutation_registry() -> StateRegistrySnapshot {
+    let mut registry = StateRegistryBuilder::new();
+    register_forward_mutation_state(&mut registry);
+    registry.into_snapshot()
+}
+
+fn compensation_registry() -> StateRegistrySnapshot {
+    let mut registry = StateRegistryBuilder::new();
+    register_forward_mutation_state(&mut registry);
+    register_compensation_mutation_state(&mut registry);
+    registry.into_snapshot()
+}
+
+fn set_compensating_policy(root: &mut RootBuilder<'_, '_>) -> Result<()> {
+    root.set_saga_policy(SideEffectSagaPolicy::CompensateCompleted {
+        on_remediation_unresolved: RemediationUnresolved::FailWithoutAcdcClaim,
+    })
+}
+
 #[test]
 fn root_builder_binds_seed_and_public_output_specs() {
     let draft = build_root(
         ScopeKey::new("portfolio/root").expect("scope key"),
         |root| {
-            let seed = CanonicalSeed::from_value(&LaunchValue {
-                amount: 42,
-                label: "cash".to_owned(),
-            })?;
+            let seed = launch_seed(42, "cash");
             let handle = root.seed(SeedKey::new("launch-input")?, seed)?;
             let outputs = LaunchPublicOutputs { result: handle };
             root.bind_public_outputs(PublicOutputKey::new("terminal")?, &outputs)
@@ -500,24 +569,13 @@ fn root_builder_binds_seed_and_public_output_specs() {
 
 #[test]
 fn typed_program_launch_plan_collects_config_material() {
-    let mut state_registry = StateRegistryBuilder::new();
-    state_registry
-        .register::<MultiplyState>()
-        .expect("state registers");
-    let mut operation_registry = OperationRegistryBuilder::new();
-    operation_registry
-        .register::<MultiplyOperation>()
-        .expect("operation registers");
-    let seed = CanonicalSeed::from_value(&LaunchValue {
-        amount: 4,
-        label: "operation".to_owned(),
-    })
-    .expect("seed");
+    let (state_registry, operation_registry) = multiply_registries();
+    let seed = launch_seed(4, "operation");
     let seed_bytes = seed.canonical_json().clone();
     let draft = build_root_with_registries(
         ScopeKey::new("portfolio/root").expect("scope key"),
-        state_registry.snapshot(),
-        operation_registry.snapshot(),
+        state_registry,
+        operation_registry,
         |root| {
             let input = root.seed(SeedKey::new("launch-input")?, seed)?;
             let result = root.scope().call::<MultiplyOperation, _>(
@@ -562,17 +620,9 @@ fn typed_program_launch_plan_collects_config_material() {
 
 #[test]
 fn typed_program_launch_plan_matches_seed_material_by_seed_id() {
-    let first_seed = CanonicalSeed::from_value(&LaunchValue {
-        amount: 1,
-        label: "first".to_owned(),
-    })
-    .expect("first seed");
+    let first_seed = launch_seed(1, "first");
     let first_bytes = first_seed.canonical_json().clone();
-    let second_seed = CanonicalSeed::from_value(&LaunchValue {
-        amount: 2,
-        label: "second".to_owned(),
-    })
-    .expect("second seed");
+    let second_seed = launch_seed(2, "second");
     let second_bytes = second_seed.canonical_json().clone();
     let draft = build_root(ScopeKey::new("root").expect("scope key"), |root| {
         let first = root.seed(SeedKey::new("first")?, first_seed)?;
@@ -618,19 +668,7 @@ fn typed_program_launch_plan_matches_seed_material_by_seed_id() {
 
 #[test]
 fn typed_program_launch_plan_rejects_missing_seed_material() {
-    let seed = CanonicalSeed::from_value(&LaunchValue {
-        amount: 1,
-        label: "first".to_owned(),
-    })
-    .expect("seed");
-    let draft = build_root(ScopeKey::new("root").expect("scope key"), |root| {
-        let handle = root.seed(SeedKey::new("first")?, seed)?;
-        root.bind_public_outputs(
-            PublicOutputKey::new("terminal")?,
-            &LaunchPublicOutputs { result: handle },
-        )
-    })
-    .expect("root builds");
+    let draft = single_seed_public_output_draft(launch_seed(1, "first"));
 
     let error = TypedProgramLaunchPlan::from_draft_and_seed_material(
         draft,
@@ -645,20 +683,9 @@ fn typed_program_launch_plan_rejects_missing_seed_material() {
 
 #[test]
 fn typed_program_launch_plan_rejects_unknown_seed_material() {
-    let seed = CanonicalSeed::from_value(&LaunchValue {
-        amount: 1,
-        label: "first".to_owned(),
-    })
-    .expect("seed");
+    let seed = launch_seed(1, "first");
     let seed_bytes = seed.canonical_json().clone();
-    let draft = build_root(ScopeKey::new("root").expect("scope key"), |root| {
-        let handle = root.seed(SeedKey::new("first")?, seed)?;
-        root.bind_public_outputs(
-            PublicOutputKey::new("terminal")?,
-            &LaunchPublicOutputs { result: handle },
-        )
-    })
-    .expect("root builds");
+    let draft = single_seed_public_output_draft(seed);
     let expected_id = draft.seeds()[0].seed_id.clone();
     let seeds = std::collections::BTreeMap::from([
         (expected_id, seed_bytes.clone()),
@@ -675,26 +702,8 @@ fn typed_program_launch_plan_rejects_unknown_seed_material() {
 
 #[test]
 fn typed_program_launch_plan_rejects_mismatched_seed_material() {
-    let seed = CanonicalSeed::from_value(&LaunchValue {
-        amount: 1,
-        label: "first".to_owned(),
-    })
-    .expect("seed");
-    let mismatched_bytes = CanonicalSeed::from_value(&LaunchValue {
-        amount: 2,
-        label: "wrong".to_owned(),
-    })
-    .expect("mismatched seed")
-    .canonical_json()
-    .clone();
-    let draft = build_root(ScopeKey::new("root").expect("scope key"), |root| {
-        let handle = root.seed(SeedKey::new("first")?, seed)?;
-        root.bind_public_outputs(
-            PublicOutputKey::new("terminal")?,
-            &LaunchPublicOutputs { result: handle },
-        )
-    })
-    .expect("root builds");
+    let mismatched_bytes = launch_seed(2, "wrong").canonical_json().clone();
+    let draft = single_seed_public_output_draft(launch_seed(1, "first"));
     let seeds =
         std::collections::BTreeMap::from([(draft.seeds()[0].seed_id.clone(), mismatched_bytes)]);
 
@@ -709,19 +718,14 @@ fn typed_program_launch_plan_rejects_mismatched_seed_material() {
 #[test]
 fn registered_state_registry_plans_state_node() {
     let mut registry = StateRegistryBuilder::new();
-    let registered = registry
-        .register::<MultiplyState>()
-        .expect("state registers");
+    let registered = register_multiply_state(&mut registry);
     assert_eq!(registered.runner(), RunnerKind::Pure);
 
     let draft = build_root_with_registry(
         ScopeKey::new("portfolio/root").expect("scope key"),
         registry.snapshot(),
         |root| {
-            let seed = CanonicalSeed::from_value(&LaunchValue {
-                amount: 7,
-                label: "gross".to_owned(),
-            })?;
+            let seed = launch_seed(7, "gross");
             let input = root.seed(SeedKey::new("launch-input")?, seed)?;
             let result = root.scope().state::<MultiplyState, _>(
                 StateKey::new("multiply")?,
@@ -771,15 +775,10 @@ fn registered_state_registry_plans_state_node() {
 #[test]
 fn explicit_registered_state_token_plans_without_builder_registry() {
     let mut registry = StateRegistryBuilder::new();
-    let registered = registry
-        .register::<MultiplyState>()
-        .expect("state registers");
+    let registered = register_multiply_state(&mut registry);
 
     let draft = build_root(ScopeKey::new("root").expect("scope key"), |root| {
-        let seed = CanonicalSeed::from_value(&LaunchValue {
-            amount: 2,
-            label: "explicit".to_owned(),
-        })?;
+        let seed = launch_seed(2, "explicit");
         let input = root.seed(SeedKey::new("input")?, seed)?;
         let result = root.scope().state_registered::<MultiplyState, _>(
             StateKey::new("multiply")?,
@@ -800,25 +799,12 @@ fn explicit_registered_state_token_plans_without_builder_registry() {
 
 #[test]
 fn linked_compensation_authoring_keeps_remediation_out_of_forward_nodes() {
-    let mut registry = StateRegistryBuilder::new();
-    registry
-        .register::<ForwardMutationState>()
-        .expect("forward registers");
-    registry
-        .register::<CompensationMutationState>()
-        .expect("compensation registers");
-
     let draft = build_root_with_registry(
         ScopeKey::new("root").expect("scope key"),
-        registry.snapshot(),
+        compensation_registry(),
         |root| {
-            root.set_saga_policy(SideEffectSagaPolicy::CompensateCompleted {
-                on_remediation_unresolved: RemediationUnresolved::FailWithoutAcdcClaim,
-            })?;
-            let seed = CanonicalSeed::from_value(&LaunchValue {
-                amount: 2,
-                label: "linked".to_owned(),
-            })?;
+            set_compensating_policy(root)?;
+            let seed = launch_seed(2, "linked");
             let input = root.seed(SeedKey::new("input")?, seed)?;
             let forward_claim = exclusive_resource_claim("mfm.program.test.forward_nonce", 0x61);
             let remediation_claim =
@@ -921,25 +907,12 @@ fn linked_compensation_authoring_keeps_remediation_out_of_forward_nodes() {
 
 #[test]
 fn linked_compensation_rejects_same_forward_and_remediation_key() {
-    let mut registry = StateRegistryBuilder::new();
-    registry
-        .register::<ForwardMutationState>()
-        .expect("forward registers");
-    registry
-        .register::<CompensationMutationState>()
-        .expect("compensation registers");
-
     let err = build_root_with_registry(
         ScopeKey::new("root").expect("scope key"),
-        registry.snapshot(),
+        compensation_registry(),
         |root| {
-            root.set_saga_policy(SideEffectSagaPolicy::CompensateCompleted {
-                on_remediation_unresolved: RemediationUnresolved::FailWithoutAcdcClaim,
-            })?;
-            let seed = CanonicalSeed::from_value(&LaunchValue {
-                amount: 2,
-                label: "same-key".to_owned(),
-            })?;
+            set_compensating_policy(root)?;
+            let seed = launch_seed(2, "same-key");
             let input = root.seed(SeedKey::new("input")?, seed)?;
             let _ = root
                 .scope()
@@ -975,22 +948,12 @@ fn linked_compensation_rejects_same_forward_and_remediation_key() {
 
 #[test]
 fn compensating_policy_requires_every_forward_side_effect_linked() {
-    let mut registry = StateRegistryBuilder::new();
-    registry
-        .register::<ForwardMutationState>()
-        .expect("forward registers");
-
     let err = build_root_with_registry(
         ScopeKey::new("root").expect("scope key"),
-        registry.snapshot(),
+        forward_mutation_registry(),
         |root| {
-            root.set_saga_policy(SideEffectSagaPolicy::CompensateCompleted {
-                on_remediation_unresolved: RemediationUnresolved::FailWithoutAcdcClaim,
-            })?;
-            let seed = CanonicalSeed::from_value(&LaunchValue {
-                amount: 2,
-                label: "gap".to_owned(),
-            })?;
+            set_compensating_policy(root)?;
+            let seed = launch_seed(2, "gap");
             let input = root.seed(SeedKey::new("input")?, seed)?;
             let result = root.scope().side_effect::<ForwardMutationState, _>(
                 StateKey::new("forward")?,
@@ -1017,27 +980,16 @@ fn compensating_policy_requires_every_forward_side_effect_linked() {
 #[test]
 fn out_of_scope_remediation_binding_fails_finalize() {
     let mut registry = StateRegistryBuilder::new();
-    registry
-        .register::<MultiplyState>()
-        .expect("pure registers");
-    registry
-        .register::<ForwardMutationState>()
-        .expect("forward registers");
-    registry
-        .register::<CompensationMutationState>()
-        .expect("compensation registers");
+    register_multiply_state(&mut registry);
+    register_forward_mutation_state(&mut registry);
+    register_compensation_mutation_state(&mut registry);
 
     let err = build_root_with_registry(
         ScopeKey::new("root").expect("scope key"),
         registry.snapshot(),
         |root| {
-            root.set_saga_policy(SideEffectSagaPolicy::CompensateCompleted {
-                on_remediation_unresolved: RemediationUnresolved::FailWithoutAcdcClaim,
-            })?;
-            let seed = CanonicalSeed::from_value(&LaunchValue {
-                amount: 2,
-                label: "scope".to_owned(),
-            })?;
+            set_compensating_policy(root)?;
+            let seed = launch_seed(2, "scope");
             let input = root.seed(SeedKey::new("input")?, seed)?;
             let sibling = root.scope().state::<MultiplyState, _>(
                 StateKey::new("sibling")?,
@@ -1080,21 +1032,14 @@ fn out_of_scope_remediation_binding_fails_finalize() {
 
 #[test]
 fn state_output_domain_keys_are_lineage_evidence() {
-    let mut registry = StateRegistryBuilder::new();
-    registry
-        .register::<MultiplyState>()
-        .expect("state registers");
-    let registry = registry.into_snapshot();
+    let registry = multiply_state_registry();
 
     let build = |domain_key: TestDomainKey| {
         build_root_with_registry(
             ScopeKey::new("root").expect("scope key"),
             registry.clone(),
             |root| {
-                let seed = CanonicalSeed::from_value(&LaunchValue {
-                    amount: 2,
-                    label: "domain".to_owned(),
-                })?;
+                let seed = launch_seed(2, "domain");
                 let input = root.seed(SeedKey::new("input")?, seed)?;
                 let result = root.scope().state_with_domain_keys::<MultiplyState, _, _>(
                     StateKey::new("multiply")?,
@@ -1133,24 +1078,16 @@ fn state_output_domain_keys_are_lineage_evidence() {
 
 #[test]
 fn registered_operation_registry_records_lineage_frame() {
-    let mut state_registry = StateRegistryBuilder::new();
-    state_registry
-        .register::<MultiplyState>()
-        .expect("state registers");
+    let state_registry = multiply_state_registry();
     let mut operation_registry = OperationRegistryBuilder::new();
-    let registered_operation = operation_registry
-        .register::<MultiplyOperation>()
-        .expect("operation registers");
+    let registered_operation = register_multiply_operation(&mut operation_registry);
 
     let draft = build_root_with_registries(
         ScopeKey::new("portfolio/root").expect("scope key"),
-        state_registry.snapshot(),
+        state_registry,
         operation_registry.snapshot(),
         |root| {
-            let seed = CanonicalSeed::from_value(&LaunchValue {
-                amount: 4,
-                label: "operation".to_owned(),
-            })?;
+            let seed = launch_seed(4, "operation");
             let input = root.seed(SeedKey::new("launch-input")?, seed)?;
             let result = root.scope().call::<MultiplyOperation, _>(
                 OperationKey::new("multiply-operation")?,
@@ -1195,24 +1132,14 @@ fn registered_operation_registry_records_lineage_frame() {
 
 #[test]
 fn stable_ids_and_value_lineage_golden_vectors() {
-    let mut state_registry = StateRegistryBuilder::new();
-    state_registry
-        .register::<MultiplyState>()
-        .expect("state registers");
-    let mut operation_registry = OperationRegistryBuilder::new();
-    operation_registry
-        .register::<MultiplyOperation>()
-        .expect("operation registers");
+    let (state_registry, operation_registry) = multiply_registries();
 
     let draft = build_root_with_registries(
         ScopeKey::new("portfolio/root").expect("scope key"),
-        state_registry.snapshot(),
-        operation_registry.snapshot(),
+        state_registry,
+        operation_registry,
         |root| {
-            let seed = CanonicalSeed::from_value(&LaunchValue {
-                amount: 4,
-                label: "operation".to_owned(),
-            })?;
+            let seed = launch_seed(4, "operation");
             let input = root.seed(SeedKey::new("launch-input")?, seed)?;
             let result = root.scope().call::<MultiplyOperation, _>(
                 OperationKey::new("multiply-operation")?,
@@ -1262,19 +1189,19 @@ fn stable_ids_and_value_lineage_golden_vectors() {
     );
     assert_eq!(
         seed.seed_id.as_str(),
-        "seed:sha256-jcs-v1:05ba036389ad5af4fbcbbbc36f5b4f4b566573aa04de470a7b2a88d5e7f1b1a5"
+        "seed:sha256-jcs-v1:f13eb7cea8383588ea4b87607db8074478c8212ee4ce3660220224fd0636d745"
     );
     assert_eq!(
         seed.cell_id.as_str(),
-        "cell:sha256-jcs-v1:b4c309b0528560c3051be99b494bcb10c533c2cf93fa83c91279fb228508ff3d"
+        "cell:sha256-jcs-v1:86089606d76c84a3924bda1ab24ae860ef0d66c7bf14451ac064c4fc1f19760e"
     );
     assert_eq!(
         seed.value_lineage.digest().as_str(),
-        "content:sha256-jcs-v1:f005d65682c9906a11c1ce57c98f64927f83f1ad703617cda53d50d69b92a60d"
+        "content:sha256-jcs-v1:f35696d73ebd308f69af9d2b4b42a016759cea2e69310fdbec2dbe52edb7bb4e"
     );
     assert_eq!(
         frame.config.config_ref_digest.as_str(),
-        "content:sha256-jcs-v1:1f8dd8a7c84f19669abfd377eb9aa48375902a67c411bf749bba71a1a85b45a0"
+        "content:sha256-jcs-v1:4efd60dfc94f22725016efa4bef18e7571683bb788d685c943b1e44266575555"
     );
     assert_eq!(
         node.config.config_ref_digest,
@@ -1282,20 +1209,20 @@ fn stable_ids_and_value_lineage_golden_vectors() {
     );
     assert_eq!(
         frame.input.digest.as_str(),
-        "content:sha256-jcs-v1:6412ef8c501baed54b3f226b0be63f809ee71af4e93a5ebcc604eed2c93532aa"
+        "content:sha256-jcs-v1:b3988b494d3c450e6e2680efb2ebec83a9129f704116680472a32806dc24deef"
     );
     assert_eq!(node.input.digest, frame.input.digest);
     assert_eq!(
         frame.operation_instance_id.as_str(),
-        "op:sha256-jcs-v1:ab3164ca69c1baced88da5dc70c1908e6b9a4ddc9a745ab2c091680747c2a942"
+        "op:sha256-jcs-v1:57877ac1c44ef94d0d6e6320c61aca5a8ff4a5f37ee38ea02216ecff4d0d0451"
     );
     assert_eq!(
         active_lineage.digest.as_str(),
-        "content:sha256-jcs-v1:25cbc2f3098de077b73ed91e482c5288d9b330d962711243187a3ec039e1a127"
+        "content:sha256-jcs-v1:e1211f3c4792a461bc050586526a47ee9d1eaac84458216ccd00fb99054be255"
     );
     assert_eq!(
         node.node_id.as_str(),
-        "node:sha256-jcs-v1:6a93779963e1277aa469b1f9c984f39a36d2b37a98c94b2ce638c5b27af3cb98"
+        "node:sha256-jcs-v1:a872a89920a12d479b7d06db18fe6deaede7ed9d3dcc5ef42dcf27ca43705ede"
     );
     assert_ne!(
         node.node_id, alternate_lowering_node_id,
@@ -1303,35 +1230,23 @@ fn stable_ids_and_value_lineage_golden_vectors() {
     );
     assert_eq!(
         node.output_cell_id.as_str(),
-        "cell:sha256-jcs-v1:e56569392147d60a2205202c5dc2843a5bb201f1ef445c0eb0dcc26de100dfc2"
+        "cell:sha256-jcs-v1:65e23302a4adad175b2d48f1ebd3fd5cab8cc84654a2ba3da5a6030ae3def70d"
     );
     assert_eq!(
         node.output_value_lineage.digest().as_str(),
-        "content:sha256-jcs-v1:7f253a7c654077612a83a7aad5117f25a0032e2f3fe34e3d2e1109eaadf6cad6"
+        "content:sha256-jcs-v1:e8b5b0fd85e431bf6a3c23d368b81518b7b8956f8c090f4c5f940899323b9c32"
     );
     assert_eq!(
         frame.lineage_digest.as_str(),
-        "content:sha256-jcs-v1:31ecb879b7dd45c4ad33bc9a540a88bc7ce875e2aedeb128d811fe11aa02a1ec"
+        "content:sha256-jcs-v1:2f9cc86db1d0d772f4c60bd2466fca3c48ec82fdb521226556f177ae1654e469"
     );
 }
 
 #[test]
 fn domain_keyed_handles_sort_canonically_and_reject_duplicates() {
     build_root(ScopeKey::new("root").expect("scope key"), |root| {
-        let late = root.seed(
-            SeedKey::new("late")?,
-            CanonicalSeed::from_value(&LaunchValue {
-                amount: 3,
-                label: "late".to_owned(),
-            })?,
-        )?;
-        let early = root.seed(
-            SeedKey::new("early")?,
-            CanonicalSeed::from_value(&LaunchValue {
-                amount: 1,
-                label: "early".to_owned(),
-            })?,
-        )?;
+        let late = root.seed(SeedKey::new("late")?, launch_seed(3, "late"))?;
+        let early = root.seed(SeedKey::new("early")?, launch_seed(1, "early"))?;
         let late_ref = late.typed_ref();
         let early_ref = early.typed_ref();
         let keyed = DomainKeyedHandles::new(vec![
@@ -1386,7 +1301,7 @@ fn domain_keyed_handles_sort_canonically_and_reject_duplicates() {
         assert_eq!(elements.len(), 2);
         assert_eq!(
             binding.digest().as_str(),
-            "content:sha256-jcs-v1:718b1e5b84a831a8b770461ae241eae095ededa3eb6a5470116e49b0c9b5c7be"
+            "content:sha256-jcs-v1:66cab7f584757aa11417aee5f695d9b9bb823b4ee39104196d66cb6c2798db89"
         );
         assert_eq!(
             domain_keys[0].content_digest.as_str(),
@@ -1468,20 +1383,8 @@ fn domain_keyed_handles_sort_canonically_and_reject_duplicates() {
 #[test]
 fn same_scope_same_type_lineage_mismatch_rejects_for_certification() {
     let draft = build_root(ScopeKey::new("root").expect("scope key"), |root| {
-        let first = root.seed(
-            SeedKey::new("first")?,
-            CanonicalSeed::from_value(&LaunchValue {
-                amount: 1,
-                label: "first".to_owned(),
-            })?,
-        )?;
-        let _second = root.seed(
-            SeedKey::new("second")?,
-            CanonicalSeed::from_value(&LaunchValue {
-                amount: 2,
-                label: "second".to_owned(),
-            })?,
-        )?;
+        let first = root.seed(SeedKey::new("first")?, launch_seed(1, "first"))?;
+        let _second = root.seed(SeedKey::new("second")?, launch_seed(2, "second"))?;
         root.bind_public_outputs(
             PublicOutputKey::new("terminal")?,
             &LaunchPublicOutputs { result: first },
@@ -1502,23 +1405,15 @@ fn same_scope_same_type_lineage_mismatch_rejects_for_certification() {
 
 #[test]
 fn explicit_registered_operation_token_calls_without_builder_registry() {
-    let mut state_registry = StateRegistryBuilder::new();
-    state_registry
-        .register::<MultiplyState>()
-        .expect("state registers");
+    let state_registry = multiply_state_registry();
     let mut operation_registry = OperationRegistryBuilder::new();
-    let registered_operation = operation_registry
-        .register::<MultiplyOperation>()
-        .expect("operation registers");
+    let registered_operation = register_multiply_operation(&mut operation_registry);
 
     let draft = build_root_with_registry(
         ScopeKey::new("root").expect("scope key"),
-        state_registry.into_snapshot(),
+        state_registry,
         |root| {
-            let seed = CanonicalSeed::from_value(&LaunchValue {
-                amount: 5,
-                label: "explicit-operation".to_owned(),
-            })?;
+            let seed = launch_seed(5, "explicit-operation");
             let input = root.seed(SeedKey::new("input")?, seed)?;
             let result = root.scope().call_registered::<MultiplyOperation, _>(
                 OperationKey::new("multiply-operation")?,
@@ -1546,27 +1441,19 @@ fn explicit_registered_operation_token_calls_without_builder_registry() {
 
 #[test]
 fn failed_operation_expansion_rolls_back_scope_mutations_and_lineage() {
-    let mut state_registry = StateRegistryBuilder::new();
-    state_registry
-        .register::<MultiplyState>()
-        .expect("state registers");
+    let state_registry = multiply_state_registry();
     let mut operation_registry = OperationRegistryBuilder::new();
     operation_registry
         .register::<FailingOperation>()
         .expect("failing operation registers");
-    operation_registry
-        .register::<MultiplyOperation>()
-        .expect("multiply operation registers");
+    register_multiply_operation(&mut operation_registry);
 
     let draft = build_root_with_registries(
         ScopeKey::new("root").expect("scope key"),
-        state_registry.into_snapshot(),
+        state_registry,
         operation_registry.into_snapshot(),
         |root| {
-            let seed = CanonicalSeed::from_value(&LaunchValue {
-                amount: 5,
-                label: "rollback".to_owned(),
-            })?;
+            let seed = launch_seed(5, "rollback");
             let input = root.seed(SeedKey::new("input")?, seed)?;
             let failed = root.scope().call::<FailingOperation, _>(
                 OperationKey::new("rollback-operation")?,
@@ -1636,19 +1523,11 @@ fn failed_operation_expansion_rolls_back_scope_mutations_and_lineage() {
 
 #[test]
 fn unregistered_operation_cannot_be_called() {
-    let mut state_registry = StateRegistryBuilder::new();
-    state_registry
-        .register::<MultiplyState>()
-        .expect("state registers");
-
     let result = build_root_with_registry(
         ScopeKey::new("root").expect("scope key"),
-        state_registry.into_snapshot(),
+        multiply_state_registry(),
         |root| {
-            let seed = CanonicalSeed::from_value(&LaunchValue {
-                amount: 1,
-                label: "unregistered-operation".to_owned(),
-            })?;
+            let seed = launch_seed(1, "unregistered-operation");
             let input = root.seed(SeedKey::new("input")?, seed)?;
             let _ = root.scope().call::<MultiplyOperation, _>(
                 OperationKey::new("multiply-operation")?,
@@ -1670,10 +1549,7 @@ fn unregistered_operation_cannot_be_called() {
 #[test]
 fn unregistered_state_cannot_be_planned() {
     let result = build_root(ScopeKey::new("root").expect("scope key"), |root| {
-        let seed = CanonicalSeed::from_value(&LaunchValue {
-            amount: 1,
-            label: "unregistered".to_owned(),
-        })?;
+        let seed = launch_seed(1, "unregistered");
         let input = root.seed(SeedKey::new("input")?, seed)?;
         let _ = root.scope().state::<MultiplyState, _>(
             StateKey::new("multiply")?,
@@ -1691,29 +1567,12 @@ fn unregistered_state_cannot_be_planned() {
 
 #[test]
 fn duplicate_state_key_is_rejected_without_partial_node() {
-    let mut registry = StateRegistryBuilder::new();
-    registry
-        .register::<MultiplyState>()
-        .expect("state registers");
-
     let result = build_root_with_registry(
         ScopeKey::new("root").expect("scope key"),
-        registry.into_snapshot(),
+        multiply_state_registry(),
         |root| {
-            let first = root.seed(
-                SeedKey::new("first")?,
-                CanonicalSeed::from_value(&LaunchValue {
-                    amount: 1,
-                    label: "first".to_owned(),
-                })?,
-            )?;
-            let second = root.seed(
-                SeedKey::new("second")?,
-                CanonicalSeed::from_value(&LaunchValue {
-                    amount: 2,
-                    label: "second".to_owned(),
-                })?,
-            )?;
+            let first = root.seed(SeedKey::new("first")?, launch_seed(1, "first"))?;
+            let second = root.seed(SeedKey::new("second")?, launch_seed(2, "second"))?;
             let _ = root.scope().state::<MultiplyState, _>(
                 StateKey::new("multiply")?,
                 LaunchConfig { multiplier: 2 },
@@ -1737,10 +1596,7 @@ fn duplicate_state_key_is_rejected_without_partial_node() {
 #[test]
 fn single_handle_input_binding_records_identity_and_lineage() {
     build_root(ScopeKey::new("root").expect("scope key"), |root| {
-        let seed = CanonicalSeed::from_value(&LaunchValue {
-            amount: 10,
-            label: "single".to_owned(),
-        })?;
+        let seed = launch_seed(10, "single");
         let handle = root.seed(SeedKey::new("single")?, seed)?;
         let binding: InputBinding<LaunchValue> = handle.clone().into_binding()?;
 
@@ -1807,10 +1663,7 @@ fn optional_and_artifact_handles_bind_as_typed_value_cells() {
             mfm_values::ArtifactRef::<LaunchValue>::semantic_id().expect("artifact semantic id")
         );
 
-        let final_seed = CanonicalSeed::from_value(&LaunchValue {
-            amount: 11,
-            label: "terminal".to_owned(),
-        })?;
+        let final_seed = launch_seed(11, "terminal");
         let final_handle = root.seed(SeedKey::new("terminal-seed")?, final_seed)?;
         root.bind_public_outputs(
             PublicOutputKey::new("terminal")?,
@@ -1825,20 +1678,8 @@ fn optional_and_artifact_handles_bind_as_typed_value_cells() {
 #[test]
 fn tuple_vector_and_non_empty_inputs_preserve_author_order() {
     build_root(ScopeKey::new("root").expect("scope key"), |root| {
-        let first = root.seed(
-            SeedKey::new("first")?,
-            CanonicalSeed::from_value(&LaunchValue {
-                amount: 1,
-                label: "first".to_owned(),
-            })?,
-        )?;
-        let second = root.seed(
-            SeedKey::new("second")?,
-            CanonicalSeed::from_value(&LaunchValue {
-                amount: 2,
-                label: "second".to_owned(),
-            })?,
-        )?;
+        let first = root.seed(SeedKey::new("first")?, launch_seed(1, "first"))?;
+        let second = root.seed(SeedKey::new("second")?, launch_seed(2, "second"))?;
 
         let tuple_binding: InputBinding<(LaunchValue, LaunchValue)> =
             (first.clone(), second.clone()).into_binding()?;
@@ -1905,13 +1746,7 @@ fn tuple_vector_and_non_empty_inputs_preserve_author_order() {
 #[test]
 fn derive_backed_state_input_handles_build_canonical_struct_bindings() {
     build_root(ScopeKey::new("root").expect("scope key"), |root| {
-        let primary = root.seed(
-            SeedKey::new("primary")?,
-            CanonicalSeed::from_value(&LaunchValue {
-                amount: 1,
-                label: "primary".to_owned(),
-            })?,
-        )?;
+        let primary = root.seed(SeedKey::new("primary")?, launch_seed(1, "primary"))?;
         let optional = root.seed(
             SeedKey::new("optional")?,
             CanonicalSeed::from_value(&mfm_values::MaybeValue::Produced(LaunchValue {
@@ -1921,17 +1756,11 @@ fn derive_backed_state_input_handles_build_canonical_struct_bindings() {
         )?;
         let ordered_first = root.seed(
             SeedKey::new("ordered-first")?,
-            CanonicalSeed::from_value(&LaunchValue {
-                amount: 3,
-                label: "ordered-first".to_owned(),
-            })?,
+            launch_seed(3, "ordered-first"),
         )?;
         let ordered_second = root.seed(
             SeedKey::new("ordered-second")?,
-            CanonicalSeed::from_value(&LaunchValue {
-                amount: 4,
-                label: "ordered-second".to_owned(),
-            })?,
+            launch_seed(4, "ordered-second"),
         )?;
         let artifact = root.seed(
             SeedKey::new("artifact")?,
@@ -2034,10 +1863,7 @@ fn child_scope_exports_bridge_nodes_and_validates_refs() {
     let draft = build_root(
         ScopeKey::new("portfolio/root").expect("scope key"),
         |root| {
-            let seed = CanonicalSeed::from_value(&LaunchValue {
-                amount: 42,
-                label: "cash".to_owned(),
-            })?;
+            let seed = launch_seed(42, "cash");
             let parent_handle = root.seed(SeedKey::new("launch-input")?, seed)?;
             let child_output = root
                 .scope()
@@ -2108,10 +1934,7 @@ fn child_scope_exports_bridge_nodes_and_validates_refs() {
 #[test]
 fn already_parent_bridged_handle_can_flow_through_later_child_scope() {
     let draft = build_root(ScopeKey::new("root").expect("scope key"), |root| {
-        let seed = CanonicalSeed::from_value(&LaunchValue {
-            amount: 42,
-            label: "cash".to_owned(),
-        })?;
+        let seed = launch_seed(42, "cash");
         let parent_handle = root.seed(SeedKey::new("launch-input")?, seed)?;
         let first_output = root.scope().child_scope(ScopeKey::new("first")?, |child| {
             let child_handle = child.import_from_parent(
@@ -2149,10 +1972,7 @@ fn already_parent_bridged_handle_can_flow_through_later_child_scope() {
 #[test]
 fn forged_or_stale_bridge_refs_do_not_certify() {
     let left = build_root(ScopeKey::new("left").expect("scope key"), |root| {
-        let seed = CanonicalSeed::from_value(&LaunchValue {
-            amount: 1,
-            label: "left".to_owned(),
-        })?;
+        let seed = launch_seed(1, "left");
         let parent_handle = root.seed(SeedKey::new("input")?, seed)?;
         let child_output = root.scope().child_scope(ScopeKey::new("child")?, |child| {
             let child_handle = child.import_from_parent(
@@ -2176,10 +1996,7 @@ fn forged_or_stale_bridge_refs_do_not_certify() {
     })
     .expect("left builds");
     let right = build_root(ScopeKey::new("right").expect("scope key"), |root| {
-        let seed = CanonicalSeed::from_value(&LaunchValue {
-            amount: 2,
-            label: "right".to_owned(),
-        })?;
+        let seed = launch_seed(2, "right");
         let parent_handle = root.seed(SeedKey::new("input")?, seed)?;
         let outputs = LaunchPublicOutputs {
             result: parent_handle,
@@ -2208,14 +2025,8 @@ fn forged_or_stale_bridge_refs_do_not_certify() {
 #[test]
 fn duplicate_seed_keys_reject() {
     let error = build_root(ScopeKey::new("root").expect("scope key"), |root| {
-        let first = CanonicalSeed::from_value(&LaunchValue {
-            amount: 1,
-            label: "a".to_owned(),
-        })?;
-        let second = CanonicalSeed::from_value(&LaunchValue {
-            amount: 2,
-            label: "b".to_owned(),
-        })?;
+        let first = launch_seed(1, "a");
+        let second = launch_seed(2, "b");
         let _ = root.seed(SeedKey::new("same")?, first)?;
         let _ = root.seed(SeedKey::new("same")?, second)?;
         unreachable!("duplicate seed must reject before binding outputs")
@@ -2257,20 +2068,14 @@ fn canonical_seed_rejects_json_that_does_not_decode_as_value_type() {
 #[test]
 fn root_scope_id_is_stable_for_key() {
     let left = build_root(ScopeKey::new("same").expect("scope key"), |root| {
-        let seed = CanonicalSeed::from_value(&LaunchValue {
-            amount: 1,
-            label: "a".to_owned(),
-        })?;
+        let seed = launch_seed(1, "a");
         let handle = root.seed(SeedKey::new("input")?, seed)?;
         let outputs = LaunchPublicOutputs { result: handle };
         root.bind_public_outputs(PublicOutputKey::new("terminal")?, &outputs)
     })
     .expect("left");
     let right = build_root(ScopeKey::new("same").expect("scope key"), |root| {
-        let seed = CanonicalSeed::from_value(&LaunchValue {
-            amount: 2,
-            label: "b".to_owned(),
-        })?;
+        let seed = launch_seed(2, "b");
         let handle = root.seed(SeedKey::new("input")?, seed)?;
         let outputs = LaunchPublicOutputs { result: handle };
         root.bind_public_outputs(PublicOutputKey::new("terminal")?, &outputs)

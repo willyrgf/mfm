@@ -4,8 +4,7 @@ Experimental REST API (Axum) for certified typed runs.
 
 The REST API is a typed assembly surface only. It can start, resume, inspect, replay, and render
 certified typed runs through `mfm-app`, `mfm-runtime`, `mfm-store`, and typed artifact storage. It
-does not accept old dynamic DAGs, `PlannedOp`, context snapshots, generic feature execution, or
-legacy artifact ids as semantic run authority.
+accepts only certified typed run authority.
 
 ## Running (Nixfied)
 
@@ -24,9 +23,7 @@ Environment variables:
 - `MFM_REST_API_ADDR`: bind address (default: `127.0.0.1:3001`)
 - `DATABASE_URL`: Postgres URL for the certified run store (required)
 - `MFM_SOURCE_REVISION`: optional source revision evidence for typed run starts
-- `MFM_EVM_RPC_SOURCES_JSON`: runtime-only EVM source registry for EVM contract entry-point runs
-- `MFM_EVM_NETWORK_ROUTES_JSON`: runtime-only map from semantic network ids to EVM source/policy ids
-- `MFM_EVM_SIGNERS_JSON`: runtime-only signer provider registry for EVM contract entry-point runs
+- `MFM_RUNTIME_CONFIG_FILE`: optional runtime config file path for live capability-backed runs
 
 The REST API validates the PostgreSQL schema on startup and does not create or
 alter tables. Apply the `mfm-stream-store-postgres` migrations before starting
@@ -38,9 +35,12 @@ cargo sqlx migrate run --source crates/storages/stream-store-postgres/migrations
 ```
 
 Use a fresh or explicitly reset database for this typed Postgres baseline. There
-is no downgrade migration; rollback to an older branch requires resetting the
-database or schema to that branch's expected baseline. Old filesystem artifact
-roots are not read or migrated by the REST API.
+is no downgrade migration; rollback to another branch requires resetting the
+database or schema to that branch's expected baseline. Filesystem artifact roots
+outside the typed run store are not read or migrated by the REST API.
+
+REST startup does not load or validate `MFM_RUNTIME_CONFIG_FILE`; malformed or missing runtime
+config is reported only when a live start/resume request needs the affected capability family.
 
 ## API
 
@@ -134,8 +134,7 @@ Request notes:
 The response is `{"outcome": "...", "run": ..., "public_output": ...}` inside the standard success
 envelope. Fresh admissions report `admitted`. Duplicate starts for the same certified run identity
 report `attached` without driving; if another process holds a live execution claim they report
-`already_driving`; if this process cannot match admitted runner executable evidence they report
-`incompatible_executable`.
+`already_driving`.
 `public_output` is present when the run completes while driving and the op exposes a public output
 schema id.
 
@@ -211,11 +210,9 @@ EVM contract lifecycle:
 ```
 
 EVM configs carry semantic network intent, expected chain id, artifact refs, and non-secret signer
-intent. The runtime resolves the config's `network.network_id` through
-`MFM_EVM_NETWORK_ROUTES_JSON`, then resolves the selected source and policy against
-`MFM_EVM_RPC_SOURCES_JSON`. The config's `signer.signer_ref` resolves against
-`MFM_EVM_SIGNERS_JSON`. Process-local RPC endpoints and keystore paths never belong in the
-entry-point config.
+intent. The runtime resolves the config's `network.network_id` and `signer.signer_ref` through
+`MFM_RUNTIME_CONFIG_FILE`. Process-local RPC endpoints, auth headers, keystore paths, unlock files,
+and private material never belong in the entry-point config.
 
 Stable launch error codes:
 
@@ -296,8 +293,8 @@ against the compiled certification registry, compare their evidence to `RunAdmit
 stream evidence before constructing runtime, replay, or render authority. Rendered public-output JSON
 is an output/cache surface only.
 
-Typed run responses expose semantic status through `run_mode`, not the old absent/started/completed
-phase. `run_mode` is one of `forward`, `remediating`, `manual_blocked`, `completed`, `compensated`,
+Typed run responses expose semantic status through `run_mode`. `run_mode` is one of `forward`,
+`remediating`, `manual_blocked`, `completed`, `compensated`,
 `manually_resolved`, or `failed_without_acdc_claim`. The nested `saga` object reports the certified
 policy, derived per-forward-ledger obligations, linked remediation ledgers, manual-block reason and
 manual authorization requirements when applicable, terminal resolution claim when present,
@@ -309,24 +306,11 @@ that blocked before appending lane evidence.
 each entry has `node_id`, `attempt_id`, `disposition` (`started`, `completed`, `failed`, or
 `interrupted`), and status-specific fields such as `attempt_no`, `retryable`, or `output_cell_id`.
 `scheduler_status` is read-only `observed` for `GET /v1/runs/:run_id/status`; start/resume responses
-set it to `advanced`, `blocked`, `public_output_projected`, `execution_claim_busy`,
-`execution_claim_lost`, or `incompatible_executable` according to the app dispatch loop and
-claim-coordination outcome.
+set it to `advanced`, `blocked`, `public_output_projected`, `execution_claim_busy`, or
+`execution_claim_lost` according to the app dispatch loop and claim-coordination outcome.
 Manual authorization requirements include the required evidence schema, signing scheme, authority id,
 allowed operator public identities or a safe summary, and quorum. They never expose signer runtime
 sources, keystore paths, password paths, passwords, or other secrets.
-
-## Removed Dynamic Surfaces
-
-These old REST surfaces are intentionally not part of the typed API:
-
-- `GET /v1/features`
-- `POST /v1/features/:feature_id/execute`
-- `GET /v1/artifacts/:artifact_id`
-- dynamic single-op or pipeline run-start payloads
-- context snapshot reads as public output
-
-Old dynamic runs are not silently migrated into certified typed runs.
 
 Docs:
 

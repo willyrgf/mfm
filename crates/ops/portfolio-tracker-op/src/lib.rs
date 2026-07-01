@@ -2,8 +2,7 @@
 //! Typed portfolio tracker workflow operation.
 //!
 //! The portfolio tracker workflow is authored through `mfm-program` and lowers to certified typed
-//! state programs. This crate exposes no legacy dynamic `PlannedOp`, `PortKey`, context-key, or
-//! generic IO surface.
+//! state programs.
 //!
 //! # Examples
 //!
@@ -34,8 +33,7 @@ use mfm_portfolio_model::symbol::SymbolConfig;
 use mfm_portfolio_model::wallet::WalletConfig;
 use mfm_program::{
     build_root_with_registries, DomainKeyedNonEmptyHandles, Operation, OperationExpansion,
-    OperationKey, OperationRegistryBuilder, PublicOutputKey, RootBuilder, ScopeKey, StateKey,
-    StateRegistryBuilder, TypedProgramLaunchPlan,
+    OperationKey, PublicOutputKey, RootBuilder, ScopeKey, StateKey, TypedProgramLaunchPlan,
 };
 pub use mfm_state_portfolio::{
     balance_reader_kind, observation_batch_id, portfolio_adapter_kind, portfolio_adapter_version,
@@ -208,80 +206,21 @@ impl Operation for PortfolioTrackerWorkflowOperation {
     }
 }
 
-/// Builds the portfolio state registry used for authoring and certification.
-pub fn portfolio_state_registry() -> mfm_program::Result<mfm_program::StateRegistrySnapshot> {
-    let mut states = StateRegistryBuilder::new();
-    states.register::<PrepareSourcesState>()?;
-    states.register::<ResolveSubjectsState>()?;
-    states.register::<PinViewsState>()?;
-    states.register::<ResolveValuationsState>()?;
-    states.register::<ObserveBatchState>()?;
-    states.register::<MergeObservationsState>()?;
-    states.register::<AssembleSnapshotState>()?;
-    states.register::<ProjectReportState>()?;
-    Ok(states.into_snapshot())
-}
-
-/// Builds the portfolio operation registry used for authoring and certification.
-pub fn portfolio_operation_registry() -> mfm_program::Result<mfm_program::OperationRegistrySnapshot>
-{
-    let mut operations = OperationRegistryBuilder::new();
-    operations.register::<PortfolioTrackerWorkflowOperation>()?;
-    Ok(operations.into_snapshot())
-}
-
-/// Adds portfolio workflow descriptors to a trusted certification registry.
-pub fn register_portfolio_certification_descriptors(
-    registry: &mut mfm_certify::CertificationRegistry,
-) -> mfm_certify::Result<()> {
-    let mut states = StateRegistryBuilder::new();
-    registry.register_state(
-        &states
-            .register::<PrepareSourcesState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
-            .register::<ResolveSubjectsState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
-            .register::<PinViewsState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
-            .register::<ResolveValuationsState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
-            .register::<ObserveBatchState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
-            .register::<MergeObservationsState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
-            .register::<AssembleSnapshotState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
-            .register::<ProjectReportState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    let mut operations = OperationRegistryBuilder::new();
-    registry.register_operation(
-        &operations
-            .register::<PortfolioTrackerWorkflowOperation>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    Ok(())
+mfm_certify::define_program_descriptor_registry! {
+    state_registry: pub portfolio_state_registry,
+    operation_registry: pub portfolio_operation_registry,
+    certification: pub register_portfolio_certification_descriptors,
+    states: [
+        PrepareSourcesState,
+        ResolveSubjectsState,
+        PinViewsState,
+        ResolveValuationsState,
+        ObserveBatchState,
+        MergeObservationsState,
+        AssembleSnapshotState,
+        ProjectReportState,
+    ],
+    operations: [PortfolioTrackerWorkflowOperation],
 }
 
 /// Builds a typed portfolio program draft.
@@ -419,31 +358,57 @@ mod tests {
             6,
             "source, subject, view, valuation, observation batch, and report outputs need domain-key lineage"
         );
-        assert!(
-            draft
-                .state_nodes()
-                .iter()
-                .all(|node| !node.state_descriptor_name.contains("DynContext")),
-            "portfolio descriptors must not expose dynamic context"
-        );
-
-        assert!(
-            draft
-                .state_nodes()
-                .iter()
-                .all(|node| node.key.as_str() != "publish_snapshot"),
-            "portfolio snapshot graph must not include the removed publish wrapper"
+        let state_keys = draft
+            .state_nodes()
+            .iter()
+            .map(|node| node.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            state_keys,
+            [
+                "prepare_sources",
+                "resolve_subjects",
+                "pin_views",
+                "resolve_valuations",
+                "observe/wallet/wallet_main/symbol/eth.native.ethereum-mainnet",
+                "merge_observations",
+                "assemble_snapshot",
+                "project_report",
+            ]
         );
 
         let certified = certify_program_draft(&draft).expect("certified portfolio spec");
-        assert!(
+        assert_eq!(
             certified
                 .envelope()
                 .spec
                 .nodes
                 .iter()
-                .all(|node| !node.node_id.as_str().contains("publish_snapshot")),
-            "certified portfolio spec must not include the removed publish wrapper"
+                .map(|node| node.stable_key.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "prepare_sources",
+                "resolve_subjects",
+                "pin_views",
+                "resolve_valuations",
+                "observe/wallet/wallet_main/symbol/eth.native.ethereum-mainnet",
+                "merge_observations",
+                "assemble_snapshot",
+                "project_report",
+                "portfolio",
+                "framework/project-retention-manifest",
+                "framework/complete-run",
+                "framework/resolve-saga-terminal",
+            ]
+        );
+        assert_eq!(
+            draft
+                .public_output_spec()
+                .outputs()
+                .iter()
+                .map(|output| output.public_field_path().as_str())
+                .collect::<Vec<_>>(),
+            ["snapshot", "report"]
         );
         assert_eq!(
             certified

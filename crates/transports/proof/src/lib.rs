@@ -2,8 +2,7 @@
 //! Deterministic typed proof implementation.
 //!
 //! This crate provides the enabled proof implementation used by conformance tests and by typed
-//! runner assembly. It exposes typed runtime runners and replay verifiers only; it does not expose
-//! legacy live-IO transports or generic request/response namespaces.
+//! runner assembly. It exposes typed runtime runners and replay verifiers.
 
 use std::sync::Arc;
 

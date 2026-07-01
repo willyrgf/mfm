@@ -65,7 +65,7 @@ User-facing docs:
 
 Crate docs:
 
-- Core primitives (keystore + config models): [`crates/core/README.md`](crates/core/README.md)
+- Core primitives (keystore + crypto): [`crates/core/README.md`](crates/core/README.md)
 - Typed runtime: [`crates/kernel/runtime/README.md`](crates/kernel/runtime/README.md)
 - Typed store contract: [`crates/kernel/store/README.md`](crates/kernel/store/README.md)
 - Typed replay: [`crates/kernel/replay/README.md`](crates/kernel/replay/README.md)
@@ -86,7 +86,6 @@ when a parity test needs them, then run the targeted test against those live end
 cargo fmt --all -- --check
 cargo test --workspace
 cargo test -p mfm-integration-tests --test cargo_metadata_contract
-cargo test -p mfm-integration-tests --test architecture_namespace_contract
 ```
 
 Useful focused parity examples:
@@ -114,7 +113,7 @@ nix run .#ci
 `nix run .#test-db` starts managed Postgres, checks crate-local SQLx metadata
 against a migrated schema, and runs Postgres-backed parity tests.
 `.#ci` is full by definition: it starts managed Postgres and Reth and runs all feature-gated parity
-tests. There is no `--mode` or `--full` compatibility flag.
+tests. There is no `--mode` or `--full` alias flag.
 
 Run binaries locally:
 

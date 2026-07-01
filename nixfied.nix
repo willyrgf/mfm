@@ -27,8 +27,7 @@ let
   ];
 
   ccEnvSuffix = lib.replaceStrings [ "-" ] [ "_" ] pkgs.stdenv.hostPlatform.config;
-  # The hermetic-env replacements for the old shell `export`s: typed values,
-  # no append-to-inherited (the child env starts empty).
+  # Hermetic environment values; no append-to-inherited behavior because the child env starts empty.
   cargoEnv = {
     CARGO_TARGET_DIR = "\${stateDir}/cargo-target";
     CARGO_INCREMENTAL = "0";
@@ -50,22 +49,34 @@ let
   };
   rethEnv = {
     RETH_HTTP_PORT = "\${port:reth}";
-    MFM_EVM_RPC_SOURCES_JSON = builtins.toJSON {
-      sources = [
-        {
-          id = "reth-local";
-          rpc_url = "http://\${host:reth}:\${port:reth}";
-          authorization = null;
-        }
-      ];
-      policies = [
-        {
-          id = "reth-local";
-          ordered_sources = [ "reth-local" ];
-        }
-      ];
-    };
+    MFM_RUNTIME_CONFIG_FILE = "\${stateDir}/runtime-config/reth-runtime.toml";
   };
+  rethTools = cargoTools ++ [
+    pkgs.bash
+    pkgs.coreutils
+  ];
+  writeRethRuntimeConfig = ''
+    set -euo pipefail
+    runtime_config_file="$MFM_RUNTIME_CONFIG_FILE"
+    runtime_config_dir="$(dirname "$runtime_config_file")"
+    mkdir -p "$runtime_config_dir"
+    chmod 700 "$runtime_config_dir"
+    runtime_config_tmp="$(mktemp "$runtime_config_dir/reth-runtime.toml.tmp.XXXXXX")"
+    cleanup_runtime_config() {
+      rm -f "$runtime_config_tmp"
+    }
+    trap cleanup_runtime_config EXIT
+    printf '%s\n' \
+      '[evm.sources."reth-local"]' \
+      'rpc_url = "http://''${host:reth}:''${port:reth}"' \
+      "" \
+      '[evm.routes."reth-local"]' \
+      'source_ref = "reth-local"' \
+      > "$runtime_config_tmp"
+    chmod 600 "$runtime_config_tmp"
+    mv -f "$runtime_config_tmp" "$runtime_config_file"
+    trap - EXIT
+  '';
 
   # A cargo leaf: argv + extra env + service requirements. Reuse is this Nix
   # function; the model carries the fully-applied copies.
@@ -164,16 +175,6 @@ in
         "mfm-integration-tests"
         "--test"
         "cargo_metadata_contract"
-      ];
-    };
-    architecture-namespace-contract = cargoLeaf {
-      run = [
-        "cargo"
-        "test"
-        "-p"
-        "mfm-integration-tests"
-        "--test"
-        "architecture_namespace_contract"
       ];
     };
     postgres-sqlx-offline-check = cargoLeaf {
@@ -315,40 +316,33 @@ in
       requires = [ "postgres" ];
     };
     parity-reth-contracts = cargoLeaf {
+      tools = rethTools;
       run = [
-        "cargo"
-        "test"
-        "-p"
-        "mfm-integration-tests"
-        "--features"
-        "parity-tests"
-        "--test"
-        "parity_evm_contract_lifecycle_reth"
-        "--"
-        "--nocapture"
+        "bash"
+        "-lc"
+        ''
+          ${writeRethRuntimeConfig}
+          cargo test -p mfm-integration-tests --features parity-tests --test parity_evm_contract_lifecycle_reth -- --nocapture
+        ''
       ];
       env = rethEnv;
       requires = [ "reth" ];
     };
     parity-reth-portfolio = cargoLeaf {
+      tools = rethTools;
       run = [
-        "cargo"
-        "test"
-        "-p"
-        "mfm-integration-tests"
-        "--features"
-        "parity-tests"
-        "--test"
-        "parity_portfolio_tracker_reth_snapshot"
-        "--"
-        "--nocapture"
+        "bash"
+        "-lc"
+        ''
+          ${writeRethRuntimeConfig}
+          cargo test -p mfm-integration-tests --features parity-tests --test parity_portfolio_tracker_reth_snapshot -- --nocapture
+        ''
       ];
       env = rethEnv;
       requires = [ "reth" ];
     };
 
-    # The old `workspace-tests` case arm ran two commands; as a composite the
-    # second command is its own leaf with its own evidence.
+    # Keep workspace tests as explicit leaves so each command has its own evidence.
     workspace-tests = {
       kind = "composite";
       steps = nixfiedLib.seq [
@@ -363,7 +357,6 @@ in
         "fmt"
         "clippy"
         "cargo-metadata-contract"
-        "architecture-namespace-contract"
         "postgres-sqlx-offline-check"
       ];
     };

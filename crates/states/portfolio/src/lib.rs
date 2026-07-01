@@ -2,8 +2,7 @@
 //! Typed portfolio-domain state contracts.
 //!
 //! This crate owns the reusable typed state, value, input, and capability contracts for portfolio
-//! snapshots. It intentionally exposes no legacy `DynContext`, `IoProvider`, `PlannedOp`,
-//! `PortKey`, or hand-authored dynamic DAG surface.
+//! snapshots.
 //!
 //! # Examples
 //!
@@ -139,6 +138,10 @@ pub struct PortfolioReadError {
     pub code: String,
     /// Redacted human-readable message.
     pub message: String,
+    /// Optional closed redacted diagnostic details for retained runtime evidence.
+    pub redacted_details: Option<serde_json::Value>,
+    /// Whether this read error must fail the runtime attempt instead of becoming domain output.
+    pub fatal_attempt_failure: bool,
 }
 
 impl PortfolioReadError {
@@ -147,14 +150,28 @@ impl PortfolioReadError {
         Self {
             code: code.into(),
             message: message.into(),
+            redacted_details: None,
+            fatal_attempt_failure: false,
         }
+    }
+
+    /// Attaches closed redacted diagnostic details.
+    pub fn with_redacted_details(mut self, details: serde_json::Value) -> Self {
+        self.redacted_details = Some(details);
+        self
+    }
+
+    /// Marks this read error as a runtime attempt failure.
+    pub fn with_fatal_attempt_failure(mut self) -> Self {
+        self.fatal_attempt_failure = true;
+        self
     }
 }
 
 /// Runtime backend used by read portfolio states to observe external chain data.
 pub trait PortfolioReadBackend: Send + Sync {
     /// Reads the current EVM block number for a network.
-    fn evm_block_number<'a>(&'a self, network_id: &'a str) -> PortfolioReadFuture<'a, u64>;
+    fn evm_block_number<'a>(&'a self, network: &'a NetworkConfig) -> PortfolioReadFuture<'a, u64>;
 
     /// Reads a raw wallet/symbol balance and its decimals at a pinned block.
     fn observe_raw_balance<'a>(
@@ -167,11 +184,14 @@ pub trait PortfolioReadBackend: Send + Sync {
 struct UnavailablePortfolioReadBackend;
 
 impl PortfolioReadBackend for UnavailablePortfolioReadBackend {
-    fn evm_block_number<'a>(&'a self, network_id: &'a str) -> PortfolioReadFuture<'a, u64> {
+    fn evm_block_number<'a>(&'a self, network: &'a NetworkConfig) -> PortfolioReadFuture<'a, u64> {
         Box::pin(async move {
             Err(PortfolioReadError::new(
                 "external_read_required",
-                format!("typed portfolio read backend unavailable for network `{network_id}`"),
+                format!(
+                    "typed portfolio read backend unavailable for network `{}`",
+                    network.network_id()
+                ),
             ))
         })
     }
@@ -1056,10 +1076,9 @@ impl ReadState for ObserveBatchState {
 
     fn run<'a>(&'a self, input: Self::Input, _caps: &'a Self::Caps) -> Self::RunFuture<'a> {
         Box::pin(async move {
-            Ok(
-                observe_batch_with_backend(&self.config, &input, &UnavailablePortfolioReadBackend)
-                    .await,
-            )
+            observe_batch_with_backend(&self.config, &input, &UnavailablePortfolioReadBackend)
+                .await
+                .map_err(state_error_from_portfolio_read)
         })
     }
 }
@@ -1233,7 +1252,7 @@ where
     let mut views = Vec::new();
     for network in config.networks() {
         let block_number = match network.family() {
-            NetworkFamilyConfig::Evm => backend.evm_block_number(network.network_id()).await?,
+            NetworkFamilyConfig::Evm => backend.evm_block_number(network).await?,
             NetworkFamilyConfig::Bitcoin => 0,
         };
         views.push(pinned_view_for_network(network, block_number));
@@ -1448,16 +1467,21 @@ pub async fn observe_batch_with_backend<B>(
     config: &ObserveBatchConfig,
     input: &ObserveBatchInput,
     backend: &B,
-) -> ObservationBatch
+) -> Result<ObservationBatch, PortfolioReadError>
 where
     B: PortfolioReadBackend + ?Sized,
 {
     let block_number = evm_block_number_for(&input.views, config.network.network_id());
     match backend.observe_raw_balance(config, block_number).await {
-        Ok((raw, decimals)) => {
-            observation_batch_from_raw_balance(config, input, raw, decimals, block_number)
-        }
-        Err(error) => observation_batch_error(config, error.code, error.message),
+        Ok((raw, decimals)) => Ok(observation_batch_from_raw_balance(
+            config,
+            input,
+            raw,
+            decimals,
+            block_number,
+        )),
+        Err(error) if error.fatal_attempt_failure => Err(error),
+        Err(error) => Ok(observation_batch_error(config, error.code, error.message)),
     }
 }
 

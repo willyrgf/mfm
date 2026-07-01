@@ -1,7 +1,7 @@
 use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::run_store::{connect_run_services, parse_run_id, RunStoresArgs};
+use crate::support::run_store::{connect_run_read_services, parse_run_id, RunStoresArgs};
 use clap::Args;
 use mfm_app::RunResponse;
 
@@ -24,7 +24,7 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &StatusArgs) -> ! {
 
 async fn execute_internal(args: &StatusArgs) -> CommandResult<RunResponse> {
     let run_id = parse_run_id(&args.run_id)?;
-    let services = connect_run_services(&args.stores).await?;
+    let services = connect_run_read_services(&args.stores).await?;
     let response = services.run_status(&run_id).await?;
 
     Ok(CommandOutput::new(response))

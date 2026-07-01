@@ -15,6 +15,9 @@ Authority roles:
   behavior. They are not replay, resume, side-effect, lane ownership, or public-output authority.
 - `operational telemetry`: runtime metadata used for paging, readiness, diagnostics, or process
   operation. It is not semantic run authority.
+- `audit provenance`: non-secret persisted context that explains which process-local resource served
+  a recorded action. It must not mint replay, retry, consistency, public-output, or side-effect
+  authority.
 - `public output`: data intentionally returned to users by CLI/REST. It must not contain secrets and
   is not a substitute for strict authority unless the command explicitly verifies strict rows first.
 
@@ -25,6 +28,7 @@ Authority roles:
 | Artifact bytes | `artifact_blobs.bytes` | No secrets allowed. Secret-like bytes must stay below artifacts. | strict authority | Trusted only with matching `artifact_admissions` evidence, digest, byte length, role, and proof-bearing read request. |
 | EVM prepared invocation artifacts | `artifact_blobs.bytes` for schema `mfm.evm.contract.adapter.prepared_invocation` | No secrets allowed. Contains unsigned transaction evidence, signing digest, and expected transaction hash only; raw signed transaction bytes and signatures remain transient. | strict authority | Resume reconstructs signing requests from this artifact and verifies the submit-time deterministic signed transaction hash against `expected_transaction_hash` before broadcast. |
 | EVM not-submitted proof artifacts | `artifact_blobs.bytes` for schema `mfm.evm.contract.adapter.not_submitted_proof` | No secrets allowed. Contains public transaction hashes, signer address, nonce, optional occupying block number, and redacted chain evidence only. | strict authority | Emitted only when recovery observes a concrete non-anchor transaction occupying the prepared sender nonce. Mere nonce advancement or provider failure remains `SubmissionUnknown`. |
+| EVM runtime source provenance | Typed EVM evidence fields in run events, facts, artifacts, and closed chain-mismatch diagnostics | No secrets allowed. May include redacted `source_ref`, `policy_id`, semantic `network_id`, expected chain id, and observed chain id. Must not include RPC URLs, auth headers, file paths, signer material, or signed raw transactions. | audit provenance | `source_ref` is the actual source that served the call after policy fallback. These fields are for auditability only; replay verifies recorded evidence against the certified request guard and must not resolve them against current runtime config. Retry, consistency, public-output, and side-effect authority must not depend on them. |
 | Artifact evidence | `artifact_admissions`, `evidence_canonical_json`, `evidence_hash` | No secrets allowed. Producer and schema ids are non-secret identities. | strict authority | Binds artifact id, digest, byte length, media type, role, schema/semantic ids, and producer identity. |
 | Commit artifact bindings | `commit_artifact_evidence`, `run_artifact_admissions` | No secrets allowed. | strict authority | Binds required/admitted artifact evidence to one commit and one run. |
 | Commit authority bytes | `commits.idempotency_canonical_json`, `prepared_authority_canonical_json`, `commit_batch_canonical_json` | No secrets allowed. | strict authority | Strict load revalidates canonicalizer identity, hash-domain version, commit id, idempotency hash, prepared authority hash, and final batch hash. |
@@ -47,6 +51,7 @@ Authority roles:
 | Manual-resolution evidence input/output | CLI manual resolution commands and REST request/response bodies | No secrets. | public output | Evidence bytes are artifacts only after digest/evidence verification and commit admission. CLI/REST error details must stay redacted. |
 | Keystore list output | `mfm_cli keystore list` | Public addresses and labels only; no private keys, mnemonics, passwords, decrypted bytes, or raw transactions. | public output | Keystore secrets remain below CLI output and typed semantic surfaces. |
 | REST health/readiness | `/v1/health`, `/v1/ready` | No secrets. | operational telemetry | Liveness/readiness only. |
+| Live runtime config | Process-local runtime config file path, indirection paths, resolved RPC URLs/auth, signer paths, and signer unlock files | Secret-bearing; forbidden in CLI/REST output, run events, artifacts, fixtures, replay authority, and public-output rendering. | none | Evidence-only status, stream inspection, list/watch, replay, and public-output paths must not parse or validate live runtime config. Live start/resume may use it only as process-local capability wiring. |
 
 ## Review Rules
 

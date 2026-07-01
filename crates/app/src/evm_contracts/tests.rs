@@ -1,11 +1,11 @@
 use super::*;
 use crate::{
     make_run_services_with_certification_registry, prepare_entry_point_run_launch,
-    EntryPointRunLaunchInput, RunLaunchRequest, RunModeStatus, RunServices,
+    EntryPointRunLaunchInput, ErrorClass, RunLaunchRequest, RunModeStatus, RunServices,
 };
 use mfm_adapters_evm_contracts::{
-    ensure_prepared_invocation_public, EvmContractRuntime, EvmContractRuntimeFactory,
-    EvmContractRuntimeRoute, PreparedContractInvocation,
+    ensure_prepared_invocation_public, EvmContractReadRuntime, EvmContractRuntime,
+    EvmContractRuntimeFactory, PreparedContractInvocation,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use mfm_capabilities::CapabilitySpec;
@@ -28,7 +28,7 @@ use mfm_evm_capabilities::{
 use mfm_evm_contract_config::{ConfigurePhaseConfig, DeployPhaseConfig, ValidatePhaseConfig};
 use mfm_evm_contract_model::{ConfiguredContract, DeployedContract};
 use mfm_op_evm_contract_lifecycle::ContractLifecycleConfig;
-use mfm_runtime::ErasedRunnerRegistry;
+use mfm_runtime::{CertifiedRuntimeSpec, ErasedRunnerRegistry};
 use mfm_signing::{
     PublicSigningIdentity, SignatureBytes, SignerRef, SigningError, SigningFuture, SigningProvider,
     SigningRequest, SigningResult,
@@ -43,6 +43,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 const TEST_SIGNER_HEX: &str = "4c0883a69102937d6231471b5dbb6204fe512961708279c2f802d6a8ebf2d3a4";
+
+type ContractRunStore = store::AsyncInMemoryRunStore;
+type ContractRunServices = RunServices<ContractRunStore, ContractRunStore>;
 
 fn evm_forbidden_runtime_terms() -> Vec<String> {
     vec![
@@ -123,116 +126,240 @@ where
     .request
 }
 
-#[tokio::test]
-async fn app_runner_resumes_replays_and_renders_validate_only_lifecycle_run() {
-    let store = test_run_store();
-    let artifacts = crate::artifact_read_provider_from_retained(store.clone());
-    let config = validate_config();
-    let configured = configured_contract();
-    let mut certification = CertificationRegistry::new();
-    mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
-        &mut certification,
-    )
-    .expect("contract certification descriptors");
-    let mut runners = ErasedRunnerRegistry::new();
-    mfm_adapters_evm_contracts::register_contract_lifecycle_runners_with_factory(
-        &mut runners,
-        Arc::new(TestRuntimeFactory::new(artifacts)),
-    )
-    .expect("contract runners");
-    let services = make_run_services_with_certification_registry(
-        runners,
-        store.clone(),
-        store.clone(),
-        certification,
-    );
-    let request = prepare_evm_entry_point_request(
-        &services,
+async fn prepare_validate_entry_point_request<S, A>(
+    services: &RunServices<S, A>,
+    config: ValidatePhaseConfig,
+    configured: ConfiguredContract,
+) -> RunLaunchRequest
+where
+    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
+    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
+{
+    prepare_evm_entry_point_request(
+        services,
         "evm_contract_validate",
         json!({
             "config": config,
             "configured": configured,
         }),
     )
-    .await;
-    let run_id = request.run_id.clone();
-    let public_schema_id = request
+    .await
+}
+
+fn public_schema_id(request: &RunLaunchRequest) -> mfm_ids::SchemaId {
+    request
         .certified_spec
         .envelope()
         .spec
         .public_outputs
         .public_schema_id
-        .clone();
+        .clone()
+}
 
+async fn launch_completed(
+    services: &ContractRunServices,
+    request: RunLaunchRequest,
+    label: &str,
+) -> (mfm_ids::RunId, mfm_ids::SchemaId) {
+    let run_id = request.run_id.clone();
+    let public_schema_id = public_schema_id(&request);
     let (_, launched) = services
         .launch_run(request)
         .await
-        .expect("launch validate lifecycle")
+        .expect(label)
         .into_response_parts();
     assert_eq!(launched.run_mode, RunModeStatus::Completed);
+    (run_id, public_schema_id)
+}
+
+async fn assert_replay_completed(
+    services: &ContractRunServices,
+    run_id: &mfm_ids::RunId,
+    label: &str,
+) {
+    let replay = services.verify_replay_for_run(run_id).await.expect(label);
+    assert_eq!(replay.run_mode, RunModeStatus::Completed);
+}
+
+async fn assert_execution_claim_unclaimed(store: &ContractRunStore, run_id: &mfm_ids::RunId) {
     assert!(matches!(
         store
-            .execution_claim_status(&run_id)
+            .execution_claim_status(run_id)
             .await
             .expect("execution claim status"),
         ExecutionClaimStatus::Unclaimed
     ));
-    let replay = services
-        .verify_replay_for_run(&run_id)
+}
+
+async fn public_output_string(
+    services: &ContractRunServices,
+    run_id: &mfm_ids::RunId,
+    public_schema_id: &mfm_ids::SchemaId,
+) -> String {
+    services
+        .public_output(run_id, public_schema_id)
         .await
-        .expect("replay validate lifecycle");
-    assert_eq!(
-        replay.run_mode,
-        RunModeStatus::Completed,
-        "validated lifecycle replay should report a completed run"
-    );
-    let public_output = services
-        .public_output(&run_id, &public_schema_id)
-        .await
-        .expect("public output");
-    let rendered = public_output.json.expect("json");
+        .expect("public output")
+        .json
+        .expect("json")
+        .to_string()
+}
+
+async fn launch_replay_and_render(
+    services: &ContractRunServices,
+    request: RunLaunchRequest,
+    lifecycle: &str,
+) -> (mfm_ids::RunId, String) {
+    let launch_label = format!("launch {lifecycle} lifecycle");
+    let (run_id, public_schema_id) = launch_completed(services, request, &launch_label).await;
+    let replay_label = format!("replay {lifecycle} lifecycle");
+    assert_replay_completed(services, &run_id, &replay_label).await;
+    let rendered = public_output_string(services, &run_id, &public_schema_id).await;
+    (run_id, rendered)
+}
+
+fn assert_rendered_contains(rendered: &str, needle: &str) {
     assert!(
-        rendered.to_string().contains("\"valid\":true"),
-        "rendered validation output must contain a valid report: {rendered}"
+        rendered.contains(needle),
+        "rendered output must contain {needle}: {rendered}"
     );
 }
 
-#[tokio::test]
-async fn app_runner_reports_execution_claim_lost_after_renewal_failure() {
-    let store = test_run_store();
-    let artifacts = crate::artifact_read_provider_from_retained(store.clone());
-    let config = validate_config();
-    let configured = configured_contract();
+fn contract_lifecycle_certification_registry() -> CertificationRegistry {
     let mut certification = CertificationRegistry::new();
     mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
         &mut certification,
     )
     .expect("contract certification descriptors");
+    certification
+}
+
+fn contract_lifecycle_runners(
+    factory: impl EvmContractRuntimeFactory + 'static,
+) -> ErasedRunnerRegistry {
     let mut runners = ErasedRunnerRegistry::new();
     mfm_adapters_evm_contracts::register_contract_lifecycle_runners_with_factory(
         &mut runners,
-        Arc::new(TestRuntimeFactory::with_chain_identity_delay(
-            artifacts,
-            Duration::from_millis(100),
-        )),
+        Arc::new(factory),
     )
     .expect("contract runners");
-    let mut services = make_run_services_with_certification_registry(
+    runners
+}
+
+fn contract_lifecycle_services(
+    store: &ContractRunStore,
+    runners: ErasedRunnerRegistry,
+    certification: CertificationRegistry,
+) -> ContractRunServices {
+    make_run_services_with_certification_registry(
         runners,
         store.clone(),
         store.clone(),
         certification,
-    );
-    services.execution_claim_heartbeat_interval = Duration::from_millis(10);
-    let request = prepare_evm_entry_point_request(
-        &services,
-        "evm_contract_validate",
-        json!({
-            "config": config,
-            "configured": configured,
-        }),
+    )
+}
+
+fn contract_services(
+    store: &ContractRunStore,
+    factory: impl EvmContractRuntimeFactory + 'static,
+) -> ContractRunServices {
+    contract_lifecycle_services(
+        store,
+        contract_lifecycle_runners(factory),
+        contract_lifecycle_certification_registry(),
+    )
+}
+
+fn contract_test_services(
+    make_factory: impl FnOnce(Arc<dyn ArtifactReadProvider>) -> TestRuntimeFactory,
+) -> (ContractRunStore, ContractRunServices) {
+    let store = test_run_store();
+    let artifacts = crate::artifact_read_provider_from_retained(store.clone());
+    let services = contract_services(&store, make_factory(artifacts));
+    (store, services)
+}
+
+#[tokio::test]
+async fn app_runner_resumes_replays_and_renders_validate_only_lifecycle_run() {
+    let (store, services) = contract_test_services(TestRuntimeFactory::new);
+    let request =
+        prepare_validate_entry_point_request(&services, validate_config(), configured_contract())
+            .await;
+    let (run_id, rendered) = launch_replay_and_render(&services, request, "validate").await;
+    assert_execution_claim_unclaimed(&store, &run_id).await;
+    assert_rendered_contains(&rendered, "\"valid\":true");
+}
+
+#[tokio::test]
+async fn app_resume_completed_run_is_evidence_only_without_live_runners() {
+    let store = test_run_store();
+    let artifacts = crate::artifact_read_provider_from_retained(store.clone());
+    let certification = contract_lifecycle_certification_registry();
+    let runners = contract_lifecycle_runners(TestRuntimeFactory::new(artifacts));
+    let launch_services = contract_lifecycle_services(&store, runners, certification.clone());
+    let request = prepare_validate_entry_point_request(
+        &launch_services,
+        validate_config(),
+        configured_contract(),
     )
     .await;
+    let run_id = request.run_id.clone();
+
+    let (_, launched) = launch_services
+        .launch_run(request)
+        .await
+        .expect("launch validate lifecycle")
+        .into_response_parts();
+    assert_eq!(launched.run_mode, RunModeStatus::Completed);
+    assert_execution_claim_unclaimed(&store, &run_id).await;
+    let completed_stream = store
+        .load_run_stream(&run_id)
+        .await
+        .expect("completed stream");
+
+    let resume_services =
+        contract_lifecycle_services(&store, ErasedRunnerRegistry::new(), certification);
+    let resumed = resume_services
+        .resume_stored_run(&run_id)
+        .await
+        .expect("terminal resume");
+
+    assert_eq!(resumed.run_mode, RunModeStatus::Completed);
+    assert_eq!(resumed.scheduler_status, "observed");
+    assert_eq!(resumed.head_seq, launched.head_seq);
+    assert_execution_claim_unclaimed(&store, &run_id).await;
+    assert_eq!(
+        store
+            .load_run_stream(&run_id)
+            .await
+            .expect("stream after terminal resume"),
+        completed_stream
+    );
+}
+
+#[tokio::test]
+async fn app_resume_missing_runtime_config_fails_before_claim_or_attempt() {
+    assert_resume_runtime_config_ingress_failure(None).await;
+}
+
+#[tokio::test]
+async fn app_resume_malformed_runtime_config_fails_before_claim_or_attempt() {
+    let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
+    let runtime_config_path = runtime_config_dir.path().join("runtime.toml");
+    std::fs::write(&runtime_config_path, "[evm.sources.bad\n").expect("write malformed config");
+
+    assert_resume_runtime_config_ingress_failure(Some(&runtime_config_path)).await;
+}
+
+#[tokio::test]
+async fn app_runner_reports_execution_claim_lost_after_renewal_failure() {
+    let (store, mut services) = contract_test_services(|artifacts| {
+        TestRuntimeFactory::with_chain_identity_delay(artifacts, Duration::from_millis(100))
+    });
+    services.execution_claim_heartbeat_interval = Duration::from_millis(10);
+    let request =
+        prepare_validate_entry_point_request(&services, validate_config(), configured_contract())
+            .await;
     let run_id = request.run_id.clone();
     let services_for_launch = services.clone();
     let launch = tokio::spawn(async move {
@@ -257,41 +384,85 @@ async fn app_runner_reports_execution_claim_lost_after_renewal_failure() {
     assert_eq!(resumed.scheduler_status, "execution_claim_lost");
 }
 
-#[tokio::test]
-async fn app_runner_records_distinct_validation_capability_facts() {
+async fn assert_resume_runtime_config_ingress_failure(
+    runtime_config_path: Option<&std::path::Path>,
+) {
     let store = test_run_store();
     let artifacts = crate::artifact_read_provider_from_retained(store.clone());
-    let configured = configured_contract();
-    let mut certification = CertificationRegistry::new();
-    mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
-        &mut certification,
-    )
-    .expect("contract certification descriptors");
-    let mut runners = ErasedRunnerRegistry::new();
-    mfm_adapters_evm_contracts::register_contract_lifecycle_runners_with_factory(
-        &mut runners,
-        Arc::new(TestRuntimeFactory::new(artifacts)),
-    )
-    .expect("contract runners");
-    let services =
-        make_run_services_with_certification_registry(runners, store.clone(), store, certification);
-    let request = prepare_evm_entry_point_request(
-        &services,
-        "evm_contract_validate",
-        json!({
-            "config": validate_config_with_assertions(),
-            "configured": configured,
-        }),
+    let certification = contract_lifecycle_certification_registry();
+    let launch_runners = contract_lifecycle_runners(TestRuntimeFactory::new(artifacts.clone()));
+    let launch_services =
+        contract_lifecycle_services(&store, launch_runners, certification.clone());
+    let request = prepare_validate_entry_point_request(
+        &launch_services,
+        validate_config(),
+        configured_contract(),
     )
     .await;
     let run_id = request.run_id.clone();
-
-    let (_, launched) = services
-        .launch_run(request)
+    let runtime_spec =
+        CertifiedRuntimeSpec::new(request.certified_spec.clone()).expect("runtime spec");
+    let expected_next_seq = store
+        .expected_next_seq(&run_id)
         .await
-        .expect("launch validate lifecycle")
-        .into_response_parts();
-    assert_eq!(launched.run_mode, RunModeStatus::Completed);
+        .expect("expected next seq");
+    let launch = launch_services
+        .scheduler
+        .prepare_run_launch(
+            &runtime_spec,
+            request.identity_material,
+            request.evidence,
+            expected_next_seq,
+        )
+        .expect("prepare admitted-only launch");
+    launch_services
+        .scheduler
+        .start_run(&store, launch)
+        .await
+        .expect("admit run");
+    let admitted_stream = store
+        .load_run_stream(&run_id)
+        .await
+        .expect("admitted stream");
+    assert_eq!(
+        admitted_stream.len(),
+        1,
+        "test setup must admit only RunAdmitted"
+    );
+
+    let resume_runners = crate::production_runner_registry(artifacts, runtime_config_path)
+        .expect("production runners");
+    let resume_services = contract_lifecycle_services(&store, resume_runners, certification);
+    let error = resume_services
+        .resume_stored_run(&run_id)
+        .await
+        .expect_err("resume ingress must reject missing or malformed runtime config");
+
+    assert_eq!(error.class, ErrorClass::BadRequest);
+    assert_eq!(error.code, "LaunchRunnerUnavailable");
+    assert_eq!(error.message, "A required typed runner is unavailable");
+    assert_execution_claim_unclaimed(&store, &run_id).await;
+    let stream = store.load_run_stream(&run_id).await.expect("run stream");
+    assert_eq!(stream, admitted_stream);
+    assert!(
+        stream.iter().all(|event| !matches!(
+            event.payload(),
+            events::KernelEventPayload::StateAttemptStarted(_)
+        )),
+        "resume ingress failure must not append attempts"
+    );
+}
+
+#[tokio::test]
+async fn app_runner_records_distinct_validation_capability_facts() {
+    let (_store, services) = contract_test_services(TestRuntimeFactory::new);
+    let request = prepare_validate_entry_point_request(
+        &services,
+        validate_config_with_assertions(),
+        configured_contract(),
+    )
+    .await;
+    let (run_id, _) = launch_completed(&services, request, "launch validate lifecycle").await;
     let stream = services
         .store()
         .load_run_stream(&run_id)
@@ -318,142 +489,108 @@ async fn app_runner_records_distinct_validation_capability_facts() {
 
 #[tokio::test]
 async fn app_runner_resumes_replays_and_renders_deploy_lifecycle_run() {
-    let store = test_run_store();
-    let artifacts = crate::artifact_read_provider_from_retained(store.clone());
     let signer = test_contract_signer();
     let config = deploy_config(&signer.address);
-    let mut certification = CertificationRegistry::new();
-    mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
-        &mut certification,
-    )
-    .expect("contract certification descriptors");
-    let mut runners = ErasedRunnerRegistry::new();
-    mfm_adapters_evm_contracts::register_contract_lifecycle_runners_with_factory(
-        &mut runners,
-        Arc::new(TestRuntimeFactory::with_signer(
-            artifacts.clone(),
-            Arc::new(signer.provider),
-            true,
-        )),
-    )
-    .expect("contract runners");
-    let services =
-        make_run_services_with_certification_registry(runners, store.clone(), store, certification);
+    let (_store, services) = contract_test_services(|artifacts| {
+        TestRuntimeFactory::with_signer(artifacts, Arc::new(signer.provider), true)
+    });
     let request = prepare_evm_entry_point_request(
         &services,
         "evm_contract_deploy",
         serde_json::to_value(config).expect("deploy config json"),
     )
     .await;
-    let run_id = request.run_id.clone();
-    let public_schema_id = request
-        .certified_spec
-        .envelope()
-        .spec
-        .public_outputs
-        .public_schema_id
-        .clone();
+    let (_, rendered) = launch_replay_and_render(&services, request, "deploy").await;
+    assert_rendered_contains(&rendered, "contract_address");
+    assert_rendered_contains(&rendered, "deploy_receipt_evidence");
+}
 
-    let (_, launched) = services
-        .launch_run(request)
-        .await
-        .expect("launch deploy lifecycle")
-        .into_response_parts();
-    assert_eq!(launched.run_mode, RunModeStatus::Completed);
-    let replay = services
-        .verify_replay_for_run(&run_id)
-        .await
-        .expect("replay deploy lifecycle");
-    assert_eq!(
-        replay.run_mode,
-        RunModeStatus::Completed,
-        "deploy lifecycle replay should report a completed run"
+#[tokio::test]
+async fn replay_diagnostic_resolves_evm_guard_from_side_effect_submit_node() {
+    let signer = test_contract_signer();
+    let config = deploy_config(&signer.address);
+    let (_store, services) = contract_test_services(|artifacts| {
+        TestRuntimeFactory::with_signer(artifacts, Arc::new(signer.provider), true)
+    });
+    let request = prepare_evm_entry_point_request(
+        &services,
+        "evm_contract_deploy",
+        serde_json::to_value(config).expect("deploy config json"),
+    )
+    .await;
+    let runtime_spec =
+        CertifiedRuntimeSpec::new(request.certified_spec.clone()).expect("runtime spec");
+    let verify_node = runtime_spec
+        .topological_order()
+        .iter()
+        .filter_map(|node_id| runtime_spec.node(node_id))
+        .find(|node| {
+            matches!(
+                &node.framework,
+                Some(mfm_spec::v1::FrameworkNodeSpec::SideEffectVerify(_))
+            )
+        })
+        .expect("deploy spec has side-effect verifier");
+    let Some(mfm_spec::v1::FrameworkNodeSpec::SideEffectVerify(verify)) = &verify_node.framework
+    else {
+        unreachable!("matched side-effect verifier");
+    };
+    let submit_node = runtime_spec
+        .node(&verify.submit_node_id)
+        .expect("submit node is certified");
+    assert!(submit_node.side_effect.is_some());
+    assert_ne!(
+        verify_node.config_ref.schema_id, submit_node.config_ref.schema_id,
+        "verifier framework config must not be used as EVM guard authority"
     );
-    let public_output = services
-        .public_output(&run_id, &public_schema_id)
-        .await
-        .expect("public output");
-    let rendered = public_output.json.expect("json");
+
+    let guards = crate::certified_evm_chain_guards_for_failed_node(
+        &runtime_spec,
+        &request.evidence,
+        &verify_node.node_id,
+    )
+    .expect("verifier diagnostics derive submit-node guards");
     assert!(
-        rendered.to_string().contains("contract_address"),
-        "rendered deploy output must contain deployed contract evidence: {rendered}"
+        guards.iter().any(|guard| {
+            guard.network_id().as_str() == "reth-dev" && guard.expected_chain_id() == 31337
+        }),
+        "derived guards must include the submit node's certified EVM guard"
     );
-    assert!(
-        rendered.to_string().contains("deploy_receipt_evidence"),
-        "rendered deploy output must contain receipt evidence refs: {rendered}"
-    );
+    let details = json!({
+        "network_id": "reth-dev",
+        "expected_chain_id": 31337,
+        "observed_chain_id": 31338,
+        "source_ref": "reth-dev",
+        "policy_id": "reth-dev",
+    });
+    let expected =
+        events::RedactedJson::new(crate::canonical_value_digest(&details).expect("details digest"));
+    crate::verify_replay_public_details(Some(&expected), &details, &guards)
+        .expect("verifier diagnostic details match submit-node guard");
 }
 
 #[tokio::test]
 async fn app_runner_resumes_replays_and_renders_full_lifecycle_run() {
-    let store = test_run_store();
-    let artifacts = crate::artifact_read_provider_from_retained(store.clone());
     let signer = test_contract_signer();
     let config = ContractLifecycleConfig::new(
         deploy_config(&signer.address),
         configure_config(&signer.address),
         validate_config(),
     );
-    let mut certification = CertificationRegistry::new();
-    mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
-        &mut certification,
-    )
-    .expect("contract certification descriptors");
-    let mut runners = ErasedRunnerRegistry::new();
-    mfm_adapters_evm_contracts::register_contract_lifecycle_runners_with_factory(
-        &mut runners,
-        Arc::new(TestRuntimeFactory::with_signer(
-            artifacts.clone(),
-            Arc::new(signer.provider),
-            false,
-        )),
-    )
-    .expect("contract runners");
-    let services =
-        make_run_services_with_certification_registry(runners, store.clone(), store, certification);
+    let (_store, services) = contract_test_services(|artifacts| {
+        TestRuntimeFactory::with_signer(artifacts, Arc::new(signer.provider), false)
+    });
     let request = prepare_evm_entry_point_request(
         &services,
         "evm_contract_lifecycle",
         serde_json::to_value(config).expect("lifecycle config json"),
     )
     .await;
-    let run_id = request.run_id.clone();
-    let public_schema_id = request
-        .certified_spec
-        .envelope()
-        .spec
-        .public_outputs
-        .public_schema_id
-        .clone();
-
-    let (_, launched) = services
-        .launch_run(request)
-        .await
-        .expect("launch full lifecycle")
-        .into_response_parts();
-    assert_eq!(launched.run_mode, RunModeStatus::Completed);
-    services
-        .verify_replay_for_run(&run_id)
-        .await
-        .expect("replay full lifecycle");
-    let public_output = services
-        .public_output(&run_id, &public_schema_id)
-        .await
-        .expect("public output");
-    let rendered = public_output.json.expect("json");
-    assert!(
-        rendered.to_string().contains("\"valid\":true"),
-        "rendered lifecycle output must contain a valid validation report: {rendered}"
-    );
-    assert!(
-        rendered.to_string().contains("configure_tx_hashes"),
-        "rendered lifecycle output must contain configure transaction hashes: {rendered}"
-    );
-    assert!(
-        rendered.to_string().contains("configure_receipt_evidence"),
-        "rendered lifecycle output must contain configure receipt evidence refs: {rendered}"
-    );
-    assert_no_evm_runtime_surface("contract public output", &rendered.to_string());
+    let (run_id, rendered) = launch_replay_and_render(&services, request, "full").await;
+    assert_rendered_contains(&rendered, "\"valid\":true");
+    assert_rendered_contains(&rendered, "configure_tx_hashes");
+    assert_rendered_contains(&rendered, "configure_receipt_evidence");
+    assert_no_evm_runtime_surface("contract public output", &rendered);
 
     let stream = services
         .store()
@@ -525,6 +662,7 @@ async fn app_runner_resumes_replays_and_renders_full_lifecycle_run() {
 #[derive(Clone)]
 struct TestRuntimeFactory {
     artifacts: Arc<dyn ArtifactReadProvider>,
+    read_runtime: EvmContractReadRuntime,
     runtime: EvmContractRuntime,
 }
 
@@ -545,26 +683,13 @@ impl TestRuntimeFactory {
         mutation: bool,
         chain_identity_delay: Option<Duration>,
     ) -> Self {
-        let source_ref = EvmSourceRef::new("reth-dev").expect("source ref");
-        let policy_id = EvmSourcePolicyId::new("reth-dev").expect("policy id");
-        let reads = Arc::new(Mutex::new(TestEvmReads::default()));
-        let evm = Arc::new(TestEvmProvider {
-            source_ref: source_ref.clone(),
-            policy_id: policy_id.clone(),
-            chain_id: 31337,
-            mutation,
-            fail_repeated_prepare_reads: false,
-            chain_identity_delay,
-            reads: Arc::clone(&reads),
-        });
-        Self {
+        Self::with_runtime(
             artifacts,
-            runtime: EvmContractRuntime::new(
-                EvmContractRuntimeRoute::new(source_ref, policy_id),
-                evm,
-                Arc::new(TestSigner),
-            ),
-        }
+            Arc::new(TestSigner),
+            mutation,
+            false,
+            chain_identity_delay,
+        )
     }
 
     fn with_signer(
@@ -572,25 +697,28 @@ impl TestRuntimeFactory {
         signer: Arc<dyn SigningProvider>,
         fail_repeated_prepare_reads: bool,
     ) -> Self {
-        let source_ref = EvmSourceRef::new("reth-dev").expect("source ref");
-        let policy_id = EvmSourcePolicyId::new("reth-dev").expect("policy id");
-        let reads = Arc::new(Mutex::new(TestEvmReads::default()));
+        Self::with_runtime(artifacts, signer, true, fail_repeated_prepare_reads, None)
+    }
+
+    fn with_runtime(
+        artifacts: Arc<dyn ArtifactReadProvider>,
+        signer: Arc<dyn SigningProvider>,
+        mutation: bool,
+        fail_repeated_prepare_reads: bool,
+        chain_identity_delay: Option<Duration>,
+    ) -> Self {
         let evm = Arc::new(TestEvmProvider {
-            source_ref: source_ref.clone(),
-            policy_id: policy_id.clone(),
-            chain_id: 31337,
-            mutation: true,
+            source_ref: EvmSourceRef::new("reth-dev").expect("source ref"),
+            policy_id: EvmSourcePolicyId::new("reth-dev").expect("policy id"),
+            mutation,
             fail_repeated_prepare_reads,
-            chain_identity_delay: None,
-            reads: Arc::clone(&reads),
+            chain_identity_delay,
+            reads: Arc::new(Mutex::new(TestEvmReads::default())),
         });
         Self {
             artifacts,
-            runtime: EvmContractRuntime::new(
-                EvmContractRuntimeRoute::new(source_ref, policy_id),
-                evm,
-                signer,
-            ),
+            read_runtime: EvmContractReadRuntime::new(evm.clone()),
+            runtime: EvmContractRuntime::new(evm, signer),
         }
     }
 }
@@ -598,6 +726,18 @@ impl TestRuntimeFactory {
 impl EvmContractRuntimeFactory for TestRuntimeFactory {
     fn artifacts(&self) -> &dyn ArtifactReadProvider {
         self.artifacts.as_ref()
+    }
+
+    fn validate_runtime_for(
+        &self,
+        _network_id: &str,
+        _signer_ref: Option<&SignerRef>,
+    ) -> mfm_runtime::Result<()> {
+        Ok(())
+    }
+
+    fn read_runtime_for(&self, _network_id: &str) -> mfm_runtime::Result<EvmContractReadRuntime> {
+        Ok(self.read_runtime.clone())
     }
 
     fn runtime_for(&self, _network_id: &str) -> mfm_runtime::Result<EvmContractRuntime> {
@@ -617,7 +757,6 @@ impl SigningProvider for TestSigner {
 struct TestEvmProvider {
     source_ref: EvmSourceRef,
     policy_id: EvmSourcePolicyId,
-    chain_id: u64,
     mutation: bool,
     fail_repeated_prepare_reads: bool,
     chain_identity_delay: Option<Duration>,
@@ -633,11 +772,13 @@ struct TestEvmReads {
 }
 
 impl TestEvmProvider {
-    fn evidence(&self) -> RedactedEvmSourceEvidence {
+    fn evidence(&self, guard: &EvmChainGuard) -> RedactedEvmSourceEvidence {
         RedactedEvmSourceEvidence {
+            network_id: guard.network_id().clone(),
+            expected_chain_id: guard.expected_chain_id(),
+            observed_chain_id: guard.expected_chain_id(),
             source_ref: self.source_ref.clone(),
             policy_id: self.policy_id.clone(),
-            chain_id: self.chain_id,
         }
     }
 
@@ -672,15 +813,15 @@ enum TestPrepareReadKind {
 impl EvmChainIdentityProvider for TestEvmProvider {
     fn chain_identity<'a>(
         &'a self,
-        _request: &'a EvmChainIdentityRequest,
+        request: &'a EvmChainIdentityRequest,
     ) -> EvmCapabilityFuture<'a, EvmChainIdentityResponse> {
         Box::pin(async move {
             if let Some(delay) = self.chain_identity_delay {
                 tokio::time::sleep(delay).await;
             }
             Ok(EvmChainIdentityResponse {
-                evidence: self.evidence(),
-                chain_id: self.chain_id,
+                evidence: self.evidence(&request.guard),
+                chain_id: request.guard.expected_chain_id(),
                 client_version: Some("mfm-test-evm".to_owned()),
             })
         })
@@ -698,7 +839,7 @@ impl EvmBlockReadProvider for TestEvmProvider {
         assert_eq!(request.block, EvmBlockSelector::Latest);
         Box::pin(async move {
             Ok(EvmBlockReadResponse {
-                evidence: self.evidence(),
+                evidence: self.evidence(&request.guard),
                 block_number: 64,
                 block_hash: Default::default(),
             })
@@ -709,7 +850,7 @@ impl EvmBlockReadProvider for TestEvmProvider {
 impl EvmNonceReadProvider for TestEvmProvider {
     fn read_nonce<'a>(
         &'a self,
-        _request: &'a EvmNonceReadRequest,
+        request: &'a EvmNonceReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmNonceReadResponse> {
         if !self.mutation {
             return failed_evm();
@@ -717,7 +858,7 @@ impl EvmNonceReadProvider for TestEvmProvider {
         Box::pin(async move {
             self.record_prepare_read(TestPrepareReadKind::Nonce)?;
             Ok(EvmNonceReadResponse {
-                evidence: self.evidence(),
+                evidence: self.evidence(&request.guard),
                 nonce: 7,
             })
         })
@@ -727,7 +868,7 @@ impl EvmNonceReadProvider for TestEvmProvider {
 impl EvmFeeReadProvider for TestEvmProvider {
     fn read_fee<'a>(
         &'a self,
-        _request: &'a EvmFeeReadRequest,
+        request: &'a EvmFeeReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmFeeReadResponse> {
         if !self.mutation {
             return failed_evm();
@@ -735,7 +876,7 @@ impl EvmFeeReadProvider for TestEvmProvider {
         Box::pin(async move {
             self.record_prepare_read(TestPrepareReadKind::Fee)?;
             Ok(EvmFeeReadResponse {
-                evidence: self.evidence(),
+                evidence: self.evidence(&request.guard),
                 base_fee_per_gas: Some(5),
                 priority_fee_per_gas: Some(3),
                 max_fee_per_gas: Some(11),
@@ -748,7 +889,7 @@ impl EvmFeeReadProvider for TestEvmProvider {
 impl EvmGasEstimateProvider for TestEvmProvider {
     fn estimate_gas<'a>(
         &'a self,
-        _request: &'a EvmGasEstimateRequest,
+        request: &'a EvmGasEstimateRequest,
     ) -> EvmCapabilityFuture<'a, EvmGasEstimateResponse> {
         if !self.mutation {
             return failed_evm();
@@ -756,7 +897,7 @@ impl EvmGasEstimateProvider for TestEvmProvider {
         Box::pin(async move {
             self.record_prepare_read(TestPrepareReadKind::Gas)?;
             Ok(EvmGasEstimateResponse {
-                evidence: self.evidence(),
+                evidence: self.evidence(&request.guard),
                 gas_limit: 21_000,
             })
         })
@@ -773,7 +914,7 @@ impl EvmTransactionSubmitProvider for TestEvmProvider {
         }
         Box::pin(async move {
             Ok(EvmTransactionSubmitResponse {
-                evidence: self.evidence(),
+                evidence: self.evidence(&request.guard),
                 transaction_hash: request.signed_payload.transaction_hash(),
             })
         })
@@ -802,7 +943,7 @@ impl EvmReceiptReadProvider for TestEvmProvider {
                 .map_err(|_| EvmCapabilityError::redacted_provider_failure("test evm"))?;
             reads.receipt += 1;
             Ok(EvmReceiptReadResponse {
-                evidence: self.evidence(),
+                evidence: self.evidence(&request.guard),
                 transaction_hash: request.transaction_hash,
                 block_number: 42,
                 status: true,
@@ -814,11 +955,11 @@ impl EvmReceiptReadProvider for TestEvmProvider {
 impl EvmNonceOccupancyReadProvider for TestEvmProvider {
     fn read_nonce_occupancy<'a>(
         &'a self,
-        _request: &'a EvmNonceOccupancyReadRequest,
+        request: &'a EvmNonceOccupancyReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmNonceOccupancyReadResponse> {
         Box::pin(async move {
             Ok(EvmNonceOccupancyReadResponse {
-                evidence: self.evidence(),
+                evidence: self.evidence(&request.guard),
                 outcome: EvmNonceOccupancy::Unknown,
             })
         })
@@ -828,13 +969,13 @@ impl EvmNonceOccupancyReadProvider for TestEvmProvider {
 impl EvmCallReadProvider for TestEvmProvider {
     fn read_call<'a>(
         &'a self,
-        _request: &'a EvmCallReadRequest,
+        request: &'a EvmCallReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmCallReadResponse> {
         Box::pin(async move {
             let mut return_data = vec![0_u8; 32];
             return_data[31] = 1;
             Ok(EvmCallReadResponse {
-                evidence: self.evidence(),
+                evidence: self.evidence(&request.guard),
                 return_data,
             })
         })
@@ -848,7 +989,7 @@ impl EvmLogsReadProvider for TestEvmProvider {
     ) -> EvmCapabilityFuture<'a, EvmLogsReadResponse> {
         Box::pin(async move {
             Ok(EvmLogsReadResponse {
-                evidence: self.evidence(),
+                evidence: self.evidence(&request.guard),
                 logs: vec![EvmLogEntry {
                     address: request.address.expect("validation log address"),
                     topics: request.topics.clone(),
@@ -939,12 +1080,23 @@ impl LocalTestSigner {
     }
 }
 
+fn reth_network_json() -> serde_json::Value {
+    json!({
+        "network_id": "reth-dev",
+        "expected_chain_id": 31337
+    })
+}
+
+fn deployer_signer_json(expected_signer_address: &str) -> serde_json::Value {
+    json!({
+        "signer_ref": "deployer",
+        "expected_signer_address": expected_signer_address
+    })
+}
+
 fn validate_config() -> ValidatePhaseConfig {
     serde_json::from_value(json!({
-        "network": {
-            "network_id": "reth-dev",
-            "expected_chain_id": 31337
-        }
+        "network": reth_network_json()
     }))
     .expect("validate config")
 }
@@ -952,10 +1104,7 @@ fn validate_config() -> ValidatePhaseConfig {
 fn validate_config_with_assertions() -> ValidatePhaseConfig {
     serde_json::from_value(json!({
         "artifact": artifact_json(),
-        "network": {
-            "network_id": "reth-dev",
-            "expected_chain_id": 31337
-        },
+        "network": reth_network_json(),
         "validation": {
             "read_assertions": [
                 {
@@ -980,14 +1129,8 @@ fn validate_config_with_assertions() -> ValidatePhaseConfig {
 fn deploy_config(expected_signer_address: &str) -> DeployPhaseConfig {
     serde_json::from_value(json!({
         "artifact": artifact_json(),
-        "network": {
-            "network_id": "reth-dev",
-            "expected_chain_id": 31337
-        },
-        "signer": {
-            "signer_ref": "deployer",
-            "expected_signer_address": expected_signer_address
-        },
+        "network": reth_network_json(),
+        "signer": deployer_signer_json(expected_signer_address),
         "transaction": {
             "style": "eip1559",
             "max_fee_per_gas": "11",
@@ -1000,14 +1143,8 @@ fn deploy_config(expected_signer_address: &str) -> DeployPhaseConfig {
 fn configure_config(expected_signer_address: &str) -> ConfigurePhaseConfig {
     serde_json::from_value(json!({
         "artifact": artifact_json(),
-        "network": {
-            "network_id": "reth-dev",
-            "expected_chain_id": 31337
-        },
-        "signer": {
-            "signer_ref": "deployer",
-            "expected_signer_address": expected_signer_address
-        },
+        "network": reth_network_json(),
+        "signer": deployer_signer_json(expected_signer_address),
         "calls": [
             {
                 "function": "configure",
@@ -1145,57 +1282,40 @@ fn state_kinds_by_node(stream: &[store::KernelEventEnvelope]) -> BTreeMap<String
         .collect()
 }
 
+macro_rules! node_id_from_payload {
+    ($payload:expr, $($variant:ident),+ $(,)?) => {
+        match $payload {
+            $(
+                events::KernelEventPayload::$variant(payload) => {
+                    Some(payload.node_id.as_str().to_owned())
+                }
+            )+
+            _ => None,
+        }
+    };
+}
+
 fn runner_output_node_id(events: &[store::KernelEventEnvelope]) -> Option<String> {
-    events.iter().find_map(|event| match event.payload() {
-        events::KernelEventPayload::FactRecorded(payload) => {
-            Some(payload.node_id.as_str().to_owned())
-        }
-        events::KernelEventPayload::CellProduced(payload) => {
-            Some(payload.node_id.as_str().to_owned())
-        }
-        events::KernelEventPayload::CellSkipped(payload) => {
-            Some(payload.node_id.as_str().to_owned())
-        }
-        events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
-            Some(payload.node_id.as_str().to_owned())
-        }
-        events::KernelEventPayload::SideEffectClaimed(payload) => {
-            Some(payload.node_id.as_str().to_owned())
-        }
-        events::KernelEventPayload::SideEffectClaimTakenOver(payload) => {
-            Some(payload.node_id.as_str().to_owned())
-        }
-        events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
-            Some(payload.node_id.as_str().to_owned())
-        }
-        events::KernelEventPayload::SideEffectInvocationStarted(payload) => {
-            Some(payload.node_id.as_str().to_owned())
-        }
-        events::KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
-            Some(payload.node_id.as_str().to_owned())
-        }
-        events::KernelEventPayload::SideEffectSubmissionObserved(payload) => {
-            Some(payload.node_id.as_str().to_owned())
-        }
-        events::KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
-            Some(payload.node_id.as_str().to_owned())
-        }
-        events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
-            Some(payload.node_id.as_str().to_owned())
-        }
-        events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
-            Some(payload.node_id.as_str().to_owned())
-        }
-        events::KernelEventPayload::SideEffectAmbiguous(payload) => {
-            Some(payload.node_id.as_str().to_owned())
-        }
-        events::KernelEventPayload::SideEffectFailed(payload) => {
-            Some(payload.node_id.as_str().to_owned())
-        }
-        events::KernelEventPayload::StateAttemptCompleted(payload) => {
-            Some(payload.node_id.as_str().to_owned())
-        }
-        _ => None,
+    events.iter().find_map(|event| {
+        node_id_from_payload!(
+            event.payload(),
+            FactRecorded,
+            CellProduced,
+            CellSkipped,
+            SideEffectIntentPersisted,
+            SideEffectClaimed,
+            SideEffectClaimTakenOver,
+            SideEffectInvocationPrepared,
+            SideEffectInvocationStarted,
+            SideEffectNotSubmittedProven,
+            SideEffectSubmissionObserved,
+            SideEffectSubmissionUnknown,
+            SideEffectReceiptObserved,
+            SideEffectConfirmationObserved,
+            SideEffectAmbiguous,
+            SideEffectFailed,
+            StateAttemptCompleted,
+        )
     })
 }
 

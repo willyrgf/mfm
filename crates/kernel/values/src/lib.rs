@@ -378,8 +378,8 @@ pub struct SchemaIdentity {
     pub shape: SchemaShape,
     /// Canonicalization algorithm.
     pub canonicalization: DigestAlgorithm,
-    /// Compatibility policy.
-    pub compatibility: CompatibilityPolicy,
+    /// Versioning policy.
+    pub versioning: SchemaVersioningPolicy,
     /// Persisted-surface no-secret/no-float policy.
     pub persisted_surface: PersistedSurfacePolicy,
 }
@@ -404,7 +404,7 @@ impl SchemaIdentity {
             schema_version,
             shape,
             canonicalization: DigestAlgorithm::Sha256JcsV1,
-            compatibility: CompatibilityPolicy::ManualVersion,
+            versioning: SchemaVersioningPolicy::ManualVersion,
             persisted_surface: PersistedSurfacePolicy::strict(),
         };
         identity.validate()?;
@@ -439,7 +439,6 @@ impl SchemaIdentity {
     fn to_canonical_value(&self) -> CanonicalValue {
         canonical_object([
             ("canonicalization", string(self.canonicalization.as_str())),
-            ("compatibility", self.compatibility.to_canonical_value()),
             (
                 "persisted_surface",
                 self.persisted_surface.to_canonical_value(),
@@ -452,6 +451,7 @@ impl SchemaIdentity {
                 optional_string(self.semantic_type_id.as_ref().map(SemanticTypeId::as_str)),
             ),
             ("shape", self.shape.to_canonical_value()),
+            ("versioning", self.versioning.to_canonical_value()),
         ])
     }
 }
@@ -564,15 +564,15 @@ impl SchemaKind {
     }
 }
 
-/// Schema compatibility policy.
+/// Schema versioning policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum CompatibilityPolicy {
+pub enum SchemaVersioningPolicy {
     /// Breaking shape or semantic changes require a manually assigned new
     /// schema version.
     ManualVersion,
 }
 
-impl CompatibilityPolicy {
+impl SchemaVersioningPolicy {
     fn to_canonical_value(self) -> CanonicalValue {
         match self {
             Self::ManualVersion => string("manual_version"),

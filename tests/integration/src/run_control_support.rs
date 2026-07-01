@@ -1,16 +1,29 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use mfm_ids::RunId;
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
-/// Environment variable carrying process-local EVM RPC source configuration.
-pub const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
-const ENV_EVM_NETWORK_ROUTES_JSON: &str = "MFM_EVM_NETWORK_ROUTES_JSON";
+/// Environment variable carrying the runtime config file path.
+pub const ENV_RUNTIME_CONFIG_FILE: &str = mfm_app::MFM_RUNTIME_CONFIG_FILE;
+
+/// Runtime signer binding used by test runtime config files.
+pub struct RuntimeConfigSignerBinding<'a> {
+    /// Workflow signer reference.
+    pub signer_ref: &'a str,
+    /// Keystore entry id.
+    pub entry_id: &'a str,
+    /// Keystore file path.
+    pub keystore_path: &'a Path,
+    /// Unlock password file path.
+    pub unlock_file: &'a Path,
+}
 
 /// Restores an environment variable to its previous test value when dropped.
 pub struct EnvVarRestore {
     previous: Vec<(&'static str, Option<String>)>,
+    _temp_dirs: Vec<tempfile::TempDir>,
 }
 
 impl Drop for EnvVarRestore {
@@ -75,54 +88,74 @@ async fn portfolio_rpc_handler(
     }))
 }
 
-/// Sets the EVM RPC source registry env var for one test network and restores it on drop.
-pub fn set_evm_rpc_sources_env_for_test(
+/// Writes a runtime config file for one EVM source/route and returns its path.
+pub fn write_evm_runtime_config_for_test(
+    dir: &Path,
     network_id: &str,
-    expected_chain_id: u64,
-    rpc_url: String,
+    rpc_url: &str,
+    signer: Option<RuntimeConfigSignerBinding<'_>>,
+) -> std::path::PathBuf {
+    let config_path = dir.join("runtime.toml");
+    let mut config = format!(
+        r#"
+[evm.sources.{network}]
+rpc_url = {rpc_url}
+
+[evm.routes.{network}]
+source_ref = {network}
+"#,
+        network = toml_string(network_id),
+        rpc_url = toml_string(rpc_url),
+    );
+    if let Some(signer) = signer {
+        config.push_str(&format!(
+            r#"
+[keystores.default]
+keystore_path = {keystore_path}
+unlock_file = {unlock_file}
+
+[signers.{signer_ref}]
+provider = "keystore"
+keystore_ref = "default"
+entry_id = {entry_id}
+"#,
+            signer_ref = toml_string(signer.signer_ref),
+            entry_id = toml_string(signer.entry_id),
+            keystore_path = toml_string(&signer.keystore_path.display().to_string()),
+            unlock_file = toml_string(&signer.unlock_file.display().to_string()),
+        ));
+    }
+    std::fs::write(&config_path, config).expect("write runtime config");
+    config_path
+}
+
+/// Sets the runtime config env var for one test EVM route and restores it on drop.
+pub fn set_evm_runtime_config_env_for_test(network_id: &str, rpc_url: &str) -> EnvVarRestore {
+    set_evm_runtime_config_env_with_signer_for_test(network_id, rpc_url, None)
+}
+
+/// Sets the runtime config env var for one EVM route plus optional signer binding.
+pub fn set_evm_runtime_config_env_with_signer_for_test(
+    network_id: &str,
+    rpc_url: &str,
+    signer: Option<RuntimeConfigSignerBinding<'_>>,
 ) -> EnvVarRestore {
-    let previous = vec![
-        (
-            ENV_EVM_RPC_SOURCES_JSON,
-            std::env::var(ENV_EVM_RPC_SOURCES_JSON).ok(),
-        ),
-        (
-            ENV_EVM_NETWORK_ROUTES_JSON,
-            std::env::var(ENV_EVM_NETWORK_ROUTES_JSON).ok(),
-        ),
-    ];
-    std::env::set_var(
-        ENV_EVM_RPC_SOURCES_JSON,
-        serde_json::json!({
-            "sources": [
-                {
-                    "id": network_id,
-                    "expected_chain_id": expected_chain_id,
-                    "rpc_url": rpc_url,
-                    "authorization": null
-                }
-            ],
-            "policies": [
-                {
-                    "id": network_id,
-                    "ordered_sources": [network_id]
-                }
-            ]
-        })
-        .to_string(),
-    );
-    std::env::set_var(
-        ENV_EVM_NETWORK_ROUTES_JSON,
-        serde_json::json!([
-            {
-                "network_id": network_id,
-                "source_ref": network_id,
-                "policy_id": network_id
-            }
-        ])
-        .to_string(),
-    );
-    EnvVarRestore { previous }
+    let previous = vec![(
+        ENV_RUNTIME_CONFIG_FILE,
+        std::env::var(ENV_RUNTIME_CONFIG_FILE).ok(),
+    )];
+    let temp_dir = tempfile::tempdir().expect("runtime config tempdir");
+    let config_path =
+        write_evm_runtime_config_for_test(temp_dir.path(), network_id, rpc_url, signer);
+    std::env::set_var(ENV_RUNTIME_CONFIG_FILE, config_path);
+    EnvVarRestore {
+        previous,
+        _temp_dirs: vec![temp_dir],
+    }
+}
+
+fn toml_string(value: &str) -> String {
+    serde_json::to_string(value).expect("toml-compatible string")
 }
 
 /// Prepares a portfolio snapshot entry-point launch against the supplied store trust scope.
@@ -200,6 +233,7 @@ where
     let certified = prepared.request.certified_spec.clone();
     let runners = mfm_app::production_runner_registry(
         mfm_app::artifact_read_provider_from_retained(store.clone()),
+        None,
     )
     .expect("production runners");
     let scheduler = mfm_runtime::SerialTypedScheduler::new(runners, Arc::new(store.clone()));

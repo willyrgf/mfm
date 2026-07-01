@@ -6,7 +6,7 @@ This policy applies to every code, test, documentation, build, and workflow chan
 
 The repository prioritizes code quality over immediate results.
 
-If a requested change cannot be completed without introducing a local hack, workaround, monkey patch, partial solution, or fragile compatibility shim, stop and choose one of these paths:
+If a requested change cannot be completed without introducing a local hack, workaround, monkey patch, partial solution, or fragile schema shim, stop and choose one of these paths:
 
 - Fix the underlying flaw in a robust, well-designed, production-ready manner.
 - Explain honestly that the request cannot be completed without first adding missing support.
@@ -24,9 +24,9 @@ Do not commit code that could predictably break later because it avoided the rea
 - Doing it right over doing it now.
 - Honesty above everything.
 
-## Compatibility
+## Breaking Changes
 
-Assume this repository is not production software. Backward compatibility is subordinate to correctness, clarity, and maintainability.
+Assume this repository is not production software. Correctness, clarity, and maintainability take priority over preserving previous behavior.
 
 Do not casually break documented public contracts. If a public API, CLI output shape, persisted format, or documented behavior is flawed, fix it deliberately and update the relevant docs and tests in the same change.
 

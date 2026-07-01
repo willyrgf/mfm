@@ -96,10 +96,10 @@ async fn test_store() -> (PostgresRunStore, String) {
     crate::schema::migrate_pool(&pool)
         .await
         .expect("migrate schema");
-    crate::schema::validate_pool(&pool)
+    let authority = crate::schema::validate_pool(&pool)
         .await
         .expect("validate schema");
-    let store = PostgresRunStore { pool };
+    let store = PostgresRunStore { pool, authority };
     (store, schema)
 }
 
@@ -151,6 +151,106 @@ async fn schema_validation_proves_append_xid_trigger_contracts() {
 }
 
 #[tokio::test]
+async fn store_authority_rejects_missing_migration_record() {
+    let (store, schema) = test_store().await;
+
+    sqlx::query("DELETE FROM _sqlx_migrations")
+        .execute(&store.pool)
+        .await
+        .expect("delete migration ledger");
+    let error = crate::schema::validate_pool(&store.pool)
+        .await
+        .expect_err("missing migration ledger fails authority validation");
+    assert_authority_error(error, PostgresStoreAuthorityError::Migrations);
+
+    drop_schema(&store, &schema).await;
+}
+
+#[tokio::test]
+async fn store_authority_rejects_migration_checksum_mismatch() {
+    let (store, schema) = test_store().await;
+
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = decode(repeat('00', 32), 'hex')")
+        .execute(&store.pool)
+        .await
+        .expect("mutate migration checksum");
+    let error = crate::schema::validate_pool(&store.pool)
+        .await
+        .expect_err("checksum mismatch fails authority validation");
+    assert_authority_error(error, PostgresStoreAuthorityError::Migrations);
+
+    drop_schema(&store, &schema).await;
+}
+
+#[tokio::test]
+async fn store_authority_rejects_stale_schema_object() {
+    let (store, schema) = test_store().await;
+
+    sqlx::query("CREATE TABLE typed_run_heads (id TEXT PRIMARY KEY)")
+        .execute(&store.pool)
+        .await
+        .expect("create stale retired table");
+    let error = crate::schema::validate_pool(&store.pool)
+        .await
+        .expect_err("stale schema object fails authority validation");
+    assert_authority_error(error, PostgresStoreAuthorityError::Catalog);
+
+    drop_schema(&store, &schema).await;
+}
+
+#[tokio::test]
+async fn store_authority_rejects_invalid_store_metadata() {
+    let (store, schema) = test_store().await;
+
+    sqlx::query("ALTER TABLE store_metadata DISABLE TRIGGER store_metadata_no_update")
+        .execute(&store.pool)
+        .await
+        .expect("disable metadata mutation guard");
+    sqlx::query("UPDATE store_metadata SET schema_contract_version = 'mfm.postgres.run_store.v0'")
+        .execute(&store.pool)
+        .await
+        .expect("mutate schema contract version");
+    sqlx::query("ALTER TABLE store_metadata ENABLE TRIGGER store_metadata_no_update")
+        .execute(&store.pool)
+        .await
+        .expect("reenable metadata mutation guard");
+    let error = crate::schema::validate_pool(&store.pool)
+        .await
+        .expect_err("invalid metadata fails authority validation");
+    assert_authority_error(error, PostgresStoreAuthorityError::Metadata);
+
+    drop_schema(&store, &schema).await;
+}
+
+#[tokio::test]
+async fn store_authority_rejects_invalid_trust_scope_binding() {
+    let (store, schema) = test_store().await;
+
+    sqlx::query("ALTER TABLE store_metadata DISABLE TRIGGER store_metadata_no_update")
+        .execute(&store.pool)
+        .await
+        .expect("disable metadata mutation guard");
+    sqlx::query("ALTER TABLE store_metadata ALTER COLUMN trust_scope_id DROP NOT NULL")
+        .execute(&store.pool)
+        .await
+        .expect("allow null trust scope fixture");
+    sqlx::query("UPDATE store_metadata SET trust_scope_id = NULL")
+        .execute(&store.pool)
+        .await
+        .expect("remove trust scope");
+    sqlx::query("ALTER TABLE store_metadata ENABLE TRIGGER store_metadata_no_update")
+        .execute(&store.pool)
+        .await
+        .expect("reenable metadata mutation guard");
+    let error = crate::schema::validate_pool(&store.pool)
+        .await
+        .expect_err("invalid trust scope fails authority validation");
+    assert_authority_error(error, PostgresStoreAuthorityError::TrustScope);
+
+    drop_schema(&store, &schema).await;
+}
+
+#[tokio::test]
 async fn schema_validation_rejects_disabled_append_xid_trigger() {
     let (store, schema) = test_store().await;
 
@@ -158,9 +258,10 @@ async fn schema_validation_rejects_disabled_append_xid_trigger() {
         .execute(&store.pool)
         .await
         .expect("disable append xid trigger");
-    crate::schema::validate_pool(&store.pool)
+    let error = crate::schema::validate_pool(&store.pool)
         .await
         .expect_err("disabled append xid trigger fails schema validation");
+    assert_authority_error(error, PostgresStoreAuthorityError::Catalog);
 
     drop_schema(&store, &schema).await;
 }
@@ -173,9 +274,10 @@ async fn schema_validation_rejects_missing_mutation_guard_trigger() {
         .execute(&store.pool)
         .await
         .expect("drop run events mutation guard");
-    crate::schema::validate_pool(&store.pool)
+    let error = crate::schema::validate_pool(&store.pool)
         .await
         .expect_err("missing mutation guard fails schema validation");
+    assert_authority_error(error, PostgresStoreAuthorityError::Catalog);
 
     drop_schema(&store, &schema).await;
 }
@@ -186,9 +288,11 @@ async fn store_trust_scope_survives_reconnects_and_rejects_mutation() {
 
     let trust_scope = store.load_trust_scope_id().await.expect("load trust scope");
     assert!(trust_scope.as_str().starts_with(TrustScopeId::PREFIX));
+    assert_eq!(store.store_authority().trust_scope_id(), &trust_scope);
 
     let restarted = PostgresRunStore {
         pool: store.pool.clone(),
+        authority: store.store_authority().clone(),
     };
     let restarted_trust_scope = restarted
         .load_trust_scope_id()
@@ -1719,6 +1823,13 @@ fn assert_corruption(error: PostgresStoreError, expected: &str) {
     );
 }
 
+fn assert_authority_error(error: PostgresStoreError, expected: PostgresStoreAuthorityError) {
+    let PostgresStoreError::Authority(actual) = error else {
+        panic!("expected store authority error, got {error:?}");
+    };
+    assert_eq!(actual, expected);
+}
+
 fn assert_invalid_cursor(error: PostgresStoreError, expected: &str) {
     let PostgresStoreError::Store(StoreError::InvalidCursor { message }) = error else {
         panic!("expected invalid cursor error, got {error:?}");
@@ -2154,20 +2265,20 @@ async fn observation_cursor_lifecycle_is_epoch_bound_without_ttl() {
     .expect("age cursor");
     decode_observation_cursor(&store.pool, &cursor, &metadata)
         .await
-        .expect("old issued_at does not expire current-epoch cursor");
+        .expect("aged issued_at does not expire current-epoch cursor");
 
     sqlx::query(
         "UPDATE run_observation_cursors \
-         SET store_epoch = 'mfm.store.epoch.v1:old' \
+         SET store_epoch = 'mfm.store.epoch.v1:prior' \
          WHERE token_hash = $1",
     )
     .bind(&token_hash)
     .execute(&store.pool)
     .await
-    .expect("move cursor to old epoch");
+    .expect("move cursor to prior epoch");
     let expired = decode_observation_cursor(&store.pool, &cursor, &metadata)
         .await
-        .expect_err("old epoch cursor expires");
+        .expect_err("prior epoch cursor expires");
     assert_cursor_expired(expired);
 
     drop_schema(&store, &schema).await;
@@ -2226,6 +2337,7 @@ async fn observation_cursor_uses_durable_metadata_across_store_restarts() {
     let cursor = observation_row_cursor_for_commit(&store, &run, 1).await;
     let restarted = PostgresRunStore {
         pool: store.pool.clone(),
+        authority: store.store_authority().clone(),
     };
     let page = restarted
         .read_run_observations(RunObservationQuery::new(Some(cursor), 10, 0))

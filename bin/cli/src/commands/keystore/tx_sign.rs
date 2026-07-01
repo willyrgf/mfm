@@ -1,7 +1,7 @@
 use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::{command_defaults, keystore};
+use crate::support::{keystore, keystore_selection};
 use clap::Args;
 use serde::Serialize;
 use std::fmt;
@@ -61,6 +61,14 @@ pub(crate) struct TxSignArgs {
     /// Keystore file path
     #[arg(long)]
     pub keystore: Option<PathBuf>,
+
+    /// Runtime configuration file for keystore profile selection
+    #[arg(long)]
+    pub runtime_config: Option<PathBuf>,
+
+    /// Keystore profile ref inside the runtime config (default: default)
+    #[arg(long)]
+    pub keystore_ref: Option<String>,
 }
 
 /// Response returned after writing a signed transaction payload.
@@ -91,7 +99,12 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &TxSignArgs) -> ! {
 }
 
 async fn execute_internal(args: &TxSignArgs) -> CommandResult<TxSignResponse> {
-    let keystore_path = command_defaults::resolve_keystore_path(args.keystore.as_ref());
+    let access =
+        keystore_selection::resolve_keystore_access(keystore_selection::KeystoreSelectionArgs {
+            keystore: args.keystore.as_ref(),
+            runtime_config: args.runtime_config.as_ref(),
+            keystore_ref: args.keystore_ref.as_deref(),
+        })?;
     let response = keystore::sign_transaction(keystore::TxSignRequest {
         id: args.id.clone(),
         by_label: args.by_label.clone(),
@@ -109,7 +122,7 @@ async fn execute_internal(args: &TxSignArgs) -> CommandResult<TxSignResponse> {
             keystore::OutputWriteMode::CreateNew
         },
         data: args.data.clone(),
-        keystore_path,
+        access,
     })?;
 
     Ok(CommandOutput::new(TxSignResponse {
