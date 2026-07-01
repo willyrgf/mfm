@@ -1,10 +1,9 @@
 #![allow(clippy::disallowed_methods)]
 #![warn(missing_docs)]
-//! Core primitives for MFM configuration and secret-bearing key material.
+//! Core primitives for MFM secret-bearing key material.
 //!
-//! `mfm_core` provides the typed configuration models that describe networks, tokens, DEXes,
-//! and authentication methods, together with the security-sensitive keystore implementation used
-//! by higher layers.
+//! `mfm_core` provides security-sensitive crypto and keystore implementation used by higher
+//! layers.
 //!
 //! # Examples
 //!
@@ -18,8 +17,6 @@
 //! # Ok::<(), mfm_core::keystore::KeystoreError>(())
 //! ```
 
-/// Typed YAML configuration models shared across the workspace.
-pub mod config;
 /// Security-sensitive Ethereum private-key parsing and signing primitives.
 pub mod crypto;
 /// Security-sensitive Ethereum keystore primitives and errors.
