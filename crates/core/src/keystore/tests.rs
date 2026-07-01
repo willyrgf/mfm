@@ -379,19 +379,19 @@ fn test_mnemonic_passphrase_not_persisted_in_plaintext() {
 }
 
 #[test]
-fn test_legacy_mnemonic_entry_fails_closed_without_secret_error() {
+fn test_unsupported_mnemonic_entry_fails_closed_without_secret_error() {
     let temp_dir = tempdir().unwrap();
-    let keystore_path = temp_dir.path().join("legacy_mnemonic_entry.keystore");
+    let keystore_path = temp_dir.path().join("unsupported_mnemonic_entry.keystore");
     let mnemonic =
         "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-    let passphrase = "legacy-secret-passphrase";
+    let passphrase = "unsupported-secret-passphrase";
 
     let mut keystore =
         Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
     keystore.unlock("strong_password_123").unwrap();
     keystore
         .import_private_key(
-            Some("legacy".to_string()),
+            Some("unsupported".to_string()),
             "0000000000000000000000000000000000000000000000000000000000000001",
         )
         .unwrap();

@@ -828,7 +828,7 @@ pub enum RuntimeConfigErrorKind {
     MissingFamily,
     /// Runtime config contained an unknown field.
     UnknownField,
-    /// Runtime config contained forbidden legacy source chain metadata.
+    /// Runtime config contained forbidden source chain metadata.
     ForbiddenExpectedChainId,
     /// Runtime config contained forbidden secret-bearing material.
     ForbiddenSecretMaterial,

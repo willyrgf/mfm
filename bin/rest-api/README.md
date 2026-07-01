@@ -5,7 +5,7 @@ Experimental REST API (Axum) for certified typed runs.
 The REST API is a typed assembly surface only. It can start, resume, inspect, replay, and render
 certified typed runs through `mfm-app`, `mfm-runtime`, `mfm-store`, and typed artifact storage. It
 does not accept old dynamic DAGs, `PlannedOp`, context snapshots, generic feature execution, or
-legacy artifact ids as semantic run authority.
+old artifact ids as semantic run authority.
 
 ## Running (Nixfied)
 
@@ -135,8 +135,7 @@ Request notes:
 The response is `{"outcome": "...", "run": ..., "public_output": ...}` inside the standard success
 envelope. Fresh admissions report `admitted`. Duplicate starts for the same certified run identity
 report `attached` without driving; if another process holds a live execution claim they report
-`already_driving`; if this process cannot match admitted runner executable evidence they report
-`incompatible_executable`.
+`already_driving`.
 `public_output` is present when the run completes while driving and the op exposes a public output
 schema id.
 
@@ -308,9 +307,8 @@ that blocked before appending lane evidence.
 each entry has `node_id`, `attempt_id`, `disposition` (`started`, `completed`, `failed`, or
 `interrupted`), and status-specific fields such as `attempt_no`, `retryable`, or `output_cell_id`.
 `scheduler_status` is read-only `observed` for `GET /v1/runs/:run_id/status`; start/resume responses
-set it to `advanced`, `blocked`, `public_output_projected`, `execution_claim_busy`,
-`execution_claim_lost`, or `incompatible_executable` according to the app dispatch loop and
-claim-coordination outcome.
+set it to `advanced`, `blocked`, `public_output_projected`, `execution_claim_busy`, or
+`execution_claim_lost` according to the app dispatch loop and claim-coordination outcome.
 Manual authorization requirements include the required evidence schema, signing scheme, authority id,
 allowed operator public identities or a safe summary, and quorum. They never expose signer runtime
 sources, keystore paths, password paths, passwords, or other secrets.

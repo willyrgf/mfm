@@ -30,8 +30,8 @@ use mfm_ids::{
 use mfm_replay::v1::{ReplayBroker, ReplayError, ReplayReadAuthority};
 use mfm_runtime::{
     CertifiedRuntimeSpec, ManualResolutionEvidenceArtifact, ManualResolutionRequest,
-    RunAdmittedBindingCompatibility, RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell,
-    SchedulerStatus, SerialTypedScheduler, VerifiedRunHistoryView,
+    RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell, SchedulerStatus, SerialTypedScheduler,
+    VerifiedRunHistoryView,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -666,7 +666,6 @@ enum DriveStatus {
     Scheduler(SchedulerStatus),
     ExecutionClaimBusy,
     ExecutionClaimLost,
-    IncompatibleExecutable,
 }
 
 impl DriveStatus {
@@ -675,7 +674,6 @@ impl DriveStatus {
             Self::Scheduler(status) => scheduler_status_str(status),
             Self::ExecutionClaimBusy => "execution_claim_busy",
             Self::ExecutionClaimLost => "execution_claim_lost",
-            Self::IncompatibleExecutable => "incompatible_executable",
         }
     }
 }
@@ -1097,8 +1095,8 @@ pub struct RunResponse {
     pub attempt_dispositions: Vec<AttemptDispositionStatus>,
     /// Last scheduler status observed by the app dispatch loop.
     ///
-    /// Read-only status reports `observed`; start/resume dispatch reports scheduler progress,
-    /// execution-claim coordination, or incompatible executable binding status.
+    /// Read-only status reports `observed`; start/resume dispatch reports scheduler progress or
+    /// execution-claim coordination.
     pub scheduler_status: String,
     /// Current typed run-stream head sequence.
     pub head_seq: u64,
@@ -1124,8 +1122,6 @@ pub enum RunLaunchOutcomeStatus {
     Attached,
     /// The launch request found an already admitted run with an active compatible driver.
     AlreadyDriving,
-    /// The launch request found the same run identity with incompatible executable bindings.
-    IncompatibleExecutable,
 }
 
 impl RunLaunchOutcomeStatus {
@@ -1135,7 +1131,6 @@ impl RunLaunchOutcomeStatus {
             Self::Admitted => "admitted",
             Self::Attached => "attached",
             Self::AlreadyDriving => "already_driving",
-            Self::IncompatibleExecutable => "incompatible_executable",
         }
     }
 }
@@ -1164,11 +1159,6 @@ pub enum RunLaunchOutcome {
         /// Current run status for the existing run.
         run: RunResponse,
     },
-    /// This launch found the same run identity with incompatible executable bindings.
-    IncompatibleExecutable {
-        /// Current run status for the existing run.
-        run: RunResponse,
-    },
 }
 
 impl RunLaunchOutcome {
@@ -1178,17 +1168,13 @@ impl RunLaunchOutcome {
             Self::Admitted { .. } => RunLaunchOutcomeStatus::Admitted,
             Self::Attached { .. } => RunLaunchOutcomeStatus::Attached,
             Self::AlreadyDriving { .. } => RunLaunchOutcomeStatus::AlreadyDriving,
-            Self::IncompatibleExecutable { .. } => RunLaunchOutcomeStatus::IncompatibleExecutable,
         }
     }
 
     /// Returns the run response carried by this outcome.
     pub fn run(&self) -> &RunResponse {
         match self {
-            Self::Admitted { run }
-            | Self::Attached { run }
-            | Self::AlreadyDriving { run }
-            | Self::IncompatibleExecutable { run } => run,
+            Self::Admitted { run } | Self::Attached { run } | Self::AlreadyDriving { run } => run,
         }
     }
 
@@ -1198,9 +1184,6 @@ impl RunLaunchOutcome {
             Self::Admitted { run } => (RunLaunchOutcomeStatus::Admitted, run),
             Self::Attached { run } => (RunLaunchOutcomeStatus::Attached, run),
             Self::AlreadyDriving { run } => (RunLaunchOutcomeStatus::AlreadyDriving, run),
-            Self::IncompatibleExecutable { run } => {
-                (RunLaunchOutcomeStatus::IncompatibleExecutable, run)
-            }
         }
     }
 }
@@ -1895,21 +1878,14 @@ where
         if &run_admitted.identity_material != identity_material {
             return Err(run_identity_material_mismatch());
         }
+        self.scheduler
+            .validate_admitted_run_binding(context.runtime_spec(), run_admitted)?;
         let run = run_status_from_projection(
             run_id,
             context.runtime_spec(),
             context.events(),
             context.projection(),
         )?;
-        match self
-            .scheduler
-            .run_admitted_binding_compatibility(context.runtime_spec(), run_admitted)?
-        {
-            RunAdmittedBindingCompatibility::Compatible => {}
-            RunAdmittedBindingCompatibility::IncompatibleExecutable => {
-                return Ok(RunLaunchOutcome::IncompatibleExecutable { run });
-            }
-        }
         match self
             .store
             .execution_claim_status(run_id)
@@ -1929,9 +1905,8 @@ where
         run_id: &RunId,
     ) -> Result<DriveStatus, AppError> {
         let context = self.load_verified_status_read_context(run_id).await?;
-        if let Some(status) = self.drive_binding_decline_status(runtime_spec, &context)? {
-            return Ok(status);
-        }
+        self.scheduler
+            .validate_admitted_run_binding(runtime_spec, context.read.view().run_admitted())?;
         let launch_evidence = stored_launch_evidence_from_run_admitted(
             &self.artifacts,
             context.read.view().run_admitted(),
@@ -1966,22 +1941,6 @@ where
                 SchedulerStatus::Advanced => {}
                 SchedulerStatus::Blocked => return Ok(SchedulerStatus::Blocked.into()),
                 SchedulerStatus::PublicOutputProjected => unreachable!("handled above"),
-            }
-        }
-    }
-
-    fn drive_binding_decline_status(
-        &self,
-        runtime_spec: &CertifiedRuntimeSpec,
-        context: &VerifiedStatusReadContext,
-    ) -> Result<Option<DriveStatus>, AppError> {
-        let compatibility = self
-            .scheduler
-            .run_admitted_binding_compatibility(runtime_spec, context.read.view().run_admitted())?;
-        match compatibility {
-            RunAdmittedBindingCompatibility::Compatible => Ok(None),
-            RunAdmittedBindingCompatibility::IncompatibleExecutable => {
-                Ok(Some(DriveStatus::IncompatibleExecutable))
             }
         }
     }

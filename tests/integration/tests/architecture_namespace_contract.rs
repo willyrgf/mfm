@@ -85,7 +85,7 @@ fn repository_text_entries_include_tracked_dot_config_surfaces() {
 }
 
 #[test]
-fn legacy_evm_runtime_env_surfaces_do_not_return() {
+fn old_evm_runtime_env_surfaces_do_not_return() {
     let root = repo_root();
     let entries = repo_text_entries(&root);
     let forbidden = [
@@ -102,15 +102,11 @@ fn legacy_evm_runtime_env_surfaces_do_not_return() {
     ];
 
     assert_forbidden_terms_are_allowlisted(
-        "legacy EVM runtime surface",
+        "old EVM runtime surface",
         &entries,
         &forbidden,
         &[],
-        |path, _source| {
-            !TEST_HARNESS_PATHS.contains(&path)
-                && path != "PLAN_IMPL_RFC_RUNTIME_CONFIG.md"
-                && path != "RFC_RUNTIME_CONFIG.md"
-        },
+        |path, _source| !TEST_HARNESS_PATHS.contains(&path),
     );
 }
 

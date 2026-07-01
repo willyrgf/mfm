@@ -338,9 +338,9 @@ trust boundary; callers cannot supply or update it. Observation list/watch rows 
 strict authority at read time. Artifact bytes live in Postgres; production app, CLI, and REST paths
 do not stage, read, or migrate workflow artifacts through filesystem artifact roots. The schema and
 migrations are owned by `crates/storages/stream-store-postgres`; runtime callers validate schema
-compatibility and must not run startup auto-DDL. Because MFM is pre-production, replacing a persisted
-contract shape is a destructive schema change: delete obsolete tables and schema checks instead of
-adding compatibility migrations or dual old/new write paths. Logical-key admission folds
+contract shape and must not run startup auto-DDL. Because MFM is pre-production, replacing a
+persisted contract shape is a destructive schema change: delete obsolete tables and schema checks
+instead of adding dual old/new write paths. Logical-key admission folds
 authoritative `run_events`; there is no logical-key admission index. Admission-lane rows are
 operational coordination only. In v1 they serve single-lane FIFO resource claims and nowait execution
 claims; they can preserve retry order or active-driver liveness, but cannot grant ownership and are
@@ -442,10 +442,10 @@ reject attempt-bound payloads that are not preceded by a separate `StateAttemptS
 runtime, replay, and Postgres-backed loads fail before trusting old lifecycle rows.
 
 Read, resume, replay, and status paths must construct a `VerifiedRunHistoryView` from a
-`CommittedRunStream` plus `VerifiedRunArtifactStore` before trusting history. `VerifiedRunHistory`
-wraps that view for compatibility. Replay authority is minted from the verified view and certified
-runtime authority; raw event vectors or retained artifact bytes without committed evidence do not
-cross the runtime/replay boundary. Scheduler drive paths construct `VerifiedRunContext` through
+`CommittedRunStream` plus `VerifiedRunArtifactStore` before trusting history. Replay authority is
+minted from the verified view and certified runtime authority; raw event vectors or retained
+artifact bytes without committed evidence do not cross the runtime/replay boundary. Scheduler drive
+paths construct `VerifiedRunContext` through
 `VerifiedRunContextLoader`, which combines the same committed stream/fold authority with
 `BoundRuntimeContext` runner, capability, and framework-handler authority before any transition is
 selected.

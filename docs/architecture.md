@@ -66,7 +66,7 @@ The typed boundary separates data, evidence, authority, and implementation artif
 - `CommittedRunStream` is store-owned append-only stream authority
 - `VerifiedRunArtifactStore` is retained-artifact authority tied to a committed stream
 - `VerifiedRunHistoryView` is runtime/replay read authority over a committed stream plus verified
-  retained artifact evidence; `VerifiedRunHistory` wraps that view for compatibility
+  retained artifact evidence
 - erased runner plans are implementation artifacts
 - rendered public-output JSON is an output/cache surface only
 

@@ -102,12 +102,6 @@ impl RuntimeCommittedBatch {
     }
 }
 
-/// Store-owned run history validated against certified runtime authority.
-#[derive(Debug, Clone)]
-pub struct VerifiedRunHistory {
-    view: VerifiedRunHistoryView,
-}
-
 /// Shared verified run-history view for runtime, replay, and app read paths.
 ///
 /// This view is minted only from a store-owned committed run stream, certified runtime authority,
@@ -223,96 +217,7 @@ impl VerifiedRunContextLoader {
     }
 }
 
-impl VerifiedRunHistory {
-    /// Loads the authoritative run stream from an async typed store and validates it against
-    /// certified runtime authority and verified retained artifact evidence.
-    pub async fn from_async_store<S>(
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        store: &S,
-        artifacts: store::VerifiedRunArtifactStore,
-    ) -> Result<Self>
-    where
-        S: store::RunEventStore + ?Sized,
-    {
-        Ok(Self {
-            view: VerifiedRunHistoryView::from_async_store(runtime_spec, run_id, store, artifacts)
-                .await?,
-        })
-    }
-
-    /// Validates a committed stream against certified runtime authority and verified retained
-    /// artifact evidence.
-    pub fn from_committed_stream(
-        runtime_spec: &CertifiedRuntimeSpec,
-        committed: store::CommittedRunStream,
-        artifacts: store::VerifiedRunArtifactStore,
-    ) -> Result<Self> {
-        Ok(Self {
-            view: VerifiedRunHistoryView::from_committed_stream(
-                runtime_spec,
-                committed,
-                artifacts,
-            )?,
-        })
-    }
-
-    /// Shared verified view covered by this history authority.
-    pub fn view(&self) -> &VerifiedRunHistoryView {
-        &self.view
-    }
-
-    /// Run id covered by this verified history.
-    pub fn run_id(&self) -> &RunId {
-        self.view.run_id()
-    }
-
-    /// Certified spec hash covered by this verified history.
-    pub fn spec_hash(&self) -> &SpecHash {
-        self.view.spec_hash()
-    }
-
-    /// Authoritative committed event envelopes covered by this verified history.
-    pub fn events(&self) -> &[store::KernelEventEnvelope] {
-        self.view.events()
-    }
-
-    /// Projection rebuilt from the verified committed stream.
-    pub fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
-        self.view.projection_snapshot()
-    }
-
-    /// Store-owned committed stream authority covered by this runtime verification.
-    pub fn committed_stream(&self) -> &store::CommittedRunStream {
-        self.view.committed_stream()
-    }
-
-    /// Verified retained artifacts required by this run history.
-    pub fn artifact_store(&self) -> &store::VerifiedRunArtifactStore {
-        self.view.artifact_store()
-    }
-}
-
 impl VerifiedRunHistoryView {
-    async fn from_async_store<S>(
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        store: &S,
-        artifacts: store::VerifiedRunArtifactStore,
-    ) -> Result<Self>
-    where
-        S: store::RunEventStore + ?Sized,
-    {
-        let committed = store::CommittedRunStream::from_events(
-            run_id.clone(),
-            store
-                .load_run_stream(run_id)
-                .await
-                .map_err(async_store_error)?,
-        )?;
-        Self::from_committed_stream(runtime_spec, committed, artifacts)
-    }
-
     /// Validates a committed stream against certified runtime authority and verified retained
     /// artifact evidence.
     pub fn from_committed_stream(

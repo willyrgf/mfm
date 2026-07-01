@@ -112,13 +112,13 @@ fn descriptor_identity_has_golden_canonical_json_and_schema_id() {
 
     assert_eq!(
         descriptor.identity_canonical_json().as_str(),
-        "{\"canonicalization\":\"sha256-jcs-v1\",\"compatibility\":\"manual_version\",\"persisted_surface\":{\"numbers\":\"no_floats\",\"secrets\":\"no_secrets\"},\"schema_kind\":\"value\",\"schema_name\":\"mfm.test.example_value\",\"schema_version\":\"1\",\"semantic_type_id\":\"semantic:mfm.test:example-value:1:sha256-jcs-v1:3333333333333333333333333333333333333333333333333333333333333333\",\"shape\":{\"fields\":[{\"default\":\"required\",\"name\":\"amount\",\"shape\":{\"kind\":\"decimal_string\",\"scale\":{\"kind\":\"variable\"}}},{\"default\":\"required\",\"name\":\"label\",\"shape\":{\"kind\":\"string\"}}],\"kind\":\"struct\"}}"
+        "{\"canonicalization\":\"sha256-jcs-v1\",\"persisted_surface\":{\"numbers\":\"no_floats\",\"secrets\":\"no_secrets\"},\"schema_kind\":\"value\",\"schema_name\":\"mfm.test.example_value\",\"schema_version\":\"1\",\"semantic_type_id\":\"semantic:mfm.test:example-value:1:sha256-jcs-v1:3333333333333333333333333333333333333333333333333333333333333333\",\"shape\":{\"fields\":[{\"default\":\"required\",\"name\":\"amount\",\"shape\":{\"kind\":\"decimal_string\",\"scale\":{\"kind\":\"variable\"}}},{\"default\":\"required\",\"name\":\"label\",\"shape\":{\"kind\":\"string\"}}],\"kind\":\"struct\"},\"versioning\":\"manual_version\"}"
     );
     assert_eq!(
         ExampleValue::schema_id()
             .expect("example schema id")
             .as_str(),
-        "schema:mfm.test.example_value:1:sha256-jcs-v1:265d5d5a5078d5b736e77b50cd4e336681817203d2f59d364648e521d604ba88"
+        "schema:mfm.test.example_value:1:sha256-jcs-v1:a8d99e06027b3fbad4b15248550d1fe2fe899091c629f48af1a3e267f7bd3379"
     );
 }
 
@@ -151,13 +151,13 @@ fn framework_generic_descriptors_have_golden_schema_ids() {
         MaybeValue::<ExampleValue>::schema_id()
             .expect("maybe schema id")
             .as_str(),
-        "schema:mfm.kernel.maybe_value:1:sha256-jcs-v1:f1825449efdd1ce962ac698c089442970415c16b0907a1a0157dc51ef8a15c24"
+        "schema:mfm.kernel.maybe_value:1:sha256-jcs-v1:2f50c16c5cbfd672799334a6749c9f1438184782e6ef794d30cd9fa5934e2a95"
     );
     assert_eq!(
         ArtifactRef::<ExampleValue>::schema_id()
             .expect("artifact ref schema id")
             .as_str(),
-        "schema:mfm.kernel.artifact_ref:1:sha256-jcs-v1:dba004dc21483ca3b4b822b02cab5d0335fe59027ee3c03e1be5bf7c5f88a7d5"
+        "schema:mfm.kernel.artifact_ref:1:sha256-jcs-v1:2f3dcaab8ef8b51b86b239fbb34f7b070cb7e70efb6f603d3c047dd20d5dba8b"
     );
 }
 

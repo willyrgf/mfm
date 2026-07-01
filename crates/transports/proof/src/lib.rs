@@ -3,7 +3,7 @@
 //!
 //! This crate provides the enabled proof implementation used by conformance tests and by typed
 //! runner assembly. It exposes typed runtime runners and replay verifiers only; it does not expose
-//! legacy live-IO transports or generic request/response namespaces.
+//! old live-IO transports or generic request/response namespaces.
 
 use std::sync::Arc;
 

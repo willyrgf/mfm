@@ -365,7 +365,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn app_resume_declines_incompatible_executable_without_claiming() {
+    async fn app_resume_rejects_unavailable_runner_binding_without_claiming() {
         let fixture = EntryPointRunFixture::in_memory().await;
         let prepared = fixture.prepare_sample_portfolio(None);
         let run_id = prepared.request.run_id.clone();
@@ -378,12 +378,12 @@ mod tests {
             fixture.prep.certification_registry.clone(),
         );
 
-        let resumed = incompatible_services
+        let error = incompatible_services
             .resume_stored_run(&run_id)
             .await
-            .expect("resume response");
+            .expect_err("resume should reject unavailable runner bindings");
 
-        assert_eq!(resumed.scheduler_status, "incompatible_executable");
+        assert_eq!(error.code, "LaunchRunnerUnavailable");
         assert!(matches!(
             fixture
                 .store

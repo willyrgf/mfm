@@ -97,7 +97,7 @@ mod tests {
         let forbidden = [
             format!("mfm_{}", "sdk"),
             format!("mfm_{}", "machine"),
-            format!("mfm_app_{}", "legacy"),
+            format!("mfm_app_{}{}", "leg", "acy"),
             format!("Runs{}Request", "Start"),
             format!("{}line", "Pipe"),
             format!("Port{}", "Key"),

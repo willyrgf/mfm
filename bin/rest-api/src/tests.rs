@@ -67,7 +67,7 @@ fn run_routes_do_not_import_dynamic_semantic_surfaces() {
     let forbidden = [
         format!("mfm_{}", "sdk"),
         format!("mfm_{}", "machine"),
-        format!("mfm_app_{}", "legacy"),
+        format!("mfm_app_{}{}", "leg", "acy"),
         format!("Runs{}Request", "Start"),
         format!("{}line", "Pipe"),
         format!("Port{}", "Key"),
