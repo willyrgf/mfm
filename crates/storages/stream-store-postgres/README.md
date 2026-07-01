@@ -64,17 +64,14 @@ nix shell .#sqlx-cli --command bash -lc \
 
 After regenerating metadata, run `nix run .#test-db`.
 
-## Compatibility
+## Local Database Baseline
 
-The old dynamic stream-store surface and old `typed_*` schema are removed from
-this crate. This is a destructive dev-branch baseline: use a fresh database or
+This crate owns the certified Postgres run-store schema. Use a fresh database or
 drop/recreate the existing local schema before applying migrations.
 
 There is no downgrade migration. Rollback means rolling code back to the target
 branch and resetting the database or schema to that branch's expected baseline.
-Old filesystem artifact roots are not read or migrated by this store; after a
-local reset, developers may delete those roots once no old branch still needs
-them.
+Filesystem artifact roots outside this store are not read or migrated.
 
 ## Operational Constraints
 

@@ -3,8 +3,7 @@
 Typed kernel crate for the event-sourced typed state-machine workflow runtime.
 
 `docs/design.md` is the normative typed-core authority contract. This crate executes only certified
-typed execution specs. It must not depend on old dynamic machine, SDK, `PlannedOp`, `PortKey`,
-public `StateGraph`, `DependencyEdge`, `DynContext`, or generic `IoProvider` surfaces.
+typed execution specs.
 
 `CertifiedRuntimeSpec::new` accepts only `mfm_certify::CertifiedTypedSpec`. Runtime callers cannot
 construct runtime authority from a parsed `TypedExecutionSpec`, a hash-only

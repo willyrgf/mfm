@@ -2,8 +2,7 @@
 
 Status: authoritative typed-core design contract
 
-This document defines the runtime and authoring contract for the current MFM codebase. The typed
-core RFC is now implemented enough that this document, not the removed dynamic model, is the
+This document defines the runtime and authoring contract for the current MFM codebase. It is the
 normative contributor-facing design reference.
 
 The central rule is:
@@ -339,8 +338,8 @@ strict authority at read time. Artifact bytes live in Postgres; production app, 
 do not stage, read, or migrate workflow artifacts through filesystem artifact roots. The schema and
 migrations are owned by `crates/storages/stream-store-postgres`; runtime callers validate schema
 contract shape and must not run startup auto-DDL. Because MFM is pre-production, replacing a
-persisted contract shape is a destructive schema change: delete obsolete tables and schema checks
-instead of adding dual old/new write paths. Logical-key admission folds
+persisted contract shape is a destructive schema change that updates the baseline directly.
+Logical-key admission folds
 authoritative `run_events`; there is no logical-key admission index. Admission-lane rows are
 operational coordination only. In v1 they serve single-lane FIFO resource claims and nowait execution
 claims; they can preserve retry order or active-driver liveness, but cannot grant ownership and are
@@ -437,9 +436,8 @@ delegates spec-independent ordering and projection checks to `mfm-store`, then p
 runtime-owned spec-aware validation of seeds, configs, artifacts, completed cells, side-effect
 ledger evidence, public-output events, retention events, and terminal run state. The rebuilt
 projection is derived from the stream; it is not independent semantic authority. Store-owned stream
-validation is also the centralized old-model ingress guard: loaded streams and projection rebuilds
-reject attempt-bound payloads that are not preceded by a separate `StateAttemptStarted` commit, so
-runtime, replay, and Postgres-backed loads fail before trusting old lifecycle rows.
+validation requires attempt-bound payloads to be preceded by a separate `StateAttemptStarted`
+commit before runtime, replay, or Postgres-backed loads trust them.
 
 Read, resume, replay, and status paths must construct a `VerifiedRunHistoryView` from a
 `CommittedRunStream` plus `VerifiedRunArtifactStore` before trusting history. Replay authority is

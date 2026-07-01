@@ -2,8 +2,7 @@
 //! Typed proof domain contracts.
 //!
 //! This crate owns the proof value, capability, state, and replay-verifier contracts used by the
-//! typed proof operation. It has no dependency on the old machine, SDK, context, or generic IO
-//! surfaces.
+//! typed proof operation.
 
 use std::{fmt, future, ops::Deref, str::FromStr};
 

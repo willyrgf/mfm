@@ -1,9 +1,8 @@
 #![warn(missing_docs)]
 //! Typed application assembly for certified MFM runs.
 //!
-//! `mfm-app` is the typed boundary used by binaries and process adapters. It does not plan old
-//! dynamic DAGs, own workflow semantics, or expose `mfm-machine`/`mfm-sdk` execution authority.
-//! Callers select a registered entry-point operation and authored config; this crate resolves,
+//! `mfm-app` is the typed boundary used by binaries and process adapters. Callers select a
+//! registered entry-point operation and authored config; this crate resolves,
 //! plans, certifies, stages launch material, and wires typed services for start, resume, replay,
 //! and public-output rendering.
 //!

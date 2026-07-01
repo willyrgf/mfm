@@ -251,25 +251,19 @@ The CLI validates the PostgreSQL schema on connect and does not create or alter
 tables. Apply the `mfm-stream-store-postgres` migrations against a fresh or
 explicitly reset local database before running typed run commands.
 There is no downgrade migration for the current typed Postgres baseline; rolling
-back to an older branch requires resetting the database or schema to that
-branch's expected baseline. Old filesystem artifact roots are not read or
-migrated by typed run commands.
+back to another branch requires resetting the database or schema to that
+branch's expected baseline. Filesystem artifact roots outside the typed run
+store are not read or migrated by typed run commands.
 
-Run ids use the typed identity format `run:<algorithm>:<digest>`. Old UUID dynamic run ids are not
-accepted by the typed CLI run surface. Normal `run start` derives the typed run id from certified
-run identity material: certified spec hash, store trust scope, and an optional distinct-run key
-digest.
+Run ids use the typed identity format `run:<algorithm>:<digest>`. Normal `run start` derives the
+typed run id from certified run identity material: certified spec hash, store trust scope, and an
+optional distinct-run key digest.
 
-Old dynamic op launch, pipeline launch, context snapshots, and generic artifact reads have been
-removed from the `run` subcommand. The CLI starts only through registered entry-point ops that app
-assembly plans and certifies into typed execution specs, and it resumes/replays only from stored
-typed run streams.
-
-Old dynamic runs are not silently migrated into certified typed runs. Historical dynamic run data can
-only be inspected through explicit operational tooling outside this typed run surface.
+The CLI starts only through registered entry-point ops that app assembly plans and certifies into
+typed execution specs, and it resumes/replays only from stored typed run streams.
 
 Keystore tx commands are direct CLI helpers over the keystore and EVM libraries. They do not submit
-or resume certified typed runs, and they do not route through the removed dynamic app bridge.
+or resume certified typed runs.
 
 ### `run start`
 

@@ -8,7 +8,7 @@
 //! [`PortfolioSnapshotCanonicalConfig`].
 //!
 //! Planning and execution-specific built config live outside this crate so authored/canonical
-//! config remains independent from runtime, scheduler, and old dynamic-machine APIs.
+//! config remains independent from runtime and scheduler APIs.
 //!
 //! # Examples
 //!

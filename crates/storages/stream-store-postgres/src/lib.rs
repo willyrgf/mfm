@@ -1,9 +1,7 @@
 #![warn(missing_docs)]
 //! Postgres-backed run store.
 //!
-//! This crate exposes only the certified Postgres run-store implementation. The old dynamic
-//! stream-store surface was removed with the typed-core rewrite so it cannot act as semantic
-//! authority for certified runs.
+//! This crate exposes the certified Postgres run-store implementation for typed runs.
 //!
 //! # Examples
 //!
