@@ -1,6 +1,7 @@
 #![allow(clippy::disallowed_methods)]
 
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use axum::{routing::post, Json, Router};
 use mfm_app::{PublicOpName, RunModeStatus};
 use mfm_events::v1 as events;
@@ -10,7 +11,7 @@ use serde_json::json;
 use tower::ServiceExt;
 
 mod support;
-use support::{json_post, response_json};
+use support::{empty_post, json_post, response_json};
 
 const NETWORK_ID: &str = "typed-local-eth";
 static RPC_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -104,6 +105,92 @@ async fn rest_portfolio_snapshot_matches_public_output() {
     assert_eq!(
         &body["data"]["public_output"]["json"], expected_public_output,
         "REST portfolio route must render the same public JSON as the typed workflow helper"
+    );
+}
+
+#[tokio::test]
+async fn read_only_routes_work_after_runtime_config_is_removed() {
+    let _env_guard = RPC_ENV_LOCK.lock().await;
+    let rpc_url = start_rpc_mock().await;
+    let runtime_config = set_rpc_env(rpc_url);
+    let app = rest_test_app();
+    let response = local_portfolio_snapshot_post(&app, &portfolio_payload()).await;
+    let run_id = response["data"]["run"]["run_id"]
+        .as_str()
+        .expect("run id")
+        .to_owned();
+    let public_schema_id = response["data"]["public_output"]["public_schema_id"]
+        .as_str()
+        .expect("public schema id")
+        .to_owned();
+
+    drop(runtime_config);
+
+    let status = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/runs/{run_id}/status"))
+                .body(Body::empty())
+                .expect("status request"),
+        )
+        .await
+        .expect("status response");
+    assert_eq!(status.status(), StatusCode::OK);
+    let status_body = response_json(status).await;
+    assert_eq!(status_body["status"], "success");
+    assert_eq!(status_body["data"]["run_mode"], "completed");
+
+    let stream = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/runs/{run_id}/stream"))
+                .body(Body::empty())
+                .expect("stream request"),
+        )
+        .await
+        .expect("stream response");
+    assert_eq!(stream.status(), StatusCode::OK);
+    let stream_body = response_json(stream).await;
+    assert_eq!(stream_body["status"], "success");
+    assert!(
+        stream_body["data"]["events"]
+            .as_array()
+            .is_some_and(|events| !events.is_empty()),
+        "{stream_body}"
+    );
+
+    let replay = app
+        .clone()
+        .oneshot(empty_post(&format!("/v1/runs/{run_id}/replay")))
+        .await
+        .expect("replay response");
+    assert_eq!(replay.status(), StatusCode::OK);
+    let replay_body = response_json(replay).await;
+    assert_eq!(replay_body["status"], "success");
+    assert_eq!(replay_body["data"]["run_mode"], "completed");
+
+    let public_output = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/v1/runs/{run_id}/public-output/{public_schema_id}"
+                ))
+                .body(Body::empty())
+                .expect("public output request"),
+        )
+        .await
+        .expect("public output response");
+    assert_eq!(public_output.status(), StatusCode::OK);
+    let public_output_body = response_json(public_output).await;
+    assert_eq!(public_output_body["status"], "success");
+    assert_eq!(
+        public_output_body["data"]["json"]["snapshot"]["portfolio_id"],
+        "typed-local"
     );
 }
 

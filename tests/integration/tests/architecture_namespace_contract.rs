@@ -85,6 +85,77 @@ fn repository_text_entries_include_tracked_dot_config_surfaces() {
 }
 
 #[test]
+fn legacy_evm_runtime_env_surfaces_do_not_return() {
+    let root = repo_root();
+    let entries = repo_text_entries(&root);
+    let forbidden = [
+        "MFM_EVM_RPC_SOURCES_JSON",
+        "MFM_EVM_NETWORK_ROUTES_JSON",
+        "MFM_EVM_SIGNERS_JSON",
+        "--evm-rpc-sources",
+        "EvmJsonRpcClient::from_env",
+        "KeystoreSignerRegistryEntry::from_env_sources",
+        "from_env_sources",
+        "UnavailablePortfolioEvmProvider",
+        "EvmContractRuntimeRoute",
+        "PortfolioEvmRoute",
+    ];
+
+    assert_forbidden_terms_are_allowlisted(
+        "legacy EVM runtime surface",
+        &entries,
+        &forbidden,
+        &[],
+        |path, _source| {
+            !TEST_HARNESS_PATHS.contains(&path)
+                && path != "PLAN_IMPL_RFC_RUNTIME_CONFIG.md"
+                && path != "RFC_RUNTIME_CONFIG.md"
+        },
+    );
+}
+
+#[test]
+fn evm_route_ids_do_not_leak_into_adapter_request_surfaces() {
+    let root = repo_root();
+    let entries = repo_text_entries(&root);
+    let forbidden = [
+        "source_ref",
+        "policy_id",
+        "EvmSourceRef",
+        "EvmSourcePolicyId",
+    ];
+
+    assert_forbidden_terms_are_allowlisted(
+        "adapter-facing EVM route id",
+        &entries,
+        &forbidden,
+        &[],
+        |path, _source| path.starts_with("crates/adapters/") && !is_test_support_path(path),
+    );
+}
+
+#[test]
+fn nixfied_generates_runtime_config_with_restrictive_atomic_write() {
+    let root = repo_root();
+    let nixfied = fs::read_to_string(root.join("nixfied.nix")).expect("nixfied model");
+
+    for required in [
+        "MFM_RUNTIME_CONFIG_FILE",
+        "runtime-config/reth-runtime.toml",
+        "mktemp",
+        "chmod 700",
+        "chmod 600",
+        "mv -f",
+        "source_ref = \"reth-local\"",
+    ] {
+        assert!(
+            nixfied.contains(required),
+            "nixfied runtime config generation must contain `{required}`"
+        );
+    }
+}
+
+#[test]
 fn runtime_docs_assign_public_output_render_to_framework_lifecycle() {
     let root = repo_root();
     let entries = repo_text_entries(&root);

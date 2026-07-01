@@ -17,7 +17,7 @@ async fn parity_reth_contract_lifecycle_rest_route_completes_and_replays() {
     let rpc_url = required_rpc_url_for_source(NETWORK_ID);
     let chain_id = rpc_chain_id(&rpc_url).await;
     let wallet = test_support::funded_reth_keystore_wallet(&rpc_url, 0).await;
-    let _runtime_config = wallet.set_runtime_config_env_for_test(NETWORK_ID, &rpc_url);
+    let runtime_config = wallet.set_runtime_config_env_for_test(NETWORK_ID, &rpc_url);
 
     let app = rest_test_app();
     let config = lifecycle_config(chain_id, wallet.signer_json());
@@ -73,6 +73,8 @@ async fn parity_reth_contract_lifecycle_rest_route_completes_and_replays() {
             && !wallet.rendered_contains_runtime_signer_config(&body.to_string()),
         "runtime responses must not leak signer provider config"
     );
+    drop(runtime_config);
+    drop(wallet);
 
     let replay = app
         .clone()
