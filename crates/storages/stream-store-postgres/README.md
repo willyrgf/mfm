@@ -8,7 +8,7 @@ streams. It persists append-only commits, canonical event payload bytes,
 artifact blobs/evidence, resource-lane transition authority, and observation
 cursor rows through `mfm-store`.
 It owns the PostgreSQL migrations, crate-local SQLx query metadata, and runtime
-schema compatibility checks for that store.
+schema contract checks for that store.
 
 ## Runtime Contract
 
@@ -30,7 +30,7 @@ assert_eq!(store.store_authority(), &authority);
 `PostgresRunStore::connect` performs the same authority validation before returning
 a store. Authority validation checks that PostgreSQL is reachable, the SQLx
 migration ledger matches the compiled migrations, required catalog objects are
-present with expected contracts, stale legacy tables are absent, and the
+present with expected contracts, stale retired tables are absent, and the
 singleton `store_metadata` row contains the expected contract version and a
 valid store-owned trust-scope id. These failures are reported through closed
 `PostgresStoreAuthorityError` categories and never include database URLs,

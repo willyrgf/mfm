@@ -53,7 +53,7 @@ pub enum WalletSubject {
 }
 
 impl WalletSubject {
-    /// Creates a checked wallet subject from the legacy address/kind pair.
+    /// Creates a checked wallet subject from an address and subject kind.
     pub fn new(
         address: impl Into<String>,
         subject_kind: WalletSubjectKind,

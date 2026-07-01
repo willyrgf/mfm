@@ -2,7 +2,7 @@
 //! Typed portfolio tracker workflow operation.
 //!
 //! The portfolio tracker workflow is authored through `mfm-program` and lowers to certified typed
-//! state programs. This crate exposes no legacy dynamic `PlannedOp`, `PortKey`, context-key, or
+//! state programs. This crate exposes no old dynamic `PlannedOp`, `PortKey`, context-key, or
 //! generic IO surface.
 //!
 //! # Examples

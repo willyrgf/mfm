@@ -10,6 +10,5 @@ generic `IoProvider` surfaces.
 
 Replay authority is minted from certified spec authority, a validated `VerifiedRunHistoryView`, and
 retained artifact evidence from the committed run stream plus rebuilt and validated projections.
-The `VerifiedRunHistory` wrapper delegates to the same view. Raw status DTOs, stream JSON,
-hash-only specs, rendered public output, or artifact-store bytes without committed evidence cannot
-construct replay authority.
+Raw status DTOs, stream JSON, hash-only specs, rendered public output, or artifact-store bytes
+without committed evidence cannot construct replay authority.

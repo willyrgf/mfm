@@ -18,7 +18,7 @@ and typed public outputs:
 - `AssembleSnapshot`
 - `ProjectReport`
 
-The crate exposes no legacy dynamic `PlannedOp`, `PortKey`, `DynContext`, context-key, or
+The crate exposes no old dynamic `PlannedOp`, `PortKey`, `DynContext`, context-key, or
 hand-authored dependency-edge surface. Runtime execution is provided by the typed runner registry
 in `mfm-adapters-portfolio`.
 

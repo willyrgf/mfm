@@ -189,7 +189,7 @@ async fn store_authority_rejects_stale_schema_object() {
     sqlx::query("CREATE TABLE typed_run_heads (id TEXT PRIMARY KEY)")
         .execute(&store.pool)
         .await
-        .expect("create stale legacy table");
+        .expect("create stale retired table");
     let error = crate::schema::validate_pool(&store.pool)
         .await
         .expect_err("stale schema object fails authority validation");

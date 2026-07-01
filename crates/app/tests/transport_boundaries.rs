@@ -26,13 +26,13 @@ fn production_app_links_only_supported_transport_crates() {
     ] {
         assert!(
             !manifest.contains(forbidden),
-            "production app manifest must not link legacy transport dependency {forbidden}"
+            "production app manifest must not link unsupported transport dependency {forbidden}"
         );
     }
 }
 
 #[test]
-fn transport_sources_exclude_legacy_io_surfaces() {
+fn transport_sources_exclude_unsupported_io_surfaces() {
     for (name, source) in [
         ("proof", include_str!("../../transports/proof/src/lib.rs")),
         (
@@ -59,7 +59,7 @@ fn transport_sources_exclude_legacy_io_surfaces() {
         ] {
             assert!(
                 !source.contains(banned),
-                "transport {name} must not expose legacy IO surface {banned}"
+                "transport {name} must not expose unsupported IO surface {banned}"
             );
         }
     }

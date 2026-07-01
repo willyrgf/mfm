@@ -4953,12 +4953,9 @@ async fn run_admission_returns_bound_context_with_capability_and_framework_autho
         run_admitted.adapter_executables,
         authority.bound_context().adapter_executables()
     );
-    assert_eq!(
-        scheduler
-            .run_admitted_binding_compatibility(&fixture.runtime_spec, &run_admitted)
-            .expect("binding compatibility"),
-        RunAdmittedBindingCompatibility::Compatible
-    );
+    scheduler
+        .validate_admitted_run_binding(&fixture.runtime_spec, &run_admitted)
+        .expect("binding validation");
 }
 
 #[test]
@@ -5143,12 +5140,9 @@ async fn resume_rejects_runner_executable_identity_mismatch_before_attempt_start
             _ => None,
         })
         .expect("RunAdmitted payload");
-    assert_eq!(
-        resume_scheduler
-            .run_admitted_binding_compatibility(&fixture.runtime_spec, &run_admitted)
-            .expect("binding compatibility"),
-        RunAdmittedBindingCompatibility::IncompatibleExecutable
-    );
+    resume_scheduler
+        .validate_admitted_run_binding(&fixture.runtime_spec, &run_admitted)
+        .expect_err("changed executable identity should reject binding validation");
     let error = drive_once(
         &resume_scheduler,
         &mut store,
@@ -5195,12 +5189,9 @@ async fn resume_rejects_adapter_executable_identity_mismatch_before_attempt_star
             _ => None,
         })
         .expect("RunAdmitted payload");
-    assert_eq!(
-        resume_scheduler
-            .run_admitted_binding_compatibility(&fixture.runtime_spec, &run_admitted)
-            .expect("binding compatibility"),
-        RunAdmittedBindingCompatibility::IncompatibleExecutable
-    );
+    resume_scheduler
+        .validate_admitted_run_binding(&fixture.runtime_spec, &run_admitted)
+        .expect_err("changed adapter executable identity should reject binding validation");
     let error = drive_once(
         &resume_scheduler,
         &mut store,

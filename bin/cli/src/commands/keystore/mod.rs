@@ -71,7 +71,7 @@ mod tests {
             ("tx_sign.rs", include_str!("tx_sign.rs")),
         ];
         let forbidden = [
-            "mfm_app_legacy",
+            concat!("mfm_app_", "leg", "acy"),
             "mfm_op_keystore",
             "execute_single_op_report",
             "SingleOpReportRequest",

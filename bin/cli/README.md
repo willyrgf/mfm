@@ -269,7 +269,7 @@ Old dynamic runs are not silently migrated into certified typed runs. Historical
 only be inspected through explicit operational tooling outside this typed run surface.
 
 Keystore tx commands are direct CLI helpers over the keystore and EVM libraries. They do not submit
-or resume certified typed runs, and they do not route through the removed legacy app bridge.
+or resume certified typed runs, and they do not route through the removed dynamic app bridge.
 
 ### `run start`
 
@@ -321,8 +321,7 @@ used by registered entry-point ops.
 
 JSON and text output include `launch_outcome`. Fresh admissions report `admitted`. A duplicate start
 for the same certified run identity reports `attached` without driving; if another process holds a
-live execution claim it reports `already_driving`; if this process cannot match the admitted runner
-executable evidence it reports `incompatible_executable`.
+live execution claim it reports `already_driving`.
 
 Stable launch errors include:
 
@@ -431,9 +430,8 @@ before appending lane evidence.
 each entry has `node_id`, `attempt_id`, `disposition` (`started`, `completed`, `failed`, or
 `interrupted`), and status-specific fields such as `attempt_no`, `retryable`, or `output_cell_id`.
 `scheduler_status` is read-only `observed` for `run status`; start/resume responses set it to
-`advanced`, `blocked`, `public_output_projected`, `execution_claim_busy`,
-`execution_claim_lost`, or `incompatible_executable` according to the app dispatch loop and
-claim-coordination outcome. Manual
+`advanced`, `blocked`, `public_output_projected`, `execution_claim_busy`, or
+`execution_claim_lost` according to the app dispatch loop and claim-coordination outcome. Manual
 authorization requirements include the required evidence schema, signing scheme, authority id,
 allowed operator public identities or a safe summary, and quorum. They never expose signer runtime
 sources, keystore paths, password paths, passwords, or other secrets.

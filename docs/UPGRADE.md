@@ -35,7 +35,7 @@ Use this sequence before changing the project model:
    NIXFIED_STATE_DIR="$tmpdir" timeout 30s nix run .#check
    ```
    If the fresh state root starts running tasks while the default state root fails at admission or
-   state setup, treat the problem as local runtime state compatibility rather than a malformed
+   state setup, treat the problem as local runtime state drift rather than a malformed
    `nixfied.nix`. A timeout or canceled run after tasks start is enough evidence that the fresh
    state root passed the registry and marker gates.
 3. Check for live owned processes before cleanup:

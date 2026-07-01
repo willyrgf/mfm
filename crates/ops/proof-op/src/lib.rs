@@ -2,7 +2,7 @@
 //! Typed proof workflow operation.
 //!
 //! The proof workflow is authored through `mfm-program` and lowers to certified typed state
-//! programs. It does not expose the legacy dynamic `PlannedOp`, `PortKey`, context-key, or generic
+//! programs. It does not expose the old dynamic `PlannedOp`, `PortKey`, context-key, or generic
 //! IO surfaces.
 //!
 //! # Examples

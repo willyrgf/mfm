@@ -114,7 +114,7 @@ nix run .#ci
 `nix run .#test-db` starts managed Postgres, checks crate-local SQLx metadata
 against a migrated schema, and runs Postgres-backed parity tests.
 `.#ci` is full by definition: it starts managed Postgres and Reth and runs all feature-gated parity
-tests. There is no `--mode` or `--full` compatibility flag.
+tests. There is no `--mode` or `--full` alias flag.
 
 Run binaries locally:
 

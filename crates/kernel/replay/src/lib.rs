@@ -162,15 +162,6 @@ pub mod v1 {
     }
 
     impl ReplayReadAuthority {
-        /// Mints replay read authority from certifier-backed runtime authority and verified run
-        /// history.
-        pub fn from_verified_run_history(
-            runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
-            verified_history: &mfm_runtime::VerifiedRunHistory,
-        ) -> Result<Self> {
-            Self::from_verified_run_history_view(runtime_spec, verified_history.view())
-        }
-
         /// Mints replay read authority from certifier-backed runtime authority and a shared
         /// verified run-history view.
         pub fn from_verified_run_history_view(

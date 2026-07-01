@@ -50,9 +50,7 @@ pub use binding::{
 };
 pub use commit::{PreparedRunLaunch, RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell};
 pub use error::{RuntimeDiagnosticDetails, RuntimeError};
-pub use history::{
-    VerifiedRunContext, VerifiedRunContextLoader, VerifiedRunHistory, VerifiedRunHistoryView,
-};
+pub use history::{VerifiedRunContext, VerifiedRunContextLoader, VerifiedRunHistoryView};
 pub use invocation::{
     CertifiedRuntimeCapabilities, ErasedRunCtx, MaterializedCell, MaterializedCellTerminal,
     MaterializedInputNode, MaterializedInputs, NamedMaterializedInput, PreInvocationRunCtx,
@@ -71,9 +69,7 @@ pub use runners::{
     ErasedNodeRunner, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
     ErasedRunnerRegistry, PreInvocationRunnerFuture, RunnerEventPayload, RunnerIngressContext,
 };
-pub use scheduler::{
-    ManualResolutionRequest, RunAdmittedBindingCompatibility, SchedulerStatus, SerialTypedScheduler,
-};
+pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
 pub use side_effect_driver::{
     SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
     SideEffectLanePreclaimBuilder, SideEffectObservedEvidence, SideEffectPreparedInvocationPlan,
