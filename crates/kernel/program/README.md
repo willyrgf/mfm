@@ -3,8 +3,7 @@
 Typed kernel crate for state-program authoring, handles, builders, and registry evidence.
 
 `docs/design.md` is the normative typed-core authority contract.
-This crate is framework-owned and must remain domain-free. It must not depend on old dynamic
-machine or SDK crates.
+This crate is framework-owned and must remain domain-free.
 
 Operations expand through `OperationExpansion`, a framework-minted context created only by
 `ScopeBuilder::call` and `ScopeBuilder::call_registered`. Operation implementations can compose

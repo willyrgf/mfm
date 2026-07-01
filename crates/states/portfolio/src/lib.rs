@@ -2,8 +2,7 @@
 //! Typed portfolio-domain state contracts.
 //!
 //! This crate owns the reusable typed state, value, input, and capability contracts for portfolio
-//! snapshots. It intentionally exposes no old `DynContext`, `IoProvider`, `PlannedOp`,
-//! `PortKey`, or hand-authored dynamic DAG surface.
+//! snapshots.
 //!
 //! # Examples
 //!

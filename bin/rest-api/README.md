@@ -4,8 +4,7 @@ Experimental REST API (Axum) for certified typed runs.
 
 The REST API is a typed assembly surface only. It can start, resume, inspect, replay, and render
 certified typed runs through `mfm-app`, `mfm-runtime`, `mfm-store`, and typed artifact storage. It
-does not accept old dynamic DAGs, `PlannedOp`, context snapshots, generic feature execution, or
-old artifact ids as semantic run authority.
+accepts only certified typed run authority.
 
 ## Running (Nixfied)
 
@@ -36,9 +35,9 @@ cargo sqlx migrate run --source crates/storages/stream-store-postgres/migrations
 ```
 
 Use a fresh or explicitly reset database for this typed Postgres baseline. There
-is no downgrade migration; rollback to an older branch requires resetting the
-database or schema to that branch's expected baseline. Old filesystem artifact
-roots are not read or migrated by the REST API.
+is no downgrade migration; rollback to another branch requires resetting the
+database or schema to that branch's expected baseline. Filesystem artifact roots
+outside the typed run store are not read or migrated by the REST API.
 
 REST startup does not load or validate `MFM_RUNTIME_CONFIG_FILE`; malformed or missing runtime
 config is reported only when a live start/resume request needs the affected capability family.
@@ -294,8 +293,8 @@ against the compiled certification registry, compare their evidence to `RunAdmit
 stream evidence before constructing runtime, replay, or render authority. Rendered public-output JSON
 is an output/cache surface only.
 
-Typed run responses expose semantic status through `run_mode`, not the old absent/started/completed
-phase. `run_mode` is one of `forward`, `remediating`, `manual_blocked`, `completed`, `compensated`,
+Typed run responses expose semantic status through `run_mode`. `run_mode` is one of `forward`,
+`remediating`, `manual_blocked`, `completed`, `compensated`,
 `manually_resolved`, or `failed_without_acdc_claim`. The nested `saga` object reports the certified
 policy, derived per-forward-ledger obligations, linked remediation ledgers, manual-block reason and
 manual authorization requirements when applicable, terminal resolution claim when present,
@@ -312,18 +311,6 @@ set it to `advanced`, `blocked`, `public_output_projected`, `execution_claim_bus
 Manual authorization requirements include the required evidence schema, signing scheme, authority id,
 allowed operator public identities or a safe summary, and quorum. They never expose signer runtime
 sources, keystore paths, password paths, passwords, or other secrets.
-
-## Removed Dynamic Surfaces
-
-These old REST surfaces are intentionally not part of the typed API:
-
-- `GET /v1/features`
-- `POST /v1/features/:feature_id/execute`
-- `GET /v1/artifacts/:artifact_id`
-- dynamic single-op or pipeline run-start payloads
-- context snapshot reads as public output
-
-Old dynamic runs are not silently migrated into certified typed runs.
 
 Docs:
 

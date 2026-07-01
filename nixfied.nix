@@ -27,8 +27,7 @@ let
   ];
 
   ccEnvSuffix = lib.replaceStrings [ "-" ] [ "_" ] pkgs.stdenv.hostPlatform.config;
-  # The hermetic-env replacements for the old shell `export`s: typed values,
-  # no append-to-inherited (the child env starts empty).
+  # Hermetic environment values; no append-to-inherited behavior because the child env starts empty.
   cargoEnv = {
     CARGO_TARGET_DIR = "\${stateDir}/cargo-target";
     CARGO_INCREMENTAL = "0";
@@ -353,8 +352,7 @@ in
       requires = [ "reth" ];
     };
 
-    # The old `workspace-tests` case arm ran two commands; as a composite the
-    # second command is its own leaf with its own evidence.
+    # Keep workspace tests as explicit leaves so each command has its own evidence.
     workspace-tests = {
       kind = "composite";
       steps = nixfiedLib.seq [

@@ -7,7 +7,7 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 
 - Keep changes small and local; prefer 1 logical change per PR/commit.
 - Follow `docs/code-quality.md` for every code, test, documentation, build, and workflow change.
-- Do not introduce hacks, monkey patches, partial workarounds, or fragile old-shape shims.
+- Do not introduce hacks, monkey patches, partial workarounds, or fragile schema shims.
 - If the requested change needs missing underlying support, add that support properly or report the blocker honestly.
 - Use focused Cargo verification while developing. Prefer targeted `cargo test`, `cargo check`,
   `cargo metadata`, namespace scans, schema checks, and manually started service parity tests.
@@ -198,8 +198,8 @@ These are typical, review-friendly change patterns (focus on a single outcome).
 ### Op vs State Placement Contract
 
 - `Operation` (`expand`): planning-only (`config -> graph`), deterministic, no ambient IO.
-    - If code builds `StateNode`/`DependencyEdge`, place it in an op crate.
-- `State` (`handle`): execution-only (runtime behavior through context + `IoProvider` + recorder).
+    - If code builds typed state graph nodes or dependency edges, place it in an op crate.
+- `State` (`handle`): execution-only (runtime behavior through context, explicit capabilities, and recorder).
     - If code implements `State::handle`, place it in a shared-state crate unless it is a justified op-local output/aggregation state.
 
 ### Unsafe

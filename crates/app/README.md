@@ -17,8 +17,8 @@ Domain runner behavior lives in adapter crates. For EVM contract lifecycles,
 artifact read providers, and keystore-backed signer providers into the adapter runner
 factory.
 
-It does not depend on old dynamic machine or SDK crates, dynamic DAG planning, context snapshots,
-or generic IO providers.
+It depends on typed operation planning, typed certification, typed runtime dispatch, and explicit
+process capability wiring.
 
 Entry-point start resolves a registered public op name and version, normalizes authored config,
 plans a typed draft, certifies it through `mfm-certify`, verifies config and seed inputs against the

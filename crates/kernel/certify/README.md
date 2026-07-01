@@ -18,4 +18,4 @@ already-lowered descriptor identities, but persisted spec descriptors are not tr
 until the certifier verifier has accepted the spec/certificate pair.
 
 `docs/design.md` is the normative typed-core authority contract. This crate is framework-owned and
-must remain domain-free. It must not depend on old dynamic machine or SDK crates.
+must remain domain-free.

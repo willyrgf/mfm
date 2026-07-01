@@ -3,8 +3,7 @@
 Typed kernel crate for certified run event commit contracts.
 
 `docs/design.md` is the normative typed-core authority contract.
-This crate is framework-owned and must remain domain-free. It must not depend on old dynamic
-machine or SDK crates.
+This crate is framework-owned and must remain domain-free.
 
 Production run mutation is `append_prepared_commit_bundle(PreparedCommitBundle)`. Bundles contain a
 purpose-specific `PreparedCommit<Purpose>` plan plus the artifact bytes or explicit existing
