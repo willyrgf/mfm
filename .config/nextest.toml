@@ -19,6 +19,5 @@ binary(=capability_ui)
 | binary(=public_output_authority_ui)
 | binary(=replay_authority_ui)
 | binary(=runtime_authority_ui)
-| binary(=signing_ui)
 '''
 test-group = "trybuild-ui"
