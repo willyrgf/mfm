@@ -3,7 +3,9 @@ use std::collections::BTreeSet;
 use mfm_store::v1::TrustScopeId;
 use sqlx::{PgPool, Row};
 
-use crate::run_store::{PostgresStoreError, Result};
+use crate::run_store::{
+    PostgresStoreAuthority, PostgresStoreAuthorityError, PostgresStoreError, Result,
+};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -18,9 +20,11 @@ impl PostgresSchema {
         Ok(())
     }
 
-    /// Verifies that all expected migrations are applied and the schema contains required objects.
-    pub async fn validate(database_url: &str) -> Result<()> {
-        let pool = connect_pool(database_url).await?;
+    /// Verifies store authority and returns the validated Postgres run-store authority.
+    pub async fn validate(database_url: &str) -> Result<PostgresStoreAuthority> {
+        let pool = connect_pool(database_url)
+            .await
+            .map_err(|_| PostgresStoreError::Authority(PostgresStoreAuthorityError::Connection))?;
         validate_pool(&pool).await
     }
 }
@@ -39,7 +43,7 @@ pub(crate) async fn connect_pool(database_url: &str) -> Result<PgPool> {
         .map_err(|_| PostgresStoreError::Database("connect failed"))
 }
 
-pub(crate) async fn validate_pool(pool: &PgPool) -> Result<()> {
+pub(crate) async fn validate_pool(pool: &PgPool) -> Result<PostgresStoreAuthority> {
     validate_migrations(pool).await?;
     validate_catalog(pool).await?;
     validate_store_metadata(pool).await
@@ -50,11 +54,11 @@ async fn validate_migrations(pool: &PgPool) -> Result<()> {
         sqlx::query!("SELECT version, success, checksum FROM _sqlx_migrations ORDER BY version")
             .fetch_all(pool)
             .await
-            .map_err(|_| PostgresStoreError::Database("schema migrations missing"))?;
+            .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Migrations))?;
 
     if rows.len() != MIGRATOR.iter().count() {
-        return Err(PostgresStoreError::Database(
-            "schema migration count mismatch",
+        return Err(store_authority_error(
+            PostgresStoreAuthorityError::Migrations,
         ));
     }
 
@@ -62,13 +66,15 @@ async fn validate_migrations(pool: &PgPool) -> Result<()> {
         let row = rows
             .iter()
             .find(|row| row.version == migration.version)
-            .ok_or(PostgresStoreError::Database("schema migration missing"))?;
+            .ok_or_else(|| store_authority_error(PostgresStoreAuthorityError::Migrations))?;
         if !row.success {
-            return Err(PostgresStoreError::Database("schema migration failed"));
+            return Err(store_authority_error(
+                PostgresStoreAuthorityError::Migrations,
+            ));
         }
         if row.checksum.as_slice() != migration.checksum.as_ref() {
-            return Err(PostgresStoreError::Database(
-                "schema migration checksum mismatch",
+            return Err(store_authority_error(
+                PostgresStoreAuthorityError::Migrations,
             ));
         }
     }
@@ -84,7 +90,7 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| PostgresStoreError::Database("failed to inspect schema tables"))?;
+    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
     let tables = table_rows
         .into_iter()
         .map(|row| row.table_name)
@@ -92,14 +98,12 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
 
     for table in REQUIRED_TABLES {
         if !tables.contains(*table) {
-            return Err(PostgresStoreError::Database(
-                "required schema table missing",
-            ));
+            return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
         }
     }
     for table in FORBIDDEN_TABLES {
         if tables.contains(*table) {
-            return Err(PostgresStoreError::Database("stale schema table present"));
+            return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
         }
     }
 
@@ -110,15 +114,15 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| PostgresStoreError::Database("failed to inspect schema views"))?;
+    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
     let views = view_rows
         .into_iter()
         .map(|row| row.try_get::<String, _>("table_name"))
         .collect::<std::result::Result<BTreeSet<_>, _>>()
-        .map_err(|_| PostgresStoreError::Database("failed to decode schema views"))?;
+        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
     for view in REQUIRED_VIEWS {
         if !views.contains(*view) {
-            return Err(PostgresStoreError::Database("required schema view missing"));
+            return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
         }
     }
 
@@ -129,17 +133,15 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| PostgresStoreError::Database("failed to inspect schema indexes"))?;
+    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
     let indexes = index_rows
         .into_iter()
         .map(|row| row.try_get::<String, _>("indexname"))
         .collect::<std::result::Result<BTreeSet<_>, _>>()
-        .map_err(|_| PostgresStoreError::Database("failed to decode schema indexes"))?;
+        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
     for index in REQUIRED_INDEXES {
         if !indexes.contains(*index) {
-            return Err(PostgresStoreError::Database(
-                "required schema index missing",
-            ));
+            return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
         }
     }
 
@@ -150,17 +152,15 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| PostgresStoreError::Database("failed to inspect schema triggers"))?;
+    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
     let triggers = trigger_rows
         .into_iter()
         .map(|row| row.try_get::<String, _>("trigger_name"))
         .collect::<std::result::Result<BTreeSet<_>, _>>()
-        .map_err(|_| PostgresStoreError::Database("failed to decode schema triggers"))?;
+        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
     for trigger in REQUIRED_TRIGGERS {
         if !triggers.contains(*trigger) {
-            return Err(PostgresStoreError::Database(
-                "required schema trigger missing",
-            ));
+            return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
         }
     }
     validate_trigger_contracts(pool).await?;
@@ -174,17 +174,15 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| PostgresStoreError::Database("failed to inspect schema functions"))?;
+    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
     let functions = function_rows
         .into_iter()
         .map(|row| row.try_get::<String, _>("proname"))
         .collect::<std::result::Result<BTreeSet<_>, _>>()
-        .map_err(|_| PostgresStoreError::Database("failed to decode schema functions"))?;
+        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
     for function in REQUIRED_FUNCTIONS {
         if !functions.contains(*function) {
-            return Err(PostgresStoreError::Database(
-                "required schema function missing",
-            ));
+            return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
         }
     }
     validate_function_contracts(pool).await?;
@@ -196,17 +194,15 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| PostgresStoreError::Database("failed to inspect schema constraints"))?;
+    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
     let constraints = constraint_rows
         .into_iter()
         .map(|row| row.try_get::<String, _>("constraint_name"))
         .collect::<std::result::Result<BTreeSet<_>, _>>()
-        .map_err(|_| PostgresStoreError::Database("failed to decode schema constraints"))?;
+        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
     for constraint in REQUIRED_CONSTRAINTS {
         if !constraints.contains(*constraint) {
-            return Err(PostgresStoreError::Database(
-                "required schema constraint missing",
-            ));
+            return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
         }
     }
 
@@ -218,17 +214,15 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| PostgresStoreError::Database("failed to inspect cursor columns"))?;
+    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
     let cursor_columns = cursor_column_rows
         .into_iter()
         .map(|row| row.try_get::<String, _>("column_name"))
         .collect::<std::result::Result<BTreeSet<_>, _>>()
-        .map_err(|_| PostgresStoreError::Database("failed to decode cursor columns"))?;
+        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
     for column in REQUIRED_CURSOR_COLUMNS {
         if !cursor_columns.contains(*column) {
-            return Err(PostgresStoreError::Database(
-                "required cursor column missing",
-            ));
+            return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
         }
     }
 
@@ -245,34 +239,28 @@ async fn validate_function_contracts(pool: &PgPool) -> Result<()> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| PostgresStoreError::Database("failed to inspect schema function contracts"))?;
+    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
 
     for contract in REQUIRED_FUNCTION_CONTRACTS {
         let row = rows
             .iter()
             .find(|row| row.try_get::<String, _>("proname").ok().as_deref() == Some(contract.name))
-            .ok_or(PostgresStoreError::Database(
-                "required schema function missing",
-            ))?;
+            .ok_or_else(|| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
         let result_type: String = row
             .try_get("result_type")
-            .map_err(|_| PostgresStoreError::Database("failed to decode schema function result"))?;
-        let arguments: String = row.try_get("arguments").map_err(|_| {
-            PostgresStoreError::Database("failed to decode schema function arguments")
-        })?;
-        let definition: String = row.try_get("definition").map_err(|_| {
-            PostgresStoreError::Database("failed to decode schema function definition")
-        })?;
+            .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+        let arguments: String = row
+            .try_get("arguments")
+            .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
+        let definition: String = row
+            .try_get("definition")
+            .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
         if result_type != "trigger" || !arguments.is_empty() {
-            return Err(PostgresStoreError::Database(
-                "required schema function contract mismatch",
-            ));
+            return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
         }
         for snippet in contract.required_definition_snippets {
             if !definition.contains(snippet) {
-                return Err(PostgresStoreError::Database(
-                    "required schema function contract mismatch",
-                ));
+                return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
             }
         }
     }
@@ -292,7 +280,7 @@ async fn validate_trigger_contracts(pool: &PgPool) -> Result<()> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| PostgresStoreError::Database("failed to inspect schema trigger contracts"))?;
+    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
 
     for contract in REQUIRED_TRIGGER_CONTRACTS {
         validate_trigger_contract_row(&rows, contract)?;
@@ -326,21 +314,19 @@ fn validate_trigger_contract_row(
     let row = rows
         .iter()
         .find(|row| row.try_get::<String, _>("tgname").ok().as_deref() == Some(contract.name))
-        .ok_or(PostgresStoreError::Database(
-            "required schema trigger missing",
-        ))?;
+        .ok_or_else(|| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
     let table_name: String = row
         .try_get("table_name")
-        .map_err(|_| PostgresStoreError::Database("failed to decode schema trigger table"))?;
+        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
     let function_name: String = row
         .try_get("function_name")
-        .map_err(|_| PostgresStoreError::Database("failed to decode schema trigger function"))?;
+        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
     let trigger_type: i32 = row
         .try_get("trigger_type")
-        .map_err(|_| PostgresStoreError::Database("failed to decode schema trigger type"))?;
+        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
     let trigger_enabled: String = row
         .try_get("trigger_enabled")
-        .map_err(|_| PostgresStoreError::Database("failed to decode schema trigger enabled"))?;
+        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
 
     if table_name != contract.table
         || function_name != contract.function
@@ -352,9 +338,7 @@ fn validate_trigger_contract_row(
         || trigger_type_has(trigger_type, TRIGGER_TYPE_DELETE) != contract.delete
         || trigger_type_has(trigger_type, TRIGGER_TYPE_TRUNCATE) != contract.truncate
     {
-        return Err(PostgresStoreError::Database(
-            "required schema trigger contract mismatch",
-        ));
+        return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
     }
 
     Ok(())
@@ -374,59 +358,74 @@ async fn validate_append_xid_columns(pool: &PgPool) -> Result<()> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| PostgresStoreError::Database("failed to inspect append xid columns"))?;
+    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
     for table in APPEND_XID_TABLES {
         let row = rows
             .iter()
             .find(|row| row.try_get::<String, _>("table_name").ok().as_deref() == Some(*table))
-            .ok_or(PostgresStoreError::Database(
-                "required append_xid column missing",
-            ))?;
+            .ok_or_else(|| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
         let default: Option<String> = row
             .try_get("column_default")
-            .map_err(|_| PostgresStoreError::Database("failed to decode append xid default"))?;
+            .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
         if default.as_deref() != Some("pg_current_xact_id()") {
-            return Err(PostgresStoreError::Database(
-                "required append_xid default mismatch",
-            ));
+            return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
         }
     }
 
     Ok(())
 }
 
-async fn validate_store_metadata(pool: &PgPool) -> Result<()> {
+async fn validate_store_metadata(pool: &PgPool) -> Result<PostgresStoreAuthority> {
     let row = sqlx::query(
         "SELECT COUNT(*)::bigint AS row_count, \
+          MIN(store_epoch) AS store_epoch, \
           MIN(trust_scope_id) AS trust_scope_id, \
           MIN(schema_contract_version) AS schema_contract_version \
          FROM store_metadata WHERE singleton",
     )
     .fetch_one(pool)
     .await
-    .map_err(|_| PostgresStoreError::Database("failed to inspect store metadata"))?;
+    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Metadata))?;
     let row_count: i64 = row
         .try_get("row_count")
-        .map_err(|_| PostgresStoreError::Database("failed to decode store metadata"))?;
+        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Metadata))?;
+    let store_epoch: Option<String> = row
+        .try_get("store_epoch")
+        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Metadata))?;
     let schema_contract_version: Option<String> = row
         .try_get("schema_contract_version")
-        .map_err(|_| PostgresStoreError::Database("failed to decode store metadata"))?;
+        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Metadata))?;
     let trust_scope_id: Option<String> = row
         .try_get("trust_scope_id")
-        .map_err(|_| PostgresStoreError::Database("failed to decode store metadata"))?;
-    let trust_scope_id = trust_scope_id
-        .as_deref()
-        .map(TrustScopeId::new)
-        .transpose()
-        .ok()
-        .flatten();
+        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Metadata))?;
     if row_count != 1
         || schema_contract_version.as_deref() != Some("mfm.postgres.run_store.v1")
-        || trust_scope_id.is_none()
+        || !valid_store_epoch(store_epoch.as_deref())
     {
-        return Err(PostgresStoreError::Database("invalid store metadata"));
+        return Err(store_authority_error(PostgresStoreAuthorityError::Metadata));
     }
-    Ok(())
+    let trust_scope_id = trust_scope_id
+        .ok_or_else(|| store_authority_error(PostgresStoreAuthorityError::TrustScope))
+        .and_then(|value| {
+            TrustScopeId::new(value)
+                .map_err(|_| store_authority_error(PostgresStoreAuthorityError::TrustScope))
+        })?;
+    Ok(PostgresStoreAuthority::new(trust_scope_id))
+}
+
+fn valid_store_epoch(value: Option<&str>) -> bool {
+    const PREFIX: &str = "mfm.store.epoch.v1:";
+    let Some(value) = value else {
+        return false;
+    };
+    let Some(hex) = value.strip_prefix(PREFIX) else {
+        return false;
+    };
+    hex.len() == 32 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn store_authority_error(kind: PostgresStoreAuthorityError) -> PostgresStoreError {
+    PostgresStoreError::Authority(kind)
 }
 
 const REQUIRED_TABLES: &[&str] = &[

@@ -161,3 +161,28 @@ async fn run_read_services_are_evidence_only() {
         .expect("list observations does not construct live drivers");
     assert!(observations.runs.is_empty());
 }
+
+#[tokio::test]
+async fn postgres_store_authority_error_is_redacted_for_public_app_surface() {
+    let database_url = "postgres://mfm_user:super-secret@127.0.0.1:notaport/mfm";
+    let error = match connect_production_run_store(Some(database_url)).await {
+        Ok(_) => panic!("invalid postgres URL should not connect"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.code, "RunStoreAuthorityInvalid");
+    assert_eq!(error.message, "Run store authority could not be validated");
+    let rendered = format!("{error:?}\n{error}");
+    for forbidden in [
+        database_url,
+        "mfm_user",
+        "super-secret",
+        "127.0.0.1",
+        "notaport",
+    ] {
+        assert!(
+            !rendered.contains(forbidden),
+            "app error leaked `{forbidden}` in {rendered}"
+        );
+    }
+}

@@ -201,6 +201,11 @@ impl From<store::StoreError> for AppError {
 impl From<mfm_stream_store_postgres::PostgresStoreError> for AppError {
     fn from(error: mfm_stream_store_postgres::PostgresStoreError) -> Self {
         match error {
+            mfm_stream_store_postgres::PostgresStoreError::Authority(_) => Self::backend(
+                ErrorClass::Internal,
+                "RunStoreAuthorityInvalid",
+                "Run store authority could not be validated",
+            ),
             mfm_stream_store_postgres::PostgresStoreError::Store(_) => Self::backend(
                 ErrorClass::Conflict,
                 "RunStoreRejected",
