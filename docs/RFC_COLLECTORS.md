@@ -11,10 +11,11 @@ to observe the outside world and record facts.
 
 `FactRecorded` should become the universal event for adding knowledge to MFM.
 There should be no collector-specific fact event such as
-`CollectedFactRecorded`. Every valid `FactRecorded` must carry typed fact
-subject material through the `MfmFactKey` API. Unless a fact is explicitly marked
-private, the store projects it into ordered, indexed, searchable platform fact
-tables.
+`CollectedFactRecorded`. Every valid `FactRecorded` must declare explicit
+visibility and carry typed fact subject material through the `MfmFactKey` API.
+`Platform` facts become public platform knowledge. `Control` facts become
+non-public cross-run operational knowledge. `RunPrivate` facts remain local run
+evidence.
 
 The key architectural point is that states do not hand-author platform search
 labels. States record a typed fact claim. The runtime/store derives the
@@ -27,8 +28,8 @@ In short:
 state records typed FactRecorded claim
   -> append-only run event + admitted artifact evidence
   -> descriptor + canonical key material derive FactKey and index fields
-  -> store-maintained platform fact projection
-  -> later runs query, select, and pin facts as read evidence
+  -> store-maintained projected fact tables for Platform/Control visibility
+  -> later runs query and pin PlatformFactQueryEvidence for replay
 ```
 
 This is a breaking event-contract reset. Existing opaque or ad hoc fact records
@@ -64,15 +65,22 @@ wallets, weather, prices, chain heads, or any other domain into
 - Treat `FactRecorded` as the canonical platform knowledge primitive.
 - Require every `FactRecorded` to use typed fact subject material through
   `MfmFactKey`.
-- Make platform visibility the default, with an explicit private opt-out.
+- Require explicit fact visibility; no implicit public publication.
+- Add a non-public `Control` visibility for cross-run operational facts such as
+  collector checkpoints.
 - Keep platform facts generic across domains.
 - Derive `FactKey` and queryable key fields from typed descriptor material, not
   from caller-provided label maps.
+- Derive queryable observed-result fields from typed response artifacts through
+  descriptor-owned result indexes.
+- Make ordering policies descriptor-owned so queries can order by store commit,
+  observation time, block number, provider time, price time, or other typed
+  result fields.
 - Keep run streams, commits, and artifact evidence as strict authority.
-- Make platform fact rows an ordered, indexed, rebuildable store projection.
+- Make projected fact rows an ordered, indexed, rebuildable store projection.
 - Let CLI and REST expose kind-first fact queries that compile to descriptor
   fields.
-- Preserve replay by pinning consumed platform facts into the consuming run.
+- Preserve replay by pinning projected fact queries into the consuming run.
 
 ## Non-Goals
 
@@ -80,6 +88,7 @@ wallets, weather, prices, chain heads, or any other domain into
 - Do not introduce `CollectedFactRecorded`.
 - Do not let states publish facts through ad hoc side channels.
 - Do not allow opaque caller-chosen fact keys after this reset.
+- Do not default facts into public platform search.
 - Do not make `PlatformFactRef` a domain-specific struct or arbitrary label bag.
 - Do not use PostgreSQL JSONB-only search as the v1 indexing model.
 - Do not parse domain-specific response artifacts in SQL triggers.
@@ -153,11 +162,12 @@ about a transaction-in-block observation.
 
 Rule of thumb:
 
-- if a value identifies the subject or is needed as a stable search dimension,
-  it belongs in typed subject material
+- if a value identifies the stable subject of the claim, it belongs in typed
+  subject material
 - if a value is the observed result, it belongs in the response artifact
-- if observed result fields need first-class search later, model a fact kind
-  whose subject intentionally includes those dimensions
+- if observed result fields need first-class search or ordering, add a separate
+  descriptor-owned result index derived from typed response artifacts in Rust
+  append logic, not to the subject key
 
 ### Fact Claim
 
@@ -191,32 +201,72 @@ It declares:
 - field paths that may be indexed
 - scalar type for each indexed field
 - allowed query operators for those fields
+- public exposure policy for those fields
 - size limits and redaction expectations
 
-The descriptor is the source of truth for platform search. State code does not
-provide arbitrary search labels.
+The key descriptor is the source of truth for subject search. State code does
+not provide arbitrary search labels.
+
+Descriptor canonical bytes are content-addressed framework artifacts produced
+by derive or registration. On first append, the store must already have the
+descriptor or receive and admit it in the same append transaction. Rebuild uses
+stored descriptor bytes, not whatever Rust code happens to exist later.
+
+### Fact Result Descriptor
+
+A fact result descriptor is an immutable, content-addressed description of which
+typed response fields may be indexed or used for ordering.
+
+It declares:
+
+- fact kind
+- response schema id
+- response field paths that may be indexed
+- scalar type for each indexed result field
+- allowed query operators for those fields
+- public exposure policy for those fields
+- ordering policies that may use those fields
+- size limits and redaction expectations
+
+Result descriptors do not participate in `FactKey` derivation. They index the
+observed claim payload for a specific recorded fact. This keeps subject identity
+stable while still making observed facts useful to query.
+
+Result descriptor canonical bytes are admitted and retained like fact key
+descriptor bytes. The store derives result index rows from typed response
+artifacts in Rust append logic; SQL never parses domain response JSON.
 
 ### PlatformFactRef
 
-`PlatformFactRef` is a store projection row that points back to an authoritative
-`FactRecorded` event and its artifact evidence.
+`PlatformFactRef` is the public reference view over a `Platform`
+`ProjectedFactRef`. It points back to an authoritative `FactRecorded` event and
+its artifact evidence.
 
 It is not independent authority. It is a searchable reference into run-stream
 authority.
 
 ### Platform Fact
 
-A platform fact is a platform-visible `FactRecorded` claim. Private facts remain
-valid run evidence, but they are not exposed through platform fact queries.
+A platform fact is a `Platform` `FactRecorded` claim. `RunPrivate` facts remain
+local run evidence. `Control` facts are cross-run operational evidence, but they
+are not exposed through public platform fact queries.
 
-### PlatformFactSelectionEvidence
+### Control Fact
 
-`PlatformFactSelectionEvidence` is private read evidence recorded by a run that
-consumes platform facts.
+A control fact is a non-public, cross-run discoverable `FactRecorded` claim. It
+is intended for operational state such as collector checkpoints. Control facts
+are queryable through internal runtime/collector capabilities, not through
+public platform fact APIs.
 
-When a live run queries the platform fact index and selects a result, replay must
-not repeat that live query. The consuming run pins the selected source fact,
-query hash, selection policy, and artifact evidence as run evidence.
+### PlatformFactQueryEvidence
+
+`PlatformFactQueryEvidence` is private read evidence recorded by a run that
+queries platform or control facts.
+
+When a live run queries projected facts, replay must not repeat that live query.
+The consuming run pins the canonical query, ordering policy, limit, store
+watermark, selection policy, selected source facts, and empty-result/cardinality
+statement as run evidence.
 
 ## Design Principles
 
@@ -251,27 +301,50 @@ chain.head + {chain, network, finality_policy}
 ```
 
 There can be many claims for the same `FactKey`. "Latest" is a query over
-ordered claims, not a mutable authoritative row.
+ordered claims under an explicit ordering policy, not a mutable authoritative
+row.
 
-### One Source Of Truth For Search
+### One Source Of Truth For Search And Ordering
 
-The fact key descriptor owns the indexable shape. The runtime/store derives
-indexed fields from descriptor plus canonical subject material.
+The fact key descriptor owns the indexable subject shape. The fact result
+descriptor owns the indexable observed-result shape and ordering policies. The
+runtime/store derives subject fields from canonical subject material and result
+fields from typed response artifacts.
 
 This prevents two failure modes:
 
 - hardcoding domain fields such as `chain`, `asset`, `location`, or `measure`
   into `PlatformFactRef`
 - letting state code attach arbitrary labels that bypass schema review
+- stuffing observed values such as amount, temperature, price, or block number
+  into `FactKey` just because callers need to search or sort by them
 
-### Platform Visibility Is Default
+### Visibility Is Explicit
 
-All `FactRecorded` events become platform facts unless explicitly marked
-private.
+Every `FactRecorded` declares visibility. There is no implicit public
+publication.
 
-`RunPrivate` means "do not project this claim into platform search." It does not
-mean secrets are allowed. Secret-bearing data must never enter fact material,
-fact artifacts, events, public outputs, diagnostics, fixtures, or snapshots.
+Conceptual visibility:
+
+```rust
+pub enum FactVisibility {
+    RunPrivate,
+    Control,
+    Platform,
+}
+```
+
+`RunPrivate` means "keep this as local run evidence only."
+
+`Control` means "make this discoverable across runs for internal operational
+workflows, but do not expose it through public platform fact APIs."
+
+`Platform` means "make this discoverable through public platform fact APIs,
+subject to descriptor exposure policy."
+
+Visibility does not make secrets acceptable. Secret-bearing data must never
+enter fact material, fact artifacts, events, public outputs, diagnostics,
+fixtures, or snapshots.
 
 ### Authority Remains Append-Only
 
@@ -282,33 +355,51 @@ The authoritative record is still:
 - artifact admissions and bindings
 - canonical event payload bytes
 
-The platform fact tables are a projection. They must be rebuildable and
+The projected fact tables are a projection. They must be rebuildable and
 verifiable from durable authority and content-addressed descriptor/material
 data.
 
 ### Live Search Is Not Replay
 
-A live run may query platform facts. Once it selects a fact, the selection must
-be pinned into the consuming run.
+A live run may query platform or control facts. The query result, including
+empty results and bounded result sets, must be pinned into the consuming run.
 
-Replay uses the consuming run's pinned selection evidence and retained artifacts,
-not the current platform fact index and not a live collector.
+Replay uses the consuming run's pinned query evidence and retained artifacts,
+not the current projected fact index and not a live collector.
 
-## Fact Key Contract
+## Fact Descriptor Contracts
 
 Every `FactRecorded` producer must use typed key material. The runner API should
-make the typed path the only convenient path.
+make the typed path the only available path for fact publication.
 
 Conceptual API:
 
 ```rust
-pub trait MfmFactKey {
+pub trait MfmFactKey: private::Sealed {
+    type Material: MfmValue;
+
     fn descriptor() -> &'static FactKeyDescriptor;
-    fn canonical_key_material(&self) -> PlainCanonicalJsonBytes;
+    fn material(&self) -> &Self::Material;
+}
+
+pub trait MfmFactResult: private::Sealed {
+    type Response: MfmValue;
+
+    fn result_descriptor() -> Option<&'static FactResultDescriptor>;
 }
 ```
 
-The descriptor, not the state, defines index fields:
+`MfmFactKey` should be derive-only or otherwise sealed outside the framework.
+State code should not return raw canonical bytes. Framework-owned
+canonicalization turns typed `MfmValue` material into canonical bytes and
+enforces schema id, descriptor hash, no-float hashing rules, size limits,
+redaction constraints, and field extraction.
+
+`MfmFactResult` follows the same rule for typed response artifacts. Framework
+code extracts descriptor-approved result fields from typed response values and
+rejects a fact append when a declared result index cannot be derived safely.
+
+The descriptors, not the state, define index fields:
 
 ```rust
 pub struct FactKeyDescriptor {
@@ -323,6 +414,44 @@ pub struct FactKeyFieldDescriptor {
     pub value_type: FactKeyFieldValueType,
     pub material_pointer: CanonicalMaterialPointer,
     pub operators: &'static [FactQueryOperator],
+    pub exposure: FactFieldExposure,
+}
+
+pub enum FactFieldExposure {
+    Returnable,
+    SearchOnly,
+    EqualityOnly,
+    Redacted,
+}
+
+pub struct FactResultDescriptor {
+    pub fact_kind: FactKind,
+    pub response_schema_id: SchemaId,
+    pub descriptor_hash: ContentDigest,
+    pub fields: &'static [FactResultFieldDescriptor],
+    pub orderings: &'static [FactOrderingDescriptor],
+}
+
+pub struct FactResultFieldDescriptor {
+    pub path: FactResultFieldPath,
+    pub value_type: FactFieldValueType,
+    pub response_pointer: TypedResponsePointer,
+    pub operators: &'static [FactQueryOperator],
+    pub exposure: FactFieldExposure,
+}
+
+pub struct FactOrderingDescriptor {
+    pub name: FactOrderingName,
+    pub terms: &'static [FactOrderingTerm],
+}
+
+pub enum FactOrderingTerm {
+    StoreCommitOrder,
+    ObservedAt,
+    ResultField {
+        path: FactResultFieldPath,
+        direction: SortDirection,
+    },
 }
 ```
 
@@ -389,6 +518,33 @@ The measured temperature, humidity, wind speed, or pressure belongs in the
 response artifact for the claim. `observed_at` captures source/domain time for
 search and ordering.
 
+### Observed-Result Indexing
+
+Observed-result indexing means indexing values from the response artifact, not
+from the fact subject.
+
+Examples:
+
+- all wallet balance claims where `amount > 1 BTC`
+- all weather observations where `temperature_celsius < 0`
+- all price quotes where `price_usd > 100000`
+- all chain head claims above a block height when block height is an observed
+  response value rather than part of the subject
+
+These are core platform queries. V1 should support them when the fact result
+descriptor declares the response field, scalar type, operators, exposure policy,
+and ordering behavior.
+
+The constraint is separation, not deferral:
+
+- subject indexes answer "what is this fact about?"
+- result indexes answer "what value did this claim observe?"
+- ordering policies define how claims are sorted for `latest`, history, and
+  bounded result windows
+
+Result indexes are derived from typed response artifacts in Rust append logic,
+separate from `FactKey`, so response values do not distort subject identity.
+
 ## FactRecorded Contract
 
 `FactRecorded` remains the event. Its contract changes to require typed fact
@@ -398,16 +554,13 @@ Conceptual shape:
 
 ```rust
 pub enum FactVisibility {
-    Platform,
     RunPrivate,
+    Control,
+    Platform,
 }
 ```
 
-Default:
-
-```text
-FactVisibility::Platform
-```
+There is no default. Callers must choose visibility explicitly.
 
 Conceptual claim payload:
 
@@ -417,6 +570,7 @@ pub struct FactClaim {
     pub fact_kind: FactKind,
     pub key_schema_id: SchemaId,
     pub key_descriptor_hash: ContentDigest,
+    pub result_descriptor_hash: Option<ContentDigest>,
     pub key_material: PlainCanonicalJsonBytes,
     pub key_material_hash: ContentDigest,
     pub fact_key: FactKey,
@@ -445,15 +599,17 @@ construct the claim:
 recorder.record_fact(
     WalletBalanceKey { /* subject */ },
     response_artifact,
-    FactRecordOptions::platform().observed_at(source_time),
+    FactRecordOptions::new(FactVisibility::Platform).observed_at(source_time),
 )?;
 ```
 
 There is no valid "old shape" `FactRecorded` after this reset. If code cannot
 provide typed subject material through `MfmFactKey`, it cannot record a fact.
 
-Private facts still use the same typed shape. The difference is projection:
-private facts do not create platform fact rows or platform key-field rows.
+Private and control facts still use the same typed shape. The difference is
+projection and access: `RunPrivate` facts do not create projected fact rows,
+`Control` facts create non-public projected fact rows, and `Platform` facts
+create public projected fact rows.
 
 ## Platform Projection
 
@@ -483,10 +639,27 @@ transaction.
 The descriptor table is not a mutable schema registry. Descriptor changes create
 new descriptor hashes and usually new schema ids.
 
-### Platform Fact Keys
+### Fact Result Descriptors
 
 ```sql
-CREATE TABLE platform_fact_keys (
+CREATE TABLE fact_result_descriptors (
+  descriptor_hash TEXT PRIMARY KEY,
+  fact_kind TEXT NOT NULL,
+  response_schema_id TEXT NOT NULL,
+  descriptor_canonical_bytes BYTEA NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL
+);
+```
+
+This table stores immutable result indexing and ordering definitions by hash.
+A `FactRecorded` append that names a result descriptor is valid only when the
+matching descriptor is available to the store, either already present or
+supplied with the append and inserted in the same transaction.
+
+### Projected Fact Keys
+
+```sql
+CREATE TABLE projected_fact_keys (
   fact_key TEXT PRIMARY KEY,
   descriptor_hash TEXT NOT NULL,
   fact_kind TEXT NOT NULL,
@@ -510,10 +683,10 @@ the hashed canonical representation must remain available for validation and
 rebuild. If key material is too large to persist inline, the fact-key design is
 wrong for v1 and should be redesigned.
 
-### Platform Fact Key Fields
+### Projected Fact Key Fields
 
 ```sql
-CREATE TABLE platform_fact_key_fields (
+CREATE TABLE projected_fact_key_fields (
   fact_key TEXT NOT NULL,
   descriptor_hash TEXT NOT NULL,
   field_path TEXT NOT NULL,
@@ -526,7 +699,7 @@ CREATE TABLE platform_fact_key_fields (
   value_digest TEXT NULL,
   PRIMARY KEY (fact_key, field_path),
   FOREIGN KEY (fact_key)
-    REFERENCES platform_fact_keys(fact_key)
+    REFERENCES projected_fact_keys(fact_key)
     ON DELETE RESTRICT,
   FOREIGN KEY (descriptor_hash)
     REFERENCES fact_key_descriptors(descriptor_hash)
@@ -540,23 +713,71 @@ do not supply these rows directly.
 Useful initial indexes:
 
 ```sql
-CREATE INDEX platform_fact_key_fields_text_idx
-  ON platform_fact_key_fields (descriptor_hash, field_path, value_text);
+CREATE INDEX projected_fact_key_fields_text_idx
+  ON projected_fact_key_fields (descriptor_hash, field_path, value_text);
 
-CREATE INDEX platform_fact_key_fields_i64_idx
-  ON platform_fact_key_fields (descriptor_hash, field_path, value_i64);
+CREATE INDEX projected_fact_key_fields_i64_idx
+  ON projected_fact_key_fields (descriptor_hash, field_path, value_i64);
 
-CREATE INDEX platform_fact_key_fields_u64_idx
-  ON platform_fact_key_fields (descriptor_hash, field_path, value_u64);
+CREATE INDEX projected_fact_key_fields_u64_idx
+  ON projected_fact_key_fields (descriptor_hash, field_path, value_u64);
 
-CREATE INDEX platform_fact_key_fields_timestamp_idx
-  ON platform_fact_key_fields (descriptor_hash, field_path, value_timestamp);
+CREATE INDEX projected_fact_key_fields_timestamp_idx
+  ON projected_fact_key_fields (descriptor_hash, field_path, value_timestamp);
 ```
 
-### Platform Facts
+### Projected Fact Result Fields
 
 ```sql
-CREATE TABLE platform_facts (
+CREATE TABLE projected_fact_result_fields (
+  source_run_id TEXT NOT NULL,
+  source_seq BIGINT NOT NULL,
+  source_ordinal INTEGER NOT NULL,
+  result_descriptor_hash TEXT NOT NULL,
+  field_path TEXT NOT NULL,
+  value_type TEXT NOT NULL,
+  value_text TEXT NULL,
+  value_i64 BIGINT NULL,
+  value_u64 NUMERIC(20,0) NULL,
+  value_bool BOOLEAN NULL,
+  value_timestamp TIMESTAMPTZ NULL,
+  value_decimal TEXT NULL,
+  value_digest TEXT NULL,
+  PRIMARY KEY (source_run_id, source_seq, source_ordinal, field_path),
+  FOREIGN KEY (result_descriptor_hash)
+    REFERENCES fact_result_descriptors(descriptor_hash)
+    ON DELETE RESTRICT
+);
+```
+
+Result field rows are per recorded fact because each claim may observe different
+values for the same subject. The store derives these rows from the fact result
+descriptor plus typed response artifact evidence. States do not supply result
+rows or labels directly.
+
+Useful initial indexes:
+
+```sql
+CREATE INDEX projected_fact_result_fields_text_idx
+  ON projected_fact_result_fields (result_descriptor_hash, field_path, value_text);
+
+CREATE INDEX projected_fact_result_fields_i64_idx
+  ON projected_fact_result_fields (result_descriptor_hash, field_path, value_i64);
+
+CREATE INDEX projected_fact_result_fields_u64_idx
+  ON projected_fact_result_fields (result_descriptor_hash, field_path, value_u64);
+
+CREATE INDEX projected_fact_result_fields_timestamp_idx
+  ON projected_fact_result_fields (result_descriptor_hash, field_path, value_timestamp);
+
+CREATE INDEX projected_fact_result_fields_decimal_idx
+  ON projected_fact_result_fields (result_descriptor_hash, field_path, value_decimal);
+```
+
+### Projected Facts
+
+```sql
+CREATE TABLE projected_facts (
   source_run_id TEXT NOT NULL,
   source_seq BIGINT NOT NULL,
   source_ordinal INTEGER NOT NULL,
@@ -566,11 +787,13 @@ CREATE TABLE platform_facts (
   commit_sort_key TEXT NOT NULL,
   recorded_at TIMESTAMPTZ NOT NULL,
   observed_at TIMESTAMPTZ NULL,
+  visibility TEXT NOT NULL,
   spec_hash TEXT NOT NULL,
   node_id TEXT NOT NULL,
   attempt_id TEXT NOT NULL,
   fact_key TEXT NOT NULL,
   descriptor_hash TEXT NOT NULL,
+  result_descriptor_hash TEXT NULL,
   fact_kind TEXT NOT NULL,
   key_schema_id TEXT NOT NULL,
   key_material_hash TEXT NOT NULL,
@@ -587,34 +810,46 @@ CREATE TABLE platform_facts (
   PRIMARY KEY (source_run_id, source_seq, source_ordinal),
   UNIQUE (source_run_id, source_event_id),
   FOREIGN KEY (fact_key)
-    REFERENCES platform_fact_keys(fact_key)
+    REFERENCES projected_fact_keys(fact_key)
+    ON DELETE RESTRICT,
+  FOREIGN KEY (result_descriptor_hash)
+    REFERENCES fact_result_descriptors(descriptor_hash)
     ON DELETE RESTRICT
 );
 ```
 
 Types and foreign key names are illustrative. The implementation should bind
 these rows tightly to existing `run_events`, `commits`, and artifact admission
-tables. `artifact_id` alone is not enough; the projected reference must retain
-artifact evidence hash/provenance needed to verify the selected claim.
+tables, and `projected_fact_result_fields` should be tied to the same projected
+fact identity. `artifact_id` alone is not enough; the projected reference must
+retain artifact evidence hash/provenance needed to verify the selected claim.
+
+`projected_facts` contains both `Platform` and `Control` rows. Public platform
+fact APIs should read through a strict view or query boundary filtered to
+`visibility = 'Platform'`. Internal collector/runtime capabilities may query
+`Control` rows. `RunPrivate` facts are not inserted into projected fact tables.
 
 Useful initial indexes:
 
 ```sql
-CREATE INDEX platform_facts_fact_kind_recorded_idx
-  ON platform_facts (fact_kind, recorded_at DESC);
+CREATE INDEX projected_facts_fact_kind_recorded_idx
+  ON projected_facts (visibility, fact_kind, recorded_at DESC);
 
-CREATE INDEX platform_facts_fact_key_recorded_idx
-  ON platform_facts (fact_key, recorded_at DESC);
+CREATE INDEX projected_facts_fact_key_recorded_idx
+  ON projected_facts (visibility, fact_key, recorded_at DESC);
 
-CREATE INDEX platform_facts_observed_idx
-  ON platform_facts (fact_kind, observed_at DESC)
+CREATE INDEX projected_facts_observed_idx
+  ON projected_facts (visibility, fact_kind, observed_at DESC)
   WHERE observed_at IS NOT NULL;
 
-CREATE INDEX platform_facts_store_order_idx
-  ON platform_facts (append_xid, commit_sort_key, source_ordinal);
+CREATE INDEX projected_facts_store_order_idx
+  ON projected_facts (visibility, append_xid, commit_sort_key, source_ordinal);
 
-CREATE INDEX platform_facts_response_idx
-  ON platform_facts (response_schema_id, response_hash);
+CREATE INDEX projected_facts_response_idx
+  ON projected_facts (visibility, response_schema_id, response_hash);
+
+CREATE INDEX projected_facts_result_descriptor_idx
+  ON projected_facts (visibility, result_descriptor_hash, fact_kind);
 ```
 
 ### Projection Algorithm
@@ -622,19 +857,25 @@ CREATE INDEX platform_facts_response_idx
 For each appended `FactRecorded`:
 
 1. Validate the typed fact claim shape.
-2. Validate descriptor hash, fact kind, and key schema id.
-3. Canonicalize subject material.
-4. Recompute `key_material_hash`.
-5. Recompute `fact_key`.
-6. Derive indexed fields from descriptor plus material.
-7. Verify derived fields satisfy descriptor type and size limits.
-8. If visibility is `RunPrivate`, insert only the run event and artifacts.
-9. If visibility is `Platform`, upsert descriptor, key, key fields, and fact ref
-   inside the same append transaction.
+2. Validate key descriptor hash, fact kind, and key schema id.
+3. Validate result descriptor hash and response schema id when result indexing is
+   declared.
+4. Canonicalize subject material.
+5. Recompute `key_material_hash`.
+6. Recompute `fact_key`.
+7. Derive subject index fields from key descriptor plus material.
+8. Derive result index fields from result descriptor plus typed response
+   artifact when a result descriptor is present.
+9. Verify derived fields satisfy descriptor type, exposure, operator, and size
+   limits.
+10. If visibility is `RunPrivate`, insert only the run event and artifacts.
+11. If visibility is `Control` or `Platform`, upsert descriptors, key, key
+    fields, result fields, and projected fact ref inside the same append
+    transaction.
 
-If projection fails for a platform-visible fact, the append fails. MFM should not
-commit an event that is supposed to be public platform knowledge while omitting
-its projection row.
+If projection fails for a `Control` or `Platform` fact, the append fails. MFM
+should not commit an event that is supposed to be cross-run discoverable while
+omitting its projection row.
 
 ### Ordering And Time
 
@@ -646,15 +887,31 @@ should be captured as close to the external observation as the source and
 adapter can honestly support. If no trustworthy source/domain time exists, it
 remains absent.
 
-Ordering authority should prefer store order:
+Every query that asks for "latest" or otherwise depends on order must name an
+ordering policy. Different policies are different semantics:
+
+- `StoreCommitOrderDesc`: newest committed fact first, using commit/store order
+- `ObservedAtDesc`: newest source/domain observation time first, tie-broken by
+  store order
+- `ResultFieldDesc(path)` / `ResultFieldAsc(path)`: ordered by a
+  result-descriptor field such as `block_number`, `provider_timestamp`,
+  `price_time`, `amount`, or `temperature`
+- named domain policies such as `chain-finalized-height-desc` when a result
+  descriptor defines them as one or more ordering terms
+
+V1 should support `StoreCommitOrderDesc` as the default only when the caller did
+not request result or domain semantics. V1 should also support ordering by
+descriptor-declared timestamp, integer, unsigned integer, decimal-string, and
+digest result fields when the descriptor allows ordering for that field. The
+selected ordering policy is part of the canonical query and is hashed into query
+evidence.
+
+Store order remains the deterministic tie-breaker:
 
 - source run sequence and ordinal order facts inside one run
 - commit ordering orders facts across runs
 - `append_xid` and `commit_sort_key` are suitable internal ordering inputs
 - public cursors should remain opaque
-
-Timestamps are for filters, dashboards, and human inspection. They are not the
-only deterministic ordering basis.
 
 ## Why Not A Materialized View
 
@@ -663,7 +920,7 @@ VIEW CONCURRENTLY` reduces read blocking, but it is still not the per-insert
 incremental projection MFM needs.
 
 The append path already has a transaction that inserts commits, admits artifacts,
-and inserts run events. Platform fact projection belongs in that transaction.
+and inserts run events. Projected fact insertion belongs in that transaction.
 That gives:
 
 - atomic event/artifact/fact visibility
@@ -713,8 +970,8 @@ Example cycle:
 1. read checkpoint evidence or seed checkpoint
 2. wait or poll source through transport-backed capability
 3. normalize observations into typed response artifacts
-4. emit platform-visible FactRecorded claims
-5. emit private/control checkpoint fact
+4. emit `Platform` FactRecorded claims
+5. emit control checkpoint fact
 6. complete cycle
 7. operational launcher starts or resumes the next ordinary run cycle
 ```
@@ -727,56 +984,62 @@ A checkpoint fact should include subject material such as collector kind, source
 scope, and stream partition. Its response artifact should include high-watermark,
 range, predecessor checkpoint, and any finality policy needed for safe resume.
 
-Checkpoint visibility should usually be `RunPrivate` or a future control scope.
-Make a checkpoint platform-visible only when other workflows are expected to
-query and trust it as shared state.
+Checkpoint visibility should usually be `Control`, because the next collector
+cycle needs cross-run discovery without publishing operational subjects through
+public platform fact APIs. Use `RunPrivate` only when the next cycle already has
+an exact pinned predecessor reference. Make a checkpoint `Platform` only when
+other public workflows are expected to query and trust it as shared knowledge.
 
-## Consuming Platform Facts
+## Consuming Projected Facts
 
-A workflow can query platform facts through a typed read capability. That live
-query is not replay authority.
+A workflow can query platform or control facts through a typed read capability.
+That live query is not replay authority.
 
 Flow:
 
 ```text
-consumer state queries platform_facts
-  -> selects a PlatformFactRef
-  -> records PlatformFactSelectionEvidence as private read evidence
+consumer state queries projected facts
+  -> selects zero or more refs under an explicit policy
+  -> records PlatformFactQueryEvidence as private read evidence
   -> downstream states consume the pinned evidence
 ```
 
 The consuming run should not emit a new domain `FactRecorded` merely because it
-read an existing platform fact. It records private selection evidence unless it
-is making a genuinely new claim.
+read an existing fact. It records private query evidence unless it is making a
+genuinely new claim.
 
-Conceptual pinned evidence:
+Conceptual query evidence:
 
 ```rust
-pub struct PlatformFactSelectionEvidence {
-    pub source_run_id: RunId,
-    pub source_seq: StreamSeq,
-    pub source_ordinal: EventOrdinal,
-    pub source_event_id: EventId,
+pub struct PlatformFactQueryEvidence {
     pub store_scope: StoreScopeRef,
-    pub fact_kind: FactKind,
-    pub fact_key: FactKey,
-    pub descriptor_hash: ContentDigest,
-    pub key_material_hash: ContentDigest,
-    pub response_schema_id: SchemaId,
-    pub response_hash: ContentDigest,
-    pub artifact_id: ArtifactId,
-    pub artifact_evidence_hash: ContentDigest,
-    pub query_hash: ContentDigest,
+    pub read_watermark: StoreReadWatermark,
+    pub visibility: FactVisibility,
+    pub canonical_query_hash: ContentDigest,
+    /// Key and result descriptor hashes/schemas that bound the query.
+    pub descriptor_scope: FactDescriptorScope,
+    pub ordering_policy_hash: ContentDigest,
+    pub limit: Option<u64>,
     pub selection_policy_hash: ContentDigest,
+    pub selected_refs: Vec<ProjectedFactRef>,
+    pub result_cardinality: QueryResultCardinality,
 }
 ```
 
-Replay verifies the pinned source fact and artifact evidence. It does not ask
-"what is latest now?"
+This evidence covers selected facts, bounded result sets, and empty-result
+branches. For v1, a store-trusted read watermark is enough to support replayable
+"no result at this point" decisions. Cryptographic absence proofs can be
+deferred.
+
+Replay verifies the pinned source facts, artifact evidence, canonical query,
+ordering policy, selection policy, and read watermark. It does not ask "what is
+latest now?"
 
 ## Public APIs
 
-The public query surface should be kind-first and descriptor-driven.
+The public query surface should be kind-first and descriptor-driven. Kind-only
+commands are convenience commands; execution semantics are descriptor- or
+schema-scoped.
 
 Initial CLI shape:
 
@@ -784,29 +1047,43 @@ Initial CLI shape:
 mfm facts kinds
 mfm facts describe wallet.balance
 mfm facts latest wallet.balance \
+  --descriptor <descriptor-hash> \
+  --result-descriptor <result-descriptor-hash> \
+  --order result:observed_block_number:desc \
   chain=bitcoin \
   network=mainnet \
   account_ref=addr:bc1q... \
   asset_ref=btc \
   balance_kind=confirmed
 mfm facts history weather.observation \
+  --schema mfm.weather.observation-key.v1 \
+  --result-schema mfm.weather.observation-result.v1 \
+  --order observed-at-desc \
   country=IE \
   locality=Dublin \
-  measure=temperature
+  measure=temperature \
+  --result temperature_celsius.lt=0
 mfm facts show <source-run-id>:<seq>:<ordinal>
 mfm facts explain wallet.balance
 ```
 
-The CLI uses descriptor metadata to validate fields, parse typed values, and
-compile the query into generic fact-key-field filters.
+`mfm facts describe wallet.balance` lists known descriptors/schema versions for
+the kind. A kind-only query is allowed only when the kind resolves
+unambiguously, or when a deterministic compatibility group is registered.
+Otherwise the CLI must return an ambiguity error and require `--descriptor` or
+`--schema`.
+
+The CLI uses key and result descriptor metadata to validate fields, parse typed
+values, enforce field exposure policy, choose an explicit ordering policy, and
+compile the query into generic key-field and result-field filters.
 
 Initial REST shape:
 
 ```text
 GET /v1/facts/kinds
 GET /v1/facts/kinds/wallet.balance
-GET /v1/facts/wallet.balance/latest?chain=bitcoin&network=mainnet&asset_ref=btc
-GET /v1/facts/weather.observation?country=IE&locality=Dublin&measure=temperature
+GET /v1/facts/wallet.balance/latest?descriptor=...&result_descriptor=...&order=result%3Aobserved_block_number%3Adesc&chain=bitcoin&network=mainnet&asset_ref=btc
+GET /v1/facts/weather.observation?schema=mfm.weather.observation-key.v1&result_schema=mfm.weather.observation-result.v1&order=observed-at-desc&country=IE&locality=Dublin&measure=temperature&result=temperature_celsius.lt%3D0
 GET /v1/facts/ref/{source_run_id}/{seq}/{ordinal}
 ```
 
@@ -815,31 +1092,37 @@ Raw generic query can exist for tooling:
 ```sh
 mfm facts query \
   --kind wallet.balance \
+  --descriptor <descriptor-hash> \
+  --result-descriptor <result-descriptor-hash> \
+  --order result:amount_sat:desc \
   --field chain=bitcoin \
   --field network=mainnet \
   --field account_ref=addr:bc1q... \
-  --field asset_ref=btc
+  --field asset_ref=btc \
+  --result amount_sat.gt=100000000
 ```
 
 Public pagination should use opaque cursors. The API should not expose raw
 append XIDs, commit sort keys, cursor versions, or store epochs.
 
-### PlatformFactRef DTO
+### ProjectedFactRef DTO
 
-The DTO should remain generic:
+The internal DTO should remain generic:
 
 ```rust
-pub struct PlatformFactRef {
+pub struct ProjectedFactRef {
     pub source_run_id: RunId,
     pub source_seq: StreamSeq,
     pub source_ordinal: EventOrdinal,
     pub source_event_id: EventId,
     pub recorded_at: Timestamp,
     pub observed_at: Option<Timestamp>,
+    pub visibility: FactVisibility,
     pub fact_kind: FactKind,
     pub fact_key: FactKey,
     pub key_schema_id: SchemaId,
     pub descriptor_hash: ContentDigest,
+    pub result_descriptor_hash: Option<ContentDigest>,
     pub key_material_hash: ContentDigest,
     pub request_schema_id: SchemaId,
     pub request_hash: ContentDigest,
@@ -855,8 +1138,18 @@ pub struct PlatformFactRef {
 ```
 
 It intentionally does not contain domain columns such as `chain`, `network`,
-`asset`, `country`, or `measure`. Those are descriptor-derived key fields joined
-through `fact_key`.
+`asset`, `country`, `measure`, `amount`, `temperature`, or `block_number`.
+Those are descriptor-derived key fields joined through `fact_key` and
+descriptor-derived result fields joined through the source fact identity.
+
+Public `PlatformFactRef` output is a filtered view of `ProjectedFactRef` for
+`visibility = Platform`. It must not return canonical key material wholesale.
+Field values may be returned only according to descriptor exposure policy:
+
+- `Returnable`: may be displayed and returned by public APIs
+- `SearchOnly`: may be used as a filter but omitted from returned summaries
+- `EqualityOnly`: may be matched exactly, but not ranged, listed, or displayed
+- `Redacted`: may be retained for authority/rebuild but not queried or returned
 
 ## Privacy And Security
 
@@ -866,13 +1159,38 @@ Rules:
 
 - secret-bearing data must never enter fact subject material, artifacts, events,
   public outputs, diagnostics, fixtures, or snapshots
-- private visibility hides a fact from platform search, but does not make
+- explicit visibility controls projection and query access, but does not make
   secret data acceptable
-- private facts should not create platform key rows that would leak
+- `RunPrivate` facts should not create projected key rows that would leak
   private-only subjects
+- `Control` facts are cross-run discoverable only through internal operational
+  capabilities
+- public APIs must expose only descriptor-approved subject/result fields and
+  must not return canonical key material or response artifacts wholesale
 - public APIs must redact errors and avoid endpoint/auth leakage
 - source routing, credentials, RPC URLs, authorization headers, passwords,
   keystores, and signer material remain below typed semantic surfaces
+
+## Retention
+
+A queryable projected fact must not outlive the material needed to verify it.
+
+While a `Platform` or `Control` fact remains queryable, the store must retain:
+
+- source run event payload and commit metadata
+- descriptor canonical bytes
+- result descriptor canonical bytes when present
+- key material canonical bytes
+- derived key-field rows
+- derived result-field rows
+- request and response schema/hash evidence
+- response artifact
+- artifact admission/binding evidence
+- capability and adapter provenance
+
+Garbage collection must either keep these materials or first remove the
+projected fact from all query surfaces. A projected fact ref that cannot be
+verified is corruption.
 
 ## Rebuild And Verification
 
@@ -882,13 +1200,17 @@ will not necessarily repair missing projection rows.
 
 Required validation:
 
-- every platform fact row points to an existing `FactRecorded` event
-- every projected event is platform-visible
-- no private fact creates a platform fact row or private-only key rows
+- every projected fact row points to an existing `FactRecorded` event
+- every projected event is `Platform` or `Control`
+- public platform APIs expose only `Platform` rows
+- no `RunPrivate` fact creates projected fact rows or private-only key rows
 - descriptor hash, fact kind, and schema id match descriptor canonical bytes
+- result descriptor hash and response schema id match result descriptor canonical
+  bytes when present
 - key material hash matches canonical subject material
 - `FactKey` matches descriptor hash plus key material hash
 - key-field rows match descriptor-derived values
+- result-field rows match response-artifact-derived values
 - artifact id and artifact evidence hash match admitted response evidence
 - request/response schema and hash match event payload
 - source run id, sequence, ordinal, and event id match the run stream
@@ -899,14 +1221,15 @@ content-addressed descriptor/material data, then run the same validation checks.
 
 ## Failure Semantics
 
-Facts and platform projections must be atomic.
+Facts and projected fact rows must be atomic.
 
 - If descriptor validation fails, the append fails.
 - If key derivation fails, the append fails.
+- If declared result-field derivation fails, the append fails.
 - If artifact admission fails, the `FactRecorded` event and projection rows do
   not appear.
 - If event insertion fails, projection rows do not appear.
-- If platform projection fails, the whole append fails.
+- If `Platform` or `Control` projection fails, the whole append fails.
 - Retrying the same prepared commit remains idempotent.
 - Projection rebuild from authority produces the same rows.
 
@@ -917,15 +1240,16 @@ Existing fact records, artifacts, and projections from the old contract are
 discarded with the old store baseline.
 
 1. Document `FactRecorded` as the platform knowledge primitive.
-2. Add `FactVisibility`.
-3. Add typed `MfmFactKey` support and descriptor derivation.
+2. Add explicit `FactVisibility` with `RunPrivate`, `Control`, and `Platform`.
+3. Add sealed/derive-owned `MfmFactKey` support and descriptor derivation.
 4. Replace ad hoc `FactKey` construction with typed subject material.
 5. Require every `FactRecorded` to carry `FactClaim` data.
-6. Add descriptor, key, key-field, and platform-fact projection tables.
+6. Add key descriptor, result descriptor, key-field, result-field, and
+   projected-fact tables.
 7. Populate projection tables in the same append transaction as `run_events`.
 8. Add projection validation and rebuild.
-9. Add kind-first CLI and REST query APIs.
-10. Add private read evidence for platform fact selection.
+9. Add descriptor-scoped, kind-first CLI and REST query APIs.
+10. Add private `PlatformFactQueryEvidence`.
 11. Build the first collector as a recurring certified workflow over ordinary
     states.
 
@@ -935,33 +1259,42 @@ discarded with the old store baseline.
   category.
 - `FactRecorded` is the universal fact event.
 - There is no `CollectedFactRecorded`.
-- Platform visibility is default.
+- Visibility is explicit; there is no default public publication.
+- `Control` is the non-public cross-run visibility for collector checkpoints and
+  shared operational state.
 - Every `FactRecorded` must have typed subject material after the reset.
-- `FactKey`, indexed fields, and key material hash are descriptor-derived.
+- `MfmFactKey` canonicalization is framework-owned, sealed, and derive-oriented.
+- `FactKey`, indexed subject fields, and key material hash are key-descriptor
+  derived.
+- Indexed result fields and result-based ordering policies are
+  result-descriptor derived from typed response artifacts.
+- Descriptor canonical bytes are durable content-addressed framework artifacts
+  admitted before or during the first append that needs them.
 - `PlatformFactRef` is generic provenance and ordering, not domain labels.
 - Canonical key material is persisted in bounded form for v1.
+- Persisted key material is authority/rebuild material, not public output.
 - `recorded_at` is store-owned commit time.
 - `observed_at` is optional source/domain time supplied by the fact producer.
-- Platform projection is maintained inside the append transaction.
+- Projection for `Platform` and `Control` facts is maintained inside the append
+  transaction.
 - PostgreSQL materialized views and SQL artifact-parsing triggers are not the v1
   projection strategy.
-- Consuming runs pin selected facts as private read evidence for replay.
+- Consuming runs pin `PlatformFactQueryEvidence` as private read evidence for
+  replay.
+- Query ordering policy is explicit and hashed into query evidence.
+- V1 supports observed-result indexing for descriptor-declared response fields.
+- Queryable projected facts require retention of their verification material.
 
 ## Deferred Questions
 
-- Should descriptors be supplied inline with each first use, admitted as
-  descriptor artifacts, or both? The invariant is that rebuild must not depend
-  only on whatever Rust code happens to be present later.
 - Which typed field operators are required beyond equality and timestamp
   ordering in the first public API?
-- Do named visibility scopes need to exist before multi-tenant stores, or is
-  `Platform` / `RunPrivate` sufficient until there is a concrete authorization
-  model?
-- Which checkpoint facts should ever be platform-visible, and should a future
-  control scope exist separately from public platform search?
-- When a future use case needs search over observed response values, should that
-  be modeled as a new fact kind with those dimensions in subject material, or a
-  separate response-value indexing system?
+- Do named visibility scopes need to exist before multi-tenant stores, or is the
+  v1 `Platform` / `Control` / `RunPrivate` enum sufficient until there is a
+  concrete authorization model?
+- Which checkpoint facts should ever be platform-visible rather than `Control`?
+- Which result field scalar types and operators are needed beyond exact,
+  comparison, timestamp, and decimal-string ordering in the first API?
 - What operational lease/backoff policy should launch recurring collector
   cycles outside the durable state-machine semantics?
 - How should cross-store export/import prove source store trust scope, source
@@ -973,15 +1306,19 @@ Start with one vertical slice:
 
 - `MfmFactKey` derive for one domain fact key
 - mandatory typed `FactClaim` on `FactRecorded`
-- `FactVisibility::Platform` and `FactVisibility::RunPrivate`
-- descriptor, key, key-field, and platform-fact PostgreSQL projection tables
-- append-transaction projection for platform-visible facts
+- explicit `FactVisibility::{RunPrivate, Control, Platform}`
+- descriptor admission as content-addressed framework artifacts
+- key descriptor, result descriptor, key-field, result-field, and projected-fact
+  PostgreSQL projection tables
+- append-transaction projection for `Platform` and `Control` facts
 - projection validation and rebuild
 - `recorded_at` and optional `observed_at`
-- kind-first `mfm facts` query path
-- pinned platform fact selection evidence for consumers
+- descriptor-scoped, kind-first `mfm facts` query path
+- explicit ordering policies for store commit order, observed time, and
+  descriptor-declared result fields
+- pinned `PlatformFactQueryEvidence` for consumers
 - one collector-style workflow that records platform-visible domain facts and
-  private checkpoint facts using existing state-machine primitives
+  control checkpoint facts using existing state-machine primitives
 
 This proves the model: MFM's shared knowledge graph is built from ordinary typed
 `FactRecorded` events, and collectors are just recurring certified workflows
