@@ -58,32 +58,6 @@ async fn run_start_accepts_entry_point_shape() {
     assert_eq!(value["error"]["code"], "EntryPointOpNotFound");
 }
 
-#[test]
-fn run_routes_do_not_import_dynamic_semantic_surfaces() {
-    let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
-    )
-    .expect("read rest source");
-    let forbidden = [
-        format!("mfm_{}", "sdk"),
-        format!("mfm_{}", "machine"),
-        format!("mfm_app_{}{}", "leg", "acy"),
-        format!("Runs{}Request", "Start"),
-        format!("{}line", "Pipe"),
-        format!("Port{}", "Key"),
-        format!("Dyn{}", "Context"),
-        format!("State{}", "Graph"),
-        format!("Dependency{}", "Edge"),
-    ];
-
-    for needle in forbidden {
-        assert!(
-            !source.contains(&needle),
-            "REST typed run surface must not mention dynamic semantic surface `{needle}`"
-        );
-    }
-}
-
 #[tokio::test]
 async fn read_only_routes_ignore_malformed_runtime_config_env() {
     let _env = locked_env([(

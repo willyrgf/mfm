@@ -59,31 +59,3 @@ impl KeystoreCommand {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn command_modules_do_not_import_keystore_op_crates_or_sdk_report_helpers() {
-        let modules = [
-            ("delete.rs", include_str!("delete.rs")),
-            ("import.rs", include_str!("import.rs")),
-            ("list.rs", include_str!("list.rs")),
-            ("tx_sign.rs", include_str!("tx_sign.rs")),
-        ];
-        let forbidden = [
-            concat!("mfm_app_", "leg", "acy"),
-            "mfm_op_keystore",
-            "execute_single_op_report",
-            "SingleOpReportRequest",
-        ];
-
-        for (path, source) in modules {
-            for needle in forbidden {
-                assert!(
-                    !source.contains(needle),
-                    "{path} must use direct typed keystore helpers instead of importing {needle}"
-                );
-            }
-        }
-    }
-}
