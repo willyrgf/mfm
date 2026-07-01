@@ -74,6 +74,8 @@ domain into `PlatformFactRef`.
 - Treat `FactRecorded` as the canonical platform knowledge primitive.
 - Author facts through one sealed/derive-oriented `MfmFactType`.
 - Use one durable `FactDescriptor` per fact shape.
+- Treat `FactDescriptor` as certified authority allowed by the certified
+  state/runner contract, not merely store-admitted data.
 - Derive `FactKey` only from the descriptor's subject section and canonical
   subject material.
 - Support observed-result indexing in v1 through descriptor-owned result
@@ -84,6 +86,8 @@ domain into `PlatformFactRef`.
 - Add non-public `Control` visibility for cross-run operational facts such as
   collector checkpoints.
 - Keep projected facts generic across domains.
+- Keep facet extraction declarative and kernel-owned so append/rebuild never
+  calls arbitrary domain crate code.
 - Keep run streams, commits, descriptors, subject material, and artifact
   evidence as strict authority.
 - Make projected fact claims and facet terms an ordered, indexed, rebuildable
@@ -102,6 +106,9 @@ domain into `PlatformFactRef`.
 - Do not make `PlatformFactRef` a domain-specific struct or arbitrary label bag.
 - Do not use PostgreSQL JSONB-only search as the v1 indexing model.
 - Do not parse domain-specific response artifacts in SQL triggers.
+- Do not let the store or projection rebuild call domain crate code for facet
+  extraction.
+- Do not let CLI or REST own fact query compilation.
 - Do not make mutable "latest fact" rows authoritative.
 - Do not migrate legacy fact records or preserve old fact-key shapes.
 - Do not put secrets into facts, artifacts, public projections, errors,
@@ -428,6 +435,31 @@ empty results and bounded result sets, must be pinned into the consuming run as
 Replay uses pinned query evidence and retained artifacts, not the current
 projected fact index and not a live collector.
 
+## Facts Kernel Contract
+
+The platform should define a small facts kernel contract reused by states,
+runners, stores, CLI, REST, and collectors. This is not a new runtime or
+collector framework. It is the shared contract for typed fact publication,
+projection, query compilation, and replay evidence.
+
+The facts kernel owns:
+
+- certified `FactDescriptor` admission and validation
+- descriptor-declared facet extraction
+- stable facet ids and facet compatibility rules
+- generic query compilation from user/API filters into canonical facet queries
+- ordering normalization and tie-breaker rules
+- projection/rebuild validation rules
+- `FactQueryEvidence` shape and canonicalization
+
+Certified workflow specs or runner bindings must declare which fact descriptor
+hashes a node may emit. Store admission proves descriptor bytes are available;
+it does not by itself prove the certified workflow was allowed to publish that
+descriptor. An append is valid only when the `FactRecorded` descriptor is both:
+
+- content-addressed and available to the store
+- allowed by the certified state/runner contract for the producing node
+
 ## FactDescriptor Contract
 
 Every `FactRecorded` producer must use a sealed/derive-owned fact type. The
@@ -444,10 +476,14 @@ pub trait MfmFactType: private::Sealed {
 }
 ```
 
-Framework-owned canonicalization turns typed subject values into canonical bytes
-and extracts descriptor-approved facets from typed subject, response, and
-metadata values. Manual implementations must not return raw canonical bytes or
-ad hoc labels.
+Framework-owned canonicalization turns typed subject values into canonical bytes.
+Facet extraction must be descriptor-declared and kernel-owned. Append and
+rebuild must not call domain crate code to compute facets. The descriptor must
+lower to a small generic extraction language over canonical subject values,
+canonical response values or slices, and claim/store metadata.
+
+Manual implementations must not return raw canonical bytes, ad hoc labels, or
+precomputed facets as unchecked authority.
 
 Conceptual descriptor shape:
 
@@ -475,10 +511,11 @@ pub struct FactSubjectFieldDescriptor {
 }
 
 pub struct FactFacetDescriptor {
+    pub facet_id: FactFacetId,
     pub source: FactFacetSource,
     pub path: FactFacetPath,
     pub value_type: FactFacetValueType,
-    pub pointer: FactFacetPointer,
+    pub extraction: FactFacetExtraction,
     pub operators: &'static [FactQueryOperator],
     pub exposure: FactFieldExposure,
     pub unit: Option<FactUnit>,
@@ -498,6 +535,7 @@ pub struct FactOrderingDescriptor {
 }
 
 pub struct FactOrderingTerm {
+    pub facet_id: FactFacetId,
     pub source: FactFacetSource,
     pub path: FactFacetPath,
     pub value_type: FactFacetValueType,
@@ -506,6 +544,15 @@ pub struct FactOrderingTerm {
     pub tie_breaker: bool,
 }
 ```
+
+`facet_id` is descriptor-owned stable identity. `path` is a human-readable and
+schema-facing pointer that may evolve across descriptor versions. Index rows,
+ordering policies, compatibility rules, and query evidence bind to `facet_id`.
+
+`FactFacetExtraction` is a declarative kernel language over canonical values,
+for example field pointers, object paths, array/slice bindings, scalar coercions
+allowed by the descriptor, unit/scale interpretation, and metadata sources. It
+must be deterministic, bounded, and replayable from retained authority.
 
 Ordering policies must define type comparison, null handling, and deterministic
 tie-breakers. Store order should be the final fallback tie-breaker.
@@ -640,8 +687,11 @@ The existing provenance remains part of `FactRecorded`:
 - response schema id and hash
 - response artifact id and evidence hash
 
-The runtime helper should accept a typed fact type and response evidence, then
-construct the claim:
+The runtime helper should use one canonical material source. It should either
+stage/admit the response artifact from the typed fact value, or accept a typed
+artifact handle whose canonical bytes are the source for response decoding,
+facet extraction, hashes, and artifact evidence. It should not accept an
+independent typed response and unrelated response artifact that can drift.
 
 ```rust
 recorder.record_fact(
@@ -649,10 +699,13 @@ recorder.record_fact(
         subject,
         response,
     },
-    response_artifact,
     FactRecordOptions::new(FactVisibility::Platform { scope }).observed_at(source_time),
 )?;
 ```
+
+The helper stages the response artifact from the typed `WalletBalanceFact`
+material, computes the canonical response hash, admits the artifact, derives
+facets, and records `FactRecorded` from that same material.
 
 There is no valid old-shape `FactRecorded` after this reset. If code cannot
 provide a sealed `MfmFactType`, it cannot record a fact.
@@ -702,7 +755,9 @@ created_at
 ```
 
 A `FactRecorded` append is valid only when the descriptor is available to the
-store, either already present or supplied and admitted in the same transaction.
+store and certified for the producing node. The descriptor may already be
+present or be supplied and admitted in the same transaction, but store admission
+is necessary, not sufficient.
 
 ### fact_subjects
 
@@ -723,6 +778,11 @@ created_at
 `fact_subjects` lets many claims for the same subject share one identity and one
 set of subject facets.
 
+Canonical subject material is retained authority. It must be bounded,
+non-secret, and unavailable through generic public read APIs. Public access to
+subject information goes through descriptor-approved subject facets and exposure
+policy only.
+
 ### fact_claims
 
 Stores one projected `Platform` or `Control` claim per visible `FactRecorded`.
@@ -735,8 +795,7 @@ source_seq
 source_ordinal
 source_event_id
 commit_id
-append_xid
-commit_sort_key
+store_commit_order
 recorded_at
 observed_at
 visibility_kind
@@ -779,6 +838,7 @@ source_seq              // for claim-owned terms
 source_ordinal          // for claim-owned terms
 fact_descriptor_hash
 facet_source            // subject | result | metadata
+facet_id
 field_path
 value_type
 unit
@@ -804,11 +864,11 @@ material, response artifacts, and claim metadata.
 Useful logical indexes:
 
 ```text
-(fact_descriptor_hash, facet_source, field_path, typed_value)
+(fact_descriptor_hash, facet_id, typed_value)
 (visibility_kind, visibility_scope, fact_kind, recorded_at desc)
 (visibility_kind, visibility_scope, fact_key, recorded_at desc)
-(visibility_kind, visibility_scope, fact_descriptor_hash, field_path, sortable_value)
-(append_xid, commit_sort_key, source_ordinal)
+(visibility_kind, visibility_scope, fact_descriptor_hash, facet_id, sortable_value)
+(store_commit_order, source_run_id, source_seq, source_ordinal)
 ```
 
 These are logical access paths. A physical implementation may satisfy them with
@@ -821,20 +881,23 @@ For each appended `FactRecorded`:
 
 1. Validate the typed fact claim shape.
 2. Admit or load the `FactDescriptor`.
-3. Validate fact kind, subject schema id, response schema id, and descriptor
+3. Verify the descriptor hash is allowed by the certified state/runner contract
+   for the producing node.
+4. Validate fact kind, subject schema id, response schema id, and descriptor
    hash.
-4. Canonicalize subject material.
-5. Recompute subject material hash and subject shape hash.
-6. Recompute `FactKey` from subject shape hash and subject material hash.
-7. Validate response binding against the response artifact.
-8. Derive subject facets from subject material.
-9. Derive result facets from the typed response artifact or response slice.
-10. Derive metadata facets from claim/store metadata.
-11. Verify facet type, unit, scale, operator, exposure, size, and scalar
+5. Canonicalize subject material.
+6. Recompute subject material hash and subject shape hash.
+7. Recompute `FactKey` from subject shape hash and subject material hash.
+8. Validate response binding against the response artifact.
+9. Derive subject facets from subject material using the kernel extractor.
+10. Derive result facets from the typed response artifact or response slice
+    using the kernel extractor.
+11. Derive metadata facets from claim/store metadata using the kernel extractor.
+12. Verify facet id, type, unit, scale, operator, exposure, size, and scalar
     constraints.
-12. If visibility is `RunPrivate`, admit descriptor evidence and insert only the
+13. If visibility is `RunPrivate`, admit descriptor evidence and insert only the
     run event and artifacts; do not insert projected claims or facet terms.
-13. If visibility is `Control` or `Platform`, upsert descriptor, subject, facet
+14. If visibility is `Control` or `Platform`, upsert descriptor, subject, facet
     terms, and projected claim inside the same append transaction.
 
 If projection fails for a `Control` or `Platform` fact, the append fails. MFM
@@ -850,6 +913,7 @@ Ordering terms are canonical structures:
 
 ```text
 source       // metadata | result | subject
+facet_id
 path
 value_type
 direction
@@ -879,9 +943,9 @@ latest-per-subject wallet.balance where subject.asset_ref = btc
 top wallet.balance by result.amount_sat desc
 ```
 
-Public cursors are opaque. Internal order can use append transaction ordering,
-commit sort key, source sequence, and source ordinal as deterministic
-tie-breakers.
+Public cursors are opaque. Internal order should use store-owned order
+coordinates such as `store_commit_order`, commit id, source run id, source
+sequence, and source ordinal as deterministic tie-breakers.
 
 ## Why Not A Materialized View
 
@@ -962,6 +1026,23 @@ public platform fact APIs. Use `RunPrivate` only when the next cycle already has
 an exact pinned predecessor reference. Make a checkpoint `Platform` only when
 public workflows are expected to query and trust it as shared knowledge.
 
+Checkpoint descriptors must declare monotonic conflict rules. At minimum, a
+checkpoint shape should define:
+
+- partition identity, such as collector kind, source, scope, and stream
+  partition
+- predecessor checkpoint reference or explicit genesis marker
+- high-watermark field and ordering semantics
+- non-regression rule for high-watermark movement
+- finality policy for deciding whether a checkpoint can advance
+- competing writer behavior for two collectors in the same partition
+- conflict outcome, such as reject, supersede with proof, or fork for manual
+  resolution
+
+The next cycle may query the latest valid checkpoint under this monotonic policy.
+It should not treat "latest checkpoint by store order" as mutable operational
+state unless the descriptor explicitly declares that policy.
+
 ## Consuming Projected Facts
 
 A workflow can query platform or control facts through a typed read capability.
@@ -988,11 +1069,17 @@ pub struct FactQueryEvidence {
     pub store_scope: StoreScopeRef,
     pub visibility: FactVisibility,
     pub read_frontier: StoreReadFrontier,
+    pub frontier_type: StoreReadFrontierType,
+    pub query_compiler_version: Version,
+    pub canonicalizer_version: Version,
+    pub resolved_descriptors: Vec<ContentDigest>,
+    pub scope_decision_evidence: ScopeDecisionEvidence,
     pub canonical_query: PlainCanonicalJsonBytes,
     pub canonical_query_hash: ContentDigest,
     pub ordering: FactOrdering,
     pub limit: Option<u64>,
     pub returned_refs: Vec<ProjectedFactRef>,
+    pub returned_facet_summaries: Option<ReturnedFacetSummaries>,
     pub selected_refs: Vec<ProjectedFactRef>,
     pub result_set_digest: ContentDigest,
     pub result_cardinality: QueryResultCardinality,
@@ -1001,13 +1088,18 @@ pub struct FactQueryEvidence {
 ```
 
 This evidence covers selected facts, bounded result sets, and empty-result
-branches. For v1, a store-trusted read frontier is enough to support replayable
-"no result at this point" decisions. Cryptographic absence proofs can be
-deferred.
+branches. Returned refs are enough only when replay can deterministically
+recompute every value used by the selection policy from retained artifacts. If a
+selection policy depends on returned summaries, the evidence must pin those
+summary values or their digest.
+
+For v1, a store-trusted read frontier is enough to support replayable "no result
+at this point" decisions. Cryptographic absence proofs can be deferred.
 
 Replay verifies the pinned source facts, artifact evidence, canonical query,
 ordering policy, selection policy, returned refs, selected refs, result set
-digest, and read frontier.
+digest, scope decision, descriptor resolution, query compiler/canonicalizer
+versions, and read frontier.
 
 ## Public APIs
 
@@ -1056,9 +1148,11 @@ descriptor hash.
 alias, compatibility-group version, or descriptor hash, but execution must
 resolve it to one descriptor before planning the query.
 
-The CLI uses descriptor metadata to validate fields, parse typed values, enforce
-field exposure policy, choose an explicit ordering policy, and compile the query
-into generic facet filters.
+CLI and REST must not own query compilation. They decode transport input and
+render output. A reusable facts-query crate or service resolves descriptors,
+validates fields, parses typed values, enforces exposure policy, normalizes
+ordering, and compiles input into canonical facet queries and
+`FactQueryEvidence`.
 
 Initial REST shape:
 
@@ -1083,7 +1177,7 @@ mfm facts query \
 ```
 
 Public pagination should use opaque cursors. The API should not expose raw
-append XIDs, commit sort keys, cursor versions, or store epochs.
+database transaction ids, cursor versions, or store epochs.
 
 ### ProjectedFactRef DTO
 
@@ -1152,6 +1246,7 @@ Rules:
   capabilities and their scopes
 - public APIs must expose only descriptor-approved facets and must not return
   canonical subject material or response artifacts wholesale
+- there should be no generic public raw-subject-material read path
 - public APIs must redact errors and avoid endpoint/auth leakage
 - source routing, credentials, RPC URLs, authorization headers, passwords,
   keystores, and signer material remain below typed semantic surfaces
@@ -1188,6 +1283,8 @@ Required validation:
 - public platform APIs expose only authorized `Platform` rows
 - no `RunPrivate` fact creates projected subject/claim terms
 - descriptor hash matches descriptor canonical bytes
+- descriptor hash is allowed by the producing node's certified state/runner
+  contract
 - subject shape hash matches descriptor subject section bytes
 - subject material hash matches canonical subject material
 - `FactKey` matches subject shape hash plus subject material hash
@@ -1198,7 +1295,7 @@ Required validation:
 - artifact id and artifact evidence hash match admitted response evidence
 - request/response schema and hash match event payload
 - source run id, sequence, ordinal, and event id match the run stream
-- store ordering columns match the commit row
+- store order coordinates match the commit row
 
 Rebuild should truncate and repopulate projections from strict authority and
 then run the same validation checks.
@@ -1208,6 +1305,7 @@ then run the same validation checks.
 Facts and projected fact rows must be atomic.
 
 - If descriptor validation fails, the append fails.
+- If the descriptor is not certified for the producing node, the append fails.
 - If subject derivation fails, the append fails.
 - If declared facet derivation fails, the append fails.
 - If response binding validation fails, the append fails.
@@ -1228,16 +1326,19 @@ discarded with the old store baseline.
 2. Add explicit scoped `FactVisibility` with `RunPrivate`, `Control`, and
    `Platform`.
 3. Add sealed/derive-owned `MfmFactType` support.
-4. Add durable `FactDescriptor` admission.
+4. Add certified `FactDescriptor` admission and validation against the
+   producing node's certified state/runner contract.
 5. Replace ad hoc `FactKey` construction with typed subject material.
 6. Require every `FactRecorded` to carry `FactClaim` data.
 7. Add logical `fact_descriptors`, `fact_subjects`, `fact_claims`, and
    `fact_terms` projections.
 8. Populate projections in the same append transaction as `run_events`.
 9. Add projection validation and rebuild.
-10. Add descriptor-scoped, kind-first CLI and REST query APIs.
+10. Add reusable facts-query compilation and canonicalization.
 11. Add private `FactQueryEvidence`.
-12. Build the first collector as a recurring certified workflow over ordinary
+12. Add descriptor-scoped, kind-first CLI and REST query APIs over the reusable
+    query compiler.
+13. Build the first collector as a recurring certified workflow over ordinary
     states.
 
 ## Resolved Decisions
@@ -1250,8 +1351,13 @@ discarded with the old store baseline.
 - `Control` is the non-public cross-run visibility for collector checkpoints and
   shared operational state.
 - Every `FactRecorded` must use a sealed typed `MfmFactType` after the reset.
+- Fact descriptors are certified authority: a node may emit only descriptors
+  allowed by its certified state/runner contract.
 - `FactDescriptor` is the durable shape for subject identity, result facets,
   metadata facets, ordering, operators, units/scales, and exposure.
+- Facet extraction is declarative and kernel-owned; append/rebuild must not call
+  arbitrary domain crate code.
+- Facets have stable descriptor-owned ids; paths are UX/schema pointers.
 - `FactKey` is derived only from the descriptor subject section and canonical
   subject material.
 - Observed-result indexing is in v1 through descriptor-declared result facets.
@@ -1268,7 +1374,11 @@ discarded with the old store baseline.
 - PostgreSQL materialized views and SQL artifact-parsing triggers are not the v1
   projection strategy.
 - Consuming runs pin `FactQueryEvidence` as private read evidence for replay.
-- Query evidence stores canonical query material, not only hashes.
+- Query compilation lives in a reusable facts-query crate/service; CLI and REST
+  remain transport adapters.
+- Query evidence stores canonical query material, descriptor resolution,
+  compiler/canonicalizer versions, scope decision evidence, and frontier type,
+  not only hashes.
 - Query ordering policy is explicit and hashed into query evidence.
 - Queryable projected facts require retention of their verification authority.
 
@@ -1290,23 +1400,40 @@ discarded with the old store baseline.
 
 ## Preferred First Implementation
 
-Start with one vertical slice:
+Build this in gates, while keeping one vertical slice as the north star.
+
+Gate 1: fact contract, certified descriptors, and append projection.
 
 - one `MfmFactType` derive for a domain fact
 - mandatory typed `FactClaim` on `FactRecorded`
 - explicit scoped `FactVisibility::{RunPrivate, Control, Platform}`
 - descriptor admission as content-addressed framework artifacts
+- certified descriptor allow-list validation from the producing node contract
+- declarative kernel facet extraction with stable facet ids
 - logical `fact_descriptors`, `fact_subjects`, `fact_claims`, and `fact_terms`
   projections in PostgreSQL
 - subject facets, result facets, and metadata facets
 - append-transaction projection for `Platform` and `Control` facts
 - projection validation and rebuild
+
+Gate 2: reusable query compiler and replay evidence.
+
+- reusable facts-query crate/service
+- canonical query and ordering representation
 - explicit ordering policies for store commit order, observed time, and
   descriptor-declared result fields
+- `FactQueryEvidence` with descriptor resolution, compiler/canonicalizer
+  version, scope decision evidence, frontier type, returned refs, selected refs,
+  and result-set digest
+
+Gate 3: public surfaces and first collector.
+
 - descriptor-scoped, kind-first `mfm facts` query path
-- pinned `FactQueryEvidence` for consumers
+- REST query surface over the same query compiler
 - one collector-style workflow that records platform-visible domain facts and
   control checkpoint facts using existing state-machine primitives
+- checkpoint descriptor with predecessor, high-watermark, finality, and conflict
+  rules
 
 This proves the model: MFM's shared knowledge graph is built from ordinary typed
 `FactRecorded` events, and collectors are recurring certified workflows that
