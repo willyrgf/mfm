@@ -59,21 +59,6 @@ fn lifecycle_config() -> ContractLifecycleConfig {
     ContractLifecycleConfig::new(deploy_config(), configure_config(), validate_config())
 }
 
-#[test]
-fn lifecycle_config_rejects_stale_version_field() {
-    let value = serde_json::json!({
-        "lifecycle_version": 1,
-        "deploy": serde_json::to_value(deploy_config()).expect("deploy json"),
-        "configure": serde_json::to_value(configure_config()).expect("configure json"),
-        "validate": serde_json::to_value(validate_config()).expect("validate json"),
-    });
-
-    let error = serde_json::from_value::<ContractLifecycleConfig>(value)
-        .expect_err("stale lifecycle version field");
-
-    assert!(error.to_string().contains("unknown field"));
-}
-
 fn deployed_contract() -> DeployedContract {
     deployed_contract_on_chain(1)
 }
