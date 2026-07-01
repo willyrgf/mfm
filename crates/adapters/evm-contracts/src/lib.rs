@@ -725,52 +725,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         input: &ValidateContractInput,
         request: &ContractValidationReadRequest,
     ) -> Result<ContractValidationReadResponse> {
-        let expected = ValidateContractState::new(config.clone())?.read_request(input)?;
-        if &expected != request {
-            return Err(EvmContractAdapterError::IntentMismatch);
-        }
-        let config = config.as_ref();
-        let guard = evm_chain_guard(config.network().network_id(), request.expected_chain_id)?;
-        let chain = self
-            .reads
-            .chain_identity
-            .chain_identity(&EvmChainIdentityRequest {
-                guard: guard.clone(),
-            })
-            .await?;
-        chain.evidence.verify_guard(&guard)?;
-        if chain.chain_id != request.expected_chain_id {
-            return Err(EvmContractAdapterError::ChainMismatch);
-        }
-
-        let (configuration_read_results, configuration_event_results) = self
-            .evaluate_assertions(
-                config.artifact(),
-                &guard,
-                &input.configured.confirmation_read_assertions,
-                &input.configured.confirmation_event_assertions,
-                &input.configured.deployed.contract_address,
-            )
-            .await?;
-        let (read_results, event_results) = self
-            .evaluate_assertions(
-                config.artifact(),
-                &guard,
-                &request.read_assertions,
-                &request.event_assertions,
-                &input.configured.deployed.contract_address,
-            )
-            .await?;
-
-        Ok(ContractValidationReadResponse {
-            response_version: 1,
-            observed_chain_id: chain.chain_id,
-            client_version: chain.client_version.unwrap_or_else(|| "unknown".to_owned()),
-            configuration_read_results,
-            configuration_event_results,
-            read_results,
-            event_results,
-        })
+        validate_contract_with_reads(self.reads, config, input, request).await
     }
 
     async fn prepare_transactions(
@@ -956,85 +911,136 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             .parse::<B256>()
             .map_err(|_| EvmContractAdapterError::TransactionHashMismatch)
     }
+}
 
-    async fn evaluate_assertions(
-        &self,
-        artifact: Option<&mfm_evm_contract_model::ContractArtifactConfig>,
-        guard: &EvmChainGuard,
-        read_assertions: &[ReadAssertionConfig],
-        event_assertions: &[EventAssertionConfig],
-        contract_address: &str,
-    ) -> Result<(Vec<ValidationReadResult>, Vec<ValidationEventResult>)> {
-        if read_assertions.is_empty() && event_assertions.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
-        }
-        let artifact = artifact.ok_or(EvmContractAdapterError::MissingContractArtifact)?;
-        let (abi, _) = parse_artifact(artifact).map_err(EvmContractAdapterError::Model)?;
-        let (prepared_reads, prepared_events) =
-            prepare_validate_assertions(&abi, read_assertions, event_assertions)
-                .map_err(EvmContractAdapterError::Model)?;
-        let address = parse_address(contract_address, "contract_address")
-            .map_err(|error| EvmContractAdapterError::Model(error.message))?;
-
-        let mut read_results = Vec::with_capacity(prepared_reads.len());
-        for (assertion, prepared) in read_assertions.iter().zip(prepared_reads.iter()) {
-            let response = self
-                .reads
-                .call
-                .read_call(&EvmCallReadRequest {
-                    guard: guard.clone(),
-                    to: address,
-                    calldata: hex_to_bytes(&prepared.data_hex)
-                        .map_err(EvmContractAdapterError::Model)?,
-                    block: EvmBlockSelector::Latest,
-                })
-                .await?;
-            response.evidence.verify_guard(guard)?;
-            let actual_json = decode_single_output_to_json(
-                &prepared.outputs,
-                &bytes_to_hex_prefixed(&response.return_data),
-            )
-            .map_err(EvmContractAdapterError::Model)?;
-            let actual = ExpectedValue::from_json_value(&actual_json)
-                .map_err(EvmContractAdapterError::Model)?;
-            read_results.push(ValidationReadResult {
-                function: assertion.function.to_string(),
-                args: assertion.args.clone(),
-                expected: assertion.expected.clone(),
-                passed: expected_matches(&actual, &assertion.expected),
-                actual,
-            });
-        }
-
-        let mut event_results = Vec::with_capacity(prepared_events.len());
-        for (assertion, prepared) in event_assertions.iter().zip(prepared_events.iter()) {
-            let topic = prepared
-                .topic0_hex
-                .parse::<B256>()
-                .map_err(|_| EvmContractAdapterError::Model("invalid event topic".to_owned()))?;
-            let logs = self
-                .reads
-                .logs
-                .read_logs(&EvmLogsReadRequest {
-                    guard: guard.clone(),
-                    from_block: block_selector(assertion.from_block.as_ref(), false),
-                    to_block: block_selector(assertion.to_block.as_ref(), true),
-                    address: Some(address),
-                    topics: vec![topic],
-                })
-                .await?;
-            logs.evidence.verify_guard(guard)?;
-            let observed_count = logs.logs.len() as u64;
-            event_results.push(ValidationEventResult {
-                event: prepared.event.clone(),
-                min_count: prepared.min_count,
-                observed_count,
-                passed: observed_count >= prepared.min_count,
-            });
-        }
-
-        Ok((read_results, event_results))
+async fn validate_contract_with_reads(
+    reads: EvmContractReadProviders<'_>,
+    config: &ValidatedConfig<ValidatePhaseConfig>,
+    input: &ValidateContractInput,
+    request: &ContractValidationReadRequest,
+) -> Result<ContractValidationReadResponse> {
+    let expected = ValidateContractState::new(config.clone())?.read_request(input)?;
+    if &expected != request {
+        return Err(EvmContractAdapterError::IntentMismatch);
     }
+    let config = config.as_ref();
+    let guard = evm_chain_guard(config.network().network_id(), request.expected_chain_id)?;
+    let chain = reads
+        .chain_identity
+        .chain_identity(&EvmChainIdentityRequest {
+            guard: guard.clone(),
+        })
+        .await?;
+    chain.evidence.verify_guard(&guard)?;
+    if chain.chain_id != request.expected_chain_id {
+        return Err(EvmContractAdapterError::ChainMismatch);
+    }
+
+    let (configuration_read_results, configuration_event_results) = evaluate_assertions(
+        reads,
+        config.artifact(),
+        &guard,
+        &input.configured.confirmation_read_assertions,
+        &input.configured.confirmation_event_assertions,
+        &input.configured.deployed.contract_address,
+    )
+    .await?;
+    let (read_results, event_results) = evaluate_assertions(
+        reads,
+        config.artifact(),
+        &guard,
+        &request.read_assertions,
+        &request.event_assertions,
+        &input.configured.deployed.contract_address,
+    )
+    .await?;
+
+    Ok(ContractValidationReadResponse {
+        response_version: 1,
+        observed_chain_id: chain.chain_id,
+        client_version: chain.client_version.unwrap_or_else(|| "unknown".to_owned()),
+        configuration_read_results,
+        configuration_event_results,
+        read_results,
+        event_results,
+    })
+}
+
+async fn evaluate_assertions(
+    reads: EvmContractReadProviders<'_>,
+    artifact: Option<&mfm_evm_contract_model::ContractArtifactConfig>,
+    guard: &EvmChainGuard,
+    read_assertions: &[ReadAssertionConfig],
+    event_assertions: &[EventAssertionConfig],
+    contract_address: &str,
+) -> Result<(Vec<ValidationReadResult>, Vec<ValidationEventResult>)> {
+    if read_assertions.is_empty() && event_assertions.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let artifact = artifact.ok_or(EvmContractAdapterError::MissingContractArtifact)?;
+    let (abi, _) = parse_artifact(artifact).map_err(EvmContractAdapterError::Model)?;
+    let (prepared_reads, prepared_events) =
+        prepare_validate_assertions(&abi, read_assertions, event_assertions)
+            .map_err(EvmContractAdapterError::Model)?;
+    let address = parse_address(contract_address, "contract_address")
+        .map_err(|error| EvmContractAdapterError::Model(error.message))?;
+
+    let mut read_results = Vec::with_capacity(prepared_reads.len());
+    for (assertion, prepared) in read_assertions.iter().zip(prepared_reads.iter()) {
+        let response = reads
+            .call
+            .read_call(&EvmCallReadRequest {
+                guard: guard.clone(),
+                to: address,
+                calldata: hex_to_bytes(&prepared.data_hex)
+                    .map_err(EvmContractAdapterError::Model)?,
+                block: EvmBlockSelector::Latest,
+            })
+            .await?;
+        response.evidence.verify_guard(guard)?;
+        let actual_json = decode_single_output_to_json(
+            &prepared.outputs,
+            &bytes_to_hex_prefixed(&response.return_data),
+        )
+        .map_err(EvmContractAdapterError::Model)?;
+        let actual =
+            ExpectedValue::from_json_value(&actual_json).map_err(EvmContractAdapterError::Model)?;
+        read_results.push(ValidationReadResult {
+            function: assertion.function.to_string(),
+            args: assertion.args.clone(),
+            expected: assertion.expected.clone(),
+            passed: expected_matches(&actual, &assertion.expected),
+            actual,
+        });
+    }
+
+    let mut event_results = Vec::with_capacity(prepared_events.len());
+    for (assertion, prepared) in event_assertions.iter().zip(prepared_events.iter()) {
+        let topic = prepared
+            .topic0_hex
+            .parse::<B256>()
+            .map_err(|_| EvmContractAdapterError::Model("invalid event topic".to_owned()))?;
+        let logs = reads
+            .logs
+            .read_logs(&EvmLogsReadRequest {
+                guard: guard.clone(),
+                from_block: block_selector(assertion.from_block.as_ref(), false),
+                to_block: block_selector(assertion.to_block.as_ref(), true),
+                address: Some(address),
+                topics: vec![topic],
+            })
+            .await?;
+        logs.evidence.verify_guard(guard)?;
+        let observed_count = logs.logs.len() as u64;
+        event_results.push(ValidationEventResult {
+            event: prepared.event.clone(),
+            min_count: prepared.min_count,
+            observed_count,
+            passed: observed_count >= prepared.min_count,
+        });
+    }
+
+    Ok((read_results, event_results))
 }
 
 struct PreparedTransactionInput {
@@ -1739,6 +1745,17 @@ impl<T> EvmContractProvider for T where
 {
 }
 
+/// EVM capability provider set required by contract validation reads.
+pub trait EvmContractReadProvider:
+    EvmChainIdentityProvider + EvmCallReadProvider + EvmLogsReadProvider
+{
+}
+
+impl<T> EvmContractReadProvider for T where
+    T: EvmChainIdentityProvider + EvmCallReadProvider + EvmLogsReadProvider
+{
+}
+
 /// Factory for per-network EVM contract runtime bindings.
 pub trait EvmContractRuntimeFactory: Send + Sync {
     /// Returns the artifact reader used to materialize configs, inputs, and side-effect evidence.
@@ -1749,13 +1766,53 @@ pub trait EvmContractRuntimeFactory: Send + Sync {
         &self,
         network_id: &str,
         signer_ref: Option<&SignerRef>,
-    ) -> mfm_runtime::Result<()> {
-        let _ = signer_ref;
-        self.runtime_for(network_id).map(|_| ())
-    }
+    ) -> mfm_runtime::Result<()>;
+
+    /// Returns process-local EVM read capabilities for validation on `network_id`.
+    fn read_runtime_for(&self, network_id: &str) -> mfm_runtime::Result<EvmContractReadRuntime>;
 
     /// Returns process-local EVM and signing capabilities for `network_id`.
     fn runtime_for(&self, network_id: &str) -> mfm_runtime::Result<EvmContractRuntime>;
+}
+
+/// Process-local read capability set for one EVM contract lifecycle route.
+#[derive(Clone)]
+pub struct EvmContractReadRuntime {
+    evm: Arc<dyn EvmContractReadProvider>,
+}
+
+impl fmt::Debug for EvmContractReadRuntime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EvmContractReadRuntime")
+            .finish_non_exhaustive()
+    }
+}
+
+impl EvmContractReadRuntime {
+    /// Creates an EVM contract read runtime from explicit process-local providers.
+    pub fn new(evm: Arc<dyn EvmContractReadProvider>) -> Self {
+        Self { evm }
+    }
+
+    async fn validate_contract(
+        &self,
+        config: &ValidatedConfig<ValidatePhaseConfig>,
+        input: &ValidateContractInput,
+        request: &ContractValidationReadRequest,
+    ) -> Result<ContractValidationReadResponse> {
+        let evm = self.evm.as_ref();
+        validate_contract_with_reads(
+            EvmContractReadProviders {
+                chain_identity: evm,
+                call: evm,
+                logs: evm,
+            },
+            config,
+            input,
+            request,
+        )
+        .await
+    }
 }
 
 /// Process-local runtime capability set for one EVM contract lifecycle route.
@@ -2795,11 +2852,8 @@ async fn run_validate(
     let request = state
         .read_request(&input)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    let runtime = factory.runtime_for(config.as_ref().network().network_id())?;
-    let response = runtime
-        .adapter()
-        .validate_contract(&config, &input, &request)
-        .await?;
+    let runtime = factory.read_runtime_for(config.as_ref().network().network_id())?;
+    let response = runtime.validate_contract(&config, &input, &request).await?;
     let report = state
         .report_from_response(&input, response.clone())
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;

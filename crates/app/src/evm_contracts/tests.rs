@@ -4,8 +4,8 @@ use crate::{
     EntryPointRunLaunchInput, ErrorClass, RunLaunchRequest, RunModeStatus, RunServices,
 };
 use mfm_adapters_evm_contracts::{
-    ensure_prepared_invocation_public, EvmContractRuntime, EvmContractRuntimeFactory,
-    PreparedContractInvocation,
+    ensure_prepared_invocation_public, EvmContractReadRuntime, EvmContractRuntime,
+    EvmContractRuntimeFactory, PreparedContractInvocation,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use mfm_capabilities::CapabilitySpec;
@@ -636,6 +636,7 @@ async fn app_runner_resumes_replays_and_renders_full_lifecycle_run() {
 #[derive(Clone)]
 struct TestRuntimeFactory {
     artifacts: Arc<dyn ArtifactReadProvider>,
+    read_runtime: EvmContractReadRuntime,
     runtime: EvmContractRuntime,
 }
 
@@ -669,6 +670,7 @@ impl TestRuntimeFactory {
         });
         Self {
             artifacts,
+            read_runtime: EvmContractReadRuntime::new(evm.clone()),
             runtime: EvmContractRuntime::new(evm, Arc::new(TestSigner)),
         }
     }
@@ -691,6 +693,7 @@ impl TestRuntimeFactory {
         });
         Self {
             artifacts,
+            read_runtime: EvmContractReadRuntime::new(evm.clone()),
             runtime: EvmContractRuntime::new(evm, signer),
         }
     }
@@ -699,6 +702,18 @@ impl TestRuntimeFactory {
 impl EvmContractRuntimeFactory for TestRuntimeFactory {
     fn artifacts(&self) -> &dyn ArtifactReadProvider {
         self.artifacts.as_ref()
+    }
+
+    fn validate_runtime_for(
+        &self,
+        _network_id: &str,
+        _signer_ref: Option<&SignerRef>,
+    ) -> mfm_runtime::Result<()> {
+        Ok(())
+    }
+
+    fn read_runtime_for(&self, _network_id: &str) -> mfm_runtime::Result<EvmContractReadRuntime> {
+        Ok(self.read_runtime.clone())
     }
 
     fn runtime_for(&self, _network_id: &str) -> mfm_runtime::Result<EvmContractRuntime> {

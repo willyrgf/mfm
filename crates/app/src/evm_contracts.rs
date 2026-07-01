@@ -29,6 +29,10 @@ impl RuntimeConfigEvmContractRuntimeFactory {
     fn load_evm(&self) -> mfm_runtime::Result<mfm_runtime_config::EvmRuntimeConfig> {
         self.runtime_config.load_evm()
     }
+
+    fn load_evm_with_signers(&self) -> mfm_runtime::Result<mfm_runtime_config::EvmRuntimeConfig> {
+        self.runtime_config.load_evm_with_signers()
+    }
 }
 
 impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
@@ -43,7 +47,11 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
         network_id: &str,
         signer_ref: Option<&SignerRef>,
     ) -> mfm_runtime::Result<()> {
-        let evm = self.load_evm()?;
+        let evm = if signer_ref.is_some() {
+            self.load_evm_with_signers()?
+        } else {
+            self.load_evm()?
+        };
         let network_id = EvmNetworkId::new(network_id)
             .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
         let client = evm_json_rpc_client(evm.clone())?;
@@ -60,12 +68,34 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
         Ok(())
     }
 
+    fn read_runtime_for(
+        &self,
+        network_id: &str,
+    ) -> mfm_runtime::Result<mfm_adapters_evm_contracts::EvmContractReadRuntime> {
+        let evm = self.load_evm()?;
+        let network_id = EvmNetworkId::new(network_id)
+            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+        let evm_provider = evm_json_rpc_client(evm)?;
+        evm_provider
+            .validate_route_binding(&network_id)
+            .map_err(runtime_evm_transport_error)?;
+        Ok(mfm_adapters_evm_contracts::EvmContractReadRuntime::new(
+            Arc::new(evm_provider),
+        ))
+    }
+
     fn runtime_for(
         &self,
-        _network_id: &str,
+        network_id: &str,
     ) -> mfm_runtime::Result<mfm_adapters_evm_contracts::EvmContractRuntime> {
-        let evm = self.load_evm()?;
-        let evm_provider = Arc::new(evm_json_rpc_client(evm.clone())?);
+        let evm = self.load_evm_with_signers()?;
+        let network_id = EvmNetworkId::new(network_id)
+            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+        let evm_client = evm_json_rpc_client(evm.clone())?;
+        evm_client
+            .validate_route_binding(&network_id)
+            .map_err(runtime_evm_transport_error)?;
+        let evm_provider = Arc::new(evm_client);
         let signer = Arc::new(keystore_signer_provider_from_config(&evm));
         Ok(mfm_adapters_evm_contracts::EvmContractRuntime::new(
             evm_provider,

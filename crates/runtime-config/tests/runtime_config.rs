@@ -338,6 +338,61 @@ fn signer_shape_is_validated() {
 }
 
 #[test]
+fn route_only_evm_requirement_ignores_unused_malformed_signers() {
+    let config = r#"
+        [evm.sources.local]
+        rpc_url = "http://127.0.0.1:8545"
+
+        [evm.routes.dev]
+        source_ref = "local"
+
+        [evm.signers.deployer]
+        provider = "raw-private-key"
+        entry_id = "not-a-uuid"
+        private_key = "placeholder-private-key-value"
+    "#;
+
+    let runtime = RuntimeConfig::from_str_with_requirements(
+        config,
+        RuntimeConfigFormat::Toml,
+        RuntimeConfigRequirement::evm(),
+    )
+    .expect("route-only EVM config");
+    assert!(
+        runtime.evm().expect("evm").signers().is_empty(),
+        "route-only parses must not retain unused signer descriptors"
+    );
+}
+
+#[test]
+fn signer_requirement_rejects_malformed_signers() {
+    let config = r#"
+        [evm.sources.local]
+        rpc_url = "http://127.0.0.1:8545"
+
+        [evm.routes.dev]
+        source_ref = "local"
+
+        [evm.signers.deployer]
+        provider = "raw-private-key"
+        entry_id = "00000000-0000-0000-0000-000000000000"
+        keystore_path = "/runtime/keystore.json"
+        unlock_file = "/runtime/unlock"
+    "#;
+
+    let err = RuntimeConfig::from_str_with_requirements(
+        config,
+        RuntimeConfigFormat::Toml,
+        RuntimeConfigRequirement::evm_with_signers(),
+    )
+    .expect_err("signer-required EVM config");
+    assert_eq!(
+        err.kind(),
+        &RuntimeConfigErrorKind::UnsupportedSignerProvider
+    );
+}
+
+#[test]
 fn secret_material_fields_are_rejected() {
     for field in [
         "password",
