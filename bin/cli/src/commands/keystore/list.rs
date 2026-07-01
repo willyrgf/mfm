@@ -1,7 +1,7 @@
 use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::{format_keys_table, handle_command_result, KeyDisplay};
-use crate::support::{command_defaults, keystore};
+use crate::support::{keystore, keystore_selection};
 use clap::Args;
 use serde::Serialize;
 use std::fmt;
@@ -13,6 +13,14 @@ pub(crate) struct ListArgs {
     /// Keystore file path
     #[arg(long)]
     pub keystore: Option<PathBuf>,
+
+    /// Runtime configuration file for keystore profile selection
+    #[arg(long)]
+    pub runtime_config: Option<PathBuf>,
+
+    /// Keystore profile ref inside the runtime config (default: default)
+    #[arg(long)]
+    pub keystore_ref: Option<String>,
 
     /// Include Ethereum addresses in output
     #[arg(long, default_value = "true")]
@@ -65,9 +73,14 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &ListArgs) -> ! {
 }
 
 async fn execute_internal(args: &ListArgs) -> CommandResult<ListResponse> {
-    let keystore_path = command_defaults::resolve_keystore_path(args.keystore.as_ref());
+    let access =
+        keystore_selection::resolve_keystore_access(keystore_selection::KeystoreSelectionArgs {
+            keystore: args.keystore.as_ref(),
+            runtime_config: args.runtime_config.as_ref(),
+            keystore_ref: args.keystore_ref.as_deref(),
+        })?;
     let response = keystore::list_keys(keystore::ListKeysRequest {
-        keystore_path,
+        access,
         show_addresses: args.show_addresses,
         filter_label: args.filter_label.clone(),
         sort_by: match args.sort_by {
