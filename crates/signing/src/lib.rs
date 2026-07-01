@@ -14,7 +14,7 @@ use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{CapabilityError, CapabilitySpec, SupportRole};
 use mfm_ids::{
     CapabilityKind, CapabilityVersion, CheckedStringError, CheckedStringErrorReason,
-    DigestAlgorithm, DigestBytes, LocalPublicId, RuntimeEnvName,
+    DigestAlgorithm, DigestBytes, LocalPublicId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -271,107 +271,6 @@ pub fn manual_resolution_signing_request(
         manual_resolution_signing_purpose_id()?,
         digest,
     ))
-}
-
-/// Runtime signer provider identifier.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SigningProviderId(LocalPublicId);
-
-impl SigningProviderId {
-    /// Creates a checked runtime provider identifier.
-    pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        let value = checked_local_public_id(SigningIdentifierKind::Provider, value)?;
-        Ok(Self(value))
-    }
-
-    /// Returns the provider identifier string.
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-/// Runtime-only provider config that must not become a typed value or config.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SignerProviderRuntimeConfig {
-    signer_ref: SignerRef,
-    provider_id: SigningProviderId,
-    secret_source: RuntimeSecretSource,
-}
-
-impl SignerProviderRuntimeConfig {
-    /// Creates runtime provider config from process-local pieces.
-    pub fn new(
-        signer_ref: SignerRef,
-        provider_id: SigningProviderId,
-        secret_source: RuntimeSecretSource,
-    ) -> Self {
-        Self {
-            signer_ref,
-            provider_id,
-            secret_source,
-        }
-    }
-
-    /// Returns the signer reference this runtime config satisfies.
-    pub fn signer_ref(&self) -> &SignerRef {
-        &self.signer_ref
-    }
-
-    /// Returns the runtime provider identifier.
-    pub fn provider_id(&self) -> &SigningProviderId {
-        &self.provider_id
-    }
-
-    /// Returns the runtime secret source descriptor.
-    pub fn secret_source(&self) -> &RuntimeSecretSource {
-        &self.secret_source
-    }
-}
-
-/// Runtime-only reference to secret-bearing provider material.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeSecretSource {
-    kind: RuntimeSecretSourceKind,
-    name: RuntimeEnvName,
-}
-
-impl RuntimeSecretSource {
-    /// Creates a runtime secret reference to an environment variable.
-    pub fn env_var(name: impl AsRef<str>) -> Result<Self> {
-        let name = checked_runtime_env_name(SigningIdentifierKind::RuntimeSecretSource, name)?;
-        Ok(Self {
-            kind: RuntimeSecretSourceKind::EnvVar,
-            name,
-        })
-    }
-
-    /// Creates a runtime secret reference to an environment variable containing a path.
-    pub fn path_env_var(name: impl AsRef<str>) -> Result<Self> {
-        let name = checked_runtime_env_name(SigningIdentifierKind::RuntimeSecretSource, name)?;
-        Ok(Self {
-            kind: RuntimeSecretSourceKind::PathEnvVar,
-            name,
-        })
-    }
-
-    /// Returns the source kind.
-    pub const fn kind(&self) -> RuntimeSecretSourceKind {
-        self.kind
-    }
-
-    /// Returns the process-local source name.
-    pub fn name(&self) -> &str {
-        self.name.as_str()
-    }
-}
-
-/// Runtime secret source category.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeSecretSourceKind {
-    /// Secret material is read from an environment variable.
-    EnvVar,
-    /// Secret material is read from a path carried by an environment variable.
-    PathEnvVar,
 }
 
 /// Transient signing request. This type is intentionally not serializable.
@@ -665,12 +564,8 @@ pub enum SigningIdentifierKind {
     Domain,
     /// Signing purpose id.
     Purpose,
-    /// Runtime provider id.
-    Provider,
     /// Public account id.
     Account,
-    /// Runtime secret source name.
-    RuntimeSecretSource,
 }
 
 impl SigningIdentifierKind {
@@ -680,9 +575,7 @@ impl SigningIdentifierKind {
             Self::Algorithm => "algorithm",
             Self::Domain => "domain",
             Self::Purpose => "purpose",
-            Self::Provider => "provider",
             Self::Account => "account",
-            Self::RuntimeSecretSource => "runtime_secret_source",
         }
     }
 }
@@ -767,13 +660,6 @@ fn checked_local_public_id(
     value: impl AsRef<str>,
 ) -> Result<LocalPublicId> {
     LocalPublicId::new(value).map_err(|error| signing_identifier_error(kind, error))
-}
-
-fn checked_runtime_env_name(
-    kind: SigningIdentifierKind,
-    value: impl AsRef<str>,
-) -> Result<RuntimeEnvName> {
-    RuntimeEnvName::new(value).map_err(|error| signing_identifier_error(kind, error))
 }
 
 fn signing_identifier_error(
