@@ -19,6 +19,7 @@ mfm-canonical = { path = "../canonical" }
 mfm-capabilities = { path = "../capabilities" }
 mfm-certify = { path = "../certify" }
 mfm-events = { path = "../events" }
+mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-manual-auth = { path = "../manual-auth" }
 mfm-runtime = { path = "../runtime" }

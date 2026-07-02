@@ -11,21 +11,22 @@ use mfm_spec::v1::MediaType;
 use mfm_store::v1::codec::parse_identity;
 use mfm_store::v1::{
     payload_from_json_value, prepared_commit_plan_fingerprint, stage_prepared_commit_plan,
-    AdmissionLease, AdmissionToken, AdmissionWaiter, ArtifactAuthorityMap, ArtifactEvidenceRef,
-    AsyncStoreFuture, CodecError, CommitBase, CommitFingerprint, CommitKey, CommitOrdinal,
-    CommitOutcome, CommittedBatch, EventArtifactRequirement, ExecutionClaimStatus,
-    ExecutionClaimStore, ExpiredExecutionClaim, KernelEventEnvelope, LogicalEventKey,
-    NowaitSkipAdmissionResult, ObservedRunStatus, PersistedKernelEventRecord,
-    PreparedArtifactBytes, PreparedCommitBundle, ProjectionSnapshot, ProjectionSnapshotParts,
-    ResourceLaneAuthoritySet, ResourceLaneKey, ResourceLaneProjection, RetainedArtifactReadFuture,
-    RetainedArtifactReadProvider, RunEventStore, RunObservation, RunObservationPage,
-    RunObservationQuery, RunObservationStore, RunState, StagedCommitOutcome, StoreError,
-    StoreErrorInspection, StreamSeq, TrustScopeId, TrustScopeStore, VerifiedRunArtifactBytes,
+    AdmissionLease, AdmissionToken, AdmissionWaiter, ArtifactAuthorityMap,
+    ArtifactByteAuthorityMap, ArtifactEvidenceRef, AsyncStoreFuture, CodecError, CommitBase,
+    CommitFingerprint, CommitKey, CommitOrdinal, CommitOutcome, CommittedBatch, CommittedRunStream,
+    EventArtifactRequirement, ExecutionClaimStatus, ExecutionClaimStore, ExpiredExecutionClaim,
+    KernelEventEnvelope, LogicalEventKey, NowaitSkipAdmissionResult, ObservedRunStatus,
+    PersistedKernelEventRecord, PreparedArtifactBytes, PreparedCommitBundle, ProjectionSnapshot,
+    ProjectionSnapshotParts, ResourceLaneAuthoritySet, ResourceLaneKey, ResourceLaneProjection,
+    RetainedArtifactReadFuture, RetainedArtifactReadProvider, RunEventStore, RunObservation,
+    RunObservationPage, RunObservationQuery, RunObservationStore, RunState, StagedCommitOutcome,
+    StoreError, StoreErrorInspection, StreamSeq, TrustScopeId, TrustScopeStore,
+    VerifiedRunArtifactBytes,
 };
 use serde_json::Value;
 use sqlx::{
     postgres::{PgListener, PgPoolOptions, PgRow},
-    PgPool, Postgres, Row, Transaction,
+    PgPool, Postgres, QueryBuilder, Row, Transaction,
 };
 
 use crate::schema::{connect_pool, validate_pool};
@@ -101,22 +102,37 @@ pub enum PostgresStoreAuthorityError {
     /// The store-owned deployment trust-scope binding was missing or invalid.
     #[error("trust-scope validation failed")]
     TrustScope,
+    /// The store-owned fact-query receipt trust root was invalid.
+    #[error("fact receipt trust-root validation failed")]
+    FactReceiptTrustRoot,
 }
 
 /// Validated Postgres run-store authority loaded during store construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostgresStoreAuthority {
     trust_scope_id: TrustScopeId,
+    fact_receipt_trust_root: Option<mfm_store::v1::FactQueryReceiptTrustRoot>,
 }
 
 impl PostgresStoreAuthority {
-    pub(crate) fn new(trust_scope_id: TrustScopeId) -> Self {
-        Self { trust_scope_id }
+    pub(crate) fn new(
+        trust_scope_id: TrustScopeId,
+        fact_receipt_trust_root: Option<mfm_store::v1::FactQueryReceiptTrustRoot>,
+    ) -> Self {
+        Self {
+            trust_scope_id,
+            fact_receipt_trust_root,
+        }
     }
 
     /// Returns the store-owned deployment trust-scope id validated at construction.
     pub fn trust_scope_id(&self) -> &TrustScopeId {
         &self.trust_scope_id
+    }
+
+    /// Returns the configured fact-query receipt trust root, when the store has one.
+    pub fn fact_receipt_trust_root(&self) -> Option<&mfm_store::v1::FactQueryReceiptTrustRoot> {
+        self.fact_receipt_trust_root.as_ref()
     }
 }
 
@@ -141,8 +157,11 @@ mod artifacts;
 mod authority;
 mod commits;
 mod event_rows;
+mod fact_projections;
+mod fact_queries;
 mod observations;
 mod projections;
+mod receipt_authentication;
 mod resource_lanes;
 mod stream;
 #[cfg(all(test, feature = "parity-tests"))]
@@ -151,10 +170,13 @@ mod tests;
 mod unit_tests;
 mod util;
 
+pub use fact_queries::{PostgresFactQueryResult, PostgresFactQueryRow};
+pub use receipt_authentication::PostgresFactReceiptSigner;
+
 use self::{
     admission_lanes::*, artifact_admission::*, artifact_writes::*, artifacts::*, authority::*,
-    commits::*, event_rows::*, observations::*, projections::*, resource_lanes::*, stream::*,
-    util::*,
+    commits::*, event_rows::*, fact_projections::*, observations::*, projections::*,
+    receipt_authentication::*, resource_lanes::*, stream::*, util::*,
 };
 
 /// PostgreSQL-backed typed run event store.
@@ -165,6 +187,7 @@ use self::{
 pub struct PostgresRunStore {
     pub(crate) pool: PgPool,
     authority: PostgresStoreAuthority,
+    fact_receipt_signer: Option<PostgresFactReceiptSigner>,
 }
 
 impl PostgresRunStore {
@@ -174,7 +197,28 @@ impl PostgresRunStore {
             .await
             .map_err(|_| PostgresStoreError::Authority(PostgresStoreAuthorityError::Connection))?;
         let authority = validate_pool(&pool).await?;
-        Ok(Self { pool, authority })
+        Ok(Self {
+            pool,
+            authority,
+            fact_receipt_signer: None,
+        })
+    }
+
+    /// Connects and validates that the supplied in-memory fact receipt signer matches the store trust root.
+    pub async fn connect_with_fact_receipt_signer(
+        database_url: &str,
+        fact_receipt_signer: PostgresFactReceiptSigner,
+    ) -> Result<Self> {
+        let pool = connect_pool(database_url)
+            .await
+            .map_err(|_| PostgresStoreError::Authority(PostgresStoreAuthorityError::Connection))?;
+        let authority = validate_pool(&pool).await?;
+        require_fact_receipt_signer_matches_authority(&authority, &fact_receipt_signer)?;
+        Ok(Self {
+            pool,
+            authority,
+            fact_receipt_signer: Some(fact_receipt_signer),
+        })
     }
 
     /// Returns the store authority validated during construction.
@@ -198,6 +242,29 @@ impl RunEventStore for PostgresRunStore {
         run_id: &'a RunId,
     ) -> AsyncStoreFuture<'a, Vec<KernelEventEnvelope>, Self::Error> {
         Box::pin(async move { load_run_stream_client(&self.pool, run_id).await })
+    }
+
+    fn load_committed_run_stream<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> AsyncStoreFuture<'a, CommittedRunStream, Self::Error> {
+        Box::pin(async move {
+            let mut tx =
+                self.pool.begin().await.map_err(|error| {
+                    database_error("failed to begin committed stream load", error)
+                })?;
+            let stream = load_run_stream_tx(&mut tx, run_id).await?;
+            let artifact_bytes = load_fact_rebuild_artifact_bytes_tx(&mut tx, &stream).await?;
+            let committed = CommittedRunStream::from_events_with_artifact_bytes(
+                run_id.clone(),
+                stream,
+                &artifact_bytes,
+            )?;
+            tx.commit()
+                .await
+                .map_err(|error| database_error("failed to commit committed stream load", error))?;
+            Ok(committed)
+        })
     }
 
     fn expected_next_seq<'a>(

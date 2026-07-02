@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
-use mfm_canonical::PlainCanonicalJsonBytes;
+use mfm_canonical::{CanonicalValue, DecimalString, PlainCanonicalJsonBytes};
 use mfm_capabilities::CapabilitySetDescriptor;
 use mfm_events::v1::{self as events, side_effect};
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
     DescriptorId, SchemaId,
 };
+use mfm_program::MfmFactType;
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 use mfm_values::MfmValue;
@@ -15,7 +16,7 @@ use serde::Serialize;
 use crate::{
     AdapterExecutableBinding, CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx,
     ErasedRunnerBinding, ErasedRunnerOutput, ErasedRunnerRegistry, Result, RunnerEventPayload,
-    RuntimeError, StagedArtifact, StagedRetentionRefs,
+    RunnerFactRecorded, RuntimeError, StagedArtifact, StagedRetentionRefs,
 };
 
 /// Canonical JSON artifact prepared by a typed runner before runtime staging.
@@ -48,6 +49,58 @@ impl RunnerJsonArtifact {
     /// Splits the artifact into canonical bytes and evidence.
     pub fn into_parts(self) -> (Vec<u8>, store::ArtifactEvidenceRef) {
         (self.bytes, self.evidence)
+    }
+}
+
+/// Runner-owned input for recording one typed fact claim.
+pub struct FactRecordInput<T: MfmFactType> {
+    /// Typed fact value containing the subject and response material.
+    pub fact: T,
+    /// Visibility selected for the recorded claim.
+    pub visibility: mfm_facts::FactVisibility,
+    /// Optional source observation timestamp.
+    pub observed_at: Option<String>,
+}
+
+impl<T: MfmFactType> FactRecordInput<T> {
+    /// Creates fact record input with no source observation timestamp.
+    pub fn new(fact: T, visibility: mfm_facts::FactVisibility) -> Self {
+        Self {
+            fact,
+            visibility,
+            observed_at: None,
+        }
+    }
+
+    /// Sets the source observation timestamp.
+    pub fn observed_at(mut self, observed_at: impl Into<String>) -> Self {
+        self.observed_at = Some(observed_at.into());
+        self
+    }
+}
+
+/// Handle returned after a typed fact has been staged into runner output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedFactRecord {
+    fact_key: mfm_facts::FactKey,
+    response_artifact_id: ArtifactId,
+    response_hash: ContentDigest,
+}
+
+impl StagedFactRecord {
+    /// Returns the descriptor-derived fact key for the staged claim.
+    pub const fn fact_key(&self) -> &mfm_facts::FactKey {
+        &self.fact_key
+    }
+
+    /// Returns the staged response artifact id.
+    pub const fn response_artifact_id(&self) -> &ArtifactId {
+        &self.response_artifact_id
+    }
+
+    /// Returns the staged response content hash.
+    pub const fn response_hash(&self) -> &ContentDigest {
+        &self.response_hash
     }
 }
 
@@ -353,35 +406,6 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
             value_lineage: self.ctx.output_cell().value_lineage.clone(),
             skip_reason,
         })
-    }
-
-    /// Builds a `FactRecorded` runner payload from a typed request and fact-response artifact.
-    pub fn fact_recorded<Request>(
-        &self,
-        fact_key: events::FactKey,
-        request: &Request,
-        response: &RunnerJsonArtifact,
-        binding: RunnerCapabilityBinding,
-    ) -> Result<RunnerEventPayload>
-    where
-        Request: MfmValue,
-    {
-        ensure_artifact_role(response, events::ArtifactRole::FactResponse)?;
-        Ok(RunnerEventPayload::FactRecorded(events::FactRecorded {
-            spec_hash: self.ctx.spec_hash().clone(),
-            node_id: self.ctx.node().node_id.clone(),
-            attempt_id: self.ctx.attempt_id().clone(),
-            capability_kind: binding.capability_kind,
-            capability_version: binding.capability_version,
-            adapter_kind: binding.adapter_kind,
-            adapter_version: binding.adapter_version,
-            request_schema_id: Request::schema_id().map_err(runtime_value_error)?,
-            request_hash: canonical_json(request)?.content_digest(),
-            response_schema_id: artifact_schema_id(response)?,
-            response_hash: response.evidence.digest.clone(),
-            fact_key,
-            artifact_id: response.evidence.artifact_id.clone(),
-        }))
     }
 
     /// Builds a `SideEffectIntentPersisted` runner payload.
@@ -819,6 +843,94 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
         self
     }
 
+    /// Stages a typed fact response artifact and appends the matching `FactRecorded` payload.
+    pub fn record_fact<T>(
+        &mut self,
+        input: FactRecordInput<T>,
+        producer: RunnerCapabilityBinding,
+    ) -> Result<StagedFactRecord>
+    where
+        T: MfmFactType,
+    {
+        let descriptor = T::descriptor().map_err(runtime_fact_error)?;
+        ensure_fact_descriptor_matches_type::<T>(&descriptor)?;
+        let descriptor_hash =
+            mfm_facts::fact_descriptor_hash(&descriptor).map_err(runtime_fact_error)?;
+        ensure_node_allows_fact_descriptor(self.artifacts.ctx.node(), &descriptor_hash)?;
+
+        let subject_json = serde_json::to_value(input.fact.subject())
+            .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
+        let subject_value =
+            typed_fact_subject_value(&descriptor, &subject_json).map_err(runtime_fact_error)?;
+        let subject_material = mfm_facts::extract_subject_material(&descriptor, &subject_value)
+            .map_err(runtime_fact_error)?;
+        let subject_material_hash =
+            mfm_facts::subject_material_hash(&subject_material).map_err(runtime_fact_error)?;
+        let subject_namespace =
+            mfm_facts::fact_subject_namespace(&descriptor).map_err(runtime_fact_error)?;
+        let subject_namespace_hash = mfm_facts::fact_subject_namespace_hash(&subject_namespace)
+            .map_err(runtime_fact_error)?;
+        let fact_key = mfm_facts::derive_fact_key(
+            subject_namespace_hash.clone(),
+            subject_material_hash.clone(),
+        )
+        .map_err(runtime_fact_error)?;
+
+        let response = self.artifacts.fact_response(input.fact.response())?;
+        let response_schema_id = artifact_schema_id(&response)?;
+        if descriptor.response_schema_id() != &response_schema_id {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "fact response schema {} did not match descriptor response schema {}",
+                response_schema_id,
+                descriptor.response_schema_id()
+            )));
+        }
+        let response_evidence = response.evidence().clone();
+        let claim = mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
+            visibility: input.visibility,
+            fact_kind: descriptor.fact_kind().clone(),
+            fact_descriptor_hash: descriptor_hash,
+            subject: mfm_facts::FactSubjectEvidence::from_material(
+                subject_namespace_hash,
+                &subject_material,
+            )
+            .map_err(runtime_fact_error)?,
+            observed_at: input.observed_at,
+            request: None,
+            response: mfm_facts::FactResponseEvidence::new(
+                response_schema_id,
+                response_evidence.digest.clone(),
+                response_evidence.artifact_id.clone(),
+                response_evidence.evidence_hash()?,
+            ),
+            producer: mfm_facts::FactProducerProvenance::new(
+                producer.capability_kind,
+                producer.capability_version,
+                producer.adapter_kind,
+                producer.adapter_version,
+            ),
+        })
+        .map_err(runtime_fact_error)?;
+
+        self.staged_artifacts
+            .push(self.artifacts.staged_attempt(&response)?);
+        self.payloads
+            .push(RunnerEventPayload::FactRecorded(RunnerFactRecorded::new(
+                events::FactRecorded {
+                    spec_hash: self.artifacts.ctx.spec_hash().clone(),
+                    node_id: self.artifacts.ctx.node().node_id.clone(),
+                    attempt_id: self.artifacts.ctx.attempt_id().clone(),
+                    claim,
+                },
+            )));
+
+        Ok(StagedFactRecord {
+            fact_key,
+            response_artifact_id: response_evidence.artifact_id,
+            response_hash: response_evidence.digest,
+        })
+    }
+
     /// Appends a runner-owned event payload.
     pub fn payload(&mut self, payload: RunnerEventPayload) -> &mut Self {
         self.payloads.push(payload);
@@ -945,6 +1057,182 @@ fn artifact_schema_id(artifact: &RunnerJsonArtifact) -> Result<SchemaId> {
     })
 }
 
+fn ensure_fact_descriptor_matches_type<T>(descriptor: &mfm_facts::FactDescriptor) -> Result<()>
+where
+    T: MfmFactType,
+{
+    let subject_schema_id = <T::Subject as MfmValue>::schema_id().map_err(runtime_value_error)?;
+    let response_schema_id = <T::Response as MfmValue>::schema_id().map_err(runtime_value_error)?;
+
+    if descriptor.subject_schema_id() != &subject_schema_id {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "fact subject schema {} did not match subject type schema {}",
+            descriptor.subject_schema_id(),
+            subject_schema_id
+        )));
+    }
+    if descriptor.response_schema_id() != &response_schema_id {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "fact response schema {} did not match response type schema {}",
+            descriptor.response_schema_id(),
+            response_schema_id
+        )));
+    }
+
+    Ok(())
+}
+
+fn ensure_node_allows_fact_descriptor(
+    node: &spec::NodeSpec,
+    descriptor_hash: &ContentDigest,
+) -> Result<()> {
+    if node
+        .fact_descriptor_allowlist
+        .iter()
+        .any(|reference| &reference.descriptor_hash == descriptor_hash)
+    {
+        return Ok(());
+    }
+    Err(RuntimeError::InvalidRunnerOutput(format!(
+        "node {} is not certified to emit fact descriptor {}",
+        node.node_id, descriptor_hash
+    )))
+}
+
+fn typed_fact_subject_value(
+    descriptor: &mfm_facts::FactDescriptor,
+    subject: &serde_json::Value,
+) -> std::result::Result<CanonicalValue, mfm_facts::FactDescriptorError> {
+    let mut typed_paths = std::collections::BTreeMap::new();
+    for field in descriptor.fields() {
+        let mfm_facts::FactFieldAccessor::SubjectPath(path) = field.accessor() else {
+            continue;
+        };
+        if let Some(previous) = typed_paths.insert(path.as_str().to_owned(), field.value_type()) {
+            if previous != field.value_type() {
+                return Err(mfm_facts::FactDescriptorError::descriptor(format!(
+                    "subject path {} is declared with incompatible value types",
+                    path
+                )));
+            }
+        }
+    }
+    json_to_fact_canonical_value(subject, "", &typed_paths)
+}
+
+fn json_to_fact_canonical_value(
+    value: &serde_json::Value,
+    path: &str,
+    typed_paths: &std::collections::BTreeMap<String, mfm_facts::FactFieldValueType>,
+) -> std::result::Result<CanonicalValue, mfm_facts::FactDescriptorError> {
+    if let Some(value_type) = typed_paths.get(path) {
+        return json_to_typed_fact_scalar(value, *value_type, path);
+    }
+
+    match value {
+        serde_json::Value::Null => Ok(CanonicalValue::Null),
+        serde_json::Value::Bool(value) => Ok(CanonicalValue::Bool(*value)),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_u64() {
+                Ok(CanonicalValue::Unsigned(value))
+            } else if let Some(value) = value.as_i64() {
+                Ok(CanonicalValue::Signed(value))
+            } else {
+                Err(mfm_facts::FactDescriptorError::descriptor(format!(
+                    "fact subject path {path} contains unsupported floating-point number"
+                )))
+            }
+        }
+        serde_json::Value::String(value) => Ok(CanonicalValue::String(value.clone())),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let child_path = if path.is_empty() {
+                    index.to_string()
+                } else {
+                    format!("{path}.{index}")
+                };
+                json_to_fact_canonical_value(value, &child_path, typed_paths)
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map(CanonicalValue::Array),
+        serde_json::Value::Object(entries) => {
+            let values = entries
+                .iter()
+                .map(|(key, value)| {
+                    let child_path = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    Ok((
+                        key.clone(),
+                        json_to_fact_canonical_value(value, &child_path, typed_paths)?,
+                    ))
+                })
+                .collect::<std::result::Result<Vec<_>, mfm_facts::FactDescriptorError>>()?;
+            CanonicalValue::object(values)
+                .map_err(|error| mfm_facts::FactDescriptorError::descriptor(error.to_string()))
+        }
+    }
+}
+
+fn json_to_typed_fact_scalar(
+    value: &serde_json::Value,
+    value_type: mfm_facts::FactFieldValueType,
+    path: &str,
+) -> std::result::Result<CanonicalValue, mfm_facts::FactDescriptorError> {
+    match value_type {
+        mfm_facts::FactFieldValueType::String => {
+            string_json(value, path).map(|value| CanonicalValue::String(value.to_owned()))
+        }
+        mfm_facts::FactFieldValueType::Boolean => value
+            .as_bool()
+            .map(CanonicalValue::Bool)
+            .ok_or_else(|| fact_scalar_type_error(path, value_type)),
+        mfm_facts::FactFieldValueType::SignedInteger => value
+            .as_i64()
+            .map(CanonicalValue::Signed)
+            .ok_or_else(|| fact_scalar_type_error(path, value_type)),
+        mfm_facts::FactFieldValueType::UnsignedInteger => value
+            .as_u64()
+            .map(CanonicalValue::Unsigned)
+            .ok_or_else(|| fact_scalar_type_error(path, value_type)),
+        mfm_facts::FactFieldValueType::Timestamp => {
+            string_json(value, path).map(|value| CanonicalValue::String(value.to_owned()))
+        }
+        mfm_facts::FactFieldValueType::DecimalString => {
+            let decimal = DecimalString::new_variable(string_json(value, path)?)
+                .map_err(|error| mfm_facts::FactDescriptorError::descriptor(error.to_string()))?;
+            Ok(CanonicalValue::Decimal(decimal))
+        }
+        mfm_facts::FactFieldValueType::Digest => {
+            string_json(value, path).map(|value| CanonicalValue::String(value.to_owned()))
+        }
+    }
+}
+
+fn string_json<'a>(
+    value: &'a serde_json::Value,
+    path: &str,
+) -> std::result::Result<&'a str, mfm_facts::FactDescriptorError> {
+    value.as_str().ok_or_else(|| {
+        mfm_facts::FactDescriptorError::descriptor(format!(
+            "fact subject path {path} is not a string"
+        ))
+    })
+}
+
+fn fact_scalar_type_error(
+    path: &str,
+    value_type: mfm_facts::FactFieldValueType,
+) -> mfm_facts::FactDescriptorError {
+    mfm_facts::FactDescriptorError::descriptor(format!(
+        "fact subject path {path} does not match {value_type:?}"
+    ))
+}
+
 fn canonical_json<T>(value: &T) -> Result<PlainCanonicalJsonBytes>
 where
     T: Serialize,
@@ -956,5 +1244,9 @@ where
 }
 
 fn runtime_value_error(error: mfm_values::ValueError) -> RuntimeError {
+    RuntimeError::InvalidRunnerOutput(error.to_string())
+}
+
+fn runtime_fact_error(error: mfm_facts::FactDescriptorError) -> RuntimeError {
     RuntimeError::InvalidRunnerOutput(error.to_string())
 }

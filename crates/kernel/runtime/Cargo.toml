@@ -19,8 +19,10 @@ mfm-canonical = { path = "../canonical" }
 mfm-capabilities = { path = "../capabilities" }
 mfm-certify = { path = "../certify" }
 mfm-events = { path = "../events" }
+mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-manual-auth = { path = "../manual-auth" }
+mfm-program = { path = "../program" }
 mfm-spec = { path = "../spec" }
 mfm-store = { path = "../store" }
 mfm-values = { path = "../values" }
@@ -31,7 +33,6 @@ thiserror = { workspace = true }
 [dev-dependencies]
 k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-effects = { path = "../effects" }
-mfm-program = { path = "../program" }
 mfm-program-derive = { path = "../program-derive" }
 mfm-store = { path = "../store", features = ["test-support"] }
 tokio = { workspace = true }

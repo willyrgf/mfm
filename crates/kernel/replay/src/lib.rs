@@ -226,7 +226,7 @@ pub mod v1 {
         /// Attempt id that requested the fact.
         pub attempt_id: AttemptId,
         /// Stable fact key.
-        pub fact_key: events::FactKey,
+        pub fact_key: mfm_facts::FactKey,
         /// Capability kind expected by the replaying state.
         pub capability_kind: CapabilityKind,
         /// Capability version expected by the replaying state.
@@ -499,7 +499,7 @@ pub mod v1 {
         producer_seed_id: Option<&'a SeedId>,
     }
 
-    type FactKey = (NodeId, AttemptId, events::FactKey);
+    type FactKey = (NodeId, AttemptId, mfm_facts::FactKey);
     type ReplayArtifactAuthorityKey = (ArtifactId, ContentDigest);
     type SideEffectKey = (SideEffectPairId, u32);
 
@@ -797,13 +797,18 @@ pub mod v1 {
                         format!("missing recorded fact {}", request.fact_key),
                     )
                 })?;
-            if fact.capability_kind != request.capability_kind
-                || fact.capability_version != request.capability_version
-                || fact.adapter_kind != request.adapter_kind
-                || fact.adapter_version != request.adapter_version
-                || fact.request_schema_id != request.request_schema_id
-                || fact.request_hash != request.request_hash
-                || fact.response_schema_id != request.response_schema_id
+            let producer = fact.claim.producer();
+            let fact_request = fact.claim.request();
+            let response = fact.claim.response();
+            if producer.capability_kind() != &request.capability_kind
+                || producer.capability_version() != &request.capability_version
+                || producer.adapter_kind() != &request.adapter_kind
+                || producer.adapter_version() != &request.adapter_version
+                || fact_request.is_none_or(|evidence| {
+                    evidence.request_schema_id() != &request.request_schema_id
+                        || evidence.request_hash() != &request.request_hash
+                })
+                || response.response_schema_id() != &request.response_schema_id
             {
                 return Err(ReplayError::new(
                     ReplayErrorKind::FactMismatch,
@@ -817,9 +822,9 @@ pub mod v1 {
             Ok(RecordedFactReplay {
                 fact: fact.clone(),
                 artifact: self.verify_artifact(ArtifactEvidenceExpectation {
-                    artifact_id: &fact.artifact_id,
-                    digest: &fact.response_hash,
-                    schema_id: Some(&fact.response_schema_id),
+                    artifact_id: response.artifact_id(),
+                    digest: response.response_hash(),
+                    schema_id: Some(response.response_schema_id()),
                     semantic_type_id: None,
                     role: ArtifactRole::FactResponse,
                     producer_node_id: Some(&fact.node_id),
@@ -1039,7 +1044,7 @@ pub mod v1 {
                             (
                                 payload.node_id.clone(),
                                 payload.attempt_id.clone(),
-                                payload.fact_key.clone(),
+                                payload.claim.subject().fact_key().clone(),
                             ),
                             payload.clone(),
                             ReplayErrorKind::InvalidRunStream,
@@ -1599,15 +1604,16 @@ pub mod v1 {
         }
 
         fn verify_fact_against_spec(&self, payload: &events::FactRecorded) -> Result<()> {
+            let producer = payload.claim.producer();
             self.verify_node_capability(
                 &payload.node_id,
-                &payload.capability_kind,
-                &payload.capability_version,
+                producer.capability_kind(),
+                producer.capability_version(),
             )?;
             self.verify_node_adapter(
                 &payload.node_id,
-                &payload.adapter_kind,
-                &payload.adapter_version,
+                producer.adapter_kind(),
+                producer.adapter_version(),
             )?;
             Ok(())
         }

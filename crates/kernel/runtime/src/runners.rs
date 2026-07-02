@@ -113,6 +113,27 @@ pub trait ErasedNodeRunner: Send + Sync {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a>;
 }
 
+/// Runner-owned typed fact payload emitted by the runtime fact recorder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerFactRecorded {
+    payload: events::FactRecorded,
+}
+
+impl RunnerFactRecorded {
+    pub(crate) fn new(payload: events::FactRecorded) -> Self {
+        Self { payload }
+    }
+
+    /// Returns the typed fact payload.
+    pub fn payload(&self) -> &events::FactRecorded {
+        &self.payload
+    }
+
+    pub(crate) fn into_payload(self) -> events::FactRecorded {
+        self.payload
+    }
+}
+
 /// Runner-owned payloads that may be proposed by domain execution.
 ///
 /// Scheduler, framework lifecycle, artifact reference, retention, and run lifecycle events are
@@ -124,8 +145,8 @@ pub trait ErasedNodeRunner: Send + Sync {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunnerEventPayload {
-    /// Recorded read fact event.
-    FactRecorded(events::FactRecorded),
+    /// Recorded read fact event emitted by the typed runtime fact recorder.
+    FactRecorded(RunnerFactRecorded),
     /// Cell produced terminal event.
     CellProduced(events::CellProduced),
     /// Cell skipped terminal event.
@@ -167,7 +188,7 @@ pub enum RunnerEventPayload {
 impl From<RunnerEventPayload> for events::KernelEventPayload {
     fn from(payload: RunnerEventPayload) -> Self {
         match payload {
-            RunnerEventPayload::FactRecorded(payload) => Self::FactRecorded(payload),
+            RunnerEventPayload::FactRecorded(payload) => Self::FactRecorded(payload.into_payload()),
             RunnerEventPayload::CellProduced(payload) => Self::CellProduced(payload),
             RunnerEventPayload::CellSkipped(payload) => Self::CellSkipped(payload),
             RunnerEventPayload::SideEffectIntentPersisted(payload) => {

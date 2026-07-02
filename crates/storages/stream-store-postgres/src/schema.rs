@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
-use mfm_store::v1::TrustScopeId;
+use mfm_facts::{StoreIdentity, StoreKeyId, StoreReceiptAuthenticationScheme};
+use mfm_store::v1::{FactQueryReceiptTrustRoot, TrustScopeId};
 use sqlx::{PgPool, Row};
 
 use crate::run_store::{
@@ -46,7 +47,8 @@ pub(crate) async fn connect_pool(database_url: &str) -> Result<PgPool> {
 pub(crate) async fn validate_pool(pool: &PgPool) -> Result<PostgresStoreAuthority> {
     validate_migrations(pool).await?;
     validate_catalog(pool).await?;
-    validate_store_metadata(pool).await
+    let trust_root = load_fact_receipt_trust_root(pool).await?;
+    validate_store_metadata(pool, trust_root).await
 }
 
 async fn validate_migrations(pool: &PgPool) -> Result<()> {
@@ -375,7 +377,10 @@ async fn validate_append_xid_columns(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-async fn validate_store_metadata(pool: &PgPool) -> Result<PostgresStoreAuthority> {
+async fn validate_store_metadata(
+    pool: &PgPool,
+    fact_receipt_trust_root: Option<FactQueryReceiptTrustRoot>,
+) -> Result<PostgresStoreAuthority> {
     let row = sqlx::query(
         "SELECT COUNT(*)::bigint AS row_count, \
           MIN(store_epoch) AS store_epoch, \
@@ -410,7 +415,58 @@ async fn validate_store_metadata(pool: &PgPool) -> Result<PostgresStoreAuthority
             TrustScopeId::new(value)
                 .map_err(|_| store_authority_error(PostgresStoreAuthorityError::TrustScope))
         })?;
-    Ok(PostgresStoreAuthority::new(trust_scope_id))
+    Ok(PostgresStoreAuthority::new(
+        trust_scope_id,
+        fact_receipt_trust_root,
+    ))
+}
+
+async fn load_fact_receipt_trust_root(pool: &PgPool) -> Result<Option<FactQueryReceiptTrustRoot>> {
+    let row = sqlx::query(
+        "SELECT store_identity, authentication_scheme, key_id, verifying_key \
+         FROM fact_receipt_trust_root WHERE singleton",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot))?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let store_identity = row
+        .try_get::<String, _>("store_identity")
+        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot))
+        .and_then(|value| {
+            StoreIdentity::new(value).map_err(|_| {
+                store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot)
+            })
+        })?;
+    let scheme = row
+        .try_get::<String, _>("authentication_scheme")
+        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot))
+        .and_then(|value| match value.as_str() {
+            "local_ed25519_sha256_jcs_v1" => {
+                Ok(StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1)
+            }
+            _ => Err(store_authority_error(
+                PostgresStoreAuthorityError::FactReceiptTrustRoot,
+            )),
+        })?;
+    let key_id = row
+        .try_get::<String, _>("key_id")
+        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot))
+        .and_then(|value| {
+            StoreKeyId::new(value).map_err(|_| {
+                store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot)
+            })
+        })?;
+    let verifying_key: [u8; 32] = row
+        .try_get::<Vec<u8>, _>("verifying_key")
+        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot))?
+        .try_into()
+        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot))?;
+    FactQueryReceiptTrustRoot::new(store_identity, scheme, key_id, verifying_key)
+        .map(Some)
+        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot))
 }
 
 fn valid_store_epoch(value: Option<&str>) -> bool {
@@ -431,12 +487,17 @@ fn store_authority_error(kind: PostgresStoreAuthorityError) -> PostgresStoreErro
 const REQUIRED_TABLES: &[&str] = &[
     "_sqlx_migrations",
     "store_metadata",
+    "fact_receipt_trust_root",
     "commits",
     "run_events",
     "artifact_blobs",
     "artifact_admissions",
     "commit_artifact_evidence",
     "run_artifact_admissions",
+    "fact_descriptor_index",
+    "fact_index",
+    "fact_index_terms",
+    "fact_projection_metadata",
     "admission_lane",
     "admission_waiter",
     "run_observation_cursors",
@@ -448,6 +509,17 @@ const REQUIRED_INDEXES: &[&str] = &[
     "admission_lane_expired_execution_claim_idx",
     "admission_waiter_live_fifo_idx",
     "admission_waiter_waiting_expiry_idx",
+    "fact_descriptor_index_kind_idx",
+    "fact_index_descriptor_scope_idx",
+    "fact_index_fact_key_idx",
+    "fact_index_response_artifact_idx",
+    "fact_index_terms_text_idx",
+    "fact_index_terms_bool_idx",
+    "fact_index_terms_i64_idx",
+    "fact_index_terms_u64_idx",
+    "fact_index_terms_decimal_idx",
+    "fact_index_terms_timestamp_idx",
+    "fact_index_terms_digest_idx",
 ];
 
 const REQUIRED_FUNCTIONS: &[&str] = &["mfm_set_append_xid", "mfm_reject_authority_mutation"];
@@ -455,6 +527,7 @@ const REQUIRED_FUNCTIONS: &[&str] = &["mfm_set_append_xid", "mfm_reject_authorit
 const REQUIRED_TRIGGERS: &[&str] = &[
     "commits_set_append_xid",
     "store_metadata_no_update",
+    "fact_receipt_trust_root_no_update",
     "commits_no_update",
     "run_events_no_update",
     "artifact_blobs_no_update",
@@ -470,6 +543,10 @@ const REQUIRED_CONSTRAINTS: &[&str] = &[
     "commits_sort_key_v1_prefix",
     "commits_sort_key_not_sentinel",
     "store_metadata_trust_scope_id_v1",
+    "fact_receipt_trust_root_store_identity_v1",
+    "fact_receipt_trust_root_scheme_v1",
+    "fact_receipt_trust_root_key_id_v1",
+    "fact_receipt_trust_root_key_len",
     "admission_lane_id_len",
     "admission_lane_class_v1",
     "admission_lane_mode_v1",
@@ -485,6 +562,34 @@ const REQUIRED_CONSTRAINTS: &[&str] = &[
     "admission_waiter_id_nonempty",
     "admission_waiter_token_nonempty",
     "admission_waiter_status_v1",
+    "fact_descriptor_index_event_fk",
+    "fact_descriptor_index_event_id_fk",
+    "fact_descriptor_index_commit_fk",
+    "fact_descriptor_index_artifact_fk",
+    "fact_descriptor_index_seq_positive",
+    "fact_descriptor_index_ordinal_nonnegative",
+    "fact_descriptor_index_artifact_unique",
+    "fact_index_event_fk",
+    "fact_index_event_id_fk",
+    "fact_index_commit_fk",
+    "fact_index_descriptor_fk",
+    "fact_index_response_artifact_fk",
+    "fact_index_seq_positive",
+    "fact_index_ordinal_nonnegative",
+    "fact_index_store_commit_order_positive",
+    "fact_index_audience_v1",
+    "fact_index_visibility_scope_v1",
+    "fact_index_request_pair",
+    "fact_index_response_artifact_unique",
+    "fact_index_terms_claim_fk",
+    "fact_index_terms_descriptor_fk",
+    "fact_index_terms_seq_positive",
+    "fact_index_terms_ordinal_nonnegative",
+    "fact_index_terms_source_v1",
+    "fact_index_terms_value_type_v1",
+    "fact_index_terms_u64_range",
+    "fact_index_terms_value_shape",
+    "fact_projection_metadata_generation_positive",
     "run_observation_cursors_version_v1",
     "run_observation_cursors_sort_key_v1_length",
 ];
@@ -503,6 +608,7 @@ const APPEND_XID_TABLES: &[&str] = &["commits"];
 
 const IMMUTABLE_TABLES: &[&str] = &[
     "store_metadata",
+    "fact_receipt_trust_root",
     "commits",
     "run_events",
     "artifact_blobs",
@@ -577,6 +683,10 @@ const FORBIDDEN_TABLES: &[&str] = &[
     "typed_attempt_projection",
     "typed_cell_projection",
     "typed_fact_projection",
+    "fact_projection",
+    "fact_projections",
+    "fact_records",
+    "fact_terms",
     "typed_side_effect_projection",
     "typed_resource_lane_projection",
     "public_output_projection",

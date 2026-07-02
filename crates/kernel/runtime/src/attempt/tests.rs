@@ -136,6 +136,7 @@ fn exclusive_resource_node(node_id: NodeId) -> spec::NodeSpec {
             verification: spec::SideEffectVerificationSpec::Receipt,
         }),
         framework: None,
+        fact_descriptor_allowlist: Vec::new(),
         planning_lineage: spec::PlanningLineage {
             active_operation_instances: Vec::new(),
             completed_operation_frames: Vec::new(),

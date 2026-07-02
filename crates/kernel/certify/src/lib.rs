@@ -2430,6 +2430,7 @@ impl<'a> DraftLowerer<'a> {
                     binding_digest: None,
                 })
                 .collect(),
+            fact_descriptor_allowlist: node.fact_descriptor_allowlist.clone(),
             side_effect,
             framework: None,
             planning_lineage,
@@ -2544,6 +2545,7 @@ impl<'a> DraftLowerer<'a> {
             effect_kind: descriptor.effect_kind,
             capability_bindings: descriptor.capabilities,
             adapter_bindings: Vec::new(),
+            fact_descriptor_allowlist: Vec::new(),
             side_effect: None,
             framework: Some(spec::FrameworkNodeSpec::SideEffectVerify(
                 spec::SideEffectVerifyNodeSpec {
@@ -2620,6 +2622,7 @@ impl<'a> DraftLowerer<'a> {
                 effect_kind: descriptor.effect_kind,
                 capability_bindings: descriptor.capabilities,
                 adapter_bindings: Vec::new(),
+                fact_descriptor_allowlist: Vec::new(),
                 side_effect: None,
                 framework: Some(spec::FrameworkNodeSpec::Bridge(spec::BridgeNodeSpec {
                     bridge_kind: lower_bridge_kind(bridge.bridge_kind),
@@ -2798,6 +2801,7 @@ impl<'a> DraftLowerer<'a> {
             effect_kind: descriptor.effect_kind,
             capability_bindings: descriptor.capabilities,
             adapter_bindings: Vec::new(),
+            fact_descriptor_allowlist: Vec::new(),
             side_effect: None,
             framework: Some(spec::FrameworkNodeSpec::PublicOutputRender(
                 spec::PublicOutputRenderNodeSpec {
@@ -2911,6 +2915,7 @@ impl<'a> DraftLowerer<'a> {
             effect_kind: descriptor.effect_kind,
             capability_bindings: descriptor.capabilities,
             adapter_bindings: Vec::new(),
+            fact_descriptor_allowlist: Vec::new(),
             side_effect: None,
             framework: Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(retention)),
             planning_lineage,
@@ -3018,6 +3023,7 @@ impl<'a> DraftLowerer<'a> {
             effect_kind: descriptor.effect_kind,
             capability_bindings: descriptor.capabilities,
             adapter_bindings: Vec::new(),
+            fact_descriptor_allowlist: Vec::new(),
             side_effect: None,
             framework: Some(spec::FrameworkNodeSpec::CompleteRun(complete)),
             planning_lineage,
@@ -3106,6 +3112,7 @@ impl<'a> DraftLowerer<'a> {
             effect_kind: descriptor.effect_kind,
             capability_bindings: descriptor.capabilities,
             adapter_bindings: Vec::new(),
+            fact_descriptor_allowlist: Vec::new(),
             side_effect: None,
             framework: Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(resolve)),
             planning_lineage,
@@ -3676,6 +3683,10 @@ fn validate_state_descriptor_identity(descriptor: &spec::StateDescriptorIdentity
             ),
         ));
     }
+    validate_sorted_unique_fact_descriptor_refs(
+        &descriptor.emitted_fact_descriptors,
+        "state descriptor emitted fact descriptors",
+    )?;
     match (effect.class, &descriptor.side_effect_contract_digest) {
         (EffectClass::ApplySideEffect, Some(_)) => {}
         (EffectClass::ApplySideEffect, None) => {
@@ -3997,6 +4008,7 @@ fn validate_nodes(
         let descriptor = descriptors.state(&node.descriptor_id)?;
         let config_ref_digest = config_ref_digest(&node.config_ref)?;
         framework_lifecycle::validate_framework_descriptor_variant(node, descriptor)?;
+        validate_node_fact_descriptor_allowlist(node, descriptor)?;
         if let Some(framework) = &node.framework {
             framework_lifecycle::validate_framework_config_ref(node, framework.config_kind())?;
         }
@@ -4807,6 +4819,61 @@ fn validate_effect_capabilities(
         })
 }
 
+fn validate_sorted_unique_fact_descriptor_refs(
+    refs: &[spec::FactDescriptorRef],
+    owner: &str,
+) -> Result<()> {
+    let mut previous: Option<&spec::FactDescriptorRef> = None;
+    for reference in refs {
+        if let Some(previous) = previous {
+            if previous == reference {
+                return Err(problem(
+                    ProblemClass::InvalidDataShape,
+                    format!(
+                        "{owner} repeats fact descriptor {}",
+                        reference.descriptor_hash
+                    ),
+                ));
+            }
+            if previous > reference {
+                return Err(problem(
+                    ProblemClass::InvalidDataShape,
+                    format!("{owner} fact descriptor refs are not sorted"),
+                ));
+            }
+        }
+        previous = Some(reference);
+    }
+    Ok(())
+}
+
+fn validate_node_fact_descriptor_allowlist(
+    node: &spec::NodeSpec,
+    descriptor: &spec::StateDescriptorIdentity,
+) -> Result<()> {
+    validate_sorted_unique_fact_descriptor_refs(
+        &node.fact_descriptor_allowlist,
+        "node fact descriptor allow-list",
+    )?;
+    let emitted = descriptor
+        .emitted_fact_descriptors
+        .iter()
+        .map(|reference| reference.descriptor_hash.as_str())
+        .collect::<BTreeSet<_>>();
+    for reference in &node.fact_descriptor_allowlist {
+        if !emitted.contains(reference.descriptor_hash.as_str()) {
+            return Err(problem(
+                ProblemClass::InvalidSemanticTransition,
+                format!(
+                    "node {} allows fact descriptor {} outside state descriptor {}",
+                    node.node_id, reference.descriptor_hash, descriptor.descriptor_id
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_side_effect_contract(
     node: &spec::NodeSpec,
     descriptor: &spec::StateDescriptorIdentity,
@@ -5216,6 +5283,7 @@ fn state_descriptor_identity_from_program(
         effect_name: effect.name.to_owned(),
         effect_version: effect.version,
         capabilities: node.capability_bindings.clone(),
+        emitted_fact_descriptors: node.fact_descriptor_allowlist.clone(),
         runner: runner_kind_name(node.runner).to_owned(),
         side_effect_contract_digest: node.side_effect_contract_digest.clone(),
     })
@@ -5240,6 +5308,7 @@ fn state_descriptor_identity_from_registered(
         effect_name: effect.name.to_owned(),
         effect_version: effect.version.clone(),
         capabilities: descriptor.capabilities().clone(),
+        emitted_fact_descriptors: descriptor.emitted_fact_descriptors().to_vec(),
         runner: runner_kind_name(runner).to_owned(),
         side_effect_contract_digest: descriptor.side_effect_contract_digest().cloned(),
     })
@@ -5719,6 +5788,7 @@ fn state_descriptor_id_from_spec(
             "name": descriptor.effect_name.as_str(),
             "version": descriptor.effect_version.as_str(),
         },
+        "emitted_fact_descriptors": fact_descriptor_refs_json(&descriptor.emitted_fact_descriptors),
         "input_schema_id": descriptor.input_schema_id.as_str(),
         "kind": descriptor.state_kind.as_str(),
         "name": descriptor.name.as_str(),
@@ -6005,6 +6075,7 @@ fn framework_state_descriptor(
             "name": effect.name,
             "version": effect.version.as_str(),
         },
+        "emitted_fact_descriptors": [],
         "input_schema_id": input_schema_id.as_str(),
         "kind": state_kind.as_str(),
         "name": name,
@@ -6028,6 +6099,7 @@ fn framework_state_descriptor(
         effect_name: effect.name.to_owned(),
         effect_version: effect.version,
         capabilities,
+        emitted_fact_descriptors: Vec::new(),
         runner: runner.to_owned(),
         side_effect_contract_digest: None,
     })
@@ -6362,6 +6434,16 @@ fn capability_set_json(descriptor: &CapabilitySetDescriptor) -> Vec<serde_json::
                 "name": capability.name.as_str(),
                 "role": capability.role.as_str(),
                 "version": capability.version.as_str(),
+            })
+        })
+        .collect()
+}
+
+fn fact_descriptor_refs_json(refs: &[spec::FactDescriptorRef]) -> Vec<serde_json::Value> {
+    refs.iter()
+        .map(|reference| {
+            serde_json::json!({
+                "descriptor_hash": reference.descriptor_hash.as_str(),
             })
         })
         .collect()

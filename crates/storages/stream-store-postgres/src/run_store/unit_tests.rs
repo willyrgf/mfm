@@ -2,6 +2,11 @@ use super::*;
 
 #[test]
 fn artifact_role_contract_postgres_tag_roundtrip_uses_events_contract() {
+    assert_eq!(
+        decode_artifact_role_tag("fact_descriptor").expect("fact descriptor role tag parses"),
+        events::ArtifactRole::FactDescriptor
+    );
+
     for role in events::ArtifactRole::ALL {
         assert_eq!(
             decode_artifact_role_tag(role.as_str()).expect("role tag parses"),

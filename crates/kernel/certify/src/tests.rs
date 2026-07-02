@@ -4,11 +4,11 @@ use mfm_ids::{
     AdapterKind, AdapterVersion, CapabilityKind, CapabilityVersion, OperationKind, OperationVersion,
 };
 use mfm_program::{
-    build_root_with_registries, CanonicalSeed, IdempotencyKey, Operation, OperationKey,
-    OperationRegistryBuilder, PublicOutputKey, PureState, ResourceClaim, RootBuilder, ScopeKey,
-    SideEffectState, StateKey, StateRegistryBuilder, StateResult, StateSpec,
+    build_root_with_registries, CanonicalSeed, IdempotencyKey, MfmFactType as _, Operation,
+    OperationKey, OperationRegistryBuilder, PublicOutputKey, PureState, ResourceClaim, RootBuilder,
+    ScopeKey, SideEffectState, StateKey, StateRegistryBuilder, StateResult, StateSpec,
 };
-use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs};
+use mfm_program_derive::{MfmConfig, MfmFactType, MfmValue, OperationOutput, PublicOutputs};
 use serde::{Deserialize, Serialize};
 
 fn certify_untrusted_typed_spec(
@@ -34,6 +34,62 @@ macro_rules! assert_rejection_cases {
 )]
 struct TestValue {
     amount: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.certify.test",
+    name = "chain_head_subject",
+    version = "1",
+    schema = "mfm.certify.test.chain_head_subject"
+)]
+struct ChainHeadSubject {
+    chain: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.certify.test",
+    name = "chain_head_response",
+    version = "1",
+    schema = "mfm.certify.test.chain_head_response"
+)]
+struct ChainHeadResponse {
+    height: u64,
+}
+
+#[allow(clippy::duplicated_attributes)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue, MfmFactType)]
+#[mfm(
+    namespace = "mfm.certify.test",
+    name = "chain_head_fact",
+    version = "1",
+    schema = "mfm.certify.test.chain_head_fact"
+)]
+#[mfm_fact(kind = "chain.head")]
+#[mfm_fact(field(
+    id = "subject.chain",
+    source = "subject",
+    path = "chain",
+    value_type = "string",
+    exposure = "returnable"
+))]
+#[mfm_fact(field(
+    id = "result.height",
+    source = "result",
+    path = "height",
+    value_type = "unsigned_integer",
+    operators(equal, greater_than_or_equal),
+    exposure = "returnable",
+    sortable
+))]
+#[mfm_fact(ordering(
+    name = "result.height.desc",
+    term(field = "result.height", direction = "descending", nulls = "last")
+))]
+struct ChainHeadFact {
+    subject: ChainHeadSubject,
+    response: ChainHeadResponse,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
@@ -124,6 +180,55 @@ impl_test_state_spec!(
 );
 
 impl PureState for MultiplyState {
+    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+        Ok(TestValue {
+            amount: input.amount * self.config.multiplier,
+        })
+    }
+}
+
+struct FactEmittingState {
+    config: TestConfig,
+}
+
+impl StateSpec for FactEmittingState {
+    type Config = TestConfig;
+    type Input = TestValue;
+    type Output = TestValue;
+    type Effect = Pure;
+    type Caps = NoCaps;
+
+    fn kind() -> program::Result<StateKind> {
+        StateKind::new(
+            "mfm.certify.test",
+            "fact-emitting",
+            DigestAlgorithm::Sha256JcsV1,
+            digest_byte(0xa2),
+        )
+        .map_err(|error| program::PlanError::Key(error.to_string()))
+    }
+
+    fn version() -> program::Result<StateVersion> {
+        StateVersion::new("mfm.certify.test.fact_emitting.v1")
+            .map_err(|error| program::PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.certify.test.fact_emitting"
+    }
+
+    fn emitted_fact_descriptors() -> program::Result<Vec<program::FactDescriptorRef>> {
+        Ok(vec![mfm_program::fact_descriptor_ref::<ChainHeadFact>()?])
+    }
+
+    fn new(config: program::ValidatedConfig<Self::Config>) -> program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
+    }
+}
+
+impl PureState for FactEmittingState {
     fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
         Ok(TestValue {
             amount: input.amount * self.config.multiplier,
@@ -297,6 +402,34 @@ fn reference_draft() -> program::TypedProgramDraft {
         },
     )
     .expect("reference draft")
+}
+
+fn fact_emitting_draft() -> program::TypedProgramDraft {
+    let mut states = StateRegistryBuilder::new();
+    states
+        .register::<FactEmittingState>()
+        .expect("state registration");
+    build_root_with_registries(
+        ScopeKey::new("root").expect("root key"),
+        states.snapshot(),
+        OperationRegistryBuilder::new().snapshot(),
+        |root: &mut RootBuilder<'_, '_>| {
+            let seed = root.seed(
+                mfm_program::SeedKey::new("initial").expect("seed key"),
+                CanonicalSeed::from_value(&TestValue { amount: 2 }).expect("seed"),
+            )?;
+            let result = root.scope().state::<FactEmittingState, _>(
+                StateKey::new("fact-emitter")?,
+                TestConfig { multiplier: 3 },
+                seed,
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &TestPublicOutputs { result },
+            )
+        },
+    )
+    .expect("fact emitting draft")
 }
 
 fn side_effect_draft() -> program::TypedProgramDraft {
@@ -506,7 +639,7 @@ fn certifies_reference_program_draft() {
     );
     assert_eq!(
         certified.certificate_hash().as_str(),
-        "content:sha256-jcs-v1:95a7643407b304930c326ef3a5bff3d78e61931d185edb874c159758d06187d6"
+        "content:sha256-jcs-v1:fc957b695e686ce67be0f53c4a7a2374f2c80b31153d92b3fc93d5dc9b2cbe8f"
     );
     assert_eq!(
         certified.envelope().spec.public_outputs.public_schema_id,
@@ -691,6 +824,91 @@ fn typed_spec_requires_registry_authority() {
         .clone();
     let error =
         certify_untrusted_typed_spec(spec, &CertificationRegistry::new()).expect_err("must reject");
+    assert_eq!(
+        error.problem_class(),
+        Some(ProblemClass::InvalidSemanticTransition)
+    );
+}
+
+#[test]
+fn certification_rejects_node_fact_descriptor_outside_registered_descriptor() {
+    assert_reference_rejects(ProblemClass::InvalidSemanticTransition, |spec| {
+        spec.nodes[0]
+            .fact_descriptor_allowlist
+            .push(spec::FactDescriptorRef {
+                descriptor_hash: ContentDigest::from_digest(
+                    DigestAlgorithm::Sha256JcsV1,
+                    digest_byte(0xa1),
+                ),
+            });
+    });
+}
+
+#[test]
+fn certification_carries_derive_fact_descriptor_allowlist_authority() {
+    let draft = fact_emitting_draft();
+    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
+    let certified = certify_program_draft(&draft).expect("certified");
+    let expected_ref = mfm_program::fact_descriptor_ref::<ChainHeadFact>().expect("descriptor ref");
+    let derived_descriptor = ChainHeadFact::descriptor().expect("derived descriptor");
+    assert_eq!(
+        mfm_program::facts::fact_descriptor_hash(&derived_descriptor).expect("descriptor hash"),
+        expected_ref.descriptor_hash
+    );
+
+    let spec = certified.validated_spec().spec();
+    let fact_node = spec
+        .nodes
+        .iter()
+        .find(|node| {
+            node.fact_descriptor_allowlist.as_slice() == std::slice::from_ref(&expected_ref)
+        })
+        .expect("fact-emitting node");
+    let descriptor_identity = spec
+        .descriptor_identities
+        .iter()
+        .find_map(|identity| match identity {
+            spec::DescriptorIdentity::State(state)
+                if state.descriptor_id == fact_node.descriptor_id =>
+            {
+                Some(state.as_ref())
+            }
+            _ => None,
+        })
+        .expect("fact-emitting descriptor identity");
+    assert_eq!(
+        descriptor_identity.emitted_fact_descriptors.as_slice(),
+        std::slice::from_ref(&expected_ref)
+    );
+
+    let baseline_hash = certified.spec_hash().clone();
+    let mut mutated = spec.clone();
+    let mutated_node = mutated
+        .nodes
+        .iter_mut()
+        .find(|node| node.descriptor_id == fact_node.descriptor_id)
+        .expect("mutated fact node");
+    mutated_node.fact_descriptor_allowlist.clear();
+    let mutated_descriptor = mutated
+        .descriptor_identities
+        .iter_mut()
+        .find_map(|identity| match identity {
+            spec::DescriptorIdentity::State(state)
+                if state.descriptor_id == fact_node.descriptor_id =>
+            {
+                Some(state.as_mut())
+            }
+            _ => None,
+        })
+        .expect("mutated descriptor identity");
+    mutated_descriptor.emitted_fact_descriptors.clear();
+
+    assert_ne!(
+        mutated.spec_hash().expect("mutated spec hash"),
+        baseline_hash
+    );
+    let error = certify_untrusted_typed_spec(mutated, &registry)
+        .expect_err("tampered allow-list authority rejects");
     assert_eq!(
         error.problem_class(),
         Some(ProblemClass::InvalidSemanticTransition)
@@ -2227,6 +2445,7 @@ fn push_lifecycle_node(parts: LifecycleNodeParts<'_>) {
         effect_kind: descriptor.effect_kind,
         capability_bindings: descriptor.capabilities,
         adapter_bindings: Vec::new(),
+        fact_descriptor_allowlist: Vec::new(),
         side_effect: None,
         framework: Some(framework),
         planning_lineage,
@@ -2314,6 +2533,7 @@ fn append_user_receipt_consumer(
         effect_kind: descriptor.effect_kind.clone(),
         capability_bindings: descriptor.capabilities.clone(),
         adapter_bindings: template.adapter_bindings.clone(),
+        fact_descriptor_allowlist: Vec::new(),
         side_effect: None,
         framework: None,
         planning_lineage: template.planning_lineage.clone(),
@@ -2398,6 +2618,7 @@ fn append_independent_user_node(typed: &mut spec::TypedExecutionSpec, stable_key
         effect_kind: descriptor.effect_kind.clone(),
         capability_bindings: descriptor.capabilities.clone(),
         adapter_bindings: template.adapter_bindings.clone(),
+        fact_descriptor_allowlist: template.fact_descriptor_allowlist.clone(),
         side_effect: template.side_effect.clone(),
         framework: None,
         planning_lineage: template.planning_lineage.clone(),

@@ -35,6 +35,7 @@ pub struct PreparedRunnerInvocation<'a> {
     pub(crate) recorded_facts: RecordedFacts,
     pub(crate) projections: &'a store::ProjectionSnapshot,
     pub(crate) run_stream: &'a [store::KernelEventEnvelope],
+    pub(crate) view: &'a RuntimeRunView,
 }
 
 impl<'a> PreparedRunnerInvocation<'a> {
@@ -192,6 +193,7 @@ impl<'a> InvocationBuilder<'a> {
             recorded_facts,
             projections: &self.view.projections,
             run_stream: &self.view.stream,
+            view: self.view,
         })
     }
 
@@ -395,12 +397,7 @@ impl<'a> ErasedRunCtx<'a> {
 
     /// Materializes certified inputs for another node against the same verified run stream.
     pub fn materialize_node_inputs(&self, node: &spec::NodeSpec) -> Result<MaterializedInputs> {
-        let view = RuntimeRunView::from_stream(
-            self.invocation.runtime_spec(),
-            self.invocation.run_id(),
-            self.invocation.run_stream(),
-        )?;
-        materialize_inputs(self.invocation.runtime_spec(), node, &view)
+        materialize_inputs(self.invocation.runtime_spec(), node, self.invocation.view)
     }
 
     pub(crate) fn runtime_spec(&self) -> &'a CertifiedRuntimeSpec {
@@ -415,7 +412,7 @@ impl<'a> ErasedRunCtx<'a> {
 /// Facts committed for one node attempt before recovery resumed execution.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecordedFacts {
-    pub(crate) facts: BTreeMap<events::FactKey, RecordedFact>,
+    pub(crate) facts: BTreeMap<mfm_facts::FactKey, RecordedFact>,
 }
 
 impl RecordedFacts {
@@ -425,12 +422,12 @@ impl RecordedFacts {
     }
 
     /// Returns a recorded fact by stable fact key.
-    pub fn get(&self, fact_key: &events::FactKey) -> Option<&RecordedFact> {
+    pub fn get(&self, fact_key: &mfm_facts::FactKey) -> Option<&RecordedFact> {
         self.facts.get(fact_key)
     }
 
     /// Iterates recorded facts in deterministic fact-key order.
-    pub fn iter(&self) -> impl Iterator<Item = (&events::FactKey, &RecordedFact)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&mfm_facts::FactKey, &RecordedFact)> {
         self.facts.iter()
     }
 }
@@ -439,11 +436,11 @@ impl RecordedFacts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordedFact {
     /// Stable fact key.
-    pub fact_key: events::FactKey,
-    /// Request schema id.
-    pub request_schema_id: SchemaId,
-    /// Canonical request hash.
-    pub request_hash: ContentDigest,
+    pub fact_key: mfm_facts::FactKey,
+    /// Request schema id, when request evidence is present.
+    pub request_schema_id: Option<SchemaId>,
+    /// Canonical request hash, when request evidence is present.
+    pub request_hash: Option<ContentDigest>,
     /// Response schema id.
     pub response_schema_id: SchemaId,
     /// Canonical response hash.

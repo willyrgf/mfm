@@ -1,4 +1,7 @@
-use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs, StateInput};
+use mfm_program::MfmFactType as _;
+use mfm_program_derive::{
+    MfmConfig, MfmFactType, MfmValue, OperationOutput, PublicOutputs, StateInput,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -55,6 +58,62 @@ struct PublicReport {
     id: String,
 }
 
+#[derive(Clone, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.trybuild",
+    name = "chain_head_subject",
+    version = "1",
+    schema = "mfm.trybuild.chain_head_subject"
+)]
+struct ChainHeadSubject {
+    chain: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.trybuild",
+    name = "chain_head_response",
+    version = "1",
+    schema = "mfm.trybuild.chain_head_response"
+)]
+struct ChainHeadResponse {
+    height: u64,
+}
+
+#[allow(clippy::duplicated_attributes)]
+#[derive(Clone, Serialize, Deserialize, MfmValue, MfmFactType)]
+#[mfm(
+    namespace = "mfm.trybuild",
+    name = "chain_head_fact",
+    version = "1",
+    schema = "mfm.trybuild.chain_head_fact"
+)]
+#[mfm_fact(kind = "chain.head")]
+#[mfm_fact(field(
+    id = "subject.chain",
+    source = "subject",
+    path = "chain",
+    value_type = "string",
+    exposure = "returnable"
+))]
+#[mfm_fact(field(
+    id = "result.height",
+    source = "result",
+    path = "height",
+    value_type = "unsigned_integer",
+    operators(equal, greater_than),
+    exposure = "returnable",
+    sortable
+))]
+#[mfm_fact(ordering(
+    name = "result.height.desc",
+    term(field = "result.height", direction = "descending", nulls = "last")
+))]
+struct ChainHeadFact {
+    subject: ChainHeadSubject,
+    response: ChainHeadResponse,
+}
+
 fn main() {
     let _ = <AssetPrice as mfm_values::MfmValue>::schema_descriptor().unwrap();
     let _ = <PriceKind as mfm_values::MfmValue>::schema_descriptor().unwrap();
@@ -63,4 +122,13 @@ fn main() {
     let _ = <SnapshotInput as mfm_values::StateInput>::input_schema_descriptor().unwrap();
     let _ = <SnapshotOutput as mfm_values::OperationOutput>::output_schema_descriptor().unwrap();
     let _ = <PublicReport as mfm_values::PublicOutputDescriptor>::public_schema_descriptor().unwrap();
+    let fact = ChainHeadFact {
+        subject: ChainHeadSubject {
+            chain: "bitcoin".to_owned(),
+        },
+        response: ChainHeadResponse { height: 850_000 },
+    };
+    let _ = ChainHeadFact::descriptor().unwrap();
+    let _ = fact.subject();
+    let _ = fact.response();
 }

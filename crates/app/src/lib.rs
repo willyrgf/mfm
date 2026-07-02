@@ -2517,6 +2517,22 @@ async fn stored_launch_evidence_from_run_admitted(
             .await?,
         );
     }
+    let mut fact_descriptor_artifacts =
+        Vec::with_capacity(run_admitted.fact_descriptor_artifacts.len());
+    for descriptor in &run_admitted.fact_descriptor_artifacts {
+        fact_descriptor_artifacts.push(
+            stored_run_launch_artifact(
+                artifacts,
+                run_artifact_requirement(
+                    store::EventArtifactReferenceSource::FactDescriptor,
+                    descriptor,
+                    events::ArtifactRole::FactDescriptor,
+                ),
+                |_| Ok(()),
+            )
+            .await?,
+        );
+    }
     let mut seed_cells = Vec::with_capacity(run_admitted.seed_cells.len());
     for cell in &run_admitted.seed_cells {
         let artifact = artifacts
@@ -2540,6 +2556,7 @@ async fn stored_launch_evidence_from_run_admitted(
         spec_artifact,
         certificate_artifact,
         config_artifacts,
+        fact_descriptor_artifacts,
         seed_cells,
     })
 }
@@ -3185,6 +3202,7 @@ fn prepare_certified_run_launch(
             spec_artifact,
             certificate_artifact,
             config_artifacts,
+            fact_descriptor_artifacts: Vec::new(),
             seed_cells,
         },
     })
@@ -3824,8 +3842,20 @@ fn projection_with_resource_lanes(
             .cells()
             .map(|(cell_id, projection)| (cell_id.clone(), projection.clone()))
             .collect(),
-        facts: snapshot
-            .facts()
+        fact_descriptors: snapshot
+            .fact_descriptors()
+            .map(|(descriptor_hash, projection)| (descriptor_hash.clone(), projection.clone()))
+            .collect(),
+        fact_records: snapshot
+            .fact_records()
+            .map(|(claim_id, projection)| (claim_id.clone(), projection.clone()))
+            .collect(),
+        fact_index_entries: snapshot
+            .fact_index_entries()
+            .map(|(claim_id, projection)| (claim_id.clone(), projection.clone()))
+            .collect(),
+        fact_term_entries: snapshot
+            .fact_term_entries()
             .map(|(key, projection)| (key.clone(), projection.clone()))
             .collect(),
         side_effects: snapshot

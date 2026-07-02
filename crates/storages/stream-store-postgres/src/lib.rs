@@ -27,6 +27,7 @@ mod run_store;
 mod schema;
 
 pub use run_store::{
-    PostgresRunStore, PostgresStoreAuthority, PostgresStoreAuthorityError, PostgresStoreError,
+    PostgresFactQueryResult, PostgresFactQueryRow, PostgresFactReceiptSigner, PostgresRunStore,
+    PostgresStoreAuthority, PostgresStoreAuthorityError, PostgresStoreError,
 };
 pub use schema::PostgresSchema;

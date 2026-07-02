@@ -404,8 +404,8 @@ fn open_started_attempt_for_node(
 
 fn attempt_has_committed_progress(view: &RuntimeRunView, attempt_id: &AttemptId) -> bool {
     view.projections
-        .facts()
-        .any(|((_, fact_attempt_id, _), _)| fact_attempt_id == attempt_id)
+        .fact_records()
+        .any(|(_, fact)| &fact.attempt_id == attempt_id)
         || view
             .artifact_refs
             .values()

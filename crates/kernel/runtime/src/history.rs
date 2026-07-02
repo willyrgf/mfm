@@ -191,11 +191,10 @@ impl VerifiedRunContextLoader {
     where
         S: store::RunEventStore + ?Sized,
     {
-        let stream = store
-            .load_run_stream(run_id)
+        let committed = store
+            .load_committed_run_stream(run_id)
             .await
             .map_err(async_store_error)?;
-        let committed = store::CommittedRunStream::from_events(run_id.clone(), stream)?;
         self.load_committed_stream(runtime_spec, committed)
     }
 
@@ -349,34 +348,44 @@ pub(crate) fn recorded_facts_for_attempt(
     attempt_id: &AttemptId,
 ) -> Result<RecordedFacts> {
     let mut facts = BTreeMap::new();
-    for ((fact_node_id, fact_attempt_id, fact_key), projection) in projections.facts() {
-        if fact_node_id != node_id || fact_attempt_id != attempt_id {
+    for (fact_claim_id, projection) in projections.fact_records() {
+        if projection.node_id != *node_id || projection.attempt_id != *attempt_id {
             continue;
         }
-        if projection.node_id != *node_id
-            || projection.attempt_id != *attempt_id
-            || projection.fact_key != *fact_key
-        {
+        if projection.fact_claim_id != *fact_claim_id {
             return Err(RuntimeError::InvalidRunStream(format!(
-                "fact projection {} for node {} attempt {} is internally inconsistent",
-                fact_key, node_id, attempt_id
+                "fact record {:?} for node {} attempt {} is internally inconsistent",
+                fact_claim_id, node_id, attempt_id
             )));
         }
-        facts.insert(
-            fact_key.clone(),
-            RecordedFact {
-                fact_key: fact_key.clone(),
-                request_schema_id: projection.request_schema_id.clone(),
-                request_hash: projection.request_hash.clone(),
-                response_schema_id: projection.response_schema_id.clone(),
-                response_hash: projection.response_hash.clone(),
-                artifact_id: projection.artifact_id.clone(),
-                capability_kind: projection.capability_kind.clone(),
-                capability_version: projection.capability_version.clone(),
-                adapter_kind: projection.adapter_kind.clone(),
-                adapter_version: projection.adapter_version.clone(),
-            },
-        );
+        let claim = &projection.claim;
+        let fact_key = claim.subject().fact_key();
+        let request = claim.request();
+        let response = claim.response();
+        let producer = claim.producer();
+        if facts
+            .insert(
+                fact_key.clone(),
+                RecordedFact {
+                    fact_key: fact_key.clone(),
+                    request_schema_id: request.map(|evidence| evidence.request_schema_id().clone()),
+                    request_hash: request.map(|evidence| evidence.request_hash().clone()),
+                    response_schema_id: response.response_schema_id().clone(),
+                    response_hash: response.response_hash().clone(),
+                    artifact_id: response.artifact_id().clone(),
+                    capability_kind: producer.capability_kind().clone(),
+                    capability_version: producer.capability_version().clone(),
+                    adapter_kind: producer.adapter_kind().clone(),
+                    adapter_version: producer.adapter_version().clone(),
+                },
+            )
+            .is_some()
+        {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "node {} attempt {} has multiple recorded facts for key {}",
+                node_id, attempt_id, fact_key
+            )));
+        }
     }
     Ok(RecordedFacts { facts })
 }
@@ -863,14 +872,15 @@ fn validate_historical_run_stream(
                     node.node_id.clone(),
                     node.capability_bindings.clone(),
                 );
+                let producer = payload.claim.producer();
                 require_capability(
                     &caps,
-                    &payload.capability_kind,
-                    &payload.capability_version,
+                    producer.capability_kind(),
+                    producer.capability_version(),
                     &node.node_id,
                 )
                 .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
-                require_adapter(node, &payload.adapter_kind, &payload.adapter_version)
+                require_adapter(node, producer.adapter_kind(), producer.adapter_version())
                     .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
                 require_projected_attempt(
                     projections,
@@ -880,30 +890,63 @@ fn validate_historical_run_stream(
                 )?;
                 if !active_attempts.contains(&(payload.node_id.clone(), payload.attempt_id.clone()))
                 {
+                    let fact_key = payload.claim.subject().fact_key();
                     return Err(RuntimeError::InvalidRunStream(format!(
                         "fact {} for node {} attempt {} was recorded outside an active started attempt",
-                        payload.fact_key, payload.node_id, payload.attempt_id
+                        fact_key, payload.node_id, payload.attempt_id
                     )));
                 }
-                let fact = projections
-                    .fact(&payload.node_id, &payload.attempt_id, &payload.fact_key)
-                    .ok_or_else(|| {
-                        RuntimeError::InvalidRunStream(format!(
-                            "fact {} for node {} attempt {} is not projected",
-                            payload.fact_key, payload.node_id, payload.attempt_id
-                        ))
-                    })?;
-                if fact.event_id != *event.event_id()
-                    || fact.request_schema_id != payload.request_schema_id
-                    || fact.request_hash != payload.request_hash
-                    || fact.response_schema_id != payload.response_schema_id
-                    || fact.response_hash != payload.response_hash
-                    || fact.artifact_id != payload.artifact_id
+                let claim_id = mfm_facts::derive_fact_claim_id(
+                    event.run_id().clone(),
+                    event.seq().as_u64(),
+                    event.ordinal().as_u32(),
+                )
+                .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+                let fact_key = payload.claim.subject().fact_key();
+                let record = projections.fact_record(&claim_id).ok_or_else(|| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "fact {} for node {} attempt {} is not projected",
+                        fact_key, payload.node_id, payload.attempt_id
+                    ))
+                })?;
+                if record.source_event_id != *event.event_id()
+                    || record.node_id != payload.node_id
+                    || record.attempt_id != payload.attempt_id
+                    || record.claim != payload.claim
                 {
                     return Err(RuntimeError::InvalidRunStream(format!(
                         "fact {} projection does not match authoritative event",
-                        payload.fact_key
+                        fact_key
                     )));
+                }
+                match payload.claim.visibility() {
+                    mfm_facts::FactVisibility::Indexed { .. } => {
+                        let index = projections.fact_index_entry(&claim_id).ok_or_else(|| {
+                            RuntimeError::InvalidRunStream(format!(
+                                "indexed fact {} for node {} attempt {} is not projected",
+                                fact_key, payload.node_id, payload.attempt_id
+                            ))
+                        })?;
+                        if index.source_event_id != *event.event_id()
+                            || index.fact_key != *fact_key
+                            || index.fact_descriptor_hash != *payload.claim.fact_descriptor_hash()
+                            || index.response_hash != *payload.claim.response().response_hash()
+                            || index.artifact_id != *payload.claim.response().artifact_id()
+                        {
+                            return Err(RuntimeError::InvalidRunStream(format!(
+                                "indexed fact {} projection does not match authoritative event",
+                                fact_key
+                            )));
+                        }
+                    }
+                    mfm_facts::FactVisibility::RunPrivate => {
+                        if projections.fact_index_entry(&claim_id).is_some() {
+                            return Err(RuntimeError::InvalidRunStream(format!(
+                                "private fact {} has an index projection",
+                                fact_key
+                            )));
+                        }
+                    }
                 }
             }
             events::KernelEventPayload::ArtifactReferenced(payload) => {
@@ -1323,6 +1366,7 @@ fn validate_run_admitted_matches_certified_spec(
             .map(store_artifact_from_run_ref)
             .collect(),
     )?;
+    validate_fact_descriptor_artifact_refs(runtime_spec, &run_admitted.fact_descriptor_artifacts)?;
     validate_seed_cells(runtime_spec, &run_admitted.seed_cells)?;
     Ok(())
 }
@@ -2776,6 +2820,71 @@ pub(crate) fn validate_config_artifacts(
     Ok(validated)
 }
 
+fn validate_fact_descriptor_artifact_refs(
+    runtime_spec: &CertifiedRuntimeSpec,
+    artifacts: &[events::RunArtifactEvidenceRef],
+) -> Result<()> {
+    let required = certified_fact_descriptor_hashes(runtime_spec);
+    let schema_id = mfm_facts::fact_descriptor_schema_id()
+        .map_err(|error| RuntimeError::Identity(error.to_string()))?;
+    let media_type = spec::MediaType::new("application/json")?;
+    let mut admitted = BTreeSet::new();
+
+    for artifact in artifacts {
+        if artifact.role != events::ArtifactRole::FactDescriptor
+            || artifact.content_digest.algorithm() != mfm_ids::DigestAlgorithm::Sha256JcsV1
+            || artifact.media_type != media_type
+            || artifact.schema_id.as_ref() != Some(&schema_id)
+            || artifact.semantic_type_id.is_some()
+        {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "fact descriptor artifact {} has invalid metadata",
+                artifact.artifact_id
+            )));
+        }
+        let expected_artifact_id = ArtifactId::from_digest(
+            artifact.content_digest.algorithm(),
+            *artifact.content_digest.digest(),
+        );
+        if artifact.artifact_id != expected_artifact_id {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "fact descriptor artifact {} does not match descriptor digest {}",
+                artifact.artifact_id, artifact.content_digest
+            )));
+        }
+        if !admitted.insert(artifact.content_digest.clone()) {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "duplicate fact descriptor artifact {}",
+                artifact.content_digest
+            )));
+        }
+    }
+
+    if admitted != required {
+        return Err(RuntimeError::InvalidRunStream(
+            "RunAdmitted fact descriptor artifacts do not match certified descriptor allow-lists"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn certified_fact_descriptor_hashes(
+    runtime_spec: &CertifiedRuntimeSpec,
+) -> BTreeSet<ContentDigest> {
+    runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .chain(runtime_spec.spec().remediations.values())
+        .flat_map(|node| {
+            node.fact_descriptor_allowlist
+                .iter()
+                .map(|reference| reference.descriptor_hash.clone())
+        })
+        .collect()
+}
+
 fn config_artifacts_from_run_admitted(
     runtime_spec: &CertifiedRuntimeSpec,
     config_artifacts: &[events::RunArtifactEvidenceRef],
@@ -2826,6 +2935,7 @@ fn artifact_refs_from_stream(
                     for artifact in std::iter::once(&payload.spec_artifact)
                         .chain(std::iter::once(&payload.certificate_artifact))
                         .chain(payload.config_artifacts.iter())
+                        .chain(payload.fact_descriptor_artifacts.iter())
                     {
                         insert_committed_artifact(
                             &mut artifacts,
@@ -2920,12 +3030,13 @@ fn artifact_reference_matches_same_commit_payload(
                     == Some(&payload.semantic_type_id)
         }
         events::KernelEventPayload::FactRecorded(payload) => {
+            let response = payload.claim.response();
             reference.artifact_ref.role == events::ArtifactRole::FactResponse
                 && &payload.node_id == reference_node_id
                 && &payload.attempt_id == reference_attempt_id
-                && payload.artifact_id == reference.artifact_ref.artifact_id
-                && payload.response_hash == reference.artifact_ref.content_digest
-                && payload.response_schema_id == reference.artifact_ref.schema_id
+                && response.artifact_id() == &reference.artifact_ref.artifact_id
+                && response.response_hash() == &reference.artifact_ref.content_digest
+                && response.response_schema_id() == &reference.artifact_ref.schema_id
         }
         events::KernelEventPayload::PublicOutputProduced(payload) => {
             reference.artifact_ref.role == events::ArtifactRole::PublicOutput

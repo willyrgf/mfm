@@ -31,11 +31,10 @@ use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::CapabilitySpec;
 use mfm_events::v1::{self as events, side_effect};
 use mfm_evm_capabilities::{
-    EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockSelector, EvmCallReadCapability,
-    EvmCallReadProvider, EvmCallReadRequest, EvmCapabilityError, EvmChainGuard,
-    EvmChainIdentityCapability, EvmChainIdentityProvider, EvmChainIdentityRequest,
-    EvmFeeReadProvider, EvmFeeReadRequest, EvmGasEstimateProvider, EvmGasEstimateRequest,
-    EvmLogsReadCapability, EvmLogsReadProvider, EvmLogsReadRequest, EvmNetworkId,
+    EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockSelector, EvmCallReadProvider,
+    EvmCallReadRequest, EvmCapabilityError, EvmChainGuard, EvmChainIdentityProvider,
+    EvmChainIdentityRequest, EvmFeeReadProvider, EvmFeeReadRequest, EvmGasEstimateProvider,
+    EvmGasEstimateRequest, EvmLogsReadProvider, EvmLogsReadRequest, EvmNetworkId,
     EvmNonceOccupancy, EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest,
     EvmNonceReadProvider, EvmNonceReadRequest, EvmReceiptReadProvider, EvmReceiptReadRequest,
     EvmTransactionSubmitCapability, EvmTransactionSubmitProvider, EvmTransactionSubmitRequest,
@@ -2892,39 +2891,7 @@ async fn run_validate(
     let report = state
         .report_from_response(&input, response.clone())
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    let fact_capabilities = validation_fact_capabilities(&response)?;
-    read_output(ctx, request, response, report, fact_capabilities).await
-}
-
-struct CapabilityFact {
-    key_suffix: &'static str,
-    kind: CapabilityKind,
-    version: CapabilityVersion,
-}
-
-fn validation_fact_capabilities(
-    response: &mfm_state_evm_contracts::ContractValidationReadResponse,
-) -> mfm_runtime::Result<Vec<CapabilityFact>> {
-    let mut facts = vec![CapabilityFact {
-        key_suffix: "chain_identity",
-        kind: EvmChainIdentityCapability::kind().map_err(runtime_capability_error)?,
-        version: EvmChainIdentityCapability::version().map_err(runtime_capability_error)?,
-    }];
-    if !response.configuration_read_results.is_empty() || !response.read_results.is_empty() {
-        facts.push(CapabilityFact {
-            key_suffix: "call",
-            kind: EvmCallReadCapability::kind().map_err(runtime_capability_error)?,
-            version: EvmCallReadCapability::version().map_err(runtime_capability_error)?,
-        });
-    }
-    if !response.configuration_event_results.is_empty() || !response.event_results.is_empty() {
-        facts.push(CapabilityFact {
-            key_suffix: "logs",
-            kind: EvmLogsReadCapability::kind().map_err(runtime_capability_error)?,
-            version: EvmLogsReadCapability::version().map_err(runtime_capability_error)?,
-        });
-    }
-    Ok(facts)
+    read_output(ctx, request, response, report).await
 }
 
 async fn read_receipts_with_poll(
@@ -3259,10 +3226,9 @@ where
 
 async fn read_output<Request, Response, Output>(
     ctx: ErasedRunCtx<'_>,
-    request: Request,
-    response: Response,
+    _request: Request,
+    _response: Response,
     output: Output,
-    fact_capabilities: Vec<CapabilityFact>,
 ) -> mfm_runtime::Result<ErasedRunnerOutput>
 where
     Request: MfmValue + Serialize,
@@ -3271,25 +3237,10 @@ where
 {
     let artifacts = RunnerArtifactBuilder::new(&ctx);
     let payloads = RunnerPayloadBuilder::new(&ctx);
-    let response_artifact = artifacts.fact_response(&response)?;
     let output_artifact = artifacts.state_output(&output)?;
     let mut runner_output = RunnerOutputBuilder::new(&ctx);
-    runner_output.stage_attempt_artifact(&response_artifact)?;
-    runner_output.retain_runtime_evidence(&response_artifact);
     runner_output.stage_attempt_artifact(&output_artifact)?;
     runner_output.retain_runtime_evidence(&output_artifact);
-    for fact in fact_capabilities {
-        runner_output.payload(payloads.fact_recorded(
-            events::FactKey::new(format!(
-                "mfm.evm.contract.fact.{}.{}",
-                ctx.node().node_id.as_str(),
-                fact.key_suffix
-            ))?,
-            &request,
-            &response_artifact,
-            evm_capability_binding(fact.kind, fact.version)?,
-        )?);
-    }
     runner_output.payload(payloads.cell_produced(&output_artifact)?);
     Ok(runner_output.finish())
 }

@@ -8,9 +8,11 @@ build = "build.rs"
 category = "storage"
 
 [dependencies]
+ed25519-dalek = { workspace = true }
 mfm-artifact-capabilities = { path = "../../artifact-capabilities" }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-events = { path = "../../kernel/events" }
+mfm-facts = { path = "../../kernel/facts" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-spec = { path = "../../kernel/spec" }
 mfm-store = { path = "../../kernel/store" }

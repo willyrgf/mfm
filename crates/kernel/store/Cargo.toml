@@ -18,9 +18,11 @@ path = "src/lib.rs"
 test-support = []
 
 [dependencies]
+ed25519-dalek = { workspace = true }
 mfm-canonical = { path = "../canonical" }
 mfm-capabilities = { path = "../capabilities" }
 mfm-events = { path = "../events" }
+mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-manual-auth = { path = "../manual-auth" }
 mfm-spec = { path = "../spec" }
