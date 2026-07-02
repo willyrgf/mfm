@@ -18,19 +18,24 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"
 uuid = { version = "1.0", features = ["v4"] }
 thiserror = { workspace = true }
 
+mfm-adapters-btc-jsonrpc = { path = "../adapters/btc-jsonrpc" }
 mfm-adapters-evm-contracts = { path = "../adapters/evm-contracts" }
 mfm-adapters-portfolio = { path = "../adapters/portfolio" }
 mfm-authored-config = { path = "../authored-config" }
 mfm-artifact-capabilities = { path = "../artifact-capabilities" }
+mfm-btc-capabilities = { path = "../btc-capabilities" }
 mfm-canonical = { path = "../kernel/canonical" }
 mfm-capabilities = { path = "../kernel/capabilities" }
 mfm-certify = { path = "../kernel/certify" }
+mfm-collectors-btc-jsonrpc-http = { path = "../collectors/btc-jsonrpc-http" }
 mfm-events = { path = "../kernel/events" }
 mfm-evm-capabilities = { path = "../evm-capabilities" }
 mfm-evm-contract-config = { path = "../evm-contract-config" }
 mfm-evm-contract-model = { path = "../evm-contract-model" }
+mfm-fact-capabilities = { path = "../fact-capabilities" }
 mfm-facts = { path = "../kernel/facts" }
 mfm-ids = { path = "../kernel/ids" }
+mfm-op-btc-chain-head-collector = { path = "../ops/btc-chain-head-collector-op" }
 mfm-op-evm-contract-lifecycle = { path = "../ops/evm-contract-lifecycle-op" }
 mfm-op-portfolio-tracker = { path = "../ops/portfolio-tracker-op" }
 mfm-op-proof = { path = "../ops/proof-op" }

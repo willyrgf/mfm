@@ -297,8 +297,10 @@ mod tests {
 
     #[test]
     fn config_reuses_state_validation() {
-        let mut config = BtcChainHeadCollectorConfig::default();
-        config.head_kind = "confirmed".to_owned();
+        let config = BtcChainHeadCollectorConfig {
+            head_kind: "confirmed".to_owned(),
+            ..BtcChainHeadCollectorConfig::default()
+        };
 
         let error = validate_btc_chain_head_collector_config(&config).expect_err("invalid");
         assert!(error.contains("confirmed head observations require confirmation_depth"));

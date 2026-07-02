@@ -347,6 +347,88 @@ fn prepare_app_fact_launch(include_fact_descriptor: bool) -> Result<RunLaunchReq
     prepare_app_fact_launch_with_distinct_key(include_fact_descriptor, None)
 }
 
+fn prepare_btc_collector_internal_test_launch() -> Result<RunLaunchRequest, AppError> {
+    let draft = mfm_op_btc_chain_head_collector::btc_chain_head_collector_cycle_program_draft(
+        mfm_op_btc_chain_head_collector::BtcChainHeadCollectorConfig::default(),
+    )
+    .expect("btc collector draft");
+    let query_context_seed = CanonicalSeed::from_value(
+        &mfm_op_btc_chain_head_collector::QueryCollectorCheckpointContext {
+            queried_at_unix_ms: None,
+        },
+    )
+    .expect("query context seed");
+    let observation_context_seed = CanonicalSeed::from_value(
+        &mfm_op_btc_chain_head_collector::BtcChainHeadObservationContext {
+            observed_at_unix_ms: None,
+        },
+    )
+    .expect("observation context seed");
+    let seeds = BTreeMap::from([
+        (
+            draft.seeds()[0].seed_id.clone(),
+            query_context_seed.canonical_json().clone(),
+        ),
+        (
+            draft.seeds()[1].seed_id.clone(),
+            observation_context_seed.canonical_json().clone(),
+        ),
+    ]);
+    let plan = TypedProgramLaunchPlan::from_draft_and_seed_material(draft, seeds)
+        .expect("btc collector launch plan");
+    let registry = production_certification_registry().expect("production registry");
+    let lowered = mfm_certify::lower_program_draft(&plan.draft).expect("lowered btc collector");
+    let scoped = registry
+        .scoped_for_spec(lowered.spec())
+        .expect("scoped production registry");
+    let certified_spec =
+        mfm_certify::certify_typed_spec(lowered, &scoped).expect("certified btc collector");
+    let mut config_inputs = plan
+        .config_material
+        .into_iter()
+        .map(|artifact| RunLaunchConfigArtifact {
+            schema_id: artifact.schema_id,
+            bytes: artifact.bytes.to_vec(),
+            media_type: artifact.media_type,
+        })
+        .collect::<Vec<_>>();
+    config_inputs.extend(framework_config_launch_artifacts_for_spec(
+        &certified_spec.envelope().spec,
+    )?);
+    let seed_inputs = plan
+        .seed_material
+        .into_iter()
+        .map(|artifact| RunLaunchSeedArtifact {
+            seed_id: artifact.seed_id,
+            bytes: artifact.bytes.to_vec(),
+            media_type: artifact.media_type,
+        })
+        .collect();
+
+    prepare_certified_run_launch(
+        CertifiedRunLaunchInput {
+            certified_spec,
+            registry: &scoped,
+            trust_scope_id: TrustScopeId::new(
+                "mfm.trust_scope.v1:00000000000000000000000000000000",
+            )
+            .expect("trust scope"),
+            distinct_run_key_digest: None,
+            entry_point_evidence: events::EntryPointLaunchEvidence {
+                resolved_op_id: events::EntryPointOpId::new(
+                    "mfm.bitcoin.btc_chain_head_collector_internal_test",
+                )
+                .expect("entry point"),
+                entry_point_registry_digest: content_digest_for_bytes(
+                    b"mfm.app.test.btc-collector-internal-registry",
+                ),
+            },
+        },
+        config_inputs,
+        seed_inputs,
+    )
+}
+
 fn prepare_app_fact_launch_with_distinct_key(
     include_fact_descriptor: bool,
     distinct_run_key_digest: Option<ContentDigest>,
@@ -1382,6 +1464,48 @@ async fn run_read_services_are_evidence_only() {
         .await
         .expect("list observations does not construct live drivers");
     assert!(observations.runs.is_empty());
+}
+
+#[test]
+fn production_registry_certifies_btc_collector_descriptors() {
+    let request =
+        prepare_btc_collector_internal_test_launch().expect("btc collector certifies and prepares");
+
+    assert_eq!(
+        request.evidence.entry_point.resolved_op_id.as_str(),
+        "mfm.bitcoin.btc_chain_head_collector_internal_test"
+    );
+    assert!(!request.evidence.config_artifacts.is_empty());
+    assert!(!request.evidence.seed_cells.is_empty());
+}
+
+#[tokio::test]
+async fn btc_collector_launch_requires_runtime_config_before_admission() {
+    let store = store::AsyncInMemoryRunStore::default();
+    let request =
+        prepare_btc_collector_internal_test_launch().expect("btc collector launch request");
+    let run_id = request.run_id.clone();
+    let runners =
+        production_runner_registry(artifact_read_provider_from_retained(store.clone()), None)
+            .expect("production runners without btc config");
+    let services = make_run_services_with_certification_registry(
+        runners,
+        store.clone(),
+        store.clone(),
+        production_certification_registry().expect("production registry"),
+    );
+
+    let error = services
+        .launch_run(request)
+        .await
+        .expect_err("missing btc runtime config rejects before admission");
+
+    assert_eq!(error.code, "LaunchRunnerUnavailable");
+    assert!(store
+        .load_run_stream(&run_id)
+        .await
+        .expect("run stream")
+        .is_empty());
 }
 
 #[tokio::test]

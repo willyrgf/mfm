@@ -92,6 +92,7 @@ impl RuntimeConfigFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeConfigRequirement {
     evm: bool,
+    btc: bool,
     keystores: bool,
     signers: bool,
     parse_all: bool,
@@ -102,6 +103,7 @@ impl RuntimeConfigRequirement {
     pub const fn none() -> Self {
         Self {
             evm: false,
+            btc: false,
             keystores: false,
             signers: false,
             parse_all: true,
@@ -112,6 +114,18 @@ impl RuntimeConfigRequirement {
     pub const fn evm() -> Self {
         Self {
             evm: true,
+            btc: false,
+            keystores: false,
+            signers: false,
+            parse_all: false,
+        }
+    }
+
+    /// Creates a requirement for Bitcoin JSON-RPC runtime config.
+    pub const fn btc() -> Self {
+        Self {
+            evm: false,
+            btc: true,
             keystores: false,
             signers: false,
             parse_all: false,
@@ -122,6 +136,7 @@ impl RuntimeConfigRequirement {
     pub const fn evm_with_signers() -> Self {
         Self {
             evm: true,
+            btc: false,
             keystores: true,
             signers: true,
             parse_all: false,
@@ -132,6 +147,7 @@ impl RuntimeConfigRequirement {
     pub const fn keystores() -> Self {
         Self {
             evm: false,
+            btc: false,
             keystores: true,
             signers: false,
             parse_all: false,
@@ -141,6 +157,11 @@ impl RuntimeConfigRequirement {
     /// Returns whether the EVM runtime family is required.
     pub const fn requires_evm(self) -> bool {
         self.evm
+    }
+
+    /// Returns whether the Bitcoin runtime family is required.
+    pub const fn requires_btc(self) -> bool {
+        self.btc
     }
 
     const fn requires_keystores(self) -> bool {
@@ -153,6 +174,10 @@ impl RuntimeConfigRequirement {
 
     const fn parse_evm(self) -> bool {
         self.parse_all || self.evm
+    }
+
+    const fn parse_btc(self) -> bool {
+        self.parse_all || self.btc
     }
 
     const fn parse_keystores(self) -> bool {
@@ -174,6 +199,7 @@ impl Default for RuntimeConfigRequirement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfig {
     evm: Option<EvmRuntimeConfig>,
+    btc: Option<BtcRuntimeConfig>,
     keystores: BTreeMap<KeystoreRef, KeystoreRuntimeConfig>,
     signers: BTreeMap<SignerRef, RuntimeSigner>,
 }
@@ -220,6 +246,11 @@ impl RuntimeConfig {
         self.evm.as_ref()
     }
 
+    /// Returns the parsed Bitcoin runtime config, when present.
+    pub const fn btc(&self) -> Option<&BtcRuntimeConfig> {
+        self.btc.as_ref()
+    }
+
     /// Returns configured keystore profiles.
     pub const fn keystores(&self) -> &BTreeMap<KeystoreRef, KeystoreRuntimeConfig> {
         &self.keystores
@@ -242,6 +273,24 @@ impl RuntimeConfig {
                 None if requirements.requires_evm() => {
                     return Err(RuntimeConfigError::new(
                         RuntimeConfigLocation::Evm,
+                        RuntimeConfigErrorKind::MissingFamily,
+                    ));
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        let btc = if requirements.parse_btc() {
+            match raw.btc {
+                Some(btc) => Some(BtcRuntimeConfig::from_raw(deserialize_family(
+                    btc,
+                    RuntimeConfigLocation::Btc,
+                    RuntimeConfigErrorKind::InvalidFamilyConfig,
+                )?)?),
+                None if requirements.requires_btc() => {
+                    return Err(RuntimeConfigError::new(
+                        RuntimeConfigLocation::Btc,
                         RuntimeConfigErrorKind::MissingFamily,
                     ));
                 }
@@ -274,6 +323,7 @@ impl RuntimeConfig {
         }
         Ok(Self {
             evm,
+            btc,
             keystores,
             signers,
         })
@@ -850,6 +900,111 @@ impl EvmRoute {
     }
 }
 
+/// Runtime Bitcoin JSON-RPC descriptor.
+#[derive(Clone, PartialEq, Eq)]
+pub struct BtcRuntimeConfig {
+    json_rpc: BtcJsonRpcRuntimeConfig,
+}
+
+impl BtcRuntimeConfig {
+    /// Returns the configured Bitcoin JSON-RPC endpoint descriptor.
+    pub const fn json_rpc(&self) -> &BtcJsonRpcRuntimeConfig {
+        &self.json_rpc
+    }
+
+    fn from_raw(raw: RawBtcConfig) -> Result<Self> {
+        reject_extra_fields(&raw.extra, RuntimeConfigLocation::Btc)?;
+        let json_rpc = BtcJsonRpcRuntimeConfig::from_raw(
+            raw.json_rpc,
+            RuntimeConfigLocation::Btc.with_field("json_rpc"),
+        )?;
+        Ok(Self { json_rpc })
+    }
+}
+
+impl fmt::Debug for BtcRuntimeConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BtcRuntimeConfig")
+            .field("json_rpc", &self.json_rpc)
+            .finish()
+    }
+}
+
+/// Runtime Bitcoin Core JSON-RPC endpoint descriptor.
+#[derive(Clone, PartialEq, Eq)]
+pub struct BtcJsonRpcRuntimeConfig {
+    rpc_url: RuntimeSecretValue,
+    rpc_user: Option<RuntimeSecretValue>,
+    rpc_password: Option<RuntimeSecretValue>,
+}
+
+impl BtcJsonRpcRuntimeConfig {
+    /// Returns the resolved Bitcoin Core RPC URL.
+    pub const fn rpc_url(&self) -> &RuntimeSecretValue {
+        &self.rpc_url
+    }
+
+    /// Returns the resolved RPC username, when configured.
+    pub const fn rpc_user(&self) -> Option<&RuntimeSecretValue> {
+        self.rpc_user.as_ref()
+    }
+
+    /// Returns the resolved RPC password, when configured.
+    pub const fn rpc_password(&self) -> Option<&RuntimeSecretValue> {
+        self.rpc_password.as_ref()
+    }
+
+    fn from_raw(raw: RawBtcJsonRpcConfig, location: RuntimeConfigLocation) -> Result<Self> {
+        reject_extra_fields(&raw.extra, location.clone())?;
+        let rpc_url = resolve_required_value(
+            location.clone(),
+            "rpc_url",
+            &raw.rpc_url,
+            &raw.rpc_url_env,
+            &raw.rpc_url_file,
+            &raw.rpc_url_file_env,
+        )?;
+        validate_rpc_url(&rpc_url, location.clone().with_field("rpc_url"))?;
+        let rpc_user = resolve_optional_value(
+            location.clone(),
+            "rpc_user",
+            &raw.rpc_user,
+            &raw.rpc_user_env,
+            &raw.rpc_user_file,
+            &raw.rpc_user_file_env,
+        )?;
+        let rpc_password = resolve_optional_value(
+            location.clone(),
+            "rpc_password",
+            &raw.rpc_password,
+            &raw.rpc_password_env,
+            &raw.rpc_password_file,
+            &raw.rpc_password_file_env,
+        )?;
+        if rpc_user.is_some() != rpc_password.is_some() {
+            return Err(RuntimeConfigError::new(
+                location,
+                RuntimeConfigErrorKind::IncompleteBasicAuth,
+            ));
+        }
+        Ok(Self {
+            rpc_url,
+            rpc_user,
+            rpc_password,
+        })
+    }
+}
+
+impl fmt::Debug for BtcJsonRpcRuntimeConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BtcJsonRpcRuntimeConfig")
+            .field("rpc_url", &self.rpc_url)
+            .field("rpc_user", &self.rpc_user)
+            .field("rpc_password", &self.rpc_password)
+            .finish()
+    }
+}
+
 /// Source kind used to resolve a runtime-local secret value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeValueSourceKind {
@@ -954,6 +1109,8 @@ pub enum RuntimeConfigLocation {
     Root,
     /// EVM capability family.
     Evm,
+    /// Bitcoin capability family.
+    Btc,
     /// EVM source entry.
     EvmSource {
         /// Checked source ref when available.
@@ -1002,6 +1159,7 @@ impl fmt::Display for RuntimeConfigLocation {
         match self {
             Self::Root => f.write_str("root"),
             Self::Evm => f.write_str("evm"),
+            Self::Btc => f.write_str("btc"),
             Self::EvmSource { source_ref } => match source_ref {
                 Some(source_ref) => write!(f, "evm.sources[{source_ref}]"),
                 None => f.write_str("evm.sources[<invalid>]"),
@@ -1084,6 +1242,8 @@ pub enum RuntimeConfigErrorKind {
     SourceNotInPolicy,
     /// Route omitted policy_id while an explicit same-id policy existed.
     SameIdPolicyRequiresExplicitPolicyId,
+    /// Bitcoin JSON-RPC basic authentication had only one of user/password.
+    IncompleteBasicAuth,
     /// Signer provider was unsupported.
     UnsupportedSignerProvider,
     /// Signer binding section did not have the expected shape.
@@ -1129,6 +1289,9 @@ impl fmt::Display for RuntimeConfigErrorKind {
             Self::SameIdPolicyRequiresExplicitPolicyId => {
                 f.write_str("explicit same-id policy requires explicit policy_id")
             }
+            Self::IncompleteBasicAuth => {
+                f.write_str("basic authentication requires both user and password")
+            }
             Self::UnsupportedSignerProvider => f.write_str("signer provider is unsupported"),
             Self::InvalidSignerConfig => f.write_str("signer config is invalid"),
             Self::InvalidKeystoreConfig => f.write_str("keystore config is invalid"),
@@ -1172,6 +1335,8 @@ impl fmt::Display for RuntimeConfigIdentifierKind {
 struct RawRuntimeConfig {
     #[serde(default)]
     evm: Option<Value>,
+    #[serde(default)]
+    btc: Option<Value>,
     #[serde(default)]
     keystores: Option<Value>,
     #[serde(default)]
@@ -1228,6 +1393,44 @@ struct RawEvmRoute {
     source_ref: Option<String>,
     #[serde(default)]
     policy_id: Option<String>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawBtcConfig {
+    #[serde(default)]
+    json_rpc: RawBtcJsonRpcConfig,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawBtcJsonRpcConfig {
+    #[serde(default)]
+    rpc_url: Option<String>,
+    #[serde(default)]
+    rpc_url_env: Option<String>,
+    #[serde(default)]
+    rpc_url_file: Option<String>,
+    #[serde(default)]
+    rpc_url_file_env: Option<String>,
+    #[serde(default)]
+    rpc_user: Option<String>,
+    #[serde(default)]
+    rpc_user_env: Option<String>,
+    #[serde(default)]
+    rpc_user_file: Option<String>,
+    #[serde(default)]
+    rpc_user_file_env: Option<String>,
+    #[serde(default)]
+    rpc_password: Option<String>,
+    #[serde(default)]
+    rpc_password_env: Option<String>,
+    #[serde(default)]
+    rpc_password_file: Option<String>,
+    #[serde(default)]
+    rpc_password_file_env: Option<String>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
