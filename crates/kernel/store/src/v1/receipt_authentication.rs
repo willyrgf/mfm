@@ -1,6 +1,9 @@
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use mfm_canonical::{CanonicalJsonBytes, CanonicalValue};
-use mfm_facts::{FactQueryReceipt, StoreIdentity, StoreKeyId, StoreReceiptAuthenticationScheme};
+use mfm_facts::{
+    FactQueryEvidence, FactQueryReceipt, StoreIdentity, StoreKeyId,
+    StoreReceiptAuthenticationScheme,
+};
 use mfm_ids::ContentDigest;
 
 use super::{Result, StoreError};
@@ -126,6 +129,18 @@ pub fn verify_fact_query_receipt_authentication(
     verifying_key
         .verify(message.as_bytes(), &signature)
         .map_err(|_| receipt_authentication_error("invalid receipt signature"))
+}
+
+/// Validates query evidence and verifies its receipt authentication against a trust root.
+pub fn validate_fact_query_evidence_recording(
+    evidence: &FactQueryEvidence,
+    trust_root: &FactQueryReceiptTrustRoot,
+) -> Result<()> {
+    mfm_facts::validate_fact_query_evidence(evidence)
+        .map_err(|error| receipt_authentication_error(error.to_string()))?;
+    let plan_hash = mfm_facts::fact_query_plan_hash(evidence.plan())
+        .map_err(|error| receipt_authentication_error(error.to_string()))?;
+    verify_fact_query_receipt_authentication(&plan_hash, evidence.receipt(), trust_root)
 }
 
 fn receipt_authentication_error(message: impl Into<String>) -> StoreError {
@@ -275,6 +290,42 @@ mod tests {
             FactSelectionEvidence::new(digest(4), Vec::new(), None).expect("selection"),
         );
         mfm_facts::fact_query_evidence_hash(&evidence).expect("evidence hash");
+    }
+
+    #[test]
+    fn validates_query_evidence_recording_against_trust_root() {
+        let key = signing_key();
+        let plan = plan();
+        let plan_hash = mfm_facts::fact_query_plan_hash(&plan).expect("plan hash");
+        let receipt = signed_receipt(
+            &plan_hash,
+            &key,
+            StoreIdentity::new("store.default").expect("store"),
+            StoreKeyId::new("key.default").expect("key"),
+        );
+        let evidence = FactQueryEvidence::new(
+            plan.clone(),
+            receipt.clone(),
+            FactSelectionEvidence::new(digest(4), Vec::new(), None).expect("selection"),
+        );
+        validate_fact_query_evidence_recording(&evidence, &trust_root(&key))
+            .expect("validated evidence recording");
+
+        let tampered = FactQueryEvidence::new(
+            plan,
+            mfm_facts::FactQueryReceipt::new(
+                receipt.read_frontier().clone(),
+                receipt.frontier_type(),
+                receipt.returned_refs().to_vec(),
+                receipt.returned_field_summaries().cloned(),
+                digest(99),
+                receipt.result_cardinality(),
+                receipt.store_receipt_hash().clone(),
+                receipt.store_receipt_authentication().clone(),
+            ),
+            FactSelectionEvidence::new(digest(4), Vec::new(), None).expect("selection"),
+        );
+        assert!(validate_fact_query_evidence_recording(&tampered, &trust_root(&key)).is_err());
     }
 
     #[test]

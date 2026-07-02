@@ -66,15 +66,14 @@ impl RunAdmissionLifecycle {
     /// Verifies the post-append admission stream and returns admitted run/context authority.
     pub fn admitted_run_authority(
         runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        stream: &[store::KernelEventEnvelope],
+        committed: &store::CommittedRunStream,
         bound_context: BoundRuntimeContext,
     ) -> Result<RunAdmissionAuthority> {
         bound_context.validate_admission_authority(runtime_spec)?;
-        let view = RuntimeRunView::from_stream(runtime_spec, run_id, stream)?;
+        let view = RuntimeRunView::from_committed_stream(runtime_spec, committed)?;
         bound_context.validate_run_admitted_binding(&view.run_admitted)?;
         Ok(RunAdmissionAuthority {
-            run_id: run_id.clone(),
+            run_id: committed.run_id().clone(),
             spec_hash: runtime_spec.spec_hash().clone(),
             head_seq: view.next_seq,
             bound_context,

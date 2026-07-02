@@ -36,6 +36,25 @@ pub const REGISTRY_DIGEST_ALGORITHM: &str = "mfm-certify.registry-digest.v1";
 /// Supported digest-only signing scheme for certified manual resolution decisions.
 pub const MANUAL_RESOLUTION_SIGNING_SCHEME: &str = "mfm.manual_resolution.digest_signature.v1";
 
+/// Canonical fact descriptor artifact material trusted by the certification registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactDescriptorArtifact {
+    descriptor_hash: ContentDigest,
+    bytes: Vec<u8>,
+}
+
+impl FactDescriptorArtifact {
+    /// Returns the canonical descriptor content hash.
+    pub fn descriptor_hash(&self) -> &ContentDigest {
+        &self.descriptor_hash
+    }
+
+    /// Returns the canonical descriptor bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 /// Returns the schema id for canonical persisted v1 typed-spec certificates.
 pub fn typed_spec_certificate_schema_id() -> Result<SchemaId> {
     let digest = content_digest_json(serde_json::json!({
@@ -1337,6 +1356,7 @@ struct TrustedConfigRef {
 pub struct CertificationRegistry {
     states: BTreeMap<String, spec::StateDescriptorIdentity>,
     operations: BTreeMap<String, spec::OperationDescriptorIdentity>,
+    fact_descriptor_artifacts: BTreeMap<String, FactDescriptorArtifact>,
     config_validators: BTreeMap<String, ConfigValidator>,
     trusted_config_refs: BTreeMap<String, TrustedConfigRef>,
     schema_roles: BTreeMap<String, BTreeSet<CertifiedSchemaRole>>,
@@ -1414,6 +1434,39 @@ impl CertificationRegistry {
             registered.descriptor(),
         ))?;
         self.insert_config_validator(config_validator_for::<O::Config>()?)
+    }
+
+    /// Adds canonical descriptor bytes for a typed fact authoring contract.
+    pub fn register_fact_type<F>(&mut self) -> Result<()>
+    where
+        F: program::MfmFactType,
+    {
+        let descriptor = F::descriptor()
+            .map_err(|error| problem(ProblemClass::InvalidDataShape, error.to_string()))?;
+        self.register_fact_descriptor(&descriptor)
+    }
+
+    /// Adds canonical descriptor bytes for fact descriptor artifact staging.
+    pub fn register_fact_descriptor(
+        &mut self,
+        descriptor: &program::facts::FactDescriptor,
+    ) -> Result<()> {
+        let bytes = program::facts::canonical_fact_descriptor_bytes(descriptor)
+            .map_err(|error| problem(ProblemClass::InvalidDataShape, error.to_string()))?;
+        let descriptor_hash = program::facts::fact_descriptor_hash(descriptor)
+            .map_err(|error| problem(ProblemClass::InvalidDataShape, error.to_string()))?;
+        self.insert_fact_descriptor_artifact(FactDescriptorArtifact {
+            descriptor_hash,
+            bytes: bytes.as_bytes().to_vec(),
+        })
+    }
+
+    /// Returns canonical fact descriptor artifact material by descriptor hash.
+    pub fn fact_descriptor_artifact(
+        &self,
+        descriptor_hash: &ContentDigest,
+    ) -> Option<&FactDescriptorArtifact> {
+        self.fact_descriptor_artifacts.get(descriptor_hash.as_str())
     }
 
     /// Adds a trusted already-lowered state descriptor identity to this registry.
@@ -1532,6 +1585,11 @@ impl CertificationRegistry {
                 spec::DescriptorIdentity::Renderer(_) => {}
             }
         }
+        for descriptor_hash in fact_descriptor_hashes_for_spec(spec) {
+            if let Some(artifact) = self.fact_descriptor_artifact(&descriptor_hash) {
+                scoped.insert_fact_descriptor_artifact(artifact.clone())?;
+            }
+        }
         for config_ref in &spec.config_refs {
             let key = config_ref_key(config_ref);
             if let Some(trusted) = self.trusted_config_refs.get(&key) {
@@ -1608,6 +1666,21 @@ impl CertificationRegistry {
             }
         } else {
             self.operations.insert(key, descriptor);
+        }
+        Ok(())
+    }
+
+    fn insert_fact_descriptor_artifact(&mut self, artifact: FactDescriptorArtifact) -> Result<()> {
+        let key = artifact.descriptor_hash.as_str().to_owned();
+        if let Some(existing) = self.fact_descriptor_artifacts.get(&key) {
+            if existing != &artifact {
+                return Err(problem(
+                    ProblemClass::InvalidSemanticTransition,
+                    format!("conflicting fact descriptor artifact {key}"),
+                ));
+            }
+        } else {
+            self.fact_descriptor_artifacts.insert(key, artifact);
         }
         Ok(())
     }
@@ -4872,6 +4945,18 @@ fn validate_node_fact_descriptor_allowlist(
         }
     }
     Ok(())
+}
+
+fn fact_descriptor_hashes_for_spec(spec: &spec::TypedExecutionSpec) -> BTreeSet<ContentDigest> {
+    spec.nodes
+        .iter()
+        .chain(spec.remediations.values())
+        .flat_map(|node| {
+            node.fact_descriptor_allowlist
+                .iter()
+                .map(|reference| reference.descriptor_hash.clone())
+        })
+        .collect()
 }
 
 fn validate_side_effect_contract(

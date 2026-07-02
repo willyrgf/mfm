@@ -44,9 +44,19 @@ pub(super) async fn load_fact_projection_tables_tx(
     run_id: &RunId,
 ) -> Result<PhysicalFactProjections> {
     Ok(PhysicalFactProjections {
-        fact_descriptors: load_fact_descriptor_index_tx(tx, run_id).await?,
-        fact_index_entries: load_fact_index_tx(tx, run_id).await?,
-        fact_term_entries: load_fact_index_terms_tx(tx, run_id).await?,
+        fact_descriptors: load_fact_descriptor_index_tx(tx, Some(run_id)).await?,
+        fact_index_entries: load_fact_index_tx(tx, Some(run_id)).await?,
+        fact_term_entries: load_fact_index_terms_tx(tx, Some(run_id)).await?,
+    })
+}
+
+pub(super) async fn load_store_fact_projection_tables_tx(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<PhysicalFactProjections> {
+    Ok(PhysicalFactProjections {
+        fact_descriptors: load_fact_descriptor_index_tx(tx, None).await?,
+        fact_index_entries: load_fact_index_tx(tx, None).await?,
+        fact_term_entries: load_fact_index_terms_tx(tx, None).await?,
     })
 }
 
@@ -492,18 +502,27 @@ async fn insert_fact_term_projection_tx(
 
 async fn load_fact_descriptor_index_tx(
     tx: &mut Transaction<'_, Postgres>,
-    run_id: &RunId,
+    run_id: Option<&RunId>,
 ) -> Result<BTreeMap<ContentDigest, mfm_store::v1::FactDescriptorProjection>> {
-    let rows = sqlx::query(
+    let sql = if run_id.is_some() {
         "SELECT descriptor_hash, descriptor_artifact_id, source_event_id, fact_kind, \
-          descriptor_schema_id, subject_schema_id, response_schema_id, \
-          fact_subject_namespace_hash, compatibility_group \
-         FROM fact_descriptor_index WHERE source_run_id = $1 ORDER BY descriptor_hash",
-    )
-    .bind(run_id.as_str())
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load fact descriptor projections", error))?;
+         descriptor_schema_id, subject_schema_id, response_schema_id, \
+         fact_subject_namespace_hash, compatibility_group \
+         FROM fact_descriptor_index WHERE source_run_id = $1 ORDER BY descriptor_hash"
+    } else {
+        "SELECT descriptor_hash, descriptor_artifact_id, source_event_id, fact_kind, \
+         descriptor_schema_id, subject_schema_id, response_schema_id, \
+         fact_subject_namespace_hash, compatibility_group \
+         FROM fact_descriptor_index ORDER BY descriptor_hash"
+    };
+    let mut query = sqlx::query(sql);
+    if let Some(run_id) = run_id {
+        query = query.bind(run_id.as_str());
+    }
+    let rows = query
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| database_error("failed to load fact descriptor projections", error))?;
     let mut projections = BTreeMap::new();
     for row in rows {
         let descriptor_hash = parse_identity::<ContentDigest>(&required_string(
@@ -561,21 +580,33 @@ async fn load_fact_descriptor_index_tx(
 
 async fn load_fact_index_tx(
     tx: &mut Transaction<'_, Postgres>,
-    run_id: &RunId,
+    run_id: Option<&RunId>,
 ) -> Result<BTreeMap<mfm_facts::FactClaimId, mfm_store::v1::FactIndexProjection>> {
-    let rows = sqlx::query(
+    let sql = if run_id.is_some() {
         "SELECT source_run_id, source_seq, source_ordinal, source_event_id, commit_id, \
-          commit_key, store_commit_order, recorded_at, observed_at, audience, visibility_scope, \
-          fact_kind, fact_descriptor_hash, fact_subject_namespace_hash, fact_key, \
-          subject_material_hash, request_schema_id, request_hash, response_schema_id, \
-          response_hash, response_artifact_id, response_artifact_evidence_hash, \
-          capability_kind, capability_version, adapter_kind, adapter_version \
-         FROM fact_index WHERE source_run_id = $1 ORDER BY source_seq, source_ordinal",
-    )
-    .bind(run_id.as_str())
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load fact index projections", error))?;
+         commit_key, store_commit_order, recorded_at, observed_at, audience, visibility_scope, \
+         fact_kind, fact_descriptor_hash, fact_subject_namespace_hash, fact_key, \
+         subject_material_hash, request_schema_id, request_hash, response_schema_id, \
+         response_hash, response_artifact_id, response_artifact_evidence_hash, \
+         capability_kind, capability_version, adapter_kind, adapter_version \
+         FROM fact_index WHERE source_run_id = $1 ORDER BY source_seq, source_ordinal"
+    } else {
+        "SELECT source_run_id, source_seq, source_ordinal, source_event_id, commit_id, \
+         commit_key, store_commit_order, recorded_at, observed_at, audience, visibility_scope, \
+         fact_kind, fact_descriptor_hash, fact_subject_namespace_hash, fact_key, \
+         subject_material_hash, request_schema_id, request_hash, response_schema_id, \
+         response_hash, response_artifact_id, response_artifact_evidence_hash, \
+         capability_kind, capability_version, adapter_kind, adapter_version \
+         FROM fact_index ORDER BY source_run_id, source_seq, source_ordinal"
+    };
+    let mut query = sqlx::query(sql);
+    if let Some(run_id) = run_id {
+        query = query.bind(run_id.as_str());
+    }
+    let rows = query
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| database_error("failed to load fact index projections", error))?;
     let mut projections = BTreeMap::new();
     for row in rows {
         let source_run_id = parse_identity::<RunId>(&required_string(
@@ -708,24 +739,33 @@ async fn load_fact_index_tx(
 
 async fn load_fact_index_terms_tx(
     tx: &mut Transaction<'_, Postgres>,
-    run_id: &RunId,
+    run_id: Option<&RunId>,
 ) -> Result<
     BTreeMap<
         (mfm_facts::FactClaimId, mfm_facts::FactFieldId),
         mfm_store::v1::FactIndexTermProjection,
     >,
 > {
-    let rows = sqlx::query(
+    let sql = if run_id.is_some() {
         "SELECT source_run_id, source_seq, source_ordinal, fact_descriptor_hash, field_id, \
-          source, value_type, value_text, value_bool, value_i64, value_u64, value_decimal, \
-          value_timestamp, value_digest, unit, scale \
+         source, value_type, value_text, value_bool, value_i64, value_u64, value_decimal, \
+         value_timestamp, value_digest, unit, scale \
          FROM fact_index_terms WHERE source_run_id = $1 \
-         ORDER BY source_seq, source_ordinal, field_id",
-    )
-    .bind(run_id.as_str())
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load fact term projections", error))?;
+         ORDER BY source_seq, source_ordinal, field_id"
+    } else {
+        "SELECT source_run_id, source_seq, source_ordinal, fact_descriptor_hash, field_id, \
+         source, value_type, value_text, value_bool, value_i64, value_u64, value_decimal, \
+         value_timestamp, value_digest, unit, scale \
+         FROM fact_index_terms ORDER BY source_run_id, source_seq, source_ordinal, field_id"
+    };
+    let mut query = sqlx::query(sql);
+    if let Some(run_id) = run_id {
+        query = query.bind(run_id.as_str());
+    }
+    let rows = query
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| database_error("failed to load fact term projections", error))?;
     let mut projections = BTreeMap::new();
     for row in rows {
         let source_run_id = parse_identity::<RunId>(&required_string(

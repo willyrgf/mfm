@@ -13,6 +13,7 @@ use std::pin::Pin;
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{CapabilityError, CapabilitySpec, ReadExternalRole};
 use mfm_events::v1::ArtifactRole;
+use mfm_facts::InternalFactRef;
 use mfm_ids::{
     ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest, DigestAlgorithm, NodeId,
     SchemaId, SeedId, SemanticTypeId,
@@ -190,6 +191,21 @@ impl ArtifactReadRequest {
     /// Creates a request from full replay-authorized artifact evidence.
     pub fn from_replay_authorized_evidence(evidence: ArtifactEvidenceRef) -> Self {
         Self::from_expectation(ArtifactEvidenceExpectation::exact(&evidence))
+    }
+
+    /// Creates a request for a fact response artifact pinned by an internal fact ref.
+    pub fn from_internal_fact_response_ref(fact_ref: &InternalFactRef) -> Self {
+        Self::from_expectation(ArtifactEvidenceExpectation {
+            artifact_id: fact_ref.artifact_id().clone(),
+            digest: Some(fact_ref.response_hash().clone()),
+            byte_len: None,
+            media_type: None,
+            schema_id: OptionalEvidence::Present(fact_ref.response_schema_id().clone()),
+            semantic_type_id: OptionalEvidence::Any,
+            producer_node_id: OptionalEvidence::Any,
+            producer_seed_id: OptionalEvidence::Any,
+            artifact_role: Some(ArtifactRole::FactResponse),
+        })
     }
 
     /// Creates a request for a certified config artifact reference.

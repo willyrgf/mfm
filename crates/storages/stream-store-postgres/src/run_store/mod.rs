@@ -283,6 +283,12 @@ impl RunEventStore for PostgresRunStore {
     ) -> AsyncStoreFuture<'a, ProjectionSnapshot, Self::Error> {
         Box::pin(async move { load_projection_snapshot_client(&self.pool, run_id).await })
     }
+
+    fn fact_projection_snapshot<'a>(
+        &'a self,
+    ) -> AsyncStoreFuture<'a, ProjectionSnapshot, Self::Error> {
+        Box::pin(async move { load_fact_projection_snapshot_client(&self.pool).await })
+    }
 }
 
 impl ExecutionClaimStore for PostgresRunStore {

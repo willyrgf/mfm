@@ -2156,6 +2156,66 @@ impl InternalFactRef {
     pub const fn fact_key(&self) -> &FactKey {
         &self.parts.fact_key
     }
+
+    /// Returns the subject namespace hash.
+    pub const fn fact_subject_namespace_hash(&self) -> &ContentDigest {
+        &self.parts.fact_subject_namespace_hash
+    }
+
+    /// Returns the subject material hash.
+    pub const fn subject_material_hash(&self) -> &ContentDigest {
+        &self.parts.subject_material_hash
+    }
+
+    /// Returns the optional request schema id.
+    pub const fn request_schema_id(&self) -> Option<&SchemaId> {
+        self.parts.request_schema_id.as_ref()
+    }
+
+    /// Returns the optional request hash.
+    pub const fn request_hash(&self) -> Option<&ContentDigest> {
+        self.parts.request_hash.as_ref()
+    }
+
+    /// Returns the response schema id.
+    pub const fn response_schema_id(&self) -> &SchemaId {
+        &self.parts.response_schema_id
+    }
+
+    /// Returns the response content hash.
+    pub const fn response_hash(&self) -> &ContentDigest {
+        &self.parts.response_hash
+    }
+
+    /// Returns the response artifact id.
+    pub const fn artifact_id(&self) -> &ArtifactId {
+        &self.parts.artifact_id
+    }
+
+    /// Returns the response artifact evidence hash.
+    pub const fn artifact_evidence_hash(&self) -> &ContentDigest {
+        &self.parts.artifact_evidence_hash
+    }
+
+    /// Returns the producing capability kind.
+    pub const fn capability_kind(&self) -> &CapabilityKind {
+        &self.parts.capability_kind
+    }
+
+    /// Returns the producing capability version.
+    pub const fn capability_version(&self) -> &CapabilityVersion {
+        &self.parts.capability_version
+    }
+
+    /// Returns the producing adapter kind.
+    pub const fn adapter_kind(&self) -> &AdapterKind {
+        &self.parts.adapter_kind
+    }
+
+    /// Returns the producing adapter version.
+    pub const fn adapter_version(&self) -> &AdapterVersion {
+        &self.parts.adapter_version
+    }
 }
 
 /// Descriptor catalog watermark bound into query receipts.
@@ -2683,6 +2743,19 @@ pub fn fact_descriptor_schema_id() -> Result<SchemaId> {
     .map_err(|error| FactDescriptorError::descriptor(error.to_string()))
 }
 
+/// Returns the schema id for canonical fact query evidence artifacts.
+pub fn fact_query_evidence_schema_id() -> Result<SchemaId> {
+    SchemaId::new(
+        "mfm.fact_query_evidence",
+        FACTS_KERNEL_CONTRACT_VERSION,
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(
+            format!("schema:mfm.fact_query_evidence:{FACTS_KERNEL_CONTRACT_VERSION}").as_bytes(),
+        ),
+    )
+    .map_err(|error| FactDescriptorError::descriptor(error.to_string()))
+}
+
 /// Returns canonical descriptor bytes.
 pub fn canonical_fact_descriptor_bytes(descriptor: &FactDescriptor) -> Result<CanonicalJsonBytes> {
     validate_descriptor(descriptor)?;
@@ -3002,6 +3075,21 @@ pub fn parse_canonical_fact_query_shape(
     CompiledFactQueryShape::new(predicates, return_fields)
 }
 
+/// Parses canonical fact-query evidence bytes into the typed facts-kernel contract.
+pub fn parse_canonical_fact_query_evidence_bytes(bytes: &[u8]) -> Result<FactQueryEvidence> {
+    PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
+        .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
+    let value = serde_json::from_slice::<serde_json::Value>(bytes)
+        .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
+    let object = json_object(&value, "fact query evidence")?;
+    require_version(object, "mfm.fact-query-evidence.v1", "fact query evidence")?;
+    let plan = parse_canonical_fact_query_plan(json_required(object, "plan")?)?;
+    let plan_hash = fact_query_plan_hash(&plan)?;
+    let receipt = parse_fact_query_receipt(json_required(object, "receipt")?, &plan_hash)?;
+    let selection = parse_fact_selection_evidence(json_required(object, "selection")?)?;
+    Ok(FactQueryEvidence::new(plan, receipt, selection))
+}
+
 /// Returns canonical receipt body bytes, excluding receipt hash and authentication fields.
 pub fn canonical_fact_query_receipt_body_bytes(
     plan_hash: &ContentDigest,
@@ -3103,6 +3191,140 @@ pub fn canonical_fact_query_evidence_bytes(
 /// Derives the content digest for fact query evidence.
 pub fn fact_query_evidence_hash(evidence: &FactQueryEvidence) -> Result<ContentDigest> {
     Ok(canonical_fact_query_evidence_bytes(evidence)?.content_digest())
+}
+
+/// Validates fact-query replay evidence before it can be recorded or replayed.
+///
+/// This is facts-kernel structural validation only. Store-owned receipt
+/// authentication still needs a store trust root and is verified by `mfm-store`.
+pub fn validate_fact_query_evidence(evidence: &FactQueryEvidence) -> Result<()> {
+    let plan_hash = fact_query_plan_hash(evidence.plan())?;
+    let receipt = evidence.receipt();
+
+    if receipt.read_frontier().store_scope() != evidence.plan().store_scope() {
+        return Err(FactDescriptorError::descriptor(
+            "fact query receipt frontier store scope does not match plan",
+        ));
+    }
+    if receipt.read_frontier().query_scope() != evidence.plan().query_scope() {
+        return Err(FactDescriptorError::descriptor(
+            "fact query receipt frontier query scope does not match plan",
+        ));
+    }
+
+    let expected_result_set_digest =
+        fact_query_result_set_digest(receipt.returned_refs(), receipt.returned_field_summaries())?;
+    if &expected_result_set_digest != receipt.result_set_digest() {
+        return Err(FactDescriptorError::descriptor(
+            "fact query receipt result-set digest does not match returned refs and summaries",
+        ));
+    }
+
+    let expected_receipt_hash = fact_query_receipt_body_hash(&plan_hash, receipt)?;
+    if &expected_receipt_hash != receipt.store_receipt_hash() {
+        return Err(FactDescriptorError::descriptor(
+            "fact query receipt body hash does not match store receipt hash",
+        ));
+    }
+
+    validate_returned_summaries(receipt)?;
+    validate_fact_selection_evidence(receipt, evidence.selection())
+}
+
+fn validate_returned_summaries(receipt: &FactQueryReceipt) -> Result<()> {
+    let Some(summaries) = receipt.returned_field_summaries() else {
+        return Ok(());
+    };
+    if summaries.summaries().len() != receipt.returned_refs().len() {
+        return Err(FactDescriptorError::descriptor(
+            "returned field summaries must align one-for-one with returned refs",
+        ));
+    }
+    for (summary, fact_ref) in summaries.summaries().iter().zip(receipt.returned_refs()) {
+        if summary.fact_claim_id() != fact_ref.fact_claim_id() {
+            return Err(FactDescriptorError::descriptor(
+                "returned field summary claim id does not match returned ref",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_fact_selection_evidence(
+    receipt: &FactQueryReceipt,
+    selection: &FactSelectionEvidence,
+) -> Result<()> {
+    let returned_len = receipt.returned_refs().len() as u64;
+    for window in selection.selected_indices().windows(2) {
+        if window[0] >= window[1] {
+            return Err(FactDescriptorError::descriptor(
+                "selected indices must be sorted and unique",
+            ));
+        }
+    }
+    for index in selection.selected_indices() {
+        if *index >= returned_len {
+            return Err(FactDescriptorError::descriptor(
+                "selected index is outside returned refs",
+            ));
+        }
+    }
+
+    if let Some(selected_digest) = selection.selected_summaries_digest() {
+        let summaries = receipt.returned_field_summaries().ok_or_else(|| {
+            FactDescriptorError::descriptor(
+                "selected summaries digest requires returned field summaries",
+            )
+        })?;
+        let expected =
+            selected_returned_field_summaries_digest(summaries, selection.selected_indices())?;
+        if &expected != selected_digest {
+            return Err(FactDescriptorError::descriptor(
+                "selected summaries digest does not match selected returned summaries",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Derives a digest over the returned field summaries selected by receipt index.
+pub fn selected_returned_field_summaries_digest(
+    returned_field_summaries: &ReturnedFieldSummaries,
+    selected_indices: &[u64],
+) -> Result<ContentDigest> {
+    Ok(canonical_selected_returned_field_summaries_bytes(
+        returned_field_summaries,
+        selected_indices,
+    )?
+    .content_digest())
+}
+
+/// Returns canonical bytes for the returned field summaries selected by receipt index.
+pub fn canonical_selected_returned_field_summaries_bytes(
+    returned_field_summaries: &ReturnedFieldSummaries,
+    selected_indices: &[u64],
+) -> Result<CanonicalJsonBytes> {
+    let mut selected = Vec::with_capacity(selected_indices.len());
+    for index in selected_indices {
+        let index = usize::try_from(*index).map_err(|_| {
+            FactDescriptorError::descriptor("selected summary index overflows usize")
+        })?;
+        let summary = returned_field_summaries
+            .summaries()
+            .get(index)
+            .ok_or_else(|| {
+                FactDescriptorError::descriptor("selected summary index is outside summaries")
+            })?;
+        selected.push(canonical_returned_fact_field_summary_value(summary)?);
+    }
+    let value = canonical_object([
+        (
+            "version",
+            CanonicalValue::String("mfm.fact-query-selected-summaries.v1".to_owned()),
+        ),
+        ("summaries", CanonicalValue::Array(selected)),
+    ])?;
+    Ok(CanonicalJsonBytes::from_value(&value))
 }
 
 /// Extracts canonical subject material using the descriptor's subject fields.
@@ -3556,6 +3778,527 @@ fn parse_canonical_query_return_field(value: &serde_json::Value) -> Result<FactQ
         .ok_or_else(|| FactDescriptorError::descriptor("query return field_id is required"))
         .and_then(FactFieldId::new)?;
     Ok(FactQueryReturnField::new(field_id))
+}
+
+fn parse_canonical_fact_query_plan(value: &serde_json::Value) -> Result<CanonicalFactQueryPlan> {
+    let object = json_object(value, "fact query plan")?;
+    require_version(object, "mfm.fact-query-plan.v1", "fact query plan")?;
+    let canonical_query =
+        canonical_json_bytes_from_canonical_json_str(json_str(object, "canonical_query")?)?;
+    let expected_query_hash: ContentDigest = parse_json_str(object, "canonical_query_hash")?;
+    let query_hash = canonical_query.content_digest();
+    if query_hash != expected_query_hash {
+        return Err(FactDescriptorError::descriptor(
+            "fact query plan canonical query hash mismatch",
+        ));
+    }
+    let plan = CanonicalFactQueryPlan::new(
+        StoreScopeRef::new(json_str(object, "store_scope")?)?,
+        parse_fact_query_scope(json_required(object, "query_scope")?)?,
+        FactQueryCompilerVersion::new(json_str(object, "query_compiler_version")?)?,
+        FactCanonicalizerVersion::new(json_str(object, "canonicalizer_version")?)?,
+        parse_json_str(object, "resolved_descriptor")?,
+        parse_scope_decision_evidence(json_required(object, "scope_decision_evidence")?)?,
+        canonical_query,
+        parse_fact_ordering(json_required(object, "ordering")?)?,
+        json_optional_u64(object, "limit")?,
+    )?;
+    Ok(plan)
+}
+
+fn parse_fact_query_receipt(
+    value: &serde_json::Value,
+    plan_hash: &ContentDigest,
+) -> Result<FactQueryReceipt> {
+    let object = json_object(value, "fact query receipt")?;
+    let body = json_object(json_required(object, "body")?, "fact query receipt body")?;
+    require_version(
+        body,
+        "mfm.fact-query-receipt-body.v1",
+        "fact query receipt body",
+    )?;
+    let body_plan_hash: ContentDigest = parse_json_str(body, "plan_hash")?;
+    if &body_plan_hash != plan_hash {
+        return Err(FactDescriptorError::descriptor(
+            "fact query receipt body plan hash does not match plan",
+        ));
+    }
+    let read_frontier = parse_store_read_frontier(json_required(body, "read_frontier")?)?;
+    let frontier_type = parse_store_read_frontier_type(json_str(body, "frontier_type")?)?;
+    let returned_refs = json_array(body, "returned_refs")?
+        .iter()
+        .map(parse_internal_fact_ref)
+        .collect::<Result<Vec<_>>>()?;
+    let returned_field_summaries =
+        parse_optional_returned_field_summaries(json_required(body, "returned_field_summaries")?)?;
+    let result_set_digest = parse_json_str(body, "result_set_digest")?;
+    let result_cardinality =
+        parse_query_result_cardinality(json_required(body, "result_cardinality")?)?;
+    let store_receipt_hash = parse_json_str(object, "store_receipt_hash")?;
+    let expected_hash = fact_query_receipt_body_hash_from_parts(
+        plan_hash,
+        &read_frontier,
+        frontier_type,
+        &returned_refs,
+        returned_field_summaries.as_ref(),
+        &result_set_digest,
+        result_cardinality,
+    )?;
+    if expected_hash != store_receipt_hash {
+        return Err(FactDescriptorError::descriptor(
+            "fact query receipt body hash does not match store receipt hash",
+        ));
+    }
+    let authentication =
+        parse_store_receipt_authentication(json_required(object, "store_receipt_authentication")?)?;
+    Ok(FactQueryReceipt::new(
+        read_frontier,
+        frontier_type,
+        returned_refs,
+        returned_field_summaries,
+        result_set_digest,
+        result_cardinality,
+        store_receipt_hash,
+        authentication,
+    ))
+}
+
+fn parse_fact_selection_evidence(value: &serde_json::Value) -> Result<FactSelectionEvidence> {
+    let object = json_object(value, "fact selection evidence")?;
+    let selected_indices = json_array(object, "selected_indices")?
+        .iter()
+        .map(|value| {
+            value.as_u64().ok_or_else(|| {
+                FactDescriptorError::descriptor("selected index must be an unsigned integer")
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    FactSelectionEvidence::new(
+        parse_json_str(object, "selection_policy_hash")?,
+        selected_indices,
+        parse_optional_digest(json_required(object, "selected_summaries_digest")?)?,
+    )
+}
+
+fn parse_fact_query_scope(value: &serde_json::Value) -> Result<FactQueryScope> {
+    let object = json_object(value, "fact query scope")?;
+    Ok(FactQueryScope::new(
+        parse_fact_audience(json_str(object, "audience")?)?,
+        parse_fact_visibility_scope(json_str(object, "scope")?)?,
+    ))
+}
+
+fn parse_scope_decision_evidence(value: &serde_json::Value) -> Result<ScopeDecisionEvidence> {
+    let object = json_object(value, "scope decision evidence")?;
+    Ok(ScopeDecisionEvidence::new(parse_json_str(
+        object,
+        "decision_hash",
+    )?))
+}
+
+fn parse_fact_ordering(value: &serde_json::Value) -> Result<FactOrdering> {
+    let object = json_object(value, "fact ordering")?;
+    let terms = json_array(object, "terms")?
+        .iter()
+        .map(parse_fact_ordering_term)
+        .collect::<Result<Vec<_>>>()?;
+    FactOrdering::new(FactOrderingName::new(json_str(object, "name")?)?, terms)
+}
+
+fn parse_fact_ordering_term(value: &serde_json::Value) -> Result<FactOrderingTerm> {
+    let object = json_object(value, "fact ordering term")?;
+    Ok(FactOrderingTerm::new(
+        FactFieldId::new(json_str(object, "field_id")?)?,
+        parse_sort_direction(json_str(object, "direction")?)?,
+        parse_null_ordering(json_str(object, "nulls")?)?,
+        json_bool(object, "tie_breaker")?,
+    ))
+}
+
+fn parse_store_read_frontier(value: &serde_json::Value) -> Result<StoreReadFrontier> {
+    let object = json_object(value, "store read frontier")?;
+    Ok(StoreReadFrontier::new(
+        StoreScopeRef::new(json_str(object, "store_scope")?)?,
+        parse_fact_query_scope(json_required(object, "query_scope")?)?,
+        DescriptorCatalogWatermark::new(json_u64(object, "descriptor_catalog_watermark")?),
+        FactProjectionGeneration::new(json_u64(object, "projection_generation")?),
+        json_u64(object, "max_included_store_commit_order")?,
+        StoreCommitWatermark::new(json_u64(object, "commit_watermark")?),
+    ))
+}
+
+fn parse_internal_fact_ref(value: &serde_json::Value) -> Result<InternalFactRef> {
+    let object = json_object(value, "internal fact ref")?;
+    InternalFactRef::new(InternalFactRefParts {
+        fact_claim_id: parse_fact_claim_id(json_required(object, "fact_claim_id")?)?,
+        source_event_id: parse_json_str(object, "source_event_id")?,
+        recorded_at: json_str(object, "recorded_at")?.to_owned(),
+        observed_at: parse_optional_string(json_required(object, "observed_at")?)?,
+        visibility: parse_fact_visibility(json_required(object, "visibility")?)?,
+        fact_kind: FactKind::new(json_str(object, "fact_kind")?)?,
+        fact_descriptor_hash: parse_json_str(object, "fact_descriptor_hash")?,
+        fact_subject_namespace_hash: parse_json_str(object, "fact_subject_namespace_hash")?,
+        fact_key: FactKey::from_digest(parse_json_str(object, "fact_key")?),
+        subject_material_hash: parse_json_str(object, "subject_material_hash")?,
+        request_schema_id: parse_optional_identity(json_required(object, "request_schema_id")?)?,
+        request_hash: parse_optional_digest(json_required(object, "request_hash")?)?,
+        response_schema_id: parse_json_str(object, "response_schema_id")?,
+        response_hash: parse_json_str(object, "response_hash")?,
+        artifact_id: parse_json_str(object, "artifact_id")?,
+        artifact_evidence_hash: parse_json_str(object, "artifact_evidence_hash")?,
+        capability_kind: parse_json_str(object, "capability_kind")?,
+        capability_version: parse_json_str(object, "capability_version")?,
+        adapter_kind: parse_json_str(object, "adapter_kind")?,
+        adapter_version: parse_json_str(object, "adapter_version")?,
+    })
+}
+
+fn parse_fact_claim_id(value: &serde_json::Value) -> Result<FactClaimId> {
+    let object = json_object(value, "fact claim id")?;
+    require_version(object, "mfm.fact-claim-id.v1", "fact claim id")?;
+    FactClaimId::new(
+        parse_json_str(object, "source_run_id")?,
+        json_u64(object, "source_seq")?,
+        json_u32(object, "source_ordinal")?,
+    )
+}
+
+fn parse_fact_visibility(value: &serde_json::Value) -> Result<FactVisibility> {
+    let object = json_object(value, "fact visibility")?;
+    match json_str(object, "kind")? {
+        "run_private" => Ok(FactVisibility::RunPrivate),
+        "indexed" => Ok(FactVisibility::Indexed {
+            audience: parse_fact_audience(json_str(object, "audience")?)?,
+            scope: parse_fact_visibility_scope(json_str(object, "scope")?)?,
+        }),
+        value => Err(FactDescriptorError::descriptor(format!(
+            "unknown fact visibility kind {value:?}"
+        ))),
+    }
+}
+
+fn parse_optional_returned_field_summaries(
+    value: &serde_json::Value,
+) -> Result<Option<ReturnedFieldSummaries>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let summaries = value
+        .as_array()
+        .ok_or_else(|| {
+            FactDescriptorError::descriptor("returned field summaries must be an array")
+        })?
+        .iter()
+        .map(parse_returned_fact_field_summary)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Some(ReturnedFieldSummaries::new(summaries)))
+}
+
+fn parse_returned_fact_field_summary(
+    value: &serde_json::Value,
+) -> Result<ReturnedFactFieldSummary> {
+    let object = json_object(value, "returned fact field summary")?;
+    let fields = json_array(object, "fields")?
+        .iter()
+        .map(parse_returned_field_value_summary)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(ReturnedFactFieldSummary::new(
+        parse_fact_claim_id(json_required(object, "fact_claim_id")?)?,
+        fields,
+    ))
+}
+
+fn parse_returned_field_value_summary(
+    value: &serde_json::Value,
+) -> Result<ReturnedFieldValueSummary> {
+    let object = json_object(value, "returned field value summary")?;
+    let field_id = FactFieldId::new(json_str(object, "field_id")?)?;
+    let value_type = parse_field_value_type(json_required(object, "value_type")?)?;
+    let scalar =
+        parse_canonical_scalar_value(value_type, json_required(object, "value")?, &field_id)?;
+    ReturnedFieldValueSummary::new(field_id, value_type, scalar)
+}
+
+fn parse_query_result_cardinality(value: &serde_json::Value) -> Result<QueryResultCardinality> {
+    let object = json_object(value, "query result cardinality")?;
+    match json_str(object, "kind")? {
+        "exact" => Ok(QueryResultCardinality::Exact(json_u64(object, "value")?)),
+        "at_least" => Ok(QueryResultCardinality::AtLeast(json_u64(object, "value")?)),
+        "not_counted" => Ok(QueryResultCardinality::NotCounted),
+        value => Err(FactDescriptorError::descriptor(format!(
+            "unknown query result cardinality kind {value:?}"
+        ))),
+    }
+}
+
+fn parse_store_receipt_authentication(
+    value: &serde_json::Value,
+) -> Result<StoreReceiptAuthentication> {
+    let object = json_object(value, "store receipt authentication")?;
+    let scheme = parse_store_receipt_authentication_scheme(json_str(object, "scheme")?)?;
+    let key_id = parse_optional_checked_string::<StoreKeyId>(json_required(object, "key_id")?)?;
+    let signature = CanonicalBytes::from_base64url_no_pad(json_str(object, "signature_or_mac")?)
+        .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
+    StoreReceiptAuthentication::new(
+        StoreIdentity::new(json_str(object, "store_identity")?)?,
+        scheme,
+        key_id,
+        signature.as_bytes().to_vec(),
+    )
+}
+
+fn canonical_json_bytes_from_canonical_json_str(value: &str) -> Result<CanonicalJsonBytes> {
+    PlainCanonicalJsonBytes::from_canonical_json_slice(value.as_bytes())
+        .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
+    let json = serde_json::from_str::<serde_json::Value>(value)
+        .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
+    let canonical = CanonicalJsonBytes::from_value(&plain_json_to_canonical_value(&json)?);
+    if canonical.as_str() != value {
+        return Err(FactDescriptorError::canonical(
+            "canonical JSON value did not round-trip",
+        ));
+    }
+    Ok(canonical)
+}
+
+fn plain_json_to_canonical_value(value: &serde_json::Value) -> Result<CanonicalValue> {
+    match value {
+        serde_json::Value::Null => Ok(CanonicalValue::Null),
+        serde_json::Value::Bool(value) => Ok(CanonicalValue::Bool(*value)),
+        serde_json::Value::String(value) => Ok(CanonicalValue::String(value.clone())),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_u64() {
+                Ok(CanonicalValue::Unsigned(value))
+            } else if let Some(value) = value.as_i64() {
+                Ok(CanonicalValue::Signed(value))
+            } else {
+                Err(FactDescriptorError::canonical(
+                    "floating-point numbers are not valid canonical fact query JSON",
+                ))
+            }
+        }
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(plain_json_to_canonical_value)
+            .collect::<Result<Vec<_>>>()
+            .map(CanonicalValue::Array),
+        serde_json::Value::Object(object) => {
+            let entries = object
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), plain_json_to_canonical_value(value)?)))
+                .collect::<Result<Vec<_>>>()?;
+            CanonicalValue::object(entries)
+                .map_err(|error| FactDescriptorError::canonical(error.to_string()))
+        }
+    }
+}
+
+fn parse_fact_audience(value: &str) -> Result<FactAudience> {
+    match value {
+        "control" => Ok(FactAudience::Control),
+        "platform" => Ok(FactAudience::Platform),
+        _ => Err(FactDescriptorError::descriptor(format!(
+            "unknown fact audience {value:?}"
+        ))),
+    }
+}
+
+fn parse_fact_visibility_scope(value: &str) -> Result<FactVisibilityScope> {
+    match value {
+        "default" => Ok(FactVisibilityScope::Default),
+        _ => Err(FactDescriptorError::descriptor(format!(
+            "unknown fact visibility scope {value:?}"
+        ))),
+    }
+}
+
+fn parse_store_read_frontier_type(value: &str) -> Result<StoreReadFrontierType> {
+    match value {
+        "snapshot" => Ok(StoreReadFrontierType::Snapshot),
+        "prefix" => Ok(StoreReadFrontierType::Prefix),
+        _ => Err(FactDescriptorError::descriptor(format!(
+            "unknown store read frontier type {value:?}"
+        ))),
+    }
+}
+
+fn parse_store_receipt_authentication_scheme(
+    value: &str,
+) -> Result<StoreReceiptAuthenticationScheme> {
+    match value {
+        "local_ed25519_sha256_jcs_v1" => {
+            Ok(StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1)
+        }
+        _ => Err(FactDescriptorError::descriptor(format!(
+            "unknown store receipt authentication scheme {value:?}"
+        ))),
+    }
+}
+
+fn parse_sort_direction(value: &str) -> Result<SortDirection> {
+    match value {
+        "ascending" => Ok(SortDirection::Ascending),
+        "descending" => Ok(SortDirection::Descending),
+        _ => Err(FactDescriptorError::descriptor(format!(
+            "unknown sort direction {value:?}"
+        ))),
+    }
+}
+
+fn parse_null_ordering(value: &str) -> Result<NullOrdering> {
+    match value {
+        "first" => Ok(NullOrdering::First),
+        "last" => Ok(NullOrdering::Last),
+        _ => Err(FactDescriptorError::descriptor(format!(
+            "unknown null ordering {value:?}"
+        ))),
+    }
+}
+
+fn json_object<'a>(
+    value: &'a serde_json::Value,
+    context: &'static str,
+) -> Result<&'a serde_json::Map<String, serde_json::Value>> {
+    value
+        .as_object()
+        .ok_or_else(|| FactDescriptorError::descriptor(format!("{context} must be an object")))
+}
+
+fn require_version(
+    object: &serde_json::Map<String, serde_json::Value>,
+    expected: &'static str,
+    context: &'static str,
+) -> Result<()> {
+    let actual = json_str(object, "version")?;
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(FactDescriptorError::descriptor(format!(
+            "{context} version {actual:?} is unsupported"
+        )))
+    }
+}
+
+fn json_required<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    key: &'static str,
+) -> Result<&'a serde_json::Value> {
+    object
+        .get(key)
+        .ok_or_else(|| FactDescriptorError::descriptor(format!("{key} is required")))
+}
+
+fn json_str<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    key: &'static str,
+) -> Result<&'a str> {
+    json_required(object, key)?
+        .as_str()
+        .ok_or_else(|| FactDescriptorError::descriptor(format!("{key} must be a string")))
+}
+
+fn json_array<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    key: &'static str,
+) -> Result<&'a [serde_json::Value]> {
+    json_required(object, key)?
+        .as_array()
+        .map(Vec::as_slice)
+        .ok_or_else(|| FactDescriptorError::descriptor(format!("{key} must be an array")))
+}
+
+fn json_bool(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &'static str,
+) -> Result<bool> {
+    json_required(object, key)?
+        .as_bool()
+        .ok_or_else(|| FactDescriptorError::descriptor(format!("{key} must be a bool")))
+}
+
+fn json_u64(object: &serde_json::Map<String, serde_json::Value>, key: &'static str) -> Result<u64> {
+    json_required(object, key)?
+        .as_u64()
+        .ok_or_else(|| FactDescriptorError::descriptor(format!("{key} must be a u64")))
+}
+
+fn json_u32(object: &serde_json::Map<String, serde_json::Value>, key: &'static str) -> Result<u32> {
+    let value = json_u64(object, key)?;
+    u32::try_from(value)
+        .map_err(|_| FactDescriptorError::descriptor(format!("{key} must fit in u32")))
+}
+
+fn json_optional_u64(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &'static str,
+) -> Result<Option<u64>> {
+    let value = json_required(object, key)?;
+    if value.is_null() {
+        Ok(None)
+    } else {
+        value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| FactDescriptorError::descriptor(format!("{key} must be null or u64")))
+    }
+}
+
+fn parse_json_str<T>(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &'static str,
+) -> Result<T>
+where
+    T: FromStr,
+    T::Err: fmt::Display,
+{
+    json_str(object, key)?.parse::<T>().map_err(|error| {
+        FactDescriptorError::descriptor(format!("{key} failed validation: {error}"))
+    })
+}
+
+fn parse_optional_identity<T>(value: &serde_json::Value) -> Result<Option<T>>
+where
+    T: FromStr,
+    T::Err: fmt::Display,
+{
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_str()
+        .ok_or_else(|| FactDescriptorError::descriptor("optional identity must be null or string"))?
+        .parse::<T>()
+        .map(Some)
+        .map_err(|error| {
+            FactDescriptorError::descriptor(format!("identity failed validation: {error}"))
+        })
+}
+
+fn parse_optional_checked_string<T>(value: &serde_json::Value) -> Result<Option<T>>
+where
+    T: TryFrom<String, Error = FactDescriptorError>,
+{
+    if value.is_null() {
+        return Ok(None);
+    }
+    let raw = value.as_str().ok_or_else(|| {
+        FactDescriptorError::descriptor("optional checked string must be null or string")
+    })?;
+    T::try_from(raw.to_owned()).map(Some)
+}
+
+fn parse_optional_digest(value: &serde_json::Value) -> Result<Option<ContentDigest>> {
+    parse_optional_identity(value)
+}
+
+fn parse_optional_string(value: &serde_json::Value) -> Result<Option<String>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_str()
+        .map(|value| Some(value.to_owned()))
+        .ok_or_else(|| FactDescriptorError::descriptor("optional string must be null or string"))
 }
 
 fn descriptor_fields_by_id(
@@ -5629,6 +6372,38 @@ mod tests {
             99,
             StoreCommitWatermark::new(100),
         );
+        let returned_refs =
+            vec![
+                InternalFactRef::new(internal_ref_parts(FactVisibility::indexed_default(
+                    FactAudience::Platform,
+                )))
+                .expect("returned ref"),
+            ];
+        let returned_field_summaries = Some(ReturnedFieldSummaries::new(vec![
+            ReturnedFactFieldSummary::new(
+                returned_refs[0].fact_claim_id().clone(),
+                vec![ReturnedFieldValueSummary::new(
+                    FactFieldId::new("result.height").expect("field"),
+                    FactFieldValueType::UnsignedInteger,
+                    FactCanonicalScalar::UnsignedInteger(800_000),
+                )
+                .expect("summary")],
+            ),
+        ]));
+        let result_set_digest =
+            fact_query_result_set_digest(&returned_refs, returned_field_summaries.as_ref())
+                .expect("result-set digest");
+        let plan_hash = fact_query_plan_hash(&plan).expect("plan hash");
+        let receipt_hash = fact_query_receipt_body_hash_from_parts(
+            &plan_hash,
+            &frontier,
+            StoreReadFrontierType::Snapshot,
+            &returned_refs,
+            returned_field_summaries.as_ref(),
+            &result_set_digest,
+            QueryResultCardinality::Exact(1),
+        )
+        .expect("receipt hash");
         let auth = StoreReceiptAuthentication::new(
             StoreIdentity::new("store.default").expect("store"),
             StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
@@ -5639,15 +6414,21 @@ mod tests {
         let receipt = FactQueryReceipt::new(
             frontier,
             StoreReadFrontierType::Snapshot,
-            Vec::new(),
-            None,
-            digest(19),
-            QueryResultCardinality::Exact(0),
-            digest(20),
+            returned_refs,
+            returned_field_summaries,
+            result_set_digest,
+            QueryResultCardinality::Exact(1),
+            receipt_hash,
             auth,
         );
+        let selected_summaries_digest = selected_returned_field_summaries_digest(
+            receipt.returned_field_summaries().expect("summaries"),
+            &[0],
+        )
+        .expect("selected summaries digest");
         let selection =
-            FactSelectionEvidence::new(digest(21), vec![0], Some(digest(22))).expect("selection");
+            FactSelectionEvidence::new(digest(21), vec![0], Some(selected_summaries_digest))
+                .expect("selection");
         let evidence = FactQueryEvidence::new(plan.clone(), receipt.clone(), selection);
         (plan, receipt, evidence)
     }
@@ -5746,19 +6527,19 @@ mod tests {
             canonical_fact_query_receipt_body_bytes(&plan_hash, &receipt)
                 .expect("receipt body bytes")
                 .as_str(),
-            r#"{"frontier_type":"snapshot","plan_hash":"content:sha256-jcs-v1:9282f7eb855fd79a7f907f2745fbf49f3f39b54dfb80a1e51a92444f4f0981a9","read_frontier":{"commit_watermark":100,"descriptor_catalog_watermark":3,"max_included_store_commit_order":99,"projection_generation":4,"query_scope":{"audience":"platform","scope":"default"},"store_scope":"default"},"result_cardinality":{"kind":"exact","value":0},"result_set_digest":"content:sha256-jcs-v1:1313131313131313131313131313131313131313131313131313131313131313","returned_field_summaries":null,"returned_refs":[],"version":"mfm.fact-query-receipt-body.v1"}"#
+            r#"{"frontier_type":"snapshot","plan_hash":"content:sha256-jcs-v1:9282f7eb855fd79a7f907f2745fbf49f3f39b54dfb80a1e51a92444f4f0981a9","read_frontier":{"commit_watermark":100,"descriptor_catalog_watermark":3,"max_included_store_commit_order":99,"projection_generation":4,"query_scope":{"audience":"platform","scope":"default"},"store_scope":"default"},"result_cardinality":{"kind":"exact","value":1},"result_set_digest":"content:sha256-jcs-v1:2406fe022bdf44f7e6a48eb1e3134cf43f11562774b1b7353fb82d255b651b43","returned_field_summaries":[{"fact_claim_id":{"source_ordinal":0,"source_run_id":"run:sha256-jcs-v1:0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a","source_seq":1,"version":"mfm.fact-claim-id.v1"},"fields":[{"field_id":"result.height","value":800000,"value_type":"unsigned_integer"}]}],"returned_refs":[{"adapter_kind":"adapter:mfm.test.adapter:read:sha256-jcs-v1:2020202020202020202020202020202020202020202020202020202020202020","adapter_version":"mfm.adapter.test.v1","artifact_evidence_hash":"content:sha256-jcs-v1:1212121212121212121212121212121212121212121212121212121212121212","artifact_id":"artifact:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111","capability_kind":"capability:mfm.test.capability:read:sha256-jcs-v1:1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f","capability_version":"mfm.capability.test.v1","fact_claim_id":{"source_ordinal":0,"source_run_id":"run:sha256-jcs-v1:0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a","source_seq":1,"version":"mfm.fact-claim-id.v1"},"fact_descriptor_hash":"content:sha256-jcs-v1:0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c","fact_key":"content:sha256-jcs-v1:0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e","fact_kind":"chain.head","fact_subject_namespace_hash":"content:sha256-jcs-v1:0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d","observed_at":null,"recorded_at":"2026-07-01T00:00:00Z","request_hash":null,"request_schema_id":null,"response_hash":"content:sha256-jcs-v1:1010101010101010101010101010101010101010101010101010101010101010","response_schema_id":"schema:mfm.test.response:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","source_event_id":"event:sha256-jcs-v1:0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","subject_material_hash":"content:sha256-jcs-v1:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f","visibility":{"audience":"platform","kind":"indexed","scope":"default"}}],"version":"mfm.fact-query-receipt-body.v1"}"#
         );
         assert_eq!(
             fact_query_receipt_body_hash(&plan_hash, &receipt)
                 .expect("receipt body hash")
                 .as_str(),
-            "content:sha256-jcs-v1:4557f9049a8464b53264e4204661d056958797ed2aa7599a5476a1359886d897"
+            "content:sha256-jcs-v1:6022b0954de6bd94fb379ba8c51aa248250187d6af23c597bc2a8e69d3b2deaa"
         );
         assert_eq!(
             fact_query_evidence_hash(&evidence)
                 .expect("evidence hash")
                 .as_str(),
-            "content:sha256-jcs-v1:e33cc235b61e4c5c5973cc743ad741465f7ee4539c383a0b259b980be0227c8c"
+            "content:sha256-jcs-v1:57d8f44bb396bda672091e2b14decfa46f8d283292c4a4859a6c22bd329ef1b6"
         );
     }
 
@@ -5801,6 +6582,60 @@ mod tests {
                 receipt.result_cardinality(),
             )
             .expect("parts hash")
+        );
+    }
+
+    #[test]
+    fn query_evidence_validation_rejects_tampered_receipt_and_selection() {
+        let (_, mut receipt, evidence) = query_evidence_fixture();
+        validate_fact_query_evidence(&evidence).expect("valid evidence");
+
+        receipt.result_set_digest = digest(99);
+        let tampered_result = FactQueryEvidence::new(
+            evidence.plan().clone(),
+            receipt.clone(),
+            evidence.selection().clone(),
+        );
+        assert!(validate_fact_query_evidence(&tampered_result)
+            .expect_err("tampered result-set digest rejects")
+            .to_string()
+            .contains("result-set digest"));
+
+        let (_, receipt, evidence) = query_evidence_fixture();
+        let out_of_bounds = FactQueryEvidence::new(
+            evidence.plan().clone(),
+            receipt,
+            FactSelectionEvidence::new(digest(21), vec![1], None).expect("selection"),
+        );
+        assert!(validate_fact_query_evidence(&out_of_bounds)
+            .expect_err("out-of-bounds selection rejects")
+            .to_string()
+            .contains("outside returned refs"));
+    }
+
+    #[test]
+    fn parses_canonical_fact_query_evidence_bytes() {
+        let (_, _, evidence) = query_evidence_fixture();
+        let bytes = canonical_fact_query_evidence_bytes(&evidence).expect("evidence bytes");
+        let parsed =
+            parse_canonical_fact_query_evidence_bytes(bytes.as_bytes()).expect("parsed evidence");
+
+        assert_eq!(parsed, evidence);
+
+        let mut value =
+            serde_json::from_slice::<serde_json::Value>(bytes.as_bytes()).expect("evidence json");
+        value["receipt"]["body"]["result_set_digest"] =
+            serde_json::Value::String(digest(99).as_str().to_owned());
+        let tampered = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+            &serde_json::to_string(&value).expect("tampered json"),
+        )
+        .expect("tampered canonical");
+
+        assert!(
+            parse_canonical_fact_query_evidence_bytes(tampered.as_bytes())
+                .expect_err("tampered evidence rejects")
+                .to_string()
+                .contains("body hash")
         );
     }
 }

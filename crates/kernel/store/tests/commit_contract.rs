@@ -2396,14 +2396,18 @@ fn fact_subject_evidence() -> mfm_facts::FactSubjectEvidence {
         .expect("subject evidence")
 }
 
-fn fact_response_bytes() -> Vec<u8> {
-    PlainCanonicalJsonBytes::from_json_str(r#"{"height":850000}"#)
+fn fact_response_bytes_for_height(height: u64) -> Vec<u8> {
+    PlainCanonicalJsonBytes::from_json_str(&format!(r#"{{"height":{height}}}"#))
         .expect("response bytes")
         .to_vec()
 }
 
-fn fact_artifact_ref() -> ArtifactEvidenceRef {
-    let bytes = fact_response_bytes();
+fn fact_response_bytes() -> Vec<u8> {
+    fact_response_bytes_for_height(850000)
+}
+
+fn fact_artifact_ref_for_height(height: u64) -> ArtifactEvidenceRef {
+    let bytes = fact_response_bytes_for_height(height);
     let digest = PlainCanonicalJsonBytes::from_canonical_json_slice(&bytes)
         .expect("canonical response bytes")
         .content_digest();
@@ -2418,6 +2422,10 @@ fn fact_artifact_ref() -> ArtifactEvidenceRef {
         producer_seed_id: None::<SeedId>,
         artifact_role: ArtifactRole::FactResponse,
     }
+}
+
+fn fact_artifact_ref() -> ArtifactEvidenceRef {
+    fact_artifact_ref_for_height(850000)
 }
 
 fn fact_claim(response: &ArtifactEvidenceRef) -> mfm_facts::FactClaim {
@@ -2634,6 +2642,7 @@ fn artifact_role_tag_baselines() -> &'static [(ArtifactRole, &'static str)] {
         (ArtifactRole::SeedInput, "seed_input"),
         (ArtifactRole::StateOutput, "state_output"),
         (ArtifactRole::FactResponse, "fact_response"),
+        (ArtifactRole::FactQueryEvidence, "fact_query_evidence"),
         (ArtifactRole::SideEffectIntent, "side_effect_intent"),
         (ArtifactRole::PreparedInvocation, "prepared_invocation"),
         (ArtifactRole::NotSubmittedProof, "not_submitted_proof"),
@@ -2682,6 +2691,7 @@ typed_config -> TypedConfig\n\
 seed_input -> SeedInput\n\
 state_output -> StateOutput\n\
 fact_response -> FactResponse\n\
+fact_query_evidence -> FactQueryEvidence\n\
 side_effect_intent -> SideEffectIntent\n\
 prepared_invocation -> PreparedInvocation\n\
 not_submitted_proof -> NotSubmittedProof\n\
@@ -3741,7 +3751,16 @@ fn append_fact_recorded_commit(
     run_id: &RunId,
     commit_key: &str,
 ) -> std::result::Result<CommitOutcome, StoreError> {
-    let response = fact_artifact_ref();
+    append_fact_recorded_commit_for_height(store, run_id, commit_key, 850000)
+}
+
+fn append_fact_recorded_commit_for_height(
+    store: &mut StoreContractRunStore,
+    run_id: &RunId,
+    commit_key: &str,
+    height: u64,
+) -> std::result::Result<CommitOutcome, StoreError> {
+    let response = fact_artifact_ref_for_height(height);
     let mut payloads = vec![fact_recorded(&response)];
     store.certify_payloads_for_run(run_id, &mut payloads);
     let mut preconditions = store.certified_preconditions(run_id);
@@ -3757,8 +3776,10 @@ fn append_fact_recorded_commit(
     let plan = test_prepared_commit_plan(request, vec![response.clone()])?;
     let bundle = PreparedCommitBundle::new(
         plan,
-        vec![PreparedArtifactBytes::new(fact_response_bytes(), response)
-            .expect("fact response bytes")],
+        vec![
+            PreparedArtifactBytes::new(fact_response_bytes_for_height(height), response)
+                .expect("fact response bytes"),
+        ],
         Vec::new(),
     )?;
     store.append_test_commit_bundle(bundle)
@@ -7648,6 +7669,88 @@ fn fact_recorded_projects_reusable_fact_evidence() {
     assert_eq!(projection.artifact_id, response.artifact_id);
     assert_eq!(projection.response_hash, response.digest);
     assert_eq!(projection.fact_key, fact_key());
+}
+
+#[test]
+fn fact_recorded_same_subject_claims_are_claim_id_distinct() {
+    fn single_event(outcome: &CommitOutcome) -> &KernelEventEnvelope {
+        let batch = match outcome {
+            CommitOutcome::Appended(batch) | CommitOutcome::Idempotent(batch) => batch,
+            CommitOutcome::AdmissionBlocked(_) => panic!("fact append must not admission-block"),
+        };
+        assert_eq!(batch.events().len(), 1);
+        &batch.events()[0]
+    }
+
+    fn expected_fact_logical_key(event: &KernelEventEnvelope) -> String {
+        let claim_id = mfm_facts::derive_fact_claim_id(
+            event.run_id().clone(),
+            event.seq().as_u64(),
+            event.ordinal().as_u32(),
+        )
+        .expect("claim id");
+        format!(
+            "fact:{}:{}:{}",
+            claim_id.source_run_id(),
+            claim_id.source_seq(),
+            claim_id.source_ordinal()
+        )
+    }
+
+    let run_id = fact_run_id(98);
+    let mut store = admitted_fact_store(&run_id, "same-subject-run-start");
+    let mut attempt_payloads = vec![fact_attempt_started()];
+    store.certify_payloads_for_run(&run_id, &mut attempt_payloads);
+    append_run_state_commit(
+        &mut store,
+        &run_id,
+        "same-subject-attempt-start",
+        attempt_payloads,
+        Vec::new(),
+        RequiredRunState::Started,
+    )
+    .expect("append fact attempt start");
+
+    let first =
+        append_fact_recorded_commit_for_height(&mut store, &run_id, "same-subject-1", 850000)
+            .expect("append first fact");
+    let second =
+        append_fact_recorded_commit_for_height(&mut store, &run_id, "same-subject-2", 850001)
+            .expect("append second same-subject fact");
+
+    let first_event = single_event(&first);
+    let second_event = single_event(&second);
+    assert_ne!(first_event.logical_key(), second_event.logical_key());
+    assert_eq!(
+        first_event.logical_key().as_str(),
+        expected_fact_logical_key(first_event)
+    );
+    assert_eq!(
+        second_event.logical_key().as_str(),
+        expected_fact_logical_key(second_event)
+    );
+    assert!(!first_event
+        .logical_key()
+        .as_str()
+        .contains(fact_key().as_str()));
+    assert!(!second_event
+        .logical_key()
+        .as_str()
+        .contains(fact_key().as_str()));
+
+    let snapshot = store.projection_snapshot();
+    assert_eq!(snapshot.fact_records().count(), 2);
+    assert_eq!(snapshot.fact_index_entries().count(), 2);
+    let claim_ids = snapshot
+        .fact_index_entries()
+        .map(|(claim_id, projection)| {
+            assert_eq!(projection.fact_key, fact_key());
+            assert_eq!(claim_id, &projection.fact_claim_id);
+            claim_id.clone()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(claim_ids.len(), 2);
+    assert_ne!(claim_ids[0], claim_ids[1]);
 }
 
 #[test]
