@@ -106,6 +106,10 @@ impl<'a> PreparedRunnerInvocation<'a> {
     pub(crate) fn run_stream(&self) -> &'a [store::KernelEventEnvelope] {
         self.run_stream
     }
+
+    pub(crate) fn artifact_byte_authority(&self) -> &'a store::ArtifactByteAuthorityMap {
+        &self.view.artifact_byte_authority
+    }
 }
 
 /// Builder for sealed runner invocation authority.
@@ -407,12 +411,16 @@ impl<'a> ErasedRunCtx<'a> {
     pub(crate) fn run_stream(&self) -> &'a [store::KernelEventEnvelope] {
         self.invocation.run_stream()
     }
+
+    pub(crate) fn artifact_byte_authority(&self) -> &'a store::ArtifactByteAuthorityMap {
+        self.invocation.artifact_byte_authority()
+    }
 }
 
 /// Facts committed for one node attempt before recovery resumed execution.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecordedFacts {
-    pub(crate) facts: BTreeMap<mfm_facts::FactKey, RecordedFact>,
+    pub(crate) facts: BTreeMap<mfm_facts::FactClaimId, RecordedFact>,
 }
 
 impl RecordedFacts {
@@ -421,21 +429,33 @@ impl RecordedFacts {
         self.facts.is_empty()
     }
 
-    /// Returns a recorded fact by stable fact key.
-    pub fn get(&self, fact_key: &mfm_facts::FactKey) -> Option<&RecordedFact> {
-        self.facts.get(fact_key)
+    /// Returns a recorded fact by stable claim id.
+    pub fn get(&self, claim_id: &mfm_facts::FactClaimId) -> Option<&RecordedFact> {
+        self.facts.get(claim_id)
     }
 
-    /// Iterates recorded facts in deterministic fact-key order.
-    pub fn iter(&self) -> impl Iterator<Item = (&mfm_facts::FactKey, &RecordedFact)> {
+    /// Iterates recorded facts in deterministic claim-id order.
+    pub fn iter(&self) -> impl Iterator<Item = (&mfm_facts::FactClaimId, &RecordedFact)> {
         self.facts.iter()
+    }
+
+    /// Iterates recorded facts for a subject key in deterministic claim-id order.
+    pub fn by_fact_key<'a>(
+        &'a self,
+        fact_key: &'a mfm_facts::FactKey,
+    ) -> impl Iterator<Item = (&'a mfm_facts::FactClaimId, &'a RecordedFact)> + 'a {
+        self.facts
+            .iter()
+            .filter(move |(_, fact)| &fact.fact_key == fact_key)
     }
 }
 
 /// Store-projected read fact available for same-attempt recovery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordedFact {
-    /// Stable fact key.
+    /// Store-derived identity for the recorded claim.
+    pub fact_claim_id: mfm_facts::FactClaimId,
+    /// Subject grouping key; not a unique claim identity.
     pub fact_key: mfm_facts::FactKey,
     /// Request schema id, when request evidence is present.
     pub request_schema_id: Option<SchemaId>,

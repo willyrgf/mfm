@@ -320,8 +320,8 @@ pub use admission_lanes::{
 
 mod receipt_authentication;
 pub use receipt_authentication::{
-    fact_query_receipt_authentication_message, verify_fact_query_receipt_authentication,
-    FactQueryReceiptTrustRoot,
+    fact_query_receipt_authentication_message, validate_fact_query_evidence_recording,
+    verify_fact_query_receipt_authentication, FactQueryReceiptTrustRoot,
 };
 
 /// Shared canonical-JSON codec for kernel events, projections, and saga types.
@@ -548,7 +548,13 @@ impl KernelEventEnvelope {
                 message: "persisted spec hash does not match payload".to_owned(),
             });
         }
-        let derived_logical_key = derive_logical_key(&record.payload, &record.payload_hash)?;
+        let derived_logical_key = derive_logical_key(
+            &record.run_id,
+            record.seq,
+            record.ordinal,
+            &record.payload,
+            &record.payload_hash,
+        )?;
         if derived_logical_key != record.logical_key {
             return Err(StoreError::PersistedEventMismatch {
                 field: "logical_key",
@@ -4718,6 +4724,7 @@ pub struct CommittedRunStream {
     projection: ProjectionSnapshot,
     next_seq: StreamSeq,
     artifact_requirements: Vec<EventArtifactRequirement>,
+    artifact_bytes: ArtifactByteAuthorityMap,
 }
 
 impl CommittedRunStream {
@@ -4760,6 +4767,7 @@ impl CommittedRunStream {
             projection,
             next_seq,
             artifact_requirements,
+            artifact_bytes: artifact_bytes.clone(),
         })
     }
 
@@ -4791,6 +4799,11 @@ impl CommittedRunStream {
     /// Returns artifact role requirements referenced by this stream.
     pub fn artifact_requirements(&self) -> &[EventArtifactRequirement] {
         &self.artifact_requirements
+    }
+
+    /// Returns exact retained artifact-byte authority used to rebuild this stream projection.
+    pub fn artifact_byte_authority(&self) -> &ArtifactByteAuthorityMap {
+        &self.artifact_bytes
     }
 }
 
@@ -4897,6 +4910,19 @@ impl VerifiedRunArtifactStore {
         &self,
     ) -> impl Iterator<Item = (&ArtifactAuthorityKey, &VerifiedRunArtifactBytes)> {
         self.artifacts.iter()
+    }
+
+    /// Exports exact retained artifact-byte authority for projection rebuilds.
+    pub fn artifact_byte_authority_map(&self) -> ArtifactByteAuthorityMap {
+        self.artifacts
+            .iter()
+            .map(|(key, artifact)| {
+                (
+                    key.clone(),
+                    (artifact.bytes().to_vec(), artifact.evidence().clone()),
+                )
+            })
+            .collect()
     }
 
     /// Verifies this retained artifact store covers a committed run stream exactly.
@@ -5205,6 +5231,15 @@ pub trait RunEventStore {
     fn status_projection_snapshot<'a>(
         &'a self,
         run_id: &'a RunId,
+    ) -> AsyncStoreFuture<'a, ProjectionSnapshot, Self::Error>;
+
+    /// Returns store-owned fact descriptor, index, and term projection authority.
+    ///
+    /// This is store-scoped rather than run-scoped: public Platform fact discovery and
+    /// exact-ref lookup must see all indexed public facts available in the store, not only
+    /// facts associated with an arbitrary run selected by the caller.
+    fn fact_projection_snapshot<'a>(
+        &'a self,
     ) -> AsyncStoreFuture<'a, ProjectionSnapshot, Self::Error>;
 }
 
@@ -5818,8 +5853,14 @@ fn stage_run_commit_with_fingerprint(
         let canonical_payload = payload_canonical_json(&payload)?;
         let payload_hash = canonical_payload.content_digest();
         let schema_id = payload.event_schema_id()?;
-        let logical_key = derive_logical_key(&payload, &payload_hash)?;
         let ordinal = CommitOrdinal::from_index(index)?;
+        let logical_key = derive_logical_key(
+            &request.run_id,
+            request.expected_next_seq,
+            ordinal,
+            &payload,
+            &payload_hash,
+        )?;
         let event_id = derive_event_id(
             &request.run_id,
             request.expected_next_seq,
@@ -6414,6 +6455,15 @@ impl RunEventStore for AsyncInMemoryRunStore {
                 )
             })
             .and_then(|result| result);
+        Box::pin(std::future::ready(result))
+    }
+
+    fn fact_projection_snapshot<'a>(
+        &'a self,
+    ) -> AsyncStoreFuture<'a, ProjectionSnapshot, Self::Error> {
+        let result = self
+            .lock_inner()
+            .map(|store| store.projection_snapshot().clone());
         Box::pin(std::future::ready(result))
     }
 }
@@ -7097,6 +7147,7 @@ fn validate_artifact_schema_policy(
         | events::ArtifactSchemaPolicy::ExactValueSchema
         | events::ArtifactSchemaPolicy::ExactEvidenceSchema
         | events::ArtifactSchemaPolicy::ExactFactDescriptorSchema
+        | events::ArtifactSchemaPolicy::ExactFactQueryEvidenceSchema
         | events::ArtifactSchemaPolicy::ExactPublicSchema
         | events::ArtifactSchemaPolicy::ExactDiagnosticSchema => {
             if let Some(schema_id) = &requirement.schema_id {
@@ -7367,7 +7418,10 @@ pub fn validate_artifact_requirement_against_evidence(
     Ok(())
 }
 
-fn verify_retained_artifact_bytes(bytes: &[u8], evidence: &ArtifactEvidenceRef) -> Result<()> {
+pub(super) fn verify_retained_artifact_bytes(
+    bytes: &[u8],
+    evidence: &ArtifactEvidenceRef,
+) -> Result<()> {
     let digest =
         ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes));
     let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
@@ -8645,6 +8699,9 @@ fn derive_event_id(
 }
 
 fn derive_logical_key(
+    run_id: &RunId,
+    seq: StreamSeq,
+    ordinal: CommitOrdinal,
     payload: &KernelEventPayload,
     payload_hash: &ContentDigest,
 ) -> Result<LogicalEventKey> {
@@ -8664,12 +8721,12 @@ fn derive_logical_key(
         KernelEventPayload::StateAttemptFailed(payload) => {
             format!("attempt:{}:{}", payload.node_id, payload.attempt_id)
         }
-        KernelEventPayload::FactRecorded(payload) => format!(
-            "fact:{}:{}:{}",
-            payload.node_id,
-            payload.attempt_id,
-            payload.claim.subject().fact_key()
-        ),
+        KernelEventPayload::FactRecorded(_) => {
+            let claim_id =
+                mfm_facts::derive_fact_claim_id(run_id.clone(), seq.as_u64(), ordinal.as_u32())
+                    .map_err(|error| StoreError::Event(error.to_string()))?;
+            fact_claim_projection_key("fact", &claim_id)
+        }
         KernelEventPayload::ArtifactReferenced(payload) => {
             format!("artifact:{}:ref", payload.artifact_ref.artifact_id)
         }

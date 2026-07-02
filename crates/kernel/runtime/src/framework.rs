@@ -343,8 +343,12 @@ fn project_retention_manifest(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutpu
             ctx.node().node_id
         )));
     };
-    let manifest =
-        build_retention_manifest_artifact(ctx.runtime_spec(), ctx.run_id(), ctx.run_stream())?;
+    let manifest = build_retention_manifest_artifact(
+        ctx.runtime_spec(),
+        ctx.run_id(),
+        ctx.run_stream(),
+        ctx.artifact_byte_authority(),
+    )?;
     let manifest_artifact = StagedArtifact::inline_retention_manifest_artifact(
         &ctx,
         manifest.bytes.to_vec(),
@@ -912,9 +916,13 @@ pub(crate) fn build_retention_manifest_artifact(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
+    artifact_bytes: &store::ArtifactByteAuthorityMap,
 ) -> Result<RetentionManifestArtifact> {
     store::ProjectionSnapshot::validate_run_stream(stream)?;
-    let projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
+    let projection = store::ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
+        stream,
+        artifact_bytes,
+    )?;
     let run_admitted = stream
         .iter()
         .find_map(|event| match event.payload() {

@@ -1102,6 +1102,7 @@ checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
+ "rand_core 0.6.4",
  "serde",
  "sha2 0.10.8",
  "subtle",
@@ -2091,6 +2092,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-adapters-btc-jsonrpc"
+version = "0.1.0"
+dependencies = [
+ "mfm-artifact-capabilities",
+ "mfm-btc-capabilities",
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-collectors-btc-jsonrpc-http",
+ "mfm-events",
+ "mfm-fact-capabilities",
+ "mfm-facts",
+ "mfm-ids",
+ "mfm-program",
+ "mfm-runtime",
+ "mfm-spec",
+ "mfm-states-btc",
+ "mfm-store",
+ "mfm-values",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "mfm-adapters-evm-contracts"
 version = "0.1.0"
 dependencies = [
@@ -2146,6 +2172,7 @@ dependencies = [
 name = "mfm-app"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "k256",
  "mfm-adapters-evm-contracts",
  "mfm-adapters-portfolio",
@@ -2154,10 +2181,12 @@ dependencies = [
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-certify",
+ "mfm-effects",
  "mfm-events",
  "mfm-evm-capabilities",
  "mfm-evm-contract-config",
  "mfm-evm-contract-model",
+ "mfm-facts",
  "mfm-ids",
  "mfm-manual-auth",
  "mfm-op-evm-contract-lifecycle",
@@ -2177,6 +2206,7 @@ dependencies = [
  "mfm-stream-store-postgres",
  "mfm-transports-evm",
  "mfm-transports-proof",
+ "mfm-values",
  "mfm_core",
  "serde",
  "serde_json",
@@ -2196,6 +2226,7 @@ dependencies = [
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-events",
+ "mfm-facts",
  "mfm-ids",
  "mfm-spec",
  "mfm-store",
@@ -2214,6 +2245,16 @@ dependencies = [
  "serde_json",
  "thiserror",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "mfm-btc-capabilities"
+version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-ids",
+ "thiserror",
 ]
 
 [[package]]
@@ -2371,6 +2412,17 @@ dependencies = [
  "serde",
  "thiserror",
  "trybuild",
+]
+
+[[package]]
+name = "mfm-fact-capabilities"
+version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-facts",
+ "mfm-ids",
+ "thiserror",
 ]
 
 [[package]]
@@ -2565,6 +2617,7 @@ dependencies = [
 name = "mfm-replay"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "k256",
  "mfm-canonical",
  "mfm-capabilities",
@@ -2593,6 +2646,7 @@ dependencies = [
  "mfm-events",
  "mfm-evm-contract-config",
  "mfm-evm-contract-model",
+ "mfm-facts",
  "mfm-ids",
  "mfm-op-evm-contract-lifecycle",
  "mfm-op-portfolio-tracker",
@@ -2607,12 +2661,14 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "url",
 ]
 
 [[package]]
 name = "mfm-runtime"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "k256",
  "mfm-canonical",
  "mfm-capabilities",
@@ -2728,6 +2784,25 @@ dependencies = [
  "mfm-values",
  "num-bigint",
  "num-traits",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "mfm-states-btc"
+version = "0.1.0"
+dependencies = [
+ "mfm-btc-capabilities",
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-effects",
+ "mfm-fact-capabilities",
+ "mfm-facts",
+ "mfm-ids",
+ "mfm-program",
+ "mfm-program-derive",
+ "mfm-values",
  "serde",
  "serde_json",
  "thiserror",

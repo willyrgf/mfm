@@ -1454,6 +1454,8 @@ pub mod v1 {
         StateOutput,
         /// Read fact response artifact.
         FactResponse,
+        /// Private fact query replay evidence artifact.
+        FactQueryEvidence,
         /// Side-effect intent artifact.
         SideEffectIntent,
         /// Prepared invocation artifact.
@@ -1493,6 +1495,8 @@ pub mod v1 {
         ExactEvidenceSchema,
         /// Schema must equal the canonical fact descriptor schema.
         ExactFactDescriptorSchema,
+        /// Schema must equal the canonical fact query evidence schema.
+        ExactFactQueryEvidenceSchema,
         /// Schema must be absent.
         Absent,
         /// Schema must equal the public-output schema.
@@ -1509,6 +1513,7 @@ pub mod v1 {
                 Self::ExactValueSchema => "exact_value_schema",
                 Self::ExactEvidenceSchema => "exact_evidence_schema",
                 Self::ExactFactDescriptorSchema => "exact_fact_descriptor_schema",
+                Self::ExactFactQueryEvidenceSchema => "exact_fact_query_evidence_schema",
                 Self::Absent => "absent",
                 Self::ExactPublicSchema => "exact_public_schema",
                 Self::ExactDiagnosticSchema => "exact_diagnostic_schema",
@@ -1578,6 +1583,8 @@ pub mod v1 {
         AttemptStateOutput,
         /// Attempt-produced fact response artifact.
         AttemptFactResponse,
+        /// Attempt-produced private fact query replay evidence artifact.
+        AttemptFactQueryEvidence,
         /// Side-effect intent artifact.
         SideEffectIntent,
         /// Side-effect prepared-invocation artifact.
@@ -1611,6 +1618,7 @@ pub mod v1 {
                 Self::RunAdmission => "run_admission",
                 Self::AttemptStateOutput => "attempt_state_output",
                 Self::AttemptFactResponse => "attempt_fact_response",
+                Self::AttemptFactQueryEvidence => "attempt_fact_query_evidence",
                 Self::SideEffectIntent => "side_effect_intent",
                 Self::SideEffectPreparedInvocation => "side_effect_prepared_invocation",
                 Self::SideEffectNotSubmittedProof => "side_effect_not_submitted_proof",
@@ -1711,6 +1719,7 @@ pub mod v1 {
             Self::SeedInput,
             Self::StateOutput,
             Self::FactResponse,
+            Self::FactQueryEvidence,
             Self::SideEffectIntent,
             Self::PreparedInvocation,
             Self::NotSubmittedProof,
@@ -1796,6 +1805,16 @@ pub mod v1 {
                     semantic: ArtifactSemanticPolicy::Absent,
                     producer: ArtifactProducerScope::NodeRequired,
                     staging: ArtifactStagingClass::AttemptFactResponse,
+                    retention: ArtifactRetentionClass::ValueArtifacts,
+                    same_commit: ArtifactSameCommitPolicy::PayloadRequiredArtifact,
+                },
+                Self::FactQueryEvidence => ArtifactRoleContract {
+                    role: self,
+                    tag: "fact_query_evidence",
+                    schema: ArtifactSchemaPolicy::ExactFactQueryEvidenceSchema,
+                    semantic: ArtifactSemanticPolicy::Absent,
+                    producer: ArtifactProducerScope::NodeRequired,
+                    staging: ArtifactStagingClass::AttemptFactQueryEvidence,
                     retention: ArtifactRetentionClass::ValueArtifacts,
                     same_commit: ArtifactSameCommitPolicy::PayloadRequiredArtifact,
                 },

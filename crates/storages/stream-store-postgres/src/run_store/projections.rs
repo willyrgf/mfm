@@ -69,6 +69,26 @@ pub(super) async fn load_projection_snapshot_client(
     Ok(snapshot)
 }
 
+pub(super) async fn load_fact_projection_snapshot_client(
+    pool: &PgPool,
+) -> Result<ProjectionSnapshot> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| database_error("failed to start fact projection read", error))?;
+    let fact_projections = load_store_fact_projection_tables_tx(&mut tx).await?;
+    let snapshot = ProjectionSnapshot::from_parts(ProjectionSnapshotParts {
+        fact_descriptors: fact_projections.fact_descriptors,
+        fact_index_entries: fact_projections.fact_index_entries,
+        fact_term_entries: fact_projections.fact_term_entries,
+        ..ProjectionSnapshotParts::default()
+    })?;
+    tx.commit()
+        .await
+        .map_err(|error| database_error("failed to commit fact projection read", error))?;
+    Ok(snapshot)
+}
+
 pub(super) async fn load_stream_authoritative_projection_snapshot_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,

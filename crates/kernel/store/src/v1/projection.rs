@@ -1185,6 +1185,12 @@ fn apply_fact_recorded(
 ) -> Result<()> {
     let claim = &payload.claim;
     let fact_key = claim.subject().fact_key();
+    let claim_id = mfm_facts::derive_fact_claim_id(
+        envelope.run_id().clone(),
+        envelope.seq().as_u64(),
+        envelope.ordinal().as_u32(),
+    )
+    .map_err(|error| StoreError::Identity(error.to_string()))?;
     match projections.attempt(&payload.node_id, &payload.attempt_id) {
         Some(AttemptProjection {
             status: AttemptStatus::Started { .. },
@@ -1192,19 +1198,13 @@ fn apply_fact_recorded(
         }) => {}
         Some(_) => {
             return Err(StoreError::ProjectionConflict {
-                key: format!(
-                    "fact:{}:{}:{}",
-                    payload.node_id, payload.attempt_id, fact_key
-                ),
+                key: fact_claim_projection_key("fact", &claim_id),
                 message: "fact requires an active started attempt".to_owned(),
             });
         }
         None => {
             return Err(StoreError::ProjectionConflict {
-                key: format!(
-                    "fact:{}:{}:{}",
-                    payload.node_id, payload.attempt_id, fact_key
-                ),
+                key: fact_claim_projection_key("fact", &claim_id),
                 message: "fact requires a started attempt".to_owned(),
             });
         }
@@ -1257,12 +1257,6 @@ fn apply_fact_recorded(
         });
     }
 
-    let claim_id = mfm_facts::derive_fact_claim_id(
-        envelope.run_id().clone(),
-        envelope.seq().as_u64(),
-        envelope.ordinal().as_u32(),
-    )
-    .map_err(|error| StoreError::Identity(error.to_string()))?;
     if projections.fact_records.contains_key(&claim_id) {
         return Err(StoreError::ProjectionConflict {
             key: fact_claim_projection_key("fact_record", &claim_id),
@@ -1378,7 +1372,12 @@ fn apply_fact_recorded_record_only(
     payload: &events::FactRecorded,
 ) -> Result<()> {
     let claim = &payload.claim;
-    let fact_key = claim.subject().fact_key();
+    let claim_id = mfm_facts::derive_fact_claim_id(
+        envelope.run_id().clone(),
+        envelope.seq().as_u64(),
+        envelope.ordinal().as_u32(),
+    )
+    .map_err(|error| StoreError::Identity(error.to_string()))?;
     match projections.attempt(&payload.node_id, &payload.attempt_id) {
         Some(AttemptProjection {
             status: AttemptStatus::Started { .. },
@@ -1386,19 +1385,13 @@ fn apply_fact_recorded_record_only(
         }) => {}
         Some(_) => {
             return Err(StoreError::ProjectionConflict {
-                key: format!(
-                    "fact:{}:{}:{}",
-                    payload.node_id, payload.attempt_id, fact_key
-                ),
+                key: fact_claim_projection_key("fact", &claim_id),
                 message: "fact requires an active started attempt".to_owned(),
             });
         }
         None => {
             return Err(StoreError::ProjectionConflict {
-                key: format!(
-                    "fact:{}:{}:{}",
-                    payload.node_id, payload.attempt_id, fact_key
-                ),
+                key: fact_claim_projection_key("fact", &claim_id),
                 message: "fact requires a started attempt".to_owned(),
             });
         }
@@ -1417,12 +1410,6 @@ fn apply_fact_recorded_record_only(
             message: "response artifact is already bound to a fact claim".to_owned(),
         });
     }
-    let claim_id = mfm_facts::derive_fact_claim_id(
-        envelope.run_id().clone(),
-        envelope.seq().as_u64(),
-        envelope.ordinal().as_u32(),
-    )
-    .map_err(|error| StoreError::Identity(error.to_string()))?;
     if projections.fact_records.contains_key(&claim_id) {
         return Err(StoreError::ProjectionConflict {
             key: fact_claim_projection_key("fact_record", &claim_id),
@@ -1492,7 +1479,11 @@ fn apply_fact_descriptor_artifact(
         .fact_descriptors
         .insert(descriptor_hash.clone(), projection.clone())
     {
-        Some(existing) if existing == projection => {}
+        Some(existing) if equivalent_fact_descriptor_projection(&existing, &projection) => {
+            projections
+                .fact_descriptors
+                .insert(descriptor_hash, existing);
+        }
         Some(_) => {
             return Err(StoreError::ProjectionConflict {
                 key: format!("fact_descriptor:{descriptor_hash}"),
@@ -1502,6 +1493,20 @@ fn apply_fact_descriptor_artifact(
         None => {}
     }
     Ok(())
+}
+
+fn equivalent_fact_descriptor_projection(
+    left: &FactDescriptorProjection,
+    right: &FactDescriptorProjection,
+) -> bool {
+    left.descriptor_hash == right.descriptor_hash
+        && left.descriptor_artifact_id == right.descriptor_artifact_id
+        && left.fact_kind == right.fact_kind
+        && left.descriptor_schema_id == right.descriptor_schema_id
+        && left.subject_schema_id == right.subject_schema_id
+        && left.response_schema_id == right.response_schema_id
+        && left.fact_subject_namespace_hash == right.fact_subject_namespace_hash
+        && left.compatibility_group == right.compatibility_group
 }
 
 fn load_projected_fact_descriptor(
@@ -1595,6 +1600,7 @@ fn require_artifact_bytes_exact<'a>(
             field: "artifact",
         });
     }
+    super::verify_retained_artifact_bytes(bytes, evidence)?;
     Ok(bytes.as_slice())
 }
 
@@ -1603,12 +1609,14 @@ fn require_artifact_bytes_by_key<'a>(
     artifact_id: &ArtifactId,
     evidence_hash: &ContentDigest,
 ) -> Result<(&'a [u8], &'a ArtifactEvidenceRef)> {
-    artifact_bytes
-        .get(&(artifact_id.clone(), evidence_hash.clone()))
-        .map(|(bytes, evidence)| (bytes.as_slice(), evidence))
-        .ok_or_else(|| StoreError::MissingArtifact {
+    let Some((bytes, evidence)) = artifact_bytes.get(&(artifact_id.clone(), evidence_hash.clone()))
+    else {
+        return Err(StoreError::MissingArtifact {
             artifact_id: artifact_id.clone(),
-        })
+        });
+    };
+    super::verify_retained_artifact_bytes(bytes, evidence)?;
+    Ok((bytes.as_slice(), evidence))
 }
 
 fn store_artifact_from_run_artifact(

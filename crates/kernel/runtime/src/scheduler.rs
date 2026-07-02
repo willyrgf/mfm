@@ -154,12 +154,7 @@ impl SerialTypedScheduler {
             .await
             .map_err(async_store_error)?;
         let bound_context = self.run_contexts.load_bound_context(runtime_spec)?;
-        RunAdmissionLifecycle::admitted_run_authority(
-            runtime_spec,
-            &run_id,
-            committed.events(),
-            bound_context,
-        )
+        RunAdmissionLifecycle::admitted_run_authority(runtime_spec, &committed, bound_context)
     }
 
     /// Appends a verified manual resolution through an async durable typed store.

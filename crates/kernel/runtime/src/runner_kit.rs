@@ -1,11 +1,12 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use mfm_canonical::{CanonicalValue, DecimalString, PlainCanonicalJsonBytes};
+use mfm_canonical::{sha256_digest_bytes, CanonicalValue, DecimalString, PlainCanonicalJsonBytes};
 use mfm_capabilities::CapabilitySetDescriptor;
 use mfm_events::v1::{self as events, side_effect};
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
-    DescriptorId, SchemaId,
+    DescriptorId, DigestAlgorithm, SchemaId,
 };
 use mfm_program::MfmFactType;
 use mfm_spec::v1 as spec;
@@ -14,9 +15,10 @@ use mfm_values::MfmValue;
 use serde::Serialize;
 
 use crate::{
-    AdapterExecutableBinding, CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx,
-    ErasedRunnerBinding, ErasedRunnerOutput, ErasedRunnerRegistry, Result, RunnerEventPayload,
-    RunnerFactRecorded, RuntimeError, StagedArtifact, StagedRetentionRefs,
+    artifacts::validate_fact_query_returned_ref_authority, AdapterExecutableBinding,
+    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding,
+    ErasedRunnerOutput, ErasedRunnerRegistry, Result, RunnerEventPayload, RunnerFactRecorded,
+    RuntimeError, StagedArtifact, StagedRetentionRefs,
 };
 
 /// Canonical JSON artifact prepared by a typed runner before runtime staging.
@@ -104,6 +106,25 @@ impl StagedFactRecord {
     }
 }
 
+/// Handle returned after fact query replay evidence has been staged into runner output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedFactQueryEvidence {
+    artifact_id: ArtifactId,
+    evidence_hash: ContentDigest,
+}
+
+impl StagedFactQueryEvidence {
+    /// Returns the staged query evidence artifact id.
+    pub const fn artifact_id(&self) -> &ArtifactId {
+        &self.artifact_id
+    }
+
+    /// Returns the canonical query evidence content hash.
+    pub const fn evidence_hash(&self) -> &ContentDigest {
+        &self.evidence_hash
+    }
+}
+
 /// Builder for runner-owned JSON artifacts and staging handles.
 pub struct RunnerArtifactBuilder<'a, 'ctx> {
     ctx: &'a ErasedRunCtx<'ctx>,
@@ -145,6 +166,21 @@ impl<'a, 'ctx> RunnerArtifactBuilder<'a, 'ctx> {
         T: MfmValue,
     {
         self.evidence_artifact(value, events::ArtifactRole::FactResponse)
+    }
+
+    /// Builds a private fact query replay evidence artifact from canonical facts-kernel bytes.
+    pub fn fact_query_evidence(
+        &self,
+        evidence: &mfm_facts::FactQueryEvidence,
+    ) -> Result<RunnerJsonArtifact> {
+        let bytes =
+            mfm_facts::canonical_fact_query_evidence_bytes(evidence).map_err(runtime_fact_error)?;
+        self.json_bytes_artifact(
+            bytes.as_bytes(),
+            events::ArtifactRole::FactQueryEvidence,
+            Some(mfm_facts::fact_query_evidence_schema_id().map_err(runtime_fact_error)?),
+            None,
+        )
     }
 
     /// Builds a side-effect intent artifact.
@@ -275,11 +311,22 @@ impl<'a, 'ctx> RunnerArtifactBuilder<'a, 'ctx> {
         T: Serialize,
     {
         let bytes = self.canonical_bytes(value)?;
-        let digest = bytes.content_digest();
+        self.json_bytes_artifact(bytes.as_bytes(), role, schema_id, semantic_type_id)
+    }
+
+    fn json_bytes_artifact(
+        &self,
+        bytes: &[u8],
+        role: events::ArtifactRole,
+        schema_id: Option<SchemaId>,
+        semantic_type_id: Option<mfm_ids::SemanticTypeId>,
+    ) -> Result<RunnerJsonArtifact> {
+        let digest =
+            ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes));
         let evidence = store::ArtifactEvidenceRef {
             artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
             digest,
-            byte_len: bytes.as_bytes().len() as u64,
+            byte_len: bytes.len() as u64,
             media_type: spec::MediaType::new("application/json")?,
             schema_id,
             semantic_type_id,
@@ -288,7 +335,7 @@ impl<'a, 'ctx> RunnerArtifactBuilder<'a, 'ctx> {
             artifact_role: role,
         };
         Ok(RunnerJsonArtifact {
-            bytes: bytes.to_vec(),
+            bytes: bytes.to_owned(),
             evidence,
         })
     }
@@ -931,6 +978,39 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
         })
     }
 
+    /// Stages private replay evidence for a live fact query.
+    ///
+    /// The commit planner emits the existing generic `ArtifactReferenced` event for the staged
+    /// artifact. The evidence is retained as runtime evidence and is not represented as a
+    /// `FactRecorded` claim.
+    pub fn record_fact_query_evidence(
+        &mut self,
+        evidence: mfm_facts::FactQueryEvidence,
+        trust_root: &store::FactQueryReceiptTrustRoot,
+    ) -> Result<StagedFactQueryEvidence> {
+        store::validate_fact_query_evidence_recording(&evidence, trust_root)
+            .map_err(RuntimeError::from)?;
+        let artifact = self.artifacts.fact_query_evidence(&evidence)?;
+        let staged = self.artifacts.staged_attempt(&artifact)?;
+        let staged_evidence = staged.evidence().clone();
+        let retention_refs = fact_query_evidence_retention_refs(
+            &artifact,
+            &evidence,
+            self.artifacts.ctx.projections(),
+        )?;
+        let returned_refs = evidence.receipt().returned_refs().to_vec();
+        self.staged_artifacts.push(staged);
+        self.staged_retention_refs
+            .push(StagedRetentionRefs::fact_query_evidence(
+                retention_refs,
+                returned_refs,
+            ));
+        Ok(StagedFactQueryEvidence {
+            artifact_id: staged_evidence.artifact_id,
+            evidence_hash: staged_evidence.digest,
+        })
+    }
+
     /// Appends a runner-owned event payload.
     pub fn payload(&mut self, payload: RunnerEventPayload) -> &mut Self {
         self.payloads.push(payload);
@@ -945,6 +1025,52 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
             payloads: self.payloads,
         }
     }
+}
+
+fn fact_query_evidence_retention_refs(
+    evidence_artifact: &RunnerJsonArtifact,
+    evidence: &mfm_facts::FactQueryEvidence,
+    projections: &store::ProjectionSnapshot,
+) -> Result<Vec<events::RetentionRef>> {
+    let mut refs = BTreeMap::<(ArtifactId, events::ArtifactRole), events::RetentionRef>::new();
+    insert_retention_ref(&mut refs, evidence_artifact.retention_ref());
+
+    for fact_ref in evidence.receipt().returned_refs() {
+        validate_fact_query_returned_ref_authority(projections, fact_ref)?;
+        let descriptor = projections
+            .fact_descriptor(fact_ref.fact_descriptor_hash())
+            .ok_or_else(|| {
+                RuntimeError::InvalidRunnerOutput(
+                    "fact query evidence returned ref missing descriptor authority".to_owned(),
+                )
+            })?;
+        insert_retention_ref(
+            &mut refs,
+            events::RetentionRef {
+                artifact_id: descriptor.descriptor_artifact_id.clone(),
+                role: events::ArtifactRole::FactDescriptor,
+                content_digest: descriptor.descriptor_hash.clone(),
+            },
+        );
+        insert_retention_ref(
+            &mut refs,
+            events::RetentionRef {
+                artifact_id: fact_ref.artifact_id().clone(),
+                role: events::ArtifactRole::FactResponse,
+                content_digest: fact_ref.response_hash().clone(),
+            },
+        );
+    }
+
+    Ok(refs.into_values().collect())
+}
+
+fn insert_retention_ref(
+    refs: &mut BTreeMap<(ArtifactId, events::ArtifactRole), events::RetentionRef>,
+    retention_ref: events::RetentionRef,
+) {
+    refs.entry((retention_ref.artifact_id.clone(), retention_ref.role))
+        .or_insert(retention_ref);
 }
 
 /// Builder for registering runner bindings while keeping executable identity explicit.
@@ -1249,4 +1375,454 @@ fn runtime_value_error(error: mfm_values::ValueError) -> RuntimeError {
 
 fn runtime_fact_error(error: mfm_facts::FactDescriptorError) -> RuntimeError {
     RuntimeError::InvalidRunnerOutput(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn digest(byte: u8) -> ContentDigest {
+        ContentDigest::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            mfm_ids::DigestBytes::from_array([byte; 32]),
+        )
+    }
+
+    fn artifact_id(byte: u8) -> ArtifactId {
+        ArtifactId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            mfm_ids::DigestBytes::from_array([byte; 32]),
+        )
+    }
+
+    fn run_id(byte: u8) -> mfm_ids::RunId {
+        mfm_ids::RunId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            mfm_ids::DigestBytes::from_array([byte; 32]),
+        )
+    }
+
+    fn event_id(byte: u8) -> mfm_ids::EventId {
+        mfm_ids::EventId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            mfm_ids::DigestBytes::from_array([byte; 32]),
+        )
+    }
+
+    fn schema_id() -> SchemaId {
+        SchemaId::new(
+            "mfm.test.response",
+            "mfm.test.v1",
+            DigestAlgorithm::Sha256JcsV1,
+            mfm_ids::DigestBytes::from_array([1; 32]),
+        )
+        .expect("schema")
+    }
+
+    fn capability_kind() -> CapabilityKind {
+        CapabilityKind::new(
+            "mfm.test.capability",
+            "read",
+            DigestAlgorithm::Sha256JcsV1,
+            mfm_ids::DigestBytes::from_array([2; 32]),
+        )
+        .expect("capability")
+    }
+
+    fn adapter_kind() -> AdapterKind {
+        AdapterKind::new(
+            "mfm.test.adapter",
+            "read",
+            DigestAlgorithm::Sha256JcsV1,
+            mfm_ids::DigestBytes::from_array([3; 32]),
+        )
+        .expect("adapter")
+    }
+
+    fn fact_subject_evidence(height: u64) -> mfm_facts::FactSubjectEvidence {
+        let material =
+            mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactSubjectValueV1::new(
+                mfm_facts::FactFieldId::new("subject.height").expect("field"),
+                mfm_facts::FactFieldValueType::UnsignedInteger,
+                mfm_facts::FactCanonicalScalar::UnsignedInteger(height),
+            )
+            .expect("subject value")])
+            .expect("subject material");
+        mfm_facts::FactSubjectEvidence::from_material(digest(0x13), &material)
+            .expect("subject evidence")
+    }
+
+    fn fact_ref() -> mfm_facts::InternalFactRef {
+        let subject = fact_subject_evidence(17);
+        mfm_facts::InternalFactRef::new(mfm_facts::InternalFactRefParts {
+            fact_claim_id: mfm_facts::FactClaimId::new(run_id(0x10), 1, 0).expect("claim id"),
+            source_event_id: event_id(0x11),
+            recorded_at: "2026-07-01T00:00:00Z".to_owned(),
+            observed_at: None,
+            visibility: mfm_facts::FactVisibility::indexed_default(
+                mfm_facts::FactAudience::Platform,
+            ),
+            fact_kind: mfm_facts::FactKind::new("chain.head").expect("kind"),
+            fact_descriptor_hash: digest(0x12),
+            fact_subject_namespace_hash: subject.fact_subject_namespace_hash().clone(),
+            fact_key: subject.fact_key().clone(),
+            subject_material_hash: subject.subject_material_hash().clone(),
+            request_schema_id: None,
+            request_hash: None,
+            response_schema_id: schema_id(),
+            response_hash: digest(0x16),
+            artifact_id: artifact_id(0x17),
+            artifact_evidence_hash: digest(0x18),
+            capability_kind: capability_kind(),
+            capability_version: CapabilityVersion::new("mfm.test.capability.v1")
+                .expect("capability version"),
+            adapter_kind: adapter_kind(),
+            adapter_version: AdapterVersion::new("mfm.test.adapter.v1").expect("adapter version"),
+        })
+        .expect("fact ref")
+    }
+
+    fn fact_claim_for_ref(
+        fact_ref: &mfm_facts::InternalFactRef,
+        subject_height: u64,
+    ) -> mfm_facts::FactClaim {
+        mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
+            visibility: fact_ref.visibility().clone(),
+            fact_kind: fact_ref.fact_kind().clone(),
+            fact_descriptor_hash: fact_ref.fact_descriptor_hash().clone(),
+            subject: fact_subject_evidence(subject_height),
+            observed_at: fact_ref.observed_at().map(str::to_owned),
+            request: None,
+            response: mfm_facts::FactResponseEvidence::new(
+                fact_ref.response_schema_id().clone(),
+                fact_ref.response_hash().clone(),
+                fact_ref.artifact_id().clone(),
+                fact_ref.artifact_evidence_hash().clone(),
+            ),
+            producer: mfm_facts::FactProducerProvenance::new(
+                fact_ref.capability_kind().clone(),
+                fact_ref.capability_version().clone(),
+                fact_ref.adapter_kind().clone(),
+                fact_ref.adapter_version().clone(),
+            ),
+        })
+        .expect("fact claim")
+    }
+
+    fn fact_authority_projections(
+        fact_ref: &mfm_facts::InternalFactRef,
+    ) -> store::ProjectionSnapshot {
+        let descriptor_projection = store::FactDescriptorProjection {
+            descriptor_hash: fact_ref.fact_descriptor_hash().clone(),
+            descriptor_artifact_id: artifact_id(0x40),
+            fact_kind: fact_ref.fact_kind().clone(),
+            descriptor_schema_id: schema_id(),
+            subject_schema_id: schema_id(),
+            response_schema_id: fact_ref.response_schema_id().clone(),
+            fact_subject_namespace_hash: fact_ref.fact_subject_namespace_hash().clone(),
+            compatibility_group: None,
+            source_event_id: event_id(0x41),
+        };
+        let record_projection = store::FactRecordProjection {
+            fact_claim_id: fact_ref.fact_claim_id().clone(),
+            source_event_id: fact_ref.source_event_id().clone(),
+            source_run_id: fact_ref.fact_claim_id().source_run_id().clone(),
+            source_seq: fact_ref.fact_claim_id().source_seq(),
+            source_ordinal: fact_ref.fact_claim_id().source_ordinal(),
+            node_id: mfm_ids::NodeId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                mfm_ids::DigestBytes::from_array([0x43; 32]),
+            ),
+            attempt_id: mfm_ids::AttemptId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                mfm_ids::DigestBytes::from_array([0x42; 32]),
+            ),
+            claim: fact_claim_for_ref(fact_ref, 17),
+        };
+        let index_projection = store::FactIndexProjection {
+            fact_claim_id: fact_ref.fact_claim_id().clone(),
+            source_run_id: fact_ref.fact_claim_id().source_run_id().clone(),
+            source_seq: fact_ref.fact_claim_id().source_seq(),
+            source_ordinal: fact_ref.fact_claim_id().source_ordinal(),
+            source_event_id: fact_ref.source_event_id().clone(),
+            commit_id: store::CommitKey::new("fact-query-authority").expect("commit key"),
+            store_commit_order: 1,
+            recorded_at: fact_ref.recorded_at().to_owned(),
+            observed_at: fact_ref.observed_at().map(str::to_owned),
+            audience: mfm_facts::FactAudience::Platform,
+            visibility_scope: mfm_facts::FactVisibilityScope::Default,
+            fact_kind: fact_ref.fact_kind().clone(),
+            fact_descriptor_hash: fact_ref.fact_descriptor_hash().clone(),
+            fact_subject_namespace_hash: fact_ref.fact_subject_namespace_hash().clone(),
+            fact_key: fact_ref.fact_key().clone(),
+            subject_material_hash: fact_ref.subject_material_hash().clone(),
+            request_schema_id: None,
+            request_hash: None,
+            response_schema_id: fact_ref.response_schema_id().clone(),
+            response_hash: fact_ref.response_hash().clone(),
+            artifact_id: fact_ref.artifact_id().clone(),
+            artifact_evidence_hash: fact_ref.artifact_evidence_hash().clone(),
+            capability_kind: fact_ref.capability_kind().clone(),
+            capability_version: fact_ref.capability_version().clone(),
+            adapter_kind: fact_ref.adapter_kind().clone(),
+            adapter_version: fact_ref.adapter_version().clone(),
+        };
+        store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
+            fact_descriptors: BTreeMap::from([(
+                descriptor_projection.descriptor_hash.clone(),
+                descriptor_projection,
+            )]),
+            fact_records: BTreeMap::from([(
+                record_projection.fact_claim_id.clone(),
+                record_projection,
+            )]),
+            fact_index_entries: BTreeMap::from([(
+                index_projection.fact_claim_id.clone(),
+                index_projection,
+            )]),
+            ..store::ProjectionSnapshotParts::default()
+        })
+        .expect("projection snapshot")
+    }
+
+    fn fact_authority_projections_without(
+        fact_ref: &mfm_facts::InternalFactRef,
+        descriptor: bool,
+        record: bool,
+        index: bool,
+    ) -> store::ProjectionSnapshot {
+        let full = fact_authority_projections(fact_ref);
+        store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
+            fact_descriptors: if descriptor {
+                full.fact_descriptors()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            } else {
+                BTreeMap::new()
+            },
+            fact_records: if record {
+                full.fact_records()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            } else {
+                BTreeMap::new()
+            },
+            fact_index_entries: if index {
+                full.fact_index_entries()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            } else {
+                BTreeMap::new()
+            },
+            ..store::ProjectionSnapshotParts::default()
+        })
+        .expect("filtered fact authority projection")
+    }
+
+    fn fact_authority_projections_with_tampered_subject(
+        fact_ref: &mfm_facts::InternalFactRef,
+    ) -> store::ProjectionSnapshot {
+        let full = fact_authority_projections(fact_ref);
+        let mut fact_records = full
+            .fact_records()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<BTreeMap<_, _>>();
+        fact_records
+            .get_mut(fact_ref.fact_claim_id())
+            .expect("fact record")
+            .claim = fact_claim_for_ref(fact_ref, 18);
+        store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
+            fact_descriptors: full
+                .fact_descriptors()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            fact_records,
+            fact_index_entries: full
+                .fact_index_entries()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            ..store::ProjectionSnapshotParts::default()
+        })
+        .expect("tampered fact authority projection")
+    }
+
+    fn query_evidence_artifact() -> RunnerJsonArtifact {
+        RunnerJsonArtifact {
+            bytes: b"{}".to_vec(),
+            evidence: store::ArtifactEvidenceRef {
+                artifact_id: artifact_id(0x30),
+                digest: digest(0x31),
+                byte_len: 2,
+                media_type: spec::MediaType::new("application/json").expect("media"),
+                schema_id: None,
+                semantic_type_id: None,
+                producer_node_id: None,
+                producer_seed_id: None,
+                artifact_role: events::ArtifactRole::FactQueryEvidence,
+            },
+        }
+    }
+
+    fn query_evidence(fact_ref: mfm_facts::InternalFactRef) -> mfm_facts::FactQueryEvidence {
+        let query_scope = mfm_facts::FactQueryScope::new(
+            mfm_facts::FactAudience::Platform,
+            mfm_facts::FactVisibilityScope::Default,
+        );
+        let store_scope = mfm_facts::StoreScopeRef::new("default").expect("store scope");
+        let ordering = mfm_facts::FactOrdering::new(
+            mfm_facts::FactOrderingName::new("metadata.store_order.asc").expect("ordering"),
+            vec![mfm_facts::FactOrderingTerm::new(
+                mfm_facts::FactFieldId::new("metadata.store_order").expect("field"),
+                mfm_facts::SortDirection::Ascending,
+                mfm_facts::NullOrdering::Last,
+                true,
+            )],
+        )
+        .expect("ordering");
+        let plan = mfm_facts::CanonicalFactQueryPlan::new(
+            store_scope.clone(),
+            query_scope.clone(),
+            mfm_facts::FactQueryCompilerVersion::new(mfm_facts::FACT_QUERY_COMPILER_VERSION)
+                .expect("compiler"),
+            mfm_facts::FactCanonicalizerVersion::new(mfm_facts::FACT_QUERY_CANONICALIZER_VERSION)
+                .expect("canonicalizer"),
+            digest(0x12),
+            mfm_facts::ScopeDecisionEvidence::new(digest(0x19)),
+            mfm_canonical::CanonicalJsonBytes::from_value(
+                &CanonicalValue::object([(
+                    "kind",
+                    CanonicalValue::String("chain.head".to_owned()),
+                )])
+                .expect("query"),
+            ),
+            ordering,
+            Some(1),
+        )
+        .expect("plan");
+        let frontier = mfm_facts::StoreReadFrontier::new(
+            store_scope,
+            query_scope,
+            mfm_facts::DescriptorCatalogWatermark::new(1),
+            mfm_facts::FactProjectionGeneration::new(1),
+            1,
+            mfm_facts::StoreCommitWatermark::new(1),
+        );
+        let receipt = mfm_facts::FactQueryReceipt::new(
+            frontier,
+            mfm_facts::StoreReadFrontierType::Snapshot,
+            vec![fact_ref],
+            None,
+            digest(0x20),
+            mfm_facts::QueryResultCardinality::Exact(1),
+            digest(0x21),
+            mfm_facts::StoreReceiptAuthentication::new(
+                mfm_facts::StoreIdentity::new("store.default").expect("store"),
+                mfm_facts::StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
+                Some(mfm_facts::StoreKeyId::new("key.default").expect("key")),
+                vec![0; 64],
+            )
+            .expect("auth"),
+        );
+        mfm_facts::FactQueryEvidence::new(
+            plan,
+            receipt,
+            mfm_facts::FactSelectionEvidence::new(digest(0x22), Vec::new(), None)
+                .expect("selection"),
+        )
+    }
+
+    #[test]
+    fn fact_query_evidence_retention_refs_include_returned_fact_authority_artifacts() {
+        let fact_ref = fact_ref();
+        let evidence_artifact = query_evidence_artifact();
+        let projections = fact_authority_projections(&fact_ref);
+        let evidence = query_evidence(fact_ref.clone());
+
+        let refs = fact_query_evidence_retention_refs(&evidence_artifact, &evidence, &projections)
+            .expect("fact query retention refs");
+
+        assert!(refs.contains(&events::RetentionRef {
+            artifact_id: evidence_artifact.evidence.artifact_id.clone(),
+            role: events::ArtifactRole::FactQueryEvidence,
+            content_digest: evidence_artifact.evidence.digest.clone(),
+        }));
+        assert!(refs.contains(&events::RetentionRef {
+            artifact_id: artifact_id(0x40),
+            role: events::ArtifactRole::FactDescriptor,
+            content_digest: fact_ref.fact_descriptor_hash().clone(),
+        }));
+        assert!(refs.contains(&events::RetentionRef {
+            artifact_id: fact_ref.artifact_id().clone(),
+            role: events::ArtifactRole::FactResponse,
+            content_digest: fact_ref.response_hash().clone(),
+        }));
+    }
+
+    #[test]
+    fn fact_query_evidence_retention_refs_reject_missing_descriptor_authority() {
+        let fact_ref = fact_ref();
+        let evidence_artifact = query_evidence_artifact();
+        let projections = fact_authority_projections_without(&fact_ref, false, true, true);
+        let evidence = query_evidence(fact_ref);
+
+        let error = fact_query_evidence_retention_refs(&evidence_artifact, &evidence, &projections)
+            .expect_err("missing descriptor authority rejects");
+
+        assert!(matches!(
+            error,
+            RuntimeError::InvalidRunnerOutput(message)
+                if message.contains("missing descriptor authority")
+        ));
+    }
+
+    #[test]
+    fn fact_query_evidence_retention_refs_reject_missing_source_fact_authority() {
+        let fact_ref = fact_ref();
+        let evidence_artifact = query_evidence_artifact();
+        let projections = fact_authority_projections_without(&fact_ref, true, false, true);
+        let evidence = query_evidence(fact_ref);
+
+        let error = fact_query_evidence_retention_refs(&evidence_artifact, &evidence, &projections)
+            .expect_err("missing source fact authority rejects");
+
+        assert!(matches!(
+            error,
+            RuntimeError::InvalidRunnerOutput(message)
+                if message.contains("missing source fact authority")
+        ));
+    }
+
+    #[test]
+    fn fact_query_evidence_retention_refs_reject_missing_indexed_fact_authority() {
+        let fact_ref = fact_ref();
+        let evidence_artifact = query_evidence_artifact();
+        let projections = fact_authority_projections_without(&fact_ref, true, true, false);
+        let evidence = query_evidence(fact_ref);
+
+        let error = fact_query_evidence_retention_refs(&evidence_artifact, &evidence, &projections)
+            .expect_err("missing indexed fact authority rejects");
+
+        assert!(matches!(
+            error,
+            RuntimeError::InvalidRunnerOutput(message)
+                if message.contains("missing indexed fact authority")
+        ));
+    }
+
+    #[test]
+    fn fact_query_evidence_retention_refs_reject_tampered_subject_material_authority() {
+        let fact_ref = fact_ref();
+        let evidence_artifact = query_evidence_artifact();
+        let projections = fact_authority_projections_with_tampered_subject(&fact_ref);
+        let evidence = query_evidence(fact_ref);
+
+        let error = fact_query_evidence_retention_refs(&evidence_artifact, &evidence, &projections)
+            .expect_err("tampered source subject authority rejects");
+
+        assert!(matches!(
+            error,
+            RuntimeError::InvalidRunnerOutput(message)
+                if message.contains("source fact authority does not match")
+        ));
+    }
 }

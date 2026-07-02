@@ -42,6 +42,7 @@ pub(crate) struct RuntimeRunView {
     pub(crate) seed_cells: BTreeMap<CellId, events::SeedCellRef>,
     pub(crate) config_artifacts: BTreeMap<String, store::ArtifactEvidenceRef>,
     pub(crate) artifact_refs: BTreeMap<store::ArtifactAuthorityKey, CommittedArtifactReference>,
+    pub(crate) artifact_byte_authority: store::ArtifactByteAuthorityMap,
     pub(crate) next_seq: store::StreamSeq,
 }
 
@@ -277,11 +278,18 @@ impl VerifiedRunHistoryView {
 }
 
 impl RuntimeRunView {
+    #[cfg(test)]
     pub(crate) fn from_stream(
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
         stream: &[store::KernelEventEnvelope],
     ) -> Result<Self> {
+        if raw_stream_requires_artifact_byte_authority(stream) {
+            return Err(RuntimeError::InvalidRunStream(
+                "raw run stream contains fact descriptor or fact record evidence; use committed stream artifact authority"
+                    .to_owned(),
+            ));
+        }
         let committed = store::CommittedRunStream::from_events(run_id.clone(), stream.to_vec())?;
         Self::from_committed_stream(runtime_spec, &committed)
     }
@@ -325,6 +333,7 @@ impl RuntimeRunView {
             stream,
             &projections,
             &history,
+            committed.artifact_byte_authority(),
         )?;
         let seed_cells = validate_seed_cells(runtime_spec, &run_admitted.seed_cells)?;
         let config_artifacts =
@@ -337,9 +346,24 @@ impl RuntimeRunView {
             seed_cells,
             config_artifacts,
             artifact_refs,
+            artifact_byte_authority: committed.artifact_byte_authority().clone(),
             next_seq: committed.next_seq(),
         })
     }
+}
+
+#[cfg(test)]
+fn raw_stream_requires_artifact_byte_authority(stream: &[store::KernelEventEnvelope]) -> bool {
+    stream.iter().any(|event| match event.payload() {
+        events::KernelEventPayload::RunAdmitted(payload) => {
+            !payload.fact_descriptor_artifacts.is_empty()
+        }
+        events::KernelEventPayload::FactRecorded(_) => true,
+        events::KernelEventPayload::ArtifactReferenced(payload) => {
+            payload.artifact_ref.role == events::ArtifactRole::FactDescriptor
+        }
+        _ => false,
+    })
 }
 
 pub(crate) fn recorded_facts_for_attempt(
@@ -365,8 +389,9 @@ pub(crate) fn recorded_facts_for_attempt(
         let producer = claim.producer();
         if facts
             .insert(
-                fact_key.clone(),
+                fact_claim_id.clone(),
                 RecordedFact {
+                    fact_claim_id: fact_claim_id.clone(),
                     fact_key: fact_key.clone(),
                     request_schema_id: request.map(|evidence| evidence.request_schema_id().clone()),
                     request_hash: request.map(|evidence| evidence.request_hash().clone()),
@@ -382,8 +407,8 @@ pub(crate) fn recorded_facts_for_attempt(
             .is_some()
         {
             return Err(RuntimeError::InvalidRunStream(format!(
-                "node {} attempt {} has multiple recorded facts for key {}",
-                node_id, attempt_id, fact_key
+                "node {} attempt {} has multiple recorded facts for claim {:?}",
+                node_id, attempt_id, fact_claim_id
             )));
         }
     }
@@ -677,6 +702,7 @@ fn validate_historical_run_stream(
     stream: &[store::KernelEventEnvelope],
     projections: &store::ProjectionSnapshot,
     history: &RuntimeCommittedHistory,
+    artifact_bytes: &store::ArtifactByteAuthorityMap,
 ) -> Result<()> {
     let mut available_cells = BTreeSet::<CellId>::new();
     let mut active_attempts = BTreeSet::<(NodeId, AttemptId)>::new();
@@ -733,6 +759,7 @@ fn validate_historical_run_stream(
                     event,
                     payload,
                     stream,
+                    artifact_bytes,
                 )?;
             }
             events::KernelEventPayload::RetentionRefsAppended(_) => {}
@@ -868,6 +895,15 @@ fn validate_historical_run_stream(
                         payload.node_id
                     ))
                 })?;
+                if !node.fact_descriptor_allowlist.iter().any(|reference| {
+                    &reference.descriptor_hash == payload.claim.fact_descriptor_hash()
+                }) {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "fact descriptor {} is not certified for producing node {}",
+                        payload.claim.fact_descriptor_hash(),
+                        payload.node_id
+                    )));
+                }
                 let caps = CertifiedRuntimeCapabilities::new(
                     node.node_id.clone(),
                     node.capability_bindings.clone(),
@@ -1029,8 +1065,8 @@ fn validate_historical_run_stream(
     validate_atomic_terminal_pairs(runtime_spec, stream)?;
     validate_historical_run_admission_batch(runtime_spec, run_id, stream)?;
     validate_historical_retention_ref_batches(runtime_spec, stream, history)?;
-    validate_historical_retention_manifest_batches(runtime_spec, stream, history)?;
-    validate_historical_terminal_tail(runtime_spec, run_id, stream)?;
+    validate_historical_retention_manifest_batches(runtime_spec, stream, history, artifact_bytes)?;
+    validate_historical_terminal_tail(runtime_spec, run_id, stream, artifact_bytes)?;
     validate_atomic_side_effect_failure_pairs(runtime_spec, stream)?;
     AttemptRecoveryLifecycle::validate_frontier(runtime_spec, run_id, projections)?;
     Ok(())
@@ -1042,6 +1078,7 @@ fn validate_historical_manual_resolution(
     event: &store::KernelEventEnvelope,
     payload: &events::ManualResolutionRecorded,
     stream: &[store::KernelEventEnvelope],
+    artifact_bytes: &store::ArtifactByteAuthorityMap,
 ) -> Result<()> {
     if event.run_id() != &payload.run_id || payload.spec_hash != *runtime_spec.spec_hash() {
         return Err(RuntimeError::InvalidRunStream(
@@ -1066,12 +1103,13 @@ fn validate_historical_manual_resolution(
         ));
     }
 
-    let prefix_projection = store::ProjectionSnapshot::rebuild_from_run_stream(
+    let prefix_projection = store::ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
         stream.get(..event_index).ok_or_else(|| {
             RuntimeError::InvalidRunStream(
                 "manual resolution prefix index was outside the run stream".to_owned(),
             )
         })?,
+        artifact_bytes,
     )?;
     let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
     prefix_projection
@@ -1264,12 +1302,14 @@ fn validate_historical_retention_manifest_batches(
     runtime_spec: &CertifiedRuntimeSpec,
     stream: &[store::KernelEventEnvelope],
     history: &RuntimeCommittedHistory,
+    artifact_bytes: &store::ArtifactByteAuthorityMap,
 ) -> Result<()> {
     for commit in history.commits() {
         validate_historical_retention_manifest_batch(
             runtime_spec,
             commit.prefix(stream),
             commit.events(stream),
+            artifact_bytes,
         )?;
     }
     Ok(())
@@ -1626,7 +1666,11 @@ fn same_commit_typed_artifact_keys(
     commit
         .iter()
         .flat_map(|event| store::event_artifact_requirements(event.payload()))
-        .filter(|requirement| requirement.source.is_same_commit_payload_evidence())
+        .filter(|requirement| {
+            requirement.source.is_same_commit_payload_evidence()
+                || (requirement.source == store::EventArtifactReferenceSource::ArtifactReferenced
+                    && requirement.artifact_role == Some(events::ArtifactRole::FactQueryEvidence))
+        })
         .filter_map(|requirement| {
             Some((
                 requirement.artifact_id,
@@ -1641,6 +1685,7 @@ fn validate_historical_retention_manifest_batch(
     runtime_spec: &CertifiedRuntimeSpec,
     pre_projection_stream: &[store::KernelEventEnvelope],
     commit: &[store::KernelEventEnvelope],
+    artifact_bytes: &store::ArtifactByteAuthorityMap,
 ) -> Result<()> {
     let projections = commit
         .iter()
@@ -1666,8 +1711,12 @@ fn validate_historical_retention_manifest_batch(
                 .to_owned(),
         ));
     }
-    let expected =
-        build_retention_manifest_artifact(runtime_spec, &projection.run_id, pre_projection_stream)?;
+    let expected = build_retention_manifest_artifact(
+        runtime_spec,
+        &projection.run_id,
+        pre_projection_stream,
+        artifact_bytes,
+    )?;
     if projection.manifest_seq != expected.manifest_seq
         || projection.manifest_digest != expected.evidence.digest
         || projection.previous_manifest_digest != expected.previous_manifest_digest
@@ -1711,7 +1760,10 @@ fn validate_historical_retention_manifest_batch(
         ));
     }
 
-    let pre_projection = store::ProjectionSnapshot::rebuild_from_run_stream(pre_projection_stream)?;
+    let pre_projection = store::ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
+        pre_projection_stream,
+        artifact_bytes,
+    )?;
     if !matches!(
         pre_projection
             .attempt(&retention_node.node_id, &produced.attempt_id)
@@ -1929,6 +1981,7 @@ fn validate_historical_terminal_tail(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
+    artifact_bytes: &store::ArtifactByteAuthorityMap,
 ) -> Result<()> {
     let completion_node = certified_complete_run_node(runtime_spec)?;
     let resolve_node = certified_resolve_saga_terminal_node(runtime_spec)?;
@@ -2019,6 +2072,7 @@ fn validate_historical_terminal_tail(
                 run_id,
                 &stream[..terminal_start],
                 &stream[terminal_start..terminal_end],
+                artifact_bytes,
             )
         }
         (Some(_), Some((_, _, TerminalCommitKind::CompleteRun))) => {
@@ -2038,6 +2092,7 @@ fn validate_historical_terminal_tail(
                 run_id,
                 &stream[..terminal_start],
                 &stream[terminal_start..terminal_end],
+                artifact_bytes,
             )
         }
         (Some(retention_end), None)
@@ -2115,6 +2170,7 @@ fn validate_historical_complete_run_batch(
     run_id: &RunId,
     pre_completion_stream: &[store::KernelEventEnvelope],
     commit: &[store::KernelEventEnvelope],
+    artifact_bytes: &store::ArtifactByteAuthorityMap,
 ) -> Result<()> {
     let completion_payload = commit
         .iter()
@@ -2125,7 +2181,10 @@ fn validate_historical_complete_run_batch(
         .expect("caller checked completion count");
     let completion_node = certified_complete_run_node(runtime_spec)?;
     let pre_completion_projection =
-        store::ProjectionSnapshot::rebuild_from_run_stream(pre_completion_stream)?;
+        store::ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
+            pre_completion_stream,
+            artifact_bytes,
+        )?;
     let completion = run_completion_evidence(runtime_spec, &pre_completion_projection)?;
     let retention_manifest = projected_retention_manifest(run_id, &pre_completion_projection)?;
     if completion_payload.run_id != *run_id
@@ -2221,6 +2280,7 @@ fn validate_historical_resolve_saga_terminal_batch(
     run_id: &RunId,
     pre_resolution_stream: &[store::KernelEventEnvelope],
     commit: &[store::KernelEventEnvelope],
+    artifact_bytes: &store::ArtifactByteAuthorityMap,
 ) -> Result<()> {
     let completion_payload = commit
         .iter()
@@ -2231,7 +2291,10 @@ fn validate_historical_resolve_saga_terminal_batch(
         .expect("caller checked completion count");
     let resolve_node = certified_resolve_saga_terminal_node(runtime_spec)?;
     let pre_resolution_projection =
-        store::ProjectionSnapshot::rebuild_from_run_stream(pre_resolution_stream)?;
+        store::ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
+            pre_resolution_stream,
+            artifact_bytes,
+        )?;
     let outcome =
         saga_terminal_completion_outcome(runtime_spec, run_id, &pre_resolution_projection)?;
     if completion_payload.run_id != *run_id

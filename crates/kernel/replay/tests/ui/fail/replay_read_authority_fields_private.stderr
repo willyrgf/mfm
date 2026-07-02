@@ -16,4 +16,4 @@ error: cannot construct `ReplayReadAuthority` with struct literal syntax due to 
 12 |         artifact_evidence: Vec::new(),
    |         ----------------------------- private field
    |
-   = note: ...and other private field `artifact_bytes` that was not provided
+   = note: ...and other private fields `artifact_bytes` and `fact_query_receipt_trust_root` that were not provided
