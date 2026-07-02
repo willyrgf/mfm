@@ -149,6 +149,10 @@ CertifiedTransitionContext<C>
 `C` is canonical, hash-defining domain context. A context is semantic execution identity, not
 process-local routing.
 
+Context bytes are certified typed data. The context descriptor includes the semantic type identity,
+schema/version identity, and canonicalization identity used to hash the context. Hashed context data
+follows the repository-wide canonical JSON rule and must not contain floats.
+
 Examples:
 
 - EVM chain/network context.
@@ -160,8 +164,13 @@ Examples:
 A context has a stable digest:
 
 ```text
-ContextRef = digest(canonical C)
+ContextRef =
+  digest(domain_separator, context_descriptor_id, schema_version, canonicalizer_id, canonical C)
 ```
+
+`ContextRef` is a content address, not a standalone capability. It becomes authority only through a
+certified spec context table and certified cell/input constraints that bind a node, resource, or
+output to that context reference.
 
 Context-bound resources carry or are certified with that context reference:
 
@@ -202,19 +211,45 @@ State(config_with_context, resource_with_context)
 Good shape:
 
 ```text
-State(resource_bound_to_context, action_without_context)
+State(certified_context<C>, resource_bound_to_context, action_without_context)
 ```
+
+The certified context is materialized by runtime from the certified spec. It is not resolved from a
+mutable runtime config and is not separately authored by the caller. The resource's `context_ref`,
+the node's required context, and the materialized context value must all identify the same certified
+context before the runner is invoked.
+
+The intended API shape is a separate certified invocation binding, not another user config field or
+input cell:
+
+```text
+StateSpec
+  Context = C | NoContext
+  Config = action_without_context
+  Input = context_bound_resource | unit
+
+CertifiedStateInvocation
+  context: CertifiedContext<C>
+  config: StateSpec::Config
+  input: StateSpec::Input
+```
+
+Existing states that do not need semantic context use `NoContext`. Context-bound lifecycle states
+declare `Context = EvmContractContext`. Program authors bind a node to a context handle/ref during
+planning; certification records that binding in the spec context table and node constraints. Runtime
+then passes the certified context through the runner invocation envelope. The context is not loaded
+from mutable config and is not materialized by deserializing a public output field.
 
 For root transitions that create the first resource, pass the context explicitly:
 
 ```text
-RootTransition(context, action) -> resource_bound_to_context
+RootTransition(certified_context<C>, action) -> resource_bound_to_context
 ```
 
 For external starts, import first:
 
 ```text
-Import(context, external_claim) -> resource_bound_to_context
+Import(certified_context<C>, external_claim) -> resource_bound_to_context
 ```
 
 Then continue with ordinary transitions.
@@ -247,9 +282,31 @@ observations.
 `chain_fingerprint` is optional but recommended where chain id alone is too weak. Examples include
 genesis hash or another non-secret identity value available through the relevant capability.
 
+`finality_or_observation_policy`, when present, is shared observation identity for reads and replay:
+for example a block tag, anchoring rule, or chain-observation stability rule that all phases must
+share. It must not be a second transaction-finality authority. Mutating transaction finality,
+receipt confirmation, and side-effect terminal policy belong in the action `receipt_policy` and the
+certified side-effect contract. If one policy affects both shared observation and transaction
+completion, operation lowering must author it once and derive the certified context/action material
+from that single source.
+
 `contract_profile` identifies the artifact, ABI/interface, bytecode class, or expected code shape
-used by deploy, configure, and validate phases. The exact fields can evolve by domain need, but the
-profile belongs to context when all lifecycle phases depend on the same contract identity.
+used by deploy, configure, and validate phases. For the EVM contract lifecycle, it is always present
+in `EvmContractContext`. A minimal profile can contain only a profile id and declared interface
+identity, but shared artifact/interface identity must not be repeated independently across phase
+actions.
+
+Profile fields should be digest-oriented and non-secret. Expected examples:
+
+- profile id or lifecycle kind
+- artifact digest or artifact ref, when deploy/configure/validate share one artifact
+- ABI/interface digest, when read/write selectors are part of the lifecycle contract
+- creation bytecode digest, deployed code hash, or code-shape policy when enforced
+- selector/event compatibility policy for configure and validate assertions
+
+Action-local fields remain the concrete work for that phase: constructor args, call values,
+transaction policy, receipt policy, and assertion lists. Artifact bytes and ABI material should be
+referenced by digest or typed artifact ref rather than copied into multiple actions.
 
 ### Action Types
 
@@ -294,9 +351,11 @@ ContractInstance<Configured>
   context_ref
   address
   configured_from
-  configure_provenance
-  configure_evidence
+  configuration_claim
+  configure_or_import_provenance
+  configure_or_import_evidence
   configured_block_number
+  asserted_configuration_snapshot
 ```
 
 The deployed/configured values should not duplicate `network_id` and `expected_chain_id` as
@@ -307,6 +366,50 @@ the certified context. The context, not copied typestate fields, is authority.
 the configured contract identity and provenance under the same context. If detailed deploy evidence
 is useful for audit output, it should be referenced or joined through lineage/evidence, not copied as
 a second source of truth.
+
+`configuration_claim` describes why the instance is considered configured. For a normal configure
+transition it points at the configure action, calls, confirmations, and recorded evidence. For an
+imported configured instance it points at the import claim and the admission evidence. It must be
+honest: an adopted external address cannot claim MFM configuration unless the import source proves
+that provenance.
+
+The claim should be a closed enum so renderers and replay cannot infer meaning from loose labels:
+
+```text
+ConfigurationClaim
+  MfmConfigured
+    configure_node
+    configure_action_digest
+    call_evidence_refs
+    confirmation_evidence_refs
+
+  ImportedMfmConfigured
+    source_run_id
+    source_spec_hash
+    source_cell_or_output_id
+    source_value_digest
+    source_context_ref
+
+  ExternalObservedConfigured
+    provenance_label
+    evidence_policy_digest
+    assertion_evidence_refs
+
+  ExternalClaimedConfigured
+    provenance_label
+    evidence_policy_digest
+```
+
+`ExternalClaimedConfigured` is allowed only when certified import policy permits an unverified
+configured claim. Validation and public output must not synthesize successful configure call,
+configuration read, or configuration event results for that variant. If the public schema requires
+configuration result arrays, they should be empty and accompanied by provenance/status that marks
+the claim as externally adopted and unverified.
+
+`asserted_configuration_snapshot` is optional typed evidence for configured-state semantics, such as
+read assertion results or event assertion anchors. If an externally adopted configured instance does
+not require those checks, public output must render the configuration evidence as imported or
+unverified rather than as successful MFM configure results.
 
 ### Transitions
 
@@ -320,7 +423,7 @@ Configure(ContractInstance<Deployed>, ConfigureAction)
   -> ContractInstance<Configured>
 
 Validate(ContractInstance<Configured>, ValidateAction)
-  -> ValidationReport
+  -> ValidationReport(context_ref)
 ```
 
 Configure-only:
@@ -340,7 +443,7 @@ ImportConfigured(EvmContractContext, ImportConfiguredSpec)
   -> ContractInstance<Configured>
 
 Validate(ContractInstance<Configured>, ValidateAction)
-  -> ValidationReport
+  -> ValidationReport(context_ref)
 ```
 
 There is no public semantic operation shaped as:
@@ -352,6 +455,44 @@ ValidateAction + ConfiguredContract
 
 The import node produces the same stage handle that deploy/configure would have produced. Downstream
 phases consume only stage handles.
+
+`ValidationReport` is a context-bound terminal typed value, not a lifecycle stage producer. It should
+carry `context_ref`, the configured instance identity, assertion result evidence, and recorded
+capability evidence refs. Public renderers can turn it into JSON, but rendered public JSON is not
+authority for later imports or replay.
+
+### Public Entry Shapes
+
+The public EVM lifecycle inputs should have one context object and phase-local action objects.
+
+Full lifecycle:
+
+```text
+context: EvmContractContext
+deploy: DeployAction
+configure: ConfigureAction
+validate: ValidateAction
+```
+
+Configure-only:
+
+```text
+context: EvmContractContext
+import_deployed: ImportDeployedSpec
+configure: ConfigureAction
+```
+
+Validate-only:
+
+```text
+context: EvmContractContext
+import_configured: ImportConfiguredSpec
+validate: ValidateAction
+```
+
+Old public shapes that pair `{ config, deployed }` or `{ config, configured }` are rejected. The
+cutover should use new entry-point schema names or versions so callers cannot accidentally send an
+old shape that is interpreted as a weak import.
 
 ## Import Semantics
 
@@ -369,6 +510,7 @@ ImportFromMfmRun
   source_value_digest
   source_context_ref
   required_stage
+  accepted_context_policy
 ```
 
 Admission verifies the source run, certified spec, stream evidence, value digest, stage, and context
@@ -377,25 +519,81 @@ certified context or for a context explicitly accepted by the import policy.
 
 This import proves MFM provenance.
 
+The source must be verified through authoritative typed evidence, not rendered public JSON. Valid
+source authority is either:
+
+- a `CommittedRunStream` plus `VerifiedRunArtifactStore` from a trusted MFM store boundary
+- an explicitly certified export/import bundle whose certificate and retained artifacts verify
+  against the compiled registry
+
+`source_cell_or_output_id` means a typed cell or typed terminal output binding in that authority
+surface. It does not mean a CLI/REST JSON field, cached public-output document, or projection row.
+
+The import state records an import evidence bundle with enough retained proof material for replay:
+
+```text
+ImportFromMfmRunEvidence
+  source_spec_hash
+  source_spec_certificate_or_export_certificate_ref
+  source_run_stream_ref_or_export_bundle_ref
+  source_cell_or_output_id
+  source_cell_schema_id
+  source_cell_semantic_type_id
+  source_producer_descriptor_id
+  source_stage
+  source_context_ref
+  source_context_descriptor_id
+  source_value_digest
+  source_value_artifact_ref_or_inline_canonical_value
+  source_terminal_cell_or_output_event_ref
+  import_policy_digest
+```
+
+Replay verifies the imported resource from that recorded evidence plus the certified import config.
+It does not trust identifiers alone, and it does not query a live store, current runtime config, or
+current public-output renderer.
+
+`accepted_context_policy` is hash-defining certified config. The default policy is exact context
+ref equality. Any cross-context adoption must name explicit accepted context refs or a typed,
+certified compatibility relation that replay can verify from stored evidence only.
+
 ### Adopt External Address
 
 ```text
 AdoptExternalAddress
   address
   provenance_label
-  optional_code_hash
+  evidence_policy
+  optional_expected_code_hash
   optional_block_anchor
   optional_initial_read_assertions
   optional_initial_event_assertions
 ```
 
 This import does not prove historical deployment origin. It declares that MFM is adopting an
-external address under a certified context, optionally after live/read verification. The public
-output must be honest about that provenance.
+external address under a certified context, with verification requirements set by certified
+`evidence_policy`. The public output must be honest about that provenance.
+
+`evidence_policy` is hash-defining certified config. It declares which observations are required
+for admission, including chain identity, code existence, code hash, block anchoring, initial reads,
+and initial events. Defaults may be applied only by schema or operation lowering before
+certification, where missing fields are materialized into `evidence_policy`. Runtime, admission, and
+replay must never infer missing policy fields from current defaults.
+
+Code existence and code hash require an EVM code-read capability with replayable evidence, such as:
+
+```text
+EvmCodeReadCapability
+  get_code(address, block_anchor, guard) -> code_bytes_or_hash_evidence
+```
+
+If the current EVM capability surface does not expose code reads, that capability must be added
+before the default external-adoption policy can be implemented.
 
 This import proves only what its evidence proves:
 
 - address syntax and normalization
+- required evidence policy was satisfied
 - observed code hash, if requested
 - observed assertions, if requested
 - observed chain identity through transport/capability evidence
@@ -404,19 +602,26 @@ This import proves only what its evidence proves:
 It does not prove that MFM deployed or configured the contract unless the import source is a verified
 MFM run or another explicitly certified provenance mechanism.
 
+For the lowered default external-adoption policy, MFM should require observed chain identity and code
+existence at the adopted address. Producing a `Configured` stage from external adoption additionally
+requires either configured-state assertion evidence or a certified policy that permits
+`ExternalClaimedConfigured`. Public output only renders that typed authority; it is not semantic
+permission.
+
 ## Certified Spec Requirements
 
 The certified spec must make context binding hash-defining.
 
 At minimum, certified lifecycle specs need to represent:
 
-- context definitions and context refs
-- which nodes execute under which context
-- which cells/resources are bound to which context
-- which states are authorized producers for each stage
-- which imports are authorized producers for externally admitted stages
+- a context table mapping `ContextRef` to certified context descriptors and canonical context bytes
+- node required-context constraints
+- output/cell context constraints, including resource stage and semantic resource kind
 - input binding trees from context-bound resources to consuming states
+- producer/stage constraints for each context-bound resource type
+- import policy material for externally admitted stages
 - lineage from import/deploy/configure outputs to later configure/validate inputs
+- side-effect resource lane derivation inputs when the state crosses an external mutation boundary
 
 The certifier should reject any graph where a transition consumes a context-bound resource under a
 different context than the transition requires.
@@ -429,6 +634,20 @@ The certifier should also reject unapproved producers. For EVM contract lifecycl
 
 This avoids a weak model where any seed with the right schema can masquerade as a lifecycle stage.
 
+A `context_ref` field inside a resource payload is not enough. The certified output cell descriptor
+must say that the cell is bound to a specific context ref and stage. Runtime must validate committed
+state outputs against that descriptor before it admits the output as a typed cell value. A consumer
+must bind inputs through the certified input tree, so a matching payload copied from elsewhere cannot
+be substituted for the certified producer output.
+
+For a state invocation, runtime materializes the certified context value from the spec and provides
+it to the runner together with the typed input values. Adapters and states must not resolve
+`context_ref` through runtime config, public output, projection tables, or live routing registries.
+
+The store remains domain-agnostic append authority. It should not infer EVM context semantics, but
+it must only admit commits prepared by runtime/app authority that has already validated output
+context constraints, artifact evidence, and side-effect ledger transitions.
+
 ## Layer Responsibilities
 
 ### Domain Model
@@ -440,6 +659,7 @@ Owns:
 - action types
 - context-bound contract instance types
 - import specs
+- evidence policy and configuration claim enums
 - provenance and evidence refs
 
 Does not own:
@@ -454,6 +674,7 @@ Does not own:
 Owns:
 
 - lifecycle graph topology
+- certified context declarations
 - full lifecycle entry points
 - configure-only import-plus-configure topology
 - validate-only import-plus-validate topology
@@ -471,12 +692,13 @@ Does not own:
 Owns:
 
 - deterministic deploy/configure/validate/import semantics
-- intent construction under a certified context
+- intent construction from certified context plus typed inputs
 - output projection from typed evidence
 - replay-checkable request/response contracts
 
-States should receive an already-certified context or a context-bound resource. They should not
-receive a phase config network and a typestate network that can disagree.
+States should receive an already-certified context materialized by runtime and, for non-root
+transitions, a context-bound resource whose certified input constraint points at the same context.
+They should not receive a phase config network and a typestate network that can disagree.
 
 ### Adapter Layer
 
@@ -487,8 +709,12 @@ Owns:
 - side-effect request/receipt/confirmation evidence
 - validation read evidence
 
-Adapters route by certified context. They use addresses from context-bound resources. They do not
-combine a network from phase config with an address from an independent typestate seed.
+Adapters build capability requests from certified context and context-bound resources. The certified
+context supplies semantic network identity and guard expectations. Certified capability/source policy
+supplies any outcome-affecting route constraints. Endpoints, credentials, and fallback mechanics
+remain runtime-local transport data. Adapters must not treat a `context_ref` as a process-local route
+id and must not combine a network from phase config with an address from an independent typestate
+seed.
 
 ### Transport Layer
 
@@ -510,6 +736,7 @@ Runtime owns:
 - materializing certified contexts and context-bound inputs
 - enforcing certified producer/input/context requirements before runner invocation
 - validating committed outputs against certified cell/context expectations
+- preparing import evidence and side-effect evidence under certified node context
 
 Store owns:
 
@@ -522,7 +749,9 @@ Replay owns:
 
 - reconstructing expected requests from certified context and recorded inputs
 - verifying facts, receipts, confirmations, imports, and outputs from recorded evidence only
-- never consulting live routing or mutable environment config
+- verifying source-run imports from recorded import evidence or certified export bundles
+- never consulting live routing, mutable environment config, current source registries, or public
+  output renderers
 
 ## Deletions Required
 
@@ -541,6 +770,7 @@ Delete:
 - repeated `ensure_network_matches_deployed`
 - repeated `ensure_network_matches_configured`
 - adapter runtime lookup by loose `config.network().network_id()`
+- imports from rendered public JSON, projection rows, or raw typestate payloads
 - any language implying an EVM transport guard proves typestate/context membership
 
 Replace with:
@@ -550,7 +780,9 @@ Replace with:
 - context-bound contract instances
 - explicit import states
 - certified producer/context constraints
+- certified context materialization for state and adapter execution
 - runtime/admission verification of context-bound inputs and imported material
+- replay-verifiable import evidence bundles
 
 ## Why Not Rust Phantom Network Types
 
@@ -607,21 +839,26 @@ then:
 
 This keeps audit output useful without making copied fields a second authority surface.
 
+Rendered output may include both the `context_ref` and selected context fields for auditability.
+Those rendered fields are not import authority. A later run that wants to continue from a previous
+run must import from typed run evidence or a certified export bundle, not from copied public JSON.
+
 ## Resource Lane Implications
 
-Side-effect resource lanes should be keyed by certified context, not by bare chain id or free-form
-network string.
+Side-effect resource lanes should be derived from the certified side-effect contract, not by bare
+chain id or free-form network string.
 
 For EVM signer nonce mutation lanes, the key should include:
 
 ```text
-context_ref
+evm_network_context_ref
 expected_signer_address
 ```
 
-or a deliberate narrower/wider lane definition if the architecture chooses one. The important point
-is that the lane key should derive from certified execution context rather than repeated,
-call-site-local strings.
+The network context ref, not the full contract context ref, is the default nonce lane partition. Two
+different contract lifecycles on the same chain and signer still share the same external account
+nonce. A full `EvmContractContext` may appear in evidence, but using it as the only nonce lane key
+would allow unsafe concurrency across contracts unless a stronger nonce manager is specified.
 
 ## Expected Benefits
 
@@ -634,21 +871,21 @@ call-site-local strings.
 - Replay can verify context and provenance from certified spec plus recorded evidence.
 - The same pattern can be reused by other context-scoped domains.
 
-## Risks And Open Questions
+## Risks And Resolved Decisions
 
 ### Import Evidence Strength
 
 Address-only adoption is weak. It may be acceptable for some operational workflows, but public
 output must state that it is adoption, not proof of deployment origin.
 
-Open question: what minimum evidence should MFM require for `AdoptExternalAddress` by default?
-
-Possible answer:
+Default policy:
 
 - require observed chain identity
 - require code exists at address
-- optionally require code hash when available
-- optionally require configured read assertions before producing `Configured`
+- require code hash when the import config declares one
+- require block anchor when the import config declares one
+- require configured read/event assertions before producing `Configured` unless certified import
+  policy permits `ExternalClaimedConfigured`
 
 ### Context Granularity
 
@@ -656,34 +893,39 @@ Possible answer:
 `EvmContractContext`, because artifact/interface identity often scopes deploy, configure, and
 validate semantics too.
 
-Open question: should `EvmContractContext` always include contract profile, or should profile remain
-action-local for deploy-only workflows?
-
-The default should be conservative: if multiple phases depend on the same artifact/interface
-identity, put it in context.
+Decision: EVM contract lifecycle uses `EvmContractContext` with a `contract_profile`. A minimal
+profile is allowed for simple deploy-only workflows, but when multiple phases depend on the same
+artifact/interface identity, that identity belongs to context and is referenced by action-local
+work.
 
 ### Kernel Support
 
 This RFC uses generic terms like `CertifiedTransitionContext` and `ContextBoundResource`.
 
-Open question: should these be first-class kernel/program primitives or domain-level conventions
-validated by state descriptors and certifier extensions?
+Decision: implement minimal kernel/program support for context refs, certified context tables,
+context-bound cell constraints, input context constraints, and producer/stage constraints. Domain
+crates define the concrete context and resource types. A domain-only convention is not sufficient
+for this RFC, because it would leave the core invariant outside the certified runtime contract.
 
-The preferred direction is a minimal kernel primitive for context refs and context-bound cell
-constraints, with domain crates defining the concrete context/resource types.
+Until those certified constraints exist, the EVM lifecycle cutover should not land behind local
+helper checks that imitate the new model.
 
 ## Cutover Plan
 
 This is not a compatibility migration.
 
 1. Add the context-bound model and certified context constraints.
-2. Replace EVM contract lifecycle configs with context plus action configs.
-3. Replace lifecycle typestates with context-bound contract instances.
-4. Replace standalone configure/validate with import-based entry points.
-5. Update adapters to route from certified context.
-6. Update replay to recompute requests from certified context and context-bound inputs.
-7. Delete old config/typestate pair entry points and old network matching helpers.
-8. Update CLI/REST/docs/tests to expose only the new shapes.
+2. Add EVM context, action, resource, import, report, and evidence model types.
+3. Add the EVM code-read capability and replay evidence needed by external adoption.
+4. Replace EVM contract lifecycle configs with context plus action configs.
+5. Replace lifecycle typestates with context-bound contract instances.
+6. Replace standalone configure/validate with import-based entry points.
+7. Update adapters to build requests from certified context and context-bound inputs.
+8. Update prepared invocation, fact, receipt, confirmation, and validation evidence to include the
+   relevant context refs and stage identities.
+9. Update replay to recompute requests from certified context and verify context-bound evidence.
+10. Delete old config/typestate pair entry points and old network matching helpers.
+11. Update CLI/REST/docs/tests to expose only the new shapes and reject the old shapes.
 
 Old persisted specs and old public JSON contracts are not preserved by this RFC. If old behavior is
 needed for analysis, recover it from git history rather than carrying it forward in production code.
@@ -700,12 +942,19 @@ Required tests:
   different context
 - import-from-MFM-run accepts matching source context and rejects mismatched source context
 - external address adoption records honest provenance and does not claim MFM deployment
+- external address adoption records and replays code-existence/code-hash evidence according to
+  certified evidence policy
 - adapter route selection uses certified context, not phase action config
 - transport guard still rejects observed chain mismatch
 - replay verifies context refs and fails closed on mismatched import, fact, receipt, or output
   evidence
 - public output renders network data from context, not copied typestate fields
-- resource lane keys include certified context identity
+- public output is rejected as import authority
+- old `{ config, deployed }` and `{ config, configured }` public input shapes are rejected
+- prepared invocation, receipt, confirmation, and validation evidence are rejected when their
+  context refs do not match the certified node context
+- EVM nonce resource lane keys use certified network context plus signer, not full contract context
+  alone
 
 ## Decision
 
@@ -727,4 +976,3 @@ It should be:
 ```text
 the certified graph cannot express a transition that consumes a resource outside its context
 ```
-
