@@ -16,6 +16,7 @@ thiserror = { workspace = true }
 axum = "0.7"
 tower-http = { version = "0.6", features = ["request-id", "trace"] }
 http = "1"
+url = "2"
 
 mfm-app = { path = "../../crates/app" }
 mfm-authored-config = { path = "../../crates/authored-config" }
@@ -35,6 +36,8 @@ mfm-store = { path = "../../crates/kernel/store" }
 parity-tests = []
 
 [dev-dependencies]
+mfm-app = { path = "../../crates/app", features = ["test-support"] }
+mfm-facts = { path = "../../crates/kernel/facts" }
 mfm-store = { path = "../../crates/kernel/store", features = ["test-support"] }
 tower = "0.5"
 

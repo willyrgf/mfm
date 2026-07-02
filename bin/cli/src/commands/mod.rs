@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::ffi::OsStr;
 
+/// Public fact query commands.
+mod facts;
 /// Keystore-oriented CLI commands.
 mod keystore;
 /// Shared command result types.
@@ -109,6 +111,12 @@ pub(crate) struct Cli {
 /// Top-level CLI command tree.
 #[derive(Subcommand)]
 enum Commands {
+    /// Public fact discovery and query operations
+    Facts {
+        /// Nested facts command to execute.
+        #[command(subcommand)]
+        command: facts::FactsCommand,
+    },
     /// Keystore management operations
     Keystore {
         /// Nested keystore command to execute.
@@ -129,6 +137,7 @@ impl Cli {
         let ctx = CommandContext::new(self.output_format);
 
         match &self.command {
+            Commands::Facts { command } => command.execute(&ctx).await,
             Commands::Keystore { command } => command.execute(&ctx).await,
             Commands::Run { command } => command.execute(&ctx).await,
         }

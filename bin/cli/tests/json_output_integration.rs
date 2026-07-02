@@ -409,6 +409,109 @@ fn test_run_start_requires_store_trust_scope_before_config_decode() {
 }
 
 #[test]
+fn test_facts_kinds_json_reaches_evidence_only_store_connection() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .env_remove("DATABASE_URL")
+        .args(["--output-format", "json", "facts", "kinds"])
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let parsed = verify_error_response(&stderr);
+    assert_eq!(parsed.error.code, "MissingDatabaseUrl");
+}
+
+#[test]
+fn test_facts_query_json_parses_public_flags_before_store_connection() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .env_remove("DATABASE_URL")
+        .args([
+            "--output-format",
+            "json",
+            "facts",
+            "query",
+            "--kind",
+            "wallet.balance",
+            "--shape",
+            "mfm.wallet.balance.v1",
+            "--order",
+            "result.amount_sat.desc",
+            "--subject",
+            "asset_ref=btc",
+            "--result",
+            "amount_sat.gt=1000",
+            "--where",
+            "metadata.observed_at.lte=timestamp:2026-07-02T00:00:00Z",
+            "--field",
+            "subject.asset_ref",
+            "--field",
+            "result.amount_sat",
+            "--limit",
+            "20",
+        ])
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let parsed = verify_error_response(&stderr);
+    assert_eq!(parsed.error.code, "MissingDatabaseUrl");
+}
+
+#[test]
+fn test_facts_show_rejects_invalid_public_ref_before_store_connection() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .env_remove("DATABASE_URL")
+        .args([
+            "--output-format",
+            "json",
+            "facts",
+            "show",
+            "not-a-public-ref",
+        ])
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let parsed = verify_error_response(&stderr);
+    assert_eq!(parsed.error.code, "PublicFactRefInvalid");
+}
+
+#[test]
+fn test_facts_query_requires_return_fields() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .env_remove("DATABASE_URL")
+        .args([
+            "--output-format",
+            "json",
+            "facts",
+            "query",
+            "--kind",
+            "wallet.balance",
+            "--order",
+            "result.amount_sat.desc",
+        ])
+        .output()
+        .expect("Failed to execute command");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let parsed = verify_error_response(&stderr);
+    assert_eq!(parsed.error.code, "CliParseError");
+    assert!(parsed.error.message.contains("--field"));
+}
+
+#[test]
 fn test_run_replay_requires_run_store_after_valid_run_id() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd

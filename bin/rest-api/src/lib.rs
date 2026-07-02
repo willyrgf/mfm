@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::Json;
@@ -29,9 +29,9 @@ use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
     AppError, DistinctRunKey, EntryPointRunLaunchInput, ErrorClass, ManualResolutionDecision,
-    ManualResolutionRecordRequest, ProductionRunStore, PublicOpName, PublicOutputResponse,
-    PublicSafeMessage, RunLaunchOutcomeStatus, RunReadServices, RunResponse, RunServices,
-    RunStreamResponse,
+    ManualResolutionRecordRequest, ProductionRunStore, PublicFactPredicate, PublicFactQueryRequest,
+    PublicFactRefId, PublicFactScalarValue, PublicOpName, PublicOutputResponse, PublicSafeMessage,
+    RunLaunchOutcomeStatus, RunReadServices, RunResponse, RunServices, RunStreamResponse,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use mfm_canonical::PlainCanonicalJsonBytes;
@@ -44,6 +44,7 @@ use serde_json::json;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 use tracing::instrument;
+use url::form_urlencoded;
 
 fn ok(data: serde_json::Value) -> serde_json::Value {
     json!({ "status": "success", "data": data })
@@ -269,6 +270,7 @@ where
         + store::ExecutionClaimStore
         + RunObservationStore<Error = <S as RunEventStore>::Error>
         + store::RetainedArtifactReadProvider
+        + mfm_app::PublicFactQueryExecutor
         + Clone
         + Send
         + Sync
@@ -281,6 +283,11 @@ where
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/ready", get(ready::<S>))
+        .route("/v1/facts/kinds", get(facts_kinds::<S>))
+        .route("/v1/facts/kinds/:kind", get(facts_describe_kind::<S>))
+        .route("/v1/facts/ref/:public_ref", get(facts_ref::<S>))
+        .route("/v1/facts/:kind/latest", get(facts_latest::<S>))
+        .route("/v1/facts/:kind", get(facts_query::<S>))
         .route("/v1/runs", get(runs_list::<S>))
         .route("/v1/runs/start", post(runs_start::<S>))
         .route("/v1/runs/:run_id/resume", post(runs_resume::<S>))
@@ -444,6 +451,17 @@ struct RunListQuery {
     wait_ms: Option<u64>,
 }
 
+#[derive(Debug, Default)]
+struct FactQueryParams {
+    shape: Option<String>,
+    order: Option<String>,
+    subject: Vec<String>,
+    result: Vec<String>,
+    where_predicates: Vec<String>,
+    field: Vec<String>,
+    limit: Option<u64>,
+}
+
 #[derive(Debug, Serialize)]
 struct RunObservationPageResponse {
     next_cursor: String,
@@ -487,6 +505,269 @@ impl From<store::RunObservation> for RunObservationResponse {
             change_id: row.change_id,
         }
     }
+}
+
+#[instrument(level = "debug", skip(state))]
+async fn facts_kinds<S>(
+    State(state): State<RouterState<S>>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: RunCommandStore,
+{
+    json_ok(state.read_services()?.fact_kinds().await?)
+}
+
+#[instrument(level = "debug", skip(state), fields(kind = kind.as_str()))]
+async fn facts_describe_kind<S>(
+    State(state): State<RouterState<S>>,
+    Path(kind): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: RunCommandStore,
+{
+    json_ok(state.read_services()?.describe_fact_kind(&kind).await?)
+}
+
+#[instrument(level = "debug", skip(state, query), fields(kind = kind.as_str()))]
+async fn facts_query<S>(
+    State(state): State<RouterState<S>>,
+    Path(kind): Path<String>,
+    query: RawQuery,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: RunCommandStore + mfm_app::PublicFactQueryExecutor,
+{
+    let request = public_fact_query_request(kind, query, None)?;
+    json_ok(state.read_services()?.query_public_facts(request).await?)
+}
+
+#[instrument(level = "debug", skip(state, query), fields(kind = kind.as_str()))]
+async fn facts_latest<S>(
+    State(state): State<RouterState<S>>,
+    Path(kind): Path<String>,
+    query: RawQuery,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: RunCommandStore + mfm_app::PublicFactQueryExecutor,
+{
+    let request = public_fact_query_request(kind, query, Some(1))?;
+    json_ok(state.read_services()?.query_public_facts(request).await?)
+}
+
+#[instrument(level = "debug", skip(state), fields(public_ref = public_ref.as_str()))]
+async fn facts_ref<S>(
+    State(state): State<RouterState<S>>,
+    Path(public_ref): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: RunCommandStore,
+{
+    let public_ref = PublicFactRefId::new(public_ref)?;
+    json_ok(
+        state
+            .read_services()?
+            .resolve_public_fact_ref(&public_ref)
+            .await?,
+    )
+}
+
+fn public_fact_query_request(
+    kind: String,
+    query: RawQuery,
+    forced_limit: Option<u64>,
+) -> Result<PublicFactQueryRequest, ApiError> {
+    let query = parse_fact_query_params(query.0.as_deref())?;
+    let ordering = query.order.ok_or_else(|| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "FactOrderingMissing",
+            "Fact queries must provide an explicit order parameter",
+        )
+    })?;
+    if query.field.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "FactReturnFieldMissing",
+            "Fact queries must request at least one return field",
+        ));
+    }
+    let limit = forced_limit.or(query.limit);
+    if limit == Some(0) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "FactQueryLimitInvalid",
+            "Fact query limit must be greater than zero",
+        ));
+    }
+    Ok(PublicFactQueryRequest {
+        fact_kind: kind,
+        shape: query.shape,
+        predicates: parse_fact_predicates(
+            query.subject.iter(),
+            query.result.iter(),
+            query.where_predicates.iter(),
+        )?,
+        return_fields: query.field,
+        ordering,
+        limit,
+    })
+}
+
+fn parse_fact_query_params(raw: Option<&str>) -> Result<FactQueryParams, ApiError> {
+    let mut params = FactQueryParams::default();
+    let Some(raw) = raw else {
+        return Ok(params);
+    };
+    for (key, value) in form_urlencoded::parse(raw.as_bytes()) {
+        match key.as_ref() {
+            "shape" => params.shape = Some(value.into_owned()),
+            "order" => params.order = Some(value.into_owned()),
+            "subject" => params.subject.push(value.into_owned()),
+            "result" => params.result.push(value.into_owned()),
+            "where" => params.where_predicates.push(value.into_owned()),
+            "field" | "fields" => params.field.push(value.into_owned()),
+            "limit" => {
+                params.limit = Some(value.parse::<u64>().map_err(|_| {
+                    ApiError::new(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidQuery",
+                        "Failed to parse fact query parameters",
+                    )
+                })?);
+            }
+            _ => {
+                return Err(ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidQuery",
+                    "Failed to parse fact query parameters",
+                ));
+            }
+        }
+    }
+    Ok(params)
+}
+
+fn parse_fact_predicates<'a>(
+    subjects: impl Iterator<Item = &'a String>,
+    results: impl Iterator<Item = &'a String>,
+    where_predicates: impl Iterator<Item = &'a String>,
+) -> Result<Vec<PublicFactPredicate>, ApiError> {
+    let mut predicates = Vec::new();
+    for value in subjects {
+        predicates.push(parse_prefixed_fact_predicate("subject", value)?);
+    }
+    for value in results {
+        predicates.push(parse_prefixed_fact_predicate("result", value)?);
+    }
+    for value in where_predicates {
+        predicates.push(parse_fact_predicate(value)?);
+    }
+    Ok(predicates)
+}
+
+fn parse_prefixed_fact_predicate(
+    prefix: &'static str,
+    value: &str,
+) -> Result<PublicFactPredicate, ApiError> {
+    let mut predicate = parse_fact_predicate(value)?;
+    if !predicate.field_id.starts_with("subject.") && !predicate.field_id.starts_with("result.") {
+        predicate.field_id = format!("{prefix}.{}", predicate.field_id);
+    }
+    Ok(predicate)
+}
+
+fn parse_fact_predicate(value: &str) -> Result<PublicFactPredicate, ApiError> {
+    let (left, raw_value) = value.split_once('=').ok_or_else(invalid_fact_predicate)?;
+    if left.is_empty() {
+        return Err(invalid_fact_predicate());
+    }
+    let (field_id, operator) = parse_fact_field_and_operator(left)?;
+    Ok(PublicFactPredicate {
+        field_id,
+        operator,
+        value: parse_fact_scalar_value(raw_value)?,
+    })
+}
+
+fn parse_fact_field_and_operator(value: &str) -> Result<(String, String), ApiError> {
+    let operators = [
+        (".lte", "less_than_or_equal"),
+        (".gte", "greater_than_or_equal"),
+        (".eq", "equal"),
+        (".lt", "less_than"),
+        (".gt", "greater_than"),
+    ];
+    for (suffix, operator) in operators {
+        if let Some(field_id) = value.strip_suffix(suffix) {
+            if field_id.is_empty() {
+                return Err(invalid_fact_predicate());
+            }
+            return Ok((field_id.to_owned(), operator.to_owned()));
+        }
+    }
+    Ok((value.to_owned(), "equal".to_owned()))
+}
+
+fn parse_fact_scalar_value(value: &str) -> Result<PublicFactScalarValue, ApiError> {
+    if let Some((type_name, typed_value)) = value.split_once(':') {
+        return match type_name {
+            "string" => Ok(PublicFactScalarValue::String(typed_value.to_owned())),
+            "bool" => parse_bool_fact_scalar(typed_value),
+            "i64" => parse_i64_fact_scalar(typed_value),
+            "u64" => parse_u64_fact_scalar(typed_value),
+            "timestamp" => Ok(PublicFactScalarValue::Timestamp(typed_value.to_owned())),
+            "decimal" => Ok(PublicFactScalarValue::DecimalString(typed_value.to_owned())),
+            "digest" => Ok(PublicFactScalarValue::Digest(typed_value.to_owned())),
+            _ => Ok(infer_fact_scalar_value(value)),
+        };
+    }
+    Ok(infer_fact_scalar_value(value))
+}
+
+fn infer_fact_scalar_value(value: &str) -> PublicFactScalarValue {
+    if let Ok(parsed) = value.parse::<bool>() {
+        return PublicFactScalarValue::Boolean(parsed);
+    }
+    if value.starts_with('-') {
+        if let Ok(parsed) = value.parse::<i64>() {
+            return PublicFactScalarValue::SignedInteger(parsed);
+        }
+    } else if let Ok(parsed) = value.parse::<u64>() {
+        return PublicFactScalarValue::UnsignedInteger(parsed);
+    }
+    if value.contains('.') && value.chars().all(|ch| ch.is_ascii_digit() || ch == '.') {
+        return PublicFactScalarValue::DecimalString(value.to_owned());
+    }
+    PublicFactScalarValue::String(value.to_owned())
+}
+
+fn parse_bool_fact_scalar(value: &str) -> Result<PublicFactScalarValue, ApiError> {
+    value
+        .parse::<bool>()
+        .map(PublicFactScalarValue::Boolean)
+        .map_err(|_| invalid_fact_predicate())
+}
+
+fn parse_i64_fact_scalar(value: &str) -> Result<PublicFactScalarValue, ApiError> {
+    value
+        .parse::<i64>()
+        .map(PublicFactScalarValue::SignedInteger)
+        .map_err(|_| invalid_fact_predicate())
+}
+
+fn parse_u64_fact_scalar(value: &str) -> Result<PublicFactScalarValue, ApiError> {
+    value
+        .parse::<u64>()
+        .map(PublicFactScalarValue::UnsignedInteger)
+        .map_err(|_| invalid_fact_predicate())
+}
+
+fn invalid_fact_predicate() -> ApiError {
+    ApiError::new(
+        StatusCode::BAD_REQUEST,
+        "FactPredicateInvalid",
+        "Fact predicates must use `field[.operator]=value`",
+    )
 }
 
 fn default_from_seq() -> u64 {
