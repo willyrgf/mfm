@@ -1004,9 +1004,10 @@ async fn run_read_services_load_public_fact_catalog_from_retained_projection_aut
         .fact_index_entries()
         .next()
         .expect("platform fact index entry");
-    let public_ref =
-        public_ref_id(&internal_fact_ref_from_projection(entry).expect("platform internal ref"))
-            .expect("public ref id");
+    let public_ref = public_ref_id(
+        &internal_fact_ref_for_entry(&projection, entry).expect("platform internal ref"),
+    )
+    .expect("public ref id");
     let resolved = services
         .resolve_public_fact_ref(&public_ref)
         .await
@@ -1074,7 +1075,7 @@ async fn run_read_services_public_fact_reads_are_store_scoped_across_runs() {
     let mut public_refs = BTreeSet::new();
     for entry in &platform_entries {
         let public_ref =
-            public_ref_id(&internal_fact_ref_from_projection(entry).expect("internal ref"))
+            public_ref_id(&internal_fact_ref_for_entry(&projection, entry).expect("internal ref"))
                 .expect("public ref");
         let resolved = services
             .resolve_public_fact_ref(&public_ref)
@@ -1093,7 +1094,7 @@ async fn run_read_services_public_fact_reads_are_store_scoped_across_runs() {
         rows: platform_entries
             .iter()
             .map(|entry| AppFactQueryRow {
-                fact_ref: internal_fact_ref_from_projection(entry).expect("internal ref"),
+                fact_ref: internal_fact_ref_for_entry(&projection, entry).expect("internal ref"),
                 returned_fields: returned_fields_for_entry(&projection, entry),
             })
             .collect(),
@@ -1159,9 +1160,10 @@ async fn run_read_services_do_not_disclose_control_facts() {
         .fact_index_entries()
         .next()
         .expect("control fact index entry");
-    let control_ref =
-        public_ref_id(&internal_fact_ref_from_projection(entry).expect("control internal ref"))
-            .expect("control public ref-shaped id");
+    let control_ref = public_ref_id(
+        &internal_fact_ref_for_entry(&projection, entry).expect("control internal ref"),
+    )
+    .expect("control public ref-shaped id");
     let error = services
         .resolve_public_fact_ref(&control_ref)
         .await
@@ -1229,11 +1231,12 @@ async fn public_fact_query_filters_non_public_refs_and_redacts_internal_fields()
         .next()
         .expect("platform fact index entry");
     let platform_ref =
-        internal_fact_ref_from_projection(platform_entry).expect("platform internal ref");
+        internal_fact_ref_for_entry(&projection, platform_entry).expect("platform internal ref");
     let platform_fields = returned_fields_for_entry(&projection, platform_entry);
     let mut control_entry = platform_entry.clone();
     control_entry.audience = mfm_facts::FactAudience::Control;
-    let control_ref = internal_fact_ref_from_projection(&control_entry).expect("control ref");
+    let control_ref =
+        internal_fact_ref_for_entry(&projection, &control_entry).expect("control ref");
     let executor = FakeFactQueryExecutor {
         rows: vec![
             AppFactQueryRow {
@@ -1309,6 +1312,16 @@ fn returned_fields_for_entry(
             .expect("returned field")
         })
         .collect()
+}
+
+fn internal_fact_ref_for_entry(
+    projection: &store::ProjectionSnapshot,
+    entry: &store::FactIndexProjection,
+) -> Result<mfm_facts::InternalFactRef, AppError> {
+    let record = projection
+        .fact_record(&entry.fact_claim_id)
+        .expect("fact record projection");
+    internal_fact_ref_from_projection(entry, record)
 }
 
 #[test]

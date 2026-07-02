@@ -14,8 +14,8 @@ use mfm_btc_capabilities::{
     BtcHeadSelection, BtcNetworkId, BtcSourceIdentity, BtcSourceStatus, RedactedBtcSourceEvidence,
 };
 use mfm_canonical::{sha256_digest_bytes, CanonicalJsonBytes, CanonicalValue};
-use mfm_capabilities::NoCaps;
-use mfm_effects::{Pure, ReadExternal};
+use mfm_capabilities::{CapabilitySpec, ManagedPlatformWriteRole};
+use mfm_effects::{ManagedPlatformWrite, ReadExternal};
 use mfm_fact_capabilities::{FactIndexReadCapability, FactIndexReadRequest, FactIndexReadResponse};
 use mfm_facts::{
     fact_descriptor_hash, CanonicalFactQueryPlan, FactAudience, FactCanonicalScalar,
@@ -26,8 +26,8 @@ use mfm_facts::{
 use mfm_ids::{AdapterKind, AdapterVersion, ContentDigest};
 use mfm_ids::{DigestAlgorithm, StateKind, StateVersion};
 use mfm_program::{
-    fact_descriptor_ref, AdapterBindingSpec, FactDescriptorRef, MfmFactType, PureState, ReadState,
-    StateError, StateResult, StateSpec, ValidatedConfig,
+    fact_descriptor_ref, AdapterBindingSpec, FactDescriptorRef, ManagedWriteState, MfmFactType,
+    ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
 };
 use mfm_program_derive::{MfmConfig, MfmFactType, MfmValue, StateInput};
 use serde::{Deserialize, Serialize};
@@ -101,6 +101,32 @@ fn state_version(name: &'static str) -> mfm_program::Result<StateVersion> {
 
 fn adapter_required_error(state_name: &'static str) -> StateError {
     StateError::Message(format!("{state_name} requires a Bitcoin adapter runner"))
+}
+
+/// Managed platform-write capability for recording Bitcoin fact claims.
+pub struct BtcFactRecordCapability;
+
+impl CapabilitySpec for BtcFactRecordCapability {
+    type Role = ManagedPlatformWriteRole;
+
+    fn kind() -> mfm_capabilities::Result<mfm_ids::CapabilityKind> {
+        mfm_ids::CapabilityKind::new(
+            NAMESPACE,
+            "fact.record",
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(b"mfm.bitcoin.capability:fact.record"),
+        )
+        .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+    }
+
+    fn version() -> mfm_capabilities::Result<mfm_ids::CapabilityVersion> {
+        mfm_ids::CapabilityVersion::new("mfm.bitcoin.fact.record.v1")
+            .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "fact.record"
+    }
 }
 
 /// Redaction-safe state error for Bitcoin fact normalization contracts.
@@ -862,8 +888,8 @@ impl StateSpec for RecordBtcChainHeadFactState {
     type Config = RecordBtcChainHeadFactConfig;
     type Input = RecordBtcChainHeadFactInput;
     type Output = BtcChainHeadFact;
-    type Effect = Pure;
-    type Caps = NoCaps;
+    type Effect = ManagedPlatformWrite;
+    type Caps = (BtcFactRecordCapability,);
 
     fn kind() -> mfm_program::Result<StateKind> {
         state_kind("chain_head.record")
@@ -890,9 +916,11 @@ impl StateSpec for RecordBtcChainHeadFactState {
     }
 }
 
-impl PureState for RecordBtcChainHeadFactState {
-    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
-        Ok(input.observation.into_fact())
+impl ManagedWriteState for RecordBtcChainHeadFactState {
+    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
+
+    fn run<'a>(&'a self, input: Self::Input, _caps: &'a Self::Caps) -> Self::RunFuture<'a> {
+        future::ready(Ok(input.observation.into_fact()))
     }
 }
 
@@ -1169,8 +1197,8 @@ impl StateSpec for RecordCollectorCheckpointState {
     type Config = RecordCollectorCheckpointConfig;
     type Input = RecordCollectorCheckpointInput;
     type Output = CollectorCheckpointFact;
-    type Effect = Pure;
-    type Caps = NoCaps;
+    type Effect = ManagedPlatformWrite;
+    type Caps = (BtcFactRecordCapability,);
 
     fn kind() -> mfm_program::Result<StateKind> {
         state_kind("collector_checkpoint.record")
@@ -1199,14 +1227,18 @@ impl StateSpec for RecordCollectorCheckpointState {
     }
 }
 
-impl PureState for RecordCollectorCheckpointState {
-    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
-        build_checkpoint_fact_from_outputs(
-            &self.config,
-            &input.chain_head_fact,
-            &input.loaded_checkpoint,
+impl ManagedWriteState for RecordCollectorCheckpointState {
+    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
+
+    fn run<'a>(&'a self, input: Self::Input, _caps: &'a Self::Caps) -> Self::RunFuture<'a> {
+        future::ready(
+            build_checkpoint_fact_from_outputs(
+                &self.config,
+                &input.chain_head_fact,
+                &input.loaded_checkpoint,
+            )
+            .map_err(StateError::from),
         )
-        .map_err(StateError::from)
     }
 }
 
@@ -1447,9 +1479,7 @@ fn collector_checkpoint_query_value(
         ),
         (
             "return_fields",
-            CanonicalValue::Array(vec![CanonicalValue::String(
-                "result.high_watermark_height".to_owned(),
-            )]),
+            CanonicalValue::Array(vec![query_return_field("result.high_watermark_height")?]),
         ),
         (
             "ordering",
@@ -1457,6 +1487,19 @@ fn collector_checkpoint_query_value(
         ),
         ("limit", CanonicalValue::Unsigned(1)),
     ])
+    .map_err(|error| BtcStateError::InvalidInput {
+        reason: error.to_string(),
+    })
+}
+
+fn query_return_field(field_id: &str) -> Result<CanonicalValue, BtcStateError> {
+    let field_id = FactFieldId::new(field_id).map_err(|error| BtcStateError::InvalidInput {
+        reason: error.to_string(),
+    })?;
+    CanonicalValue::object([(
+        "field_id",
+        CanonicalValue::String(field_id.as_str().to_owned()),
+    )])
     .map_err(|error| BtcStateError::InvalidInput {
         reason: error.to_string(),
     })
@@ -1600,6 +1643,19 @@ mod tests {
         ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest, DigestBytes, EventId, RunId,
         SchemaId,
     };
+
+    fn poll_ready<F>(future: F) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        let mut future = std::pin::pin!(future);
+        match std::future::Future::poll(future.as_mut(), &mut cx) {
+            std::task::Poll::Ready(output) => output,
+            std::task::Poll::Pending => panic!("test future unexpectedly pending"),
+        }
+    }
 
     fn observe_config() -> ObserveBtcChainHeadConfig {
         ObserveBtcChainHeadConfig {
@@ -1770,6 +1826,12 @@ mod tests {
         assert_eq!(query["scope"], "default");
         assert_eq!(query["limit"], 1);
         assert_eq!(query["ordering"], "result.high_watermark_height.desc");
+        assert_eq!(
+            query["return_fields"][0]["field_id"],
+            "result.high_watermark_height"
+        );
+        let parsed_shape = mfm_facts::parse_canonical_fact_query_shape(plan).expect("query shape");
+        assert_eq!(parsed_shape.return_fields().len(), 1);
         assert!(query["predicates"]
             .as_array()
             .expect("predicates")
@@ -1890,11 +1952,14 @@ mod tests {
             ValidatedConfig::new(RecordBtcChainHeadFactConfig {}).expect("config"),
         )
         .expect("state");
-        let fact = chain_head_state
-            .run(RecordBtcChainHeadFactInput {
+        let caps = (BtcFactRecordCapability,);
+        let fact = poll_ready(chain_head_state.run(
+            RecordBtcChainHeadFactInput {
                 observation: observation.clone(),
-            })
-            .expect("chain head fact");
+            },
+            &caps,
+        ))
+        .expect("chain head fact");
         assert_eq!(fact.subject(), observation.subject());
         assert_eq!(fact.response(), observation.response());
 
@@ -1902,12 +1967,14 @@ mod tests {
             ValidatedConfig::new(checkpoint_record_config()).expect("config"),
         )
         .expect("state");
-        let checkpoint = checkpoint_state
-            .run(RecordCollectorCheckpointInput {
+        let checkpoint = poll_ready(checkpoint_state.run(
+            RecordCollectorCheckpointInput {
                 chain_head_fact: fact.clone(),
                 loaded_checkpoint: LoadedCollectorCheckpoint::new(None),
-            })
-            .expect("checkpoint fact");
+            },
+            &caps,
+        ))
+        .expect("checkpoint fact");
 
         assert_eq!(checkpoint.subject().collector_kind(), "btc-chain-head");
         assert_eq!(checkpoint.subject().partition(), "chain-head");
@@ -1933,12 +2000,15 @@ mod tests {
         )
         .expect("state");
 
-        let checkpoint = state
-            .run(RecordCollectorCheckpointInput {
+        let caps = (BtcFactRecordCapability,);
+        let checkpoint = poll_ready(state.run(
+            RecordCollectorCheckpointInput {
                 chain_head_fact: fact,
                 loaded_checkpoint: LoadedCollectorCheckpoint::new(Some(previous.clone())),
-            })
-            .expect("checkpoint");
+            },
+            &caps,
+        ))
+        .expect("checkpoint");
 
         assert_eq!(checkpoint.response().high_watermark_height(), 850_000);
         assert_eq!(
@@ -1957,8 +2027,9 @@ mod tests {
         )
         .expect("state");
 
-        let error = state
-            .run(RecordCollectorCheckpointInput {
+        let caps = (BtcFactRecordCapability,);
+        let error = poll_ready(state.run(
+            RecordCollectorCheckpointInput {
                 chain_head_fact: observation.to_fact(),
                 loaded_checkpoint: LoadedCollectorCheckpoint::new(Some(
                     checkpoint_fact_for_source(
@@ -1968,8 +2039,10 @@ mod tests {
                         BtcFinality::BestAvailable,
                     ),
                 )),
-            })
-            .expect_err("incompatible checkpoint");
+            },
+            &caps,
+        ))
+        .expect_err("incompatible checkpoint");
 
         assert!(error
             .to_string()
@@ -2193,6 +2266,10 @@ mod tests {
                 digest_bytes(seed + 1),
             ),
             recorded_at: "2026-07-02T00:00:00Z".to_owned(),
+            producer_node_id: mfm_ids::NodeId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                digest_bytes(seed + 2),
+            ),
             observed_at: Some("2026-07-02T00:00:00Z".to_owned()),
             visibility: FactVisibility::indexed_default(FactAudience::Control),
             fact_kind: mfm_facts::FactKind::new("collector.checkpoint").expect("kind"),

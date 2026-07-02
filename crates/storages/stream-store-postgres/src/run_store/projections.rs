@@ -79,6 +79,7 @@ pub(super) async fn load_fact_projection_snapshot_client(
     let fact_projections = load_store_fact_projection_tables_tx(&mut tx).await?;
     let snapshot = ProjectionSnapshot::from_parts(ProjectionSnapshotParts {
         fact_descriptors: fact_projections.fact_descriptors,
+        fact_records: fact_projections.fact_records,
         fact_index_entries: fact_projections.fact_index_entries,
         fact_term_entries: fact_projections.fact_term_entries,
         ..ProjectionSnapshotParts::default()
@@ -96,7 +97,12 @@ pub(super) async fn load_stream_authoritative_projection_snapshot_tx(
     let stream = load_run_stream_tx(tx, run_id).await?;
     let snapshot = projection_snapshot_from_physical_fact_tables_tx(tx, run_id, &stream).await?;
     let resource_lane_state = load_resource_lane_state_tx(tx).await?;
-    projection_snapshot_with_resource_lanes(&snapshot, resource_lane_state.active)
+    let store_fact_projections = load_store_fact_projection_tables_tx(tx).await?;
+    projection_snapshot_with_store_authority(
+        &snapshot,
+        store_fact_projections,
+        resource_lane_state.active,
+    )
 }
 
 pub(super) async fn projection_snapshot_from_physical_fact_tables_tx(
@@ -381,7 +387,9 @@ fn projection_snapshot_with_fact_projections(
             .collect(),
         cells: snapshot
             .cells()
-            .map(|(cell_id, projection)| (cell_id.clone(), projection.clone()))
+            .map(|(run_id, cell_id, projection)| {
+                ((run_id.clone(), cell_id.clone()), projection.clone())
+            })
             .collect(),
         fact_descriptors: fact_projections.fact_descriptors,
         fact_records: snapshot
@@ -400,7 +408,9 @@ fn projection_snapshot_with_fact_projections(
             .collect(),
         public_outputs: snapshot
             .public_outputs()
-            .map(|(schema_id, projection)| (schema_id.clone(), projection.clone()))
+            .map(|(run_id, schema_id, projection)| {
+                ((run_id.clone(), schema_id.clone()), projection.clone())
+            })
             .collect(),
         retentions: snapshot
             .retentions()
@@ -444,7 +454,9 @@ pub(super) fn projection_snapshot_with_resource_lanes(
             .collect(),
         cells: snapshot
             .cells()
-            .map(|(cell_id, projection)| (cell_id.clone(), projection.clone()))
+            .map(|(run_id, cell_id, projection)| {
+                ((run_id.clone(), cell_id.clone()), projection.clone())
+            })
             .collect(),
         fact_descriptors: snapshot
             .fact_descriptors()
@@ -469,7 +481,71 @@ pub(super) fn projection_snapshot_with_resource_lanes(
         resource_lanes,
         public_outputs: snapshot
             .public_outputs()
-            .map(|(schema_id, projection)| (schema_id.clone(), projection.clone()))
+            .map(|(run_id, schema_id, projection)| {
+                ((run_id.clone(), schema_id.clone()), projection.clone())
+            })
+            .collect(),
+        retentions: snapshot
+            .retentions()
+            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+            .collect(),
+    })?)
+}
+
+fn projection_snapshot_with_store_authority(
+    snapshot: &ProjectionSnapshot,
+    fact_projections: PhysicalFactProjections,
+    resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
+) -> Result<ProjectionSnapshot> {
+    Ok(ProjectionSnapshot::from_parts(ProjectionSnapshotParts {
+        run_states: snapshot
+            .run_states()
+            .map(|(run_id, state)| (run_id.clone(), *state))
+            .collect(),
+        run_spec_hashes: snapshot
+            .run_spec_hashes()
+            .map(|(run_id, spec_hash)| (run_id.clone(), spec_hash.clone()))
+            .collect(),
+        saga_policy_digests: snapshot
+            .saga_policy_digests()
+            .map(|(run_id, digest)| (run_id.clone(), digest.clone()))
+            .collect(),
+        run_completions: snapshot
+            .run_completions()
+            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+            .collect(),
+        saga_engagements: snapshot
+            .saga_engagements()
+            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+            .collect(),
+        manual_resolutions: snapshot
+            .manual_resolutions()
+            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+            .collect(),
+        attempts: snapshot
+            .attempts()
+            .map(|(key, projection)| (key.clone(), projection.clone()))
+            .collect(),
+        cells: snapshot
+            .cells()
+            .map(|(run_id, cell_id, projection)| {
+                ((run_id.clone(), cell_id.clone()), projection.clone())
+            })
+            .collect(),
+        fact_descriptors: fact_projections.fact_descriptors,
+        fact_records: fact_projections.fact_records,
+        fact_index_entries: fact_projections.fact_index_entries,
+        fact_term_entries: fact_projections.fact_term_entries,
+        side_effects: snapshot
+            .side_effects()
+            .map(|(ledger_ref, projection)| (ledger_ref.clone(), projection.clone()))
+            .collect(),
+        resource_lanes,
+        public_outputs: snapshot
+            .public_outputs()
+            .map(|(run_id, schema_id, projection)| {
+                ((run_id.clone(), schema_id.clone()), projection.clone())
+            })
             .collect(),
         retentions: snapshot
             .retentions()

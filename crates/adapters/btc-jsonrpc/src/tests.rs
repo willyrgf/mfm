@@ -25,6 +25,19 @@ const ED25519_TEST_VERIFYING_KEY: [u8; 32] = [
     0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25, 0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07, 0x51, 0x1a,
 ];
 
+fn poll_ready<F>(future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    let waker = std::task::Waker::noop();
+    let mut cx = std::task::Context::from_waker(waker);
+    let mut future = std::pin::pin!(future);
+    match std::future::Future::poll(future.as_mut(), &mut cx) {
+        std::task::Poll::Ready(output) => output,
+        std::task::Poll::Pending => panic!("test future unexpectedly pending"),
+    }
+}
+
 #[derive(Default)]
 struct MockTransport {
     calls: Mutex<Vec<String>>,
@@ -107,18 +120,21 @@ impl MockArtifacts {
         let digest =
             ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(&bytes));
         let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
-        let evidence = ArtifactEvidenceRef {
-            artifact_id: artifact_id.clone(),
-            digest: digest.clone(),
-            byte_len: bytes.len() as u64,
-            media_type: MediaType::new("application/json").expect("media type"),
-            schema_id: Some(CollectorCheckpointResponse::schema_id().expect("schema")),
-            semantic_type_id: None,
-            producer_node_id: None,
-            producer_seed_id: None,
-            artifact_role: events::ArtifactRole::FactResponse,
-        };
-        let fact_ref = internal_fact_ref(1, artifact_id, digest);
+        let producer_node_id = producer_node_id(1);
+        let evidence = checkpoint_response_evidence(
+            bytes.len() as u64,
+            artifact_id.clone(),
+            digest.clone(),
+            producer_node_id.clone(),
+        );
+        let artifact_evidence_hash = artifact_evidence_hash(&evidence);
+        let fact_ref = internal_fact_ref(
+            1,
+            artifact_id,
+            digest,
+            producer_node_id,
+            artifact_evidence_hash,
+        );
         (
             Self {
                 calls: Mutex::new(Vec::new()),
@@ -382,10 +398,21 @@ fn checkpoint_replay_helper_uses_recorded_evidence_without_provider() {
     let bytes = serde_json::to_vec(&response).expect("response json");
     let response_digest =
         ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(&bytes));
+    let artifact_id =
+        ArtifactId::from_digest(response_digest.algorithm(), *response_digest.digest());
+    let producer_node_id = producer_node_id(2);
+    let evidence = checkpoint_response_evidence(
+        bytes.len() as u64,
+        artifact_id.clone(),
+        response_digest.clone(),
+        producer_node_id.clone(),
+    );
     let fact_ref = internal_fact_ref(
         2,
-        ArtifactId::from_digest(response_digest.algorithm(), *response_digest.digest()),
+        artifact_id,
         response_digest,
+        producer_node_id,
+        artifact_evidence_hash(&evidence),
     );
     let plan = config.request().expect("request").plan().clone();
     let selection = FactSelectionEvidence::new(digest(0x71), vec![0], None).expect("selection");
@@ -461,6 +488,8 @@ fn internal_fact_ref(
     seed: u8,
     artifact_id: ArtifactId,
     response_hash: ContentDigest,
+    producer_node_id: mfm_ids::NodeId,
+    artifact_evidence_hash: ContentDigest,
 ) -> InternalFactRef {
     let descriptor_hash =
         fact_descriptor_hash(&CollectorCheckpointFact::descriptor().expect("descriptor"))
@@ -469,6 +498,7 @@ fn internal_fact_ref(
         fact_claim_id: FactClaimId::new(run_id(seed), 9, 0).expect("claim id"),
         source_event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(seed + 1)),
         recorded_at: "2026-07-02T00:00:00Z".to_owned(),
+        producer_node_id,
         observed_at: Some("2026-07-02T00:00:00Z".to_owned()),
         visibility: FactVisibility::indexed_default(FactAudience::Control),
         fact_kind: mfm_facts::FactKind::new("collector.checkpoint").expect("kind"),
@@ -481,7 +511,7 @@ fn internal_fact_ref(
         response_schema_id: CollectorCheckpointResponse::schema_id().expect("schema"),
         response_hash,
         artifact_id,
-        artifact_evidence_hash: digest(seed + 9),
+        artifact_evidence_hash,
         capability_kind: CapabilityKind::new(
             "mfm.bitcoin",
             "chain_head.read",
@@ -502,6 +532,35 @@ fn internal_fact_ref(
             .expect("adapter version"),
     })
     .expect("fact ref")
+}
+
+fn checkpoint_response_evidence(
+    byte_len: u64,
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+    producer_node_id: mfm_ids::NodeId,
+) -> ArtifactEvidenceRef {
+    ArtifactEvidenceRef {
+        artifact_id,
+        digest,
+        byte_len,
+        media_type: MediaType::new("application/json").expect("media type"),
+        schema_id: Some(CollectorCheckpointResponse::schema_id().expect("schema")),
+        semantic_type_id: None,
+        producer_node_id: Some(producer_node_id),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::FactResponse,
+    }
+}
+
+fn artifact_evidence_hash(evidence: &ArtifactEvidenceRef) -> ContentDigest {
+    mfm_store::v1::ArtifactEvidenceRef::from(evidence.clone())
+        .evidence_hash()
+        .expect("artifact evidence hash")
+}
+
+fn producer_node_id(seed: u8) -> mfm_ids::NodeId {
+    mfm_ids::NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(seed + 2))
 }
 
 fn run_id(seed: u8) -> RunId {
@@ -689,12 +748,15 @@ fn checkpoint_record_fixture_uses_recorded_chain_head_fact() {
     )
     .expect("state");
 
-    let checkpoint = state
-        .run(RecordCollectorCheckpointInput {
+    let caps = (BtcFactRecordCapability,);
+    let checkpoint = poll_ready(state.run(
+        RecordCollectorCheckpointInput {
             chain_head_fact,
             loaded_checkpoint: LoadedCollectorCheckpoint::new(Some(checkpoint_fact(849_999))),
-        })
-        .expect("checkpoint fact");
+        },
+        &caps,
+    ))
+    .expect("checkpoint fact");
 
     assert_eq!(checkpoint.response().high_watermark_height(), 850_000);
     assert_eq!(checkpoint.response().high_watermark_hash(), BEST_HASH);
@@ -706,11 +768,11 @@ fn checkpoint_record_fixture_uses_recorded_chain_head_fact() {
 
 #[test]
 fn capability_binding_uses_btc_jsonrpc_adapter_identity() {
-    let binding = btc_capability_binding().expect("binding");
+    let binding = btc_fact_record_capability_binding().expect("binding");
 
     assert_eq!(
         binding.capability_kind.canonical_name(),
-        Some("mfm.bitcoin/chain_head.read")
+        Some("mfm.bitcoin/fact.record")
     );
     assert_eq!(
         binding.adapter_kind,

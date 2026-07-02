@@ -17,18 +17,24 @@ uuid = { version = "1.0", features = ["v4"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 tempfile = "3.0"
 tokio = { workspace = true }
-mfm-app = { path = "../../crates/app" }
+mfm-app = { path = "../../crates/app", features = ["test-support"] }
 mfm-authored-config = { path = "../../crates/authored-config" }
 mfm-events = { path = "../../crates/kernel/events" }
 mfm-ids = { path = "../../crates/kernel/ids" }
 mfm-canonical = { path = "../../crates/kernel/canonical" }
+mfm-facts = { path = "../../crates/kernel/facts" }
 mfm-spec = { path = "../../crates/kernel/spec" }
 mfm-certify = { path = "../../crates/kernel/certify" }
 mfm-program = { path = "../../crates/kernel/program" }
 mfm-manual-auth = { path = "../../crates/kernel/manual-auth" }
 mfm-store = { path = "../../crates/kernel/store", features = ["test-support"] }
 mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
+mfm-adapters-btc-jsonrpc = { path = "../../crates/adapters/btc-jsonrpc" }
+mfm-artifact-capabilities = { path = "../../crates/artifact-capabilities" }
+mfm-btc-capabilities = { path = "../../crates/btc-capabilities" }
+mfm-fact-capabilities = { path = "../../crates/fact-capabilities" }
 mfm-op-proof = { path = "../../crates/ops/proof-op" }
+mfm-op-btc-chain-head-collector = { path = "../../crates/ops/btc-chain-head-collector-op" }
 mfm-op-evm-contract-lifecycle = { path = "../../crates/ops/evm-contract-lifecycle-op" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
 mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
@@ -38,6 +44,7 @@ mfm-rest-api = { path = "../../bin/rest-api" }
 
 [dev-dependencies]
 alloy-primitives = { workspace = true }
+ed25519-dalek = { workspace = true }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-evm-contract-config = { path = "../../crates/evm-contract-config" }
 mfm-evm-contract-model = { path = "../../crates/evm-contract-model" }

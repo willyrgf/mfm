@@ -637,6 +637,10 @@ mod tests {
                 digest_bytes(seed + 1),
             ),
             recorded_at: "2026-07-02T00:00:00Z".to_owned(),
+            producer_node_id: mfm_ids::NodeId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                digest_bytes(seed + 2),
+            ),
             observed_at: Some("2026-07-02T00:00:00Z".to_owned()),
             visibility: FactVisibility::indexed_default(FactAudience::Control),
             fact_kind: mfm_facts::FactKind::new("collector.checkpoint").expect("kind"),

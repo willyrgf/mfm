@@ -661,7 +661,7 @@ impl FactRouteFixture {
         };
         let descriptor_artifact = store::VerifiedRunArtifactBytes::new(
             descriptor_bytes.to_vec(),
-            descriptor_evidence,
+            descriptor_evidence.clone(),
             &descriptor_requirement,
         )
         .expect("descriptor artifact");
@@ -717,6 +717,7 @@ impl FactRouteFixture {
                 store::FactDescriptorProjection {
                     descriptor_hash: descriptor_hash.clone(),
                     descriptor_artifact_id,
+                    descriptor_artifact_evidence: descriptor_evidence,
                     fact_kind: descriptor.fact_kind().clone(),
                     descriptor_schema_id: descriptor.descriptor_schema_id().clone(),
                     subject_schema_id: descriptor.subject_schema_id().clone(),
@@ -831,7 +832,14 @@ fn fact_projection_row(
     let subject = subject_evidence(namespace_hash.clone());
     let response_hash = digest(40 + n);
     let artifact_id = artifact_id(50 + n);
-    let artifact_evidence_hash = digest(60 + n);
+    let response_artifact_evidence = fact_artifact_evidence(
+        artifact_id.clone(),
+        response_hash.clone(),
+        schema_id("mfm.rest.test.fact.response", 3),
+        Some(node_id(n)),
+        events::ArtifactRole::FactResponse,
+    );
+    let artifact_evidence_hash = artifact_evidence_hash(&response_artifact_evidence);
     let producer = producer();
     let claim = mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
         visibility: mfm_facts::FactVisibility::Indexed {
@@ -858,6 +866,7 @@ fn fact_projection_row(
         source_seq: n as u64,
         source_ordinal: 0,
         source_event_id: event_id(n),
+        producer_node_id: node_id(n),
         commit_id: store::CommitKey::new(format!("commit-{n}")).expect("commit"),
         store_commit_order: n as u64,
         recorded_at: "2026-07-02T00:00:00Z".to_owned(),
@@ -888,6 +897,7 @@ fn fact_projection_row(
         source_ordinal: index.source_ordinal,
         node_id: node_id(n),
         attempt_id: attempt_id(n),
+        response_artifact_evidence: Some(response_artifact_evidence),
         claim,
     };
     let terms = vec![
@@ -925,6 +935,16 @@ fn private_fact_record(
     namespace_hash: ContentDigest,
 ) -> store::FactRecordProjection {
     let subject = subject_evidence(namespace_hash);
+    let response_hash = digest(43);
+    let artifact_id = artifact_id(53);
+    let response_artifact_evidence = fact_artifact_evidence(
+        artifact_id.clone(),
+        response_hash.clone(),
+        schema_id("mfm.rest.test.fact.response", 3),
+        Some(node_id(n)),
+        events::ArtifactRole::FactResponse,
+    );
+    let artifact_evidence_hash = artifact_evidence_hash(&response_artifact_evidence);
     store::FactRecordProjection {
         fact_claim_id: mfm_facts::FactClaimId::new(run_id(n), n as u64, 0).expect("claim id"),
         source_event_id: event_id(n),
@@ -933,6 +953,7 @@ fn private_fact_record(
         source_ordinal: 0,
         node_id: node_id(n),
         attempt_id: attempt_id(n),
+        response_artifact_evidence: Some(response_artifact_evidence),
         claim: mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
             visibility: mfm_facts::FactVisibility::RunPrivate,
             fact_kind: mfm_facts::FactKind::new("mfm.rest.test.fact").expect("kind"),
@@ -942,9 +963,9 @@ fn private_fact_record(
             request: None,
             response: mfm_facts::FactResponseEvidence::new(
                 schema_id("mfm.rest.test.fact.response", 3),
-                digest(43),
-                artifact_id(53),
-                digest(63),
+                response_hash,
+                artifact_id,
+                artifact_evidence_hash,
             ),
             producer: producer(),
         })
@@ -1112,6 +1133,30 @@ fn node_id(n: u8) -> mfm_ids::NodeId {
 
 fn attempt_id(n: u8) -> mfm_ids::AttemptId {
     mfm_ids::AttemptId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(n))
+}
+
+fn fact_artifact_evidence(
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+    schema_id: SchemaId,
+    producer_node_id: Option<mfm_ids::NodeId>,
+    artifact_role: events::ArtifactRole,
+) -> store::ArtifactEvidenceRef {
+    store::ArtifactEvidenceRef {
+        artifact_id,
+        digest,
+        byte_len: 2,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(schema_id),
+        semantic_type_id: None,
+        producer_node_id,
+        producer_seed_id: None,
+        artifact_role,
+    }
+}
+
+fn artifact_evidence_hash(evidence: &store::ArtifactEvidenceRef) -> ContentDigest {
+    evidence.evidence_hash().expect("artifact evidence hash")
 }
 
 fn digest(n: u8) -> ContentDigest {

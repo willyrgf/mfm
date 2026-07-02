@@ -119,7 +119,7 @@ impl StagedFactQueryEvidence {
         &self.artifact_id
     }
 
-    /// Returns the canonical query evidence content hash.
+    /// Returns the canonical query evidence artifact-evidence hash.
     pub const fn evidence_hash(&self) -> &ContentDigest {
         &self.evidence_hash
     }
@@ -1005,9 +1005,10 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
                 retention_refs,
                 returned_refs,
             ));
+        let evidence_hash = staged_evidence.evidence_hash()?;
         Ok(StagedFactQueryEvidence {
             artifact_id: staged_evidence.artifact_id,
-            evidence_hash: staged_evidence.digest,
+            evidence_hash,
         })
     }
 
@@ -1452,12 +1453,41 @@ mod tests {
             .expect("subject evidence")
     }
 
+    fn fact_producer_node_id() -> mfm_ids::NodeId {
+        mfm_ids::NodeId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            mfm_ids::DigestBytes::from_array([0x19; 32]),
+        )
+    }
+
+    fn fact_response_artifact_evidence(
+        producer_node_id: &mfm_ids::NodeId,
+    ) -> store::ArtifactEvidenceRef {
+        store::ArtifactEvidenceRef {
+            artifact_id: artifact_id(0x17),
+            digest: digest(0x16),
+            byte_len: 2,
+            media_type: spec::MediaType::new("application/json").expect("media"),
+            schema_id: Some(schema_id()),
+            semantic_type_id: None,
+            producer_node_id: Some(producer_node_id.clone()),
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::FactResponse,
+        }
+    }
+
     fn fact_ref() -> mfm_facts::InternalFactRef {
         let subject = fact_subject_evidence(17);
+        let producer_node_id = fact_producer_node_id();
+        let response_evidence = fact_response_artifact_evidence(&producer_node_id);
+        let artifact_evidence_hash = response_evidence
+            .evidence_hash()
+            .expect("response artifact evidence hash");
         mfm_facts::InternalFactRef::new(mfm_facts::InternalFactRefParts {
             fact_claim_id: mfm_facts::FactClaimId::new(run_id(0x10), 1, 0).expect("claim id"),
             source_event_id: event_id(0x11),
             recorded_at: "2026-07-01T00:00:00Z".to_owned(),
+            producer_node_id,
             observed_at: None,
             visibility: mfm_facts::FactVisibility::indexed_default(
                 mfm_facts::FactAudience::Platform,
@@ -1469,10 +1499,13 @@ mod tests {
             subject_material_hash: subject.subject_material_hash().clone(),
             request_schema_id: None,
             request_hash: None,
-            response_schema_id: schema_id(),
-            response_hash: digest(0x16),
-            artifact_id: artifact_id(0x17),
-            artifact_evidence_hash: digest(0x18),
+            response_schema_id: response_evidence
+                .schema_id
+                .clone()
+                .expect("response schema id"),
+            response_hash: response_evidence.digest.clone(),
+            artifact_id: response_evidence.artifact_id,
+            artifact_evidence_hash,
             capability_kind: capability_kind(),
             capability_version: CapabilityVersion::new("mfm.test.capability.v1")
                 .expect("capability version"),
@@ -1512,9 +1545,23 @@ mod tests {
     fn fact_authority_projections(
         fact_ref: &mfm_facts::InternalFactRef,
     ) -> store::ProjectionSnapshot {
+        let descriptor_artifact_evidence = store::ArtifactEvidenceRef {
+            artifact_id: artifact_id(0x40),
+            digest: fact_ref.fact_descriptor_hash().clone(),
+            byte_len: 2,
+            media_type: spec::MediaType::new("application/json").expect("media"),
+            schema_id: Some(schema_id()),
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::FactDescriptor,
+        };
+        let response_artifact_evidence =
+            fact_response_artifact_evidence(fact_ref.producer_node_id());
         let descriptor_projection = store::FactDescriptorProjection {
             descriptor_hash: fact_ref.fact_descriptor_hash().clone(),
-            descriptor_artifact_id: artifact_id(0x40),
+            descriptor_artifact_id: descriptor_artifact_evidence.artifact_id.clone(),
+            descriptor_artifact_evidence,
             fact_kind: fact_ref.fact_kind().clone(),
             descriptor_schema_id: schema_id(),
             subject_schema_id: schema_id(),
@@ -1529,14 +1576,12 @@ mod tests {
             source_run_id: fact_ref.fact_claim_id().source_run_id().clone(),
             source_seq: fact_ref.fact_claim_id().source_seq(),
             source_ordinal: fact_ref.fact_claim_id().source_ordinal(),
-            node_id: mfm_ids::NodeId::from_digest(
-                DigestAlgorithm::Sha256JcsV1,
-                mfm_ids::DigestBytes::from_array([0x43; 32]),
-            ),
+            node_id: fact_ref.producer_node_id().clone(),
             attempt_id: mfm_ids::AttemptId::from_digest(
                 DigestAlgorithm::Sha256JcsV1,
                 mfm_ids::DigestBytes::from_array([0x42; 32]),
             ),
+            response_artifact_evidence: Some(response_artifact_evidence),
             claim: fact_claim_for_ref(fact_ref, 17),
         };
         let index_projection = store::FactIndexProjection {
@@ -1545,6 +1590,7 @@ mod tests {
             source_seq: fact_ref.fact_claim_id().source_seq(),
             source_ordinal: fact_ref.fact_claim_id().source_ordinal(),
             source_event_id: fact_ref.source_event_id().clone(),
+            producer_node_id: fact_ref.producer_node_id().clone(),
             commit_id: store::CommitKey::new("fact-query-authority").expect("commit key"),
             store_commit_order: 1,
             recorded_at: fact_ref.recorded_at().to_owned(),

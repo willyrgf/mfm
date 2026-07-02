@@ -252,12 +252,7 @@ impl<'a> AttemptLifecycle<'a> {
             Some(attempt_id) => (attempt_id, selected_attempt.phase.attempt_no),
         };
 
-        let mut latest_committed = store
-            .load_committed_run_stream(run_id)
-            .await
-            .map_err(async_store_error)?;
-        let mut latest_view =
-            RuntimeRunView::from_committed_stream(runtime_spec, &latest_committed)?;
+        let mut latest_view = load_runtime_run_view(runtime_spec, store, run_id).await?;
         if node_needs_pre_invocation_lane_claim(
             runtime_spec,
             run_id,
@@ -324,11 +319,7 @@ impl<'a> AttemptLifecycle<'a> {
                     Err(error) => return Err(async_store_error(error)),
                 }
             }
-            latest_committed = store
-                .load_committed_run_stream(run_id)
-                .await
-                .map_err(async_store_error)?;
-            latest_view = RuntimeRunView::from_committed_stream(runtime_spec, &latest_committed)?;
+            latest_view = load_runtime_run_view(runtime_spec, store, run_id).await?;
         }
         let started_attempt = Attempt {
             phase: Started {
@@ -511,6 +502,23 @@ pub(crate) async fn terminalize_observed_failure<S: store::RunEventStore + ?Size
         }
         Err(error) => Err(async_store_error(error)),
     }
+}
+
+async fn load_runtime_run_view<S: store::RunEventStore + ?Sized>(
+    runtime_spec: &CertifiedRuntimeSpec,
+    store: &S,
+    run_id: &RunId,
+) -> Result<RuntimeRunView> {
+    let committed = store
+        .load_committed_run_stream(run_id)
+        .await
+        .map_err(async_store_error)?;
+    let authority = store
+        .status_projection_snapshot(run_id)
+        .await
+        .map_err(async_store_error)?;
+    RuntimeRunView::from_committed_stream(runtime_spec, &committed)?
+        .with_status_authority(&authority)
 }
 
 fn can_terminalize_observed_failure(

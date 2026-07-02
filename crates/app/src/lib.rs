@@ -698,7 +698,11 @@ impl FactPublicRefResolver {
             {
                 continue;
             }
-            let fact_ref = internal_fact_ref_from_projection(entry)?;
+            let record = self
+                .projection
+                .fact_record(&entry.fact_claim_id)
+                .ok_or_else(redacted_fact_not_found)?;
+            let fact_ref = internal_fact_ref_from_projection(entry, record)?;
             if public_ref_id(&fact_ref)? != *public_ref {
                 continue;
             }
@@ -843,8 +847,11 @@ fn execute_in_memory_app_fact_query(
         })
         .filter(|(_claim_id, entry)| fact_entry_matches_predicates(&projection, entry, &shape))
         .map(|(_claim_id, entry)| {
+            let record = projection
+                .fact_record(&entry.fact_claim_id)
+                .ok_or_else(replay_diagnostic_error)?;
             Ok(AppFactQueryRow {
-                fact_ref: internal_fact_ref_from_projection(entry)?,
+                fact_ref: internal_fact_ref_from_projection(entry, record)?,
                 returned_fields: returned_fields_from_projection(&projection, entry, &shape)?,
             })
         })
@@ -4324,12 +4331,14 @@ fn fact_scalar_to_public_scalar(value: &mfm_facts::FactCanonicalScalar) -> Publi
 
 fn internal_fact_ref_from_projection(
     entry: &store::FactIndexProjection,
+    record: &store::FactRecordProjection,
 ) -> Result<mfm_facts::InternalFactRef, AppError> {
     Ok(mfm_facts::InternalFactRef::new(
         mfm_facts::InternalFactRefParts {
             fact_claim_id: entry.fact_claim_id.clone(),
             source_event_id: entry.source_event_id.clone(),
             recorded_at: entry.recorded_at.clone(),
+            producer_node_id: record.node_id.clone(),
             observed_at: entry.observed_at.clone(),
             visibility: mfm_facts::FactVisibility::Indexed {
                 audience: entry.audience,
@@ -4649,6 +4658,84 @@ pub fn prepare_entry_point_run_launch(
     Ok(PreparedEntryPointRunLaunch { request, evidence })
 }
 
+/// Prepares a certified typed run launch from a program draft for integration tests.
+///
+/// This helper is compiled only with `test-support`. It uses the same launch-material preparation
+/// path as production app services after the caller has supplied an already-built typed program
+/// draft and matching root seed material.
+#[cfg(feature = "test-support")]
+pub fn prepare_typed_program_run_launch_for_test(
+    draft: mfm_program::TypedProgramDraft,
+    seed_material: BTreeMap<SeedId, PlainCanonicalJsonBytes>,
+    certification_registry: &CertificationRegistry,
+    trust_scope_id: TrustScopeId,
+    distinct_run_key: Option<DistinctRunKey>,
+) -> Result<RunLaunchRequest, AppError> {
+    let plan =
+        mfm_program::TypedProgramLaunchPlan::from_draft_and_seed_material(draft, seed_material)
+            .map_err(|_| {
+                AppError::backend(
+                    ErrorClass::BadRequest,
+                    "TypedProgramLaunchPlanInvalid",
+                    "typed program launch material is invalid",
+                )
+            })?;
+    let mut config_inputs = plan
+        .config_material
+        .iter()
+        .map(|artifact| RunLaunchConfigArtifact {
+            schema_id: artifact.schema_id.clone(),
+            bytes: artifact.bytes.to_vec(),
+            media_type: artifact.media_type.clone(),
+        })
+        .collect::<Vec<_>>();
+    let seed_inputs = plan
+        .seed_material
+        .iter()
+        .map(|artifact| RunLaunchSeedArtifact {
+            seed_id: artifact.seed_id.clone(),
+            bytes: artifact.bytes.to_vec(),
+            media_type: artifact.media_type.clone(),
+        })
+        .collect::<Vec<_>>();
+    let lowered =
+        mfm_certify::lower_program_draft(&plan.draft).map_err(entry_point_certification_error)?;
+    let scoped_registry = certification_registry
+        .scoped_for_spec(lowered.spec())
+        .map_err(entry_point_certification_error)?;
+    let certified_spec = mfm_certify::certify_typed_spec(lowered, &scoped_registry)
+        .map_err(entry_point_certification_error)?;
+    config_inputs.extend(framework_config_launch_artifacts_for_spec(
+        &certified_spec.envelope().spec,
+    )?);
+    let distinct_run_key_digest = distinct_run_key
+        .as_ref()
+        .map(DistinctRunKey::digest)
+        .transpose()?;
+    prepare_certified_run_launch(
+        CertifiedRunLaunchInput {
+            certified_spec,
+            registry: &scoped_registry,
+            trust_scope_id,
+            distinct_run_key_digest,
+            entry_point_evidence: events::EntryPointLaunchEvidence {
+                resolved_op_id: events::EntryPointOpId::new("mfm.test.typed_program_internal_test")
+                    .map_err(|_| {
+                        entry_point_launch_internal_error(
+                            "EntryPointLaunchEvidenceInvalid",
+                            "entry-point launch evidence is invalid",
+                        )
+                    })?,
+                entry_point_registry_digest: content_digest_for_bytes(
+                    b"mfm.app.test-support.typed-program-launch.v1",
+                ),
+            },
+        },
+        config_inputs,
+        seed_inputs,
+    )
+}
+
 fn entry_point_certification_error(_error: mfm_certify::CertifyError) -> AppError {
     AppError::backend(
         ErrorClass::BadRequest,
@@ -4862,12 +4949,14 @@ pub async fn public_output_read_authority_for_run(
         ));
     }
     let projection = verified_view.projection_snapshot();
-    let public_output = projection.public_output(public_schema_id).ok_or_else(|| {
-        AppError::not_found(
-            "PublicOutputNotFound",
-            "typed public output was not found for the requested schema",
-        )
-    })?;
+    let public_output = projection
+        .public_output(verified_view.run_id(), public_schema_id)
+        .ok_or_else(|| {
+            AppError::not_found(
+                "PublicOutputNotFound",
+                "typed public output was not found for the requested schema",
+            )
+        })?;
     let store::PublicOutputProjection::Produced {
         event_id,
         rendered_digest,
@@ -5348,7 +5437,9 @@ fn projection_with_resource_lanes(
             .collect(),
         cells: snapshot
             .cells()
-            .map(|(cell_id, projection)| (cell_id.clone(), projection.clone()))
+            .map(|(run_id, cell_id, projection)| {
+                ((run_id.clone(), cell_id.clone()), projection.clone())
+            })
             .collect(),
         fact_descriptors: snapshot
             .fact_descriptors()
@@ -5373,7 +5464,9 @@ fn projection_with_resource_lanes(
         resource_lanes,
         public_outputs: snapshot
             .public_outputs()
-            .map(|(schema_id, projection)| (schema_id.clone(), projection.clone()))
+            .map(|(run_id, schema_id, projection)| {
+                ((run_id.clone(), schema_id.clone()), projection.clone())
+            })
             .collect(),
         retentions: snapshot
             .retentions()

@@ -23,7 +23,7 @@ use mfm_canonical::{
 };
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
-    DigestAlgorithm, EventId, RunId, SchemaId,
+    DigestAlgorithm, EventId, NodeId, RunId, SchemaId,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -2045,6 +2045,8 @@ pub struct InternalFactRefParts {
     pub source_event_id: EventId,
     /// Store-assigned recorded time.
     pub recorded_at: String,
+    /// Producing node id for the recorded fact response artifact.
+    pub producer_node_id: NodeId,
     /// Optional source observation time.
     pub observed_at: Option<String>,
     /// Fact visibility; must be indexed for an internal ref.
@@ -2130,6 +2132,11 @@ impl InternalFactRef {
     /// Returns the recorded time.
     pub fn recorded_at(&self) -> &str {
         &self.parts.recorded_at
+    }
+
+    /// Returns the producing node id for the fact response artifact.
+    pub const fn producer_node_id(&self) -> &NodeId {
+        &self.parts.producer_node_id
     }
 
     /// Returns the optional observed time.
@@ -3542,7 +3549,7 @@ fn canonical_accessor_value(accessor: &FactFieldAccessor) -> Result<CanonicalVal
                 "source",
                 CanonicalValue::String(FactFieldSource::Metadata.as_str().to_owned()),
             ),
-            ("field", CanonicalValue::String(field.as_str().to_owned())),
+            ("path", CanonicalValue::String(field.as_str().to_owned())),
         ]),
     }
 }
@@ -3933,6 +3940,7 @@ fn parse_internal_fact_ref(value: &serde_json::Value) -> Result<InternalFactRef>
         fact_claim_id: parse_fact_claim_id(json_required(object, "fact_claim_id")?)?,
         source_event_id: parse_json_str(object, "source_event_id")?,
         recorded_at: json_str(object, "recorded_at")?.to_owned(),
+        producer_node_id: parse_json_str(object, "producer_node_id")?,
         observed_at: parse_optional_string(json_required(object, "observed_at")?)?,
         visibility: parse_fact_visibility(json_required(object, "visibility")?)?,
         fact_kind: FactKind::new(json_str(object, "fact_kind")?)?,
@@ -4656,6 +4664,10 @@ fn canonical_internal_fact_ref_value(reference: &InternalFactRef) -> Result<Cano
             CanonicalValue::String(parts.recorded_at.clone()),
         ),
         (
+            "producer_node_id",
+            CanonicalValue::String(parts.producer_node_id.as_str().to_owned()),
+        ),
+        (
             "observed_at",
             optional_string_value(parts.observed_at.as_deref()),
         ),
@@ -5159,6 +5171,9 @@ fn json_to_typed_fact_scalar(
     value_type: FactFieldValueType,
     path: &str,
 ) -> Result<CanonicalValue> {
+    if value.is_null() {
+        return Ok(CanonicalValue::Null);
+    }
     match value_type {
         FactFieldValueType::String => {
             string_json(value, path).map(|value| CanonicalValue::String(value.to_owned()))
@@ -6056,6 +6071,31 @@ mod tests {
     }
 
     #[test]
+    fn canonical_fact_response_parse_preserves_optional_null_fields() {
+        let descriptor = descriptor_without_orderings(vec![
+            subject_field("subject.chain", "subject.chain"),
+            optional_result_field(
+                "result.observed_at_unix_ms",
+                "result.observed_at_unix_ms",
+                "observed_at_unix_ms",
+            ),
+        ])
+        .expect("descriptor");
+        let response =
+            parse_canonical_fact_response_bytes(&descriptor, br#"{"observed_at_unix_ms":null}"#)
+                .expect("response");
+        let subject = CanonicalValue::object([("chain", CanonicalValue::String("bitcoin".into()))])
+            .expect("subject");
+        let metadata = FactExtractionMetadata::new("2026-07-01T00:00:00Z", None::<String>, 42)
+            .expect("metadata");
+
+        let terms = extract_terms(&descriptor, &subject, &response, &metadata).expect("terms");
+        assert!(terms
+            .iter()
+            .all(|term| term.field_id().as_str() != "result.observed_at_unix_ms"));
+    }
+
+    #[test]
     fn query_plan_computes_canonical_query_hash_and_rejects_zero_limit() {
         let descriptor = descriptor(vec![
             subject_field("subject.chain", "subject.chain"),
@@ -6319,6 +6359,10 @@ mod tests {
             fact_claim_id: FactClaimId::new(run_id(10), 1, 0).expect("claim id"),
             source_event_id: event_id(11),
             recorded_at: "2026-07-01T00:00:00Z".to_owned(),
+            producer_node_id: NodeId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([19; 32]),
+            ),
             observed_at: None,
             visibility,
             fact_kind: FactKind::new("chain.head").expect("kind"),
@@ -6449,6 +6493,27 @@ mod tests {
     }
 
     #[test]
+    fn canonical_fact_descriptor_bytes_round_trip_metadata_accessors() {
+        let descriptor = descriptor(vec![
+            subject_field("subject.chain", "subject.chain"),
+            metadata_recorded_at_field(),
+            sortable_result_field("result.height", "result.height"),
+        ])
+        .expect("descriptor");
+        let bytes = canonical_fact_descriptor_bytes(&descriptor).expect("descriptor bytes");
+
+        assert!(bytes
+            .as_str()
+            .contains(r#""accessor":{"path":"recorded_at","source":"metadata"}"#));
+        let parsed =
+            parse_canonical_fact_descriptor_bytes(bytes.as_bytes()).expect("parsed descriptor");
+        assert_eq!(
+            canonical_fact_descriptor_bytes(&parsed).expect("parsed descriptor bytes"),
+            bytes
+        );
+    }
+
+    #[test]
     fn canonical_goldens_match_expected_values() {
         let descriptor = descriptor(vec![
             subject_field("subject.chain", "subject.chain"),
@@ -6527,19 +6592,19 @@ mod tests {
             canonical_fact_query_receipt_body_bytes(&plan_hash, &receipt)
                 .expect("receipt body bytes")
                 .as_str(),
-            r#"{"frontier_type":"snapshot","plan_hash":"content:sha256-jcs-v1:9282f7eb855fd79a7f907f2745fbf49f3f39b54dfb80a1e51a92444f4f0981a9","read_frontier":{"commit_watermark":100,"descriptor_catalog_watermark":3,"max_included_store_commit_order":99,"projection_generation":4,"query_scope":{"audience":"platform","scope":"default"},"store_scope":"default"},"result_cardinality":{"kind":"exact","value":1},"result_set_digest":"content:sha256-jcs-v1:2406fe022bdf44f7e6a48eb1e3134cf43f11562774b1b7353fb82d255b651b43","returned_field_summaries":[{"fact_claim_id":{"source_ordinal":0,"source_run_id":"run:sha256-jcs-v1:0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a","source_seq":1,"version":"mfm.fact-claim-id.v1"},"fields":[{"field_id":"result.height","value":800000,"value_type":"unsigned_integer"}]}],"returned_refs":[{"adapter_kind":"adapter:mfm.test.adapter:read:sha256-jcs-v1:2020202020202020202020202020202020202020202020202020202020202020","adapter_version":"mfm.adapter.test.v1","artifact_evidence_hash":"content:sha256-jcs-v1:1212121212121212121212121212121212121212121212121212121212121212","artifact_id":"artifact:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111","capability_kind":"capability:mfm.test.capability:read:sha256-jcs-v1:1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f","capability_version":"mfm.capability.test.v1","fact_claim_id":{"source_ordinal":0,"source_run_id":"run:sha256-jcs-v1:0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a","source_seq":1,"version":"mfm.fact-claim-id.v1"},"fact_descriptor_hash":"content:sha256-jcs-v1:0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c","fact_key":"content:sha256-jcs-v1:0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e","fact_kind":"chain.head","fact_subject_namespace_hash":"content:sha256-jcs-v1:0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d","observed_at":null,"recorded_at":"2026-07-01T00:00:00Z","request_hash":null,"request_schema_id":null,"response_hash":"content:sha256-jcs-v1:1010101010101010101010101010101010101010101010101010101010101010","response_schema_id":"schema:mfm.test.response:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","source_event_id":"event:sha256-jcs-v1:0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","subject_material_hash":"content:sha256-jcs-v1:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f","visibility":{"audience":"platform","kind":"indexed","scope":"default"}}],"version":"mfm.fact-query-receipt-body.v1"}"#
+            r#"{"frontier_type":"snapshot","plan_hash":"content:sha256-jcs-v1:9282f7eb855fd79a7f907f2745fbf49f3f39b54dfb80a1e51a92444f4f0981a9","read_frontier":{"commit_watermark":100,"descriptor_catalog_watermark":3,"max_included_store_commit_order":99,"projection_generation":4,"query_scope":{"audience":"platform","scope":"default"},"store_scope":"default"},"result_cardinality":{"kind":"exact","value":1},"result_set_digest":"content:sha256-jcs-v1:b0499b4df552c3d0e86c2b5044e8b2dd6d93d1d7b376647f522cdd91b0a8f579","returned_field_summaries":[{"fact_claim_id":{"source_ordinal":0,"source_run_id":"run:sha256-jcs-v1:0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a","source_seq":1,"version":"mfm.fact-claim-id.v1"},"fields":[{"field_id":"result.height","value":800000,"value_type":"unsigned_integer"}]}],"returned_refs":[{"adapter_kind":"adapter:mfm.test.adapter:read:sha256-jcs-v1:2020202020202020202020202020202020202020202020202020202020202020","adapter_version":"mfm.adapter.test.v1","artifact_evidence_hash":"content:sha256-jcs-v1:1212121212121212121212121212121212121212121212121212121212121212","artifact_id":"artifact:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111","capability_kind":"capability:mfm.test.capability:read:sha256-jcs-v1:1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f","capability_version":"mfm.capability.test.v1","fact_claim_id":{"source_ordinal":0,"source_run_id":"run:sha256-jcs-v1:0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a","source_seq":1,"version":"mfm.fact-claim-id.v1"},"fact_descriptor_hash":"content:sha256-jcs-v1:0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c","fact_key":"content:sha256-jcs-v1:0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e","fact_kind":"chain.head","fact_subject_namespace_hash":"content:sha256-jcs-v1:0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d","observed_at":null,"producer_node_id":"node:sha256-jcs-v1:1313131313131313131313131313131313131313131313131313131313131313","recorded_at":"2026-07-01T00:00:00Z","request_hash":null,"request_schema_id":null,"response_hash":"content:sha256-jcs-v1:1010101010101010101010101010101010101010101010101010101010101010","response_schema_id":"schema:mfm.test.response:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","source_event_id":"event:sha256-jcs-v1:0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","subject_material_hash":"content:sha256-jcs-v1:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f","visibility":{"audience":"platform","kind":"indexed","scope":"default"}}],"version":"mfm.fact-query-receipt-body.v1"}"#
         );
         assert_eq!(
             fact_query_receipt_body_hash(&plan_hash, &receipt)
                 .expect("receipt body hash")
                 .as_str(),
-            "content:sha256-jcs-v1:6022b0954de6bd94fb379ba8c51aa248250187d6af23c597bc2a8e69d3b2deaa"
+            "content:sha256-jcs-v1:8dc8b91d6ded51205a064ba5002c8948de766c97c1cadf6f58f33801416528fe"
         );
         assert_eq!(
             fact_query_evidence_hash(&evidence)
                 .expect("evidence hash")
                 .as_str(),
-            "content:sha256-jcs-v1:57d8f44bb396bda672091e2b14decfa46f8d283292c4a4859a6c22bd329ef1b6"
+            "content:sha256-jcs-v1:820b72c5f0fee9e2050f23a9a07d5b93c28e9e84298c5fca0bda03c2eabc0f39"
         );
     }
 

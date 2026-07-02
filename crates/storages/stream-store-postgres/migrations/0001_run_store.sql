@@ -204,6 +204,7 @@ CREATE TABLE fact_index (
   source_seq BIGINT NOT NULL,
   source_ordinal INTEGER NOT NULL,
   source_event_id TEXT NOT NULL,
+  producer_node_id TEXT NOT NULL,
   commit_id TEXT NOT NULL,
   commit_key TEXT NOT NULL,
   store_commit_order BIGINT NOT NULL,
