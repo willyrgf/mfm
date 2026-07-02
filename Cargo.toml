@@ -50,6 +50,7 @@ members = [
 	"crates/transports/evm",
 	"crates/transports/proof",
 	"crates/ops/evm-contract-lifecycle-op",
+	"crates/ops/btc-chain-head-collector-op",
 	"crates/ops/portfolio-tracker-op",
 	"crates/ops/proof-op",
 ]
