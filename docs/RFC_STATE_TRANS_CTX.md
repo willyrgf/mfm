@@ -136,6 +136,32 @@ to that context.
 - Add generic JSON-path predicates to the certifier as a substitute for domain modeling.
 - Treat address-only external imports as proof of historical deployment origin.
 
+## Implementation Gate
+
+This RFC is implemented only when context binding is enforced by kernel, program, certifier, runtime,
+admission, and replay authority.
+
+A domain-only implementation is non-compliant. It is not enough to add `EvmContractContext`, store a
+`context_ref` inside lifecycle payloads, rename phase configs to actions, or replace the old network
+comparisons with new local helper checks. Those changes can be useful pieces of the cutover, but they
+do not satisfy the RFC unless the certified spec can express the context invariant and the runtime can
+enforce it before state invocation and output admission.
+
+The following must be impossible or rejected by certified/kernel authority before the EVM lifecycle
+cutover lands:
+
+- consuming a context-bound resource under a different node context
+- accepting a lifecycle resource from an unapproved producer or stage
+- admitting an output whose payload context disagrees with the certified cell context
+- importing external or source-run material without certified import policy and replay-verifiable
+  evidence
+- using rendered public JSON, projection rows, raw seeds, or loose payloads as lifecycle continuation
+  authority
+
+If kernel/program/certifier/runtime support is missing, the implementation must add that support
+first. It must not land as an EVM-only convention guarded by state, adapter, or operation equality
+checks.
+
 ## Proposed Architecture
 
 ### Core Concept
@@ -1096,6 +1122,11 @@ helper checks that imitate the new model.
 ## Cutover Plan
 
 This is not a compatibility migration.
+
+Steps 4-11 are blocked until steps 1-3 include certification, runtime/admission, and replay tests
+that prove the old bad shapes cannot be certified, invoked, admitted, or replayed. In particular, the
+EVM schema and entry-point break must not land before kernel/program/certifier/runtime support can
+enforce context-bound inputs, outputs, producer/stage constraints, and import evidence.
 
 1. Add the context-bound model and certified context constraints.
 2. Add EVM context, action, resource, import, report, and evidence model types.
