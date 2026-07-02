@@ -1566,7 +1566,8 @@ pub mod v1 {
                 return Ok(false);
             }
             Ok(matches!(
-                self.projection.cell_terminal(&node.output_cell),
+                self.projection
+                    .cell_terminal_for_run(&self.run_id.run_id, &node.output_cell),
                 Some(store::CellTerminalProjection::Produced {
                     artifact_id: projected_artifact_id,
                     content_digest,
@@ -2001,7 +2002,7 @@ pub mod v1 {
                 events::RunCompletionOutcome::Completed(evidence) => {
                     match self
                         .projection
-                        .public_output(&evidence.public_output_schema_id)
+                        .public_output(&self.run_id.run_id, &evidence.public_output_schema_id)
                     {
                         Some(store::PublicOutputProjection::Produced { event_id, .. })
                             if event_id == &evidence.public_output_event_id =>
@@ -2491,7 +2492,10 @@ pub mod v1 {
             &self,
             cell: &events::NamedTypedCellRef,
         ) -> Result<()> {
-            let Some(projection) = self.projection.cell_terminal(&cell.cell_id) else {
+            let Some(projection) = self
+                .projection
+                .cell_terminal_for_run(&self.run_id.run_id, &cell.cell_id)
+            else {
                 return Err(certified_evidence_mismatch(
                     "public output cell has no terminal projection",
                 ));
@@ -2529,7 +2533,7 @@ pub mod v1 {
             }
             match self
                 .projection
-                .public_output(&evidence.public_output_schema_id)
+                .public_output(&self.run_id.run_id, &evidence.public_output_schema_id)
             {
                 Some(store::PublicOutputProjection::Produced { event_id, .. })
                     if event_id == &evidence.public_output_event_id =>

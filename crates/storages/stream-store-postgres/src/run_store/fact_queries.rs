@@ -264,7 +264,7 @@ async fn load_matching_fact_index_rows_tx(
 ) -> Result<Vec<PgRow>> {
     let mut builder = QueryBuilder::new(
         "SELECT f.source_run_id, f.source_seq, f.source_ordinal, f.source_event_id, \
-         f.recorded_at, f.observed_at, f.audience, f.visibility_scope, f.fact_kind, \
+         f.producer_node_id, f.recorded_at, f.observed_at, f.audience, f.visibility_scope, f.fact_kind, \
          f.fact_descriptor_hash, f.fact_subject_namespace_hash, f.fact_key, \
          f.subject_material_hash, f.request_schema_id, f.request_hash, f.response_schema_id, \
          f.response_hash, f.response_artifact_id, f.response_artifact_evidence_hash, \
@@ -587,6 +587,11 @@ fn internal_fact_ref_from_row(row: &PgRow) -> Result<mfm_facts::InternalFactRef>
             "fact_index.source_event_id",
         )?)?,
         recorded_at: row_string(row, "recorded_at", "fact_index.recorded_at")?,
+        producer_node_id: parse_identity(&row_string(
+            row,
+            "producer_node_id",
+            "fact_index.producer_node_id",
+        )?)?,
         observed_at: row_optional_string(row, "observed_at")?,
         visibility: mfm_facts::FactVisibility::Indexed { audience, scope },
         fact_kind: mfm_facts::FactKind::new(row_string(row, "fact_kind", "fact_index.fact_kind")?)

@@ -55,7 +55,7 @@ pub(crate) fn scheduler_decision_with_blocked_nodes<'a>(
     if saga.engagement.is_some() {
         return saga_scheduler_decision(runtime_spec, view, &saga, blocked_nodes);
     }
-    if public_output_is_produced(runtime_spec, &view.projections) {
+    if public_output_is_produced(runtime_spec, run_id, &view.projections) {
         return match next_runnable_node(runtime_spec, view, blocked_nodes)? {
             Some(runnable) => Ok(SchedulerDecision::Run(runnable)),
             None => Ok(SchedulerDecision::Completed),
@@ -206,7 +206,7 @@ fn next_remediation_node<'a>(
             if remediation.closed
                 && view
                     .projections
-                    .cell_terminal(&output_node.output_cell)
+                    .cell_terminal_for_run(&view.run_admitted.run_id, &output_node.output_cell)
                     .is_some()
             {
                 continue;
@@ -482,7 +482,10 @@ fn non_side_effect_attempt_plan(
     node: &spec::NodeSpec,
     view: &RuntimeRunView,
 ) -> Result<Option<AttemptPlan>> {
-    if let Some(cell_terminal) = view.projections.cell_terminal(&node.output_cell) {
+    if let Some(cell_terminal) = view
+        .projections
+        .cell_terminal_for_run(&view.run_admitted.run_id, &node.output_cell)
+    {
         validate_terminal_cell_has_completed_attempt(
             runtime_spec,
             &view.projections,
@@ -548,7 +551,10 @@ fn side_effect_attempt_plan(
     node: &spec::NodeSpec,
     view: &RuntimeRunView,
 ) -> Result<Option<AttemptPlan>> {
-    if let Some(cell_terminal) = view.projections.cell_terminal(&node.output_cell) {
+    if let Some(cell_terminal) = view
+        .projections
+        .cell_terminal_for_run(&view.run_admitted.run_id, &node.output_cell)
+    {
         let attempt_id = validate_terminal_cell_has_completed_attempt(
             runtime_spec,
             &view.projections,
@@ -597,7 +603,11 @@ fn side_effect_attempt_plan(
                 }
             }
             store::AttemptStatus::Completed { output_cell_id } => {
-                if view.projections.cell_terminal(output_cell_id).is_none() {
+                if view
+                    .projections
+                    .cell_terminal_for_run(&view.run_admitted.run_id, output_cell_id)
+                    .is_none()
+                {
                     return Err(RuntimeError::InvalidRunStream(format!(
                         "side-effect node {} attempt {} completed without terminal output cell {}",
                         node.node_id, attempt_id, output_cell_id
@@ -683,7 +693,10 @@ fn input_cell_ready(
     })?;
     match &cell.producer {
         spec::CellProducer::Seed(_) => Ok(view.seed_cells.contains_key(&input.cell_id)),
-        spec::CellProducer::Node(_) => match view.projections.cell_terminal(&input.cell_id) {
+        spec::CellProducer::Node(_) => match view
+            .projections
+            .cell_terminal_for_run(&view.run_admitted.run_id, &input.cell_id)
+        {
             Some(store::CellTerminalProjection::Produced { .. }) => Ok(true),
             Some(store::CellTerminalProjection::Skipped { .. }) => {
                 Ok(input.required_terminal == spec::RequiredTerminal::MaybeSkipped)

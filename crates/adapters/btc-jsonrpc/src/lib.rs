@@ -12,9 +12,9 @@ use std::sync::Arc;
 
 use mfm_artifact_capabilities::{ArtifactReadProvider, ArtifactReadRequest};
 use mfm_btc_capabilities::{
-    BtcBlockHash, BtcCapabilityError, BtcCapabilityFuture, BtcChain, BtcChainHeadReadCapability,
-    BtcChainHeadReadProvider, BtcChainHeadRequest, BtcChainHeadResponse, BtcFinality, BtcNetworkId,
-    BtcSourceIdentity, BtcSourceStatus, RedactedBtcSourceEvidence,
+    BtcBlockHash, BtcCapabilityError, BtcCapabilityFuture, BtcChain, BtcChainHeadReadProvider,
+    BtcChainHeadRequest, BtcChainHeadResponse, BtcFinality, BtcNetworkId, BtcSourceIdentity,
+    BtcSourceStatus, RedactedBtcSourceEvidence,
 };
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_capabilities::CapabilitySpec;
@@ -27,7 +27,7 @@ use mfm_fact_capabilities::{
     FactQueryReceiptTrustRootMaterial,
 };
 use mfm_ids::ContentDigest;
-use mfm_program::{MfmFactType, PureState, StateSpec, ValidatedConfig};
+use mfm_program::{ManagedWriteState, MfmFactType, StateSpec, ValidatedConfig};
 use mfm_runtime::{
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
@@ -37,19 +37,19 @@ use mfm_runtime::{
 use mfm_states_btc::{
     btc_jsonrpc_adapter_kind, btc_jsonrpc_adapter_version, chain_head_fact_visibility,
     collector_checkpoint_fact_visibility, normalize_chain_head_response, BtcChainHeadFact,
-    CollectorCheckpointFact, CollectorCheckpointResponse, CollectorCheckpointSubject,
-    LoadedCollectorCheckpoint, ObserveBtcChainHeadConfig, ObserveBtcChainHeadInput,
-    ObserveBtcChainHeadState, QueryCollectorCheckpointConfig, QueryCollectorCheckpointInput,
-    QueryCollectorCheckpointState, RecordBtcChainHeadFactConfig, RecordBtcChainHeadFactInput,
-    RecordBtcChainHeadFactState, RecordCollectorCheckpointConfig, RecordCollectorCheckpointInput,
-    RecordCollectorCheckpointState,
+    BtcFactRecordCapability, CollectorCheckpointFact, CollectorCheckpointResponse,
+    CollectorCheckpointSubject, LoadedCollectorCheckpoint, ObserveBtcChainHeadConfig,
+    ObserveBtcChainHeadInput, ObserveBtcChainHeadState, QueryCollectorCheckpointConfig,
+    QueryCollectorCheckpointInput, QueryCollectorCheckpointState, RecordBtcChainHeadFactConfig,
+    RecordBtcChainHeadFactInput, RecordBtcChainHeadFactState, RecordCollectorCheckpointConfig,
+    RecordCollectorCheckpointInput, RecordCollectorCheckpointState,
 };
 use mfm_values::{MfmConfig, MfmValue};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 const READ_FACTORY: &str = "read_external";
-const PURE_FACTORY: &str = "pure";
+const MANAGED_WRITE_FACTORY: &str = "managed_platform_write";
 const ADAPTER_FACTORY: &str = "btc_jsonrpc_adapter";
 const CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.bitcoin.jsonrpc.runtime.v1";
 
@@ -189,7 +189,7 @@ pub fn register_btc_jsonrpc_runners(
     let fact_index = capabilities.fact_index();
     let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
     let read_factory = events::RunnerFactoryId::new(READ_FACTORY)?;
-    let pure_factory = events::RunnerFactoryId::new(PURE_FACTORY)?;
+    let managed_write_factory = events::RunnerFactoryId::new(MANAGED_WRITE_FACTORY)?;
     let adapter_factory = events::RunnerFactoryId::new(ADAPTER_FACTORY)?;
     registrations.register_adapter_executable(
         btc_jsonrpc_adapter_kind().map_err(adapter_identity_error)?,
@@ -214,8 +214,8 @@ pub fn register_btc_jsonrpc_runners(
     registrations.register_descriptor(
         record_chain_head.descriptor_id().clone(),
         record_chain_head.capabilities(),
-        pure_factory.clone(),
-        executable(pure_factory.clone())?,
+        managed_write_factory.clone(),
+        executable(managed_write_factory.clone())?,
         Arc::new(RecordChainHeadFactRunner {
             artifacts: artifacts.clone(),
         }),
@@ -239,8 +239,8 @@ pub fn register_btc_jsonrpc_runners(
     registrations.register_descriptor(
         record_checkpoint.descriptor_id().clone(),
         record_checkpoint.capabilities(),
-        pure_factory.clone(),
-        executable(pure_factory)?,
+        managed_write_factory.clone(),
+        executable(managed_write_factory)?,
         Arc::new(RecordCheckpointFactRunner { artifacts }),
     )?;
     Ok(())
@@ -339,9 +339,12 @@ impl ErasedNodeRunner for RecordChainHeadFactRunner {
                 self.artifacts.as_ref(),
             )
             .await?;
-            let fact = state.run(input).map_err(|error| {
-                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
-            })?;
+            let fact = state
+                .run(input, &(BtcFactRecordCapability,))
+                .await
+                .map_err(|error| {
+                    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+                })?;
             record_fact_output(ctx, &fact, chain_head_fact_visibility()).await
         })
     }
@@ -393,9 +396,12 @@ impl ErasedNodeRunner for RecordCheckpointFactRunner {
                 self.artifacts.as_ref(),
             )
             .await?;
-            let checkpoint = state.run(input).map_err(|error| {
-                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
-            })?;
+            let checkpoint = state
+                .run(input, &(BtcFactRecordCapability,))
+                .await
+                .map_err(|error| {
+                    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+                })?;
             record_fact_output(ctx, &checkpoint, collector_checkpoint_fact_visibility()).await
         })
     }
@@ -417,7 +423,7 @@ where
     output.retain_runtime_evidence(&output_artifact);
     output.record_fact(
         mfm_runtime::FactRecordInput::new(fact.clone(), visibility),
-        btc_capability_binding()?,
+        btc_fact_record_capability_binding()?,
     )?;
     output.payload(payloads.cell_produced(&output_artifact)?);
     Ok(output.finish())
@@ -745,11 +751,11 @@ fn redacted_provider_error(error: BtcRpcError) -> BtcCapabilityError {
     BtcCapabilityError::redacted_provider_failure(error)
 }
 
-fn btc_capability_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {
+fn btc_fact_record_capability_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {
     Ok(RunnerCapabilityBinding {
-        capability_kind: BtcChainHeadReadCapability::kind()
+        capability_kind: BtcFactRecordCapability::kind()
             .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?,
-        capability_version: BtcChainHeadReadCapability::version()
+        capability_version: BtcFactRecordCapability::version()
             .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?,
         adapter_kind: btc_jsonrpc_adapter_kind().map_err(adapter_identity_error)?,
         adapter_version: btc_jsonrpc_adapter_version().map_err(adapter_identity_error)?,

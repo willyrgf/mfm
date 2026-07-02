@@ -954,19 +954,7 @@ fn retained_fact_artifact_evidence_for_requirement(
             else {
                 return Ok(None);
             };
-            Ok(Some(store::ArtifactEvidenceRef {
-                artifact_id: descriptor.descriptor_artifact_id.clone(),
-                digest: descriptor.descriptor_hash.clone(),
-                byte_len: 0,
-                media_type: spec::MediaType::new("application/json")?,
-                schema_id: Some(
-                    mfm_facts::fact_descriptor_schema_id().map_err(runtime_fact_error)?,
-                ),
-                semantic_type_id: None,
-                producer_node_id: None,
-                producer_seed_id: None,
-                artifact_role: events::ArtifactRole::FactDescriptor,
-            }))
+            Ok(Some(descriptor.descriptor_artifact_evidence.clone()))
         }
         Some(events::ArtifactRole::FactResponse) => Ok(view
             .projections
@@ -978,19 +966,9 @@ fn retained_fact_artifact_evidence_for_requirement(
                         .as_ref()
                         .is_some_and(|digest| index.response_hash == *digest)
             })
-            .and_then(|(claim_id, index)| {
+            .and_then(|(claim_id, _index)| {
                 let record = view.projections.fact_record(claim_id)?;
-                Some(store::ArtifactEvidenceRef {
-                    artifact_id: index.artifact_id.clone(),
-                    digest: index.response_hash.clone(),
-                    byte_len: 0,
-                    media_type: spec::MediaType::new("application/json").ok()?,
-                    schema_id: Some(index.response_schema_id.clone()),
-                    semantic_type_id: None,
-                    producer_node_id: Some(record.node_id.clone()),
-                    producer_seed_id: None,
-                    artifact_role: events::ArtifactRole::FactResponse,
-                })
+                record.response_artifact_evidence.clone()
             })),
         _ => Ok(None),
     }
@@ -2048,7 +2026,7 @@ fn runner_output_preconditions(
         &node.framework,
         Some(spec::FrameworkNodeSpec::CompleteRun(_))
     ) {
-        let completion = run_completion_evidence(runtime_spec, projections)?;
+        let completion = run_completion_evidence(runtime_spec, run_id, projections)?;
         let retention_manifest = projected_retention_manifest(run_id, projections)?;
         preconditions
             .required_present_logical_keys

@@ -202,7 +202,7 @@ impl ArtifactReadRequest {
             media_type: None,
             schema_id: OptionalEvidence::Present(fact_ref.response_schema_id().clone()),
             semantic_type_id: OptionalEvidence::Any,
-            producer_node_id: OptionalEvidence::Any,
+            producer_node_id: OptionalEvidence::Present(fact_ref.producer_node_id().clone()),
             producer_seed_id: OptionalEvidence::Any,
             artifact_role: Some(ArtifactRole::FactResponse),
         })

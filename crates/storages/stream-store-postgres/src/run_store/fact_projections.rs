@@ -3,6 +3,7 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PhysicalFactProjections {
     pub(super) fact_descriptors: BTreeMap<ContentDigest, mfm_store::v1::FactDescriptorProjection>,
+    pub(super) fact_records: BTreeMap<mfm_facts::FactClaimId, mfm_store::v1::FactRecordProjection>,
     pub(super) fact_index_entries:
         BTreeMap<mfm_facts::FactClaimId, mfm_store::v1::FactIndexProjection>,
     pub(super) fact_term_entries: BTreeMap<
@@ -43,9 +44,13 @@ pub(super) async fn load_fact_projection_tables_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
 ) -> Result<PhysicalFactProjections> {
+    let fact_index_entries = load_fact_index_tx(tx, Some(run_id)).await?;
+    let fact_records =
+        load_fact_record_projections_tx(tx, Some(run_id), &fact_index_entries).await?;
     Ok(PhysicalFactProjections {
         fact_descriptors: load_fact_descriptor_index_tx(tx, Some(run_id)).await?,
-        fact_index_entries: load_fact_index_tx(tx, Some(run_id)).await?,
+        fact_records,
+        fact_index_entries,
         fact_term_entries: load_fact_index_terms_tx(tx, Some(run_id)).await?,
     })
 }
@@ -53,9 +58,12 @@ pub(super) async fn load_fact_projection_tables_tx(
 pub(super) async fn load_store_fact_projection_tables_tx(
     tx: &mut Transaction<'_, Postgres>,
 ) -> Result<PhysicalFactProjections> {
+    let fact_index_entries = load_fact_index_tx(tx, None).await?;
+    let fact_records = load_fact_record_projections_tx(tx, None, &fact_index_entries).await?;
     Ok(PhysicalFactProjections {
         fact_descriptors: load_fact_descriptor_index_tx(tx, None).await?,
-        fact_index_entries: load_fact_index_tx(tx, None).await?,
+        fact_records,
+        fact_index_entries,
         fact_term_entries: load_fact_index_terms_tx(tx, None).await?,
     })
 }
@@ -308,6 +316,10 @@ fn physical_fact_projections_from_snapshot(
             .fact_descriptors()
             .map(|(descriptor_hash, projection)| (descriptor_hash.clone(), projection.clone()))
             .collect(),
+        fact_records: snapshot
+            .fact_records()
+            .map(|(claim_id, projection)| (claim_id.clone(), projection.clone()))
+            .collect(),
         fact_index_entries: snapshot
             .fact_index_entries()
             .map(|(claim_id, projection)| (claim_id.clone(), projection.clone()))
@@ -404,13 +416,13 @@ async fn insert_fact_index_projection_tx(
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO fact_index \
-         (source_run_id, source_seq, source_ordinal, source_event_id, commit_id, commit_key, \
+         (source_run_id, source_seq, source_ordinal, source_event_id, producer_node_id, commit_id, commit_key, \
           store_commit_order, recorded_at, observed_at, audience, visibility_scope, fact_kind, \
           fact_descriptor_hash, fact_subject_namespace_hash, fact_key, subject_material_hash, \
           request_schema_id, request_hash, response_schema_id, response_hash, \
           response_artifact_id, response_artifact_evidence_hash, capability_kind, \
           capability_version, adapter_kind, adapter_version) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)",
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)",
     )
     .bind(projection.source_run_id.as_str())
     .bind(u64_to_i64(projection.source_seq, "fact_index.source_seq")?)
@@ -418,6 +430,7 @@ async fn insert_fact_index_projection_tx(
         PostgresStoreError::Corruption("fact_index.source_ordinal overflow".into())
     })?)
     .bind(projection.source_event_id.as_str())
+    .bind(projection.producer_node_id.as_str())
     .bind(commit_id)
     .bind(projection.commit_id.as_str())
     .bind(u64_to_i64(
@@ -505,12 +518,14 @@ async fn load_fact_descriptor_index_tx(
     run_id: Option<&RunId>,
 ) -> Result<BTreeMap<ContentDigest, mfm_store::v1::FactDescriptorProjection>> {
     let sql = if run_id.is_some() {
-        "SELECT descriptor_hash, descriptor_artifact_id, source_event_id, fact_kind, \
+        "SELECT descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash, \
+         source_event_id, fact_kind, \
          descriptor_schema_id, subject_schema_id, response_schema_id, \
          fact_subject_namespace_hash, compatibility_group \
          FROM fact_descriptor_index WHERE source_run_id = $1 ORDER BY descriptor_hash"
     } else {
-        "SELECT descriptor_hash, descriptor_artifact_id, source_event_id, fact_kind, \
+        "SELECT descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash, \
+         source_event_id, fact_kind, \
          descriptor_schema_id, subject_schema_id, response_schema_id, \
          fact_subject_namespace_hash, compatibility_group \
          FROM fact_descriptor_index ORDER BY descriptor_hash"
@@ -530,13 +545,26 @@ async fn load_fact_descriptor_index_tx(
             "descriptor_hash",
             "fact_descriptor_index.descriptor_hash",
         )?)?;
+        let descriptor_artifact_id = parse_identity(&required_string(
+            &row,
+            "descriptor_artifact_id",
+            "fact_descriptor_index.descriptor_artifact_id",
+        )?)?;
+        let descriptor_artifact_evidence_hash = parse_identity(&required_string(
+            &row,
+            "descriptor_artifact_evidence_hash",
+            "fact_descriptor_index.descriptor_artifact_evidence_hash",
+        )?)?;
+        let descriptor_artifact = load_artifact_record_tx(
+            tx,
+            &descriptor_artifact_id,
+            &descriptor_artifact_evidence_hash,
+        )
+        .await?;
         let projection = mfm_store::v1::FactDescriptorProjection {
             descriptor_hash: descriptor_hash.clone(),
-            descriptor_artifact_id: parse_identity(&required_string(
-                &row,
-                "descriptor_artifact_id",
-                "fact_descriptor_index.descriptor_artifact_id",
-            )?)?,
+            descriptor_artifact_id,
+            descriptor_artifact_evidence: descriptor_artifact.evidence,
             fact_kind: mfm_facts::FactKind::new(required_string(
                 &row,
                 "fact_kind",
@@ -578,13 +606,146 @@ async fn load_fact_descriptor_index_tx(
     Ok(projections)
 }
 
+async fn load_fact_record_projections_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: Option<&RunId>,
+    fact_index_entries: &BTreeMap<mfm_facts::FactClaimId, mfm_store::v1::FactIndexProjection>,
+) -> Result<BTreeMap<mfm_facts::FactClaimId, mfm_store::v1::FactRecordProjection>> {
+    if fact_index_entries.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let sql = if run_id.is_some() {
+        "SELECT e.run_id, e.seq, e.ordinal, e.event_id, e.event_schema_id, e.spec_hash, \
+         e.commit_key, e.logical_key, e.payload_hash, e.payload_canonical_json \
+         FROM run_events e \
+         INNER JOIN fact_index f \
+           ON f.source_run_id = e.run_id \
+          AND f.source_seq = e.seq \
+          AND f.source_ordinal = e.ordinal \
+         WHERE f.source_run_id = $1 \
+         ORDER BY e.seq, e.ordinal"
+    } else {
+        "SELECT e.run_id, e.seq, e.ordinal, e.event_id, e.event_schema_id, e.spec_hash, \
+         e.commit_key, e.logical_key, e.payload_hash, e.payload_canonical_json \
+         FROM run_events e \
+         INNER JOIN fact_index f \
+           ON f.source_run_id = e.run_id \
+          AND f.source_seq = e.seq \
+          AND f.source_ordinal = e.ordinal \
+         ORDER BY e.run_id, e.seq, e.ordinal"
+    };
+    let mut query = sqlx::query(sql);
+    if let Some(run_id) = run_id {
+        query = query.bind(run_id.as_str());
+    }
+    let rows = query
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| database_error("failed to load fact record projections", error))?;
+    let mut projections = BTreeMap::new();
+    for row in rows {
+        let event = event_envelope_from_row(row)?;
+        let events::KernelEventPayload::FactRecorded(payload) = event.payload() else {
+            return Err(PostgresStoreError::Corruption(
+                "fact_index references a non-FactRecorded event".to_owned(),
+            ));
+        };
+        let claim_id = mfm_facts::derive_fact_claim_id(
+            event.run_id().clone(),
+            event.seq().as_u64(),
+            event.ordinal().as_u32(),
+        )
+        .map_err(fact_error)?;
+        let response = payload.claim.response();
+        let response_artifact = load_artifact_record_tx(
+            tx,
+            response.artifact_id(),
+            response.artifact_evidence_hash(),
+        )
+        .await?;
+        let projection = mfm_store::v1::FactRecordProjection {
+            fact_claim_id: claim_id.clone(),
+            source_event_id: event.event_id().clone(),
+            source_run_id: event.run_id().clone(),
+            source_seq: event.seq().as_u64(),
+            source_ordinal: event.ordinal().as_u32(),
+            node_id: payload.node_id.clone(),
+            attempt_id: payload.attempt_id.clone(),
+            response_artifact_evidence: Some(response_artifact.evidence),
+            claim: payload.claim.clone(),
+        };
+        let Some(index) = fact_index_entries.get(&claim_id) else {
+            return Err(PostgresStoreError::Corruption(format!(
+                "loaded fact record {:?} has no fact_index row",
+                claim_id
+            )));
+        };
+        if !fact_record_projection_matches_index(&projection, index) {
+            return Err(PostgresStoreError::Corruption(format!(
+                "fact_index row {:?} does not match its FactRecorded payload",
+                claim_id
+            )));
+        }
+        if projections.insert(claim_id.clone(), projection).is_some() {
+            return Err(PostgresStoreError::Corruption(format!(
+                "duplicate fact record projection {:?}",
+                claim_id
+            )));
+        }
+    }
+    for claim_id in fact_index_entries.keys() {
+        if !projections.contains_key(claim_id) {
+            return Err(PostgresStoreError::Corruption(format!(
+                "fact_index row {:?} has no FactRecorded payload",
+                claim_id
+            )));
+        }
+    }
+    Ok(projections)
+}
+
+fn fact_record_projection_matches_index(
+    record: &mfm_store::v1::FactRecordProjection,
+    index: &mfm_store::v1::FactIndexProjection,
+) -> bool {
+    let mfm_facts::FactVisibility::Indexed { audience, scope } = record.claim.visibility() else {
+        return false;
+    };
+    let request = record.claim.request();
+    record.fact_claim_id == index.fact_claim_id
+        && record.source_run_id == index.source_run_id
+        && record.source_seq == index.source_seq
+        && record.source_ordinal == index.source_ordinal
+        && record.source_event_id == index.source_event_id
+        && record.node_id == index.producer_node_id
+        && audience == &index.audience
+        && scope == &index.visibility_scope
+        && record.claim.fact_kind() == &index.fact_kind
+        && record.claim.fact_descriptor_hash() == &index.fact_descriptor_hash
+        && record.claim.observed_at() == index.observed_at.as_deref()
+        && record.claim.subject().fact_subject_namespace_hash()
+            == &index.fact_subject_namespace_hash
+        && record.claim.subject().subject_material_hash() == &index.subject_material_hash
+        && record.claim.subject().fact_key() == &index.fact_key
+        && request.map(|request| request.request_schema_id()) == index.request_schema_id.as_ref()
+        && request.map(|request| request.request_hash()) == index.request_hash.as_ref()
+        && record.claim.response().response_schema_id() == &index.response_schema_id
+        && record.claim.response().response_hash() == &index.response_hash
+        && record.claim.response().artifact_id() == &index.artifact_id
+        && record.claim.response().artifact_evidence_hash() == &index.artifact_evidence_hash
+        && record.claim.producer().capability_kind() == &index.capability_kind
+        && record.claim.producer().capability_version() == &index.capability_version
+        && record.claim.producer().adapter_kind() == &index.adapter_kind
+        && record.claim.producer().adapter_version() == &index.adapter_version
+}
+
 async fn load_fact_index_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: Option<&RunId>,
 ) -> Result<BTreeMap<mfm_facts::FactClaimId, mfm_store::v1::FactIndexProjection>> {
     let sql = if run_id.is_some() {
         "SELECT source_run_id, source_seq, source_ordinal, source_event_id, commit_id, \
-         commit_key, store_commit_order, recorded_at, observed_at, audience, visibility_scope, \
+         producer_node_id, commit_key, store_commit_order, recorded_at, observed_at, audience, visibility_scope, \
          fact_kind, fact_descriptor_hash, fact_subject_namespace_hash, fact_key, \
          subject_material_hash, request_schema_id, request_hash, response_schema_id, \
          response_hash, response_artifact_id, response_artifact_evidence_hash, \
@@ -592,7 +753,7 @@ async fn load_fact_index_tx(
          FROM fact_index WHERE source_run_id = $1 ORDER BY source_seq, source_ordinal"
     } else {
         "SELECT source_run_id, source_seq, source_ordinal, source_event_id, commit_id, \
-         commit_key, store_commit_order, recorded_at, observed_at, audience, visibility_scope, \
+         producer_node_id, commit_key, store_commit_order, recorded_at, observed_at, audience, visibility_scope, \
          fact_kind, fact_descriptor_hash, fact_subject_namespace_hash, fact_key, \
          subject_material_hash, request_schema_id, request_hash, response_schema_id, \
          response_hash, response_artifact_id, response_artifact_evidence_hash, \
@@ -634,6 +795,11 @@ async fn load_fact_index_tx(
                 &row,
                 "source_event_id",
                 "fact_index.source_event_id",
+            )?)?,
+            producer_node_id: parse_identity(&required_string(
+                &row,
+                "producer_node_id",
+                "fact_index.producer_node_id",
             )?)?,
             commit_id: CommitKey::new(required_string(
                 &row,

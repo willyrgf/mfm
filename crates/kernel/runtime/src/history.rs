@@ -350,6 +350,91 @@ impl RuntimeRunView {
             next_seq: committed.next_seq(),
         })
     }
+
+    pub(crate) fn with_status_authority(
+        mut self,
+        authority: &store::ProjectionSnapshot,
+    ) -> Result<Self> {
+        self.projections = projection_with_status_authority(&self.projections, authority)?;
+        Ok(self)
+    }
+}
+
+fn projection_with_status_authority(
+    projections: &store::ProjectionSnapshot,
+    authority: &store::ProjectionSnapshot,
+) -> Result<store::ProjectionSnapshot> {
+    store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
+        run_states: projections
+            .run_states()
+            .map(|(run_id, state)| (run_id.clone(), *state))
+            .collect(),
+        run_spec_hashes: projections
+            .run_spec_hashes()
+            .map(|(run_id, spec_hash)| (run_id.clone(), spec_hash.clone()))
+            .collect(),
+        saga_policy_digests: projections
+            .saga_policy_digests()
+            .map(|(run_id, digest)| (run_id.clone(), digest.clone()))
+            .collect(),
+        run_completions: projections
+            .run_completions()
+            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+            .collect(),
+        saga_engagements: projections
+            .saga_engagements()
+            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+            .collect(),
+        manual_resolutions: projections
+            .manual_resolutions()
+            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+            .collect(),
+        attempts: projections
+            .attempts()
+            .map(|(key, projection)| (key.clone(), projection.clone()))
+            .collect(),
+        cells: projections
+            .cells()
+            .map(|(run_id, cell_id, projection)| {
+                ((run_id.clone(), cell_id.clone()), projection.clone())
+            })
+            .collect(),
+        fact_descriptors: authority
+            .fact_descriptors()
+            .map(|(descriptor_hash, projection)| (descriptor_hash.clone(), projection.clone()))
+            .collect(),
+        fact_records: authority
+            .fact_records()
+            .map(|(claim_id, projection)| (claim_id.clone(), projection.clone()))
+            .collect(),
+        fact_index_entries: authority
+            .fact_index_entries()
+            .map(|(claim_id, projection)| (claim_id.clone(), projection.clone()))
+            .collect(),
+        fact_term_entries: authority
+            .fact_term_entries()
+            .map(|(key, projection)| (key.clone(), projection.clone()))
+            .collect(),
+        side_effects: projections
+            .side_effects()
+            .map(|(ledger_ref, projection)| (ledger_ref.clone(), projection.clone()))
+            .collect(),
+        resource_lanes: authority
+            .resource_lanes()
+            .map(|(lane_key, projection)| (lane_key.clone(), projection.clone()))
+            .collect(),
+        public_outputs: projections
+            .public_outputs()
+            .map(|(run_id, schema_id, projection)| {
+                ((run_id.clone(), schema_id.clone()), projection.clone())
+            })
+            .collect(),
+        retentions: projections
+            .retentions()
+            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+            .collect(),
+    })
+    .map_err(RuntimeError::from)
 }
 
 #[cfg(test)]
@@ -523,7 +608,7 @@ fn materialize_cell(
         spec::CellProducer::Node(_) => {
             let projection = view
                 .projections
-                .cell_terminal(&cell.cell_id)
+                .cell_terminal_for_run(&view.run_admitted.run_id, &cell.cell_id)
                 .ok_or_else(|| {
                     RuntimeError::InputMaterialization(format!(
                         "input cell {} is not terminal",
@@ -1029,7 +1114,7 @@ fn validate_historical_run_stream(
                     &payload.renderer_descriptor_id,
                 )
                 .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
-                validate_historical_public_output_failed(projections, payload)?;
+                validate_historical_public_output_failed(projections, event.run_id(), payload)?;
             }
             events::KernelEventPayload::ResourceLaneClaimIntent(_)
             | events::KernelEventPayload::ResourceLaneReleaseIntent(_) => {
@@ -1505,6 +1590,7 @@ fn validate_historical_retention_ref_batch(
                     payload,
                     &artifact_refs,
                     &typed_payload_refs,
+                    true,
                 )?;
             }
             events::RetentionReason::PublicOutput => {
@@ -1512,6 +1598,7 @@ fn validate_historical_retention_ref_batch(
                     payload,
                     &artifact_refs,
                     &typed_payload_refs,
+                    false,
                 )?;
                 validate_public_output_retention_refs(runtime_spec, commit, payload)?;
             }
@@ -1524,8 +1611,23 @@ fn validate_same_commit_retention_ref_evidence(
     payload: &events::RetentionRefsAppended,
     artifact_refs: &BTreeSet<RetentionRefKey>,
     typed_payload_refs: &BTreeSet<RetentionRefKey>,
+    allow_fact_query_returned_refs: bool,
 ) -> Result<()> {
+    let has_same_commit_fact_query_evidence = payload.refs.iter().any(|retention_ref| {
+        retention_ref.role == events::ArtifactRole::FactQueryEvidence
+            && artifact_refs.contains(&retention_ref_key(retention_ref))
+            && typed_payload_refs.contains(&retention_ref_key(retention_ref))
+    });
     for retention_ref in &payload.refs {
+        if allow_fact_query_returned_refs
+            && has_same_commit_fact_query_evidence
+            && matches!(
+                retention_ref.role,
+                events::ArtifactRole::FactDescriptor | events::ArtifactRole::FactResponse
+            )
+        {
+            continue;
+        }
         let key = retention_ref_key(retention_ref);
         if retention_ref_requires_artifact_reference(retention_ref.role)
             && !artifact_refs.contains(&key)
@@ -2185,7 +2287,7 @@ fn validate_historical_complete_run_batch(
             pre_completion_stream,
             artifact_bytes,
         )?;
-    let completion = run_completion_evidence(runtime_spec, &pre_completion_projection)?;
+    let completion = run_completion_evidence(runtime_spec, run_id, &pre_completion_projection)?;
     let retention_manifest = projected_retention_manifest(run_id, &pre_completion_projection)?;
     if completion_payload.run_id != *run_id
         || completion_payload.spec_hash != *runtime_spec.spec_hash()
@@ -2483,7 +2585,7 @@ fn validate_historical_produced_cell(
             payload.cell_id
         )));
     }
-    match projections.cell_terminal(&payload.cell_id) {
+    match projections.cell_terminal_for_run(event.run_id(), &payload.cell_id) {
         Some(store::CellTerminalProjection::Produced {
             event_id,
             node_id,
@@ -2537,7 +2639,7 @@ fn validate_historical_skipped_cell(
             payload.cell_id
         )));
     }
-    match projections.cell_terminal(&payload.cell_id) {
+    match projections.cell_terminal_for_run(event.run_id(), &payload.cell_id) {
         Some(store::CellTerminalProjection::Skipped {
             event_id,
             node_id,
@@ -2583,7 +2685,10 @@ fn validate_historical_public_output_produced(
             )));
         }
     }
-    if projections.cell_terminal(&node.output_cell).is_none() {
+    if projections
+        .cell_terminal_for_run(event.run_id(), &node.output_cell)
+        .is_none()
+    {
         return Err(RuntimeError::InvalidRunStream(format!(
             "public output for node {} has no terminal render receipt cell",
             payload.node_id
@@ -2596,7 +2701,7 @@ fn validate_historical_public_output_produced(
                 cell.cell_id
             ))
         })?;
-        match projections.cell_terminal(&cell.cell_id) {
+        match projections.cell_terminal_for_run(event.run_id(), &cell.cell_id) {
             Some(store::CellTerminalProjection::Produced {
                 schema_id,
                 semantic_type_id,
@@ -2648,7 +2753,7 @@ fn validate_historical_public_output_produced(
         ))
     })?;
     let receipt_schema_id = spec::public_output_receipt_schema_id()?;
-    match projections.cell_terminal(&node.output_cell) {
+    match projections.cell_terminal_for_run(event.run_id(), &node.output_cell) {
         Some(store::CellTerminalProjection::Produced {
             schema_id,
             semantic_type_id,
@@ -2666,7 +2771,7 @@ fn validate_historical_public_output_produced(
             )));
         }
     }
-    match projections.public_output(&payload.public_schema_id) {
+    match projections.public_output(event.run_id(), &payload.public_schema_id) {
         Some(store::PublicOutputProjection::Produced {
             event_id,
             rendered_digest,
@@ -2735,6 +2840,7 @@ fn validate_historical_run_completed(
 
 fn validate_historical_public_output_failed(
     projections: &store::ProjectionSnapshot,
+    run_id: &RunId,
     payload: &events::PublicOutputRenderFailed,
 ) -> Result<()> {
     match require_projected_attempt(
@@ -2751,7 +2857,7 @@ fn validate_historical_public_output_failed(
             )));
         }
     }
-    match projections.public_output(&payload.public_schema_id) {
+    match projections.public_output(run_id, &payload.public_schema_id) {
         Some(store::PublicOutputProjection::Produced { .. })
         | Some(store::PublicOutputProjection::RenderFailed { .. }) => Ok(()),
         _ => Err(RuntimeError::InvalidRunStream(format!(
@@ -3129,6 +3235,13 @@ fn artifact_reference_matches_same_commit_payload(
                     .diagnostic_ref
                     .as_ref()
                     .is_some_and(|diagnostic| event_artifact_refs_match(diagnostic, reference))
+        }
+        events::KernelEventPayload::ArtifactReferenced(payload) => {
+            reference.artifact_ref.role == events::ArtifactRole::FactQueryEvidence
+                && payload.artifact_ref.role == events::ArtifactRole::FactQueryEvidence
+                && payload.node_id.as_ref() == Some(reference_node_id)
+                && payload.attempt_id.as_ref() == Some(reference_attempt_id)
+                && event_artifact_refs_match(&payload.artifact_ref, reference)
         }
         _ => false,
     })

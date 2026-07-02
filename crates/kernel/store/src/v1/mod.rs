@@ -2332,6 +2332,23 @@ pub enum CellTerminalProjection {
     },
 }
 
+impl CellTerminalProjection {
+    fn attempt_key(&self) -> (&NodeId, &AttemptId) {
+        match self {
+            Self::Produced {
+                node_id,
+                attempt_id,
+                ..
+            }
+            | Self::Skipped {
+                node_id,
+                attempt_id,
+                ..
+            } => (node_id, attempt_id),
+        }
+    }
+}
+
 /// Side-effect projection derived from committed run events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SideEffectProjection {
@@ -3963,6 +3980,8 @@ pub struct FactDescriptorProjection {
     pub descriptor_hash: ContentDigest,
     /// Descriptor artifact id.
     pub descriptor_artifact_id: ArtifactId,
+    /// Exact descriptor artifact evidence.
+    pub descriptor_artifact_evidence: ArtifactEvidenceRef,
     /// Fact kind declared by the descriptor.
     pub fact_kind: mfm_facts::FactKind,
     /// Descriptor schema id.
@@ -3996,6 +4015,8 @@ pub struct FactRecordProjection {
     pub node_id: NodeId,
     /// Producing attempt id.
     pub attempt_id: AttemptId,
+    /// Exact response artifact evidence when this projection was hydrated with artifact authority.
+    pub response_artifact_evidence: Option<ArtifactEvidenceRef>,
     /// Normalized claim payload.
     pub claim: mfm_facts::FactClaim,
 }
@@ -4013,6 +4034,8 @@ pub struct FactIndexProjection {
     pub source_ordinal: u32,
     /// Store-owned event id that recorded the fact.
     pub source_event_id: EventId,
+    /// Producing node id.
+    pub producer_node_id: NodeId,
     /// Commit idempotency key for the append.
     pub commit_id: CommitKey,
     /// Deterministic store commit ordering coordinate.
@@ -4133,7 +4156,7 @@ pub struct ProjectionSnapshot {
     saga_engagements: BTreeMap<RunId, SagaEngagementProjection>,
     manual_resolutions: BTreeMap<RunId, ManualResolutionProjection>,
     attempts: BTreeMap<(NodeId, AttemptId), AttemptProjection>,
-    cells: BTreeMap<CellId, CellTerminalProjection>,
+    cells: BTreeMap<(RunId, CellId), CellTerminalProjection>,
     fact_descriptors: BTreeMap<ContentDigest, FactDescriptorProjection>,
     fact_records: BTreeMap<mfm_facts::FactClaimId, FactRecordProjection>,
     fact_index_entries: BTreeMap<mfm_facts::FactClaimId, FactIndexProjection>,
@@ -4141,7 +4164,7 @@ pub struct ProjectionSnapshot {
         BTreeMap<(mfm_facts::FactClaimId, mfm_facts::FactFieldId), FactIndexTermProjection>,
     side_effects: BTreeMap<SideEffectPairLedgerRef, SideEffectProjection>,
     resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
-    public_outputs: BTreeMap<SchemaId, PublicOutputProjection>,
+    public_outputs: BTreeMap<(RunId, SchemaId), PublicOutputProjection>,
     retentions: BTreeMap<RunId, RetentionProjection>,
 }
 
@@ -4166,7 +4189,7 @@ pub struct ProjectionSnapshotParts {
     /// Attempt projections.
     pub attempts: BTreeMap<(NodeId, AttemptId), AttemptProjection>,
     /// Terminal cell projections.
-    pub cells: BTreeMap<CellId, CellTerminalProjection>,
+    pub cells: BTreeMap<(RunId, CellId), CellTerminalProjection>,
     /// Descriptor catalog projections.
     pub fact_descriptors: BTreeMap<ContentDigest, FactDescriptorProjection>,
     /// Recorded fact projections.
@@ -4181,7 +4204,7 @@ pub struct ProjectionSnapshotParts {
     /// Cross-run resource lane projections.
     pub resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
     /// Public output projections.
-    pub public_outputs: BTreeMap<SchemaId, PublicOutputProjection>,
+    pub public_outputs: BTreeMap<(RunId, SchemaId), PublicOutputProjection>,
     /// Retention projections.
     pub retentions: BTreeMap<RunId, RetentionProjection>,
 }
@@ -4215,6 +4238,23 @@ impl ProjectionSnapshot {
                 return Err(StoreError::ProjectionConflict {
                     key: format!("attempt:{}:{}", projection.node_id, projection.attempt_id),
                     message: "attempt projection key does not match projection identity".to_owned(),
+                });
+            }
+        }
+        for ((run_id, cell_id), projection) in &cells {
+            let (projection_node_id, projection_attempt_id) = projection.attempt_key();
+            let Some(attempt) =
+                attempts.get(&(projection_node_id.clone(), projection_attempt_id.clone()))
+            else {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("cell:{run_id}:{cell_id}:terminal"),
+                    message: "cell projection references missing attempt projection".to_owned(),
+                });
+            };
+            if &attempt.run_id != run_id {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("cell:{run_id}:{cell_id}:terminal"),
+                    message: "cell projection key does not match attempt run id".to_owned(),
                 });
             }
         }
@@ -4422,7 +4462,20 @@ impl ProjectionSnapshot {
 
     /// Returns a cell terminal projection.
     pub fn cell_terminal(&self, cell_id: &CellId) -> Option<&CellTerminalProjection> {
-        self.cells.get(cell_id)
+        self.cells
+            .iter()
+            .find_map(|((_run_id, key_cell_id), projection)| {
+                (key_cell_id == cell_id).then_some(projection)
+            })
+    }
+
+    /// Returns a cell terminal projection for a specific run.
+    pub fn cell_terminal_for_run(
+        &self,
+        run_id: &RunId,
+        cell_id: &CellId,
+    ) -> Option<&CellTerminalProjection> {
+        self.cells.get(&(run_id.clone(), cell_id.clone()))
     }
 
     /// Returns a descriptor catalog projection.
@@ -4501,8 +4554,13 @@ impl ProjectionSnapshot {
     }
 
     /// Returns a public-output projection.
-    pub fn public_output(&self, schema_id: &SchemaId) -> Option<&PublicOutputProjection> {
-        self.public_outputs.get(schema_id)
+    pub fn public_output(
+        &self,
+        run_id: &RunId,
+        schema_id: &SchemaId,
+    ) -> Option<&PublicOutputProjection> {
+        self.public_outputs
+            .get(&(run_id.clone(), schema_id.clone()))
     }
 
     /// Returns a retention projection.
@@ -4511,10 +4569,13 @@ impl ProjectionSnapshot {
     }
 
     /// Returns whether terminal public-output authority is projected.
-    pub fn has_public_output(&self) -> bool {
+    pub fn has_public_output(&self, run_id: &RunId) -> bool {
         self.public_outputs
-            .values()
-            .any(|projection| matches!(projection, PublicOutputProjection::Produced { .. }))
+            .iter()
+            .any(|((projection_run_id, _), projection)| {
+                projection_run_id == run_id
+                    && matches!(projection, PublicOutputProjection::Produced { .. })
+            })
     }
 
     /// Returns whether all past-boundary forward ledgers for the current projection are quiescent.
@@ -4615,8 +4676,10 @@ impl ProjectionSnapshot {
     }
 
     /// Iterates cell terminal projections.
-    pub fn cells(&self) -> impl Iterator<Item = (&CellId, &CellTerminalProjection)> {
-        self.cells.iter()
+    pub fn cells(&self) -> impl Iterator<Item = (&RunId, &CellId, &CellTerminalProjection)> {
+        self.cells
+            .iter()
+            .map(|((run_id, cell_id), projection)| (run_id, cell_id, projection))
     }
 
     /// Iterates descriptor catalog projections.
@@ -4667,8 +4730,12 @@ impl ProjectionSnapshot {
     }
 
     /// Iterates public-output projections.
-    pub fn public_outputs(&self) -> impl Iterator<Item = (&SchemaId, &PublicOutputProjection)> {
-        self.public_outputs.iter()
+    pub fn public_outputs(
+        &self,
+    ) -> impl Iterator<Item = (&RunId, &SchemaId, &PublicOutputProjection)> {
+        self.public_outputs
+            .iter()
+            .map(|((run_id, schema_id), projection)| (run_id, schema_id, projection))
     }
 
     /// Iterates retention projections.
@@ -5543,7 +5610,9 @@ impl CommitStagingVerifier<'_> {
             }
         }
         for precondition in &request.preconditions.required_cell_states {
-            let actual = self.projections.cell_terminal(&precondition.cell_id);
+            let actual = self
+                .projections
+                .cell_terminal_for_run(&request.run_id, &precondition.cell_id);
             let ok = match precondition.required {
                 RequiredCellState::Absent => actual.is_none(),
                 RequiredCellState::Produced => {
@@ -5573,7 +5642,7 @@ impl CommitStagingVerifier<'_> {
             }
         }
         if request.preconditions.required_public_output_absent
-            && self.projections.has_public_output()
+            && self.projections.has_public_output(&request.run_id)
         {
             return Err(StoreError::PublicOutputPreconditionFailed);
         }
@@ -6445,14 +6514,7 @@ impl RunEventStore for AsyncInMemoryRunStore {
                     &store.artifact_bytes,
                 )?;
                 let run_projection = committed.projection().clone();
-                projection_with_resource_lanes(
-                    &run_projection,
-                    store
-                        .projection_snapshot()
-                        .resource_lanes()
-                        .map(|(lane_key, projection)| (lane_key.clone(), projection.clone()))
-                        .collect(),
-                )
+                projection_with_store_authority(&run_projection, store.projection_snapshot())
             })
             .and_then(|result| result);
         Box::pin(std::future::ready(result))
@@ -6699,9 +6761,9 @@ impl RetainedArtifactReadProvider for AsyncInMemoryRunStore {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-fn projection_with_resource_lanes(
+fn projection_with_store_authority(
     snapshot: &ProjectionSnapshot,
-    resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
+    authority: &ProjectionSnapshot,
 ) -> Result<ProjectionSnapshot> {
     ProjectionSnapshot::from_parts(ProjectionSnapshotParts {
         run_states: snapshot
@@ -6734,21 +6796,23 @@ fn projection_with_resource_lanes(
             .collect(),
         cells: snapshot
             .cells()
-            .map(|(cell_id, projection)| (cell_id.clone(), projection.clone()))
+            .map(|(run_id, cell_id, projection)| {
+                ((run_id.clone(), cell_id.clone()), projection.clone())
+            })
             .collect(),
-        fact_descriptors: snapshot
+        fact_descriptors: authority
             .fact_descriptors()
             .map(|(key, projection)| (key.clone(), projection.clone()))
             .collect(),
-        fact_records: snapshot
+        fact_records: authority
             .fact_records()
             .map(|(key, projection)| (key.clone(), projection.clone()))
             .collect(),
-        fact_index_entries: snapshot
+        fact_index_entries: authority
             .fact_index_entries()
             .map(|(key, projection)| (key.clone(), projection.clone()))
             .collect(),
-        fact_term_entries: snapshot
+        fact_term_entries: authority
             .fact_term_entries()
             .map(|(key, projection)| (key.clone(), projection.clone()))
             .collect(),
@@ -6756,10 +6820,15 @@ fn projection_with_resource_lanes(
             .side_effects()
             .map(|(ledger_ref, projection)| (ledger_ref.clone(), projection.clone()))
             .collect(),
-        resource_lanes,
+        resource_lanes: authority
+            .resource_lanes()
+            .map(|(lane_key, projection)| (lane_key.clone(), projection.clone()))
+            .collect(),
         public_outputs: snapshot
             .public_outputs()
-            .map(|(schema_id, projection)| (schema_id.clone(), projection.clone()))
+            .map(|(run_id, schema_id, projection)| {
+                ((run_id.clone(), schema_id.clone()), projection.clone())
+            })
             .collect(),
         retentions: snapshot
             .retentions()
@@ -11028,6 +11097,7 @@ pub fn parse_attempt_projection(json: &serde_json::Value) -> CodecResult<Attempt
 
 /// Encodes a cell terminal projection as JSON.
 pub fn cell_projection_json(
+    run_id: &RunId,
     cell_id: &CellId,
     projection: &CellTerminalProjection,
 ) -> serde_json::Value {
@@ -11042,6 +11112,7 @@ pub fn cell_projection_json(
             content_digest,
         } => serde_json::json!({
             "variant": "produced",
+            "run_id": run_id.as_str(),
             "cell_id": cell_id.as_str(),
             "event_id": event_id.as_str(),
             "node_id": node_id.as_str(),
@@ -11060,6 +11131,7 @@ pub fn cell_projection_json(
             skip_reason,
         } => serde_json::json!({
             "variant": "skipped",
+            "run_id": run_id.as_str(),
             "cell_id": cell_id.as_str(),
             "event_id": event_id.as_str(),
             "node_id": node_id.as_str(),
@@ -11074,7 +11146,8 @@ pub fn cell_projection_json(
 /// Parses a cell terminal projection from JSON.
 pub fn parse_cell_projection(
     json: &serde_json::Value,
-) -> CodecResult<(CellId, CellTerminalProjection)> {
+) -> CodecResult<((RunId, CellId), CellTerminalProjection)> {
+    let run_id = parse_identity(required_str(json, "run_id")?)?;
     let cell_id = parse_identity(required_str(json, "cell_id")?)?;
     let projection = match required_str(json, "variant")? {
         "produced" => CellTerminalProjection::Produced {
@@ -11100,7 +11173,7 @@ pub fn parse_cell_projection(
             )));
         }
     };
-    Ok((cell_id, projection))
+    Ok(((run_id, cell_id), projection))
 }
 
 /// Encodes a side-effect projection as JSON.
@@ -11428,6 +11501,7 @@ fn parse_side_effect_phase(json: &serde_json::Value) -> CodecResult<SideEffectPh
 
 /// Encodes a public-output projection as JSON.
 pub fn public_output_projection_json(
+    run_id: &RunId,
     schema_id: &SchemaId,
     projection: &PublicOutputProjection,
 ) -> serde_json::Value {
@@ -11438,6 +11512,7 @@ pub fn public_output_projection_json(
             rendered_artifact_id,
         } => serde_json::json!({
             "variant": "produced",
+            "run_id": run_id.as_str(),
             "public_schema_id": schema_id.as_str(),
             "event_id": event_id.as_str(),
             "rendered_digest": rendered_digest.as_str(),
@@ -11445,6 +11520,7 @@ pub fn public_output_projection_json(
         }),
         PublicOutputProjection::RenderFailed { event_id, error } => serde_json::json!({
             "variant": "render_failed",
+            "run_id": run_id.as_str(),
             "public_schema_id": schema_id.as_str(),
             "event_id": event_id.as_str(),
             "error": error_info_json(error),
@@ -11455,7 +11531,8 @@ pub fn public_output_projection_json(
 /// Parses a public-output projection from JSON.
 pub fn parse_public_output_projection(
     json: &serde_json::Value,
-) -> CodecResult<(SchemaId, PublicOutputProjection)> {
+) -> CodecResult<((RunId, SchemaId), PublicOutputProjection)> {
+    let run_id = parse_identity(required_str(json, "run_id")?)?;
     let schema_id = parse_identity(required_str(json, "public_schema_id")?)?;
     let projection = match required_str(json, "variant")? {
         "produced" => PublicOutputProjection::Produced {
@@ -11475,7 +11552,7 @@ pub fn parse_public_output_projection(
             )));
         }
     };
-    Ok((schema_id, projection))
+    Ok(((run_id, schema_id), projection))
 }
 
 /// Encodes a retention manifest projection as JSON.

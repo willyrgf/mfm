@@ -2605,20 +2605,29 @@ fn projection_snapshot_summary(
         )
     }));
 
-    rows.extend(snapshot.public_outputs().map(|(schema_id, projection)| {
-        let PublicOutputProjection::Produced {
-            rendered_artifact_id,
-            ..
-        } = projection
-        else {
-            return format!("public_output schema={} failed", schema_id.as_str());
-        };
-        format!(
-            "public_output schema={} rendered_artifact={}",
-            schema_id.as_str(),
-            rendered_artifact_id.is_some()
-        )
-    }));
+    rows.extend(
+        snapshot
+            .public_outputs()
+            .map(|(run_id, schema_id, projection)| {
+                let PublicOutputProjection::Produced {
+                    rendered_artifact_id,
+                    ..
+                } = projection
+                else {
+                    return format!(
+                        "public_output run={} schema={} failed",
+                        run_id.as_str(),
+                        schema_id.as_str()
+                    );
+                };
+                format!(
+                    "public_output run={} schema={} rendered_artifact={}",
+                    run_id.as_str(),
+                    schema_id.as_str(),
+                    rendered_artifact_id.is_some()
+                )
+            }),
+    );
 
     rows.extend(snapshot.retentions().map(|(retention_run_id, retention)| {
         let latest = retention.manifest.as_ref().expect("latest manifest");
@@ -8124,11 +8133,11 @@ fn assert_projection_codecs_round_trip(snapshot: &ProjectionSnapshot) {
             projection.clone()
         );
     }
-    for (cell_id, projection) in snapshot.cells() {
-        let json = codec::cell_projection_json(cell_id, projection);
+    for (run_id, cell_id, projection) in snapshot.cells() {
+        let json = codec::cell_projection_json(run_id, cell_id, projection);
         assert_eq!(
             codec::parse_cell_projection(&json).expect("parse cell"),
-            (cell_id.clone(), projection.clone())
+            ((run_id.clone(), cell_id.clone()), projection.clone())
         );
     }
     for (_ledger_ref, projection) in snapshot.side_effects() {
@@ -8145,11 +8154,11 @@ fn assert_projection_codecs_round_trip(snapshot: &ProjectionSnapshot) {
             (lane_key.clone(), projection.clone())
         );
     }
-    for (schema_id, projection) in snapshot.public_outputs() {
-        let json = codec::public_output_projection_json(schema_id, projection);
+    for (run_id, schema_id, projection) in snapshot.public_outputs() {
+        let json = codec::public_output_projection_json(run_id, schema_id, projection);
         assert_eq!(
             codec::parse_public_output_projection(&json).expect("parse public output"),
-            (schema_id.clone(), projection.clone())
+            ((run_id.clone(), schema_id.clone()), projection.clone())
         );
     }
     for (_run_id, projection) in snapshot.retentions() {
@@ -8278,7 +8287,8 @@ fn projections_rebuild_from_authoritative_run_stream() {
             side_effect_pair_id()
         ),
         format!(
-            "public_output schema={} rendered_artifact=true",
+            "public_output run={} schema={} rendered_artifact=true",
+            run_id,
             schema_id("mfm.test.public_output", 3)
         ),
         format!("retention run={} refs=3 manifests=1 latest_seq=1", run_id),

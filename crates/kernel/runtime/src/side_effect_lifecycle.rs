@@ -422,7 +422,7 @@ pub(crate) fn validate_side_effect_terminal_evidence(
     attempt_id: &AttemptId,
 ) -> Result<()> {
     let terminal_skipped = matches!(
-        projections.cell_terminal(&node.output_cell),
+        projections.cell_terminal_for_run(run_id, &node.output_cell),
         Some(store::CellTerminalProjection::Skipped {
             node_id,
             attempt_id: cell_attempt_id,

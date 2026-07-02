@@ -364,6 +364,7 @@ fn test_returned_fact_authority(
         fact_claim_id: fact_claim_id.clone(),
         source_event_id: source_event_id.clone(),
         recorded_at: recorded_at.clone(),
+        producer_node_id: node.node_id.clone(),
         observed_at: observed_at.clone(),
         visibility: visibility.clone(),
         fact_kind: descriptor.fact_kind().clone(),
@@ -385,7 +386,8 @@ fn test_returned_fact_authority(
     .expect("internal fact ref");
     let descriptor_projection = store::FactDescriptorProjection {
         descriptor_hash: descriptor_hash.clone(),
-        descriptor_artifact_id: descriptor_artifact.evidence.artifact_id,
+        descriptor_artifact_id: descriptor_artifact.evidence.artifact_id.clone(),
+        descriptor_artifact_evidence: descriptor_artifact.evidence.clone(),
         fact_kind: descriptor.fact_kind().clone(),
         descriptor_schema_id: mfm_facts::fact_descriptor_schema_id().expect("descriptor schema"),
         subject_schema_id: descriptor.subject_schema_id().clone(),
@@ -429,6 +431,7 @@ fn test_returned_fact_authority(
             DigestAlgorithm::Sha256JcsV1,
             DigestBytes::from_array([0x79; 32]),
         ),
+        response_artifact_evidence: Some(response_evidence.clone()),
         claim,
     };
     let index_projection = store::FactIndexProjection {
@@ -437,6 +440,7 @@ fn test_returned_fact_authority(
         source_seq: 2,
         source_ordinal: 0,
         source_event_id,
+        producer_node_id: node.node_id.clone(),
         commit_id: store::CommitKey::new("test-returned-fact").expect("commit key"),
         store_commit_order: 2,
         recorded_at,
@@ -519,7 +523,7 @@ fn projection_snapshot_with_returned_fact_authority(
             .collect(),
         cells: base
             .cells()
-            .map(|(key, value)| (key.clone(), value.clone()))
+            .map(|(run_id, cell_id, value)| ((run_id.clone(), cell_id.clone()), value.clone()))
             .collect(),
         fact_descriptors,
         fact_records,
@@ -538,7 +542,7 @@ fn projection_snapshot_with_returned_fact_authority(
             .collect(),
         public_outputs: base
             .public_outputs()
-            .map(|(key, value)| (key.clone(), value.clone()))
+            .map(|(run_id, schema_id, value)| ((run_id.clone(), schema_id.clone()), value.clone()))
             .collect(),
         retentions: base
             .retentions()
@@ -2221,7 +2225,10 @@ fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
             *staged_query_evidence.artifact_id()
         );
         assert_eq!(
-            query_artifact.evidence().digest,
+            query_artifact
+                .evidence()
+                .evidence_hash()
+                .expect("query artifact evidence hash"),
             *staged_query_evidence.evidence_hash()
         );
         let expected_query_retention = events::RetentionRef {
@@ -4811,9 +4818,10 @@ async fn public_output_render_failure_resumes_and_completes() {
     let failed_attempt = append_attempt_start(&mut store, &fixture, render_node, 1);
     append_public_output_render_failure(&mut store, &fixture, render_node, &failed_attempt);
     assert!(matches!(
-        store
-            .projection_snapshot()
-            .public_output(&fixture.runtime_spec.spec().public_outputs.public_schema_id),
+        store.projection_snapshot().public_output(
+            &fixture.run_id,
+            &fixture.runtime_spec.spec().public_outputs.public_schema_id,
+        ),
         Some(store::PublicOutputProjection::RenderFailed { .. })
     ));
 
@@ -4832,9 +4840,10 @@ async fn public_output_render_failure_resumes_and_completes() {
         store::RunState::Completed
     );
     assert!(matches!(
-        store
-            .projection_snapshot()
-            .public_output(&fixture.runtime_spec.spec().public_outputs.public_schema_id),
+        store.projection_snapshot().public_output(
+            &fixture.run_id,
+            &fixture.runtime_spec.spec().public_outputs.public_schema_id,
+        ),
         Some(store::PublicOutputProjection::Produced { .. })
     ));
 }
@@ -11674,7 +11683,7 @@ fn runtime_lifecycle_summary(store: &TestTypedRunStore, run_id: &RunId) -> Strin
         .collect::<BTreeSet<_>>();
     let cells = projections
         .cells()
-        .filter(|(_, terminal)| match terminal {
+        .filter(|(_, _, terminal)| match terminal {
             store::CellTerminalProjection::Produced {
                 node_id,
                 attempt_id,
@@ -13157,8 +13166,10 @@ async fn drive_until_public_output_produced(
         let projections = store.projection_snapshot();
         if projections.run_state(&fixture.run_id) == store::RunState::Started
             && matches!(
-                projections
-                    .public_output(&fixture.runtime_spec.spec().public_outputs.public_schema_id),
+                projections.public_output(
+                    &fixture.run_id,
+                    &fixture.runtime_spec.spec().public_outputs.public_schema_id,
+                ),
                 Some(store::PublicOutputProjection::Produced { .. })
             )
         {

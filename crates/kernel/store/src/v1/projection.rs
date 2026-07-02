@@ -29,10 +29,10 @@ pub(super) fn apply_projection(
             apply_attempt_failed(projections, envelope, payload)?;
         }
         KernelEventPayload::CellProduced(payload) => {
-            apply_cell_produced(projections, &envelope.event_id, payload)?;
+            apply_cell_produced(projections, envelope.run_id(), &envelope.event_id, payload)?;
         }
         KernelEventPayload::CellSkipped(payload) => {
-            apply_cell_skipped(projections, &envelope.event_id, payload)?;
+            apply_cell_skipped(projections, envelope.run_id(), &envelope.event_id, payload)?;
         }
         KernelEventPayload::SideEffectIntentPersisted(payload) => {
             apply_side_effect_intent_persisted(projections, envelope, payload)?;
@@ -84,10 +84,20 @@ pub(super) fn apply_projection(
             apply_resource_lane_released(projections, envelope, payload)?;
         }
         KernelEventPayload::PublicOutputProduced(payload) => {
-            apply_public_output_produced(projections, &envelope.event_id, payload)?;
+            apply_public_output_produced(
+                projections,
+                envelope.run_id(),
+                &envelope.event_id,
+                payload,
+            )?;
         }
         KernelEventPayload::PublicOutputRenderFailed(payload) => {
-            apply_public_output_render_failed(projections, &envelope.event_id, payload)?;
+            apply_public_output_render_failed(
+                projections,
+                envelope.run_id(),
+                &envelope.event_id,
+                payload,
+            )?;
         }
         KernelEventPayload::ManualResolutionRecorded(payload) => {
             apply_manual_resolution_recorded(projections, &envelope.event_id, payload)?;
@@ -961,17 +971,19 @@ fn apply_side_effect_failed(
 
 fn apply_cell_produced(
     projections: &mut ProjectionSnapshot,
+    run_id: &RunId,
     event_id: &EventId,
     payload: &events::CellProduced,
 ) -> Result<()> {
-    if projections.cells.contains_key(&payload.cell_id) {
+    let key = (run_id.clone(), payload.cell_id.clone());
+    if projections.cells.contains_key(&key) {
         return Err(StoreError::ProjectionConflict {
-            key: format!("cell:{}:terminal", payload.cell_id),
+            key: format!("cell:{run_id}:{}:terminal", payload.cell_id),
             message: "cell already terminal".to_owned(),
         });
     }
     projections.cells.insert(
-        payload.cell_id.clone(),
+        key,
         CellTerminalProjection::Produced {
             event_id: event_id.clone(),
             node_id: payload.node_id.clone(),
@@ -987,17 +999,19 @@ fn apply_cell_produced(
 
 fn apply_cell_skipped(
     projections: &mut ProjectionSnapshot,
+    run_id: &RunId,
     event_id: &EventId,
     payload: &events::CellSkipped,
 ) -> Result<()> {
-    if projections.cells.contains_key(&payload.cell_id) {
+    let key = (run_id.clone(), payload.cell_id.clone());
+    if projections.cells.contains_key(&key) {
         return Err(StoreError::ProjectionConflict {
-            key: format!("cell:{}:terminal", payload.cell_id),
+            key: format!("cell:{run_id}:{}:terminal", payload.cell_id),
             message: "cell already terminal".to_owned(),
         });
     }
     projections.cells.insert(
-        payload.cell_id.clone(),
+        key,
         CellTerminalProjection::Skipped {
             event_id: event_id.clone(),
             node_id: payload.node_id.clone(),
@@ -1012,20 +1026,22 @@ fn apply_cell_skipped(
 
 fn apply_public_output_produced(
     projections: &mut ProjectionSnapshot,
+    run_id: &RunId,
     event_id: &EventId,
     payload: &events::PublicOutputProduced,
 ) -> Result<()> {
+    let key = (run_id.clone(), payload.public_schema_id.clone());
     if matches!(
-        projections.public_outputs.get(&payload.public_schema_id),
+        projections.public_outputs.get(&key),
         Some(PublicOutputProjection::Produced { .. })
     ) {
         return Err(StoreError::ProjectionConflict {
-            key: format!("public_output:{}", payload.public_schema_id),
+            key: format!("public_output:{run_id}:{}", payload.public_schema_id),
             message: "public output already projected".to_owned(),
         });
     }
     projections.public_outputs.insert(
-        payload.public_schema_id.clone(),
+        key,
         PublicOutputProjection::Produced {
             event_id: event_id.clone(),
             rendered_digest: payload.rendered_digest.clone(),
@@ -1037,20 +1053,22 @@ fn apply_public_output_produced(
 
 fn apply_public_output_render_failed(
     projections: &mut ProjectionSnapshot,
+    run_id: &RunId,
     event_id: &EventId,
     payload: &events::PublicOutputRenderFailed,
 ) -> Result<()> {
+    let key = (run_id.clone(), payload.public_schema_id.clone());
     if matches!(
-        projections.public_outputs.get(&payload.public_schema_id),
+        projections.public_outputs.get(&key),
         Some(PublicOutputProjection::Produced { .. })
     ) {
         return Err(StoreError::ProjectionConflict {
-            key: format!("public_output:{}", payload.public_schema_id),
+            key: format!("public_output:{run_id}:{}", payload.public_schema_id),
             message: "public output already produced".to_owned(),
         });
     }
     projections.public_outputs.insert(
-        payload.public_schema_id.clone(),
+        key,
         PublicOutputProjection::RenderFailed {
             event_id: event_id.clone(),
             error: Box::new(payload.error.clone()),
@@ -1275,6 +1293,7 @@ fn apply_fact_recorded(
             source_ordinal,
             node_id: payload.node_id.clone(),
             attempt_id: payload.attempt_id.clone(),
+            response_artifact_evidence: Some(response_evidence.clone()),
             claim: claim.clone(),
         },
     );
@@ -1311,6 +1330,7 @@ fn apply_fact_recorded(
             source_seq,
             source_ordinal,
             source_event_id: envelope.event_id().clone(),
+            producer_node_id: payload.node_id.clone(),
             commit_id: envelope.commit_key().clone(),
             store_commit_order,
             recorded_at,
@@ -1426,6 +1446,7 @@ fn apply_fact_recorded_record_only(
             source_ordinal: envelope.ordinal().as_u32(),
             node_id: payload.node_id.clone(),
             attempt_id: payload.attempt_id.clone(),
+            response_artifact_evidence: None,
             claim: claim.clone(),
         },
     );
@@ -1467,6 +1488,7 @@ fn apply_fact_descriptor_artifact(
     let projection = FactDescriptorProjection {
         descriptor_hash: descriptor_hash.clone(),
         descriptor_artifact_id: artifact.artifact_id.clone(),
+        descriptor_artifact_evidence: evidence.clone(),
         fact_kind: descriptor.fact_kind().clone(),
         descriptor_schema_id: descriptor.descriptor_schema_id().clone(),
         subject_schema_id: descriptor.subject_schema_id().clone(),
@@ -1501,6 +1523,7 @@ fn equivalent_fact_descriptor_projection(
 ) -> bool {
     left.descriptor_hash == right.descriptor_hash
         && left.descriptor_artifact_id == right.descriptor_artifact_id
+        && left.descriptor_artifact_evidence == right.descriptor_artifact_evidence
         && left.fact_kind == right.fact_kind
         && left.descriptor_schema_id == right.descriptor_schema_id
         && left.subject_schema_id == right.subject_schema_id
