@@ -12,7 +12,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -260,6 +262,742 @@ impl From<mfm_certify::CertifyError> for AppError {
     }
 }
 
+impl From<mfm_facts::FactDescriptorError> for AppError {
+    fn from(_error: mfm_facts::FactDescriptorError) -> Self {
+        Self::backend(
+            ErrorClass::BadRequest,
+            "FactQueryInvalid",
+            "Fact query input is invalid",
+        )
+    }
+}
+
+/// Opaque public identifier for a fact returned by app public fact services.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct PublicFactRefId(String);
+
+impl PublicFactRefId {
+    /// Creates a public fact ref id from app-generated opaque text.
+    pub fn new(value: impl Into<String>) -> Result<Self, AppError> {
+        let value = value.into();
+        if !value.starts_with("pfr_") || value.len() != 68 {
+            return Err(AppError::new(
+                ErrorClass::BadRequest,
+                "PublicFactRefInvalid",
+                "Public fact reference is invalid",
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the opaque public ref text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for PublicFactRefId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Public descriptor reference that omits descriptor hashes and artifact ids.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicFactDescriptorRef {
+    /// Descriptor schema id.
+    pub descriptor_schema_id: String,
+    /// Subject schema id.
+    pub subject_schema_id: String,
+    /// Response schema id.
+    pub response_schema_id: String,
+    /// Optional public compatibility group.
+    pub compatibility_group: Option<String>,
+}
+
+/// Public fact field descriptor summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicFactFieldSummary {
+    /// Stable descriptor-owned field id.
+    pub field_id: String,
+    /// Descriptor path shown to users.
+    pub path: String,
+    /// Field source: `subject`, `result`, or `metadata`.
+    pub source: String,
+    /// Field scalar type.
+    pub value_type: String,
+    /// Public exposure policy.
+    pub exposure: String,
+    /// Allowed query operators.
+    pub operators: Vec<String>,
+    /// Optional descriptor unit.
+    pub unit: Option<String>,
+    /// Optional base-10 scale exponent.
+    pub scale: Option<i16>,
+    /// Whether the field can participate in descriptor orderings.
+    pub sortable: bool,
+}
+
+/// Public descriptor ordering summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicFactOrderingSummary {
+    /// Ordering policy name.
+    pub name: String,
+    /// Ordered public term summaries.
+    pub terms: Vec<PublicFactOrderingTermSummary>,
+}
+
+/// Public descriptor ordering term summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicFactOrderingTermSummary {
+    /// Descriptor field id.
+    pub field_id: String,
+    /// Sort direction.
+    pub direction: String,
+    /// Null placement.
+    pub nulls: String,
+    /// Whether this term is a tie-breaker.
+    pub tie_breaker: bool,
+}
+
+/// Public fact kind catalog summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicFactKindSummary {
+    /// Fact kind.
+    pub fact_kind: String,
+    /// Number of public descriptors for the kind.
+    pub descriptor_count: usize,
+}
+
+/// Public fact descriptor summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicFactDescriptorSummary {
+    /// Fact kind.
+    pub fact_kind: String,
+    /// Public descriptor reference.
+    pub descriptor: PublicFactDescriptorRef,
+    /// Public-safe field summaries.
+    pub fields: Vec<PublicFactFieldSummary>,
+    /// Public-safe ordering summaries.
+    pub orderings: Vec<PublicFactOrderingSummary>,
+}
+
+/// Public fact explanation for query construction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicFactExplain {
+    /// Fact kind.
+    pub fact_kind: String,
+    /// Matching public descriptors.
+    pub descriptors: Vec<PublicFactDescriptorSummary>,
+}
+
+/// Scalar value accepted by app public fact query requests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type", content = "value")]
+pub enum PublicFactScalarValue {
+    /// String scalar.
+    String(String),
+    /// Boolean scalar.
+    Boolean(bool),
+    /// Signed integer scalar.
+    SignedInteger(i64),
+    /// Unsigned integer scalar.
+    UnsignedInteger(u64),
+    /// Timestamp string scalar.
+    Timestamp(String),
+    /// Decimal string scalar.
+    DecimalString(String),
+    /// Digest string scalar.
+    Digest(String),
+}
+
+/// Public fact query predicate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicFactPredicate {
+    /// Descriptor field id.
+    pub field_id: String,
+    /// Operator name: `equal`, `less_than`, `less_than_or_equal`, `greater_than`, or `greater_than_or_equal`.
+    pub operator: String,
+    /// Predicate scalar value.
+    pub value: PublicFactScalarValue,
+}
+
+/// App-level public fact query request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicFactQueryRequest {
+    /// Fact kind to query.
+    pub fact_kind: String,
+    /// Optional public shape selector matching descriptor schema id or compatibility group.
+    pub shape: Option<String>,
+    /// Public predicates.
+    pub predicates: Vec<PublicFactPredicate>,
+    /// Returnable field ids to include in each fact.
+    pub return_fields: Vec<String>,
+    /// Descriptor ordering policy name.
+    pub ordering: String,
+    /// Optional non-zero limit.
+    pub limit: Option<u64>,
+}
+
+/// Public fact query page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicFactQueryPage {
+    /// Returned public facts.
+    pub facts: Vec<PublicFactRef>,
+    /// Opaque cursor for a future page. V1 app services return no cursor.
+    pub next_cursor: Option<String>,
+}
+
+/// Public fact reference returned by app public fact services.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicFactRef {
+    /// Opaque public reference id.
+    pub public_ref: PublicFactRefId,
+    /// Fact kind.
+    pub fact_kind: String,
+    /// Public descriptor reference.
+    pub descriptor: PublicFactDescriptorRef,
+    /// Store-assigned recorded timestamp.
+    pub recorded_at: String,
+    /// Optional source observation timestamp.
+    pub observed_at: Option<String>,
+    /// Descriptor-approved returnable fields.
+    pub fields: Vec<PublicFactFieldValue>,
+}
+
+/// Public returned fact field value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicFactFieldValue {
+    /// Stable descriptor-owned field id.
+    pub field_id: String,
+    /// Descriptor path shown to users.
+    pub path: String,
+    /// Field source: `subject`, `result`, or `metadata`.
+    pub source: String,
+    /// Field scalar type.
+    pub value_type: String,
+    /// Public-safe scalar value.
+    pub value: PublicFactScalarValue,
+    /// Optional descriptor unit.
+    pub unit: Option<String>,
+    /// Optional base-10 scale exponent.
+    pub scale: Option<i16>,
+}
+
+/// App-owned public descriptor catalog for facts.
+#[derive(Debug, Clone, Default)]
+pub struct FactCatalogService {
+    descriptors: BTreeMap<ContentDigest, mfm_facts::FactDescriptor>,
+}
+
+impl FactCatalogService {
+    /// Creates a catalog from descriptors that are already authorized for public discovery.
+    pub fn new<I>(descriptors: I) -> Result<Self, AppError>
+    where
+        I: IntoIterator<Item = mfm_facts::FactDescriptor>,
+    {
+        let descriptors = descriptors
+            .into_iter()
+            .map(|descriptor| {
+                let hash = mfm_facts::fact_descriptor_hash(&descriptor)?;
+                Ok((hash, descriptor))
+            })
+            .collect::<mfm_facts::Result<BTreeMap<_, _>>>()?;
+        Ok(Self { descriptors })
+    }
+
+    /// Loads a public catalog from retained descriptor artifacts and store projection authority.
+    ///
+    /// Only descriptors with indexed `Platform` facts in the default visibility scope are included.
+    pub async fn from_retained_public_projection<A>(
+        artifacts: &A,
+        projection: &store::ProjectionSnapshot,
+    ) -> Result<Self, AppError>
+    where
+        A: store::RetainedArtifactReadProvider + ?Sized,
+    {
+        let public_hashes = public_fact_descriptor_hashes(projection);
+        let mut descriptors = BTreeMap::new();
+        for descriptor_hash in public_hashes {
+            let projection = projection
+                .fact_descriptor(&descriptor_hash)
+                .ok_or_else(fact_descriptor_projection_missing)?;
+            let descriptor = load_projected_fact_descriptor(artifacts, projection).await?;
+            descriptors.insert(descriptor_hash, descriptor);
+        }
+        Ok(Self { descriptors })
+    }
+
+    /// Creates a catalog filtered to descriptors with Platform facts in the projection snapshot.
+    pub fn from_public_projection<I>(
+        descriptors: I,
+        projection: &store::ProjectionSnapshot,
+    ) -> Result<Self, AppError>
+    where
+        I: IntoIterator<Item = mfm_facts::FactDescriptor>,
+    {
+        let public_hashes = projection
+            .fact_index_entries()
+            .filter(|(_claim_id, entry)| {
+                entry.audience == mfm_facts::FactAudience::Platform
+                    && entry.visibility_scope == mfm_facts::FactVisibilityScope::Default
+            })
+            .map(|(_claim_id, entry)| entry.fact_descriptor_hash.clone())
+            .collect::<BTreeSet<_>>();
+        let descriptors = descriptors
+            .into_iter()
+            .filter_map(|descriptor| {
+                let hash = mfm_facts::fact_descriptor_hash(&descriptor).ok()?;
+                public_hashes.contains(&hash).then_some((hash, descriptor))
+            })
+            .collect();
+        Ok(Self { descriptors })
+    }
+
+    /// Lists public fact kinds.
+    pub fn list_kinds(&self) -> Vec<PublicFactKindSummary> {
+        let mut counts = BTreeMap::<String, usize>::new();
+        for descriptor in self.descriptors.values() {
+            *counts
+                .entry(descriptor.fact_kind().as_str().to_owned())
+                .or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .map(|(fact_kind, descriptor_count)| PublicFactKindSummary {
+                fact_kind,
+                descriptor_count,
+            })
+            .collect()
+    }
+
+    /// Describes public descriptors for one kind.
+    pub fn describe_kind(
+        &self,
+        fact_kind: &str,
+    ) -> Result<Vec<PublicFactDescriptorSummary>, AppError> {
+        let descriptors = self
+            .descriptors
+            .values()
+            .filter(|descriptor| descriptor.fact_kind().as_str() == fact_kind)
+            .map(public_descriptor_summary)
+            .collect::<Vec<_>>();
+        if descriptors.is_empty() {
+            return Err(redacted_fact_not_found());
+        }
+        Ok(descriptors)
+    }
+
+    /// Explains public query and return fields for one kind.
+    pub fn explain_kind(&self, fact_kind: &str) -> Result<PublicFactExplain, AppError> {
+        Ok(PublicFactExplain {
+            fact_kind: fact_kind.to_owned(),
+            descriptors: self.describe_kind(fact_kind)?,
+        })
+    }
+
+    fn resolve_descriptor(
+        &self,
+        request: &PublicFactQueryRequest,
+    ) -> Result<(&ContentDigest, &mfm_facts::FactDescriptor), AppError> {
+        let matches = self
+            .descriptors
+            .iter()
+            .filter(|(_hash, descriptor)| descriptor.fact_kind().as_str() == request.fact_kind)
+            .filter(|(_hash, descriptor)| {
+                request.shape.as_ref().is_none_or(|shape| {
+                    descriptor.descriptor_schema_id().as_str() == shape
+                        || descriptor
+                            .compatibility_group()
+                            .is_some_and(|group| group.as_str() == shape)
+                })
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [(hash, descriptor)] => Ok((hash, descriptor)),
+            [] => Err(redacted_fact_not_found()),
+            _ => Err(AppError::new(
+                ErrorClass::BadRequest,
+                "FactDescriptorAmbiguous",
+                "Fact kind resolves to more than one public descriptor; provide a shape",
+            )),
+        }
+    }
+
+    fn descriptor_by_hash(
+        &self,
+        descriptor_hash: &ContentDigest,
+    ) -> Option<&mfm_facts::FactDescriptor> {
+        self.descriptors.get(descriptor_hash)
+    }
+}
+
+/// App public fact query service.
+#[derive(Debug, Clone)]
+pub struct FactPublicQueryService<E> {
+    catalog: FactCatalogService,
+    executor: E,
+    store_scope: mfm_facts::StoreScopeRef,
+    scope_decision_evidence: mfm_facts::ScopeDecisionEvidence,
+}
+
+impl<E> FactPublicQueryService<E>
+where
+    E: PublicFactQueryExecutor,
+{
+    /// Creates a public fact query service from a public catalog and store executor.
+    pub fn new(catalog: FactCatalogService, executor: E) -> Result<Self, AppError> {
+        Ok(Self {
+            catalog,
+            executor,
+            store_scope: mfm_facts::StoreScopeRef::new("mfm.store.default")?,
+            scope_decision_evidence: mfm_facts::ScopeDecisionEvidence::new(
+                content_digest_for_bytes(b"mfm.public-facts.default-scope.v1"),
+            ),
+        })
+    }
+
+    /// Executes a public Platform fact query and returns public DTOs only.
+    pub async fn query(
+        &self,
+        request: PublicFactQueryRequest,
+    ) -> Result<PublicFactQueryPage, AppError> {
+        self.executor
+            .execute_public_fact_query(
+                &self.catalog,
+                &self.store_scope,
+                &self.scope_decision_evidence,
+                request,
+            )
+            .await
+    }
+}
+
+/// Resolves opaque public fact refs against a projection snapshot.
+#[derive(Debug, Clone)]
+pub struct FactPublicRefResolver {
+    catalog: FactCatalogService,
+    projection: store::ProjectionSnapshot,
+}
+
+impl FactPublicRefResolver {
+    /// Creates a resolver over public projection data and a public catalog.
+    pub fn new(catalog: FactCatalogService, projection: store::ProjectionSnapshot) -> Self {
+        Self {
+            catalog,
+            projection,
+        }
+    }
+
+    /// Resolves a public fact ref, returning the same not-found class for unknown and non-public refs.
+    pub fn resolve(&self, public_ref: &PublicFactRefId) -> Result<PublicFactRef, AppError> {
+        for (_claim_id, entry) in self.projection.fact_index_entries() {
+            if entry.audience != mfm_facts::FactAudience::Platform
+                || entry.visibility_scope != mfm_facts::FactVisibilityScope::Default
+            {
+                continue;
+            }
+            let fact_ref = internal_fact_ref_from_projection(entry)?;
+            if public_ref_id(&fact_ref)? != *public_ref {
+                continue;
+            }
+            let descriptor = self
+                .catalog
+                .descriptor_by_hash(&entry.fact_descriptor_hash)
+                .ok_or_else(redacted_fact_not_found)?;
+            let fields = public_fields_from_projection(
+                descriptor,
+                self.projection
+                    .fact_term_entries()
+                    .filter(|((claim_id, _field_id), _term)| claim_id == &entry.fact_claim_id)
+                    .map(|(_key, term)| term),
+            )?;
+            return public_fact_from_parts(&fact_ref, descriptor, fields);
+        }
+        Err(redacted_fact_not_found())
+    }
+}
+
+async fn query_public_facts<E>(
+    catalog: &FactCatalogService,
+    executor: &E,
+    store_scope: &mfm_facts::StoreScopeRef,
+    scope_decision_evidence: &mfm_facts::ScopeDecisionEvidence,
+    request: PublicFactQueryRequest,
+) -> Result<PublicFactQueryPage, AppError>
+where
+    E: AppFactQueryExecutor,
+    E::Error: Into<AppError>,
+{
+    let (_descriptor_hash, descriptor) = catalog.resolve_descriptor(&request)?;
+    let input = public_query_input(
+        &request,
+        store_scope.clone(),
+        scope_decision_evidence.clone(),
+    )?;
+    let plan = mfm_facts::compile_fact_query_plan(descriptor, input)?;
+    if plan.query_scope().audience() != mfm_facts::FactAudience::Platform {
+        return Err(AppError::backend(
+            ErrorClass::Internal,
+            "FactPublicScopeInvalid",
+            "Public fact query scope was invalid",
+        ));
+    }
+    let execution = executor
+        .execute_app_fact_query(&plan)
+        .await
+        .map_err(Into::into)?;
+    let facts = execution
+        .rows
+        .iter()
+        .filter_map(|row| public_fact_from_query_row(catalog, row).transpose())
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(PublicFactQueryPage {
+        facts,
+        next_cursor: None,
+    })
+}
+
+type AppFactQueryFuture<'a, E> =
+    Pin<Box<dyn Future<Output = std::result::Result<AppFactQueryExecution, E>> + Send + 'a>>;
+
+trait AppFactQueryExecutor {
+    type Error: Send + Sync + 'static;
+
+    fn execute_app_fact_query<'a>(
+        &'a self,
+        plan: &'a mfm_facts::CanonicalFactQueryPlan,
+    ) -> AppFactQueryFuture<'a, Self::Error>;
+}
+
+/// Store capability required by app public fact query services.
+pub trait PublicFactQueryExecutor: Clone + Send + Sync + 'static {
+    /// Executes a public Platform fact query through app-owned DTO shaping.
+    fn execute_public_fact_query<'a>(
+        &'a self,
+        catalog: &'a FactCatalogService,
+        store_scope: &'a mfm_facts::StoreScopeRef,
+        scope_decision_evidence: &'a mfm_facts::ScopeDecisionEvidence,
+        request: PublicFactQueryRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<PublicFactQueryPage, AppError>> + Send + 'a>>;
+}
+
+struct AppFactQueryExecution {
+    rows: Vec<AppFactQueryRow>,
+}
+
+#[derive(Clone)]
+struct AppFactQueryRow {
+    fact_ref: mfm_facts::InternalFactRef,
+    returned_fields: Vec<mfm_facts::ReturnedFieldValueSummary>,
+}
+
+impl AppFactQueryExecutor for ProductionRunStore {
+    type Error = mfm_stream_store_postgres::PostgresStoreError;
+
+    fn execute_app_fact_query<'a>(
+        &'a self,
+        plan: &'a mfm_facts::CanonicalFactQueryPlan,
+    ) -> AppFactQueryFuture<'a, Self::Error> {
+        Box::pin(async move {
+            let result = self.execute_fact_query(plan).await?;
+            let rows = result
+                .rows()
+                .iter()
+                .map(|row| AppFactQueryRow {
+                    fact_ref: row.fact_ref().clone(),
+                    returned_fields: row.returned_fields().to_vec(),
+                })
+                .collect();
+            Ok(AppFactQueryExecution { rows })
+        })
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl AppFactQueryExecutor for store::AsyncInMemoryRunStore {
+    type Error = AppError;
+
+    fn execute_app_fact_query<'a>(
+        &'a self,
+        plan: &'a mfm_facts::CanonicalFactQueryPlan,
+    ) -> AppFactQueryFuture<'a, Self::Error> {
+        Box::pin(async move { execute_in_memory_app_fact_query(self, plan) })
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn execute_in_memory_app_fact_query(
+    store: &store::AsyncInMemoryRunStore,
+    plan: &mfm_facts::CanonicalFactQueryPlan,
+) -> Result<AppFactQueryExecution, AppError> {
+    let projection = store.projection_snapshot().map_err(async_app_store_error)?;
+    let shape = mfm_facts::parse_canonical_fact_query_shape(plan)?;
+    let mut rows = projection
+        .fact_index_entries()
+        .filter(|(_claim_id, entry)| {
+            entry.fact_descriptor_hash == *plan.resolved_descriptor()
+                && entry.audience == plan.query_scope().audience()
+                && entry.visibility_scope == plan.query_scope().scope()
+        })
+        .filter(|(_claim_id, entry)| fact_entry_matches_predicates(&projection, entry, &shape))
+        .map(|(_claim_id, entry)| {
+            Ok(AppFactQueryRow {
+                fact_ref: internal_fact_ref_from_projection(entry)?,
+                returned_fields: returned_fields_from_projection(&projection, entry, &shape)?,
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    rows.sort_by(|left, right| compare_app_fact_rows(&projection, plan, left, right));
+    if let Some(limit) = plan.limit() {
+        rows.truncate(limit as usize);
+    }
+    Ok(AppFactQueryExecution { rows })
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn fact_entry_matches_predicates(
+    projection: &store::ProjectionSnapshot,
+    entry: &store::FactIndexProjection,
+    shape: &mfm_facts::CompiledFactQueryShape,
+) -> bool {
+    shape.predicates().iter().all(|predicate| {
+        projection
+            .fact_term_entries()
+            .find(|((claim_id, field_id), _term)| {
+                claim_id == &entry.fact_claim_id && field_id == predicate.field_id()
+            })
+            .is_some_and(|(_key, term)| {
+                fact_scalar_matches_operator(&term.value, predicate.operator(), predicate.value())
+            })
+    })
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn fact_scalar_matches_operator(
+    left: &mfm_facts::FactCanonicalScalar,
+    operator: mfm_facts::FactQueryOperator,
+    right: &mfm_facts::FactCanonicalScalar,
+) -> bool {
+    if left.value_type() != right.value_type() {
+        return false;
+    }
+    match operator {
+        mfm_facts::FactQueryOperator::Equal => left == right,
+        mfm_facts::FactQueryOperator::LessThan => left < right,
+        mfm_facts::FactQueryOperator::LessThanOrEqual => left <= right,
+        mfm_facts::FactQueryOperator::GreaterThan => left > right,
+        mfm_facts::FactQueryOperator::GreaterThanOrEqual => left >= right,
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn returned_fields_from_projection(
+    projection: &store::ProjectionSnapshot,
+    entry: &store::FactIndexProjection,
+    shape: &mfm_facts::CompiledFactQueryShape,
+) -> Result<Vec<mfm_facts::ReturnedFieldValueSummary>, AppError> {
+    shape
+        .return_fields()
+        .iter()
+        .filter_map(|return_field| {
+            projection
+                .fact_term_entries()
+                .find(|((claim_id, field_id), _term)| {
+                    claim_id == &entry.fact_claim_id && field_id == return_field.field_id()
+                })
+                .map(|(_key, term)| {
+                    mfm_facts::ReturnedFieldValueSummary::new(
+                        term.field_id.clone(),
+                        term.value_type,
+                        term.value.clone(),
+                    )
+                    .map_err(AppError::from)
+                })
+        })
+        .collect()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn compare_app_fact_rows(
+    projection: &store::ProjectionSnapshot,
+    plan: &mfm_facts::CanonicalFactQueryPlan,
+    left: &AppFactQueryRow,
+    right: &AppFactQueryRow,
+) -> std::cmp::Ordering {
+    for term in plan.ordering().terms() {
+        let left_value = fact_ordering_value(projection, left, term.field_id());
+        let right_value = fact_ordering_value(projection, right, term.field_id());
+        let ordering = compare_optional_fact_scalars(left_value, right_value, term.nulls());
+        let ordering = match term.direction() {
+            mfm_facts::SortDirection::Ascending => ordering,
+            mfm_facts::SortDirection::Descending => ordering.reverse(),
+        };
+        if ordering != std::cmp::Ordering::Equal {
+            return ordering;
+        }
+    }
+    left.fact_ref
+        .fact_claim_id()
+        .cmp(right.fact_ref.fact_claim_id())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn fact_ordering_value<'a>(
+    projection: &'a store::ProjectionSnapshot,
+    row: &AppFactQueryRow,
+    field_id: &mfm_facts::FactFieldId,
+) -> Option<&'a mfm_facts::FactCanonicalScalar> {
+    projection
+        .fact_term_entries()
+        .find(|((claim_id, term_field_id), _term)| {
+            claim_id == row.fact_ref.fact_claim_id() && term_field_id == field_id
+        })
+        .map(|(_key, term)| &term.value)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn compare_optional_fact_scalars(
+    left: Option<&mfm_facts::FactCanonicalScalar>,
+    right: Option<&mfm_facts::FactCanonicalScalar>,
+    nulls: mfm_facts::NullOrdering,
+) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left.cmp(right),
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => match nulls {
+            mfm_facts::NullOrdering::First => std::cmp::Ordering::Less,
+            mfm_facts::NullOrdering::Last => std::cmp::Ordering::Greater,
+        },
+        (Some(_), None) => match nulls {
+            mfm_facts::NullOrdering::First => std::cmp::Ordering::Greater,
+            mfm_facts::NullOrdering::Last => std::cmp::Ordering::Less,
+        },
+    }
+}
+
+impl<E> PublicFactQueryExecutor for E
+where
+    E: AppFactQueryExecutor + Clone + Send + Sync + 'static,
+    E::Error: Into<AppError>,
+{
+    fn execute_public_fact_query<'a>(
+        &'a self,
+        catalog: &'a FactCatalogService,
+        store_scope: &'a mfm_facts::StoreScopeRef,
+        scope_decision_evidence: &'a mfm_facts::ScopeDecisionEvidence,
+        request: PublicFactQueryRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<PublicFactQueryPage, AppError>> + Send + 'a>> {
+        Box::pin(query_public_facts(
+            catalog,
+            self,
+            store_scope,
+            scope_decision_evidence,
+            request,
+        ))
+    }
+}
+
 impl From<EntryPointOpResolveError> for AppError {
     fn from(error: EntryPointOpResolveError) -> Self {
         Self::new(
@@ -300,6 +1038,27 @@ where
     )
 }
 
+fn make_run_services_with_certification_registry_and_fact_query_trust_root<S, A>(
+    runners: ErasedRunnerRegistry,
+    store: S,
+    artifacts: A,
+    certification_registry: CertificationRegistry,
+    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+) -> RunServices<S, A>
+where
+    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
+    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
+{
+    let runtime_artifacts = Arc::new(artifacts.clone());
+    RunServices::new_with_certification_registry_and_fact_query_trust_root(
+        SerialTypedScheduler::new(runners, runtime_artifacts),
+        store,
+        artifacts,
+        certification_registry,
+        fact_query_receipt_trust_root,
+    )
+}
+
 /// Builds evidence-only async app services with an explicit trusted certification registry.
 pub fn make_run_read_services_with_certification_registry<S, A>(
     store: S,
@@ -313,11 +1072,32 @@ where
     RunReadServices::new_with_certification_registry(store, artifacts, certification_registry)
 }
 
+fn make_run_read_services_with_certification_registry_and_fact_query_trust_root<S, A>(
+    store: S,
+    artifacts: A,
+    certification_registry: CertificationRegistry,
+    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+) -> RunReadServices<S, A>
+where
+    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
+    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
+{
+    RunReadServices::new_with_certification_registry_and_fact_query_trust_root(
+        store,
+        artifacts,
+        certification_registry,
+        fact_query_receipt_trust_root,
+    )
+}
+
 /// Production typed run services backed by the Postgres run store.
 pub type ProductionRunServices = RunServices<ProductionRunStore, ProductionRunStore>;
 
 /// Production evidence-only run services backed by the Postgres run store.
 pub type ProductionRunReadServices = RunReadServices<ProductionRunStore, ProductionRunStore>;
+
+/// Production public fact query service backed by the Postgres fact query executor.
+pub type ProductionFactPublicQueryService = FactPublicQueryService<ProductionRunStore>;
 
 /// Connects the production Postgres run store.
 pub async fn connect_production_run_store(
@@ -347,12 +1127,16 @@ pub async fn connect_production_run_services(
         runtime_config_path,
     )?;
     let certification_registry = production_certification_registry()?;
-    Ok(make_run_services_with_certification_registry(
-        runners,
-        store.clone(),
-        store,
-        certification_registry,
-    ))
+    let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
+    Ok(
+        make_run_services_with_certification_registry_and_fact_query_trust_root(
+            runners,
+            store.clone(),
+            store,
+            certification_registry,
+            fact_query_receipt_trust_root,
+        ),
+    )
 }
 
 /// Builds production evidence-only run services backed by the Postgres run store.
@@ -361,11 +1145,15 @@ pub async fn connect_production_run_read_services(
 ) -> Result<ProductionRunReadServices, AppError> {
     let store = connect_production_run_store(database_url).await?;
     let certification_registry = production_certification_registry()?;
-    Ok(make_run_read_services_with_certification_registry(
-        store.clone(),
-        store,
-        certification_registry,
-    ))
+    let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
+    Ok(
+        make_run_read_services_with_certification_registry_and_fact_query_trust_root(
+            store.clone(),
+            store,
+            certification_registry,
+            fact_query_receipt_trust_root,
+        ),
+    )
 }
 
 /// Builds the production typed runner registry for this process.
@@ -1357,6 +2145,7 @@ pub struct RunReadServices<S, A> {
     store: S,
     artifacts: A,
     certification_registry: CertificationRegistry,
+    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
 }
 
 impl<S, A> RunReadServices<S, A>
@@ -1374,6 +2163,22 @@ where
             store,
             artifacts,
             certification_registry,
+            fact_query_receipt_trust_root: None,
+        }
+    }
+
+    /// Creates evidence-only app services with explicit fact-query receipt replay authority.
+    pub fn new_with_certification_registry_and_fact_query_trust_root(
+        store: S,
+        artifacts: A,
+        certification_registry: CertificationRegistry,
+        fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+    ) -> Self {
+        Self {
+            store,
+            artifacts,
+            certification_registry,
+            fact_query_receipt_trust_root,
         }
     }
 
@@ -1443,7 +2248,11 @@ where
             context.events(),
         )
         .await?;
-        let authority = replay_read_authority_for_run(context.runtime_spec(), context.view())?;
+        let authority = replay_read_authority_for_run_with_fact_query_trust_root(
+            context.runtime_spec(),
+            context.view(),
+            self.fact_query_receipt_trust_root.clone(),
+        )?;
         let broker = ReplayBroker::from_read_authority(authority)?;
         let stream = context.events();
         mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&broker)?;
@@ -1486,6 +2295,38 @@ where
         )
         .await?;
         render_public_output(&self.artifacts, &authority).await
+    }
+
+    /// Lists public fact kinds from retained descriptor artifacts and store-scoped fact projection authority.
+    pub async fn fact_kinds(&self) -> Result<Vec<PublicFactKindSummary>, AppError> {
+        Ok(self.public_fact_catalog().await?.list_kinds())
+    }
+
+    /// Describes public fact descriptors for one kind from store-scoped fact projection authority.
+    pub async fn describe_fact_kind(
+        &self,
+        fact_kind: &str,
+    ) -> Result<Vec<PublicFactDescriptorSummary>, AppError> {
+        self.public_fact_catalog().await?.describe_kind(fact_kind)
+    }
+
+    /// Explains public query and return fields for one fact kind from store-scoped fact projection authority.
+    pub async fn explain_fact_kind(&self, fact_kind: &str) -> Result<PublicFactExplain, AppError> {
+        self.public_fact_catalog().await?.explain_kind(fact_kind)
+    }
+
+    /// Resolves an opaque public fact reference against store-scoped Platform facts.
+    ///
+    /// Unknown, `Control`, and `RunPrivate` facts all return the same redacted not-found class.
+    pub async fn resolve_public_fact_ref(
+        &self,
+        public_ref: &PublicFactRefId,
+    ) -> Result<PublicFactRef, AppError> {
+        let projection = self.public_fact_projection().await?;
+        let catalog =
+            FactCatalogService::from_retained_public_projection(&self.artifacts, &projection)
+                .await?;
+        FactPublicRefResolver::new(catalog, projection).resolve(public_ref)
     }
 
     async fn load_verified_run_read_context(
@@ -1534,6 +2375,38 @@ where
         }
         Ok(())
     }
+
+    async fn public_fact_catalog(&self) -> Result<FactCatalogService, AppError> {
+        let projection = self.public_fact_projection().await?;
+        FactCatalogService::from_retained_public_projection(&self.artifacts, &projection).await
+    }
+
+    async fn public_fact_projection(&self) -> Result<store::ProjectionSnapshot, AppError> {
+        self.store
+            .fact_projection_snapshot()
+            .await
+            .map_err(async_app_store_error)
+    }
+}
+
+impl<S, A> RunReadServices<S, A>
+where
+    S: store::RunEventStore + store::TrustScopeStore + PublicFactQueryExecutor + Send + Sync,
+    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
+{
+    /// Builds a production public fact query service from retained descriptor and store-scoped projection authority.
+    pub async fn public_fact_query_service(&self) -> Result<FactPublicQueryService<S>, AppError> {
+        let catalog = self.public_fact_catalog().await?;
+        FactPublicQueryService::new(catalog, self.store.clone())
+    }
+
+    /// Executes a public Platform fact query against store-scoped public facts.
+    pub async fn query_public_facts(
+        &self,
+        request: PublicFactQueryRequest,
+    ) -> Result<PublicFactQueryPage, AppError> {
+        self.public_fact_query_service().await?.query(request).await
+    }
 }
 
 /// Application facade for certified typed runtime dispatch.
@@ -1543,6 +2416,7 @@ pub struct RunServices<S, A> {
     store: S,
     artifacts: A,
     certification_registry: CertificationRegistry,
+    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
     execution_claim_heartbeat_interval: Duration,
 }
 
@@ -1563,6 +2437,25 @@ where
             store,
             artifacts,
             certification_registry,
+            fact_query_receipt_trust_root: None,
+            execution_claim_heartbeat_interval: default_execution_claim_heartbeat_interval(),
+        }
+    }
+
+    /// Creates typed async app services with explicit fact-query receipt replay authority.
+    pub fn new_with_certification_registry_and_fact_query_trust_root(
+        scheduler: SerialTypedScheduler,
+        store: S,
+        artifacts: A,
+        certification_registry: CertificationRegistry,
+        fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+    ) -> Self {
+        Self {
+            scheduler,
+            store,
+            artifacts,
+            certification_registry,
+            fact_query_receipt_trust_root,
             execution_claim_heartbeat_interval: default_execution_claim_heartbeat_interval(),
         }
     }
@@ -1648,7 +2541,11 @@ where
             context.events(),
         )
         .await?;
-        let authority = replay_read_authority_for_run(context.runtime_spec(), context.view())?;
+        let authority = replay_read_authority_for_run_with_fact_query_trust_root(
+            context.runtime_spec(),
+            context.view(),
+            self.fact_query_receipt_trust_root.clone(),
+        )?;
         let broker = ReplayBroker::from_read_authority(authority)?;
         let stream = context.events();
         mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&broker)?;
@@ -2170,11 +3067,11 @@ where
     S: store::RunEventStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + ?Sized,
 {
-    let stream = store
-        .load_run_stream(run_id)
+    let committed = store
+        .load_committed_run_stream(run_id)
         .await
         .map_err(async_app_store_error)?;
-    verified_run_read_context_from_events(artifacts, registry, run_id, stream).await
+    verified_run_read_context_from_committed_stream(artifacts, registry, committed).await
 }
 
 async fn load_async_verified_status_read_context<S, A>(
@@ -2187,43 +3084,44 @@ where
     S: store::RunEventStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + ?Sized,
 {
-    let stream = store
-        .load_run_stream(run_id)
+    let committed = store
+        .load_committed_run_stream(run_id)
         .await
         .map_err(async_app_store_error)?;
     let projection = store
         .status_projection_snapshot(run_id)
         .await
         .map_err(async_app_store_error)?;
-    verified_status_read_context_from_events(artifacts, registry, run_id, stream, &projection).await
+    verified_status_read_context_from_committed_stream(artifacts, registry, committed, &projection)
+        .await
 }
 
-async fn verified_status_read_context_from_events(
+async fn verified_status_read_context_from_committed_stream(
     artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
     registry: &CertificationRegistry,
-    run_id: &RunId,
-    stream: Vec<store::KernelEventEnvelope>,
+    committed: store::CommittedRunStream,
     global_projection: &store::ProjectionSnapshot,
 ) -> Result<VerifiedStatusReadContext, AppError> {
-    let read = verified_run_read_context_from_events(artifacts, registry, run_id, stream).await?;
+    let read =
+        verified_run_read_context_from_committed_stream(artifacts, registry, committed).await?;
     let projection = read.status_projection_with_resource_lanes(global_projection)?;
     Ok(VerifiedStatusReadContext { read, projection })
 }
 
-async fn verified_run_read_context_from_events(
+async fn verified_run_read_context_from_committed_stream(
     artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
     registry: &CertificationRegistry,
-    run_id: &RunId,
-    stream: Vec<store::KernelEventEnvelope>,
+    committed: store::CommittedRunStream,
 ) -> Result<VerifiedRunReadContext, AppError> {
+    let run_id = committed.run_id().clone();
+    let stream = committed.events();
     if stream.is_empty() {
         return Err(AppError::not_found(
             "RunNotFound",
             "typed run stream was not found",
         ));
     }
-    let runtime_spec = load_runtime_spec_for_run(artifacts, registry, run_id, &stream).await?;
-    let committed = store::CommittedRunStream::from_events(run_id.clone(), stream)?;
+    let runtime_spec = load_runtime_spec_for_run(artifacts, registry, &run_id, stream).await?;
     let retained_artifacts =
         store::VerifiedRunArtifactStore::from_committed_stream(&committed, artifacts).await?;
     let view = VerifiedRunHistoryView::from_committed_stream(
@@ -2603,6 +3501,21 @@ pub fn replay_read_authority_for_run(
     )?)
 }
 
+/// Builds sealed replay read authority with explicit fact-query receipt trust authority.
+pub fn replay_read_authority_for_run_with_fact_query_trust_root(
+    runtime_spec: &CertifiedRuntimeSpec,
+    verified_view: &VerifiedRunHistoryView,
+    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+) -> Result<ReplayReadAuthority, AppError> {
+    Ok(
+        ReplayReadAuthority::from_verified_run_history_view_with_fact_query_receipt_trust_root(
+            runtime_spec,
+            verified_view,
+            fact_query_receipt_trust_root,
+        )?,
+    )
+}
+
 fn certified_spec_launch_artifact(
     runtime_spec: &CertifiedRuntimeSpec,
 ) -> Result<RunLaunchArtifact, AppError> {
@@ -2747,6 +3660,62 @@ fn config_launch_artifacts_for_spec(
         ));
     }
     Ok(validated)
+}
+
+fn fact_descriptor_launch_artifacts_for_spec(
+    runtime_spec: &CertifiedRuntimeSpec,
+    registry: &CertificationRegistry,
+) -> Result<Vec<RunLaunchArtifact>, AppError> {
+    let schema_id = mfm_program::facts::fact_descriptor_schema_id().map_err(|_| {
+        AppError::backend(
+            ErrorClass::Internal,
+            "FactDescriptorSchemaInvalid",
+            "Fact descriptor schema identity is invalid",
+        )
+    })?;
+    let media_type = json_media_type()?;
+    let required = runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .chain(runtime_spec.spec().remediations.values())
+        .flat_map(|node| {
+            node.fact_descriptor_allowlist
+                .iter()
+                .map(|reference| reference.descriptor_hash.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    let mut artifacts = Vec::with_capacity(required.len());
+    for descriptor_hash in required {
+        let descriptor = registry
+            .fact_descriptor_artifact(&descriptor_hash)
+            .ok_or_else(|| {
+                AppError::backend(
+                    ErrorClass::Internal,
+                    "FactDescriptorArtifactMissing",
+                    "certified fact descriptor bytes are not available for launch",
+                )
+            })?;
+        let artifact = launch_artifact(
+            descriptor.bytes().to_vec(),
+            media_type.clone(),
+            Some(schema_id.clone()),
+            None,
+            None,
+            events::ArtifactRole::FactDescriptor,
+        );
+        if artifact.evidence.digest != *descriptor.descriptor_hash()
+            || artifact.evidence.digest != descriptor_hash
+        {
+            return Err(AppError::backend(
+                ErrorClass::Internal,
+                "FactDescriptorArtifactTampered",
+                "certified fact descriptor bytes do not match their descriptor hash",
+            ));
+        }
+        artifacts.push(artifact);
+    }
+    Ok(artifacts)
 }
 
 fn framework_config_launch_artifacts_for_spec(
@@ -2913,6 +3882,475 @@ fn launch_artifact(
 
 fn content_digest_for_bytes(bytes: &[u8]) -> ContentDigest {
     ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes))
+}
+
+fn public_fact_descriptor_hashes(
+    projection: &store::ProjectionSnapshot,
+) -> BTreeSet<ContentDigest> {
+    projection
+        .fact_index_entries()
+        .filter(|(_claim_id, entry)| {
+            entry.audience == mfm_facts::FactAudience::Platform
+                && entry.visibility_scope == mfm_facts::FactVisibilityScope::Default
+        })
+        .map(|(_claim_id, entry)| entry.fact_descriptor_hash.clone())
+        .collect()
+}
+
+async fn load_projected_fact_descriptor<A>(
+    artifacts: &A,
+    projection: &store::FactDescriptorProjection,
+) -> Result<mfm_facts::FactDescriptor, AppError>
+where
+    A: store::RetainedArtifactReadProvider + ?Sized,
+{
+    let artifact = artifacts
+        .read_retained_artifact(&fact_descriptor_artifact_requirement(projection)?)
+        .await
+        .map_err(async_app_store_error)?;
+    let descriptor = mfm_facts::parse_canonical_fact_descriptor_bytes(artifact.bytes())
+        .map_err(|_| fact_descriptor_artifact_invalid())?;
+    validate_projected_fact_descriptor(&descriptor, projection)?;
+    Ok(descriptor)
+}
+
+fn validate_projected_fact_descriptor(
+    descriptor: &mfm_facts::FactDescriptor,
+    projection: &store::FactDescriptorProjection,
+) -> Result<(), AppError> {
+    let descriptor_hash = mfm_facts::fact_descriptor_hash(descriptor)
+        .map_err(|_| fact_descriptor_artifact_invalid())?;
+    let namespace_hash = mfm_facts::fact_subject_namespace(descriptor)
+        .and_then(|namespace| mfm_facts::fact_subject_namespace_hash(&namespace))
+        .map_err(|_| fact_descriptor_artifact_invalid())?;
+    if descriptor_hash != projection.descriptor_hash
+        || descriptor.fact_kind() != &projection.fact_kind
+        || descriptor.descriptor_schema_id() != &projection.descriptor_schema_id
+        || descriptor.subject_schema_id() != &projection.subject_schema_id
+        || descriptor.response_schema_id() != &projection.response_schema_id
+        || namespace_hash != projection.fact_subject_namespace_hash
+        || descriptor.compatibility_group() != projection.compatibility_group.as_ref()
+    {
+        return Err(AppError::backend(
+            ErrorClass::Internal,
+            "FactDescriptorProjectionMismatch",
+            "Fact descriptor projection did not match retained descriptor authority",
+        ));
+    }
+    Ok(())
+}
+
+fn fact_descriptor_artifact_requirement(
+    projection: &store::FactDescriptorProjection,
+) -> Result<store::EventArtifactRequirement, AppError> {
+    Ok(store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::FactDescriptor,
+        artifact_id: projection.descriptor_artifact_id.clone(),
+        digest: Some(projection.descriptor_hash.clone()),
+        byte_len: None,
+        media_type: Some(json_media_type()?),
+        schema_id: Some(mfm_facts::fact_descriptor_schema_id().map_err(|_| {
+            AppError::backend(
+                ErrorClass::Internal,
+                "FactDescriptorSchemaInvalid",
+                "Fact descriptor schema identity is invalid",
+            )
+        })?),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: Some(events::ArtifactRole::FactDescriptor),
+    })
+}
+
+fn fact_descriptor_projection_missing() -> AppError {
+    AppError::backend(
+        ErrorClass::Internal,
+        "FactDescriptorProjectionMissing",
+        "Fact descriptor projection was missing retained descriptor authority",
+    )
+}
+
+fn fact_descriptor_artifact_invalid() -> AppError {
+    AppError::backend(
+        ErrorClass::Internal,
+        "FactDescriptorArtifactInvalid",
+        "Fact descriptor artifact failed verification",
+    )
+}
+
+fn public_descriptor_summary(
+    descriptor: &mfm_facts::FactDescriptor,
+) -> PublicFactDescriptorSummary {
+    PublicFactDescriptorSummary {
+        fact_kind: descriptor.fact_kind().as_str().to_owned(),
+        descriptor: public_descriptor_ref(descriptor),
+        fields: descriptor
+            .fields()
+            .iter()
+            .filter(|field| field.exposure() != mfm_facts::FactFieldExposure::Hidden)
+            .map(public_field_summary)
+            .collect(),
+        orderings: descriptor
+            .orderings()
+            .iter()
+            .filter_map(|ordering| public_ordering_summary(descriptor, ordering))
+            .collect(),
+    }
+}
+
+fn public_descriptor_ref(descriptor: &mfm_facts::FactDescriptor) -> PublicFactDescriptorRef {
+    PublicFactDescriptorRef {
+        descriptor_schema_id: descriptor.descriptor_schema_id().as_str().to_owned(),
+        subject_schema_id: descriptor.subject_schema_id().as_str().to_owned(),
+        response_schema_id: descriptor.response_schema_id().as_str().to_owned(),
+        compatibility_group: descriptor
+            .compatibility_group()
+            .map(|group| group.as_str().to_owned()),
+    }
+}
+
+fn public_field_summary(field: &mfm_facts::FactFieldDescriptor) -> PublicFactFieldSummary {
+    PublicFactFieldSummary {
+        field_id: field.field_id().as_str().to_owned(),
+        path: field.path().as_str().to_owned(),
+        source: field.accessor().source().path_prefix().to_owned(),
+        value_type: fact_value_type_str(field.value_type()).to_owned(),
+        exposure: fact_exposure_str(field.exposure()).to_owned(),
+        operators: field
+            .operators()
+            .iter()
+            .map(|operator| fact_query_operator_str(*operator).to_owned())
+            .collect(),
+        unit: field.unit().map(|unit| unit.as_str().to_owned()),
+        scale: field.scale().map(mfm_facts::FactScale::exponent),
+        sortable: field.sortable(),
+    }
+}
+
+fn public_ordering_summary(
+    descriptor: &mfm_facts::FactDescriptor,
+    ordering: &mfm_facts::FactOrderingDescriptor,
+) -> Option<PublicFactOrderingSummary> {
+    let fields = descriptor_fields_by_id(descriptor);
+    let terms = ordering
+        .terms()
+        .iter()
+        .map(|term| {
+            let field = fields.get(term.field_id())?;
+            (field.exposure() != mfm_facts::FactFieldExposure::Hidden).then_some(
+                PublicFactOrderingTermSummary {
+                    field_id: term.field_id().as_str().to_owned(),
+                    direction: sort_direction_str(term.direction()).to_owned(),
+                    nulls: null_ordering_str(term.nulls()).to_owned(),
+                    tie_breaker: term.tie_breaker(),
+                },
+            )
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(PublicFactOrderingSummary {
+        name: ordering.name().as_str().to_owned(),
+        terms,
+    })
+}
+
+fn descriptor_fields_by_id(
+    descriptor: &mfm_facts::FactDescriptor,
+) -> BTreeMap<&mfm_facts::FactFieldId, &mfm_facts::FactFieldDescriptor> {
+    descriptor
+        .fields()
+        .iter()
+        .map(|field| (field.field_id(), field))
+        .collect()
+}
+
+fn public_query_input(
+    request: &PublicFactQueryRequest,
+    store_scope: mfm_facts::StoreScopeRef,
+    scope_decision_evidence: mfm_facts::ScopeDecisionEvidence,
+) -> Result<mfm_facts::FactQueryInput, AppError> {
+    let predicates = request
+        .predicates
+        .iter()
+        .map(|predicate| {
+            Ok(mfm_facts::FactQueryPredicate::new(
+                mfm_facts::FactFieldId::new(&predicate.field_id)?,
+                parse_public_fact_operator(&predicate.operator)?,
+                public_scalar_to_fact_scalar(&predicate.value)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    let return_fields = request
+        .return_fields
+        .iter()
+        .map(|field| {
+            Ok(mfm_facts::FactQueryReturnField::new(
+                mfm_facts::FactFieldId::new(field)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    Ok(mfm_facts::FactQueryInput::new(
+        store_scope,
+        mfm_facts::FactQueryScope::new(
+            mfm_facts::FactAudience::Platform,
+            mfm_facts::FactVisibilityScope::Default,
+        ),
+        scope_decision_evidence,
+        predicates,
+        return_fields,
+        mfm_facts::FactOrderingName::new(&request.ordering)?,
+        request.limit,
+    )?)
+}
+
+fn parse_public_fact_operator(value: &str) -> Result<mfm_facts::FactQueryOperator, AppError> {
+    match value {
+        "equal" => Ok(mfm_facts::FactQueryOperator::Equal),
+        "less_than" => Ok(mfm_facts::FactQueryOperator::LessThan),
+        "less_than_or_equal" => Ok(mfm_facts::FactQueryOperator::LessThanOrEqual),
+        "greater_than" => Ok(mfm_facts::FactQueryOperator::GreaterThan),
+        "greater_than_or_equal" => Ok(mfm_facts::FactQueryOperator::GreaterThanOrEqual),
+        _ => Err(AppError::new(
+            ErrorClass::BadRequest,
+            "FactQueryOperatorInvalid",
+            "Fact query operator is invalid",
+        )),
+    }
+}
+
+fn public_scalar_to_fact_scalar(
+    value: &PublicFactScalarValue,
+) -> Result<mfm_facts::FactCanonicalScalar, AppError> {
+    match value {
+        PublicFactScalarValue::String(value) => {
+            Ok(mfm_facts::FactCanonicalScalar::String(value.clone()))
+        }
+        PublicFactScalarValue::Boolean(value) => {
+            Ok(mfm_facts::FactCanonicalScalar::Boolean(*value))
+        }
+        PublicFactScalarValue::SignedInteger(value) => {
+            Ok(mfm_facts::FactCanonicalScalar::SignedInteger(*value))
+        }
+        PublicFactScalarValue::UnsignedInteger(value) => {
+            Ok(mfm_facts::FactCanonicalScalar::UnsignedInteger(*value))
+        }
+        PublicFactScalarValue::Timestamp(value) => {
+            Ok(mfm_facts::FactCanonicalScalar::timestamp(value.clone())?)
+        }
+        PublicFactScalarValue::DecimalString(value) => Ok(
+            mfm_facts::FactCanonicalScalar::decimal_variable(value.clone())?,
+        ),
+        PublicFactScalarValue::Digest(value) => Ok(mfm_facts::FactCanonicalScalar::Digest(
+            ContentDigest::parse(value).map_err(|_| {
+                AppError::new(
+                    ErrorClass::BadRequest,
+                    "FactQueryDigestInvalid",
+                    "Fact query digest value is invalid",
+                )
+            })?,
+        )),
+    }
+}
+
+fn public_fact_from_query_row(
+    catalog: &FactCatalogService,
+    row: &AppFactQueryRow,
+) -> Result<Option<PublicFactRef>, AppError> {
+    let mfm_facts::FactVisibility::Indexed { audience, scope } = row.fact_ref.visibility() else {
+        return Ok(None);
+    };
+    if *audience != mfm_facts::FactAudience::Platform
+        || *scope != mfm_facts::FactVisibilityScope::Default
+    {
+        return Ok(None);
+    }
+    let Some(descriptor) = catalog.descriptor_by_hash(row.fact_ref.fact_descriptor_hash()) else {
+        return Ok(None);
+    };
+    let fields = public_fields_from_summaries(descriptor, &row.returned_fields)?;
+    public_fact_from_parts(&row.fact_ref, descriptor, fields).map(Some)
+}
+
+fn public_fact_from_parts(
+    fact_ref: &mfm_facts::InternalFactRef,
+    descriptor: &mfm_facts::FactDescriptor,
+    fields: Vec<PublicFactFieldValue>,
+) -> Result<PublicFactRef, AppError> {
+    Ok(PublicFactRef {
+        public_ref: public_ref_id(fact_ref)?,
+        fact_kind: fact_ref.fact_kind().as_str().to_owned(),
+        descriptor: public_descriptor_ref(descriptor),
+        recorded_at: fact_ref.recorded_at().to_owned(),
+        observed_at: fact_ref.observed_at().map(str::to_owned),
+        fields,
+    })
+}
+
+fn public_fields_from_summaries(
+    descriptor: &mfm_facts::FactDescriptor,
+    summaries: &[mfm_facts::ReturnedFieldValueSummary],
+) -> Result<Vec<PublicFactFieldValue>, AppError> {
+    let fields = descriptor_fields_by_id(descriptor);
+    summaries
+        .iter()
+        .filter_map(|summary| {
+            let field = fields.get(summary.field_id())?;
+            (field.exposure() == mfm_facts::FactFieldExposure::Returnable)
+                .then(|| public_field_value(field, summary.value()))
+        })
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn public_fields_from_projection<'a>(
+    descriptor: &mfm_facts::FactDescriptor,
+    terms: impl Iterator<Item = &'a store::FactIndexTermProjection>,
+) -> Result<Vec<PublicFactFieldValue>, AppError> {
+    let fields = descriptor_fields_by_id(descriptor);
+    terms
+        .filter_map(|term| {
+            let field = fields.get(&term.field_id)?;
+            (field.exposure() == mfm_facts::FactFieldExposure::Returnable)
+                .then(|| public_field_value(field, &term.value))
+        })
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn public_field_value(
+    field: &mfm_facts::FactFieldDescriptor,
+    value: &mfm_facts::FactCanonicalScalar,
+) -> Result<PublicFactFieldValue, AppError> {
+    Ok(PublicFactFieldValue {
+        field_id: field.field_id().as_str().to_owned(),
+        path: field.path().as_str().to_owned(),
+        source: field.accessor().source().path_prefix().to_owned(),
+        value_type: fact_value_type_str(field.value_type()).to_owned(),
+        value: fact_scalar_to_public_scalar(value),
+        unit: field.unit().map(|unit| unit.as_str().to_owned()),
+        scale: field.scale().map(mfm_facts::FactScale::exponent),
+    })
+}
+
+fn fact_scalar_to_public_scalar(value: &mfm_facts::FactCanonicalScalar) -> PublicFactScalarValue {
+    match value {
+        mfm_facts::FactCanonicalScalar::String(value) => {
+            PublicFactScalarValue::String(value.clone())
+        }
+        mfm_facts::FactCanonicalScalar::Boolean(value) => PublicFactScalarValue::Boolean(*value),
+        mfm_facts::FactCanonicalScalar::SignedInteger(value) => {
+            PublicFactScalarValue::SignedInteger(*value)
+        }
+        mfm_facts::FactCanonicalScalar::UnsignedInteger(value) => {
+            PublicFactScalarValue::UnsignedInteger(*value)
+        }
+        mfm_facts::FactCanonicalScalar::Timestamp(value) => {
+            PublicFactScalarValue::Timestamp(value.clone())
+        }
+        mfm_facts::FactCanonicalScalar::DecimalString(value) => {
+            PublicFactScalarValue::DecimalString(value.as_str().to_owned())
+        }
+        mfm_facts::FactCanonicalScalar::Digest(value) => {
+            PublicFactScalarValue::Digest(value.as_str().to_owned())
+        }
+    }
+}
+
+fn internal_fact_ref_from_projection(
+    entry: &store::FactIndexProjection,
+) -> Result<mfm_facts::InternalFactRef, AppError> {
+    Ok(mfm_facts::InternalFactRef::new(
+        mfm_facts::InternalFactRefParts {
+            fact_claim_id: entry.fact_claim_id.clone(),
+            source_event_id: entry.source_event_id.clone(),
+            recorded_at: entry.recorded_at.clone(),
+            observed_at: entry.observed_at.clone(),
+            visibility: mfm_facts::FactVisibility::Indexed {
+                audience: entry.audience,
+                scope: entry.visibility_scope,
+            },
+            fact_kind: entry.fact_kind.clone(),
+            fact_descriptor_hash: entry.fact_descriptor_hash.clone(),
+            fact_subject_namespace_hash: entry.fact_subject_namespace_hash.clone(),
+            fact_key: entry.fact_key.clone(),
+            subject_material_hash: entry.subject_material_hash.clone(),
+            request_schema_id: entry.request_schema_id.clone(),
+            request_hash: entry.request_hash.clone(),
+            response_schema_id: entry.response_schema_id.clone(),
+            response_hash: entry.response_hash.clone(),
+            artifact_id: entry.artifact_id.clone(),
+            artifact_evidence_hash: entry.artifact_evidence_hash.clone(),
+            capability_kind: entry.capability_kind.clone(),
+            capability_version: entry.capability_version.clone(),
+            adapter_kind: entry.adapter_kind.clone(),
+            adapter_version: entry.adapter_version.clone(),
+        },
+    )?)
+}
+
+fn public_ref_id(fact_ref: &mfm_facts::InternalFactRef) -> Result<PublicFactRefId, AppError> {
+    let claim_id = mfm_facts::canonical_fact_claim_id_bytes(fact_ref.fact_claim_id())?;
+    let material = [
+        b"mfm.public-fact-ref.v1:".as_slice(),
+        claim_id.as_bytes(),
+        b":platform:default".as_slice(),
+    ]
+    .concat();
+    let digest =
+        ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(&material));
+    PublicFactRefId::new(format!(
+        "pfr_{}",
+        digest.as_str().rsplit(':').next().unwrap_or_default()
+    ))
+}
+
+fn redacted_fact_not_found() -> AppError {
+    AppError::not_found(
+        "FactNotFound",
+        "Fact was not found or is not available through the public fact service",
+    )
+}
+
+fn fact_value_type_str(value_type: mfm_facts::FactFieldValueType) -> &'static str {
+    match value_type {
+        mfm_facts::FactFieldValueType::String => "string",
+        mfm_facts::FactFieldValueType::Boolean => "boolean",
+        mfm_facts::FactFieldValueType::SignedInteger => "signed_integer",
+        mfm_facts::FactFieldValueType::UnsignedInteger => "unsigned_integer",
+        mfm_facts::FactFieldValueType::Timestamp => "timestamp",
+        mfm_facts::FactFieldValueType::DecimalString => "decimal_string",
+        mfm_facts::FactFieldValueType::Digest => "digest",
+    }
+}
+
+fn fact_exposure_str(exposure: mfm_facts::FactFieldExposure) -> &'static str {
+    match exposure {
+        mfm_facts::FactFieldExposure::Returnable => "returnable",
+        mfm_facts::FactFieldExposure::QueryOnly => "query_only",
+        mfm_facts::FactFieldExposure::Hidden => "hidden",
+    }
+}
+
+fn fact_query_operator_str(operator: mfm_facts::FactQueryOperator) -> &'static str {
+    match operator {
+        mfm_facts::FactQueryOperator::Equal => "equal",
+        mfm_facts::FactQueryOperator::LessThan => "less_than",
+        mfm_facts::FactQueryOperator::LessThanOrEqual => "less_than_or_equal",
+        mfm_facts::FactQueryOperator::GreaterThan => "greater_than",
+        mfm_facts::FactQueryOperator::GreaterThanOrEqual => "greater_than_or_equal",
+    }
+}
+
+fn sort_direction_str(direction: mfm_facts::SortDirection) -> &'static str {
+    match direction {
+        mfm_facts::SortDirection::Ascending => "ascending",
+        mfm_facts::SortDirection::Descending => "descending",
+    }
+}
+
+fn null_ordering_str(nulls: mfm_facts::NullOrdering) -> &'static str {
+    match nulls {
+        mfm_facts::NullOrdering::First => "first",
+        mfm_facts::NullOrdering::Last => "last",
+    }
 }
 
 fn artifact_id_for_digest(digest: &ContentDigest) -> ArtifactId {
@@ -3180,6 +4618,8 @@ fn prepare_certified_run_launch(
     let certificate_artifact = certified_spec_certificate_launch_artifact(&runtime_spec)?;
     let config_artifacts =
         config_launch_artifacts_for_spec(&runtime_spec, input.registry, config_inputs)?;
+    let fact_descriptor_artifacts =
+        fact_descriptor_launch_artifacts_for_spec(&runtime_spec, input.registry)?;
     let seed_cells = seed_launch_cells_for_spec(&runtime_spec, seed_inputs)?;
     let identity_material = events::RunIdentityMaterialV1 {
         certified_spec_hash: runtime_spec.spec_hash().clone(),
@@ -3202,7 +4642,7 @@ fn prepare_certified_run_launch(
             spec_artifact,
             certificate_artifact,
             config_artifacts,
-            fact_descriptor_artifacts: Vec::new(),
+            fact_descriptor_artifacts,
             seed_cells,
         },
     })

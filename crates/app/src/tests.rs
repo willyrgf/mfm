@@ -1,5 +1,681 @@
 use super::*;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
+
+use ed25519_dalek::SigningKey;
+use mfm_capabilities::{CapabilitySpec, ReadExternalRole};
+use mfm_program::{
+    build_root_with_registries, AdapterBindingSpec, CanonicalSeed, MfmFactType as _,
+    PublicOutputKey, ReadState, RootBuilder, ScopeKey, StateKey, StateRegistryBuilder, StateResult,
+    StateSpec, TypedProgramLaunchPlan,
+};
+use mfm_program_derive::{MfmConfig, MfmFactType, MfmValue, PublicOutputs};
+use mfm_store::v1::{ExecutionClaimStore as _, RunEventStore as _};
+use serde::{Deserialize, Serialize};
+
+#[test]
+fn run_read_services_carry_explicit_fact_query_receipt_trust_root() {
+    let store = store::AsyncInMemoryRunStore::new();
+    let registry = CertificationRegistry::new();
+    let key = SigningKey::from_bytes(&[11; 32]);
+    let trust_root = store::FactQueryReceiptTrustRoot::new(
+        mfm_facts::StoreIdentity::new("store.default").expect("store identity"),
+        mfm_facts::StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
+        mfm_facts::StoreKeyId::new("key.default").expect("key id"),
+        key.verifying_key().to_bytes(),
+    )
+    .expect("trust root");
+
+    let without_root = RunReadServices::new_with_certification_registry(
+        store.clone(),
+        store.clone(),
+        registry.clone(),
+    );
+    assert!(without_root.fact_query_receipt_trust_root.is_none());
+
+    let with_root = RunReadServices::new_with_certification_registry_and_fact_query_trust_root(
+        store.clone(),
+        store,
+        registry,
+        Some(trust_root.clone()),
+    );
+    assert_eq!(
+        with_root.fact_query_receipt_trust_root.as_ref(),
+        Some(&trust_root)
+    );
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.app.test",
+    name = "fact_value",
+    version = "1",
+    schema = "mfm.app.test.fact_value"
+)]
+struct AppFactValue {
+    amount: u64,
+}
+
+struct AppFactReadCap;
+
+impl CapabilitySpec for AppFactReadCap {
+    type Role = ReadExternalRole;
+
+    fn kind() -> mfm_capabilities::Result<mfm_ids::CapabilityKind> {
+        mfm_ids::CapabilityKind::new(
+            "mfm.app.test",
+            "fact-read",
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(b"mfm.app.test.fact-read"),
+        )
+        .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+    }
+
+    fn version() -> mfm_capabilities::Result<mfm_ids::CapabilityVersion> {
+        mfm_ids::CapabilityVersion::new("mfm.app.test.fact_read.v1")
+            .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "fact-read"
+    }
+}
+
+fn app_fact_adapter_kind() -> mfm_ids::AdapterKind {
+    mfm_ids::AdapterKind::new(
+        "mfm.app.test",
+        "fact-adapter",
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(b"mfm.app.test.fact-adapter"),
+    )
+    .expect("adapter kind")
+}
+
+fn app_fact_adapter_version() -> mfm_ids::AdapterVersion {
+    mfm_ids::AdapterVersion::new("mfm.app.test.fact_adapter.v1").expect("adapter version")
+}
+
+#[allow(clippy::duplicated_attributes)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue, MfmFactType)]
+#[mfm(
+    namespace = "mfm.app.test",
+    name = "launch_fact",
+    version = "1",
+    schema = "mfm.app.test.launch_fact"
+)]
+#[mfm_fact(kind = "mfm.app.test.launch")]
+#[mfm_fact(field(
+    id = "subject.amount",
+    source = "subject",
+    path = "amount",
+    value_type = "unsigned_integer",
+    operator = "equal",
+    exposure = "returnable"
+))]
+#[mfm_fact(field(
+    id = "result.amount",
+    source = "result",
+    path = "amount",
+    value_type = "unsigned_integer",
+    operators(equal, greater_than),
+    exposure = "returnable",
+    sortable
+))]
+#[mfm_fact(ordering(
+    name = "result.amount.asc",
+    term(field = "result.amount", direction = "ascending", nulls = "last")
+))]
+struct AppLaunchFact {
+    subject: AppFactValue,
+    response: AppFactValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+struct AppFactStateConfig {
+    multiplier: u64,
+}
+
+#[derive(PublicOutputs)]
+#[mfm(schema = "mfm.app.test.public_outputs")]
+struct AppFactPublicOutputs<'p, 's> {
+    result: mfm_program::Handle<'p, 's, AppFactValue>,
+}
+
+struct AppFactState {
+    config: AppFactStateConfig,
+}
+
+impl StateSpec for AppFactState {
+    type Config = AppFactStateConfig;
+    type Input = AppFactValue;
+    type Output = AppFactValue;
+    type Effect = mfm_effects::ReadExternal;
+    type Caps = (AppFactReadCap,);
+
+    fn kind() -> mfm_program::Result<mfm_ids::StateKind> {
+        mfm_ids::StateKind::new(
+            "mfm.app.test",
+            "fact-state",
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(b"mfm.app.test.fact-state"),
+        )
+        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+    }
+
+    fn version() -> mfm_program::Result<mfm_ids::StateVersion> {
+        mfm_ids::StateVersion::new("mfm.app.test.fact_state.v1")
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.app.test.fact_state"
+    }
+
+    fn adapter_bindings() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
+        Ok(vec![AdapterBindingSpec {
+            adapter_kind: app_fact_adapter_kind(),
+            adapter_version: app_fact_adapter_version(),
+        }])
+    }
+
+    fn emitted_fact_descriptors() -> mfm_program::Result<Vec<mfm_program::FactDescriptorRef>> {
+        Ok(vec![mfm_program::fact_descriptor_ref::<AppLaunchFact>()?])
+    }
+
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
+    }
+}
+
+impl ReadState for AppFactState {
+    type RunFuture<'a> = std::future::Ready<StateResult<Self::Output>>;
+
+    fn run<'a>(&'a self, input: Self::Input, _caps: &'a Self::Caps) -> Self::RunFuture<'a> {
+        std::future::ready(Ok(AppFactValue {
+            amount: input.amount * self.config.multiplier,
+        }))
+    }
+}
+
+fn app_fact_launch_plan_with_state_key(state_key: &str) -> TypedProgramLaunchPlan {
+    let mut states = StateRegistryBuilder::new();
+    states
+        .register::<AppFactState>()
+        .expect("state registration");
+    let seed = CanonicalSeed::from_value(&AppFactValue { amount: 7 }).expect("seed");
+    let draft = build_root_with_registries(
+        ScopeKey::new("root").expect("root key"),
+        states.snapshot(),
+        mfm_program::OperationRegistryBuilder::new().snapshot(),
+        |root: &mut RootBuilder<'_, '_>| {
+            let input = root.seed(
+                mfm_program::SeedKey::new("initial").expect("seed key"),
+                seed.clone(),
+            )?;
+            let result = root.scope().state::<AppFactState, _>(
+                StateKey::new(state_key)?,
+                AppFactStateConfig { multiplier: 2 },
+                input,
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &AppFactPublicOutputs { result },
+            )
+        },
+    )
+    .expect("fact launch draft");
+    let seeds = std::collections::BTreeMap::from([(
+        draft.seeds()[0].seed_id.clone(),
+        seed.canonical_json().clone(),
+    )]);
+    TypedProgramLaunchPlan::from_draft_and_seed_material(draft, seeds).expect("launch plan")
+}
+
+fn app_fact_certification_registry(include_fact_descriptor: bool) -> CertificationRegistry {
+    let mut registry = CertificationRegistry::new();
+    let mut states = StateRegistryBuilder::new();
+    let registered = states
+        .register::<AppFactState>()
+        .expect("state registration");
+    registry
+        .register_state(&registered)
+        .expect("certification state registration");
+    if include_fact_descriptor {
+        registry
+            .register_fact_type::<AppLaunchFact>()
+            .expect("fact descriptor registration");
+    }
+    registry
+}
+
+struct AppFactRecordingRunner {
+    visibility: mfm_program::facts::FactVisibility,
+}
+
+impl mfm_runtime::ErasedNodeRunner for AppFactRecordingRunner {
+    fn run_erased<'a>(
+        &'a self,
+        ctx: mfm_runtime::ErasedRunCtx<'a>,
+    ) -> mfm_runtime::ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            let value = AppFactValue { amount: 14 };
+            let artifacts = mfm_runtime::RunnerArtifactBuilder::new(&ctx);
+            let payloads = mfm_runtime::RunnerPayloadBuilder::new(&ctx);
+            let output_artifact = artifacts.state_output(&value)?;
+            let output_payload = payloads.cell_produced(&output_artifact)?;
+            let mut output = mfm_runtime::RunnerOutputBuilder::new(&ctx);
+            output.stage_attempt_artifact(&output_artifact)?;
+            output.record_fact(
+                mfm_runtime::FactRecordInput::new(
+                    AppLaunchFact {
+                        subject: AppFactValue { amount: 7 },
+                        response: AppFactValue { amount: 15 },
+                    },
+                    self.visibility.clone(),
+                )
+                .observed_at("2026-07-02T00:00:00Z"),
+                app_fact_runner_capability_binding(),
+            )?;
+            output.payload(output_payload);
+            Ok(output.finish())
+        })
+    }
+}
+
+fn app_fact_runner_capability_binding() -> mfm_runtime::RunnerCapabilityBinding {
+    mfm_runtime::RunnerCapabilityBinding {
+        capability_kind: AppFactReadCap::kind().expect("capability kind"),
+        capability_version: AppFactReadCap::version().expect("capability version"),
+        adapter_kind: app_fact_adapter_kind(),
+        adapter_version: app_fact_adapter_version(),
+    }
+}
+
+fn app_fact_runner_registry(
+    runtime_spec: &CertifiedRuntimeSpec,
+    visibility: mfm_program::facts::FactVisibility,
+) -> ErasedRunnerRegistry {
+    let node = runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .find(|node| node.framework.is_none())
+        .expect("app fact state node");
+    let descriptor = runtime_spec
+        .state_descriptor_for_node(node)
+        .expect("app fact state descriptor");
+    let factory_id = events::RunnerFactoryId::new(descriptor.runner.clone()).expect("factory id");
+    let executable = events::ExecutableIdentity {
+        factory_id: factory_id.clone(),
+        cargo_package_digest: content_digest_for_bytes(b"mfm.app.test.fact-runner.cargo"),
+        binary_digest: content_digest_for_bytes(b"mfm.app.test.fact-runner.binary"),
+        nix_derivation_hash: None,
+        nix_output_hash: None,
+    };
+    let mut registry = ErasedRunnerRegistry::new();
+    mfm_runtime::RunnerRegistrationBuilder::new(
+        &mut registry,
+        mfm_runtime::CapabilityImplementationId::new("mfm.app.test.fact-runner")
+            .expect("implementation id"),
+    )
+    .register_descriptor(
+        node.descriptor_id.clone(),
+        &node.capability_bindings,
+        factory_id.clone(),
+        executable,
+        Arc::new(AppFactRecordingRunner { visibility }),
+    )
+    .expect("app fact runner registration")
+    .register_adapter_executable(
+        app_fact_adapter_kind(),
+        app_fact_adapter_version(),
+        events::ExecutableIdentity {
+            factory_id,
+            cargo_package_digest: content_digest_for_bytes(b"mfm.app.test.fact-adapter.cargo"),
+            binary_digest: content_digest_for_bytes(b"mfm.app.test.fact-adapter.binary"),
+            nix_derivation_hash: None,
+            nix_output_hash: None,
+        },
+    )
+    .expect("app fact runner registration");
+    registry
+}
+
+fn prepare_app_fact_launch(include_fact_descriptor: bool) -> Result<RunLaunchRequest, AppError> {
+    prepare_app_fact_launch_with_distinct_key(include_fact_descriptor, None)
+}
+
+fn prepare_app_fact_launch_with_distinct_key(
+    include_fact_descriptor: bool,
+    distinct_run_key_digest: Option<ContentDigest>,
+) -> Result<RunLaunchRequest, AppError> {
+    prepare_app_fact_launch_with_distinct_key_and_state_key(
+        include_fact_descriptor,
+        distinct_run_key_digest,
+        "fact-state",
+    )
+}
+
+fn prepare_app_fact_launch_with_distinct_key_and_state_key(
+    include_fact_descriptor: bool,
+    distinct_run_key_digest: Option<ContentDigest>,
+    state_key: &str,
+) -> Result<RunLaunchRequest, AppError> {
+    let plan = app_fact_launch_plan_with_state_key(state_key);
+    let registry = app_fact_certification_registry(include_fact_descriptor);
+    let lowered = mfm_certify::lower_program_draft(&plan.draft).expect("lowered");
+    let scoped = registry
+        .scoped_for_spec(lowered.spec())
+        .expect("scoped registry");
+    let certified_spec = mfm_certify::certify_typed_spec(lowered, &scoped).expect("certified spec");
+    let mut config_inputs = plan
+        .config_material
+        .into_iter()
+        .map(|artifact| RunLaunchConfigArtifact {
+            schema_id: artifact.schema_id,
+            bytes: artifact.bytes.to_vec(),
+            media_type: artifact.media_type,
+        })
+        .collect::<Vec<_>>();
+    config_inputs.extend(framework_config_launch_artifacts_for_spec(
+        &certified_spec.envelope().spec,
+    )?);
+    let seed_inputs = plan
+        .seed_material
+        .into_iter()
+        .map(|artifact| RunLaunchSeedArtifact {
+            seed_id: artifact.seed_id,
+            bytes: artifact.bytes.to_vec(),
+            media_type: artifact.media_type,
+        })
+        .collect();
+
+    prepare_certified_run_launch(
+        CertifiedRunLaunchInput {
+            certified_spec,
+            registry: &scoped,
+            trust_scope_id: TrustScopeId::new(
+                "mfm.trust_scope.v1:00000000000000000000000000000000",
+            )
+            .expect("trust scope"),
+            distinct_run_key_digest,
+            entry_point_evidence: events::EntryPointLaunchEvidence {
+                resolved_op_id: events::EntryPointOpId::new("mfm.app.test.fact-launch")
+                    .expect("entry point"),
+                entry_point_registry_digest: content_digest_for_bytes(b"mfm.app.test.registry"),
+            },
+        },
+        config_inputs,
+        seed_inputs,
+    )
+}
+
+async fn launch_app_fact_run() -> (RunId, store::AsyncInMemoryRunStore, CertificationRegistry) {
+    launch_app_fact_run_with_visibility(mfm_program::facts::FactVisibility::indexed_default(
+        mfm_program::facts::FactAudience::Platform,
+    ))
+    .await
+}
+
+async fn launch_app_fact_run_with_visibility(
+    visibility: mfm_program::facts::FactVisibility,
+) -> (RunId, store::AsyncInMemoryRunStore, CertificationRegistry) {
+    let store = store::AsyncInMemoryRunStore::default();
+    launch_app_fact_run_in_store_with_visibility(store, visibility, None).await
+}
+
+async fn launch_app_fact_run_in_store_with_visibility(
+    store: store::AsyncInMemoryRunStore,
+    visibility: mfm_program::facts::FactVisibility,
+    distinct_run_key_digest: Option<ContentDigest>,
+) -> (RunId, store::AsyncInMemoryRunStore, CertificationRegistry) {
+    launch_app_fact_run_in_store_with_visibility_and_state_key(
+        store,
+        visibility,
+        distinct_run_key_digest,
+        "fact-state",
+        true,
+    )
+    .await
+}
+
+async fn launch_app_fact_run_in_store_with_visibility_and_state_key(
+    store: store::AsyncInMemoryRunStore,
+    visibility: mfm_program::facts::FactVisibility,
+    distinct_run_key_digest: Option<ContentDigest>,
+    state_key: &str,
+    require_completion: bool,
+) -> (RunId, store::AsyncInMemoryRunStore, CertificationRegistry) {
+    let request = prepare_app_fact_launch_with_distinct_key_and_state_key(
+        true,
+        distinct_run_key_digest,
+        state_key,
+    )
+    .expect("prepared app fact launch");
+    let runtime_spec =
+        CertifiedRuntimeSpec::new(request.certified_spec.clone()).expect("runtime spec");
+    let runners = app_fact_runner_registry(&runtime_spec, visibility);
+    let registry = app_fact_certification_registry(true);
+    let run_id = request.run_id.clone();
+    let scheduler = SerialTypedScheduler::new(runners, Arc::new(store.clone()));
+    let launch = scheduler
+        .prepare_run_launch(
+            &runtime_spec,
+            request.identity_material,
+            request.evidence,
+            store.expected_next_seq(&run_id).await.expect("next seq"),
+        )
+        .expect("prepare fact run launch");
+    scheduler
+        .start_run(&store, launch)
+        .await
+        .expect("start fact run");
+    let token = store::AdmissionToken::new("mfm.app.test.fact-runner-claim")
+        .expect("execution claim token");
+    match store
+        .acquire_execution_claim(&run_id, token.clone())
+        .await
+        .expect("acquire execution claim")
+    {
+        store::NowaitSkipAdmissionResult::Admitted(_) => {}
+        store::NowaitSkipAdmissionResult::Busy(_) => panic!("fact run execution claim busy"),
+    }
+
+    for _ in 0..16 {
+        let committed = store
+            .load_committed_run_stream(&run_id)
+            .await
+            .expect("committed stream");
+        if committed.projection().run_state(&run_id) == store::RunState::Completed {
+            break;
+        }
+        if !require_completion
+            && committed
+                .projection()
+                .fact_records()
+                .any(|(_claim_id, record)| record.source_run_id == run_id)
+        {
+            break;
+        }
+        match scheduler
+            .drive_once(&store, &runtime_spec, &run_id, token.clone())
+            .await
+        {
+            Ok(_) => {}
+            Err(error) => {
+                let stream = store.load_run_stream(&run_id).await.unwrap_or_default();
+                let event_variants = stream
+                    .iter()
+                    .map(|event| match event.payload() {
+                        events::KernelEventPayload::RunAdmitted(_) => "RunAdmitted".to_owned(),
+                        events::KernelEventPayload::StateAttemptStarted(_) => {
+                            "StateAttemptStarted".to_owned()
+                        }
+                        events::KernelEventPayload::StateAttemptFailed(payload) => format!(
+                            "StateAttemptFailed:{}:{}",
+                            payload.error.code, payload.error.safe_message
+                        ),
+                        events::KernelEventPayload::CellProduced(_) => "CellProduced".to_owned(),
+                        events::KernelEventPayload::FactRecorded(_) => "FactRecorded".to_owned(),
+                        events::KernelEventPayload::ArtifactReferenced(_) => {
+                            "ArtifactReferenced".to_owned()
+                        }
+                        events::KernelEventPayload::RetentionRefsAppended(_) => {
+                            "RetentionRefsAppended".to_owned()
+                        }
+                        events::KernelEventPayload::RunCompleted(_) => "RunCompleted".to_owned(),
+                        _ => "Other".to_owned(),
+                    })
+                    .collect::<Vec<_>>();
+                panic!("drive fact run failed: {error:?}; events: {event_variants:?}");
+            }
+        }
+    }
+    let committed = store
+        .load_committed_run_stream(&run_id)
+        .await
+        .expect("fact committed stream");
+    if require_completion {
+        assert_eq!(
+            committed.projection().run_state(&run_id),
+            store::RunState::Completed
+        );
+    }
+    let event_variants = committed
+        .events()
+        .iter()
+        .map(|event| match event.payload() {
+            events::KernelEventPayload::RunAdmitted(_) => "RunAdmitted".to_owned(),
+            events::KernelEventPayload::StateAttemptStarted(_) => "StateAttemptStarted".to_owned(),
+            events::KernelEventPayload::StateAttemptFailed(payload) => format!(
+                "StateAttemptFailed:{}:{}",
+                payload.error.code, payload.error.safe_message
+            ),
+            events::KernelEventPayload::CellProduced(_) => "CellProduced".to_owned(),
+            events::KernelEventPayload::FactRecorded(_) => "FactRecorded".to_owned(),
+            events::KernelEventPayload::ArtifactReferenced(_) => "ArtifactReferenced".to_owned(),
+            events::KernelEventPayload::RetentionRefsAppended(_) => {
+                "RetentionRefsAppended".to_owned()
+            }
+            events::KernelEventPayload::PublicOutputProduced(_) => {
+                "PublicOutputProduced".to_owned()
+            }
+            events::KernelEventPayload::RunCompleted(_) => "RunCompleted".to_owned(),
+            _ => "Other".to_owned(),
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        committed
+            .events()
+            .iter()
+            .any(|event| matches!(event.payload(), events::KernelEventPayload::FactRecorded(_))),
+        "events: {event_variants:?}"
+    );
+
+    (run_id, store, registry)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CommittedStreamArtifactMode {
+    Missing,
+    TamperFactResponse,
+}
+
+#[derive(Clone)]
+struct OverriddenCommittedStreamStore {
+    inner: store::AsyncInMemoryRunStore,
+    mode: CommittedStreamArtifactMode,
+}
+
+impl OverriddenCommittedStreamStore {
+    fn new(inner: store::AsyncInMemoryRunStore, mode: CommittedStreamArtifactMode) -> Self {
+        Self { inner, mode }
+    }
+}
+
+impl store::RunEventStore for OverriddenCommittedStreamStore {
+    type Error = store::StoreError;
+
+    fn append_prepared_commit_bundle<'a>(
+        &'a self,
+        bundle: store::PreparedCommitBundle,
+    ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
+        self.inner.append_prepared_commit_bundle(bundle)
+    }
+
+    fn load_run_stream<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
+        self.inner.load_run_stream(run_id)
+    }
+
+    fn load_committed_run_stream<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::CommittedRunStream, Self::Error> {
+        Box::pin(async move {
+            let committed = self.inner.load_committed_run_stream(run_id).await?;
+            let mut artifact_bytes = committed.artifact_byte_authority().clone();
+            match self.mode {
+                CommittedStreamArtifactMode::Missing => artifact_bytes.clear(),
+                CommittedStreamArtifactMode::TamperFactResponse => {
+                    let (_, (bytes, _)) = artifact_bytes
+                        .iter_mut()
+                        .find(|(_, (_, evidence))| {
+                            evidence.artifact_role == events::ArtifactRole::FactResponse
+                        })
+                        .expect("fact response artifact bytes");
+                    bytes.push(b'\n');
+                }
+            }
+            store::CommittedRunStream::from_events_with_artifact_bytes(
+                run_id.clone(),
+                committed.events().to_vec(),
+                &artifact_bytes,
+            )
+        })
+    }
+
+    fn expected_next_seq<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
+        self.inner.expected_next_seq(run_id)
+    }
+
+    fn status_projection_snapshot<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        self.inner.status_projection_snapshot(run_id)
+    }
+
+    fn fact_projection_snapshot<'a>(
+        &'a self,
+    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        self.inner.fact_projection_snapshot()
+    }
+}
+
+impl store::TrustScopeStore for OverriddenCommittedStreamStore {
+    type Error = store::StoreError;
+
+    fn load_trust_scope_id<'a>(&'a self) -> store::AsyncStoreFuture<'a, TrustScopeId, Self::Error> {
+        self.inner.load_trust_scope_id()
+    }
+}
+
+impl store::RetainedArtifactReadProvider for OverriddenCommittedStreamStore {
+    fn read_retained_artifact<'a>(
+        &'a self,
+        requirement: &'a store::EventArtifactRequirement,
+    ) -> store::RetainedArtifactReadFuture<'a> {
+        self.inner.read_retained_artifact(requirement)
+    }
+}
 
 #[derive(Clone)]
 struct ExpectingRetainedArtifactProvider {
@@ -87,6 +763,515 @@ async fn retained_artifact_adapter_preserves_read_request_expectations() {
         .expect("adapter preserves exact config expectation");
 
     assert_eq!(*seen.lock().expect("seen lock"), vec![expected]);
+}
+
+#[tokio::test]
+async fn app_read_services_reconstruct_fact_bearing_status_from_committed_stream() {
+    let (run_id, store, registry) = launch_app_fact_run().await;
+    let read_services =
+        make_run_read_services_with_certification_registry(store.clone(), store, registry);
+
+    let status = read_services
+        .run_status(&run_id)
+        .await
+        .expect("fact-bearing status uses committed artifact authority");
+    assert_eq!(status.run_mode, RunModeStatus::Completed);
+    assert!(status.head_seq > store::StreamSeq::FIRST.as_u64());
+
+    let stream = read_services
+        .run_stream(&run_id)
+        .await
+        .expect("fact-bearing stream uses committed artifact authority");
+    assert_eq!(stream.run_id, run_id.as_str());
+    assert!(stream.events.len() > 1);
+}
+
+#[tokio::test]
+async fn app_read_services_fail_closed_for_missing_or_tampered_fact_artifacts() {
+    let (run_id, store, registry) = launch_app_fact_run().await;
+
+    for mode in [
+        CommittedStreamArtifactMode::Missing,
+        CommittedStreamArtifactMode::TamperFactResponse,
+    ] {
+        let overridden = OverriddenCommittedStreamStore::new(store.clone(), mode);
+        let read_services = make_run_read_services_with_certification_registry(
+            overridden.clone(),
+            overridden,
+            registry.clone(),
+        );
+
+        let status_error = read_services
+            .run_status(&run_id)
+            .await
+            .expect_err("fact artifact authority failure must close status reads");
+        assert_eq!(status_error.code, "RunStoreRejected", "mode {mode:?}");
+
+        let stream_error = read_services
+            .run_stream(&run_id)
+            .await
+            .expect_err("fact artifact authority failure must close stream reads");
+        assert_eq!(stream_error.code, "RunStoreRejected", "mode {mode:?}");
+    }
+}
+
+#[tokio::test]
+async fn public_fact_catalog_discovers_only_platform_descriptors() {
+    let (_run_id, store, _registry) = launch_app_fact_run().await;
+    let descriptor = AppLaunchFact::descriptor().expect("fact descriptor");
+    let projection = store.projection_snapshot().expect("projection snapshot");
+    let public_catalog =
+        FactCatalogService::from_public_projection(vec![descriptor.clone()], &projection)
+            .expect("public catalog");
+
+    assert_eq!(
+        public_catalog.list_kinds(),
+        vec![PublicFactKindSummary {
+            fact_kind: "mfm.app.test.launch".to_owned(),
+            descriptor_count: 1,
+        }]
+    );
+
+    let (_claim_id, platform_entry) = projection
+        .fact_index_entries()
+        .next()
+        .expect("platform fact index entry");
+    let mut control_entry = platform_entry.clone();
+    control_entry.audience = mfm_facts::FactAudience::Control;
+    let control_projection =
+        store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
+            fact_index_entries: BTreeMap::from([(
+                control_entry.fact_claim_id.clone(),
+                control_entry,
+            )]),
+            ..store::ProjectionSnapshotParts::default()
+        })
+        .expect("control projection");
+    let control_catalog =
+        FactCatalogService::from_public_projection(vec![descriptor], &control_projection)
+            .expect("control catalog");
+
+    assert!(control_catalog.list_kinds().is_empty());
+    let error = control_catalog
+        .describe_kind("mfm.app.test.launch")
+        .expect_err("control-only descriptors are not publicly discoverable");
+    assert_eq!(error.class, ErrorClass::NotFound);
+    assert_eq!(error.code, "FactNotFound");
+
+    let (_record_claim_id, platform_record) = projection
+        .fact_records()
+        .next()
+        .expect("recorded fact projection");
+    let run_private_claim = mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
+        visibility: mfm_facts::FactVisibility::RunPrivate,
+        fact_kind: platform_record.claim.fact_kind().clone(),
+        fact_descriptor_hash: platform_record.claim.fact_descriptor_hash().clone(),
+        subject: platform_record.claim.subject().clone(),
+        observed_at: platform_record.claim.observed_at().map(str::to_owned),
+        request: platform_record.claim.request().cloned(),
+        response: platform_record.claim.response().clone(),
+        producer: platform_record.claim.producer().clone(),
+    })
+    .expect("run-private claim");
+    let mut run_private_record = platform_record.clone();
+    run_private_record.claim = run_private_claim;
+    let run_private_projection =
+        store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
+            fact_records: BTreeMap::from([(
+                run_private_record.fact_claim_id.clone(),
+                run_private_record,
+            )]),
+            ..store::ProjectionSnapshotParts::default()
+        })
+        .expect("run-private projection");
+    let run_private_catalog = FactCatalogService::from_public_projection(
+        vec![AppLaunchFact::descriptor().expect("fact descriptor")],
+        &run_private_projection,
+    )
+    .expect("run-private catalog");
+    assert!(run_private_catalog.list_kinds().is_empty());
+}
+
+#[tokio::test]
+async fn run_read_services_load_public_fact_catalog_from_retained_projection_authority() {
+    let (_run_id, store, registry) = launch_app_fact_run().await;
+    let services =
+        make_run_read_services_with_certification_registry(store.clone(), store.clone(), registry);
+
+    assert_eq!(
+        services.fact_kinds().await.expect("fact kinds"),
+        vec![PublicFactKindSummary {
+            fact_kind: "mfm.app.test.launch".to_owned(),
+            descriptor_count: 1,
+        }]
+    );
+    let described = services
+        .describe_fact_kind("mfm.app.test.launch")
+        .await
+        .expect("fact description");
+    assert_eq!(described.len(), 1);
+    assert_eq!(described[0].fields.len(), 2);
+    let explained = services
+        .explain_fact_kind("mfm.app.test.launch")
+        .await
+        .expect("fact explanation");
+    assert_eq!(explained.descriptors, described);
+
+    let projection = store.projection_snapshot().expect("projection snapshot");
+    let (_claim_id, entry) = projection
+        .fact_index_entries()
+        .next()
+        .expect("platform fact index entry");
+    let public_ref =
+        public_ref_id(&internal_fact_ref_from_projection(entry).expect("platform internal ref"))
+            .expect("public ref id");
+    let resolved = services
+        .resolve_public_fact_ref(&public_ref)
+        .await
+        .expect("resolve public ref");
+    assert_eq!(resolved.fact_kind, "mfm.app.test.launch");
+    assert_eq!(resolved.fields.len(), 2);
+
+    let rendered = serde_json::to_string(&resolved).expect("public fact JSON");
+    assert!(!rendered.contains("artifact_id"));
+    assert!(!rendered.contains("artifact_evidence_hash"));
+    assert!(!rendered.contains("fact_descriptor_hash"));
+    assert!(!rendered.contains("subject_material_hash"));
+    assert!(!rendered.contains("response_hash"));
+    assert!(!rendered.contains("source_run_id"));
+    assert!(!rendered.contains("source_seq"));
+    assert!(!rendered.contains("source_ordinal"));
+}
+
+#[tokio::test]
+async fn run_read_services_public_fact_reads_are_store_scoped_across_runs() {
+    let store = store::AsyncInMemoryRunStore::default();
+    let (first_run_id, store, _registry) = launch_app_fact_run_in_store_with_visibility(
+        store,
+        mfm_program::facts::FactVisibility::indexed_default(
+            mfm_program::facts::FactAudience::Platform,
+        ),
+        Some(content_digest_for_bytes(
+            b"mfm.app.test.first-public-fact-run",
+        )),
+    )
+    .await;
+    let (second_run_id, store, registry) =
+        launch_app_fact_run_in_store_with_visibility_and_state_key(
+            store,
+            mfm_program::facts::FactVisibility::indexed_default(
+                mfm_program::facts::FactAudience::Platform,
+            ),
+            Some(content_digest_for_bytes(
+                b"mfm.app.test.second-public-fact-run",
+            )),
+            "fact-state-second",
+            false,
+        )
+        .await;
+    assert_ne!(first_run_id, second_run_id);
+    let services =
+        make_run_read_services_with_certification_registry(store.clone(), store.clone(), registry);
+
+    assert_eq!(
+        services.fact_kinds().await.expect("fact kinds"),
+        vec![PublicFactKindSummary {
+            fact_kind: "mfm.app.test.launch".to_owned(),
+            descriptor_count: 1,
+        }]
+    );
+
+    let projection = store.projection_snapshot().expect("projection snapshot");
+    let platform_entries = projection
+        .fact_index_entries()
+        .filter(|(_claim_id, entry)| entry.audience == mfm_facts::FactAudience::Platform)
+        .map(|(_claim_id, entry)| entry)
+        .collect::<Vec<_>>();
+    assert_eq!(platform_entries.len(), 2);
+
+    let mut public_refs = BTreeSet::new();
+    for entry in &platform_entries {
+        let public_ref =
+            public_ref_id(&internal_fact_ref_from_projection(entry).expect("internal ref"))
+                .expect("public ref");
+        let resolved = services
+            .resolve_public_fact_ref(&public_ref)
+            .await
+            .expect("resolve public ref");
+        assert_eq!(resolved.fact_kind, "mfm.app.test.launch");
+        assert_eq!(resolved.fields.len(), 2);
+        public_refs.insert(public_ref);
+    }
+
+    let catalog = services
+        .public_fact_catalog()
+        .await
+        .expect("public catalog");
+    let executor = FakeFactQueryExecutor {
+        rows: platform_entries
+            .iter()
+            .map(|entry| AppFactQueryRow {
+                fact_ref: internal_fact_ref_from_projection(entry).expect("internal ref"),
+                returned_fields: returned_fields_for_entry(&projection, entry),
+            })
+            .collect(),
+    };
+    let page = query_public_facts(
+        &catalog,
+        &executor,
+        &mfm_facts::StoreScopeRef::new("mfm.store.default").expect("store scope"),
+        &mfm_facts::ScopeDecisionEvidence::new(content_digest_for_bytes(
+            b"mfm.public-facts.default-scope.v1",
+        )),
+        PublicFactQueryRequest {
+            fact_kind: "mfm.app.test.launch".to_owned(),
+            shape: None,
+            predicates: Vec::new(),
+            return_fields: vec!["subject.amount".to_owned(), "result.amount".to_owned()],
+            ordering: "result.amount.asc".to_owned(),
+            limit: Some(10),
+        },
+    )
+    .await
+    .expect("public fact query");
+
+    assert_eq!(page.facts.len(), 2);
+    let query_refs = page
+        .facts
+        .iter()
+        .map(|fact| fact.public_ref.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(query_refs, public_refs);
+}
+
+#[tokio::test]
+async fn run_read_services_do_not_disclose_control_facts() {
+    let (_run_id, store, registry) =
+        launch_app_fact_run_with_visibility(mfm_program::facts::FactVisibility::indexed_default(
+            mfm_program::facts::FactAudience::Control,
+        ))
+        .await;
+    let services =
+        make_run_read_services_with_certification_registry(store.clone(), store.clone(), registry);
+
+    assert!(services
+        .fact_kinds()
+        .await
+        .expect("control fact kinds")
+        .is_empty());
+    let error = services
+        .describe_fact_kind("mfm.app.test.launch")
+        .await
+        .expect_err("control descriptors are not public");
+    assert_eq!(error.class, ErrorClass::NotFound);
+    assert_eq!(error.code, "FactNotFound");
+    let error = services
+        .explain_fact_kind("mfm.app.test.launch")
+        .await
+        .expect_err("control descriptors are not explainable");
+    assert_eq!(error.class, ErrorClass::NotFound);
+    assert_eq!(error.code, "FactNotFound");
+
+    let projection = store.projection_snapshot().expect("projection snapshot");
+    let (_claim_id, entry) = projection
+        .fact_index_entries()
+        .next()
+        .expect("control fact index entry");
+    let control_ref =
+        public_ref_id(&internal_fact_ref_from_projection(entry).expect("control internal ref"))
+            .expect("control public ref-shaped id");
+    let error = services
+        .resolve_public_fact_ref(&control_ref)
+        .await
+        .expect_err("control refs resolve as not found");
+    assert_eq!(error.class, ErrorClass::NotFound);
+    assert_eq!(error.code, "FactNotFound");
+}
+
+#[tokio::test]
+async fn run_read_services_do_not_disclose_run_private_facts() {
+    let (_run_id, store, registry) =
+        launch_app_fact_run_with_visibility(mfm_program::facts::FactVisibility::RunPrivate).await;
+    let services =
+        make_run_read_services_with_certification_registry(store.clone(), store.clone(), registry);
+
+    assert!(services
+        .fact_kinds()
+        .await
+        .expect("run-private fact kinds")
+        .is_empty());
+    let error = services
+        .describe_fact_kind("mfm.app.test.launch")
+        .await
+        .expect_err("run-private descriptors are not public");
+    assert_eq!(error.class, ErrorClass::NotFound);
+    assert_eq!(error.code, "FactNotFound");
+    let error = services
+        .explain_fact_kind("mfm.app.test.launch")
+        .await
+        .expect_err("run-private descriptors are not explainable");
+    assert_eq!(error.class, ErrorClass::NotFound);
+    assert_eq!(error.code, "FactNotFound");
+
+    let projection = store.projection_snapshot().expect("projection snapshot");
+    assert!(projection.fact_records().next().is_some());
+    assert!(projection.fact_index_entries().next().is_none());
+}
+
+#[derive(Clone)]
+struct FakeFactQueryExecutor {
+    rows: Vec<AppFactQueryRow>,
+}
+
+impl AppFactQueryExecutor for FakeFactQueryExecutor {
+    type Error = AppError;
+
+    fn execute_app_fact_query<'a>(
+        &'a self,
+        _plan: &'a mfm_facts::CanonicalFactQueryPlan,
+    ) -> AppFactQueryFuture<'a, Self::Error> {
+        let rows = self.rows.clone();
+        Box::pin(async move { Ok(AppFactQueryExecution { rows }) })
+    }
+}
+
+#[tokio::test]
+async fn public_fact_query_filters_non_public_refs_and_redacts_internal_fields() {
+    let (_run_id, store, _registry) = launch_app_fact_run().await;
+    let descriptor = AppLaunchFact::descriptor().expect("fact descriptor");
+    let projection = store.projection_snapshot().expect("projection snapshot");
+    let catalog = FactCatalogService::from_public_projection(vec![descriptor], &projection)
+        .expect("public catalog");
+    let (_claim_id, platform_entry) = projection
+        .fact_index_entries()
+        .next()
+        .expect("platform fact index entry");
+    let platform_ref =
+        internal_fact_ref_from_projection(platform_entry).expect("platform internal ref");
+    let platform_fields = returned_fields_for_entry(&projection, platform_entry);
+    let mut control_entry = platform_entry.clone();
+    control_entry.audience = mfm_facts::FactAudience::Control;
+    let control_ref = internal_fact_ref_from_projection(&control_entry).expect("control ref");
+    let executor = FakeFactQueryExecutor {
+        rows: vec![
+            AppFactQueryRow {
+                fact_ref: platform_ref,
+                returned_fields: platform_fields.clone(),
+            },
+            AppFactQueryRow {
+                fact_ref: control_ref,
+                returned_fields: platform_fields,
+            },
+        ],
+    };
+
+    let page = query_public_facts(
+        &catalog,
+        &executor,
+        &mfm_facts::StoreScopeRef::new("mfm.store.default").expect("store scope"),
+        &mfm_facts::ScopeDecisionEvidence::new(content_digest_for_bytes(
+            b"mfm.public-facts.default-scope.v1",
+        )),
+        PublicFactQueryRequest {
+            fact_kind: "mfm.app.test.launch".to_owned(),
+            shape: None,
+            predicates: Vec::new(),
+            return_fields: vec!["subject.amount".to_owned(), "result.amount".to_owned()],
+            ordering: "result.amount.asc".to_owned(),
+            limit: Some(10),
+        },
+    )
+    .await
+    .expect("public fact query");
+
+    assert_eq!(page.facts.len(), 1);
+    assert_eq!(page.facts[0].fact_kind, "mfm.app.test.launch");
+    assert_eq!(page.facts[0].fields.len(), 2);
+    assert!(page.facts[0]
+        .fields
+        .iter()
+        .any(|field| field.field_id == "result.amount"
+            && field.value == PublicFactScalarValue::UnsignedInteger(15)));
+
+    let rendered = serde_json::to_string(&page).expect("public page JSON");
+    assert!(!rendered.contains("artifact_id"));
+    assert!(!rendered.contains("artifact_evidence_hash"));
+    assert!(!rendered.contains("fact_descriptor_hash"));
+    assert!(!rendered.contains("subject_material_hash"));
+    assert!(!rendered.contains("response_hash"));
+    assert!(!rendered.contains("source_run_id"));
+    assert!(!rendered.contains("source_seq"));
+    assert!(!rendered.contains("source_ordinal"));
+    assert!(!rendered.contains(platform_entry.artifact_id.as_str()));
+    assert!(!rendered.contains(platform_entry.artifact_evidence_hash.as_str()));
+    assert!(!rendered.contains(platform_entry.fact_descriptor_hash.as_str()));
+    assert!(!rendered.contains(platform_entry.subject_material_hash.as_str()));
+}
+
+fn returned_fields_for_entry(
+    projection: &store::ProjectionSnapshot,
+    entry: &store::FactIndexProjection,
+) -> Vec<mfm_facts::ReturnedFieldValueSummary> {
+    projection
+        .fact_term_entries()
+        .filter(|((claim_id, _field_id), _term)| claim_id == &entry.fact_claim_id)
+        .filter(|((_claim_id, field_id), _term)| {
+            ["subject.amount", "result.amount"].contains(&field_id.as_str())
+        })
+        .map(|((_claim_id, _field_id), term)| {
+            mfm_facts::ReturnedFieldValueSummary::new(
+                term.field_id.clone(),
+                term.value_type,
+                term.value.clone(),
+            )
+            .expect("returned field")
+        })
+        .collect()
+}
+
+#[test]
+fn certified_launch_stages_fact_descriptor_artifacts() {
+    let request = prepare_app_fact_launch(true).expect("prepared launch");
+    let descriptor = AppLaunchFact::descriptor().expect("fact descriptor");
+    let canonical =
+        mfm_program::facts::canonical_fact_descriptor_bytes(&descriptor).expect("canonical");
+    let descriptor_hash =
+        mfm_program::facts::fact_descriptor_hash(&descriptor).expect("descriptor hash");
+    let descriptor_schema =
+        mfm_program::facts::fact_descriptor_schema_id().expect("descriptor schema");
+
+    assert_eq!(request.evidence.fact_descriptor_artifacts.len(), 1);
+    let artifact = &request.evidence.fact_descriptor_artifacts[0];
+    assert_eq!(artifact.bytes, canonical.as_bytes());
+    assert_eq!(artifact.evidence.digest, descriptor_hash);
+    assert_eq!(
+        artifact.evidence.artifact_id,
+        artifact_id_for_digest(&descriptor_hash)
+    );
+    assert_eq!(
+        artifact.evidence.byte_len,
+        canonical.as_bytes().len() as u64
+    );
+    assert_eq!(
+        artifact.evidence.artifact_role,
+        events::ArtifactRole::FactDescriptor
+    );
+    assert_eq!(
+        artifact.evidence.schema_id.as_ref(),
+        Some(&descriptor_schema)
+    );
+    assert!(artifact.evidence.semantic_type_id.is_none());
+    assert!(artifact.evidence.producer_node_id.is_none());
+    assert!(artifact.evidence.producer_seed_id.is_none());
+}
+
+#[test]
+fn certified_launch_rejects_missing_fact_descriptor_artifacts() {
+    let error =
+        prepare_app_fact_launch(false).expect_err("hash-only fact descriptor refs must not launch");
+
+    assert_eq!(error.class, ErrorClass::Internal);
+    assert_eq!(error.code, "FactDescriptorArtifactMissing");
 }
 
 #[test]
