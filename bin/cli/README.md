@@ -2,11 +2,12 @@
 
 ## Overview
 
-The `mfm_cli` is the command-line interface for the MFM toolkit. It provides a user-friendly and scriptable way to interact with MFM modules, including keystore management and an experimental `run` subcommand for starting/resuming/inspecting runs. The CLI is built using the `clap` crate for robust argument parsing and command structure.
+The `mfm_cli` is the command-line interface for the MFM toolkit. It provides a user-friendly and scriptable way to interact with MFM modules, including keystore management, public fact discovery/query, and an experimental `run` subcommand for starting/resuming/inspecting runs. The CLI is built using the `clap` crate for robust argument parsing and command structure.
 
 Run the packaged CLI with `nix run .#mfm -- <ARGS>`, for example:
 - `nix run .#mfm -- keystore list`
 - `nix run .#mfm -- keystore tx-sign --to ...`
+- `nix run .#mfm -- facts kinds`
 - `nix run .#mfm -- run status <RUN_ID>`
 
 ## Design Philosophy
@@ -28,13 +29,12 @@ mfm_cli/
 │   ├── commands/
 │   │   ├── mod.rs         # Top-level clap CLI + dispatch
 │   │   ├── result.rs      # Shared command result/error types
+│   │   ├── facts.rs       # `facts` public discovery/query subcommands
 │   │   ├── keystore/      # `keystore` subcommands (import, list, delete, tx-sign)
 │   │   └── run/           # `run` subcommands
 │   ├── support/
-│   │   ├── app_services.rs # Shared AppServices + error-adapter helpers
-│   │   ├── input.rs       # Input prompts/password helpers
-│   │   ├── keystore_manager.rs # Keystore path/unlock/create helpers
-│   │   └── run_stores.rs  # Event/artifact store construction helpers
+│   │   ├── keystore.rs    # Keystore path/unlock/create helpers
+│   │   └── run_store.rs   # Event/artifact store construction helpers
 │   └── presentation/
 │       └── output.rs      # Text/JSON output models and rendering
 └── tests/
@@ -97,6 +97,143 @@ failures return structured JSON responses. Parser failures use the stable error 
 - `AmbiguousLabel`: Multiple keys found with same label
 - `MissingArgument`: Required argument not provided
 - `OperationCancelled`: User cancelled the operation
+- `MissingDatabaseUrl`: `DATABASE_URL` was not set and `--database-url` was not supplied
+- `FactNotFound`: A fact kind/ref was not found or is not available through the public fact service
+- `FactDescriptorAmbiguous`: A public fact kind resolves to more than one descriptor; pass `--shape`
+- `FactQueryInvalid`: Fact query input was rejected by the app/facts query service
+- `FactPredicateInvalid`: A CLI fact predicate flag could not be decoded
+- `FactQueryLimitInvalid`: `--limit` must be greater than zero
+
+## Facts Commands
+
+Public fact discovery and read-only queries are available under the `facts` subcommand.
+
+Facts commands use only evidence-backed app read services over the certified PostgreSQL run store
+and retained fact descriptor artifacts. They do not construct live transports, signer providers,
+keystores, runtime source config, or workflow runners. Public queries always use the app service's
+Platform audience and default public scope; the CLI does not expose flags for `Control` or
+`RunPrivate` facts.
+
+All fact query commands require `DATABASE_URL` or `--database-url`.
+
+### `facts kinds`
+
+Lists public fact kinds that have Platform/default indexed facts.
+
+```sh
+mfm_cli facts kinds [--database-url <URL>]
+```
+
+JSON output:
+
+```json
+{
+  "status": "success",
+  "data": {
+    "kinds": [
+      { "fact_kind": "wallet.balance", "descriptor_count": 1 }
+    ]
+  }
+}
+```
+
+### `facts describe`
+
+Describes public descriptors for one fact kind, including public-safe fields and ordering policies.
+
+```sh
+mfm_cli facts describe <KIND> [--database-url <URL>]
+```
+
+### `facts explain`
+
+Returns the same public descriptor information in a query-oriented envelope.
+
+```sh
+mfm_cli facts explain <KIND> [--database-url <URL>]
+```
+
+### `facts query`
+
+Runs a descriptor-scoped public fact query.
+
+```sh
+mfm_cli facts query \
+  --kind wallet.balance \
+  --shape mfm.wallet.balance.v1 \
+  --order result.amount_sat.desc \
+  --subject asset_ref=btc \
+  --result amount_sat.gt=100000000 \
+  --field subject.asset_ref \
+  --field result.amount_sat \
+  --limit 20
+```
+
+`--kind`, `--order`, and at least one `--field` are required. `--shape` is optional only when the
+kind resolves to exactly one public descriptor. The app service owns descriptor resolution, field
+validation, exposure checks, operator checks, ordering normalization, and query compilation.
+
+Predicate flags:
+
+- `--subject field=value`: maps to `subject.field equal value`
+- `--result field.op=value`: maps to `result.field <operator> value`
+- `--where full.field.op=value`: uses the full descriptor field id as supplied
+
+Supported operator suffixes are `.eq`, `.lt`, `.lte`, `.gt`, and `.gte`; omitted suffix means
+equality. Unprefixed scalar values are decoded as bool, signed/unsigned integer, decimal string, or
+string. Explicit scalar prefixes are available when needed: `string:`, `bool:`, `i64:`, `u64:`,
+`timestamp:`, `decimal:`, and `digest:`.
+
+### `facts latest`, `facts history`, and `facts top`
+
+Kind-first helpers over the same public query service.
+
+```sh
+mfm_cli facts latest wallet.balance \
+  --shape mfm.wallet.balance.v1 \
+  --order result.block_number.desc \
+  --subject account_ref=addr:bc1q... \
+  --field result.amount_sat
+
+mfm_cli facts history weather.observation \
+  --shape mfm.weather.observation.v1 \
+  --order metadata.observed_at.desc \
+  --subject country=IE \
+  --result temperature_celsius_milli.lt=0 \
+  --field result.temperature_celsius_milli \
+  --limit 50
+
+mfm_cli facts top wallet.balance \
+  --shape mfm.wallet.balance.v1 \
+  --order result.amount_sat.desc \
+  --subject asset_ref=btc \
+  --field result.amount_sat \
+  --limit 20
+```
+
+`latest` always sends `limit = 1` to the app query service and still requires an explicit ordering
+policy. `history` and `top` default to `--limit 50`.
+
+### `facts show`
+
+Resolves one opaque public fact reference returned by a facts query.
+
+```sh
+mfm_cli facts show <PUBLIC_REF> [--database-url <URL>]
+```
+
+Unknown refs and refs for non-public facts return the same redacted `FactNotFound` error class.
+
+### Facts Output And Privacy Contract
+
+Facts JSON uses the standard CLI success/error envelope. Query and show results contain only app
+public DTOs: `public_ref`, `fact_kind`, a public descriptor reference, `recorded_at`,
+`observed_at`, and descriptor-approved returned fields.
+
+Text output is concise and follows the same privacy boundary. Facts commands must not print or
+serialize internal refs, artifact ids, artifact evidence hashes, descriptor hashes, subject
+material, subject hashes, response hashes, raw run/event coordinates, response artifacts,
+capability routing details, RPC URLs, authorization headers, signer material, or keystore paths.
 
 ## Command Reference
 

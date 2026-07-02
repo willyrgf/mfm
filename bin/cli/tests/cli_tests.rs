@@ -18,7 +18,87 @@ fn test_cli_help() {
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("MFM - On-chain operations tool"))
+        .stdout(predicate::str::contains("facts"))
         .stdout(predicate::str::contains("keystore"));
+}
+
+#[test]
+fn test_facts_help() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    cmd.args(&["facts", "--help"]);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Public fact discovery and query operations",
+        ))
+        .stdout(predicate::str::contains("kinds"))
+        .stdout(predicate::str::contains("describe"))
+        .stdout(predicate::str::contains("explain"))
+        .stdout(predicate::str::contains("query"))
+        .stdout(predicate::str::contains("latest"))
+        .stdout(predicate::str::contains("history"))
+        .stdout(predicate::str::contains("top"))
+        .stdout(predicate::str::contains("show"));
+}
+
+#[test]
+fn test_facts_query_help_has_public_query_shape() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    cmd.args(&["facts", "query", "--help"]);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("--kind"))
+        .stdout(predicate::str::contains("--shape"))
+        .stdout(predicate::str::contains("--order"))
+        .stdout(predicate::str::contains("--subject"))
+        .stdout(predicate::str::contains("--result"))
+        .stdout(predicate::str::contains("--where"))
+        .stdout(predicate::str::contains("--field"))
+        .stdout(predicate::str::contains("--limit"))
+        .stdout(predicate::str::contains("--audience").not())
+        .stdout(predicate::str::contains("--scope").not())
+        .stdout(predicate::str::contains("control").not())
+        .stdout(predicate::str::contains("RunPrivate").not());
+}
+
+#[test]
+fn facts_commands_use_evidence_only_services() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source =
+        std::fs::read_to_string(manifest_dir.join("src/commands/facts.rs")).expect("facts source");
+
+    assert!(
+        source.contains("connect_run_read_services"),
+        "facts commands must construct evidence-only run services"
+    );
+    assert!(
+        !source.contains("connect_run_services("),
+        "facts commands must not construct live run services"
+    );
+}
+
+#[test]
+fn facts_commands_do_not_expose_non_public_fact_access_knobs() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source =
+        std::fs::read_to_string(manifest_dir.join("src/commands/facts.rs")).expect("facts source");
+
+    for forbidden in [
+        "FactAudience::Control",
+        "RunPrivate",
+        "audience:",
+        "scope:",
+        "control_scope",
+        "runtime_config",
+        "MFM_RUNTIME_CONFIG_FILE",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "facts command source must not expose {forbidden}"
+        );
+    }
 }
 
 #[test]
