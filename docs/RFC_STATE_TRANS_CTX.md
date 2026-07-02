@@ -784,6 +784,189 @@ Replace with:
 - runtime/admission verification of context-bound inputs and imported material
 - replay-verifiable import evidence bundles
 
+## Validation Code This Removes
+
+This RFC is expected to make the implementation smaller, not only safer. The new certified context
+invariant should delete repeated local checks whose only job is to defend against pairing two
+independent network authorities after construction.
+
+The following current EVM lifecycle code patterns should disappear after the context-bound model is
+implemented.
+
+### Operation Planning Checks
+
+Delete phase-to-phase network equality checks:
+
+```text
+validate_contract_lifecycle_config
+ensure_phase_networks_match
+ensure_networks_match
+network_mismatch_error
+```
+
+Full lifecycle planning no longer needs to compare deploy/configure/validate phase configs, because
+there is one `EvmContractContext` and phase actions do not carry network.
+
+Delete standalone seed pairing checks:
+
+```text
+ConfigurePhaseConfig.network == DeployedContract.network
+ValidatePhaseConfig.network == ConfiguredContract.deployed.network
+```
+
+Configure-only and validate-only planning should not admit raw typestate seeds. They should build an
+import node under a certified context, then consume the imported stage handle. Any mismatch is a
+certification/admission failure on the import edge, not an operation-local string comparison.
+
+Delete EVM lifecycle seed plumbing that exists only to smuggle raw continuation typestates into a
+new run:
+
+```text
+ContractConfigureEntryPointConfig { config, deployed }
+ContractValidateEntryPointConfig { config, configured }
+configure_contract_program_draft(config, deployed)
+validate_contract_program_draft(config, configured)
+seed bytes for DEPLOY_SEED_KEY / CONFIGURED_SEED_KEY continuation
+```
+
+The replacement entry points are context-plus-import specs. The import state owns provenance,
+evidence, and replay behavior.
+
+### State Checks
+
+Delete state-local network matching used to guard configure and validate inputs:
+
+```text
+ensure_network_matches
+ConfigureContractState::prepare_intent input/config network check
+ConfigureContractState::output_from_receipt input/config network check
+ConfigureContractState::output_from_confirmation input/config network check
+ValidateContractState::read_request input/config network check
+ValidateContractState::report_from_response input/config network check
+```
+
+Those checks are redundant once runtime invokes the state with:
+
+```text
+CertifiedContext<EvmContractContext>
+ContractInstance<Stage> bound to the same context
+networkless action config
+```
+
+State code should use the materialized certified context to build intents and reports. It should not
+compare a phase config network against a typestate network, because neither side exists as an
+independent authority.
+
+Delete intent/report construction that copies network authority from phase config into lifecycle
+typestates or report refs:
+
+```text
+transaction_intent_from_deploy_config copying network_id / expected_chain_id from phase config
+transaction_intent_from_configure_call copying network_id / expected_chain_id from phase config
+ConfiguredContractRef::from_configured copying network_id / expected_chain_id from nested deployed
+ValidationReport.expected_chain_id copied from validate config
+```
+
+The intent still carries the guard expectations needed by the capability call, but those values come
+from certified context. Public reports render network data by joining to context.
+
+### Model Invariant Fields
+
+Delete copied context authority from lifecycle values:
+
+```text
+DeployedContract.network_id
+DeployedContract.expected_chain_id
+ConfiguredContract.deployed as the configured identity boundary
+ConfiguredContractRef.network_id
+ConfiguredContractRef.expected_chain_id
+ValidationReport.expected_chain_id as an independently copied field
+```
+
+Replace those fields with:
+
+```text
+context_ref
+stage identity
+contract address
+provenance/evidence refs
+configuration claim
+```
+
+Any network or chain fields shown to users are rendered from certified context and recorded
+capability evidence, not copied through every typestate.
+
+### Adapter Routing Checks
+
+Delete adapter routing that selects process-local runtime by loose phase config network:
+
+```text
+runtime_for(config.network().network_id())
+read_runtime_for(config.network().network_id())
+validate_runtime_for(config.network().network_id(), ...)
+side-effect plan network_id() forwarding phase config network
+```
+
+Adapters should receive certified context and certified capability/source policy. They build EVM
+guards and runtime capability requests from those certified inputs. They should not recover a
+network from phase config while taking the address from an independently supplied typestate.
+
+Delete prepared/replay checks that merely re-derive phase-config network equality. Replace them with
+context-bound evidence validation:
+
+```text
+prepared invocation context_ref matches certified node context
+receipt/submission/confirmation evidence context_ref matches certified node context
+validation fact evidence context_ref matches certified node context
+input resource context_ref matches certified node context
+```
+
+### Test Cases To Remove Or Rewrite
+
+Remove tests whose only purpose is to prove repeated copied network fields agree across old shapes:
+
+```text
+full lifecycle rejects deploy/configure network mismatch
+full lifecycle rejects deploy/validate network mismatch
+configure-only rejects config/deployed network mismatch
+validate-only rejects config/configured network mismatch
+configured ref copies network fields from configured.deployed
+validation report copies expected_chain_id from validate config
+```
+
+Replace them with tests at the certified boundary:
+
+```text
+certifier rejects a configure edge from a deployed instance in another context
+certifier rejects a validate edge from a configured instance in another context
+runtime rejects committed output whose payload context_ref disagrees with the certified cell
+import admission rejects mismatched source context unless certified import policy allows it
+public JSON cannot be used as import authority
+transport guard still rejects observed chain mismatch
+```
+
+## Validations That Stay
+
+This RFC removes duplicated context-membership checks. It does not remove validations that prove
+different invariants.
+
+Keep:
+
+- schema, semantic type, no-float, and canonical JSON validation
+- address syntax and normalization
+- signer reference and expected signer address validation
+- transaction, receipt, confirmation, idempotency, and nonce-lane validation
+- EVM transport guard checks for observed chain id and optional chain fingerprint
+- evidence and artifact digest verification
+- prepared invocation public-surface and secret-leak checks
+- replay checks that facts, receipts, confirmations, imports, and outputs match certified context
+  and recorded evidence
+- public output rendering checks that join context data without making rendered JSON authority
+
+The cleanup target is local defensive equality code caused by duplicate authorities. The new
+invariant is enforced once at certification, runtime input materialization, output admission, import
+admission, and replay evidence verification.
+
 ## Why Not Rust Phantom Network Types
 
 Rust phantom types are the wrong abstraction for semantic networks in MFM.
