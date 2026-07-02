@@ -1,8 +1,9 @@
 #![warn(missing_docs)]
 //! Bitcoin Core JSON-RPC over HTTP client.
 //!
-//! Minimal typed client for the two Bitcoin Core RPCs needed by the mfm semantic runtime:
+//! Minimal typed client for the Bitcoin Core RPCs needed by the mfm semantic runtime:
 //! - `getblockchaininfo` — current chain height and best block hash (anchor)
+//! - `getblockhash` and `getblockheader` — selected chain-head metadata
 //! - `scantxoutset` — UTXO balance for a given address (observation)
 //!
 //! The client speaks plain JSON-RPC 2.0 over HTTP with optional Basic auth, using `reqwest`.
@@ -256,6 +257,20 @@ pub struct BlockchainInfo {
     pub bestblockhash: String,
     /// Current chain name (e.g. "main", "test", "signet", "regtest").
     pub chain: String,
+    /// Whether the node reports initial block download, when present.
+    #[serde(default)]
+    pub initialblockdownload: Option<bool>,
+}
+
+/// Response from `getblockheader` with verbose output.
+#[derive(Clone, Debug, Deserialize)]
+pub struct BlockHeaderInfo {
+    /// Block hash.
+    pub hash: String,
+    /// Block height.
+    pub height: u64,
+    /// Block timestamp in Unix seconds.
+    pub time: u64,
 }
 
 /// One unspent output returned by `scantxoutset`.
@@ -559,6 +574,22 @@ impl BtcJsonRpcClient {
         serde_json::from_value(result).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))
     }
 
+    /// Calls `getblockhash` for the given block height.
+    pub async fn get_block_hash(&self, height: u64) -> Result<String, BtcRpcError> {
+        let result = self
+            .rpc_call("getblockhash", serde_json::json!([height]))
+            .await?;
+        serde_json::from_value(result).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))
+    }
+
+    /// Calls `getblockheader` with verbose output for the given block hash.
+    pub async fn get_block_header(&self, block_hash: &str) -> Result<BlockHeaderInfo, BtcRpcError> {
+        let result = self
+            .rpc_call("getblockheader", serde_json::json!([block_hash, true]))
+            .await?;
+        serde_json::from_value(result).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))
+    }
+
     /// Calls `scantxoutset` for a single address descriptor.
     ///
     /// Uses `"start"` action to perform a fresh scan. The descriptor uses `addr(ADDRESS)` format.
@@ -692,6 +723,35 @@ mod tests {
             "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5"
         );
         assert_eq!(info.chain, "main");
+        assert_eq!(info.initialblockdownload, Some(false));
+    }
+
+    #[test]
+    fn block_header_info_deserializes() {
+        let json = serde_json::json!({
+            "hash": "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5",
+            "confirmations": 12,
+            "height": 840000,
+            "version": 536870912,
+            "versionHex": "20000000",
+            "merkleroot": "4d5e...",
+            "time": 1713571767,
+            "mediantime": 1713569060,
+            "nonce": 0,
+            "bits": "17034219",
+            "difficulty": 83148355189239.77,
+            "chainwork": "00000000000000000000000000000000000000007b48a3b73a8f3af5bf6d5e5e",
+            "nTx": 3200,
+            "previousblockhash": "0000000000000000000011111111111111111111111111111111111111111111",
+        });
+        let header: BlockHeaderInfo = serde_json::from_value(json).expect("deserialize");
+
+        assert_eq!(header.height, 840000);
+        assert_eq!(
+            header.hash,
+            "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5"
+        );
+        assert_eq!(header.time, 1713571767);
     }
 
     #[test]

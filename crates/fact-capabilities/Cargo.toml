@@ -1,0 +1,18 @@
+[package]
+name = "mfm-fact-capabilities"
+version = "0.1.0"
+edition = "2021"
+description = "Generic internal fact-index read capability contracts for MFM"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+
+[package.metadata.mfm]
+category = "capability-contract"
+
+[dependencies]
+thiserror = { workspace = true }
+
+mfm-canonical = { path = "../kernel/canonical" }
+mfm-capabilities = { path = "../kernel/capabilities" }
+mfm-facts = { path = "../kernel/facts" }
+mfm-ids = { path = "../kernel/ids" }
