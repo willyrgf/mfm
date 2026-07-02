@@ -2497,6 +2497,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-op-btc-chain-head-collector"
+version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-certify",
+ "mfm-ids",
+ "mfm-program",
+ "mfm-program-derive",
+ "mfm-states-btc",
+ "mfm-values",
+ "serde",
+]
+
+[[package]]
 name = "mfm-op-evm-contract-lifecycle"
 version = "0.1.0"
 dependencies = [
