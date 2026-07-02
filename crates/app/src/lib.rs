@@ -44,6 +44,7 @@ pub use mfm_runtime::ErasedRunnerRegistry;
 pub use mfm_stream_store_postgres::PostgresRunStore as ProductionRunStore;
 pub use mfm_stream_store_postgres::PostgresSchema as ProductionPostgresSchema;
 
+mod btc_collector;
 mod entry_point;
 mod entry_points;
 mod evm_contracts;
@@ -1122,8 +1123,17 @@ pub async fn connect_production_run_services(
     runtime_config_path: Option<&Path>,
 ) -> Result<ProductionRunServices, AppError> {
     let store = connect_production_run_store(database_url).await?;
-    let runners = production_runner_registry(
+    let runtime_config = RuntimeConfigLoader::from_path_or_env(runtime_config_path);
+    let fact_index = if runtime_config.load_optional_btc()?.is_some() {
+        Some(btc_collector::production_fact_index_read_provider(
+            store.clone(),
+        )?)
+    } else {
+        None
+    };
+    let runners = production_runner_registry_inner(
         artifact_read_provider_from_retained(store.clone()),
+        fact_index,
         runtime_config_path,
     )?;
     let certification_registry = production_certification_registry()?;
@@ -1164,6 +1174,23 @@ pub fn production_runner_registry(
     artifacts: Arc<dyn ArtifactReadProvider>,
     runtime_config_path: Option<&Path>,
 ) -> Result<ErasedRunnerRegistry, AppError> {
+    production_runner_registry_inner(artifacts, None, runtime_config_path)
+}
+
+/// Builds the production typed runner registry with an explicit internal fact-index provider.
+pub fn production_runner_registry_with_fact_index_provider(
+    artifacts: Arc<dyn ArtifactReadProvider>,
+    fact_index: Arc<dyn mfm_fact_capabilities::FactIndexReadProvider>,
+    runtime_config_path: Option<&Path>,
+) -> Result<ErasedRunnerRegistry, AppError> {
+    production_runner_registry_inner(artifacts, Some(fact_index), runtime_config_path)
+}
+
+fn production_runner_registry_inner(
+    artifacts: Arc<dyn ArtifactReadProvider>,
+    fact_index: Option<Arc<dyn mfm_fact_capabilities::FactIndexReadProvider>>,
+    runtime_config_path: Option<&Path>,
+) -> Result<ErasedRunnerRegistry, AppError> {
     let mut registry = ErasedRunnerRegistry::new();
     let runtime_config = RuntimeConfigLoader::from_path_or_env(runtime_config_path);
     let portfolio_artifacts: Arc<dyn mfm_artifact_capabilities::ArtifactReadProvider> =
@@ -1179,7 +1206,17 @@ pub fn production_runner_registry(
         portfolio_runtime,
     );
     mfm_adapters_portfolio::register_portfolio_runners(&mut registry, portfolio_capabilities)?;
-    evm_contracts::register_contract_lifecycle_runners(&mut registry, artifacts, runtime_config)?;
+    evm_contracts::register_contract_lifecycle_runners(
+        &mut registry,
+        artifacts.clone(),
+        runtime_config.clone(),
+    )?;
+    btc_collector::register_btc_collector_runners_if_configured(
+        &mut registry,
+        artifacts,
+        fact_index,
+        runtime_config,
+    )?;
     mfm_transports_proof::register_deterministic_proof_runners(&mut registry)?;
     Ok(registry)
 }
@@ -1277,6 +1314,32 @@ impl RuntimeConfigLoader {
                 mfm_runtime::RuntimeError::RunnerBinding("missing EVM runtime config".to_owned())
             })
         })
+    }
+
+    pub(crate) fn load_optional_btc(
+        &self,
+    ) -> mfm_runtime::Result<Option<mfm_runtime_config::BtcRuntimeConfig>> {
+        let Some(path) = self.path.as_ref() else {
+            return Ok(None);
+        };
+        match mfm_runtime_config::RuntimeConfig::load_path_with_requirements(
+            path,
+            mfm_runtime_config::RuntimeConfigRequirement::btc(),
+        ) {
+            Ok(config) => Ok(config.btc().cloned()),
+            Err(error)
+                if (error.location() == &mfm_runtime_config::RuntimeConfigLocation::Btc
+                    && error.kind()
+                        == &mfm_runtime_config::RuntimeConfigErrorKind::MissingFamily)
+                    || matches!(
+                        error.kind(),
+                        mfm_runtime_config::RuntimeConfigErrorKind::Syntax { .. }
+                    ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(runtime_config_error(error)),
+        }
     }
 
     pub(crate) fn load_runtime_config_with_signers(
@@ -1438,6 +1501,11 @@ fn capability_artifact_error_from_store(
 /// Builds the trusted production certification registry for typed spec certification and replay verification.
 pub fn production_certification_registry() -> Result<CertificationRegistry, AppError> {
     let mut registry = CertificationRegistry::new();
+    mfm_op_btc_chain_head_collector::register_btc_chain_head_collector_certification_descriptors(
+        &mut registry,
+    )?;
+    registry.register_fact_type::<mfm_op_btc_chain_head_collector::BtcChainHeadFact>()?;
+    registry.register_fact_type::<mfm_op_btc_chain_head_collector::CollectorCheckpointFact>()?;
     mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
         &mut registry,
     )?;

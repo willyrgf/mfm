@@ -56,6 +56,73 @@ fn toml_and_json_parsing_have_matching_descriptors() {
 }
 
 #[test]
+fn btc_jsonrpc_runtime_config_parses_from_toml_and_json() {
+    let toml = r#"
+        [btc.json_rpc]
+        rpc_url = "http://127.0.0.1:8332"
+        rpc_user = "rpc-user"
+        rpc_password = "rpc-pass"
+    "#;
+    let json = r#"
+        {
+          "btc": {
+            "json_rpc": {
+              "rpc_url": "http://127.0.0.1:8332",
+              "rpc_user": "rpc-user",
+              "rpc_password": "rpc-pass"
+            }
+          }
+        }
+    "#;
+
+    let from_toml = RuntimeConfig::from_str(toml, RuntimeConfigFormat::Toml).expect("toml");
+    let from_json = RuntimeConfig::from_str(json, RuntimeConfigFormat::Json).expect("json");
+
+    assert_eq!(from_toml, from_json);
+    let btc = from_toml.btc().expect("btc").json_rpc();
+    assert_value(
+        btc.rpc_url(),
+        "http://127.0.0.1:8332",
+        RuntimeValueSourceKind::Direct,
+    );
+    assert_value(
+        btc.rpc_user().expect("user"),
+        "rpc-user",
+        RuntimeValueSourceKind::Direct,
+    );
+    assert_value(
+        btc.rpc_password().expect("password"),
+        "rpc-pass",
+        RuntimeValueSourceKind::Direct,
+    );
+}
+
+#[test]
+fn required_btc_family_must_exist() {
+    let err = RuntimeConfig::from_str_with_requirements(
+        "",
+        RuntimeConfigFormat::Toml,
+        RuntimeConfigRequirement::btc(),
+    )
+    .expect_err("missing btc");
+    assert_eq!(err.kind(), &RuntimeConfigErrorKind::MissingFamily);
+}
+
+#[test]
+fn btc_basic_auth_requires_user_and_password_together() {
+    let config = r#"
+        [btc.json_rpc]
+        rpc_url = "http://127.0.0.1:8332"
+        rpc_user = "rpc-user"
+    "#;
+
+    let err = RuntimeConfig::from_str(config, RuntimeConfigFormat::Toml)
+        .expect_err("incomplete basic auth");
+
+    assert_eq!(err.kind(), &RuntimeConfigErrorKind::IncompleteBasicAuth);
+}
+
+#[test]
 fn direct_env_file_and_file_env_sources_resolve() {
     let dir = tempdir().expect("tempdir");
     let rpc_file = dir.path().join("rpc-url");
