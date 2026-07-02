@@ -16,6 +16,7 @@ path = "src/lib.rs"
 
 [dependencies]
 mfm-canonical = { path = "../canonical" }
+mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-spec = { path = "../spec" }
 serde_json = { workspace = true }

@@ -122,6 +122,6 @@ pub(super) async fn rebuild_projection_snapshot_with_head(
 ) -> Result<(ProjectionSnapshot, u64)> {
     let stream = load_run_stream_tx(tx, run_id).await?;
     let head = stream.last().map(|event| event.seq().as_u64()).unwrap_or(0);
-    let snapshot = ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
+    let snapshot = projection_snapshot_from_physical_fact_tables_tx(tx, run_id, &stream).await?;
     Ok((snapshot, head))
 }

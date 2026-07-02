@@ -61,13 +61,14 @@ pub use manual_resolution::{
     unresolved_manual_obligations_digest, ManualResolutionEvidenceArtifact,
 };
 pub use runner_kit::{
-    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerJsonArtifact, RunnerOutputBuilder,
-    RunnerPayloadBuilder, RunnerRegistrationBuilder,
+    FactRecordInput, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerJsonArtifact,
+    RunnerOutputBuilder, RunnerPayloadBuilder, RunnerRegistrationBuilder, StagedFactRecord,
 };
 pub use runners::{
     AdapterExecutableBinding, CapabilityImplementationBinding, CapabilityImplementationId,
     ErasedNodeRunner, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
-    ErasedRunnerRegistry, PreInvocationRunnerFuture, RunnerEventPayload, RunnerIngressContext,
+    ErasedRunnerRegistry, PreInvocationRunnerFuture, RunnerEventPayload, RunnerFactRecorded,
+    RunnerIngressContext,
 };
 pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
 pub use side_effect_driver::{

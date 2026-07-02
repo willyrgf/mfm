@@ -10,11 +10,10 @@ use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_capabilities::CapabilitySpec;
 use mfm_collectors_proof::{
     proof_adapter_kind, proof_adapter_version, ProofApplyConfig, ProofApplySideEffectState,
-    ProofAssembleConfig, ProofAssembleOutputState, ProofConfirmation, ProofFact, ProofFactRequest,
-    ProofFactResponse, ProofIdempotencyInput, ProofIntent, ProofMutationCapability, ProofOutput,
-    ProofReadCapability, ProofReadConfig, ProofReadFactState, ProofReceipt, ProofReplayError,
-    ProofReplayVerifier, ProofSideEffectResult, ProofSubmission, RecordedProofFacts,
-    MANUAL_RESOLUTION_PROOF_ACTION,
+    ProofAssembleConfig, ProofAssembleOutputState, ProofConfirmation, ProofFact,
+    ProofIdempotencyInput, ProofIntent, ProofMutationCapability, ProofOutput, ProofReadConfig,
+    ProofReadFactState, ProofReceipt, ProofReplayError, ProofReplayVerifier, ProofSideEffectResult,
+    ProofSubmission, RecordedProofFacts, MANUAL_RESOLUTION_PROOF_ACTION,
 };
 use mfm_events::v1::{self as events, side_effect};
 use mfm_ids::{short_stable_id_fragment, ContentDigest};
@@ -143,23 +142,10 @@ async fn run_read(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutp
     let artifacts = RunnerArtifactBuilder::new(&ctx);
     let payloads = RunnerPayloadBuilder::new(&ctx);
     let fact = ProofFact { n: 1 };
-    let request = ProofFactRequest {
-        source: "deterministic-proof".to_owned(),
-    };
-    let response = ProofFactResponse { fact: fact.clone() };
-    let response_artifact = artifacts.fact_response(&response)?;
     let output_artifact = artifacts.state_output(&fact)?;
     let mut output = RunnerOutputBuilder::new(&ctx);
-    output.stage_attempt_artifact(&response_artifact)?;
-    output.retain_runtime_evidence(&response_artifact);
     output.stage_attempt_artifact(&output_artifact)?;
     output.retain_runtime_evidence(&output_artifact);
-    output.payload(payloads.fact_recorded(
-        events::FactKey::new("mfm.proof.fact.default")?,
-        &request,
-        &response_artifact,
-        proof_read_binding()?,
-    )?);
     output.payload(payloads.cell_produced(&output_artifact)?);
     Ok(output.finish())
 }
@@ -436,15 +422,6 @@ fn ensure_struct_input_digest(
             "proof assemble input field {field} was not produced"
         ))),
     }
-}
-
-fn proof_read_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {
-    Ok(RunnerCapabilityBinding {
-        capability_kind: ProofReadCapability::kind().map_err(runtime_capability_error)?,
-        capability_version: ProofReadCapability::version().map_err(runtime_capability_error)?,
-        adapter_kind: proof_adapter_kind()?,
-        adapter_version: proof_adapter_version()?,
-    })
 }
 
 fn proof_mutation_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {

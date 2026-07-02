@@ -271,11 +271,11 @@ async fn portfolio_runner_output_summary_matches_golden() {
     assert_eq!(
         portfolio_runner_output_summary(&stream),
         [
-            "attempt-output:mfm.portfolio/prepare_sources:fact_recorded+cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+artifact_referenced[role=fact_response]+retention_refs_appended[roles=fact_response]+retention_refs_appended[roles=state_output]",
+            "attempt-output:mfm.portfolio/prepare_sources:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
             "attempt-output:mfm.portfolio/resolve_subjects:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
-            "attempt-output:mfm.portfolio/pin_views:fact_recorded+cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+artifact_referenced[role=fact_response]+retention_refs_appended[roles=fact_response]+retention_refs_appended[roles=state_output]",
+            "attempt-output:mfm.portfolio/pin_views:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
             "attempt-output:mfm.portfolio/resolve_valuations:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
-            "attempt-output:mfm.portfolio/observe_batch:fact_recorded+cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+artifact_referenced[role=fact_response]+retention_refs_appended[roles=fact_response]+retention_refs_appended[roles=state_output]",
+            "attempt-output:mfm.portfolio/observe_batch:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
             "attempt-output:mfm.portfolio/merge_observations:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
             "attempt-output:mfm.portfolio/assemble_snapshot:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
             "attempt-output:mfm.portfolio/project_report:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",

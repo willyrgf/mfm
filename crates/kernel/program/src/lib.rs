@@ -18,6 +18,7 @@ use mfm_capabilities::{CapabilitySet, CapabilitySetDescriptor, CapabilitySetFor,
 use mfm_effects::{
     ApplySideEffect, EffectDescriptor, EffectSpec, ManagedPlatformWrite, Pure, ReadExternal,
 };
+pub use mfm_facts as facts;
 use mfm_ids::{
     AdapterKind, AdapterVersion, CellId, ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes,
     EffectKind, FieldPath as CheckedFieldPath, FieldSegment as CheckedFieldSegment, NodeId,
@@ -26,14 +27,14 @@ use mfm_ids::{
     StateVersion,
 };
 use mfm_spec::v1::MediaType;
+pub use mfm_spec::v1::{
+    FactDescriptorRef, ManualAuthorizationVerifierId, ManualSigningSchemeSpec, OperatorAuthorityId,
+    OperatorAuthorityMemberSpec, OperatorId, OperatorPublicIdentity, ResourceNamespace,
+    SideEffectVerificationSpec,
+};
 use mfm_spec::v1::{
     ManualAuthorizationQuorumSpec, ManualResolutionAuthorizationSpec, ManualResolutionEvidenceSpec,
     OperatorAuthoritySnapshotSpec, ResourceClaimSpec,
-};
-pub use mfm_spec::v1::{
-    ManualAuthorizationVerifierId, ManualSigningSchemeSpec, OperatorAuthorityId,
-    OperatorAuthorityMemberSpec, OperatorId, OperatorPublicIdentity, ResourceNamespace,
-    SideEffectVerificationSpec,
 };
 use mfm_values::{
     MfmConfig, MfmValue, SchemaDescriptor, SchemaShape, StateInput, ValueTerminalPolicy,
@@ -47,6 +48,43 @@ const LOWERING_VERSION: &str = "mfm.typed.lowering.v1";
 
 /// Result type for typed program authoring operations.
 pub type Result<T> = std::result::Result<T, PlanError>;
+
+/// Authoring helper for typed fact publication.
+///
+/// This trait is not fact publication authority. Production recording must still validate
+/// descriptor bytes, certified node allow-lists, response artifacts, and store append rules.
+pub trait MfmFactType: MfmValue {
+    /// Typed subject value used to derive fact identity.
+    type Subject: MfmValue;
+
+    /// Typed response value retained as fact response evidence.
+    type Response: MfmValue;
+
+    /// Returns the fact descriptor emitted by the derive-owned authoring path.
+    fn descriptor() -> facts::Result<facts::FactDescriptor>;
+
+    /// Returns this fact's subject value.
+    fn subject(&self) -> &Self::Subject;
+
+    /// Returns this fact's response value.
+    fn response(&self) -> &Self::Response;
+}
+
+/// Builds the certified descriptor reference for a typed fact authoring contract.
+pub fn fact_descriptor_ref<F: MfmFactType>() -> Result<FactDescriptorRef> {
+    let descriptor = F::descriptor().map_err(|error| PlanError::Registry(error.to_string()))?;
+    fact_descriptor_ref_for_descriptor(&descriptor)
+}
+
+/// Builds the certified descriptor reference for canonical fact descriptor authority.
+pub fn fact_descriptor_ref_for_descriptor(
+    descriptor: &facts::FactDescriptor,
+) -> Result<FactDescriptorRef> {
+    Ok(FactDescriptorRef {
+        descriptor_hash: facts::fact_descriptor_hash(descriptor)
+            .map_err(|error| PlanError::Registry(error.to_string()))?,
+    })
+}
 
 /// Error returned by typed program authoring operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -379,6 +417,11 @@ pub trait StateSpec: Send + Sync + 'static {
 
     /// Returns behaviorally relevant adapter bindings for this state.
     fn adapter_bindings() -> Result<Vec<AdapterBindingSpec>> {
+        Ok(Vec::new())
+    }
+
+    /// Returns fact descriptor hashes this state type may emit.
+    fn emitted_fact_descriptors() -> Result<Vec<FactDescriptorRef>> {
         Ok(Vec::new())
     }
 
@@ -827,6 +870,7 @@ pub struct StateDescriptorIdentity {
     output_semantic_type_id: SemanticTypeId,
     effect: EffectDescriptor,
     capabilities: CapabilitySetDescriptor,
+    emitted_fact_descriptors: Vec<FactDescriptorRef>,
     side_effect_contract_digest: Option<ContentDigest>,
     runner: RunnerKind,
 }
@@ -856,6 +900,8 @@ impl StateDescriptorIdentity {
         let runner = <S::Effect as EffectRunner<S>>::runner_kind();
         let side_effect_contract_digest =
             <S::Effect as EffectRunner<S>>::side_effect_contract_digest()?;
+        let emitted_fact_descriptors =
+            canonical_fact_descriptor_refs(S::emitted_fact_descriptors()?)?;
         let descriptor_id = state_descriptor_id(StateDescriptorIdParts {
             kind: &kind,
             version: &version,
@@ -866,6 +912,7 @@ impl StateDescriptorIdentity {
             output_semantic_type_id: &output_semantic_type_id,
             effect: &effect,
             capabilities: &capabilities,
+            emitted_fact_descriptors: &emitted_fact_descriptors,
             side_effect_contract_digest: side_effect_contract_digest.as_ref(),
             runner,
         })?;
@@ -880,6 +927,7 @@ impl StateDescriptorIdentity {
             output_semantic_type_id,
             effect,
             capabilities,
+            emitted_fact_descriptors,
             side_effect_contract_digest,
             runner,
         })
@@ -933,6 +981,11 @@ impl StateDescriptorIdentity {
     /// Returns the capability-set descriptor.
     pub fn capabilities(&self) -> &CapabilitySetDescriptor {
         &self.capabilities
+    }
+
+    /// Returns fact descriptor hashes this state type may emit.
+    pub fn emitted_fact_descriptors(&self) -> &[FactDescriptorRef] {
+        &self.emitted_fact_descriptors
     }
 
     /// Returns the side-effect contract digest when this descriptor mutates an external system.
@@ -2154,6 +2207,8 @@ pub struct StateNodeSpec {
     pub capability_bindings: CapabilitySetDescriptor,
     /// Behaviorally relevant adapter bindings required by the registered state.
     pub adapter_bindings: Vec<AdapterBindingSpec>,
+    /// Fact descriptors this producing node may emit.
+    pub fact_descriptor_allowlist: Vec<FactDescriptorRef>,
     /// Side-effect contract digest when this node mutates an external system.
     pub side_effect_contract_digest: Option<ContentDigest>,
     /// Cross-run resource claim when this node mutates an external system.
@@ -4218,6 +4273,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
                 effect_kind: descriptor.effect().kind.clone(),
                 capability_bindings: descriptor.capabilities().clone(),
                 adapter_bindings,
+                fact_descriptor_allowlist: descriptor.emitted_fact_descriptors().to_vec(),
                 side_effect_contract_digest,
                 side_effect_resource_claim: side_effect_contract
                     .as_ref()
@@ -5278,8 +5334,34 @@ struct StateDescriptorIdParts<'a> {
     output_semantic_type_id: &'a SemanticTypeId,
     effect: &'a EffectDescriptor,
     capabilities: &'a CapabilitySetDescriptor,
+    emitted_fact_descriptors: &'a [FactDescriptorRef],
     side_effect_contract_digest: Option<&'a ContentDigest>,
     runner: RunnerKind,
+}
+
+fn canonical_fact_descriptor_refs(
+    mut refs: Vec<FactDescriptorRef>,
+) -> Result<Vec<FactDescriptorRef>> {
+    refs.sort();
+    for window in refs.windows(2) {
+        if window[0] == window[1] {
+            return Err(PlanError::Registry(format!(
+                "duplicate fact descriptor ref {}",
+                window[0].descriptor_hash
+            )));
+        }
+    }
+    Ok(refs)
+}
+
+fn fact_descriptor_refs_json(refs: &[FactDescriptorRef]) -> Vec<serde_json::Value> {
+    refs.iter()
+        .map(|reference| {
+            serde_json::json!({
+                "descriptor_hash": reference.descriptor_hash.as_str(),
+            })
+        })
+        .collect()
 }
 
 fn state_descriptor_id(parts: StateDescriptorIdParts<'_>) -> Result<DescriptorId> {
@@ -5303,6 +5385,7 @@ fn state_descriptor_id(parts: StateDescriptorIdParts<'_>) -> Result<DescriptorId
             "name": parts.effect.name,
             "version": parts.effect.version.as_str(),
         },
+        "emitted_fact_descriptors": fact_descriptor_refs_json(parts.emitted_fact_descriptors),
         "input_schema_id": parts.input_schema_id.as_str(),
         "kind": parts.kind.as_str(),
         "name": parts.name,

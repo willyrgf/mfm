@@ -17,6 +17,14 @@ pub fn admitted_artifact_evidence<'a>(
     super::admitted_artifact_evidence(bundle, artifact_id, evidence_hash)
 }
 
+/// Returns artifact-byte projection authority after applying a prepared bundle.
+pub fn artifact_byte_authority_for_bundle(
+    existing: &ArtifactByteAuthorityMap,
+    bundle: &PreparedCommitBundle,
+) -> Result<ArtifactByteAuthorityMap> {
+    super::artifact_byte_authority_for_bundle(existing, bundle)
+}
+
 /// Returns whether a logical key is globally unique in a run stream.
 pub fn is_unique_logical_key(key: &LogicalEventKey) -> bool {
     super::is_unique_logical_key(key)

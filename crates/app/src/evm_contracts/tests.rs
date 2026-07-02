@@ -8,22 +8,21 @@ use mfm_adapters_evm_contracts::{
     EvmContractRuntimeFactory, PreparedContractInvocation,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
-use mfm_capabilities::CapabilitySpec;
 use mfm_certify::CertificationRegistry;
 use mfm_core::crypto::EthereumPrivateKey;
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
     EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockReadResponse, EvmBlockSelector,
-    EvmCallReadCapability, EvmCallReadProvider, EvmCallReadRequest, EvmCallReadResponse,
-    EvmCapabilityError, EvmCapabilityFuture, EvmChainIdentityCapability, EvmChainIdentityProvider,
-    EvmChainIdentityRequest, EvmChainIdentityResponse, EvmFeeReadProvider, EvmFeeReadRequest,
-    EvmFeeReadResponse, EvmGasEstimateProvider, EvmGasEstimateRequest, EvmGasEstimateResponse,
-    EvmLogEntry, EvmLogsReadCapability, EvmLogsReadProvider, EvmLogsReadRequest,
-    EvmLogsReadResponse, EvmNonceOccupancy, EvmNonceOccupancyReadProvider,
-    EvmNonceOccupancyReadRequest, EvmNonceOccupancyReadResponse, EvmNonceReadProvider,
-    EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider, EvmReceiptReadRequest,
-    EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef, EvmTransactionSubmitProvider,
-    EvmTransactionSubmitRequest, EvmTransactionSubmitResponse, RedactedEvmSourceEvidence,
+    EvmCallReadProvider, EvmCallReadRequest, EvmCallReadResponse, EvmCapabilityError,
+    EvmCapabilityFuture, EvmChainIdentityProvider, EvmChainIdentityRequest,
+    EvmChainIdentityResponse, EvmFeeReadProvider, EvmFeeReadRequest, EvmFeeReadResponse,
+    EvmGasEstimateProvider, EvmGasEstimateRequest, EvmGasEstimateResponse, EvmLogEntry,
+    EvmLogsReadProvider, EvmLogsReadRequest, EvmLogsReadResponse, EvmNonceOccupancy,
+    EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest, EvmNonceOccupancyReadResponse,
+    EvmNonceReadProvider, EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider,
+    EvmReceiptReadRequest, EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef,
+    EvmTransactionSubmitProvider, EvmTransactionSubmitRequest, EvmTransactionSubmitResponse,
+    RedactedEvmSourceEvidence,
 };
 use mfm_evm_contract_config::{ConfigurePhaseConfig, DeployPhaseConfig, ValidatePhaseConfig};
 use mfm_evm_contract_model::{ConfiguredContract, DeployedContract};
@@ -454,40 +453,6 @@ async fn assert_resume_runtime_config_ingress_failure(
 }
 
 #[tokio::test]
-async fn app_runner_records_distinct_validation_capability_facts() {
-    let (_store, services) = contract_test_services(TestRuntimeFactory::new);
-    let request = prepare_validate_entry_point_request(
-        &services,
-        validate_config_with_assertions(),
-        configured_contract(),
-    )
-    .await;
-    let (run_id, _) = launch_completed(&services, request, "launch validate lifecycle").await;
-    let stream = services
-        .store()
-        .load_run_stream(&run_id)
-        .await
-        .expect("load run stream");
-    let fact_kinds = stream
-        .iter()
-        .filter_map(|event| match event.payload() {
-            events::KernelEventPayload::FactRecorded(fact) => Some(fact.capability_kind.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        fact_kinds.len(),
-        3,
-        "validation with chain, call, and logs must record separate facts"
-    );
-    assert!(fact_kinds
-        .contains(&EvmChainIdentityCapability::kind().expect("chain identity capability")));
-    assert!(fact_kinds.contains(&EvmCallReadCapability::kind().expect("call capability")));
-    assert!(fact_kinds.contains(&EvmLogsReadCapability::kind().expect("logs capability")));
-}
-
-#[tokio::test]
 async fn app_runner_resumes_replays_and_renders_deploy_lifecycle_run() {
     let signer = test_contract_signer();
     let config = deploy_config(&signer.address);
@@ -608,7 +573,7 @@ async fn app_runner_resumes_replays_and_renders_full_lifecycle_run() {
             "attempt-output:mfm.evm.contract/configure:side_effect.invocation_prepared+side_effect.invocation_started+retention_refs_appended[roles=prepared_invocation]",
             "attempt-output:mfm.evm.contract/configure:side_effect.submission_observed+retention_refs_appended[roles=submission]",
             "attempt-output:mfm.evm.contract/configure:cell_skipped+state_attempt_completed",
-            "attempt-output:mfm.evm.contract/validate:fact_recorded+cell_produced+state_attempt_completed+artifact_referenced[role=fact_response]+artifact_referenced[role=state_output]+retention_refs_appended[roles=fact_response]+retention_refs_appended[roles=state_output]",
+            "attempt-output:mfm.evm.contract/validate:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
         ]
     );
     let mut prepared_artifact_requirements = Vec::new();
@@ -1099,31 +1064,6 @@ fn validate_config() -> ValidatePhaseConfig {
         "network": reth_network_json()
     }))
     .expect("validate config")
-}
-
-fn validate_config_with_assertions() -> ValidatePhaseConfig {
-    serde_json::from_value(json!({
-        "artifact": artifact_json(),
-        "network": reth_network_json(),
-        "validation": {
-            "read_assertions": [
-                {
-                    "function": "ready",
-                    "args": [],
-                    "expected": {
-                        "json_text": "true"
-                    }
-                }
-            ],
-            "event_assertions": [
-                {
-                    "event": "Configured",
-                    "min_count": 1
-                }
-            ]
-        }
-    }))
-    .expect("validate config with assertions")
 }
 
 fn deploy_config(expected_signer_address: &str) -> DeployPhaseConfig {

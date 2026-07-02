@@ -8,6 +8,7 @@ const EXPECTED_KERNEL_MANIFESTS: &[&str] = &[
     "crates/kernel/ids/Cargo.toml",
     "crates/kernel/canonical/Cargo.toml",
     "crates/kernel/values/Cargo.toml",
+    "crates/kernel/facts/Cargo.toml",
     "crates/kernel/effects/Cargo.toml",
     "crates/kernel/capabilities/Cargo.toml",
     "crates/kernel/program/Cargo.toml",

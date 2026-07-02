@@ -75,9 +75,21 @@ impl PostgresRunStore {
         let resource_lane_state = load_resource_lane_state_tx(&mut tx).await?;
         let projections =
             projection_snapshot_with_resource_lanes(&run_projection, resource_lane_state.active)?;
+        let mut artifact_bytes = mfm_store::v1::backend::artifact_byte_authority_for_bundle(
+            &mfm_store::v1::ArtifactByteAuthorityMap::new(),
+            &bundle,
+        )?;
+        load_fact_descriptor_artifact_bytes_tx(
+            &mut tx,
+            request.run_id(),
+            &projections,
+            &mut artifact_bytes,
+        )
+        .await?;
         let claim_admission = single_lane_claim_admission(request)?;
         let base = CommitBase {
             artifacts,
+            artifact_bytes,
             logical_keys: load_logical_keys(&mut tx, request.run_id()).await?,
             unique_logical_payloads: load_unique_logical_payloads(&mut tx, request.run_id())
                 .await?,
@@ -190,6 +202,14 @@ impl PostgresRunStore {
             .await
             .map_err(|error| database_error("failed to insert run event", error))?;
         }
+        insert_fact_projection_rows_tx(
+            &mut tx,
+            &base.projections,
+            staged.projections(),
+            batch.events(),
+            &commit_id,
+        )
+        .await?;
         if let Some(admission) = &claim_admission {
             mark_wait_fifo_waiter_admitted_tx(&mut tx, &admission.lane, &admission.admission_token)
                 .await?;

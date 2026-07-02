@@ -88,11 +88,11 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
                 attempt_id
             }
         };
-        let latest_stream = store
-            .load_run_stream(run_id)
+        let latest_committed = store
+            .load_committed_run_stream(run_id)
             .await
             .map_err(async_store_error)?;
-        let latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
+        let latest_view = RuntimeRunView::from_committed_stream(runtime_spec, &latest_committed)?;
         let failure_context = ObservedFailureContext {
             runtime_spec,
             run_id,

@@ -6,12 +6,12 @@ use super::{CodecError, IdentityError};
 /// here so the Postgres adapter consumes one implementation through this module.
 pub use super::{
     attempt_projection_json, cell_projection_json, error_category_str, error_info_json,
-    event_artifact_json, fact_projection_json, failure_phase_str, manual_resolution_note_json,
+    event_artifact_json, failure_phase_str, manual_resolution_note_json,
     manual_resolution_outcome_str, manual_resolution_projection_json, parse_attempt_projection,
     parse_cell_projection, parse_error_category, parse_error_info, parse_event_artifact,
-    parse_fact_projection, parse_failure_phase, parse_manual_resolution_note,
-    parse_manual_resolution_outcome, parse_manual_resolution_projection,
-    parse_public_output_projection, parse_resource_key_evidence, parse_resource_lane_projection,
+    parse_failure_phase, parse_manual_resolution_note, parse_manual_resolution_outcome,
+    parse_manual_resolution_projection, parse_public_output_projection,
+    parse_resource_key_evidence, parse_resource_lane_projection,
     parse_resource_touched_set_evidence, parse_retention_manifest_projection,
     parse_run_completion_outcome, parse_run_completion_projection, parse_run_state,
     parse_saga_engagement_projection, parse_side_effect_ledger_purpose,

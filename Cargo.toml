@@ -15,6 +15,7 @@ members = [
 	"crates/kernel/certify",
 	"crates/kernel/effects",
 	"crates/kernel/events",
+	"crates/kernel/facts",
 	"crates/kernel/ids",
 	"crates/kernel/manual-auth",
 	"crates/kernel/program",
@@ -57,6 +58,7 @@ bech32 = "0.12"
 bs58 = "0.5.1"
 # Cryptography dependency
 ring = "0.17.14"
+ed25519-dalek = { version = "2.1", features = ["std"] }
 # Common dependencies
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.108"

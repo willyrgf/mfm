@@ -10,7 +10,6 @@ use std::{fmt, sync::Arc};
 use alloy_primitives::{Address, U256};
 use mfm_artifact_capabilities::{ArtifactReadProvider, ArtifactReadRequest};
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_capabilities::CapabilitySpec;
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
     EvmBalanceReadProvider, EvmBalanceReadRequest, EvmBlockReadProvider, EvmBlockReadRequest,
@@ -26,8 +25,8 @@ use mfm_program::ValidatedConfig;
 use mfm_runtime::{
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
-    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerIngressContext, RunnerOutputBuilder,
-    RunnerPayloadBuilder, RunnerRegistrationBuilder,
+    RunnerArtifactBuilder, RunnerIngressContext, RunnerOutputBuilder, RunnerPayloadBuilder,
+    RunnerRegistrationBuilder,
 };
 use mfm_state_portfolio::{
     balance_reader_kind, evm_block_number_for, observe_batch_with_backend, pin_views_with_backend,
@@ -36,9 +35,9 @@ use mfm_state_portfolio::{
     AssembleSnapshotInput, AssembleSnapshotState, MergeObservationsConfig, MergeObservationsState,
     ObservationBatch, ObservationRequest, ObservationResponse, ObserveBatchConfig,
     ObserveBatchInput, ObserveBatchState, PinViewsConfig, PinViewsState, PortfolioReadBackend,
-    PortfolioReadCapability, PortfolioReadError, PortfolioReadFuture, PrepareSourcesConfig,
-    PrepareSourcesState, ProjectReportConfig, ProjectReportInput, ProjectReportState,
-    ResolveSubjectsConfig, ResolveSubjectsState, ResolveValuationsConfig, ResolveValuationsState,
+    PortfolioReadError, PortfolioReadFuture, PrepareSourcesConfig, PrepareSourcesState,
+    ProjectReportConfig, ProjectReportInput, ProjectReportState, ResolveSubjectsConfig,
+    ResolveSubjectsState, ResolveValuationsConfig, ResolveValuationsState,
     SourcePreparationRequest, SourcePreparationResponse, ViewPinRequest, ViewPinResponse,
 };
 use mfm_values::{MfmConfig, MfmValue, NonEmpty};
@@ -505,8 +504,8 @@ impl ErasedNodeRunner for ProjectReportRunner {
 
 async fn read_output<Request, Response, Output>(
     ctx: ErasedRunCtx<'_>,
-    request: Request,
-    response: Response,
+    _request: Request,
+    _response: Response,
     output: Output,
 ) -> mfm_runtime::Result<ErasedRunnerOutput>
 where
@@ -516,22 +515,10 @@ where
 {
     let artifacts = RunnerArtifactBuilder::new(&ctx);
     let payloads = RunnerPayloadBuilder::new(&ctx);
-    let response_artifact = artifacts.fact_response(&response)?;
     let output_artifact = artifacts.state_output(&output)?;
     let mut runner_output = RunnerOutputBuilder::new(&ctx);
-    runner_output.stage_attempt_artifact(&response_artifact)?;
-    runner_output.retain_runtime_evidence(&response_artifact);
     runner_output.stage_attempt_artifact(&output_artifact)?;
     runner_output.retain_runtime_evidence(&output_artifact);
-    runner_output.payload(payloads.fact_recorded(
-        events::FactKey::new(format!(
-            "mfm.portfolio.fact.{}",
-            ctx.node().node_id.as_str()
-        ))?,
-        &request,
-        &response_artifact,
-        portfolio_read_binding()?,
-    )?);
     runner_output.payload(payloads.cell_produced(&output_artifact)?);
     Ok(runner_output.finish())
 }
@@ -763,25 +750,12 @@ async fn load_cell_bytes(
     Ok(verified.into_bytes())
 }
 
-fn portfolio_read_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {
-    Ok(RunnerCapabilityBinding {
-        capability_kind: PortfolioReadCapability::kind().map_err(runtime_capability_error)?,
-        capability_version: PortfolioReadCapability::version().map_err(runtime_capability_error)?,
-        adapter_kind: portfolio_adapter_kind()?,
-        adapter_version: portfolio_adapter_version()?,
-    })
-}
-
 fn digest_json(value: serde_json::Value) -> mfm_runtime::Result<ContentDigest> {
     let json = serde_json::to_string(&value)
         .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))?;
     Ok(PlainCanonicalJsonBytes::from_json_str(&json)
         .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))?
         .content_digest())
-}
-
-fn runtime_capability_error(error: mfm_capabilities::CapabilityError) -> mfm_runtime::RuntimeError {
-    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
 }
 
 fn portfolio_evm_guard(network: &NetworkConfig) -> Result<EvmChainGuard, PortfolioReadError> {

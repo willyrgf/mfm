@@ -252,11 +252,12 @@ impl<'a> AttemptLifecycle<'a> {
             Some(attempt_id) => (attempt_id, selected_attempt.phase.attempt_no),
         };
 
-        let mut latest_stream = store
-            .load_run_stream(run_id)
+        let mut latest_committed = store
+            .load_committed_run_stream(run_id)
             .await
             .map_err(async_store_error)?;
-        let mut latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
+        let mut latest_view =
+            RuntimeRunView::from_committed_stream(runtime_spec, &latest_committed)?;
         if node_needs_pre_invocation_lane_claim(
             runtime_spec,
             run_id,
@@ -323,11 +324,11 @@ impl<'a> AttemptLifecycle<'a> {
                     Err(error) => return Err(async_store_error(error)),
                 }
             }
-            latest_stream = store
-                .load_run_stream(run_id)
+            latest_committed = store
+                .load_committed_run_stream(run_id)
                 .await
                 .map_err(async_store_error)?;
-            latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
+            latest_view = RuntimeRunView::from_committed_stream(runtime_spec, &latest_committed)?;
         }
         let started_attempt = Attempt {
             phase: Started {

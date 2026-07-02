@@ -299,10 +299,10 @@ allowed by its certified spec, and descriptor allow-list changes must affect the
 
 ### New Or Changed Public Types And Interfaces
 
-- `MfmFactType` trait, likely in `mfm-program` or `mfm-values` depending on dependency direction:
+- `MfmFactType` trait in `mfm-program`:
   - `type Subject: MfmValue`
   - `type Response: MfmValue`
-  - `fn descriptor() -> &'static FactDescriptor`
+  - `fn descriptor() -> mfm_facts::Result<FactDescriptor>`
   - `fn subject(&self) -> &Self::Subject`
   - `fn response(&self) -> &Self::Response`
 - `#[derive(MfmFactType)]` in `mfm-program-derive`.
@@ -1127,8 +1127,9 @@ when review remains practical, but each commit should keep this scope and verifi
 ### Gate 2 Commits
 
 7. `add mfm fact derive surface`
-   - Scope: add `MfmFactType` authoring trait and `#[derive(MfmFactType)]` support with subject and
-     response accessors.
+   - Scope: add `MfmFactType` authoring trait in `mfm-program` and `#[derive(MfmFactType)]` support
+     with subject and response accessors. The descriptor accessor is fallible, matching existing
+     `MfmValue` descriptor APIs and avoiding generated static fallible initialization.
    - Delete: any temporary hand-written production fact descriptor helper used during development.
    - Verify: `cargo test -p mfm-program-derive --test derive_ui`.
 
@@ -1174,56 +1175,63 @@ when review remains practical, but each commit should keep this scope and verifi
     - Delete: caller-supplied `FactKey` recorder helpers.
     - Verify: `cargo test -p mfm-runtime`.
 
-14. `replace store fact projection contracts`
+14. `admit fact descriptor artifacts`
+    - Scope: extend run admission/runtime launch to carry descriptor artifacts for every certified
+      fact descriptor allow-list entry, validate descriptor bytes against descriptor hashes, and
+      reject missing or extra descriptor artifacts before any fact can be recorded.
+    - Delete: any hash-only descriptor admission assumption; descriptor bytes are required authority.
+    - Verify: `cargo test -p mfm-events`; `cargo test -p mfm-runtime`; `cargo test -p mfm-store`.
+
+15. `replace store fact projection contracts`
     - Scope: replace old `FactProjection` and logical keys with descriptor/index/term projection
       contracts, `FactClaimId` mapping, and append validation hooks in `mfm-store`.
     - Delete: old fact projection structs, JSON encoders, parsers, and tests.
     - Verify: `cargo test -p mfm-store --test commit_contract --features test-support`.
 
-15. `reset postgres fact schema`
+16. `reset postgres fact schema`
     - Scope: reset `0001_run_store.sql` for `fact_descriptor_index`, `fact_index`, and
       `fact_index_terms`; add constraints, indexes, stale-object checks, and schema validation.
     - Delete: retired old fact projection tables, columns, indexes, triggers, and schema checks.
     - Verify: `cargo test -p mfm-stream-store-postgres`.
 
-16. `project facts during append`
+17. `project facts during append`
     - Scope: insert descriptor/index/term rows in the same Postgres append transaction as events and
       artifact admissions.
     - Delete: any post-append repair or fallback projection path.
     - Verify: `cargo test -p mfm-stream-store-postgres`; focused rollback/idempotency tests.
 
-17. `add fact projection rebuild`
+18. `add fact projection rebuild`
     - Scope: add internal/test-only rebuild and validation from run stream plus retained artifacts.
     - Delete: no public operator command until a maintenance contract is designed.
     - Verify: `cargo test -p mfm-stream-store-postgres`; projection rebuild parity tests.
 
 ### Gate 4 Commits
 
-18. `add fact query compiler`
+19. `add fact query compiler`
     - Scope: add descriptor resolution input, field filter parsing, exposure/operator checks,
       canonical query plan building, and explicit ordering normalization.
     - Delete: any parser/compiler duplicated in CLI, REST, app, or tests.
     - Verify: `cargo test -p mfm-facts`.
 
-19. `add postgres fact query executor`
+20. `add postgres fact query executor`
     - Scope: execute one-descriptor v1 plans against `fact_index` and `fact_index_terms` with
       audience/scope filtering and deterministic ordering.
     - Delete: any JSONB-only or SQL-trigger extraction shortcut.
     - Verify: `cargo test -p mfm-stream-store-postgres`.
 
-20. `add fact receipt authentication`
+21. `add fact receipt authentication`
     - Scope: add local receipt hash/authentication, store read frontier, projection generation,
       descriptor catalog watermark, and trust-root verification.
     - Delete: unauthenticated receipt mode.
     - Verify: `cargo test -p mfm-store`; `cargo test -p mfm-stream-store-postgres`.
 
-21. `record fact query evidence`
+22. `record fact query evidence`
     - Scope: add `ArtifactRole::FactQueryEvidence`, query evidence artifact staging, private
       `ArtifactReferenced` emission, and retention edges.
     - Delete: any live query result reuse path that is not pinned as evidence.
     - Verify: `cargo test -p mfm-events`; `cargo test -p mfm-runtime`; `cargo test -p mfm-store`.
 
-22. `verify fact query replay`
+23. `verify fact query replay`
     - Scope: add replay verification for plans, receipts, returned refs, summaries, selection
       evidence, retained source facts, and no-live-store replay.
     - Delete: live-store replay shortcuts and current-index replay reads.
@@ -1231,24 +1239,24 @@ when review remains practical, but each commit should keep this scope and verifi
 
 ### Gate 5 Commits
 
-23. `add app fact query services`
+24. `add app fact query services`
     - Scope: add evidence-only app services for public Platform queries, internal Control queries,
       descriptor discovery, exact public ref lookup, and public DTO construction.
     - Delete: any app path that exposes `InternalFactRef` publicly.
     - Verify: `cargo test -p mfm-app`.
 
-24. `add cli facts commands`
+25. `add cli facts commands`
     - Scope: add `mfm facts kinds/describe/explain/query/latest/history/top/show`, output structs,
       stable errors, and CLI docs.
     - Delete: any CLI-owned query compiler or descriptor parser.
     - Verify: `cargo test -p mfm --test cli_tests`; `cargo test -p mfm --test json_output_integration`.
 
-25. `add rest facts routes`
+26. `add rest facts routes`
     - Scope: add `/v1/facts/...` routes, response/error envelopes, exact ref lookup, and REST docs.
     - Delete: any REST-owned query compiler or descriptor parser.
     - Verify: `cargo test -p mfm-rest-api`.
 
-26. `add public fact privacy tests`
+27. `add public fact privacy tests`
     - Scope: add end-to-end tests proving public surfaces do not expose Control/RunPrivate facts,
       internal refs, artifact ids, subject hashes, run/event coordinates, or response artifacts.
     - Delete: stale output snapshots that expose internal fields.
@@ -1256,37 +1264,37 @@ when review remains practical, but each commit should keep this scope and verifi
 
 ### Gate 6 Commits
 
-27. `add bitcoin fact capability contracts`
+28. `add bitcoin fact capability contracts`
     - Scope: add `crates/btc-capabilities` for typed Bitcoin read requests/evidence and redacted
       capability errors.
     - Delete: no live IO or workflow topology in the capability crate.
     - Verify: `cargo test -p mfm-btc-capabilities`; cargo metadata boundary tests.
 
-28. `add bitcoin fact states`
+29. `add bitcoin fact states`
     - Scope: add reusable bounded Bitcoin read/normalize/checkpoint state contracts and
       `MfmFactType` facts for `chain.head` and `collector.checkpoint`.
     - Delete: no process-local runtime source routing in typed state config.
     - Verify: `cargo test -p mfm-states-btc`; state boundary tests.
 
-29. `add bitcoin jsonrpc adapter`
+30. `add bitcoin jsonrpc adapter`
     - Scope: bind Bitcoin states to capability calls and evidence recording through the existing
       redacted JSON-RPC transport or a properly renamed transport crate.
     - Delete: any workflow-specific protocol IO from state or op crates.
     - Verify: `cargo test -p mfm-adapters-btc-jsonrpc`; transport replay tests.
 
-30. `add bitcoin chain head collector op`
+31. `add bitcoin chain head collector op`
     - Scope: add deterministic one-cycle collector operation with descriptor allow-lists,
       checkpoint query selection, fact recording, and completion topology.
     - Delete: no collector daemon/runtime primitive.
     - Verify: `cargo test -p mfm-op-btc-chain-head-collector`; certification tests.
 
-31. `register bitcoin collector assembly`
+32. `register bitcoin collector assembly`
     - Scope: wire app registration, optional entry point, runner factories, and evidence-only query
       dependencies.
     - Delete: no live runtime config parsing from evidence-only read paths.
     - Verify: `cargo test -p mfm-app`.
 
-32. `add collector workflow integration tests`
+33. `add collector workflow integration tests`
     - Scope: prove Platform chain-head facts, Control checkpoint facts, checkpoint query evidence,
       replay without live Bitcoin RPC, crash/retry behavior, and public API visibility.
     - Delete: any temporary deterministic-only proof that replaces the external collector target.
@@ -1299,11 +1307,11 @@ Suggested PR grouping over the commit sequence:
 
 1. Gate 1 PR: commits 1-6.
 2. Gate 2 PR: commits 7-10.
-3. Gate 3 event/runtime/store PR: commits 11-14.
-4. Gate 3 Postgres projection PR: commits 15-17.
-5. Gate 4 query/replay PR: commits 18-22.
-6. Gate 5 app/CLI/REST PR: commits 23-26.
-7. Gate 6 collector PR: commits 27-32.
+3. Gate 3 event/runtime/store PR: commits 11-15.
+4. Gate 3 Postgres projection PR: commits 16-18.
+5. Gate 4 query/replay PR: commits 19-23.
+6. Gate 5 app/CLI/REST PR: commits 24-27.
+7. Gate 6 collector PR: commits 28-33.
 8. Final merge-readiness PR, if needed: final docs/repo-map cleanup and full Nix gates.
 
 Some adjacent PRs can merge if they stay reviewable, but do not combine infrastructure gates with
@@ -1333,8 +1341,10 @@ the implementation must add that support properly or record the blocker honestly
 
 These are not blocking ambiguities in the RFC, but implementation should answer them explicitly:
 
-1. Should `MfmFactType` live in `mfm-program`, `mfm-values`, or `mfm-facts`? The owner must avoid
-   cycles while keeping derive ergonomics reasonable.
+1. Resolved for Gate 2: `MfmFactType` lives in `mfm-program`. `mfm-facts` owns domain-free fact
+   semantics and canonical contracts, while `mfm-program` owns Rust authoring ergonomics over
+   `MfmValue` subject/response types. The trait is not semantic authority; descriptor bytes,
+   certified allow-lists, and append validation remain authority.
 2. Should `mfm-events` depend on `mfm-facts`, or should event structs define versioned wrappers that
    convert to facts kernel types? Prefer the option that keeps the kernel DAG simplest.
 3. What exact artifact role contract should `FactDescriptor` and `FactQueryEvidence` use for schema,

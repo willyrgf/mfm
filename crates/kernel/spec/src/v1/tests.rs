@@ -192,6 +192,7 @@ fn test_spec() -> TypedExecutionSpec {
                 effect_name: "pure".to_owned(),
                 effect_version: EffectVersion::new("mfm.effect.v1").expect("effect version"),
                 capabilities: no_caps.clone(),
+                emitted_fact_descriptors: Vec::new(),
                 runner: "pure".to_owned(),
                 side_effect_contract_digest: None,
             })),
@@ -222,6 +223,7 @@ fn test_spec() -> TypedExecutionSpec {
                 effect_name: "pure".to_owned(),
                 effect_version: EffectVersion::new("mfm.effect.v1").expect("effect version"),
                 capabilities: no_caps.clone(),
+                emitted_fact_descriptors: Vec::new(),
                 runner: "pure".to_owned(),
                 side_effect_contract_digest: None,
             })),
@@ -252,6 +254,7 @@ fn test_spec() -> TypedExecutionSpec {
                 effect_name: "managed_platform_write".to_owned(),
                 effect_version: EffectVersion::new("mfm.effect.v1").expect("effect version"),
                 capabilities: no_caps.clone(),
+                emitted_fact_descriptors: Vec::new(),
                 runner: "managed_platform_write".to_owned(),
                 side_effect_contract_digest: None,
             })),
@@ -302,6 +305,7 @@ fn test_spec() -> TypedExecutionSpec {
                 .expect("effect kind"),
                 capability_bindings: no_caps.clone(),
                 adapter_bindings: Vec::new(),
+                fact_descriptor_allowlist: Vec::new(),
                 side_effect: None,
                 framework: None,
                 planning_lineage: empty_planning_lineage.clone(),
@@ -347,6 +351,7 @@ fn test_spec() -> TypedExecutionSpec {
                 .expect("effect kind"),
                 capability_bindings: no_caps.clone(),
                 adapter_bindings: Vec::new(),
+                fact_descriptor_allowlist: Vec::new(),
                 side_effect: None,
                 framework: Some(FrameworkNodeSpec::Bridge(BridgeNodeSpec {
                     bridge_kind: BridgeKind::ExportToParent,
@@ -393,6 +398,7 @@ fn test_spec() -> TypedExecutionSpec {
                 .expect("managed effect kind"),
                 capability_bindings: no_caps.clone(),
                 adapter_bindings: Vec::new(),
+                fact_descriptor_allowlist: Vec::new(),
                 side_effect: None,
                 framework: Some(FrameworkNodeSpec::PublicOutputRender(
                     PublicOutputRenderNodeSpec {
@@ -541,7 +547,7 @@ fn certified_spec_hash_golden() {
     );
     assert_eq!(
         spec.spec_hash().expect("spec hash").as_str(),
-        "spec:sha256-jcs-v1:87d706df0b869b002f44c3de373d2825969c828dcaa315b355997cc23ab32857"
+        "spec:sha256-jcs-v1:b9d680fecf828eda65c3635451134c8396cc1d8c02092ce5c78ce7082e37085d"
     );
     assert!(canonical
         .as_str()
@@ -568,6 +574,36 @@ fn certified_spec_hash_golden() {
         stale.verify_hash(),
         Err(SpecError::HashMismatch { .. })
     ));
+}
+
+#[test]
+fn fact_descriptor_allowlists_are_hash_defining() {
+    let base = test_spec();
+    let base_hash = base.spec_hash().expect("base hash");
+    let fact_ref = FactDescriptorRef {
+        descriptor_hash: content(0xa1),
+    };
+
+    let mut descriptor_changed = base.clone();
+    let DescriptorIdentity::State(state) = &mut descriptor_changed.descriptor_identities[0] else {
+        panic!("first descriptor is state");
+    };
+    state.emitted_fact_descriptors.push(fact_ref.clone());
+    assert_ne!(
+        descriptor_changed.spec_hash().expect("descriptor hash"),
+        base_hash
+    );
+
+    let mut node_changed = base;
+    node_changed.nodes[0]
+        .fact_descriptor_allowlist
+        .push(fact_ref);
+    assert_ne!(node_changed.spec_hash().expect("node hash"), base_hash);
+    assert!(node_changed
+        .canonical_json()
+        .expect("canonical spec")
+        .as_str()
+        .contains(r#""fact_descriptor_allowlist":[{"descriptor_hash":"content:"#));
 }
 
 #[test]

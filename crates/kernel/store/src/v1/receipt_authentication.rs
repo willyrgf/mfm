@@ -1,0 +1,320 @@
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use mfm_canonical::{CanonicalJsonBytes, CanonicalValue};
+use mfm_facts::{FactQueryReceipt, StoreIdentity, StoreKeyId, StoreReceiptAuthenticationScheme};
+use mfm_ids::ContentDigest;
+
+use super::{Result, StoreError};
+
+/// Public trust root for fact-query receipt authentication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactQueryReceiptTrustRoot {
+    store_identity: StoreIdentity,
+    scheme: StoreReceiptAuthenticationScheme,
+    key_id: StoreKeyId,
+    verifying_key: [u8; 32],
+}
+
+impl FactQueryReceiptTrustRoot {
+    /// Creates a receipt trust root and validates the public verifying key.
+    pub fn new(
+        store_identity: StoreIdentity,
+        scheme: StoreReceiptAuthenticationScheme,
+        key_id: StoreKeyId,
+        verifying_key: [u8; 32],
+    ) -> Result<Self> {
+        match scheme {
+            StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1 => {
+                VerifyingKey::from_bytes(&verifying_key)
+                    .map_err(|_| receipt_authentication_error("invalid Ed25519 verifying key"))?;
+            }
+        }
+        Ok(Self {
+            store_identity,
+            scheme,
+            key_id,
+            verifying_key,
+        })
+    }
+
+    /// Returns the store identity bound to this trust root.
+    pub const fn store_identity(&self) -> &StoreIdentity {
+        &self.store_identity
+    }
+
+    /// Returns the authentication scheme bound to this trust root.
+    pub const fn scheme(&self) -> StoreReceiptAuthenticationScheme {
+        self.scheme
+    }
+
+    /// Returns the non-secret key id bound to this trust root.
+    pub const fn key_id(&self) -> &StoreKeyId {
+        &self.key_id
+    }
+
+    /// Returns the raw Ed25519 verifying key bytes.
+    pub const fn verifying_key(&self) -> &[u8; 32] {
+        &self.verifying_key
+    }
+}
+
+/// Returns the canonical signing message for a fact-query receipt authentication record.
+pub fn fact_query_receipt_authentication_message(
+    store_identity: &StoreIdentity,
+    scheme: StoreReceiptAuthenticationScheme,
+    key_id: &StoreKeyId,
+    store_receipt_hash: &ContentDigest,
+) -> Result<CanonicalJsonBytes> {
+    let value = CanonicalValue::object([
+        (
+            "version",
+            CanonicalValue::String("mfm.fact-query-receipt-authentication.v1".to_owned()),
+        ),
+        (
+            "store_identity",
+            CanonicalValue::String(store_identity.as_str().to_owned()),
+        ),
+        ("scheme", CanonicalValue::String(scheme.as_str().to_owned())),
+        ("key_id", CanonicalValue::String(key_id.as_str().to_owned())),
+        (
+            "store_receipt_hash",
+            CanonicalValue::String(store_receipt_hash.as_str().to_owned()),
+        ),
+    ])
+    .map_err(|error| receipt_authentication_error(error.to_string()))?;
+    Ok(CanonicalJsonBytes::from_value(&value))
+}
+
+/// Verifies a fact-query receipt against a store-owned receipt trust root.
+pub fn verify_fact_query_receipt_authentication(
+    plan_hash: &ContentDigest,
+    receipt: &FactQueryReceipt,
+    trust_root: &FactQueryReceiptTrustRoot,
+) -> Result<()> {
+    let auth = receipt.store_receipt_authentication();
+    if auth.store_identity() != trust_root.store_identity() {
+        return Err(receipt_authentication_error("store identity mismatch"));
+    }
+    if auth.scheme() != trust_root.scheme() {
+        return Err(receipt_authentication_error(
+            "authentication scheme mismatch",
+        ));
+    }
+    let key_id = auth
+        .key_id()
+        .ok_or_else(|| receipt_authentication_error("missing receipt key id"))?;
+    if key_id != trust_root.key_id() {
+        return Err(receipt_authentication_error("receipt key id mismatch"));
+    }
+    let body_hash = mfm_facts::fact_query_receipt_body_hash(plan_hash, receipt)
+        .map_err(|error| receipt_authentication_error(error.to_string()))?;
+    if &body_hash != receipt.store_receipt_hash() {
+        return Err(receipt_authentication_error("receipt body hash mismatch"));
+    }
+    let signature_bytes: [u8; 64] = auth
+        .signature_or_mac()
+        .try_into()
+        .map_err(|_| receipt_authentication_error("invalid Ed25519 signature length"))?;
+    let signature = Signature::from_bytes(&signature_bytes);
+    let verifying_key = VerifyingKey::from_bytes(trust_root.verifying_key())
+        .map_err(|_| receipt_authentication_error("invalid Ed25519 verifying key"))?;
+    let message = fact_query_receipt_authentication_message(
+        auth.store_identity(),
+        auth.scheme(),
+        key_id,
+        receipt.store_receipt_hash(),
+    )?;
+    verifying_key
+        .verify(message.as_bytes(), &signature)
+        .map_err(|_| receipt_authentication_error("invalid receipt signature"))
+}
+
+fn receipt_authentication_error(message: impl Into<String>) -> StoreError {
+    StoreError::ReceiptAuthentication {
+        message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ed25519_dalek::{Signer, SigningKey};
+    use mfm_canonical::{CanonicalJsonBytes, CanonicalValue};
+    use mfm_facts::{
+        DescriptorCatalogWatermark, FactProjectionGeneration, FactQueryCompilerVersion,
+        StoreCommitWatermark,
+    };
+    use mfm_facts::{
+        FactAudience, FactCanonicalizerVersion, FactFieldId, FactOrdering, FactOrderingName,
+        FactOrderingTerm, FactQueryEvidence, FactQueryScope, FactSelectionEvidence,
+        FactVisibilityScope, NullOrdering, QueryResultCardinality, ScopeDecisionEvidence,
+        SortDirection, StoreReadFrontier, StoreReadFrontierType, StoreScopeRef,
+    };
+    use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes};
+
+    use super::*;
+
+    fn digest(byte: u8) -> ContentDigest {
+        ContentDigest::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([byte; 32]),
+        )
+    }
+
+    fn signing_key() -> SigningKey {
+        SigningKey::from_bytes(&[9; 32])
+    }
+
+    fn plan() -> mfm_facts::CanonicalFactQueryPlan {
+        mfm_facts::CanonicalFactQueryPlan::new(
+            StoreScopeRef::new("default").expect("store scope"),
+            FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
+            FactQueryCompilerVersion::new("mfm.facts.query.v1").expect("compiler"),
+            FactCanonicalizerVersion::new("mfm.canonical.v1").expect("canonicalizer"),
+            digest(1),
+            ScopeDecisionEvidence::new(digest(2)),
+            CanonicalJsonBytes::from_value(
+                &CanonicalValue::object([(
+                    "kind",
+                    CanonicalValue::String("chain.head".to_owned()),
+                )])
+                .expect("query"),
+            ),
+            FactOrdering::new(
+                FactOrderingName::new("result.height.desc").expect("ordering"),
+                vec![FactOrderingTerm::new(
+                    FactFieldId::new("result.height").expect("field"),
+                    SortDirection::Descending,
+                    NullOrdering::Last,
+                    false,
+                )],
+            )
+            .expect("ordering"),
+            Some(10),
+        )
+        .expect("plan")
+    }
+
+    fn trust_root(key: &SigningKey) -> FactQueryReceiptTrustRoot {
+        FactQueryReceiptTrustRoot::new(
+            StoreIdentity::new("store.default").expect("store identity"),
+            StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
+            StoreKeyId::new("key.default").expect("key id"),
+            key.verifying_key().to_bytes(),
+        )
+        .expect("trust root")
+    }
+
+    fn signed_receipt(
+        plan_hash: &ContentDigest,
+        key: &SigningKey,
+        store_identity: StoreIdentity,
+        key_id: StoreKeyId,
+    ) -> FactQueryReceipt {
+        let frontier = StoreReadFrontier::new(
+            StoreScopeRef::new("default").expect("store scope"),
+            FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
+            DescriptorCatalogWatermark::new(1),
+            FactProjectionGeneration::new(1),
+            0,
+            StoreCommitWatermark::new(0),
+        );
+        let result_set_digest =
+            mfm_facts::fact_query_result_set_digest(&[], None).expect("result set digest");
+        let receipt_hash = mfm_facts::fact_query_receipt_body_hash_from_parts(
+            plan_hash,
+            &frontier,
+            StoreReadFrontierType::Snapshot,
+            &[],
+            None,
+            &result_set_digest,
+            QueryResultCardinality::Exact(0),
+        )
+        .expect("receipt hash");
+        let message = fact_query_receipt_authentication_message(
+            &store_identity,
+            StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
+            &key_id,
+            &receipt_hash,
+        )
+        .expect("message");
+        let auth = mfm_facts::StoreReceiptAuthentication::new(
+            store_identity,
+            StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
+            Some(key_id),
+            key.sign(message.as_bytes()).to_bytes().to_vec(),
+        )
+        .expect("auth");
+        mfm_facts::FactQueryReceipt::new(
+            frontier,
+            StoreReadFrontierType::Snapshot,
+            Vec::new(),
+            None,
+            result_set_digest,
+            QueryResultCardinality::Exact(0),
+            receipt_hash,
+            auth,
+        )
+    }
+
+    #[test]
+    fn verifies_ed25519_receipt_authentication() {
+        let key = signing_key();
+        let plan = plan();
+        let plan_hash = mfm_facts::fact_query_plan_hash(&plan).expect("plan hash");
+        let receipt = signed_receipt(
+            &plan_hash,
+            &key,
+            StoreIdentity::new("store.default").expect("store"),
+            StoreKeyId::new("key.default").expect("key"),
+        );
+        verify_fact_query_receipt_authentication(&plan_hash, &receipt, &trust_root(&key))
+            .expect("verified receipt");
+
+        let evidence = FactQueryEvidence::new(
+            plan,
+            receipt,
+            FactSelectionEvidence::new(digest(4), Vec::new(), None).expect("selection"),
+        );
+        mfm_facts::fact_query_evidence_hash(&evidence).expect("evidence hash");
+    }
+
+    #[test]
+    fn rejects_tampered_receipt_hash_and_auth_metadata() {
+        let key = signing_key();
+        let plan_hash = mfm_facts::fact_query_plan_hash(&plan()).expect("plan hash");
+        let receipt = signed_receipt(
+            &plan_hash,
+            &key,
+            StoreIdentity::new("store.default").expect("store"),
+            StoreKeyId::new("key.default").expect("key"),
+        );
+
+        let mut tampered_hash = receipt.clone();
+        tampered_hash = mfm_facts::FactQueryReceipt::new(
+            tampered_hash.read_frontier().clone(),
+            tampered_hash.frontier_type(),
+            tampered_hash.returned_refs().to_vec(),
+            tampered_hash.returned_field_summaries().cloned(),
+            tampered_hash.result_set_digest().clone(),
+            tampered_hash.result_cardinality(),
+            digest(99),
+            tampered_hash.store_receipt_authentication().clone(),
+        );
+        assert!(verify_fact_query_receipt_authentication(
+            &plan_hash,
+            &tampered_hash,
+            &trust_root(&key)
+        )
+        .is_err());
+
+        let wrong_root = FactQueryReceiptTrustRoot::new(
+            StoreIdentity::new("store.default").expect("store"),
+            StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
+            StoreKeyId::new("key.other").expect("key"),
+            key.verifying_key().to_bytes(),
+        )
+        .expect("wrong root");
+        assert!(
+            verify_fact_query_receipt_authentication(&plan_hash, &receipt, &wrong_root).is_err()
+        );
+    }
+}
