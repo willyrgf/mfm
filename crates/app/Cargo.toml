@@ -6,6 +6,9 @@ edition = "2021"
 [package.metadata.mfm]
 category = "app"
 
+[features]
+test-support = ["mfm-store/test-support"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -26,6 +29,7 @@ mfm-events = { path = "../kernel/events" }
 mfm-evm-capabilities = { path = "../evm-capabilities" }
 mfm-evm-contract-config = { path = "../evm-contract-config" }
 mfm-evm-contract-model = { path = "../evm-contract-model" }
+mfm-facts = { path = "../kernel/facts" }
 mfm-ids = { path = "../kernel/ids" }
 mfm-op-evm-contract-lifecycle = { path = "../ops/evm-contract-lifecycle-op" }
 mfm-op-portfolio-tracker = { path = "../ops/portfolio-tracker-op" }
@@ -45,9 +49,12 @@ mfm-transports-evm = { path = "../transports/evm" }
 mfm-transports-proof = { path = "../transports/proof" }
 
 [dev-dependencies]
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
+mfm-effects = { path = "../kernel/effects" }
 mfm-manual-auth = { path = "../kernel/manual-auth" }
 mfm-store = { path = "../kernel/store", features = ["test-support"] }
+mfm-values = { path = "../kernel/values" }
 mfm_core = { path = "../core" }
 mfm-program-derive = { path = "../kernel/program-derive" }
 tempfile = "3.0"
