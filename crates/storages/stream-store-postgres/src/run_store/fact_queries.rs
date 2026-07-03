@@ -109,71 +109,25 @@ async fn build_fact_query_receipt_tx(
     rows: &[PostgresFactQueryRow],
 ) -> Result<mfm_facts::FactQueryReceipt> {
     let plan_hash = mfm_facts::fact_query_plan_hash(plan).map_err(fact_error)?;
-    let returned_refs = rows
-        .iter()
-        .map(|row| row.fact_ref.clone())
-        .collect::<Vec<_>>();
-    let returned_field_summaries = returned_field_summaries_for_receipt(plan, rows)?;
-    let result_set_digest =
-        mfm_facts::fact_query_result_set_digest(&returned_refs, returned_field_summaries.as_ref())
-            .map_err(fact_error)?;
-    let result_cardinality = query_result_cardinality(plan, rows.len())?;
-    let read_frontier = load_store_read_frontier_tx(tx, plan).await?;
-    let receipt_hash = mfm_facts::fact_query_receipt_body_hash_from_parts(
-        &plan_hash,
-        &read_frontier,
-        mfm_facts::StoreReadFrontierType::Snapshot,
-        &returned_refs,
-        returned_field_summaries.as_ref(),
-        &result_set_digest,
-        result_cardinality,
-    )
-    .map_err(fact_error)?;
-    let auth = signer.sign_receipt_hash(&receipt_hash)?;
-    Ok(mfm_facts::FactQueryReceipt::new(
-        read_frontier,
-        mfm_facts::StoreReadFrontierType::Snapshot,
-        returned_refs,
-        returned_field_summaries,
-        result_set_digest,
-        result_cardinality,
-        receipt_hash,
-        auth,
-    ))
-}
-
-fn returned_field_summaries_for_receipt(
-    plan: &mfm_facts::CanonicalFactQueryPlan,
-    rows: &[PostgresFactQueryRow],
-) -> Result<Option<mfm_facts::ReturnedFieldSummaries>> {
-    let shape = mfm_facts::parse_canonical_fact_query_shape(plan).map_err(fact_error)?;
-    if shape.return_fields().is_empty() {
-        return Ok(None);
-    }
-    let summaries = rows
+    let query_rows = rows
         .iter()
         .map(|row| {
-            mfm_facts::ReturnedFactFieldSummary::new(
-                row.fact_ref.fact_claim_id().clone(),
-                row.returned_fields.clone(),
-            )
+            mfm_facts::FactQueryResultRow::new(row.fact_ref.clone(), row.returned_fields.clone())
         })
-        .collect();
-    Ok(Some(mfm_facts::ReturnedFieldSummaries::new(summaries)))
-}
-
-fn query_result_cardinality(
-    plan: &mfm_facts::CanonicalFactQueryPlan,
-    row_count: usize,
-) -> Result<mfm_facts::QueryResultCardinality> {
-    let row_count = u64::try_from(row_count)
-        .map_err(|_| PostgresStoreError::Corruption("fact query row count overflow".to_owned()))?;
-    match plan.limit() {
-        Some(limit) if row_count == limit => {
-            Ok(mfm_facts::QueryResultCardinality::AtLeast(row_count))
-        }
-        _ => Ok(mfm_facts::QueryResultCardinality::Exact(row_count)),
-    }
+        .collect::<Vec<_>>();
+    let read_frontier = load_store_read_frontier_tx(tx, plan).await?;
+    let shape = mfm_facts::parse_canonical_fact_query_shape(plan).map_err(fact_error)?;
+    let material = mfm_facts::FactQueryReceiptMaterial::from_rows(
+        &plan_hash,
+        read_frontier,
+        mfm_facts::StoreReadFrontierType::Snapshot,
+        &query_rows,
+        !shape.return_fields().is_empty(),
+        plan.limit(),
+    )
+    .map_err(fact_error)?;
+    let auth = signer.sign_receipt_hash(material.store_receipt_hash())?;
+    Ok(material.into_receipt(auth))
 }
 
 async fn load_store_read_frontier_tx(

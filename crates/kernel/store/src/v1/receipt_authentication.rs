@@ -160,8 +160,8 @@ mod tests {
     use mfm_facts::{
         FactAudience, FactCanonicalizerVersion, FactFieldId, FactOrderingName, FactOrderingPolicy,
         FactOrderingTerm, FactQueryEvidence, FactQueryScope, FactSelectionEvidence,
-        FactVisibilityScope, NullOrdering, QueryResultCardinality, ScopeDecisionEvidence,
-        SortDirection, StoreReadFrontier, StoreReadFrontierType, StoreScopeRef,
+        FactVisibilityScope, NullOrdering, ScopeDecisionEvidence, SortDirection, StoreReadFrontier,
+        StoreScopeRef,
     };
     use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes};
 
@@ -232,23 +232,21 @@ mod tests {
             0,
             StoreCommitWatermark::new(0),
         );
-        let result_set_digest =
-            mfm_facts::fact_query_result_set_digest(&[], None).expect("result set digest");
-        let receipt_hash = mfm_facts::fact_query_receipt_body_hash_from_parts(
+        let rows: [mfm_facts::FactQueryResultRow; 0] = [];
+        let material = mfm_facts::FactQueryReceiptMaterial::from_rows(
             plan_hash,
-            &frontier,
-            StoreReadFrontierType::Snapshot,
-            &[],
+            frontier,
+            mfm_facts::StoreReadFrontierType::Snapshot,
+            &rows,
+            false,
             None,
-            &result_set_digest,
-            QueryResultCardinality::Exact(0),
         )
-        .expect("receipt hash");
+        .expect("receipt material");
         let message = fact_query_receipt_authentication_message(
             &store_identity,
             StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
             &key_id,
-            &receipt_hash,
+            material.store_receipt_hash(),
         )
         .expect("message");
         let auth = mfm_facts::StoreReceiptAuthentication::new(
@@ -258,16 +256,7 @@ mod tests {
             key.sign(message.as_bytes()).to_bytes().to_vec(),
         )
         .expect("auth");
-        mfm_facts::FactQueryReceipt::new(
-            frontier,
-            StoreReadFrontierType::Snapshot,
-            Vec::new(),
-            None,
-            result_set_digest,
-            QueryResultCardinality::Exact(0),
-            receipt_hash,
-            auth,
-        )
+        material.into_receipt(auth)
     }
 
     #[test]
@@ -313,23 +302,14 @@ mod tests {
 
         let tampered = FactQueryEvidence::new(
             plan,
-            mfm_facts::FactQueryReceipt::new(
-                receipt.read_frontier().clone(),
-                receipt.frontier_type(),
-                receipt.returned_refs().to_vec(),
-                receipt.returned_field_summaries().cloned(),
-                digest(99),
-                receipt.result_cardinality(),
-                receipt.store_receipt_hash().clone(),
-                receipt.store_receipt_authentication().clone(),
-            ),
+            receipt_with_invalid_signature(&plan_hash, &receipt),
             FactSelectionEvidence::new(digest(4), Vec::new(), None).expect("selection"),
         );
         assert!(validate_fact_query_evidence_recording(&tampered, &trust_root(&key)).is_err());
     }
 
     #[test]
-    fn rejects_tampered_receipt_hash_and_auth_metadata() {
+    fn rejects_tampered_receipt_authentication() {
         let key = signing_key();
         let plan_hash = mfm_facts::fact_query_plan_hash(&plan()).expect("plan hash");
         let receipt = signed_receipt(
@@ -339,17 +319,7 @@ mod tests {
             StoreKeyId::new("key.default").expect("key"),
         );
 
-        let mut tampered_hash = receipt.clone();
-        tampered_hash = mfm_facts::FactQueryReceipt::new(
-            tampered_hash.read_frontier().clone(),
-            tampered_hash.frontier_type(),
-            tampered_hash.returned_refs().to_vec(),
-            tampered_hash.returned_field_summaries().cloned(),
-            tampered_hash.result_set_digest().clone(),
-            tampered_hash.result_cardinality(),
-            digest(99),
-            tampered_hash.store_receipt_authentication().clone(),
-        );
+        let tampered_hash = receipt_with_invalid_signature(&plan_hash, &receipt);
         assert!(verify_fact_query_receipt_authentication(
             &plan_hash,
             &tampered_hash,
@@ -367,5 +337,29 @@ mod tests {
         assert!(
             verify_fact_query_receipt_authentication(&plan_hash, &receipt, &wrong_root).is_err()
         );
+    }
+
+    fn receipt_with_invalid_signature(
+        plan_hash: &ContentDigest,
+        receipt: &FactQueryReceipt,
+    ) -> FactQueryReceipt {
+        let rows = mfm_facts::fact_query_result_rows_from_receipt(receipt);
+        let material = mfm_facts::FactQueryReceiptMaterial::from_rows(
+            plan_hash,
+            receipt.read_frontier().clone(),
+            receipt.frontier_type(),
+            &rows,
+            receipt.returned_field_summaries().is_some(),
+            None,
+        )
+        .expect("receipt material");
+        let auth = mfm_facts::StoreReceiptAuthentication::new(
+            StoreIdentity::new("store.default").expect("store"),
+            StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
+            Some(StoreKeyId::new("key.default").expect("key")),
+            vec![0x44; 64],
+        )
+        .expect("tampered auth");
+        material.into_receipt(auth)
     }
 }

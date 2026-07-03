@@ -1138,7 +1138,6 @@ fn parse_query_result_cardinality(value: &serde_json::Value) -> Result<QueryResu
     match json_str(object, "kind")? {
         "exact" => Ok(QueryResultCardinality::Exact(json_u64(object, "value")?)),
         "at_least" => Ok(QueryResultCardinality::AtLeast(json_u64(object, "value")?)),
-        "not_counted" => Ok(QueryResultCardinality::NotCounted),
         value => Err(FactDescriptorError::descriptor(format!(
             "unknown query result cardinality kind {value:?}"
         ))),
@@ -1957,7 +1956,7 @@ impl OwnedFactQueryReceiptBodyParts {
         store_receipt_hash: ContentDigest,
         store_receipt_authentication: StoreReceiptAuthentication,
     ) -> FactQueryReceipt {
-        FactQueryReceipt::new(
+        FactQueryReceipt::from_parts(
             self.read_frontier,
             self.frontier_type,
             self.returned_refs,
@@ -2288,9 +2287,6 @@ fn canonical_query_result_cardinality_value(
             ("kind", CanonicalValue::String("at_least".to_owned())),
             ("value", CanonicalValue::Unsigned(value)),
         ]),
-        QueryResultCardinality::NotCounted => {
-            canonical_object([("kind", CanonicalValue::String("not_counted".to_owned()))])
-        }
     }
 }
 

@@ -1101,32 +1101,27 @@ fn query_evidence_fixture() -> (CanonicalFactQueryPlan, FactQueryReceipt, FactQu
         99,
         StoreCommitWatermark::new(100),
     );
-    let returned_refs =
-        vec![
-            InternalFactRef::new(internal_ref_parts(FactVisibility::indexed_default(
-                FactAudience::Platform,
-            )))
-            .expect("returned ref"),
-        ];
-    let returned_field_summaries = Some(ReturnedFieldSummaries::new(vec![
-        ReturnedFactFieldSummary::new(
-            returned_refs[0].fact_claim_id().clone(),
-            vec![ReturnedFieldValueSummary::new(
-                FactFieldId::new("result.height").expect("field"),
-                FactFieldValueType::UnsignedInteger,
-                FactCanonicalScalar::UnsignedInteger(800_000),
-            )
-            .expect("summary")],
-        ),
-    ]));
+    let returned_ref = InternalFactRef::new(internal_ref_parts(FactVisibility::indexed_default(
+        FactAudience::Platform,
+    )))
+    .expect("returned ref");
+    let rows = [FactQueryResultRow::new(
+        returned_ref,
+        vec![ReturnedFieldValueSummary::new(
+            FactFieldId::new("result.height").expect("field"),
+            FactFieldValueType::UnsignedInteger,
+            FactCanonicalScalar::UnsignedInteger(800_000),
+        )
+        .expect("summary")],
+    )];
     let plan_hash = fact_query_plan_hash(&plan).expect("plan hash");
-    let receipt_material = FactQueryReceiptMaterial::from_parts(
+    let receipt_material = FactQueryReceiptMaterial::from_rows(
         &plan_hash,
         frontier,
         StoreReadFrontierType::Snapshot,
-        returned_refs,
-        returned_field_summaries,
-        QueryResultCardinality::Exact(1),
+        &rows,
+        true,
+        None,
     )
     .expect("receipt material");
     let auth = StoreReceiptAuthentication::new(
@@ -1170,30 +1165,54 @@ fn fact_query_result_accepts_receipt_aligned_rows() {
 }
 
 #[test]
-fn fact_query_result_row_helpers_derive_receipt_material() {
-    let (_, receipt, _) = query_evidence_fixture();
+fn fact_query_receipt_material_from_rows_derives_receipt_shape() {
+    let (plan, receipt, _) = query_evidence_fixture();
+    let plan_hash = fact_query_plan_hash(&plan).expect("plan hash");
     let row = query_result_row_from_receipt(&receipt);
     let rows = [row.clone()];
 
+    let limited = FactQueryReceiptMaterial::from_rows(
+        &plan_hash,
+        receipt.read_frontier().clone(),
+        receipt.frontier_type(),
+        &rows,
+        true,
+        Some(1),
+    )
+    .expect("limited receipt material");
+    assert_eq!(limited.returned_refs.as_slice(), receipt.returned_refs());
     assert_eq!(
-        fact_query_result_returned_refs(&rows),
-        receipt.returned_refs()
-    );
-    assert_eq!(
-        fact_query_result_returned_field_summaries(&rows, true).as_ref(),
+        limited.returned_field_summaries.as_ref(),
         receipt.returned_field_summaries()
     );
     assert_eq!(
-        fact_query_result_returned_field_summaries(&rows, false),
-        None
-    );
-    assert_eq!(
-        fact_query_result_cardinality_for_rows(rows.len(), Some(1)).expect("limited cardinality"),
+        limited.result_cardinality,
         QueryResultCardinality::AtLeast(1)
     );
+
+    let without_summaries = FactQueryReceiptMaterial::from_rows(
+        &plan_hash,
+        receipt.read_frontier().clone(),
+        receipt.frontier_type(),
+        &rows,
+        false,
+        None,
+    )
+    .expect("receipt material without summaries");
+    assert_eq!(without_summaries.returned_field_summaries.as_ref(), None);
+
+    let exact = FactQueryReceiptMaterial::from_rows(
+        &plan_hash,
+        receipt.read_frontier().clone(),
+        receipt.frontier_type(),
+        &rows,
+        true,
+        Some(2),
+    )
+    .expect("exact receipt material");
     assert_eq!(
-        fact_query_result_cardinality_for_rows(rows.len(), Some(2)).expect("exact cardinality"),
-        QueryResultCardinality::Exact(1)
+        exact.result_cardinality,
+        QueryResultCardinality::Exact(rows.len() as u64)
     );
 }
 
@@ -1408,13 +1427,14 @@ fn receipt_body_hash_from_parts_matches_receipt_hash() {
         )
         .expect("parts hash")
     );
-    let material = FactQueryReceiptMaterial::from_parts(
+    let rows = [query_result_row_from_receipt(&receipt)];
+    let material = FactQueryReceiptMaterial::from_rows(
         &plan_hash,
         receipt.read_frontier().clone(),
         receipt.frontier_type(),
-        receipt.returned_refs().to_vec(),
-        receipt.returned_field_summaries().cloned(),
-        receipt.result_cardinality(),
+        &rows,
+        true,
+        None,
     )
     .expect("receipt material");
     assert_eq!(material.store_receipt_hash(), receipt.store_receipt_hash());

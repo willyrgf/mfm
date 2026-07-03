@@ -164,31 +164,27 @@ fn test_fact_query_evidence_with_returned_refs(
         10,
         mfm_facts::StoreCommitWatermark::new(10),
     );
-    let returned_field_summaries: Option<mfm_facts::ReturnedFieldSummaries> = None;
-    let result_set_digest =
-        mfm_facts::fact_query_result_set_digest(&returned_refs, returned_field_summaries.as_ref())
-            .expect("result-set digest");
-    let result_cardinality = mfm_facts::QueryResultCardinality::Exact(
-        u64::try_from(returned_refs.len()).expect("returned ref count fits u64"),
-    );
+    let rows = returned_refs
+        .into_iter()
+        .map(|fact_ref| mfm_facts::FactQueryResultRow::new(fact_ref, Vec::new()))
+        .collect::<Vec<_>>();
     let plan_hash = mfm_facts::fact_query_plan_hash(&plan).expect("plan hash");
-    let receipt_hash = mfm_facts::fact_query_receipt_body_hash_from_parts(
+    let material = mfm_facts::FactQueryReceiptMaterial::from_rows(
         &plan_hash,
-        &frontier,
+        frontier,
         mfm_facts::StoreReadFrontierType::Snapshot,
-        &returned_refs,
-        returned_field_summaries.as_ref(),
-        &result_set_digest,
-        result_cardinality,
+        &rows,
+        false,
+        plan.limit(),
     )
-    .expect("receipt hash");
+    .expect("receipt material");
     let store_identity = mfm_facts::StoreIdentity::new("store.default").expect("store identity");
     let key_id = mfm_facts::StoreKeyId::new("key.default").expect("store key id");
     let message = store::fact_query_receipt_authentication_message(
         &store_identity,
         mfm_facts::StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
         &key_id,
-        &receipt_hash,
+        material.store_receipt_hash(),
     )
     .expect("receipt authentication message");
     let signature = test_fact_query_signing_key()
@@ -202,16 +198,7 @@ fn test_fact_query_evidence_with_returned_refs(
         signature,
     )
     .expect("receipt authentication");
-    let receipt = mfm_facts::FactQueryReceipt::new(
-        frontier,
-        mfm_facts::StoreReadFrontierType::Snapshot,
-        returned_refs,
-        returned_field_summaries,
-        result_set_digest,
-        result_cardinality,
-        receipt_hash,
-        auth,
-    );
+    let receipt = material.into_receipt(auth);
     let selection = mfm_facts::FactSelectionEvidence::new(content(0x45), Vec::new(), None)
         .expect("selection evidence");
     mfm_facts::FactQueryEvidence::new(plan, receipt, selection)
