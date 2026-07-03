@@ -1515,84 +1515,23 @@ impl CompiledQueryWire {
     }
 
     fn parse(value: &serde_json::Value) -> Result<Self> {
-        let object = value.as_object().ok_or_else(|| {
-            FactDescriptorError::descriptor("canonical fact query must be an object")
-        })?;
-        let version = object
-            .get("version")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                FactDescriptorError::descriptor("canonical fact query version is required")
-            })?;
-        if version != Self::VERSION {
-            return Err(FactDescriptorError::descriptor(format!(
-                "unsupported canonical fact query version {version:?}"
-            )));
-        }
-        let fact_kind = object
-            .get("fact_kind")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                FactDescriptorError::descriptor("canonical fact query fact_kind is required")
-            })
-            .and_then(FactKind::new)?;
-        let resolved_descriptor = object
-            .get("resolved_descriptor")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                FactDescriptorError::descriptor("canonical fact query descriptor hash is required")
-            })?
-            .parse::<ContentDigest>()
-            .map_err(|error| {
-                FactDescriptorError::descriptor(format!(
-                    "canonical fact query descriptor hash failed validation: {error}"
-                ))
-            })?;
-        let predicates = object
-            .get("predicates")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| {
-                FactDescriptorError::descriptor("canonical fact query predicates are required")
-            })?
+        let object = json_object(value, "canonical fact query")?;
+        require_version(object, Self::VERSION, "canonical fact query")?;
+        let predicates = json_array(object, "predicates")?
             .iter()
             .map(parse_query_predicate)
             .collect::<Result<Vec<_>>>()?;
-        let return_fields = object
-            .get("return_fields")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| {
-                FactDescriptorError::descriptor("canonical fact query return fields are required")
-            })?
+        let return_fields = json_array(object, "return_fields")?
             .iter()
             .map(parse_query_return_field)
             .collect::<Result<Vec<_>>>()?;
-        let ordering = object
-            .get("ordering")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                FactDescriptorError::descriptor("canonical fact query ordering is required")
-            })
-            .and_then(FactOrderingName::new)?;
-        let limit = Self::parse_limit(object)?;
         Ok(Self {
-            fact_kind,
-            resolved_descriptor,
+            fact_kind: FactKind::new(json_str(object, "fact_kind")?)?,
+            resolved_descriptor: parse_json_str(object, "resolved_descriptor")?,
             predicates,
             return_fields,
-            ordering,
-            limit,
-        })
-    }
-
-    fn parse_limit(object: &serde_json::Map<String, serde_json::Value>) -> Result<Option<u64>> {
-        let value = object.get("limit").ok_or_else(|| {
-            FactDescriptorError::descriptor("canonical fact query limit is required")
-        })?;
-        if value.is_null() {
-            return Ok(None);
-        }
-        value.as_u64().map(Some).ok_or_else(|| {
-            FactDescriptorError::descriptor("canonical fact query limit must be a u64")
+            ordering: FactOrderingName::new(json_str(object, "ordering")?)?,
+            limit: json_optional_u64(object, "limit")?,
         })
     }
 
@@ -1665,27 +1604,12 @@ impl CompiledQueryWire {
 }
 
 fn parse_query_predicate(value: &serde_json::Value) -> Result<FactQueryPredicate> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| FactDescriptorError::descriptor("query predicate must be an object"))?;
-    let field_id = object
-        .get("field_id")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| FactDescriptorError::descriptor("query predicate field_id is required"))
-        .and_then(FactFieldId::new)?;
-    let operator = object
-        .get("operator")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| FactDescriptorError::field(field_id.clone(), "query operator is required"))
-        .and_then(|value| parse_query_operator(&field_id, value))?;
-    let value_type = object
-        .get("value_type")
-        .ok_or_else(|| FactDescriptorError::field(field_id.clone(), "query value_type is required"))
-        .and_then(parse_field_value_type)?;
-    let scalar_value = object
-        .get("value")
-        .ok_or_else(|| FactDescriptorError::field(field_id.clone(), "query value is required"))?;
-    let value = parse_canonical_scalar_value(value_type, scalar_value, &field_id)?;
+    let object = json_object(value, "query predicate")?;
+    let field_id = FactFieldId::new(json_str(object, "field_id")?)?;
+    let operator = parse_query_operator(&field_id, json_str(object, "operator")?)?;
+    let value_type = parse_field_value_type(json_required(object, "value_type")?)?;
+    let value =
+        parse_canonical_scalar_value(value_type, json_required(object, "value")?, &field_id)?;
     Ok(FactQueryPredicate::new(field_id, operator, value))
 }
 
@@ -1708,15 +1632,10 @@ fn canonical_query_predicate_value(predicate: &FactQueryPredicate) -> Result<Can
 }
 
 fn parse_query_return_field(value: &serde_json::Value) -> Result<FactQueryReturnField> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| FactDescriptorError::descriptor("query return field must be an object"))?;
-    let field_id = object
-        .get("field_id")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| FactDescriptorError::descriptor("query return field_id is required"))
-        .and_then(FactFieldId::new)?;
-    Ok(FactQueryReturnField::new(field_id))
+    let object = json_object(value, "query return field")?;
+    Ok(FactQueryReturnField::new(FactFieldId::new(json_str(
+        object, "field_id",
+    )?)?))
 }
 
 fn canonical_query_return_field_value(field: &FactQueryReturnField) -> Result<CanonicalValue> {
