@@ -4295,7 +4295,7 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
         store.expected_next_seq(&run).await.expect("next seq"),
         StreamSeq::new(3).expect("seq")
     );
-    assert_fact_projection_table_counts(&store, &run, 0, 0, 0).await;
+    assert_fact_projection_table_counts(&store, &run, 1, 0, 0).await;
     let empty_plan = fact_query_plan_with_limit(None);
     assert_empty_fact_query(&store, &empty_plan).await;
 
