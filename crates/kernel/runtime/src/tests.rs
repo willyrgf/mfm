@@ -314,14 +314,9 @@ fn test_returned_fact_authority(
         DigestAlgorithm::Sha256JcsV1,
         DigestBytes::from_array([0x77; 32]),
     );
-    let descriptor_fixture = store::test_support::fact_descriptor_projection_fixture_for_test(
-        descriptor.clone(),
-        EventId::from_digest(
-            DigestAlgorithm::Sha256JcsV1,
-            DigestBytes::from_array([0x78; 32]),
-        ),
-    )
-    .expect("descriptor projection fixture");
+    let descriptor_fixture =
+        store::test_support::fact_descriptor_projection_fixture_for_test(descriptor.clone())
+            .expect("descriptor projection fixture");
     let fact_fixture = store::test_support::fact_projection_fixture_for_test(
         &descriptor,
         descriptor_fixture.descriptor_hash.clone(),

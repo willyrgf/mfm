@@ -1909,9 +1909,8 @@ mod tests {
         store::FactIndexProjection,
     ) {
         let descriptor = descriptor();
-        let descriptor_fixture =
-            fact_descriptor_projection_fixture_for_test(descriptor.clone(), event_id(0x41))
-                .expect("descriptor fixture");
+        let descriptor_fixture = fact_descriptor_projection_fixture_for_test(descriptor.clone())
+            .expect("descriptor fixture");
         let fact_fixture = fact_projection_fixture_for_test(
             &descriptor,
             descriptor_fixture.descriptor_hash.clone(),

@@ -40,7 +40,6 @@ impl PublicFactVisibilityFixtureForTest {
     pub fn new() -> Self {
         let descriptor_fixture = store::test_support::fact_descriptor_projection_fixture_for_test(
             public_visibility_fact_descriptor(),
-            event_id(90),
         )
         .expect("descriptor projection fixture");
         let platform = fact_projection_fixture(

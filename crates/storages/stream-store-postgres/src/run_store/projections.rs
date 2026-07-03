@@ -258,28 +258,56 @@ fn projection_snapshot_with_fact_projections(
     stream: &[KernelEventEnvelope],
     fact_projections: PhysicalFactProjections,
 ) -> Result<ProjectionSnapshot> {
-    let mut admitted_descriptor_hashes = BTreeSet::new();
+    let mut admitted_descriptor_events = BTreeMap::new();
     for event in stream {
         if let events::KernelEventPayload::RunAdmitted(payload) = event.payload() {
             for artifact in &payload.fact_descriptor_artifacts {
-                admitted_descriptor_hashes.insert(artifact.content_digest.clone());
+                admitted_descriptor_events.insert(
+                    (event.run_id().clone(), artifact.content_digest.clone()),
+                    (
+                        event.seq().as_u64(),
+                        event.ordinal().as_u32(),
+                        event.event_id().clone(),
+                    ),
+                );
             }
         }
     }
-    for descriptor_hash in &admitted_descriptor_hashes {
+    for (run_id, descriptor_hash) in admitted_descriptor_events.keys() {
         if !fact_projections
-            .fact_descriptors
-            .contains_key(descriptor_hash)
+            .fact_descriptor_admissions
+            .contains_key(&(run_id.clone(), descriptor_hash.clone()))
         {
             return Err(PostgresStoreError::Corruption(format!(
-                "run-admitted fact descriptor {descriptor_hash} has no physical descriptor row",
+                "run-admitted fact descriptor {run_id}/{descriptor_hash} has no physical admission row",
             )));
         }
     }
+    for ((run_id, descriptor_hash), admission) in &fact_projections.fact_descriptor_admissions {
+        let Some((source_seq, source_ordinal, source_event_id)) =
+            admitted_descriptor_events.get(&(run_id.clone(), descriptor_hash.clone()))
+        else {
+            return Err(PostgresStoreError::Corruption(format!(
+                "physical fact descriptor admission {run_id}/{descriptor_hash} was not admitted by the run stream",
+            )));
+        };
+        if admission.source_seq != *source_seq
+            || admission.source_ordinal != *source_ordinal
+            || admission.source_event_id != *source_event_id
+        {
+            return Err(PostgresStoreError::Corruption(format!(
+                "physical fact descriptor admission {run_id}/{descriptor_hash} does not match run stream coordinates",
+            )));
+        }
+    }
+    let admitted_descriptor_hashes = admitted_descriptor_events
+        .keys()
+        .map(|(_, descriptor_hash)| descriptor_hash.clone())
+        .collect::<BTreeSet<_>>();
     for descriptor_hash in fact_projections.fact_descriptors.keys() {
         if !admitted_descriptor_hashes.contains(descriptor_hash) {
             return Err(PostgresStoreError::Corruption(format!(
-                "physical fact descriptor {descriptor_hash} was not admitted by the run stream",
+                "physical fact descriptor {descriptor_hash} has no run admission",
             )));
         }
     }

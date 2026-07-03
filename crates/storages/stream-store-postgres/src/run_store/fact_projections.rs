@@ -3,6 +3,8 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PhysicalFactProjections {
     pub(super) fact_descriptors: BTreeMap<ContentDigest, mfm_store::v1::FactDescriptorProjection>,
+    pub(super) fact_descriptor_admissions:
+        BTreeMap<(RunId, ContentDigest), FactDescriptorAdmissionProjection>,
     pub(super) fact_records: BTreeMap<mfm_facts::FactClaimId, mfm_store::v1::FactRecordProjection>,
     pub(super) fact_index_entries:
         BTreeMap<mfm_facts::FactClaimId, mfm_store::v1::FactIndexProjection>,
@@ -12,14 +14,66 @@ pub(super) struct PhysicalFactProjections {
     >,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FactDescriptorAdmissionProjection {
+    pub(super) run_id: RunId,
+    pub(super) descriptor_hash: ContentDigest,
+    pub(super) descriptor_artifact_id: ArtifactId,
+    pub(super) descriptor_artifact_evidence: ArtifactEvidenceRef,
+    pub(super) source_seq: u64,
+    pub(super) source_ordinal: u32,
+    pub(super) source_event_id: mfm_ids::EventId,
+}
+
 impl PhysicalFactProjections {
     #[cfg(all(test, feature = "parity-tests"))]
-    pub(super) fn from_snapshot(snapshot: &ProjectionSnapshot) -> Self {
-        Self {
+    pub(super) fn from_snapshot_and_stream(
+        snapshot: &ProjectionSnapshot,
+        stream: &[KernelEventEnvelope],
+    ) -> Result<Self> {
+        let mut fact_descriptor_admissions = BTreeMap::new();
+        for event in stream {
+            if let events::KernelEventPayload::RunAdmitted(payload) = event.payload() {
+                for artifact in &payload.fact_descriptor_artifacts {
+                    let descriptor_hash = artifact.content_digest.clone();
+                    let projection =
+                        snapshot.fact_descriptor(&descriptor_hash).ok_or_else(|| {
+                            PostgresStoreError::Corruption(format!(
+                                "rebuilt descriptor {descriptor_hash} missing catalog projection",
+                            ))
+                        })?;
+                    let evidence = ArtifactEvidenceRef::from_run_artifact(artifact);
+                    if projection.descriptor_artifact_id != evidence.artifact_id
+                        || projection.descriptor_artifact_evidence != evidence
+                    {
+                        return Err(StoreError::ArtifactEvidenceMismatch {
+                            artifact_id: evidence.artifact_id,
+                            field: "fact_descriptor",
+                        }
+                        .into());
+                    }
+                    let admission = FactDescriptorAdmissionProjection {
+                        run_id: event.run_id().clone(),
+                        descriptor_hash: descriptor_hash.clone(),
+                        descriptor_artifact_id: projection.descriptor_artifact_id.clone(),
+                        descriptor_artifact_evidence: projection
+                            .descriptor_artifact_evidence
+                            .clone(),
+                        source_seq: event.seq().as_u64(),
+                        source_ordinal: event.ordinal().as_u32(),
+                        source_event_id: event.event_id().clone(),
+                    };
+                    fact_descriptor_admissions
+                        .insert((event.run_id().clone(), descriptor_hash), admission);
+                }
+            }
+        }
+        Ok(Self {
             fact_descriptors: snapshot
                 .fact_descriptors()
                 .map(|(descriptor_hash, projection)| (descriptor_hash.clone(), projection.clone()))
                 .collect(),
+            fact_descriptor_admissions,
             fact_records: snapshot
                 .fact_records()
                 .map(|(claim_id, projection)| (claim_id.clone(), projection.clone()))
@@ -32,7 +86,7 @@ impl PhysicalFactProjections {
                 .fact_term_entries()
                 .map(|(key, projection)| (key.clone(), projection.clone()))
                 .collect(),
-        }
+        })
     }
 
     pub(super) fn into_projection_snapshot(self) -> Result<ProjectionSnapshot> {
@@ -62,9 +116,24 @@ pub(super) async fn insert_fact_projection_rows_tx(
     events: &[KernelEventEnvelope],
     commit_id: &str,
 ) -> Result<()> {
-    for (descriptor_hash, projection) in after.fact_descriptors() {
-        if before.fact_descriptor(descriptor_hash).is_none() {
-            insert_fact_descriptor_projection_tx(tx, projection, events, commit_id).await?;
+    for event in events {
+        if let events::KernelEventPayload::RunAdmitted(payload) = event.payload() {
+            for artifact in &payload.fact_descriptor_artifacts {
+                let projection =
+                    after
+                        .fact_descriptor(&artifact.content_digest)
+                        .ok_or_else(|| {
+                            PostgresStoreError::Corruption(format!(
+                                "RunAdmitted descriptor {} missing staged projection",
+                                artifact.content_digest
+                            ))
+                        })?;
+                insert_fact_descriptor_projection_tx(tx, projection).await?;
+                insert_run_fact_descriptor_admission_projection_tx(
+                    tx, event, projection, commit_id,
+                )
+                .await?;
+            }
         }
     }
     for (claim_id, projection) in after.fact_index_entries() {
@@ -102,6 +171,7 @@ async fn load_fact_projection_tables_scoped_tx(
     let fact_records = load_fact_record_projections_tx(tx, run_id).await?;
     let projections = PhysicalFactProjections {
         fact_descriptors: load_fact_descriptor_index_tx(tx, run_id).await?,
+        fact_descriptor_admissions: load_run_fact_descriptor_admissions_tx(tx, run_id).await?,
         fact_records,
         fact_index_entries,
         fact_term_entries: load_fact_index_terms_tx(tx, run_id).await?,
@@ -111,6 +181,25 @@ async fn load_fact_projection_tables_scoped_tx(
 }
 
 fn validate_physical_fact_projections(projections: &PhysicalFactProjections) -> Result<()> {
+    for ((run_id, descriptor_hash), admission) in &projections.fact_descriptor_admissions {
+        if run_id != &admission.run_id || descriptor_hash != &admission.descriptor_hash {
+            return Err(PostgresStoreError::Corruption(format!(
+                "run fact descriptor admission key {run_id}/{descriptor_hash} does not match row identity",
+            )));
+        }
+        let Some(descriptor) = projections.fact_descriptors.get(descriptor_hash) else {
+            return Err(PostgresStoreError::Corruption(format!(
+                "run fact descriptor admission {run_id}/{descriptor_hash} references missing descriptor row",
+            )));
+        };
+        if descriptor.descriptor_artifact_id != admission.descriptor_artifact_id
+            || descriptor.descriptor_artifact_evidence != admission.descriptor_artifact_evidence
+        {
+            return Err(PostgresStoreError::Corruption(format!(
+                "run fact descriptor admission {run_id}/{descriptor_hash} does not match descriptor catalog artifact",
+            )));
+        }
+    }
     for (claim_id, record) in &projections.fact_records {
         if !projections
             .fact_descriptors
@@ -118,6 +207,19 @@ fn validate_physical_fact_projections(projections: &PhysicalFactProjections) -> 
         {
             return Err(PostgresStoreError::Corruption(format!(
                 "fact record {:?} references missing descriptor row",
+                claim_id
+            )));
+        }
+        let admission_key = (
+            record.source_run_id.clone(),
+            record.claim.fact_descriptor_hash().clone(),
+        );
+        if !projections
+            .fact_descriptor_admissions
+            .contains_key(&admission_key)
+        {
+            return Err(PostgresStoreError::Corruption(format!(
+                "fact record {:?} references descriptor not admitted by run",
                 claim_id
             )));
         }
@@ -195,7 +297,7 @@ pub(super) async fn rebuild_fact_projection_tables_tx(
     insert_rebuilt_fact_projection_rows_tx(tx, &rebuilt, stream, &commit_ids).await?;
     increment_fact_projection_generation_tx(tx).await?;
     let actual = load_fact_projection_tables_tx(tx, run_id).await?;
-    let expected = PhysicalFactProjections::from_snapshot(&rebuilt);
+    let expected = PhysicalFactProjections::from_snapshot_and_stream(&rebuilt, stream)?;
     if actual != expected {
         return Err(PostgresStoreError::Corruption(
             "rebuilt fact projection tables did not match authoritative stream projection"
@@ -283,15 +385,19 @@ async fn load_fact_descriptor_artifact_bytes_for_projection_tx(
          INNER JOIN artifact_admissions a \
            ON a.artifact_id = f.descriptor_artifact_id \
           AND a.evidence_hash = f.descriptor_artifact_evidence_hash \
+         INNER JOIN run_fact_descriptor_admissions r \
+           ON r.descriptor_hash = f.descriptor_hash \
+          AND r.descriptor_artifact_id = f.descriptor_artifact_id \
+          AND r.descriptor_artifact_evidence_hash = f.descriptor_artifact_evidence_hash \
          INNER JOIN run_artifact_admissions ra \
-           ON ra.run_id = f.source_run_id \
+           ON ra.run_id = r.run_id \
           AND ra.artifact_id = a.artifact_id \
           AND ra.evidence_hash = a.evidence_hash \
          INNER JOIN artifact_blobs b \
            ON b.artifact_id = a.artifact_id \
           AND b.digest = a.digest \
           AND b.byte_len = a.byte_len \
-         WHERE f.source_run_id = $1 AND f.descriptor_hash = $2",
+         WHERE r.run_id = $1 AND f.descriptor_hash = $2",
     )
     .bind(run_id.as_str())
     .bind(projection.descriptor_hash.as_str())
@@ -351,11 +457,13 @@ async fn delete_fact_projection_rows_tx(
         .execute(&mut **tx)
         .await
         .map_err(|error| database_error("failed to delete fact index projections", error))?;
-    sqlx::query("DELETE FROM fact_descriptor_index WHERE source_run_id = $1")
+    sqlx::query("DELETE FROM run_fact_descriptor_admissions WHERE run_id = $1")
         .bind(run_id.as_str())
         .execute(&mut **tx)
         .await
-        .map_err(|error| database_error("failed to delete fact descriptor projections", error))?;
+        .map_err(|error| {
+            database_error("failed to delete run fact descriptor admissions", error)
+        })?;
     Ok(())
 }
 
@@ -366,9 +474,25 @@ async fn insert_rebuilt_fact_projection_rows_tx(
     events: &[KernelEventEnvelope],
     commit_ids_by_event: &BTreeMap<mfm_ids::EventId, String>,
 ) -> Result<()> {
-    for (_, projection) in snapshot.fact_descriptors() {
-        let commit_id = required_commit_id(commit_ids_by_event, &projection.source_event_id)?;
-        insert_fact_descriptor_projection_tx(tx, projection, events, commit_id).await?;
+    for event in events {
+        if let events::KernelEventPayload::RunAdmitted(payload) = event.payload() {
+            let commit_id = required_commit_id(commit_ids_by_event, event.event_id())?;
+            for artifact in &payload.fact_descriptor_artifacts {
+                let projection = snapshot
+                    .fact_descriptor(&artifact.content_digest)
+                    .ok_or_else(|| {
+                        PostgresStoreError::Corruption(format!(
+                            "rebuilt descriptor {} missing catalog projection",
+                            artifact.content_digest
+                        ))
+                    })?;
+                insert_fact_descriptor_projection_tx(tx, projection).await?;
+                insert_run_fact_descriptor_admission_projection_tx(
+                    tx, event, projection, commit_id,
+                )
+                .await?;
+            }
+        }
     }
     for (_, projection) in snapshot.fact_index_entries() {
         let commit_id = required_commit_id(commit_ids_by_event, &projection.source_event_id)?;
@@ -452,32 +576,19 @@ fn insert_artifact_record_into_byte_authority(
 async fn insert_fact_descriptor_projection_tx(
     tx: &mut Transaction<'_, Postgres>,
     projection: &mfm_store::v1::FactDescriptorProjection,
-    events: &[KernelEventEnvelope],
-    commit_id: &str,
 ) -> Result<()> {
-    let event = event_for_id(events, &projection.source_event_id)?;
-    let evidence_hash = descriptor_evidence_hash(event, projection)?;
+    let evidence_hash = descriptor_projection_evidence_hash(projection)?;
     sqlx::query(
         "INSERT INTO fact_descriptor_index \
          (descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash, \
-          source_run_id, source_seq, source_ordinal, source_event_id, commit_id, fact_kind, \
-          descriptor_schema_id, subject_schema_id, response_schema_id, \
+          fact_kind, descriptor_schema_id, subject_schema_id, response_schema_id, \
           fact_subject_namespace_hash) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) \
+         ON CONFLICT (descriptor_hash) DO NOTHING",
     )
     .bind(projection.descriptor_hash.as_str())
     .bind(projection.descriptor_artifact_id.as_str())
     .bind(evidence_hash.as_str())
-    .bind(event.run_id().as_str())
-    .bind(u64_to_i64(
-        event.seq().as_u64(),
-        "fact_descriptor_index.source_seq",
-    )?)
-    .bind(i32::try_from(event.ordinal().as_u32()).map_err(|_| {
-        PostgresStoreError::Corruption("fact_descriptor_index.source_ordinal overflow".into())
-    })?)
-    .bind(event.event_id().as_str())
-    .bind(commit_id)
     .bind(projection.fact_kind.as_str())
     .bind(projection.descriptor_schema_id.as_str())
     .bind(projection.subject_schema_id.as_str())
@@ -486,6 +597,60 @@ async fn insert_fact_descriptor_projection_tx(
     .execute(&mut **tx)
     .await
     .map_err(|error| database_error("failed to insert fact descriptor projection", error))?;
+    verify_fact_descriptor_projection_tx(tx, projection).await?;
+    Ok(())
+}
+
+async fn verify_fact_descriptor_projection_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    projection: &mfm_store::v1::FactDescriptorProjection,
+) -> Result<()> {
+    let stored = load_fact_descriptor_projection_tx(tx, &projection.descriptor_hash).await?;
+    if &stored == projection {
+        return Ok(());
+    }
+    Err(PostgresStoreError::Corruption(format!(
+        "fact descriptor catalog row {} conflicts with staged descriptor projection",
+        projection.descriptor_hash
+    )))
+}
+
+async fn insert_run_fact_descriptor_admission_projection_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &KernelEventEnvelope,
+    projection: &mfm_store::v1::FactDescriptorProjection,
+    commit_id: &str,
+) -> Result<()> {
+    let evidence_hash = descriptor_admission_evidence_hash(event, projection)?;
+    sqlx::query(
+        "INSERT INTO run_fact_descriptor_admissions \
+         (run_id, descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash, \
+          source_seq, source_ordinal, source_event_id, commit_id) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+    )
+    .bind(event.run_id().as_str())
+    .bind(projection.descriptor_hash.as_str())
+    .bind(projection.descriptor_artifact_id.as_str())
+    .bind(evidence_hash.as_str())
+    .bind(u64_to_i64(
+        event.seq().as_u64(),
+        "run_fact_descriptor_admissions.source_seq",
+    )?)
+    .bind(i32::try_from(event.ordinal().as_u32()).map_err(|_| {
+        PostgresStoreError::Corruption(
+            "run_fact_descriptor_admissions.source_ordinal overflow".into(),
+        )
+    })?)
+    .bind(event.event_id().as_str())
+    .bind(commit_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| {
+        database_error(
+            "failed to insert run fact descriptor admission projection",
+            error,
+        )
+    })?;
     Ok(())
 }
 
@@ -598,16 +763,18 @@ async fn load_fact_descriptor_index_tx(
     run_id: Option<&RunId>,
 ) -> Result<BTreeMap<ContentDigest, mfm_store::v1::FactDescriptorProjection>> {
     let sql = if run_id.is_some() {
-        "SELECT descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash, \
-         source_event_id, fact_kind, \
-         descriptor_schema_id, subject_schema_id, response_schema_id, \
-         fact_subject_namespace_hash \
-         FROM fact_descriptor_index WHERE source_run_id = $1 ORDER BY descriptor_hash"
+        "SELECT f.descriptor_hash, f.descriptor_artifact_id, f.descriptor_artifact_evidence_hash, \
+         f.fact_kind, f.descriptor_schema_id, f.subject_schema_id, f.response_schema_id, \
+         f.fact_subject_namespace_hash \
+         FROM run_fact_descriptor_admissions r \
+         INNER JOIN fact_descriptor_index f \
+           ON f.descriptor_hash = r.descriptor_hash \
+          AND f.descriptor_artifact_id = r.descriptor_artifact_id \
+          AND f.descriptor_artifact_evidence_hash = r.descriptor_artifact_evidence_hash \
+         WHERE r.run_id = $1 ORDER BY f.descriptor_hash"
     } else {
         "SELECT descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash, \
-         source_event_id, fact_kind, \
-         descriptor_schema_id, subject_schema_id, response_schema_id, \
-         fact_subject_namespace_hash \
+         fact_kind, descriptor_schema_id, subject_schema_id, response_schema_id, fact_subject_namespace_hash \
          FROM fact_descriptor_index ORDER BY descriptor_hash"
     };
     let mut query = sqlx::query(sql);
@@ -618,6 +785,35 @@ async fn load_fact_descriptor_index_tx(
         .fetch_all(&mut **tx)
         .await
         .map_err(|error| database_error("failed to load fact descriptor projections", error))?;
+    fact_descriptor_projections_from_rows(tx, rows).await
+}
+
+async fn load_fact_descriptor_projection_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    descriptor_hash: &ContentDigest,
+) -> Result<mfm_store::v1::FactDescriptorProjection> {
+    let rows = sqlx::query(
+        "SELECT descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash, \
+         fact_kind, descriptor_schema_id, subject_schema_id, response_schema_id, \
+         fact_subject_namespace_hash \
+         FROM fact_descriptor_index WHERE descriptor_hash = $1",
+    )
+    .bind(descriptor_hash.as_str())
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load fact descriptor projection", error))?;
+    let projections = fact_descriptor_projections_from_rows(tx, rows).await?;
+    projections.into_values().next().ok_or_else(|| {
+        PostgresStoreError::Corruption(format!(
+            "fact descriptor catalog row {descriptor_hash} missing after insert"
+        ))
+    })
+}
+
+async fn fact_descriptor_projections_from_rows(
+    tx: &mut Transaction<'_, Postgres>,
+    rows: Vec<PgRow>,
+) -> Result<BTreeMap<ContentDigest, mfm_store::v1::FactDescriptorProjection>> {
     let mut projections = BTreeMap::new();
     for row in rows {
         let row = PgRowReader::new(&row, "fact_descriptor_index");
@@ -641,11 +837,72 @@ async fn load_fact_descriptor_index_tx(
             subject_schema_id: row.required_identity("subject_schema_id")?,
             response_schema_id: row.required_identity("response_schema_id")?,
             fact_subject_namespace_hash: row.required_identity("fact_subject_namespace_hash")?,
-            source_event_id: row.required_identity("source_event_id")?,
         };
         projections.insert(descriptor_hash, projection);
     }
     Ok(projections)
+}
+
+async fn load_run_fact_descriptor_admissions_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: Option<&RunId>,
+) -> Result<BTreeMap<(RunId, ContentDigest), FactDescriptorAdmissionProjection>> {
+    let sql = if run_id.is_some() {
+        "SELECT run_id, descriptor_hash, descriptor_artifact_id, \
+         descriptor_artifact_evidence_hash, source_seq, source_ordinal, source_event_id \
+         FROM run_fact_descriptor_admissions WHERE run_id = $1 \
+         ORDER BY run_id, descriptor_hash"
+    } else {
+        "SELECT run_id, descriptor_hash, descriptor_artifact_id, \
+         descriptor_artifact_evidence_hash, source_seq, source_ordinal, source_event_id \
+         FROM run_fact_descriptor_admissions ORDER BY run_id, descriptor_hash"
+    };
+    let mut query = sqlx::query(sql);
+    if let Some(run_id) = run_id {
+        query = query.bind(run_id.as_str());
+    }
+    let rows = query
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| database_error("failed to load run fact descriptor admissions", error))?;
+    let mut admissions = BTreeMap::new();
+    for row in rows {
+        let row = PgRowReader::new(&row, "run_fact_descriptor_admissions");
+        let run_id = row.required_identity::<RunId>("run_id")?;
+        let descriptor_hash = row.required_identity::<ContentDigest>("descriptor_hash")?;
+        let descriptor_artifact_id = row.required_identity("descriptor_artifact_id")?;
+        let descriptor_artifact_evidence_hash =
+            row.required_identity("descriptor_artifact_evidence_hash")?;
+        let descriptor_artifact = load_artifact_record_tx(
+            tx,
+            &descriptor_artifact_id,
+            &descriptor_artifact_evidence_hash,
+        )
+        .await?;
+        let source_seq = i64_to_positive_u64(
+            row.required_i64("source_seq")?,
+            "run_fact_descriptor_admissions.source_seq",
+        )?;
+        let source_ordinal = row.required_u32("source_ordinal")?;
+        let admission = FactDescriptorAdmissionProjection {
+            run_id: run_id.clone(),
+            descriptor_hash: descriptor_hash.clone(),
+            descriptor_artifact_id,
+            descriptor_artifact_evidence: descriptor_artifact.evidence,
+            source_seq,
+            source_ordinal,
+            source_event_id: row.required_identity("source_event_id")?,
+        };
+        if admissions
+            .insert((run_id, descriptor_hash), admission)
+            .is_some()
+        {
+            return Err(PostgresStoreError::Corruption(
+                "duplicate run fact descriptor admission projection".to_owned(),
+            ));
+        }
+    }
+    Ok(admissions)
 }
 
 async fn load_fact_record_projections_tx(
@@ -991,7 +1248,27 @@ impl FactTermValueColumn {
     }
 }
 
-fn descriptor_evidence_hash(
+fn descriptor_projection_evidence_hash(
+    projection: &mfm_store::v1::FactDescriptorProjection,
+) -> Result<ContentDigest> {
+    if projection.descriptor_artifact_evidence.artifact_id != projection.descriptor_artifact_id
+        || projection.descriptor_artifact_evidence.digest != projection.descriptor_hash
+        || projection.descriptor_artifact_evidence.artifact_role
+            != events::ArtifactRole::FactDescriptor
+    {
+        return Err(StoreError::ArtifactEvidenceMismatch {
+            artifact_id: projection.descriptor_artifact_id.clone(),
+            field: "fact_descriptor",
+        }
+        .into());
+    }
+    projection
+        .descriptor_artifact_evidence
+        .evidence_hash()
+        .map_err(Into::into)
+}
+
+fn descriptor_admission_evidence_hash(
     event: &KernelEventEnvelope,
     projection: &mfm_store::v1::FactDescriptorProjection,
 ) -> Result<ContentDigest> {
@@ -1012,21 +1289,15 @@ fn descriptor_evidence_hash(
                 "fact descriptor projection missing RunAdmitted artifact evidence".to_owned(),
             )
         })?;
-    ArtifactEvidenceRef::from_run_artifact(artifact)
-        .evidence_hash()
-        .map_err(Into::into)
-}
-
-fn event_for_id<'a>(
-    events: &'a [KernelEventEnvelope],
-    event_id: &mfm_ids::EventId,
-) -> Result<&'a KernelEventEnvelope> {
-    events
-        .iter()
-        .find(|event| event.event_id() == event_id)
-        .ok_or_else(|| {
-            PostgresStoreError::Corruption(format!("event {event_id} missing from staged batch"))
-        })
+    let evidence = ArtifactEvidenceRef::from_run_artifact(artifact);
+    if evidence != projection.descriptor_artifact_evidence {
+        return Err(StoreError::ArtifactEvidenceMismatch {
+            artifact_id: evidence.artifact_id,
+            field: "fact_descriptor",
+        }
+        .into());
+    }
+    evidence.evidence_hash().map_err(Into::into)
 }
 
 struct TermValueColumns {
@@ -1189,7 +1460,6 @@ mod tests {
         let other_descriptor_fixture =
             mfm_store::v1::test_support::fact_descriptor_projection_fixture_for_test(
                 fact_descriptor_with_seed(2),
-                event_id(11),
             )
             .expect("other descriptor fixture");
         let mismatched_descriptor_hash = other_descriptor_fixture.descriptor_hash.clone();
@@ -1233,12 +1503,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn physical_fact_projection_validation_rejects_admission_without_descriptor() {
+        let mut projections = valid_physical_fact_projections();
+        projections.fact_descriptors.clear();
+
+        let error = validate_physical_fact_projections(&projections)
+            .expect_err("admission without descriptor should reject");
+        assert!(
+            error
+                .to_string()
+                .contains("references missing descriptor row"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn physical_fact_projection_validation_rejects_record_without_run_admission() {
+        let mut projections = valid_physical_fact_projections();
+        projections.fact_descriptor_admissions.clear();
+
+        let error = validate_physical_fact_projections(&projections)
+            .expect_err("record without run descriptor admission should reject");
+        assert!(
+            error
+                .to_string()
+                .contains("references descriptor not admitted by run"),
+            "{error}"
+        );
+    }
+
     fn valid_physical_fact_projections() -> PhysicalFactProjections {
         let descriptor = fact_descriptor();
         let descriptor_fixture =
             mfm_store::v1::test_support::fact_descriptor_projection_fixture_for_test(
                 descriptor.clone(),
-                event_id(10),
             )
             .expect("descriptor fixture");
         let fact_fixture = mfm_store::v1::test_support::fact_projection_fixture_for_test(
@@ -1278,10 +1577,24 @@ mod tests {
         let index = fact_fixture.index.expect("indexed fact projection");
         let claim_id = index.fact_claim_id.clone();
         let term = fact_fixture.terms.into_iter().next().expect("index term");
+        let descriptor_hash = descriptor_fixture.descriptor_hash.clone();
+        let descriptor_admission = FactDescriptorAdmissionProjection {
+            run_id: run_id(3),
+            descriptor_hash: descriptor_hash.clone(),
+            descriptor_artifact_id: descriptor_fixture.descriptor_artifact_id.clone(),
+            descriptor_artifact_evidence: descriptor_fixture.descriptor_evidence.clone(),
+            source_seq: 1,
+            source_ordinal: 0,
+            source_event_id: event_id(10),
+        };
         PhysicalFactProjections {
             fact_descriptors: BTreeMap::from([(
-                descriptor_fixture.descriptor_hash.clone(),
+                descriptor_hash.clone(),
                 descriptor_fixture.projection,
+            )]),
+            fact_descriptor_admissions: BTreeMap::from([(
+                (run_id(3), descriptor_hash),
+                descriptor_admission,
             )]),
             fact_records: BTreeMap::from([(claim_id.clone(), fact_fixture.record)]),
             fact_index_entries: BTreeMap::from([(claim_id.clone(), index)]),

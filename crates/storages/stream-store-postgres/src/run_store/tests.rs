@@ -175,7 +175,7 @@ async fn assert_fact_projection_table_counts(
         fact_projection_table_count(
             &store.pool,
             run,
-            "SELECT COUNT(*) FROM fact_descriptor_index WHERE source_run_id = $1"
+            "SELECT COUNT(*) FROM run_fact_descriptor_admissions WHERE run_id = $1"
         )
         .await,
         descriptors as i64
@@ -206,6 +206,13 @@ async fn fact_projection_table_count(pool: &PgPool, run: &RunId, sql: &'static s
         .fetch_one(pool)
         .await
         .expect("fact projection table count")
+}
+
+async fn global_fact_descriptor_catalog_count(store: &PostgresRunStore) -> i64 {
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM fact_descriptor_index")
+        .fetch_one(&store.pool)
+        .await
+        .expect("global fact descriptor catalog count")
 }
 
 fn assert_fact_query_receipt(
@@ -809,8 +816,7 @@ fn fact_descriptor_artifact_ref() -> ArtifactEvidenceRef {
 }
 
 fn fact_descriptor_fixture() -> FactDescriptorProjectionFixtureForTest {
-    fact_descriptor_projection_fixture_for_test(fact_descriptor(), event_id(44))
-        .expect("descriptor fixture")
+    fact_descriptor_projection_fixture_for_test(fact_descriptor()).expect("descriptor fixture")
 }
 
 fn fact_subject_evidence() -> mfm_facts::FactSubjectEvidence {
@@ -830,14 +836,25 @@ fn fact_subject_evidence() -> mfm_facts::FactSubjectEvidence {
 }
 
 fn fact_response_bytes() -> Vec<u8> {
-    PlainCanonicalJsonBytes::from_json_str(r#"{"height":12345}"#)
+    fact_response_bytes_with_height(12_345)
+}
+
+fn fact_response_bytes_with_height(height: u64) -> Vec<u8> {
+    PlainCanonicalJsonBytes::from_json_str(&format!(r#"{{"height":{height}}}"#))
         .expect("response bytes")
         .to_vec()
 }
 
 fn fact_artifact_ref() -> ArtifactEvidenceRef {
-    let bytes = fact_response_bytes();
-    let digest = PlainCanonicalJsonBytes::from_canonical_json_slice(&bytes)
+    fact_artifact_ref_for_response_bytes(&fact_response_bytes())
+}
+
+fn fact_artifact_ref_with_height(height: u64) -> ArtifactEvidenceRef {
+    fact_artifact_ref_for_response_bytes(&fact_response_bytes_with_height(height))
+}
+
+fn fact_artifact_ref_for_response_bytes(bytes: &[u8]) -> ArtifactEvidenceRef {
+    let digest = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
         .expect("canonical response bytes")
         .content_digest();
     ArtifactEvidenceRef {
@@ -2272,7 +2289,16 @@ async fn append_fact_commit(
     request: mfm_store::v1::CommitRequest,
     response: &ArtifactEvidenceRef,
 ) -> Result<CommitOutcome> {
-    let response_bytes = PreparedArtifactBytes::new(fact_response_bytes(), response.clone())?;
+    append_fact_commit_with_response_bytes(store, request, response, fact_response_bytes()).await
+}
+
+async fn append_fact_commit_with_response_bytes(
+    store: &PostgresRunStore,
+    request: mfm_store::v1::CommitRequest,
+    response: &ArtifactEvidenceRef,
+    response_bytes: Vec<u8>,
+) -> Result<CommitOutcome> {
+    let response_bytes = PreparedArtifactBytes::new(response_bytes, response.clone())?;
     let plan = test_prepared_commit_plan(request, vec![response.clone()])?;
     store
         .append_prepared_commit_bundle(test_prepared_commit_bundle_with_artifact_bytes(
@@ -4378,11 +4404,11 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
         .execute(&store.pool)
         .await
         .expect("delete fact index");
-    sqlx::query("DELETE FROM fact_descriptor_index WHERE source_run_id = $1")
+    sqlx::query("DELETE FROM run_fact_descriptor_admissions WHERE run_id = $1")
         .bind(run.as_str())
         .execute(&store.pool)
         .await
-        .expect("delete fact descriptors");
+        .expect("delete run fact descriptor admissions");
     let err = store
         .status_projection_snapshot(&run)
         .await
@@ -4404,6 +4430,81 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
         .expect("fact commit idempotent retry");
     assert!(matches!(retry, CommitOutcome::Idempotent(_)));
     assert_fact_projection_table_counts(&store, &run, 1, 1, 2).await;
+
+    drop_schema(&store, &schema).await;
+}
+
+#[tokio::test]
+async fn fact_descriptor_catalog_deduplicates_across_runs() {
+    let (store, schema) = test_store().await;
+    let first_run = fact_run_id(11);
+    let second_run = fact_run_id(12);
+
+    append_fact_run_start(&store, first_run.clone())
+        .await
+        .expect("first run start");
+    append_fact_run_start(&store, second_run.clone())
+        .await
+        .expect("second run start with duplicate descriptor");
+    assert_eq!(global_fact_descriptor_catalog_count(&store).await, 1);
+    assert_fact_projection_table_counts(&store, &first_run, 1, 0, 0).await;
+    assert_fact_projection_table_counts(&store, &second_run, 1, 0, 0).await;
+
+    append_fact_attempt_start(&store, first_run.clone(), "first-fact-attempt-start")
+        .await
+        .expect("first fact attempt start");
+    append_fact_attempt_start(&store, second_run.clone(), "second-fact-attempt-start")
+        .await
+        .expect("second fact attempt start");
+
+    let first_response_ref = fact_artifact_ref_with_height(12_345);
+    let first_fact_request =
+        fact_commit_request(first_run.clone(), 3, "first-fact", &first_response_ref);
+    append_fact_commit_with_response_bytes(
+        &store,
+        first_fact_request,
+        &first_response_ref,
+        fact_response_bytes_with_height(12_345),
+    )
+    .await
+    .expect("first fact commit");
+
+    let second_response_ref = fact_artifact_ref_with_height(12_346);
+    let second_fact_request =
+        fact_commit_request(second_run.clone(), 3, "second-fact", &second_response_ref);
+    append_fact_commit_with_response_bytes(
+        &store,
+        second_fact_request,
+        &second_response_ref,
+        fact_response_bytes_with_height(12_346),
+    )
+    .await
+    .expect("second fact commit");
+
+    assert_eq!(global_fact_descriptor_catalog_count(&store).await, 1);
+    assert_fact_projection_table_counts(&store, &first_run, 1, 1, 2).await;
+    assert_fact_projection_table_counts(&store, &second_run, 1, 1, 2).await;
+
+    let query_plan = fact_query_plan_with_limit(None);
+    let query_result = store
+        .execute_fact_query(&query_plan)
+        .await
+        .expect("fact query execution");
+    assert_eq!(query_result.rows().len(), 2);
+    assert_fact_query_receipt(
+        &store,
+        &query_plan,
+        &query_result,
+        mfm_facts::QueryResultCardinality::Exact(2),
+    );
+    assert_eq!(
+        query_result
+            .receipt()
+            .read_frontier()
+            .descriptor_catalog_watermark()
+            .as_u64(),
+        1
+    );
 
     drop_schema(&store, &schema).await;
 }

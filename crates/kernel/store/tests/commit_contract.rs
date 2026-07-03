@@ -2365,8 +2365,7 @@ fn fact_descriptor_artifact_ref() -> ArtifactEvidenceRef {
 
 fn fact_descriptor_fixture() -> mfm_store::v1::test_support::FactDescriptorProjectionFixtureForTest
 {
-    fact_descriptor_projection_fixture_for_test(fact_descriptor(), event_id(98))
-        .expect("fact descriptor fixture")
+    fact_descriptor_projection_fixture_for_test(fact_descriptor()).expect("fact descriptor fixture")
 }
 
 fn fact_subject_evidence() -> mfm_facts::FactSubjectEvidence {
