@@ -24,6 +24,8 @@ Environment variables:
 - `DATABASE_URL`: Postgres URL for the certified run store (required)
 - `MFM_SOURCE_REVISION`: optional source revision evidence for typed run starts
 - `MFM_RUNTIME_CONFIG_FILE`: optional runtime config file path for live capability-backed runs
+- `MFM_FACT_RECEIPT_SIGNING_KEY_FILE`: optional Ed25519 signing-key file for authenticated fact
+  queries
 
 The REST API validates the PostgreSQL schema on startup and does not create or
 alter tables. Apply the `mfm-stream-store-postgres` migrations before starting
@@ -41,6 +43,11 @@ outside the typed run store are not read or migrated by the REST API.
 
 REST startup does not load or validate `MFM_RUNTIME_CONFIG_FILE`; malformed or missing runtime
 config is reported only when a live start/resume request needs the affected capability family.
+When `MFM_FACT_RECEIPT_SIGNING_KEY_FILE` is set, startup validates that the key matches the
+store-owned `fact_receipt_trust_root`. The public fact query endpoints (`GET /v1/facts/:kind` and
+`GET /v1/facts/:kind/latest`) require that matching signer because query execution issues
+authenticated receipts. The signer file may contain raw 32-byte Ed25519 key material or 64 hex
+characters.
 
 ## API
 

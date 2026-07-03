@@ -1,6 +1,7 @@
 use super::*;
 use ed25519_dalek::{Signer, SigningKey};
 use std::fmt;
+use zeroize::Zeroize;
 
 /// In-memory signer for authenticated Postgres fact-query receipts.
 #[derive(Clone)]
@@ -15,13 +16,15 @@ impl PostgresFactReceiptSigner {
     pub fn from_ed25519_signing_key_bytes(
         store_identity: mfm_facts::StoreIdentity,
         key_id: mfm_facts::StoreKeyId,
-        signing_key: [u8; 32],
+        mut signing_key: [u8; 32],
     ) -> Self {
-        Self {
+        let signer = Self {
             store_identity,
             key_id,
             signing_key: SigningKey::from_bytes(&signing_key),
-        }
+        };
+        signing_key.zeroize();
+        signer
     }
 
     /// Returns the non-secret store identity this signer asserts.

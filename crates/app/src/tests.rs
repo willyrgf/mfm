@@ -1471,3 +1471,61 @@ async fn postgres_store_authority_error_is_redacted_for_public_app_surface() {
         );
     }
 }
+
+#[test]
+fn fact_receipt_signing_key_file_accepts_raw_and_hex_material() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let raw_path = dir.path().join("raw.key");
+    let raw = [0x27_u8; 32];
+    std::fs::write(&raw_path, raw).expect("write raw key");
+
+    let loaded = load_fact_receipt_signing_key_file(&raw_path).expect("raw key loads");
+    assert_eq!(&*loaded, &raw);
+
+    let hex_path = dir.path().join("hex.key");
+    std::fs::write(&hex_path, format!("0x{}\n", "27".repeat(32))).expect("write hex key");
+
+    let loaded = load_fact_receipt_signing_key_file(&hex_path).expect("hex key loads");
+    assert_eq!(&*loaded, &raw);
+}
+
+#[test]
+fn fact_receipt_signing_key_errors_are_redacted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let invalid_path = dir.path().join("fact-receipt-secret.key");
+    let invalid_secret = "not-valid-secret-material";
+    std::fs::write(&invalid_path, invalid_secret).expect("write invalid key");
+
+    let invalid =
+        load_fact_receipt_signing_key_file(&invalid_path).expect_err("invalid key is rejected");
+    assert_eq!(invalid.code, "FactReceiptSigningKeyInvalid");
+    let rendered = format!("{invalid:?}\n{invalid}");
+    assert!(!rendered.contains(invalid_secret));
+    assert!(!rendered.contains(invalid_path.to_str().expect("utf8 path")));
+
+    let missing_path = dir.path().join("missing-secret.key");
+    let missing =
+        load_fact_receipt_signing_key_file(&missing_path).expect_err("missing key is rejected");
+    assert_eq!(missing.code, "FactReceiptSigningKeyReadFailed");
+    let rendered = format!("{missing:?}\n{missing}");
+    assert!(!rendered.contains(missing_path.to_str().expect("utf8 path")));
+}
+
+#[test]
+fn fact_query_receipt_authentication_errors_report_signer_requirement() {
+    let private_diagnostic = "missing fact receipt signer";
+    let error =
+        fact_query_execution_store_error(mfm_stream_store_postgres::PostgresStoreError::Store(
+            store::StoreError::ReceiptAuthentication {
+                message: private_diagnostic.to_owned(),
+            },
+        ));
+
+    assert_eq!(error.code, "MissingFactReceiptSigningKey");
+    assert_eq!(
+        error.message,
+        "Fact receipt signing key is required for public fact queries"
+    );
+    let rendered = format!("{error:?}\n{error}");
+    assert!(!rendered.contains(private_diagnostic));
+}

@@ -262,7 +262,7 @@ where
 
 /// Connects to the default certified run store.
 pub async fn make_default_run_store() -> Result<ProductionRunStore, ApiError> {
-    Ok(mfm_app::connect_production_run_store(None).await?)
+    Ok(mfm_app::connect_production_run_store_with_optional_fact_query_signer(None).await?)
 }
 
 /// Builds default production REST API state from environment-selected stores.

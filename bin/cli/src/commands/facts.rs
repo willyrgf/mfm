@@ -3,7 +3,9 @@ use std::fmt;
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::run_store::{connect_run_read_services, RunStoresArgs};
+use crate::support::run_store::{
+    connect_fact_query_run_read_services, connect_run_read_services, RunStoresArgs,
+};
 use clap::{Args, Subcommand};
 use mfm_app::{
     PublicFactDescriptorSummary, PublicFactExplain, PublicFactKindSummary, PublicFactQueryPage,
@@ -356,7 +358,7 @@ async fn execute_kind_query(
     query: &FactQuerySelectorArgs,
     limit: Option<u64>,
 ) -> CommandResult<QueryOutput> {
-    let services = connect_run_read_services(stores).await?;
+    let services = connect_fact_query_run_read_services(stores).await?;
     let request = public_fact_query_request(kind, query, limit)?;
     Ok(CommandOutput::new(
         services.query_public_facts(request).await?.into(),

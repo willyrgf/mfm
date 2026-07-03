@@ -2223,6 +2223,7 @@ dependencies = [
  "tracing-subscriber",
  "trybuild",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -2873,6 +2874,7 @@ dependencies = [
  "sqlx",
  "thiserror",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
