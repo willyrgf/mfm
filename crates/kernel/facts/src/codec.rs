@@ -363,47 +363,13 @@ pub fn canonical_fact_query_receipt_body_bytes(
     FactQueryReceiptBodyParts::from_receipt(plan_hash, receipt).canonical_bytes()
 }
 
-/// Returns canonical result-set bytes for the rows and summaries pinned in a receipt.
-pub fn canonical_fact_query_result_set_bytes(
-    returned_refs: &[InternalFactRef],
-    returned_field_summaries: Option<&ReturnedFieldSummaries>,
-) -> Result<CanonicalJsonBytes> {
-    canonical_fact_query_result_set_value(returned_refs, returned_field_summaries)
-        .map(|value| CanonicalJsonBytes::from_value(&value))
-}
-
 /// Derives the result-set digest for the rows and summaries pinned in a receipt.
 pub fn fact_query_result_set_digest(
     returned_refs: &[InternalFactRef],
     returned_field_summaries: Option<&ReturnedFieldSummaries>,
 ) -> Result<ContentDigest> {
-    Ok(
-        canonical_fact_query_result_set_bytes(returned_refs, returned_field_summaries)?
-            .content_digest(),
-    )
-}
-
-/// Returns canonical receipt body bytes from unsigned receipt parts.
-#[allow(clippy::too_many_arguments)]
-pub fn canonical_fact_query_receipt_body_bytes_from_parts(
-    plan_hash: &ContentDigest,
-    read_frontier: &StoreReadFrontier,
-    frontier_type: StoreReadFrontierType,
-    returned_refs: &[InternalFactRef],
-    returned_field_summaries: Option<&ReturnedFieldSummaries>,
-    result_set_digest: &ContentDigest,
-    result_cardinality: QueryResultCardinality,
-) -> Result<CanonicalJsonBytes> {
-    FactQueryReceiptBodyParts::new(
-        plan_hash,
-        read_frontier,
-        frontier_type,
-        returned_refs,
-        returned_field_summaries,
-        result_set_digest,
-        result_cardinality,
-    )
-    .canonical_bytes()
+    canonical_fact_query_result_set_value(returned_refs, returned_field_summaries)
+        .map(|value| CanonicalJsonBytes::from_value(&value).content_digest())
 }
 
 /// Derives the receipt body hash, excluding receipt hash and authentication fields.
@@ -548,18 +514,6 @@ pub fn selected_returned_field_summaries_digest(
     returned_field_summaries: &ReturnedFieldSummaries,
     selected_indices: &[u64],
 ) -> Result<ContentDigest> {
-    Ok(canonical_selected_returned_field_summaries_bytes(
-        returned_field_summaries,
-        selected_indices,
-    )?
-    .content_digest())
-}
-
-/// Returns canonical bytes for the returned field summaries selected by receipt index.
-pub fn canonical_selected_returned_field_summaries_bytes(
-    returned_field_summaries: &ReturnedFieldSummaries,
-    selected_indices: &[u64],
-) -> Result<CanonicalJsonBytes> {
     let mut selected = Vec::with_capacity(selected_indices.len());
     for index in selected_indices {
         let index = usize::try_from(*index).map_err(|_| {
@@ -580,7 +534,7 @@ pub fn canonical_selected_returned_field_summaries_bytes(
         ),
         ("summaries", CanonicalValue::Array(selected)),
     ])?;
-    Ok(CanonicalJsonBytes::from_value(&value))
+    Ok(CanonicalJsonBytes::from_value(&value).content_digest())
 }
 
 /// Extracts canonical subject material using the descriptor's subject fields.

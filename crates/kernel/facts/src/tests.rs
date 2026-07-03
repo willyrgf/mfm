@@ -1402,19 +1402,6 @@ fn receipt_body_hash_from_parts_matches_receipt_hash() {
     let (plan, receipt, _) = query_evidence_fixture();
     let plan_hash = fact_query_plan_hash(&plan).expect("plan hash");
     assert_eq!(
-        canonical_fact_query_receipt_body_bytes(&plan_hash, &receipt).expect("receipt bytes"),
-        canonical_fact_query_receipt_body_bytes_from_parts(
-            &plan_hash,
-            receipt.read_frontier(),
-            receipt.frontier_type(),
-            receipt.returned_refs(),
-            receipt.returned_field_summaries(),
-            receipt.result_set_digest(),
-            receipt.result_cardinality(),
-        )
-        .expect("parts bytes")
-    );
-    assert_eq!(
         fact_query_receipt_body_hash(&plan_hash, &receipt).expect("receipt hash"),
         fact_query_receipt_body_hash_from_parts(
             &plan_hash,
