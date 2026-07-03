@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use mfm_canonical::CanonicalJsonBytes;
+use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::ContentDigest;
 
 use crate::*;
@@ -255,7 +255,7 @@ pub struct CanonicalFactQueryPlan {
     pub(crate) canonicalizer_version: FactCanonicalizerVersion,
     pub(crate) resolved_descriptor: ContentDigest,
     pub(crate) scope_decision_evidence: ScopeDecisionEvidence,
-    pub(crate) canonical_query: CanonicalJsonBytes,
+    pub(crate) canonical_query: PlainCanonicalJsonBytes,
     pub(crate) canonical_query_hash: ContentDigest,
     pub(crate) ordering: FactOrderingPolicy,
     pub(crate) limit: Option<u64>,
@@ -271,7 +271,7 @@ impl CanonicalFactQueryPlan {
         canonicalizer_version: FactCanonicalizerVersion,
         resolved_descriptor: ContentDigest,
         scope_decision_evidence: ScopeDecisionEvidence,
-        canonical_query: CanonicalJsonBytes,
+        canonical_query: PlainCanonicalJsonBytes,
         ordering: FactOrderingPolicy,
         limit: Option<u64>,
     ) -> Result<Self> {
@@ -326,7 +326,7 @@ impl CanonicalFactQueryPlan {
     }
 
     /// Returns canonical query bytes.
-    pub const fn canonical_query(&self) -> &CanonicalJsonBytes {
+    pub const fn canonical_query(&self) -> &PlainCanonicalJsonBytes {
         &self.canonical_query
     }
 

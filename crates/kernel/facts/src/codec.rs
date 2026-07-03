@@ -971,7 +971,7 @@ fn parse_canonical_fact_query_plan(value: &serde_json::Value) -> Result<Canonica
     let object = json_object(value, "fact query plan")?;
     require_version(object, "mfm.fact-query-plan.v1", "fact query plan")?;
     let canonical_query =
-        canonical_json_bytes_from_canonical_json_str(json_str(object, "canonical_query")?)?;
+        plain_canonical_json_bytes_from_canonical_json_str(json_str(object, "canonical_query")?)?;
     let expected_query_hash: ContentDigest = parse_json_str(object, "canonical_query_hash")?;
     let query_hash = canonical_query.content_digest();
     if query_hash != expected_query_hash {
@@ -1160,50 +1160,11 @@ fn parse_store_receipt_authentication(
     )
 }
 
-fn canonical_json_bytes_from_canonical_json_str(value: &str) -> Result<CanonicalJsonBytes> {
+fn plain_canonical_json_bytes_from_canonical_json_str(
+    value: &str,
+) -> Result<PlainCanonicalJsonBytes> {
     PlainCanonicalJsonBytes::from_canonical_json_slice(value.as_bytes())
-        .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
-    let json = serde_json::from_str::<serde_json::Value>(value)
-        .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
-    let canonical = CanonicalJsonBytes::from_value(&plain_json_to_canonical_value(&json)?);
-    if canonical.as_str() != value {
-        return Err(FactDescriptorError::canonical(
-            "canonical JSON value did not round-trip",
-        ));
-    }
-    Ok(canonical)
-}
-
-fn plain_json_to_canonical_value(value: &serde_json::Value) -> Result<CanonicalValue> {
-    match value {
-        serde_json::Value::Null => Ok(CanonicalValue::Null),
-        serde_json::Value::Bool(value) => Ok(CanonicalValue::Bool(*value)),
-        serde_json::Value::String(value) => Ok(CanonicalValue::String(value.clone())),
-        serde_json::Value::Number(value) => {
-            if let Some(value) = value.as_u64() {
-                Ok(CanonicalValue::Unsigned(value))
-            } else if let Some(value) = value.as_i64() {
-                Ok(CanonicalValue::Signed(value))
-            } else {
-                Err(FactDescriptorError::canonical(
-                    "floating-point numbers are not valid canonical fact query JSON",
-                ))
-            }
-        }
-        serde_json::Value::Array(values) => values
-            .iter()
-            .map(plain_json_to_canonical_value)
-            .collect::<Result<Vec<_>>>()
-            .map(CanonicalValue::Array),
-        serde_json::Value::Object(object) => {
-            let entries = object
-                .iter()
-                .map(|(key, value)| Ok((key.clone(), plain_json_to_canonical_value(value)?)))
-                .collect::<Result<Vec<_>>>()?;
-            CanonicalValue::object(entries)
-                .map_err(|error| FactDescriptorError::canonical(error.to_string()))
-        }
-    }
+        .map_err(|error| FactDescriptorError::canonical(error.to_string()))
 }
 
 fn parse_fact_audience(value: &str) -> Result<FactAudience> {
@@ -1599,9 +1560,12 @@ impl CompiledQueryWire {
         ])
     }
 
-    fn canonical_bytes(&self) -> Result<CanonicalJsonBytes> {
-        self.canonical_value()
-            .map(|value| CanonicalJsonBytes::from_value(&value))
+    fn canonical_bytes(&self) -> Result<PlainCanonicalJsonBytes> {
+        let bytes = self
+            .canonical_value()
+            .map(|value| CanonicalJsonBytes::from_value(&value))?;
+        PlainCanonicalJsonBytes::from_canonical_json_slice(bytes.as_bytes())
+            .map_err(|error| FactDescriptorError::canonical(error.to_string()))
     }
 }
 
