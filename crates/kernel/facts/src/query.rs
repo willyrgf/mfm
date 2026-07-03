@@ -132,11 +132,6 @@ impl FactQueryInput {
         ordering: FactOrderingName,
         limit: Option<u64>,
     ) -> Result<Self> {
-        if return_fields.is_empty() {
-            return Err(FactDescriptorError::descriptor(
-                "fact query must request at least one return field",
-            ));
-        }
         if limit == Some(0) {
             return Err(FactDescriptorError::descriptor(
                 "fact query limit must be non-zero when present",
@@ -224,11 +219,6 @@ impl CompiledFactQueryShape {
         predicates: Vec<FactQueryPredicate>,
         return_fields: Vec<FactQueryReturnField>,
     ) -> Result<Self> {
-        if return_fields.is_empty() {
-            return Err(FactDescriptorError::descriptor(
-                "compiled fact query shape must contain return fields",
-            ));
-        }
         Ok(Self {
             predicates,
             return_fields,

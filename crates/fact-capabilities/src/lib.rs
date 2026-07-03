@@ -521,6 +521,21 @@ mod tests {
             schema_id(0x91),
             vec![
                 mfm_facts::FactFieldDescriptor::new(
+                    FactFieldId::new("subject.source").expect("field"),
+                    mfm_facts::FactFieldPath::new("subject.source").expect("path"),
+                    FactFieldValueType::String,
+                    mfm_facts::FactFieldExtraction::SubjectPath(
+                        mfm_facts::CanonicalValuePath::new("source").expect("subject path"),
+                    ),
+                    vec![mfm_facts::FactQueryOperator::Equal],
+                    mfm_facts::FactFieldExposure::QueryOnly,
+                    None,
+                    None,
+                    false,
+                    true,
+                )
+                .expect("subject field"),
+                mfm_facts::FactFieldDescriptor::new(
                     FactFieldId::new("result.height").expect("field"),
                     mfm_facts::FactFieldPath::new("result.height").expect("path"),
                     FactFieldValueType::UnsignedInteger,
