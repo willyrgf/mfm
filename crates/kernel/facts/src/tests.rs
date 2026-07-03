@@ -283,24 +283,13 @@ fn fact_query_scalar_comparison_uses_numeric_decimal_ordering() {
     let negative_two = FactCanonicalScalar::decimal_variable("-2").expect("decimal");
     let negative_ten = FactCanonicalScalar::decimal_variable("-10").expect("decimal");
 
+    assert_eq!(two.query_cmp(&ten), Some(std::cmp::Ordering::Less));
     assert_eq!(
-        fact_query_scalar_cmp(&two, &ten),
+        negative_ten.query_cmp(&negative_two),
         Some(std::cmp::Ordering::Less)
     );
-    assert_eq!(
-        fact_query_scalar_cmp(&negative_ten, &negative_two),
-        Some(std::cmp::Ordering::Less)
-    );
-    assert!(fact_query_scalar_matches_operator(
-        &ten,
-        FactQueryOperator::GreaterThan,
-        &two
-    ));
-    assert!(fact_query_scalar_matches_operator(
-        &negative_ten,
-        FactQueryOperator::LessThan,
-        &negative_two
-    ));
+    assert!(ten.matches_query_operator(FactQueryOperator::GreaterThan, &two));
+    assert!(negative_ten.matches_query_operator(FactQueryOperator::LessThan, &negative_two));
 }
 
 #[test]
@@ -314,19 +303,19 @@ fn fact_query_ordering_term_comparison_keeps_null_policy_independent_of_directio
             FactOrderingTerm::new(field_id.clone(), direction, NullOrdering::Last, false);
 
         assert_eq!(
-            fact_query_ordering_term_cmp(&nulls_first, None, Some(&value)),
+            nulls_first.compare_values(None, Some(&value)),
             Some(std::cmp::Ordering::Less)
         );
         assert_eq!(
-            fact_query_ordering_term_cmp(&nulls_first, Some(&value), None),
+            nulls_first.compare_values(Some(&value), None),
             Some(std::cmp::Ordering::Greater)
         );
         assert_eq!(
-            fact_query_ordering_term_cmp(&nulls_last, None, Some(&value)),
+            nulls_last.compare_values(None, Some(&value)),
             Some(std::cmp::Ordering::Greater)
         );
         assert_eq!(
-            fact_query_ordering_term_cmp(&nulls_last, Some(&value), None),
+            nulls_last.compare_values(Some(&value), None),
             Some(std::cmp::Ordering::Less)
         );
     }

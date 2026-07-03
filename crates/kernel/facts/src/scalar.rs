@@ -121,6 +121,78 @@ impl FactCanonicalScalar {
                 .and_then(|value| context.digest(value)),
         }
     }
+
+    /// Compares this scalar with another scalar using canonical fact-query semantics.
+    ///
+    /// Decimal strings compare by numeric value rather than by canonical spelling, matching the
+    /// durable query store contract.
+    pub fn query_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        if self.value_type() != other.value_type() {
+            return None;
+        }
+        Some(match (self, other) {
+            (Self::String(left), Self::String(right)) => left.cmp(right),
+            (Self::Boolean(left), Self::Boolean(right)) => left.cmp(right),
+            (Self::SignedInteger(left), Self::SignedInteger(right)) => left.cmp(right),
+            (Self::UnsignedInteger(left), Self::UnsignedInteger(right)) => left.cmp(right),
+            (Self::Timestamp(left), Self::Timestamp(right)) => left.cmp(right),
+            (Self::DecimalString(left), Self::DecimalString(right)) => {
+                compare_decimal_strings(left.as_str(), right.as_str())
+            }
+            (Self::Digest(left), Self::Digest(right)) => left.cmp(right),
+            _ => unreachable!("fact scalar value types matched but variants differed"),
+        })
+    }
+
+    /// Returns whether this scalar satisfies a query operator against another same-typed scalar.
+    pub fn matches_query_operator(&self, operator: FactQueryOperator, other: &Self) -> bool {
+        let Some(ordering) = self.query_cmp(other) else {
+            return false;
+        };
+        match operator {
+            FactQueryOperator::Equal => ordering == std::cmp::Ordering::Equal,
+            FactQueryOperator::LessThan => ordering == std::cmp::Ordering::Less,
+            FactQueryOperator::LessThanOrEqual => {
+                matches!(
+                    ordering,
+                    std::cmp::Ordering::Less | std::cmp::Ordering::Equal
+                )
+            }
+            FactQueryOperator::GreaterThan => ordering == std::cmp::Ordering::Greater,
+            FactQueryOperator::GreaterThanOrEqual => {
+                matches!(
+                    ordering,
+                    std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
+                )
+            }
+        }
+    }
+}
+
+/// Compares two fact scalars using canonical fact-query semantics.
+pub fn fact_query_scalar_cmp(
+    left: &FactCanonicalScalar,
+    right: &FactCanonicalScalar,
+) -> Option<std::cmp::Ordering> {
+    left.query_cmp(right)
+}
+
+/// Returns whether an actual scalar satisfies a query operator against an expected scalar.
+pub fn fact_query_scalar_matches_operator(
+    actual: &FactCanonicalScalar,
+    operator: FactQueryOperator,
+    expected: &FactCanonicalScalar,
+) -> bool {
+    actual.matches_query_operator(operator, expected)
+}
+
+/// Compares optional fact scalars using a descriptor ordering term.
+pub fn fact_query_ordering_term_cmp(
+    term: &FactOrderingTerm,
+    left: Option<&FactCanonicalScalar>,
+    right: Option<&FactCanonicalScalar>,
+) -> Option<std::cmp::Ordering> {
+    term.compare_values(left, right)
 }
 
 #[derive(Clone, Copy)]
@@ -188,97 +260,6 @@ impl ScalarJsonContext<'_> {
                 )),
             })
     }
-}
-
-/// Compares same-typed fact scalars using canonical fact-query semantics.
-///
-/// Decimal strings compare by numeric value rather than by their canonical spelling, matching the
-/// durable query store contract.
-pub fn fact_query_scalar_cmp(
-    left: &FactCanonicalScalar,
-    right: &FactCanonicalScalar,
-) -> Option<std::cmp::Ordering> {
-    if left.value_type() != right.value_type() {
-        return None;
-    }
-    Some(match (left, right) {
-        (FactCanonicalScalar::String(left), FactCanonicalScalar::String(right)) => left.cmp(right),
-        (FactCanonicalScalar::Boolean(left), FactCanonicalScalar::Boolean(right)) => {
-            left.cmp(right)
-        }
-        (FactCanonicalScalar::SignedInteger(left), FactCanonicalScalar::SignedInteger(right)) => {
-            left.cmp(right)
-        }
-        (
-            FactCanonicalScalar::UnsignedInteger(left),
-            FactCanonicalScalar::UnsignedInteger(right),
-        ) => left.cmp(right),
-        (FactCanonicalScalar::Timestamp(left), FactCanonicalScalar::Timestamp(right)) => {
-            left.cmp(right)
-        }
-        (FactCanonicalScalar::DecimalString(left), FactCanonicalScalar::DecimalString(right)) => {
-            compare_decimal_strings(left.as_str(), right.as_str())
-        }
-        (FactCanonicalScalar::Digest(left), FactCanonicalScalar::Digest(right)) => left.cmp(right),
-        _ => unreachable!("fact scalar value types matched but variants differed"),
-    })
-}
-
-/// Returns whether a fact scalar satisfies a query predicate against another same-typed scalar.
-pub fn fact_query_scalar_matches_operator(
-    left: &FactCanonicalScalar,
-    operator: FactQueryOperator,
-    right: &FactCanonicalScalar,
-) -> bool {
-    let Some(ordering) = fact_query_scalar_cmp(left, right) else {
-        return false;
-    };
-    match operator {
-        FactQueryOperator::Equal => ordering == std::cmp::Ordering::Equal,
-        FactQueryOperator::LessThan => ordering == std::cmp::Ordering::Less,
-        FactQueryOperator::LessThanOrEqual => {
-            matches!(
-                ordering,
-                std::cmp::Ordering::Less | std::cmp::Ordering::Equal
-            )
-        }
-        FactQueryOperator::GreaterThan => ordering == std::cmp::Ordering::Greater,
-        FactQueryOperator::GreaterThanOrEqual => {
-            matches!(
-                ordering,
-                std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
-            )
-        }
-    }
-}
-
-/// Compares optional fact scalars for one query ordering term.
-///
-/// Sort direction applies only to present scalar values. Null placement follows the term's
-/// `NULLS FIRST`/`NULLS LAST` policy independently, matching SQL ordering semantics.
-pub fn fact_query_ordering_term_cmp(
-    term: &FactOrderingTerm,
-    left: Option<&FactCanonicalScalar>,
-    right: Option<&FactCanonicalScalar>,
-) -> Option<std::cmp::Ordering> {
-    Some(match (left, right) {
-        (Some(left), Some(right)) => {
-            let ordering = fact_query_scalar_cmp(left, right)?;
-            match term.direction() {
-                SortDirection::Ascending => ordering,
-                SortDirection::Descending => ordering.reverse(),
-            }
-        }
-        (None, None) => std::cmp::Ordering::Equal,
-        (None, Some(_)) => match term.nulls() {
-            NullOrdering::First => std::cmp::Ordering::Less,
-            NullOrdering::Last => std::cmp::Ordering::Greater,
-        },
-        (Some(_), None) => match term.nulls() {
-            NullOrdering::First => std::cmp::Ordering::Greater,
-            NullOrdering::Last => std::cmp::Ordering::Less,
-        },
-    })
 }
 
 fn compare_decimal_strings(left: &str, right: &str) -> std::cmp::Ordering {
