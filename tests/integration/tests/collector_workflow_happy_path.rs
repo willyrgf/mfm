@@ -93,6 +93,19 @@ async fn bitcoin_chain_head_collector_two_cycles_record_checkpoint_and_public_fa
     assert_chain_head_height(&projection, 850_001);
     assert_checkpoint_height(&projection, 850_001);
 
+    let btc_calls_before_replay = btc.calls();
+    let fact_index_reads_before_replay = fact_index.returned_row_counts();
+    let replay = services
+        .verify_replay_for_run(&second.run_id.parse().expect("second run id"))
+        .await
+        .expect("second cycle replay");
+    assert_eq!(replay.run_mode, mfm_app::RunModeStatus::Completed);
+    assert_eq!(btc.calls(), btc_calls_before_replay);
+    assert_eq!(
+        fact_index.returned_row_counts(),
+        fact_index_reads_before_replay
+    );
+
     let read_services = mfm_app::make_run_read_services_with_certification_registry(
         store.clone(),
         store.clone(),
@@ -150,18 +163,21 @@ fn collector_services(
     store: AsyncInMemoryRunStore,
     artifacts: Arc<dyn ArtifactReadProvider>,
     btc: Arc<dyn BtcChainHeadReadProvider>,
-    fact_index: Arc<dyn FactIndexReadProvider>,
+    fact_index: Arc<InMemoryControlFactIndexProvider>,
 ) -> mfm_app::RunServices<AsyncInMemoryRunStore, AsyncInMemoryRunStore> {
+    let receipt_trust_root = fact_index.receipt_trust_root();
     let capabilities =
         mfm_adapters_btc_jsonrpc::BtcJsonRpcRunnerCapabilities::new(artifacts, btc, fact_index);
     let mut runners = mfm_runtime::ErasedRunnerRegistry::new();
     mfm_adapters_btc_jsonrpc::register_btc_jsonrpc_runners(&mut runners, capabilities)
         .expect("btc runners");
-    mfm_app::make_run_services_with_certification_registry(
-        runners,
+    let runtime_artifacts = Arc::new(store.clone());
+    mfm_app::RunServices::new_with_certification_registry_and_fact_query_trust_root(
+        mfm_runtime::SerialTypedScheduler::new(runners, runtime_artifacts),
         store.clone(),
         store,
         mfm_app::production_certification_registry().expect("certification registry"),
+        Some(receipt_trust_root),
     )
 }
 
@@ -455,6 +471,16 @@ impl InMemoryControlFactIndexProvider {
             self.key_id.clone(),
             self.signing_key.verifying_key().to_bytes(),
         )
+    }
+
+    fn receipt_trust_root(&self) -> mfm_store::v1::FactQueryReceiptTrustRoot {
+        mfm_store::v1::FactQueryReceiptTrustRoot::new(
+            self.store_identity.clone(),
+            StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
+            self.key_id.clone(),
+            self.signing_key.verifying_key().to_bytes(),
+        )
+        .expect("receipt trust root")
     }
 
     fn signed_receipt(

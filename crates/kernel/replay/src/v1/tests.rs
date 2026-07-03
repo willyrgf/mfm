@@ -100,6 +100,40 @@ fn replay_verifies_fact_query_evidence_from_retained_authority() {
 }
 
 #[test]
+fn replay_verifies_fact_query_evidence_with_retained_cross_run_source_fact() {
+    let fixture = replay_fact_stream_fixture();
+    let source_run_id = run_id(0x77);
+    let source_claim_id =
+        mfm_facts::FactClaimId::new(source_run_id.clone(), 3, 0).expect("source claim id");
+    let source_payload = fixture.stream[2].payload().clone();
+    let source_envelope = persisted_envelope(&source_run_id, 3, source_payload);
+    let source_event_id = source_envelope.event_id().clone();
+    let query = fact_query_evidence_artifact(&fixture, |fact_ref| {
+        let mut parts = internal_fact_ref_parts_from_ref(&fact_ref);
+        parts.fact_claim_id = source_claim_id.clone();
+        parts.source_event_id = source_event_id;
+        mfm_facts::InternalFactRef::new(parts).expect("cross-run source ref")
+    });
+    let source_event = RetainedSourceFactReplayEvent::new(source_claim_id, source_envelope)
+        .expect("retained source fact event");
+    let mut authority = fixture.authority();
+    authority.stream = fixture.stream[..2].to_vec();
+    authority.stream.push(persisted_envelope(
+        &fixture.run_id,
+        3,
+        KernelEventPayload::ArtifactReferenced(query.event.clone()),
+    ));
+    authority.artifact_evidence.push(query.artifact.clone());
+    authority
+        .artifact_bytes
+        .insert(query.artifact.artifact_id.clone(), query.bytes);
+    authority.fact_query_receipt_trust_root = Some(query.trust_root);
+    authority.source_fact_events.push(source_event);
+
+    ReplayBroker::from_read_authority(authority).expect("cross-run source fact verifies");
+}
+
+#[test]
 fn replay_rejects_fact_query_evidence_without_trust_root() {
     let fixture = replay_fact_stream_fixture();
     let query = fact_query_evidence_artifact(&fixture, |fact_ref| fact_ref);
@@ -294,6 +328,7 @@ fn replay_rejects_fact_descriptor_allowed_only_for_other_node() {
             (response_artifact.artifact_id.clone(), response_bytes),
         ]),
         fact_query_receipt_trust_root: None,
+        source_fact_events: Vec::new(),
     };
 
     let error = ReplayBroker::from_read_authority(authority)
@@ -766,6 +801,7 @@ fn replay_broker_with_facts(
         fact_query_receipt_trust_root: None,
         artifacts: artifact_map,
         facts: fact_map,
+        fact_events: BTreeMap::new(),
         intents: BTreeMap::new(),
         submissions: BTreeMap::new(),
         not_submitted: BTreeMap::new(),
@@ -1033,6 +1069,7 @@ impl ReplayFactStreamFixture {
             artifact_evidence: self.artifact_evidence.clone(),
             artifact_bytes: self.artifact_bytes.clone(),
             fact_query_receipt_trust_root: None,
+            source_fact_events: Vec::new(),
         }
     }
 }

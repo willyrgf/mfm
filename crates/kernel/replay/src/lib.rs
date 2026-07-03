@@ -160,6 +160,7 @@ pub mod v1 {
         artifact_evidence: Vec<StoredArtifactEvidenceRef>,
         artifact_bytes: BTreeMap<ArtifactId, Vec<u8>>,
         fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+        source_fact_events: Vec<RetainedSourceFactReplayEvent>,
     }
 
     impl ReplayReadAuthority {
@@ -181,6 +182,22 @@ pub mod v1 {
             runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
             verified_view: &mfm_runtime::VerifiedRunHistoryView,
             fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+        ) -> Result<Self> {
+            Self::from_verified_run_history_view_with_fact_query_receipt_trust_root_and_source_facts(
+                runtime_spec,
+                verified_view,
+                fact_query_receipt_trust_root,
+                Vec::new(),
+            )
+        }
+
+        /// Mints replay read authority with explicit fact-query receipt trust root and retained
+        /// source fact events referenced by pinned fact-query evidence.
+        pub fn from_verified_run_history_view_with_fact_query_receipt_trust_root_and_source_facts(
+            runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
+            verified_view: &mfm_runtime::VerifiedRunHistoryView,
+            fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+            source_fact_events: Vec<RetainedSourceFactReplayEvent>,
         ) -> Result<Self> {
             if runtime_spec.spec_hash() != verified_view.spec_hash() {
                 return Err(ReplayError::new(
@@ -220,7 +237,58 @@ pub mod v1 {
                 artifact_evidence,
                 artifact_bytes,
                 fact_query_receipt_trust_root,
+                source_fact_events,
             })
+        }
+    }
+
+    /// Retained source fact event authority referenced by pinned fact-query evidence.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RetainedSourceFactReplayEvent {
+        fact_claim_id: mfm_facts::FactClaimId,
+        envelope: KernelEventEnvelope,
+    }
+
+    impl RetainedSourceFactReplayEvent {
+        /// Creates retained source fact event authority after validating the event coordinate.
+        pub fn new(
+            fact_claim_id: mfm_facts::FactClaimId,
+            envelope: KernelEventEnvelope,
+        ) -> Result<Self> {
+            let expected = mfm_facts::derive_fact_claim_id(
+                envelope.run_id().clone(),
+                envelope.seq().as_u64(),
+                envelope.ordinal().as_u32(),
+            )
+            .map_err(|error| {
+                ReplayError::new(ReplayErrorKind::InvalidRunStream, error.to_string())
+            })?;
+            if expected != fact_claim_id {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::FactMismatch,
+                    "retained source fact event coordinate does not match fact claim id",
+                ));
+            }
+            if !matches!(envelope.payload(), KernelEventPayload::FactRecorded(_)) {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::FactMismatch,
+                    "retained source fact event payload is not FactRecorded",
+                ));
+            }
+            Ok(Self {
+                fact_claim_id,
+                envelope,
+            })
+        }
+
+        /// Returns the retained source fact claim id.
+        pub fn fact_claim_id(&self) -> &mfm_facts::FactClaimId {
+            &self.fact_claim_id
+        }
+
+        /// Returns the retained source fact event envelope.
+        pub fn envelope(&self) -> &KernelEventEnvelope {
+            &self.envelope
         }
     }
 
@@ -683,6 +751,7 @@ pub mod v1 {
         fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
         artifacts: BTreeMap<ReplayArtifactAuthorityKey, StoredArtifactEvidenceRef>,
         facts: BTreeMap<FactReplayKey, events::FactRecorded>,
+        fact_events: BTreeMap<FactReplayKey, KernelEventEnvelope>,
         intents: BTreeMap<SideEffectPairId, side_effect::IntentPersisted>,
         submissions: BTreeMap<SideEffectKey, side_effect::SubmissionObserved>,
         not_submitted: BTreeMap<SideEffectKey, side_effect::NotSubmittedProven>,
@@ -747,6 +816,7 @@ pub mod v1 {
                 fact_query_receipt_trust_root: authority.fact_query_receipt_trust_root.clone(),
                 artifacts: BTreeMap::new(),
                 facts: BTreeMap::new(),
+                fact_events: BTreeMap::new(),
                 intents: BTreeMap::new(),
                 submissions: BTreeMap::new(),
                 not_submitted: BTreeMap::new(),
@@ -756,6 +826,7 @@ pub mod v1 {
                 manual_resolutions: BTreeMap::new(),
             };
             broker.authorize_certified_spec_artifacts()?;
+            broker.index_retained_source_fact_events(&authority.source_fact_events)?;
             broker.index_stream(&stream)?;
             broker.verify_terminal_outcome_agreement()?;
             broker.reject_unauthorized_artifact_evidence()?;
@@ -1068,23 +1139,7 @@ pub mod v1 {
                     KernelEventPayload::FactRecorded(payload) => {
                         self.verify_fact_against_spec(payload)?;
                         self.authorize_event_artifacts(envelope.payload())?;
-                        insert_unique(
-                            &mut self.facts,
-                            mfm_facts::derive_fact_claim_id(
-                                envelope.run_id().clone(),
-                                envelope.seq().as_u64(),
-                                envelope.ordinal().as_u32(),
-                            )
-                            .map_err(|error| {
-                                ReplayError::new(
-                                    ReplayErrorKind::InvalidRunStream,
-                                    error.to_string(),
-                                )
-                            })?,
-                            payload.clone(),
-                            ReplayErrorKind::InvalidRunStream,
-                            "duplicate fact replay event",
-                        )?;
+                        self.insert_fact_event(envelope, payload)?;
                     }
                     KernelEventPayload::ArtifactReferenced(payload) => {
                         if let Some(node_id) = &payload.node_id {
@@ -1343,6 +1398,66 @@ pub mod v1 {
                     }
                 }
             }
+            Ok(())
+        }
+
+        fn index_retained_source_fact_events(
+            &mut self,
+            source_fact_events: &[RetainedSourceFactReplayEvent],
+        ) -> Result<()> {
+            for source in source_fact_events {
+                let envelope = source.envelope();
+                if envelope.spec_hash() != &self.certified_spec.spec_hash {
+                    return Err(ReplayError::new(
+                        ReplayErrorKind::SpecHashMismatch,
+                        "retained source fact event spec hash does not match replay spec",
+                    ));
+                }
+                let KernelEventPayload::FactRecorded(payload) = envelope.payload() else {
+                    return Err(ReplayError::new(
+                        ReplayErrorKind::FactMismatch,
+                        "retained source fact event payload is not FactRecorded",
+                    ));
+                };
+                self.verify_fact_against_spec(payload)?;
+                self.authorize_event_artifacts(envelope.payload())?;
+                self.insert_fact_event(envelope, payload)?;
+            }
+            Ok(())
+        }
+
+        fn insert_fact_event(
+            &mut self,
+            envelope: &KernelEventEnvelope,
+            payload: &events::FactRecorded,
+        ) -> Result<()> {
+            let fact_claim_id = mfm_facts::derive_fact_claim_id(
+                envelope.run_id().clone(),
+                envelope.seq().as_u64(),
+                envelope.ordinal().as_u32(),
+            )
+            .map_err(|error| {
+                ReplayError::new(ReplayErrorKind::InvalidRunStream, error.to_string())
+            })?;
+            match (
+                self.facts.get(&fact_claim_id),
+                self.fact_events.get(&fact_claim_id),
+            ) {
+                (Some(existing_payload), Some(existing_envelope))
+                    if existing_payload == payload && existing_envelope == envelope =>
+                {
+                    return Ok(());
+                }
+                (Some(_), _) | (_, Some(_)) => {
+                    return Err(ReplayError::new(
+                        ReplayErrorKind::InvalidRunStream,
+                        "duplicate fact replay event",
+                    ));
+                }
+                (None, None) => {}
+            }
+            self.facts.insert(fact_claim_id.clone(), payload.clone());
+            self.fact_events.insert(fact_claim_id, envelope.clone());
             Ok(())
         }
 
@@ -2202,25 +2317,17 @@ pub mod v1 {
                     ),
                 )
             })?;
-            let envelope = self
-                .stream
-                .iter()
-                .find(|envelope| {
-                    envelope.run_id() == fact_claim_id.source_run_id()
-                        && envelope.seq().as_u64() == fact_claim_id.source_seq()
-                        && envelope.ordinal().as_u32() == fact_claim_id.source_ordinal()
-                })
-                .ok_or_else(|| {
-                    ReplayError::new(
-                        ReplayErrorKind::FactMissing,
-                        format!(
-                            "missing source fact event for returned ref {}:{}:{}",
-                            fact_claim_id.source_run_id(),
-                            fact_claim_id.source_seq(),
-                            fact_claim_id.source_ordinal()
-                        ),
-                    )
-                })?;
+            let envelope = self.fact_events.get(fact_claim_id).ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::FactMissing,
+                    format!(
+                        "missing source fact event for returned ref {}:{}:{}",
+                        fact_claim_id.source_run_id(),
+                        fact_claim_id.source_seq(),
+                        fact_claim_id.source_ordinal()
+                    ),
+                )
+            })?;
             Ok((envelope, fact))
         }
 

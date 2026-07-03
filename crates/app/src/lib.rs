@@ -28,7 +28,9 @@ use mfm_ids::{
     ArtifactId, ContentDigest, DigestAlgorithm, EventId, RunId, SchemaId, SeedId, SemanticTypeId,
     SpecHash, TrustScopeId,
 };
-use mfm_replay::v1::{ReplayBroker, ReplayError, ReplayReadAuthority};
+use mfm_replay::v1::{
+    ReplayBroker, ReplayError, ReplayReadAuthority, RetainedSourceFactReplayEvent,
+};
 use mfm_runtime::{
     CertifiedRuntimeSpec, ManualResolutionEvidenceArtifact, ManualResolutionRequest,
     RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell, SchedulerStatus, SerialTypedScheduler,
@@ -2323,11 +2325,14 @@ where
             context.events(),
         )
         .await?;
-        let authority = replay_read_authority_for_run_with_fact_query_trust_root(
+        let authority = replay_read_authority_for_run_with_retained_source_facts(
+            &self.store,
+            &self.artifacts,
             context.runtime_spec(),
             context.view(),
             self.fact_query_receipt_trust_root.clone(),
-        )?;
+        )
+        .await?;
         let broker = ReplayBroker::from_read_authority(authority)?;
         let stream = context.events();
         mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&broker)?;
@@ -2616,11 +2621,14 @@ where
             context.events(),
         )
         .await?;
-        let authority = replay_read_authority_for_run_with_fact_query_trust_root(
+        let authority = replay_read_authority_for_run_with_retained_source_facts(
+            &self.store,
+            &self.artifacts,
             context.runtime_spec(),
             context.view(),
             self.fact_query_receipt_trust_root.clone(),
-        )?;
+        )
+        .await?;
         let broker = ReplayBroker::from_read_authority(authority)?;
         let stream = context.events();
         mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&broker)?;
@@ -3591,6 +3599,86 @@ pub fn replay_read_authority_for_run_with_fact_query_trust_root(
     )
 }
 
+async fn replay_read_authority_for_run_with_retained_source_facts<S, A>(
+    store: &S,
+    artifacts: &A,
+    runtime_spec: &CertifiedRuntimeSpec,
+    verified_view: &VerifiedRunHistoryView,
+    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+) -> Result<ReplayReadAuthority, AppError>
+where
+    S: store::RunEventStore + Send + Sync,
+    A: store::RetainedArtifactReadProvider + ?Sized,
+{
+    let source_fact_events =
+        retained_source_fact_events_from_query_evidence(store, artifacts, verified_view.events())
+            .await?;
+    Ok(ReplayReadAuthority::from_verified_run_history_view_with_fact_query_receipt_trust_root_and_source_facts(
+        runtime_spec,
+        verified_view,
+        fact_query_receipt_trust_root,
+        source_fact_events,
+    )?)
+}
+
+async fn retained_source_fact_events_from_query_evidence<S, A>(
+    store: &S,
+    artifacts: &A,
+    stream: &[store::KernelEventEnvelope],
+) -> Result<Vec<RetainedSourceFactReplayEvent>, AppError>
+where
+    S: store::RunEventStore + Send + Sync,
+    A: store::RetainedArtifactReadProvider + ?Sized,
+{
+    let mut source_events = BTreeMap::new();
+    for event in stream {
+        let events::KernelEventPayload::ArtifactReferenced(payload) = event.payload() else {
+            continue;
+        };
+        if payload.artifact_ref.role != events::ArtifactRole::FactQueryEvidence {
+            continue;
+        }
+        let artifact = artifacts
+            .read_retained_artifact(&artifact_referenced_artifact_requirement(payload))
+            .await
+            .map_err(async_app_store_error)?;
+        let evidence = mfm_facts::parse_canonical_fact_query_evidence_bytes(artifact.bytes())
+            .map_err(|_| {
+                AppError::backend(
+                    ErrorClass::Internal,
+                    "FactQueryEvidenceInvalid",
+                    "Fact query evidence artifact is invalid",
+                )
+            })?;
+        for fact_ref in evidence.receipt().returned_refs() {
+            let fact_claim_id = fact_ref.fact_claim_id().clone();
+            if source_events.contains_key(&fact_claim_id) {
+                continue;
+            }
+            let source_stream = store
+                .load_run_stream(fact_claim_id.source_run_id())
+                .await
+                .map_err(async_app_store_error)?;
+            let envelope = source_stream
+                .into_iter()
+                .find(|candidate| {
+                    candidate.seq().as_u64() == fact_claim_id.source_seq()
+                        && candidate.ordinal().as_u32() == fact_claim_id.source_ordinal()
+                })
+                .ok_or_else(|| {
+                    AppError::backend(
+                        ErrorClass::Internal,
+                        "FactQuerySourceFactMissing",
+                        "Fact query evidence source fact event is missing",
+                    )
+                })?;
+            let source_event = RetainedSourceFactReplayEvent::new(fact_claim_id.clone(), envelope)?;
+            source_events.insert(fact_claim_id, source_event);
+        }
+    }
+    Ok(source_events.into_values().collect())
+}
+
 fn certified_spec_launch_artifact(
     runtime_spec: &CertifiedRuntimeSpec,
 ) -> Result<RunLaunchArtifact, AppError> {
@@ -4471,6 +4559,23 @@ fn run_artifact_requirement(
         producer_node_id: None,
         producer_seed_id: None,
         artifact_role: Some(role),
+    }
+}
+
+fn artifact_referenced_artifact_requirement(
+    payload: &events::ArtifactReferenced,
+) -> store::EventArtifactRequirement {
+    store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::ArtifactReferenced,
+        artifact_id: payload.artifact_ref.artifact_id.clone(),
+        digest: Some(payload.artifact_ref.content_digest.clone()),
+        byte_len: Some(payload.artifact_ref.byte_len),
+        media_type: Some(payload.artifact_ref.media_type.clone()),
+        schema_id: Some(payload.artifact_ref.schema_id.clone()),
+        semantic_type_id: payload.artifact_ref.semantic_type_id.clone(),
+        producer_node_id: payload.node_id.clone(),
+        producer_seed_id: None,
+        artifact_role: Some(payload.artifact_ref.role),
     }
 }
 
