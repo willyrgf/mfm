@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, VecDeque};
 use std::future;
 use std::sync::{Arc, Mutex};
 
-use mfm_artifact_capabilities::ArtifactReadProvider;
 use mfm_btc_capabilities::{
     BtcBlockHash, BtcCapabilityFuture, BtcChainHeadReadProvider, BtcChainHeadRequest,
     BtcChainHeadResponse, BtcSourceStatus, RedactedBtcSourceEvidence,
@@ -17,7 +16,10 @@ use mfm_op_btc_chain_head_collector::{
     BtcChainHeadObservationContext,
 };
 use mfm_program::CanonicalSeed;
-use mfm_store::v1::{AsyncInMemoryRunStore, ProjectionSnapshot, RunEventStore, TrustScopeStore};
+use mfm_store::v1::{
+    AsyncInMemoryRunStore, ProjectionSnapshot, RetainedArtifactReadProvider, RunEventStore,
+    TrustScopeStore,
+};
 use tokio::sync::oneshot;
 
 const FIRST_HASH: &str = "00000000000000000000000000000000000000000000000000000000000a0001";
@@ -26,7 +28,7 @@ const SECOND_HASH: &str = "00000000000000000000000000000000000000000000000000000
 #[tokio::test]
 async fn bitcoin_chain_head_collector_two_cycles_record_checkpoint_and_public_fact() {
     let store = AsyncInMemoryRunStore::default();
-    let artifacts = mfm_app::artifact_read_provider_from_retained(store.clone());
+    let artifacts = Arc::new(store.clone());
     let btc = Arc::new(MockBtcProvider::new(vec![
         MockHead {
             height: 850_000,
@@ -158,7 +160,7 @@ async fn bitcoin_chain_head_collector_two_cycles_record_checkpoint_and_public_fa
 async fn bitcoin_chain_head_collector_recovers_interrupted_observation_without_partial_projection()
 {
     let store = AsyncInMemoryRunStore::default();
-    let artifacts = mfm_app::artifact_read_provider_from_retained(store.clone());
+    let artifacts = Arc::new(store.clone());
     let first_btc = Arc::new(MockBtcProvider::new(vec![MockHead {
         height: 850_000,
         hash: FIRST_HASH,
@@ -278,7 +280,7 @@ async fn bitcoin_chain_head_collector_recovers_interrupted_observation_without_p
 
 fn collector_services(
     store: AsyncInMemoryRunStore,
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn RetainedArtifactReadProvider>,
     btc: Arc<dyn BtcChainHeadReadProvider>,
     fact_index: Arc<InMemoryControlFactIndexProvider>,
 ) -> mfm_app::RunServices<AsyncInMemoryRunStore, AsyncInMemoryRunStore> {

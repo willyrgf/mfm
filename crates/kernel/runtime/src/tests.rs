@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use ed25519_dalek::SigningKey;
-use mfm_artifact_capabilities::{ArtifactReadProvider, ArtifactReadRequest, VerifiedArtifactBytes};
 use mfm_canonical::{sha256_digest_bytes, CanonicalValue};
 use mfm_capabilities::{
     CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor, CapabilitySpec, EffectSpec,
@@ -691,11 +690,11 @@ fn block_on_ready<F: Future>(future: F) -> F::Output {
 
 #[derive(Clone, Default)]
 struct RunnerKitArtifactProvider {
-    artifacts: BTreeMap<ArtifactId, (Vec<u8>, mfm_artifact_capabilities::ArtifactEvidenceRef)>,
+    artifacts: BTreeMap<ArtifactId, (Vec<u8>, store::ArtifactEvidenceRef)>,
 }
 
 impl RunnerKitArtifactProvider {
-    fn new(artifacts: Vec<(Vec<u8>, mfm_artifact_capabilities::ArtifactEvidenceRef)>) -> Self {
+    fn new(artifacts: Vec<(Vec<u8>, store::ArtifactEvidenceRef)>) -> Self {
         Self {
             artifacts: artifacts
                 .into_iter()
@@ -705,18 +704,18 @@ impl RunnerKitArtifactProvider {
     }
 }
 
-impl ArtifactReadProvider for RunnerKitArtifactProvider {
-    fn read_artifact<'a>(
+impl store::RetainedArtifactReadProvider for RunnerKitArtifactProvider {
+    fn read_retained_artifact<'a>(
         &'a self,
-        request: &'a ArtifactReadRequest,
-    ) -> mfm_artifact_capabilities::ArtifactReadFuture<'a> {
+        requirement: &'a store::EventArtifactRequirement,
+    ) -> store::RetainedArtifactReadFuture<'a> {
         Box::pin(async move {
-            let Some((bytes, evidence)) = self.artifacts.get(request.artifact_id()) else {
-                return Err(mfm_artifact_capabilities::ArtifactReadError::NotFound {
-                    artifact_id: Box::new(request.artifact_id().clone()),
+            let Some((bytes, evidence)) = self.artifacts.get(&requirement.artifact_id) else {
+                return Err(store::StoreError::MissingArtifact {
+                    artifact_id: requirement.artifact_id.clone(),
                 });
             };
-            VerifiedArtifactBytes::new(bytes.clone(), evidence.clone(), request)
+            store::VerifiedRunArtifactBytes::new(bytes.clone(), evidence.clone(), requirement)
         })
     }
 }
@@ -1929,12 +1928,9 @@ struct RunnerKitStructInput {
     right: Vec<CertifierValue>,
 }
 
-fn runner_kit_config_artifact(
-    node: &spec::NodeSpec,
-    bytes: &[u8],
-) -> mfm_artifact_capabilities::ArtifactEvidenceRef {
+fn runner_kit_config_artifact(node: &spec::NodeSpec, bytes: &[u8]) -> store::ArtifactEvidenceRef {
     assert_eq!(node.config_ref.digest, digest_for_bytes(bytes));
-    mfm_artifact_capabilities::ArtifactEvidenceRef {
+    store::ArtifactEvidenceRef {
         artifact_id: node.config_ref.artifact_id.clone(),
         digest: node.config_ref.digest.clone(),
         byte_len: node.config_ref.byte_len,
@@ -1952,9 +1948,9 @@ fn runner_kit_value_artifact(
     artifact_role: events::ArtifactRole,
     producer_node_id: Option<NodeId>,
     producer_seed_id: Option<SeedId>,
-) -> mfm_artifact_capabilities::ArtifactEvidenceRef {
+) -> store::ArtifactEvidenceRef {
     let digest = digest_for_bytes(bytes);
-    mfm_artifact_capabilities::ArtifactEvidenceRef {
+    store::ArtifactEvidenceRef {
         artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
         digest,
         byte_len: bytes.len() as u64,
@@ -1968,7 +1964,7 @@ fn runner_kit_value_artifact(
 }
 
 fn runner_kit_input_cell(
-    evidence: &mfm_artifact_capabilities::ArtifactEvidenceRef,
+    evidence: &store::ArtifactEvidenceRef,
     terminal: MaterializedCellTerminal,
 ) -> MaterializedInputNode {
     MaterializedInputNode::Cell(Box::new(MaterializedCell {

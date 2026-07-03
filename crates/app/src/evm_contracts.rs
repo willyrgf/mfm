@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use mfm_artifact_capabilities::ArtifactReadProvider;
 use mfm_evm_capabilities::EvmNetworkId;
 use mfm_signers_keystore::{KeystoreSignerProvider, KeystoreSignerRegistryEntry};
 use mfm_signing::SignerRef;
+use mfm_store::v1 as store;
 
 use crate::{evm_json_rpc_client, runtime_evm_transport_error, RuntimeConfigLoader};
 
@@ -12,12 +12,15 @@ use mfm_evm_capabilities::EvmChainGuard;
 
 #[derive(Clone)]
 struct RuntimeConfigEvmContractRuntimeFactory {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     runtime_config: RuntimeConfigLoader,
 }
 
 impl RuntimeConfigEvmContractRuntimeFactory {
-    fn new(artifacts: Arc<dyn ArtifactReadProvider>, runtime_config: RuntimeConfigLoader) -> Self {
+    fn new(
+        artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
+        runtime_config: RuntimeConfigLoader,
+    ) -> Self {
         Self {
             artifacts,
             runtime_config,
@@ -38,7 +41,7 @@ impl RuntimeConfigEvmContractRuntimeFactory {
 impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
     for RuntimeConfigEvmContractRuntimeFactory
 {
-    fn artifacts(&self) -> &dyn ArtifactReadProvider {
+    fn artifacts(&self) -> &dyn store::RetainedArtifactReadProvider {
         self.artifacts.as_ref()
     }
 
@@ -137,7 +140,7 @@ fn keystore_signer_provider_from_config(
 /// Registers contract lifecycle runners in the process production runner registry.
 pub(crate) fn register_contract_lifecycle_runners(
     registry: &mut mfm_runtime::ErasedRunnerRegistry,
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     runtime_config: RuntimeConfigLoader,
 ) -> mfm_runtime::Result<()> {
     mfm_adapters_evm_contracts::register_contract_lifecycle_runners_with_factory(

@@ -242,11 +242,8 @@ mod tests {
         let fixture = EntryPointRunFixture::in_memory().await;
         let prepared = fixture.prepare_sample_portfolio(None);
         let run_id = prepared.request.run_id.clone();
-        let runners = crate::production_runner_registry(
-            crate::artifact_read_provider_from_retained(fixture.store.clone()),
-            None,
-        )
-        .expect("runners");
+        let runners = crate::production_runner_registry(Arc::new(fixture.store.clone()), None)
+            .expect("runners");
         let services = crate::make_run_services_with_certification_registry(
             runners,
             fixture.store.clone(),
@@ -602,7 +599,7 @@ mod tests {
             mfm_store::v1::AsyncInMemoryRunStore,
         > {
             let runners = crate::production_runner_registry(
-                crate::artifact_read_provider_from_retained(self.store.clone()),
+                Arc::new(self.store.clone()),
                 Some(&self.runtime_config_path),
             )
             .expect("runners");

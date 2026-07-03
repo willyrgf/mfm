@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use mfm_artifact_capabilities::{ArtifactReadProvider, ArtifactReadRequest};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::{CapabilitySetDescriptor, CapabilitySetFor, CapabilitySpec};
 use mfm_events::v1::{self as events, side_effect};
@@ -193,7 +192,7 @@ impl RunnerFactoryBinding {
 /// Loads and validates the certified config artifact for the current runner node.
 pub async fn load_runner_config<T>(
     ctx: &ErasedRunCtx<'_>,
-    artifacts: &dyn ArtifactReadProvider,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> Result<ValidatedConfig<T>>
 where
     T: MfmConfig + DeserializeOwned,
@@ -204,19 +203,14 @@ where
 /// Loads and validates the certified config artifact for a specific certified node.
 pub async fn load_runner_config_for_node<T>(
     node: &spec::NodeSpec,
-    artifacts: &dyn ArtifactReadProvider,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> Result<ValidatedConfig<T>>
 where
     T: MfmConfig + DeserializeOwned,
 {
-    let request = ArtifactReadRequest::from_certified_config_ref(&node.config_ref);
-    let verified = artifacts
-        .read_artifact(&request)
-        .await
-        .map_err(artifact_read_runtime_error)?;
-    let config = verified
-        .decode_json::<T>()
-        .map_err(artifact_read_runtime_error)?;
+    let requirement = certified_config_requirement(node);
+    let verified = read_retained_artifact(artifacts, &requirement).await?;
+    let config = decode_verified_json::<T>(&verified)?;
     ValidatedConfig::new(config)
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
@@ -250,7 +244,7 @@ where
 /// Loads the root materialized input as a typed value from a state-output or seed cell.
 pub async fn load_materialized_input_value<T>(
     inputs: &MaterializedInputs,
-    artifacts: &dyn ArtifactReadProvider,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> Result<T>
 where
     T: MfmValue + DeserializeOwned,
@@ -261,7 +255,7 @@ where
 /// Loads one materialized input node as a typed value from a state-output or seed cell.
 pub async fn load_materialized_node_value<T>(
     node: &MaterializedInputNode,
-    artifacts: &dyn ArtifactReadProvider,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> Result<T>
 where
     T: MfmValue + DeserializeOwned,
@@ -272,13 +266,13 @@ where
         ));
     };
     let verified = load_materialized_cell_artifact(cell, artifacts).await?;
-    verified.decode_json().map_err(artifact_read_runtime_error)
+    decode_verified_json(&verified)
 }
 
 /// Loads the root materialized input as a struct-like value.
 pub async fn load_materialized_struct_input<T>(
     inputs: &MaterializedInputs,
-    artifacts: &dyn ArtifactReadProvider,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> Result<T>
 where
     T: DeserializeOwned,
@@ -292,7 +286,7 @@ where
 pub async fn load_materialized_struct_field_value<T>(
     inputs: &MaterializedInputs,
     field_path: &str,
-    artifacts: &dyn ArtifactReadProvider,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> Result<T>
 where
     T: MfmValue + DeserializeOwned,
@@ -316,7 +310,7 @@ where
 /// Loads a non-empty vector materialized input from cell-backed elements.
 pub async fn load_non_empty_materialized_input<T>(
     inputs: &MaterializedInputs,
-    artifacts: &dyn ArtifactReadProvider,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> Result<NonEmpty<T>>
 where
     T: MfmValue + DeserializeOwned,
@@ -339,7 +333,7 @@ pub async fn load_side_effect_value<T>(
     artifact: &store::SideEffectArtifactProjection,
     role: events::ArtifactRole,
     ctx: &ErasedRunCtx<'_>,
-    artifacts: &dyn ArtifactReadProvider,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> Result<T>
 where
     T: MfmValue + DeserializeOwned,
@@ -353,7 +347,7 @@ pub async fn load_side_effect_value_for_node<T>(
     artifact: &store::SideEffectArtifactProjection,
     role: events::ArtifactRole,
     producer_node_id: &NodeId,
-    artifacts: &dyn ArtifactReadProvider,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> Result<T>
 where
     T: MfmValue + DeserializeOwned,
@@ -368,8 +362,8 @@ pub async fn load_side_effect_artifact<T>(
     artifact: &store::SideEffectArtifactProjection,
     role: events::ArtifactRole,
     ctx: &ErasedRunCtx<'_>,
-    artifacts: &dyn ArtifactReadProvider,
-) -> Result<(T, mfm_artifact_capabilities::ArtifactEvidenceRef)>
+    artifacts: &dyn store::RetainedArtifactReadProvider,
+) -> Result<(T, store::ArtifactEvidenceRef)>
 where
     T: MfmValue + DeserializeOwned,
 {
@@ -381,34 +375,28 @@ pub async fn load_side_effect_artifact_for_node<T>(
     artifact: &store::SideEffectArtifactProjection,
     role: events::ArtifactRole,
     producer_node_id: &NodeId,
-    artifacts: &dyn ArtifactReadProvider,
-) -> Result<(T, mfm_artifact_capabilities::ArtifactEvidenceRef)>
+    artifacts: &dyn store::RetainedArtifactReadProvider,
+) -> Result<(T, store::ArtifactEvidenceRef)>
 where
     T: MfmValue + DeserializeOwned,
 {
-    let request =
-        ArtifactReadRequest::from_side_effect_projection(artifact, role, producer_node_id.clone());
-    let verified = artifacts
-        .read_artifact(&request)
-        .await
-        .map_err(artifact_read_runtime_error)?;
+    let requirement = side_effect_artifact_requirement(artifact, role, producer_node_id)?;
+    let verified = read_retained_artifact(artifacts, &requirement).await?;
     let evidence = verified.evidence().clone();
-    let value = verified
-        .decode_json()
-        .map_err(artifact_read_runtime_error)?;
+    let value = decode_verified_json(&verified)?;
     Ok((value, evidence))
 }
 
 /// Materializes an input node tree into JSON, loading cell bytes where needed.
 pub async fn materialized_input_node_json(
     node: &MaterializedInputNode,
-    artifacts: &dyn ArtifactReadProvider,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> Result<serde_json::Value> {
     match node {
         MaterializedInputNode::Unit => Ok(serde_json::Value::Null),
         MaterializedInputNode::Cell(cell) => {
             let verified = load_materialized_cell_artifact(cell, artifacts).await?;
-            verified.decode_json().map_err(artifact_read_runtime_error)
+            decode_verified_json(&verified)
         }
         MaterializedInputNode::Tuple(elements) => {
             let mut values = Vec::with_capacity(elements.len());
@@ -439,46 +427,131 @@ pub async fn materialized_input_node_json(
 
 async fn load_materialized_cell_artifact(
     cell: &MaterializedCell,
-    artifacts: &dyn ArtifactReadProvider,
-) -> Result<mfm_artifact_capabilities::VerifiedArtifactBytes> {
-    let request = match &cell.terminal {
+    artifacts: &dyn store::RetainedArtifactReadProvider,
+) -> Result<store::VerifiedRunArtifactBytes> {
+    let requirement = match &cell.terminal {
         MaterializedCellTerminal::Produced {
             producer_node_id,
             artifact_id,
             content_digest,
-        } => ArtifactReadRequest::from_materialized_produced_cell(
-            artifact_id.clone(),
-            content_digest.clone(),
-            cell.schema_id.clone(),
-            cell.semantic_type_id.clone(),
-            producer_node_id.clone(),
-        ),
+        } => store::EventArtifactRequirement {
+            source: store::EventArtifactReferenceSource::StateOutput,
+            artifact_id: artifact_id.clone(),
+            digest: Some(content_digest.clone()),
+            byte_len: None,
+            media_type: None,
+            schema_id: Some(cell.schema_id.clone()),
+            semantic_type_id: Some(cell.semantic_type_id.clone()),
+            producer_node_id: Some(producer_node_id.clone()),
+            producer_seed_id: None,
+            artifact_role: Some(events::ArtifactRole::StateOutput),
+        },
         MaterializedCellTerminal::Seed {
             seed_id,
             artifact_id,
             content_digest,
-        } => ArtifactReadRequest::from_materialized_seed_cell(
-            artifact_id.clone(),
-            content_digest.clone(),
-            cell.schema_id.clone(),
-            cell.semantic_type_id.clone(),
-            seed_id.clone(),
-        ),
+        } => store::EventArtifactRequirement {
+            source: store::EventArtifactReferenceSource::SeedCell,
+            artifact_id: artifact_id.clone(),
+            digest: Some(content_digest.clone()),
+            byte_len: None,
+            media_type: None,
+            schema_id: Some(cell.schema_id.clone()),
+            semantic_type_id: Some(cell.semantic_type_id.clone()),
+            producer_node_id: None,
+            producer_seed_id: Some(seed_id.clone()),
+            artifact_role: Some(events::ArtifactRole::SeedInput),
+        },
         MaterializedCellTerminal::Skipped { .. } => {
             return Err(RuntimeError::InvalidRunnerOutput(
                 "materialized input cell was skipped".to_owned(),
             ));
         }
     };
+    read_retained_artifact(artifacts, &requirement).await
+}
+
+async fn read_retained_artifact(
+    artifacts: &dyn store::RetainedArtifactReadProvider,
+    requirement: &store::EventArtifactRequirement,
+) -> Result<store::VerifiedRunArtifactBytes> {
     artifacts
-        .read_artifact(&request)
+        .read_retained_artifact(requirement)
         .await
         .map_err(artifact_read_runtime_error)
 }
 
-fn artifact_read_runtime_error(
-    error: mfm_artifact_capabilities::ArtifactReadError,
-) -> RuntimeError {
+fn decode_verified_json<T>(artifact: &store::VerifiedRunArtifactBytes) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_slice(artifact.bytes())
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
+}
+
+fn certified_config_requirement(node: &spec::NodeSpec) -> store::EventArtifactRequirement {
+    store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::RunConfig,
+        artifact_id: node.config_ref.artifact_id.clone(),
+        digest: Some(node.config_ref.digest.clone()),
+        byte_len: Some(node.config_ref.byte_len),
+        media_type: Some(node.config_ref.media_type.clone()),
+        schema_id: Some(node.config_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: Some(events::ArtifactRole::TypedConfig),
+    }
+}
+
+fn side_effect_artifact_requirement(
+    artifact: &store::SideEffectArtifactProjection,
+    role: events::ArtifactRole,
+    producer_node_id: &NodeId,
+) -> Result<store::EventArtifactRequirement> {
+    Ok(store::EventArtifactRequirement {
+        source: side_effect_artifact_source(role)?,
+        artifact_id: artifact.artifact_id.clone(),
+        digest: Some(artifact.content_digest.clone()),
+        byte_len: None,
+        media_type: None,
+        schema_id: artifact.schema_id.clone(),
+        semantic_type_id: None,
+        producer_node_id: Some(producer_node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: Some(role),
+    })
+}
+
+fn side_effect_artifact_source(
+    role: events::ArtifactRole,
+) -> Result<store::EventArtifactReferenceSource> {
+    match role {
+        events::ArtifactRole::SideEffectIntent => {
+            Ok(store::EventArtifactReferenceSource::SideEffectIntent)
+        }
+        events::ArtifactRole::PreparedInvocation => {
+            Ok(store::EventArtifactReferenceSource::PreparedInvocation)
+        }
+        events::ArtifactRole::NotSubmittedProof => {
+            Ok(store::EventArtifactReferenceSource::NotSubmittedProof)
+        }
+        events::ArtifactRole::Submission => Ok(store::EventArtifactReferenceSource::Submission),
+        events::ArtifactRole::SubmissionUnknownEvidence => {
+            Ok(store::EventArtifactReferenceSource::SubmissionUnknownEvidence)
+        }
+        events::ArtifactRole::Receipt => Ok(store::EventArtifactReferenceSource::Receipt),
+        events::ArtifactRole::Confirmation => Ok(store::EventArtifactReferenceSource::Confirmation),
+        events::ArtifactRole::AmbiguityEvidence => {
+            Ok(store::EventArtifactReferenceSource::AmbiguityEvidence)
+        }
+        _ => Err(RuntimeError::InvalidRunnerOutput(format!(
+            "artifact role {role:?} is not a side-effect artifact"
+        ))),
+    }
+}
+
+fn artifact_read_runtime_error(error: store::StoreError) -> RuntimeError {
     RuntimeError::InvalidRunnerOutput(error.to_string())
 }
 

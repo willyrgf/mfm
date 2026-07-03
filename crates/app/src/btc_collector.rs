@@ -1,16 +1,16 @@
 use std::sync::Arc;
 
-use mfm_artifact_capabilities::ArtifactReadProvider;
 use mfm_fact_capabilities::{
     FactIndexReadProvider, FactIndexReadRequest, FactIndexReadResponse,
     FactQueryReceiptTrustRootMaterial,
 };
+use mfm_store::v1 as store;
 
 use crate::{AppError, ErrorClass, ProductionRunStore};
 
 pub(crate) fn register_btc_collector_runners_if_configured(
     registry: &mut mfm_runtime::ErasedRunnerRegistry,
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     fact_index: Option<Arc<dyn FactIndexReadProvider>>,
     btc: Option<mfm_runtime_config::BtcRuntimeConfig>,
 ) -> Result<(), AppError> {

@@ -17,6 +17,7 @@
 //! ```
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -229,7 +230,7 @@ where
 {
     fn live_services(&self) -> Result<RunServices<S, S>, ApiError> {
         let runners = mfm_app::production_runner_registry(
-            mfm_app::artifact_read_provider_from_retained(self.app.store.clone()),
+            Arc::new(self.app.store.clone()),
             self.app.runtime_config_path.as_deref(),
         )?;
         let certification_registry = mfm_app::production_certification_registry()?;
