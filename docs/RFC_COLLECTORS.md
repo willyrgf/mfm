@@ -225,7 +225,7 @@ identity of the same wallet balance or weather subject.
 
 Subject identity is based on stable semantic field ids and typed values, not on
 Rust struct layout, schema paths, or extraction paths. Descriptor paths and
-accessors can evolve compatibly without changing `FactKey` when the subject
+extractions can evolve compatibly without changing `FactKey` when the subject
 field ids, value types, units, scales, and values are unchanged.
 
 ### Fact Field
@@ -233,10 +233,10 @@ field ids, value types, units, scales, and values are unchanged.
 A fact field is a descriptor-declared typed field that can produce index terms.
 Terms are projection data, not authority.
 
-Field source is defined by `FactFieldAccessor`:
+Field source is defined by `FactFieldExtraction`:
 
 ```rust
-pub enum FactFieldAccessor {
+pub enum FactFieldExtraction {
     SubjectPath(CanonicalValuePath),
     ResponsePath(CanonicalValuePath),
     Metadata(FactMetadataField),
@@ -528,7 +528,7 @@ pub trait MfmFactType: MfmValue {
 
 `MfmFactType` is derive-owned, but not enforced through an inaccessible private
 supertrait. The derive macro emits the descriptor artifact with
-`ArtifactRole::FactDescriptor`, subject/response accessors, and compile-time
+`ArtifactRole::FactDescriptor`, subject/response extractions, and compile-time
 shape checks. The public recorder API accepts `T: MfmFactType`, but type
 implementation is not semantic authority. Descriptor bytes, descriptor hash,
 certified node allow-list, and append validation are the only authority for fact
@@ -569,7 +569,7 @@ pub struct FactFieldDescriptor {
     pub field_id: FactFieldId,
     pub path: FactFieldPath,
     pub value_type: FactFieldValueType,
-    pub accessor: FactFieldAccessor,
+    pub extraction: FactFieldExtraction,
     pub operators: &'static [FactQueryOperator],
     pub exposure: FactFieldExposure,
     pub unit: Option<FactUnit>,
@@ -601,7 +601,7 @@ pub struct FactOrderingTerm {
 schema-facing pointer that may evolve across descriptor versions. Index rows,
 ordering policies, compatibility rules, and query evidence bind to `field_id`.
 
-`accessor` is the single source of field extraction authority. Its variant
+`extraction` is the single source of field extraction authority. Its variant
 defines whether the field is `Subject`, `Result`, or `Metadata`. In v1, every
 `SubjectPath` field is required and participates in `FactKey`; result and
 metadata fields never participate in `FactKey`.
@@ -609,7 +609,7 @@ metadata fields never participate in `FactKey`.
 V1 extraction grammar:
 
 ```rust
-pub enum FactFieldAccessor {
+pub enum FactFieldExtraction {
     SubjectPath(CanonicalValuePath),
     ResponsePath(CanonicalValuePath),
     Metadata(FactMetadataField),
@@ -642,7 +642,7 @@ Descriptor validation must reject:
 - duplicate `field_id` values
 - zero `SubjectPath` fields
 - optional `SubjectPath` fields
-- descriptor paths whose prefix conflicts with the accessor source
+- descriptor paths whose prefix conflicts with the extraction source
 - ordering terms that reference missing or non-sortable fields
 - fields whose allowed operators conflict with their value type
 - unsupported timestamp, decimal, digest, numeric bound, or normalization rules
@@ -692,7 +692,7 @@ pub struct FactSubjectValueV1 {
 ```
 
 Both vectors are sorted by `field_id` before canonicalization. The namespace
-includes only descriptor fields whose accessor is `SubjectPath`; the material
+includes only descriptor fields whose extraction is `SubjectPath`; the material
 contains only values extracted for those fields from `T::Subject`. This excludes
 result fields, metadata fields, schema paths, extraction paths, ordering
 policies, allowed operators, exposure policy, compatibility group, descriptor
@@ -1032,7 +1032,7 @@ implementation as long as ownership boundaries stay intact.
 | `ArtifactRole::FactQueryEvidence` | new | `crates/kernel/events` | Role for canonical private query-evidence artifacts. |
 | `MfmFactType` | new | `crates/kernel/program`, `crates/kernel/program-derive` | Rust v1 authoring path for descriptor-certified typed facts. |
 | `FactDescriptor` and field/order descriptors | new | `crates/kernel/facts` | Semantic authority for subject identity, extraction, operators, exposure, and ordering. |
-| `FactFieldAccessor` | new | `crates/kernel/facts` | Declarative kernel-owned extraction grammar. |
+| `FactFieldExtraction` | new | `crates/kernel/facts` | Declarative kernel-owned extraction grammar. |
 | `FactVisibility`, `FactAudience`, `FactVisibilityScope` | new | `crates/kernel/facts` | Explicit visibility and query audience contract. |
 | `FactRecordedPayload` and `FactClaim` | new | `crates/kernel/events`, `crates/kernel/facts` | Normalized claim payload for every `FactRecorded`. |
 | `FactSubjectNamespaceV1`, `FactSubjectMaterialV1` | new | `crates/kernel/facts` | Canonical subject identity inputs for `FactKey`. |
@@ -1955,7 +1955,7 @@ Gate 1: facts kernel types and canonical contracts.
 
 - `FactVisibility::{RunPrivate, Indexed { audience, scope }}`
 - `FactAudience::{Control, Platform}`
-- `FactDescriptor`, `FactFieldDescriptor`, `FactFieldAccessor`, field ids, and
+- `FactDescriptor`, `FactFieldDescriptor`, `FactFieldExtraction`, field ids, and
   ordering descriptors
 - canonical `FactSubjectNamespaceV1`, `FactSubjectMaterialV1`, and kind-scoped
   `FactKey` derivation
