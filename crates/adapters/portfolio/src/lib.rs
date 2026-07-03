@@ -8,7 +8,6 @@
 use std::{fmt, sync::Arc};
 
 use alloy_primitives::{Address, U256};
-use mfm_artifact_capabilities::ArtifactReadProvider;
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
     EvmBalanceReadProvider, EvmBalanceReadRequest, EvmBlockReadProvider, EvmBlockReadRequest,
@@ -37,6 +36,7 @@ use mfm_state_portfolio::{
     PrepareSourcesState, ProjectReportConfig, ProjectReportInput, ProjectReportState,
     ResolveSubjectsConfig, ResolveSubjectsState, ResolveValuationsConfig, ResolveValuationsState,
 };
+use mfm_store::v1 as store;
 use mfm_values::{MfmConfig, MfmValue};
 use serde::de::DeserializeOwned;
 
@@ -103,7 +103,7 @@ pub fn evm_chain_guards_from_launch_config(
 /// Runtime capabilities used by portfolio adapter runners.
 #[derive(Clone)]
 pub struct PortfolioRunnerCapabilities {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     evm: Arc<dyn PortfolioEvmProvider>,
     runtime: Arc<dyn PortfolioRuntimeValidator>,
 }
@@ -111,7 +111,7 @@ pub struct PortfolioRunnerCapabilities {
 impl PortfolioRunnerCapabilities {
     /// Creates portfolio runner capabilities from artifact and EVM providers.
     pub fn new(
-        artifacts: Arc<dyn ArtifactReadProvider>,
+        artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
         evm: Arc<dyn PortfolioEvmProvider>,
         runtime: Arc<dyn PortfolioRuntimeValidator>,
     ) -> Self {
@@ -122,7 +122,7 @@ impl PortfolioRunnerCapabilities {
         }
     }
 
-    fn artifacts(&self) -> Arc<dyn ArtifactReadProvider> {
+    fn artifacts(&self) -> Arc<dyn store::RetainedArtifactReadProvider> {
         Arc::clone(&self.artifacts)
     }
 
@@ -215,7 +215,7 @@ pub fn register_portfolio_runners(
 }
 
 struct PrepareSourcesRunner {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 }
 
 impl ErasedNodeRunner for PrepareSourcesRunner {
@@ -231,7 +231,7 @@ impl ErasedNodeRunner for PrepareSourcesRunner {
 }
 
 struct ResolveSubjectsRunner {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 }
 
 impl ErasedNodeRunner for ResolveSubjectsRunner {
@@ -252,7 +252,7 @@ impl ErasedNodeRunner for ResolveSubjectsRunner {
 }
 
 struct PinViewsRunner {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     runtime: Arc<dyn PortfolioRuntimeValidator>,
     evm: Arc<dyn PortfolioEvmProvider>,
 }
@@ -288,7 +288,7 @@ impl ErasedNodeRunner for PinViewsRunner {
 }
 
 struct ResolveValuationsRunner {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 }
 
 impl ErasedNodeRunner for ResolveValuationsRunner {
@@ -310,7 +310,7 @@ impl ErasedNodeRunner for ResolveValuationsRunner {
 }
 
 struct ObserveBatchRunner {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     runtime: Arc<dyn PortfolioRuntimeValidator>,
     evm: Arc<dyn PortfolioEvmProvider>,
 }
@@ -346,7 +346,7 @@ impl ErasedNodeRunner for ObserveBatchRunner {
 }
 
 struct MergeObservationsRunner {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 }
 
 impl ErasedNodeRunner for MergeObservationsRunner {
@@ -367,7 +367,7 @@ impl ErasedNodeRunner for MergeObservationsRunner {
 }
 
 struct AssembleSnapshotRunner {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 }
 
 impl ErasedNodeRunner for AssembleSnapshotRunner {
@@ -388,7 +388,7 @@ impl ErasedNodeRunner for AssembleSnapshotRunner {
 }
 
 struct ProjectReportRunner {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 }
 
 impl ErasedNodeRunner for ProjectReportRunner {

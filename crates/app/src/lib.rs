@@ -435,7 +435,7 @@ pub async fn connect_production_run_services(
         None
     };
     let runners = production_runner_registry_inner(
-        artifact_read_provider_from_retained(store.clone()),
+        Arc::new(store.clone()),
         fact_index,
         runtime_config,
         btc_config,
@@ -475,7 +475,7 @@ pub async fn connect_production_run_read_services(
 /// Framework public-output render nodes are resolved by `mfm-runtime` as built-ins. Enabled
 /// domain runners register here as certified typed descriptor bindings.
 pub fn production_runner_registry(
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     runtime_config_path: Option<&Path>,
 ) -> Result<ErasedRunnerRegistry, AppError> {
     let runtime_config = RuntimeConfigLoader::from_path_or_env(runtime_config_path);
@@ -485,7 +485,7 @@ pub fn production_runner_registry(
 
 /// Builds the production typed runner registry with an explicit internal fact-index provider.
 pub fn production_runner_registry_with_fact_index_provider(
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     fact_index: Arc<dyn mfm_fact_capabilities::FactIndexReadProvider>,
     runtime_config_path: Option<&Path>,
 ) -> Result<ErasedRunnerRegistry, AppError> {
@@ -495,14 +495,13 @@ pub fn production_runner_registry_with_fact_index_provider(
 }
 
 fn production_runner_registry_inner(
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     fact_index: Option<Arc<dyn mfm_fact_capabilities::FactIndexReadProvider>>,
     runtime_config: RuntimeConfigLoader,
     btc_config: Option<mfm_runtime_config::BtcRuntimeConfig>,
 ) -> Result<ErasedRunnerRegistry, AppError> {
     let mut registry = ErasedRunnerRegistry::new();
-    let portfolio_artifacts: Arc<dyn mfm_artifact_capabilities::ArtifactReadProvider> =
-        artifacts.clone();
+    let portfolio_artifacts: Arc<dyn store::RetainedArtifactReadProvider> = artifacts.clone();
     let portfolio_runtime = Arc::new(RuntimeConfigPortfolioEvm::new(runtime_config.clone()));
     let portfolio_evm: Arc<dyn mfm_adapters_portfolio::PortfolioEvmProvider> =
         portfolio_runtime.clone();

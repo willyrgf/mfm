@@ -38,7 +38,7 @@ use mfm_store::v1::{
 };
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const TEST_SIGNER_HEX: &str = "4c0883a69102937d6231471b5dbb6204fe512961708279c2f802d6a8ebf2d3a4";
@@ -270,10 +270,10 @@ fn contract_services(
 }
 
 fn contract_test_services(
-    make_factory: impl FnOnce(Arc<dyn ArtifactReadProvider>) -> TestRuntimeFactory,
+    make_factory: impl FnOnce(Arc<dyn store::RetainedArtifactReadProvider>) -> TestRuntimeFactory,
 ) -> (ContractRunStore, ContractRunServices) {
     let store = test_run_store();
-    let artifacts = crate::artifact_read_provider_from_retained(store.clone());
+    let artifacts = Arc::new(store.clone());
     let services = contract_services(&store, make_factory(artifacts));
     (store, services)
 }
@@ -292,7 +292,7 @@ async fn app_runner_resumes_replays_and_renders_validate_only_lifecycle_run() {
 #[tokio::test]
 async fn app_resume_completed_run_is_evidence_only_without_live_runners() {
     let store = test_run_store();
-    let artifacts = crate::artifact_read_provider_from_retained(store.clone());
+    let artifacts = Arc::new(store.clone());
     let certification = contract_lifecycle_certification_registry();
     let runners = contract_lifecycle_runners(TestRuntimeFactory::new(artifacts));
     let launch_services = contract_lifecycle_services(&store, runners, certification.clone());
@@ -387,7 +387,7 @@ async fn assert_resume_runtime_config_ingress_failure(
     runtime_config_path: Option<&std::path::Path>,
 ) {
     let store = test_run_store();
-    let artifacts = crate::artifact_read_provider_from_retained(store.clone());
+    let artifacts = Arc::new(store.clone());
     let certification = contract_lifecycle_certification_registry();
     let launch_runners = contract_lifecycle_runners(TestRuntimeFactory::new(artifacts.clone()));
     let launch_services =
@@ -429,8 +429,9 @@ async fn assert_resume_runtime_config_ingress_failure(
         "test setup must admit only RunAdmitted"
     );
 
-    let resume_runners = crate::production_runner_registry(artifacts, runtime_config_path)
-        .expect("production runners");
+    let resume_runners =
+        crate::production_runner_registry(Arc::new(store.clone()), runtime_config_path)
+            .expect("production runners");
     let resume_services = contract_lifecycle_services(&store, resume_runners, certification);
     let error = resume_services
         .resume_stored_run(&run_id)
@@ -626,25 +627,25 @@ async fn app_runner_resumes_replays_and_renders_full_lifecycle_run() {
 
 #[derive(Clone)]
 struct TestRuntimeFactory {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     read_runtime: EvmContractReadRuntime,
     runtime: EvmContractRuntime,
 }
 
 impl TestRuntimeFactory {
-    fn new(artifacts: Arc<dyn ArtifactReadProvider>) -> Self {
+    fn new(artifacts: Arc<dyn store::RetainedArtifactReadProvider>) -> Self {
         Self::with_options(artifacts, false, None)
     }
 
     fn with_chain_identity_delay(
-        artifacts: Arc<dyn ArtifactReadProvider>,
+        artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
         delay: Duration,
     ) -> Self {
         Self::with_options(artifacts, false, Some(delay))
     }
 
     fn with_options(
-        artifacts: Arc<dyn ArtifactReadProvider>,
+        artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
         mutation: bool,
         chain_identity_delay: Option<Duration>,
     ) -> Self {
@@ -658,7 +659,7 @@ impl TestRuntimeFactory {
     }
 
     fn with_signer(
-        artifacts: Arc<dyn ArtifactReadProvider>,
+        artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
         signer: Arc<dyn SigningProvider>,
         fail_repeated_prepare_reads: bool,
     ) -> Self {
@@ -666,7 +667,7 @@ impl TestRuntimeFactory {
     }
 
     fn with_runtime(
-        artifacts: Arc<dyn ArtifactReadProvider>,
+        artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
         signer: Arc<dyn SigningProvider>,
         mutation: bool,
         fail_repeated_prepare_reads: bool,
@@ -689,7 +690,7 @@ impl TestRuntimeFactory {
 }
 
 impl EvmContractRuntimeFactory for TestRuntimeFactory {
-    fn artifacts(&self) -> &dyn ArtifactReadProvider {
+    fn artifacts(&self) -> &dyn store::RetainedArtifactReadProvider {
         self.artifacts.as_ref()
     }
 

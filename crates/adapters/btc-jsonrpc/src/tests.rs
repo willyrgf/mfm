@@ -1,6 +1,6 @@
 use super::*;
 use ed25519_dalek::SigningKey;
-use mfm_artifact_capabilities::{ArtifactEvidenceRef, VerifiedArtifactBytes};
+use mfm_artifact_capabilities::ArtifactEvidenceRef;
 use mfm_btc_capabilities::{
     BtcChain, BtcChainGuard, BtcHeadSelection, BtcNetworkId, BtcSourceIdentity,
 };
@@ -19,8 +19,9 @@ use mfm_spec::v1::MediaType;
 use mfm_states_btc::{
     CollectorCheckpointSubject, RecordCollectorCheckpointConfig, RecordCollectorCheckpointInput,
 };
-use mfm_store::v1::test_support::{
-    signed_fact_query_receipt_for_test, SignedFactQueryReceiptFixtureInputForTest,
+use mfm_store::v1::{
+    self as store,
+    test_support::{signed_fact_query_receipt_for_test, SignedFactQueryReceiptFixtureInputForTest},
 };
 use std::sync::Mutex;
 
@@ -151,22 +152,26 @@ impl MockArtifacts {
     }
 }
 
-impl ArtifactReadProvider for MockArtifacts {
-    fn read_artifact<'a>(
+impl store::RetainedArtifactReadProvider for MockArtifacts {
+    fn read_retained_artifact<'a>(
         &'a self,
-        request: &'a ArtifactReadRequest,
-    ) -> mfm_artifact_capabilities::ArtifactReadFuture<'a> {
+        requirement: &'a store::EventArtifactRequirement,
+    ) -> store::RetainedArtifactReadFuture<'a> {
         Box::pin(async move {
             self.calls
                 .lock()
                 .expect("calls")
-                .push(request.artifact_id().clone());
+                .push(requirement.artifact_id.clone());
             let Some((bytes, evidence)) = &self.artifact else {
-                return Err(mfm_artifact_capabilities::ArtifactReadError::NotFound {
-                    artifact_id: Box::new(request.artifact_id().clone()),
+                return Err(store::StoreError::MissingArtifact {
+                    artifact_id: requirement.artifact_id.clone(),
                 });
             };
-            VerifiedArtifactBytes::new(bytes.clone(), evidence.clone(), request)
+            store::VerifiedRunArtifactBytes::new(
+                bytes.clone(),
+                evidence.clone().into(),
+                requirement,
+            )
         })
     }
 }

@@ -25,9 +25,7 @@ use std::time::Duration;
 
 use alloy_primitives::{keccak256, Address, B256};
 use mfm_adapter_contracts::evm_contract_lifecycle_adapter_binding;
-use mfm_artifact_capabilities::{
-    ArtifactEvidenceRef as CapabilityArtifactEvidenceRef, ArtifactReadProvider,
-};
+use mfm_artifact_capabilities::ArtifactEvidenceRef as CapabilityArtifactEvidenceRef;
 use mfm_canonical::sha256_digest_bytes;
 use mfm_events::v1::{self as events, side_effect};
 use mfm_evm_capabilities::{
@@ -2033,7 +2031,7 @@ impl<T> EvmContractReadProvider for T where
 /// Factory for per-network EVM contract runtime bindings.
 pub trait EvmContractRuntimeFactory: Send + Sync {
     /// Returns the artifact reader used to materialize configs, inputs, and side-effect evidence.
-    fn artifacts(&self) -> &dyn ArtifactReadProvider;
+    fn artifacts(&self) -> &dyn store::RetainedArtifactReadProvider;
 
     /// Validates process-local runtime bindings for launch ingress before `RunAdmitted`.
     fn validate_runtime_for(
@@ -2467,7 +2465,7 @@ trait ContractMutationPlanOps: Send + Sync {
     fn load_plan<'a>(
         node: &'a spec::NodeSpec,
         inputs: &'a MaterializedInputs,
-        artifacts: &'a dyn ArtifactReadProvider,
+        artifacts: &'a dyn store::RetainedArtifactReadProvider,
     ) -> SideEffectDriverFuture<'a, Self>
     where
         Self: Sized;
@@ -2508,7 +2506,7 @@ impl ContractMutationPlanOps for DeployMutationPlan {
     fn load_plan<'a>(
         node: &'a spec::NodeSpec,
         _inputs: &'a MaterializedInputs,
-        artifacts: &'a dyn ArtifactReadProvider,
+        artifacts: &'a dyn store::RetainedArtifactReadProvider,
     ) -> SideEffectDriverFuture<'a, Self> {
         Box::pin(async move { deploy_mutation_plan_for_node(node, artifacts).await })
     }
@@ -2556,7 +2554,7 @@ impl ContractMutationPlanOps for ConfigureMutationPlan {
     fn load_plan<'a>(
         node: &'a spec::NodeSpec,
         inputs: &'a MaterializedInputs,
-        artifacts: &'a dyn ArtifactReadProvider,
+        artifacts: &'a dyn store::RetainedArtifactReadProvider,
     ) -> SideEffectDriverFuture<'a, Self> {
         Box::pin(async move { configure_mutation_plan_for_inputs(node, inputs, artifacts).await })
     }
@@ -2827,6 +2825,7 @@ where
                 self.factory.artifacts(),
             )
             .await?;
+            let receipt_evidence = CapabilityArtifactEvidenceRef::from(receipt_evidence);
             let receipt = P::receipt_with_evidence(receipt, &receipt_evidence);
             let confirmations = verified_finality_confirmations(
                 &runtime,
@@ -3017,7 +3016,7 @@ impl ContractVerifyPhase for ConfigureMutationPlan {
 
 async fn deploy_mutation_plan_for_node(
     node: &spec::NodeSpec,
-    artifacts: &dyn ArtifactReadProvider,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> mfm_runtime::Result<DeployMutationPlan> {
     let config = load_runner_config_for_node::<DeployPhaseConfig>(node, artifacts).await?;
     let state = DeployContractState::new(config.clone()).map_err(runtime_plan_error)?;
@@ -3036,7 +3035,7 @@ async fn deploy_mutation_plan_for_node(
 async fn configure_mutation_plan_for_inputs(
     node: &spec::NodeSpec,
     inputs: &mfm_runtime::MaterializedInputs,
-    artifacts: &dyn ArtifactReadProvider,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> mfm_runtime::Result<ConfigureMutationPlan> {
     let config = load_runner_config_for_node::<ConfigurePhaseConfig>(node, artifacts).await?;
     let deployed =
@@ -3167,7 +3166,7 @@ async fn verified_finality_confirmations(
 
 async fn load_validate_input(
     inputs: &mfm_runtime::MaterializedInputs,
-    artifacts: &dyn ArtifactReadProvider,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> mfm_runtime::Result<ValidateContractInput> {
     let configured =
         load_materialized_struct_field_value::<ConfiguredContract>(inputs, "configured", artifacts)
@@ -3195,7 +3194,7 @@ async fn load_prepared_invocation(
     artifact: &store::SideEffectArtifactProjection,
     role: events::ArtifactRole,
     ctx: &ErasedRunCtx<'_>,
-    artifacts: &dyn ArtifactReadProvider,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> mfm_runtime::Result<PreparedContractInvocation> {
     load_prepared_invocation_for_node(artifact, role, artifacts, &ctx.node().node_id).await
 }
@@ -3203,7 +3202,7 @@ async fn load_prepared_invocation(
 async fn load_prepared_invocation_for_node(
     artifact: &store::SideEffectArtifactProjection,
     role: events::ArtifactRole,
-    artifacts: &dyn ArtifactReadProvider,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
     producer_node_id: &NodeId,
 ) -> mfm_runtime::Result<PreparedContractInvocation> {
     let prepared = load_side_effect_value_for_node::<PreparedContractInvocation>(

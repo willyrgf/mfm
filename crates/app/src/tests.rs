@@ -1,6 +1,6 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use ed25519_dalek::SigningKey;
 use mfm_capabilities::{CapabilitySpec, ReadExternalRole};
@@ -1425,9 +1425,8 @@ async fn btc_collector_launch_requires_runtime_config_before_admission() {
     let request =
         prepare_btc_collector_internal_test_launch().expect("btc collector launch request");
     let run_id = request.run_id.clone();
-    let runners =
-        production_runner_registry(artifact_read_provider_from_retained(store.clone()), None)
-            .expect("production runners without btc config");
+    let runners = production_runner_registry(Arc::new(store.clone()), None)
+        .expect("production runners without btc config");
     let services = make_run_services_with_certification_registry(
         runners,
         store.clone(),

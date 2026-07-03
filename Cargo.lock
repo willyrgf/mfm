@@ -2153,7 +2153,6 @@ name = "mfm-adapters-portfolio"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
- "mfm-artifact-capabilities",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-events",
@@ -2164,6 +2163,7 @@ dependencies = [
  "mfm-program",
  "mfm-runtime",
  "mfm-state-portfolio",
+ "mfm-store",
  "mfm-values",
  "serde",
  "serde_json",
@@ -2697,7 +2697,6 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "k256",
- "mfm-artifact-capabilities",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-certify",

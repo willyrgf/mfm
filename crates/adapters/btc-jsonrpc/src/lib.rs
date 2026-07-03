@@ -11,7 +11,6 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use mfm_artifact_capabilities::{ArtifactReadProvider, ArtifactReadRequest};
 use mfm_btc_capabilities::{
     BtcBlockHash, BtcCapabilityError, BtcCapabilityFuture, BtcChainHeadReadProvider,
     BtcChainHeadRequest, BtcChainHeadResponse, BtcFinality, BtcSourceStatus,
@@ -40,6 +39,7 @@ use mfm_states_btc::{
     ObserveBtcChainHeadState, QueryCollectorCheckpointConfig, QueryCollectorCheckpointInput,
     QueryCollectorCheckpointState, RecordBtcChainHeadFactState, RecordCollectorCheckpointState,
 };
+use mfm_store::v1 as store;
 use mfm_values::MfmValue;
 
 const READ_FACTORY: &str = "read_external";
@@ -140,7 +140,7 @@ impl BtcChainHeadReadProvider for BtcJsonRpcChainHeadProvider {
 /// Runtime capabilities used by Bitcoin JSON-RPC adapter runners.
 #[derive(Clone)]
 pub struct BtcJsonRpcRunnerCapabilities {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     btc: Arc<dyn BtcChainHeadReadProvider>,
     fact_index: Arc<dyn FactIndexReadProvider>,
 }
@@ -148,7 +148,7 @@ pub struct BtcJsonRpcRunnerCapabilities {
 impl BtcJsonRpcRunnerCapabilities {
     /// Creates runner capabilities from artifact and Bitcoin providers.
     pub fn new(
-        artifacts: Arc<dyn ArtifactReadProvider>,
+        artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
         btc: Arc<dyn BtcChainHeadReadProvider>,
         fact_index: Arc<dyn FactIndexReadProvider>,
     ) -> Self {
@@ -159,7 +159,7 @@ impl BtcJsonRpcRunnerCapabilities {
         }
     }
 
-    fn artifacts(&self) -> Arc<dyn ArtifactReadProvider> {
+    fn artifacts(&self) -> Arc<dyn store::RetainedArtifactReadProvider> {
         Arc::clone(&self.artifacts)
     }
 
@@ -261,7 +261,7 @@ pub enum BtcJsonRpcAdapterError {
 }
 
 struct ObserveChainHeadRunner {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     btc: Arc<dyn BtcChainHeadReadProvider>,
 }
 
@@ -294,14 +294,14 @@ impl ErasedNodeRunner for ObserveChainHeadRunner {
 }
 
 struct ManagedFactRecordRunner<S> {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     visibility: mfm_program::facts::FactVisibility,
     _state: PhantomData<fn() -> S>,
 }
 
 impl<S> ManagedFactRecordRunner<S> {
     fn new(
-        artifacts: Arc<dyn ArtifactReadProvider>,
+        artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
         visibility: mfm_program::facts::FactVisibility,
     ) -> Self {
         Self {
@@ -313,7 +313,7 @@ impl<S> ManagedFactRecordRunner<S> {
 }
 
 struct QueryCheckpointRunner {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     fact_index: Arc<dyn FactIndexReadProvider>,
 }
 
@@ -356,7 +356,7 @@ where
 
 async fn run_managed_fact_record<S>(
     ctx: ErasedRunCtx<'_>,
-    artifacts: &dyn ArtifactReadProvider,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
     visibility: mfm_program::facts::FactVisibility,
 ) -> mfm_runtime::Result<ErasedRunnerOutput>
 where
@@ -398,7 +398,7 @@ fn checkpoint_query_output(
 async fn query_collector_checkpoint(
     config: ValidatedConfig<QueryCollectorCheckpointConfig>,
     _input: QueryCollectorCheckpointInput,
-    artifacts: &dyn ArtifactReadProvider,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
     fact_index: &dyn FactIndexReadProvider,
 ) -> mfm_runtime::Result<(LoadedCollectorCheckpoint, FactIndexReadEvidence)> {
     let state = QueryCollectorCheckpointState::new(config)
@@ -424,7 +424,7 @@ async fn query_collector_checkpoint(
 async fn checkpoint_from_response(
     state: &QueryCollectorCheckpointState,
     response: &FactIndexReadResponse,
-    artifacts: &dyn ArtifactReadProvider,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> mfm_runtime::Result<Option<CollectorCheckpointFact>> {
     match state
         .selected_checkpoint_response_ref(response)
@@ -432,18 +432,37 @@ async fn checkpoint_from_response(
     {
         None => Ok(None),
         Some(fact_ref) => {
-            let request = ArtifactReadRequest::from_internal_fact_response_ref(fact_ref);
-            let bytes = artifacts
-                .read_artifact(&request)
+            let requirement = fact_response_artifact_requirement(fact_ref);
+            let artifact = artifacts
+                .read_retained_artifact(&requirement)
                 .await
                 .map_err(runtime_artifact_read_error)?;
             let checkpoint_response: CollectorCheckpointResponse =
-                bytes.decode_json().map_err(runtime_artifact_read_error)?;
+                serde_json::from_slice(artifact.bytes()).map_err(|error| {
+                    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+                })?;
             state
                 .checkpoint_fact_from_response(checkpoint_response)
                 .map(Some)
                 .map_err(btc_state_runtime_error)
         }
+    }
+}
+
+fn fact_response_artifact_requirement(
+    fact_ref: &mfm_facts::InternalFactRef,
+) -> store::EventArtifactRequirement {
+    store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::FactResponse,
+        artifact_id: fact_ref.artifact_id().clone(),
+        digest: Some(fact_ref.response_hash().clone()),
+        byte_len: None,
+        media_type: None,
+        schema_id: Some(fact_ref.response_schema_id().clone()),
+        semantic_type_id: None,
+        producer_node_id: Some(fact_ref.producer_node_id().clone()),
+        producer_seed_id: None,
+        artifact_role: Some(events::ArtifactRole::FactResponse),
     }
 }
 
@@ -533,9 +552,7 @@ fn btc_fact_record_capability_binding() -> mfm_runtime::Result<RunnerCapabilityB
     )
 }
 
-fn runtime_artifact_read_error(
-    error: mfm_artifact_capabilities::ArtifactReadError,
-) -> mfm_runtime::RuntimeError {
+fn runtime_artifact_read_error(error: store::StoreError) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
 }
 
