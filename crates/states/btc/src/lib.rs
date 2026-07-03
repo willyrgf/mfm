@@ -13,20 +13,21 @@ use mfm_btc_capabilities::{
     BtcChainHeadResponse as CapabilityChainHeadResponse, BtcFinality, BtcHeadKind,
     BtcHeadSelection, BtcNetworkId, BtcSourceIdentity, BtcSourceStatus, RedactedBtcSourceEvidence,
 };
-use mfm_canonical::{sha256_digest_bytes, CanonicalJsonBytes, CanonicalValue};
+use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{CapabilitySpec, ManagedPlatformWriteRole};
 use mfm_effects::{ManagedPlatformWrite, ReadExternal};
 use mfm_fact_capabilities::{FactIndexReadCapability, FactIndexReadRequest, FactIndexReadResponse};
 use mfm_facts::{
     compile_fact_query_plan, FactAudience, FactCanonicalScalar, FactFieldId, FactOrderingName,
-    FactQueryInput, FactQueryOperator, FactQueryPredicate, FactQueryScope, FactSelectionEvidence,
-    FactVisibility, FactVisibilityScope, ScopeDecisionEvidence, StoreScopeRef,
+    FactQueryInput, FactQueryOperator, FactQueryPredicate, FactQueryReturnField, FactQueryScope,
+    FactSelectionEvidence, FactVisibility, FactVisibilityScope, ScopeDecisionEvidence,
+    StoreScopeRef,
 };
 use mfm_ids::{AdapterKind, AdapterVersion, ContentDigest};
 use mfm_ids::{DigestAlgorithm, StateKind, StateVersion};
 use mfm_program::{
-    fact_descriptor_ref, AdapterBindingSpec, FactDescriptorRef, ManagedWriteState, MfmFactType,
-    ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
+    fact_descriptor_ref, AdapterBindingSpec, CanonicalSeed, FactDescriptorRef, ManagedWriteState,
+    MfmFactType, ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
 };
 use mfm_program_derive::{MfmConfig, MfmFactType, MfmValue, StateInput};
 use serde::{Deserialize, Serialize};
@@ -69,18 +70,12 @@ fn adapter_binding() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
 
 /// Returns the fact visibility for platform Bitcoin chain-head observations.
 pub fn chain_head_fact_visibility() -> FactVisibility {
-    FactVisibility::Indexed {
-        audience: FactAudience::Platform,
-        scope: FactVisibilityScope::Default,
-    }
+    FactVisibility::indexed_default(FactAudience::Platform)
 }
 
 /// Returns the fact visibility for internal collector checkpoint observations.
 pub fn collector_checkpoint_fact_visibility() -> FactVisibility {
-    FactVisibility::Indexed {
-        audience: FactAudience::Control,
-        scope: FactVisibilityScope::Default,
-    }
+    FactVisibility::indexed_default(FactAudience::Control)
 }
 
 fn state_kind(name: &'static str) -> mfm_program::Result<StateKind> {
@@ -583,7 +578,7 @@ impl CollectorCheckpointResponse {
         less_than,
         less_than_or_equal
     ),
-    exposure = "query_only",
+    exposure = "returnable",
     sortable
 ))]
 #[mfm_fact(field(
@@ -957,6 +952,21 @@ pub fn validate_query_collector_checkpoint_config(
 }
 
 impl QueryCollectorCheckpointConfig {
+    /// Builds the subject identity for this checkpoint query.
+    pub fn checkpoint_subject(&self) -> Result<CollectorCheckpointSubject, BtcStateError> {
+        validate_query_collector_checkpoint_config(self)
+            .map_err(|reason| BtcStateError::InvalidInput { reason })?;
+        let source_identity = BtcSourceIdentity::new(&self.semantic_source_identity)?;
+        let network = BtcNetworkId::new(&self.network)?;
+        Ok(CollectorCheckpointSubject::new(
+            self.collector_kind.clone(),
+            &source_identity,
+            self.partition.clone(),
+            BtcChain::Bitcoin,
+            &network,
+        ))
+    }
+
     /// Builds the Control fact-index read request for the latest checkpoint.
     pub fn request(&self) -> Result<FactIndexReadRequest, BtcStateError> {
         validate_query_collector_checkpoint_config(self)
@@ -972,6 +982,44 @@ impl QueryCollectorCheckpointConfig {
         FactIndexReadRequest::new(plan).map_err(|error| BtcStateError::InvalidInput {
             reason: error.to_string(),
         })
+    }
+
+    /// Materializes a checkpoint fact from retained response material.
+    pub fn checkpoint_fact_from_response(
+        &self,
+        response: CollectorCheckpointResponse,
+    ) -> Result<CollectorCheckpointFact, BtcStateError> {
+        Ok(CollectorCheckpointFact::new(
+            self.checkpoint_subject()?,
+            response,
+        ))
+    }
+
+    /// Rebuilds loaded checkpoint output from recorded query evidence and retained response material.
+    pub fn loaded_checkpoint_from_replay_evidence(
+        &self,
+        evidence: &mfm_facts::FactQueryEvidence,
+        response: Option<CollectorCheckpointResponse>,
+    ) -> Result<LoadedCollectorCheckpoint, BtcStateError> {
+        mfm_facts::validate_fact_query_evidence(evidence).map_err(|error| {
+            BtcStateError::InvalidInput {
+                reason: error.to_string(),
+            }
+        })?;
+        match (
+            evidence.receipt().returned_refs().len(),
+            evidence.selection().selected_indices(),
+            response,
+        ) {
+            (0, [], None) => Ok(LoadedCollectorCheckpoint::new(None)),
+            (1, [0], Some(response)) => self
+                .checkpoint_fact_from_response(response)
+                .map(|checkpoint| LoadedCollectorCheckpoint::new(Some(checkpoint))),
+            _ => Err(BtcStateError::InvalidInput {
+                reason: "checkpoint replay evidence did not match latest-checkpoint selection"
+                    .to_owned(),
+            }),
+        }
     }
 }
 
@@ -990,23 +1038,7 @@ impl Default for QueryCollectorCheckpointConfig {
 /// Input for querying a collector checkpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, StateInput)]
 #[mfm(schema = "mfm.bitcoin.state.input.query_collector_checkpoint")]
-pub struct QueryCollectorCheckpointInput {
-    /// Optional non-secret query context supplied by the adapter.
-    pub context: QueryCollectorCheckpointContext,
-}
-
-/// Adapter-supplied context for a collector checkpoint query.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.bitcoin",
-    name = "collector_checkpoint_query_context",
-    version = "1",
-    schema = "mfm.bitcoin.state.value.collector_checkpoint_query_context"
-)]
-pub struct QueryCollectorCheckpointContext {
-    /// State query time in Unix milliseconds, when supplied by an adapter.
-    pub queried_at_unix_ms: Option<u64>,
-}
+pub struct QueryCollectorCheckpointInput {}
 
 /// Output from loading a collector checkpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
@@ -1049,20 +1081,33 @@ impl QueryCollectorCheckpointState {
         response: &FactIndexReadResponse,
         checkpoint: Option<CollectorCheckpointFact>,
     ) -> Result<LoadedCollectorCheckpoint, BtcStateError> {
-        match (response.rows().len(), checkpoint) {
-            (0, None) => Ok(LoadedCollectorCheckpoint::new(None)),
-            (1, Some(checkpoint)) => Ok(LoadedCollectorCheckpoint::new(Some(checkpoint))),
-            (0, Some(_)) => Err(BtcStateError::InvalidInput {
+        match (has_latest_checkpoint_row(response)?, checkpoint) {
+            (false, None) => Ok(LoadedCollectorCheckpoint::new(None)),
+            (true, Some(checkpoint)) => Ok(LoadedCollectorCheckpoint::new(Some(checkpoint))),
+            (false, Some(_)) => Err(BtcStateError::InvalidInput {
                 reason: "checkpoint material was supplied for an empty fact-index receipt"
                     .to_owned(),
             }),
-            (1, None) => Err(BtcStateError::InvalidInput {
+            (true, None) => Err(BtcStateError::InvalidInput {
                 reason: "checkpoint receipt row requires materialized checkpoint fact".to_owned(),
             }),
-            (_, _) => Err(BtcStateError::InvalidInput {
-                reason: "latest checkpoint query must return at most one row".to_owned(),
-            }),
         }
+    }
+
+    /// Returns the retained response fact ref selected by the latest-checkpoint policy.
+    pub fn selected_checkpoint_response_ref<'a>(
+        &self,
+        response: &'a FactIndexReadResponse,
+    ) -> Result<Option<&'a mfm_facts::InternalFactRef>, BtcStateError> {
+        latest_checkpoint_response_ref(response)
+    }
+
+    /// Materializes a checkpoint fact from retained response material.
+    pub fn checkpoint_fact_from_response(
+        &self,
+        response: CollectorCheckpointResponse,
+    ) -> Result<CollectorCheckpointFact, BtcStateError> {
+        self.config.checkpoint_fact_from_response(response)
     }
 
     /// Builds selection evidence for the state-owned latest-checkpoint policy.
@@ -1070,20 +1115,32 @@ impl QueryCollectorCheckpointState {
         &self,
         response: &FactIndexReadResponse,
     ) -> Result<FactSelectionEvidence, BtcStateError> {
-        let selected_indices = match response.rows().len() {
-            0 => Vec::new(),
-            1 => vec![0],
-            _ => {
-                return Err(BtcStateError::InvalidInput {
-                    reason: "latest checkpoint query must return at most one row".to_owned(),
-                })
-            }
+        let selected_indices = if has_latest_checkpoint_row(response)? {
+            vec![0]
+        } else {
+            Vec::new()
         };
         FactSelectionEvidence::new(selection_policy_hash(), selected_indices, None).map_err(
             |error| BtcStateError::InvalidInput {
                 reason: error.to_string(),
             },
         )
+    }
+}
+
+fn has_latest_checkpoint_row(response: &FactIndexReadResponse) -> Result<bool, BtcStateError> {
+    latest_checkpoint_response_ref(response).map(|row| row.is_some())
+}
+
+fn latest_checkpoint_response_ref(
+    response: &FactIndexReadResponse,
+) -> Result<Option<&mfm_facts::InternalFactRef>, BtcStateError> {
+    match response.rows() {
+        [] => Ok(None),
+        [row] => Ok(Some(row.fact_ref())),
+        _ => Err(BtcStateError::InvalidInput {
+            reason: "latest checkpoint query must return at most one row".to_owned(),
+        }),
     }
 }
 
@@ -1141,6 +1198,25 @@ pub fn validate_record_collector_checkpoint_config(
 ) -> Result<(), String> {
     validate_non_secret_label("collector_kind", &config.collector_kind)?;
     validate_non_secret_label("partition", &config.partition)
+}
+
+impl RecordCollectorCheckpointConfig {
+    /// Builds the checkpoint subject identity for a recorded chain-head fact.
+    pub fn checkpoint_subject(
+        &self,
+        chain_head_fact: &BtcChainHeadFact,
+    ) -> Result<CollectorCheckpointSubject, BtcStateError> {
+        validate_record_collector_checkpoint_config(self)
+            .map_err(|reason| BtcStateError::InvalidInput { reason })?;
+        Ok(CollectorCheckpointSubject {
+            collector_kind: self.collector_kind.clone(),
+            semantic_source_identity: chain_head_fact.subject().semantic_source_identity.clone(),
+            scope: DEFAULT_SCOPE.to_owned(),
+            partition: self.partition.clone(),
+            chain: chain_head_fact.subject().chain.clone(),
+            network: chain_head_fact.subject().network.clone(),
+        })
+    }
 }
 
 /// Input for recording a collector checkpoint fact.
@@ -1214,14 +1290,7 @@ fn build_checkpoint_fact_from_outputs(
 ) -> Result<CollectorCheckpointFact, BtcStateError> {
     validate_loaded_checkpoint_for_recorded_fact(config, chain_head_fact, loaded_checkpoint)?;
 
-    let subject = CollectorCheckpointSubject {
-        collector_kind: config.collector_kind.clone(),
-        semantic_source_identity: chain_head_fact.subject().semantic_source_identity.clone(),
-        scope: DEFAULT_SCOPE.to_owned(),
-        partition: config.partition.clone(),
-        chain: chain_head_fact.subject().chain.clone(),
-        network: chain_head_fact.subject().network.clone(),
-    };
+    let subject = config.checkpoint_subject(chain_head_fact)?;
     let predecessor_checkpoint_hash = loaded_checkpoint
         .checkpoint()
         .map(checkpoint_material_hash)
@@ -1309,92 +1378,11 @@ fn validate_loaded_checkpoint_for_recorded_fact(
 fn checkpoint_material_hash(
     checkpoint: &CollectorCheckpointFact,
 ) -> Result<ContentDigest, BtcStateError> {
-    let value = CanonicalValue::object([
-        (
-            "subject",
-            CanonicalValue::object([
-                (
-                    "chain",
-                    CanonicalValue::String(checkpoint.subject().chain.clone()),
-                ),
-                (
-                    "collector_kind",
-                    CanonicalValue::String(checkpoint.subject().collector_kind.clone()),
-                ),
-                (
-                    "network",
-                    CanonicalValue::String(checkpoint.subject().network.clone()),
-                ),
-                (
-                    "partition",
-                    CanonicalValue::String(checkpoint.subject().partition.clone()),
-                ),
-                (
-                    "scope",
-                    CanonicalValue::String(checkpoint.subject().scope.clone()),
-                ),
-                (
-                    "semantic_source_identity",
-                    CanonicalValue::String(checkpoint.subject().semantic_source_identity.clone()),
-                ),
-            ])
-            .map_err(canonical_checkpoint_error)?,
-        ),
-        (
-            "response",
-            CanonicalValue::object([
-                (
-                    "confirmation_depth",
-                    optional_u64_value(checkpoint.response().confirmation_depth),
-                ),
-                (
-                    "finality_policy",
-                    CanonicalValue::String(checkpoint.response().finality_policy.clone()),
-                ),
-                (
-                    "high_watermark_hash",
-                    CanonicalValue::String(checkpoint.response().high_watermark_hash.clone()),
-                ),
-                (
-                    "high_watermark_height",
-                    CanonicalValue::Unsigned(checkpoint.response().high_watermark_height),
-                ),
-                (
-                    "predecessor_checkpoint_hash",
-                    optional_string_value(
-                        checkpoint.response().predecessor_checkpoint_hash.as_deref(),
-                    ),
-                ),
-                (
-                    "predecessor_checkpoint_ref",
-                    optional_string_value(
-                        checkpoint.response().predecessor_checkpoint_ref.as_deref(),
-                    ),
-                ),
-            ])
-            .map_err(canonical_checkpoint_error)?,
-        ),
-    ])
-    .map_err(canonical_checkpoint_error)?;
-    Ok(CanonicalJsonBytes::from_value(&value).content_digest())
-}
-
-fn optional_string_value(value: Option<&str>) -> CanonicalValue {
-    value
-        .map(|value| CanonicalValue::String(value.to_owned()))
-        .unwrap_or(CanonicalValue::Null)
-}
-
-fn optional_u64_value(value: Option<u64>) -> CanonicalValue {
-    value
-        .map(CanonicalValue::Unsigned)
-        .unwrap_or(CanonicalValue::Null)
-}
-
-fn canonical_checkpoint_error(error: mfm_canonical::CanonicalError) -> BtcStateError {
-    BtcStateError::InvalidInput {
-        reason: format!("checkpoint material canonicalization failed: {error}"),
-    }
+    CanonicalSeed::from_value(checkpoint)
+        .map(|seed| seed.content_digest().clone())
+        .map_err(|error| BtcStateError::InvalidInput {
+            reason: format!("checkpoint material canonicalization failed: {error}"),
+        })
 }
 
 fn collector_checkpoint_query_input(
@@ -1429,7 +1417,7 @@ fn collector_checkpoint_query_input(
                 FactCanonicalScalar::string(&config.semantic_source_identity),
             )?,
         ],
-        Vec::new(),
+        vec![query_return_field("result.high_watermark_height")?],
         FactOrderingName::new("result.high_watermark_height.desc").map_err(|error| {
             BtcStateError::InvalidInput {
                 reason: error.to_string(),
@@ -1440,6 +1428,13 @@ fn collector_checkpoint_query_input(
     .map_err(|error| BtcStateError::InvalidInput {
         reason: error.to_string(),
     })
+}
+
+fn query_return_field(field_id: &str) -> Result<FactQueryReturnField, BtcStateError> {
+    let field_id = FactFieldId::new(field_id).map_err(|error| BtcStateError::InvalidInput {
+        reason: error.to_string(),
+    })?;
+    Ok(FactQueryReturnField::new(field_id))
 }
 
 fn query_predicate(
@@ -1666,6 +1661,7 @@ mod tests {
         assert!(descriptor.fields().iter().any(|field| {
             field.field_id().as_str() == "result.high_watermark_height"
                 && field.value_type() == FactFieldValueType::UnsignedInteger
+                && field.exposure() == FactFieldExposure::Returnable
                 && field.sortable()
         }));
         assert!(descriptor.fields().iter().any(|field| {
@@ -1725,14 +1721,16 @@ mod tests {
         let query: serde_json::Value =
             serde_json::from_slice(plan.canonical_query().as_bytes()).expect("query json");
         assert_eq!(query["fact_kind"], "collector.checkpoint");
+        assert!(query.get("audience").is_none());
+        assert!(query.get("scope").is_none());
         assert_eq!(query["limit"], 1);
         assert_eq!(query["ordering"], "result.high_watermark_height.desc");
         assert_eq!(
-            query["return_fields"].as_array().expect("return fields"),
-            &[] as &[serde_json::Value]
+            query["return_fields"][0]["field_id"],
+            "result.high_watermark_height"
         );
         let parsed_shape = mfm_facts::parse_canonical_fact_query_shape(plan).expect("query shape");
-        assert_eq!(parsed_shape.return_fields().len(), 0);
+        assert_eq!(parsed_shape.return_fields().len(), 1);
         assert!(query["predicates"]
             .as_array()
             .expect("predicates")

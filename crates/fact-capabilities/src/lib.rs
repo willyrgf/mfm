@@ -19,11 +19,12 @@ use std::pin::Pin;
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{CapabilityError, CapabilitySpec, ReadExternalRole};
 use mfm_facts::{
-    CanonicalFactQueryPlan, FactAudience, FactQueryEvidence, FactQueryReceipt,
-    FactSelectionEvidence, InternalFactRef, ReturnedFieldValueSummary,
-    StoreReceiptAuthenticationScheme,
+    CanonicalFactQueryPlan, FactAudience, FactQueryEvidence, FactQueryReceipt, FactQueryResultRow,
+    FactSelectionEvidence,
 };
 use mfm_ids::{CapabilityKind, CapabilityVersion, DigestAlgorithm};
+
+pub use mfm_facts::FactQueryReceiptTrustRootMaterial;
 
 /// Result type for fact-index read capability contracts.
 pub type Result<T> = std::result::Result<T, FactIndexReadError>;
@@ -88,77 +89,7 @@ impl FactIndexReadRequest {
 }
 
 /// One row returned by an internal fact-index read.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FactIndexReadRow {
-    fact_ref: InternalFactRef,
-    returned_fields: Vec<ReturnedFieldValueSummary>,
-}
-
-impl FactIndexReadRow {
-    /// Creates a returned row from its trusted internal ref and pinned summaries.
-    pub fn new(fact_ref: InternalFactRef, returned_fields: Vec<ReturnedFieldValueSummary>) -> Self {
-        Self {
-            fact_ref,
-            returned_fields,
-        }
-    }
-
-    /// Returns the trusted internal fact ref.
-    pub const fn fact_ref(&self) -> &InternalFactRef {
-        &self.fact_ref
-    }
-
-    /// Returns field summaries in receipt order for this row.
-    pub fn returned_fields(&self) -> &[ReturnedFieldValueSummary] {
-        &self.returned_fields
-    }
-}
-
-/// Store-neutral public trust-root material for fact query receipt authentication.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FactQueryReceiptTrustRootMaterial {
-    store_identity: mfm_facts::StoreIdentity,
-    scheme: StoreReceiptAuthenticationScheme,
-    key_id: mfm_facts::StoreKeyId,
-    verifying_key: [u8; 32],
-}
-
-impl FactQueryReceiptTrustRootMaterial {
-    /// Creates trust-root material from store-owned public verification data.
-    pub fn new(
-        store_identity: mfm_facts::StoreIdentity,
-        scheme: StoreReceiptAuthenticationScheme,
-        key_id: mfm_facts::StoreKeyId,
-        verifying_key: [u8; 32],
-    ) -> Self {
-        Self {
-            store_identity,
-            scheme,
-            key_id,
-            verifying_key,
-        }
-    }
-
-    /// Returns the store identity bound to this trust root.
-    pub const fn store_identity(&self) -> &mfm_facts::StoreIdentity {
-        &self.store_identity
-    }
-
-    /// Returns the authentication scheme bound to this trust root.
-    pub const fn scheme(&self) -> StoreReceiptAuthenticationScheme {
-        self.scheme
-    }
-
-    /// Returns the non-secret key id bound to this trust root.
-    pub const fn key_id(&self) -> &mfm_facts::StoreKeyId {
-        &self.key_id
-    }
-
-    /// Returns the raw public verifying key bytes.
-    pub const fn verifying_key(&self) -> &[u8; 32] {
-        &self.verifying_key
-    }
-}
+pub type FactIndexReadRow = FactQueryResultRow;
 
 /// Response from an internal fact-index read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,7 +106,8 @@ impl FactIndexReadResponse {
         receipt: FactQueryReceipt,
         trust_root: FactQueryReceiptTrustRootMaterial,
     ) -> Result<Self> {
-        validate_rows_match_receipt(&rows, &receipt)?;
+        mfm_facts::validate_fact_query_result_rows(&rows, &receipt)
+            .map_err(|reason| FactIndexReadError::Receipt { reason })?;
         Ok(Self {
             rows,
             receipt,
@@ -188,7 +120,7 @@ impl FactIndexReadResponse {
         receipt: FactQueryReceipt,
         trust_root: FactQueryReceiptTrustRootMaterial,
     ) -> Self {
-        let rows = rows_from_receipt(&receipt);
+        let rows = mfm_facts::fact_query_result_rows_from_receipt(&receipt);
         Self {
             rows,
             receipt,
@@ -274,21 +206,7 @@ pub enum FactIndexProviderFailure {
 }
 
 /// Closed receipt mismatch reasons.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FactIndexReceiptFailure {
-    /// Row count differed from the returned refs in the receipt.
-    RowCountMismatch,
-    /// A row ref differed from the corresponding receipt ref.
-    RowRefMismatch,
-    /// Returned field summaries were supplied without receipt-pinned summaries.
-    UnpinnedFieldSummaries,
-    /// Receipt summary count differed from the returned refs in the receipt.
-    SummaryCountMismatch,
-    /// A receipt summary claim id differed from the corresponding row ref.
-    SummaryClaimMismatch,
-    /// A row's returned fields differed from receipt-pinned summaries.
-    SummaryValueMismatch,
-}
+pub type FactIndexReceiptFailure = mfm_facts::FactQueryResultMismatch;
 
 /// Closed evidence validation reasons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,75 +253,19 @@ impl FactIndexReadError {
     }
 }
 
-fn rows_from_receipt(receipt: &FactQueryReceipt) -> Vec<FactIndexReadRow> {
-    receipt
-        .returned_refs()
-        .iter()
-        .enumerate()
-        .map(|(index, fact_ref)| {
-            let returned_fields = receipt
-                .returned_field_summaries()
-                .and_then(|summaries| summaries.summaries().get(index))
-                .map(|summary| summary.fields().to_vec())
-                .unwrap_or_default();
-            FactIndexReadRow::new(fact_ref.clone(), returned_fields)
-        })
-        .collect()
-}
-
-fn validate_rows_match_receipt(
-    rows: &[FactIndexReadRow],
-    receipt: &FactQueryReceipt,
-) -> Result<()> {
-    if rows.len() != receipt.returned_refs().len() {
-        return Err(receipt_error(FactIndexReceiptFailure::RowCountMismatch));
-    }
-
-    for (row, returned_ref) in rows.iter().zip(receipt.returned_refs()) {
-        if row.fact_ref() != returned_ref {
-            return Err(receipt_error(FactIndexReceiptFailure::RowRefMismatch));
-        }
-    }
-
-    let Some(summaries) = receipt.returned_field_summaries() else {
-        if rows.iter().any(|row| !row.returned_fields().is_empty()) {
-            return Err(receipt_error(
-                FactIndexReceiptFailure::UnpinnedFieldSummaries,
-            ));
-        }
-        return Ok(());
-    };
-
-    if summaries.summaries().len() != rows.len() {
-        return Err(receipt_error(FactIndexReceiptFailure::SummaryCountMismatch));
-    }
-
-    for (row, summary) in rows.iter().zip(summaries.summaries()) {
-        if summary.fact_claim_id() != row.fact_ref().fact_claim_id() {
-            return Err(receipt_error(FactIndexReceiptFailure::SummaryClaimMismatch));
-        }
-        if summary.fields() != row.returned_fields() {
-            return Err(receipt_error(FactIndexReceiptFailure::SummaryValueMismatch));
-        }
-    }
-
-    Ok(())
-}
-
-fn receipt_error(reason: FactIndexReceiptFailure) -> FactIndexReadError {
-    FactIndexReadError::Receipt { reason }
-}
-
 #[cfg(test)]
 mod tests {
+    use mfm_canonical::{CanonicalJsonBytes, CanonicalValue};
     use mfm_capabilities::{CapabilityRole, CapabilitySpec};
     use mfm_facts::{
-        DescriptorCatalogWatermark, FactCanonicalScalar, FactClaimId, FactFieldId,
-        FactFieldValueType, FactProjectionGeneration, FactQueryResultRow, FactQueryScope,
-        FactVisibility, FactVisibilityScope, InternalFactRefParts, ReturnedFactFieldSummary,
-        ReturnedFieldSummaries, ScopeDecisionEvidence, StoreCommitWatermark, StoreIdentity,
-        StoreKeyId, StoreReadFrontier, StoreReadFrontierType, StoreReceiptAuthentication,
-        StoreScopeRef,
+        DescriptorCatalogWatermark, FactCanonicalScalar, FactCanonicalizerVersion, FactClaimId,
+        FactFieldId, FactFieldValueType, FactOrderingName, FactOrderingPolicy, FactOrderingTerm,
+        FactProjectionGeneration, FactQueryCompilerVersion, FactQueryScope, FactVisibility,
+        FactVisibilityScope, InternalFactRef, InternalFactRefParts, NullOrdering,
+        ReturnedFactFieldSummary, ReturnedFieldSummaries, ReturnedFieldValueSummary,
+        ScopeDecisionEvidence, SortDirection, StoreCommitWatermark, StoreIdentity, StoreKeyId,
+        StoreReadFrontier, StoreReadFrontierType, StoreReceiptAuthentication,
+        StoreReceiptAuthenticationScheme, StoreScopeRef,
     };
     use mfm_ids::{
         AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
@@ -514,83 +376,32 @@ mod tests {
     }
 
     fn plan(audience: FactAudience) -> CanonicalFactQueryPlan {
-        let descriptor = mfm_facts::FactDescriptor::new(
-            mfm_facts::FactKind::new("collector.checkpoint").expect("kind"),
-            mfm_facts::fact_descriptor_schema_id().expect("descriptor schema"),
-            schema_id(0x90),
-            schema_id(0x91),
-            vec![
-                mfm_facts::FactFieldDescriptor::new(
-                    FactFieldId::new("subject.source").expect("field"),
-                    mfm_facts::FactFieldPath::new("subject.source").expect("path"),
-                    FactFieldValueType::String,
-                    mfm_facts::FactFieldExtraction::SubjectPath(
-                        mfm_facts::CanonicalValuePath::new("source").expect("subject path"),
-                    ),
-                    vec![mfm_facts::FactQueryOperator::Equal],
-                    mfm_facts::FactFieldExposure::QueryOnly,
-                    None,
-                    None,
-                    false,
-                    true,
-                )
-                .expect("subject field"),
-                mfm_facts::FactFieldDescriptor::new(
-                    FactFieldId::new("result.height").expect("field"),
-                    mfm_facts::FactFieldPath::new("result.height").expect("path"),
-                    FactFieldValueType::UnsignedInteger,
-                    mfm_facts::FactFieldExtraction::ResponsePath(
-                        mfm_facts::CanonicalValuePath::new("height").expect("response path"),
-                    ),
-                    vec![mfm_facts::FactQueryOperator::Equal],
-                    mfm_facts::FactFieldExposure::Returnable,
-                    None,
-                    None,
-                    true,
-                    true,
-                )
-                .expect("result field"),
-                mfm_facts::FactFieldDescriptor::new(
+        let query = CanonicalValue::object([(
+            "kind",
+            CanonicalValue::String("collector.checkpoint".to_owned()),
+        )])
+        .expect("canonical query");
+        CanonicalFactQueryPlan::new(
+            StoreScopeRef::new("mfm.store.default").expect("store scope"),
+            FactQueryScope::new(audience, FactVisibilityScope::Default),
+            FactQueryCompilerVersion::new("mfm.facts.query.v1").expect("compiler"),
+            FactCanonicalizerVersion::new("mfm.canonical.v1").expect("canonicalizer"),
+            digest(0x20),
+            ScopeDecisionEvidence::new(digest(0x21)),
+            CanonicalJsonBytes::from_value(&query),
+            FactOrderingPolicy::new(
+                FactOrderingName::new("metadata.recorded_at.desc").expect("ordering"),
+                vec![FactOrderingTerm::new(
                     FactFieldId::new("metadata.recorded_at").expect("field"),
-                    mfm_facts::FactFieldPath::new("metadata.recorded_at").expect("path"),
-                    FactFieldValueType::Timestamp,
-                    mfm_facts::FactFieldExtraction::Metadata(
-                        mfm_facts::FactMetadataField::RecordedAt,
-                    ),
-                    vec![mfm_facts::FactQueryOperator::Equal],
-                    mfm_facts::FactFieldExposure::QueryOnly,
-                    None,
-                    None,
-                    true,
-                    false,
-                )
-                .expect("metadata field"),
-            ],
-            vec![mfm_facts::FactOrderingPolicy::new(
-                mfm_facts::FactOrderingName::new("metadata.recorded_at.desc").expect("ordering"),
-                vec![mfm_facts::FactOrderingTerm::new(
-                    FactFieldId::new("metadata.recorded_at").expect("field"),
-                    mfm_facts::SortDirection::Descending,
-                    mfm_facts::NullOrdering::Last,
+                    SortDirection::Descending,
+                    NullOrdering::Last,
                     true,
                 )],
             )
-            .expect("fact ordering")],
-        )
-        .expect("descriptor");
-        let input = mfm_facts::FactQueryInput::new(
-            StoreScopeRef::new("mfm.store.default").expect("store scope"),
-            FactQueryScope::new(audience, FactVisibilityScope::Default),
-            ScopeDecisionEvidence::new(digest(0x21)),
-            Vec::new(),
-            vec![mfm_facts::FactQueryReturnField::new(
-                FactFieldId::new("result.height").expect("field"),
-            )],
-            mfm_facts::FactOrderingName::new("metadata.recorded_at.desc").expect("ordering"),
+            .expect("fact ordering"),
             Some(1),
         )
-        .expect("query input");
-        mfm_facts::compile_fact_query_plan(&descriptor, input).expect("plan")
+        .expect("plan")
     }
 
     fn receipt_with_summary(

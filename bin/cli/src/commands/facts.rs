@@ -6,9 +6,8 @@ use crate::presentation::output::handle_command_result;
 use crate::support::run_store::{connect_run_read_services, RunStoresArgs};
 use clap::{Args, Subcommand};
 use mfm_app::{
-    PublicFactDescriptorSummary, PublicFactExplain, PublicFactFieldValue, PublicFactKindSummary,
-    PublicFactPredicate, PublicFactQueryPage, PublicFactQueryRequest, PublicFactRef,
-    PublicFactRefId, PublicFactScalarValue,
+    PublicFactDescriptorSummary, PublicFactExplain, PublicFactKindSummary, PublicFactQueryPage,
+    PublicFactQueryRequest, PublicFactQuerySelector, PublicFactRef, PublicFactRefId,
 };
 use serde::Serialize;
 
@@ -69,16 +68,29 @@ impl FactsCommand {
     /// Dispatches the selected facts subcommand and terminates the process.
     pub(crate) async fn execute(&self, ctx: &CommandContext) -> ! {
         match self {
-            FactsCommand::Kinds { args } => kinds::execute(ctx, args).await,
-            FactsCommand::Describe { args } => describe::execute(ctx, args).await,
-            FactsCommand::Explain { args } => explain::execute(ctx, args).await,
-            FactsCommand::Query { args } => query::execute(ctx, args).await,
-            FactsCommand::Latest { args } => latest::execute(ctx, args).await,
-            FactsCommand::History { args } => history::execute(ctx, args).await,
-            FactsCommand::Top { args } => top::execute(ctx, args).await,
-            FactsCommand::Show { args } => show::execute(ctx, args).await,
+            FactsCommand::Kinds { args } => finish_fact_command(ctx, execute_kinds(args).await),
+            FactsCommand::Describe { args } => {
+                finish_fact_command(ctx, execute_describe(args).await)
+            }
+            FactsCommand::Explain { args } => finish_fact_command(ctx, execute_explain(args).await),
+            FactsCommand::Query { args } => finish_fact_command(ctx, execute_query(args).await),
+            FactsCommand::Latest { args } => finish_fact_command(ctx, execute_latest(args).await),
+            FactsCommand::History { args } => {
+                finish_fact_command(ctx, execute_limited_kind_query(args).await)
+            }
+            FactsCommand::Top { args } => {
+                finish_fact_command(ctx, execute_limited_kind_query(args).await)
+            }
+            FactsCommand::Show { args } => finish_fact_command(ctx, execute_show(args).await),
         }
     }
+}
+
+fn finish_fact_command<T>(ctx: &CommandContext, result: CommandResult<T>) -> !
+where
+    T: Serialize + fmt::Display,
+{
+    handle_command_result(result, &ctx.output_format)
 }
 
 /// Arguments for `mfm facts kinds`.
@@ -118,29 +130,9 @@ pub(crate) struct QueryArgs {
     #[arg(long)]
     pub(crate) kind: String,
 
-    /// Optional descriptor shape selector.
-    #[arg(long)]
-    pub(crate) shape: Option<String>,
-
-    /// Descriptor ordering policy name.
-    #[arg(long)]
-    pub(crate) order: String,
-
-    /// Subject predicate, for example `chain=bitcoin` or `subject.chain.eq=bitcoin`.
-    #[arg(long = "subject")]
-    pub(crate) subjects: Vec<String>,
-
-    /// Result predicate, for example `amount_sat.gt=1000` or `result.amount_sat.gt=1000`.
-    #[arg(long = "result")]
-    pub(crate) results: Vec<String>,
-
-    /// Full field predicate, for example `subject.chain.eq=bitcoin`.
-    #[arg(long = "where")]
-    pub(crate) where_predicates: Vec<String>,
-
-    /// Returnable field id to request from the public fact service.
-    #[arg(long = "field", required = true)]
-    pub(crate) fields: Vec<String>,
+    /// Shared fact query selector arguments.
+    #[command(flatten)]
+    pub(crate) query: FactQuerySelectorArgs,
 
     /// Maximum fact rows to return.
     #[arg(long, default_value_t = 50)]
@@ -151,12 +143,9 @@ pub(crate) struct QueryArgs {
     pub(crate) stores: RunStoresArgs,
 }
 
-/// Shared arguments for kind-first latest queries.
+/// Shared public fact query selector arguments.
 #[derive(Args)]
-pub(crate) struct KindQueryArgs {
-    /// Public fact kind to query.
-    pub(crate) kind: String,
-
+pub(crate) struct FactQuerySelectorArgs {
     /// Optional descriptor shape selector.
     #[arg(long)]
     pub(crate) shape: Option<String>,
@@ -180,6 +169,17 @@ pub(crate) struct KindQueryArgs {
     /// Returnable field id to request from the public fact service.
     #[arg(long = "field", required = true)]
     pub(crate) fields: Vec<String>,
+}
+
+/// Shared arguments for kind-first latest queries.
+#[derive(Args)]
+pub(crate) struct KindQueryArgs {
+    /// Public fact kind to query.
+    pub(crate) kind: String,
+
+    /// Shared fact query selector arguments.
+    #[command(flatten)]
+    pub(crate) query: FactQuerySelectorArgs,
 
     /// Storage configuration for certified typed run events and fact projections.
     #[command(flatten)]
@@ -192,29 +192,9 @@ pub(crate) struct LimitedKindQueryArgs {
     /// Public fact kind to query.
     pub(crate) kind: String,
 
-    /// Optional descriptor shape selector.
-    #[arg(long)]
-    pub(crate) shape: Option<String>,
-
-    /// Descriptor ordering policy name.
-    #[arg(long)]
-    pub(crate) order: String,
-
-    /// Subject predicate, for example `chain=bitcoin` or `subject.chain.eq=bitcoin`.
-    #[arg(long = "subject")]
-    pub(crate) subjects: Vec<String>,
-
-    /// Result predicate, for example `amount_sat.gt=1000` or `result.amount_sat.gt=1000`.
-    #[arg(long = "result")]
-    pub(crate) results: Vec<String>,
-
-    /// Full field predicate, for example `subject.chain.eq=bitcoin`.
-    #[arg(long = "where")]
-    pub(crate) where_predicates: Vec<String>,
-
-    /// Returnable field id to request from the public fact service.
-    #[arg(long = "field", required = true)]
-    pub(crate) fields: Vec<String>,
+    /// Shared fact query selector arguments.
+    #[command(flatten)]
+    pub(crate) query: FactQuerySelectorArgs,
 
     /// Maximum fact rows to return.
     #[arg(long, default_value_t = 50)]
@@ -293,30 +273,25 @@ impl fmt::Display for ExplainOutput {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct QueryOutput {
-    facts: Vec<PublicFactRef>,
-    next_cursor: Option<String>,
-}
+#[serde(transparent)]
+pub(crate) struct QueryOutput(PublicFactQueryPage);
 
 impl From<PublicFactQueryPage> for QueryOutput {
     fn from(page: PublicFactQueryPage) -> Self {
-        Self {
-            facts: page.facts,
-            next_cursor: page.next_cursor,
-        }
+        Self(page)
     }
 }
 
 impl fmt::Display for QueryOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.facts.is_empty() {
+        if self.0.facts.is_empty() {
             writeln!(f, "facts 0")?;
         } else {
-            for fact in &self.facts {
+            for fact in &self.0.facts {
                 write_fact(f, fact)?;
             }
         }
-        if let Some(cursor) = &self.next_cursor {
+        if let Some(cursor) = &self.0.next_cursor {
             writeln!(f, "next_cursor {cursor}")?;
         }
         Ok(())
@@ -334,318 +309,77 @@ impl fmt::Display for ShowOutput {
     }
 }
 
-mod kinds {
-    use super::*;
-
-    pub(crate) async fn execute(ctx: &CommandContext, args: &KindsArgs) -> ! {
-        let result = execute_internal(args).await;
-        handle_command_result(result, &ctx.output_format);
-    }
-
-    async fn execute_internal(args: &KindsArgs) -> CommandResult<KindsOutput> {
-        let services = connect_run_read_services(&args.stores).await?;
-        Ok(CommandOutput::new(KindsOutput {
-            kinds: services.fact_kinds().await?,
-        }))
-    }
+async fn execute_kinds(args: &KindsArgs) -> CommandResult<KindsOutput> {
+    let services = connect_run_read_services(&args.stores).await?;
+    Ok(CommandOutput::new(KindsOutput {
+        kinds: services.fact_kinds().await?,
+    }))
 }
 
-mod describe {
-    use super::*;
-
-    pub(crate) async fn execute(ctx: &CommandContext, args: &DescribeArgs) -> ! {
-        let result = execute_internal(args).await;
-        handle_command_result(result, &ctx.output_format);
-    }
-
-    async fn execute_internal(args: &DescribeArgs) -> CommandResult<DescribeOutput> {
-        let services = connect_run_read_services(&args.stores).await?;
-        Ok(CommandOutput::new(DescribeOutput {
-            descriptors: services.describe_fact_kind(&args.kind).await?,
-        }))
-    }
+async fn execute_describe(args: &DescribeArgs) -> CommandResult<DescribeOutput> {
+    let services = connect_run_read_services(&args.stores).await?;
+    Ok(CommandOutput::new(DescribeOutput {
+        descriptors: services.describe_fact_kind(&args.kind).await?,
+    }))
 }
 
-mod explain {
-    use super::*;
-
-    pub(crate) async fn execute(ctx: &CommandContext, args: &ExplainArgs) -> ! {
-        let result = execute_internal(args).await;
-        handle_command_result(result, &ctx.output_format);
-    }
-
-    async fn execute_internal(args: &ExplainArgs) -> CommandResult<ExplainOutput> {
-        let services = connect_run_read_services(&args.stores).await?;
-        Ok(CommandOutput::new(ExplainOutput {
-            explain: services.explain_fact_kind(&args.kind).await?,
-        }))
-    }
+async fn execute_explain(args: &ExplainArgs) -> CommandResult<ExplainOutput> {
+    let services = connect_run_read_services(&args.stores).await?;
+    Ok(CommandOutput::new(ExplainOutput {
+        explain: services.explain_fact_kind(&args.kind).await?,
+    }))
 }
 
-mod query {
-    use super::*;
-
-    pub(crate) async fn execute(ctx: &CommandContext, args: &QueryArgs) -> ! {
-        let result = execute_internal(args).await;
-        handle_command_result(result, &ctx.output_format);
-    }
-
-    async fn execute_internal(args: &QueryArgs) -> CommandResult<QueryOutput> {
-        validate_limit(args.limit)?;
-        let services = connect_run_read_services(&args.stores).await?;
-        let request = PublicFactQueryRequest {
-            fact_kind: args.kind.clone(),
-            shape: args.shape.clone(),
-            predicates: parse_predicates(
-                args.subjects.iter(),
-                args.results.iter(),
-                args.where_predicates.iter(),
-            )?,
-            return_fields: args.fields.clone(),
-            ordering: args.order.clone(),
-            limit: Some(args.limit),
-        };
-        Ok(CommandOutput::new(
-            services.query_public_facts(request).await?.into(),
-        ))
-    }
+async fn execute_query(args: &QueryArgs) -> CommandResult<QueryOutput> {
+    execute_kind_query(&args.stores, &args.kind, &args.query, Some(args.limit)).await
 }
 
-mod latest {
-    use super::*;
-
-    pub(crate) async fn execute(ctx: &CommandContext, args: &KindQueryArgs) -> ! {
-        let result = execute_internal(args).await;
-        handle_command_result(result, &ctx.output_format);
-    }
-
-    async fn execute_internal(args: &KindQueryArgs) -> CommandResult<QueryOutput> {
-        let services = connect_run_read_services(&args.stores).await?;
-        let request = PublicFactQueryRequest {
-            fact_kind: args.kind.clone(),
-            shape: args.shape.clone(),
-            predicates: parse_predicates(
-                args.subjects.iter(),
-                args.results.iter(),
-                args.where_predicates.iter(),
-            )?,
-            return_fields: args.fields.clone(),
-            ordering: args.order.clone(),
-            limit: Some(1),
-        };
-        Ok(CommandOutput::new(
-            services.query_public_facts(request).await?.into(),
-        ))
-    }
+async fn execute_latest(args: &KindQueryArgs) -> CommandResult<QueryOutput> {
+    execute_kind_query(&args.stores, &args.kind, &args.query, Some(1)).await
 }
 
-mod history {
-    use super::*;
-
-    pub(crate) async fn execute(ctx: &CommandContext, args: &LimitedKindQueryArgs) -> ! {
-        let result = execute_internal(args).await;
-        handle_command_result(result, &ctx.output_format);
-    }
-
-    async fn execute_internal(args: &LimitedKindQueryArgs) -> CommandResult<QueryOutput> {
-        execute_limited_kind_query(args).await
-    }
-}
-
-mod top {
-    use super::*;
-
-    pub(crate) async fn execute(ctx: &CommandContext, args: &LimitedKindQueryArgs) -> ! {
-        let result = execute_internal(args).await;
-        handle_command_result(result, &ctx.output_format);
-    }
-
-    async fn execute_internal(args: &LimitedKindQueryArgs) -> CommandResult<QueryOutput> {
-        execute_limited_kind_query(args).await
-    }
-}
-
-mod show {
-    use super::*;
-
-    pub(crate) async fn execute(ctx: &CommandContext, args: &ShowArgs) -> ! {
-        let result = execute_internal(args).await;
-        handle_command_result(result, &ctx.output_format);
-    }
-
-    async fn execute_internal(args: &ShowArgs) -> CommandResult<ShowOutput> {
-        let public_ref = PublicFactRefId::new(args.public_ref.clone())?;
-        let services = connect_run_read_services(&args.stores).await?;
-        Ok(CommandOutput::new(ShowOutput {
-            fact: services.resolve_public_fact_ref(&public_ref).await?,
-        }))
-    }
+async fn execute_show(args: &ShowArgs) -> CommandResult<ShowOutput> {
+    let public_ref = PublicFactRefId::new(args.public_ref.clone())?;
+    let services = connect_run_read_services(&args.stores).await?;
+    Ok(CommandOutput::new(ShowOutput {
+        fact: services.resolve_public_fact_ref(&public_ref).await?,
+    }))
 }
 
 async fn execute_limited_kind_query(args: &LimitedKindQueryArgs) -> CommandResult<QueryOutput> {
-    validate_limit(args.limit)?;
-    let services = connect_run_read_services(&args.stores).await?;
-    let request = PublicFactQueryRequest {
-        fact_kind: args.kind.clone(),
-        shape: args.shape.clone(),
-        predicates: parse_predicates(
-            args.subjects.iter(),
-            args.results.iter(),
-            args.where_predicates.iter(),
-        )?,
-        return_fields: args.fields.clone(),
-        ordering: args.order.clone(),
-        limit: Some(args.limit),
-    };
+    execute_kind_query(&args.stores, &args.kind, &args.query, Some(args.limit)).await
+}
+
+async fn execute_kind_query(
+    stores: &RunStoresArgs,
+    kind: &str,
+    query: &FactQuerySelectorArgs,
+    limit: Option<u64>,
+) -> CommandResult<QueryOutput> {
+    let services = connect_run_read_services(stores).await?;
+    let request = public_fact_query_request(kind, query, limit)?;
     Ok(CommandOutput::new(
         services.query_public_facts(request).await?.into(),
     ))
 }
 
-fn validate_limit(limit: u64) -> Result<(), CommandError> {
-    if limit == 0 {
-        return Err(CommandError::new(
-            "FactQueryLimitInvalid",
-            "--limit must be greater than zero",
-        ));
-    }
-    Ok(())
-}
-
-fn parse_predicates<'a>(
-    subjects: impl Iterator<Item = &'a String>,
-    results: impl Iterator<Item = &'a String>,
-    where_predicates: impl Iterator<Item = &'a String>,
-) -> Result<Vec<PublicFactPredicate>, CommandError> {
-    let mut predicates = Vec::new();
-    for value in subjects {
-        predicates.push(parse_prefixed_predicate("subject", value)?);
-    }
-    for value in results {
-        predicates.push(parse_prefixed_predicate("result", value)?);
-    }
-    for value in where_predicates {
-        predicates.push(parse_field_predicate(value)?);
-    }
-    Ok(predicates)
-}
-
-fn parse_prefixed_predicate(
-    prefix: &'static str,
-    value: &str,
-) -> Result<PublicFactPredicate, CommandError> {
-    let mut predicate = parse_field_predicate(value)?;
-    if !predicate.field_id.starts_with("subject.") && !predicate.field_id.starts_with("result.") {
-        predicate.field_id = format!("{prefix}.{}", predicate.field_id);
-    }
-    Ok(predicate)
-}
-
-fn parse_field_predicate(value: &str) -> Result<PublicFactPredicate, CommandError> {
-    let (left, raw_value) = value.split_once('=').ok_or_else(|| {
-        CommandError::new(
-            "FactPredicateInvalid",
-            "Fact predicates must use `field[.operator]=value`",
-        )
-    })?;
-    if left.is_empty() {
-        return Err(CommandError::new(
-            "FactPredicateInvalid",
-            "Fact predicate field must not be empty",
-        ));
-    }
-    let (field_id, operator) = parse_field_and_operator(left)?;
-    Ok(PublicFactPredicate {
-        field_id,
-        operator,
-        value: parse_scalar_value(raw_value)?,
-    })
-}
-
-fn parse_field_and_operator(value: &str) -> Result<(String, String), CommandError> {
-    let operators = [
-        (".lte", "less_than_or_equal"),
-        (".gte", "greater_than_or_equal"),
-        (".eq", "equal"),
-        (".lt", "less_than"),
-        (".gt", "greater_than"),
-    ];
-    for (suffix, operator) in operators {
-        if let Some(field_id) = value.strip_suffix(suffix) {
-            if field_id.is_empty() {
-                return Err(CommandError::new(
-                    "FactPredicateInvalid",
-                    "Fact predicate field must not be empty",
-                ));
-            }
-            return Ok((field_id.to_owned(), operator.to_owned()));
-        }
-    }
-    Ok((value.to_owned(), "equal".to_owned()))
-}
-
-fn parse_scalar_value(value: &str) -> Result<PublicFactScalarValue, CommandError> {
-    if let Some((type_name, typed_value)) = value.split_once(':') {
-        return match type_name {
-            "string" => Ok(PublicFactScalarValue::String(typed_value.to_owned())),
-            "bool" => parse_bool_scalar(typed_value),
-            "i64" => parse_i64_scalar(typed_value),
-            "u64" => parse_u64_scalar(typed_value),
-            "timestamp" => Ok(PublicFactScalarValue::Timestamp(typed_value.to_owned())),
-            "decimal" => Ok(PublicFactScalarValue::DecimalString(typed_value.to_owned())),
-            "digest" => Ok(PublicFactScalarValue::Digest(typed_value.to_owned())),
-            _ => Ok(infer_scalar_value(value)),
-        };
-    }
-    Ok(infer_scalar_value(value))
-}
-
-fn infer_scalar_value(value: &str) -> PublicFactScalarValue {
-    if let Ok(parsed) = value.parse::<bool>() {
-        return PublicFactScalarValue::Boolean(parsed);
-    }
-    if value.starts_with('-') {
-        if let Ok(parsed) = value.parse::<i64>() {
-            return PublicFactScalarValue::SignedInteger(parsed);
-        }
-    } else if let Ok(parsed) = value.parse::<u64>() {
-        return PublicFactScalarValue::UnsignedInteger(parsed);
-    }
-    if value.contains('.') && value.chars().all(|ch| ch.is_ascii_digit() || ch == '.') {
-        return PublicFactScalarValue::DecimalString(value.to_owned());
-    }
-    PublicFactScalarValue::String(value.to_owned())
-}
-
-fn parse_bool_scalar(value: &str) -> Result<PublicFactScalarValue, CommandError> {
-    value
-        .parse::<bool>()
-        .map(PublicFactScalarValue::Boolean)
-        .map_err(|_| CommandError::new("FactPredicateInvalid", "Boolean fact value is invalid"))
-}
-
-fn parse_i64_scalar(value: &str) -> Result<PublicFactScalarValue, CommandError> {
-    value
-        .parse::<i64>()
-        .map(PublicFactScalarValue::SignedInteger)
-        .map_err(|_| {
-            CommandError::new(
-                "FactPredicateInvalid",
-                "Signed integer fact value is invalid",
-            )
-        })
-}
-
-fn parse_u64_scalar(value: &str) -> Result<PublicFactScalarValue, CommandError> {
-    value
-        .parse::<u64>()
-        .map(PublicFactScalarValue::UnsignedInteger)
-        .map_err(|_| {
-            CommandError::new(
-                "FactPredicateInvalid",
-                "Unsigned integer fact value is invalid",
-            )
-        })
+fn public_fact_query_request(
+    kind: &str,
+    query: &FactQuerySelectorArgs,
+    limit: Option<u64>,
+) -> Result<PublicFactQueryRequest, CommandError> {
+    Ok(PublicFactQueryRequest::from_selector(
+        kind,
+        PublicFactQuerySelector {
+            shape: query.shape.clone(),
+            subject_predicates: query.subjects.clone(),
+            result_predicates: query.results.clone(),
+            field_predicates: query.where_predicates.clone(),
+            return_fields: query.fields.clone(),
+            ordering: Some(query.order.clone()),
+            limit,
+        },
+    )?)
 }
 
 fn write_descriptor(
@@ -700,64 +434,23 @@ fn write_fact(f: &mut fmt::Formatter<'_>, fact: &PublicFactRef) -> fmt::Result {
         fact.observed_at.as_deref().unwrap_or("none")
     )?;
     for field in &fact.fields {
-        writeln!(f, "  {}={}", field.field_id, public_scalar_display(field))?;
+        writeln!(f, "  {}={}", field.field_id, field.value)?;
     }
     Ok(())
-}
-
-fn public_scalar_display(field: &PublicFactFieldValue) -> String {
-    match &field.value {
-        PublicFactScalarValue::String(value)
-        | PublicFactScalarValue::Timestamp(value)
-        | PublicFactScalarValue::DecimalString(value)
-        | PublicFactScalarValue::Digest(value) => value.clone(),
-        PublicFactScalarValue::Boolean(value) => value.to_string(),
-        PublicFactScalarValue::SignedInteger(value) => value.to_string(),
-        PublicFactScalarValue::UnsignedInteger(value) => value.to_string(),
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mfm_app::{PublicFactDescriptorRef, PublicFactFieldValue};
-
-    #[test]
-    fn predicate_flags_decode_to_app_public_query_dtos() {
-        let predicates = parse_predicates(
-            [&"chain=bitcoin".to_owned()].into_iter(),
-            [&"amount_sat.gt=1000".to_owned()].into_iter(),
-            [&"metadata.observed_at.lte=timestamp:2026-07-02T00:00:00Z".to_owned()].into_iter(),
-        )
-        .expect("predicates");
-
-        assert_eq!(predicates[0].field_id, "subject.chain");
-        assert_eq!(predicates[0].operator, "equal");
-        assert_eq!(
-            predicates[0].value,
-            PublicFactScalarValue::String("bitcoin".to_owned())
-        );
-        assert_eq!(predicates[1].field_id, "result.amount_sat");
-        assert_eq!(predicates[1].operator, "greater_than");
-        assert_eq!(
-            predicates[1].value,
-            PublicFactScalarValue::UnsignedInteger(1000)
-        );
-        assert_eq!(predicates[2].field_id, "metadata.observed_at");
-        assert_eq!(predicates[2].operator, "less_than_or_equal");
-        assert_eq!(
-            predicates[2].value,
-            PublicFactScalarValue::Timestamp("2026-07-02T00:00:00Z".to_owned())
-        );
-    }
+    use mfm_app::{PublicFactDescriptorRef, PublicFactFieldValue, PublicFactScalarValue};
 
     #[test]
     fn rendered_public_fact_outputs_do_not_include_internal_fields() {
         let fact = sample_public_fact();
-        let output = QueryOutput {
+        let output = QueryOutput(PublicFactQueryPage {
             facts: vec![fact],
             next_cursor: None,
-        };
+        });
 
         let json = serde_json::to_string(&output).expect("json");
         let text = output.to_string();

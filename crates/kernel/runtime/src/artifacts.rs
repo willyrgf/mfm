@@ -570,6 +570,28 @@ pub(crate) fn validate_fact_query_returned_ref_authority(
     Ok(())
 }
 
+pub(crate) fn fact_query_returned_ref_retention_refs(
+    projections: &store::ProjectionSnapshot,
+    fact_ref: &mfm_facts::InternalFactRef,
+) -> Result<[events::RetentionRef; 2]> {
+    validate_fact_query_returned_ref_authority(projections, fact_ref)?;
+    let descriptor = projections
+        .fact_descriptor(fact_ref.fact_descriptor_hash())
+        .ok_or_else(|| fact_query_ref_authority_error("missing descriptor authority"))?;
+    Ok([
+        events::RetentionRef {
+            artifact_id: descriptor.descriptor_artifact_id.clone(),
+            role: events::ArtifactRole::FactDescriptor,
+            content_digest: descriptor.descriptor_hash.clone(),
+        },
+        events::RetentionRef {
+            artifact_id: fact_ref.artifact_id().clone(),
+            role: events::ArtifactRole::FactResponse,
+            content_digest: fact_ref.response_hash().clone(),
+        },
+    ])
+}
+
 fn fact_descriptor_projection_matches_returned_ref(
     descriptor: &store::FactDescriptorProjection,
     fact_ref: &mfm_facts::InternalFactRef,

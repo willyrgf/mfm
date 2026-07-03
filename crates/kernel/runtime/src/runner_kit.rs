@@ -1,24 +1,26 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use mfm_canonical::{sha256_digest_bytes, CanonicalValue, DecimalString, PlainCanonicalJsonBytes};
-use mfm_capabilities::CapabilitySetDescriptor;
+use mfm_artifact_capabilities::{ArtifactReadProvider, ArtifactReadRequest};
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
+use mfm_capabilities::{CapabilitySetDescriptor, CapabilitySetFor, CapabilitySpec};
 use mfm_events::v1::{self as events, side_effect};
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
-    DescriptorId, DigestAlgorithm, SchemaId,
+    DescriptorId, DigestAlgorithm, NodeId, SchemaId,
 };
-use mfm_program::MfmFactType;
+use mfm_program::{EffectRunner, MfmFactType, StateSpec};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
-use mfm_values::MfmValue;
-use serde::Serialize;
+use mfm_values::{MfmConfig, MfmValue, NonEmpty, ValidatedConfig};
+use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{
-    artifacts::validate_fact_query_returned_ref_authority, AdapterExecutableBinding,
+    artifacts::fact_query_returned_ref_retention_refs, AdapterExecutableBinding,
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding,
-    ErasedRunnerOutput, ErasedRunnerRegistry, Result, RunnerEventPayload, RunnerFactRecorded,
-    RuntimeError, StagedArtifact, StagedRetentionRefs,
+    ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCell, MaterializedCellTerminal,
+    MaterializedInputNode, MaterializedInputs, Result, RunnerEventPayload, RunnerFactRecorded,
+    RunnerIngressContext, RuntimeError, StagedArtifact, StagedRetentionRefs,
 };
 
 /// Canonical JSON artifact prepared by a typed runner before runtime staging.
@@ -41,11 +43,7 @@ impl RunnerJsonArtifact {
 
     /// Returns a runtime retention ref for this artifact.
     pub fn retention_ref(&self) -> events::RetentionRef {
-        events::RetentionRef {
-            artifact_id: self.evidence.artifact_id.clone(),
-            role: self.evidence.artifact_role,
-            content_digest: self.evidence.digest.clone(),
-        }
+        self.evidence.retention_ref()
     }
 
     /// Splits the artifact into canonical bytes and evidence.
@@ -123,6 +121,373 @@ impl StagedFactQueryEvidence {
     pub const fn evidence_hash(&self) -> &ContentDigest {
         &self.evidence_hash
     }
+}
+
+/// Precomputed executable identity material shared by runner factories in one adapter binary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerExecutableIdentityTemplate {
+    cargo_package_digest: ContentDigest,
+    binary_digest: ContentDigest,
+}
+
+impl RunnerExecutableIdentityTemplate {
+    /// Builds executable identity material from the stable adapter package and runner labels.
+    pub fn new(
+        cargo_package: &'static str,
+        runner: &'static str,
+        version: &'static str,
+    ) -> Result<Self> {
+        Ok(Self {
+            cargo_package_digest: executable_identity_digest(serde_json::json!({
+                "crate": cargo_package,
+                "version": version,
+            }))?,
+            binary_digest: executable_identity_digest(serde_json::json!({
+                "crate": cargo_package,
+                "runner": runner,
+                "version": version,
+            }))?,
+        })
+    }
+
+    /// Builds an executable identity for one logical runner or adapter factory.
+    pub fn executable(&self, factory_id: events::RunnerFactoryId) -> events::ExecutableIdentity {
+        events::ExecutableIdentity {
+            factory_id,
+            cargo_package_digest: self.cargo_package_digest.clone(),
+            binary_digest: self.binary_digest.clone(),
+            nix_derivation_hash: None,
+            nix_output_hash: None,
+        }
+    }
+
+    /// Builds a reusable factory binding for one logical runner or adapter factory.
+    pub fn factory_binding(&self, factory_id: events::RunnerFactoryId) -> RunnerFactoryBinding {
+        let executable = self.executable(factory_id.clone());
+        RunnerFactoryBinding {
+            factory_id,
+            executable,
+        }
+    }
+}
+
+/// Bound runner factory id and executable identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerFactoryBinding {
+    factory_id: events::RunnerFactoryId,
+    executable: events::ExecutableIdentity,
+}
+
+impl RunnerFactoryBinding {
+    /// Returns the runner factory id.
+    pub fn factory_id(&self) -> events::RunnerFactoryId {
+        self.factory_id.clone()
+    }
+
+    /// Returns the executable identity bound to the factory.
+    pub fn executable(&self) -> events::ExecutableIdentity {
+        self.executable.clone()
+    }
+}
+
+/// Loads and validates the certified config artifact for the current runner node.
+pub async fn load_runner_config<T>(
+    ctx: &ErasedRunCtx<'_>,
+    artifacts: &dyn ArtifactReadProvider,
+) -> Result<ValidatedConfig<T>>
+where
+    T: MfmConfig + DeserializeOwned,
+{
+    load_runner_config_for_node(ctx.node(), artifacts).await
+}
+
+/// Loads and validates the certified config artifact for a specific certified node.
+pub async fn load_runner_config_for_node<T>(
+    node: &spec::NodeSpec,
+    artifacts: &dyn ArtifactReadProvider,
+) -> Result<ValidatedConfig<T>>
+where
+    T: MfmConfig + DeserializeOwned,
+{
+    let request = ArtifactReadRequest::from_certified_config_ref(&node.config_ref);
+    let verified = artifacts
+        .read_artifact(&request)
+        .await
+        .map_err(artifact_read_runtime_error)?;
+    let config = verified
+        .decode_json::<T>()
+        .map_err(artifact_read_runtime_error)?;
+    ValidatedConfig::new(config)
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
+}
+
+/// Loads and validates the launch config artifact for the runner ingress node.
+pub fn load_launch_config<T>(ctx: &RunnerIngressContext<'_>) -> Result<ValidatedConfig<T>>
+where
+    T: MfmConfig + DeserializeOwned,
+{
+    load_launch_config_for_node(ctx, ctx.node())
+}
+
+/// Loads and validates the launch config artifact for a specific ingress node.
+pub fn load_launch_config_for_node<T>(
+    ctx: &RunnerIngressContext<'_>,
+    node: &spec::NodeSpec,
+) -> Result<ValidatedConfig<T>>
+where
+    T: MfmConfig + DeserializeOwned,
+{
+    let artifact = ctx.config_artifact_for_node(node)?;
+    let config = serde_json::from_slice::<T>(&artifact.bytes).map_err(|error| {
+        RuntimeError::RunnerBinding(format!(
+            "launch config for node {} failed to decode: {error}",
+            node.node_id
+        ))
+    })?;
+    ValidatedConfig::new(config).map_err(|error| RuntimeError::RunnerBinding(error.to_string()))
+}
+
+/// Loads the root materialized input as a typed value from a state-output or seed cell.
+pub async fn load_materialized_input_value<T>(
+    inputs: &MaterializedInputs,
+    artifacts: &dyn ArtifactReadProvider,
+) -> Result<T>
+where
+    T: MfmValue + DeserializeOwned,
+{
+    load_materialized_node_value(&inputs.root, artifacts).await
+}
+
+/// Loads one materialized input node as a typed value from a state-output or seed cell.
+pub async fn load_materialized_node_value<T>(
+    node: &MaterializedInputNode,
+    artifacts: &dyn ArtifactReadProvider,
+) -> Result<T>
+where
+    T: MfmValue + DeserializeOwned,
+{
+    let MaterializedInputNode::Cell(cell) = node else {
+        return Err(RuntimeError::InvalidRunnerOutput(
+            "materialized input node was not a cell".to_owned(),
+        ));
+    };
+    let verified = load_materialized_cell_artifact(cell, artifacts).await?;
+    verified.decode_json().map_err(artifact_read_runtime_error)
+}
+
+/// Loads the root materialized input as a struct-like value.
+pub async fn load_materialized_struct_input<T>(
+    inputs: &MaterializedInputs,
+    artifacts: &dyn ArtifactReadProvider,
+) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let value = materialized_input_node_json(&inputs.root, artifacts).await?;
+    serde_json::from_value(value)
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
+}
+
+/// Loads one field from a struct-shaped materialized input as a typed value.
+pub async fn load_materialized_struct_field_value<T>(
+    inputs: &MaterializedInputs,
+    field_path: &str,
+    artifacts: &dyn ArtifactReadProvider,
+) -> Result<T>
+where
+    T: MfmValue + DeserializeOwned,
+{
+    let MaterializedInputNode::Struct(fields) = &inputs.root else {
+        return Err(RuntimeError::InvalidRunnerOutput(
+            "materialized input root was not a struct".to_owned(),
+        ));
+    };
+    let field = fields
+        .iter()
+        .find(|field| field.field_path.as_str() == field_path)
+        .ok_or_else(|| {
+            RuntimeError::InvalidRunnerOutput(format!(
+                "materialized input missing {field_path} field"
+            ))
+        })?;
+    load_materialized_node_value(&field.node, artifacts).await
+}
+
+/// Loads a non-empty vector materialized input from cell-backed elements.
+pub async fn load_non_empty_materialized_input<T>(
+    inputs: &MaterializedInputs,
+    artifacts: &dyn ArtifactReadProvider,
+) -> Result<NonEmpty<T>>
+where
+    T: MfmValue + DeserializeOwned,
+{
+    let MaterializedInputNode::NonEmptyVec(elements) = &inputs.root else {
+        return Err(RuntimeError::InvalidRunnerOutput(
+            "materialized input root was not a non-empty vector".to_owned(),
+        ));
+    };
+    let mut values = Vec::with_capacity(elements.len());
+    for element in elements {
+        values.push(load_materialized_node_value(element, artifacts).await?);
+    }
+    NonEmpty::try_from_vec(values)
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
+}
+
+/// Loads a side-effect artifact value produced by the current runner node.
+pub async fn load_side_effect_value<T>(
+    artifact: &store::SideEffectArtifactProjection,
+    role: events::ArtifactRole,
+    ctx: &ErasedRunCtx<'_>,
+    artifacts: &dyn ArtifactReadProvider,
+) -> Result<T>
+where
+    T: MfmValue + DeserializeOwned,
+{
+    let (value, _) = load_side_effect_artifact(artifact, role, ctx, artifacts).await?;
+    Ok(value)
+}
+
+/// Loads a side-effect artifact value produced by an explicit certified node.
+pub async fn load_side_effect_value_for_node<T>(
+    artifact: &store::SideEffectArtifactProjection,
+    role: events::ArtifactRole,
+    producer_node_id: &NodeId,
+    artifacts: &dyn ArtifactReadProvider,
+) -> Result<T>
+where
+    T: MfmValue + DeserializeOwned,
+{
+    let (value, _) =
+        load_side_effect_artifact_for_node(artifact, role, producer_node_id, artifacts).await?;
+    Ok(value)
+}
+
+/// Loads a side-effect artifact and returned evidence produced by the current runner node.
+pub async fn load_side_effect_artifact<T>(
+    artifact: &store::SideEffectArtifactProjection,
+    role: events::ArtifactRole,
+    ctx: &ErasedRunCtx<'_>,
+    artifacts: &dyn ArtifactReadProvider,
+) -> Result<(T, mfm_artifact_capabilities::ArtifactEvidenceRef)>
+where
+    T: MfmValue + DeserializeOwned,
+{
+    load_side_effect_artifact_for_node(artifact, role, &ctx.node().node_id, artifacts).await
+}
+
+/// Loads a side-effect artifact and returned evidence produced by an explicit certified node.
+pub async fn load_side_effect_artifact_for_node<T>(
+    artifact: &store::SideEffectArtifactProjection,
+    role: events::ArtifactRole,
+    producer_node_id: &NodeId,
+    artifacts: &dyn ArtifactReadProvider,
+) -> Result<(T, mfm_artifact_capabilities::ArtifactEvidenceRef)>
+where
+    T: MfmValue + DeserializeOwned,
+{
+    let request =
+        ArtifactReadRequest::from_side_effect_projection(artifact, role, producer_node_id.clone());
+    let verified = artifacts
+        .read_artifact(&request)
+        .await
+        .map_err(artifact_read_runtime_error)?;
+    let evidence = verified.evidence().clone();
+    let value = verified
+        .decode_json()
+        .map_err(artifact_read_runtime_error)?;
+    Ok((value, evidence))
+}
+
+/// Materializes an input node tree into JSON, loading cell bytes where needed.
+pub async fn materialized_input_node_json(
+    node: &MaterializedInputNode,
+    artifacts: &dyn ArtifactReadProvider,
+) -> Result<serde_json::Value> {
+    match node {
+        MaterializedInputNode::Unit => Ok(serde_json::Value::Null),
+        MaterializedInputNode::Cell(cell) => {
+            let verified = load_materialized_cell_artifact(cell, artifacts).await?;
+            verified.decode_json().map_err(artifact_read_runtime_error)
+        }
+        MaterializedInputNode::Tuple(elements) => {
+            let mut values = Vec::with_capacity(elements.len());
+            for element in elements {
+                values.push(Box::pin(materialized_input_node_json(element, artifacts)).await?);
+            }
+            Ok(serde_json::Value::Array(values))
+        }
+        MaterializedInputNode::Struct(fields) => {
+            let mut object = serde_json::Map::new();
+            for field in fields {
+                object.insert(
+                    field.field_path.as_str().to_owned(),
+                    Box::pin(materialized_input_node_json(&field.node, artifacts)).await?,
+                );
+            }
+            Ok(serde_json::Value::Object(object))
+        }
+        MaterializedInputNode::Vec(elements) | MaterializedInputNode::NonEmptyVec(elements) => {
+            let mut values = Vec::with_capacity(elements.len());
+            for element in elements {
+                values.push(Box::pin(materialized_input_node_json(element, artifacts)).await?);
+            }
+            Ok(serde_json::Value::Array(values))
+        }
+    }
+}
+
+async fn load_materialized_cell_artifact(
+    cell: &MaterializedCell,
+    artifacts: &dyn ArtifactReadProvider,
+) -> Result<mfm_artifact_capabilities::VerifiedArtifactBytes> {
+    let request = match &cell.terminal {
+        MaterializedCellTerminal::Produced {
+            producer_node_id,
+            artifact_id,
+            content_digest,
+        } => ArtifactReadRequest::from_materialized_produced_cell(
+            artifact_id.clone(),
+            content_digest.clone(),
+            cell.schema_id.clone(),
+            cell.semantic_type_id.clone(),
+            producer_node_id.clone(),
+        ),
+        MaterializedCellTerminal::Seed {
+            seed_id,
+            artifact_id,
+            content_digest,
+        } => ArtifactReadRequest::from_materialized_seed_cell(
+            artifact_id.clone(),
+            content_digest.clone(),
+            cell.schema_id.clone(),
+            cell.semantic_type_id.clone(),
+            seed_id.clone(),
+        ),
+        MaterializedCellTerminal::Skipped { .. } => {
+            return Err(RuntimeError::InvalidRunnerOutput(
+                "materialized input cell was skipped".to_owned(),
+            ));
+        }
+    };
+    artifacts
+        .read_artifact(&request)
+        .await
+        .map_err(artifact_read_runtime_error)
+}
+
+fn artifact_read_runtime_error(
+    error: mfm_artifact_capabilities::ArtifactReadError,
+) -> RuntimeError {
+    RuntimeError::InvalidRunnerOutput(error.to_string())
+}
+
+fn executable_identity_digest(value: serde_json::Value) -> Result<ContentDigest> {
+    let json = serde_json::to_string(&value)
+        .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
+    Ok(PlainCanonicalJsonBytes::from_json_str(&json)
+        .map_err(|error| RuntimeError::Canonical(error.to_string()))?
+        .content_digest())
 }
 
 /// Builder for runner-owned JSON artifacts and staging handles.
@@ -354,6 +719,26 @@ pub struct RunnerCapabilityBinding {
     pub adapter_version: AdapterVersion,
 }
 
+impl RunnerCapabilityBinding {
+    /// Builds binding metadata for a typed capability and adapter identity.
+    pub fn for_capability<C>(
+        adapter_kind: AdapterKind,
+        adapter_version: AdapterVersion,
+    ) -> Result<Self>
+    where
+        C: CapabilitySpec,
+    {
+        Ok(Self {
+            capability_kind: C::kind()
+                .map_err(|error| RuntimeError::RunnerBinding(error.to_string()))?,
+            capability_version: C::version()
+                .map_err(|error| RuntimeError::RunnerBinding(error.to_string()))?,
+            adapter_kind,
+            adapter_version,
+        })
+    }
+}
+
 /// Shared side-effect ledger coordinates for runner payload builders.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerSideEffectBinding {
@@ -365,12 +750,6 @@ pub struct RunnerSideEffectBinding {
     pub pair_id: mfm_ids::SideEffectPairId,
     /// Invocation epoch.
     pub invocation_epoch: u32,
-}
-
-impl RunnerSideEffectBinding {
-    pub(crate) fn pair_role(&self, role: events::SideEffectPairRole) -> events::SideEffectPairRole {
-        role
-    }
 }
 
 /// Claim metadata for a side-effect invocation owner.
@@ -413,6 +792,29 @@ pub struct RunnerPreparedInvocationBinding {
 /// Builder for runner-owned event payloads.
 pub struct RunnerPayloadBuilder<'a, 'ctx> {
     ctx: &'a ErasedRunCtx<'ctx>,
+}
+
+macro_rules! runner_side_effect_payload {
+    (
+        $builder:expr,
+        $side_effect:expr,
+        $pair_role:expr,
+        $variant:ident {
+            $($field:ident : $value:expr),* $(,)?
+        }
+    ) => {
+        side_effect::$variant {
+            spec_hash: $builder.ctx.spec_hash().clone(),
+            node_id: $builder.ctx.node().node_id.clone(),
+            attempt_id: $builder.ctx.attempt_id().clone(),
+            ledger_key: $side_effect.ledger_key.clone(),
+            ledger_purpose: $side_effect.ledger_purpose.clone(),
+            pair_id: $side_effect.pair_id.clone(),
+            pair_role: $pair_role,
+            invocation_epoch: $side_effect.invocation_epoch,
+            $($field: $value,)*
+        }
+    };
 }
 
 impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
@@ -469,28 +871,25 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
     {
         ensure_artifact_role(intent, events::ArtifactRole::SideEffectIntent)?;
         Ok(RunnerEventPayload::SideEffectIntentPersisted(
-            side_effect::IntentPersisted {
-                spec_hash: self.ctx.spec_hash().clone(),
-                node_id: self.ctx.node().node_id.clone(),
-                scope_id: self.ctx.node().scope_id.clone(),
-                attempt_id: self.ctx.attempt_id().clone(),
-                ledger_key: side_effect.ledger_key.clone(),
-                ledger_purpose: side_effect.ledger_purpose.clone(),
-                pair_id: side_effect.pair_id.clone(),
-                pair_role: side_effect.pair_role(events::SideEffectPairRole::Submit),
-                invocation_epoch: side_effect.invocation_epoch,
-                intent_schema_id: artifact_schema_id(intent)?,
-                intent_hash: intent.evidence.digest.clone(),
-                intent_artifact_id: intent.evidence.artifact_id.clone(),
-                idempotency_input_schema_id: Idempotency::schema_id()
-                    .map_err(runtime_value_error)?,
-                idempotency_input_hash: canonical_json(idempotency)?.content_digest(),
-                idempotency_key,
-                capability_kind: binding.capability_kind,
-                capability_version: binding.capability_version,
-                adapter_kind: binding.adapter_kind,
-                adapter_version: binding.adapter_version,
-            },
+            runner_side_effect_payload!(
+                self,
+                side_effect,
+                events::SideEffectPairRole::Submit,
+                IntentPersisted {
+                    scope_id: self.ctx.node().scope_id.clone(),
+                    intent_schema_id: artifact_schema_id(intent)?,
+                    intent_hash: intent.evidence.digest.clone(),
+                    intent_artifact_id: intent.evidence.artifact_id.clone(),
+                    idempotency_input_schema_id: Idempotency::schema_id()
+                        .map_err(runtime_value_error)?,
+                    idempotency_input_hash: canonical_json(idempotency)?.content_digest(),
+                    idempotency_key: idempotency_key,
+                    capability_kind: binding.capability_kind,
+                    capability_version: binding.capability_version,
+                    adapter_kind: binding.adapter_kind,
+                    adapter_version: binding.adapter_version,
+                }
+            ),
         ))
     }
 
@@ -500,19 +899,16 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
         side_effect: RunnerSideEffectBinding,
         claim: RunnerClaimBinding,
     ) -> RunnerEventPayload {
-        RunnerEventPayload::SideEffectClaimed(side_effect::Claimed {
-            spec_hash: self.ctx.spec_hash().clone(),
-            node_id: self.ctx.node().node_id.clone(),
-            attempt_id: self.ctx.attempt_id().clone(),
-            ledger_key: side_effect.ledger_key.clone(),
-            ledger_purpose: side_effect.ledger_purpose.clone(),
-            pair_id: side_effect.pair_id.clone(),
-            pair_role: side_effect.pair_role(events::SideEffectPairRole::Submit),
-            claim_owner: claim.claim_owner,
-            invocation_epoch: side_effect.invocation_epoch,
-            claim_generation: claim.claim_generation,
-            claim_fencing_token: claim.claim_fencing_token,
-        })
+        RunnerEventPayload::SideEffectClaimed(runner_side_effect_payload!(
+            self,
+            side_effect,
+            events::SideEffectPairRole::Submit,
+            Claimed {
+                claim_owner: claim.claim_owner,
+                claim_generation: claim.claim_generation,
+                claim_fencing_token: claim.claim_fencing_token,
+            }
+        ))
     }
 
     /// Builds a `SideEffectClaimTakenOver` runner payload.
@@ -521,21 +917,18 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
         side_effect: RunnerSideEffectBinding,
         takeover: RunnerClaimTakeoverBinding,
     ) -> RunnerEventPayload {
-        RunnerEventPayload::SideEffectClaimTakenOver(side_effect::ClaimTakenOver {
-            spec_hash: self.ctx.spec_hash().clone(),
-            node_id: self.ctx.node().node_id.clone(),
-            attempt_id: self.ctx.attempt_id().clone(),
-            ledger_key: side_effect.ledger_key.clone(),
-            ledger_purpose: side_effect.ledger_purpose.clone(),
-            pair_id: side_effect.pair_id.clone(),
-            pair_role: side_effect.pair_role(events::SideEffectPairRole::Submit),
-            previous_claim_owner: takeover.previous_claim_owner,
-            new_claim_owner: takeover.new_claim_owner,
-            invocation_epoch: side_effect.invocation_epoch,
-            previous_claim_generation: takeover.previous_claim_generation,
-            claim_generation: takeover.claim_generation,
-            claim_fencing_token: takeover.claim_fencing_token,
-        })
+        RunnerEventPayload::SideEffectClaimTakenOver(runner_side_effect_payload!(
+            self,
+            side_effect,
+            events::SideEffectPairRole::Submit,
+            ClaimTakenOver {
+                previous_claim_owner: takeover.previous_claim_owner,
+                new_claim_owner: takeover.new_claim_owner,
+                previous_claim_generation: takeover.previous_claim_generation,
+                claim_generation: takeover.claim_generation,
+                claim_fencing_token: takeover.claim_fencing_token,
+            }
+        ))
     }
 
     /// Builds a `ResourceLaneClaimIntent` runner payload for pre-invocation lane authority.
@@ -553,7 +946,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
             ledger_key: side_effect.ledger_key.clone(),
             ledger_purpose: side_effect.ledger_purpose.clone(),
             pair_id: side_effect.pair_id.clone(),
-            pair_role: side_effect.pair_role(events::SideEffectPairRole::Submit),
+            pair_role: events::SideEffectPairRole::Submit,
             invocation_epoch: side_effect.invocation_epoch,
             resource_key,
             requirement_digest,
@@ -573,7 +966,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
             ledger_key: side_effect.ledger_key.clone(),
             ledger_purpose: side_effect.ledger_purpose.clone(),
             pair_id: side_effect.pair_id.clone(),
-            pair_role: side_effect.pair_role(events::SideEffectPairRole::Verify),
+            pair_role: events::SideEffectPairRole::Verify,
             invocation_epoch: side_effect.invocation_epoch,
             claim_id,
             release_authority: events::ResourceLaneReleaseAuthority::VerifyTerminal,
@@ -592,22 +985,19 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
             ensure_artifact_role(artifact, events::ArtifactRole::PreparedInvocation)?;
         }
         Ok(RunnerEventPayload::SideEffectInvocationPrepared(
-            side_effect::InvocationPrepared {
-                spec_hash: self.ctx.spec_hash().clone(),
-                node_id: self.ctx.node().node_id.clone(),
-                attempt_id: self.ctx.attempt_id().clone(),
-                ledger_key: side_effect.ledger_key.clone(),
-                ledger_purpose: side_effect.ledger_purpose.clone(),
-                pair_id: side_effect.pair_id.clone(),
-                pair_role: side_effect.pair_role(events::SideEffectPairRole::Submit),
-                invocation_epoch: side_effect.invocation_epoch,
-                claim_generation: prepared_binding.claim_generation,
-                claim_fencing_token: prepared_binding.claim_fencing_token,
-                resource_key: prepared_binding.resource_key,
-                prepared_artifact_id: prepared
-                    .map(|artifact| artifact.evidence.artifact_id.clone()),
-                prepared_hash: prepared.map(|artifact| artifact.evidence.digest.clone()),
-            },
+            runner_side_effect_payload!(
+                self,
+                side_effect,
+                events::SideEffectPairRole::Submit,
+                InvocationPrepared {
+                    claim_generation: prepared_binding.claim_generation,
+                    claim_fencing_token: prepared_binding.claim_fencing_token,
+                    resource_key: prepared_binding.resource_key,
+                    prepared_artifact_id: prepared
+                        .map(|artifact| artifact.evidence.artifact_id.clone()),
+                    prepared_hash: prepared.map(|artifact| artifact.evidence.digest.clone()),
+                }
+            ),
         ))
     }
 
@@ -617,19 +1007,16 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
         side_effect: RunnerSideEffectBinding,
         claim: RunnerClaimBinding,
     ) -> RunnerEventPayload {
-        RunnerEventPayload::SideEffectInvocationStarted(side_effect::InvocationStarted {
-            spec_hash: self.ctx.spec_hash().clone(),
-            node_id: self.ctx.node().node_id.clone(),
-            attempt_id: self.ctx.attempt_id().clone(),
-            ledger_key: side_effect.ledger_key.clone(),
-            ledger_purpose: side_effect.ledger_purpose.clone(),
-            pair_id: side_effect.pair_id.clone(),
-            pair_role: side_effect.pair_role(events::SideEffectPairRole::Submit),
-            invocation_epoch: side_effect.invocation_epoch,
-            claim_owner: claim.claim_owner,
-            claim_generation: claim.claim_generation,
-            claim_fencing_token: claim.claim_fencing_token,
-        })
+        RunnerEventPayload::SideEffectInvocationStarted(runner_side_effect_payload!(
+            self,
+            side_effect,
+            events::SideEffectPairRole::Submit,
+            InvocationStarted {
+                claim_owner: claim.claim_owner,
+                claim_generation: claim.claim_generation,
+                claim_fencing_token: claim.claim_fencing_token,
+            }
+        ))
     }
 
     /// Builds a `SideEffectNotSubmittedProven` runner payload.
@@ -654,19 +1041,16 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
     ) -> Result<RunnerEventPayload> {
         ensure_artifact_role(proof, events::ArtifactRole::NotSubmittedProof)?;
         Ok(RunnerEventPayload::SideEffectNotSubmittedProven(
-            side_effect::NotSubmittedProven {
-                spec_hash: self.ctx.spec_hash().clone(),
-                node_id: self.ctx.node().node_id.clone(),
-                attempt_id: self.ctx.attempt_id().clone(),
-                ledger_key: side_effect.ledger_key.clone(),
-                ledger_purpose: side_effect.ledger_purpose.clone(),
-                pair_id: side_effect.pair_id.clone(),
-                pair_role: side_effect.pair_role(pair_role),
-                invocation_epoch: side_effect.invocation_epoch,
-                proof_schema_id: artifact_schema_id(proof)?,
-                proof_hash: proof.evidence.digest.clone(),
-                proof_artifact_id: proof.evidence.artifact_id.clone(),
-            },
+            runner_side_effect_payload!(
+                self,
+                side_effect,
+                pair_role,
+                NotSubmittedProven {
+                    proof_schema_id: artifact_schema_id(proof)?,
+                    proof_hash: proof.evidence.digest.clone(),
+                    proof_artifact_id: proof.evidence.artifact_id.clone(),
+                }
+            ),
         ))
     }
 
@@ -692,19 +1076,16 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
     ) -> Result<RunnerEventPayload> {
         ensure_artifact_role(submission, events::ArtifactRole::Submission)?;
         Ok(RunnerEventPayload::SideEffectSubmissionObserved(
-            side_effect::SubmissionObserved {
-                spec_hash: self.ctx.spec_hash().clone(),
-                node_id: self.ctx.node().node_id.clone(),
-                attempt_id: self.ctx.attempt_id().clone(),
-                ledger_key: side_effect.ledger_key.clone(),
-                ledger_purpose: side_effect.ledger_purpose.clone(),
-                pair_id: side_effect.pair_id.clone(),
-                pair_role: side_effect.pair_role(pair_role),
-                invocation_epoch: side_effect.invocation_epoch,
-                submission_schema_id: artifact_schema_id(submission)?,
-                submission_hash: submission.evidence.digest.clone(),
-                submission_artifact_id: submission.evidence.artifact_id.clone(),
-            },
+            runner_side_effect_payload!(
+                self,
+                side_effect,
+                pair_role,
+                SubmissionObserved {
+                    submission_schema_id: artifact_schema_id(submission)?,
+                    submission_hash: submission.evidence.digest.clone(),
+                    submission_artifact_id: submission.evidence.artifact_id.clone(),
+                }
+            ),
         ))
     }
 
@@ -716,19 +1097,16 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
     ) -> Result<RunnerEventPayload> {
         ensure_artifact_role(evidence, events::ArtifactRole::SubmissionUnknownEvidence)?;
         Ok(RunnerEventPayload::SideEffectSubmissionUnknown(
-            side_effect::SubmissionUnknown {
-                spec_hash: self.ctx.spec_hash().clone(),
-                node_id: self.ctx.node().node_id.clone(),
-                attempt_id: self.ctx.attempt_id().clone(),
-                ledger_key: side_effect.ledger_key.clone(),
-                ledger_purpose: side_effect.ledger_purpose.clone(),
-                pair_id: side_effect.pair_id.clone(),
-                pair_role: side_effect.pair_role(events::SideEffectPairRole::Submit),
-                invocation_epoch: side_effect.invocation_epoch,
-                evidence_schema_id: artifact_schema_id(evidence)?,
-                evidence_hash: evidence.evidence.digest.clone(),
-                evidence_artifact_id: evidence.evidence.artifact_id.clone(),
-            },
+            runner_side_effect_payload!(
+                self,
+                side_effect,
+                events::SideEffectPairRole::Submit,
+                SubmissionUnknown {
+                    evidence_schema_id: artifact_schema_id(evidence)?,
+                    evidence_hash: evidence.evidence.digest.clone(),
+                    evidence_artifact_id: evidence.evidence.artifact_id.clone(),
+                }
+            ),
         ))
     }
 
@@ -742,21 +1120,18 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
     ) -> Result<RunnerEventPayload> {
         ensure_artifact_role(receipt, events::ArtifactRole::Receipt)?;
         Ok(RunnerEventPayload::SideEffectReceiptObserved(
-            side_effect::ReceiptObserved {
-                spec_hash: self.ctx.spec_hash().clone(),
-                node_id: self.ctx.node().node_id.clone(),
-                attempt_id: self.ctx.attempt_id().clone(),
-                ledger_key: side_effect.ledger_key.clone(),
-                ledger_purpose: side_effect.ledger_purpose.clone(),
-                pair_id: side_effect.pair_id.clone(),
-                pair_role: side_effect.pair_role(events::SideEffectPairRole::Verify),
-                invocation_epoch: side_effect.invocation_epoch,
-                receipt_schema_id: artifact_schema_id(receipt)?,
-                receipt_hash: receipt.evidence.digest.clone(),
-                receipt_artifact_id: receipt.evidence.artifact_id.clone(),
-                replay_verifier_id,
-                resource_touched_set,
-            },
+            runner_side_effect_payload!(
+                self,
+                side_effect,
+                events::SideEffectPairRole::Verify,
+                ReceiptObserved {
+                    receipt_schema_id: artifact_schema_id(receipt)?,
+                    receipt_hash: receipt.evidence.digest.clone(),
+                    receipt_artifact_id: receipt.evidence.artifact_id.clone(),
+                    replay_verifier_id: replay_verifier_id,
+                    resource_touched_set: resource_touched_set,
+                }
+            ),
         ))
     }
 
@@ -770,21 +1145,18 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
     ) -> Result<RunnerEventPayload> {
         ensure_artifact_role(confirmation, events::ArtifactRole::Confirmation)?;
         Ok(RunnerEventPayload::SideEffectConfirmationObserved(
-            side_effect::ConfirmationObserved {
-                spec_hash: self.ctx.spec_hash().clone(),
-                node_id: self.ctx.node().node_id.clone(),
-                attempt_id: self.ctx.attempt_id().clone(),
-                ledger_key: side_effect.ledger_key.clone(),
-                ledger_purpose: side_effect.ledger_purpose.clone(),
-                pair_id: side_effect.pair_id.clone(),
-                pair_role: side_effect.pair_role(events::SideEffectPairRole::Verify),
-                invocation_epoch: side_effect.invocation_epoch,
-                confirmation_schema_id: artifact_schema_id(confirmation)?,
-                confirmation_hash: confirmation.evidence.digest.clone(),
-                confirmation_artifact_id: confirmation.evidence.artifact_id.clone(),
-                replay_verifier_id,
-                resource_touched_set,
-            },
+            runner_side_effect_payload!(
+                self,
+                side_effect,
+                events::SideEffectPairRole::Verify,
+                ConfirmationObserved {
+                    confirmation_schema_id: artifact_schema_id(confirmation)?,
+                    confirmation_hash: confirmation.evidence.digest.clone(),
+                    confirmation_artifact_id: confirmation.evidence.artifact_id.clone(),
+                    replay_verifier_id: replay_verifier_id,
+                    resource_touched_set: resource_touched_set,
+                }
+            ),
         ))
     }
 
@@ -798,20 +1170,17 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
     ) -> Result<RunnerEventPayload> {
         ensure_artifact_role(evidence, events::ArtifactRole::AmbiguityEvidence)?;
         Ok(RunnerEventPayload::SideEffectAmbiguous(
-            side_effect::Ambiguous {
-                spec_hash: self.ctx.spec_hash().clone(),
-                node_id: self.ctx.node().node_id.clone(),
-                attempt_id: self.ctx.attempt_id().clone(),
-                ledger_key: side_effect.ledger_key.clone(),
-                ledger_purpose: side_effect.ledger_purpose.clone(),
-                pair_id: side_effect.pair_id.clone(),
-                pair_role: side_effect.pair_role(pair_role),
-                invocation_epoch: side_effect.invocation_epoch,
-                ambiguity_code,
-                evidence_schema_id: artifact_schema_id(evidence)?,
-                evidence_hash: evidence.evidence.digest.clone(),
-                evidence_artifact_id: evidence.evidence.artifact_id.clone(),
-            },
+            runner_side_effect_payload!(
+                self,
+                side_effect,
+                pair_role,
+                Ambiguous {
+                    ambiguity_code: ambiguity_code,
+                    evidence_schema_id: artifact_schema_id(evidence)?,
+                    evidence_hash: evidence.evidence.digest.clone(),
+                    evidence_artifact_id: evidence.evidence.artifact_id.clone(),
+                }
+            ),
         ))
     }
 
@@ -824,19 +1193,16 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
         retryable: bool,
         error: events::MfmErrorInfo,
     ) -> RunnerEventPayload {
-        RunnerEventPayload::SideEffectFailed(side_effect::Failed {
-            spec_hash: self.ctx.spec_hash().clone(),
-            node_id: self.ctx.node().node_id.clone(),
-            attempt_id: self.ctx.attempt_id().clone(),
-            ledger_key: side_effect.ledger_key.clone(),
-            ledger_purpose: side_effect.ledger_purpose.clone(),
-            pair_id: side_effect.pair_id.clone(),
-            pair_role: side_effect.pair_role(pair_role),
-            invocation_epoch: side_effect.invocation_epoch,
-            failure_phase,
-            retryable,
-            error,
-        })
+        RunnerEventPayload::SideEffectFailed(runner_side_effect_payload!(
+            self,
+            side_effect,
+            pair_role,
+            Failed {
+                failure_phase: failure_phase,
+                retryable: retryable,
+                error: error,
+            }
+        ))
     }
 }
 
@@ -881,6 +1247,21 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
         Ok(self)
     }
 
+    /// Stages a side-effect artifact and retains it as runtime evidence.
+    pub fn stage_side_effect_runtime_evidence(
+        &mut self,
+        artifact: &RunnerJsonArtifact,
+        side_effect: &RunnerSideEffectBinding,
+    ) -> Result<&mut Self> {
+        self.stage_side_effect_artifact(
+            artifact,
+            side_effect.ledger_key.clone(),
+            side_effect.invocation_epoch,
+        )?;
+        self.retain_runtime_evidence(artifact);
+        Ok(self)
+    }
+
     /// Appends runtime retention refs for one artifact.
     pub fn retain_runtime_evidence(&mut self, artifact: &RunnerJsonArtifact) -> &mut Self {
         self.staged_retention_refs
@@ -888,6 +1269,51 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
                 artifact.retention_ref()
             ]));
         self
+    }
+
+    /// Stages a state-output artifact, retains it as runtime evidence, and emits its cell payload.
+    pub fn state_output<T>(&mut self, value: &T) -> Result<RunnerJsonArtifact>
+    where
+        T: MfmValue,
+    {
+        let payloads = RunnerPayloadBuilder::new(self.artifacts.ctx);
+        let artifact = self.artifacts.state_output(value)?;
+        self.stage_attempt_artifact(&artifact)?;
+        self.retain_runtime_evidence(&artifact);
+        self.payload(payloads.cell_produced(&artifact)?);
+        Ok(artifact)
+    }
+
+    /// Stages a state-output artifact for a fact value and appends the matching fact record.
+    pub fn state_output_and_record_fact<T>(
+        &mut self,
+        input: FactRecordInput<T>,
+        producer: RunnerCapabilityBinding,
+    ) -> Result<StagedFactRecord>
+    where
+        T: MfmFactType + MfmValue,
+    {
+        let payloads = RunnerPayloadBuilder::new(self.artifacts.ctx);
+        let state_artifact = self.artifacts.state_output(&input.fact)?;
+        self.stage_attempt_artifact(&state_artifact)?;
+        self.retain_runtime_evidence(&state_artifact);
+        let staged = self.record_fact(input, producer)?;
+        self.payload(payloads.cell_produced(&state_artifact)?);
+        Ok(staged)
+    }
+
+    /// Stages a state-output artifact and private fact-query replay evidence.
+    pub fn state_output_and_record_fact_query_evidence<T>(
+        &mut self,
+        value: &T,
+        evidence: mfm_facts::FactQueryEvidence,
+        trust_root: &store::FactQueryReceiptTrustRoot,
+    ) -> Result<StagedFactQueryEvidence>
+    where
+        T: MfmValue,
+    {
+        self.state_output(value)?;
+        self.record_fact_query_evidence(evidence, trust_root)
     }
 
     /// Stages a typed fact response artifact and appends the matching `FactRecorded` payload.
@@ -907,21 +1333,9 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
 
         let subject_json = serde_json::to_value(input.fact.subject())
             .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
-        let subject_value =
-            typed_fact_subject_value(&descriptor, &subject_json).map_err(runtime_fact_error)?;
-        let subject_material = mfm_facts::extract_subject_material(&descriptor, &subject_value)
+        let subject = mfm_facts::typed_fact_subject_evidence(&descriptor, &subject_json)
             .map_err(runtime_fact_error)?;
-        let subject_material_hash =
-            mfm_facts::subject_material_hash(&subject_material).map_err(runtime_fact_error)?;
-        let subject_namespace =
-            mfm_facts::fact_subject_namespace(&descriptor).map_err(runtime_fact_error)?;
-        let subject_namespace_hash = mfm_facts::fact_subject_namespace_hash(&subject_namespace)
-            .map_err(runtime_fact_error)?;
-        let fact_key = mfm_facts::derive_fact_key(
-            subject_namespace_hash.clone(),
-            subject_material_hash.clone(),
-        )
-        .map_err(runtime_fact_error)?;
+        let fact_key = subject.fact_key().clone();
 
         let response = self.artifacts.fact_response(input.fact.response())?;
         let response_schema_id = artifact_schema_id(&response)?;
@@ -937,11 +1351,7 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
             visibility: input.visibility,
             fact_kind: descriptor.fact_kind().clone(),
             fact_descriptor_hash: descriptor_hash,
-            subject: mfm_facts::FactSubjectEvidence::from_material(
-                subject_namespace_hash,
-                &subject_material,
-            )
-            .map_err(runtime_fact_error)?,
+            subject,
             observed_at: input.observed_at,
             request: None,
             response: mfm_facts::FactResponseEvidence::new(
@@ -1028,6 +1438,18 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
     }
 }
 
+impl ErasedRunnerOutput {
+    /// Builds an erased runner output containing one state-output value.
+    pub fn state_output<T>(ctx: &ErasedRunCtx<'_>, value: &T) -> Result<Self>
+    where
+        T: MfmValue,
+    {
+        let mut output = RunnerOutputBuilder::new(ctx);
+        output.state_output(value)?;
+        Ok(output.finish())
+    }
+}
+
 fn fact_query_evidence_retention_refs(
     evidence_artifact: &RunnerJsonArtifact,
     evidence: &mfm_facts::FactQueryEvidence,
@@ -1037,30 +1459,9 @@ fn fact_query_evidence_retention_refs(
     insert_retention_ref(&mut refs, evidence_artifact.retention_ref());
 
     for fact_ref in evidence.receipt().returned_refs() {
-        validate_fact_query_returned_ref_authority(projections, fact_ref)?;
-        let descriptor = projections
-            .fact_descriptor(fact_ref.fact_descriptor_hash())
-            .ok_or_else(|| {
-                RuntimeError::InvalidRunnerOutput(
-                    "fact query evidence returned ref missing descriptor authority".to_owned(),
-                )
-            })?;
-        insert_retention_ref(
-            &mut refs,
-            events::RetentionRef {
-                artifact_id: descriptor.descriptor_artifact_id.clone(),
-                role: events::ArtifactRole::FactDescriptor,
-                content_digest: descriptor.descriptor_hash.clone(),
-            },
-        );
-        insert_retention_ref(
-            &mut refs,
-            events::RetentionRef {
-                artifact_id: fact_ref.artifact_id().clone(),
-                role: events::ArtifactRole::FactResponse,
-                content_digest: fact_ref.response_hash().clone(),
-            },
-        );
+        for retention_ref in fact_query_returned_ref_retention_refs(projections, fact_ref)? {
+            insert_retention_ref(&mut refs, retention_ref);
+        }
     }
 
     Ok(refs.into_values().collect())
@@ -1128,6 +1529,44 @@ impl<'a> RunnerRegistrationBuilder<'a> {
         self.register_runner(descriptor_id, factory_id, executable, runner)
     }
 
+    /// Registers capabilities and a runner for one typed state descriptor.
+    pub fn register_state_descriptor<S>(
+        &mut self,
+        factory_id: events::RunnerFactoryId,
+        executable: events::ExecutableIdentity,
+        runner: Arc<dyn ErasedNodeRunner>,
+    ) -> Result<mfm_program::StateDescriptorIdentity>
+    where
+        S: StateSpec,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
+    {
+        let descriptor = mfm_program::registered_state_descriptor::<S>()
+            .map_err(|error| RuntimeError::RunnerBinding(error.to_string()))?;
+        self.register_descriptor(
+            descriptor.descriptor_id().clone(),
+            descriptor.capabilities(),
+            factory_id,
+            executable,
+            runner,
+        )?;
+        Ok(descriptor)
+    }
+
+    /// Registers capabilities and a runner for one typed state descriptor using a bound factory.
+    pub fn register_state_descriptor_with_factory<S>(
+        &mut self,
+        factory: &RunnerFactoryBinding,
+        runner: Arc<dyn ErasedNodeRunner>,
+    ) -> Result<mfm_program::StateDescriptorIdentity>
+    where
+        S: StateSpec,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
+    {
+        self.register_state_descriptor::<S>(factory.factory_id(), factory.executable(), runner)
+    }
+
     /// Registers the adapter-owned runner used by side-effect verify framework nodes
     /// for one certified side-effect submit descriptor.
     pub fn register_side_effect_verify_runner(
@@ -1146,6 +1585,21 @@ impl<'a> RunnerRegistrationBuilder<'a> {
         Ok(self)
     }
 
+    /// Registers an adapter-owned side-effect verify runner using a bound factory.
+    pub fn register_side_effect_verify_runner_with_factory(
+        &mut self,
+        submit_descriptor_id: DescriptorId,
+        factory: &RunnerFactoryBinding,
+        runner: Arc<dyn ErasedNodeRunner>,
+    ) -> Result<&mut Self> {
+        self.register_side_effect_verify_runner(
+            submit_descriptor_id,
+            factory.factory_id(),
+            factory.executable(),
+            runner,
+        )
+    }
+
     /// Registers executable evidence for one certified adapter binding.
     pub fn register_adapter_executable(
         &mut self,
@@ -1160,6 +1614,16 @@ impl<'a> RunnerRegistrationBuilder<'a> {
                 executable,
             ))?;
         Ok(self)
+    }
+
+    /// Registers executable evidence for one certified adapter binding using a bound factory.
+    pub fn register_adapter_executable_with_factory(
+        &mut self,
+        adapter_kind: AdapterKind,
+        adapter_version: AdapterVersion,
+        factory: &RunnerFactoryBinding,
+    ) -> Result<&mut Self> {
+        self.register_adapter_executable(adapter_kind, adapter_version, factory.executable())
     }
 }
 
@@ -1226,140 +1690,6 @@ fn ensure_node_allows_fact_descriptor(
     )))
 }
 
-fn typed_fact_subject_value(
-    descriptor: &mfm_facts::FactDescriptor,
-    subject: &serde_json::Value,
-) -> std::result::Result<CanonicalValue, mfm_facts::FactDescriptorError> {
-    let mut typed_paths = std::collections::BTreeMap::new();
-    for field in descriptor.fields() {
-        let mfm_facts::FactFieldExtraction::SubjectPath(path) = field.extraction() else {
-            continue;
-        };
-        if let Some(previous) = typed_paths.insert(path.as_str().to_owned(), field.value_type()) {
-            if previous != field.value_type() {
-                return Err(mfm_facts::FactDescriptorError::descriptor(format!(
-                    "subject path {} is declared with incompatible value types",
-                    path
-                )));
-            }
-        }
-    }
-    json_to_fact_canonical_value(subject, "", &typed_paths)
-}
-
-fn json_to_fact_canonical_value(
-    value: &serde_json::Value,
-    path: &str,
-    typed_paths: &std::collections::BTreeMap<String, mfm_facts::FactFieldValueType>,
-) -> std::result::Result<CanonicalValue, mfm_facts::FactDescriptorError> {
-    if let Some(value_type) = typed_paths.get(path) {
-        return json_to_typed_fact_scalar(value, *value_type, path);
-    }
-
-    match value {
-        serde_json::Value::Null => Ok(CanonicalValue::Null),
-        serde_json::Value::Bool(value) => Ok(CanonicalValue::Bool(*value)),
-        serde_json::Value::Number(value) => {
-            if let Some(value) = value.as_u64() {
-                Ok(CanonicalValue::Unsigned(value))
-            } else if let Some(value) = value.as_i64() {
-                Ok(CanonicalValue::Signed(value))
-            } else {
-                Err(mfm_facts::FactDescriptorError::descriptor(format!(
-                    "fact subject path {path} contains unsupported floating-point number"
-                )))
-            }
-        }
-        serde_json::Value::String(value) => Ok(CanonicalValue::String(value.clone())),
-        serde_json::Value::Array(values) => values
-            .iter()
-            .enumerate()
-            .map(|(index, value)| {
-                let child_path = if path.is_empty() {
-                    index.to_string()
-                } else {
-                    format!("{path}.{index}")
-                };
-                json_to_fact_canonical_value(value, &child_path, typed_paths)
-            })
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map(CanonicalValue::Array),
-        serde_json::Value::Object(entries) => {
-            let values = entries
-                .iter()
-                .map(|(key, value)| {
-                    let child_path = if path.is_empty() {
-                        key.clone()
-                    } else {
-                        format!("{path}.{key}")
-                    };
-                    Ok((
-                        key.clone(),
-                        json_to_fact_canonical_value(value, &child_path, typed_paths)?,
-                    ))
-                })
-                .collect::<std::result::Result<Vec<_>, mfm_facts::FactDescriptorError>>()?;
-            CanonicalValue::object(values)
-                .map_err(|error| mfm_facts::FactDescriptorError::descriptor(error.to_string()))
-        }
-    }
-}
-
-fn json_to_typed_fact_scalar(
-    value: &serde_json::Value,
-    value_type: mfm_facts::FactFieldValueType,
-    path: &str,
-) -> std::result::Result<CanonicalValue, mfm_facts::FactDescriptorError> {
-    match value_type {
-        mfm_facts::FactFieldValueType::String => {
-            string_json(value, path).map(|value| CanonicalValue::String(value.to_owned()))
-        }
-        mfm_facts::FactFieldValueType::Boolean => value
-            .as_bool()
-            .map(CanonicalValue::Bool)
-            .ok_or_else(|| fact_scalar_type_error(path, value_type)),
-        mfm_facts::FactFieldValueType::SignedInteger => value
-            .as_i64()
-            .map(CanonicalValue::Signed)
-            .ok_or_else(|| fact_scalar_type_error(path, value_type)),
-        mfm_facts::FactFieldValueType::UnsignedInteger => value
-            .as_u64()
-            .map(CanonicalValue::Unsigned)
-            .ok_or_else(|| fact_scalar_type_error(path, value_type)),
-        mfm_facts::FactFieldValueType::Timestamp => {
-            string_json(value, path).map(|value| CanonicalValue::String(value.to_owned()))
-        }
-        mfm_facts::FactFieldValueType::DecimalString => {
-            let decimal = DecimalString::new_variable(string_json(value, path)?)
-                .map_err(|error| mfm_facts::FactDescriptorError::descriptor(error.to_string()))?;
-            Ok(CanonicalValue::Decimal(decimal))
-        }
-        mfm_facts::FactFieldValueType::Digest => {
-            string_json(value, path).map(|value| CanonicalValue::String(value.to_owned()))
-        }
-    }
-}
-
-fn string_json<'a>(
-    value: &'a serde_json::Value,
-    path: &str,
-) -> std::result::Result<&'a str, mfm_facts::FactDescriptorError> {
-    value.as_str().ok_or_else(|| {
-        mfm_facts::FactDescriptorError::descriptor(format!(
-            "fact subject path {path} is not a string"
-        ))
-    })
-}
-
-fn fact_scalar_type_error(
-    path: &str,
-    value_type: mfm_facts::FactFieldValueType,
-) -> mfm_facts::FactDescriptorError {
-    mfm_facts::FactDescriptorError::descriptor(format!(
-        "fact subject path {path} does not match {value_type:?}"
-    ))
-}
-
 fn canonical_json<T>(value: &T) -> Result<PlainCanonicalJsonBytes>
 where
     T: Serialize,
@@ -1381,6 +1711,13 @@ fn runtime_fact_error(error: mfm_facts::FactDescriptorError) -> RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::SigningKey;
+    use mfm_canonical::CanonicalValue;
+    use mfm_store::v1::test_support::{
+        fact_descriptor_projection_fixture_for_test, fact_projection_fixture_for_test,
+        signed_fact_query_receipt_for_test, FactProjectionFixtureInputForTest,
+        SignedFactQueryReceiptFixtureInputForTest,
+    };
 
     fn digest(byte: u8) -> ContentDigest {
         ContentDigest::from_digest(
@@ -1440,17 +1777,47 @@ mod tests {
         .expect("adapter")
     }
 
-    fn fact_subject_evidence(height: u64) -> mfm_facts::FactSubjectEvidence {
-        let material =
-            mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactSubjectValueV1::new(
-                mfm_facts::FactFieldId::new("subject.height").expect("field"),
-                mfm_facts::FactFieldValueType::UnsignedInteger,
-                mfm_facts::FactCanonicalScalar::UnsignedInteger(height),
-            )
-            .expect("subject value")])
-            .expect("subject material");
-        mfm_facts::FactSubjectEvidence::from_material(digest(0x13), &material)
-            .expect("subject evidence")
+    fn descriptor() -> mfm_facts::FactDescriptor {
+        mfm_facts::FactDescriptor::new(
+            mfm_facts::FactKind::new("chain.head").expect("kind"),
+            schema_id(),
+            schema_id(),
+            schema_id(),
+            vec![
+                mfm_facts::FactFieldDescriptor::new(
+                    mfm_facts::FactFieldId::new("subject.height").expect("field"),
+                    mfm_facts::FactFieldPath::new("subject.height").expect("path"),
+                    mfm_facts::FactFieldValueType::UnsignedInteger,
+                    mfm_facts::FactFieldExtraction::SubjectPath(
+                        mfm_facts::CanonicalValuePath::new("height").expect("extraction"),
+                    ),
+                    vec![mfm_facts::FactQueryOperator::Equal],
+                    mfm_facts::FactFieldExposure::Returnable,
+                    None,
+                    None,
+                    false,
+                    true,
+                )
+                .expect("subject field"),
+                mfm_facts::FactFieldDescriptor::new(
+                    mfm_facts::FactFieldId::new("result.height").expect("field"),
+                    mfm_facts::FactFieldPath::new("result.height").expect("path"),
+                    mfm_facts::FactFieldValueType::UnsignedInteger,
+                    mfm_facts::FactFieldExtraction::ResponsePath(
+                        mfm_facts::CanonicalValuePath::new("height").expect("extraction"),
+                    ),
+                    vec![mfm_facts::FactQueryOperator::Equal],
+                    mfm_facts::FactFieldExposure::Returnable,
+                    None,
+                    None,
+                    true,
+                    true,
+                )
+                .expect("result field"),
+            ],
+            Vec::new(),
+        )
+        .expect("descriptor")
     }
 
     fn fact_producer_node_id() -> mfm_ids::NodeId {
@@ -1460,158 +1827,81 @@ mod tests {
         )
     }
 
-    fn fact_response_artifact_evidence(
-        producer_node_id: &mfm_ids::NodeId,
-    ) -> store::ArtifactEvidenceRef {
-        store::ArtifactEvidenceRef {
-            artifact_id: artifact_id(0x17),
-            digest: digest(0x16),
-            byte_len: 2,
-            media_type: spec::MediaType::new("application/json").expect("media"),
-            schema_id: Some(schema_id()),
-            semantic_type_id: None,
-            producer_node_id: Some(producer_node_id.clone()),
-            producer_seed_id: None,
-            artifact_role: events::ArtifactRole::FactResponse,
-        }
+    fn fact_projection_fixture(
+        subject_height: u64,
+    ) -> (
+        mfm_facts::InternalFactRef,
+        store::FactDescriptorProjection,
+        store::FactRecordProjection,
+        store::FactIndexProjection,
+    ) {
+        let descriptor = descriptor();
+        let descriptor_fixture =
+            fact_descriptor_projection_fixture_for_test(descriptor.clone(), event_id(0x41))
+                .expect("descriptor fixture");
+        let fact_fixture = fact_projection_fixture_for_test(
+            &descriptor,
+            descriptor_fixture.descriptor_hash.clone(),
+            FactProjectionFixtureInputForTest {
+                run_id: run_id(0x10),
+                source_seq: 1,
+                source_ordinal: 0,
+                source_event_id: event_id(0x11),
+                node_id: fact_producer_node_id(),
+                attempt_id: mfm_ids::AttemptId::from_digest(
+                    DigestAlgorithm::Sha256JcsV1,
+                    mfm_ids::DigestBytes::from_array([0x42; 32]),
+                ),
+                commit_id: store::CommitKey::new("fact-query-authority").expect("commit key"),
+                store_commit_order: 1,
+                recorded_at: "2026-07-01T00:00:00Z".to_owned(),
+                observed_at: None,
+                visibility: mfm_facts::FactVisibility::indexed_default(
+                    mfm_facts::FactAudience::Platform,
+                ),
+                subject: CanonicalValue::object([(
+                    "height",
+                    CanonicalValue::Unsigned(subject_height),
+                )])
+                .expect("subject"),
+                response: CanonicalValue::object([("height", CanonicalValue::Unsigned(800000))])
+                    .expect("response"),
+                request: None,
+                response_schema_id: schema_id(),
+                response_artifact_id: None,
+                producer: mfm_facts::FactProducerProvenance::new(
+                    capability_kind(),
+                    CapabilityVersion::new("mfm.test.capability.v1").expect("capability version"),
+                    adapter_kind(),
+                    AdapterVersion::new("mfm.test.adapter.v1").expect("adapter version"),
+                ),
+            },
+        )
+        .expect("fact fixture");
+        let index = fact_fixture.index.expect("indexed fact fixture");
+        let fact_ref = index.internal_ref().expect("internal fact ref");
+        (
+            fact_ref,
+            descriptor_fixture.projection,
+            fact_fixture.record,
+            index,
+        )
     }
 
     fn fact_ref() -> mfm_facts::InternalFactRef {
-        let subject = fact_subject_evidence(17);
-        let producer_node_id = fact_producer_node_id();
-        let response_evidence = fact_response_artifact_evidence(&producer_node_id);
-        let artifact_evidence_hash = response_evidence
-            .evidence_hash()
-            .expect("response artifact evidence hash");
-        mfm_facts::InternalFactRef::new(mfm_facts::InternalFactRefParts {
-            fact_claim_id: mfm_facts::FactClaimId::new(run_id(0x10), 1, 0).expect("claim id"),
-            source_event_id: event_id(0x11),
-            recorded_at: "2026-07-01T00:00:00Z".to_owned(),
-            producer_node_id,
-            observed_at: None,
-            visibility: mfm_facts::FactVisibility::indexed_default(
-                mfm_facts::FactAudience::Platform,
-            ),
-            fact_kind: mfm_facts::FactKind::new("chain.head").expect("kind"),
-            fact_descriptor_hash: digest(0x12),
-            fact_subject_namespace_hash: subject.fact_subject_namespace_hash().clone(),
-            fact_key: subject.fact_key().clone(),
-            subject_material_hash: subject.subject_material_hash().clone(),
-            request_schema_id: None,
-            request_hash: None,
-            response_schema_id: response_evidence
-                .schema_id
-                .clone()
-                .expect("response schema id"),
-            response_hash: response_evidence.digest.clone(),
-            artifact_id: response_evidence.artifact_id,
-            artifact_evidence_hash,
-            capability_kind: capability_kind(),
-            capability_version: CapabilityVersion::new("mfm.test.capability.v1")
-                .expect("capability version"),
-            adapter_kind: adapter_kind(),
-            adapter_version: AdapterVersion::new("mfm.test.adapter.v1").expect("adapter version"),
-        })
-        .expect("fact ref")
-    }
-
-    fn fact_claim_for_ref(
-        fact_ref: &mfm_facts::InternalFactRef,
-        subject_height: u64,
-    ) -> mfm_facts::FactClaim {
-        mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
-            visibility: fact_ref.visibility().clone(),
-            fact_kind: fact_ref.fact_kind().clone(),
-            fact_descriptor_hash: fact_ref.fact_descriptor_hash().clone(),
-            subject: fact_subject_evidence(subject_height),
-            observed_at: fact_ref.observed_at().map(str::to_owned),
-            request: None,
-            response: mfm_facts::FactResponseEvidence::new(
-                fact_ref.response_schema_id().clone(),
-                fact_ref.response_hash().clone(),
-                fact_ref.artifact_id().clone(),
-                fact_ref.artifact_evidence_hash().clone(),
-            ),
-            producer: mfm_facts::FactProducerProvenance::new(
-                fact_ref.capability_kind().clone(),
-                fact_ref.capability_version().clone(),
-                fact_ref.adapter_kind().clone(),
-                fact_ref.adapter_version().clone(),
-            ),
-        })
-        .expect("fact claim")
+        fact_projection_fixture(17).0
     }
 
     fn fact_authority_projections(
         fact_ref: &mfm_facts::InternalFactRef,
     ) -> store::ProjectionSnapshot {
-        let descriptor_artifact_evidence = store::ArtifactEvidenceRef {
-            artifact_id: artifact_id(0x40),
-            digest: fact_ref.fact_descriptor_hash().clone(),
-            byte_len: 2,
-            media_type: spec::MediaType::new("application/json").expect("media"),
-            schema_id: Some(schema_id()),
-            semantic_type_id: None,
-            producer_node_id: None,
-            producer_seed_id: None,
-            artifact_role: events::ArtifactRole::FactDescriptor,
-        };
-        let response_artifact_evidence =
-            fact_response_artifact_evidence(fact_ref.producer_node_id());
-        let descriptor_projection = store::FactDescriptorProjection {
-            descriptor_hash: fact_ref.fact_descriptor_hash().clone(),
-            descriptor_artifact_id: descriptor_artifact_evidence.artifact_id.clone(),
-            descriptor_artifact_evidence,
-            fact_kind: fact_ref.fact_kind().clone(),
-            descriptor_schema_id: schema_id(),
-            subject_schema_id: schema_id(),
-            response_schema_id: fact_ref.response_schema_id().clone(),
-            fact_subject_namespace_hash: fact_ref.fact_subject_namespace_hash().clone(),
-            source_event_id: event_id(0x41),
-        };
-        let record_projection = store::FactRecordProjection {
-            fact_claim_id: fact_ref.fact_claim_id().clone(),
-            source_event_id: fact_ref.source_event_id().clone(),
-            source_run_id: fact_ref.fact_claim_id().source_run_id().clone(),
-            source_seq: fact_ref.fact_claim_id().source_seq(),
-            source_ordinal: fact_ref.fact_claim_id().source_ordinal(),
-            node_id: fact_ref.producer_node_id().clone(),
-            attempt_id: mfm_ids::AttemptId::from_digest(
-                DigestAlgorithm::Sha256JcsV1,
-                mfm_ids::DigestBytes::from_array([0x42; 32]),
-            ),
-            response_artifact_evidence: Some(response_artifact_evidence),
-            claim: fact_claim_for_ref(fact_ref, 17),
-        };
-        let index_projection = store::FactIndexProjection {
-            fact_claim_id: fact_ref.fact_claim_id().clone(),
-            source_run_id: fact_ref.fact_claim_id().source_run_id().clone(),
-            source_seq: fact_ref.fact_claim_id().source_seq(),
-            source_ordinal: fact_ref.fact_claim_id().source_ordinal(),
-            source_event_id: fact_ref.source_event_id().clone(),
-            producer_node_id: fact_ref.producer_node_id().clone(),
-            commit_id: store::CommitKey::new("fact-query-authority").expect("commit key"),
-            store_commit_order: 1,
-            recorded_at: fact_ref.recorded_at().to_owned(),
-            observed_at: fact_ref.observed_at().map(str::to_owned),
-            audience: mfm_facts::FactAudience::Platform,
-            visibility_scope: mfm_facts::FactVisibilityScope::Default,
-            fact_kind: fact_ref.fact_kind().clone(),
-            fact_descriptor_hash: fact_ref.fact_descriptor_hash().clone(),
-            fact_subject_namespace_hash: fact_ref.fact_subject_namespace_hash().clone(),
-            fact_key: fact_ref.fact_key().clone(),
-            subject_material_hash: fact_ref.subject_material_hash().clone(),
-            request_schema_id: None,
-            request_hash: None,
-            response_schema_id: fact_ref.response_schema_id().clone(),
-            response_hash: fact_ref.response_hash().clone(),
-            artifact_id: fact_ref.artifact_id().clone(),
-            artifact_evidence_hash: fact_ref.artifact_evidence_hash().clone(),
-            capability_kind: fact_ref.capability_kind().clone(),
-            capability_version: fact_ref.capability_version().clone(),
-            adapter_kind: fact_ref.adapter_kind().clone(),
-            adapter_version: fact_ref.adapter_version().clone(),
-        };
+        let (_built_ref, descriptor_projection, record_projection, index_projection) =
+            fact_projection_fixture(17);
+        assert_eq!(index_projection.fact_claim_id, *fact_ref.fact_claim_id());
+        assert_eq!(
+            index_projection.source_event_id,
+            *fact_ref.source_event_id()
+        );
         store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
             fact_descriptors: BTreeMap::from([(
                 descriptor_projection.descriptor_hash.clone(),
@@ -1637,58 +1927,30 @@ mod tests {
         index: bool,
     ) -> store::ProjectionSnapshot {
         let full = fact_authority_projections(fact_ref);
-        store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
-            fact_descriptors: if descriptor {
-                full.fact_descriptors()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect()
-            } else {
-                BTreeMap::new()
-            },
-            fact_records: if record {
-                full.fact_records()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect()
-            } else {
-                BTreeMap::new()
-            },
-            fact_index_entries: if index {
-                full.fact_index_entries()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect()
-            } else {
-                BTreeMap::new()
-            },
-            ..store::ProjectionSnapshotParts::default()
-        })
-        .expect("filtered fact authority projection")
+        let mut parts = store::ProjectionSnapshotParts::from_snapshot(&full);
+        if !descriptor {
+            parts.fact_descriptors.clear();
+        }
+        if !record {
+            parts.fact_records.clear();
+        }
+        if !index {
+            parts.fact_index_entries.clear();
+        }
+        store::ProjectionSnapshot::from_parts(parts).expect("filtered fact authority projection")
     }
 
     fn fact_authority_projections_with_tampered_subject(
         fact_ref: &mfm_facts::InternalFactRef,
     ) -> store::ProjectionSnapshot {
         let full = fact_authority_projections(fact_ref);
-        let mut fact_records = full
-            .fact_records()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect::<BTreeMap<_, _>>();
-        fact_records
+        let mut parts = store::ProjectionSnapshotParts::from_snapshot(&full);
+        parts
+            .fact_records
             .get_mut(fact_ref.fact_claim_id())
             .expect("fact record")
-            .claim = fact_claim_for_ref(fact_ref, 18);
-        store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
-            fact_descriptors: full
-                .fact_descriptors()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect(),
-            fact_records,
-            fact_index_entries: full
-                .fact_index_entries()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect(),
-            ..store::ProjectionSnapshotParts::default()
-        })
-        .expect("tampered fact authority projection")
+            .claim = fact_projection_fixture(18).2.claim;
+        store::ProjectionSnapshot::from_parts(parts).expect("tampered fact authority projection")
     }
 
     fn query_evidence_artifact() -> RunnerJsonArtifact {
@@ -1708,78 +1970,42 @@ mod tests {
         }
     }
 
-    fn fact_query_descriptor() -> mfm_facts::FactDescriptor {
-        mfm_facts::FactDescriptor::new(
-            mfm_facts::FactKind::new("chain.head").expect("kind"),
-            mfm_facts::fact_descriptor_schema_id().expect("descriptor schema"),
-            schema_id(),
-            schema_id(),
-            vec![
-                mfm_facts::FactFieldDescriptor::new(
-                    mfm_facts::FactFieldId::new("subject.source").expect("field"),
-                    mfm_facts::FactFieldPath::new("subject.source").expect("path"),
-                    mfm_facts::FactFieldValueType::String,
-                    mfm_facts::FactFieldExtraction::SubjectPath(
-                        mfm_facts::CanonicalValuePath::new("source").expect("subject path"),
-                    ),
-                    vec![mfm_facts::FactQueryOperator::Equal],
-                    mfm_facts::FactFieldExposure::QueryOnly,
-                    None,
-                    None,
-                    false,
-                    true,
-                )
-                .expect("source field"),
-                mfm_facts::FactFieldDescriptor::new(
-                    mfm_facts::FactFieldId::new("result.height").expect("field"),
-                    mfm_facts::FactFieldPath::new("result.height").expect("path"),
-                    mfm_facts::FactFieldValueType::UnsignedInteger,
-                    mfm_facts::FactFieldExtraction::ResponsePath(
-                        mfm_facts::CanonicalValuePath::new("height").expect("response path"),
-                    ),
-                    vec![mfm_facts::FactQueryOperator::Equal],
-                    mfm_facts::FactFieldExposure::Returnable,
-                    None,
-                    None,
-                    true,
-                    true,
-                )
-                .expect("height field"),
-            ],
-            vec![mfm_facts::FactOrderingPolicy::new(
-                mfm_facts::FactOrderingName::new("result.height.asc").expect("ordering"),
-                vec![mfm_facts::FactOrderingTerm::new(
-                    mfm_facts::FactFieldId::new("result.height").expect("field"),
-                    mfm_facts::SortDirection::Ascending,
-                    mfm_facts::NullOrdering::Last,
-                    false,
-                )],
-            )
-            .expect("ordering")],
-        )
-        .expect("descriptor")
-    }
-
     fn query_evidence(fact_ref: mfm_facts::InternalFactRef) -> mfm_facts::FactQueryEvidence {
         let query_scope = mfm_facts::FactQueryScope::new(
             mfm_facts::FactAudience::Platform,
             mfm_facts::FactVisibilityScope::Default,
         );
         let store_scope = mfm_facts::StoreScopeRef::new("default").expect("store scope");
-        let descriptor = fact_query_descriptor();
-        let input = mfm_facts::FactQueryInput::new(
+        let ordering = mfm_facts::FactOrderingPolicy::new(
+            mfm_facts::FactOrderingName::new("metadata.store_order.asc").expect("ordering"),
+            vec![mfm_facts::FactOrderingTerm::new(
+                mfm_facts::FactFieldId::new("metadata.store_order").expect("field"),
+                mfm_facts::SortDirection::Ascending,
+                mfm_facts::NullOrdering::Last,
+                true,
+            )],
+        )
+        .expect("ordering");
+        let plan = mfm_facts::CanonicalFactQueryPlan::new(
             store_scope.clone(),
             query_scope.clone(),
+            mfm_facts::FactQueryCompilerVersion::new(mfm_facts::FACT_QUERY_COMPILER_VERSION)
+                .expect("compiler"),
+            mfm_facts::FactCanonicalizerVersion::new(mfm_facts::FACT_QUERY_CANONICALIZER_VERSION)
+                .expect("canonicalizer"),
+            digest(0x12),
             mfm_facts::ScopeDecisionEvidence::new(digest(0x19)),
-            Vec::new(),
-            vec![mfm_facts::FactQueryReturnField::new(
-                mfm_facts::FactFieldId::new("result.height").expect("field"),
-            )],
-            mfm_facts::FactOrderingName::new("result.height.asc").expect("ordering"),
+            mfm_canonical::CanonicalJsonBytes::from_value(
+                &CanonicalValue::object([(
+                    "kind",
+                    CanonicalValue::String("chain.head".to_owned()),
+                )])
+                .expect("query"),
+            ),
+            ordering,
             Some(1),
         )
-        .expect("query input");
-        let plan = mfm_facts::compile_fact_query_plan(&descriptor, input).expect("plan");
+        .expect("plan");
         let frontier = mfm_facts::StoreReadFrontier::new(
             store_scope,
             query_scope,
@@ -1790,24 +2016,18 @@ mod tests {
         );
         let plan_hash = mfm_facts::fact_query_plan_hash(&plan).expect("plan hash");
         let rows = [mfm_facts::FactQueryResultRow::new(fact_ref, Vec::new())];
-        let material = mfm_facts::FactQueryReceiptMaterial::from_rows(
-            &plan_hash,
-            frontier,
-            mfm_facts::StoreReadFrontierType::Snapshot,
-            &rows,
-            false,
-            None,
-        )
-        .expect("receipt material");
-        let receipt = material.into_receipt(
-            mfm_facts::StoreReceiptAuthentication::new(
-                mfm_facts::StoreIdentity::new("store.default").expect("store"),
-                mfm_facts::StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
-                Some(mfm_facts::StoreKeyId::new("key.default").expect("key")),
-                vec![0; 64],
-            )
-            .expect("auth"),
-        );
+        let key = SigningKey::from_bytes(&[0x52; 32]);
+        let receipt =
+            signed_fact_query_receipt_for_test(SignedFactQueryReceiptFixtureInputForTest {
+                plan_hash: &plan_hash,
+                key: &key,
+                store_identity: mfm_facts::StoreIdentity::new("store.default").expect("store"),
+                key_id: mfm_facts::StoreKeyId::new("key.default").expect("key"),
+                read_frontier: frontier,
+                rows: &rows,
+                include_returned_field_summaries: false,
+                limit: None,
+            });
         mfm_facts::FactQueryEvidence::new(
             plan,
             receipt,
@@ -1821,6 +2041,9 @@ mod tests {
         let fact_ref = fact_ref();
         let evidence_artifact = query_evidence_artifact();
         let projections = fact_authority_projections(&fact_ref);
+        let descriptor_projection = projections
+            .fact_descriptor(fact_ref.fact_descriptor_hash())
+            .expect("descriptor projection");
         let evidence = query_evidence(fact_ref.clone());
 
         let refs = fact_query_evidence_retention_refs(&evidence_artifact, &evidence, &projections)
@@ -1832,7 +2055,7 @@ mod tests {
             content_digest: evidence_artifact.evidence.digest.clone(),
         }));
         assert!(refs.contains(&events::RetentionRef {
-            artifact_id: artifact_id(0x40),
+            artifact_id: descriptor_projection.descriptor_artifact_id.clone(),
             role: events::ArtifactRole::FactDescriptor,
             content_digest: fact_ref.fact_descriptor_hash().clone(),
         }));
@@ -1844,70 +2067,63 @@ mod tests {
     }
 
     #[test]
-    fn fact_query_evidence_retention_refs_reject_missing_descriptor_authority() {
-        let fact_ref = fact_ref();
-        let evidence_artifact = query_evidence_artifact();
-        let projections = fact_authority_projections_without(&fact_ref, false, true, true);
-        let evidence = query_evidence(fact_ref);
+    fn fact_query_evidence_retention_refs_reject_invalid_returned_fact_authority() {
+        for (name, descriptor, record, index, tampered, expected) in [
+            (
+                "missing descriptor",
+                false,
+                true,
+                true,
+                false,
+                "missing descriptor authority",
+            ),
+            (
+                "missing source fact",
+                true,
+                false,
+                true,
+                false,
+                "missing source fact authority",
+            ),
+            (
+                "missing indexed fact",
+                true,
+                true,
+                false,
+                false,
+                "missing indexed fact authority",
+            ),
+            (
+                "tampered subject",
+                true,
+                true,
+                true,
+                true,
+                "source fact authority does not match",
+            ),
+        ] {
+            let fact_ref = fact_ref();
+            let evidence_artifact = query_evidence_artifact();
+            let projections = if tampered {
+                fact_authority_projections_with_tampered_subject(&fact_ref)
+            } else {
+                fact_authority_projections_without(&fact_ref, descriptor, record, index)
+            };
+            let evidence = query_evidence(fact_ref);
 
-        let error = fact_query_evidence_retention_refs(&evidence_artifact, &evidence, &projections)
-            .expect_err("missing descriptor authority rejects");
+            let error = match fact_query_evidence_retention_refs(
+                &evidence_artifact,
+                &evidence,
+                &projections,
+            ) {
+                Ok(_) => panic!("{name} authority should reject"),
+                Err(error) => error,
+            };
 
-        assert!(matches!(
-            error,
-            RuntimeError::InvalidRunnerOutput(message)
-                if message.contains("missing descriptor authority")
-        ));
-    }
-
-    #[test]
-    fn fact_query_evidence_retention_refs_reject_missing_source_fact_authority() {
-        let fact_ref = fact_ref();
-        let evidence_artifact = query_evidence_artifact();
-        let projections = fact_authority_projections_without(&fact_ref, true, false, true);
-        let evidence = query_evidence(fact_ref);
-
-        let error = fact_query_evidence_retention_refs(&evidence_artifact, &evidence, &projections)
-            .expect_err("missing source fact authority rejects");
-
-        assert!(matches!(
-            error,
-            RuntimeError::InvalidRunnerOutput(message)
-                if message.contains("missing source fact authority")
-        ));
-    }
-
-    #[test]
-    fn fact_query_evidence_retention_refs_reject_missing_indexed_fact_authority() {
-        let fact_ref = fact_ref();
-        let evidence_artifact = query_evidence_artifact();
-        let projections = fact_authority_projections_without(&fact_ref, true, true, false);
-        let evidence = query_evidence(fact_ref);
-
-        let error = fact_query_evidence_retention_refs(&evidence_artifact, &evidence, &projections)
-            .expect_err("missing indexed fact authority rejects");
-
-        assert!(matches!(
-            error,
-            RuntimeError::InvalidRunnerOutput(message)
-                if message.contains("missing indexed fact authority")
-        ));
-    }
-
-    #[test]
-    fn fact_query_evidence_retention_refs_reject_tampered_subject_material_authority() {
-        let fact_ref = fact_ref();
-        let evidence_artifact = query_evidence_artifact();
-        let projections = fact_authority_projections_with_tampered_subject(&fact_ref);
-        let evidence = query_evidence(fact_ref);
-
-        let error = fact_query_evidence_retention_refs(&evidence_artifact, &evidence, &projections)
-            .expect_err("tampered source subject authority rejects");
-
-        assert!(matches!(
-            error,
-            RuntimeError::InvalidRunnerOutput(message)
-                if message.contains("source fact authority does not match")
-        ));
+            assert!(
+                matches!(&error, RuntimeError::InvalidRunnerOutput(message) if message.contains(expected)),
+                "{name} returned {error:?}"
+            );
+        }
     }
 }

@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use mfm_canonical::PlainCanonicalJsonBytes;
+use mfm_canonical::CanonicalJsonBytes;
 use mfm_ids::ContentDigest;
 
 use crate::*;
@@ -132,6 +132,11 @@ impl FactQueryInput {
         ordering: FactOrderingName,
         limit: Option<u64>,
     ) -> Result<Self> {
+        if return_fields.is_empty() {
+            return Err(FactDescriptorError::descriptor(
+                "fact query must request at least one return field",
+            ));
+        }
         if limit == Some(0) {
             return Err(FactDescriptorError::descriptor(
                 "fact query limit must be non-zero when present",
@@ -215,10 +220,15 @@ pub struct CompiledFactQueryShape {
 
 impl CompiledFactQueryShape {
     /// Creates a parsed query shape.
-    pub(crate) fn new(
+    pub fn new(
         predicates: Vec<FactQueryPredicate>,
         return_fields: Vec<FactQueryReturnField>,
     ) -> Result<Self> {
+        if return_fields.is_empty() {
+            return Err(FactDescriptorError::descriptor(
+                "compiled fact query shape must contain return fields",
+            ));
+        }
         Ok(Self {
             predicates,
             return_fields,
@@ -245,7 +255,7 @@ pub struct CanonicalFactQueryPlan {
     pub(crate) canonicalizer_version: FactCanonicalizerVersion,
     pub(crate) resolved_descriptor: ContentDigest,
     pub(crate) scope_decision_evidence: ScopeDecisionEvidence,
-    pub(crate) canonical_query: PlainCanonicalJsonBytes,
+    pub(crate) canonical_query: CanonicalJsonBytes,
     pub(crate) canonical_query_hash: ContentDigest,
     pub(crate) ordering: FactOrderingPolicy,
     pub(crate) limit: Option<u64>,
@@ -254,14 +264,14 @@ pub struct CanonicalFactQueryPlan {
 impl CanonicalFactQueryPlan {
     /// Creates a canonical fact query plan and computes its query hash.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub fn new(
         store_scope: StoreScopeRef,
         query_scope: FactQueryScope,
         query_compiler_version: FactQueryCompilerVersion,
         canonicalizer_version: FactCanonicalizerVersion,
         resolved_descriptor: ContentDigest,
         scope_decision_evidence: ScopeDecisionEvidence,
-        canonical_query: PlainCanonicalJsonBytes,
+        canonical_query: CanonicalJsonBytes,
         ordering: FactOrderingPolicy,
         limit: Option<u64>,
     ) -> Result<Self> {
@@ -316,7 +326,7 @@ impl CanonicalFactQueryPlan {
     }
 
     /// Returns canonical query bytes.
-    pub const fn canonical_query(&self) -> &PlainCanonicalJsonBytes {
+    pub const fn canonical_query(&self) -> &CanonicalJsonBytes {
         &self.canonical_query
     }
 

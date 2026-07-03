@@ -29,9 +29,9 @@ use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
     AppError, DistinctRunKey, EntryPointRunLaunchInput, ErrorClass, ManualResolutionDecision,
-    ManualResolutionRecordRequest, ProductionRunStore, PublicFactPredicate, PublicFactQueryRequest,
-    PublicFactRefId, PublicFactScalarValue, PublicOpName, PublicOutputResponse, PublicSafeMessage,
-    RunLaunchOutcomeStatus, RunReadServices, RunResponse, RunServices, RunStreamResponse,
+    ManualResolutionRecordRequest, ProductionRunStore, PublicFactQueryRequest, PublicFactRefId,
+    PublicOpName, PublicOutputResponse, PublicSafeMessage, RunLaunchOutcomeStatus, RunReadServices,
+    RunResponse, RunServices, RunStreamResponse,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use mfm_canonical::PlainCanonicalJsonBytes;
@@ -180,6 +180,8 @@ pub struct AppState<S = ProductionRunStore> {
     pub store: S,
     /// Optional runtime configuration file path for live capability-backed runs.
     pub runtime_config_path: Option<PathBuf>,
+    /// Optional fact-query receipt trust root used for replay verification.
+    pub fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
 }
 
 #[derive(Clone)]
@@ -231,21 +233,29 @@ where
             self.app.runtime_config_path.as_deref(),
         )?;
         let certification_registry = mfm_app::production_certification_registry()?;
-        Ok(mfm_app::make_run_services_with_certification_registry(
-            runners,
-            self.app.store.clone(),
-            self.app.store.clone(),
-            certification_registry,
-        ))
+        let fact_query_receipt_trust_root = self.app.fact_query_receipt_trust_root.clone();
+        Ok(
+            mfm_app::make_run_services_with_certification_registry_and_fact_query_trust_root(
+                runners,
+                self.app.store.clone(),
+                self.app.store.clone(),
+                certification_registry,
+                fact_query_receipt_trust_root,
+            ),
+        )
     }
 
     fn read_services(&self) -> Result<RunReadServices<S, S>, ApiError> {
         let certification_registry = mfm_app::production_certification_registry()?;
-        Ok(mfm_app::make_run_read_services_with_certification_registry(
-            self.app.store.clone(),
-            self.app.store.clone(),
-            certification_registry,
-        ))
+        let fact_query_receipt_trust_root = self.app.fact_query_receipt_trust_root.clone();
+        Ok(
+            mfm_app::make_run_read_services_with_certification_registry_and_fact_query_trust_root(
+                self.app.store.clone(),
+                self.app.store.clone(),
+                certification_registry,
+                fact_query_receipt_trust_root,
+            ),
+        )
     }
 }
 
@@ -256,9 +266,12 @@ pub async fn make_default_run_store() -> Result<ProductionRunStore, ApiError> {
 
 /// Builds default production REST API state from environment-selected stores.
 pub async fn make_default_app_state() -> Result<DefaultAppState, ApiError> {
+    let store = make_default_run_store().await?;
+    let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
     Ok(AppState {
-        store: make_default_run_store().await?,
+        store,
         runtime_config_path: std::env::var_os(mfm_app::MFM_RUNTIME_CONFIG_FILE).map(PathBuf::from),
+        fact_query_receipt_trust_root,
     })
 }
 
@@ -451,17 +464,6 @@ struct RunListQuery {
     wait_ms: Option<u64>,
 }
 
-#[derive(Debug, Default)]
-struct FactQueryParams {
-    shape: Option<String>,
-    order: Option<String>,
-    subject: Vec<String>,
-    result: Vec<String>,
-    where_predicates: Vec<String>,
-    field: Vec<String>,
-    limit: Option<u64>,
-}
-
 #[derive(Debug, Serialize)]
 struct RunObservationPageResponse {
     next_cursor: String,
@@ -537,8 +539,7 @@ async fn facts_query<S>(
 where
     S: RunCommandStore + mfm_app::PublicFactQueryExecutor,
 {
-    let request = public_fact_query_request(kind, query, None)?;
-    json_ok(state.read_services()?.query_public_facts(request).await?)
+    facts_query_response(&state, kind, query, None).await
 }
 
 #[instrument(level = "debug", skip(state, query), fields(kind = kind.as_str()))]
@@ -550,7 +551,19 @@ async fn facts_latest<S>(
 where
     S: RunCommandStore + mfm_app::PublicFactQueryExecutor,
 {
-    let request = public_fact_query_request(kind, query, Some(1))?;
+    facts_query_response(&state, kind, query, Some(1)).await
+}
+
+async fn facts_query_response<S>(
+    state: &RouterState<S>,
+    kind: String,
+    query: RawQuery,
+    forced_limit: Option<u64>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: RunCommandStore + mfm_app::PublicFactQueryExecutor,
+{
+    let request = public_fact_query_request(kind, query, forced_limit)?;
     json_ok(state.read_services()?.query_public_facts(request).await?)
 }
 
@@ -576,198 +589,26 @@ fn public_fact_query_request(
     query: RawQuery,
     forced_limit: Option<u64>,
 ) -> Result<PublicFactQueryRequest, ApiError> {
-    let query = parse_fact_query_params(query.0.as_deref())?;
-    let ordering = query.order.ok_or_else(|| {
+    let pairs = query
+        .0
+        .as_deref()
+        .map(|raw| form_urlencoded::parse(raw.as_bytes()))
+        .into_iter()
+        .flatten();
+    PublicFactQueryRequest::from_query_pairs(kind, pairs, forced_limit)
+        .map_err(fact_query_params_api_error)
+}
+
+fn fact_query_params_api_error(error: AppError) -> ApiError {
+    if mfm_app::is_public_fact_query_parameter_error(&error) {
         ApiError::new(
             StatusCode::BAD_REQUEST,
-            "FactOrderingMissing",
-            "Fact queries must provide an explicit order parameter",
+            "InvalidQuery",
+            "Failed to parse fact query parameters",
         )
-    })?;
-    if query.field.is_empty() {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "FactReturnFieldMissing",
-            "Fact queries must request at least one return field",
-        ));
+    } else {
+        ApiError::from(error)
     }
-    let limit = forced_limit.or(query.limit);
-    if limit == Some(0) {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "FactQueryLimitInvalid",
-            "Fact query limit must be greater than zero",
-        ));
-    }
-    Ok(PublicFactQueryRequest {
-        fact_kind: kind,
-        shape: query.shape,
-        predicates: parse_fact_predicates(
-            query.subject.iter(),
-            query.result.iter(),
-            query.where_predicates.iter(),
-        )?,
-        return_fields: query.field,
-        ordering,
-        limit,
-    })
-}
-
-fn parse_fact_query_params(raw: Option<&str>) -> Result<FactQueryParams, ApiError> {
-    let mut params = FactQueryParams::default();
-    let Some(raw) = raw else {
-        return Ok(params);
-    };
-    for (key, value) in form_urlencoded::parse(raw.as_bytes()) {
-        match key.as_ref() {
-            "shape" => params.shape = Some(value.into_owned()),
-            "order" => params.order = Some(value.into_owned()),
-            "subject" => params.subject.push(value.into_owned()),
-            "result" => params.result.push(value.into_owned()),
-            "where" => params.where_predicates.push(value.into_owned()),
-            "field" | "fields" => params.field.push(value.into_owned()),
-            "limit" => {
-                params.limit = Some(value.parse::<u64>().map_err(|_| {
-                    ApiError::new(
-                        StatusCode::BAD_REQUEST,
-                        "InvalidQuery",
-                        "Failed to parse fact query parameters",
-                    )
-                })?);
-            }
-            _ => {
-                return Err(ApiError::new(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidQuery",
-                    "Failed to parse fact query parameters",
-                ));
-            }
-        }
-    }
-    Ok(params)
-}
-
-fn parse_fact_predicates<'a>(
-    subjects: impl Iterator<Item = &'a String>,
-    results: impl Iterator<Item = &'a String>,
-    where_predicates: impl Iterator<Item = &'a String>,
-) -> Result<Vec<PublicFactPredicate>, ApiError> {
-    let mut predicates = Vec::new();
-    for value in subjects {
-        predicates.push(parse_prefixed_fact_predicate("subject", value)?);
-    }
-    for value in results {
-        predicates.push(parse_prefixed_fact_predicate("result", value)?);
-    }
-    for value in where_predicates {
-        predicates.push(parse_fact_predicate(value)?);
-    }
-    Ok(predicates)
-}
-
-fn parse_prefixed_fact_predicate(
-    prefix: &'static str,
-    value: &str,
-) -> Result<PublicFactPredicate, ApiError> {
-    let mut predicate = parse_fact_predicate(value)?;
-    if !predicate.field_id.starts_with("subject.") && !predicate.field_id.starts_with("result.") {
-        predicate.field_id = format!("{prefix}.{}", predicate.field_id);
-    }
-    Ok(predicate)
-}
-
-fn parse_fact_predicate(value: &str) -> Result<PublicFactPredicate, ApiError> {
-    let (left, raw_value) = value.split_once('=').ok_or_else(invalid_fact_predicate)?;
-    if left.is_empty() {
-        return Err(invalid_fact_predicate());
-    }
-    let (field_id, operator) = parse_fact_field_and_operator(left)?;
-    Ok(PublicFactPredicate {
-        field_id,
-        operator,
-        value: parse_fact_scalar_value(raw_value)?,
-    })
-}
-
-fn parse_fact_field_and_operator(value: &str) -> Result<(String, String), ApiError> {
-    let operators = [
-        (".lte", "less_than_or_equal"),
-        (".gte", "greater_than_or_equal"),
-        (".eq", "equal"),
-        (".lt", "less_than"),
-        (".gt", "greater_than"),
-    ];
-    for (suffix, operator) in operators {
-        if let Some(field_id) = value.strip_suffix(suffix) {
-            if field_id.is_empty() {
-                return Err(invalid_fact_predicate());
-            }
-            return Ok((field_id.to_owned(), operator.to_owned()));
-        }
-    }
-    Ok((value.to_owned(), "equal".to_owned()))
-}
-
-fn parse_fact_scalar_value(value: &str) -> Result<PublicFactScalarValue, ApiError> {
-    if let Some((type_name, typed_value)) = value.split_once(':') {
-        return match type_name {
-            "string" => Ok(PublicFactScalarValue::String(typed_value.to_owned())),
-            "bool" => parse_bool_fact_scalar(typed_value),
-            "i64" => parse_i64_fact_scalar(typed_value),
-            "u64" => parse_u64_fact_scalar(typed_value),
-            "timestamp" => Ok(PublicFactScalarValue::Timestamp(typed_value.to_owned())),
-            "decimal" => Ok(PublicFactScalarValue::DecimalString(typed_value.to_owned())),
-            "digest" => Ok(PublicFactScalarValue::Digest(typed_value.to_owned())),
-            _ => Ok(infer_fact_scalar_value(value)),
-        };
-    }
-    Ok(infer_fact_scalar_value(value))
-}
-
-fn infer_fact_scalar_value(value: &str) -> PublicFactScalarValue {
-    if let Ok(parsed) = value.parse::<bool>() {
-        return PublicFactScalarValue::Boolean(parsed);
-    }
-    if value.starts_with('-') {
-        if let Ok(parsed) = value.parse::<i64>() {
-            return PublicFactScalarValue::SignedInteger(parsed);
-        }
-    } else if let Ok(parsed) = value.parse::<u64>() {
-        return PublicFactScalarValue::UnsignedInteger(parsed);
-    }
-    if value.contains('.') && value.chars().all(|ch| ch.is_ascii_digit() || ch == '.') {
-        return PublicFactScalarValue::DecimalString(value.to_owned());
-    }
-    PublicFactScalarValue::String(value.to_owned())
-}
-
-fn parse_bool_fact_scalar(value: &str) -> Result<PublicFactScalarValue, ApiError> {
-    value
-        .parse::<bool>()
-        .map(PublicFactScalarValue::Boolean)
-        .map_err(|_| invalid_fact_predicate())
-}
-
-fn parse_i64_fact_scalar(value: &str) -> Result<PublicFactScalarValue, ApiError> {
-    value
-        .parse::<i64>()
-        .map(PublicFactScalarValue::SignedInteger)
-        .map_err(|_| invalid_fact_predicate())
-}
-
-fn parse_u64_fact_scalar(value: &str) -> Result<PublicFactScalarValue, ApiError> {
-    value
-        .parse::<u64>()
-        .map(PublicFactScalarValue::UnsignedInteger)
-        .map_err(|_| invalid_fact_predicate())
-}
-
-fn invalid_fact_predicate() -> ApiError {
-    ApiError::new(
-        StatusCode::BAD_REQUEST,
-        "FactPredicateInvalid",
-        "Fact predicates must use `field[.operator]=value`",
-    )
 }
 
 fn default_from_seq() -> u64 {

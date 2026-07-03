@@ -77,13 +77,7 @@ pub(super) async fn load_fact_projection_snapshot_client(
         .await
         .map_err(|error| database_error("failed to start fact projection read", error))?;
     let fact_projections = load_store_fact_projection_tables_tx(&mut tx).await?;
-    let snapshot = ProjectionSnapshot::from_parts(ProjectionSnapshotParts {
-        fact_descriptors: fact_projections.fact_descriptors,
-        fact_records: fact_projections.fact_records,
-        fact_index_entries: fact_projections.fact_index_entries,
-        fact_term_entries: fact_projections.fact_term_entries,
-        ..ProjectionSnapshotParts::default()
-    })?;
+    let snapshot = fact_projections.into_projection_snapshot()?;
     tx.commit()
         .await
         .map_err(|error| database_error("failed to commit fact projection read", error))?;
@@ -356,140 +350,18 @@ fn projection_snapshot_with_fact_projections(
             )));
         }
     }
-    Ok(ProjectionSnapshot::from_parts(ProjectionSnapshotParts {
-        run_states: snapshot
-            .run_states()
-            .map(|(run_id, state)| (run_id.clone(), *state))
-            .collect(),
-        run_spec_hashes: snapshot
-            .run_spec_hashes()
-            .map(|(run_id, spec_hash)| (run_id.clone(), spec_hash.clone()))
-            .collect(),
-        saga_policy_digests: snapshot
-            .saga_policy_digests()
-            .map(|(run_id, digest)| (run_id.clone(), digest.clone()))
-            .collect(),
-        run_completions: snapshot
-            .run_completions()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-        saga_engagements: snapshot
-            .saga_engagements()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-        manual_resolutions: snapshot
-            .manual_resolutions()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-        attempts: snapshot
-            .attempts()
-            .map(|(key, projection)| (key.clone(), projection.clone()))
-            .collect(),
-        cells: snapshot
-            .cells()
-            .map(|(run_id, cell_id, projection)| {
-                ((run_id.clone(), cell_id.clone()), projection.clone())
-            })
-            .collect(),
-        fact_descriptors: fact_projections.fact_descriptors,
-        fact_records: snapshot
-            .fact_records()
-            .map(|(claim_id, projection)| (claim_id.clone(), projection.clone()))
-            .collect(),
-        fact_index_entries: fact_projections.fact_index_entries,
-        fact_term_entries: fact_projections.fact_term_entries,
-        side_effects: snapshot
-            .side_effects()
-            .map(|(ledger_ref, projection)| (ledger_ref.clone(), projection.clone()))
-            .collect(),
-        resource_lanes: snapshot
-            .resource_lanes()
-            .map(|(lane_key, projection)| (lane_key.clone(), projection.clone()))
-            .collect(),
-        public_outputs: snapshot
-            .public_outputs()
-            .map(|(run_id, schema_id, projection)| {
-                ((run_id.clone(), schema_id.clone()), projection.clone())
-            })
-            .collect(),
-        retentions: snapshot
-            .retentions()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-    })?)
+    let mut parts = ProjectionSnapshotParts::from_snapshot(snapshot);
+    fact_projections.install_external_fact_indexes(&mut parts);
+    Ok(ProjectionSnapshot::from_parts(parts)?)
 }
 
 pub(super) fn projection_snapshot_with_resource_lanes(
     snapshot: &ProjectionSnapshot,
     resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
 ) -> Result<ProjectionSnapshot> {
-    Ok(ProjectionSnapshot::from_parts(ProjectionSnapshotParts {
-        run_states: snapshot
-            .run_states()
-            .map(|(run_id, state)| (run_id.clone(), *state))
-            .collect(),
-        run_spec_hashes: snapshot
-            .run_spec_hashes()
-            .map(|(run_id, spec_hash)| (run_id.clone(), spec_hash.clone()))
-            .collect(),
-        saga_policy_digests: snapshot
-            .saga_policy_digests()
-            .map(|(run_id, digest)| (run_id.clone(), digest.clone()))
-            .collect(),
-        run_completions: snapshot
-            .run_completions()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-        saga_engagements: snapshot
-            .saga_engagements()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-        manual_resolutions: snapshot
-            .manual_resolutions()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-        attempts: snapshot
-            .attempts()
-            .map(|(key, projection)| (key.clone(), projection.clone()))
-            .collect(),
-        cells: snapshot
-            .cells()
-            .map(|(run_id, cell_id, projection)| {
-                ((run_id.clone(), cell_id.clone()), projection.clone())
-            })
-            .collect(),
-        fact_descriptors: snapshot
-            .fact_descriptors()
-            .map(|(descriptor_hash, projection)| (descriptor_hash.clone(), projection.clone()))
-            .collect(),
-        fact_records: snapshot
-            .fact_records()
-            .map(|(claim_id, projection)| (claim_id.clone(), projection.clone()))
-            .collect(),
-        fact_index_entries: snapshot
-            .fact_index_entries()
-            .map(|(claim_id, projection)| (claim_id.clone(), projection.clone()))
-            .collect(),
-        fact_term_entries: snapshot
-            .fact_term_entries()
-            .map(|(key, projection)| (key.clone(), projection.clone()))
-            .collect(),
-        side_effects: snapshot
-            .side_effects()
-            .map(|(ledger_ref, projection)| (ledger_ref.clone(), projection.clone()))
-            .collect(),
-        resource_lanes,
-        public_outputs: snapshot
-            .public_outputs()
-            .map(|(run_id, schema_id, projection)| {
-                ((run_id.clone(), schema_id.clone()), projection.clone())
-            })
-            .collect(),
-        retentions: snapshot
-            .retentions()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-    })?)
+    let mut parts = ProjectionSnapshotParts::from_snapshot(snapshot);
+    parts.resource_lanes = resource_lanes;
+    Ok(ProjectionSnapshot::from_parts(parts)?)
 }
 
 fn projection_snapshot_with_store_authority(
@@ -497,59 +369,8 @@ fn projection_snapshot_with_store_authority(
     fact_projections: PhysicalFactProjections,
     resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
 ) -> Result<ProjectionSnapshot> {
-    Ok(ProjectionSnapshot::from_parts(ProjectionSnapshotParts {
-        run_states: snapshot
-            .run_states()
-            .map(|(run_id, state)| (run_id.clone(), *state))
-            .collect(),
-        run_spec_hashes: snapshot
-            .run_spec_hashes()
-            .map(|(run_id, spec_hash)| (run_id.clone(), spec_hash.clone()))
-            .collect(),
-        saga_policy_digests: snapshot
-            .saga_policy_digests()
-            .map(|(run_id, digest)| (run_id.clone(), digest.clone()))
-            .collect(),
-        run_completions: snapshot
-            .run_completions()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-        saga_engagements: snapshot
-            .saga_engagements()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-        manual_resolutions: snapshot
-            .manual_resolutions()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-        attempts: snapshot
-            .attempts()
-            .map(|(key, projection)| (key.clone(), projection.clone()))
-            .collect(),
-        cells: snapshot
-            .cells()
-            .map(|(run_id, cell_id, projection)| {
-                ((run_id.clone(), cell_id.clone()), projection.clone())
-            })
-            .collect(),
-        fact_descriptors: fact_projections.fact_descriptors,
-        fact_records: fact_projections.fact_records,
-        fact_index_entries: fact_projections.fact_index_entries,
-        fact_term_entries: fact_projections.fact_term_entries,
-        side_effects: snapshot
-            .side_effects()
-            .map(|(ledger_ref, projection)| (ledger_ref.clone(), projection.clone()))
-            .collect(),
-        resource_lanes,
-        public_outputs: snapshot
-            .public_outputs()
-            .map(|(run_id, schema_id, projection)| {
-                ((run_id.clone(), schema_id.clone()), projection.clone())
-            })
-            .collect(),
-        retentions: snapshot
-            .retentions()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-    })?)
+    let mut parts = ProjectionSnapshotParts::from_snapshot(snapshot);
+    fact_projections.install_store_fact_authority(&mut parts);
+    parts.resource_lanes = resource_lanes;
+    Ok(ProjectionSnapshot::from_parts(parts)?)
 }

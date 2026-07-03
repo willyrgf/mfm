@@ -6,24 +6,18 @@ use mfm_fact_capabilities::{
     FactQueryReceiptTrustRootMaterial,
 };
 
-use crate::{AppError, ErrorClass, ProductionRunStore, RuntimeConfigLoader};
+use crate::{AppError, ErrorClass, ProductionRunStore};
 
 pub(crate) fn register_btc_collector_runners_if_configured(
     registry: &mut mfm_runtime::ErasedRunnerRegistry,
     artifacts: Arc<dyn ArtifactReadProvider>,
     fact_index: Option<Arc<dyn FactIndexReadProvider>>,
-    runtime_config: RuntimeConfigLoader,
+    btc: Option<mfm_runtime_config::BtcRuntimeConfig>,
 ) -> Result<(), AppError> {
-    let Some(btc) = runtime_config.load_optional_btc()? else {
+    let Some(btc) = btc else {
         return Ok(());
     };
-    let fact_index = fact_index.ok_or_else(|| {
-        AppError::backend(
-            ErrorClass::BadRequest,
-            "LaunchRunnerUnavailable",
-            "A required typed runner is unavailable",
-        )
-    })?;
+    let fact_index = fact_index.ok_or_else(launch_runner_unavailable)?;
     let client = btc_json_rpc_client(btc)?;
     let btc = Arc::new(mfm_adapters_btc_jsonrpc::BtcJsonRpcChainHeadProvider::new(
         Arc::new(client),
@@ -40,23 +34,20 @@ pub(crate) fn production_fact_index_read_provider(
     let trust_root = store
         .store_authority()
         .fact_receipt_trust_root()
-        .ok_or_else(|| {
-            AppError::backend(
-                ErrorClass::BadRequest,
-                "LaunchRunnerUnavailable",
-                "A required typed runner is unavailable",
-            )
-        })?;
-    let trust_root = FactQueryReceiptTrustRootMaterial::new(
-        trust_root.store_identity().clone(),
-        trust_root.scheme(),
-        trust_root.key_id().clone(),
-        *trust_root.verifying_key(),
-    );
+        .ok_or_else(launch_runner_unavailable)?
+        .to_material();
     Ok(Arc::new(PostgresFactIndexReadProvider {
         store,
         trust_root,
     }))
+}
+
+fn launch_runner_unavailable() -> AppError {
+    AppError::backend(
+        ErrorClass::BadRequest,
+        "LaunchRunnerUnavailable",
+        "A required typed runner is unavailable",
+    )
 }
 
 fn btc_json_rpc_client(
@@ -92,17 +83,10 @@ impl FactIndexReadProvider for PostgresFactIndexReadProvider {
                 .execute_fact_query(request.plan())
                 .await
                 .map_err(mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure)?;
-            let rows = result
-                .rows()
-                .iter()
-                .map(|row| {
-                    mfm_fact_capabilities::FactIndexReadRow::new(
-                        row.fact_ref().clone(),
-                        row.returned_fields().to_vec(),
-                    )
-                })
-                .collect();
-            FactIndexReadResponse::new(rows, result.receipt().clone(), self.trust_root.clone())
+            Ok(FactIndexReadResponse::from_receipt(
+                result.receipt().clone(),
+                self.trust_root.clone(),
+            ))
         })
     }
 }

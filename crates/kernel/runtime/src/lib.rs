@@ -61,7 +61,13 @@ pub use manual_resolution::{
     unresolved_manual_obligations_digest, ManualResolutionEvidenceArtifact,
 };
 pub use runner_kit::{
-    FactRecordInput, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerJsonArtifact,
+    load_launch_config, load_launch_config_for_node, load_materialized_input_value,
+    load_materialized_node_value, load_materialized_struct_field_value,
+    load_materialized_struct_input, load_non_empty_materialized_input, load_runner_config,
+    load_runner_config_for_node, load_side_effect_artifact, load_side_effect_artifact_for_node,
+    load_side_effect_value, load_side_effect_value_for_node, materialized_input_node_json,
+    FactRecordInput, RunnerArtifactBuilder, RunnerCapabilityBinding,
+    RunnerExecutableIdentityTemplate, RunnerFactoryBinding, RunnerJsonArtifact,
     RunnerOutputBuilder, RunnerPayloadBuilder, RunnerRegistrationBuilder, StagedFactRecord,
 };
 pub use runners::{
@@ -246,11 +252,7 @@ fn attempt_id(
 }
 
 fn retention_ref_for_artifact(artifact: &store::ArtifactEvidenceRef) -> events::RetentionRef {
-    events::RetentionRef {
-        artifact_id: artifact.artifact_id.clone(),
-        role: artifact.artifact_role,
-        content_digest: artifact.digest.clone(),
-    }
+    artifact.retention_ref()
 }
 
 fn canonical_json(value: serde_json::Value) -> Result<PlainCanonicalJsonBytes> {

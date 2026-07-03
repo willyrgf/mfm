@@ -7,17 +7,16 @@
 //! recorded evidence.
 
 use std::future::Future;
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use mfm_artifact_capabilities::{ArtifactReadProvider, ArtifactReadRequest};
 use mfm_btc_capabilities::{
-    BtcBlockHash, BtcCapabilityError, BtcCapabilityFuture, BtcChain, BtcChainHeadReadProvider,
-    BtcChainHeadRequest, BtcChainHeadResponse, BtcFinality, BtcNetworkId, BtcSourceIdentity,
-    BtcSourceStatus, RedactedBtcSourceEvidence,
+    BtcBlockHash, BtcCapabilityError, BtcCapabilityFuture, BtcChainHeadReadProvider,
+    BtcChainHeadRequest, BtcChainHeadResponse, BtcFinality, BtcSourceStatus,
+    RedactedBtcSourceEvidence,
 };
-use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_capabilities::CapabilitySpec;
 use mfm_collectors_btc_jsonrpc_http::{
     BlockHeaderInfo, BlockchainInfo, BtcJsonRpcClient, BtcRpcError,
 };
@@ -26,27 +25,22 @@ use mfm_fact_capabilities::{
     FactIndexReadEvidence, FactIndexReadProvider, FactIndexReadResponse,
     FactQueryReceiptTrustRootMaterial,
 };
-use mfm_ids::ContentDigest;
 use mfm_program::{ManagedWriteState, MfmFactType, StateSpec, ValidatedConfig};
 use mfm_runtime::{
-    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
-    ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
-    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder, RunnerPayloadBuilder,
+    load_materialized_struct_input, load_runner_config, CapabilityImplementationId,
+    ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
+    RunnerCapabilityBinding, RunnerExecutableIdentityTemplate, RunnerOutputBuilder,
     RunnerRegistrationBuilder,
 };
 use mfm_states_btc::{
     btc_jsonrpc_adapter_kind, btc_jsonrpc_adapter_version, chain_head_fact_visibility,
     collector_checkpoint_fact_visibility, normalize_chain_head_response, BtcChainHeadFact,
     BtcFactRecordCapability, CollectorCheckpointFact, CollectorCheckpointResponse,
-    CollectorCheckpointSubject, LoadedCollectorCheckpoint, ObserveBtcChainHeadConfig,
-    ObserveBtcChainHeadInput, ObserveBtcChainHeadState, QueryCollectorCheckpointConfig,
-    QueryCollectorCheckpointInput, QueryCollectorCheckpointState, RecordBtcChainHeadFactConfig,
-    RecordBtcChainHeadFactInput, RecordBtcChainHeadFactState, RecordCollectorCheckpointConfig,
-    RecordCollectorCheckpointInput, RecordCollectorCheckpointState,
+    LoadedCollectorCheckpoint, ObserveBtcChainHeadConfig, ObserveBtcChainHeadInput,
+    ObserveBtcChainHeadState, QueryCollectorCheckpointConfig, QueryCollectorCheckpointInput,
+    QueryCollectorCheckpointState, RecordBtcChainHeadFactState, RecordCollectorCheckpointState,
 };
-use mfm_values::{MfmConfig, MfmValue};
-use serde::de::DeserializeOwned;
-use serde::Serialize;
+use mfm_values::MfmValue;
 
 const READ_FACTORY: &str = "read_external";
 const MANAGED_WRITE_FACTORY: &str = "managed_platform_write";
@@ -188,60 +182,51 @@ pub fn register_btc_jsonrpc_runners(
     let btc = capabilities.btc();
     let fact_index = capabilities.fact_index();
     let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
-    let read_factory = events::RunnerFactoryId::new(READ_FACTORY)?;
-    let managed_write_factory = events::RunnerFactoryId::new(MANAGED_WRITE_FACTORY)?;
-    let adapter_factory = events::RunnerFactoryId::new(ADAPTER_FACTORY)?;
-    registrations.register_adapter_executable(
+    let executable_identities = RunnerExecutableIdentityTemplate::new(
+        "mfm-adapters-btc-jsonrpc",
+        "typed-bitcoin-jsonrpc",
+        env!("CARGO_PKG_VERSION"),
+    )?;
+    let read_factory =
+        executable_identities.factory_binding(events::RunnerFactoryId::new(READ_FACTORY)?);
+    let managed_write_factory =
+        executable_identities.factory_binding(events::RunnerFactoryId::new(MANAGED_WRITE_FACTORY)?);
+    let adapter_factory =
+        executable_identities.factory_binding(events::RunnerFactoryId::new(ADAPTER_FACTORY)?);
+    registrations.register_adapter_executable_with_factory(
         btc_jsonrpc_adapter_kind().map_err(adapter_identity_error)?,
         btc_jsonrpc_adapter_version().map_err(adapter_identity_error)?,
-        executable(adapter_factory)?,
+        &adapter_factory,
     )?;
-    let observe = mfm_program::registered_state_descriptor::<ObserveBtcChainHeadState>()
-        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    registrations.register_descriptor(
-        observe.descriptor_id().clone(),
-        observe.capabilities(),
-        read_factory.clone(),
-        executable(read_factory.clone())?,
+    registrations.register_state_descriptor_with_factory::<ObserveBtcChainHeadState>(
+        &read_factory,
         Arc::new(ObserveChainHeadRunner {
             artifacts: artifacts.clone(),
             btc,
         }),
     )?;
-    let record_chain_head =
-        mfm_program::registered_state_descriptor::<RecordBtcChainHeadFactState>()
-            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    registrations.register_descriptor(
-        record_chain_head.descriptor_id().clone(),
-        record_chain_head.capabilities(),
-        managed_write_factory.clone(),
-        executable(managed_write_factory.clone())?,
-        Arc::new(RecordChainHeadFactRunner {
-            artifacts: artifacts.clone(),
-        }),
+    registrations.register_state_descriptor_with_factory::<RecordBtcChainHeadFactState>(
+        &managed_write_factory,
+        Arc::new(ManagedFactRecordRunner::<RecordBtcChainHeadFactState>::new(
+            artifacts.clone(),
+            chain_head_fact_visibility(),
+        )),
     )?;
-    let query_checkpoint =
-        mfm_program::registered_state_descriptor::<QueryCollectorCheckpointState>()
-            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    registrations.register_descriptor(
-        query_checkpoint.descriptor_id().clone(),
-        query_checkpoint.capabilities(),
-        read_factory.clone(),
-        executable(read_factory)?,
+    registrations.register_state_descriptor_with_factory::<QueryCollectorCheckpointState>(
+        &read_factory,
         Arc::new(QueryCheckpointRunner {
             artifacts: artifacts.clone(),
             fact_index,
         }),
     )?;
-    let record_checkpoint =
-        mfm_program::registered_state_descriptor::<RecordCollectorCheckpointState>()
-            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    registrations.register_descriptor(
-        record_checkpoint.descriptor_id().clone(),
-        record_checkpoint.capabilities(),
-        managed_write_factory.clone(),
-        executable(managed_write_factory)?,
-        Arc::new(RecordCheckpointFactRunner { artifacts }),
+    registrations.register_state_descriptor_with_factory::<RecordCollectorCheckpointState>(
+        &managed_write_factory,
+        Arc::new(
+            ManagedFactRecordRunner::<RecordCollectorCheckpointState>::new(
+                artifacts,
+                collector_checkpoint_fact_visibility(),
+            ),
+        ),
     )?;
     Ok(())
 }
@@ -275,25 +260,6 @@ pub enum BtcJsonRpcAdapterError {
     ReplayEvidenceMismatch,
 }
 
-fn executable(
-    factory_id: events::RunnerFactoryId,
-) -> mfm_runtime::Result<events::ExecutableIdentity> {
-    Ok(events::ExecutableIdentity {
-        factory_id,
-        cargo_package_digest: digest_json(serde_json::json!({
-            "crate": "mfm-adapters-btc-jsonrpc",
-            "version": env!("CARGO_PKG_VERSION"),
-        }))?,
-        binary_digest: digest_json(serde_json::json!({
-            "crate": "mfm-adapters-btc-jsonrpc",
-            "runner": "typed-bitcoin-jsonrpc",
-            "version": env!("CARGO_PKG_VERSION"),
-        }))?,
-        nix_derivation_hash: None,
-        nix_output_hash: None,
-    })
-}
-
 struct ObserveChainHeadRunner {
     artifacts: Arc<dyn ArtifactReadProvider>,
     btc: Arc<dyn BtcChainHeadReadProvider>,
@@ -303,50 +269,46 @@ impl ErasedNodeRunner for ObserveChainHeadRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
             let config =
-                load_config::<ObserveBtcChainHeadConfig>(&ctx, self.artifacts.as_ref()).await?;
-            let input = load_struct_input::<ObserveBtcChainHeadInput>(
+                load_runner_config::<ObserveBtcChainHeadConfig>(&ctx, self.artifacts.as_ref())
+                    .await?;
+            let state = ObserveBtcChainHeadState::new(config).map_err(|error| {
+                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+            })?;
+            let input = load_materialized_struct_input::<ObserveBtcChainHeadInput>(
                 ctx.inputs(),
                 self.artifacts.as_ref(),
             )
             .await?;
-            let request = config.as_ref().request().map_err(btc_state_runtime_error)?;
+            let request = state.request().map_err(btc_state_runtime_error)?;
             let response = self
                 .btc
                 .read_chain_head(&request)
                 .await
                 .map_err(btc_capability_runtime_error)?;
-            let fact = normalize_chain_head_response(&request, &response, &input)
+            let fact = state
+                .materialize_response(&input, &response)
                 .map_err(btc_state_runtime_error)?;
-            state_output(ctx, &fact).await
+            ErasedRunnerOutput::state_output(&ctx, &fact)
         })
     }
 }
 
-struct RecordChainHeadFactRunner {
+struct ManagedFactRecordRunner<S> {
     artifacts: Arc<dyn ArtifactReadProvider>,
+    visibility: mfm_program::facts::FactVisibility,
+    _state: PhantomData<fn() -> S>,
 }
 
-impl ErasedNodeRunner for RecordChainHeadFactRunner {
-    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        Box::pin(async move {
-            let config =
-                load_config::<RecordBtcChainHeadFactConfig>(&ctx, self.artifacts.as_ref()).await?;
-            let state = RecordBtcChainHeadFactState::new(config).map_err(|error| {
-                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
-            })?;
-            let input = load_struct_input::<RecordBtcChainHeadFactInput>(
-                ctx.inputs(),
-                self.artifacts.as_ref(),
-            )
-            .await?;
-            let fact = state
-                .run(input, &(BtcFactRecordCapability,))
-                .await
-                .map_err(|error| {
-                    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
-                })?;
-            record_fact_output(ctx, &fact, chain_head_fact_visibility()).await
-        })
+impl<S> ManagedFactRecordRunner<S> {
+    fn new(
+        artifacts: Arc<dyn ArtifactReadProvider>,
+        visibility: mfm_program::facts::FactVisibility,
+    ) -> Self {
+        Self {
+            artifacts,
+            visibility,
+            _state: PhantomData,
+        }
     }
 }
 
@@ -359,9 +321,9 @@ impl ErasedNodeRunner for QueryCheckpointRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
             let config =
-                load_config::<QueryCollectorCheckpointConfig>(&ctx, self.artifacts.as_ref())
+                load_runner_config::<QueryCollectorCheckpointConfig>(&ctx, self.artifacts.as_ref())
                     .await?;
-            let input = load_struct_input::<QueryCollectorCheckpointInput>(
+            let input = load_materialized_struct_input::<QueryCollectorCheckpointInput>(
                 ctx.inputs(),
                 self.artifacts.as_ref(),
             )
@@ -373,93 +335,63 @@ impl ErasedNodeRunner for QueryCheckpointRunner {
                 self.fact_index.as_ref(),
             )
             .await?;
-            checkpoint_query_output(ctx, &loaded, &evidence).await
+            checkpoint_query_output(ctx, &loaded, &evidence)
         })
     }
 }
 
-struct RecordCheckpointFactRunner {
-    artifacts: Arc<dyn ArtifactReadProvider>,
-}
-
-impl ErasedNodeRunner for RecordCheckpointFactRunner {
+impl<S> ErasedNodeRunner for ManagedFactRecordRunner<S>
+where
+    S: ManagedWriteState<Caps = (BtcFactRecordCapability,)>,
+    S::Input: serde::de::DeserializeOwned,
+    S::Output: MfmFactType + MfmValue,
+{
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config =
-                load_config::<RecordCollectorCheckpointConfig>(&ctx, self.artifacts.as_ref())
-                    .await?;
-            let state = RecordCollectorCheckpointState::new(config).map_err(|error| {
-                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
-            })?;
-            let input = load_struct_input::<RecordCollectorCheckpointInput>(
-                ctx.inputs(),
-                self.artifacts.as_ref(),
-            )
-            .await?;
-            let checkpoint = state
-                .run(input, &(BtcFactRecordCapability,))
+            run_managed_fact_record::<S>(ctx, self.artifacts.as_ref(), self.visibility.clone())
                 .await
-                .map_err(|error| {
-                    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
-                })?;
-            record_fact_output(ctx, &checkpoint, collector_checkpoint_fact_visibility()).await
         })
     }
 }
 
-async fn record_fact_output<T>(
+async fn run_managed_fact_record<S>(
     ctx: ErasedRunCtx<'_>,
-    fact: &T,
+    artifacts: &dyn ArtifactReadProvider,
     visibility: mfm_program::facts::FactVisibility,
 ) -> mfm_runtime::Result<ErasedRunnerOutput>
 where
-    T: MfmFactType + MfmValue + Serialize + Clone,
+    S: ManagedWriteState<Caps = (BtcFactRecordCapability,)>,
+    S::Input: serde::de::DeserializeOwned,
+    S::Output: MfmFactType + MfmValue,
 {
-    let artifacts = RunnerArtifactBuilder::new(&ctx);
-    let payloads = RunnerPayloadBuilder::new(&ctx);
-    let output_artifact = artifacts.state_output(fact)?;
+    let config = load_runner_config::<S::Config>(&ctx, artifacts).await?;
+    let state = S::new(config)
+        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+    let input = load_materialized_struct_input::<S::Input>(ctx.inputs(), artifacts).await?;
+    let fact = state
+        .run(input, &(BtcFactRecordCapability,))
+        .await
+        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
     let mut output = RunnerOutputBuilder::new(&ctx);
-    output.stage_attempt_artifact(&output_artifact)?;
-    output.retain_runtime_evidence(&output_artifact);
-    output.record_fact(
-        mfm_runtime::FactRecordInput::new(fact.clone(), visibility),
+    output.state_output_and_record_fact(
+        mfm_runtime::FactRecordInput::new(fact, visibility),
         btc_fact_record_capability_binding()?,
     )?;
-    output.payload(payloads.cell_produced(&output_artifact)?);
     Ok(output.finish())
 }
 
-async fn state_output<T>(
-    ctx: ErasedRunCtx<'_>,
-    value: &T,
-) -> mfm_runtime::Result<ErasedRunnerOutput>
-where
-    T: MfmValue + Serialize,
-{
-    let artifacts = RunnerArtifactBuilder::new(&ctx);
-    let payloads = RunnerPayloadBuilder::new(&ctx);
-    let artifact = artifacts.state_output(value)?;
-    let mut output = RunnerOutputBuilder::new(&ctx);
-    output.stage_attempt_artifact(&artifact)?;
-    output.retain_runtime_evidence(&artifact);
-    output.payload(payloads.cell_produced(&artifact)?);
-    Ok(output.finish())
-}
-
-async fn checkpoint_query_output(
+fn checkpoint_query_output(
     ctx: ErasedRunCtx<'_>,
     value: &LoadedCollectorCheckpoint,
     evidence: &FactIndexReadEvidence,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let artifacts = RunnerArtifactBuilder::new(&ctx);
-    let payloads = RunnerPayloadBuilder::new(&ctx);
-    let artifact = artifacts.state_output(value)?;
     let trust_root = fact_query_trust_root(evidence.trust_root())?;
     let mut output = RunnerOutputBuilder::new(&ctx);
-    output.stage_attempt_artifact(&artifact)?;
-    output.retain_runtime_evidence(&artifact);
-    output.record_fact_query_evidence(evidence.query_evidence().clone(), &trust_root)?;
-    output.payload(payloads.cell_produced(&artifact)?);
+    output.state_output_and_record_fact_query_evidence(
+        value,
+        evidence.query_evidence().clone(),
+        &trust_root,
+    )?;
     Ok(output.finish())
 }
 
@@ -469,7 +401,6 @@ async fn query_collector_checkpoint(
     artifacts: &dyn ArtifactReadProvider,
     fact_index: &dyn FactIndexReadProvider,
 ) -> mfm_runtime::Result<(LoadedCollectorCheckpoint, FactIndexReadEvidence)> {
-    let config_value = config.as_ref().clone();
     let state = QueryCollectorCheckpointState::new(config)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
     let request = state.request().map_err(btc_state_runtime_error)?;
@@ -477,7 +408,7 @@ async fn query_collector_checkpoint(
         .read_fact_index(&request)
         .await
         .map_err(fact_index_runtime_error)?;
-    let checkpoint = checkpoint_from_response(&config_value, &response, artifacts).await?;
+    let checkpoint = checkpoint_from_response(&state, &response, artifacts).await?;
     let selection = state
         .selection_evidence(&response)
         .map_err(btc_state_runtime_error)?;
@@ -491,27 +422,28 @@ async fn query_collector_checkpoint(
 }
 
 async fn checkpoint_from_response(
-    config: &QueryCollectorCheckpointConfig,
+    state: &QueryCollectorCheckpointState,
     response: &FactIndexReadResponse,
     artifacts: &dyn ArtifactReadProvider,
 ) -> mfm_runtime::Result<Option<CollectorCheckpointFact>> {
-    match response.rows() {
-        [] => Ok(None),
-        [row] => {
-            let request = ArtifactReadRequest::from_internal_fact_response_ref(row.fact_ref());
+    match state
+        .selected_checkpoint_response_ref(response)
+        .map_err(btc_state_runtime_error)?
+    {
+        None => Ok(None),
+        Some(fact_ref) => {
+            let request = ArtifactReadRequest::from_internal_fact_response_ref(fact_ref);
             let bytes = artifacts
                 .read_artifact(&request)
                 .await
                 .map_err(runtime_artifact_read_error)?;
             let checkpoint_response: CollectorCheckpointResponse =
                 bytes.decode_json().map_err(runtime_artifact_read_error)?;
-            checkpoint_fact_from_query_config(config, checkpoint_response)
+            state
+                .checkpoint_fact_from_response(checkpoint_response)
                 .map(Some)
                 .map_err(btc_state_runtime_error)
         }
-        _ => Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
-            "latest checkpoint query returned more than one row".to_owned(),
-        )),
     }
 }
 
@@ -521,173 +453,16 @@ pub fn replay_loaded_checkpoint_from_evidence(
     evidence: &mfm_facts::FactQueryEvidence,
     response: Option<CollectorCheckpointResponse>,
 ) -> Result<LoadedCollectorCheckpoint> {
-    mfm_facts::validate_fact_query_evidence(evidence)
-        .map_err(|_| BtcJsonRpcAdapterError::ReplayEvidenceMismatch)?;
-    let checkpoint = match (
-        evidence.receipt().returned_refs().len(),
-        evidence.selection().selected_indices(),
-        response,
-    ) {
-        (0, [], None) => None,
-        (1, [0], Some(response)) => Some(
-            checkpoint_fact_from_query_config(config, response)
-                .map_err(|_| BtcJsonRpcAdapterError::ReplayEvidenceMismatch)?,
-        ),
-        _ => return Err(BtcJsonRpcAdapterError::ReplayEvidenceMismatch),
-    };
-    Ok(LoadedCollectorCheckpoint::new(checkpoint))
-}
-
-fn checkpoint_fact_from_query_config(
-    config: &QueryCollectorCheckpointConfig,
-    response: CollectorCheckpointResponse,
-) -> std::result::Result<CollectorCheckpointFact, mfm_states_btc::BtcStateError> {
-    mfm_states_btc::validate_query_collector_checkpoint_config(config)
-        .map_err(|reason| mfm_states_btc::BtcStateError::InvalidInput { reason })?;
-    let source_identity = BtcSourceIdentity::new(&config.semantic_source_identity)?;
-    let network = BtcNetworkId::new(&config.network)?;
-    let subject = CollectorCheckpointSubject::new(
-        config.collector_kind.clone(),
-        &source_identity,
-        config.partition.clone(),
-        BtcChain::Bitcoin,
-        &network,
-    );
-    Ok(CollectorCheckpointFact::new(subject, response))
+    config
+        .loaded_checkpoint_from_replay_evidence(evidence, response)
+        .map_err(|_| BtcJsonRpcAdapterError::ReplayEvidenceMismatch)
 }
 
 fn fact_query_trust_root(
     material: &FactQueryReceiptTrustRootMaterial,
 ) -> mfm_runtime::Result<mfm_store::v1::FactQueryReceiptTrustRoot> {
-    mfm_store::v1::FactQueryReceiptTrustRoot::new(
-        material.store_identity().clone(),
-        material.scheme(),
-        material.key_id().clone(),
-        *material.verifying_key(),
-    )
-    .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))
-}
-
-async fn load_config<T>(
-    ctx: &ErasedRunCtx<'_>,
-    artifacts: &dyn ArtifactReadProvider,
-) -> mfm_runtime::Result<ValidatedConfig<T>>
-where
-    T: MfmConfig + DeserializeOwned,
-{
-    let request = ArtifactReadRequest::from_certified_config_ref(&ctx.node().config_ref);
-    let verified = artifacts
-        .read_artifact(&request)
-        .await
-        .map_err(runtime_artifact_read_error)?;
-    decode_config_bytes(verified.bytes())
-}
-fn decode_config_bytes<T>(bytes: &[u8]) -> mfm_runtime::Result<ValidatedConfig<T>>
-where
-    T: MfmConfig + DeserializeOwned,
-{
-    let config: T = serde_json::from_slice(bytes)
-        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    ValidatedConfig::new(config).map_err(|error| {
-        mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
-            "Bitcoin config failed validation: {error}"
-        ))
-    })
-}
-
-async fn load_struct_input<T>(
-    inputs: &mfm_runtime::MaterializedInputs,
-    artifacts: &dyn ArtifactReadProvider,
-) -> mfm_runtime::Result<T>
-where
-    T: DeserializeOwned,
-{
-    let value = materialized_node_json(&inputs.root, artifacts).await?;
-    serde_json::from_value(value)
+    mfm_store::v1::FactQueryReceiptTrustRoot::from_material(material)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))
-}
-
-async fn materialized_node_json(
-    node: &MaterializedInputNode,
-    artifacts: &dyn ArtifactReadProvider,
-) -> mfm_runtime::Result<serde_json::Value> {
-    match node {
-        MaterializedInputNode::Unit => Ok(serde_json::Value::Null),
-        MaterializedInputNode::Cell(_) => {
-            let bytes = load_cell_bytes(node, artifacts).await?;
-            serde_json::from_slice(&bytes)
-                .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))
-        }
-        MaterializedInputNode::Tuple(elements) => {
-            let mut values = Vec::with_capacity(elements.len());
-            for element in elements {
-                values.push(Box::pin(materialized_node_json(element, artifacts)).await?);
-            }
-            Ok(serde_json::Value::Array(values))
-        }
-        MaterializedInputNode::Struct(fields) => {
-            let mut object = serde_json::Map::new();
-            for field in fields {
-                object.insert(
-                    field.field_path.as_str().to_owned(),
-                    Box::pin(materialized_node_json(&field.node, artifacts)).await?,
-                );
-            }
-            Ok(serde_json::Value::Object(object))
-        }
-        MaterializedInputNode::Vec(elements) | MaterializedInputNode::NonEmptyVec(elements) => {
-            let mut values = Vec::with_capacity(elements.len());
-            for element in elements {
-                values.push(Box::pin(materialized_node_json(element, artifacts)).await?);
-            }
-            Ok(serde_json::Value::Array(values))
-        }
-    }
-}
-
-async fn load_cell_bytes(
-    node: &MaterializedInputNode,
-    artifacts: &dyn ArtifactReadProvider,
-) -> mfm_runtime::Result<Vec<u8>> {
-    let MaterializedInputNode::Cell(cell) = node else {
-        return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
-            "Bitcoin input node was not a produced cell".to_owned(),
-        ));
-    };
-    let request = match &cell.terminal {
-        MaterializedCellTerminal::Produced {
-            producer_node_id,
-            artifact_id,
-            content_digest,
-        } => ArtifactReadRequest::from_materialized_produced_cell(
-            artifact_id.clone(),
-            content_digest.clone(),
-            cell.schema_id.clone(),
-            cell.semantic_type_id.clone(),
-            producer_node_id.clone(),
-        ),
-        MaterializedCellTerminal::Seed {
-            seed_id,
-            artifact_id,
-            content_digest,
-        } => ArtifactReadRequest::from_materialized_seed_cell(
-            artifact_id.clone(),
-            content_digest.clone(),
-            cell.schema_id.clone(),
-            cell.semantic_type_id.clone(),
-            seed_id.clone(),
-        ),
-        MaterializedCellTerminal::Skipped { .. } => {
-            return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
-                "Bitcoin input cell was skipped".to_owned(),
-            ))
-        }
-    };
-    let verified = artifacts
-        .read_artifact(&request)
-        .await
-        .map_err(runtime_artifact_read_error)?;
-    Ok(verified.into_bytes())
 }
 
 async fn selected_head(
@@ -752,22 +527,10 @@ fn redacted_provider_error(error: BtcRpcError) -> BtcCapabilityError {
 }
 
 fn btc_fact_record_capability_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {
-    Ok(RunnerCapabilityBinding {
-        capability_kind: BtcFactRecordCapability::kind()
-            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?,
-        capability_version: BtcFactRecordCapability::version()
-            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?,
-        adapter_kind: btc_jsonrpc_adapter_kind().map_err(adapter_identity_error)?,
-        adapter_version: btc_jsonrpc_adapter_version().map_err(adapter_identity_error)?,
-    })
-}
-
-fn digest_json(value: serde_json::Value) -> mfm_runtime::Result<ContentDigest> {
-    let json = serde_json::to_string(&value)
-        .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))?;
-    Ok(PlainCanonicalJsonBytes::from_json_str(&json)
-        .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))?
-        .content_digest())
+    RunnerCapabilityBinding::for_capability::<BtcFactRecordCapability>(
+        btc_jsonrpc_adapter_kind().map_err(adapter_identity_error)?,
+        btc_jsonrpc_adapter_version().map_err(adapter_identity_error)?,
+    )
 }
 
 fn runtime_artifact_read_error(

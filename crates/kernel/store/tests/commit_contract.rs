@@ -21,15 +21,15 @@ use mfm_spec::v1::{
 use mfm_store::v1::test_support::{
     confirmation_terminal_policies_for_projection_for_test as confirmation_terminal_policies_for_projection,
     empty_terminal_policies_for_test as empty_terminal_policies,
-    fixed_adapter_kind_for_test as adapter_kind, fixed_artifact_id_for_test as artifact_id,
-    fixed_attempt_id_for_test as attempt_id, fixed_capability_kind_for_test as capability_kind,
-    fixed_cell_id_for_test as cell_id, fixed_content_digest_for_test as content_digest,
-    fixed_descriptor_id_for_test as descriptor_id, fixed_digest_bytes_for_test as digest_bytes,
-    fixed_event_id_for_test as event_id, fixed_node_id_for_test as node_id,
-    fixed_schema_id_for_test as schema_id, fixed_scope_id_for_test as scope_id,
-    fixed_semantic_type_id_for_test as semantic_id, fixed_spec_hash_for_test as spec_hash,
-    fixed_state_kind_for_test as state_kind, media_type_for_test as media_type,
-    poll_ready_store_future_for_test as poll_ready_store_future,
+    fact_descriptor_projection_fixture_for_test, fixed_adapter_kind_for_test as adapter_kind,
+    fixed_artifact_id_for_test as artifact_id, fixed_attempt_id_for_test as attempt_id,
+    fixed_capability_kind_for_test as capability_kind, fixed_cell_id_for_test as cell_id,
+    fixed_content_digest_for_test as content_digest, fixed_descriptor_id_for_test as descriptor_id,
+    fixed_digest_bytes_for_test as digest_bytes, fixed_event_id_for_test as event_id,
+    fixed_node_id_for_test as node_id, fixed_schema_id_for_test as schema_id,
+    fixed_scope_id_for_test as scope_id, fixed_semantic_type_id_for_test as semantic_id,
+    fixed_spec_hash_for_test as spec_hash, fixed_state_kind_for_test as state_kind,
+    media_type_for_test as media_type, poll_ready_store_future_for_test as poll_ready_store_future,
     prepared_commit_bundle_from_plan as test_bundle_from_plan,
     prepared_commit_plan_for_test as test_prepared_commit_plan,
     receipt_terminal_policies_for_projection_for_test as receipt_terminal_policies_for_projection,
@@ -2352,31 +2352,21 @@ fn fact_descriptor() -> mfm_facts::FactDescriptor {
 }
 
 fn fact_descriptor_hash() -> ContentDigest {
-    mfm_facts::fact_descriptor_hash(&fact_descriptor()).expect("descriptor hash")
+    fact_descriptor_fixture().descriptor_hash
 }
 
 fn fact_descriptor_bytes() -> Vec<u8> {
-    mfm_facts::canonical_fact_descriptor_bytes(&fact_descriptor())
-        .expect("descriptor bytes")
-        .to_vec()
+    fact_descriptor_fixture().descriptor_bytes
 }
 
 fn fact_descriptor_artifact_ref() -> ArtifactEvidenceRef {
-    let bytes = fact_descriptor_bytes();
-    let digest = PlainCanonicalJsonBytes::from_canonical_json_slice(&bytes)
-        .expect("canonical descriptor bytes")
-        .content_digest();
-    ArtifactEvidenceRef {
-        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
-        digest,
-        byte_len: bytes.len() as u64,
-        media_type: media_type("application/json"),
-        schema_id: Some(mfm_facts::fact_descriptor_schema_id().expect("descriptor schema")),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None::<SeedId>,
-        artifact_role: ArtifactRole::FactDescriptor,
-    }
+    fact_descriptor_fixture().descriptor_evidence
+}
+
+fn fact_descriptor_fixture() -> mfm_store::v1::test_support::FactDescriptorProjectionFixtureForTest
+{
+    fact_descriptor_projection_fixture_for_test(fact_descriptor(), event_id(98))
+        .expect("fact descriptor fixture")
 }
 
 fn fact_subject_evidence() -> mfm_facts::FactSubjectEvidence {
@@ -7677,6 +7667,112 @@ fn fact_recorded_projects_reusable_fact_evidence() {
     assert_eq!(projection.artifact_id, response.artifact_id);
     assert_eq!(projection.response_hash, response.digest);
     assert_eq!(projection.fact_key, fact_key());
+}
+
+#[test]
+fn fact_record_projection_constructor_derives_event_coordinates() {
+    let run_id = fact_run_id(96);
+    let mut store = admitted_fact_store(&run_id, "constructor-run-start");
+    let response = fact_artifact_ref();
+    let mut attempt_payloads = vec![fact_attempt_started()];
+    store.certify_payloads_for_run(&run_id, &mut attempt_payloads);
+    append_run_state_commit(
+        &mut store,
+        &run_id,
+        "constructor-attempt-start",
+        attempt_payloads,
+        Vec::new(),
+        RequiredRunState::Started,
+    )
+    .expect("append fact attempt start");
+    let outcome = append_fact_recorded_commit(&mut store, &run_id, "constructor-fact-recorded")
+        .expect("append fact");
+    let CommitOutcome::Appended(batch) = outcome else {
+        panic!("fact append should be new");
+    };
+    assert_eq!(batch.events().len(), 1);
+    let event = &batch.events()[0];
+    let KernelEventPayload::FactRecorded(payload) = event.payload() else {
+        panic!("fact event payload");
+    };
+
+    let with_evidence = mfm_store::v1::FactRecordProjection::from_recorded_event(
+        event,
+        payload,
+        Some(response.clone()),
+    )
+    .expect("fact record projection");
+    assert_eq!(
+        with_evidence.fact_claim_id,
+        mfm_facts::derive_fact_claim_id(
+            event.run_id().clone(),
+            event.seq().as_u64(),
+            event.ordinal().as_u32(),
+        )
+        .expect("claim id")
+    );
+    assert_eq!(&with_evidence.source_event_id, event.event_id());
+    assert_eq!(&with_evidence.source_run_id, event.run_id());
+    assert_eq!(with_evidence.source_seq, event.seq().as_u64());
+    assert_eq!(with_evidence.source_ordinal, event.ordinal().as_u32());
+    assert_eq!(&with_evidence.node_id, &payload.node_id);
+    assert_eq!(&with_evidence.attempt_id, &payload.attempt_id);
+    assert_eq!(with_evidence.response_artifact_evidence, Some(response));
+    assert_eq!(&with_evidence.claim, &payload.claim);
+    assert_eq!(
+        store
+            .projection_snapshot()
+            .fact_record(&with_evidence.fact_claim_id),
+        Some(&with_evidence)
+    );
+
+    let without_evidence =
+        mfm_store::v1::FactRecordProjection::from_recorded_event(event, payload, None)
+            .expect("fact record projection without retained evidence");
+    let mut expected_without_evidence = with_evidence;
+    expected_without_evidence.response_artifact_evidence = None;
+    assert_eq!(without_evidence, expected_without_evidence);
+
+    let index = mfm_store::v1::FactIndexProjection::from_record_projection(
+        &without_evidence,
+        event.commit_key().clone(),
+        event.seq().as_u64(),
+        "2026-01-02T03:04:06Z",
+    )
+    .expect("index constructor")
+    .expect("indexed fact projection");
+    assert!(without_evidence.matches_index_projection(&index));
+    assert_eq!(index.fact_claim_id, without_evidence.fact_claim_id);
+    assert_eq!(index.store_commit_order, event.seq().as_u64());
+    assert_eq!(index.recorded_at, "2026-01-02T03:04:06Z");
+
+    let mut private_record = without_evidence.clone();
+    private_record.claim = mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
+        visibility: mfm_facts::FactVisibility::RunPrivate,
+        fact_kind: without_evidence.claim.fact_kind().clone(),
+        fact_descriptor_hash: without_evidence.claim.fact_descriptor_hash().clone(),
+        subject: without_evidence.claim.subject().clone(),
+        observed_at: without_evidence.claim.observed_at().map(str::to_owned),
+        request: without_evidence.claim.request().cloned(),
+        response: without_evidence.claim.response().clone(),
+        producer: without_evidence.claim.producer().clone(),
+    })
+    .expect("private claim");
+    assert!(mfm_store::v1::FactIndexProjection::from_record_projection(
+        &private_record,
+        event.commit_key().clone(),
+        event.seq().as_u64(),
+        "2026-01-02T03:04:06Z",
+    )
+    .expect("private constructor")
+    .is_none());
+    assert!(mfm_store::v1::FactIndexProjection::from_record_projection(
+        &without_evidence,
+        event.commit_key().clone(),
+        event.seq().as_u64(),
+        "",
+    )
+    .is_err());
 }
 
 #[test]

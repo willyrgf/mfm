@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.trybuild",
     name = "asset_price",
@@ -46,6 +47,9 @@ struct PortfolioConfig {
 struct SnapshotInput {
     prices: Vec<AssetPrice>,
 }
+
+#[derive(Clone, Serialize, Deserialize, StateInput)]
+struct EmptyInput {}
 
 #[derive(Clone, Serialize, Deserialize, OperationOutput)]
 struct SnapshotOutput {
@@ -120,6 +124,7 @@ fn main() {
     let _ = <PriceSource as mfm_values::MfmValue>::schema_descriptor().unwrap();
     let _ = <PortfolioConfig as mfm_values::MfmConfig>::schema_descriptor().unwrap();
     let _ = <SnapshotInput as mfm_values::StateInput>::input_schema_descriptor().unwrap();
+    let _ = <EmptyInput as mfm_values::StateInput>::input_schema_descriptor().unwrap();
     let _ = <SnapshotOutput as mfm_values::OperationOutput>::output_schema_descriptor().unwrap();
     let _ = <PublicReport as mfm_values::PublicOutputDescriptor>::public_schema_descriptor().unwrap();
     let fact = ChainHeadFact {

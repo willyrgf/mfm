@@ -1,4 +1,5 @@
 use super::*;
+use ed25519_dalek::SigningKey;
 use mfm_artifact_capabilities::{ArtifactEvidenceRef, VerifiedArtifactBytes};
 use mfm_btc_capabilities::{
     BtcChain, BtcChainGuard, BtcHeadSelection, BtcNetworkId, BtcSourceIdentity,
@@ -8,22 +9,23 @@ use mfm_facts::{
     fact_descriptor_hash, DescriptorCatalogWatermark, FactAudience, FactClaimId,
     FactProjectionGeneration, FactQueryReceipt, FactQueryScope, FactSelectionEvidence,
     FactVisibility, FactVisibilityScope, InternalFactRef, InternalFactRefParts,
-    StoreCommitWatermark, StoreIdentity, StoreKeyId, StoreReadFrontier, StoreReceiptAuthentication,
-    StoreScopeRef,
+    StoreCommitWatermark, StoreIdentity, StoreKeyId, StoreReadFrontier, StoreScopeRef,
 };
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
     DigestAlgorithm, DigestBytes, EventId, RunId,
 };
 use mfm_spec::v1::MediaType;
+use mfm_states_btc::{
+    CollectorCheckpointSubject, RecordCollectorCheckpointConfig, RecordCollectorCheckpointInput,
+};
+use mfm_store::v1::test_support::{
+    signed_fact_query_receipt_for_test, SignedFactQueryReceiptFixtureInputForTest,
+};
 use std::sync::Mutex;
 
 const BEST_HASH: &str = "00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc";
 const CONFIRMED_HASH: &str = "00000000000000000002b2a7f3e0d5c4b6a897887766554433221100ffeeddcc";
-const ED25519_TEST_VERIFYING_KEY: [u8; 32] = [
-    0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7, 0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07, 0x3a,
-    0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25, 0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07, 0x51, 0x1a,
-];
 
 fn poll_ready<F>(future: F) -> F::Output
 where
@@ -287,11 +289,7 @@ fn checkpoint_query_config() -> QueryCollectorCheckpointConfig {
 }
 
 fn checkpoint_query_input() -> QueryCollectorCheckpointInput {
-    QueryCollectorCheckpointInput {
-        context: mfm_states_btc::QueryCollectorCheckpointContext {
-            queried_at_unix_ms: Some(1_720_000_001_000),
-        },
-    }
+    QueryCollectorCheckpointInput {}
 }
 
 #[tokio::test]
@@ -435,10 +433,9 @@ fn fact_query_receipt(
     plan: &mfm_facts::CanonicalFactQueryPlan,
     returned_refs: Vec<InternalFactRef>,
 ) -> FactQueryReceipt {
-    let rows = returned_refs
-        .into_iter()
-        .map(|fact_ref| mfm_facts::FactQueryResultRow::new(fact_ref, Vec::new()))
-        .collect::<Vec<_>>();
+    let key = signing_key();
+    let store_identity = StoreIdentity::new("store.default").expect("store identity");
+    let key_id = StoreKeyId::new("fact.read.key").expect("key id");
     let read_frontier = StoreReadFrontier::new(
         StoreScopeRef::new("mfm.store.default").expect("store scope"),
         FactQueryScope::new(FactAudience::Control, FactVisibilityScope::Default),
@@ -448,32 +445,33 @@ fn fact_query_receipt(
         StoreCommitWatermark::new(11),
     );
     let plan_hash = mfm_facts::fact_query_plan_hash(plan).expect("plan hash");
-    let material = mfm_facts::FactQueryReceiptMaterial::from_rows(
-        &plan_hash,
+    let rows = returned_refs
+        .into_iter()
+        .map(|fact_ref| mfm_facts::FactQueryResultRow::new(fact_ref, Vec::new()))
+        .collect::<Vec<_>>();
+    signed_fact_query_receipt_for_test(SignedFactQueryReceiptFixtureInputForTest {
+        plan_hash: &plan_hash,
+        key: &key,
+        store_identity,
+        key_id,
         read_frontier,
-        mfm_facts::StoreReadFrontierType::Snapshot,
-        &rows,
-        false,
-        None,
-    )
-    .expect("receipt material");
-    material.into_receipt(
-        StoreReceiptAuthentication::new(
-            StoreIdentity::new("store.default").expect("store identity"),
-            mfm_facts::StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
-            Some(StoreKeyId::new("fact.read.key").expect("key id")),
-            vec![0x11; 64],
-        )
-        .expect("auth"),
-    )
+        rows: &rows,
+        include_returned_field_summaries: false,
+        limit: None,
+    })
+}
+
+fn signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[7; 32])
 }
 
 fn trust_root() -> FactQueryReceiptTrustRootMaterial {
+    let key = signing_key();
     FactQueryReceiptTrustRootMaterial::new(
         StoreIdentity::new("store.default").expect("store identity"),
         mfm_facts::StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
         StoreKeyId::new("fact.read.key").expect("key id"),
-        ED25519_TEST_VERIFYING_KEY,
+        key.verifying_key().to_bytes(),
     )
 }
 

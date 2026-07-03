@@ -8,10 +8,10 @@ use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
 use crate::artifacts::{
-    artifact_role_name, staged_artifact_binding_kind, staged_artifact_binding_role,
-    staged_side_effect_artifact_phase, validate_fact_query_returned_ref_authority,
-    verify_artifact_bytes, StagedArtifact, StagedArtifactBindingKind, StagedRetentionRefAuthority,
-    StagedRetentionRefs, StagedSideEffectArtifactPhase,
+    artifact_role_name, fact_query_returned_ref_retention_refs, staged_artifact_binding_kind,
+    staged_artifact_binding_role, staged_side_effect_artifact_phase, verify_artifact_bytes,
+    StagedArtifact, StagedArtifactBindingKind, StagedRetentionRefAuthority, StagedRetentionRefs,
+    StagedSideEffectArtifactPhase,
 };
 use crate::binding::BoundRuntimeContext;
 use crate::framework::{
@@ -1839,30 +1839,14 @@ fn validate_fact_query_evidence_retention_set(
     }
 
     for fact_ref in returned_refs {
-        validate_fact_query_returned_ref_authority(projections, fact_ref)?;
-        let descriptor = projections
-            .fact_descriptor(fact_ref.fact_descriptor_hash())
-            .ok_or_else(|| {
-                RuntimeError::InvalidRunnerOutput(
-                    "fact query evidence returned ref missing descriptor authority".to_owned(),
-                )
-            })?;
-        let descriptor_ref = events::RetentionRef {
-            artifact_id: descriptor.descriptor_artifact_id.clone(),
-            role: events::ArtifactRole::FactDescriptor,
-            content_digest: descriptor.descriptor_hash.clone(),
-        };
+        let [descriptor_ref, response_ref] =
+            fact_query_returned_ref_retention_refs(projections, fact_ref)?;
         if !staged_refs.refs.contains(&descriptor_ref) {
             return Err(RuntimeError::InvalidRunnerOutput(
                 "fact query evidence retention missing descriptor artifact authority".to_owned(),
             ));
         }
 
-        let response_ref = events::RetentionRef {
-            artifact_id: fact_ref.artifact_id().clone(),
-            role: events::ArtifactRole::FactResponse,
-            content_digest: fact_ref.response_hash().clone(),
-        };
         if !staged_refs.refs.contains(&response_ref) {
             return Err(RuntimeError::InvalidRunnerOutput(
                 "fact query evidence retention missing response artifact authority".to_owned(),
@@ -1884,40 +1868,15 @@ fn staged_retention_ref_authorized_by_existing_fact_query_evidence(
     };
 
     match retention_ref.role {
-        events::ArtifactRole::FactDescriptor => returned_refs.iter().any(|fact_ref| {
-            validate_fact_query_returned_ref_authority(projections, fact_ref).is_ok()
-                && projections
-                    .fact_descriptor(fact_ref.fact_descriptor_hash())
-                    .is_some_and(|descriptor| {
-                        descriptor.descriptor_artifact_id == retention_ref.artifact_id
-                            && descriptor.descriptor_hash == retention_ref.content_digest
-                    })
-        }),
-        events::ArtifactRole::FactResponse => returned_refs.iter().any(|fact_ref| {
-            fact_query_returned_ref_authorizes_response_retention(
-                projections,
-                fact_ref,
-                retention_ref,
-            )
-        }),
+        events::ArtifactRole::FactDescriptor | events::ArtifactRole::FactResponse => {
+            returned_refs.iter().any(|fact_ref| {
+                fact_query_returned_ref_retention_refs(projections, fact_ref)
+                    .map(|refs| refs.contains(retention_ref))
+                    .unwrap_or(false)
+            })
+        }
         _ => false,
     }
-}
-
-fn fact_query_returned_ref_authorizes_response_retention(
-    projections: &store::ProjectionSnapshot,
-    fact_ref: &mfm_facts::InternalFactRef,
-    retention_ref: &events::RetentionRef,
-) -> bool {
-    if validate_fact_query_returned_ref_authority(projections, fact_ref).is_err() {
-        return false;
-    }
-    if fact_ref.artifact_id() != &retention_ref.artifact_id
-        || fact_ref.response_hash() != &retention_ref.content_digest
-    {
-        return false;
-    }
-    true
 }
 
 fn validate_staged_retention_reason(

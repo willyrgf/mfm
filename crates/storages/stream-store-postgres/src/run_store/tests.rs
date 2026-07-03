@@ -22,13 +22,15 @@ use mfm_spec::v1::{
 use mfm_store::v1::test_support::{
     artifact_bytes_for_digest_for_test, artifact_content_digest_for_test as content_digest,
     confirmation_terminal_policies_for_projection_for_test as confirmation_terminal_policies_for_projection,
-    fixed_attempt_id_for_test as attempt_id, fixed_cell_id_for_test as cell_id,
-    fixed_descriptor_id_for_test as descriptor_id, fixed_digest_bytes_for_test as digest_bytes,
+    fact_descriptor_projection_fixture_for_test, fixed_attempt_id_for_test as attempt_id,
+    fixed_cell_id_for_test as cell_id, fixed_descriptor_id_for_test as descriptor_id,
+    fixed_digest_bytes_for_test as digest_bytes, fixed_event_id_for_test as event_id,
     fixed_node_id_for_test as node_id, fixed_schema_id_for_test as schema_id,
     fixed_scope_id_for_test as scope_id, fixed_semantic_type_id_for_test as semantic_id,
     fixed_spec_hash_for_test as spec_hash, fixed_state_kind_for_test as state_kind,
     media_type_for_test as media_type, prepared_commit_plan_for_test as test_prepared_commit_plan,
-    run_identity_material_for_test,
+    run_artifact_ref_from_store_artifact_for_test as run_artifact_ref,
+    run_identity_material_for_test, FactDescriptorProjectionFixtureForTest,
 };
 use mfm_store::v1::{
     AdmissionLease, AdmissionToken, AdmissionWaiter, ArtifactEvidenceRef, AttemptStatus,
@@ -147,6 +149,82 @@ async fn drop_schema(store: &PostgresRunStore, schema: &str) {
     .execute(&admin_pool)
     .await
     .expect("drop schema");
+}
+
+fn assert_fact_projection_counts(
+    projection: &ProjectionSnapshot,
+    descriptors: usize,
+    records: usize,
+    index_entries: usize,
+    terms: usize,
+) {
+    assert_eq!(projection.fact_descriptors().count(), descriptors);
+    assert_eq!(projection.fact_records().count(), records);
+    assert_eq!(projection.fact_index_entries().count(), index_entries);
+    assert_eq!(projection.fact_term_entries().count(), terms);
+}
+
+async fn assert_fact_projection_table_counts(
+    store: &PostgresRunStore,
+    run: &RunId,
+    descriptors: usize,
+    index_entries: usize,
+    terms: usize,
+) {
+    assert_eq!(
+        fact_projection_table_count(
+            &store.pool,
+            run,
+            "SELECT COUNT(*) FROM fact_descriptor_index WHERE source_run_id = $1"
+        )
+        .await,
+        descriptors as i64
+    );
+    assert_eq!(
+        fact_projection_table_count(
+            &store.pool,
+            run,
+            "SELECT COUNT(*) FROM fact_index WHERE source_run_id = $1"
+        )
+        .await,
+        index_entries as i64
+    );
+    assert_eq!(
+        fact_projection_table_count(
+            &store.pool,
+            run,
+            "SELECT COUNT(*) FROM fact_index_terms WHERE source_run_id = $1"
+        )
+        .await,
+        terms as i64
+    );
+}
+
+async fn fact_projection_table_count(pool: &PgPool, run: &RunId, sql: &'static str) -> i64 {
+    sqlx::query_scalar::<_, i64>(sql)
+        .bind(run.as_str())
+        .fetch_one(pool)
+        .await
+        .expect("fact projection table count")
+}
+
+fn assert_fact_query_receipt(
+    store: &PostgresRunStore,
+    plan: &mfm_facts::CanonicalFactQueryPlan,
+    result: &mfm_facts::FactQueryResult,
+    expected_cardinality: mfm_facts::QueryResultCardinality,
+) {
+    let plan_hash = mfm_facts::fact_query_plan_hash(plan).expect("fact query plan hash");
+    mfm_store::v1::verify_fact_query_receipt_authentication(
+        &plan_hash,
+        result.receipt(),
+        store
+            .store_authority()
+            .fact_receipt_trust_root()
+            .expect("receipt trust root"),
+    )
+    .expect("fact query receipt signature verifies");
+    assert_eq!(result.receipt().result_cardinality(), expected_cardinality);
 }
 
 #[tokio::test]
@@ -719,29 +797,20 @@ fn fact_descriptor() -> mfm_facts::FactDescriptor {
 }
 
 fn fact_descriptor_hash() -> ContentDigest {
-    mfm_facts::fact_descriptor_hash(&fact_descriptor()).expect("descriptor hash")
+    fact_descriptor_fixture().descriptor_hash
 }
 
 fn fact_descriptor_bytes() -> Vec<u8> {
-    mfm_facts::canonical_fact_descriptor_bytes(&fact_descriptor())
-        .expect("descriptor bytes")
-        .to_vec()
+    fact_descriptor_fixture().descriptor_bytes
 }
 
 fn fact_descriptor_artifact_ref() -> ArtifactEvidenceRef {
-    let bytes = fact_descriptor_bytes();
-    let digest = fact_descriptor_hash();
-    ArtifactEvidenceRef {
-        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
-        digest,
-        byte_len: bytes.len() as u64,
-        media_type: media_type("application/json"),
-        schema_id: Some(mfm_facts::fact_descriptor_schema_id().expect("descriptor schema")),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: ArtifactRole::FactDescriptor,
-    }
+    fact_descriptor_fixture().descriptor_evidence
+}
+
+fn fact_descriptor_fixture() -> FactDescriptorProjectionFixtureForTest {
+    fact_descriptor_projection_fixture_for_test(fact_descriptor(), event_id(44))
+        .expect("descriptor fixture")
 }
 
 fn fact_subject_evidence() -> mfm_facts::FactSubjectEvidence {
@@ -823,9 +892,12 @@ fn fact_query_plan_with_limit(limit: Option<u64>) -> mfm_facts::CanonicalFactQue
     mfm_facts::compile_fact_query_plan(&fact_descriptor(), input).expect("fact query plan")
 }
 
-fn fact_claim(response: &ArtifactEvidenceRef) -> mfm_facts::FactClaim {
+fn fact_claim_with_visibility(
+    response: &ArtifactEvidenceRef,
+    visibility: mfm_facts::FactVisibility,
+) -> mfm_facts::FactClaim {
     mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
-        visibility: mfm_facts::FactVisibility::indexed_default(mfm_facts::FactAudience::Platform),
+        visibility,
         fact_kind: mfm_facts::FactKind::new("mfm.test.fact").expect("fact kind"),
         fact_descriptor_hash: fact_descriptor_hash(),
         subject: fact_subject_evidence(),
@@ -862,12 +934,15 @@ fn fact_claim(response: &ArtifactEvidenceRef) -> mfm_facts::FactClaim {
     .expect("fact claim")
 }
 
-fn fact_recorded(response: &ArtifactEvidenceRef) -> KernelEventPayload {
+fn fact_recorded_with_visibility(
+    response: &ArtifactEvidenceRef,
+    visibility: mfm_facts::FactVisibility,
+) -> KernelEventPayload {
     KernelEventPayload::FactRecorded(events::FactRecorded {
         spec_hash: spec_hash(1),
         node_id: node_id(30),
         attempt_id: attempt_id(31),
-        claim: fact_claim(response),
+        claim: fact_claim_with_visibility(response, visibility),
     })
 }
 
@@ -1816,18 +1891,6 @@ fn certificate_artifact_ref() -> ArtifactEvidenceRef {
     }
 }
 
-fn run_artifact_ref(artifact: &ArtifactEvidenceRef) -> events::RunArtifactEvidenceRef {
-    events::RunArtifactEvidenceRef {
-        artifact_id: artifact.artifact_id.clone(),
-        role: artifact.artifact_role,
-        schema_id: artifact.schema_id.clone(),
-        semantic_type_id: artifact.semantic_type_id.clone(),
-        content_digest: artifact.digest.clone(),
-        byte_len: artifact.byte_len,
-        media_type: artifact.media_type.clone(),
-    }
-}
-
 fn request(
     run_id: RunId,
     seq: u64,
@@ -2156,13 +2219,47 @@ async fn append_fact_run_start(store: &PostgresRunStore, run_id: RunId) -> Resul
         .await
 }
 
+async fn append_fact_attempt_start(
+    store: &PostgresRunStore,
+    run: RunId,
+    commit_key: &str,
+) -> Result<CommitOutcome> {
+    append_prepared(
+        store,
+        certified_fact_request(run, 2, commit_key, vec![fact_attempt_started()]),
+        Vec::new(),
+    )
+    .await
+}
+
 fn fact_commit_request(
     run_id: RunId,
     seq: u64,
     key: &str,
     response: &ArtifactEvidenceRef,
 ) -> mfm_store::v1::CommitRequest {
-    let request = certified_fact_request(run_id, seq, key, vec![fact_recorded(response)]);
+    fact_commit_request_with_visibility(
+        run_id,
+        seq,
+        key,
+        response,
+        mfm_facts::FactVisibility::indexed_default(mfm_facts::FactAudience::Platform),
+    )
+}
+
+fn fact_commit_request_with_visibility(
+    run_id: RunId,
+    seq: u64,
+    key: &str,
+    response: &ArtifactEvidenceRef,
+    visibility: mfm_facts::FactVisibility,
+) -> mfm_store::v1::CommitRequest {
+    let request = certified_fact_request(
+        run_id,
+        seq,
+        key,
+        vec![fact_recorded_with_visibility(response, visibility)],
+    );
     let mut preconditions = request.preconditions().clone();
     preconditions.required_run_state = RequiredRunState::Started;
     request
@@ -2183,6 +2280,54 @@ async fn append_fact_commit(
             vec![response_bytes],
         )?)
         .await
+}
+
+async fn assert_empty_fact_query(
+    store: &PostgresRunStore,
+    plan: &mfm_facts::CanonicalFactQueryPlan,
+) {
+    let query_result = store
+        .execute_fact_query(plan)
+        .await
+        .expect("empty fact query execution");
+    assert!(query_result.rows().is_empty());
+    assert_fact_query_receipt(
+        store,
+        plan,
+        &query_result,
+        mfm_facts::QueryResultCardinality::Exact(0),
+    );
+}
+
+async fn assert_single_public_fact_query(
+    store: &PostgresRunStore,
+    plan: &mfm_facts::CanonicalFactQueryPlan,
+) -> mfm_facts::FactQueryResult {
+    let query_result = store
+        .execute_fact_query(plan)
+        .await
+        .expect("fact query execution");
+    assert_eq!(query_result.rows().len(), 1);
+    let row = &query_result.rows()[0];
+    assert_eq!(row.fact_ref().fact_key(), &fact_key());
+    assert_eq!(row.returned_fields().len(), 2);
+    assert_eq!(
+        row.returned_fields()[0].field_id().as_str(),
+        "subject.chain"
+    );
+    assert_eq!(
+        row.returned_fields()[0].value(),
+        &mfm_facts::FactCanonicalScalar::string("postgres_test_chain")
+    );
+    assert_eq!(
+        row.returned_fields()[1].field_id().as_str(),
+        "result.height"
+    );
+    assert_eq!(
+        row.returned_fields()[1].value(),
+        &mfm_facts::FactCanonicalScalar::UnsignedInteger(12_345)
+    );
+    query_result
 }
 
 async fn append_fact_commit_with_missing_existing_artifact(
@@ -4129,18 +4274,9 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
     append_fact_run_start(&store, run.clone())
         .await
         .expect("run start");
-    append_prepared(
-        &store,
-        certified_fact_request(
-            run.clone(),
-            2,
-            "fact-attempt-start",
-            vec![fact_attempt_started()],
-        ),
-        Vec::new(),
-    )
-    .await
-    .expect("fact attempt start");
+    append_fact_attempt_start(&store, run.clone(), "fact-attempt-start")
+        .await
+        .expect("fact attempt start");
 
     let response_ref = fact_artifact_ref();
     let fact_request = fact_commit_request(run.clone(), 3, "fact", &response_ref);
@@ -4159,44 +4295,9 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
         store.expected_next_seq(&run).await.expect("next seq"),
         StreamSeq::new(3).expect("seq")
     );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM fact_index WHERE source_run_id = $1")
-            .bind(run.as_str())
-            .fetch_one(&store.pool)
-            .await
-            .expect("fact index count after missing artifact"),
-        0
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM fact_index_terms WHERE source_run_id = $1"
-        )
-        .bind(run.as_str())
-        .fetch_one(&store.pool)
-        .await
-        .expect("fact terms count after missing artifact"),
-        0
-    );
+    assert_fact_projection_table_counts(&store, &run, 0, 0, 0).await;
     let empty_plan = fact_query_plan_with_limit(None);
-    let empty_query_result = store
-        .execute_fact_query(&empty_plan)
-        .await
-        .expect("empty fact query execution");
-    assert!(empty_query_result.rows().is_empty());
-    let empty_plan_hash = mfm_facts::fact_query_plan_hash(&empty_plan).expect("empty plan hash");
-    mfm_store::v1::verify_fact_query_receipt_authentication(
-        &empty_plan_hash,
-        empty_query_result.receipt(),
-        store
-            .store_authority()
-            .fact_receipt_trust_root()
-            .expect("receipt trust root"),
-    )
-    .expect("empty receipt signature verifies");
-    assert!(matches!(
-        empty_query_result.receipt().result_cardinality(),
-        mfm_facts::QueryResultCardinality::Exact(0)
-    ));
+    assert_empty_fact_query(&store, &empty_plan).await;
 
     append_fact_commit(&store, fact_request.clone(), &response_ref)
         .await
@@ -4205,10 +4306,7 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
         .status_projection_snapshot(&run)
         .await
         .expect("projection");
-    assert_eq!(projection.fact_descriptors().count(), 1);
-    assert_eq!(projection.fact_records().count(), 1);
-    assert_eq!(projection.fact_index_entries().count(), 1);
-    assert_eq!(projection.fact_term_entries().count(), 2);
+    assert_fact_projection_counts(&projection, 1, 1, 1, 2);
     assert!(projection.fact_records().any(|(_, fact)| {
         fact.node_id == node_id(30)
             && fact.attempt_id == attempt_id(31)
@@ -4217,95 +4315,25 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
     assert!(projection
         .fact_index_entries()
         .any(|(_, fact)| fact.fact_key == fact_key()));
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM fact_descriptor_index WHERE source_run_id = $1"
-        )
-        .bind(run.as_str())
-        .fetch_one(&store.pool)
-        .await
-        .expect("fact descriptor count"),
-        1
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM fact_index WHERE source_run_id = $1")
-            .bind(run.as_str())
-            .fetch_one(&store.pool)
-            .await
-            .expect("fact index count"),
-        1
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM fact_index_terms WHERE source_run_id = $1"
-        )
-        .bind(run.as_str())
-        .fetch_one(&store.pool)
-        .await
-        .expect("fact terms count"),
-        2
-    );
+    assert_fact_projection_table_counts(&store, &run, 1, 1, 2).await;
     let exact_plan = fact_query_plan_with_limit(Some(10));
-    let exact_query_result = store
-        .execute_fact_query(&exact_plan)
-        .await
-        .expect("exact fact query execution");
-    assert_eq!(exact_query_result.rows().len(), 1);
-    let exact_plan_hash = mfm_facts::fact_query_plan_hash(&exact_plan).expect("exact plan hash");
-    mfm_store::v1::verify_fact_query_receipt_authentication(
-        &exact_plan_hash,
-        exact_query_result.receipt(),
-        store
-            .store_authority()
-            .fact_receipt_trust_root()
-            .expect("receipt trust root"),
-    )
-    .expect("exact receipt signature verifies");
-    assert!(matches!(
-        exact_query_result.receipt().result_cardinality(),
-        mfm_facts::QueryResultCardinality::Exact(1)
-    ));
+    let exact_query_result = assert_single_public_fact_query(&store, &exact_plan).await;
+    assert_fact_query_receipt(
+        &store,
+        &exact_plan,
+        &exact_query_result,
+        mfm_facts::QueryResultCardinality::Exact(1),
+    );
     let query_plan = fact_query_plan();
-    let query_result = store
-        .execute_fact_query(&query_plan)
-        .await
-        .expect("fact query execution");
-    assert_eq!(query_result.rows().len(), 1);
-    let row = &query_result.rows()[0];
-    assert_eq!(row.fact_ref().fact_key(), &fact_key());
-    assert_eq!(row.returned_fields().len(), 2);
-    assert_eq!(
-        row.returned_fields()[0].field_id().as_str(),
-        "subject.chain"
-    );
-    assert_eq!(
-        row.returned_fields()[0].value(),
-        &mfm_facts::FactCanonicalScalar::string("postgres_test_chain")
-    );
-    assert_eq!(
-        row.returned_fields()[1].field_id().as_str(),
-        "result.height"
-    );
-    assert_eq!(
-        row.returned_fields()[1].value(),
-        &mfm_facts::FactCanonicalScalar::UnsignedInteger(12_345)
-    );
+    let query_result = assert_single_public_fact_query(&store, &query_plan).await;
     let receipt = query_result.receipt();
-    let plan_hash = mfm_facts::fact_query_plan_hash(&query_plan).expect("plan hash");
-    mfm_store::v1::verify_fact_query_receipt_authentication(
-        &plan_hash,
-        receipt,
-        store
-            .store_authority()
-            .fact_receipt_trust_root()
-            .expect("receipt trust root"),
-    )
-    .expect("receipt signature verifies");
+    assert_fact_query_receipt(
+        &store,
+        &query_plan,
+        &query_result,
+        mfm_facts::QueryResultCardinality::AtLeast(1),
+    );
     assert_eq!(receipt.returned_refs().len(), 1);
-    assert!(matches!(
-        receipt.result_cardinality(),
-        mfm_facts::QueryResultCardinality::AtLeast(1)
-    ));
     assert_eq!(
         receipt
             .read_frontier()
@@ -4364,41 +4392,60 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
     let rebuilt = rebuild_fact_projection_tables_client(&store.pool, &run)
         .await
         .expect("fact projection rebuild");
-    assert_eq!(rebuilt.fact_descriptors().count(), 1);
-    assert_eq!(rebuilt.fact_records().count(), 1);
-    assert_eq!(rebuilt.fact_index_entries().count(), 1);
-    assert_eq!(rebuilt.fact_term_entries().count(), 2);
+    assert_fact_projection_counts(&rebuilt, 1, 1, 1, 2);
     let projection = store
         .status_projection_snapshot(&run)
         .await
         .expect("projection after fact rebuild");
-    assert_eq!(projection.fact_descriptors().count(), 1);
-    assert_eq!(projection.fact_records().count(), 1);
-    assert_eq!(projection.fact_index_entries().count(), 1);
-    assert_eq!(projection.fact_term_entries().count(), 2);
+    assert_fact_projection_counts(&projection, 1, 1, 1, 2);
 
     let retry = append_fact_commit(&store, fact_request, &response_ref)
         .await
         .expect("fact commit idempotent retry");
     assert!(matches!(retry, CommitOutcome::Idempotent(_)));
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM fact_index WHERE source_run_id = $1")
-            .bind(run.as_str())
-            .fetch_one(&store.pool)
-            .await
-            .expect("fact index count after retry"),
-        1
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM fact_index_terms WHERE source_run_id = $1"
-        )
-        .bind(run.as_str())
-        .fetch_one(&store.pool)
+    assert_fact_projection_table_counts(&store, &run, 1, 1, 2).await;
+
+    drop_schema(&store, &schema).await;
+}
+
+#[tokio::test]
+async fn run_private_fact_records_load_without_index_rows() {
+    let (store, schema) = test_store().await;
+    let run = fact_run_id(11);
+    append_fact_run_start(&store, run.clone())
         .await
-        .expect("fact terms count after retry"),
-        2
+        .expect("run start");
+    append_fact_attempt_start(&store, run.clone(), "private-fact-attempt-start")
+        .await
+        .expect("fact attempt start");
+
+    let response_ref = fact_artifact_ref();
+    let fact_request = fact_commit_request_with_visibility(
+        run.clone(),
+        3,
+        "private-fact",
+        &response_ref,
+        mfm_facts::FactVisibility::RunPrivate,
     );
+    append_fact_commit(&store, fact_request, &response_ref)
+        .await
+        .expect("private fact commit");
+
+    let projection = store
+        .status_projection_snapshot(&run)
+        .await
+        .expect("projection");
+    assert_fact_projection_counts(&projection, 1, 1, 0, 0);
+    assert!(projection.fact_records().any(|(_, fact)| {
+        matches!(
+            fact.claim.visibility(),
+            mfm_facts::FactVisibility::RunPrivate
+        )
+    }));
+    assert_fact_projection_table_counts(&store, &run, 1, 0, 0).await;
+
+    let private_plan = fact_query_plan_with_limit(Some(10));
+    assert_empty_fact_query(&store, &private_plan).await;
 
     drop_schema(&store, &schema).await;
 }

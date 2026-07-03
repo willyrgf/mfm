@@ -243,8 +243,8 @@ fn expand_schema_derive_result(
     };
 
     Ok(quote! {
-        #impl_block
-        #state_input_handles
+            #impl_block
+            #state_input_handles
     })
 }
 
@@ -553,7 +553,9 @@ impl ContainerAttrs {
                     } else if meta.path.is_ident("try_from") || meta.path.is_ident("into") {
                         let _ = meta.value()?.parse::<LitStr>()?;
                         Ok(())
-                    } else if meta.path.is_ident("transparent") {
+                    } else if meta.path.is_ident("transparent")
+                        || meta.path.is_ident("deny_unknown_fields")
+                    {
                         Ok(())
                     } else if meta.path.is_ident("untagged") {
                         Err(meta.error("serde(untagged) is not supported by MFM derives"))
@@ -1055,15 +1057,32 @@ fn generated_state_input_handles_tokens(
         });
     }
 
-    Ok(quote! {
-        #[derive(Clone)]
-        #[allow(missing_docs)]
-        pub struct #handle_ident<#program_lifetime, #scope_lifetime> {
-            #(#handle_fields,)*
+    let handle_definition = if handle_fields.is_empty() {
+        quote! {
+            #[derive(Clone)]
+            #[allow(missing_docs)]
+            pub struct #handle_ident {}
         }
+    } else {
+        quote! {
+            #[derive(Clone)]
+            #[allow(missing_docs)]
+            pub struct #handle_ident<#program_lifetime, #scope_lifetime> {
+                #(#handle_fields,)*
+            }
+        }
+    };
+    let handle_ty = if handle_fields.is_empty() {
+        quote!(#handle_ident)
+    } else {
+        quote!(#handle_ident<#program_lifetime, #scope_lifetime>)
+    };
+
+    Ok(quote! {
+        #handle_definition
 
         impl<#program_lifetime, #scope_lifetime> ::mfm_program::IntoInputBindingNode<#input_ident>
-            for #handle_ident<#program_lifetime, #scope_lifetime>
+            for #handle_ty
         {
             fn into_binding_node(
                 self,
@@ -1074,7 +1093,7 @@ fn generated_state_input_handles_tokens(
         }
 
         impl<#program_lifetime, #scope_lifetime> ::mfm_program::IntoStateInput<#program_lifetime, #scope_lifetime, #input_ident>
-            for #handle_ident<#program_lifetime, #scope_lifetime>
+            for #handle_ty
         {
             fn into_binding(self) -> ::mfm_program::Result<::mfm_program::InputBinding<#input_ident>> {
                 ::mfm_program::InputBinding::from_root(
@@ -1603,7 +1622,7 @@ fn fact_wrapper_field_role(attrs: &[Attribute]) -> syn::Result<Option<FactWrappe
 
 fn fact_field_descriptor_tokens(field: &FactFieldAttr) -> syn::Result<proc_macro2::TokenStream> {
     let id = &field.id;
-    let accessor = fact_field_accessor_tokens(field)?;
+    let extraction = fact_field_extraction_tokens(field)?;
     let value_type = fact_value_type_tokens(&field.value_type, Span::call_site())?;
     let operators = field
         .operators
@@ -1628,7 +1647,7 @@ fn fact_field_descriptor_tokens(field: &FactFieldAttr) -> syn::Result<proc_macro
             ::mfm_program::facts::FactFieldId::new(#id)?,
             ::mfm_program::facts::FactFieldPath::new(#id)?,
             #value_type,
-            #accessor,
+            #extraction,
             vec![#(#operators),*],
             #exposure,
             #unit,
@@ -1639,7 +1658,7 @@ fn fact_field_descriptor_tokens(field: &FactFieldAttr) -> syn::Result<proc_macro
     })
 }
 
-fn fact_field_accessor_tokens(field: &FactFieldAttr) -> syn::Result<proc_macro2::TokenStream> {
+fn fact_field_extraction_tokens(field: &FactFieldAttr) -> syn::Result<proc_macro2::TokenStream> {
     match field.source {
         FactFieldAttrSource::Subject => {
             let path = field.path.as_ref().expect("validated subject path");

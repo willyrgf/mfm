@@ -5,7 +5,8 @@ use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
 use super::*;
-use mfm_canonical::sha256_digest_bytes;
+use ed25519_dalek::{Signer, SigningKey};
+use mfm_canonical::{sha256_digest_bytes, CanonicalJsonBytes, CanonicalValue};
 use mfm_events::v1 as events;
 use mfm_ids::{
     AdapterKind, ArtifactId, AttemptId, CapabilityKind, CellId, ContentDigest, DescriptorId,
@@ -13,6 +14,246 @@ use mfm_ids::{
     SpecHash, StateKind, TrustScopeId,
 };
 use mfm_spec::v1 as spec;
+
+/// Descriptor projection fixture built from canonical descriptor bytes.
+#[derive(Debug, Clone)]
+pub struct FactDescriptorProjectionFixtureForTest {
+    /// Source descriptor used to build the projection.
+    pub descriptor: mfm_facts::FactDescriptor,
+    /// Canonical descriptor bytes retained as an artifact.
+    pub descriptor_bytes: Vec<u8>,
+    /// Descriptor content hash.
+    pub descriptor_hash: ContentDigest,
+    /// Descriptor artifact id derived from the descriptor hash.
+    pub descriptor_artifact_id: ArtifactId,
+    /// Descriptor artifact evidence.
+    pub descriptor_evidence: ArtifactEvidenceRef,
+    /// Verified descriptor artifact bytes.
+    pub descriptor_artifact: VerifiedRunArtifactBytes,
+    /// Descriptor projection row.
+    pub projection: FactDescriptorProjection,
+    /// Descriptor-derived subject namespace hash.
+    pub subject_namespace_hash: ContentDigest,
+}
+
+/// Builds a descriptor projection fixture from a fact descriptor.
+pub fn fact_descriptor_projection_fixture_for_test(
+    descriptor: mfm_facts::FactDescriptor,
+    source_event_id: EventId,
+) -> Result<FactDescriptorProjectionFixtureForTest> {
+    let descriptor_bytes = mfm_facts::canonical_fact_descriptor_bytes(&descriptor)
+        .map_err(|error| StoreError::Identity(error.to_string()))?
+        .to_vec();
+    let descriptor_hash = mfm_facts::fact_descriptor_hash(&descriptor)
+        .map_err(|error| StoreError::Identity(error.to_string()))?;
+    let descriptor_artifact_id =
+        ArtifactId::from_digest(descriptor_hash.algorithm(), *descriptor_hash.digest());
+    let media_type = spec::MediaType::new("application/json")
+        .map_err(|error| StoreError::Identity(error.to_string()))?;
+    let descriptor_schema_id = mfm_facts::fact_descriptor_schema_id()
+        .map_err(|error| StoreError::Identity(error.to_string()))?;
+    let descriptor_evidence = ArtifactEvidenceRef {
+        artifact_id: descriptor_artifact_id.clone(),
+        digest: descriptor_hash.clone(),
+        byte_len: descriptor_bytes.len() as u64,
+        media_type: media_type.clone(),
+        schema_id: Some(descriptor_schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::FactDescriptor,
+    };
+    let descriptor_requirement = events::EventArtifactRequirement {
+        source: events::EventArtifactReferenceSource::FactDescriptor,
+        artifact_id: descriptor_artifact_id.clone(),
+        digest: Some(descriptor_hash.clone()),
+        byte_len: Some(descriptor_bytes.len() as u64),
+        media_type: Some(media_type),
+        schema_id: Some(descriptor_schema_id),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: Some(events::ArtifactRole::FactDescriptor),
+    };
+    let descriptor_artifact = VerifiedRunArtifactBytes::new(
+        descriptor_bytes.clone(),
+        descriptor_evidence.clone(),
+        &descriptor_requirement,
+    )?;
+    let subject_namespace_hash = mfm_facts::fact_subject_namespace(&descriptor)
+        .and_then(|namespace| mfm_facts::fact_subject_namespace_hash(&namespace))
+        .map_err(|error| StoreError::Identity(error.to_string()))?;
+    let projection = FactDescriptorProjection {
+        descriptor_hash: descriptor_hash.clone(),
+        descriptor_artifact_id: descriptor_artifact_id.clone(),
+        descriptor_artifact_evidence: descriptor_evidence.clone(),
+        fact_kind: descriptor.fact_kind().clone(),
+        descriptor_schema_id: descriptor.descriptor_schema_id().clone(),
+        subject_schema_id: descriptor.subject_schema_id().clone(),
+        response_schema_id: descriptor.response_schema_id().clone(),
+        fact_subject_namespace_hash: subject_namespace_hash.clone(),
+        source_event_id,
+    };
+    Ok(FactDescriptorProjectionFixtureForTest {
+        descriptor,
+        descriptor_bytes,
+        descriptor_hash,
+        descriptor_artifact_id,
+        descriptor_evidence,
+        descriptor_artifact,
+        projection,
+        subject_namespace_hash,
+    })
+}
+
+/// Input for building a projected fact record fixture.
+#[derive(Debug, Clone)]
+pub struct FactProjectionFixtureInputForTest {
+    /// Producing run id.
+    pub run_id: RunId,
+    /// Producing stream sequence.
+    pub source_seq: u64,
+    /// Producing event ordinal.
+    pub source_ordinal: u32,
+    /// Fact-record event id.
+    pub source_event_id: EventId,
+    /// Producing node id.
+    pub node_id: NodeId,
+    /// Producing attempt id.
+    pub attempt_id: AttemptId,
+    /// Commit idempotency key for index rows.
+    pub commit_id: CommitKey,
+    /// Store commit ordering coordinate.
+    pub store_commit_order: u64,
+    /// Store-recorded timestamp.
+    pub recorded_at: String,
+    /// Source observation timestamp.
+    pub observed_at: Option<String>,
+    /// Fact visibility.
+    pub visibility: mfm_facts::FactVisibility,
+    /// Canonical subject value used by descriptor subject extractions.
+    pub subject: CanonicalValue,
+    /// Canonical response value used by descriptor result extractions.
+    pub response: CanonicalValue,
+    /// Optional request evidence pinned in the fact claim.
+    pub request: Option<mfm_facts::FactRequestEvidence>,
+    /// Response schema id.
+    pub response_schema_id: SchemaId,
+    /// Optional response artifact id. Defaults to the response content digest.
+    pub response_artifact_id: Option<ArtifactId>,
+    /// Fact producer provenance.
+    pub producer: mfm_facts::FactProducerProvenance,
+}
+
+/// Projected fact fixture built from descriptor, subject, and response values.
+#[derive(Debug, Clone)]
+pub struct FactProjectionFixtureForTest {
+    /// Store-owned fact record projection.
+    pub record: FactRecordProjection,
+    /// Store-owned index projection when the fact is indexed.
+    pub index: Option<FactIndexProjection>,
+    /// Extracted index term projections when the fact is indexed.
+    pub terms: Vec<FactIndexTermProjection>,
+    /// Verified response artifact evidence.
+    pub response_artifact_evidence: ArtifactEvidenceRef,
+}
+
+/// Builds a fact record, optional index row, and optional term rows for projection fixtures.
+pub fn fact_projection_fixture_for_test(
+    descriptor: &mfm_facts::FactDescriptor,
+    descriptor_hash: ContentDigest,
+    input: FactProjectionFixtureInputForTest,
+) -> Result<FactProjectionFixtureForTest> {
+    let subject_material = mfm_facts::extract_subject_material(descriptor, &input.subject)
+        .map_err(|error| StoreError::Identity(error.to_string()))?;
+    let subject = mfm_facts::fact_subject_evidence_from_material(descriptor, &subject_material)
+        .map_err(|error| StoreError::Identity(error.to_string()))?;
+    let response_bytes = CanonicalJsonBytes::from_value(&input.response);
+    let response_hash = response_bytes.content_digest();
+    let response_artifact_id = input.response_artifact_id.unwrap_or_else(|| {
+        ArtifactId::from_digest(response_hash.algorithm(), *response_hash.digest())
+    });
+    let response_artifact_evidence = ArtifactEvidenceRef {
+        artifact_id: response_artifact_id.clone(),
+        digest: response_hash.clone(),
+        byte_len: response_bytes.as_bytes().len() as u64,
+        media_type: spec::MediaType::new("application/json").expect("json media type"),
+        schema_id: Some(input.response_schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: Some(input.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::FactResponse,
+    };
+    let artifact_evidence_hash = response_artifact_evidence.evidence_hash()?;
+    let claim = mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
+        visibility: input.visibility,
+        fact_kind: descriptor.fact_kind().clone(),
+        fact_descriptor_hash: descriptor_hash.clone(),
+        subject: subject.clone(),
+        observed_at: input.observed_at.clone(),
+        request: input.request.clone(),
+        response: mfm_facts::FactResponseEvidence::new(
+            input.response_schema_id.clone(),
+            response_hash.clone(),
+            response_artifact_id.clone(),
+            artifact_evidence_hash.clone(),
+        ),
+        producer: input.producer.clone(),
+    })
+    .map_err(|error| StoreError::Identity(error.to_string()))?;
+    let fact_claim_id =
+        mfm_facts::FactClaimId::new(input.run_id.clone(), input.source_seq, input.source_ordinal)
+            .map_err(|error| StoreError::Identity(error.to_string()))?;
+    let record = FactRecordProjection {
+        fact_claim_id: fact_claim_id.clone(),
+        source_event_id: input.source_event_id.clone(),
+        source_run_id: input.run_id.clone(),
+        source_seq: input.source_seq,
+        source_ordinal: input.source_ordinal,
+        node_id: input.node_id.clone(),
+        attempt_id: input.attempt_id,
+        response_artifact_evidence: Some(response_artifact_evidence.clone()),
+        claim,
+    };
+    let Some(index) = FactIndexProjection::from_record_projection(
+        &record,
+        input.commit_id.clone(),
+        input.store_commit_order,
+        input.recorded_at.clone(),
+    )?
+    else {
+        return Ok(FactProjectionFixtureForTest {
+            record,
+            index: None,
+            terms: Vec::new(),
+            response_artifact_evidence,
+        });
+    };
+    let metadata = mfm_facts::FactExtractionMetadata::new(
+        input.recorded_at,
+        input.observed_at,
+        input.store_commit_order,
+    )
+    .map_err(|error| StoreError::Identity(error.to_string()))?;
+    let terms = mfm_facts::extract_terms_from_material(
+        descriptor,
+        &subject_material,
+        &input.response,
+        &metadata,
+    )
+    .map_err(|error| StoreError::Identity(error.to_string()))?
+    .into_iter()
+    .map(|term| {
+        FactIndexTermProjection::from_extracted_term(&fact_claim_id, &descriptor_hash, &term)
+    })
+    .collect();
+    Ok(FactProjectionFixtureForTest {
+        record,
+        index: Some(index),
+        terms,
+        response_artifact_evidence,
+    })
+}
 
 /// Polls an in-memory store future that is expected to complete immediately.
 pub fn poll_ready_store_future_for_test<T, E>(
@@ -333,76 +574,109 @@ pub fn fixed_digest_bytes_for_test(byte: u8) -> DigestBytes {
     DigestBytes::from_array([byte; 32])
 }
 
-/// Returns a deterministic content digest made from one repeated digest byte.
-pub fn fixed_content_digest_for_test(byte: u8) -> ContentDigest {
-    ContentDigest::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        fixed_digest_bytes_for_test(byte),
-    )
+macro_rules! fixed_digest_id_for_test {
+    ($(#[$meta:meta])* $name:ident -> $ty:ty) => {
+        $(#[$meta])*
+        pub fn $name(byte: u8) -> $ty {
+            <$ty>::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                fixed_digest_bytes_for_test(byte),
+            )
+        }
+    };
 }
 
-/// Returns a deterministic spec hash made from one repeated digest byte.
-pub fn fixed_spec_hash_for_test(byte: u8) -> SpecHash {
-    SpecHash::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        fixed_digest_bytes_for_test(byte),
-    )
+fixed_digest_id_for_test! {
+    /// Returns a deterministic content digest made from one repeated digest byte.
+    fixed_content_digest_for_test -> ContentDigest
 }
 
-/// Returns a deterministic artifact id made from one repeated digest byte.
-pub fn fixed_artifact_id_for_test(byte: u8) -> ArtifactId {
-    ArtifactId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        fixed_digest_bytes_for_test(byte),
-    )
+fixed_digest_id_for_test! {
+    /// Returns a deterministic spec hash made from one repeated digest byte.
+    fixed_spec_hash_for_test -> SpecHash
 }
 
-/// Returns a deterministic attempt id made from one repeated digest byte.
-pub fn fixed_attempt_id_for_test(byte: u8) -> AttemptId {
-    AttemptId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        fixed_digest_bytes_for_test(byte),
-    )
+fixed_digest_id_for_test! {
+    /// Returns a deterministic artifact id made from one repeated digest byte.
+    fixed_artifact_id_for_test -> ArtifactId
 }
 
-/// Returns a deterministic node id made from one repeated digest byte.
-pub fn fixed_node_id_for_test(byte: u8) -> NodeId {
-    NodeId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        fixed_digest_bytes_for_test(byte),
-    )
+fixed_digest_id_for_test! {
+    /// Returns a deterministic attempt id made from one repeated digest byte.
+    fixed_attempt_id_for_test -> AttemptId
 }
 
-/// Returns a deterministic cell id made from one repeated digest byte.
-pub fn fixed_cell_id_for_test(byte: u8) -> CellId {
-    CellId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        fixed_digest_bytes_for_test(byte),
-    )
+fixed_digest_id_for_test! {
+    /// Returns a deterministic node id made from one repeated digest byte.
+    fixed_node_id_for_test -> NodeId
 }
 
-/// Returns a deterministic scope id made from one repeated digest byte.
-pub fn fixed_scope_id_for_test(byte: u8) -> ScopeId {
-    ScopeId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        fixed_digest_bytes_for_test(byte),
-    )
+fixed_digest_id_for_test! {
+    /// Returns a deterministic cell id made from one repeated digest byte.
+    fixed_cell_id_for_test -> CellId
 }
 
-/// Returns a deterministic event id made from one repeated digest byte.
-pub fn fixed_event_id_for_test(byte: u8) -> EventId {
-    EventId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        fixed_digest_bytes_for_test(byte),
-    )
+fixed_digest_id_for_test! {
+    /// Returns a deterministic scope id made from one repeated digest byte.
+    fixed_scope_id_for_test -> ScopeId
 }
 
-/// Returns a deterministic descriptor id made from one repeated digest byte.
-pub fn fixed_descriptor_id_for_test(byte: u8) -> DescriptorId {
-    DescriptorId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        fixed_digest_bytes_for_test(byte),
-    )
+fixed_digest_id_for_test! {
+    /// Returns a deterministic event id made from one repeated digest byte.
+    fixed_event_id_for_test -> EventId
+}
+
+fixed_digest_id_for_test! {
+    /// Returns a deterministic descriptor id made from one repeated digest byte.
+    fixed_descriptor_id_for_test -> DescriptorId
+}
+
+/// Returns the persisted event id derived from store envelope inputs.
+pub fn event_id_for_envelope_inputs_for_test(
+    run_id: &RunId,
+    seq: StreamSeq,
+    ordinal: CommitOrdinal,
+    event_schema_id: &SchemaId,
+    payload_hash: &ContentDigest,
+) -> EventId {
+    derive_event_id(run_id, seq, ordinal, event_schema_id, payload_hash).expect("event id")
+}
+
+/// Builds a validated persisted event envelope from a typed payload.
+pub fn persisted_kernel_event_envelope_for_test(
+    run_id: &RunId,
+    seq: u64,
+    commit_key: CommitKey,
+    payload: events::KernelEventPayload,
+) -> KernelEventEnvelope {
+    let seq = StreamSeq::new(seq).expect("stream seq");
+    let ordinal = CommitOrdinal::new(0);
+    let payload_hash = payload_canonical_json(&payload)
+        .expect("payload canonical")
+        .content_digest();
+    let event_schema_id = payload.event_schema_id().expect("event schema");
+    let event_id = event_id_for_envelope_inputs_for_test(
+        run_id,
+        seq,
+        ordinal,
+        &event_schema_id,
+        &payload_hash,
+    );
+    let logical_key =
+        derive_logical_key(run_id, seq, ordinal, &payload, &payload_hash).expect("logical key");
+    KernelEventEnvelope::from_persisted_record(PersistedKernelEventRecord {
+        event_id,
+        event_schema_id,
+        run_id: run_id.clone(),
+        seq,
+        ordinal,
+        spec_hash: payload_spec_hash(&payload),
+        commit_key,
+        logical_key,
+        payload_hash,
+        payload,
+    })
+    .expect("persisted envelope")
 }
 
 /// Returns a deterministic schema id in version 1.
@@ -489,6 +763,21 @@ pub fn artifact_bytes_for_digest_for_test(digest: &ContentDigest) -> Option<Vec<
         })
 }
 
+/// Builds run-admission artifact evidence from stored artifact evidence.
+pub fn run_artifact_ref_from_store_artifact_for_test(
+    artifact: &ArtifactEvidenceRef,
+) -> events::RunArtifactEvidenceRef {
+    events::RunArtifactEvidenceRef {
+        artifact_id: artifact.artifact_id.clone(),
+        role: artifact.artifact_role,
+        schema_id: artifact.schema_id.clone(),
+        semantic_type_id: artifact.semantic_type_id.clone(),
+        content_digest: artifact.digest.clone(),
+        byte_len: artifact.byte_len,
+        media_type: artifact.media_type.clone(),
+    }
+}
+
 /// Builds run identity material for a deterministic test trust scope suffix.
 pub fn run_identity_material_for_test(
     certified_spec_hash: SpecHash,
@@ -540,4 +829,226 @@ pub fn receipt_terminal_policies_for_projection_for_test(
 /// Returns empty side-effect terminal policies.
 pub fn empty_terminal_policies_for_test() -> SideEffectTerminalPolicies {
     SideEffectTerminalPolicies::new(BTreeMap::new())
+}
+
+/// One row returned by a projection-backed fact query fixture.
+pub type FactQueryProjectionRowForTest = mfm_facts::FactQueryResultRow;
+
+/// Executes a canonical fact query against a projection snapshot for tests.
+pub fn execute_fact_query_projection_for_test(
+    projection: &ProjectionSnapshot,
+    plan: &mfm_facts::CanonicalFactQueryPlan,
+) -> Result<Vec<FactQueryProjectionRowForTest>> {
+    let shape = mfm_facts::parse_canonical_fact_query_shape(plan)
+        .map_err(|error| StoreError::Identity(error.to_string()))?;
+    let mut rows = projection
+        .fact_index_entries()
+        .filter(|(_claim_id, entry)| {
+            entry.fact_descriptor_hash == *plan.resolved_descriptor()
+                && entry.audience == plan.query_scope().audience()
+                && entry.visibility_scope == plan.query_scope().scope()
+        })
+        .filter(|(_claim_id, entry)| fact_entry_matches_predicates(projection, entry, &shape))
+        .map(|(_claim_id, entry)| {
+            Ok(FactQueryProjectionRowForTest::new(
+                entry.internal_ref()?,
+                returned_fields_from_projection(projection, entry, &shape)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    rows.sort_by(|left, right| compare_fact_projection_rows(projection, plan, left, right));
+    if let Some(limit) = plan.limit() {
+        rows.truncate(limit as usize);
+    }
+    Ok(rows)
+}
+
+/// Builds a signed fact-query receipt for projection-backed query rows.
+pub fn signed_fact_query_receipt_for_projection_for_test(
+    plan: &mfm_facts::CanonicalFactQueryPlan,
+    projection: &ProjectionSnapshot,
+    key: &SigningKey,
+    store_identity: mfm_facts::StoreIdentity,
+    key_id: mfm_facts::StoreKeyId,
+    rows: &[mfm_facts::FactQueryResultRow],
+) -> mfm_facts::FactQueryReceipt {
+    let shape = mfm_facts::parse_canonical_fact_query_shape(plan).expect("query shape");
+    let max_order = projection
+        .fact_index_entries()
+        .filter(|(_claim_id, entry)| {
+            entry.audience == plan.query_scope().audience()
+                && entry.visibility_scope == plan.query_scope().scope()
+        })
+        .map(|(_claim_id, entry)| entry.store_commit_order)
+        .max()
+        .unwrap_or_default();
+    let read_frontier = mfm_facts::StoreReadFrontier::new(
+        plan.store_scope().clone(),
+        plan.query_scope().clone(),
+        mfm_facts::DescriptorCatalogWatermark::new(projection.fact_descriptors().count() as u64),
+        mfm_facts::FactProjectionGeneration::new(1),
+        max_order,
+        mfm_facts::StoreCommitWatermark::new(max_order),
+    );
+    let plan_hash = mfm_facts::fact_query_plan_hash(plan).expect("fact query plan hash");
+    let material = mfm_facts::FactQueryReceiptMaterial::from_rows(
+        &plan_hash,
+        read_frontier,
+        mfm_facts::StoreReadFrontierType::Snapshot,
+        rows,
+        !shape.return_fields().is_empty(),
+        plan.limit(),
+    )
+    .expect("fact query receipt material");
+    signed_fact_query_receipt_material_for_test(material, key, store_identity, key_id)
+}
+
+fn fact_entry_matches_predicates(
+    projection: &ProjectionSnapshot,
+    entry: &FactIndexProjection,
+    shape: &mfm_facts::CompiledFactQueryShape,
+) -> bool {
+    shape.predicates().iter().all(|predicate| {
+        projection
+            .fact_term(&entry.fact_claim_id, predicate.field_id())
+            .is_some_and(|term| predicate.matches_scalar(&term.value))
+    })
+}
+
+fn returned_fields_from_projection(
+    projection: &ProjectionSnapshot,
+    entry: &FactIndexProjection,
+    shape: &mfm_facts::CompiledFactQueryShape,
+) -> Result<Vec<mfm_facts::ReturnedFieldValueSummary>> {
+    shape
+        .return_fields()
+        .iter()
+        .filter_map(|return_field| {
+            projection
+                .fact_term(&entry.fact_claim_id, return_field.field_id())
+                .map(|term| {
+                    mfm_facts::ReturnedFieldValueSummary::new(
+                        term.field_id.clone(),
+                        term.value_type,
+                        term.value.clone(),
+                    )
+                    .map_err(|error| StoreError::Identity(error.to_string()))
+                })
+        })
+        .collect()
+}
+
+fn compare_fact_projection_rows(
+    projection: &ProjectionSnapshot,
+    plan: &mfm_facts::CanonicalFactQueryPlan,
+    left: &FactQueryProjectionRowForTest,
+    right: &FactQueryProjectionRowForTest,
+) -> std::cmp::Ordering {
+    for term in plan.ordering().terms() {
+        let left_value =
+            fact_ordering_value(projection, left.fact_ref().fact_claim_id(), term.field_id());
+        let right_value = fact_ordering_value(
+            projection,
+            right.fact_ref().fact_claim_id(),
+            term.field_id(),
+        );
+        let ordering = term
+            .compare_values(left_value, right_value)
+            .unwrap_or(std::cmp::Ordering::Equal);
+        if ordering != std::cmp::Ordering::Equal {
+            return ordering;
+        }
+    }
+    left.fact_ref()
+        .fact_claim_id()
+        .cmp(right.fact_ref().fact_claim_id())
+}
+
+fn fact_ordering_value<'a>(
+    projection: &'a ProjectionSnapshot,
+    claim_id: &mfm_facts::FactClaimId,
+    field_id: &mfm_facts::FactFieldId,
+) -> Option<&'a mfm_facts::FactCanonicalScalar> {
+    projection
+        .fact_term(claim_id, field_id)
+        .map(|term| &term.value)
+}
+
+/// Builds a fact-query receipt trust root for a deterministic test signing key.
+pub fn fact_query_receipt_trust_root_for_test(
+    key: &SigningKey,
+    store_identity: mfm_facts::StoreIdentity,
+    key_id: mfm_facts::StoreKeyId,
+) -> FactQueryReceiptTrustRoot {
+    FactQueryReceiptTrustRoot::new(
+        store_identity,
+        mfm_facts::StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
+        key_id,
+        key.verifying_key().to_bytes(),
+    )
+    .expect("fact query receipt trust root")
+}
+
+/// Input for signing a fact-query receipt fixture.
+pub struct SignedFactQueryReceiptFixtureInputForTest<'a> {
+    /// Canonical query plan hash.
+    pub plan_hash: &'a ContentDigest,
+    /// Signing key used for the local receipt authentication signature.
+    pub key: &'a SigningKey,
+    /// Store identity to bind into the signed receipt.
+    pub store_identity: mfm_facts::StoreIdentity,
+    /// Store key id to bind into the signed receipt.
+    pub key_id: mfm_facts::StoreKeyId,
+    /// Read frontier reported by the receipt.
+    pub read_frontier: mfm_facts::StoreReadFrontier,
+    /// Returned fact rows covered by the receipt.
+    pub rows: &'a [mfm_facts::FactQueryResultRow],
+    /// Whether returned field summaries are included in the receipt material.
+    pub include_returned_field_summaries: bool,
+    /// Query limit covered by the receipt material.
+    pub limit: Option<u64>,
+}
+
+/// Builds a signed fact-query receipt fixture using the production receipt authentication message.
+pub fn signed_fact_query_receipt_for_test(
+    input: SignedFactQueryReceiptFixtureInputForTest<'_>,
+) -> mfm_facts::FactQueryReceipt {
+    let material = mfm_facts::FactQueryReceiptMaterial::from_rows(
+        input.plan_hash,
+        input.read_frontier,
+        mfm_facts::StoreReadFrontierType::Snapshot,
+        input.rows,
+        input.include_returned_field_summaries,
+        input.limit,
+    )
+    .expect("fact query receipt material");
+    signed_fact_query_receipt_material_for_test(
+        material,
+        input.key,
+        input.store_identity,
+        input.key_id,
+    )
+}
+
+fn signed_fact_query_receipt_material_for_test(
+    material: mfm_facts::FactQueryReceiptMaterial,
+    key: &SigningKey,
+    store_identity: mfm_facts::StoreIdentity,
+    key_id: mfm_facts::StoreKeyId,
+) -> mfm_facts::FactQueryReceipt {
+    let message = fact_query_receipt_authentication_message(
+        &store_identity,
+        mfm_facts::StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
+        &key_id,
+        material.store_receipt_hash(),
+    )
+    .expect("fact query receipt authentication message");
+    let auth = mfm_facts::StoreReceiptAuthentication::new(
+        store_identity,
+        mfm_facts::StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
+        Some(key_id),
+        key.sign(message.as_bytes()).to_bytes().to_vec(),
+    )
+    .expect("fact query receipt authentication");
+    material.into_receipt(auth)
 }
