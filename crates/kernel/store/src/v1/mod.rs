@@ -216,6 +216,12 @@ pub enum StoreError {
         /// Stable diagnostic.
         message: String,
     },
+    /// Fact query receipt authentication failed.
+    #[error("fact query receipt authentication failed: {message}")]
+    ReceiptAuthentication {
+        /// Stable diagnostic.
+        message: String,
+    },
     /// Identity construction failed.
     #[error("identity error: {0}")]
     Identity(String),
@@ -312,6 +318,12 @@ pub use admission_lanes::{
     EXECUTION_CLAIM_LEASE_TTL_SECS,
 };
 
+mod receipt_authentication;
+pub use receipt_authentication::{
+    fact_query_receipt_authentication_message, validate_fact_query_evidence_recording,
+    verify_fact_query_receipt_authentication, FactQueryReceiptTrustRoot,
+};
+
 /// Shared canonical-JSON codec for kernel events, projections, and saga types.
 ///
 /// This module exists so the in-memory store and the Postgres adapter share one
@@ -320,7 +332,7 @@ pub use admission_lanes::{
 /// store maps into its own error type via `From`.
 pub mod codec;
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
 fn canonical_json(value: serde_json::Value) -> Result<PlainCanonicalJsonBytes> {
@@ -536,7 +548,13 @@ impl KernelEventEnvelope {
                 message: "persisted spec hash does not match payload".to_owned(),
             });
         }
-        let derived_logical_key = derive_logical_key(&record.payload, &record.payload_hash)?;
+        let derived_logical_key = derive_logical_key(
+            &record.run_id,
+            record.seq,
+            record.ordinal,
+            &record.payload,
+            &record.payload_hash,
+        )?;
         if derived_logical_key != record.logical_key {
             return Err(StoreError::PersistedEventMismatch {
                 field: "logical_key",
@@ -646,9 +664,33 @@ pub struct ArtifactEvidenceRef {
 }
 
 impl ArtifactEvidenceRef {
+    /// Converts run-admission artifact evidence into exact store artifact evidence.
+    pub fn from_run_artifact(artifact: &events::RunArtifactEvidenceRef) -> Self {
+        Self {
+            artifact_id: artifact.artifact_id.clone(),
+            digest: artifact.content_digest.clone(),
+            byte_len: artifact.byte_len,
+            media_type: artifact.media_type.clone(),
+            schema_id: artifact.schema_id.clone(),
+            semantic_type_id: artifact.semantic_type_id.clone(),
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: artifact.role,
+        }
+    }
+
     /// Computes the canonical evidence hash used by exact-evidence artifact authority.
     pub fn evidence_hash(&self) -> Result<ContentDigest> {
         Ok(canonical_json(store_artifact_json(self))?.content_digest())
+    }
+
+    /// Converts this exact artifact evidence into a retention reference.
+    pub fn retention_ref(&self) -> events::RetentionRef {
+        events::RetentionRef {
+            artifact_id: self.artifact_id.clone(),
+            role: self.artifact_role,
+            content_digest: self.digest.clone(),
+        }
     }
 }
 
@@ -1364,6 +1406,7 @@ pub struct CertifiedRunStoreAuthority {
     saga_policy: SagaPolicySpec,
     terminal_policies: SideEffectTerminalPolicies,
     side_effect_pairs: BTreeMap<SideEffectPairId, CertifiedSideEffectPairAuthority>,
+    fact_descriptor_allowlists: BTreeMap<NodeId, BTreeSet<ContentDigest>>,
 }
 
 impl CertifiedRunStoreAuthority {
@@ -1378,7 +1421,22 @@ impl CertifiedRunStoreAuthority {
             .map_err(|error| StoreError::Canonical(error.to_string()))?;
         let terminal_policies = SideEffectTerminalPolicies::from_spec(spec)?;
         let mut side_effect_pairs = BTreeMap::new();
+        let mut fact_descriptor_allowlists = BTreeMap::new();
         for node in spec.nodes.iter().chain(spec.remediations.values()) {
+            let allowlist = node
+                .fact_descriptor_allowlist
+                .iter()
+                .map(|reference| reference.descriptor_hash.clone())
+                .collect::<BTreeSet<_>>();
+            if fact_descriptor_allowlists
+                .insert(node.node_id.clone(), allowlist)
+                .is_some()
+            {
+                return Err(StoreError::Identity(format!(
+                    "duplicate node authority for {}",
+                    node.node_id
+                )));
+            }
             if node.side_effect.is_none() {
                 continue;
             }
@@ -1411,6 +1469,7 @@ impl CertifiedRunStoreAuthority {
             saga_policy,
             terminal_policies,
             side_effect_pairs,
+            fact_descriptor_allowlists,
         })
     }
 
@@ -1457,6 +1516,27 @@ impl CertifiedRunStoreAuthority {
         &self,
     ) -> impl Iterator<Item = (&SideEffectPairId, &CertifiedSideEffectPairAuthority)> {
         self.side_effect_pairs.iter()
+    }
+
+    /// Requires that a certified node is allowed to emit a fact descriptor hash.
+    pub fn require_fact_descriptor_allowed(
+        &self,
+        node_id: &NodeId,
+        descriptor_hash: &ContentDigest,
+    ) -> Result<()> {
+        let Some(allowlist) = self.fact_descriptor_allowlists.get(node_id) else {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("fact_descriptor_allowlist:{node_id}"),
+                message: "missing certified node fact descriptor allowlist".to_owned(),
+            });
+        };
+        if allowlist.contains(descriptor_hash) {
+            return Ok(());
+        }
+        Err(StoreError::ProjectionConflict {
+            key: format!("fact_descriptor_allowlist:{node_id}:{descriptor_hash}"),
+            message: "fact descriptor is not certified for producing node".to_owned(),
+        })
     }
 }
 
@@ -2274,6 +2354,23 @@ pub enum CellTerminalProjection {
         /// Skip reason.
         skip_reason: events::SkipReason,
     },
+}
+
+impl CellTerminalProjection {
+    fn attempt_key(&self) -> (&NodeId, &AttemptId) {
+        match self {
+            Self::Produced {
+                node_id,
+                attempt_id,
+                ..
+            }
+            | Self::Skipped {
+                node_id,
+                attempt_id,
+                ..
+            } => (node_id, attempt_id),
+        }
+    }
 }
 
 /// Side-effect projection derived from committed run events.
@@ -3900,27 +3997,164 @@ pub enum AttemptStatus {
     Interrupted,
 }
 
-/// Fact projection derived from committed read-fact events.
+/// Descriptor catalog projection derived from certified descriptor artifacts.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FactProjection {
+pub struct FactDescriptorProjection {
+    /// Canonical descriptor content hash.
+    pub descriptor_hash: ContentDigest,
+    /// Descriptor artifact id.
+    pub descriptor_artifact_id: ArtifactId,
+    /// Exact descriptor artifact evidence.
+    pub descriptor_artifact_evidence: ArtifactEvidenceRef,
+    /// Fact kind declared by the descriptor.
+    pub fact_kind: mfm_facts::FactKind,
+    /// Descriptor schema id.
+    pub descriptor_schema_id: SchemaId,
+    /// Subject schema id.
+    pub subject_schema_id: SchemaId,
+    /// Response schema id.
+    pub response_schema_id: SchemaId,
+    /// Descriptor-derived subject namespace hash.
+    pub fact_subject_namespace_hash: ContentDigest,
+}
+
+/// Store-owned projection for every recorded fact claim, indexed or private.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactRecordProjection {
+    /// Store-derived claim id from run-stream coordinates.
+    pub fact_claim_id: mfm_facts::FactClaimId,
     /// Store-owned event id that recorded the fact.
-    pub event_id: EventId,
-    /// Node id that requested the fact.
+    pub source_event_id: EventId,
+    /// Producing run id.
+    pub source_run_id: RunId,
+    /// Producing stream sequence.
+    pub source_seq: u64,
+    /// Producing event ordinal.
+    pub source_ordinal: u32,
+    /// Producing node id.
     pub node_id: NodeId,
-    /// Attempt id that requested the fact.
+    /// Producing attempt id.
     pub attempt_id: AttemptId,
-    /// Stable fact key.
-    pub fact_key: events::FactKey,
-    /// Request schema id.
-    pub request_schema_id: SchemaId,
-    /// Canonical request hash.
-    pub request_hash: ContentDigest,
+    /// Exact response artifact evidence when this projection was hydrated with artifact authority.
+    pub response_artifact_evidence: Option<ArtifactEvidenceRef>,
+    /// Normalized claim payload.
+    pub claim: mfm_facts::FactClaim,
+}
+
+impl FactRecordProjection {
+    /// Builds the store-owned fact record projection for a `FactRecorded` event.
+    ///
+    /// The fact claim id is derived from the event envelope's run-stream coordinates. Attempt
+    /// state validation, duplicate response-artifact checks, and indexed visibility checks remain
+    /// the caller's responsibility because they depend on the surrounding projection state.
+    pub fn from_recorded_event(
+        envelope: &KernelEventEnvelope,
+        payload: &mfm_events::v1::FactRecorded,
+        response_artifact_evidence: Option<ArtifactEvidenceRef>,
+    ) -> Result<Self> {
+        let fact_claim_id = mfm_facts::derive_fact_claim_id(
+            envelope.run_id().clone(),
+            envelope.seq().as_u64(),
+            envelope.ordinal().as_u32(),
+        )
+        .map_err(|error| StoreError::Identity(error.to_string()))?;
+        Ok(Self {
+            fact_claim_id,
+            source_event_id: envelope.event_id().clone(),
+            source_run_id: envelope.run_id().clone(),
+            source_seq: envelope.seq().as_u64(),
+            source_ordinal: envelope.ordinal().as_u32(),
+            node_id: payload.node_id.clone(),
+            attempt_id: payload.attempt_id.clone(),
+            response_artifact_evidence,
+            claim: payload.claim.clone(),
+        })
+    }
+
+    /// Returns true when this stream-derived record projection agrees with an indexed row.
+    pub fn matches_index_projection(&self, index: &FactIndexProjection) -> bool {
+        let record_ref =
+            match internal_fact_ref_from_record_projection(self, index.recorded_at.clone()) {
+                Ok(Some(fact_ref)) => fact_ref,
+                Ok(None) | Err(_) => return false,
+            };
+        let index_ref = match index.internal_ref() {
+            Ok(fact_ref) => fact_ref,
+            Err(_) => return false,
+        };
+        self.fact_claim_id == index.fact_claim_id
+            && self.source_run_id == index.source_run_id
+            && self.source_seq == index.source_seq
+            && self.source_ordinal == index.source_ordinal
+            && self.source_event_id == index.source_event_id
+            && self.node_id == index.producer_node_id
+            && record_ref == index_ref
+    }
+}
+
+fn internal_fact_ref_from_record_projection(
+    record: &FactRecordProjection,
+    recorded_at: String,
+) -> Result<Option<mfm_facts::InternalFactRef>> {
+    mfm_facts::InternalFactRef::from_claim(
+        record.fact_claim_id.clone(),
+        record.source_event_id.clone(),
+        recorded_at,
+        record.node_id.clone(),
+        &record.claim,
+    )
+    .map_err(|error| StoreError::Identity(error.to_string()))
+}
+
+/// Queryable indexed fact projection for one recorded claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactIndexProjection {
+    /// Store-derived claim id from run-stream coordinates.
+    pub fact_claim_id: mfm_facts::FactClaimId,
+    /// Producing run id.
+    pub source_run_id: RunId,
+    /// Producing stream sequence.
+    pub source_seq: u64,
+    /// Producing event ordinal.
+    pub source_ordinal: u32,
+    /// Store-owned event id that recorded the fact.
+    pub source_event_id: EventId,
+    /// Producing node id.
+    pub producer_node_id: NodeId,
+    /// Commit idempotency key for the append.
+    pub commit_id: CommitKey,
+    /// Deterministic store commit ordering coordinate.
+    pub store_commit_order: u64,
+    /// Store-observed record timestamp.
+    pub recorded_at: String,
+    /// Optional source observation timestamp.
+    pub observed_at: Option<String>,
+    /// Indexed audience.
+    pub audience: mfm_facts::FactAudience,
+    /// Indexed visibility scope.
+    pub visibility_scope: mfm_facts::FactVisibilityScope,
+    /// Fact kind.
+    pub fact_kind: mfm_facts::FactKind,
+    /// Fact descriptor hash.
+    pub fact_descriptor_hash: ContentDigest,
+    /// Subject namespace hash.
+    pub fact_subject_namespace_hash: ContentDigest,
+    /// Descriptor-derived fact key.
+    pub fact_key: mfm_facts::FactKey,
+    /// Canonical subject material hash.
+    pub subject_material_hash: ContentDigest,
+    /// Request schema id, when request evidence is present.
+    pub request_schema_id: Option<SchemaId>,
+    /// Canonical request hash, when request evidence is present.
+    pub request_hash: Option<ContentDigest>,
     /// Response schema id.
     pub response_schema_id: SchemaId,
     /// Canonical response hash.
     pub response_hash: ContentDigest,
     /// Response artifact id.
     pub artifact_id: ArtifactId,
+    /// Canonical response artifact evidence hash.
+    pub artifact_evidence_hash: ContentDigest,
     /// Adapter capability kind.
     pub capability_kind: CapabilityKind,
     /// Adapter capability version.
@@ -3929,6 +4163,175 @@ pub struct FactProjection {
     pub adapter_kind: AdapterKind,
     /// Adapter version.
     pub adapter_version: AdapterVersion,
+}
+
+impl FactIndexProjection {
+    /// Builds an indexed fact projection from a recorded fact projection.
+    ///
+    /// Run-private records return `Ok(None)`. Indexed records are validated through the same
+    /// internal reference shape used by fact query and replay surfaces.
+    pub fn from_record_projection(
+        record: &FactRecordProjection,
+        commit_id: CommitKey,
+        store_commit_order: u64,
+        recorded_at: impl Into<String>,
+    ) -> Result<Option<Self>> {
+        let recorded_at = recorded_at.into();
+        let Some(fact_ref) = internal_fact_ref_from_record_projection(record, recorded_at.clone())?
+        else {
+            return Ok(None);
+        };
+        let _metadata = mfm_facts::FactExtractionMetadata::new(
+            recorded_at.clone(),
+            fact_ref.observed_at().map(str::to_owned),
+            store_commit_order,
+        )
+        .map_err(|error| StoreError::Identity(error.to_string()))?;
+        let projection = Self::from_internal_ref(&fact_ref, commit_id, store_commit_order)?;
+        projection.internal_ref()?;
+        if !record.matches_index_projection(&projection) {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("fact-index:{:?}", projection.fact_claim_id),
+                message: "fact index projection does not match recorded fact".to_owned(),
+            });
+        }
+        Ok(Some(projection))
+    }
+
+    fn from_internal_ref(
+        fact_ref: &mfm_facts::InternalFactRef,
+        commit_id: CommitKey,
+        store_commit_order: u64,
+    ) -> Result<Self> {
+        let (audience, visibility_scope) = match fact_ref.visibility() {
+            mfm_facts::FactVisibility::Indexed { audience, scope } => (*audience, *scope),
+            mfm_facts::FactVisibility::RunPrivate => {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("fact-index:{:?}", fact_ref.fact_claim_id()),
+                    message: "internal fact ref was not indexed".to_owned(),
+                });
+            }
+        };
+        Ok(Self {
+            fact_claim_id: fact_ref.fact_claim_id().clone(),
+            source_run_id: fact_ref.fact_claim_id().source_run_id().clone(),
+            source_seq: fact_ref.fact_claim_id().source_seq(),
+            source_ordinal: fact_ref.fact_claim_id().source_ordinal(),
+            source_event_id: fact_ref.source_event_id().clone(),
+            producer_node_id: fact_ref.producer_node_id().clone(),
+            commit_id,
+            store_commit_order,
+            recorded_at: fact_ref.recorded_at().to_owned(),
+            observed_at: fact_ref.observed_at().map(str::to_owned),
+            audience,
+            visibility_scope,
+            fact_kind: fact_ref.fact_kind().clone(),
+            fact_descriptor_hash: fact_ref.fact_descriptor_hash().clone(),
+            fact_subject_namespace_hash: fact_ref.fact_subject_namespace_hash().clone(),
+            fact_key: fact_ref.fact_key().clone(),
+            subject_material_hash: fact_ref.subject_material_hash().clone(),
+            request_schema_id: fact_ref.request_schema_id().cloned(),
+            request_hash: fact_ref.request_hash().cloned(),
+            response_schema_id: fact_ref.response_schema_id().clone(),
+            response_hash: fact_ref.response_hash().clone(),
+            artifact_id: fact_ref.artifact_id().clone(),
+            artifact_evidence_hash: fact_ref.artifact_evidence_hash().clone(),
+            capability_kind: fact_ref.capability_kind().clone(),
+            capability_version: fact_ref.capability_version().clone(),
+            adapter_kind: fact_ref.adapter_kind().clone(),
+            adapter_version: fact_ref.adapter_version().clone(),
+        })
+    }
+
+    /// Builds the durable internal fact reference represented by this index row.
+    pub fn internal_ref(&self) -> Result<mfm_facts::InternalFactRef> {
+        let request = match (&self.request_schema_id, &self.request_hash) {
+            (Some(schema_id), Some(hash)) => Some(mfm_facts::FactRequestEvidence::new(
+                schema_id.clone(),
+                hash.clone(),
+            )),
+            (None, None) => None,
+            _ => {
+                return Err(StoreError::Identity(
+                    "internal fact index row has partial request evidence".to_owned(),
+                ));
+            }
+        };
+        let parts = mfm_facts::InternalFactRefParts {
+            fact_claim_id: self.fact_claim_id.clone(),
+            source_event_id: self.source_event_id.clone(),
+            recorded_at: self.recorded_at.clone(),
+            producer_node_id: self.producer_node_id.clone(),
+            observed_at: self.observed_at.clone(),
+            visibility: mfm_facts::FactVisibility::Indexed {
+                audience: self.audience,
+                scope: self.visibility_scope,
+            },
+            fact_kind: self.fact_kind.clone(),
+            fact_descriptor_hash: self.fact_descriptor_hash.clone(),
+            subject: mfm_facts::FactSubjectRef::new(
+                self.fact_subject_namespace_hash.clone(),
+                self.fact_key.clone(),
+                self.subject_material_hash.clone(),
+            ),
+            request,
+            response: mfm_facts::FactResponseEvidence::new(
+                self.response_schema_id.clone(),
+                self.response_hash.clone(),
+                self.artifact_id.clone(),
+                self.artifact_evidence_hash.clone(),
+            ),
+            producer: mfm_facts::FactProducerProvenance::new(
+                self.capability_kind.clone(),
+                self.capability_version.clone(),
+                self.adapter_kind.clone(),
+                self.adapter_version.clone(),
+            ),
+        };
+        mfm_facts::InternalFactRef::new(parts)
+            .map_err(|error| StoreError::Identity(error.to_string()))
+    }
+}
+
+/// Extracted index term projection for one indexed fact claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactIndexTermProjection {
+    /// Store-derived claim id from run-stream coordinates.
+    pub fact_claim_id: mfm_facts::FactClaimId,
+    /// Fact descriptor hash.
+    pub fact_descriptor_hash: ContentDigest,
+    /// Descriptor-owned field id.
+    pub field_id: mfm_facts::FactFieldId,
+    /// Descriptor field source category.
+    pub source: mfm_facts::FactFieldSource,
+    /// Descriptor value type.
+    pub value_type: mfm_facts::FactFieldValueType,
+    /// Extracted canonical scalar.
+    pub value: mfm_facts::FactCanonicalScalar,
+    /// Optional descriptor unit.
+    pub unit: Option<mfm_facts::FactUnit>,
+    /// Optional descriptor scale.
+    pub scale: Option<mfm_facts::FactScale>,
+}
+
+impl FactIndexTermProjection {
+    /// Builds an index term projection from descriptor-extracted fact term material.
+    pub fn from_extracted_term(
+        fact_claim_id: &mfm_facts::FactClaimId,
+        fact_descriptor_hash: &ContentDigest,
+        term: &mfm_facts::FactIndexTerm,
+    ) -> Self {
+        Self {
+            fact_claim_id: fact_claim_id.clone(),
+            fact_descriptor_hash: fact_descriptor_hash.clone(),
+            field_id: term.field_id().clone(),
+            source: term.source(),
+            value_type: term.value_type(),
+            value: term.value().clone(),
+            unit: term.unit().cloned(),
+            scale: term.scale(),
+        }
+    }
 }
 
 /// Public-output projection derived from committed run events.
@@ -3986,11 +4389,15 @@ pub struct ProjectionSnapshot {
     saga_engagements: BTreeMap<RunId, SagaEngagementProjection>,
     manual_resolutions: BTreeMap<RunId, ManualResolutionProjection>,
     attempts: BTreeMap<(NodeId, AttemptId), AttemptProjection>,
-    cells: BTreeMap<CellId, CellTerminalProjection>,
-    facts: BTreeMap<(NodeId, AttemptId, events::FactKey), FactProjection>,
+    cells: BTreeMap<(RunId, CellId), CellTerminalProjection>,
+    fact_descriptors: BTreeMap<ContentDigest, FactDescriptorProjection>,
+    fact_records: BTreeMap<mfm_facts::FactClaimId, FactRecordProjection>,
+    fact_index_entries: BTreeMap<mfm_facts::FactClaimId, FactIndexProjection>,
+    fact_term_entries:
+        BTreeMap<(mfm_facts::FactClaimId, mfm_facts::FactFieldId), FactIndexTermProjection>,
     side_effects: BTreeMap<SideEffectPairLedgerRef, SideEffectProjection>,
     resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
-    public_outputs: BTreeMap<SchemaId, PublicOutputProjection>,
+    public_outputs: BTreeMap<(RunId, SchemaId), PublicOutputProjection>,
     retentions: BTreeMap<RunId, RetentionProjection>,
 }
 
@@ -4015,20 +4422,70 @@ pub struct ProjectionSnapshotParts {
     /// Attempt projections.
     pub attempts: BTreeMap<(NodeId, AttemptId), AttemptProjection>,
     /// Terminal cell projections.
-    pub cells: BTreeMap<CellId, CellTerminalProjection>,
+    pub cells: BTreeMap<(RunId, CellId), CellTerminalProjection>,
+    /// Descriptor catalog projections.
+    pub fact_descriptors: BTreeMap<ContentDigest, FactDescriptorProjection>,
     /// Recorded fact projections.
-    pub facts: BTreeMap<(NodeId, AttemptId, events::FactKey), FactProjection>,
+    pub fact_records: BTreeMap<mfm_facts::FactClaimId, FactRecordProjection>,
+    /// Indexed fact projections.
+    pub fact_index_entries: BTreeMap<mfm_facts::FactClaimId, FactIndexProjection>,
+    /// Extracted fact term projections.
+    pub fact_term_entries:
+        BTreeMap<(mfm_facts::FactClaimId, mfm_facts::FactFieldId), FactIndexTermProjection>,
     /// Side-effect pair projections.
     pub side_effects: BTreeMap<SideEffectPairLedgerRef, SideEffectProjection>,
     /// Cross-run resource lane projections.
     pub resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
     /// Public output projections.
-    pub public_outputs: BTreeMap<SchemaId, PublicOutputProjection>,
+    pub public_outputs: BTreeMap<(RunId, SchemaId), PublicOutputProjection>,
     /// Retention projections.
     pub retentions: BTreeMap<RunId, RetentionProjection>,
 }
 
+impl ProjectionSnapshotParts {
+    /// Clones every projection family from an existing snapshot.
+    pub fn from_snapshot(snapshot: &ProjectionSnapshot) -> Self {
+        Self {
+            run_states: snapshot.run_states.clone(),
+            run_spec_hashes: snapshot.run_spec_hashes.clone(),
+            saga_policy_digests: snapshot.saga_policy_digests.clone(),
+            run_completions: snapshot.run_completions.clone(),
+            saga_engagements: snapshot.saga_engagements.clone(),
+            manual_resolutions: snapshot.manual_resolutions.clone(),
+            attempts: snapshot.attempts.clone(),
+            cells: snapshot.cells.clone(),
+            fact_descriptors: snapshot.fact_descriptors.clone(),
+            fact_records: snapshot.fact_records.clone(),
+            fact_index_entries: snapshot.fact_index_entries.clone(),
+            fact_term_entries: snapshot.fact_term_entries.clone(),
+            side_effects: snapshot.side_effects.clone(),
+            resource_lanes: snapshot.resource_lanes.clone(),
+            public_outputs: snapshot.public_outputs.clone(),
+            retentions: snapshot.retentions.clone(),
+        }
+    }
+
+    fn replace_fact_authority_from(&mut self, authority: &ProjectionSnapshot) {
+        self.fact_descriptors = authority.fact_descriptors.clone();
+        self.fact_records = authority.fact_records.clone();
+        self.fact_index_entries = authority.fact_index_entries.clone();
+        self.fact_term_entries = authority.fact_term_entries.clone();
+    }
+
+    fn replace_resource_lanes_from(&mut self, authority: &ProjectionSnapshot) {
+        self.resource_lanes = authority.resource_lanes.clone();
+    }
+}
+
 impl ProjectionSnapshot {
+    /// Returns a snapshot with store-owned fact authority and resource lanes copied together.
+    pub fn with_store_authority_from(&self, authority: &ProjectionSnapshot) -> Result<Self> {
+        let mut parts = ProjectionSnapshotParts::from_snapshot(self);
+        parts.replace_fact_authority_from(authority);
+        parts.replace_resource_lanes_from(authority);
+        Self::from_parts(parts)
+    }
+
     /// Creates a projection snapshot from storage-owned projection maps.
     ///
     /// Callers populate only the projection families they hydrate and leave the rest empty via
@@ -4043,7 +4500,10 @@ impl ProjectionSnapshot {
             manual_resolutions,
             attempts,
             cells,
-            facts,
+            fact_descriptors,
+            fact_records,
+            fact_index_entries,
+            fact_term_entries,
             side_effects,
             resource_lanes,
             public_outputs,
@@ -4054,6 +4514,61 @@ impl ProjectionSnapshot {
                 return Err(StoreError::ProjectionConflict {
                     key: format!("attempt:{}:{}", projection.node_id, projection.attempt_id),
                     message: "attempt projection key does not match projection identity".to_owned(),
+                });
+            }
+        }
+        for ((run_id, cell_id), projection) in &cells {
+            let (projection_node_id, projection_attempt_id) = projection.attempt_key();
+            let Some(attempt) =
+                attempts.get(&(projection_node_id.clone(), projection_attempt_id.clone()))
+            else {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("cell:{run_id}:{cell_id}:terminal"),
+                    message: "cell projection references missing attempt projection".to_owned(),
+                });
+            };
+            if &attempt.run_id != run_id {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("cell:{run_id}:{cell_id}:terminal"),
+                    message: "cell projection key does not match attempt run id".to_owned(),
+                });
+            }
+        }
+        for (descriptor_hash, projection) in &fact_descriptors {
+            if descriptor_hash != &projection.descriptor_hash {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("fact_descriptor:{}", projection.descriptor_hash),
+                    message: "fact descriptor projection key does not match descriptor hash"
+                        .to_owned(),
+                });
+            }
+        }
+        for (claim_id, projection) in &fact_records {
+            if claim_id != &projection.fact_claim_id {
+                return Err(StoreError::ProjectionConflict {
+                    key: fact_claim_projection_key("fact_record", claim_id),
+                    message: "fact record projection key does not match claim id".to_owned(),
+                });
+            }
+        }
+        for (claim_id, projection) in &fact_index_entries {
+            if claim_id != &projection.fact_claim_id {
+                return Err(StoreError::ProjectionConflict {
+                    key: fact_claim_projection_key("fact_index", claim_id),
+                    message: "fact index projection key does not match claim id".to_owned(),
+                });
+            }
+        }
+        for ((claim_id, field_id), projection) in &fact_term_entries {
+            if claim_id != &projection.fact_claim_id || field_id != &projection.field_id {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!(
+                        "{}:{}",
+                        fact_claim_projection_key("fact_term", claim_id),
+                        field_id
+                    ),
+                    message: "fact term projection key does not match projection identity"
+                        .to_owned(),
                 });
             }
         }
@@ -4075,7 +4590,10 @@ impl ProjectionSnapshot {
             manual_resolutions,
             attempts,
             cells,
-            facts,
+            fact_descriptors,
+            fact_records,
+            fact_index_entries,
+            fact_term_entries,
             side_effects,
             resource_lanes,
             public_outputs,
@@ -4092,6 +4610,56 @@ impl ProjectionSnapshot {
     /// Rebuilds projections from store-owned event envelopes.
     pub fn rebuild_from_run_stream(events: &[KernelEventEnvelope]) -> Result<Self> {
         Self::validate_run_stream(events)?;
+        for event in events {
+            match event.payload() {
+                KernelEventPayload::RunAdmitted(payload)
+                    if !payload.fact_descriptor_artifacts.is_empty() =>
+                {
+                    return Err(StoreError::ProjectionConflict {
+                        key: "fact_descriptor:artifact_bytes".to_owned(),
+                        message:
+                            "fact descriptor projection requires retained descriptor artifact bytes"
+                                .to_owned(),
+                    });
+                }
+                KernelEventPayload::FactRecorded(_) => {
+                    return Err(StoreError::ProjectionConflict {
+                        key: "fact:artifact_bytes".to_owned(),
+                        message: "fact projection requires retained artifact bytes".to_owned(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        let mut snapshot = Self::default();
+        let artifact_bytes = ArtifactByteAuthorityMap::new();
+        for commit in committed_run_stream_commits(events) {
+            let payloads = commit
+                .events
+                .iter()
+                .map(|event| event.payload().clone())
+                .collect::<Vec<_>>();
+            validate_terminal_attempt_cell_pairs(&payloads)?;
+            validate_terminal_side_effect_evidence_pairs(&payloads)?;
+            validate_side_effect_attempt_failures_have_terminal_evidence(&snapshot, &payloads)?;
+            validate_retention_manifest_pairs(&payloads)?;
+            for event in commit.events {
+                projection::apply_projection(&mut snapshot, &event, &artifact_bytes)?;
+            }
+        }
+        Ok(snapshot)
+    }
+
+    /// Rebuilds projections from a run stream using exact retained artifact bytes.
+    ///
+    /// Durable stores use this for validation and physical projection rebuilds when fact descriptor
+    /// and response artifacts are already loaded from authoritative storage. The supplied artifact
+    /// byte authority must be keyed by exact `(artifact_id, evidence_hash)`.
+    pub fn rebuild_from_run_stream_with_artifact_bytes(
+        events: &[KernelEventEnvelope],
+        artifact_bytes: &ArtifactByteAuthorityMap,
+    ) -> Result<Self> {
+        Self::validate_run_stream(events)?;
         let mut snapshot = Self::default();
         for commit in committed_run_stream_commits(events) {
             let payloads = commit
@@ -4104,7 +4672,32 @@ impl ProjectionSnapshot {
             validate_side_effect_attempt_failures_have_terminal_evidence(&snapshot, &payloads)?;
             validate_retention_manifest_pairs(&payloads)?;
             for event in commit.events {
-                projection::apply_projection(&mut snapshot, &event)?;
+                projection::apply_projection(&mut snapshot, &event, artifact_bytes)?;
+            }
+        }
+        Ok(snapshot)
+    }
+
+    /// Rebuilds non-fact projections plus fact record identities for stores with physical fact indexes.
+    ///
+    /// This helper is for stores that maintain descriptor, index, and term projections in separate
+    /// validated tables. It does not rebuild queryable fact indexes from the stream, and it is not a
+    /// replay validation substitute for retained descriptor and response artifact authority.
+    pub fn rebuild_for_external_fact_indexes(events: &[KernelEventEnvelope]) -> Result<Self> {
+        Self::validate_run_stream(events)?;
+        let mut snapshot = Self::default();
+        for commit in committed_run_stream_commits(events) {
+            let payloads = commit
+                .events
+                .iter()
+                .map(|event| event.payload().clone())
+                .collect::<Vec<_>>();
+            validate_terminal_attempt_cell_pairs(&payloads)?;
+            validate_terminal_side_effect_evidence_pairs(&payloads)?;
+            validate_side_effect_attempt_failures_have_terminal_evidence(&snapshot, &payloads)?;
+            validate_retention_manifest_pairs(&payloads)?;
+            for event in commit.events {
+                projection::apply_projection_for_external_fact_indexes(&mut snapshot, &event)?;
             }
         }
         Ok(snapshot)
@@ -4145,18 +4738,62 @@ impl ProjectionSnapshot {
 
     /// Returns a cell terminal projection.
     pub fn cell_terminal(&self, cell_id: &CellId) -> Option<&CellTerminalProjection> {
-        self.cells.get(cell_id)
+        self.cells
+            .iter()
+            .find_map(|((_run_id, key_cell_id), projection)| {
+                (key_cell_id == cell_id).then_some(projection)
+            })
+    }
+
+    /// Returns a cell terminal projection for a specific run.
+    pub fn cell_terminal_for_run(
+        &self,
+        run_id: &RunId,
+        cell_id: &CellId,
+    ) -> Option<&CellTerminalProjection> {
+        self.cells.get(&(run_id.clone(), cell_id.clone()))
+    }
+
+    /// Returns a descriptor catalog projection.
+    pub fn fact_descriptor(
+        &self,
+        descriptor_hash: &ContentDigest,
+    ) -> Option<&FactDescriptorProjection> {
+        self.fact_descriptors.get(descriptor_hash)
     }
 
     /// Returns a recorded fact projection.
-    pub fn fact(
+    pub fn fact_record(&self, claim_id: &mfm_facts::FactClaimId) -> Option<&FactRecordProjection> {
+        self.fact_records.get(claim_id)
+    }
+
+    /// Returns an indexed fact projection.
+    pub fn fact_index_entry(
         &self,
-        node_id: &NodeId,
-        attempt_id: &AttemptId,
-        fact_key: &events::FactKey,
-    ) -> Option<&FactProjection> {
-        self.facts
-            .get(&(node_id.clone(), attempt_id.clone(), fact_key.clone()))
+        claim_id: &mfm_facts::FactClaimId,
+    ) -> Option<&FactIndexProjection> {
+        self.fact_index_entries.get(claim_id)
+    }
+
+    /// Returns an extracted fact term for a claim and field id.
+    pub fn fact_term(
+        &self,
+        claim_id: &mfm_facts::FactClaimId,
+        field_id: &mfm_facts::FactFieldId,
+    ) -> Option<&FactIndexTermProjection> {
+        self.fact_term_entries
+            .get(&(claim_id.clone(), field_id.clone()))
+    }
+
+    /// Iterates extracted fact terms for one claim id.
+    pub fn fact_terms_for_claim<'a>(
+        &'a self,
+        claim_id: &'a mfm_facts::FactClaimId,
+    ) -> impl Iterator<Item = &'a FactIndexTermProjection> + 'a {
+        self.fact_term_entries
+            .iter()
+            .filter(move |((term_claim_id, _field_id), _term)| term_claim_id == claim_id)
+            .map(|(_key, term)| term)
     }
 
     /// Returns an attempt lifecycle projection.
@@ -4214,8 +4851,13 @@ impl ProjectionSnapshot {
     }
 
     /// Returns a public-output projection.
-    pub fn public_output(&self, schema_id: &SchemaId) -> Option<&PublicOutputProjection> {
-        self.public_outputs.get(schema_id)
+    pub fn public_output(
+        &self,
+        run_id: &RunId,
+        schema_id: &SchemaId,
+    ) -> Option<&PublicOutputProjection> {
+        self.public_outputs
+            .get(&(run_id.clone(), schema_id.clone()))
     }
 
     /// Returns a retention projection.
@@ -4224,10 +4866,13 @@ impl ProjectionSnapshot {
     }
 
     /// Returns whether terminal public-output authority is projected.
-    pub fn has_public_output(&self) -> bool {
+    pub fn has_public_output(&self, run_id: &RunId) -> bool {
         self.public_outputs
-            .values()
-            .any(|projection| matches!(projection, PublicOutputProjection::Produced { .. }))
+            .iter()
+            .any(|((projection_run_id, _), projection)| {
+                projection_run_id == run_id
+                    && matches!(projection, PublicOutputProjection::Produced { .. })
+            })
     }
 
     /// Returns whether all past-boundary forward ledgers for the current projection are quiescent.
@@ -4328,15 +4973,43 @@ impl ProjectionSnapshot {
     }
 
     /// Iterates cell terminal projections.
-    pub fn cells(&self) -> impl Iterator<Item = (&CellId, &CellTerminalProjection)> {
-        self.cells.iter()
+    pub fn cells(&self) -> impl Iterator<Item = (&RunId, &CellId, &CellTerminalProjection)> {
+        self.cells
+            .iter()
+            .map(|((run_id, cell_id), projection)| (run_id, cell_id, projection))
     }
 
-    /// Iterates fact projections.
-    pub fn facts(
+    /// Iterates descriptor catalog projections.
+    pub fn fact_descriptors(
         &self,
-    ) -> impl Iterator<Item = (&(NodeId, AttemptId, events::FactKey), &FactProjection)> {
-        self.facts.iter()
+    ) -> impl Iterator<Item = (&ContentDigest, &FactDescriptorProjection)> {
+        self.fact_descriptors.iter()
+    }
+
+    /// Iterates recorded fact projections.
+    pub fn fact_records(
+        &self,
+    ) -> impl Iterator<Item = (&mfm_facts::FactClaimId, &FactRecordProjection)> {
+        self.fact_records.iter()
+    }
+
+    /// Iterates indexed fact projections.
+    pub fn fact_index_entries(
+        &self,
+    ) -> impl Iterator<Item = (&mfm_facts::FactClaimId, &FactIndexProjection)> {
+        self.fact_index_entries.iter()
+    }
+
+    /// Iterates extracted fact term projections.
+    pub fn fact_term_entries(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &(mfm_facts::FactClaimId, mfm_facts::FactFieldId),
+            &FactIndexTermProjection,
+        ),
+    > {
+        self.fact_term_entries.iter()
     }
 
     /// Iterates side-effect projections.
@@ -4354,14 +5027,28 @@ impl ProjectionSnapshot {
     }
 
     /// Iterates public-output projections.
-    pub fn public_outputs(&self) -> impl Iterator<Item = (&SchemaId, &PublicOutputProjection)> {
-        self.public_outputs.iter()
+    pub fn public_outputs(
+        &self,
+    ) -> impl Iterator<Item = (&RunId, &SchemaId, &PublicOutputProjection)> {
+        self.public_outputs
+            .iter()
+            .map(|((run_id, schema_id), projection)| (run_id, schema_id, projection))
     }
 
     /// Iterates retention projections.
     pub fn retentions(&self) -> impl Iterator<Item = (&RunId, &RetentionProjection)> {
         self.retentions.iter()
     }
+}
+
+fn fact_claim_projection_key(prefix: &str, claim_id: &mfm_facts::FactClaimId) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        prefix,
+        claim_id.source_run_id(),
+        claim_id.source_seq(),
+        claim_id.source_ordinal()
+    )
 }
 
 /// One atomically committed run-stream batch reconstructed from persisted envelopes.
@@ -4401,11 +5088,21 @@ pub struct CommittedRunStream {
     projection: ProjectionSnapshot,
     next_seq: StreamSeq,
     artifact_requirements: Vec<EventArtifactRequirement>,
+    artifact_bytes: ArtifactByteAuthorityMap,
 }
 
 impl CommittedRunStream {
     /// Rebuilds store-owned stream authority from persisted event envelopes.
     pub fn from_events(run_id: RunId, events: Vec<KernelEventEnvelope>) -> Result<Self> {
+        Self::from_events_with_artifact_bytes(run_id, events, &ArtifactByteAuthorityMap::new())
+    }
+
+    /// Rebuilds store-owned stream authority from persisted event envelopes and retained bytes.
+    pub fn from_events_with_artifact_bytes(
+        run_id: RunId,
+        events: Vec<KernelEventEnvelope>,
+        artifact_bytes: &ArtifactByteAuthorityMap,
+    ) -> Result<Self> {
         if let Some(event) = events.iter().find(|event| event.run_id() != &run_id) {
             return Err(StoreError::PersistedEventMismatch {
                 field: "run_id",
@@ -4418,7 +5115,10 @@ impl CommittedRunStream {
         }
         ProjectionSnapshot::validate_run_stream(&events)?;
         let commits = committed_run_stream_commits(&events);
-        let projection = ProjectionSnapshot::rebuild_from_run_stream(&events)?;
+        let projection = ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
+            &events,
+            artifact_bytes,
+        )?;
         let next_seq = next_seq_after_committed_stream(&events)?;
         let artifact_requirements = events
             .iter()
@@ -4431,6 +5131,7 @@ impl CommittedRunStream {
             projection,
             next_seq,
             artifact_requirements,
+            artifact_bytes: artifact_bytes.clone(),
         })
     }
 
@@ -4462,6 +5163,11 @@ impl CommittedRunStream {
     /// Returns artifact role requirements referenced by this stream.
     pub fn artifact_requirements(&self) -> &[EventArtifactRequirement] {
         &self.artifact_requirements
+    }
+
+    /// Returns exact retained artifact-byte authority used to rebuild this stream projection.
+    pub fn artifact_byte_authority(&self) -> &ArtifactByteAuthorityMap {
+        &self.artifact_bytes
     }
 }
 
@@ -4568,6 +5274,19 @@ impl VerifiedRunArtifactStore {
         &self,
     ) -> impl Iterator<Item = (&ArtifactAuthorityKey, &VerifiedRunArtifactBytes)> {
         self.artifacts.iter()
+    }
+
+    /// Exports exact retained artifact-byte authority for projection rebuilds.
+    pub fn artifact_byte_authority_map(&self) -> ArtifactByteAuthorityMap {
+        self.artifacts
+            .iter()
+            .map(|(key, artifact)| {
+                (
+                    key.clone(),
+                    (artifact.bytes().to_vec(), artifact.evidence().clone()),
+                )
+            })
+            .collect()
     }
 
     /// Verifies this retained artifact store covers a committed run stream exactly.
@@ -4856,6 +5575,12 @@ pub trait RunEventStore {
         run_id: &'a RunId,
     ) -> AsyncStoreFuture<'a, Vec<KernelEventEnvelope>, Self::Error>;
 
+    /// Loads the authoritative committed run stream with retained artifact projection authority.
+    fn load_committed_run_stream<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> AsyncStoreFuture<'a, CommittedRunStream, Self::Error>;
+
     /// Returns the next store-owned stream sequence for a run.
     fn expected_next_seq<'a>(
         &'a self,
@@ -4870,6 +5595,15 @@ pub trait RunEventStore {
     fn status_projection_snapshot<'a>(
         &'a self,
         run_id: &'a RunId,
+    ) -> AsyncStoreFuture<'a, ProjectionSnapshot, Self::Error>;
+
+    /// Returns store-owned fact descriptor, index, and term projection authority.
+    ///
+    /// This is store-scoped rather than run-scoped: public Platform fact discovery and
+    /// exact-ref lookup must see all indexed public facts available in the store, not only
+    /// facts associated with an arbitrary run selected by the caller.
+    fn fact_projection_snapshot<'a>(
+        &'a self,
     ) -> AsyncStoreFuture<'a, ProjectionSnapshot, Self::Error>;
 }
 
@@ -4944,6 +5678,9 @@ pub type ArtifactAuthorityKey = (ArtifactId, ContentDigest);
 /// Artifact authority indexed by exact `(artifact_id, evidence_hash)`.
 pub type ArtifactAuthorityMap = BTreeMap<ArtifactAuthorityKey, ArtifactEvidenceRef>;
 
+/// Artifact bytes indexed by exact `(artifact_id, evidence_hash)` authority.
+pub type ArtifactByteAuthorityMap = BTreeMap<ArtifactAuthorityKey, (Vec<u8>, ArtifactEvidenceRef)>;
+
 /// Authoritative state needed to validate and stage one absent commit-key append.
 ///
 /// Durable stores load this from their run stream, artifact table, logical-key table, and
@@ -4954,6 +5691,8 @@ pub type ArtifactAuthorityMap = BTreeMap<ArtifactAuthorityKey, ArtifactEvidenceR
 pub struct CommitBase {
     /// Exact artifact evidence recorded before event commit.
     pub artifacts: ArtifactAuthorityMap,
+    /// Exact retained or same-commit artifact bytes available for projection validation.
+    pub artifact_bytes: ArtifactByteAuthorityMap,
     /// Logical keys already present in the run stream.
     pub logical_keys: LogicalKeySet,
     /// Unique logical keys and their current payload hash.
@@ -5168,7 +5907,9 @@ impl CommitStagingVerifier<'_> {
             }
         }
         for precondition in &request.preconditions.required_cell_states {
-            let actual = self.projections.cell_terminal(&precondition.cell_id);
+            let actual = self
+                .projections
+                .cell_terminal_for_run(&request.run_id, &precondition.cell_id);
             let ok = match precondition.required {
                 RequiredCellState::Absent => actual.is_none(),
                 RequiredCellState::Produced => {
@@ -5198,9 +5939,20 @@ impl CommitStagingVerifier<'_> {
             }
         }
         if request.preconditions.required_public_output_absent
-            && self.projections.has_public_output()
+            && self.projections.has_public_output(&request.run_id)
         {
             return Err(StoreError::PublicOutputPreconditionFailed);
+        }
+        if request
+            .payloads
+            .iter()
+            .any(|payload| matches!(payload, KernelEventPayload::FactRecorded(_)))
+            && request.preconditions.certified_run_authority.is_none()
+        {
+            return Err(StoreError::ProjectionConflict {
+                key: "fact:certified_run_authority".to_owned(),
+                message: "fact recording requires certified run authority".to_owned(),
+            });
         }
         Ok(())
     }
@@ -5467,8 +6219,14 @@ fn stage_run_commit_with_fingerprint(
         let canonical_payload = payload_canonical_json(&payload)?;
         let payload_hash = canonical_payload.content_digest();
         let schema_id = payload.event_schema_id()?;
-        let logical_key = derive_logical_key(&payload, &payload_hash)?;
         let ordinal = CommitOrdinal::from_index(index)?;
+        let logical_key = derive_logical_key(
+            &request.run_id,
+            request.expected_next_seq,
+            ordinal,
+            &payload,
+            &payload_hash,
+        )?;
         let event_id = derive_event_id(
             &request.run_id,
             request.expected_next_seq,
@@ -5524,7 +6282,7 @@ fn stage_run_commit_with_fingerprint(
             &envelope.payload,
             request.preconditions.certified_run_authority.as_ref(),
         )?;
-        projection::apply_projection(&mut staged_projections, &envelope)?;
+        projection::apply_projection(&mut staged_projections, &envelope, &base.artifact_bytes)?;
         events.push(envelope);
     }
 
@@ -5886,8 +6644,10 @@ impl RunMemoryCore {
         let mut artifacts = self.artifacts.clone();
         verify_existing_artifact_admissions(&artifacts, &bundle)?;
         admit_artifact_evidence(&mut artifacts, bundle.admitted_artifacts())?;
+        let artifact_bytes = artifact_byte_authority_for_bundle(&self.artifact_bytes, &bundle)?;
         let base = CommitBase {
             artifacts,
+            artifact_bytes: artifact_bytes.clone(),
             logical_keys: self.logical_keys.clone(),
             unique_logical_payloads: self.unique_logical_payloads.clone(),
             projections: self.projections.clone(),
@@ -5907,22 +6667,7 @@ impl RunMemoryCore {
             staged_projections,
             staged_resource_lane_authority,
         ) = staged.into_parts();
-        for artifact in bundle.artifact_bytes() {
-            let verified =
-                PreparedArtifactBytes::new(artifact.bytes().to_vec(), artifact.evidence().clone())?;
-            let (bytes, evidence, evidence_hash) = verified.into_parts();
-            let key = (evidence.artifact_id.clone(), evidence_hash);
-            if let Some((stored_bytes, stored_evidence)) = self.artifact_bytes.get(&key) {
-                if stored_bytes != &bytes || stored_evidence != &evidence {
-                    return Err(StoreError::ArtifactEvidenceMismatch {
-                        artifact_id: evidence.artifact_id,
-                        field: "artifact",
-                    });
-                }
-            } else {
-                self.artifact_bytes.insert(key, (bytes, evidence));
-            }
-        }
+        self.artifact_bytes = artifact_bytes;
         self.streams
             .entry(request.run_id.clone())
             .or_default()
@@ -5989,6 +6734,24 @@ impl AsyncInMemoryRunStore {
             .and_then(|mut store| admit_artifact_evidence(&mut store.artifacts, admitted_artifacts))
     }
 
+    /// Seeds a projection snapshot and exact retained artifact bytes for tests.
+    pub fn seed_projection_snapshot_for_test(
+        &self,
+        projection: ProjectionSnapshot,
+        retained_artifacts: impl IntoIterator<Item = VerifiedRunArtifactBytes>,
+    ) -> Result<()> {
+        let mut store = self.lock_inner()?;
+        store.projections = projection;
+        for artifact in retained_artifacts {
+            let evidence = artifact.evidence().clone();
+            store.artifact_bytes.insert(
+                (evidence.artifact_id.clone(), evidence.digest.clone()),
+                (artifact.into_bytes(), evidence),
+            );
+        }
+        Ok(())
+    }
+
     /// Marks an execution claim expired for tests that need stale-claim recovery without sleeping.
     pub fn expire_execution_claim_for_test(&self, run_id: &RunId) -> Result<bool> {
         let mut store = self.lock_inner()?;
@@ -6028,6 +6791,20 @@ impl RunEventStore for AsyncInMemoryRunStore {
         Box::pin(std::future::ready(result))
     }
 
+    fn load_committed_run_stream<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> AsyncStoreFuture<'a, CommittedRunStream, Self::Error> {
+        let result = self.lock_inner().and_then(|store| {
+            CommittedRunStream::from_events_with_artifact_bytes(
+                run_id.clone(),
+                store.load_run_stream(run_id),
+                &store.artifact_bytes,
+            )
+        });
+        Box::pin(std::future::ready(result))
+    }
+
     fn expected_next_seq<'a>(
         &'a self,
         run_id: &'a RunId,
@@ -6046,17 +6823,24 @@ impl RunEventStore for AsyncInMemoryRunStore {
             .lock_inner()
             .map(|store| {
                 let stream = store.load_run_stream(run_id);
-                let run_projection = ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
-                projection_with_resource_lanes(
-                    &run_projection,
-                    store
-                        .projection_snapshot()
-                        .resource_lanes()
-                        .map(|(lane_key, projection)| (lane_key.clone(), projection.clone()))
-                        .collect(),
-                )
+                let committed = CommittedRunStream::from_events_with_artifact_bytes(
+                    run_id.clone(),
+                    stream,
+                    &store.artifact_bytes,
+                )?;
+                let run_projection = committed.projection().clone();
+                projection_with_store_authority(&run_projection, store.projection_snapshot())
             })
             .and_then(|result| result);
+        Box::pin(std::future::ready(result))
+    }
+
+    fn fact_projection_snapshot<'a>(
+        &'a self,
+    ) -> AsyncStoreFuture<'a, ProjectionSnapshot, Self::Error> {
+        let result = self
+            .lock_inner()
+            .map(|store| store.projection_snapshot().clone());
         Box::pin(std::future::ready(result))
     }
 }
@@ -6292,61 +7076,11 @@ impl RetainedArtifactReadProvider for AsyncInMemoryRunStore {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-fn projection_with_resource_lanes(
+fn projection_with_store_authority(
     snapshot: &ProjectionSnapshot,
-    resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
+    authority: &ProjectionSnapshot,
 ) -> Result<ProjectionSnapshot> {
-    ProjectionSnapshot::from_parts(ProjectionSnapshotParts {
-        run_states: snapshot
-            .run_states()
-            .map(|(run_id, state)| (run_id.clone(), *state))
-            .collect(),
-        run_spec_hashes: snapshot
-            .run_spec_hashes()
-            .map(|(run_id, spec_hash)| (run_id.clone(), spec_hash.clone()))
-            .collect(),
-        saga_policy_digests: snapshot
-            .saga_policy_digests()
-            .map(|(run_id, digest)| (run_id.clone(), digest.clone()))
-            .collect(),
-        run_completions: snapshot
-            .run_completions()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-        saga_engagements: snapshot
-            .saga_engagements()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-        manual_resolutions: snapshot
-            .manual_resolutions()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-        attempts: snapshot
-            .attempts()
-            .map(|(key, projection)| (key.clone(), projection.clone()))
-            .collect(),
-        cells: snapshot
-            .cells()
-            .map(|(cell_id, projection)| (cell_id.clone(), projection.clone()))
-            .collect(),
-        facts: snapshot
-            .facts()
-            .map(|(key, projection)| (key.clone(), projection.clone()))
-            .collect(),
-        side_effects: snapshot
-            .side_effects()
-            .map(|(ledger_ref, projection)| (ledger_ref.clone(), projection.clone()))
-            .collect(),
-        resource_lanes,
-        public_outputs: snapshot
-            .public_outputs()
-            .map(|(schema_id, projection)| (schema_id.clone(), projection.clone()))
-            .collect(),
-        retentions: snapshot
-            .retentions()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-    })
+    snapshot.with_store_authority_from(authority)
 }
 
 fn admit_artifact_evidence(
@@ -6409,6 +7143,34 @@ fn admitted_artifact_evidence<'a>(
     Err(StoreError::MissingPreparedArtifactBytes {
         artifact_id: artifact_id.clone(),
     })
+}
+
+/// Returns artifact-byte projection authority after applying a prepared bundle.
+pub fn artifact_byte_authority_for_bundle(
+    existing: &ArtifactByteAuthorityMap,
+    bundle: &PreparedCommitBundle,
+) -> Result<ArtifactByteAuthorityMap> {
+    let mut authority = existing.clone();
+    for artifact in bundle.artifact_bytes() {
+        let verified =
+            PreparedArtifactBytes::new(artifact.bytes().to_vec(), artifact.evidence().clone())?;
+        let (bytes, evidence, evidence_hash) = verified.into_parts();
+        let key = (evidence.artifact_id.clone(), evidence_hash);
+        match authority.get(&key) {
+            Some((stored_bytes, stored_evidence))
+                if stored_bytes == &bytes && stored_evidence == &evidence => {}
+            Some((_, stored_evidence)) => {
+                return Err(StoreError::ArtifactEvidenceMismatch {
+                    artifact_id: stored_evidence.artifact_id.clone(),
+                    field: "artifact",
+                });
+            }
+            None => {
+                authority.insert(key, (bytes, evidence));
+            }
+        }
+    }
+    Ok(authority)
 }
 
 fn artifact_authority_key(evidence: &ArtifactEvidenceRef) -> Result<ArtifactAuthorityKey> {
@@ -6699,6 +7461,8 @@ fn validate_artifact_schema_policy(
         events::ArtifactSchemaPolicy::ExactSeedSchema
         | events::ArtifactSchemaPolicy::ExactValueSchema
         | events::ArtifactSchemaPolicy::ExactEvidenceSchema
+        | events::ArtifactSchemaPolicy::ExactFactDescriptorSchema
+        | events::ArtifactSchemaPolicy::ExactFactQueryEvidenceSchema
         | events::ArtifactSchemaPolicy::ExactPublicSchema
         | events::ArtifactSchemaPolicy::ExactDiagnosticSchema => {
             if let Some(schema_id) = &requirement.schema_id {
@@ -6969,7 +7733,10 @@ pub fn validate_artifact_requirement_against_evidence(
     Ok(())
 }
 
-fn verify_retained_artifact_bytes(bytes: &[u8], evidence: &ArtifactEvidenceRef) -> Result<()> {
+pub(super) fn verify_retained_artifact_bytes(
+    bytes: &[u8],
+    evidence: &ArtifactEvidenceRef,
+) -> Result<()> {
     let digest =
         ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes));
     let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
@@ -8247,6 +9014,9 @@ fn derive_event_id(
 }
 
 fn derive_logical_key(
+    run_id: &RunId,
+    seq: StreamSeq,
+    ordinal: CommitOrdinal,
     payload: &KernelEventPayload,
     payload_hash: &ContentDigest,
 ) -> Result<LogicalEventKey> {
@@ -8266,10 +9036,12 @@ fn derive_logical_key(
         KernelEventPayload::StateAttemptFailed(payload) => {
             format!("attempt:{}:{}", payload.node_id, payload.attempt_id)
         }
-        KernelEventPayload::FactRecorded(payload) => format!(
-            "fact:{}:{}:{}",
-            payload.node_id, payload.attempt_id, payload.fact_key
-        ),
+        KernelEventPayload::FactRecorded(_) => {
+            let claim_id =
+                mfm_facts::derive_fact_claim_id(run_id.clone(), seq.as_u64(), ordinal.as_u32())
+                    .map_err(|error| StoreError::Event(error.to_string()))?;
+            fact_claim_projection_key("fact", &claim_id)
+        }
         KernelEventPayload::ArtifactReferenced(payload) => {
             format!("artifact:{}:ref", payload.artifact_ref.artifact_id)
         }
@@ -8493,6 +9265,7 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "certificate_artifact": run_artifact_json(&payload.certificate_artifact),
             "config_artifacts": payload.config_artifacts.iter().map(run_artifact_json).collect::<Vec<_>>(),
             "descriptor_identities": payload.descriptor_identities.iter().map(descriptor_identity_json).collect::<Vec<_>>(),
+            "fact_descriptor_artifacts": payload.fact_descriptor_artifacts.iter().map(run_artifact_json).collect::<Vec<_>>(),
             "adapter_executables": payload.adapter_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
             "entry_point": entry_point_launch_evidence_json(&payload.entry_point),
             "identity_material": run_identity_material_json(&payload.identity_material),
@@ -8517,18 +9290,9 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "variant": "StateAttemptStarted",
         }),
         KernelEventPayload::FactRecorded(payload) => serde_json::json!({
-            "adapter_kind": payload.adapter_kind.as_str(),
-            "adapter_version": payload.adapter_version.as_str(),
-            "artifact_id": payload.artifact_id.as_str(),
             "attempt_id": payload.attempt_id.as_str(),
-            "capability_kind": payload.capability_kind.as_str(),
-            "capability_version": payload.capability_version.as_str(),
-            "fact_key": payload.fact_key.as_str(),
+            "claim": fact_claim_json(&payload.claim),
             "node_id": payload.node_id.as_str(),
-            "request_hash": payload.request_hash.as_str(),
-            "request_schema_id": payload.request_schema_id.as_str(),
-            "response_hash": payload.response_hash.as_str(),
-            "response_schema_id": payload.response_schema_id.as_str(),
             "spec_hash": payload.spec_hash.as_str(),
             "variant": "FactRecorded",
         }),
@@ -8908,6 +9672,11 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                     "certificate_artifact",
                 )?)?,
                 config_artifacts: parse_vec(json, "config_artifacts", parse_run_artifact)?,
+                fact_descriptor_artifacts: parse_vec(
+                    json,
+                    "fact_descriptor_artifacts",
+                    parse_run_artifact,
+                )?,
                 spec_version: parse_identity(required_str(json, "spec_version")?)?,
                 lowering_version: parse_identity(required_str(json, "lowering_version")?)?,
                 public_output_schema_id: parse_identity(required_str(
@@ -8946,16 +9715,7 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
             spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
             node_id: parse_identity(required_str(json, "node_id")?)?,
             attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
-            capability_kind: parse_identity(required_str(json, "capability_kind")?)?,
-            capability_version: parse_identity(required_str(json, "capability_version")?)?,
-            adapter_kind: parse_identity(required_str(json, "adapter_kind")?)?,
-            adapter_version: parse_identity(required_str(json, "adapter_version")?)?,
-            request_schema_id: parse_identity(required_str(json, "request_schema_id")?)?,
-            request_hash: parse_identity(required_str(json, "request_hash")?)?,
-            response_schema_id: parse_identity(required_str(json, "response_schema_id")?)?,
-            response_hash: parse_identity(required_str(json, "response_hash")?)?,
-            fact_key: events::FactKey::new(required_str(json, "fact_key")?)?,
-            artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
+            claim: parse_fact_claim(required_obj(json, "claim")?)?,
         })),
         "ArtifactReferenced" => Ok(KernelEventPayload::ArtifactReferenced(
             events::ArtifactReferenced {
@@ -9459,6 +10219,11 @@ fn parse_descriptor_identity(json: &serde_json::Value) -> Result<DescriptorIdent
                 effect_name: required_str(json, "effect_name")?.to_owned(),
                 effect_version: parse_identity(required_str(json, "effect_version")?)?,
                 capabilities: parse_capability_set(required_obj(json, "capabilities")?)?,
+                emitted_fact_descriptors: parse_vec(
+                    json,
+                    "emitted_fact_descriptors",
+                    parse_fact_descriptor_ref,
+                )?,
                 runner: required_str(json, "runner")?.to_owned(),
                 side_effect_contract_digest: optional_str(json, "side_effect_contract_digest")?
                     .map(parse_identity)
@@ -9590,6 +10355,90 @@ pub fn parse_event_artifact(json: &serde_json::Value) -> CodecResult<events::Art
         media_type: MediaType::new(required_str(json, "media_type")?)
             .map_err(|error| CodecError::Identity(error.to_string()))?,
     })
+}
+
+fn parse_fact_claim(json: &serde_json::Value) -> Result<mfm_facts::FactClaim> {
+    mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
+        visibility: parse_fact_visibility(required_obj(json, "visibility")?)?,
+        fact_kind: mfm_facts::FactKind::new(required_str(json, "fact_kind")?)
+            .map_err(|error| StoreError::Identity(error.to_string()))?,
+        fact_descriptor_hash: parse_identity(required_str(json, "fact_descriptor_hash")?)?,
+        subject: parse_fact_subject_evidence(required_obj(json, "subject")?)?,
+        observed_at: optional_str(json, "observed_at")?.map(str::to_owned),
+        request: optional_obj(json, "request")?
+            .map(parse_fact_request_evidence)
+            .transpose()?,
+        response: parse_fact_response_evidence(required_obj(json, "response")?)?,
+        producer: parse_fact_producer_provenance(required_obj(json, "producer")?)?,
+    })
+    .map_err(|error| StoreError::Identity(error.to_string()))
+}
+
+fn parse_fact_visibility(json: &serde_json::Value) -> Result<mfm_facts::FactVisibility> {
+    match required_str(json, "kind")? {
+        "run_private" => Ok(mfm_facts::FactVisibility::RunPrivate),
+        "indexed" => Ok(mfm_facts::FactVisibility::Indexed {
+            audience: parse_fact_audience(required_str(json, "audience")?)?,
+            scope: parse_fact_visibility_scope(required_str(json, "scope")?)?,
+        }),
+        other => Err(StoreError::Identity(format!(
+            "unknown fact visibility {other}"
+        ))),
+    }
+}
+
+fn parse_fact_audience(value: &str) -> Result<mfm_facts::FactAudience> {
+    value
+        .parse::<mfm_facts::FactAudience>()
+        .map_err(|_| StoreError::Identity(format!("unknown fact audience {value}")))
+}
+
+fn parse_fact_visibility_scope(value: &str) -> Result<mfm_facts::FactVisibilityScope> {
+    value
+        .parse::<mfm_facts::FactVisibilityScope>()
+        .map_err(|_| StoreError::Identity(format!("unknown fact visibility scope {value}")))
+}
+
+fn parse_fact_subject_evidence(json: &serde_json::Value) -> Result<mfm_facts::FactSubjectEvidence> {
+    mfm_facts::FactSubjectEvidence::new(
+        parse_identity(required_str(json, "fact_subject_namespace_hash")?)?,
+        PlainCanonicalJsonBytes::from_canonical_json_slice(
+            required_str(json, "subject_material")?.as_bytes(),
+        )
+        .map_err(|error| StoreError::Identity(error.to_string()))?,
+        parse_identity(required_str(json, "subject_material_hash")?)?,
+        mfm_facts::FactKey::from_digest(parse_identity(required_str(json, "fact_key")?)?),
+    )
+    .map_err(|error| StoreError::Identity(error.to_string()))
+}
+
+fn parse_fact_request_evidence(json: &serde_json::Value) -> Result<mfm_facts::FactRequestEvidence> {
+    Ok(mfm_facts::FactRequestEvidence::new(
+        parse_identity(required_str(json, "request_schema_id")?)?,
+        parse_identity(required_str(json, "request_hash")?)?,
+    ))
+}
+
+fn parse_fact_response_evidence(
+    json: &serde_json::Value,
+) -> Result<mfm_facts::FactResponseEvidence> {
+    Ok(mfm_facts::FactResponseEvidence::new(
+        parse_identity(required_str(json, "response_schema_id")?)?,
+        parse_identity(required_str(json, "response_hash")?)?,
+        parse_identity(required_str(json, "artifact_id")?)?,
+        parse_identity(required_str(json, "artifact_evidence_hash")?)?,
+    ))
+}
+
+fn parse_fact_producer_provenance(
+    json: &serde_json::Value,
+) -> Result<mfm_facts::FactProducerProvenance> {
+    Ok(mfm_facts::FactProducerProvenance::new(
+        parse_identity(required_str(json, "capability_kind")?)?,
+        required_str(json, "capability_version")?.parse()?,
+        parse_identity(required_str(json, "adapter_kind")?)?,
+        required_str(json, "adapter_version")?.parse()?,
+    ))
 }
 
 fn parse_run_artifact(json: &serde_json::Value) -> Result<events::RunArtifactEvidenceRef> {
@@ -9766,6 +10615,12 @@ pub fn parse_run_completion_outcome(
     }
 }
 
+fn parse_fact_descriptor_ref(json: &serde_json::Value) -> Result<spec::FactDescriptorRef> {
+    Ok(spec::FactDescriptorRef {
+        descriptor_hash: parse_identity(required_str(json, "descriptor_hash")?)?,
+    })
+}
+
 fn parse_retention_ref(json: &serde_json::Value) -> Result<events::RetentionRef> {
     Ok(events::RetentionRef {
         artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
@@ -9937,6 +10792,68 @@ pub fn event_artifact_json(evidence: &events::ArtifactEvidenceRef) -> serde_json
     })
 }
 
+fn fact_claim_json(claim: &mfm_facts::FactClaim) -> serde_json::Value {
+    serde_json::json!({
+        "visibility": fact_visibility_json(claim.visibility()),
+        "fact_kind": claim.fact_kind().as_str(),
+        "fact_descriptor_hash": claim.fact_descriptor_hash().as_str(),
+        "subject": fact_subject_evidence_json(claim.subject()),
+        "observed_at": claim.observed_at(),
+        "request": claim.request().map(fact_request_evidence_json),
+        "response": fact_response_evidence_json(claim.response()),
+        "producer": fact_producer_provenance_json(claim.producer()),
+    })
+}
+
+fn fact_visibility_json(visibility: &mfm_facts::FactVisibility) -> serde_json::Value {
+    match visibility {
+        mfm_facts::FactVisibility::RunPrivate => serde_json::json!({
+            "kind": "run_private",
+        }),
+        mfm_facts::FactVisibility::Indexed { audience, scope } => serde_json::json!({
+            "kind": "indexed",
+            "audience": audience.as_str(),
+            "scope": scope.as_str(),
+        }),
+    }
+}
+
+fn fact_subject_evidence_json(evidence: &mfm_facts::FactSubjectEvidence) -> serde_json::Value {
+    serde_json::json!({
+        "fact_subject_namespace_hash": evidence.fact_subject_namespace_hash().as_str(),
+        "subject_material": evidence.subject_material().as_str(),
+        "subject_material_hash": evidence.subject_material_hash().as_str(),
+        "fact_key": evidence.fact_key().as_str(),
+    })
+}
+
+fn fact_request_evidence_json(evidence: &mfm_facts::FactRequestEvidence) -> serde_json::Value {
+    serde_json::json!({
+        "request_schema_id": evidence.request_schema_id().as_str(),
+        "request_hash": evidence.request_hash().as_str(),
+    })
+}
+
+fn fact_response_evidence_json(evidence: &mfm_facts::FactResponseEvidence) -> serde_json::Value {
+    serde_json::json!({
+        "response_schema_id": evidence.response_schema_id().as_str(),
+        "response_hash": evidence.response_hash().as_str(),
+        "artifact_id": evidence.artifact_id().as_str(),
+        "artifact_evidence_hash": evidence.artifact_evidence_hash().as_str(),
+    })
+}
+
+fn fact_producer_provenance_json(
+    provenance: &mfm_facts::FactProducerProvenance,
+) -> serde_json::Value {
+    serde_json::json!({
+        "capability_kind": provenance.capability_kind().as_str(),
+        "capability_version": provenance.capability_version().as_str(),
+        "adapter_kind": provenance.adapter_kind().as_str(),
+        "adapter_version": provenance.adapter_version().as_str(),
+    })
+}
+
 fn run_artifact_json(evidence: &events::RunArtifactEvidenceRef) -> serde_json::Value {
     serde_json::json!({
         "artifact_id": evidence.artifact_id.as_str(),
@@ -9999,6 +10916,7 @@ fn descriptor_identity_json(identity: &DescriptorIdentity) -> serde_json::Value 
             "effect_kind": identity.effect_kind.as_str(),
             "effect_name": identity.effect_name.as_str(),
             "effect_version": identity.effect_version.as_str(),
+            "emitted_fact_descriptors": fact_descriptor_refs_json(&identity.emitted_fact_descriptors),
             "input_schema_id": identity.input_schema_id.as_str(),
             "name": identity.name.as_str(),
             "output_schema_id": identity.output_schema_id.as_str(),
@@ -10021,6 +10939,16 @@ fn descriptor_identity_json(identity: &DescriptorIdentity) -> serde_json::Value 
         }),
         DescriptorIdentity::Renderer(identity) => renderer_descriptor_json(identity),
     }
+}
+
+fn fact_descriptor_refs_json(refs: &[spec::FactDescriptorRef]) -> Vec<serde_json::Value> {
+    refs.iter()
+        .map(|reference| {
+            serde_json::json!({
+                "descriptor_hash": reference.descriptor_hash.as_str(),
+            })
+        })
+        .collect()
 }
 
 fn renderer_descriptor_json(
@@ -10395,6 +11323,7 @@ pub fn parse_attempt_projection(json: &serde_json::Value) -> CodecResult<Attempt
 
 /// Encodes a cell terminal projection as JSON.
 pub fn cell_projection_json(
+    run_id: &RunId,
     cell_id: &CellId,
     projection: &CellTerminalProjection,
 ) -> serde_json::Value {
@@ -10409,6 +11338,7 @@ pub fn cell_projection_json(
             content_digest,
         } => serde_json::json!({
             "variant": "produced",
+            "run_id": run_id.as_str(),
             "cell_id": cell_id.as_str(),
             "event_id": event_id.as_str(),
             "node_id": node_id.as_str(),
@@ -10427,6 +11357,7 @@ pub fn cell_projection_json(
             skip_reason,
         } => serde_json::json!({
             "variant": "skipped",
+            "run_id": run_id.as_str(),
             "cell_id": cell_id.as_str(),
             "event_id": event_id.as_str(),
             "node_id": node_id.as_str(),
@@ -10441,7 +11372,8 @@ pub fn cell_projection_json(
 /// Parses a cell terminal projection from JSON.
 pub fn parse_cell_projection(
     json: &serde_json::Value,
-) -> CodecResult<(CellId, CellTerminalProjection)> {
+) -> CodecResult<((RunId, CellId), CellTerminalProjection)> {
+    let run_id = parse_identity(required_str(json, "run_id")?)?;
     let cell_id = parse_identity(required_str(json, "cell_id")?)?;
     let projection = match required_str(json, "variant")? {
         "produced" => CellTerminalProjection::Produced {
@@ -10467,45 +11399,7 @@ pub fn parse_cell_projection(
             )));
         }
     };
-    Ok((cell_id, projection))
-}
-
-/// Encodes a fact projection as JSON.
-pub fn fact_projection_json(projection: &FactProjection) -> serde_json::Value {
-    serde_json::json!({
-        "adapter_kind": projection.adapter_kind.as_str(),
-        "adapter_version": projection.adapter_version.as_str(),
-        "artifact_id": projection.artifact_id.as_str(),
-        "attempt_id": projection.attempt_id.as_str(),
-        "capability_kind": projection.capability_kind.as_str(),
-        "capability_version": projection.capability_version.as_str(),
-        "event_id": projection.event_id.as_str(),
-        "fact_key": projection.fact_key.as_str(),
-        "node_id": projection.node_id.as_str(),
-        "request_hash": projection.request_hash.as_str(),
-        "request_schema_id": projection.request_schema_id.as_str(),
-        "response_hash": projection.response_hash.as_str(),
-        "response_schema_id": projection.response_schema_id.as_str(),
-    })
-}
-
-/// Parses a fact projection from JSON.
-pub fn parse_fact_projection(json: &serde_json::Value) -> CodecResult<FactProjection> {
-    Ok(FactProjection {
-        event_id: parse_identity(required_str(json, "event_id")?)?,
-        node_id: parse_identity(required_str(json, "node_id")?)?,
-        attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
-        fact_key: events::FactKey::new(required_str(json, "fact_key")?)?,
-        request_schema_id: parse_identity(required_str(json, "request_schema_id")?)?,
-        request_hash: parse_identity(required_str(json, "request_hash")?)?,
-        response_schema_id: parse_identity(required_str(json, "response_schema_id")?)?,
-        response_hash: parse_identity(required_str(json, "response_hash")?)?,
-        artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
-        capability_kind: parse_identity(required_str(json, "capability_kind")?)?,
-        capability_version: required_str(json, "capability_version")?.parse()?,
-        adapter_kind: parse_identity(required_str(json, "adapter_kind")?)?,
-        adapter_version: required_str(json, "adapter_version")?.parse()?,
-    })
+    Ok(((run_id, cell_id), projection))
 }
 
 /// Encodes a side-effect projection as JSON.
@@ -10833,6 +11727,7 @@ fn parse_side_effect_phase(json: &serde_json::Value) -> CodecResult<SideEffectPh
 
 /// Encodes a public-output projection as JSON.
 pub fn public_output_projection_json(
+    run_id: &RunId,
     schema_id: &SchemaId,
     projection: &PublicOutputProjection,
 ) -> serde_json::Value {
@@ -10843,6 +11738,7 @@ pub fn public_output_projection_json(
             rendered_artifact_id,
         } => serde_json::json!({
             "variant": "produced",
+            "run_id": run_id.as_str(),
             "public_schema_id": schema_id.as_str(),
             "event_id": event_id.as_str(),
             "rendered_digest": rendered_digest.as_str(),
@@ -10850,6 +11746,7 @@ pub fn public_output_projection_json(
         }),
         PublicOutputProjection::RenderFailed { event_id, error } => serde_json::json!({
             "variant": "render_failed",
+            "run_id": run_id.as_str(),
             "public_schema_id": schema_id.as_str(),
             "event_id": event_id.as_str(),
             "error": error_info_json(error),
@@ -10860,7 +11757,8 @@ pub fn public_output_projection_json(
 /// Parses a public-output projection from JSON.
 pub fn parse_public_output_projection(
     json: &serde_json::Value,
-) -> CodecResult<(SchemaId, PublicOutputProjection)> {
+) -> CodecResult<((RunId, SchemaId), PublicOutputProjection)> {
+    let run_id = parse_identity(required_str(json, "run_id")?)?;
     let schema_id = parse_identity(required_str(json, "public_schema_id")?)?;
     let projection = match required_str(json, "variant")? {
         "produced" => PublicOutputProjection::Produced {
@@ -10880,7 +11778,7 @@ pub fn parse_public_output_projection(
             )));
         }
     };
-    Ok((schema_id, projection))
+    Ok(((run_id, schema_id), projection))
 }
 
 /// Encodes a retention manifest projection as JSON.

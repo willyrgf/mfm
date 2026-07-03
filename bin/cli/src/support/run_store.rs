@@ -30,6 +30,16 @@ pub(crate) async fn connect_run_read_services(
     Ok(mfm_app::connect_production_run_read_services(args.database_url.as_deref()).await?)
 }
 
+/// Builds evidence-only typed app services for CLI fact query commands.
+pub(crate) async fn connect_fact_query_run_read_services(
+    args: &RunStoresArgs,
+) -> Result<ProductionRunReadServices, CommandError> {
+    Ok(
+        mfm_app::connect_production_fact_query_run_read_services(args.database_url.as_deref())
+            .await?,
+    )
+}
+
 /// Parses a typed run id from the persisted typed-kernel identity grammar.
 pub(crate) fn parse_run_id(value: &str) -> Result<RunId, CommandError> {
     RunId::parse(value).map_err(|_| {

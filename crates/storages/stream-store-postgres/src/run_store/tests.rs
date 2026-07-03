@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use mfm_canonical::sha256_digest_bytes;
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1::{self as events, ArtifactRole, KernelEventPayload};
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
@@ -22,21 +22,24 @@ use mfm_spec::v1::{
 use mfm_store::v1::test_support::{
     artifact_bytes_for_digest_for_test, artifact_content_digest_for_test as content_digest,
     confirmation_terminal_policies_for_projection_for_test as confirmation_terminal_policies_for_projection,
-    fixed_attempt_id_for_test as attempt_id, fixed_cell_id_for_test as cell_id,
-    fixed_descriptor_id_for_test as descriptor_id, fixed_digest_bytes_for_test as digest_bytes,
-    fixed_node_id_for_test as node_id, fixed_schema_id_for_test as schema_id,
-    fixed_scope_id_for_test as scope_id, fixed_semantic_type_id_for_test as semantic_id,
-    fixed_spec_hash_for_test as spec_hash, fixed_state_kind_for_test as state_kind,
-    media_type_for_test as media_type, prepared_commit_plan_for_test as test_prepared_commit_plan,
-    run_identity_material_for_test,
+    fact_descriptor_projection_fixture_for_test, fixed_attempt_id_for_test as attempt_id,
+    fixed_cell_id_for_test as cell_id, fixed_descriptor_id_for_test as descriptor_id,
+    fixed_digest_bytes_for_test as digest_bytes, fixed_node_id_for_test as node_id,
+    fixed_schema_id_for_test as schema_id, fixed_scope_id_for_test as scope_id,
+    fixed_semantic_type_id_for_test as semantic_id, fixed_spec_hash_for_test as spec_hash,
+    fixed_state_kind_for_test as state_kind, media_type_for_test as media_type,
+    prepared_commit_plan_for_test as test_prepared_commit_plan,
+    run_artifact_ref_from_store_artifact_for_test as run_artifact_ref,
+    run_identity_material_for_test, FactDescriptorProjectionFixtureForTest,
 };
 use mfm_store::v1::{
     AdmissionLease, AdmissionToken, AdmissionWaiter, ArtifactEvidenceRef, AttemptStatus,
     CellTerminalProjection, CertifiedRunStoreAuthority, CommitArtifactEvidenceSet, CommitKey,
     CommitOutcome, CommitPreconditions, ExecutionClaimStatus, ExecutionClaimStore,
-    ManualResolution, NowaitSkipAdmissionResult, PreparedCommit, PreparedCommitPlan,
-    RequiredRunState, ResourceLaneKey, Retention, RunState, SagaEngagementReason, SagaTerminal,
-    SagaTerminalProof, SideEffectPhase, StoreError, StreamSeq, TrustScopeId, TrustScopeStore,
+    ExistingArtifactAdmission, ManualResolution, NowaitSkipAdmissionResult, PreparedCommit,
+    PreparedCommitPlan, RequiredRunState, ResourceLaneKey, Retention, RunState,
+    SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectPhase, StoreError, StreamSeq,
+    TrustScopeId, TrustScopeStore,
 };
 use sqlx::postgres::PgConnectOptions;
 use sqlx::AssertSqlSafe;
@@ -96,11 +99,41 @@ async fn test_store() -> (PostgresRunStore, String) {
     crate::schema::migrate_pool(&pool)
         .await
         .expect("migrate schema");
+    let fact_receipt_signer = test_fact_receipt_signer();
+    insert_fact_receipt_trust_root(&pool, &fact_receipt_signer).await;
     let authority = crate::schema::validate_pool(&pool)
         .await
         .expect("validate schema");
-    let store = PostgresRunStore { pool, authority };
+    let store = PostgresRunStore {
+        pool,
+        authority,
+        fact_receipt_signer: Some(fact_receipt_signer),
+    };
     (store, schema)
+}
+
+fn test_fact_receipt_signer() -> PostgresFactReceiptSigner {
+    PostgresFactReceiptSigner::from_ed25519_signing_key_bytes(
+        mfm_facts::StoreIdentity::new("store.test").expect("store identity"),
+        mfm_facts::StoreKeyId::new("key.test").expect("key id"),
+        [17; 32],
+    )
+}
+
+async fn insert_fact_receipt_trust_root(pool: &PgPool, signer: &PostgresFactReceiptSigner) {
+    let trust_root = signer.trust_root().expect("trust root");
+    sqlx::query(
+        "INSERT INTO fact_receipt_trust_root \
+         (store_identity, authentication_scheme, key_id, verifying_key) \
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(trust_root.store_identity().as_str())
+    .bind(trust_root.scheme().as_str())
+    .bind(trust_root.key_id().as_str())
+    .bind(trust_root.verifying_key().to_vec())
+    .execute(pool)
+    .await
+    .expect("insert fact receipt trust root");
 }
 
 async fn drop_schema(store: &PostgresRunStore, schema: &str) {
@@ -116,6 +149,89 @@ async fn drop_schema(store: &PostgresRunStore, schema: &str) {
     .execute(&admin_pool)
     .await
     .expect("drop schema");
+}
+
+fn assert_fact_projection_counts(
+    projection: &ProjectionSnapshot,
+    descriptors: usize,
+    records: usize,
+    index_entries: usize,
+    terms: usize,
+) {
+    assert_eq!(projection.fact_descriptors().count(), descriptors);
+    assert_eq!(projection.fact_records().count(), records);
+    assert_eq!(projection.fact_index_entries().count(), index_entries);
+    assert_eq!(projection.fact_term_entries().count(), terms);
+}
+
+async fn assert_fact_projection_table_counts(
+    store: &PostgresRunStore,
+    run: &RunId,
+    descriptors: usize,
+    index_entries: usize,
+    terms: usize,
+) {
+    assert_eq!(
+        fact_projection_table_count(
+            &store.pool,
+            run,
+            "SELECT COUNT(*) FROM run_fact_descriptor_admissions WHERE run_id = $1"
+        )
+        .await,
+        descriptors as i64
+    );
+    assert_eq!(
+        fact_projection_table_count(
+            &store.pool,
+            run,
+            "SELECT COUNT(*) FROM fact_index WHERE source_run_id = $1"
+        )
+        .await,
+        index_entries as i64
+    );
+    assert_eq!(
+        fact_projection_table_count(
+            &store.pool,
+            run,
+            "SELECT COUNT(*) FROM fact_index_terms WHERE source_run_id = $1"
+        )
+        .await,
+        terms as i64
+    );
+}
+
+async fn fact_projection_table_count(pool: &PgPool, run: &RunId, sql: &'static str) -> i64 {
+    sqlx::query_scalar::<_, i64>(sql)
+        .bind(run.as_str())
+        .fetch_one(pool)
+        .await
+        .expect("fact projection table count")
+}
+
+async fn global_fact_descriptor_catalog_count(store: &PostgresRunStore) -> i64 {
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM fact_descriptor_index")
+        .fetch_one(&store.pool)
+        .await
+        .expect("global fact descriptor catalog count")
+}
+
+fn assert_fact_query_receipt(
+    store: &PostgresRunStore,
+    plan: &mfm_facts::CanonicalFactQueryPlan,
+    result: &mfm_facts::FactQueryResult,
+    expected_cardinality: mfm_facts::QueryResultCardinality,
+) {
+    let plan_hash = mfm_facts::fact_query_plan_hash(plan).expect("fact query plan hash");
+    mfm_store::v1::verify_fact_query_receipt_authentication(
+        &plan_hash,
+        result.receipt(),
+        store
+            .store_authority()
+            .fact_receipt_trust_root()
+            .expect("receipt trust root"),
+    )
+    .expect("fact query receipt signature verifies");
+    assert_eq!(result.receipt().result_cardinality(), expected_cardinality);
 }
 
 #[tokio::test]
@@ -193,6 +309,38 @@ async fn store_authority_rejects_stale_schema_object() {
     let error = crate::schema::validate_pool(&store.pool)
         .await
         .expect_err("stale schema object fails authority validation");
+    assert_authority_error(error, PostgresStoreAuthorityError::Catalog);
+
+    drop_schema(&store, &schema).await;
+}
+
+#[tokio::test]
+async fn store_authority_rejects_missing_fact_projection_table() {
+    let (store, schema) = test_store().await;
+
+    sqlx::query("DROP TABLE fact_index_terms")
+        .execute(&store.pool)
+        .await
+        .expect("drop fact term table");
+    let error = crate::schema::validate_pool(&store.pool)
+        .await
+        .expect_err("missing fact projection table fails authority validation");
+    assert_authority_error(error, PostgresStoreAuthorityError::Catalog);
+
+    drop_schema(&store, &schema).await;
+}
+
+#[tokio::test]
+async fn store_authority_rejects_retired_fact_projection_object() {
+    let (store, schema) = test_store().await;
+
+    sqlx::query("CREATE TABLE typed_fact_projection (id TEXT PRIMARY KEY)")
+        .execute(&store.pool)
+        .await
+        .expect("create retired fact projection table");
+    let error = crate::schema::validate_pool(&store.pool)
+        .await
+        .expect_err("retired fact projection table fails authority validation");
     assert_authority_error(error, PostgresStoreAuthorityError::Catalog);
 
     drop_schema(&store, &schema).await;
@@ -293,6 +441,7 @@ async fn store_trust_scope_survives_reconnects_and_rejects_mutation() {
     let restarted = PostgresRunStore {
         pool: store.pool.clone(),
         authority: store.store_authority().clone(),
+        fact_receipt_signer: store.fact_receipt_signer.clone(),
     };
     let restarted_trust_scope = restarted
         .load_trust_scope_id()
@@ -491,10 +640,44 @@ fn run_admitted_with_saga_policy(
         spec_artifact: run_artifact_ref(&spec_artifact),
         certificate_artifact: run_artifact_ref(&certificate_artifact),
         config_artifacts: Vec::new(),
+        fact_descriptor_artifacts: Vec::new(),
         spec_version: SpecVersion::new("mfm.typed.execution_spec.v1").expect("spec version"),
         lowering_version: LoweringVersion::new("mfm.typed.lowering.v1").expect("lowering version"),
         public_output_schema_id: schema_id("mfm.test.public_output", 3),
         saga_policy_digest: saga_policy
+            .saga_policy_digest()
+            .expect("saga policy digest"),
+        descriptor_identities: Vec::new(),
+        runner_executables: Vec::new(),
+        adapter_executables: Vec::new(),
+        admitted_binding_digest: content_digest(9),
+        canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1").expect("canonicalizer"),
+        seed_cells: Vec::new(),
+    }))
+}
+
+fn run_admitted_with_fact_descriptor(run_id: RunId) -> KernelEventPayload {
+    let authority_spec = fact_authority_spec();
+    let certified_spec_hash = authority_spec
+        .spec_hash()
+        .expect("fact authority spec hash");
+    let spec_artifact = spec_artifact_ref();
+    let certificate_artifact = certificate_artifact_ref();
+    let fact_descriptor_artifact = fact_descriptor_artifact_ref();
+    let identity_material = run_identity_material_for_fact_run_id(&run_id);
+    KernelEventPayload::RunAdmitted(Box::new(events::RunAdmitted {
+        run_id,
+        identity_material,
+        entry_point: entry_point_launch_evidence(),
+        spec_hash: certified_spec_hash,
+        spec_artifact: run_artifact_ref(&spec_artifact),
+        certificate_artifact: run_artifact_ref(&certificate_artifact),
+        config_artifacts: Vec::new(),
+        fact_descriptor_artifacts: vec![run_artifact_ref(&fact_descriptor_artifact)],
+        spec_version: SpecVersion::new("mfm.typed.execution_spec.v1").expect("spec version"),
+        lowering_version: LoweringVersion::new("mfm.typed.lowering.v1").expect("lowering version"),
+        public_output_schema_id: schema_id("mfm.test.public_output", 3),
+        saga_policy_digest: SagaPolicySpec::NoSideEffects
             .saga_policy_digest()
             .expect("saga policy digest"),
         descriptor_identities: Vec::new(),
@@ -561,33 +744,213 @@ fn cell_produced(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventP
     })
 }
 
-fn fact_recorded(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
+fn fact_key() -> mfm_facts::FactKey {
+    fact_subject_evidence().fact_key().clone()
+}
+
+fn fact_descriptor() -> mfm_facts::FactDescriptor {
+    mfm_facts::FactDescriptor::new(
+        mfm_facts::FactKind::new("mfm.test.fact").expect("fact kind"),
+        mfm_facts::fact_descriptor_schema_id().expect("descriptor schema"),
+        schema_id("mfm.test.fact_subject", 37),
+        schema_id("mfm.test.fact_response", 36),
+        vec![
+            mfm_facts::FactFieldDescriptor::new(
+                mfm_facts::FactFieldId::new("subject.chain").expect("field id"),
+                mfm_facts::FactFieldValueType::String,
+                mfm_facts::FactFieldExtraction::Subject(
+                    mfm_facts::CanonicalValuePath::new("chain").expect("path"),
+                ),
+                mfm_facts::FactFieldPolicy::new(
+                    vec![mfm_facts::FactQueryOperator::Equal],
+                    mfm_facts::FactFieldExposure::Returnable,
+                )
+                .required(),
+            )
+            .expect("subject field"),
+            mfm_facts::FactFieldDescriptor::new(
+                mfm_facts::FactFieldId::new("result.height").expect("field id"),
+                mfm_facts::FactFieldValueType::UnsignedInteger,
+                mfm_facts::FactFieldExtraction::Response(
+                    mfm_facts::CanonicalValuePath::new("height").expect("path"),
+                ),
+                mfm_facts::FactFieldPolicy::new(
+                    vec![
+                        mfm_facts::FactQueryOperator::Equal,
+                        mfm_facts::FactQueryOperator::GreaterThanOrEqual,
+                    ],
+                    mfm_facts::FactFieldExposure::Returnable,
+                )
+                .sortable()
+                .required(),
+            )
+            .expect("response field"),
+        ],
+        vec![mfm_facts::FactOrderingPolicy::new(
+            mfm_facts::FactOrderingName::new("result.height.desc").expect("ordering"),
+            vec![mfm_facts::FactOrderingTerm::new(
+                mfm_facts::FactFieldId::new("result.height").expect("field id"),
+                mfm_facts::SortDirection::Descending,
+                mfm_facts::NullOrdering::Last,
+                false,
+            )],
+        )
+        .expect("height ordering")],
+    )
+    .expect("fact descriptor")
+}
+
+fn fact_descriptor_hash() -> ContentDigest {
+    fact_descriptor_fixture().descriptor_hash
+}
+
+fn fact_descriptor_bytes() -> Vec<u8> {
+    fact_descriptor_fixture().descriptor_bytes
+}
+
+fn fact_descriptor_artifact_ref() -> ArtifactEvidenceRef {
+    fact_descriptor_fixture().descriptor_evidence
+}
+
+fn fact_descriptor_fixture() -> FactDescriptorProjectionFixtureForTest {
+    fact_descriptor_projection_fixture_for_test(fact_descriptor()).expect("descriptor fixture")
+}
+
+fn fact_subject_evidence() -> mfm_facts::FactSubjectEvidence {
+    let material = mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactFieldValue::new(
+        mfm_facts::FactFieldId::new("subject.chain").expect("field"),
+        mfm_facts::FactFieldValueType::String,
+        mfm_facts::FactCanonicalScalar::string("postgres_test_chain"),
+    )
+    .expect("subject value")])
+    .expect("subject material");
+    let namespace_hash =
+        mfm_facts::fact_subject_namespace_hash(&fact_descriptor()).expect("subject namespace hash");
+    mfm_facts::FactSubjectEvidence::from_material(namespace_hash, &material)
+        .expect("subject evidence")
+}
+
+fn fact_response_bytes() -> Vec<u8> {
+    fact_response_bytes_with_height(12_345)
+}
+
+fn fact_response_bytes_with_height(height: u64) -> Vec<u8> {
+    PlainCanonicalJsonBytes::from_json_str(&format!(r#"{{"height":{height}}}"#))
+        .expect("response bytes")
+        .to_vec()
+}
+
+fn fact_artifact_ref() -> ArtifactEvidenceRef {
+    fact_artifact_ref_for_response_bytes(&fact_response_bytes())
+}
+
+fn fact_artifact_ref_with_height(height: u64) -> ArtifactEvidenceRef {
+    fact_artifact_ref_for_response_bytes(&fact_response_bytes_with_height(height))
+}
+
+fn fact_artifact_ref_for_response_bytes(bytes: &[u8]) -> ArtifactEvidenceRef {
+    let digest = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
+        .expect("canonical response bytes")
+        .content_digest();
+    ArtifactEvidenceRef {
+        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+        digest,
+        byte_len: bytes.len() as u64,
+        media_type: media_type("application/json"),
+        schema_id: Some(schema_id("mfm.test.fact_response", 36)),
+        semantic_type_id: None,
+        producer_node_id: Some(node_id(30)),
+        producer_seed_id: None,
+        artifact_role: ArtifactRole::FactResponse,
+    }
+}
+
+fn fact_query_plan() -> mfm_facts::CanonicalFactQueryPlan {
+    fact_query_plan_with_limit(Some(1))
+}
+
+fn fact_query_plan_with_limit(limit: Option<u64>) -> mfm_facts::CanonicalFactQueryPlan {
+    let input = mfm_facts::FactQueryInput::new(
+        mfm_facts::StoreScopeRef::new("default").expect("store scope"),
+        mfm_facts::FactQueryScope::new(
+            mfm_facts::FactAudience::Platform,
+            mfm_facts::FactVisibilityScope::Default,
+        ),
+        mfm_facts::ScopeDecisionEvidence::new(content_digest(180)),
+        vec![
+            mfm_facts::FactQueryPredicate::new(
+                mfm_facts::FactFieldId::new("subject.chain").expect("field"),
+                mfm_facts::FactQueryOperator::Equal,
+                mfm_facts::FactCanonicalScalar::string("postgres_test_chain"),
+            ),
+            mfm_facts::FactQueryPredicate::new(
+                mfm_facts::FactFieldId::new("result.height").expect("field"),
+                mfm_facts::FactQueryOperator::GreaterThanOrEqual,
+                mfm_facts::FactCanonicalScalar::UnsignedInteger(12_000),
+            ),
+        ],
+        vec![
+            mfm_facts::FactFieldId::new("subject.chain").expect("field"),
+            mfm_facts::FactFieldId::new("result.height").expect("field"),
+        ],
+        mfm_facts::FactOrderingName::new("result.height.desc").expect("ordering"),
+        limit,
+    )
+    .expect("fact query input");
+    mfm_facts::compile_fact_query_plan(&fact_descriptor(), input).expect("fact query plan")
+}
+
+fn fact_claim_with_visibility(
+    response: &ArtifactEvidenceRef,
+    visibility: mfm_facts::FactVisibility,
+) -> mfm_facts::FactClaim {
+    mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
+        visibility,
+        fact_kind: mfm_facts::FactKind::new("mfm.test.fact").expect("fact kind"),
+        fact_descriptor_hash: fact_descriptor_hash(),
+        subject: fact_subject_evidence(),
+        observed_at: Some("2026-01-02T03:04:05Z".to_owned()),
+        request: Some(mfm_facts::FactRequestEvidence::new(
+            schema_id("mfm.test.fact_request", 34),
+            content_digest(35),
+        )),
+        response: mfm_facts::FactResponseEvidence::new(
+            schema_id("mfm.test.fact_response", 36),
+            response.digest.clone(),
+            response.artifact_id.clone(),
+            response.evidence_hash().expect("response evidence hash"),
+        ),
+        producer: mfm_facts::FactProducerProvenance::new(
+            CapabilityKind::new(
+                "mfm.test",
+                "fact",
+                DigestAlgorithm::Sha256JcsV1,
+                digest_bytes(32),
+            )
+            .expect("capability kind"),
+            CapabilityVersion::new("mfm.test.fact.v1").expect("capability version"),
+            AdapterKind::new(
+                "mfm.test",
+                "adapter",
+                DigestAlgorithm::Sha256JcsV1,
+                digest_bytes(33),
+            )
+            .expect("adapter kind"),
+            AdapterVersion::new("mfm.test.adapter.v1").expect("adapter version"),
+        ),
+    })
+    .expect("fact claim")
+}
+
+fn fact_recorded_with_visibility(
+    response: &ArtifactEvidenceRef,
+    visibility: mfm_facts::FactVisibility,
+) -> KernelEventPayload {
     KernelEventPayload::FactRecorded(events::FactRecorded {
         spec_hash: spec_hash(1),
         node_id: node_id(30),
         attempt_id: attempt_id(31),
-        capability_kind: CapabilityKind::new(
-            "mfm.test",
-            "fact",
-            DigestAlgorithm::Sha256JcsV1,
-            digest_bytes(32),
-        )
-        .expect("capability kind"),
-        capability_version: CapabilityVersion::new("mfm.test.fact.v1").expect("capability version"),
-        adapter_kind: AdapterKind::new(
-            "mfm.test",
-            "adapter",
-            DigestAlgorithm::Sha256JcsV1,
-            digest_bytes(33),
-        )
-        .expect("adapter kind"),
-        adapter_version: AdapterVersion::new("mfm.test.adapter.v1").expect("adapter version"),
-        request_schema_id: schema_id("mfm.test.fact_request", 34),
-        request_hash: content_digest(35),
-        response_schema_id: schema_id("mfm.test.fact_response", 36),
-        response_hash: digest,
-        fact_key: events::FactKey::new("fact-key-1").expect("fact key"),
-        artifact_id,
+        claim: fact_claim_with_visibility(response, visibility),
     })
 }
 
@@ -908,6 +1271,7 @@ fn saga_authority_spec(policy: SagaPolicySpec) -> spec::TypedExecutionSpec {
         effect_kind: effect_kind.clone(),
         capability_bindings: capability_bindings.clone(),
         adapter_bindings: Vec::new(),
+        fact_descriptor_allowlist: Vec::new(),
         side_effect: Some(contract.clone()),
         framework: None,
         planning_lineage: planning_lineage.clone(),
@@ -926,6 +1290,7 @@ fn saga_authority_spec(policy: SagaPolicySpec) -> spec::TypedExecutionSpec {
         effect_kind: effect_kind.clone(),
         capability_bindings: capability_bindings.clone(),
         adapter_bindings: Vec::new(),
+        fact_descriptor_allowlist: Vec::new(),
         side_effect: None,
         framework: Some(spec::FrameworkNodeSpec::SideEffectVerify(
             spec::SideEffectVerifyNodeSpec {
@@ -966,6 +1331,7 @@ fn saga_authority_spec(policy: SagaPolicySpec) -> spec::TypedExecutionSpec {
                 capabilities: capability_bindings.clone(),
                 runner: "mfm.test.runner".to_owned(),
                 side_effect_contract_digest: Some(contract.contract_digest.clone()),
+                emitted_fact_descriptors: Vec::new(),
             })),
             spec::DescriptorIdentity::Renderer(Box::new(renderer_descriptor.clone())),
         ],
@@ -984,8 +1350,95 @@ fn saga_authority_spec(policy: SagaPolicySpec) -> spec::TypedExecutionSpec {
     .expect("saga authority spec")
 }
 
+fn fact_authority_spec() -> spec::TypedExecutionSpec {
+    let mut authority = saga_authority_spec(SagaPolicySpec::NoSideEffects);
+    let planning_lineage = spec::PlanningLineage {
+        active_operation_instances: Vec::new(),
+        completed_operation_frames: Vec::new(),
+        lineage_digest: content_digest(185),
+    };
+    let config_ref = spec::ConfigRef {
+        schema_id: schema_id("mfm.test.fact_config", 134),
+        artifact_id: artifact_id(135),
+        digest: content_digest(136),
+        byte_len: 2,
+        media_type: media_type("application/json"),
+    };
+    let input_bindings = spec::InputBindingSpec {
+        input_schema_id: schema_id("mfm.test.fact_input", 137),
+        input_descriptor_id: descriptor_id(138),
+        root: spec::InputBindingNodeSpec::Unit,
+        digest: content_digest(139),
+    };
+    let fact_state_kind = state_kind(30);
+    let fact_state_version = StateVersion::new("mfm.test.fact_state.v1").expect("state version");
+    let fact_descriptor_id = descriptor_id(140);
+    let fact_effect_kind = EffectKind::new(
+        "mfm.test",
+        "fact",
+        DigestAlgorithm::Sha256JcsV1,
+        digest_bytes(141),
+    )
+    .expect("effect kind");
+    let capability_bindings =
+        mfm_capabilities::CapabilitySetDescriptor::new(Vec::new()).expect("empty capabilities");
+    let fact_descriptor_ref = spec::FactDescriptorRef {
+        descriptor_hash: fact_descriptor_hash(),
+    };
+
+    authority
+        .descriptor_identities
+        .push(spec::DescriptorIdentity::State(Box::new(
+            spec::StateDescriptorIdentity {
+                descriptor_id: fact_descriptor_id.clone(),
+                name: "mfm.test.fact".to_owned(),
+                state_kind: fact_state_kind.clone(),
+                state_version: fact_state_version.clone(),
+                config_schema_id: config_ref.schema_id.clone(),
+                input_schema_id: input_bindings.input_schema_id.clone(),
+                output_schema_id: schema_id("mfm.test.fact_output", 142),
+                output_semantic_type_id: semantic_id("fact_output", 143),
+                effect_kind: fact_effect_kind.clone(),
+                effect_class: "fact".to_owned(),
+                effect_name: "fact".to_owned(),
+                effect_version: EffectVersion::new("mfm.test.fact.v1").expect("effect version"),
+                capabilities: capability_bindings.clone(),
+                emitted_fact_descriptors: vec![fact_descriptor_ref.clone()],
+                runner: "mfm.test.runner".to_owned(),
+                side_effect_contract_digest: None,
+            },
+        )));
+    authority.config_refs.push(config_ref.clone());
+    authority.nodes.push(spec::NodeSpec {
+        node_id: node_id(30),
+        stable_key: spec::StableAuthorKey::new("fact").expect("stable key"),
+        scope_id: scope_id(144),
+        state_kind: fact_state_kind,
+        state_version: fact_state_version,
+        descriptor_id: fact_descriptor_id,
+        config_ref,
+        input_bindings,
+        output_cell: cell_id(145),
+        effect_kind: fact_effect_kind,
+        capability_bindings,
+        adapter_bindings: Vec::new(),
+        fact_descriptor_allowlist: vec![fact_descriptor_ref],
+        side_effect: None,
+        framework: None,
+        planning_lineage,
+        deterministic_predecessors: Vec::new(),
+    });
+    authority
+}
+
 fn run_id(byte: u8) -> RunId {
     run_id_with_saga_policy(byte, &SagaPolicySpec::NoSideEffects)
+}
+
+fn fact_run_id(byte: u8) -> RunId {
+    run_identity_material_for_fact_spec(byte)
+        .derive_run_id()
+        .expect("test fact run id")
 }
 
 fn run_id_with_saga_policy(byte: u8, policy: &SagaPolicySpec) -> RunId {
@@ -1005,6 +1458,13 @@ fn run_identity_material_for_saga_policy(
     run_identity_material_for_test(certified_spec_hash, &trust_scope_hex(byte))
 }
 
+fn run_identity_material_for_fact_spec(byte: u8) -> events::RunIdentityMaterialV1 {
+    let certified_spec_hash = fact_authority_spec()
+        .spec_hash()
+        .expect("fact authority spec hash");
+    run_identity_material_for_test(certified_spec_hash, &trust_scope_hex(byte))
+}
+
 fn run_identity_material_for_run_id(
     run_id: &RunId,
     policy: &SagaPolicySpec,
@@ -1018,6 +1478,18 @@ fn run_identity_material_for_run_id(
                 .unwrap_or(false)
         })
         .expect("test run id must be derived from saga policy identity material")
+}
+
+fn run_identity_material_for_fact_run_id(run_id: &RunId) -> events::RunIdentityMaterialV1 {
+    (0..=u8::MAX)
+        .map(run_identity_material_for_fact_spec)
+        .find(|material| {
+            material
+                .derive_run_id()
+                .map(|derived| &derived == run_id)
+                .unwrap_or(false)
+        })
+        .expect("test run id must be derived from fact identity material")
 }
 
 fn trust_scope_hex(byte: u8) -> String {
@@ -1427,18 +1899,6 @@ fn certificate_artifact_ref() -> ArtifactEvidenceRef {
     }
 }
 
-fn run_artifact_ref(artifact: &ArtifactEvidenceRef) -> events::RunArtifactEvidenceRef {
-    events::RunArtifactEvidenceRef {
-        artifact_id: artifact.artifact_id.clone(),
-        role: artifact.artifact_role,
-        schema_id: artifact.schema_id.clone(),
-        semantic_type_id: artifact.semantic_type_id.clone(),
-        content_digest: artifact.digest.clone(),
-        byte_len: artifact.byte_len,
-        media_type: artifact.media_type.clone(),
-    }
-}
-
 fn request(
     run_id: RunId,
     seq: u64,
@@ -1484,6 +1944,24 @@ fn certified_request_with_saga_policy(
     .expect("typed certified commit request")
 }
 
+fn certified_fact_request(
+    run_id: RunId,
+    seq: u64,
+    key: &str,
+    mut payloads: Vec<KernelEventPayload>,
+) -> mfm_store::v1::CommitRequest {
+    let preconditions = certify_payloads_for_fact_spec(&run_id, &mut payloads);
+    mfm_store::v1::CommitRequest::from_payloads(
+        run_id,
+        StreamSeq::new(seq).expect("seq"),
+        CommitKey::new(key).expect("commit key"),
+        payloads,
+        Vec::new(),
+        preconditions,
+    )
+    .expect("typed certified fact commit request")
+}
+
 fn certify_payloads_for_policy(
     run_id: &RunId,
     saga_policy: SagaPolicySpec,
@@ -1493,6 +1971,26 @@ fn certify_payloads_for_policy(
     let certified_spec_hash = authority_spec
         .spec_hash()
         .expect("saga authority spec hash");
+    for payload in payloads {
+        set_payload_spec_hash(payload, &certified_spec_hash);
+    }
+    CommitPreconditions {
+        certified_run_authority: Some(
+            CertifiedRunStoreAuthority::from_spec(run_id.clone(), &authority_spec)
+                .expect("certified run authority"),
+        ),
+        ..CommitPreconditions::default()
+    }
+}
+
+fn certify_payloads_for_fact_spec(
+    run_id: &RunId,
+    payloads: &mut [KernelEventPayload],
+) -> CommitPreconditions {
+    let authority_spec = fact_authority_spec();
+    let certified_spec_hash = authority_spec
+        .spec_hash()
+        .expect("fact authority spec hash");
     for payload in payloads {
         set_payload_spec_hash(payload, &certified_spec_hash);
     }
@@ -1599,6 +2097,30 @@ fn run_start_request_with_saga_policy(
     .expect("typed run start request")
 }
 
+fn fact_run_start_request(run_id: RunId, key: &str) -> mfm_store::v1::CommitRequest {
+    let authority_spec = fact_authority_spec();
+    mfm_store::v1::CommitRequest::from_payloads(
+        run_id.clone(),
+        StreamSeq::FIRST,
+        CommitKey::new(key).expect("commit key"),
+        vec![run_admitted_with_fact_descriptor(run_id.clone())],
+        vec![
+            spec_artifact_ref(),
+            certificate_artifact_ref(),
+            fact_descriptor_artifact_ref(),
+        ],
+        CommitPreconditions {
+            required_run_state: RequiredRunState::Absent,
+            certified_run_authority: Some(
+                CertifiedRunStoreAuthority::from_spec(run_id.clone(), &authority_spec)
+                    .expect("certified run authority"),
+            ),
+            ..CommitPreconditions::default()
+        },
+    )
+    .expect("typed fact run start request")
+}
+
 async fn append_prepared(
     store: &PostgresRunStore,
     mut request: mfm_store::v1::CommitRequest,
@@ -1649,6 +2171,193 @@ fn test_prepared_commit_bundle(
         .map(test_prepared_artifact_bytes)
         .collect::<mfm_store::v1::Result<Vec<_>>>()?;
     PreparedCommitBundle::new(plan, artifact_bytes, Vec::new())
+}
+
+fn test_prepared_commit_bundle_with_artifact_bytes(
+    plan: PreparedCommitPlan,
+    exact_artifacts: Vec<PreparedArtifactBytes>,
+) -> mfm_store::v1::Result<PreparedCommitBundle> {
+    let mut artifact_bytes = Vec::new();
+    for evidence in plan.admitted_artifacts() {
+        if let Some(exact) = exact_artifacts
+            .iter()
+            .find(|artifact| artifact.evidence() == evidence)
+        {
+            artifact_bytes.push(exact.clone());
+        } else {
+            artifact_bytes.push(test_prepared_artifact_bytes(evidence)?);
+        }
+    }
+    PreparedCommitBundle::new(plan, artifact_bytes, Vec::new())
+}
+
+fn test_prepared_commit_bundle_with_existing_artifact(
+    plan: PreparedCommitPlan,
+    evidence: &ArtifactEvidenceRef,
+) -> mfm_store::v1::Result<PreparedCommitBundle> {
+    let evidence_hash = evidence.evidence_hash()?;
+    PreparedCommitBundle::new(
+        plan,
+        Vec::new(),
+        vec![ExistingArtifactAdmission::new(
+            evidence.artifact_id.clone(),
+            evidence_hash,
+        )],
+    )
+}
+
+async fn append_fact_run_start(store: &PostgresRunStore, run_id: RunId) -> Result<CommitOutcome> {
+    let descriptor_ref = fact_descriptor_artifact_ref();
+    let descriptor_bytes =
+        PreparedArtifactBytes::new(fact_descriptor_bytes(), descriptor_ref.clone())?;
+    let request = fact_run_start_request(run_id, "run-start");
+    let plan = test_prepared_commit_plan(
+        request,
+        vec![
+            spec_artifact_ref(),
+            certificate_artifact_ref(),
+            descriptor_ref,
+        ],
+    )?;
+    store
+        .append_prepared_commit_bundle(test_prepared_commit_bundle_with_artifact_bytes(
+            plan,
+            vec![descriptor_bytes],
+        )?)
+        .await
+}
+
+async fn append_fact_attempt_start(
+    store: &PostgresRunStore,
+    run: RunId,
+    commit_key: &str,
+) -> Result<CommitOutcome> {
+    append_prepared(
+        store,
+        certified_fact_request(run, 2, commit_key, vec![fact_attempt_started()]),
+        Vec::new(),
+    )
+    .await
+}
+
+fn fact_commit_request(
+    run_id: RunId,
+    seq: u64,
+    key: &str,
+    response: &ArtifactEvidenceRef,
+) -> mfm_store::v1::CommitRequest {
+    fact_commit_request_with_visibility(
+        run_id,
+        seq,
+        key,
+        response,
+        mfm_facts::FactVisibility::indexed_default(mfm_facts::FactAudience::Platform),
+    )
+}
+
+fn fact_commit_request_with_visibility(
+    run_id: RunId,
+    seq: u64,
+    key: &str,
+    response: &ArtifactEvidenceRef,
+    visibility: mfm_facts::FactVisibility,
+) -> mfm_store::v1::CommitRequest {
+    let request = certified_fact_request(
+        run_id,
+        seq,
+        key,
+        vec![fact_recorded_with_visibility(response, visibility)],
+    );
+    let mut preconditions = request.preconditions().clone();
+    preconditions.required_run_state = RequiredRunState::Started;
+    request
+        .with_preconditions(preconditions)
+        .with_required_artifacts(vec![response.clone()])
+}
+
+async fn append_fact_commit(
+    store: &PostgresRunStore,
+    request: mfm_store::v1::CommitRequest,
+    response: &ArtifactEvidenceRef,
+) -> Result<CommitOutcome> {
+    append_fact_commit_with_response_bytes(store, request, response, fact_response_bytes()).await
+}
+
+async fn append_fact_commit_with_response_bytes(
+    store: &PostgresRunStore,
+    request: mfm_store::v1::CommitRequest,
+    response: &ArtifactEvidenceRef,
+    response_bytes: Vec<u8>,
+) -> Result<CommitOutcome> {
+    let response_bytes = PreparedArtifactBytes::new(response_bytes, response.clone())?;
+    let plan = test_prepared_commit_plan(request, vec![response.clone()])?;
+    store
+        .append_prepared_commit_bundle(test_prepared_commit_bundle_with_artifact_bytes(
+            plan,
+            vec![response_bytes],
+        )?)
+        .await
+}
+
+async fn assert_empty_fact_query(
+    store: &PostgresRunStore,
+    plan: &mfm_facts::CanonicalFactQueryPlan,
+) {
+    let query_result = store
+        .execute_fact_query(plan)
+        .await
+        .expect("empty fact query execution");
+    assert!(query_result.rows().is_empty());
+    assert_fact_query_receipt(
+        store,
+        plan,
+        &query_result,
+        mfm_facts::QueryResultCardinality::Exact(0),
+    );
+}
+
+async fn assert_single_public_fact_query(
+    store: &PostgresRunStore,
+    plan: &mfm_facts::CanonicalFactQueryPlan,
+) -> mfm_facts::FactQueryResult {
+    let query_result = store
+        .execute_fact_query(plan)
+        .await
+        .expect("fact query execution");
+    assert_eq!(query_result.rows().len(), 1);
+    let row = &query_result.rows()[0];
+    assert_eq!(row.fact_ref().fact_key(), &fact_key());
+    assert_eq!(row.returned_fields().len(), 2);
+    assert_eq!(
+        row.returned_fields()[0].field_id().as_str(),
+        "subject.chain"
+    );
+    assert_eq!(
+        row.returned_fields()[0].value(),
+        &mfm_facts::FactCanonicalScalar::string("postgres_test_chain")
+    );
+    assert_eq!(
+        row.returned_fields()[1].field_id().as_str(),
+        "result.height"
+    );
+    assert_eq!(
+        row.returned_fields()[1].value(),
+        &mfm_facts::FactCanonicalScalar::UnsignedInteger(12_345)
+    );
+    query_result
+}
+
+async fn append_fact_commit_with_missing_existing_artifact(
+    store: &PostgresRunStore,
+    request: mfm_store::v1::CommitRequest,
+    response: &ArtifactEvidenceRef,
+) -> Result<CommitOutcome> {
+    let plan = test_prepared_commit_plan(request, vec![response.clone()])?;
+    store
+        .append_prepared_commit_bundle(test_prepared_commit_bundle_with_existing_artifact(
+            plan, response,
+        )?)
+        .await
 }
 
 async fn append_run_start(
@@ -2338,6 +3047,7 @@ async fn observation_cursor_uses_durable_metadata_across_store_restarts() {
     let restarted = PostgresRunStore {
         pool: store.pool.clone(),
         authority: store.store_authority().clone(),
+        fact_receipt_signer: store.fact_receipt_signer.clone(),
     };
     let page = restarted
         .read_run_observations(RunObservationQuery::new(Some(cursor), 10, 0))
@@ -3577,51 +4287,23 @@ async fn saga_projection_rebuilds_from_events() {
 #[tokio::test]
 async fn required_artifacts_and_fact_projection_are_atomic() {
     let (store, schema) = test_store().await;
-    let run = run_id(10);
-    append_prepared(
-        &store,
-        run_start_request(run.clone(), "run-start"),
-        vec![spec_artifact_ref(), certificate_artifact_ref()],
-    )
-    .await
-    .expect("run start");
-    append_prepared(
-        &store,
-        request(
-            run.clone(),
-            2,
-            "fact-attempt-start",
-            vec![fact_attempt_started()],
-        ),
-        Vec::new(),
-    )
-    .await
-    .expect("fact attempt start");
-
-    let missing_artifact = artifact_id(11);
-    let missing_digest = content_digest(11);
-    let missing_ref = store_artifact_ref(
-        missing_artifact.clone(),
-        missing_digest.clone(),
-        ArtifactRole::FactResponse,
-    );
-    let fact_request = request(
-        run.clone(),
-        3,
-        "fact",
-        vec![fact_recorded(
-            missing_artifact.clone(),
-            missing_digest.clone(),
-        )],
-    );
-    let fact_request = fact_request.with_preconditions(CommitPreconditions {
-        required_run_state: RequiredRunState::Started,
-        ..CommitPreconditions::default()
-    });
-    let fact_request = fact_request.with_required_artifacts(vec![missing_ref.clone()]);
-    let err = append_prepared(&store, fact_request.clone(), Vec::new())
+    let run = fact_run_id(10);
+    append_fact_run_start(&store, run.clone())
         .await
-        .expect_err("missing fact artifact");
+        .expect("run start");
+    append_fact_attempt_start(&store, run.clone(), "fact-attempt-start")
+        .await
+        .expect("fact attempt start");
+
+    let response_ref = fact_artifact_ref();
+    let fact_request = fact_commit_request(run.clone(), 3, "fact", &response_ref);
+    let err = append_fact_commit_with_missing_existing_artifact(
+        &store,
+        fact_request.clone(),
+        &response_ref,
+    )
+    .await
+    .expect_err("missing fact artifact");
     assert!(matches!(
         err,
         PostgresStoreError::Store(StoreError::MissingArtifact { .. })
@@ -3630,21 +4312,232 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
         store.expected_next_seq(&run).await.expect("next seq"),
         StreamSeq::new(3).expect("seq")
     );
+    assert_fact_projection_table_counts(&store, &run, 1, 0, 0).await;
+    let empty_plan = fact_query_plan_with_limit(None);
+    assert_empty_fact_query(&store, &empty_plan).await;
 
-    append_prepared(&store, fact_request, vec![missing_ref])
+    append_fact_commit(&store, fact_request.clone(), &response_ref)
         .await
         .expect("fact commit after artifact");
     let projection = store
         .status_projection_snapshot(&run)
         .await
         .expect("projection");
+    assert_fact_projection_counts(&projection, 1, 1, 1, 2);
+    assert!(projection.fact_records().any(|(_, fact)| {
+        fact.node_id == node_id(30)
+            && fact.attempt_id == attempt_id(31)
+            && fact.claim.subject().fact_key() == &fact_key()
+    }));
     assert!(projection
-        .fact(
-            &node_id(30),
-            &attempt_id(31),
-            &events::FactKey::new("fact-key-1").unwrap()
+        .fact_index_entries()
+        .any(|(_, fact)| fact.fact_key == fact_key()));
+    assert_fact_projection_table_counts(&store, &run, 1, 1, 2).await;
+    let exact_plan = fact_query_plan_with_limit(Some(10));
+    let exact_query_result = assert_single_public_fact_query(&store, &exact_plan).await;
+    assert_fact_query_receipt(
+        &store,
+        &exact_plan,
+        &exact_query_result,
+        mfm_facts::QueryResultCardinality::Exact(1),
+    );
+    let query_plan = fact_query_plan();
+    let query_result = assert_single_public_fact_query(&store, &query_plan).await;
+    let receipt = query_result.receipt();
+    assert_fact_query_receipt(
+        &store,
+        &query_plan,
+        &query_result,
+        mfm_facts::QueryResultCardinality::AtLeast(1),
+    );
+    assert_eq!(receipt.returned_refs().len(), 1);
+    assert_eq!(
+        receipt
+            .read_frontier()
+            .descriptor_catalog_watermark()
+            .as_u64(),
+        1
+    );
+    assert_eq!(receipt.read_frontier().projection_generation().as_u64(), 1);
+    assert!(receipt.read_frontier().max_included_store_commit_order() >= 1);
+    let unsigned_store = PostgresRunStore {
+        pool: store.pool.clone(),
+        authority: store.store_authority().clone(),
+        fact_receipt_signer: None,
+    };
+    let missing_signer = unsigned_store
+        .execute_fact_query(&query_plan)
+        .await
+        .expect_err("missing signer rejects fact query");
+    assert!(matches!(
+        missing_signer,
+        PostgresStoreError::Store(StoreError::ReceiptAuthentication { .. })
+    ));
+    let mismatched_signer = PostgresFactReceiptSigner::from_ed25519_signing_key_bytes(
+        mfm_facts::StoreIdentity::new("store.test").expect("store identity"),
+        mfm_facts::StoreKeyId::new("key.test").expect("key id"),
+        [18; 32],
+    );
+    assert!(require_fact_receipt_signer_matches_authority(
+        store.store_authority(),
+        &mismatched_signer
+    )
+    .is_err());
+    assert!(!format!("{:?}", mismatched_signer).contains("signing_key"));
+
+    sqlx::query("DELETE FROM fact_index_terms WHERE source_run_id = $1")
+        .bind(run.as_str())
+        .execute(&store.pool)
+        .await
+        .expect("delete fact terms");
+    sqlx::query("DELETE FROM fact_index WHERE source_run_id = $1")
+        .bind(run.as_str())
+        .execute(&store.pool)
+        .await
+        .expect("delete fact index");
+    sqlx::query("DELETE FROM run_fact_descriptor_admissions WHERE run_id = $1")
+        .bind(run.as_str())
+        .execute(&store.pool)
+        .await
+        .expect("delete run fact descriptor admissions");
+    let err = store
+        .status_projection_snapshot(&run)
+        .await
+        .expect_err("missing fact projection rows fail validation");
+    assert!(matches!(err, PostgresStoreError::Corruption(_)));
+
+    let rebuilt = rebuild_fact_projection_tables_client(&store.pool, &run)
+        .await
+        .expect("fact projection rebuild");
+    assert_fact_projection_counts(&rebuilt, 1, 1, 1, 2);
+    let projection = store
+        .status_projection_snapshot(&run)
+        .await
+        .expect("projection after fact rebuild");
+    assert_fact_projection_counts(&projection, 1, 1, 1, 2);
+
+    let retry = append_fact_commit(&store, fact_request, &response_ref)
+        .await
+        .expect("fact commit idempotent retry");
+    assert!(matches!(retry, CommitOutcome::Idempotent(_)));
+    assert_fact_projection_table_counts(&store, &run, 1, 1, 2).await;
+
+    drop_schema(&store, &schema).await;
+}
+
+#[tokio::test]
+async fn fact_descriptor_catalog_deduplicates_across_runs() {
+    let (store, schema) = test_store().await;
+    let first_run = fact_run_id(11);
+    let second_run = fact_run_id(12);
+
+    append_fact_run_start(&store, first_run.clone())
+        .await
+        .expect("first run start");
+    append_fact_run_start(&store, second_run.clone())
+        .await
+        .expect("second run start with duplicate descriptor");
+    assert_eq!(global_fact_descriptor_catalog_count(&store).await, 1);
+    assert_fact_projection_table_counts(&store, &first_run, 1, 0, 0).await;
+    assert_fact_projection_table_counts(&store, &second_run, 1, 0, 0).await;
+
+    append_fact_attempt_start(&store, first_run.clone(), "first-fact-attempt-start")
+        .await
+        .expect("first fact attempt start");
+    append_fact_attempt_start(&store, second_run.clone(), "second-fact-attempt-start")
+        .await
+        .expect("second fact attempt start");
+
+    let first_response_ref = fact_artifact_ref_with_height(12_345);
+    let first_fact_request =
+        fact_commit_request(first_run.clone(), 3, "first-fact", &first_response_ref);
+    append_fact_commit_with_response_bytes(
+        &store,
+        first_fact_request,
+        &first_response_ref,
+        fact_response_bytes_with_height(12_345),
+    )
+    .await
+    .expect("first fact commit");
+
+    let second_response_ref = fact_artifact_ref_with_height(12_346);
+    let second_fact_request =
+        fact_commit_request(second_run.clone(), 3, "second-fact", &second_response_ref);
+    append_fact_commit_with_response_bytes(
+        &store,
+        second_fact_request,
+        &second_response_ref,
+        fact_response_bytes_with_height(12_346),
+    )
+    .await
+    .expect("second fact commit");
+
+    assert_eq!(global_fact_descriptor_catalog_count(&store).await, 1);
+    assert_fact_projection_table_counts(&store, &first_run, 1, 1, 2).await;
+    assert_fact_projection_table_counts(&store, &second_run, 1, 1, 2).await;
+
+    let query_plan = fact_query_plan_with_limit(None);
+    let query_result = store
+        .execute_fact_query(&query_plan)
+        .await
+        .expect("fact query execution");
+    assert_eq!(query_result.rows().len(), 2);
+    assert_fact_query_receipt(
+        &store,
+        &query_plan,
+        &query_result,
+        mfm_facts::QueryResultCardinality::Exact(2),
+    );
+    assert_eq!(
+        query_result
+            .receipt()
+            .read_frontier()
+            .descriptor_catalog_watermark()
+            .as_u64(),
+        1
+    );
+
+    drop_schema(&store, &schema).await;
+}
+
+#[tokio::test]
+async fn run_private_fact_records_load_without_index_rows() {
+    let (store, schema) = test_store().await;
+    let run = fact_run_id(11);
+    append_fact_run_start(&store, run.clone())
+        .await
+        .expect("run start");
+    append_fact_attempt_start(&store, run.clone(), "private-fact-attempt-start")
+        .await
+        .expect("fact attempt start");
+
+    let response_ref = fact_artifact_ref();
+    let fact_request = fact_commit_request_with_visibility(
+        run.clone(),
+        3,
+        "private-fact",
+        &response_ref,
+        mfm_facts::FactVisibility::RunPrivate,
+    );
+    append_fact_commit(&store, fact_request, &response_ref)
+        .await
+        .expect("private fact commit");
+
+    let projection = store
+        .status_projection_snapshot(&run)
+        .await
+        .expect("projection");
+    assert_fact_projection_counts(&projection, 1, 1, 0, 0);
+    assert!(projection.fact_records().any(|(_, fact)| {
+        matches!(
+            fact.claim.visibility(),
+            mfm_facts::FactVisibility::RunPrivate
         )
-        .is_some());
+    }));
+    assert_fact_projection_table_counts(&store, &run, 1, 0, 0).await;
+
+    let private_plan = fact_query_plan_with_limit(Some(10));
+    assert_empty_fact_query(&store, &private_plan).await;
 
     drop_schema(&store, &schema).await;
 }

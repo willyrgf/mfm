@@ -1,0 +1,36 @@
+[package]
+name = "mfm-adapters-btc-jsonrpc"
+version = "0.1.0"
+edition = "2021"
+description = "Bitcoin JSON-RPC adapter runners for typed workflow execution"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+
+[package.metadata.mfm]
+category = "adapter"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+mfm-artifact-capabilities = { path = "../../artifact-capabilities" }
+mfm-btc-capabilities = { path = "../../btc-capabilities" }
+mfm-canonical = { path = "../../kernel/canonical" }
+mfm-capabilities = { path = "../../kernel/capabilities" }
+mfm-collectors-btc-jsonrpc-http = { path = "../../collectors/btc-jsonrpc-http" }
+mfm-events = { path = "../../kernel/events" }
+mfm-fact-capabilities = { path = "../../fact-capabilities" }
+mfm-facts = { path = "../../kernel/facts" }
+mfm-ids = { path = "../../kernel/ids" }
+mfm-program = { path = "../../kernel/program" }
+mfm-runtime = { path = "../../kernel/runtime" }
+mfm-store = { path = "../../kernel/store" }
+mfm-states-btc = { path = "../../states/btc" }
+mfm-values = { path = "../../kernel/values" }
+
+[dev-dependencies]
+ed25519-dalek = { workspace = true }
+mfm-store = { path = "../../kernel/store", features = ["test-support"] }
+mfm-spec = { path = "../../kernel/spec" }
+tokio = { workspace = true }

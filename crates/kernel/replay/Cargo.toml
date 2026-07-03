@@ -19,6 +19,7 @@ mfm-canonical = { path = "../canonical" }
 mfm-capabilities = { path = "../capabilities" }
 mfm-certify = { path = "../certify" }
 mfm-events = { path = "../events" }
+mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-manual-auth = { path = "../manual-auth" }
 mfm-runtime = { path = "../runtime" }
@@ -28,5 +29,7 @@ serde_json = { version = "1.0" }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
+mfm-store = { path = "../store", features = ["test-support"] }
 trybuild = "1.0"

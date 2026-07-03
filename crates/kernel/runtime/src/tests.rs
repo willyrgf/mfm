@@ -5,7 +5,8 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
-use mfm_canonical::sha256_digest_bytes;
+use ed25519_dalek::SigningKey;
+use mfm_canonical::{sha256_digest_bytes, CanonicalValue};
 use mfm_capabilities::{
     CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor, CapabilitySpec, EffectSpec,
     ExternalMutationAuthorityRole, ManagedPlatformWrite, ReadExternalRole,
@@ -24,15 +25,21 @@ use mfm_program::{
     SideEffectNodeParams, SideEffectSagaPolicy, SideEffectState, StateKey, StateRegistryBuilder,
     StateResult, StateSpec,
 };
-use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
+use mfm_program_derive::{MfmConfig, MfmFactType, MfmValue, PublicOutputs};
 use mfm_store::v1::{
     test_support::{
+        event_id_for_envelope_inputs_for_test as test_event_id_for_envelope_inputs,
+        fact_query_receipt_trust_root_for_test as test_store_fact_query_receipt_trust_root,
         prepared_commit_bundle_from_plan as test_bundle_from_plan,
         prepared_commit_plan_for_test as test_prepared_commit_plan,
+        signed_fact_query_receipt_for_test as test_signed_fact_query_receipt,
+        SignedFactQueryReceiptFixtureInputForTest,
     },
     RunEventStore,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::commit::{CommitPlanner, RunnerOutputCommitInput};
 
 const D0: DigestBytes = DigestBytes::from_array([0x10; 32]);
 const D1: DigestBytes = DigestBytes::from_array([0x11; 32]);
@@ -68,6 +75,301 @@ fn synthetic_side_effect_pair_id(byte: u8) -> SideEffectPairId {
     )
 }
 
+fn test_fact_descriptor() -> mfm_facts::FactDescriptor {
+    <RuntimeTestFact as mfm_program::MfmFactType>::descriptor().expect("fact descriptor")
+}
+
+fn test_fact_descriptor_with_kind(kind: &str) -> mfm_facts::FactDescriptor {
+    let descriptor = test_fact_descriptor();
+    mfm_facts::FactDescriptor::new(
+        mfm_facts::FactKind::new(kind).expect("fact kind"),
+        descriptor.descriptor_schema_id().clone(),
+        descriptor.subject_schema_id().clone(),
+        descriptor.response_schema_id().clone(),
+        descriptor.fields().to_vec(),
+        descriptor.orderings().to_vec(),
+    )
+    .expect("fact descriptor")
+}
+
+fn test_fact_key(subject_amount: u64) -> mfm_facts::FactKey {
+    test_fact_subject_evidence(subject_amount)
+        .fact_key()
+        .clone()
+}
+
+fn test_fact_query_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[0x52; 32])
+}
+
+fn test_fact_query_trust_root() -> store::FactQueryReceiptTrustRoot {
+    let key = test_fact_query_signing_key();
+    test_store_fact_query_receipt_trust_root(
+        &key,
+        mfm_facts::StoreIdentity::new("store.default").expect("store identity"),
+        mfm_facts::StoreKeyId::new("key.default").expect("store key id"),
+    )
+}
+
+fn test_fact_query_evidence() -> mfm_facts::FactQueryEvidence {
+    test_fact_query_evidence_with_returned_refs(Vec::new())
+}
+
+fn test_fact_query_evidence_with_returned_refs(
+    returned_refs: Vec<mfm_facts::InternalFactRef>,
+) -> mfm_facts::FactQueryEvidence {
+    let query_scope = mfm_facts::FactQueryScope::new(
+        mfm_facts::FactAudience::Platform,
+        mfm_facts::FactVisibilityScope::Default,
+    );
+    let store_scope = mfm_facts::StoreScopeRef::new("default").expect("store scope");
+    let input = mfm_facts::FactQueryInput::new(
+        store_scope.clone(),
+        query_scope.clone(),
+        mfm_facts::ScopeDecisionEvidence::new(content(0x42)),
+        vec![mfm_facts::FactQueryPredicate::new(
+            mfm_facts::FactFieldId::new("subject.amount").expect("field id"),
+            mfm_facts::FactQueryOperator::Equal,
+            mfm_facts::FactCanonicalScalar::UnsignedInteger(42),
+        )],
+        vec![mfm_facts::FactFieldId::new("result.amount").expect("field id")],
+        mfm_facts::FactOrderingName::new("result.amount.asc").expect("ordering"),
+        Some(10),
+    )
+    .expect("query input");
+    let plan =
+        mfm_facts::compile_fact_query_plan(&test_fact_descriptor(), input).expect("query plan");
+    let frontier = mfm_facts::StoreReadFrontier::new(
+        store_scope,
+        query_scope,
+        mfm_facts::DescriptorCatalogWatermark::new(1),
+        mfm_facts::FactProjectionGeneration::new(1),
+        10,
+        mfm_facts::StoreCommitWatermark::new(10),
+    );
+    let rows = returned_refs
+        .into_iter()
+        .map(|fact_ref| mfm_facts::FactQueryResultRow::new(fact_ref, Vec::new()))
+        .collect::<Vec<_>>();
+    let plan_hash = mfm_facts::fact_query_plan_hash(&plan).expect("plan hash");
+    let key = test_fact_query_signing_key();
+    let receipt = test_signed_fact_query_receipt(SignedFactQueryReceiptFixtureInputForTest {
+        plan_hash: &plan_hash,
+        key: &key,
+        store_identity: mfm_facts::StoreIdentity::new("store.default").expect("store identity"),
+        key_id: mfm_facts::StoreKeyId::new("key.default").expect("store key id"),
+        read_frontier: frontier,
+        rows: &rows,
+        include_returned_field_summaries: false,
+        limit: plan.limit(),
+    });
+    let selection = mfm_facts::FactSelectionEvidence::new(content(0x45), Vec::new(), None)
+        .expect("selection evidence");
+    mfm_facts::FactQueryEvidence::new(plan, receipt, selection)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn test_fact_claim(
+    subject_amount: u64,
+    request_schema_id: SchemaId,
+    request_hash: ContentDigest,
+    response_evidence: &store::ArtifactEvidenceRef,
+    capability_kind: CapabilityKind,
+    capability_version: CapabilityVersion,
+    adapter_kind: AdapterKind,
+    adapter_version: AdapterVersion,
+) -> mfm_facts::FactClaim {
+    test_fact_claim_for_descriptor(
+        &test_fact_descriptor(),
+        subject_amount,
+        request_schema_id,
+        request_hash,
+        response_evidence,
+        capability_kind,
+        capability_version,
+        adapter_kind,
+        adapter_version,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn test_fact_claim_for_descriptor(
+    descriptor: &mfm_facts::FactDescriptor,
+    subject_amount: u64,
+    request_schema_id: SchemaId,
+    request_hash: ContentDigest,
+    response_evidence: &store::ArtifactEvidenceRef,
+    capability_kind: CapabilityKind,
+    capability_version: CapabilityVersion,
+    adapter_kind: AdapterKind,
+    adapter_version: AdapterVersion,
+) -> mfm_facts::FactClaim {
+    mfm_facts::FactClaim::new(mfm_facts::FactClaimParts {
+        visibility: mfm_facts::FactVisibility::indexed_default(mfm_facts::FactAudience::Platform),
+        fact_kind: descriptor.fact_kind().clone(),
+        fact_descriptor_hash: mfm_facts::fact_descriptor_hash(descriptor).expect("descriptor hash"),
+        subject: test_fact_subject_evidence_for_descriptor(descriptor, subject_amount),
+        observed_at: Some("2026-01-02T03:04:05Z".to_owned()),
+        request: Some(mfm_facts::FactRequestEvidence::new(
+            request_schema_id,
+            request_hash,
+        )),
+        response: mfm_facts::FactResponseEvidence::new(
+            response_evidence
+                .schema_id
+                .clone()
+                .expect("fact response schema"),
+            response_evidence.digest.clone(),
+            response_evidence.artifact_id.clone(),
+            response_evidence
+                .evidence_hash()
+                .expect("fact response evidence hash"),
+        ),
+        producer: mfm_facts::FactProducerProvenance::new(
+            capability_kind,
+            capability_version,
+            adapter_kind,
+            adapter_version,
+        ),
+    })
+    .expect("fact claim")
+}
+
+fn test_fact_subject_evidence(subject_amount: u64) -> mfm_facts::FactSubjectEvidence {
+    test_fact_subject_evidence_for_descriptor(&test_fact_descriptor(), subject_amount)
+}
+
+fn test_fact_subject_evidence_for_descriptor(
+    descriptor: &mfm_facts::FactDescriptor,
+    subject_amount: u64,
+) -> mfm_facts::FactSubjectEvidence {
+    let material = mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactFieldValue::new(
+        mfm_facts::FactFieldId::new("subject.amount").expect("field"),
+        mfm_facts::FactFieldValueType::UnsignedInteger,
+        mfm_facts::FactCanonicalScalar::UnsignedInteger(subject_amount),
+    )
+    .expect("subject value")])
+    .expect("subject material");
+    let namespace_hash =
+        mfm_facts::fact_subject_namespace_hash(descriptor).expect("fact subject namespace hash");
+    mfm_facts::FactSubjectEvidence::from_material(namespace_hash, &material)
+        .expect("subject evidence")
+}
+
+fn test_fact_response_artifact(
+    node: &spec::NodeSpec,
+    amount: u64,
+) -> (store::ArtifactEvidenceRef, Vec<u8>) {
+    let bytes =
+        canonical_json(serde_json::json!({ "amount": amount })).expect("fact response json");
+    let digest = bytes.content_digest();
+    let evidence = store::ArtifactEvidenceRef {
+        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+        digest,
+        byte_len: bytes.as_bytes().len() as u64,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(
+            <CertifierValue as mfm_values::MfmValue>::schema_id().expect("fact response schema"),
+        ),
+        semantic_type_id: None,
+        producer_node_id: Some(node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::FactResponse,
+    };
+    (evidence, bytes.to_vec())
+}
+
+fn test_returned_fact_authority(
+    fixture: &Fixture,
+    node: &spec::NodeSpec,
+) -> (
+    mfm_facts::InternalFactRef,
+    store::FactDescriptorProjection,
+    store::FactRecordProjection,
+    store::FactIndexProjection,
+    Vec<store::FactIndexTermProjection>,
+) {
+    let descriptor = test_fact_descriptor();
+    let source_event_id = EventId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0x77; 32]),
+    );
+    let descriptor_fixture =
+        store::test_support::fact_descriptor_projection_fixture_for_test(descriptor.clone())
+            .expect("descriptor projection fixture");
+    let fact_fixture = store::test_support::fact_projection_fixture_for_test(
+        &descriptor,
+        descriptor_fixture.descriptor_hash.clone(),
+        store::test_support::FactProjectionFixtureInputForTest {
+            run_id: fixture.run_id.clone(),
+            source_seq: 2,
+            source_ordinal: 0,
+            source_event_id,
+            node_id: node.node_id.clone(),
+            attempt_id: AttemptId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([0x79; 32]),
+            ),
+            commit_id: store::CommitKey::new("test-returned-fact").expect("commit key"),
+            store_commit_order: 2,
+            recorded_at: "2026-07-01T00:00:00Z".to_owned(),
+            observed_at: Some("2026-07-01T00:01:00Z".to_owned()),
+            visibility: mfm_facts::FactVisibility::indexed_default(
+                mfm_facts::FactAudience::Platform,
+            ),
+            subject: CanonicalValue::object([("amount", CanonicalValue::Unsigned(17))])
+                .expect("fact subject"),
+            response: CanonicalValue::object([("amount", CanonicalValue::Unsigned(23))])
+                .expect("fact response"),
+            request: None,
+            response_schema_id: <CertifierValue as mfm_values::MfmValue>::schema_id()
+                .expect("fact response schema"),
+            response_artifact_id: None,
+            producer: mfm_facts::FactProducerProvenance::new(
+                fixture.cap_kind.clone(),
+                fixture.cap_version.clone(),
+                fixture.adapter_kind.clone(),
+                fixture.adapter_version.clone(),
+            ),
+        },
+    )
+    .expect("fact projection fixture");
+    let index_projection = fact_fixture.index.expect("indexed fact projection");
+    let fact_ref = index_projection.internal_ref().expect("internal fact ref");
+    (
+        fact_ref,
+        descriptor_fixture.projection,
+        fact_fixture.record,
+        index_projection,
+        fact_fixture.terms,
+    )
+}
+
+fn projection_snapshot_with_returned_fact_authority(
+    base: &store::ProjectionSnapshot,
+    descriptor: store::FactDescriptorProjection,
+    record: store::FactRecordProjection,
+    index: store::FactIndexProjection,
+    terms: Vec<store::FactIndexTermProjection>,
+) -> store::ProjectionSnapshot {
+    let mut parts = store::ProjectionSnapshotParts::from_snapshot(base);
+    parts
+        .fact_descriptors
+        .insert(descriptor.descriptor_hash.clone(), descriptor);
+    parts
+        .fact_records
+        .insert(record.fact_claim_id.clone(), record);
+    parts
+        .fact_index_entries
+        .insert(index.fact_claim_id.clone(), index);
+    parts.fact_term_entries.extend(
+        terms
+            .into_iter()
+            .map(|term| ((term.fact_claim_id.clone(), term.field_id.clone()), term)),
+    );
+    store::ProjectionSnapshot::from_parts(parts)
+        .expect("projection snapshot with returned fact authority")
+}
 fn fixture_side_effect_pair_id(fixture: &Fixture, node: &spec::NodeSpec) -> SideEffectPairId {
     match &node.framework {
         Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) => verify.pair_id.clone(),
@@ -362,6 +664,38 @@ fn block_on_ready<F: Future>(future: F) -> F::Output {
 }
 
 #[derive(Clone, Default)]
+struct RunnerKitArtifactProvider {
+    artifacts: BTreeMap<ArtifactId, (Vec<u8>, store::ArtifactEvidenceRef)>,
+}
+
+impl RunnerKitArtifactProvider {
+    fn new(artifacts: Vec<(Vec<u8>, store::ArtifactEvidenceRef)>) -> Self {
+        Self {
+            artifacts: artifacts
+                .into_iter()
+                .map(|(bytes, evidence)| (evidence.artifact_id.clone(), (bytes, evidence)))
+                .collect(),
+        }
+    }
+}
+
+impl store::RetainedArtifactReadProvider for RunnerKitArtifactProvider {
+    fn read_retained_artifact<'a>(
+        &'a self,
+        requirement: &'a store::EventArtifactRequirement,
+    ) -> store::RetainedArtifactReadFuture<'a> {
+        Box::pin(async move {
+            let Some((bytes, evidence)) = self.artifacts.get(&requirement.artifact_id) else {
+                return Err(store::StoreError::MissingArtifact {
+                    artifact_id: requirement.artifact_id.clone(),
+                });
+            };
+            store::VerifiedRunArtifactBytes::new(bytes.clone(), evidence.clone(), requirement)
+        })
+    }
+}
+
+#[derive(Clone, Default)]
 struct TestTypedRunStore {
     inner: store::AsyncInMemoryRunStore,
 }
@@ -431,6 +765,13 @@ impl store::RunEventStore for TestTypedRunStore {
         self.inner.load_run_stream(run_id)
     }
 
+    fn load_committed_run_stream<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::CommittedRunStream, Self::Error> {
+        self.inner.load_committed_run_stream(run_id)
+    }
+
     fn expected_next_seq<'a>(
         &'a self,
         run_id: &'a RunId,
@@ -443,6 +784,12 @@ impl store::RunEventStore for TestTypedRunStore {
         run_id: &'a RunId,
     ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
         self.inner.status_projection_snapshot(run_id)
+    }
+
+    fn fact_projection_snapshot<'a>(
+        &'a self,
+    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        self.inner.fact_projection_snapshot()
     }
 }
 
@@ -558,6 +905,13 @@ impl store::RunEventStore for RecordingTypedRunStore {
         self.inner.load_run_stream(run_id)
     }
 
+    fn load_committed_run_stream<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::CommittedRunStream, Self::Error> {
+        self.inner.load_committed_run_stream(run_id)
+    }
+
     fn expected_next_seq<'a>(
         &'a self,
         run_id: &'a RunId,
@@ -570,6 +924,12 @@ impl store::RunEventStore for RecordingTypedRunStore {
         run_id: &'a RunId,
     ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
         self.inner.status_projection_snapshot(run_id)
+    }
+
+    fn fact_projection_snapshot<'a>(
+        &'a self,
+    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        self.inner.fact_projection_snapshot()
     }
 }
 
@@ -630,6 +990,13 @@ impl store::RunEventStore for StaleOnceTypedRunStore {
         self.inner.load_run_stream(run_id)
     }
 
+    fn load_committed_run_stream<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::CommittedRunStream, Self::Error> {
+        self.inner.load_committed_run_stream(run_id)
+    }
+
     fn expected_next_seq<'a>(
         &'a self,
         run_id: &'a RunId,
@@ -643,6 +1010,12 @@ impl store::RunEventStore for StaleOnceTypedRunStore {
     ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
         self.inner.status_projection_snapshot(run_id)
     }
+
+    fn fact_projection_snapshot<'a>(
+        &'a self,
+    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        self.inner.fact_projection_snapshot()
+    }
 }
 
 delegate_execution_claim_store_to_inner!(StaleOnceTypedRunStore);
@@ -655,33 +1028,6 @@ struct TestRuntimeArtifactStore {
 }
 
 impl store::RetainedArtifactReadProvider for TestRuntimeArtifactStore {
-    fn read_retained_artifact<'a>(
-        &'a self,
-        requirement: &'a store::EventArtifactRequirement,
-    ) -> store::RetainedArtifactReadFuture<'a> {
-        Box::pin(async move {
-            let (bytes, evidence) = self
-                .artifacts
-                .lock()
-                .map_err(|_| store::StoreError::ArtifactReadFailed {
-                    artifact_id: requirement.artifact_id.clone(),
-                })?
-                .get(&requirement.artifact_id)
-                .cloned()
-                .ok_or_else(|| store::StoreError::MissingArtifact {
-                    artifact_id: requirement.artifact_id.clone(),
-                })?;
-            store::VerifiedRunArtifactBytes::new(bytes, evidence, requirement)
-        })
-    }
-}
-
-#[derive(Clone)]
-struct RecordingRuntimeArtifactStore {
-    artifacts: Arc<Mutex<TestArtifactMap>>,
-}
-
-impl store::RetainedArtifactReadProvider for RecordingRuntimeArtifactStore {
     fn read_retained_artifact<'a>(
         &'a self,
         requirement: &'a store::EventArtifactRequirement,
@@ -934,11 +1280,58 @@ struct CertifierValue {
     amount: u64,
 }
 
+#[allow(clippy::duplicated_attributes)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue, MfmFactType)]
+#[mfm(
+    namespace = "mfm.runtime.test",
+    name = "fact",
+    version = "1",
+    schema = "mfm.runtime.test.fact"
+)]
+#[mfm_fact(kind = "mfm.runtime.test.fact")]
+#[mfm_fact(field(
+    id = "subject.amount",
+    source = "subject",
+    path = "amount",
+    value_type = "unsigned_integer",
+    operator = "equal",
+    exposure = "returnable"
+))]
+#[mfm_fact(field(
+    id = "result.amount",
+    source = "result",
+    path = "amount",
+    value_type = "unsigned_integer",
+    operators(equal, greater_than),
+    exposure = "returnable",
+    sortable
+))]
+#[mfm_fact(ordering(
+    name = "result.amount.asc",
+    term(field = "result.amount", direction = "ascending", nulls = "last")
+))]
+struct RuntimeTestFact {
+    subject: CertifierValue,
+    response: CertifierValue,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct FixtureOutputValue {
     amount: u64,
     node_id: String,
     attempt_id: String,
+}
+
+fn fixture_output_value(
+    amount: u64,
+    node_id: impl Into<String>,
+    attempt_id: impl Into<String>,
+) -> FixtureOutputValue {
+    FixtureOutputValue {
+        amount,
+        node_id: node_id.into(),
+        attempt_id: attempt_id.into(),
+    }
 }
 
 impl mfm_values::MfmValue for FixtureOutputValue {
@@ -966,6 +1359,35 @@ struct FixtureSideEffectEvidence {
     amount: u64,
     node_id: String,
     attempt_id: String,
+}
+
+fn fixture_side_effect_evidence(
+    amount: u64,
+    node_id: impl Into<String>,
+    attempt_id: impl Into<String>,
+) -> FixtureSideEffectEvidence {
+    FixtureSideEffectEvidence {
+        amount,
+        node_id: node_id.into(),
+        attempt_id: attempt_id.into(),
+    }
+}
+
+fn fixture_side_effect_evidence_for_ctx(
+    ctx: &ErasedRunCtx<'_>,
+    amount: u64,
+) -> FixtureSideEffectEvidence {
+    fixture_side_effect_evidence(
+        amount,
+        ctx.node().node_id.as_str(),
+        ctx.attempt_id().as_str(),
+    )
+}
+
+impl From<&FixtureSideEffectEvidence> for FixtureOutputValue {
+    fn from(evidence: &FixtureSideEffectEvidence) -> Self {
+        fixture_output_value(evidence.amount, &evidence.node_id, &evidence.attempt_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
@@ -1136,11 +1558,11 @@ macro_rules! impl_runtime_read_state {
                 _input: Self::Input,
                 _caps: &'a Self::Caps,
             ) -> Self::RunFuture<'a> {
-                std::future::ready(Ok(FixtureOutputValue {
-                    amount: self.config.multiplier,
-                    node_id: $name.to_owned(),
-                    attempt_id: "typed-read".to_owned(),
-                }))
+                std::future::ready(Ok(fixture_output_value(
+                    self.config.multiplier,
+                    $name,
+                    "typed-read",
+                )))
             }
         }
     };
@@ -1198,11 +1620,7 @@ macro_rules! impl_runtime_side_effect_state {
                     .ok()
                     .and_then(|value| value.get("amount").and_then(serde_json::Value::as_u64))
                     .unwrap_or(self.config.multiplier);
-                Ok(FixtureSideEffectEvidence {
-                    amount,
-                    node_id: $name.to_owned(),
-                    attempt_id: "typed-intent".to_owned(),
-                })
+                Ok(fixture_side_effect_evidence(amount, $name, "typed-intent"))
             }
 
             fn idempotency_input(
@@ -1228,11 +1646,7 @@ macro_rules! impl_runtime_side_effect_state {
                 _intent: &Self::Intent,
                 receipt: &Self::Receipt,
             ) -> StateResult<Self::Output> {
-                Ok(FixtureOutputValue {
-                    amount: receipt.amount,
-                    node_id: receipt.node_id.clone(),
-                    attempt_id: receipt.attempt_id.clone(),
-                })
+                Ok(receipt.into())
             }
 
             fn output_from_confirmation(
@@ -1241,11 +1655,7 @@ macro_rules! impl_runtime_side_effect_state {
                 _intent: &Self::Intent,
                 confirmation: &Self::Confirmation,
             ) -> StateResult<Self::Output> {
-                Ok(FixtureOutputValue {
-                    amount: confirmation.amount,
-                    node_id: confirmation.node_id.clone(),
-                    attempt_id: confirmation.attempt_id.clone(),
-                })
+                Ok(confirmation.into())
             }
         }
     };
@@ -1317,11 +1727,11 @@ impl StateSpec for RuntimeTailState {
 
 impl PureState for RuntimeTailState {
     fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
-        Ok(FixtureOutputValue {
-            amount: input.amount * self.config.multiplier,
-            node_id: input.node_id,
-            attempt_id: input.attempt_id,
-        })
+        Ok(fixture_output_value(
+            input.amount * self.config.multiplier,
+            input.node_id,
+            input.attempt_id,
+        ))
     }
 }
 
@@ -1484,10 +1894,215 @@ impl ErasedNodeRunner for ErrorRunner {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+struct RunnerKitEmptyConfig {}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct RunnerKitStructInput {
+    left: CertifierValue,
+    right: Vec<CertifierValue>,
+}
+
+fn runner_kit_config_artifact(node: &spec::NodeSpec, bytes: &[u8]) -> store::ArtifactEvidenceRef {
+    assert_eq!(node.config_ref.digest, digest_for_bytes(bytes));
+    store::ArtifactEvidenceRef {
+        artifact_id: node.config_ref.artifact_id.clone(),
+        digest: node.config_ref.digest.clone(),
+        byte_len: node.config_ref.byte_len,
+        media_type: node.config_ref.media_type.clone(),
+        schema_id: Some(node.config_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::TypedConfig,
+    }
+}
+
+fn runner_kit_value_artifact(
+    bytes: &[u8],
+    artifact_role: events::ArtifactRole,
+    producer_node_id: Option<NodeId>,
+    producer_seed_id: Option<SeedId>,
+) -> store::ArtifactEvidenceRef {
+    let digest = digest_for_bytes(bytes);
+    store::ArtifactEvidenceRef {
+        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+        digest,
+        byte_len: bytes.len() as u64,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(fixture_value_schema_id()),
+        semantic_type_id: Some(fixture_value_semantic_id()),
+        producer_node_id,
+        producer_seed_id,
+        artifact_role,
+    }
+}
+
+fn runner_kit_input_cell(
+    evidence: &store::ArtifactEvidenceRef,
+    terminal: MaterializedCellTerminal,
+) -> MaterializedInputNode {
+    MaterializedInputNode::Cell(Box::new(MaterializedCell {
+        cell_id: CellId::from_digest(evidence.digest.algorithm(), *evidence.digest.digest()),
+        schema_id: evidence.schema_id.clone().expect("schema id"),
+        semantic_type_id: evidence.semantic_type_id.clone().expect("semantic id"),
+        value_lineage: spec::ValueLineageRef {
+            lineage_digest: evidence.digest.clone(),
+        },
+        terminal,
+    }))
+}
+
+fn runner_kit_skipped_cell() -> MaterializedInputNode {
+    MaterializedInputNode::Cell(Box::new(MaterializedCell {
+        cell_id: CellId::from_digest(DigestAlgorithm::Sha256JcsV1, D8),
+        schema_id: fixture_value_schema_id(),
+        semantic_type_id: fixture_value_semantic_id(),
+        value_lineage: spec::ValueLineageRef {
+            lineage_digest: content(0x78),
+        },
+        terminal: MaterializedCellTerminal::Skipped {
+            skip_reason: events::SkipReason {
+                code: events::ErrorCode::new("runner_kit_skip").expect("skip code"),
+                safe_message: "input was skipped".to_owned(),
+            },
+        },
+    }))
+}
+
+#[test]
+fn runner_kit_loads_config_and_materialized_inputs() {
+    let fixture = fixture();
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let left_bytes = br#"{"amount":4}"#;
+    let right_a_bytes = br#"{"amount":7}"#;
+    let right_b_bytes = br#"{"amount":9}"#;
+
+    let config_evidence = runner_kit_config_artifact(node, TEST_CONFIG_BYTES);
+    let left_evidence = runner_kit_value_artifact(
+        left_bytes,
+        events::ArtifactRole::StateOutput,
+        Some(node.node_id.clone()),
+        None,
+    );
+    let right_a_evidence = runner_kit_value_artifact(
+        right_a_bytes,
+        events::ArtifactRole::SeedInput,
+        None,
+        Some(fixture.seed_ref.seed_id.clone()),
+    );
+    let right_b_evidence = runner_kit_value_artifact(
+        right_b_bytes,
+        events::ArtifactRole::StateOutput,
+        Some(node.node_id.clone()),
+        None,
+    );
+    let artifacts = RunnerKitArtifactProvider::new(vec![
+        (TEST_CONFIG_BYTES.to_vec(), config_evidence),
+        (left_bytes.to_vec(), left_evidence.clone()),
+        (right_a_bytes.to_vec(), right_a_evidence.clone()),
+        (right_b_bytes.to_vec(), right_b_evidence.clone()),
+    ]);
+
+    let config = block_on_ready(load_runner_config_for_node::<RunnerKitEmptyConfig>(
+        node, &artifacts,
+    ))
+    .expect("runner config");
+    assert_eq!(config.into_inner(), RunnerKitEmptyConfig {});
+
+    let left_node = runner_kit_input_cell(
+        &left_evidence,
+        MaterializedCellTerminal::Produced {
+            producer_node_id: node.node_id.clone(),
+            artifact_id: left_evidence.artifact_id.clone(),
+            content_digest: left_evidence.digest.clone(),
+        },
+    );
+    let right_a_node = runner_kit_input_cell(
+        &right_a_evidence,
+        MaterializedCellTerminal::Seed {
+            seed_id: fixture.seed_ref.seed_id.clone(),
+            artifact_id: right_a_evidence.artifact_id.clone(),
+            content_digest: right_a_evidence.digest.clone(),
+        },
+    );
+    let right_b_node = runner_kit_input_cell(
+        &right_b_evidence,
+        MaterializedCellTerminal::Produced {
+            producer_node_id: node.node_id.clone(),
+            artifact_id: right_b_evidence.artifact_id.clone(),
+            content_digest: right_b_evidence.digest.clone(),
+        },
+    );
+    let inputs = MaterializedInputs {
+        input_schema_id: fixture_value_schema_id(),
+        root: MaterializedInputNode::Struct(vec![
+            NamedMaterializedInput {
+                field_path: spec::PublicFieldPath::new("left").expect("field path"),
+                node: left_node.clone(),
+            },
+            NamedMaterializedInput {
+                field_path: spec::PublicFieldPath::new("right").expect("field path"),
+                node: MaterializedInputNode::Vec(vec![right_a_node.clone(), right_b_node.clone()]),
+            },
+        ]),
+    };
+
+    let decoded = block_on_ready(load_materialized_struct_input::<RunnerKitStructInput>(
+        &inputs, &artifacts,
+    ))
+    .expect("struct input");
+    assert_eq!(decoded.left, CertifierValue { amount: 4 });
+    assert_eq!(
+        decoded.right,
+        vec![CertifierValue { amount: 7 }, CertifierValue { amount: 9 }]
+    );
+
+    let left = block_on_ready(load_materialized_struct_field_value::<CertifierValue>(
+        &inputs, "left", &artifacts,
+    ))
+    .expect("struct field");
+    assert_eq!(left, CertifierValue { amount: 4 });
+
+    let non_empty_inputs = MaterializedInputs {
+        input_schema_id: fixture_value_schema_id(),
+        root: MaterializedInputNode::NonEmptyVec(vec![right_a_node, right_b_node]),
+    };
+    let values = block_on_ready(load_non_empty_materialized_input::<CertifierValue>(
+        &non_empty_inputs,
+        &artifacts,
+    ))
+    .expect("non-empty input");
+    assert_eq!(
+        values.values(),
+        &[CertifierValue { amount: 7 }, CertifierValue { amount: 9 }]
+    );
+}
+
+#[test]
+fn runner_kit_rejects_skipped_materialized_input_cell() {
+    let artifacts = RunnerKitArtifactProvider::default();
+    let error = block_on_ready(load_materialized_node_value::<CertifierValue>(
+        &runner_kit_skipped_cell(),
+        &artifacts,
+    ))
+    .expect_err("skipped cells cannot be loaded");
+
+    assert!(matches!(
+        error,
+        RuntimeError::InvalidRunnerOutput(message) if message.contains("skipped")
+    ));
+}
+
 #[test]
 fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
     let fixture = fixture();
-    with_runner_erased_ctx(&fixture, &fixture.cell_a, |ctx| {
+    let fact_descriptor_ref =
+        mfm_program::fact_descriptor_ref::<RuntimeTestFact>().expect("fact descriptor ref");
+    let mut node = node_by_output(&fixture, &fixture.cell_a).clone();
+    node.fact_descriptor_allowlist = vec![fact_descriptor_ref.clone()];
+
+    with_runner_erased_ctx_for_node(&fixture, &node, |ctx| {
         let artifacts = RunnerArtifactBuilder::new(&ctx);
         let payloads = RunnerPayloadBuilder::new(&ctx);
         let value = CertifierValue { amount: 42 };
@@ -1527,24 +2142,191 @@ fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
         }
 
         let response = artifacts.fact_response(&value).expect("fact response");
-        let fact = payloads
-            .fact_recorded(
-                events::FactKey::new("mfm.test.runner_kit.fact").expect("fact key"),
-                &value,
-                &response,
+        assert_eq!(
+            response.evidence().artifact_role,
+            events::ArtifactRole::FactResponse
+        );
+        assert_eq!(
+            response.evidence().producer_node_id.as_ref(),
+            Some(&ctx.node().node_id)
+        );
+
+        let fact = RuntimeTestFact {
+            subject: CertifierValue { amount: 7 },
+            response: CertifierValue { amount: 9 },
+        };
+        let expected_descriptor =
+            <RuntimeTestFact as mfm_program::MfmFactType>::descriptor().expect("fact descriptor");
+        let expected_descriptor_hash =
+            mfm_facts::fact_descriptor_hash(&expected_descriptor).expect("descriptor hash");
+        assert_eq!(
+            fact_descriptor_ref.descriptor_hash,
+            expected_descriptor_hash
+        );
+
+        let mut fact_output = RunnerOutputBuilder::new(&ctx);
+        let staged_fact = fact_output
+            .record_fact(
+                FactRecordInput::new(
+                    fact,
+                    mfm_facts::FactVisibility::indexed_default(mfm_facts::FactAudience::Platform),
+                )
+                .observed_at("2026-01-02T03:04:05Z"),
                 binding.clone(),
             )
-            .expect("fact payload");
-        match &fact {
-            RunnerEventPayload::FactRecorded(payload) => {
+            .expect("record typed fact");
+        let fact_output = fact_output.finish();
+        assert_eq!(fact_output.staged_artifacts.len(), 1);
+        assert_eq!(fact_output.staged_retention_refs.len(), 0);
+        assert_eq!(fact_output.payloads.len(), 1);
+        let fact_artifact = &fact_output.staged_artifacts[0];
+        assert_eq!(
+            fact_artifact.evidence().artifact_role,
+            events::ArtifactRole::FactResponse
+        );
+        assert_eq!(
+            fact_artifact.evidence().artifact_id,
+            *staged_fact.response_artifact_id()
+        );
+        assert_eq!(
+            fact_artifact.evidence().digest,
+            *staged_fact.response_hash()
+        );
+        match &fact_output.payloads[0] {
+            RunnerEventPayload::FactRecorded(recorded) => {
+                let payload = recorded.payload();
+                assert_eq!(payload.spec_hash, *ctx.spec_hash());
                 assert_eq!(payload.node_id, ctx.node().node_id);
                 assert_eq!(payload.attempt_id, *ctx.attempt_id());
-                assert_eq!(payload.request_hash, state.evidence().digest);
-                assert_eq!(payload.response_hash, response.evidence().digest);
-                assert_eq!(payload.artifact_id, response.evidence().artifact_id);
+                assert_eq!(
+                    payload.claim.fact_descriptor_hash(),
+                    &expected_descriptor_hash
+                );
+                assert_eq!(payload.claim.subject().fact_key(), staged_fact.fact_key());
+                assert_eq!(payload.claim.observed_at(), Some("2026-01-02T03:04:05Z"));
+                assert!(payload.claim.request().is_none());
+                assert_eq!(
+                    payload.claim.response().response_schema_id(),
+                    &<CertifierValue as mfm_values::MfmValue>::schema_id()
+                        .expect("response schema")
+                );
+                assert_eq!(
+                    payload.claim.response().response_hash(),
+                    staged_fact.response_hash()
+                );
+                assert_eq!(
+                    payload.claim.response().artifact_id(),
+                    staged_fact.response_artifact_id()
+                );
+                assert_eq!(
+                    payload.claim.response().artifact_evidence_hash(),
+                    &fact_artifact
+                        .evidence()
+                        .evidence_hash()
+                        .expect("artifact evidence hash")
+                );
+                assert_eq!(
+                    payload.claim.producer().capability_kind(),
+                    &fixture.cap_kind
+                );
+                assert_eq!(
+                    payload.claim.producer().capability_version(),
+                    &fixture.cap_version
+                );
+                assert_eq!(
+                    payload.claim.producer().adapter_kind(),
+                    &fixture.adapter_kind
+                );
+                assert_eq!(
+                    payload.claim.producer().adapter_version(),
+                    &fixture.adapter_version
+                );
             }
             _ => panic!("expected fact recorded payload"),
         }
+
+        let composed_fact = RuntimeTestFact {
+            subject: CertifierValue { amount: 8 },
+            response: CertifierValue { amount: 10 },
+        };
+        let mut composed_output = RunnerOutputBuilder::new(&ctx);
+        composed_output
+            .state_output_and_record_fact(
+                FactRecordInput::new(
+                    composed_fact,
+                    mfm_facts::FactVisibility::indexed_default(mfm_facts::FactAudience::Platform),
+                ),
+                binding.clone(),
+            )
+            .expect("state output and fact record");
+        let composed_output = composed_output.finish();
+        assert_eq!(composed_output.staged_artifacts.len(), 2);
+        assert_eq!(composed_output.staged_retention_refs.len(), 1);
+        assert_eq!(composed_output.payloads.len(), 2);
+        assert_eq!(
+            composed_output.staged_artifacts[0].evidence().artifact_role,
+            events::ArtifactRole::StateOutput
+        );
+        assert_eq!(
+            composed_output.staged_artifacts[1].evidence().artifact_role,
+            events::ArtifactRole::FactResponse
+        );
+        assert!(matches!(
+            composed_output.payloads[0],
+            RunnerEventPayload::FactRecorded(_)
+        ));
+        assert!(matches!(
+            composed_output.payloads[1],
+            RunnerEventPayload::CellProduced(_)
+        ));
+
+        let query_evidence = test_fact_query_evidence();
+        let expected_query_evidence_hash =
+            mfm_facts::fact_query_evidence_hash(&query_evidence).expect("query evidence hash");
+        let expected_query_evidence_schema =
+            mfm_facts::fact_query_evidence_schema_id().expect("query evidence schema");
+        let mut query_output = RunnerOutputBuilder::new(&ctx);
+        let staged_query_evidence = query_output
+            .record_fact_query_evidence(query_evidence, &test_fact_query_trust_root())
+            .expect("record fact query evidence");
+        let query_output = query_output.finish();
+        assert_eq!(query_output.staged_artifacts.len(), 1);
+        assert_eq!(query_output.staged_retention_refs.len(), 1);
+        assert!(query_output.payloads.is_empty());
+        let query_artifact = &query_output.staged_artifacts[0];
+        assert_eq!(
+            query_artifact.evidence().artifact_role,
+            events::ArtifactRole::FactQueryEvidence
+        );
+        assert_eq!(
+            query_artifact.evidence().schema_id.as_ref(),
+            Some(&expected_query_evidence_schema)
+        );
+        assert!(query_artifact.evidence().semantic_type_id.is_none());
+        assert_eq!(
+            query_artifact.evidence().digest,
+            expected_query_evidence_hash
+        );
+        assert_eq!(
+            query_artifact.evidence().artifact_id,
+            *staged_query_evidence.artifact_id()
+        );
+        assert_eq!(
+            query_artifact
+                .evidence()
+                .evidence_hash()
+                .expect("query artifact evidence hash"),
+            *staged_query_evidence.evidence_hash()
+        );
+        let expected_query_retention = events::RetentionRef {
+            artifact_id: query_artifact.evidence().artifact_id.clone(),
+            role: events::ArtifactRole::FactQueryEvidence,
+            content_digest: query_artifact.evidence().digest.clone(),
+        };
+        assert_eq!(
+            query_output.staged_retention_refs[0].refs(),
+            &[expected_query_retention]
+        );
 
         let ledger_key =
             events::SideEffectLedgerKey::new("mfm.test.runner_kit.ledger").expect("ledger key");
@@ -1833,15 +2615,298 @@ fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
 
         let mut side_effect_output = RunnerOutputBuilder::new(&ctx);
         side_effect_output
-            .stage_side_effect_artifact(&intent, ledger_key, 1)
-            .expect("stage side-effect artifact")
-            .retain_runtime_evidence(&intent)
+            .stage_side_effect_runtime_evidence(&intent, &side_effect)
+            .expect("stage side-effect runtime evidence")
             .payload(intent_payload);
         let side_effect_output = side_effect_output.finish();
         assert_eq!(side_effect_output.staged_artifacts.len(), 1);
         assert_eq!(side_effect_output.staged_retention_refs.len(), 1);
         assert_eq!(side_effect_output.payloads.len(), 1);
     });
+}
+
+#[tokio::test]
+async fn fact_query_evidence_prepares_private_artifact_reference_without_fact_record() {
+    let fixture = fixture();
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = started_fixture_store(&scheduler, &fixture).await;
+    let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
+    let projections = store.projection_snapshot().clone();
+    let run_stream = store.load_run_stream(&fixture.run_id);
+    let committed =
+        store::CommittedRunStream::from_events(fixture.run_id.clone(), run_stream.clone())
+            .expect("committed stream");
+    let view = RuntimeRunView::from_committed_stream(&fixture.runtime_spec, &committed)
+        .expect("runtime view");
+    let descriptor = fixture
+        .runtime_spec
+        .state_descriptor_for_node(node)
+        .expect("state descriptor");
+    let output_cell = fixture
+        .runtime_spec
+        .cell(&node.output_cell)
+        .expect("output cell");
+    let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
+    let caps =
+        CertifiedRuntimeCapabilities::new(node.node_id.clone(), node.capability_bindings.clone());
+    let recorded_facts = RecordedFacts::default();
+    let invocation = PreparedRunnerInvocation {
+        runtime_spec: &fixture.runtime_spec,
+        run_id: &fixture.run_id,
+        spec_hash: fixture.runtime_spec.spec_hash(),
+        node,
+        descriptor,
+        output_cell,
+        attempt_id: &attempt_id,
+        attempt_no: 1,
+        config_artifact,
+        inputs: MaterializedInputs {
+            input_schema_id: node.input_bindings.input_schema_id.clone(),
+            root: MaterializedInputNode::Unit,
+        },
+        caps,
+        recorded_facts,
+        projections: &projections,
+        run_stream: &run_stream,
+        view: &view,
+    };
+    let ctx = ErasedRunCtx::from_prepared(&invocation);
+    let output_bytes = br#"{"amount":11}"#.to_vec();
+    let state_evidence =
+        state_output_artifact_for_bytes(ctx.node(), ctx.descriptor(), &output_bytes);
+    let state_artifact =
+        StagedArtifact::inline_attempt_artifact(&ctx, output_bytes, state_evidence.clone())
+            .expect("stage state output");
+    let mut query_output = RunnerOutputBuilder::new(&ctx);
+    query_output
+        .record_fact_query_evidence(test_fact_query_evidence(), &test_fact_query_trust_root())
+        .expect("record query evidence");
+    let query_output = query_output.finish();
+    let mut staged_artifacts = vec![state_artifact];
+    staged_artifacts.extend(query_output.staged_artifacts);
+    let mut tampered_retention_refs = query_output.staged_retention_refs.clone();
+    tampered_retention_refs[0].refs = vec![retention_ref_for_artifact(&state_evidence)];
+    let tampered_output = fact_query_terminal_output(
+        &ctx,
+        &state_evidence,
+        staged_artifacts.clone(),
+        tampered_retention_refs,
+    );
+    let tampered_error = match prepare_runner_output_for_invocation(&invocation, tampered_output) {
+        Ok(_) => panic!("missing query evidence retention authority rejects at commit prep"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        tampered_error,
+        RuntimeError::InvalidRunnerOutput(message)
+            if message.contains("missing query evidence artifact")
+    ));
+
+    let output = fact_query_terminal_output(
+        &ctx,
+        &state_evidence,
+        staged_artifacts,
+        query_output.staged_retention_refs,
+    );
+    let prepared =
+        prepare_runner_output_for_invocation(&invocation, output).expect("prepare runner output");
+    let query_reference = prepared
+        .commit
+        .request()
+        .payloads()
+        .iter()
+        .find_map(|payload| match payload {
+            events::KernelEventPayload::ArtifactReferenced(payload)
+                if payload.artifact_ref.role == events::ArtifactRole::FactQueryEvidence =>
+            {
+                Some(payload)
+            }
+            _ => None,
+        })
+        .expect("fact query evidence artifact reference");
+    assert_eq!(
+        query_reference.artifact_ref.schema_id,
+        mfm_facts::fact_query_evidence_schema_id().expect("query evidence schema")
+    );
+    assert!(query_reference.artifact_ref.semantic_type_id.is_none());
+    assert!(prepared
+        .commit
+        .request()
+        .payloads()
+        .iter()
+        .any(|payload| matches!(
+            payload,
+            events::KernelEventPayload::RetentionRefsAppended(payload)
+                if payload.reason == events::RetentionReason::RuntimeEvidence
+                    && payload.refs.iter().any(|reference| {
+                        reference.artifact_id == query_reference.artifact_ref.artifact_id
+                            && reference.role == events::ArtifactRole::FactQueryEvidence
+                            && reference.content_digest
+                                == query_reference.artifact_ref.content_digest
+                    })
+        )));
+    assert!(!prepared
+        .commit
+        .request()
+        .payloads()
+        .iter()
+        .any(|payload| matches!(payload, events::KernelEventPayload::FactRecorded(_))));
+}
+
+#[tokio::test]
+async fn fact_query_evidence_retains_non_empty_returned_fact_authority() {
+    let fixture = fixture();
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = started_fixture_store(&scheduler, &fixture).await;
+    let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
+    let projections = store.projection_snapshot().clone();
+    let (fact_ref, descriptor_projection, record_projection, index_projection, term_projections) =
+        test_returned_fact_authority(&fixture, node);
+    let projections = projection_snapshot_with_returned_fact_authority(
+        &projections,
+        descriptor_projection.clone(),
+        record_projection,
+        index_projection.clone(),
+        term_projections,
+    );
+    let run_stream = store.load_run_stream(&fixture.run_id);
+    let committed =
+        store::CommittedRunStream::from_events(fixture.run_id.clone(), run_stream.clone())
+            .expect("committed stream");
+    let view = RuntimeRunView::from_committed_stream(&fixture.runtime_spec, &committed)
+        .expect("runtime view");
+    let view = RuntimeRunView {
+        projections: projections.clone(),
+        ..view
+    };
+    let descriptor = fixture
+        .runtime_spec
+        .state_descriptor_for_node(node)
+        .expect("state descriptor");
+    let output_cell = fixture
+        .runtime_spec
+        .cell(&node.output_cell)
+        .expect("output cell");
+    let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
+    let caps =
+        CertifiedRuntimeCapabilities::new(node.node_id.clone(), node.capability_bindings.clone());
+    let recorded_facts = RecordedFacts::default();
+    let invocation = PreparedRunnerInvocation {
+        runtime_spec: &fixture.runtime_spec,
+        run_id: &fixture.run_id,
+        spec_hash: fixture.runtime_spec.spec_hash(),
+        node,
+        descriptor,
+        output_cell,
+        attempt_id: &attempt_id,
+        attempt_no: 1,
+        config_artifact,
+        inputs: MaterializedInputs {
+            input_schema_id: node.input_bindings.input_schema_id.clone(),
+            root: MaterializedInputNode::Unit,
+        },
+        caps,
+        recorded_facts,
+        projections: &projections,
+        run_stream: &run_stream,
+        view: &view,
+    };
+    let ctx = ErasedRunCtx::from_prepared(&invocation);
+    let output_bytes = br#"{"amount":11}"#.to_vec();
+    let state_evidence =
+        state_output_artifact_for_bytes(ctx.node(), ctx.descriptor(), &output_bytes);
+    let state_artifact =
+        StagedArtifact::inline_attempt_artifact(&ctx, output_bytes, state_evidence.clone())
+            .expect("stage state output");
+    let query_evidence = test_fact_query_evidence_with_returned_refs(vec![fact_ref.clone()]);
+    let mut query_output = RunnerOutputBuilder::new(&ctx);
+    query_output
+        .record_fact_query_evidence(query_evidence, &test_fact_query_trust_root())
+        .expect("record query evidence");
+    let query_output = query_output.finish();
+    let mut staged_artifacts = vec![state_artifact];
+    staged_artifacts.extend(query_output.staged_artifacts);
+    let mut tampered_retention_refs = query_output.staged_retention_refs.clone();
+    tampered_retention_refs[0]
+        .refs
+        .retain(|reference| reference.role != events::ArtifactRole::FactDescriptor);
+    let tampered_output = fact_query_terminal_output(
+        &ctx,
+        &state_evidence,
+        staged_artifacts.clone(),
+        tampered_retention_refs,
+    );
+    let tampered_error = match prepare_runner_output_for_invocation(&invocation, tampered_output) {
+        Ok(_) => panic!("missing descriptor retention authority rejects at commit prep"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        tampered_error,
+        RuntimeError::InvalidRunnerOutput(message)
+            if message.contains("missing descriptor artifact authority")
+    ));
+
+    let output = fact_query_terminal_output(
+        &ctx,
+        &state_evidence,
+        staged_artifacts,
+        query_output.staged_retention_refs,
+    );
+    let prepared = prepare_runner_output_for_invocation(&invocation, output)
+        .expect("prepare runner output with returned fact query refs");
+    let query_reference = prepared
+        .commit
+        .request()
+        .payloads()
+        .iter()
+        .find_map(|payload| match payload {
+            events::KernelEventPayload::ArtifactReferenced(payload)
+                if payload.artifact_ref.role == events::ArtifactRole::FactQueryEvidence =>
+            {
+                Some(payload)
+            }
+            _ => None,
+        })
+        .expect("fact query evidence artifact reference");
+    let retained_refs = prepared
+        .commit
+        .request()
+        .payloads()
+        .iter()
+        .find_map(|payload| match payload {
+            events::KernelEventPayload::RetentionRefsAppended(payload)
+                if payload.reason == events::RetentionReason::RuntimeEvidence =>
+            {
+                Some(payload.refs.as_slice())
+            }
+            _ => None,
+        })
+        .expect("runtime evidence retention refs");
+
+    assert!(retained_refs.contains(&events::RetentionRef {
+        artifact_id: query_reference.artifact_ref.artifact_id.clone(),
+        role: events::ArtifactRole::FactQueryEvidence,
+        content_digest: query_reference.artifact_ref.content_digest.clone(),
+    }));
+    assert!(retained_refs.contains(&events::RetentionRef {
+        artifact_id: descriptor_projection.descriptor_artifact_id,
+        role: events::ArtifactRole::FactDescriptor,
+        content_digest: descriptor_projection.descriptor_hash,
+    }));
+    assert!(retained_refs.contains(&events::RetentionRef {
+        artifact_id: index_projection.artifact_id,
+        role: events::ArtifactRole::FactResponse,
+        content_digest: index_projection.response_hash,
+    }));
+    assert_eq!(retained_refs.len(), 3);
+    assert!(!prepared
+        .commit
+        .request()
+        .payloads()
+        .iter()
+        .any(|payload| matches!(payload, events::KernelEventPayload::FactRecorded(_))));
 }
 
 #[test]
@@ -2082,16 +3147,8 @@ impl TestSideEffectDriverCallbacks {
         attempt_id: String,
     ) -> Result<SideEffectIntentPlan<FixtureSideEffectEvidence, FixtureSideEffectEvidence>> {
         Ok(SideEffectIntentPlan {
-            intent: FixtureSideEffectEvidence {
-                amount: 21,
-                node_id: node_id.clone(),
-                attempt_id: attempt_id.clone(),
-            },
-            idempotency: FixtureSideEffectEvidence {
-                amount: 34,
-                node_id,
-                attempt_id,
-            },
+            intent: fixture_side_effect_evidence(21, node_id.clone(), attempt_id.clone()),
+            idempotency: fixture_side_effect_evidence(34, node_id, attempt_id),
             idempotency_key: events::IdempotencyKeyRef::new("mfm.test.driver.idem")
                 .expect("idempotency key"),
             capability_binding: RunnerCapabilityBinding {
@@ -2171,35 +3228,19 @@ impl SideEffectDriverCallbacks for TestSideEffectDriverCallbacks {
         let attempt_id = ctx.attempt_id().as_str().to_owned();
         Box::pin(async move {
             Ok(match decision {
-                TestSubmissionDecision::Observed => {
-                    SideEffectSubmissionDecision::Observed(FixtureSideEffectEvidence {
-                        amount: 55,
-                        node_id: node_id.clone(),
-                        attempt_id: attempt_id.clone(),
-                    })
-                }
-                TestSubmissionDecision::Unknown => {
-                    SideEffectSubmissionDecision::Unknown(FixtureSideEffectEvidence {
-                        amount: 56,
-                        node_id: node_id.clone(),
-                        attempt_id: attempt_id.clone(),
-                    })
-                }
-                TestSubmissionDecision::NotSubmitted => {
-                    SideEffectSubmissionDecision::NotSubmitted(FixtureSideEffectEvidence {
-                        amount: 57,
-                        node_id: node_id.clone(),
-                        attempt_id: attempt_id.clone(),
-                    })
-                }
+                TestSubmissionDecision::Observed => SideEffectSubmissionDecision::Observed(
+                    fixture_side_effect_evidence(55, node_id.clone(), attempt_id.clone()),
+                ),
+                TestSubmissionDecision::Unknown => SideEffectSubmissionDecision::Unknown(
+                    fixture_side_effect_evidence(56, node_id.clone(), attempt_id.clone()),
+                ),
+                TestSubmissionDecision::NotSubmitted => SideEffectSubmissionDecision::NotSubmitted(
+                    fixture_side_effect_evidence(57, node_id.clone(), attempt_id.clone()),
+                ),
                 TestSubmissionDecision::Ambiguous => SideEffectSubmissionDecision::Ambiguous {
                     ambiguity_code: events::AmbiguityCode::new("mfm_test_driver_ambiguous")
                         .expect("ambiguity code"),
-                    evidence: FixtureSideEffectEvidence {
-                        amount: 58,
-                        node_id,
-                        attempt_id,
-                    },
+                    evidence: fixture_side_effect_evidence(58, node_id, attempt_id),
                 },
             })
         })
@@ -2231,32 +3272,24 @@ impl SideEffectVerifyCallbacks for TestSideEffectDriverCallbacks {
         let attempt_id = ctx.attempt_id().as_str().to_owned();
         Box::pin(async move {
             Ok(match decision {
-                TestSubmissionDecision::Observed => {
-                    SideEffectUnknownSubmissionDecision::Observed(FixtureSideEffectEvidence {
-                        amount: 55,
-                        node_id: node_id.clone(),
-                        attempt_id: attempt_id.clone(),
-                    })
-                }
+                TestSubmissionDecision::Observed => SideEffectUnknownSubmissionDecision::Observed(
+                    fixture_side_effect_evidence(55, node_id.clone(), attempt_id.clone()),
+                ),
                 TestSubmissionDecision::Unknown => {
                     SideEffectUnknownSubmissionDecision::StillUnknown
                 }
                 TestSubmissionDecision::NotSubmitted => {
-                    SideEffectUnknownSubmissionDecision::NotSubmitted(FixtureSideEffectEvidence {
-                        amount: 57,
-                        node_id: node_id.clone(),
-                        attempt_id: attempt_id.clone(),
-                    })
+                    SideEffectUnknownSubmissionDecision::NotSubmitted(fixture_side_effect_evidence(
+                        57,
+                        node_id.clone(),
+                        attempt_id.clone(),
+                    ))
                 }
                 TestSubmissionDecision::Ambiguous => {
                     SideEffectUnknownSubmissionDecision::Ambiguous {
                         ambiguity_code: events::AmbiguityCode::new("mfm_test_driver_ambiguous")
                             .expect("ambiguity code"),
-                        evidence: FixtureSideEffectEvidence {
-                            amount: 58,
-                            node_id,
-                            attempt_id,
-                        },
+                        evidence: fixture_side_effect_evidence(58, node_id, attempt_id),
                     }
                 }
             })
@@ -2270,15 +3303,10 @@ impl SideEffectVerifyCallbacks for TestSideEffectDriverCallbacks {
         _submit_inputs: &'a MaterializedInputs,
         _submission: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
-        let node_id = ctx.node().node_id.as_str().to_owned();
-        let attempt_id = ctx.attempt_id().as_str().to_owned();
+        let evidence = fixture_side_effect_evidence_for_ctx(ctx, 89);
         Box::pin(async move {
             Ok(SideEffectObservedEvidence {
-                evidence: FixtureSideEffectEvidence {
-                    amount: 89,
-                    node_id,
-                    attempt_id,
-                },
+                evidence,
                 replay: test_driver_replay_evidence(),
             })
         })
@@ -2291,15 +3319,10 @@ impl SideEffectVerifyCallbacks for TestSideEffectDriverCallbacks {
         _submit_inputs: &'a MaterializedInputs,
         _receipt: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
-        let node_id = ctx.node().node_id.as_str().to_owned();
-        let attempt_id = ctx.attempt_id().as_str().to_owned();
+        let evidence = fixture_side_effect_evidence_for_ctx(ctx, 144);
         Box::pin(async move {
             Ok(SideEffectObservedEvidence {
-                evidence: FixtureSideEffectEvidence {
-                    amount: 144,
-                    node_id,
-                    attempt_id,
-                },
+                evidence,
                 replay: test_driver_replay_evidence(),
             })
         })
@@ -2312,15 +3335,9 @@ impl SideEffectVerifyCallbacks for TestSideEffectDriverCallbacks {
         _submit_inputs: &'a MaterializedInputs,
         _receipt: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, Self::Output> {
-        let node_id = ctx.node().node_id.as_str().to_owned();
-        let attempt_id = ctx.attempt_id().as_str().to_owned();
-        Box::pin(async move {
-            Ok(FixtureOutputValue {
-                amount: 233,
-                node_id,
-                attempt_id,
-            })
-        })
+        let output =
+            fixture_output_value(233, ctx.node().node_id.as_str(), ctx.attempt_id().as_str());
+        Box::pin(async move { Ok(output) })
     }
 
     fn map_confirmation_to_output<'a, 'ctx>(
@@ -2330,15 +3347,9 @@ impl SideEffectVerifyCallbacks for TestSideEffectDriverCallbacks {
         _submit_inputs: &'a MaterializedInputs,
         _confirmation: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, Self::Output> {
-        let node_id = ctx.node().node_id.as_str().to_owned();
-        let attempt_id = ctx.attempt_id().as_str().to_owned();
-        Box::pin(async move {
-            Ok(FixtureOutputValue {
-                amount: 233,
-                node_id,
-                attempt_id,
-            })
-        })
+        let output =
+            fixture_output_value(233, ctx.node().node_id.as_str(), ctx.attempt_id().as_str());
+        Box::pin(async move { Ok(output) })
     }
 }
 
@@ -2975,6 +3986,11 @@ macro_rules! with_prepared_runner_ctx {
             config_artifact(&$fixture.runtime_spec, &invocation_node.config_ref).evidence;
         let projections = $projections;
         let run_stream = $run_stream;
+        let committed =
+            store::CommittedRunStream::from_events($fixture.run_id.clone(), run_stream.clone())
+                .expect("prepared runner committed stream");
+        let view = RuntimeRunView::from_committed_stream(&$fixture.runtime_spec, &committed)
+            .expect("prepared runner view");
         let invocation = PreparedRunnerInvocation {
             runtime_spec: &$fixture.runtime_spec,
             run_id: &$fixture.run_id,
@@ -2996,10 +4012,41 @@ macro_rules! with_prepared_runner_ctx {
             recorded_facts: RecordedFacts::default(),
             projections: &projections,
             run_stream: &run_stream,
+            view: &view,
         };
         let $ctx = ErasedRunCtx::from_prepared(&invocation);
         $body
     }};
+}
+
+fn started_fixture_projection_and_stream(
+    fixture: &Fixture,
+) -> (store::ProjectionSnapshot, Vec<store::KernelEventEnvelope>) {
+    let has_side_effect_nodes = fixture.runtime_spec.spec().nodes.iter().any(|node| {
+        node.side_effect.is_some()
+            || matches!(
+                node.framework,
+                Some(spec::FrameworkNodeSpec::SideEffectVerify(_))
+            )
+    });
+    let registry = if has_side_effect_nodes {
+        registered_side_effect_fixture_runners(fixture)
+    } else {
+        registered_fixture_runners(fixture)
+    };
+    let scheduler = test_scheduler(registry);
+    let mut store = TestTypedRunStore::new();
+    block_on_ready(start_fixture_run(
+        &scheduler,
+        &mut store,
+        fixture,
+        vec![fixture.seed_ref.clone()],
+    ))
+    .expect("start fixture for prepared runner context");
+    (
+        store.projection_snapshot().clone(),
+        store.load_run_stream(&fixture.run_id),
+    )
 }
 
 fn with_runner_erased_ctx<R, F>(fixture: &Fixture, cell_id: &CellId, test: F) -> R
@@ -3007,6 +4054,13 @@ where
     F: for<'a> FnOnce(ErasedRunCtx<'a>) -> R,
 {
     let node = node_by_output(fixture, cell_id);
+    with_runner_erased_ctx_for_node(fixture, node, test)
+}
+
+fn with_runner_erased_ctx_for_node<R, F>(fixture: &Fixture, node: &spec::NodeSpec, test: F) -> R
+where
+    F: for<'a> FnOnce(ErasedRunCtx<'a>) -> R,
+{
     let attempt_id = attempt_id(
         &fixture.run_id,
         fixture.runtime_spec.spec_hash(),
@@ -3014,14 +4068,10 @@ where
         1,
     )
     .expect("attempt id");
-    with_prepared_runner_ctx!(
-        fixture,
-        node,
-        &attempt_id,
-        store::ProjectionSnapshot::default(),
-        Vec::new(),
-        |ctx| { test(ctx) },
-    )
+    let (projections, run_stream) = started_fixture_projection_and_stream(fixture);
+    with_prepared_runner_ctx!(fixture, node, &attempt_id, projections, run_stream, |ctx| {
+        test(ctx)
+    },)
 }
 
 async fn drive_side_effect_driver_empty<C>(
@@ -3040,14 +4090,10 @@ where
         1,
     )
     .expect("attempt id");
-    with_prepared_runner_ctx!(
-        fixture,
-        node,
-        &attempt_id,
-        store::ProjectionSnapshot::default(),
-        Vec::new(),
-        |ctx| { SideEffectDriver::drive(ctx, callbacks).await },
-    )
+    let (projections, run_stream) = started_fixture_projection_and_stream(fixture);
+    with_prepared_runner_ctx!(fixture, node, &attempt_id, projections, run_stream, |ctx| {
+        SideEffectDriver::drive(ctx, callbacks).await
+    },)
 }
 
 async fn drive_side_effect_driver_from_store<C>(
@@ -3145,6 +4191,65 @@ fn runner_registration_builder_preserves_explicit_binding_authority() {
     );
     for binding in capabilities {
         assert_eq!(binding.implementation_id(), &implementation_id);
+    }
+
+    let typed_fixture = fixture_with_first_side_effect_state();
+    let typed_node = node_by_output(&typed_fixture, &typed_fixture.cell_b);
+    let typed_descriptor = typed_fixture
+        .runtime_spec
+        .state_descriptor_for_node(typed_node)
+        .expect("typed state descriptor");
+    let expected_descriptor =
+        mfm_program::registered_state_descriptor::<RuntimeReadState>().expect("typed descriptor");
+    let typed_factory = events::RunnerFactoryId::new("read_external").expect("typed factory");
+    let typed_executable = events::ExecutableIdentity {
+        factory_id: typed_factory.clone(),
+        cargo_package_digest: content(0xe3),
+        binary_digest: content(0xe4),
+        nix_derivation_hash: None,
+        nix_output_hash: None,
+    };
+    let typed_implementation_id =
+        CapabilityImplementationId::new("mfm.test.runner-kit-typed-registration")
+            .expect("typed implementation id");
+    let mut typed_registry = ErasedRunnerRegistry::new();
+    let registered_descriptor =
+        RunnerRegistrationBuilder::new(&mut typed_registry, typed_implementation_id.clone())
+            .register_state_descriptor::<RuntimeReadState>(
+                typed_factory.clone(),
+                typed_executable.clone(),
+                Arc::new(RecordingRunner {
+                    expected_caps: vec![(
+                        typed_fixture.cap_kind.clone(),
+                        typed_fixture.cap_version.clone(),
+                    )],
+                    output_artifact: artifact(0xd1),
+                    output_digest: content(0xd2),
+                }),
+            )
+            .expect("typed runner registration");
+    assert_eq!(
+        registered_descriptor.descriptor_id(),
+        expected_descriptor.descriptor_id()
+    );
+    assert_eq!(
+        &typed_descriptor.descriptor_id,
+        expected_descriptor.descriptor_id()
+    );
+    let typed_binding = typed_registry
+        .resolve(&typed_fixture.runtime_spec, typed_node, typed_descriptor)
+        .expect("registered typed runner");
+    assert_eq!(typed_binding.factory_id(), &typed_factory);
+    assert_eq!(typed_binding.executable(), &typed_executable);
+    let typed_capabilities = typed_registry
+        .resolve_capability_implementations(typed_node)
+        .expect("typed capability implementations");
+    assert_eq!(
+        typed_capabilities.len(),
+        typed_node.capability_bindings.capabilities.len()
+    );
+    for binding in typed_capabilities {
+        assert_eq!(binding.implementation_id(), &typed_implementation_id);
     }
 
     let wrong_factory = events::RunnerFactoryId::new("pure").expect("factory");
@@ -3393,7 +4498,7 @@ async fn no_second_authority_full_run_stages_and_admits_first_artifact_reference
         .expect("binding b");
     let scheduler = test_scheduler_with_artifacts(
         register_fixture_capabilities(registry, &fixture),
-        Arc::new(RecordingRuntimeArtifactStore {
+        Arc::new(TestRuntimeArtifactStore {
             artifacts: Arc::new(Mutex::new(BTreeMap::new())),
         }),
     );
@@ -3491,7 +4596,7 @@ async fn run_launch_commits_single_admission_root_and_admits_launch_artifacts() 
     let fixture = fixture();
     let scheduler = test_scheduler_with_artifacts(
         registered_fixture_runners(&fixture),
-        Arc::new(RecordingRuntimeArtifactStore {
+        Arc::new(TestRuntimeArtifactStore {
             artifacts: Arc::new(Mutex::new(BTreeMap::new())),
         }),
     );
@@ -3689,6 +4794,7 @@ async fn runtime_rejects_standalone_retention_manifest_projection_history() {
         &fixture.runtime_spec,
         &fixture.run_id,
         &store.load_run_stream(&fixture.run_id),
+        &store::ArtifactByteAuthorityMap::new(),
     )
     .expect("manifest");
     let manifest_evidence = manifest.evidence.clone();
@@ -3746,9 +4852,10 @@ async fn public_output_render_failure_resumes_and_completes() {
     let failed_attempt = append_attempt_start(&mut store, &fixture, render_node, 1);
     append_public_output_render_failure(&mut store, &fixture, render_node, &failed_attempt);
     assert!(matches!(
-        store
-            .projection_snapshot()
-            .public_output(&fixture.runtime_spec.spec().public_outputs.public_schema_id),
+        store.projection_snapshot().public_output(
+            &fixture.run_id,
+            &fixture.runtime_spec.spec().public_outputs.public_schema_id,
+        ),
         Some(store::PublicOutputProjection::RenderFailed { .. })
     ));
 
@@ -3767,9 +4874,10 @@ async fn public_output_render_failure_resumes_and_completes() {
         store::RunState::Completed
     );
     assert!(matches!(
-        store
-            .projection_snapshot()
-            .public_output(&fixture.runtime_spec.spec().public_outputs.public_schema_id),
+        store.projection_snapshot().public_output(
+            &fixture.run_id,
+            &fixture.runtime_spec.spec().public_outputs.public_schema_id,
+        ),
         Some(store::PublicOutputProjection::Produced { .. })
     ));
 }
@@ -3864,29 +4972,32 @@ async fn scheduler_rejects_uncertified_capability_use() {
     impl ErasedNodeRunner for BadFactRunner {
         fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
             Box::pin(async move {
+                let (response_evidence, _response_bytes) =
+                    test_fact_response_artifact(ctx.node(), 194);
                 Ok(ErasedRunnerOutput::new(vec![
-                    RunnerEventPayload::FactRecorded(events::FactRecorded {
-                        spec_hash: ctx.spec_hash().clone(),
-                        node_id: ctx.node().node_id.clone(),
-                        attempt_id: ctx.attempt_id().clone(),
-                        capability_kind: self.cap_kind.clone(),
-                        capability_version: self.cap_version.clone(),
-                        adapter_kind: AdapterKind::new(
-                            "mfm.test",
-                            "adapter",
-                            DigestAlgorithm::Sha256JcsV1,
-                            D1,
-                        )
-                        .expect("adapter"),
-                        adapter_version: AdapterVersion::new("mfm.adapter.v1")
-                            .expect("adapter version"),
-                        request_schema_id: ctx.node().config_ref.schema_id.clone(),
-                        request_hash: content(0xc1),
-                        response_schema_id: ctx.node().config_ref.schema_id.clone(),
-                        response_hash: content(0xc2),
-                        fact_key: events::FactKey::new("bad-fact").expect("fact key"),
-                        artifact_id: artifact(0xc3),
-                    }),
+                    RunnerEventPayload::FactRecorded(RunnerFactRecorded::new(
+                        events::FactRecorded {
+                            spec_hash: ctx.spec_hash().clone(),
+                            node_id: ctx.node().node_id.clone(),
+                            attempt_id: ctx.attempt_id().clone(),
+                            claim: test_fact_claim(
+                                196,
+                                ctx.node().config_ref.schema_id.clone(),
+                                content(0xc1),
+                                &response_evidence,
+                                self.cap_kind.clone(),
+                                self.cap_version.clone(),
+                                AdapterKind::new(
+                                    "mfm.test",
+                                    "adapter",
+                                    DigestAlgorithm::Sha256JcsV1,
+                                    D1,
+                                )
+                                .expect("adapter"),
+                                AdapterVersion::new("mfm.adapter.v1").expect("adapter version"),
+                            ),
+                        },
+                    )),
                 ]))
             })
         }
@@ -4093,6 +5204,8 @@ async fn runner_cannot_stage_reserved_retention_reasons() {
                     staged_retention_refs: vec![StagedRetentionRefs {
                         refs: vec![retention_ref_for_artifact(&artifact)],
                         reason: self.reason,
+                        authority:
+                            crate::artifacts::StagedRetentionRefAuthority::CurrentCommitArtifacts,
                     }],
                     payloads: terminal_payloads(
                         &ctx,
@@ -4339,6 +5452,201 @@ fn run_start_rejects_missing_config_artifact_evidence() {
         ),
         Err(RuntimeError::InvalidRunStream(_))
     ));
+}
+
+#[test]
+fn run_start_rejects_missing_fact_descriptor_artifact_evidence() {
+    let (fixture, _descriptor, descriptor_ref) = fixture_with_first_node_fact_descriptor();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let store = TestTypedRunStore::new();
+    let evidence = run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]);
+
+    assert!(matches!(
+        scheduler.prepare_run_launch(
+            &fixture.runtime_spec,
+            fixture_run_identity_material(&fixture),
+            evidence,
+            store.expected_next_seq(&fixture.run_id),
+        ),
+        Err(RuntimeError::InvalidRunnerOutput(message))
+            if message.contains("missing fact descriptor artifact")
+                && message.contains(descriptor_ref.descriptor_hash.as_str())
+    ));
+}
+
+#[tokio::test]
+async fn run_start_admits_certified_fact_descriptor_artifacts() {
+    let (fixture, descriptor, descriptor_ref) = fixture_with_first_node_fact_descriptor();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = TestTypedRunStore::new();
+    let mut evidence = run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]);
+    evidence
+        .fact_descriptor_artifacts
+        .push(fact_descriptor_artifact(&descriptor));
+
+    let launch = scheduler
+        .prepare_run_launch(
+            &fixture.runtime_spec,
+            fixture_run_identity_material(&fixture),
+            evidence,
+            store.expected_next_seq(&fixture.run_id),
+        )
+        .expect("descriptor-backed launch prepares");
+    scheduler_start_run(&scheduler, &mut store, launch)
+        .await
+        .expect("descriptor-backed launch commits");
+
+    let run_admitted = store.run_admitted(&fixture.run_id);
+    assert_eq!(run_admitted.fact_descriptor_artifacts.len(), 1);
+    let admitted_descriptor = &run_admitted.fact_descriptor_artifacts[0];
+    assert_eq!(
+        admitted_descriptor.role,
+        events::ArtifactRole::FactDescriptor
+    );
+    assert_eq!(
+        admitted_descriptor.content_digest,
+        descriptor_ref.descriptor_hash
+    );
+    let committed = block_on_ready(store.load_committed_run_stream(&fixture.run_id))
+        .expect("descriptor-backed committed stream");
+    RuntimeRunView::from_committed_stream(&fixture.runtime_spec, &committed)
+        .expect("descriptor-backed run stream validates");
+}
+
+#[tokio::test]
+async fn raw_runtime_view_rejects_fact_descriptor_stream_without_artifact_authority() {
+    let (fixture, descriptor, _) = fixture_with_first_node_fact_descriptor();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = TestTypedRunStore::new();
+    let mut evidence = run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]);
+    evidence
+        .fact_descriptor_artifacts
+        .push(fact_descriptor_artifact(&descriptor));
+
+    let launch = scheduler
+        .prepare_run_launch(
+            &fixture.runtime_spec,
+            fixture_run_identity_material(&fixture),
+            evidence,
+            store.expected_next_seq(&fixture.run_id),
+        )
+        .expect("descriptor-backed launch prepares");
+    scheduler_start_run(&scheduler, &mut store, launch)
+        .await
+        .expect("descriptor-backed launch commits");
+
+    let stream = store.load_run_stream(&fixture.run_id);
+    let error = RuntimeRunView::from_stream(&fixture.runtime_spec, &fixture.run_id, &stream)
+        .expect_err("raw descriptor-bearing stream must fail closed");
+    assert!(matches!(
+        error,
+        RuntimeError::InvalidRunStream(message)
+            if message.contains("committed stream artifact authority")
+    ));
+}
+
+#[tokio::test]
+async fn run_start_admitted_uses_committed_fact_descriptor_artifacts() {
+    let (fixture, descriptor, _) = fixture_with_first_node_fact_descriptor();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = TestTypedRunStore::new();
+    let mut evidence = run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]);
+    evidence
+        .fact_descriptor_artifacts
+        .push(fact_descriptor_artifact(&descriptor));
+    let launch = scheduler
+        .prepare_run_launch(
+            &fixture.runtime_spec,
+            fixture_run_identity_material(&fixture),
+            evidence,
+            store.expected_next_seq(&fixture.run_id),
+        )
+        .expect("descriptor-backed launch prepares");
+
+    let authority =
+        scheduler_start_run_admitted(&scheduler, &mut store, &fixture.runtime_spec, launch)
+            .await
+            .expect("descriptor-backed admission uses committed stream authority");
+
+    assert_eq!(authority.run_id(), &fixture.run_id);
+    assert_eq!(
+        authority.head_seq(),
+        store.expected_next_seq(&fixture.run_id)
+    );
+}
+
+#[tokio::test]
+async fn fact_bearing_runtime_prefix_rebuild_uses_retained_artifact_bytes() {
+    let (fixture, descriptor, _) = fixture_with_read_node_fact_descriptor();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = TestTypedRunStore::new();
+    let mut evidence = run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]);
+    evidence
+        .fact_descriptor_artifacts
+        .push(fact_descriptor_artifact(&descriptor));
+    let launch = scheduler
+        .prepare_run_launch(
+            &fixture.runtime_spec,
+            fixture_run_identity_material(&fixture),
+            evidence,
+            store.expected_next_seq(&fixture.run_id),
+        )
+        .expect("descriptor-backed launch prepares");
+    scheduler_start_run(&scheduler, &mut store, launch)
+        .await
+        .expect("descriptor-backed launch commits");
+    let node_a = node_by_output(&fixture, &fixture.cell_a).clone();
+    let node_a_attempt = append_attempt_start(&mut store, &fixture, &node_a, 1);
+    append_terminal(
+        &mut store,
+        &fixture,
+        &node_a,
+        &node_a_attempt,
+        artifact(0x70),
+        content(0x71),
+    );
+    let node = node_by_output(&fixture, &fixture.cell_b).clone();
+    let attempt_id = append_attempt_start(&mut store, &fixture, &node, 1);
+    append_fact(&mut store, &fixture, &node, &attempt_id, 17, 23);
+
+    let stream = store.load_run_stream(&fixture.run_id);
+    let raw_error = RuntimeRunView::from_stream(&fixture.runtime_spec, &fixture.run_id, &stream)
+        .expect_err("raw fact-bearing stream must fail closed");
+    assert!(matches!(
+        raw_error,
+        RuntimeError::InvalidRunStream(message)
+            if message.contains("committed stream artifact authority")
+    ));
+    let committed = block_on_ready(store.load_committed_run_stream(&fixture.run_id))
+        .expect("fact-bearing committed stream");
+    RuntimeRunView::from_committed_stream(&fixture.runtime_spec, &committed)
+        .expect("fact-bearing runtime view validates with retained bytes");
+    build_retention_manifest_artifact(
+        &fixture.runtime_spec,
+        &fixture.run_id,
+        &stream,
+        committed.artifact_byte_authority(),
+    )
+    .expect("fact-bearing prefix rebuilds with retained bytes");
+
+    let missing = store::ArtifactByteAuthorityMap::new();
+    build_retention_manifest_artifact(&fixture.runtime_spec, &fixture.run_id, &stream, &missing)
+        .expect_err("fact-bearing prefix without retained bytes must fail");
+
+    let (response_evidence, _) = test_fact_response_artifact(&node, 23);
+    let response_key = (
+        response_evidence.artifact_id.clone(),
+        response_evidence
+            .evidence_hash()
+            .expect("response evidence hash"),
+    );
+    let mut mismatched = committed.artifact_byte_authority().clone();
+    mismatched
+        .get_mut(&response_key)
+        .expect("response bytes retained")
+        .0 = b"{\"amount\":999}".to_vec();
+    build_retention_manifest_artifact(&fixture.runtime_spec, &fixture.run_id, &stream, &mismatched)
+        .expect_err("fact-bearing prefix with mismatched response bytes must fail");
 }
 
 #[test]
@@ -4882,20 +6190,8 @@ async fn store_rejects_fact_without_started_attempt() {
         .find(|node| node.output_cell == fixture.cell_b)
         .expect("read node")
         .clone();
-    let fact_artifact = artifact(0xd1);
-    let fact_digest = content(0xd2);
     let fact_schema = node.config_ref.schema_id.clone();
-    let fact_evidence = store::ArtifactEvidenceRef {
-        artifact_id: fact_artifact.clone(),
-        digest: fact_digest.clone(),
-        byte_len: 10,
-        media_type: spec::MediaType::new("application/json").expect("media"),
-        schema_id: Some(fact_schema.clone()),
-        semantic_type_id: None,
-        producer_node_id: Some(node.node_id.clone()),
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::FactResponse,
-    };
+    let (fact_evidence, _fact_bytes) = test_fact_response_artifact(&node, 210);
     assert!(store
         .append_prepared_commit(store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
@@ -4909,16 +6205,16 @@ async fn store_rejects_fact_without_started_attempt() {
                         DigestAlgorithm::Sha256JcsV1,
                         DigestBytes::from_array([0xd3; 32]),
                     ),
-                    capability_kind: fixture.cap_kind.clone(),
-                    capability_version: fixture.cap_version.clone(),
-                    adapter_kind: fixture.adapter_kind.clone(),
-                    adapter_version: fixture.adapter_version.clone(),
-                    request_schema_id: fact_schema.clone(),
-                    request_hash: content(0xd4),
-                    response_schema_id: fact_schema,
-                    response_hash: fact_digest,
-                    fact_key: events::FactKey::new("forged-fact").expect("fact key"),
-                    artifact_id: fact_artifact,
+                    claim: test_fact_claim(
+                        210,
+                        fact_schema.clone(),
+                        content(0xd4),
+                        &fact_evidence,
+                        fixture.cap_kind.clone(),
+                        fixture.cap_version.clone(),
+                        fixture.adapter_kind.clone(),
+                        fixture.adapter_version.clone(),
+                    ),
                 },
             )],
             required_artifacts: vec![fact_evidence],
@@ -5559,7 +6855,7 @@ async fn recovery_rejects_attempt_started_before_inputs_were_terminal() {
 #[tokio::test]
 async fn recovery_reuses_committed_read_facts_for_same_attempt() {
     struct FactReuseRunner {
-        fact_key: events::FactKey,
+        fact_key: mfm_facts::FactKey,
         output_artifact: ArtifactId,
         output_digest: ContentDigest,
     }
@@ -5569,10 +6865,15 @@ async fn recovery_reuses_committed_read_facts_for_same_attempt() {
             Box::pin(async move {
                 let fact = ctx
                     .recorded_facts()
-                    .get(&self.fact_key)
+                    .by_fact_key(&self.fact_key)
+                    .next()
+                    .map(|(_, fact)| fact)
                     .expect("recorded fact");
                 assert_eq!(fact.fact_key, self.fact_key);
-                assert_eq!(fact.request_schema_id, ctx.node().config_ref.schema_id);
+                assert_eq!(
+                    fact.request_schema_id,
+                    Some(ctx.node().config_ref.schema_id.clone())
+                );
                 assert_eq!(ctx.recorded_facts().iter().count(), 1);
                 let artifact = store::ArtifactEvidenceRef {
                     artifact_id: self.output_artifact.clone(),
@@ -5599,8 +6900,8 @@ async fn recovery_reuses_committed_read_facts_for_same_attempt() {
         }
     }
 
-    let fixture = fixture();
-    let fact_key = events::FactKey::new("reused-fact").expect("fact key");
+    let (fixture, fact_descriptor, _descriptor_ref) = fixture_with_read_node_fact_descriptor();
+    let fact_key = test_fact_key(212);
     let mut registry = ErasedRunnerRegistry::new();
     register_default_fixture_pure_runner(&mut registry, &fixture);
     registry
@@ -5614,22 +6915,19 @@ async fn recovery_reuses_committed_read_facts_for_same_attempt() {
             },
         ))
         .expect("binding b");
-    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
+    let (scheduler, mut store) = started_fixture_run_with_registry_and_fact_descriptors(
+        registry,
+        &fixture,
+        &[fact_descriptor],
+    )
+    .await;
     drive_ok!(scheduler, store, fixture, "produce input");
     let node = node_by_output(&fixture, &fixture.cell_b);
     let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
-    append_fact(
-        &mut store,
-        &fixture,
-        node,
-        &attempt_id,
-        fact_key.clone(),
-        artifact(0xd1),
-        content(0xd2),
-    );
+    append_fact(&mut store, &fixture, node, &attempt_id, 212, 212);
 
     drive_ok!(scheduler, store, fixture, "resume read");
-    assert_eq!(fact_recorded_count(&store), 1);
+    assert_eq!(fact_recorded_count(&store, &fact_key), 1);
     match store
         .projection_snapshot()
         .cell_terminal(&fixture.cell_b)
@@ -5644,6 +6942,174 @@ async fn recovery_reuses_committed_read_facts_for_same_attempt() {
 }
 
 #[tokio::test]
+async fn recovery_retains_same_subject_facts_by_claim_id_for_same_attempt() {
+    struct SameSubjectFactsRunner {
+        fact_key: mfm_facts::FactKey,
+        output_artifact: ArtifactId,
+        output_digest: ContentDigest,
+    }
+
+    impl ErasedNodeRunner for SameSubjectFactsRunner {
+        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move {
+                let same_subject_facts = ctx
+                    .recorded_facts()
+                    .by_fact_key(&self.fact_key)
+                    .collect::<Vec<_>>();
+                assert_eq!(same_subject_facts.len(), 2);
+                assert_eq!(ctx.recorded_facts().iter().count(), 2);
+
+                let claim_ids = same_subject_facts
+                    .iter()
+                    .map(|(claim_id, _)| (*claim_id).clone())
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(claim_ids.len(), 2);
+
+                let artifact_ids = same_subject_facts
+                    .iter()
+                    .map(|(claim_id, fact)| {
+                        assert_eq!(&fact.fact_claim_id, *claim_id);
+                        assert_eq!(&fact.fact_key, &self.fact_key);
+                        fact.artifact_id.clone()
+                    })
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(artifact_ids.len(), 2);
+
+                let artifact = store::ArtifactEvidenceRef {
+                    artifact_id: self.output_artifact.clone(),
+                    digest: self.output_digest.clone(),
+                    byte_len: 17,
+                    media_type: spec::MediaType::new("application/json").expect("media"),
+                    schema_id: Some(ctx.descriptor().output_schema_id.clone()),
+                    semantic_type_id: Some(ctx.descriptor().output_semantic_type_id.clone()),
+                    producer_node_id: Some(ctx.node().node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: events::ArtifactRole::StateOutput,
+                };
+                let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
+                Ok(ErasedRunnerOutput {
+                    staged_artifacts: vec![staged_artifact],
+                    staged_retention_refs: Vec::new(),
+                    payloads: terminal_payloads(
+                        &ctx,
+                        self.output_artifact.clone(),
+                        self.output_digest.clone(),
+                    ),
+                })
+            })
+        }
+    }
+
+    let (fixture, fact_descriptor, _descriptor_ref) = fixture_with_read_node_fact_descriptor();
+    let fact_key = test_fact_key(212);
+    let mut registry = ErasedRunnerRegistry::new();
+    register_default_fixture_pure_runner(&mut registry, &fixture);
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            SameSubjectFactsRunner {
+                fact_key: fact_key.clone(),
+                output_artifact: artifact(0xb3),
+                output_digest: content(0xb4),
+            },
+        ))
+        .expect("binding b");
+    let (scheduler, mut store) = started_fixture_run_with_registry_and_fact_descriptors(
+        registry,
+        &fixture,
+        &[fact_descriptor],
+    )
+    .await;
+    drive_ok!(scheduler, store, fixture, "produce input");
+    let node = node_by_output(&fixture, &fixture.cell_b);
+    let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
+    append_fact(&mut store, &fixture, node, &attempt_id, 212, 212);
+    append_fact(&mut store, &fixture, node, &attempt_id, 212, 213);
+
+    assert_eq!(fact_recorded_count(&store, &fact_key), 2);
+    let projected_claim_ids = store
+        .projection_snapshot()
+        .fact_records()
+        .filter(|(_, fact)| fact.claim.subject().fact_key() == &fact_key)
+        .map(|(claim_id, _)| claim_id.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(projected_claim_ids.len(), 2);
+
+    drive_ok!(
+        scheduler,
+        store,
+        fixture,
+        "resume read with same-subject facts"
+    );
+    assert_eq!(fact_recorded_count(&store, &fact_key), 2);
+    match store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_b)
+        .expect("terminal cell")
+    {
+        store::CellTerminalProjection::Produced {
+            attempt_id: produced_attempt,
+            ..
+        } => assert_eq!(produced_attempt, &attempt_id),
+        terminal => panic!("unexpected terminal projection: {terminal:?}"),
+    }
+}
+
+#[tokio::test]
+async fn runtime_history_rejects_fact_descriptor_allowed_only_for_other_node() {
+    let (fixture, read_descriptor, other_descriptor) =
+        fixture_with_read_node_and_other_node_fact_descriptors();
+    let (scheduler, mut store) = started_fixture_run_with_registry_and_fact_descriptors(
+        registered_fixture_runners(&fixture),
+        &fixture,
+        &[read_descriptor, other_descriptor.clone()],
+    )
+    .await;
+    drive_ok!(scheduler, store, fixture, "produce input");
+    let node = node_by_output(&fixture, &fixture.cell_b);
+    let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
+    append_fact(&mut store, &fixture, node, &attempt_id, 212, 212);
+
+    let (response_evidence, _response_bytes) = test_fact_response_artifact(node, 212);
+    let corrupt_claim = test_fact_claim_for_descriptor(
+        &other_descriptor,
+        212,
+        node.config_ref.schema_id.clone(),
+        content(0xd4),
+        &response_evidence,
+        fixture.cap_kind.clone(),
+        fixture.cap_version.clone(),
+        fixture.adapter_kind.clone(),
+        fixture.adapter_version.clone(),
+    );
+    let valid_stream = store.load_run_stream(&fixture.run_id);
+    let corrupt_stream = rewrite_stream_payloads(&valid_stream, |payload| match payload {
+        events::KernelEventPayload::FactRecorded(recorded) if recorded.node_id == node.node_id => {
+            let mut recorded = recorded.clone();
+            recorded.claim = corrupt_claim.clone();
+            Some(events::KernelEventPayload::FactRecorded(recorded))
+        }
+        _ => None,
+    });
+    let committed =
+        block_on_ready(store.load_committed_run_stream(&fixture.run_id)).expect("committed stream");
+    let corrupt_committed = store::CommittedRunStream::from_events_with_artifact_bytes(
+        fixture.run_id.clone(),
+        corrupt_stream,
+        committed.artifact_byte_authority(),
+    )
+    .expect("corrupt committed stream remains structurally valid");
+
+    assert!(matches!(
+        RuntimeRunView::from_committed_stream(&fixture.runtime_spec, &corrupt_committed),
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("fact descriptor")
+                && message.contains("not certified for producing node")
+    ));
+}
+
+#[tokio::test]
 async fn recovery_rejects_new_fact_after_same_attempt_fact_exists() {
     struct NewFactRunner {
         cap_kind: CapabilityKind,
@@ -5655,28 +7121,32 @@ async fn recovery_rejects_new_fact_after_same_attempt_fact_exists() {
     impl ErasedNodeRunner for NewFactRunner {
         fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
             Box::pin(async move {
+                let (response_evidence, _response_bytes) =
+                    test_fact_response_artifact(ctx.node(), 224);
                 Ok(ErasedRunnerOutput::new(vec![
-                    RunnerEventPayload::FactRecorded(events::FactRecorded {
-                        spec_hash: ctx.spec_hash().clone(),
-                        node_id: ctx.node().node_id.clone(),
-                        attempt_id: ctx.attempt_id().clone(),
-                        capability_kind: self.cap_kind.clone(),
-                        capability_version: self.cap_version.clone(),
-                        adapter_kind: self.adapter_kind.clone(),
-                        adapter_version: self.adapter_version.clone(),
-                        request_schema_id: ctx.node().config_ref.schema_id.clone(),
-                        request_hash: content(0xe1),
-                        response_schema_id: ctx.node().config_ref.schema_id.clone(),
-                        response_hash: content(0xe2),
-                        fact_key: events::FactKey::new("new-fact").expect("fact key"),
-                        artifact_id: artifact(0xe3),
-                    }),
+                    RunnerEventPayload::FactRecorded(RunnerFactRecorded::new(
+                        events::FactRecorded {
+                            spec_hash: ctx.spec_hash().clone(),
+                            node_id: ctx.node().node_id.clone(),
+                            attempt_id: ctx.attempt_id().clone(),
+                            claim: test_fact_claim(
+                                224,
+                                ctx.node().config_ref.schema_id.clone(),
+                                content(0xe1),
+                                &response_evidence,
+                                self.cap_kind.clone(),
+                                self.cap_version.clone(),
+                                self.adapter_kind.clone(),
+                                self.adapter_version.clone(),
+                            ),
+                        },
+                    )),
                 ]))
             })
         }
     }
 
-    let fixture = fixture();
+    let (fixture, fact_descriptor, _descriptor_ref) = fixture_with_read_node_fact_descriptor();
     let mut registry = ErasedRunnerRegistry::new();
     register_default_fixture_pure_runner(&mut registry, &fixture);
     registry
@@ -5691,19 +7161,16 @@ async fn recovery_rejects_new_fact_after_same_attempt_fact_exists() {
             },
         ))
         .expect("binding b");
-    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
+    let (scheduler, mut store) = started_fixture_run_with_registry_and_fact_descriptors(
+        registry,
+        &fixture,
+        &[fact_descriptor],
+    )
+    .await;
     drive_ok!(scheduler, store, fixture, "produce input");
     let node = node_by_output(&fixture, &fixture.cell_b);
     let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
-    append_fact(
-        &mut store,
-        &fixture,
-        node,
-        &attempt_id,
-        events::FactKey::new("existing-fact").expect("fact key"),
-        artifact(0xd1),
-        content(0xd2),
-    );
+    append_fact(&mut store, &fixture, node, &attempt_id, 214, 214);
 
     assert_drive!(
         scheduler,
@@ -5713,7 +7180,7 @@ async fn recovery_rejects_new_fact_after_same_attempt_fact_exists() {
         "terminalize duplicate fact output"
     );
     assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
-    assert_eq!(store.projection_snapshot().facts().count(), 1);
+    assert_eq!(store.projection_snapshot().fact_records().count(), 1);
 }
 
 #[tokio::test]
@@ -7478,62 +8945,13 @@ impl ErasedNodeRunner for PrePreparedSideEffectRunner {
                     "pre-prepared side-effect runner should not resume".to_owned(),
                 ));
             }
-            let ledger = side_effect_ledger_key_for_ctx(&ctx);
             let ledger_purpose = side_effect_ledger_purpose_for_ctx(&ctx);
-            let (pair_id, pair_role) = side_effect_pair_fields_for_ctx(
-                &ctx,
-                &ledger_purpose,
-                events::SideEffectPairRole::Submit,
-            );
-            let (intent_artifact_id, intent_hash) =
-                side_effect_fixture_artifact_pair(&ctx, "intent");
-            let staged_artifact = staged_side_effect_artifact(
-                &ctx,
-                side_effect_artifact(
-                    &ctx,
-                    intent_artifact_id.clone(),
-                    intent_hash.clone(),
-                    events::ArtifactRole::SideEffectIntent,
-                ),
-                ledger.clone(),
-                1,
-            )?;
-            let mut payloads = vec![RunnerEventPayload::SideEffectIntentPersisted(
-                events::side_effect::IntentPersisted {
-                    spec_hash: ctx.spec_hash().clone(),
-                    node_id: ctx.node().node_id.clone(),
-                    scope_id: ctx.node().scope_id.clone(),
-                    attempt_id: ctx.attempt_id().clone(),
-                    ledger_key: ledger.clone(),
-                    ledger_purpose,
-                    pair_id,
-                    pair_role,
-                    invocation_epoch: 1,
-                    intent_schema_id: ctx.node().config_ref.schema_id.clone(),
-                    intent_hash,
-                    intent_artifact_id,
-                    idempotency_input_schema_id: ctx.node().config_ref.schema_id.clone(),
-                    idempotency_input_hash: side_effect_fixture_digest(&ctx, "idempotency"),
-                    idempotency_key: events::IdempotencyKeyRef::new("idem-1")
-                        .expect("idempotency key"),
-                    capability_kind: side_effect_capability_kind(),
-                    capability_version: side_effect_capability_version(),
-                    adapter_kind: ctx
-                        .node()
-                        .adapter_bindings
-                        .first()
-                        .expect("side-effect adapter")
-                        .adapter_kind
-                        .clone(),
-                    adapter_version: ctx
-                        .node()
-                        .adapter_bindings
-                        .first()
-                        .expect("side-effect adapter")
-                        .adapter_version
-                        .clone(),
-                },
-            )];
+            let SideEffectFixtureIntentOutput {
+                ledger,
+                staged_artifact,
+                payload,
+            } = side_effect_fixture_intent_output(&ctx, ledger_purpose, 1)?;
+            let mut payloads = vec![payload];
             if self.emit_claim {
                 payloads.push(side_effect_claimed(&ctx, ledger, 1, 1));
             }
@@ -7684,59 +9102,17 @@ impl ErasedNodeRunner for FailActiveSideEffectAfterSagaRunner {
 }
 
 fn prepared_boundary_side_effect_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
-    let ledger = side_effect_ledger_key_for_ctx(&ctx);
     let ledger_purpose = side_effect_ledger_purpose_for_ctx(&ctx);
-    let (pair_id, pair_role) =
-        side_effect_pair_fields_for_ctx(&ctx, &ledger_purpose, events::SideEffectPairRole::Submit);
-    let (intent_artifact_id, intent_hash) = side_effect_fixture_artifact_pair(&ctx, "intent");
-    let staged_artifact = staged_side_effect_artifact(
-        &ctx,
-        side_effect_artifact(
-            &ctx,
-            intent_artifact_id.clone(),
-            intent_hash.clone(),
-            events::ArtifactRole::SideEffectIntent,
-        ),
-        ledger.clone(),
-        1,
-    )?;
+    let SideEffectFixtureIntentOutput {
+        ledger,
+        staged_artifact,
+        payload,
+    } = side_effect_fixture_intent_output(&ctx, ledger_purpose, 1)?;
     Ok(ErasedRunnerOutput {
         staged_artifacts: vec![staged_artifact],
         staged_retention_refs: Vec::new(),
         payloads: vec![
-            RunnerEventPayload::SideEffectIntentPersisted(events::side_effect::IntentPersisted {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                scope_id: ctx.node().scope_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key: ledger.clone(),
-                ledger_purpose,
-                pair_id,
-                pair_role,
-                invocation_epoch: 1,
-                intent_schema_id: ctx.node().config_ref.schema_id.clone(),
-                intent_hash,
-                intent_artifact_id,
-                idempotency_input_schema_id: ctx.node().config_ref.schema_id.clone(),
-                idempotency_input_hash: side_effect_fixture_digest(&ctx, "idempotency"),
-                idempotency_key: events::IdempotencyKeyRef::new("idem-1").expect("idempotency key"),
-                capability_kind: side_effect_capability_kind(),
-                capability_version: side_effect_capability_version(),
-                adapter_kind: ctx
-                    .node()
-                    .adapter_bindings
-                    .first()
-                    .expect("side-effect adapter")
-                    .adapter_kind
-                    .clone(),
-                adapter_version: ctx
-                    .node()
-                    .adapter_bindings
-                    .first()
-                    .expect("side-effect adapter")
-                    .adapter_version
-                    .clone(),
-            }),
+            payload,
             side_effect_claimed(&ctx, ledger.clone(), 1, 1),
             side_effect_prepared(&ctx, ledger, 1, 1),
         ],
@@ -7836,59 +9212,15 @@ fn side_effect_intent_with_purpose(
     ctx: ErasedRunCtx<'_>,
     ledger_purpose: events::SideEffectLedgerPurpose,
 ) -> Result<ErasedRunnerOutput> {
-    let ledger = side_effect_ledger_key_for_ctx(&ctx);
-    let (pair_id, pair_role) =
-        side_effect_pair_fields_for_ctx(&ctx, &ledger_purpose, events::SideEffectPairRole::Submit);
-    let (intent_artifact_id, intent_hash) = side_effect_fixture_artifact_pair(&ctx, "intent");
-    let staged_artifact = staged_side_effect_artifact(
-        &ctx,
-        side_effect_artifact(
-            &ctx,
-            intent_artifact_id.clone(),
-            intent_hash.clone(),
-            events::ArtifactRole::SideEffectIntent,
-        ),
-        ledger.clone(),
-        1,
-    )?;
+    let SideEffectFixtureIntentOutput {
+        staged_artifact,
+        payload,
+        ..
+    } = side_effect_fixture_intent_output(&ctx, ledger_purpose, 1)?;
     Ok(ErasedRunnerOutput {
         staged_artifacts: vec![staged_artifact],
         staged_retention_refs: Vec::new(),
-        payloads: vec![RunnerEventPayload::SideEffectIntentPersisted(
-            events::side_effect::IntentPersisted {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                scope_id: ctx.node().scope_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key: ledger,
-                ledger_purpose,
-                pair_id,
-                pair_role,
-                invocation_epoch: 1,
-                intent_schema_id: ctx.node().config_ref.schema_id.clone(),
-                intent_hash,
-                intent_artifact_id,
-                idempotency_input_schema_id: ctx.node().config_ref.schema_id.clone(),
-                idempotency_input_hash: side_effect_fixture_digest(&ctx, "idempotency"),
-                idempotency_key: events::IdempotencyKeyRef::new("idem-1").expect("idempotency key"),
-                capability_kind: side_effect_capability_kind(),
-                capability_version: side_effect_capability_version(),
-                adapter_kind: ctx
-                    .node()
-                    .adapter_bindings
-                    .first()
-                    .expect("side-effect adapter")
-                    .adapter_kind
-                    .clone(),
-                adapter_version: ctx
-                    .node()
-                    .adapter_bindings
-                    .first()
-                    .expect("side-effect adapter")
-                    .adapter_version
-                    .clone(),
-            },
-        )],
+        payloads: vec![payload],
     })
 }
 
@@ -7951,9 +9283,18 @@ impl store::RunEventStore for StaleStreamStore<'_> {
 
     fn load_run_stream<'a>(
         &'a self,
-        _run_id: &'a RunId,
+        run_id: &'a RunId,
     ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
+        let _ = run_id;
         Box::pin(std::future::ready(Ok(self.stream.clone())))
+    }
+
+    fn load_committed_run_stream<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::CommittedRunStream, Self::Error> {
+        let result = store::CommittedRunStream::from_events(run_id.clone(), self.stream.clone());
+        Box::pin(std::future::ready(result))
     }
 
     fn expected_next_seq<'a>(
@@ -7967,6 +9308,13 @@ impl store::RunEventStore for StaleStreamStore<'_> {
     fn status_projection_snapshot<'a>(
         &'a self,
         _run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        let result = Ok(self.inner.borrow().projection_snapshot().clone());
+        Box::pin(std::future::ready(result))
+    }
+
+    fn fact_projection_snapshot<'a>(
+        &'a self,
     ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
         let result = Ok(self.inner.borrow().projection_snapshot().clone());
         Box::pin(std::future::ready(result))
@@ -8022,6 +9370,25 @@ impl store::RunEventStore for MissingInputArtifactRefStore<'_> {
         Box::pin(std::future::ready(Ok(result)))
     }
 
+    fn load_committed_run_stream<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::CommittedRunStream, Self::Error> {
+        let stream = rewrite_stream_without_payloads(
+            &self.inner.borrow().load_run_stream(run_id),
+            |payload| {
+                matches!(
+                    payload,
+                    events::KernelEventPayload::ArtifactReferenced(payload)
+                        if payload.artifact_ref.role == events::ArtifactRole::StateOutput
+                            && payload.node_id.as_ref() == Some(&self.producer_node_id)
+                )
+            },
+        );
+        let result = store::CommittedRunStream::from_events(run_id.clone(), stream);
+        Box::pin(std::future::ready(result))
+    }
+
     fn expected_next_seq<'a>(
         &'a self,
         run_id: &'a RunId,
@@ -8037,6 +9404,13 @@ impl store::RunEventStore for MissingInputArtifactRefStore<'_> {
         let result = Ok(self.inner.borrow().projection_snapshot().clone());
         Box::pin(std::future::ready(result))
     }
+
+    fn fact_projection_snapshot<'a>(
+        &'a self,
+    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        let result = Ok(self.inner.borrow().projection_snapshot().clone());
+        Box::pin(std::future::ready(result))
+    }
 }
 
 delegate_execution_claim_store_to_refcell_inner!(MissingInputArtifactRefStore<'_>);
@@ -8048,7 +9422,13 @@ fn rewrite_envelope(
     commit_key: store::CommitKey,
 ) -> store::KernelEventEnvelope {
     store::KernelEventEnvelope::from_persisted_record(store::PersistedKernelEventRecord {
-        event_id: event_id_for(event, seq, ordinal),
+        event_id: test_event_id_for_envelope_inputs(
+            event.run_id(),
+            seq,
+            ordinal,
+            event.event_schema_id(),
+            event.payload_hash(),
+        ),
         event_schema_id: event.event_schema_id().clone(),
         run_id: event.run_id().clone(),
         seq,
@@ -8060,6 +9440,52 @@ fn rewrite_envelope(
         payload: event.payload().clone(),
     })
     .expect("rewritten envelope")
+}
+
+fn rewrite_envelope_payload(
+    event: &store::KernelEventEnvelope,
+    payload: events::KernelEventPayload,
+) -> store::KernelEventEnvelope {
+    let payload_hash = store::payload_canonical_json(&payload)
+        .expect("payload canonical")
+        .content_digest();
+    let event_schema_id = payload.event_schema_id().expect("event schema");
+    store::KernelEventEnvelope::from_persisted_record(store::PersistedKernelEventRecord {
+        event_id: test_event_id_for_envelope_inputs(
+            event.run_id(),
+            event.seq(),
+            event.ordinal(),
+            &event_schema_id,
+            &payload_hash,
+        ),
+        event_schema_id,
+        run_id: event.run_id().clone(),
+        seq: event.seq(),
+        ordinal: event.ordinal(),
+        spec_hash: payload.spec_hash().clone(),
+        commit_key: event.commit_key().clone(),
+        logical_key: event.logical_key().clone(),
+        payload_hash,
+        payload,
+    })
+    .expect("rewritten envelope payload")
+}
+
+fn rewrite_stream_payloads<F>(
+    stream: &[store::KernelEventEnvelope],
+    mut rewrite: F,
+) -> Vec<store::KernelEventEnvelope>
+where
+    F: FnMut(&events::KernelEventPayload) -> Option<events::KernelEventPayload>,
+{
+    stream
+        .iter()
+        .map(|event| {
+            rewrite(event.payload())
+                .map(|payload| rewrite_envelope_payload(event, payload))
+                .unwrap_or_else(|| event.clone())
+        })
+        .collect()
 }
 
 fn rewrite_stream_without_payloads<F>(
@@ -8112,22 +9538,6 @@ where
         index = end;
     }
     rewritten
-}
-
-fn event_id_for(
-    event: &store::KernelEventEnvelope,
-    seq: store::StreamSeq,
-    ordinal: store::CommitOrdinal,
-) -> EventId {
-    let canonical = canonical_json(serde_json::json!({
-        "event_schema_id": event.event_schema_id().as_str(),
-        "ordinal": ordinal.as_u32(),
-        "payload_hash": event.payload_hash().as_str(),
-        "run_id": event.run_id().as_str(),
-        "seq": seq.as_u64(),
-    }))
-    .expect("event id canonical");
-    EventId::from_digest(DigestAlgorithm::Sha256JcsV1, canonical.digest_bytes())
 }
 
 fn assert_every_certified_node_has_attempt(
@@ -8187,7 +9597,7 @@ fn referenced_artifact_ids_for_payload(payload: &events::KernelEventPayload) -> 
             );
         }
         events::KernelEventPayload::FactRecorded(payload) => {
-            artifacts.push(payload.artifact_id.clone());
+            artifacts.push(payload.claim.response().artifact_id().clone());
         }
         events::KernelEventPayload::ArtifactReferenced(payload) => {
             artifacts.push(payload.artifact_ref.artifact_id.clone());
@@ -8330,6 +9740,31 @@ async fn started_fixture_run_with_registry(
 ) -> (SerialTypedScheduler, TestTypedRunStore) {
     let scheduler = fixture_scheduler(registry, fixture);
     let store = started_fixture_store(&scheduler, fixture).await;
+    (scheduler, store)
+}
+
+async fn started_fixture_run_with_registry_and_fact_descriptors(
+    registry: ErasedRunnerRegistry,
+    fixture: &Fixture,
+    fact_descriptors: &[mfm_facts::FactDescriptor],
+) -> (SerialTypedScheduler, TestTypedRunStore) {
+    let scheduler = fixture_scheduler(registry, fixture);
+    let mut store = TestTypedRunStore::new();
+    let mut evidence = run_start_evidence(fixture, vec![fixture.seed_ref.clone()]);
+    evidence
+        .fact_descriptor_artifacts
+        .extend(fact_descriptors.iter().map(fact_descriptor_artifact));
+    let launch = scheduler
+        .prepare_run_launch(
+            &fixture.runtime_spec,
+            fixture_run_identity_material(fixture),
+            evidence,
+            store.expected_next_seq(&fixture.run_id),
+        )
+        .expect("start run with fact descriptors");
+    scheduler_start_run(&scheduler, &mut store, launch)
+        .await
+        .expect("commit run with fact descriptors");
     (scheduler, store)
 }
 
@@ -8543,6 +9978,7 @@ fn run_start_evidence(
             .iter()
             .map(|config| config_artifact(&fixture.runtime_spec, config))
             .collect(),
+        fact_descriptor_artifacts: Vec::new(),
         seed_cells: seed_cells.into_iter().map(seed_launch_cell).collect(),
     }
 }
@@ -8650,6 +10086,26 @@ fn config_artifact(
     }
 }
 
+fn fact_descriptor_artifact(descriptor: &mfm_facts::FactDescriptor) -> RunLaunchArtifact {
+    let canonical =
+        mfm_facts::canonical_fact_descriptor_bytes(descriptor).expect("canonical descriptor");
+    let digest = mfm_facts::fact_descriptor_hash(descriptor).expect("descriptor hash");
+    RunLaunchArtifact {
+        bytes: canonical.to_vec(),
+        evidence: store::ArtifactEvidenceRef {
+            artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+            digest,
+            byte_len: canonical.as_bytes().len() as u64,
+            media_type: spec::MediaType::new("application/json").expect("media"),
+            schema_id: Some(mfm_facts::fact_descriptor_schema_id().expect("descriptor schema")),
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::FactDescriptor,
+        },
+    }
+}
+
 fn seed_launch_cell(seed: events::SeedCellRef) -> RunLaunchSeedCell {
     let bytes = if seed.digest == digest_for_bytes(TEST_SEED_BYTES) {
         TEST_SEED_BYTES.to_vec()
@@ -8680,6 +10136,40 @@ fn terminal_payloads(
         producer_state_kind: Some(ctx.node().state_kind.clone()),
         producer_state_version: Some(ctx.node().state_version.clone()),
     })]
+}
+
+fn fact_query_terminal_output(
+    ctx: &ErasedRunCtx<'_>,
+    state_evidence: &store::ArtifactEvidenceRef,
+    staged_artifacts: Vec<StagedArtifact>,
+    staged_retention_refs: Vec<StagedRetentionRefs>,
+) -> ErasedRunnerOutput {
+    ErasedRunnerOutput {
+        staged_artifacts,
+        staged_retention_refs,
+        payloads: terminal_payloads(
+            ctx,
+            state_evidence.artifact_id.clone(),
+            state_evidence.digest.clone(),
+        ),
+    }
+}
+
+fn prepare_runner_output_for_invocation(
+    invocation: &PreparedRunnerInvocation<'_>,
+    output: ErasedRunnerOutput,
+) -> Result<crate::commit::PreparedRunnerOutput> {
+    CommitPlanner::prepare_runner_output(RunnerOutputCommitInput {
+        runtime_spec: invocation.runtime_spec,
+        run_id: invocation.run_id,
+        node: invocation.node,
+        attempt_id: invocation.attempt_id,
+        caps: &invocation.caps,
+        recorded_facts: &invocation.recorded_facts,
+        view: invocation.view,
+        saga_terminal_proof: None,
+        output,
+    })
 }
 
 fn state_output_artifact(
@@ -8729,6 +10219,7 @@ fn runtime_staging_class(role: events::ArtifactRole) -> &'static str {
     match role.contract().staging {
         events::ArtifactStagingClass::AttemptStateOutput
         | events::ArtifactStagingClass::AttemptFactResponse
+        | events::ArtifactStagingClass::AttemptFactQueryEvidence
         | events::ArtifactStagingClass::AttemptPublicOutput
         | events::ArtifactStagingClass::AttemptRedactedDiagnostic => {
             assert!(staged_artifact_binding_kind(role).is_some());
@@ -8769,9 +10260,11 @@ fn artifact_role_contract_runtime_staging_matches_current_helpers() {
         "TypedExecutionSpec -> run_admission\n\
 TypedSpecCertificate -> run_admission\n\
 TypedConfig -> run_admission\n\
+FactDescriptor -> run_admission\n\
 SeedInput -> run_admission\n\
 StateOutput -> attempt_state_output\n\
 FactResponse -> attempt_fact_response\n\
+FactQueryEvidence -> attempt_fact_query_evidence\n\
 SideEffectIntent -> side_effect_intent\n\
 PreparedInvocation -> side_effect_prepared_invocation\n\
 NotSubmittedProof -> side_effect_not_submitted_proof\n\
@@ -9799,65 +11292,62 @@ fn append_fact(
     fixture: &Fixture,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
-    fact_key: events::FactKey,
-    artifact_id: ArtifactId,
-    response_hash: ContentDigest,
+    subject_amount: u64,
+    response_amount: u64,
 ) {
-    let response_schema_id = node.config_ref.schema_id.clone();
-    let evidence = store::ArtifactEvidenceRef {
-        artifact_id: artifact_id.clone(),
-        digest: response_hash.clone(),
-        byte_len: 10,
-        media_type: spec::MediaType::new("application/json").expect("media"),
-        schema_id: Some(response_schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: Some(node.node_id.clone()),
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::FactResponse,
-    };
-    store
-        .append_prepared_commit(store_typed_commit_request! {
-            run_id: fixture.run_id.clone(),
-            expected_next_seq: store.expected_next_seq(&fixture.run_id),
-            commit_key: store::CommitKey::new(format!(
-                "manual-fact:{}:{}:{}",
-                node.node_id, attempt_id, fact_key
-            ))
-            .expect("commit key"),
-            payloads: vec![events::KernelEventPayload::FactRecorded(
-                events::FactRecorded {
-                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                    node_id: node.node_id.clone(),
-                    attempt_id: attempt_id.clone(),
-                    capability_kind: fixture.cap_kind.clone(),
-                    capability_version: fixture.cap_version.clone(),
-                    adapter_kind: fixture.adapter_kind.clone(),
-                    adapter_version: fixture.adapter_version.clone(),
-                    request_schema_id: node.config_ref.schema_id.clone(),
-                    request_hash: content(0xd4),
-                    response_schema_id,
-                    response_hash,
-                    fact_key,
-                    artifact_id,
-                },
-            )],
-            required_artifacts: vec![evidence],
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::NotCompleted,
-                required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
-                    "attempt:{}:{}",
-                    node.node_id, attempt_id
-                ))
-                .expect("attempt logical key")],
-                certified_run_authority: Some(store::CertifiedRunStoreAuthority::from_spec(
-                    fixture.run_id.clone(),
-                    fixture.runtime_spec.spec(),
-                )
-                .expect("certified run authority")),
-                ..store::CommitPreconditions::default()
+    let fact_key = test_fact_key(subject_amount);
+    let (evidence, response_bytes) = test_fact_response_artifact(node, response_amount);
+    let request = store_typed_commit_request! {
+        run_id: fixture.run_id.clone(),
+        expected_next_seq: store.expected_next_seq(&fixture.run_id),
+        commit_key: store::CommitKey::new(format!(
+            "manual-fact:{}:{}:{}:{}",
+            node.node_id, attempt_id, fact_key, response_amount
+        ))
+        .expect("commit key"),
+        payloads: vec![events::KernelEventPayload::FactRecorded(
+            events::FactRecorded {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+                claim: test_fact_claim(
+                    subject_amount,
+                    node.config_ref.schema_id.clone(),
+                    content(0xd4),
+                    &evidence,
+                    fixture.cap_kind.clone(),
+                    fixture.cap_version.clone(),
+                    fixture.adapter_kind.clone(),
+                    fixture.adapter_version.clone(),
+                ),
             },
-        })
-        .expect("append fact");
+        )],
+        required_artifacts: vec![evidence.clone()],
+        preconditions: store::CommitPreconditions {
+            required_run_state: store::RequiredRunState::NotCompleted,
+            required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                "attempt:{}:{}",
+                node.node_id, attempt_id
+            ))
+            .expect("attempt logical key")],
+            certified_run_authority: Some(store::CertifiedRunStoreAuthority::from_spec(
+                fixture.run_id.clone(),
+                fixture.runtime_spec.spec(),
+            )
+            .expect("certified run authority")),
+            ..store::CommitPreconditions::default()
+        },
+    };
+    let plan =
+        test_prepared_commit_plan(request, vec![evidence.clone()]).expect("fact commit plan");
+    let bundle = store::PreparedCommitBundle::new(
+        plan,
+        vec![store::PreparedArtifactBytes::new(response_bytes, evidence)
+            .expect("fact response bytes")],
+        Vec::new(),
+    )
+    .expect("fact commit bundle");
+    block_on_ready(store.append_prepared_commit_bundle(bundle)).expect("append fact");
 }
 
 fn append_terminal(
@@ -10100,7 +11590,7 @@ fn runtime_lifecycle_summary(store: &TestTypedRunStore, run_id: &RunId) -> Strin
         .collect::<BTreeSet<_>>();
     let cells = projections
         .cells()
-        .filter(|(_, terminal)| match terminal {
+        .filter(|(_, _, terminal)| match terminal {
             store::CellTerminalProjection::Produced {
                 node_id,
                 attempt_id,
@@ -10222,11 +11712,11 @@ fn assert_failure_code_count(store: &TestTypedRunStore, code: &str, expected: us
     assert_eq!(count, expected, "failure code count for {code}");
 }
 
-fn fact_recorded_count(store: &TestTypedRunStore) -> usize {
+fn fact_recorded_count(store: &TestTypedRunStore, expected: &mfm_facts::FactKey) -> usize {
     store
         .projection_snapshot()
-        .facts()
-        .filter(|(_, fact)| fact.fact_key.as_str() == "reused-fact")
+        .fact_records()
+        .filter(|(_, fact)| fact.claim.subject().fact_key() == expected)
         .count()
 }
 
@@ -10522,6 +12012,7 @@ fn append_runtime_retention_lifecycle_node(
                 effect_version: managed.version,
                 capabilities: no_caps.clone(),
                 runner: "managed_platform_write".to_owned(),
+                emitted_fact_descriptors: Vec::new(),
                 side_effect_contract_digest: None,
             },
         )));
@@ -10569,6 +12060,7 @@ fn append_runtime_retention_lifecycle_node(
                 public_output_receipt_cell: framework_receipt,
             },
         )),
+        fact_descriptor_allowlist: Vec::new(),
         planning_lineage: typed.scopes[0].planning_lineage.clone(),
         deterministic_predecessors: predecessors,
     });
@@ -10638,6 +12130,7 @@ fn append_runtime_complete_lifecycle_node(
                 effect_version: managed.version,
                 capabilities: no_caps.clone(),
                 runner: "managed_platform_write".to_owned(),
+                emitted_fact_descriptors: Vec::new(),
                 side_effect_contract_digest: None,
             },
         )));
@@ -10690,6 +12183,7 @@ fn append_runtime_complete_lifecycle_node(
                 retention_manifest_receipt_cell: framework_receipt,
             },
         )),
+        fact_descriptor_allowlist: Vec::new(),
         planning_lineage: typed.scopes[0].planning_lineage.clone(),
         deterministic_predecessors: predecessors,
     });
@@ -10748,6 +12242,7 @@ fn append_runtime_resolve_saga_terminal_lifecycle_node(
                 effect_version: managed.version,
                 capabilities: no_caps.clone(),
                 runner: "managed_platform_write".to_owned(),
+                emitted_fact_descriptors: Vec::new(),
                 side_effect_contract_digest: None,
             },
         )));
@@ -10786,6 +12281,7 @@ fn append_runtime_resolve_saga_terminal_lifecycle_node(
                 public_schema_id: typed.public_outputs.public_schema_id.clone(),
             },
         )),
+        fact_descriptor_allowlist: Vec::new(),
         planning_lineage: typed.scopes[0].planning_lineage.clone(),
         deterministic_predecessors: Vec::new(),
     });
@@ -11001,6 +12497,7 @@ fn fixture() -> Fixture {
                 required_cells: public_outputs.outputs.clone(),
             },
         )),
+        fact_descriptor_allowlist: Vec::new(),
         planning_lineage: planning.clone(),
         deterministic_predecessors: vec![node_b.clone()],
     };
@@ -11061,6 +12558,7 @@ fn fixture() -> Fixture {
                 effect_version: managed_effect.version,
                 capabilities: no_caps,
                 runner: "managed_platform_write".to_owned(),
+                emitted_fact_descriptors: Vec::new(),
                 side_effect_contract_digest: None,
             })),
             spec::DescriptorIdentity::Renderer(Box::new(renderer.clone())),
@@ -11195,6 +12693,92 @@ fn fixture() -> Fixture {
         adapter_kind,
         adapter_version,
     }
+}
+
+fn fixture_with_first_node_fact_descriptor(
+) -> (Fixture, mfm_facts::FactDescriptor, spec::FactDescriptorRef) {
+    fixture_with_node_fact_descriptor(|fixture| fixture.cell_a.clone())
+}
+
+fn fixture_with_read_node_fact_descriptor(
+) -> (Fixture, mfm_facts::FactDescriptor, spec::FactDescriptorRef) {
+    fixture_with_node_fact_descriptor(|fixture| fixture.cell_b.clone())
+}
+
+fn fixture_with_read_node_and_other_node_fact_descriptors() -> (
+    Fixture,
+    mfm_facts::FactDescriptor,
+    mfm_facts::FactDescriptor,
+) {
+    let (mut fixture, read_descriptor, _read_ref) = fixture_with_read_node_fact_descriptor();
+    let other_descriptor = test_fact_descriptor_with_kind("mfm.runtime.test.other_fact");
+    let other_ref =
+        mfm_program::fact_descriptor_ref_for_descriptor(&other_descriptor).expect("descriptor ref");
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    let node = envelope
+        .spec
+        .nodes
+        .iter_mut()
+        .find(|node| node.output_cell == fixture.cell_a)
+        .expect("other fixture node");
+    let descriptor_id = node.descriptor_id.clone();
+    node.fact_descriptor_allowlist = vec![other_ref.clone()];
+    let state_descriptor = envelope
+        .spec
+        .descriptor_identities
+        .iter_mut()
+        .find_map(|identity| match identity {
+            spec::DescriptorIdentity::State(state) if state.descriptor_id == descriptor_id => {
+                Some(state)
+            }
+            _ => None,
+        })
+        .expect("other fixture state descriptor");
+    state_descriptor.emitted_fact_descriptors = vec![other_ref];
+    let envelope =
+        spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("descriptor rehash");
+    fixture.runtime_spec =
+        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("descriptor runtime spec");
+    refresh_fixture_run_id(&mut fixture);
+    (fixture, read_descriptor, other_descriptor)
+}
+
+fn fixture_with_node_fact_descriptor(
+    select_output_cell: impl FnOnce(&Fixture) -> CellId,
+) -> (Fixture, mfm_facts::FactDescriptor, spec::FactDescriptorRef) {
+    let mut fixture = fixture();
+    let output_cell = select_output_cell(&fixture);
+    let descriptor =
+        <RuntimeTestFact as mfm_program::MfmFactType>::descriptor().expect("fact descriptor");
+    let descriptor_ref =
+        mfm_program::fact_descriptor_ref_for_descriptor(&descriptor).expect("descriptor ref");
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    let node = envelope
+        .spec
+        .nodes
+        .iter_mut()
+        .find(|node| node.output_cell == output_cell)
+        .expect("fixture node");
+    let descriptor_id = node.descriptor_id.clone();
+    node.fact_descriptor_allowlist = vec![descriptor_ref.clone()];
+    let state_descriptor = envelope
+        .spec
+        .descriptor_identities
+        .iter_mut()
+        .find_map(|identity| match identity {
+            spec::DescriptorIdentity::State(state) if state.descriptor_id == descriptor_id => {
+                Some(state)
+            }
+            _ => None,
+        })
+        .expect("fixture state descriptor");
+    state_descriptor.emitted_fact_descriptors = vec![descriptor_ref.clone()];
+    let envelope =
+        spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("descriptor rehash");
+    fixture.runtime_spec =
+        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("descriptor runtime spec");
+    refresh_fixture_run_id(&mut fixture);
+    (fixture, descriptor, descriptor_ref)
 }
 
 fn fixture_with_retention_lifecycle_node() -> Fixture {
@@ -11489,8 +13073,10 @@ async fn drive_until_public_output_produced(
         let projections = store.projection_snapshot();
         if projections.run_state(&fixture.run_id) == store::RunState::Started
             && matches!(
-                projections
-                    .public_output(&fixture.runtime_spec.spec().public_outputs.public_schema_id),
+                projections.public_output(
+                    &fixture.run_id,
+                    &fixture.runtime_spec.spec().public_outputs.public_schema_id,
+                ),
                 Some(store::PublicOutputProjection::Produced { .. })
             )
         {
@@ -11708,6 +13294,7 @@ fn node_spec(fixture: NodeSpecFixture) -> spec::NodeSpec {
         adapter_bindings: fixture.adapter_bindings,
         side_effect: None,
         framework: None,
+        fact_descriptor_allowlist: Vec::new(),
         planning_lineage: fixture.planning,
         deterministic_predecessors: fixture.predecessors,
     }
@@ -11743,6 +13330,7 @@ fn state_descriptor(
         effect_version: EffectVersion::new("mfm.effect.v1").expect("effect version"),
         capabilities,
         runner: runner.to_owned(),
+        emitted_fact_descriptors: Vec::new(),
         side_effect_contract_digest: None,
     }
 }
@@ -12191,6 +13779,66 @@ fn side_effect_fixture_digest(ctx: &ErasedRunCtx<'_>, role: &str) -> ContentDige
     .expect("side-effect fixture digest")
 }
 
+struct SideEffectFixtureIntentOutput {
+    ledger: events::SideEffectLedgerKey,
+    staged_artifact: StagedArtifact,
+    payload: RunnerEventPayload,
+}
+
+fn side_effect_fixture_intent_output(
+    ctx: &ErasedRunCtx<'_>,
+    ledger_purpose: events::SideEffectLedgerPurpose,
+    invocation_epoch: u32,
+) -> Result<SideEffectFixtureIntentOutput> {
+    let ledger = side_effect_ledger_key_for_ctx(ctx);
+    let (pair_id, pair_role) =
+        side_effect_pair_fields_for_ctx(ctx, &ledger_purpose, events::SideEffectPairRole::Submit);
+    let (intent_artifact_id, intent_hash) = side_effect_fixture_artifact_pair(ctx, "intent");
+    let staged_artifact = staged_side_effect_artifact(
+        ctx,
+        side_effect_artifact(
+            ctx,
+            intent_artifact_id.clone(),
+            intent_hash.clone(),
+            events::ArtifactRole::SideEffectIntent,
+        ),
+        ledger.clone(),
+        invocation_epoch,
+    )?;
+    let adapter_binding = ctx
+        .node()
+        .adapter_bindings
+        .first()
+        .expect("side-effect adapter");
+    let payload =
+        RunnerEventPayload::SideEffectIntentPersisted(events::side_effect::IntentPersisted {
+            spec_hash: ctx.spec_hash().clone(),
+            node_id: ctx.node().node_id.clone(),
+            scope_id: ctx.node().scope_id.clone(),
+            attempt_id: ctx.attempt_id().clone(),
+            ledger_key: ledger.clone(),
+            ledger_purpose,
+            pair_id,
+            pair_role,
+            invocation_epoch,
+            intent_schema_id: ctx.node().config_ref.schema_id.clone(),
+            intent_hash,
+            intent_artifact_id,
+            idempotency_input_schema_id: ctx.node().config_ref.schema_id.clone(),
+            idempotency_input_hash: side_effect_fixture_digest(ctx, "idempotency"),
+            idempotency_key: events::IdempotencyKeyRef::new("idem-1").expect("idempotency key"),
+            capability_kind: side_effect_capability_kind(),
+            capability_version: side_effect_capability_version(),
+            adapter_kind: adapter_binding.adapter_kind.clone(),
+            adapter_version: adapter_binding.adapter_version.clone(),
+        });
+    Ok(SideEffectFixtureIntentOutput {
+        ledger,
+        staged_artifact,
+        payload,
+    })
+}
+
 fn side_effect_fixture_artifact_pair(
     ctx: &ErasedRunCtx<'_>,
     role: &str,
@@ -12306,28 +13954,43 @@ fn side_effect_artifact(
     }
 }
 
+fn runner_side_effect_binding_for_ctx(
+    ctx: &ErasedRunCtx<'_>,
+    ledger: events::SideEffectLedgerKey,
+    invocation_epoch: u32,
+) -> RunnerSideEffectBinding {
+    let ledger_purpose = side_effect_ledger_purpose_for_ctx(ctx);
+    let (pair_id, _) =
+        side_effect_pair_fields_for_ctx(ctx, &ledger_purpose, events::SideEffectPairRole::Submit);
+    RunnerSideEffectBinding {
+        ledger_key: ledger,
+        ledger_purpose,
+        pair_id,
+        invocation_epoch,
+    }
+}
+
+fn runner_claim_binding_for_ctx(
+    ctx: &ErasedRunCtx<'_>,
+    claim_generation: u32,
+) -> RunnerClaimBinding {
+    RunnerClaimBinding {
+        claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
+        claim_generation,
+        claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
+    }
+}
+
 fn side_effect_claimed(
     ctx: &ErasedRunCtx<'_>,
     ledger: events::SideEffectLedgerKey,
     invocation_epoch: u32,
     claim_generation: u32,
 ) -> RunnerEventPayload {
-    let ledger_purpose = side_effect_ledger_purpose_for_ctx(ctx);
-    let (pair_id, pair_role) =
-        side_effect_pair_fields_for_ctx(ctx, &ledger_purpose, events::SideEffectPairRole::Submit);
-    RunnerEventPayload::SideEffectClaimed(events::side_effect::Claimed {
-        spec_hash: ctx.spec_hash().clone(),
-        node_id: ctx.node().node_id.clone(),
-        attempt_id: ctx.attempt_id().clone(),
-        ledger_key: ledger,
-        ledger_purpose,
-        pair_id,
-        pair_role,
-        claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
-        invocation_epoch,
-        claim_generation,
-        claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
-    })
+    RunnerPayloadBuilder::new(ctx).side_effect_claimed(
+        runner_side_effect_binding_for_ctx(ctx, ledger, invocation_epoch),
+        runner_claim_binding_for_ctx(ctx, claim_generation),
+    )
 }
 
 fn side_effect_prepared(
@@ -12336,34 +13999,18 @@ fn side_effect_prepared(
     invocation_epoch: u32,
     claim_generation: u32,
 ) -> RunnerEventPayload {
-    side_effect_prepared_with_resource_key(ctx, ledger, invocation_epoch, claim_generation, None)
-}
-
-fn side_effect_prepared_with_resource_key(
-    ctx: &ErasedRunCtx<'_>,
-    ledger: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
-    claim_generation: u32,
-    resource_key: Option<events::ResourceKeyEvidence>,
-) -> RunnerEventPayload {
-    let ledger_purpose = side_effect_ledger_purpose_for_ctx(ctx);
-    let (pair_id, pair_role) =
-        side_effect_pair_fields_for_ctx(ctx, &ledger_purpose, events::SideEffectPairRole::Submit);
-    RunnerEventPayload::SideEffectInvocationPrepared(events::side_effect::InvocationPrepared {
-        spec_hash: ctx.spec_hash().clone(),
-        node_id: ctx.node().node_id.clone(),
-        attempt_id: ctx.attempt_id().clone(),
-        ledger_key: ledger,
-        ledger_purpose,
-        pair_id,
-        pair_role,
-        invocation_epoch,
-        claim_generation,
-        claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
-        resource_key,
-        prepared_artifact_id: None,
-        prepared_hash: None,
-    })
+    let claim = runner_claim_binding_for_ctx(ctx, claim_generation);
+    RunnerPayloadBuilder::new(ctx)
+        .side_effect_invocation_prepared(
+            runner_side_effect_binding_for_ctx(ctx, ledger, invocation_epoch),
+            None,
+            RunnerPreparedInvocationBinding {
+                claim_generation: claim.claim_generation,
+                claim_fencing_token: claim.claim_fencing_token,
+                resource_key: None,
+            },
+        )
+        .expect("side-effect prepared payload")
 }
 
 fn side_effect_failed(
@@ -12373,22 +14020,13 @@ fn side_effect_failed(
     failure_phase: events::side_effect::FailurePhase,
     retryable: bool,
 ) -> RunnerEventPayload {
-    let ledger_purpose = side_effect_ledger_purpose_for_ctx(ctx);
-    let (pair_id, pair_role) =
-        side_effect_pair_fields_for_ctx(ctx, &ledger_purpose, events::SideEffectPairRole::Submit);
-    RunnerEventPayload::SideEffectFailed(events::side_effect::Failed {
-        spec_hash: ctx.spec_hash().clone(),
-        node_id: ctx.node().node_id.clone(),
-        attempt_id: ctx.attempt_id().clone(),
-        ledger_key: ledger,
-        ledger_purpose,
-        pair_id,
-        pair_role,
-        invocation_epoch,
+    RunnerPayloadBuilder::new(ctx).side_effect_failed(
+        runner_side_effect_binding_for_ctx(ctx, ledger, invocation_epoch),
+        events::SideEffectPairRole::Submit,
         failure_phase,
         retryable,
-        error: side_effect_error(retryable),
-    })
+        side_effect_error(retryable),
+    )
 }
 
 fn side_effect_error(retryable: bool) -> events::MfmErrorInfo {

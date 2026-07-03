@@ -1,6 +1,6 @@
 use super::*;
 use axum::body::{to_bytes, Body};
-use axum::http::Request;
+use axum::http::{Method, Request};
 use tower::ServiceExt;
 
 static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -67,97 +67,164 @@ async fn read_only_routes_ignore_malformed_runtime_config_env() {
     .await;
     let app = test_app();
 
-    let list = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/runs")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("list response");
-    assert_eq!(list.status(), StatusCode::OK);
+    let routes = [
+        (Method::GET, "/v1/runs".to_owned(), StatusCode::OK),
+        (Method::GET, "/v1/health".to_owned(), StatusCode::OK),
+        (Method::GET, "/v1/ready".to_owned(), StatusCode::OK),
+        (
+            Method::GET,
+            format!("/v1/runs/{VALID_RUN_ID}/status"),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            Method::GET,
+            format!("/v1/runs/{VALID_RUN_ID}/stream"),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            Method::POST,
+            format!("/v1/runs/{VALID_RUN_ID}/replay"),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            Method::GET,
+            format!("/v1/runs/{VALID_RUN_ID}/public-output/{VALID_SCHEMA_ID}"),
+            StatusCode::NOT_FOUND,
+        ),
+        (Method::GET, "/v1/facts/kinds".to_owned(), StatusCode::OK),
+        (
+            Method::GET,
+            "/v1/facts/kinds/mfm.rest.test.fact".to_owned(),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            Method::GET,
+            "/v1/facts/mfm.rest.test.fact?order=result.amount.asc&field=result.amount&limit=1"
+                .to_owned(),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            Method::GET,
+            "/v1/facts/mfm.rest.test.fact/latest?order=result.amount.asc&field=result.amount"
+                .to_owned(),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            Method::GET,
+            format!("/v1/facts/ref/{}", unknown_public_ref()),
+            StatusCode::NOT_FOUND,
+        ),
+    ];
+    for (method, uri, status) in routes {
+        assert_response_status(&app, request(method, uri), status).await;
+    }
+}
 
-    let health = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/health")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("health response");
-    assert_eq!(health.status(), StatusCode::OK);
+#[tokio::test]
+async fn facts_routes_are_available_and_return_json_envelopes() {
+    let app = test_app();
 
-    let ready = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/ready")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("ready response");
-    assert_eq!(ready.status(), StatusCode::OK);
+    let value = get_json(&app, "/v1/facts/kinds", StatusCode::OK).await;
+    assert_eq!(value["status"], "success");
+    assert_eq!(value["data"], json!([]));
 
-    let status = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/runs/{VALID_RUN_ID}/status"))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("status response");
-    assert_eq!(status.status(), StatusCode::NOT_FOUND);
+    let value = get_json(
+        &app,
+        "/v1/facts/kinds/mfm.rest.test.fact",
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    assert_eq!(value["status"], "error");
+    assert_eq!(value["error"]["code"], "FactNotFound");
 
-    let stream = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/runs/{VALID_RUN_ID}/stream"))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("stream response");
-    assert_eq!(stream.status(), StatusCode::NOT_FOUND);
+    let value = get_json(
+        &app,
+        &format!("/v1/facts/ref/{}", unknown_public_ref()),
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    assert_eq!(value["error"]["code"], "FactNotFound");
+}
 
-    let replay = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/v1/runs/{VALID_RUN_ID}/replay"))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("replay response");
-    assert_eq!(replay.status(), StatusCode::NOT_FOUND);
+#[tokio::test]
+async fn fact_query_routes_reject_malformed_query_shapes() {
+    let app = test_app();
 
-    let output = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!(
-                    "/v1/runs/{VALID_RUN_ID}/public-output/{VALID_SCHEMA_ID}"
-                ))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("public output response");
-    assert_eq!(output.status(), StatusCode::NOT_FOUND);
+    let cases = [
+        (
+            "/v1/facts/mfm.rest.test.fact?order=result.amount.asc&field=result.amount&limit=nope",
+            "InvalidQuery",
+        ),
+        (
+            "/v1/facts/mfm.rest.test.fact?field=result.amount",
+            "FactOrderingMissing",
+        ),
+        (
+            "/v1/facts/mfm.rest.test.fact?order=result.amount.asc",
+            "FactReturnFieldMissing",
+        ),
+        (
+            "/v1/facts/mfm.rest.test.fact/latest?order=result.amount.asc&field=result.amount&subject=broken",
+            "FactPredicateInvalid",
+        ),
+    ];
+    for (uri, code) in cases {
+        let value = get_json(&app, uri, StatusCode::BAD_REQUEST).await;
+        assert_eq!(value["error"]["code"], code);
+    }
+}
+
+#[tokio::test]
+async fn facts_routes_expose_only_public_platform_projection_data() {
+    let fixture = mfm_app::PublicFactVisibilityFixtureForTest::new();
+    let app = make_app(AppState {
+        store: fixture.store.clone(),
+        runtime_config_path: None,
+        fact_query_receipt_trust_root: None,
+    });
+
+    let value = get_json(&app, "/v1/facts/kinds", StatusCode::OK).await;
+    assert_eq!(value["data"][0]["fact_kind"], fixture.fact_kind);
+    assert_eq!(value["data"][0]["descriptor_count"], 1);
+    fixture.assert_json_redacts_private_tokens(&value);
+
+    let describe_uri = format!("/v1/facts/kinds/{}", fixture.fact_kind);
+    let value = get_json(&app, &describe_uri, StatusCode::OK).await;
+    assert_eq!(value["data"][0]["fields"].as_array().unwrap().len(), 2);
+    fixture.assert_json_redacts_private_tokens(&value);
+
+    let query_uri = format!(
+        "/v1/facts/{}?shape={}&order=result.amount.asc&field=subject.account&field=result.amount&subject=account%3Dpublic-account&result=amount.gte%3Du64%3A10&limit=10",
+        fixture.fact_kind, fixture.shape
+    );
+    let value = get_json(&app, &query_uri, StatusCode::OK).await;
+    let facts = value["data"]["facts"].as_array().expect("facts array");
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0]["public_ref"], fixture.platform_public_ref);
+    assert_eq!(facts[0]["fields"].as_array().unwrap().len(), 2);
+    fixture.assert_json_redacts_private_tokens(&value);
+
+    let latest_uri = format!(
+        "/v1/facts/{}/latest?shape={}&order=result.amount.asc&field=result.amount&limit=99",
+        fixture.fact_kind, fixture.shape
+    );
+    let value = get_json(&app, &latest_uri, StatusCode::OK).await;
+    assert_eq!(value["data"]["facts"].as_array().unwrap().len(), 1);
+    fixture.assert_json_redacts_private_tokens(&value);
+
+    let platform_ref_uri = format!("/v1/facts/ref/{}", fixture.platform_public_ref);
+    let value = get_json(&app, &platform_ref_uri, StatusCode::OK).await;
+    assert_eq!(value["data"]["public_ref"], fixture.platform_public_ref);
+    fixture.assert_json_redacts_private_tokens(&value);
+
+    let control_ref_uri = format!("/v1/facts/ref/{}", fixture.control_public_ref);
+    let control_error = get_json(&app, &control_ref_uri, StatusCode::NOT_FOUND).await;
+    assert_eq!(control_error["error"]["code"], "FactNotFound");
+    fixture.assert_json_redacts_private_tokens(&control_error);
+
+    let unknown_ref_uri = format!("/v1/facts/ref/{}", unknown_public_ref());
+    let unknown_error = get_json(&app, &unknown_ref_uri, StatusCode::NOT_FOUND).await;
+    assert_eq!(unknown_error["error"], control_error["error"]);
 }
 
 async fn locked_env<const N: usize>(pairs: [(&'static str, &str); N]) -> EnvGuard {
@@ -205,7 +272,20 @@ fn test_app() -> axum::Router {
     make_app(AppState {
         store: store::AsyncInMemoryRunStore::default(),
         runtime_config_path: None,
+        fact_query_receipt_trust_root: None,
     })
+}
+
+fn request(method: Method, uri: impl AsRef<str>) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri.as_ref())
+        .body(Body::empty())
+        .expect("request")
+}
+
+fn get(uri: &str) -> Request<Body> {
+    request(Method::GET, uri)
 }
 
 fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
@@ -217,9 +297,27 @@ fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
         .expect("request")
 }
 
+async fn assert_response_status(
+    app: &axum::Router,
+    request: Request<Body>,
+    status: StatusCode,
+) -> axum::response::Response {
+    let response = app.clone().oneshot(request).await.expect("response");
+    assert_eq!(response.status(), status);
+    response
+}
+
+async fn get_json(app: &axum::Router, uri: &str, status: StatusCode) -> serde_json::Value {
+    response_json(assert_response_status(app, get(uri), status).await).await
+}
+
 async fn response_json(response: axum::response::Response) -> serde_json::Value {
     let bytes = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
     serde_json::from_slice(&bytes).expect("response json")
+}
+
+fn unknown_public_ref() -> String {
+    format!("pfr_{}", "a".repeat(64))
 }

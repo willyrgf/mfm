@@ -17,11 +17,12 @@
 //! ```
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::Json;
@@ -29,9 +30,9 @@ use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
     AppError, DistinctRunKey, EntryPointRunLaunchInput, ErrorClass, ManualResolutionDecision,
-    ManualResolutionRecordRequest, ProductionRunStore, PublicOpName, PublicOutputResponse,
-    PublicSafeMessage, RunLaunchOutcomeStatus, RunReadServices, RunResponse, RunServices,
-    RunStreamResponse,
+    ManualResolutionRecordRequest, ProductionRunStore, PublicFactQueryRequest, PublicFactRefId,
+    PublicOpName, PublicOutputResponse, PublicSafeMessage, RunLaunchOutcomeStatus, RunReadServices,
+    RunResponse, RunServices, RunStreamResponse,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use mfm_canonical::PlainCanonicalJsonBytes;
@@ -44,6 +45,7 @@ use serde_json::json;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 use tracing::instrument;
+use url::form_urlencoded;
 
 fn ok(data: serde_json::Value) -> serde_json::Value {
     json!({ "status": "success", "data": data })
@@ -179,6 +181,8 @@ pub struct AppState<S = ProductionRunStore> {
     pub store: S,
     /// Optional runtime configuration file path for live capability-backed runs.
     pub runtime_config_path: Option<PathBuf>,
+    /// Optional fact-query receipt trust root used for replay verification.
+    pub fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
 }
 
 #[derive(Clone)]
@@ -226,38 +230,49 @@ where
 {
     fn live_services(&self) -> Result<RunServices<S, S>, ApiError> {
         let runners = mfm_app::production_runner_registry(
-            mfm_app::artifact_read_provider_from_retained(self.app.store.clone()),
+            Arc::new(self.app.store.clone()),
             self.app.runtime_config_path.as_deref(),
         )?;
         let certification_registry = mfm_app::production_certification_registry()?;
-        Ok(mfm_app::make_run_services_with_certification_registry(
-            runners,
-            self.app.store.clone(),
-            self.app.store.clone(),
-            certification_registry,
-        ))
+        let fact_query_receipt_trust_root = self.app.fact_query_receipt_trust_root.clone();
+        Ok(
+            mfm_app::make_run_services_with_certification_registry_and_fact_query_trust_root(
+                runners,
+                self.app.store.clone(),
+                self.app.store.clone(),
+                certification_registry,
+                fact_query_receipt_trust_root,
+            ),
+        )
     }
 
     fn read_services(&self) -> Result<RunReadServices<S, S>, ApiError> {
         let certification_registry = mfm_app::production_certification_registry()?;
-        Ok(mfm_app::make_run_read_services_with_certification_registry(
-            self.app.store.clone(),
-            self.app.store.clone(),
-            certification_registry,
-        ))
+        let fact_query_receipt_trust_root = self.app.fact_query_receipt_trust_root.clone();
+        Ok(
+            mfm_app::make_run_read_services_with_certification_registry_and_fact_query_trust_root(
+                self.app.store.clone(),
+                self.app.store.clone(),
+                certification_registry,
+                fact_query_receipt_trust_root,
+            ),
+        )
     }
 }
 
 /// Connects to the default certified run store.
 pub async fn make_default_run_store() -> Result<ProductionRunStore, ApiError> {
-    Ok(mfm_app::connect_production_run_store(None).await?)
+    Ok(mfm_app::connect_production_run_store_with_optional_fact_query_signer(None).await?)
 }
 
 /// Builds default production REST API state from environment-selected stores.
 pub async fn make_default_app_state() -> Result<DefaultAppState, ApiError> {
+    let store = make_default_run_store().await?;
+    let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
     Ok(AppState {
-        store: make_default_run_store().await?,
+        store,
         runtime_config_path: std::env::var_os(mfm_app::MFM_RUNTIME_CONFIG_FILE).map(PathBuf::from),
+        fact_query_receipt_trust_root,
     })
 }
 
@@ -269,6 +284,7 @@ where
         + store::ExecutionClaimStore
         + RunObservationStore<Error = <S as RunEventStore>::Error>
         + store::RetainedArtifactReadProvider
+        + mfm_app::PublicFactQueryExecutor
         + Clone
         + Send
         + Sync
@@ -281,6 +297,11 @@ where
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/ready", get(ready::<S>))
+        .route("/v1/facts/kinds", get(facts_kinds::<S>))
+        .route("/v1/facts/kinds/:kind", get(facts_describe_kind::<S>))
+        .route("/v1/facts/ref/:public_ref", get(facts_ref::<S>))
+        .route("/v1/facts/:kind/latest", get(facts_latest::<S>))
+        .route("/v1/facts/:kind", get(facts_query::<S>))
         .route("/v1/runs", get(runs_list::<S>))
         .route("/v1/runs/start", post(runs_start::<S>))
         .route("/v1/runs/:run_id/resume", post(runs_resume::<S>))
@@ -486,6 +507,108 @@ impl From<store::RunObservation> for RunObservationResponse {
             completed_at: row.completed_at,
             change_id: row.change_id,
         }
+    }
+}
+
+#[instrument(level = "debug", skip(state))]
+async fn facts_kinds<S>(
+    State(state): State<RouterState<S>>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: RunCommandStore,
+{
+    json_ok(state.read_services()?.fact_kinds().await?)
+}
+
+#[instrument(level = "debug", skip(state), fields(kind = kind.as_str()))]
+async fn facts_describe_kind<S>(
+    State(state): State<RouterState<S>>,
+    Path(kind): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: RunCommandStore,
+{
+    json_ok(state.read_services()?.describe_fact_kind(&kind).await?)
+}
+
+#[instrument(level = "debug", skip(state, query), fields(kind = kind.as_str()))]
+async fn facts_query<S>(
+    State(state): State<RouterState<S>>,
+    Path(kind): Path<String>,
+    query: RawQuery,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: RunCommandStore + mfm_app::PublicFactQueryExecutor,
+{
+    facts_query_response(&state, kind, query, None).await
+}
+
+#[instrument(level = "debug", skip(state, query), fields(kind = kind.as_str()))]
+async fn facts_latest<S>(
+    State(state): State<RouterState<S>>,
+    Path(kind): Path<String>,
+    query: RawQuery,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: RunCommandStore + mfm_app::PublicFactQueryExecutor,
+{
+    facts_query_response(&state, kind, query, Some(1)).await
+}
+
+async fn facts_query_response<S>(
+    state: &RouterState<S>,
+    kind: String,
+    query: RawQuery,
+    forced_limit: Option<u64>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: RunCommandStore + mfm_app::PublicFactQueryExecutor,
+{
+    let request = public_fact_query_request(kind, query, forced_limit)?;
+    json_ok(state.read_services()?.query_public_facts(request).await?)
+}
+
+#[instrument(level = "debug", skip(state), fields(public_ref = public_ref.as_str()))]
+async fn facts_ref<S>(
+    State(state): State<RouterState<S>>,
+    Path(public_ref): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: RunCommandStore,
+{
+    let public_ref = PublicFactRefId::new(public_ref)?;
+    json_ok(
+        state
+            .read_services()?
+            .resolve_public_fact_ref(&public_ref)
+            .await?,
+    )
+}
+
+fn public_fact_query_request(
+    kind: String,
+    query: RawQuery,
+    forced_limit: Option<u64>,
+) -> Result<PublicFactQueryRequest, ApiError> {
+    let pairs = query
+        .0
+        .as_deref()
+        .map(|raw| form_urlencoded::parse(raw.as_bytes()))
+        .into_iter()
+        .flatten();
+    PublicFactQueryRequest::from_query_pairs(kind, pairs, forced_limit)
+        .map_err(fact_query_params_api_error)
+}
+
+fn fact_query_params_api_error(error: AppError) -> ApiError {
+    if mfm_app::is_public_fact_query_parameter_error(&error) {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "InvalidQuery",
+            "Failed to parse fact query parameters",
+        )
+    } else {
+        ApiError::from(error)
     }
 }
 

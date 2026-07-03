@@ -35,6 +35,27 @@ VALUES (
   'mfm.postgres.run_store.v1'
 );
 
+CREATE TABLE fact_receipt_trust_root (
+  singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+  store_identity TEXT NOT NULL,
+  authentication_scheme TEXT NOT NULL,
+  key_id TEXT NOT NULL,
+  verifying_key BYTEA NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT fact_receipt_trust_root_store_identity_v1 CHECK (
+    store_identity ~ '^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$'
+  ),
+  CONSTRAINT fact_receipt_trust_root_scheme_v1 CHECK (
+    authentication_scheme = 'local_ed25519_sha256_jcs_v1'
+  ),
+  CONSTRAINT fact_receipt_trust_root_key_id_v1 CHECK (
+    key_id ~ '^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$'
+  ),
+  CONSTRAINT fact_receipt_trust_root_key_len CHECK (
+    octet_length(verifying_key) = 32
+  )
+);
+
 CREATE TABLE commits (
   commit_id TEXT NOT NULL,
   run_id TEXT NOT NULL,
@@ -153,6 +174,179 @@ CREATE TABLE run_artifact_admissions (
   CONSTRAINT run_artifact_admissions_seq_positive CHECK (first_seq >= 1)
 );
 
+CREATE TABLE fact_descriptor_index (
+  descriptor_hash TEXT PRIMARY KEY,
+  descriptor_artifact_id TEXT NOT NULL,
+  descriptor_artifact_evidence_hash TEXT NOT NULL,
+  fact_kind TEXT NOT NULL,
+  descriptor_schema_id TEXT NOT NULL,
+  subject_schema_id TEXT NOT NULL,
+  response_schema_id TEXT NOT NULL,
+  fact_subject_namespace_hash TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT fact_descriptor_index_artifact_fk FOREIGN KEY (descriptor_artifact_id, descriptor_artifact_evidence_hash) REFERENCES artifact_admissions(artifact_id, evidence_hash) ON DELETE RESTRICT,
+  CONSTRAINT fact_descriptor_index_artifact_unique UNIQUE (descriptor_artifact_id, descriptor_artifact_evidence_hash),
+  CONSTRAINT fact_descriptor_index_descriptor_artifact_unique UNIQUE (descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash)
+);
+
+CREATE TABLE run_fact_descriptor_admissions (
+  run_id TEXT NOT NULL,
+  descriptor_hash TEXT NOT NULL,
+  descriptor_artifact_id TEXT NOT NULL,
+  descriptor_artifact_evidence_hash TEXT NOT NULL,
+  source_seq BIGINT NOT NULL,
+  source_ordinal INTEGER NOT NULL,
+  source_event_id TEXT NOT NULL,
+  commit_id TEXT NOT NULL,
+  PRIMARY KEY (run_id, descriptor_hash),
+  CONSTRAINT run_fact_descriptor_admissions_descriptor_artifact_fk FOREIGN KEY (descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash) REFERENCES fact_descriptor_index(descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash) ON DELETE RESTRICT,
+  CONSTRAINT run_fact_descriptor_admissions_event_fk FOREIGN KEY (run_id, source_seq, source_ordinal) REFERENCES run_events(run_id, seq, ordinal) ON DELETE RESTRICT,
+  CONSTRAINT run_fact_descriptor_admissions_event_id_fk FOREIGN KEY (run_id, source_event_id) REFERENCES run_events(run_id, event_id) ON DELETE RESTRICT,
+  CONSTRAINT run_fact_descriptor_admissions_commit_fk FOREIGN KEY (commit_id) REFERENCES commits(commit_id) ON DELETE RESTRICT,
+  CONSTRAINT run_fact_descriptor_admissions_run_artifact_fk FOREIGN KEY (run_id, descriptor_artifact_id, descriptor_artifact_evidence_hash) REFERENCES run_artifact_admissions(run_id, artifact_id, evidence_hash) ON DELETE RESTRICT,
+  CONSTRAINT run_fact_descriptor_admissions_seq_positive CHECK (source_seq >= 1),
+  CONSTRAINT run_fact_descriptor_admissions_ordinal_nonnegative CHECK (source_ordinal >= 0)
+);
+
+CREATE TABLE fact_index (
+  source_run_id TEXT NOT NULL,
+  source_seq BIGINT NOT NULL,
+  source_ordinal INTEGER NOT NULL,
+  source_event_id TEXT NOT NULL,
+  producer_node_id TEXT NOT NULL,
+  commit_id TEXT NOT NULL,
+  commit_key TEXT NOT NULL,
+  store_commit_order BIGINT NOT NULL,
+  recorded_at TEXT NOT NULL,
+  observed_at TEXT NULL,
+  audience TEXT NOT NULL,
+  visibility_scope TEXT NOT NULL,
+  fact_kind TEXT NOT NULL,
+  fact_descriptor_hash TEXT NOT NULL,
+  fact_subject_namespace_hash TEXT NOT NULL,
+  fact_key TEXT NOT NULL,
+  subject_material_hash TEXT NOT NULL,
+  request_schema_id TEXT NULL,
+  request_hash TEXT NULL,
+  response_schema_id TEXT NOT NULL,
+  response_hash TEXT NOT NULL,
+  response_artifact_id TEXT NOT NULL,
+  response_artifact_evidence_hash TEXT NOT NULL,
+  capability_kind TEXT NOT NULL,
+  capability_version TEXT NOT NULL,
+  adapter_kind TEXT NOT NULL,
+  adapter_version TEXT NOT NULL,
+  PRIMARY KEY (source_run_id, source_seq, source_ordinal),
+  CONSTRAINT fact_index_event_fk FOREIGN KEY (source_run_id, source_seq, source_ordinal) REFERENCES run_events(run_id, seq, ordinal) ON DELETE RESTRICT,
+  CONSTRAINT fact_index_event_id_fk FOREIGN KEY (source_run_id, source_event_id) REFERENCES run_events(run_id, event_id) ON DELETE RESTRICT,
+  CONSTRAINT fact_index_commit_fk FOREIGN KEY (commit_id) REFERENCES commits(commit_id) ON DELETE RESTRICT,
+  CONSTRAINT fact_index_descriptor_fk FOREIGN KEY (fact_descriptor_hash) REFERENCES fact_descriptor_index(descriptor_hash) ON DELETE RESTRICT,
+  CONSTRAINT fact_index_response_artifact_fk FOREIGN KEY (response_artifact_id, response_artifact_evidence_hash) REFERENCES artifact_admissions(artifact_id, evidence_hash) ON DELETE RESTRICT,
+  CONSTRAINT fact_index_seq_positive CHECK (source_seq >= 1),
+  CONSTRAINT fact_index_ordinal_nonnegative CHECK (source_ordinal >= 0),
+  CONSTRAINT fact_index_store_commit_order_positive CHECK (store_commit_order >= 1),
+  CONSTRAINT fact_index_audience_v1 CHECK (audience IN ('control', 'platform')),
+  CONSTRAINT fact_index_visibility_scope_v1 CHECK (visibility_scope = 'default'),
+  CONSTRAINT fact_index_request_pair CHECK ((request_schema_id IS NULL) = (request_hash IS NULL)),
+  CONSTRAINT fact_index_response_artifact_unique UNIQUE (response_artifact_id, response_artifact_evidence_hash)
+);
+
+CREATE TABLE fact_index_terms (
+  source_run_id TEXT NOT NULL,
+  source_seq BIGINT NOT NULL,
+  source_ordinal INTEGER NOT NULL,
+  fact_descriptor_hash TEXT NOT NULL,
+  field_id TEXT NOT NULL,
+  source TEXT NOT NULL,
+  value_type TEXT NOT NULL,
+  value_text TEXT NULL,
+  value_bool BOOLEAN NULL,
+  value_i64 BIGINT NULL,
+  value_u64 TEXT NULL,
+  value_decimal TEXT NULL,
+  value_timestamp TEXT NULL,
+  value_digest TEXT NULL,
+  unit TEXT NULL,
+  scale INTEGER NULL,
+  PRIMARY KEY (source_run_id, source_seq, source_ordinal, field_id),
+  CONSTRAINT fact_index_terms_claim_fk FOREIGN KEY (source_run_id, source_seq, source_ordinal) REFERENCES fact_index(source_run_id, source_seq, source_ordinal) ON DELETE CASCADE,
+  CONSTRAINT fact_index_terms_descriptor_fk FOREIGN KEY (fact_descriptor_hash) REFERENCES fact_descriptor_index(descriptor_hash) ON DELETE RESTRICT,
+  CONSTRAINT fact_index_terms_seq_positive CHECK (source_seq >= 1),
+  CONSTRAINT fact_index_terms_ordinal_nonnegative CHECK (source_ordinal >= 0),
+  CONSTRAINT fact_index_terms_source_v1 CHECK (source IN ('subject', 'result', 'metadata')),
+  CONSTRAINT fact_index_terms_value_type_v1 CHECK (
+    value_type IN ('string', 'boolean', 'signed_integer', 'unsigned_integer', 'timestamp', 'decimal_string', 'digest')
+  ),
+  CONSTRAINT fact_index_terms_u64_range CHECK (
+    value_u64 IS NULL
+    OR (
+      value_u64 ~ '^[0-9]+$'
+      AND (
+        length(value_u64) < 20
+        OR (length(value_u64) = 20 AND value_u64 <= '18446744073709551615')
+      )
+    )
+  ),
+  CONSTRAINT fact_index_terms_value_shape CHECK (
+    (value_type = 'string' AND value_text IS NOT NULL AND value_bool IS NULL AND value_i64 IS NULL AND value_u64 IS NULL AND value_decimal IS NULL AND value_timestamp IS NULL AND value_digest IS NULL)
+    OR (value_type = 'boolean' AND value_text IS NULL AND value_bool IS NOT NULL AND value_i64 IS NULL AND value_u64 IS NULL AND value_decimal IS NULL AND value_timestamp IS NULL AND value_digest IS NULL)
+    OR (value_type = 'signed_integer' AND value_text IS NULL AND value_bool IS NULL AND value_i64 IS NOT NULL AND value_u64 IS NULL AND value_decimal IS NULL AND value_timestamp IS NULL AND value_digest IS NULL)
+    OR (value_type = 'unsigned_integer' AND value_text IS NULL AND value_bool IS NULL AND value_i64 IS NULL AND value_u64 IS NOT NULL AND value_decimal IS NULL AND value_timestamp IS NULL AND value_digest IS NULL)
+    OR (value_type = 'timestamp' AND value_text IS NULL AND value_bool IS NULL AND value_i64 IS NULL AND value_u64 IS NULL AND value_decimal IS NULL AND value_timestamp IS NOT NULL AND value_digest IS NULL)
+    OR (value_type = 'decimal_string' AND value_text IS NULL AND value_bool IS NULL AND value_i64 IS NULL AND value_u64 IS NULL AND value_decimal IS NOT NULL AND value_timestamp IS NULL AND value_digest IS NULL)
+    OR (value_type = 'digest' AND value_text IS NULL AND value_bool IS NULL AND value_i64 IS NULL AND value_u64 IS NULL AND value_decimal IS NULL AND value_timestamp IS NULL AND value_digest IS NOT NULL)
+  )
+);
+
+CREATE TABLE fact_projection_metadata (
+  singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+  projection_generation BIGINT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT fact_projection_metadata_generation_positive CHECK (projection_generation >= 1)
+);
+
+INSERT INTO fact_projection_metadata (projection_generation) VALUES (1);
+
+CREATE INDEX fact_descriptor_index_kind_idx
+ON fact_descriptor_index (fact_kind, descriptor_hash);
+
+CREATE INDEX fact_index_descriptor_scope_idx
+ON fact_index (fact_descriptor_hash, audience, visibility_scope, store_commit_order DESC, source_run_id, source_seq, source_ordinal);
+
+CREATE INDEX fact_index_fact_key_idx
+ON fact_index (fact_descriptor_hash, fact_key);
+
+CREATE INDEX fact_index_response_artifact_idx
+ON fact_index (response_artifact_id, response_artifact_evidence_hash);
+
+CREATE INDEX fact_index_terms_text_idx
+ON fact_index_terms (fact_descriptor_hash, field_id, value_text, source_run_id, source_seq, source_ordinal)
+WHERE value_type = 'string';
+
+CREATE INDEX fact_index_terms_bool_idx
+ON fact_index_terms (fact_descriptor_hash, field_id, value_bool, source_run_id, source_seq, source_ordinal)
+WHERE value_type = 'boolean';
+
+CREATE INDEX fact_index_terms_i64_idx
+ON fact_index_terms (fact_descriptor_hash, field_id, value_i64, source_run_id, source_seq, source_ordinal)
+WHERE value_type = 'signed_integer';
+
+CREATE INDEX fact_index_terms_u64_idx
+ON fact_index_terms (fact_descriptor_hash, field_id, value_u64, source_run_id, source_seq, source_ordinal)
+WHERE value_type = 'unsigned_integer';
+
+CREATE INDEX fact_index_terms_decimal_idx
+ON fact_index_terms (fact_descriptor_hash, field_id, value_decimal, source_run_id, source_seq, source_ordinal)
+WHERE value_type = 'decimal_string';
+
+CREATE INDEX fact_index_terms_timestamp_idx
+ON fact_index_terms (fact_descriptor_hash, field_id, value_timestamp, source_run_id, source_seq, source_ordinal)
+WHERE value_type = 'timestamp';
+
+CREATE INDEX fact_index_terms_digest_idx
+ON fact_index_terms (fact_descriptor_hash, field_id, value_digest, source_run_id, source_seq, source_ordinal)
+WHERE value_type = 'digest';
+
 CREATE TABLE admission_lane (
   class TEXT NOT NULL,
   lane_id BYTEA NOT NULL,
@@ -245,6 +439,10 @@ CREATE TABLE run_observation_cursors (
 
 CREATE TRIGGER store_metadata_no_update
 BEFORE UPDATE OR DELETE OR TRUNCATE ON store_metadata
+FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
+
+CREATE TRIGGER fact_receipt_trust_root_no_update
+BEFORE UPDATE OR DELETE OR TRUNCATE ON fact_receipt_trust_root
 FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
 
 CREATE TRIGGER commits_no_update

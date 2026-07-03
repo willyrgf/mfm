@@ -159,6 +159,8 @@ pub mod v1 {
         adapter_executables: Vec<events::ExecutableIdentity>,
         artifact_evidence: Vec<StoredArtifactEvidenceRef>,
         artifact_bytes: BTreeMap<ArtifactId, Vec<u8>>,
+        fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+        source_fact_events: Vec<RetainedSourceFactReplayEvent>,
     }
 
     impl ReplayReadAuthority {
@@ -167,6 +169,35 @@ pub mod v1 {
         pub fn from_verified_run_history_view(
             runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
             verified_view: &mfm_runtime::VerifiedRunHistoryView,
+        ) -> Result<Self> {
+            Self::from_verified_run_history_view_with_fact_query_receipt_trust_root(
+                runtime_spec,
+                verified_view,
+                None,
+            )
+        }
+
+        /// Mints replay read authority with an explicit fact-query receipt trust root.
+        pub fn from_verified_run_history_view_with_fact_query_receipt_trust_root(
+            runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
+            verified_view: &mfm_runtime::VerifiedRunHistoryView,
+            fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+        ) -> Result<Self> {
+            Self::from_verified_run_history_view_with_fact_query_receipt_trust_root_and_source_facts(
+                runtime_spec,
+                verified_view,
+                fact_query_receipt_trust_root,
+                Vec::new(),
+            )
+        }
+
+        /// Mints replay read authority with explicit fact-query receipt trust root and retained
+        /// source fact events referenced by pinned fact-query evidence.
+        pub fn from_verified_run_history_view_with_fact_query_receipt_trust_root_and_source_facts(
+            runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
+            verified_view: &mfm_runtime::VerifiedRunHistoryView,
+            fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+            source_fact_events: Vec<RetainedSourceFactReplayEvent>,
         ) -> Result<Self> {
             if runtime_spec.spec_hash() != verified_view.spec_hash() {
                 return Err(ReplayError::new(
@@ -205,7 +236,59 @@ pub mod v1 {
                 adapter_executables: run_admitted.adapter_executables.clone(),
                 artifact_evidence,
                 artifact_bytes,
+                fact_query_receipt_trust_root,
+                source_fact_events,
             })
+        }
+    }
+
+    /// Retained source fact event authority referenced by pinned fact-query evidence.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RetainedSourceFactReplayEvent {
+        fact_claim_id: mfm_facts::FactClaimId,
+        envelope: KernelEventEnvelope,
+    }
+
+    impl RetainedSourceFactReplayEvent {
+        /// Creates retained source fact event authority after validating the event coordinate.
+        pub fn new(
+            fact_claim_id: mfm_facts::FactClaimId,
+            envelope: KernelEventEnvelope,
+        ) -> Result<Self> {
+            let expected = mfm_facts::derive_fact_claim_id(
+                envelope.run_id().clone(),
+                envelope.seq().as_u64(),
+                envelope.ordinal().as_u32(),
+            )
+            .map_err(|error| {
+                ReplayError::new(ReplayErrorKind::InvalidRunStream, error.to_string())
+            })?;
+            if expected != fact_claim_id {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::FactMismatch,
+                    "retained source fact event coordinate does not match fact claim id",
+                ));
+            }
+            if !matches!(envelope.payload(), KernelEventPayload::FactRecorded(_)) {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::FactMismatch,
+                    "retained source fact event payload is not FactRecorded",
+                ));
+            }
+            Ok(Self {
+                fact_claim_id,
+                envelope,
+            })
+        }
+
+        /// Returns the retained source fact claim id.
+        pub fn fact_claim_id(&self) -> &mfm_facts::FactClaimId {
+            &self.fact_claim_id
+        }
+
+        /// Returns the retained source fact event envelope.
+        pub fn envelope(&self) -> &KernelEventEnvelope {
+            &self.envelope
         }
     }
 
@@ -221,12 +304,12 @@ pub mod v1 {
     /// Request for replaying a previously recorded read fact.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct FactReplayRequest {
-        /// Node id that requested the fact.
+        /// Expected producing node id.
         pub node_id: NodeId,
-        /// Attempt id that requested the fact.
+        /// Expected producing attempt id.
         pub attempt_id: AttemptId,
-        /// Stable fact key.
-        pub fact_key: events::FactKey,
+        /// Store-derived claim id for the recorded fact.
+        pub fact_claim_id: mfm_facts::FactClaimId,
         /// Capability kind expected by the replaying state.
         pub capability_kind: CapabilityKind,
         /// Capability version expected by the replaying state.
@@ -246,6 +329,8 @@ pub mod v1 {
     /// Replay evidence returned for a recorded read fact.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct RecordedFactReplay {
+        /// Store-derived claim id for the recorded fact.
+        pub fact_claim_id: mfm_facts::FactClaimId,
         /// Recorded fact event payload.
         pub fact: events::FactRecorded,
         /// Retained artifact evidence for the fact response.
@@ -499,7 +584,7 @@ pub mod v1 {
         producer_seed_id: Option<&'a SeedId>,
     }
 
-    type FactKey = (NodeId, AttemptId, events::FactKey);
+    type FactReplayKey = mfm_facts::FactClaimId;
     type ReplayArtifactAuthorityKey = (ArtifactId, ContentDigest);
     type SideEffectKey = (SideEffectPairId, u32);
 
@@ -662,8 +747,11 @@ pub mod v1 {
         projection: ProjectionSnapshot,
         retained_artifacts: BTreeMap<ReplayArtifactAuthorityKey, StoredArtifactEvidenceRef>,
         artifact_bytes: BTreeMap<ArtifactId, Vec<u8>>,
+        artifact_byte_authority: store::ArtifactByteAuthorityMap,
+        fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
         artifacts: BTreeMap<ReplayArtifactAuthorityKey, StoredArtifactEvidenceRef>,
-        facts: BTreeMap<FactKey, events::FactRecorded>,
+        facts: BTreeMap<FactReplayKey, events::FactRecorded>,
+        fact_events: BTreeMap<FactReplayKey, KernelEventEnvelope>,
         intents: BTreeMap<SideEffectPairId, side_effect::IntentPersisted>,
         submissions: BTreeMap<SideEffectKey, side_effect::SubmissionObserved>,
         not_submitted: BTreeMap<SideEffectKey, side_effect::NotSubmittedProven>,
@@ -684,8 +772,13 @@ pub mod v1 {
             let stream = authority.stream.clone();
             certified_spec.verify_hash()?;
             ProjectionSnapshot::validate_run_stream(&stream)?;
-            let projection = ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
             let retained_artifacts = artifact_map(authority.artifact_evidence.clone())?;
+            let artifact_byte_authority =
+                artifact_byte_authority_map(&retained_artifacts, &authority.artifact_bytes)?;
+            let projection = ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
+                &stream,
+                &artifact_byte_authority,
+            )?;
             let run_admitted = run_admitted_payload(&stream)?;
 
             if run_admitted.spec_hash != certified_spec.spec_hash {
@@ -719,8 +812,11 @@ pub mod v1 {
                 projection,
                 retained_artifacts,
                 artifact_bytes: authority.artifact_bytes.clone(),
+                artifact_byte_authority,
+                fact_query_receipt_trust_root: authority.fact_query_receipt_trust_root.clone(),
                 artifacts: BTreeMap::new(),
                 facts: BTreeMap::new(),
+                fact_events: BTreeMap::new(),
                 intents: BTreeMap::new(),
                 submissions: BTreeMap::new(),
                 not_submitted: BTreeMap::new(),
@@ -730,6 +826,7 @@ pub mod v1 {
                 manual_resolutions: BTreeMap::new(),
             };
             broker.authorize_certified_spec_artifacts()?;
+            broker.index_retained_source_fact_events(&authority.source_fact_events)?;
             broker.index_stream(&stream)?;
             broker.verify_terminal_outcome_agreement()?;
             broker.reject_unauthorized_artifact_evidence()?;
@@ -784,42 +881,50 @@ pub mod v1 {
                 &request.adapter_kind,
                 &request.adapter_version,
             )?;
-            let fact = self
-                .facts
-                .get(&(
-                    request.node_id.clone(),
-                    request.attempt_id.clone(),
-                    request.fact_key.clone(),
-                ))
-                .ok_or_else(|| {
-                    ReplayError::new(
-                        ReplayErrorKind::FactMissing,
-                        format!("missing recorded fact {}", request.fact_key),
-                    )
-                })?;
-            if fact.capability_kind != request.capability_kind
-                || fact.capability_version != request.capability_version
-                || fact.adapter_kind != request.adapter_kind
-                || fact.adapter_version != request.adapter_version
-                || fact.request_schema_id != request.request_schema_id
-                || fact.request_hash != request.request_hash
-                || fact.response_schema_id != request.response_schema_id
+            let fact = self.facts.get(&request.fact_claim_id).ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::FactMissing,
+                    format!(
+                        "missing recorded fact claim {}:{}:{}",
+                        request.fact_claim_id.source_run_id(),
+                        request.fact_claim_id.source_seq(),
+                        request.fact_claim_id.source_ordinal()
+                    ),
+                )
+            })?;
+            let producer = fact.claim.producer();
+            let fact_request = fact.claim.request();
+            let response = fact.claim.response();
+            if fact.node_id != request.node_id
+                || fact.attempt_id != request.attempt_id
+                || producer.capability_kind() != &request.capability_kind
+                || producer.capability_version() != &request.capability_version
+                || producer.adapter_kind() != &request.adapter_kind
+                || producer.adapter_version() != &request.adapter_version
+                || fact_request.is_none_or(|evidence| {
+                    evidence.request_schema_id() != &request.request_schema_id
+                        || evidence.request_hash() != &request.request_hash
+                })
+                || response.response_schema_id() != &request.response_schema_id
             {
                 return Err(ReplayError::new(
                     ReplayErrorKind::FactMismatch,
                     format!(
-                        "recorded fact {} does not match replay request",
-                        request.fact_key
+                        "recorded fact claim {}:{}:{} does not match replay request",
+                        request.fact_claim_id.source_run_id(),
+                        request.fact_claim_id.source_seq(),
+                        request.fact_claim_id.source_ordinal()
                     ),
                 ));
             }
 
             Ok(RecordedFactReplay {
+                fact_claim_id: request.fact_claim_id.clone(),
                 fact: fact.clone(),
                 artifact: self.verify_artifact(ArtifactEvidenceExpectation {
-                    artifact_id: &fact.artifact_id,
-                    digest: &fact.response_hash,
-                    schema_id: Some(&fact.response_schema_id),
+                    artifact_id: response.artifact_id(),
+                    digest: response.response_hash(),
+                    schema_id: Some(response.response_schema_id()),
                     semantic_type_id: None,
                     role: ArtifactRole::FactResponse,
                     producer_node_id: Some(&fact.node_id),
@@ -1034,23 +1139,16 @@ pub mod v1 {
                     KernelEventPayload::FactRecorded(payload) => {
                         self.verify_fact_against_spec(payload)?;
                         self.authorize_event_artifacts(envelope.payload())?;
-                        insert_unique(
-                            &mut self.facts,
-                            (
-                                payload.node_id.clone(),
-                                payload.attempt_id.clone(),
-                                payload.fact_key.clone(),
-                            ),
-                            payload.clone(),
-                            ReplayErrorKind::InvalidRunStream,
-                            "duplicate fact replay event",
-                        )?;
+                        self.insert_fact_event(envelope, payload)?;
                     }
                     KernelEventPayload::ArtifactReferenced(payload) => {
                         if let Some(node_id) = &payload.node_id {
                             self.node(node_id)?;
                         }
                         self.authorize_event_artifacts(envelope.payload())?;
+                        if payload.artifact_ref.role == ArtifactRole::FactQueryEvidence {
+                            self.verify_fact_query_evidence_reference(payload)?;
+                        }
                     }
                     KernelEventPayload::SideEffectIntentPersisted(payload) => {
                         self.verify_side_effect_intent_against_spec(payload)?;
@@ -1303,6 +1401,66 @@ pub mod v1 {
             Ok(())
         }
 
+        fn index_retained_source_fact_events(
+            &mut self,
+            source_fact_events: &[RetainedSourceFactReplayEvent],
+        ) -> Result<()> {
+            for source in source_fact_events {
+                let envelope = source.envelope();
+                if envelope.spec_hash() != &self.certified_spec.spec_hash {
+                    return Err(ReplayError::new(
+                        ReplayErrorKind::SpecHashMismatch,
+                        "retained source fact event spec hash does not match replay spec",
+                    ));
+                }
+                let KernelEventPayload::FactRecorded(payload) = envelope.payload() else {
+                    return Err(ReplayError::new(
+                        ReplayErrorKind::FactMismatch,
+                        "retained source fact event payload is not FactRecorded",
+                    ));
+                };
+                self.verify_fact_against_spec(payload)?;
+                self.authorize_event_artifacts(envelope.payload())?;
+                self.insert_fact_event(envelope, payload)?;
+            }
+            Ok(())
+        }
+
+        fn insert_fact_event(
+            &mut self,
+            envelope: &KernelEventEnvelope,
+            payload: &events::FactRecorded,
+        ) -> Result<()> {
+            let fact_claim_id = mfm_facts::derive_fact_claim_id(
+                envelope.run_id().clone(),
+                envelope.seq().as_u64(),
+                envelope.ordinal().as_u32(),
+            )
+            .map_err(|error| {
+                ReplayError::new(ReplayErrorKind::InvalidRunStream, error.to_string())
+            })?;
+            match (
+                self.facts.get(&fact_claim_id),
+                self.fact_events.get(&fact_claim_id),
+            ) {
+                (Some(existing_payload), Some(existing_envelope))
+                    if existing_payload == payload && existing_envelope == envelope =>
+                {
+                    return Ok(());
+                }
+                (Some(_), _) | (_, Some(_)) => {
+                    return Err(ReplayError::new(
+                        ReplayErrorKind::InvalidRunStream,
+                        "duplicate fact replay event",
+                    ));
+                }
+                (None, None) => {}
+            }
+            self.facts.insert(fact_claim_id.clone(), payload.clone());
+            self.fact_events.insert(fact_claim_id, envelope.clone());
+            Ok(())
+        }
+
         fn side_effect_intent_evidence(
             &self,
             request: &SideEffectEvidenceReplayRequest,
@@ -1523,7 +1681,8 @@ pub mod v1 {
                 return Ok(false);
             }
             Ok(matches!(
-                self.projection.cell_terminal(&node.output_cell),
+                self.projection
+                    .cell_terminal_for_run(&self.run_id.run_id, &node.output_cell),
                 Some(store::CellTerminalProjection::Produced {
                     artifact_id: projected_artifact_id,
                     content_digest,
@@ -1599,15 +1758,31 @@ pub mod v1 {
         }
 
         fn verify_fact_against_spec(&self, payload: &events::FactRecorded) -> Result<()> {
+            let node = self.node(&payload.node_id)?;
+            if !node
+                .fact_descriptor_allowlist
+                .iter()
+                .any(|reference| &reference.descriptor_hash == payload.claim.fact_descriptor_hash())
+            {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::CertifiedEvidenceMismatch,
+                    format!(
+                        "fact descriptor {} is not certified for producing node {}",
+                        payload.claim.fact_descriptor_hash(),
+                        payload.node_id
+                    ),
+                ));
+            }
+            let producer = payload.claim.producer();
             self.verify_node_capability(
                 &payload.node_id,
-                &payload.capability_kind,
-                &payload.capability_version,
+                producer.capability_kind(),
+                producer.capability_version(),
             )?;
             self.verify_node_adapter(
                 &payload.node_id,
-                &payload.adapter_kind,
-                &payload.adapter_version,
+                producer.adapter_kind(),
+                producer.adapter_version(),
             )?;
             Ok(())
         }
@@ -1797,9 +1972,13 @@ pub mod v1 {
                     )
                 })?;
             let prefix_projection =
-                ProjectionSnapshot::rebuild_from_run_stream(&self.stream[..manual_start]).map_err(
-                    |error| ReplayError::new(ReplayErrorKind::InvalidRunStream, error.to_string()),
-                )?;
+                ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
+                    &self.stream[..manual_start],
+                    &self.artifact_byte_authority,
+                )
+                .map_err(|error| {
+                    ReplayError::new(ReplayErrorKind::InvalidRunStream, error.to_string())
+                })?;
             let terminal_policies =
                 store::SideEffectTerminalPolicies::from_spec(&self.certified_spec.spec)
                     .map_err(store_error)?;
@@ -1938,7 +2117,7 @@ pub mod v1 {
                 events::RunCompletionOutcome::Completed(evidence) => {
                     match self
                         .projection
-                        .public_output(&evidence.public_output_schema_id)
+                        .public_output(&self.run_id.run_id, &evidence.public_output_schema_id)
                     {
                         Some(store::PublicOutputProjection::Produced { event_id, .. })
                             if event_id == &evidence.public_output_event_id =>
@@ -1965,9 +2144,11 @@ pub mod v1 {
                         })
                         .transpose()?
                         .unwrap_or(store::StreamSeq::FIRST);
-                    let prefix_projection = ProjectionSnapshot::rebuild_from_run_stream(
-                        &self.stream[..terminal_start],
-                    )?;
+                    let prefix_projection =
+                        ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
+                            &self.stream[..terminal_start],
+                            &self.artifact_byte_authority,
+                        )?;
                     let terminal_policies =
                         store::SideEffectTerminalPolicies::from_spec(&self.certified_spec.spec)
                             .map_err(store_error)?;
@@ -1998,6 +2179,158 @@ pub mod v1 {
                     }
                 }
             }
+        }
+
+        fn verify_fact_query_evidence_reference(
+            &mut self,
+            payload: &events::ArtifactReferenced,
+        ) -> Result<()> {
+            let trust_root = self.fact_query_receipt_trust_root.clone().ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::CertifiedEvidenceMismatch,
+                    "fact query evidence replay requires a receipt trust root",
+                )
+            })?;
+            let bytes = self.artifact_bytes(&payload.artifact_ref.artifact_id)?;
+            let evidence =
+                mfm_facts::parse_canonical_fact_query_evidence_bytes(bytes).map_err(|error| {
+                    ReplayError::new(
+                        ReplayErrorKind::CertifiedEvidenceMismatch,
+                        format!("fact query evidence artifact is invalid: {error}"),
+                    )
+                })?;
+            store::validate_fact_query_evidence_recording(&evidence, &trust_root).map_err(
+                |error| {
+                    ReplayError::new(
+                        ReplayErrorKind::CertifiedEvidenceMismatch,
+                        format!("fact query evidence receipt authentication failed: {error}"),
+                    )
+                },
+            )?;
+            self.verify_fact_query_descriptor_resolution(evidence.plan().resolved_descriptor())?;
+            for fact_ref in evidence.receipt().returned_refs() {
+                self.verify_fact_query_returned_ref(fact_ref)?;
+            }
+            Ok(())
+        }
+
+        fn verify_fact_query_descriptor_resolution(
+            &mut self,
+            descriptor_hash: &ContentDigest,
+        ) -> Result<()> {
+            let descriptor_schema_id = mfm_facts::fact_descriptor_schema_id().map_err(|error| {
+                ReplayError::new(
+                    ReplayErrorKind::CertifiedEvidenceMismatch,
+                    error.to_string(),
+                )
+            })?;
+            let evidence = self
+                .retained_artifacts
+                .values()
+                .find(|evidence| {
+                    evidence.artifact_role == ArtifactRole::FactDescriptor
+                        && &evidence.digest == descriptor_hash
+                        && evidence.schema_id.as_ref() == Some(&descriptor_schema_id)
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    ReplayError::new(
+                        ReplayErrorKind::ArtifactMissing,
+                        format!("missing retained fact descriptor artifact for {descriptor_hash}"),
+                    )
+                })?;
+            self.insert_authorized_artifact(evidence)
+        }
+
+        fn verify_fact_query_returned_ref(
+            &self,
+            fact_ref: &mfm_facts::InternalFactRef,
+        ) -> Result<()> {
+            let (envelope, fact) = self.fact_event_for_claim(fact_ref.fact_claim_id())?;
+            let claim = &fact.claim;
+            let request = claim.request();
+            let response = claim.response();
+            let producer = claim.producer();
+            if envelope.event_id() != fact_ref.source_event_id()
+                || fact_ref.producer_node_id() != &fact.node_id
+                || claim.visibility() != fact_ref.visibility()
+                || claim.fact_kind() != fact_ref.fact_kind()
+                || claim.fact_descriptor_hash() != fact_ref.fact_descriptor_hash()
+                || claim.subject().fact_subject_namespace_hash()
+                    != fact_ref.fact_subject_namespace_hash()
+                || claim.subject().fact_key() != fact_ref.fact_key()
+                || claim.subject().subject_material_hash() != fact_ref.subject_material_hash()
+                || claim.observed_at() != fact_ref.observed_at()
+                || request.map(|request| request.request_schema_id())
+                    != fact_ref.request_schema_id()
+                || request.map(|request| request.request_hash()) != fact_ref.request_hash()
+                || response.response_schema_id() != fact_ref.response_schema_id()
+                || response.response_hash() != fact_ref.response_hash()
+                || response.artifact_id() != fact_ref.artifact_id()
+                || response.artifact_evidence_hash() != fact_ref.artifact_evidence_hash()
+                || producer.capability_kind() != fact_ref.capability_kind()
+                || producer.capability_version() != fact_ref.capability_version()
+                || producer.adapter_kind() != fact_ref.adapter_kind()
+                || producer.adapter_version() != fact_ref.adapter_version()
+            {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::FactMismatch,
+                    format!(
+                        "returned fact ref {}:{}:{} does not match retained source fact",
+                        fact_ref.fact_claim_id().source_run_id(),
+                        fact_ref.fact_claim_id().source_seq(),
+                        fact_ref.fact_claim_id().source_ordinal()
+                    ),
+                ));
+            }
+            let artifact = self.verify_artifact(ArtifactEvidenceExpectation {
+                artifact_id: response.artifact_id(),
+                digest: response.response_hash(),
+                schema_id: Some(response.response_schema_id()),
+                semantic_type_id: None,
+                role: ArtifactRole::FactResponse,
+                producer_node_id: Some(&fact.node_id),
+                producer_seed_id: None,
+            })?;
+            let evidence_hash = artifact.evidence_hash().map_err(|error| {
+                ReplayError::new(ReplayErrorKind::ArtifactMismatch, error.to_string())
+            })?;
+            if &evidence_hash != response.artifact_evidence_hash() {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::ArtifactMismatch,
+                    "returned fact response artifact evidence hash does not match source fact",
+                ));
+            }
+            Ok(())
+        }
+
+        fn fact_event_for_claim(
+            &self,
+            fact_claim_id: &mfm_facts::FactClaimId,
+        ) -> Result<(&KernelEventEnvelope, &events::FactRecorded)> {
+            let fact = self.facts.get(fact_claim_id).ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::FactMissing,
+                    format!(
+                        "missing source fact for returned ref {}:{}:{}",
+                        fact_claim_id.source_run_id(),
+                        fact_claim_id.source_seq(),
+                        fact_claim_id.source_ordinal()
+                    ),
+                )
+            })?;
+            let envelope = self.fact_events.get(fact_claim_id).ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::FactMissing,
+                    format!(
+                        "missing source fact event for returned ref {}:{}:{}",
+                        fact_claim_id.source_run_id(),
+                        fact_claim_id.source_seq(),
+                        fact_claim_id.source_ordinal()
+                    ),
+                )
+            })?;
+            Ok((envelope, fact))
         }
 
         fn reject_unauthorized_artifact_evidence(&self) -> Result<()> {
@@ -2268,7 +2601,10 @@ pub mod v1 {
             &self,
             cell: &events::NamedTypedCellRef,
         ) -> Result<()> {
-            let Some(projection) = self.projection.cell_terminal(&cell.cell_id) else {
+            let Some(projection) = self
+                .projection
+                .cell_terminal_for_run(&self.run_id.run_id, &cell.cell_id)
+            else {
                 return Err(certified_evidence_mismatch(
                     "public output cell has no terminal projection",
                 ));
@@ -2306,7 +2642,7 @@ pub mod v1 {
             }
             match self
                 .projection
-                .public_output(&evidence.public_output_schema_id)
+                .public_output(&self.run_id.run_id, &evidence.public_output_schema_id)
             {
                 Some(store::PublicOutputProjection::Produced { event_id, .. })
                     if event_id == &evidence.public_output_event_id =>
@@ -2564,6 +2900,50 @@ pub mod v1 {
             }
         }
         Ok(map)
+    }
+
+    fn artifact_byte_authority_map(
+        artifacts: &BTreeMap<ReplayArtifactAuthorityKey, StoredArtifactEvidenceRef>,
+        artifact_bytes: &BTreeMap<ArtifactId, Vec<u8>>,
+    ) -> Result<store::ArtifactByteAuthorityMap> {
+        let mut authority = store::ArtifactByteAuthorityMap::new();
+        for (artifact_id, bytes) in artifact_bytes {
+            let mut matched = false;
+            for (key, evidence) in artifacts
+                .iter()
+                .filter(|(_, evidence)| &evidence.artifact_id == artifact_id)
+            {
+                let verified =
+                    match store::PreparedArtifactBytes::new(bytes.clone(), evidence.clone()) {
+                        Ok(verified) => verified,
+                        Err(error) => {
+                            return Err(ReplayError::new(
+                                ReplayErrorKind::ArtifactMismatch,
+                                error.to_string(),
+                            ));
+                        }
+                    };
+                let (bytes, evidence, evidence_hash) = verified.into_parts();
+                if evidence_hash != key.1 {
+                    return Err(ReplayError::new(
+                        ReplayErrorKind::ArtifactMismatch,
+                        format!(
+                            "retained artifact evidence hash mismatch for {}",
+                            evidence.artifact_id
+                        ),
+                    ));
+                }
+                authority.insert(key.clone(), (bytes, evidence));
+                matched = true;
+            }
+            if !matched {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::ArtifactMismatch,
+                    format!("unverified retained artifact bytes supplied for {artifact_id}"),
+                ));
+            }
+        }
+        Ok(authority)
     }
 
     fn verify_replay_artifact_authority(

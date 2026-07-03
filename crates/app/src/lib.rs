@@ -26,7 +26,9 @@ use mfm_ids::{
     ArtifactId, ContentDigest, DigestAlgorithm, EventId, RunId, SchemaId, SeedId, SemanticTypeId,
     SpecHash, TrustScopeId,
 };
-use mfm_replay::v1::{ReplayBroker, ReplayError, ReplayReadAuthority};
+use mfm_replay::v1::{
+    ReplayBroker, ReplayError, ReplayReadAuthority, RetainedSourceFactReplayEvent,
+};
 use mfm_runtime::{
     CertifiedRuntimeSpec, ManualResolutionEvidenceArtifact, ManualResolutionRequest,
     RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell, SchedulerStatus, SerialTypedScheduler,
@@ -37,14 +39,37 @@ use mfm_store::v1 as store;
 use serde::{Deserialize, Serialize};
 use serde_json::map::Entry;
 use serde_json::{Map, Value};
+use zeroize::{Zeroize, Zeroizing};
 
 pub use mfm_runtime::ErasedRunnerRegistry;
 pub use mfm_stream_store_postgres::PostgresRunStore as ProductionRunStore;
 pub use mfm_stream_store_postgres::PostgresSchema as ProductionPostgresSchema;
 
+pub use public_facts::{
+    is_public_fact_query_parameter_error, parse_public_fact_predicates, FactCatalogService,
+    FactPublicQueryService, FactPublicRefResolver, PublicFactDescriptorRef,
+    PublicFactDescriptorSummary, PublicFactExplain, PublicFactFieldSummary, PublicFactFieldValue,
+    PublicFactKindSummary, PublicFactOrderingSummary, PublicFactOrderingTermSummary,
+    PublicFactPredicate, PublicFactQueryExecution, PublicFactQueryExecutor, PublicFactQueryFuture,
+    PublicFactQueryPage, PublicFactQueryRequest, PublicFactQuerySelector, PublicFactRef,
+    PublicFactRefId, PublicFactScalarValue, PublicFactShapeSelector,
+};
+
+#[cfg(any(test, feature = "test-support"))]
+pub use public_facts::public_fact_ref_id_from_projection_entry_for_test;
+#[cfg(any(test, feature = "test-support"))]
+pub use public_facts::{
+    assert_public_fact_json_redacts_private_tokens_for_test, PublicFactVisibilityFixtureForTest,
+};
+
+#[cfg(test)]
+pub(crate) use public_facts::{public_ref_id, query_public_facts, AppFactQueryRow};
+
+mod btc_collector;
 mod entry_point;
 mod entry_points;
 mod evm_contracts;
+mod public_facts;
 
 pub use entry_point::{
     EntryPointOpId, EntryPointOpPlan, EntryPointOpRegistry, EntryPointOpResolveError,
@@ -53,6 +78,9 @@ pub use entry_point::{
 
 /// Environment variable that selects the live runtime config file.
 pub const MFM_RUNTIME_CONFIG_FILE: &str = "MFM_RUNTIME_CONFIG_FILE";
+
+/// Environment variable that selects the Ed25519 fact-query receipt signing-key file.
+pub const MFM_FACT_RECEIPT_SIGNING_KEY_FILE: &str = "MFM_FACT_RECEIPT_SIGNING_KEY_FILE";
 
 /// Shared observability configuration used by typed binaries.
 pub mod observability;
@@ -260,6 +288,16 @@ impl From<mfm_certify::CertifyError> for AppError {
     }
 }
 
+impl From<mfm_facts::FactError> for AppError {
+    fn from(_error: mfm_facts::FactError) -> Self {
+        Self::backend(
+            ErrorClass::BadRequest,
+            "FactQueryInvalid",
+            "Fact query input is invalid",
+        )
+    }
+}
+
 impl From<EntryPointOpResolveError> for AppError {
     fn from(error: EntryPointOpResolveError) -> Self {
         Self::new(
@@ -291,12 +329,34 @@ where
     S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
+    make_run_services_with_certification_registry_and_fact_query_trust_root(
+        runners,
+        store,
+        artifacts,
+        certification_registry,
+        None,
+    )
+}
+
+/// Builds typed async app services with an explicit certification registry and fact-query receipt trust root.
+pub fn make_run_services_with_certification_registry_and_fact_query_trust_root<S, A>(
+    runners: ErasedRunnerRegistry,
+    store: S,
+    artifacts: A,
+    certification_registry: CertificationRegistry,
+    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+) -> RunServices<S, A>
+where
+    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
+    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
+{
     let runtime_artifacts = Arc::new(artifacts.clone());
-    RunServices::new_with_certification_registry(
+    RunServices::new_with_certification_registry_and_fact_query_trust_root(
         SerialTypedScheduler::new(runners, runtime_artifacts),
         store,
         artifacts,
         certification_registry,
+        fact_query_receipt_trust_root,
     )
 }
 
@@ -310,7 +370,31 @@ where
     S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
-    RunReadServices::new_with_certification_registry(store, artifacts, certification_registry)
+    make_run_read_services_with_certification_registry_and_fact_query_trust_root(
+        store,
+        artifacts,
+        certification_registry,
+        None,
+    )
+}
+
+/// Builds evidence-only async app services with an explicit certification registry and fact-query receipt trust root.
+pub fn make_run_read_services_with_certification_registry_and_fact_query_trust_root<S, A>(
+    store: S,
+    artifacts: A,
+    certification_registry: CertificationRegistry,
+    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+) -> RunReadServices<S, A>
+where
+    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
+    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
+{
+    RunReadServices::new_with_certification_registry_and_fact_query_trust_root(
+        store,
+        artifacts,
+        certification_registry,
+        fact_query_receipt_trust_root,
+    )
 }
 
 /// Production typed run services backed by the Postgres run store.
@@ -319,21 +403,153 @@ pub type ProductionRunServices = RunServices<ProductionRunStore, ProductionRunSt
 /// Production evidence-only run services backed by the Postgres run store.
 pub type ProductionRunReadServices = RunReadServices<ProductionRunStore, ProductionRunStore>;
 
+/// Production public fact query service backed by the Postgres fact query executor.
+pub type ProductionFactPublicQueryService = FactPublicQueryService<ProductionRunStore>;
+
 /// Connects the production Postgres run store.
 pub async fn connect_production_run_store(
     database_url: Option<&str>,
 ) -> Result<ProductionRunStore, AppError> {
-    let database_url = match database_url {
-        Some(database_url) => database_url.to_owned(),
+    let database_url = production_database_url(database_url)?;
+    Ok(ProductionRunStore::connect(&database_url).await?)
+}
+
+/// Connects the production Postgres run store with a signer for authenticated fact queries.
+pub async fn connect_production_fact_query_run_store(
+    database_url: Option<&str>,
+) -> Result<ProductionRunStore, AppError> {
+    let database_url = production_database_url(database_url)?;
+    let mut signing_key = load_fact_receipt_signing_key_from_env()?;
+    let store = ProductionRunStore::connect_with_fact_receipt_signing_key_bytes(
+        &database_url,
+        *signing_key,
+    )
+    .await
+    .map_err(fact_receipt_signer_store_error)?;
+    signing_key.zeroize();
+    Ok(store)
+}
+
+/// Connects the production Postgres run store with a fact-query signer when configured.
+pub async fn connect_production_run_store_with_optional_fact_query_signer(
+    database_url: Option<&str>,
+) -> Result<ProductionRunStore, AppError> {
+    if configured_fact_receipt_signing_key_file().is_some() {
+        connect_production_fact_query_run_store(database_url).await
+    } else {
+        connect_production_run_store(database_url).await
+    }
+}
+
+fn production_database_url(database_url: Option<&str>) -> Result<String, AppError> {
+    match database_url {
+        Some(database_url) => Ok(database_url.to_owned()),
         None => std::env::var("DATABASE_URL").map_err(|_| {
             AppError::new(
                 ErrorClass::BadRequest,
                 "MissingDatabaseUrl",
                 "Missing DATABASE_URL (or pass --database-url)",
             )
-        })?,
-    };
-    Ok(ProductionRunStore::connect(&database_url).await?)
+        }),
+    }
+}
+
+fn configured_fact_receipt_signing_key_file() -> Option<PathBuf> {
+    env::var_os(MFM_FACT_RECEIPT_SIGNING_KEY_FILE)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+fn load_fact_receipt_signing_key_from_env() -> Result<Zeroizing<[u8; 32]>, AppError> {
+    let path = configured_fact_receipt_signing_key_file().ok_or_else(|| {
+        AppError::new(
+            ErrorClass::BadRequest,
+            "MissingFactReceiptSigningKey",
+            format!("Missing {MFM_FACT_RECEIPT_SIGNING_KEY_FILE}"),
+        )
+    })?;
+    load_fact_receipt_signing_key_file(&path)
+}
+
+fn load_fact_receipt_signing_key_file(path: &Path) -> Result<Zeroizing<[u8; 32]>, AppError> {
+    let bytes = Zeroizing::new(std::fs::read(path).map_err(|_| {
+        AppError::backend(
+            ErrorClass::BadRequest,
+            "FactReceiptSigningKeyReadFailed",
+            "Failed to read fact receipt signing key",
+        )
+    })?);
+    decode_fact_receipt_signing_key_bytes(&bytes)
+}
+
+fn decode_fact_receipt_signing_key_bytes(bytes: &[u8]) -> Result<Zeroizing<[u8; 32]>, AppError> {
+    if bytes.len() == 32 {
+        let mut signing_key = [0_u8; 32];
+        signing_key.copy_from_slice(bytes);
+        return Ok(Zeroizing::new(signing_key));
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| invalid_fact_receipt_signing_key())?;
+    let hex = text
+        .trim()
+        .strip_prefix("0x")
+        .unwrap_or_else(|| text.trim());
+    if hex.len() != 64 {
+        return Err(invalid_fact_receipt_signing_key());
+    }
+    let mut signing_key = Zeroizing::new([0_u8; 32]);
+    for (index, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+        let high = fact_receipt_hex_nibble(chunk[0])?;
+        let low = fact_receipt_hex_nibble(chunk[1])?;
+        signing_key[index] = (high << 4) | low;
+    }
+    Ok(signing_key)
+}
+
+fn fact_receipt_hex_nibble(byte: u8) -> Result<u8, AppError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(invalid_fact_receipt_signing_key()),
+    }
+}
+
+fn invalid_fact_receipt_signing_key() -> AppError {
+    AppError::new(
+        ErrorClass::BadRequest,
+        "FactReceiptSigningKeyInvalid",
+        "Fact receipt signing key must be raw 32-byte Ed25519 material or 64 hex characters",
+    )
+}
+
+fn fact_receipt_signer_store_error(
+    error: mfm_stream_store_postgres::PostgresStoreError,
+) -> AppError {
+    match error {
+        mfm_stream_store_postgres::PostgresStoreError::Store(
+            store::StoreError::ReceiptAuthentication { .. },
+        ) => AppError::backend(
+            ErrorClass::BadRequest,
+            "FactReceiptSignerInvalid",
+            "Fact receipt signer does not match the run store trust root",
+        ),
+        error => AppError::from(error),
+    }
+}
+
+pub(crate) fn fact_query_execution_store_error(
+    error: mfm_stream_store_postgres::PostgresStoreError,
+) -> AppError {
+    match error {
+        mfm_stream_store_postgres::PostgresStoreError::Store(
+            store::StoreError::ReceiptAuthentication { .. },
+        ) => AppError::backend(
+            ErrorClass::BadRequest,
+            "MissingFactReceiptSigningKey",
+            "Fact receipt signing key is required for public fact queries",
+        ),
+        error => AppError::from(error),
+    }
 }
 
 /// Builds production typed run services backed by the Postgres run store.
@@ -341,18 +557,37 @@ pub async fn connect_production_run_services(
     database_url: Option<&str>,
     runtime_config_path: Option<&Path>,
 ) -> Result<ProductionRunServices, AppError> {
-    let store = connect_production_run_store(database_url).await?;
-    let runners = production_runner_registry(
-        artifact_read_provider_from_retained(store.clone()),
-        runtime_config_path,
+    let runtime_config = RuntimeConfigLoader::from_path_or_env(runtime_config_path);
+    let btc_config = runtime_config.load_optional_btc()?;
+    let store = if btc_config.is_some() {
+        connect_production_fact_query_run_store(database_url).await?
+    } else {
+        connect_production_run_store(database_url).await?
+    };
+    let fact_index = if btc_config.is_some() {
+        Some(btc_collector::production_fact_index_read_provider(
+            store.clone(),
+        )?)
+    } else {
+        None
+    };
+    let runners = production_runner_registry_inner(
+        Arc::new(store.clone()),
+        fact_index,
+        runtime_config,
+        btc_config,
     )?;
     let certification_registry = production_certification_registry()?;
-    Ok(make_run_services_with_certification_registry(
-        runners,
-        store.clone(),
-        store,
-        certification_registry,
-    ))
+    let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
+    Ok(
+        make_run_services_with_certification_registry_and_fact_query_trust_root(
+            runners,
+            store.clone(),
+            store,
+            certification_registry,
+            fact_query_receipt_trust_root,
+        ),
+    )
 }
 
 /// Builds production evidence-only run services backed by the Postgres run store.
@@ -361,11 +596,32 @@ pub async fn connect_production_run_read_services(
 ) -> Result<ProductionRunReadServices, AppError> {
     let store = connect_production_run_store(database_url).await?;
     let certification_registry = production_certification_registry()?;
-    Ok(make_run_read_services_with_certification_registry(
-        store.clone(),
-        store,
-        certification_registry,
-    ))
+    let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
+    Ok(
+        make_run_read_services_with_certification_registry_and_fact_query_trust_root(
+            store.clone(),
+            store,
+            certification_registry,
+            fact_query_receipt_trust_root,
+        ),
+    )
+}
+
+/// Builds production read services with a signer for authenticated public fact queries.
+pub async fn connect_production_fact_query_run_read_services(
+    database_url: Option<&str>,
+) -> Result<ProductionRunReadServices, AppError> {
+    let store = connect_production_fact_query_run_store(database_url).await?;
+    let certification_registry = production_certification_registry()?;
+    let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
+    Ok(
+        make_run_read_services_with_certification_registry_and_fact_query_trust_root(
+            store.clone(),
+            store,
+            certification_registry,
+            fact_query_receipt_trust_root,
+        ),
+    )
 }
 
 /// Builds the production typed runner registry for this process.
@@ -373,13 +629,33 @@ pub async fn connect_production_run_read_services(
 /// Framework public-output render nodes are resolved by `mfm-runtime` as built-ins. Enabled
 /// domain runners register here as certified typed descriptor bindings.
 pub fn production_runner_registry(
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     runtime_config_path: Option<&Path>,
 ) -> Result<ErasedRunnerRegistry, AppError> {
-    let mut registry = ErasedRunnerRegistry::new();
     let runtime_config = RuntimeConfigLoader::from_path_or_env(runtime_config_path);
-    let portfolio_artifacts: Arc<dyn mfm_artifact_capabilities::ArtifactReadProvider> =
-        artifacts.clone();
+    let btc_config = runtime_config.load_optional_btc()?;
+    production_runner_registry_inner(artifacts, None, runtime_config, btc_config)
+}
+
+/// Builds the production typed runner registry with an explicit internal fact-index provider.
+pub fn production_runner_registry_with_fact_index_provider(
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
+    fact_index: Arc<dyn mfm_fact_capabilities::FactIndexReadProvider>,
+    runtime_config_path: Option<&Path>,
+) -> Result<ErasedRunnerRegistry, AppError> {
+    let runtime_config = RuntimeConfigLoader::from_path_or_env(runtime_config_path);
+    let btc_config = runtime_config.load_optional_btc()?;
+    production_runner_registry_inner(artifacts, Some(fact_index), runtime_config, btc_config)
+}
+
+fn production_runner_registry_inner(
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
+    fact_index: Option<Arc<dyn mfm_fact_capabilities::FactIndexReadProvider>>,
+    runtime_config: RuntimeConfigLoader,
+    btc_config: Option<mfm_runtime_config::BtcRuntimeConfig>,
+) -> Result<ErasedRunnerRegistry, AppError> {
+    let mut registry = ErasedRunnerRegistry::new();
+    let portfolio_artifacts: Arc<dyn store::RetainedArtifactReadProvider> = artifacts.clone();
     let portfolio_runtime = Arc::new(RuntimeConfigPortfolioEvm::new(runtime_config.clone()));
     let portfolio_evm: Arc<dyn mfm_adapters_portfolio::PortfolioEvmProvider> =
         portfolio_runtime.clone();
@@ -391,7 +667,17 @@ pub fn production_runner_registry(
         portfolio_runtime,
     );
     mfm_adapters_portfolio::register_portfolio_runners(&mut registry, portfolio_capabilities)?;
-    evm_contracts::register_contract_lifecycle_runners(&mut registry, artifacts, runtime_config)?;
+    evm_contracts::register_contract_lifecycle_runners(
+        &mut registry,
+        artifacts.clone(),
+        runtime_config.clone(),
+    )?;
+    btc_collector::register_btc_collector_runners_if_configured(
+        &mut registry,
+        artifacts,
+        fact_index,
+        btc_config,
+    )?;
     mfm_transports_proof::register_deterministic_proof_runners(&mut registry)?;
     Ok(registry)
 }
@@ -489,6 +775,32 @@ impl RuntimeConfigLoader {
                 mfm_runtime::RuntimeError::RunnerBinding("missing EVM runtime config".to_owned())
             })
         })
+    }
+
+    pub(crate) fn load_optional_btc(
+        &self,
+    ) -> mfm_runtime::Result<Option<mfm_runtime_config::BtcRuntimeConfig>> {
+        let Some(path) = self.path.as_ref() else {
+            return Ok(None);
+        };
+        match mfm_runtime_config::RuntimeConfig::load_path_with_requirements(
+            path,
+            mfm_runtime_config::RuntimeConfigRequirement::btc(),
+        ) {
+            Ok(config) => Ok(config.btc().cloned()),
+            Err(error)
+                if (error.location() == &mfm_runtime_config::RuntimeConfigLocation::Btc
+                    && error.kind()
+                        == &mfm_runtime_config::RuntimeConfigErrorKind::MissingFamily)
+                    || matches!(
+                        error.kind(),
+                        mfm_runtime_config::RuntimeConfigErrorKind::Syntax { .. }
+                    ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(runtime_config_error(error)),
+        }
     }
 
     pub(crate) fn load_runtime_config_with_signers(
@@ -650,6 +962,11 @@ fn capability_artifact_error_from_store(
 /// Builds the trusted production certification registry for typed spec certification and replay verification.
 pub fn production_certification_registry() -> Result<CertificationRegistry, AppError> {
     let mut registry = CertificationRegistry::new();
+    mfm_op_btc_chain_head_collector::register_btc_chain_head_collector_certification_descriptors(
+        &mut registry,
+    )?;
+    registry.register_fact_type::<mfm_op_btc_chain_head_collector::BtcChainHeadFact>()?;
+    registry.register_fact_type::<mfm_op_btc_chain_head_collector::CollectorCheckpointFact>()?;
     mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
         &mut registry,
     )?;
@@ -1357,6 +1674,7 @@ pub struct RunReadServices<S, A> {
     store: S,
     artifacts: A,
     certification_registry: CertificationRegistry,
+    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
 }
 
 impl<S, A> RunReadServices<S, A>
@@ -1370,10 +1688,26 @@ where
         artifacts: A,
         certification_registry: CertificationRegistry,
     ) -> Self {
+        Self::new_with_certification_registry_and_fact_query_trust_root(
+            store,
+            artifacts,
+            certification_registry,
+            None,
+        )
+    }
+
+    /// Creates evidence-only app services with explicit fact-query receipt replay authority.
+    pub fn new_with_certification_registry_and_fact_query_trust_root(
+        store: S,
+        artifacts: A,
+        certification_registry: CertificationRegistry,
+        fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+    ) -> Self {
         Self {
             store,
             artifacts,
             certification_registry,
+            fact_query_receipt_trust_root,
         }
     }
 
@@ -1394,27 +1728,17 @@ where
 
     /// Loads the store-owned deployment trust scope used to verify run identities.
     pub async fn load_trust_scope_id(&self) -> Result<TrustScopeId, AppError> {
-        self.store
-            .load_trust_scope_id()
-            .await
-            .map_err(async_app_store_error)
+        self.trusted_run_reader().load_trust_scope_id().await
     }
 
     /// Returns typed run status by rebuilding projection from the authoritative run stream.
     pub async fn run_status(&self, run_id: &RunId) -> Result<RunResponse, AppError> {
-        let context = self.load_verified_status_read_context(run_id).await?;
-        run_status_from_projection(
-            run_id,
-            context.runtime_spec(),
-            context.events(),
-            context.projection(),
-        )
+        self.trusted_run_reader().run_status(run_id).await
     }
 
     /// Returns the authoritative typed run stream.
     pub async fn run_stream(&self, run_id: &RunId) -> Result<RunStreamResponse, AppError> {
-        let context = self.load_verified_run_read_context(run_id).await?;
-        Ok(run_stream_response_from_verified_context(&context))
+        self.trusted_run_reader().run_stream(run_id).await
     }
 
     /// Reads one observation-only run list/watch page.
@@ -1427,48 +1751,14 @@ where
         <S as store::RunObservationStore>::Error:
             store::StoreErrorInspection + fmt::Display + Send + Sync + 'static,
     {
-        self.store
-            .read_run_observations(query)
-            .await
-            .map_err(observation_app_store_error)
+        self.trusted_run_reader().read_run_observations(query).await
     }
 
     /// Verifies replay authority for a run using retained typed artifact evidence only.
     pub async fn verify_replay_for_run(&self, run_id: &RunId) -> Result<ReplayResponse, AppError> {
-        let context = self.load_verified_run_read_context(run_id).await?;
-        verify_replay_diagnostics_from_recorded_artifacts(
-            &self.artifacts,
-            context.runtime_spec(),
-            run_id,
-            context.events(),
-        )
-        .await?;
-        let authority = replay_read_authority_for_run(context.runtime_spec(), context.view())?;
-        let broker = ReplayBroker::from_read_authority(authority)?;
-        let stream = context.events();
-        mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&broker)?;
-        mfm_transports_proof::verify_deterministic_proof_replay(&broker)?;
-        let projection = broker.projection_snapshot();
-        let terminal_policies =
-            store::SideEffectTerminalPolicies::from_spec(context.runtime_spec().spec())?;
-        let saga = projection.derive_saga_projection(
-            run_id,
-            &context.runtime_spec().spec().saga,
-            &terminal_policies,
-        )?;
-        let retained_artifacts = projection
-            .retention(run_id)
-            .map(|retention| retention.refs.len())
-            .unwrap_or_default();
-        Ok(ReplayResponse {
-            run_id: run_id.as_str().to_owned(),
-            spec_hash: broker.certified_spec().spec_hash.as_str().to_owned(),
-            run_mode: run_mode_status(saga.run_mode),
-            saga: saga_status_with_resources(context.runtime_spec().spec(), projection, &saga),
-            attempt_dispositions: attempt_dispositions(projection),
-            head_seq: stream_head(stream),
-            retained_artifacts,
-        })
+        self.trusted_run_reader()
+            .verify_replay(self.fact_query_receipt_trust_root.clone(), run_id)
+            .await
     }
 
     /// Renders typed public output from store-owned projection and typed artifact bytes.
@@ -1477,62 +1767,77 @@ where
         run_id: &RunId,
         public_schema_id: &SchemaId,
     ) -> Result<PublicOutputResponse, AppError> {
-        let context = self.load_verified_run_read_context(run_id).await?;
-        let authority = public_output_read_authority_for_run(
-            &self.artifacts,
-            context.runtime_spec(),
-            context.view(),
-            public_schema_id,
-        )
-        .await?;
-        render_public_output(&self.artifacts, &authority).await
+        self.trusted_run_reader()
+            .public_output(run_id, public_schema_id)
+            .await
     }
 
-    async fn load_verified_run_read_context(
-        &self,
-        run_id: &RunId,
-    ) -> Result<VerifiedRunReadContext, AppError> {
-        let context = load_async_verified_run_read_context(
-            &self.store,
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-        )
-        .await?;
-        self.validate_identity_material_trust_scope(
-            &context.view().run_admitted().identity_material,
-        )
-        .await?;
-        Ok(context)
+    /// Lists public fact kinds from retained descriptor artifacts and store-scoped fact projection authority.
+    pub async fn fact_kinds(&self) -> Result<Vec<PublicFactKindSummary>, AppError> {
+        Ok(self.public_fact_catalog().await?.list_kinds())
     }
 
-    async fn load_verified_status_read_context(
+    /// Describes public fact descriptors for one kind from store-scoped fact projection authority.
+    pub async fn describe_fact_kind(
         &self,
-        run_id: &RunId,
-    ) -> Result<VerifiedStatusReadContext, AppError> {
-        let context = load_async_verified_status_read_context(
-            &self.store,
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-        )
-        .await?;
-        self.validate_identity_material_trust_scope(
-            &context.read.view().run_admitted().identity_material,
-        )
-        .await?;
-        Ok(context)
+        fact_kind: &str,
+    ) -> Result<Vec<PublicFactDescriptorSummary>, AppError> {
+        self.public_fact_catalog().await?.describe_kind(fact_kind)
     }
 
-    async fn validate_identity_material_trust_scope(
+    /// Explains public query and return fields for one fact kind from store-scoped fact projection authority.
+    pub async fn explain_fact_kind(&self, fact_kind: &str) -> Result<PublicFactExplain, AppError> {
+        self.public_fact_catalog().await?.explain_kind(fact_kind)
+    }
+
+    /// Resolves an opaque public fact reference against store-scoped Platform facts.
+    ///
+    /// Unknown, `Control`, and `RunPrivate` facts all return the same redacted not-found class.
+    pub async fn resolve_public_fact_ref(
         &self,
-        identity_material: &events::RunIdentityMaterialV1,
-    ) -> Result<(), AppError> {
-        let trust_scope_id = self.load_trust_scope_id().await?;
-        if trust_scope_id != identity_material.trust_scope_id {
-            return Err(run_identity_material_mismatch());
-        }
-        Ok(())
+        public_ref: &PublicFactRefId,
+    ) -> Result<PublicFactRef, AppError> {
+        let projection = self.public_fact_projection().await?;
+        let catalog =
+            FactCatalogService::from_retained_public_projection(&self.artifacts, &projection)
+                .await?;
+        FactPublicRefResolver::new(catalog, projection).resolve(public_ref)
+    }
+
+    async fn public_fact_catalog(&self) -> Result<FactCatalogService, AppError> {
+        let projection = self.public_fact_projection().await?;
+        FactCatalogService::from_retained_public_projection(&self.artifacts, &projection).await
+    }
+
+    async fn public_fact_projection(&self) -> Result<store::ProjectionSnapshot, AppError> {
+        self.store
+            .fact_projection_snapshot()
+            .await
+            .map_err(async_app_store_error)
+    }
+
+    fn trusted_run_reader(&self) -> TrustedRunReader<'_, S, A> {
+        TrustedRunReader::new(&self.store, &self.artifacts, &self.certification_registry)
+    }
+}
+
+impl<S, A> RunReadServices<S, A>
+where
+    S: store::RunEventStore + store::TrustScopeStore + PublicFactQueryExecutor + Send + Sync,
+    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
+{
+    /// Builds a production public fact query service from retained descriptor and store-scoped projection authority.
+    pub async fn public_fact_query_service(&self) -> Result<FactPublicQueryService<S>, AppError> {
+        let catalog = self.public_fact_catalog().await?;
+        FactPublicQueryService::new(catalog, self.store.clone())
+    }
+
+    /// Executes a public Platform fact query against store-scoped public facts.
+    pub async fn query_public_facts(
+        &self,
+        request: PublicFactQueryRequest,
+    ) -> Result<PublicFactQueryPage, AppError> {
+        self.public_fact_query_service().await?.query(request).await
     }
 }
 
@@ -1543,6 +1848,7 @@ pub struct RunServices<S, A> {
     store: S,
     artifacts: A,
     certification_registry: CertificationRegistry,
+    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
     execution_claim_heartbeat_interval: Duration,
 }
 
@@ -1558,11 +1864,29 @@ where
         artifacts: A,
         certification_registry: CertificationRegistry,
     ) -> Self {
+        Self::new_with_certification_registry_and_fact_query_trust_root(
+            scheduler,
+            store,
+            artifacts,
+            certification_registry,
+            None,
+        )
+    }
+
+    /// Creates typed async app services with explicit fact-query receipt replay authority.
+    pub fn new_with_certification_registry_and_fact_query_trust_root(
+        scheduler: SerialTypedScheduler,
+        store: S,
+        artifacts: A,
+        certification_registry: CertificationRegistry,
+        fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+    ) -> Self {
         Self {
             scheduler,
             store,
             artifacts,
             certification_registry,
+            fact_query_receipt_trust_root,
             execution_claim_heartbeat_interval: default_execution_claim_heartbeat_interval(),
         }
     }
@@ -1584,21 +1908,12 @@ where
 
     /// Loads the store-owned deployment trust scope used to derive run identities.
     pub async fn load_trust_scope_id(&self) -> Result<TrustScopeId, AppError> {
-        self.store
-            .load_trust_scope_id()
-            .await
-            .map_err(async_app_store_error)
+        self.trusted_run_reader().load_trust_scope_id().await
     }
 
     /// Returns typed run status by rebuilding projection from the authoritative run stream.
     pub async fn run_status(&self, run_id: &RunId) -> Result<RunResponse, AppError> {
-        let context = self.load_verified_status_read_context(run_id).await?;
-        run_status_from_projection(
-            run_id,
-            context.runtime_spec(),
-            context.events(),
-            context.projection(),
-        )
+        self.trusted_run_reader().run_status(run_id).await
     }
 
     async fn run_response_from_verified_status(
@@ -1618,8 +1933,7 @@ where
 
     /// Returns the authoritative typed run stream.
     pub async fn run_stream(&self, run_id: &RunId) -> Result<RunStreamResponse, AppError> {
-        let context = self.load_verified_run_read_context(run_id).await?;
-        Ok(run_stream_response_from_verified_context(&context))
+        self.trusted_run_reader().run_stream(run_id).await
     }
 
     /// Reads one observation-only run list/watch page.
@@ -1632,48 +1946,14 @@ where
         <S as store::RunObservationStore>::Error:
             store::StoreErrorInspection + fmt::Display + Send + Sync + 'static,
     {
-        self.store
-            .read_run_observations(query)
-            .await
-            .map_err(observation_app_store_error)
+        self.trusted_run_reader().read_run_observations(query).await
     }
 
     /// Verifies replay authority for a run using retained typed artifact evidence only.
     pub async fn verify_replay_for_run(&self, run_id: &RunId) -> Result<ReplayResponse, AppError> {
-        let context = self.load_verified_run_read_context(run_id).await?;
-        verify_replay_diagnostics_from_recorded_artifacts(
-            &self.artifacts,
-            context.runtime_spec(),
-            run_id,
-            context.events(),
-        )
-        .await?;
-        let authority = replay_read_authority_for_run(context.runtime_spec(), context.view())?;
-        let broker = ReplayBroker::from_read_authority(authority)?;
-        let stream = context.events();
-        mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&broker)?;
-        mfm_transports_proof::verify_deterministic_proof_replay(&broker)?;
-        let projection = broker.projection_snapshot();
-        let terminal_policies =
-            store::SideEffectTerminalPolicies::from_spec(context.runtime_spec().spec())?;
-        let saga = projection.derive_saga_projection(
-            run_id,
-            &context.runtime_spec().spec().saga,
-            &terminal_policies,
-        )?;
-        let retained_artifacts = projection
-            .retention(run_id)
-            .map(|retention| retention.refs.len())
-            .unwrap_or_default();
-        Ok(ReplayResponse {
-            run_id: run_id.as_str().to_owned(),
-            spec_hash: broker.certified_spec().spec_hash.as_str().to_owned(),
-            run_mode: run_mode_status(saga.run_mode),
-            saga: saga_status_with_resources(context.runtime_spec().spec(), projection, &saga),
-            attempt_dispositions: attempt_dispositions(projection),
-            head_seq: stream_head(stream),
-            retained_artifacts,
-        })
+        self.trusted_run_reader()
+            .verify_replay(self.fact_query_receipt_trust_root.clone(), run_id)
+            .await
     }
 
     /// Renders typed public output from store-owned projection and typed artifact bytes.
@@ -1682,62 +1962,36 @@ where
         run_id: &RunId,
         public_schema_id: &SchemaId,
     ) -> Result<PublicOutputResponse, AppError> {
-        let context = self.load_verified_run_read_context(run_id).await?;
-        let authority = public_output_read_authority_for_run(
-            &self.artifacts,
-            context.runtime_spec(),
-            context.view(),
-            public_schema_id,
-        )
-        .await?;
-        render_public_output(&self.artifacts, &authority).await
+        self.trusted_run_reader()
+            .public_output(run_id, public_schema_id)
+            .await
     }
 
     async fn load_verified_run_read_context(
         &self,
         run_id: &RunId,
     ) -> Result<VerifiedRunReadContext, AppError> {
-        let context = load_async_verified_run_read_context(
-            &self.store,
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-        )
-        .await?;
-        self.validate_identity_material_trust_scope(
-            &context.view().run_admitted().identity_material,
-        )
-        .await?;
-        Ok(context)
+        self.trusted_run_reader().load_run_context(run_id).await
     }
 
     async fn load_verified_status_read_context(
         &self,
         run_id: &RunId,
     ) -> Result<VerifiedStatusReadContext, AppError> {
-        let context = load_async_verified_status_read_context(
-            &self.store,
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-        )
-        .await?;
-        self.validate_identity_material_trust_scope(
-            &context.read.view().run_admitted().identity_material,
-        )
-        .await?;
-        Ok(context)
+        self.trusted_run_reader().load_status_context(run_id).await
     }
 
     async fn validate_identity_material_trust_scope(
         &self,
         identity_material: &events::RunIdentityMaterialV1,
     ) -> Result<(), AppError> {
-        let trust_scope_id = self.load_trust_scope_id().await?;
-        if trust_scope_id != identity_material.trust_scope_id {
-            return Err(run_identity_material_mismatch());
-        }
-        Ok(())
+        self.trusted_run_reader()
+            .validate_identity_material_trust_scope(identity_material)
+            .await
+    }
+
+    fn trusted_run_reader(&self) -> TrustedRunReader<'_, S, A> {
+        TrustedRunReader::new(&self.store, &self.artifacts, &self.certification_registry)
     }
 }
 
@@ -2160,6 +2414,169 @@ impl VerifiedStatusReadContext {
     }
 }
 
+struct TrustedRunReader<'a, S, A: ?Sized> {
+    store: &'a S,
+    artifacts: &'a A,
+    registry: &'a CertificationRegistry,
+}
+
+impl<'a, S, A: ?Sized> TrustedRunReader<'a, S, A> {
+    fn new(store: &'a S, artifacts: &'a A, registry: &'a CertificationRegistry) -> Self {
+        Self {
+            store,
+            artifacts,
+            registry,
+        }
+    }
+}
+
+impl<S, A> TrustedRunReader<'_, S, A>
+where
+    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
+    A: store::RetainedArtifactReadProvider + ?Sized,
+{
+    async fn load_trust_scope_id(&self) -> Result<TrustScopeId, AppError> {
+        self.store
+            .load_trust_scope_id()
+            .await
+            .map_err(async_app_store_error)
+    }
+
+    async fn validate_identity_material_trust_scope(
+        &self,
+        identity_material: &events::RunIdentityMaterialV1,
+    ) -> Result<(), AppError> {
+        let trust_scope_id = self.load_trust_scope_id().await?;
+        if trust_scope_id != identity_material.trust_scope_id {
+            return Err(run_identity_material_mismatch());
+        }
+        Ok(())
+    }
+
+    async fn load_run_context(&self, run_id: &RunId) -> Result<VerifiedRunReadContext, AppError> {
+        let context =
+            load_async_verified_run_read_context(self.store, self.artifacts, self.registry, run_id)
+                .await?;
+        self.validate_identity_material_trust_scope(
+            &context.view().run_admitted().identity_material,
+        )
+        .await?;
+        Ok(context)
+    }
+
+    async fn load_status_context(
+        &self,
+        run_id: &RunId,
+    ) -> Result<VerifiedStatusReadContext, AppError> {
+        let context = load_async_verified_status_read_context(
+            self.store,
+            self.artifacts,
+            self.registry,
+            run_id,
+        )
+        .await?;
+        self.validate_identity_material_trust_scope(
+            &context.read.view().run_admitted().identity_material,
+        )
+        .await?;
+        Ok(context)
+    }
+
+    async fn run_status(&self, run_id: &RunId) -> Result<RunResponse, AppError> {
+        let context = self.load_status_context(run_id).await?;
+        run_status_from_projection(
+            run_id,
+            context.runtime_spec(),
+            context.events(),
+            context.projection(),
+        )
+    }
+
+    async fn run_stream(&self, run_id: &RunId) -> Result<RunStreamResponse, AppError> {
+        let context = self.load_run_context(run_id).await?;
+        Ok(run_stream_response_from_verified_context(&context))
+    }
+
+    async fn read_run_observations(
+        &self,
+        query: store::RunObservationQuery,
+    ) -> Result<store::RunObservationPage, AppError>
+    where
+        S: store::RunObservationStore,
+        <S as store::RunObservationStore>::Error:
+            store::StoreErrorInspection + fmt::Display + Send + Sync + 'static,
+    {
+        self.store
+            .read_run_observations(query)
+            .await
+            .map_err(observation_app_store_error)
+    }
+
+    async fn verify_replay(
+        &self,
+        fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+        run_id: &RunId,
+    ) -> Result<ReplayResponse, AppError> {
+        let context = self.load_run_context(run_id).await?;
+        verify_replay_diagnostics_from_recorded_artifacts(
+            self.artifacts,
+            context.runtime_spec(),
+            run_id,
+            context.events(),
+        )
+        .await?;
+        let authority = replay_read_authority_for_run_with_retained_source_facts(
+            self.store,
+            self.artifacts,
+            context.runtime_spec(),
+            context.view(),
+            fact_query_receipt_trust_root,
+        )
+        .await?;
+        let broker = ReplayBroker::from_read_authority(authority)?;
+        let stream = context.events();
+        mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&broker)?;
+        mfm_transports_proof::verify_deterministic_proof_replay(&broker)?;
+        let projection = broker.projection_snapshot();
+        let terminal_policies =
+            store::SideEffectTerminalPolicies::from_spec(context.runtime_spec().spec())?;
+        let saga = projection.derive_saga_projection(
+            run_id,
+            &context.runtime_spec().spec().saga,
+            &terminal_policies,
+        )?;
+        let retained_artifacts = projection
+            .retention(run_id)
+            .map(|retention| retention.refs.len())
+            .unwrap_or_default();
+        Ok(ReplayResponse {
+            run_id: run_id.as_str().to_owned(),
+            spec_hash: broker.certified_spec().spec_hash.as_str().to_owned(),
+            run_mode: run_mode_status(saga.run_mode),
+            saga: saga_status_with_resources(context.runtime_spec().spec(), projection, &saga),
+            attempt_dispositions: attempt_dispositions(projection),
+            head_seq: stream_head(stream),
+            retained_artifacts,
+        })
+    }
+
+    async fn public_output(
+        &self,
+        run_id: &RunId,
+        public_schema_id: &SchemaId,
+    ) -> Result<PublicOutputResponse, AppError> {
+        let context = self.load_run_context(run_id).await?;
+        let authority = public_output_read_authority_for_run(
+            self.artifacts,
+            context.runtime_spec(),
+            context.view(),
+            public_schema_id,
+        )
+        .await?;
+        render_public_output(self.artifacts, &authority).await
+    }
+}
+
 async fn load_async_verified_run_read_context<S, A>(
     store: &S,
     artifacts: &A,
@@ -2170,11 +2587,11 @@ where
     S: store::RunEventStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + ?Sized,
 {
-    let stream = store
-        .load_run_stream(run_id)
+    let committed = store
+        .load_committed_run_stream(run_id)
         .await
         .map_err(async_app_store_error)?;
-    verified_run_read_context_from_events(artifacts, registry, run_id, stream).await
+    verified_run_read_context_from_committed_stream(artifacts, registry, committed).await
 }
 
 async fn load_async_verified_status_read_context<S, A>(
@@ -2187,43 +2604,44 @@ where
     S: store::RunEventStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + ?Sized,
 {
-    let stream = store
-        .load_run_stream(run_id)
+    let committed = store
+        .load_committed_run_stream(run_id)
         .await
         .map_err(async_app_store_error)?;
     let projection = store
         .status_projection_snapshot(run_id)
         .await
         .map_err(async_app_store_error)?;
-    verified_status_read_context_from_events(artifacts, registry, run_id, stream, &projection).await
+    verified_status_read_context_from_committed_stream(artifacts, registry, committed, &projection)
+        .await
 }
 
-async fn verified_status_read_context_from_events(
+async fn verified_status_read_context_from_committed_stream(
     artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
     registry: &CertificationRegistry,
-    run_id: &RunId,
-    stream: Vec<store::KernelEventEnvelope>,
+    committed: store::CommittedRunStream,
     global_projection: &store::ProjectionSnapshot,
 ) -> Result<VerifiedStatusReadContext, AppError> {
-    let read = verified_run_read_context_from_events(artifacts, registry, run_id, stream).await?;
+    let read =
+        verified_run_read_context_from_committed_stream(artifacts, registry, committed).await?;
     let projection = read.status_projection_with_resource_lanes(global_projection)?;
     Ok(VerifiedStatusReadContext { read, projection })
 }
 
-async fn verified_run_read_context_from_events(
+async fn verified_run_read_context_from_committed_stream(
     artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
     registry: &CertificationRegistry,
-    run_id: &RunId,
-    stream: Vec<store::KernelEventEnvelope>,
+    committed: store::CommittedRunStream,
 ) -> Result<VerifiedRunReadContext, AppError> {
+    let run_id = committed.run_id().clone();
+    let stream = committed.events();
     if stream.is_empty() {
         return Err(AppError::not_found(
             "RunNotFound",
             "typed run stream was not found",
         ));
     }
-    let runtime_spec = load_runtime_spec_for_run(artifacts, registry, run_id, &stream).await?;
-    let committed = store::CommittedRunStream::from_events(run_id.clone(), stream)?;
+    let runtime_spec = load_runtime_spec_for_run(artifacts, registry, &run_id, stream).await?;
     let retained_artifacts =
         store::VerifiedRunArtifactStore::from_committed_stream(&committed, artifacts).await?;
     let view = VerifiedRunHistoryView::from_committed_stream(
@@ -2517,6 +2935,22 @@ async fn stored_launch_evidence_from_run_admitted(
             .await?,
         );
     }
+    let mut fact_descriptor_artifacts =
+        Vec::with_capacity(run_admitted.fact_descriptor_artifacts.len());
+    for descriptor in &run_admitted.fact_descriptor_artifacts {
+        fact_descriptor_artifacts.push(
+            stored_run_launch_artifact(
+                artifacts,
+                run_artifact_requirement(
+                    store::EventArtifactReferenceSource::FactDescriptor,
+                    descriptor,
+                    events::ArtifactRole::FactDescriptor,
+                ),
+                |_| Ok(()),
+            )
+            .await?,
+        );
+    }
     let mut seed_cells = Vec::with_capacity(run_admitted.seed_cells.len());
     for cell in &run_admitted.seed_cells {
         let artifact = artifacts
@@ -2540,6 +2974,7 @@ async fn stored_launch_evidence_from_run_admitted(
         spec_artifact,
         certificate_artifact,
         config_artifacts,
+        fact_descriptor_artifacts,
         seed_cells,
     })
 }
@@ -2584,6 +3019,101 @@ pub fn replay_read_authority_for_run(
         runtime_spec,
         verified_view,
     )?)
+}
+
+/// Builds sealed replay read authority with explicit fact-query receipt trust authority.
+pub fn replay_read_authority_for_run_with_fact_query_trust_root(
+    runtime_spec: &CertifiedRuntimeSpec,
+    verified_view: &VerifiedRunHistoryView,
+    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+) -> Result<ReplayReadAuthority, AppError> {
+    Ok(
+        ReplayReadAuthority::from_verified_run_history_view_with_fact_query_receipt_trust_root(
+            runtime_spec,
+            verified_view,
+            fact_query_receipt_trust_root,
+        )?,
+    )
+}
+
+async fn replay_read_authority_for_run_with_retained_source_facts<S, A>(
+    store: &S,
+    artifacts: &A,
+    runtime_spec: &CertifiedRuntimeSpec,
+    verified_view: &VerifiedRunHistoryView,
+    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+) -> Result<ReplayReadAuthority, AppError>
+where
+    S: store::RunEventStore + Send + Sync,
+    A: store::RetainedArtifactReadProvider + ?Sized,
+{
+    let source_fact_events =
+        retained_source_fact_events_from_query_evidence(store, artifacts, verified_view.events())
+            .await?;
+    Ok(ReplayReadAuthority::from_verified_run_history_view_with_fact_query_receipt_trust_root_and_source_facts(
+        runtime_spec,
+        verified_view,
+        fact_query_receipt_trust_root,
+        source_fact_events,
+    )?)
+}
+
+async fn retained_source_fact_events_from_query_evidence<S, A>(
+    store: &S,
+    artifacts: &A,
+    stream: &[store::KernelEventEnvelope],
+) -> Result<Vec<RetainedSourceFactReplayEvent>, AppError>
+where
+    S: store::RunEventStore + Send + Sync,
+    A: store::RetainedArtifactReadProvider + ?Sized,
+{
+    let mut source_events = BTreeMap::new();
+    for event in stream {
+        let events::KernelEventPayload::ArtifactReferenced(payload) = event.payload() else {
+            continue;
+        };
+        if payload.artifact_ref.role != events::ArtifactRole::FactQueryEvidence {
+            continue;
+        }
+        let artifact = artifacts
+            .read_retained_artifact(&artifact_referenced_artifact_requirement(payload))
+            .await
+            .map_err(async_app_store_error)?;
+        let evidence = mfm_facts::parse_canonical_fact_query_evidence_bytes(artifact.bytes())
+            .map_err(|_| {
+                AppError::backend(
+                    ErrorClass::Internal,
+                    "FactQueryEvidenceInvalid",
+                    "Fact query evidence artifact is invalid",
+                )
+            })?;
+        for fact_ref in evidence.receipt().returned_refs() {
+            let fact_claim_id = fact_ref.fact_claim_id().clone();
+            if source_events.contains_key(&fact_claim_id) {
+                continue;
+            }
+            let source_stream = store
+                .load_run_stream(fact_claim_id.source_run_id())
+                .await
+                .map_err(async_app_store_error)?;
+            let envelope = source_stream
+                .into_iter()
+                .find(|candidate| {
+                    candidate.seq().as_u64() == fact_claim_id.source_seq()
+                        && candidate.ordinal().as_u32() == fact_claim_id.source_ordinal()
+                })
+                .ok_or_else(|| {
+                    AppError::backend(
+                        ErrorClass::Internal,
+                        "FactQuerySourceFactMissing",
+                        "Fact query evidence source fact event is missing",
+                    )
+                })?;
+            let source_event = RetainedSourceFactReplayEvent::new(fact_claim_id.clone(), envelope)?;
+            source_events.insert(fact_claim_id, source_event);
+        }
+    }
+    Ok(source_events.into_values().collect())
 }
 
 fn certified_spec_launch_artifact(
@@ -2730,6 +3260,62 @@ fn config_launch_artifacts_for_spec(
         ));
     }
     Ok(validated)
+}
+
+fn fact_descriptor_launch_artifacts_for_spec(
+    runtime_spec: &CertifiedRuntimeSpec,
+    registry: &CertificationRegistry,
+) -> Result<Vec<RunLaunchArtifact>, AppError> {
+    let schema_id = mfm_program::facts::fact_descriptor_schema_id().map_err(|_| {
+        AppError::backend(
+            ErrorClass::Internal,
+            "FactDescriptorSchemaInvalid",
+            "Fact descriptor schema identity is invalid",
+        )
+    })?;
+    let media_type = json_media_type()?;
+    let required = runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .chain(runtime_spec.spec().remediations.values())
+        .flat_map(|node| {
+            node.fact_descriptor_allowlist
+                .iter()
+                .map(|reference| reference.descriptor_hash.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    let mut artifacts = Vec::with_capacity(required.len());
+    for descriptor_hash in required {
+        let descriptor = registry
+            .fact_descriptor_artifact(&descriptor_hash)
+            .ok_or_else(|| {
+                AppError::backend(
+                    ErrorClass::Internal,
+                    "FactDescriptorArtifactMissing",
+                    "certified fact descriptor bytes are not available for launch",
+                )
+            })?;
+        let artifact = launch_artifact(
+            descriptor.bytes().to_vec(),
+            media_type.clone(),
+            Some(schema_id.clone()),
+            None,
+            None,
+            events::ArtifactRole::FactDescriptor,
+        );
+        if artifact.evidence.digest != *descriptor.descriptor_hash()
+            || artifact.evidence.digest != descriptor_hash
+        {
+            return Err(AppError::backend(
+                ErrorClass::Internal,
+                "FactDescriptorArtifactTampered",
+                "certified fact descriptor bytes do not match their descriptor hash",
+            ));
+        }
+        artifacts.push(artifact);
+    }
+    Ok(artifacts)
 }
 
 fn framework_config_launch_artifacts_for_spec(
@@ -2942,6 +3528,23 @@ fn run_artifact_requirement(
     }
 }
 
+fn artifact_referenced_artifact_requirement(
+    payload: &events::ArtifactReferenced,
+) -> store::EventArtifactRequirement {
+    store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::ArtifactReferenced,
+        artifact_id: payload.artifact_ref.artifact_id.clone(),
+        digest: Some(payload.artifact_ref.content_digest.clone()),
+        byte_len: Some(payload.artifact_ref.byte_len),
+        media_type: Some(payload.artifact_ref.media_type.clone()),
+        schema_id: Some(payload.artifact_ref.schema_id.clone()),
+        semantic_type_id: payload.artifact_ref.semantic_type_id.clone(),
+        producer_node_id: payload.node_id.clone(),
+        producer_seed_id: None,
+        artifact_role: Some(payload.artifact_ref.role),
+    }
+}
+
 fn config_ref_artifact_requirement(
     config_ref: &spec::ConfigRef,
 ) -> store::EventArtifactRequirement {
@@ -3126,6 +3729,84 @@ pub fn prepare_entry_point_run_launch(
     Ok(PreparedEntryPointRunLaunch { request, evidence })
 }
 
+/// Prepares a certified typed run launch from a program draft for integration tests.
+///
+/// This helper is compiled only with `test-support`. It uses the same launch-material preparation
+/// path as production app services after the caller has supplied an already-built typed program
+/// draft and matching root seed material.
+#[cfg(feature = "test-support")]
+pub fn prepare_typed_program_run_launch_for_test(
+    draft: mfm_program::TypedProgramDraft,
+    seed_material: BTreeMap<SeedId, PlainCanonicalJsonBytes>,
+    certification_registry: &CertificationRegistry,
+    trust_scope_id: TrustScopeId,
+    distinct_run_key: Option<DistinctRunKey>,
+) -> Result<RunLaunchRequest, AppError> {
+    let plan =
+        mfm_program::TypedProgramLaunchPlan::from_draft_and_seed_material(draft, seed_material)
+            .map_err(|_| {
+                AppError::backend(
+                    ErrorClass::BadRequest,
+                    "TypedProgramLaunchPlanInvalid",
+                    "typed program launch material is invalid",
+                )
+            })?;
+    let mut config_inputs = plan
+        .config_material
+        .iter()
+        .map(|artifact| RunLaunchConfigArtifact {
+            schema_id: artifact.schema_id.clone(),
+            bytes: artifact.bytes.to_vec(),
+            media_type: artifact.media_type.clone(),
+        })
+        .collect::<Vec<_>>();
+    let seed_inputs = plan
+        .seed_material
+        .iter()
+        .map(|artifact| RunLaunchSeedArtifact {
+            seed_id: artifact.seed_id.clone(),
+            bytes: artifact.bytes.to_vec(),
+            media_type: artifact.media_type.clone(),
+        })
+        .collect::<Vec<_>>();
+    let lowered =
+        mfm_certify::lower_program_draft(&plan.draft).map_err(entry_point_certification_error)?;
+    let scoped_registry = certification_registry
+        .scoped_for_spec(lowered.spec())
+        .map_err(entry_point_certification_error)?;
+    let certified_spec = mfm_certify::certify_typed_spec(lowered, &scoped_registry)
+        .map_err(entry_point_certification_error)?;
+    config_inputs.extend(framework_config_launch_artifacts_for_spec(
+        &certified_spec.envelope().spec,
+    )?);
+    let distinct_run_key_digest = distinct_run_key
+        .as_ref()
+        .map(DistinctRunKey::digest)
+        .transpose()?;
+    prepare_certified_run_launch(
+        CertifiedRunLaunchInput {
+            certified_spec,
+            registry: &scoped_registry,
+            trust_scope_id,
+            distinct_run_key_digest,
+            entry_point_evidence: events::EntryPointLaunchEvidence {
+                resolved_op_id: events::EntryPointOpId::new("mfm.test.typed_program_internal_test")
+                    .map_err(|_| {
+                        entry_point_launch_internal_error(
+                            "EntryPointLaunchEvidenceInvalid",
+                            "entry-point launch evidence is invalid",
+                        )
+                    })?,
+                entry_point_registry_digest: content_digest_for_bytes(
+                    b"mfm.app.test-support.typed-program-launch.v1",
+                ),
+            },
+        },
+        config_inputs,
+        seed_inputs,
+    )
+}
+
 fn entry_point_certification_error(_error: mfm_certify::CertifyError) -> AppError {
     AppError::backend(
         ErrorClass::BadRequest,
@@ -3163,6 +3844,8 @@ fn prepare_certified_run_launch(
     let certificate_artifact = certified_spec_certificate_launch_artifact(&runtime_spec)?;
     let config_artifacts =
         config_launch_artifacts_for_spec(&runtime_spec, input.registry, config_inputs)?;
+    let fact_descriptor_artifacts =
+        fact_descriptor_launch_artifacts_for_spec(&runtime_spec, input.registry)?;
     let seed_cells = seed_launch_cells_for_spec(&runtime_spec, seed_inputs)?;
     let identity_material = events::RunIdentityMaterialV1 {
         certified_spec_hash: runtime_spec.spec_hash().clone(),
@@ -3185,6 +3868,7 @@ fn prepare_certified_run_launch(
             spec_artifact,
             certificate_artifact,
             config_artifacts,
+            fact_descriptor_artifacts,
             seed_cells,
         },
     })
@@ -3336,12 +4020,14 @@ pub async fn public_output_read_authority_for_run(
         ));
     }
     let projection = verified_view.projection_snapshot();
-    let public_output = projection.public_output(public_schema_id).ok_or_else(|| {
-        AppError::not_found(
-            "PublicOutputNotFound",
-            "typed public output was not found for the requested schema",
-        )
-    })?;
+    let public_output = projection
+        .public_output(verified_view.run_id(), public_schema_id)
+        .ok_or_else(|| {
+            AppError::not_found(
+                "PublicOutputNotFound",
+                "typed public output was not found for the requested schema",
+            )
+        })?;
     let store::PublicOutputProjection::Produced {
         event_id,
         rendered_digest,
@@ -3791,57 +4477,9 @@ fn projection_with_resource_lanes(
     snapshot: &store::ProjectionSnapshot,
     resource_lanes: BTreeMap<store::ResourceLaneKey, store::ResourceLaneProjection>,
 ) -> Result<store::ProjectionSnapshot, store::StoreError> {
-    store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
-        run_states: snapshot
-            .run_states()
-            .map(|(run_id, state)| (run_id.clone(), *state))
-            .collect(),
-        run_spec_hashes: snapshot
-            .run_spec_hashes()
-            .map(|(run_id, spec_hash)| (run_id.clone(), spec_hash.clone()))
-            .collect(),
-        saga_policy_digests: snapshot
-            .saga_policy_digests()
-            .map(|(run_id, digest)| (run_id.clone(), digest.clone()))
-            .collect(),
-        run_completions: snapshot
-            .run_completions()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-        saga_engagements: snapshot
-            .saga_engagements()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-        manual_resolutions: snapshot
-            .manual_resolutions()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-        attempts: snapshot
-            .attempts()
-            .map(|(key, projection)| (key.clone(), projection.clone()))
-            .collect(),
-        cells: snapshot
-            .cells()
-            .map(|(cell_id, projection)| (cell_id.clone(), projection.clone()))
-            .collect(),
-        facts: snapshot
-            .facts()
-            .map(|(key, projection)| (key.clone(), projection.clone()))
-            .collect(),
-        side_effects: snapshot
-            .side_effects()
-            .map(|(ledger_ref, projection)| (ledger_ref.clone(), projection.clone()))
-            .collect(),
-        resource_lanes,
-        public_outputs: snapshot
-            .public_outputs()
-            .map(|(schema_id, projection)| (schema_id.clone(), projection.clone()))
-            .collect(),
-        retentions: snapshot
-            .retentions()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-    })
+    let mut parts = store::ProjectionSnapshotParts::from_snapshot(snapshot);
+    parts.resource_lanes = resource_lanes;
+    store::ProjectionSnapshot::from_parts(parts)
 }
 
 fn stream_head(stream: &[store::KernelEventEnvelope]) -> u64 {

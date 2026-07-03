@@ -8,9 +8,10 @@ use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
 use crate::artifacts::{
-    artifact_role_name, staged_artifact_binding_kind, staged_artifact_binding_role,
-    staged_side_effect_artifact_phase, verify_artifact_bytes, StagedArtifact,
-    StagedArtifactBindingKind, StagedRetentionRefs, StagedSideEffectArtifactPhase,
+    artifact_role_name, fact_query_returned_ref_retention_refs, staged_artifact_binding_kind,
+    staged_artifact_binding_role, staged_side_effect_artifact_phase, verify_artifact_bytes,
+    StagedArtifact, StagedArtifactBindingKind, StagedRetentionRefAuthority, StagedRetentionRefs,
+    StagedSideEffectArtifactPhase,
 };
 use crate::binding::BoundRuntimeContext;
 use crate::framework::{
@@ -43,6 +44,8 @@ pub struct RunLaunchEvidence {
     pub certificate_artifact: RunLaunchArtifact,
     /// Staged config artifacts for every certified config reference.
     pub config_artifacts: Vec<RunLaunchArtifact>,
+    /// Staged fact descriptor artifacts for every certified fact descriptor reference.
+    pub fact_descriptor_artifacts: Vec<RunLaunchArtifact>,
     /// Seed cells materialized at run start.
     pub seed_cells: Vec<RunLaunchSeedCell>,
 }
@@ -204,6 +207,14 @@ impl CommitPlanner {
                 .collect::<Result<Vec<_>>>()?,
         )?;
         let mut config_staged_artifacts = launch_artifacts_by_id(config_inputs, "config")?;
+        let fact_descriptor_artifacts = validate_fact_descriptor_launch_artifacts(
+            runtime_spec,
+            evidence.fact_descriptor_artifacts,
+        )?;
+        let fact_descriptor_evidence = fact_descriptor_artifacts
+            .iter()
+            .map(|artifact| artifact.evidence.clone())
+            .collect::<Vec<_>>();
         let seed_inputs = evidence.seed_cells;
         let seed_cell_refs = seed_inputs
             .iter()
@@ -212,11 +223,13 @@ impl CommitPlanner {
         let seed_cells = validate_seed_cells(runtime_spec, &seed_cell_refs)?;
         let seed_staged_artifacts =
             validate_launch_seed_artifacts(seed_inputs, seed_cells.values())?;
-        let mut required_artifacts =
-            Vec::with_capacity(2 + config_artifacts.len() + seed_cells.len());
+        let mut required_artifacts = Vec::with_capacity(
+            2 + config_artifacts.len() + fact_descriptor_evidence.len() + seed_cells.len(),
+        );
         required_artifacts.push(spec_artifact.clone());
         required_artifacts.push(certificate_artifact.clone());
         required_artifacts.extend(config_artifacts.iter().cloned());
+        required_artifacts.extend(fact_descriptor_evidence.iter().cloned());
         required_artifacts.extend(seed_cells.values().map(store_seed_artifact));
         let adapter_executables = bound_context.adapter_executables().to_vec();
         let admitted_binding_digest = bound_context.admitted_binding_digest()?;
@@ -228,6 +241,10 @@ impl CommitPlanner {
             spec_artifact: run_artifact_ref_from_store(&spec_artifact),
             certificate_artifact: run_artifact_ref_from_store(&certificate_artifact),
             config_artifacts: config_artifacts
+                .iter()
+                .map(run_artifact_ref_from_store)
+                .collect(),
+            fact_descriptor_artifacts: fact_descriptor_evidence
                 .iter()
                 .map(run_artifact_ref_from_store)
                 .collect(),
@@ -271,8 +288,11 @@ impl CommitPlanner {
             request,
             store::CommitArtifactEvidenceSet::new(required_artifacts, admitted_artifacts)?,
         )?;
-        let mut artifacts_to_stage =
-            Vec::with_capacity(3 + config_artifacts.len() + seed_staged_artifacts.len());
+        let mut artifacts_to_stage = Vec::with_capacity(
+            3 + config_artifacts.len()
+                + fact_descriptor_artifacts.len()
+                + seed_staged_artifacts.len(),
+        );
         artifacts_to_stage.push(PreparedStagedArtifact {
             bytes: spec_input.bytes,
             evidence: spec_artifact,
@@ -293,6 +313,12 @@ impl CommitPlanner {
             artifacts_to_stage.push(PreparedStagedArtifact {
                 bytes: staged.bytes,
                 evidence: artifact.clone(),
+            });
+        }
+        for artifact in fact_descriptor_artifacts {
+            artifacts_to_stage.push(PreparedStagedArtifact {
+                bytes: artifact.bytes,
+                evidence: artifact.evidence,
             });
         }
         artifacts_to_stage.extend(seed_staged_artifacts);
@@ -392,6 +418,7 @@ impl CommitPlanner {
             input.run_id,
             input.node,
             &input.view.stream,
+            &input.view.artifact_byte_authority,
             &staged_artifacts,
         )?;
         let payload_bound_artifacts = staged_artifacts
@@ -449,6 +476,7 @@ impl CommitPlanner {
             input.runtime_spec,
             input.run_id,
             input.node,
+            &input.view.projections,
             &required_artifacts,
             staged_retention_refs,
         )?);
@@ -889,6 +917,11 @@ fn required_artifacts_for_payloads(
             }
             let Some(evidence) = committed_artifact_for_requirement(view, &requirement) else {
                 if requirement.source.is_retention() {
+                    if let Some(evidence) =
+                        retained_fact_artifact_evidence_for_requirement(view, &requirement)?
+                    {
+                        required_artifacts.push(evidence);
+                    }
                     continue;
                 }
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
@@ -900,6 +933,45 @@ fn required_artifacts_for_payloads(
         }
     }
     Ok(required_artifacts)
+}
+
+fn retained_fact_artifact_evidence_for_requirement(
+    view: &RuntimeRunView,
+    requirement: &store::EventArtifactRequirement,
+) -> Result<Option<store::ArtifactEvidenceRef>> {
+    match requirement.artifact_role {
+        Some(events::ArtifactRole::FactDescriptor) => {
+            let descriptor_hash = requirement.digest.as_ref().ok_or_else(|| {
+                RuntimeError::InvalidRunnerOutput(format!(
+                    "retention ref for artifact {} lacks descriptor digest",
+                    requirement.artifact_id
+                ))
+            })?;
+            let Some(descriptor) = view
+                .projections
+                .fact_descriptor(descriptor_hash)
+                .filter(|descriptor| descriptor.descriptor_artifact_id == requirement.artifact_id)
+            else {
+                return Ok(None);
+            };
+            Ok(Some(descriptor.descriptor_artifact_evidence.clone()))
+        }
+        Some(events::ArtifactRole::FactResponse) => Ok(view
+            .projections
+            .fact_index_entries()
+            .find(|(_, index)| {
+                index.artifact_id == requirement.artifact_id
+                    && requirement
+                        .digest
+                        .as_ref()
+                        .is_some_and(|digest| index.response_hash == *digest)
+            })
+            .and_then(|(claim_id, _index)| {
+                let record = view.projections.fact_record(claim_id)?;
+                record.response_artifact_evidence.clone()
+            })),
+        _ => Ok(None),
+    }
 }
 
 fn committed_artifact_for_requirement(
@@ -938,6 +1010,85 @@ fn launch_artifacts_by_id(
         }
     }
     Ok(by_artifact)
+}
+
+fn validate_fact_descriptor_launch_artifacts(
+    runtime_spec: &CertifiedRuntimeSpec,
+    artifacts: Vec<RunLaunchArtifact>,
+) -> Result<Vec<RunLaunchArtifact>> {
+    let required = certified_fact_descriptor_hashes(runtime_spec);
+    let schema_id = mfm_facts::fact_descriptor_schema_id()
+        .map_err(|error| RuntimeError::Identity(error.to_string()))?;
+    let media_type = spec::MediaType::new("application/json")?;
+    let mut by_hash = BTreeMap::new();
+
+    for artifact in artifacts {
+        verify_artifact_bytes(&artifact.bytes, &artifact.evidence)?;
+        let descriptor = mfm_facts::parse_canonical_fact_descriptor_bytes(&artifact.bytes)
+            .map_err(runtime_fact_error)?;
+        let canonical =
+            mfm_facts::canonical_fact_descriptor_bytes(&descriptor).map_err(runtime_fact_error)?;
+        let descriptor_hash =
+            mfm_facts::fact_descriptor_hash(&descriptor).map_err(runtime_fact_error)?;
+        let expected_artifact_id =
+            ArtifactId::from_digest(descriptor_hash.algorithm(), *descriptor_hash.digest());
+        if artifact.evidence.artifact_id != expected_artifact_id
+            || artifact.evidence.digest != descriptor_hash
+            || artifact.evidence.byte_len != canonical.as_bytes().len() as u64
+            || artifact.evidence.media_type != media_type
+            || artifact.evidence.schema_id.as_ref() != Some(&schema_id)
+            || artifact.evidence.semantic_type_id.is_some()
+            || artifact.evidence.producer_node_id.is_some()
+            || artifact.evidence.producer_seed_id.is_some()
+            || artifact.evidence.artifact_role != events::ArtifactRole::FactDescriptor
+        {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "fact descriptor artifact evidence does not match descriptor {}",
+                descriptor_hash
+            )));
+        }
+        if by_hash.insert(descriptor_hash.clone(), artifact).is_some() {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "duplicate fact descriptor artifact for {}",
+                descriptor_hash
+            )));
+        }
+    }
+
+    for required_hash in &required {
+        if !by_hash.contains_key(required_hash) {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "missing fact descriptor artifact for certified descriptor {}",
+                required_hash
+            )));
+        }
+    }
+    for admitted_hash in by_hash.keys() {
+        if !required.contains(admitted_hash) {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "fact descriptor artifact {} is not certified by the runtime spec",
+                admitted_hash
+            )));
+        }
+    }
+
+    Ok(by_hash.into_values().collect())
+}
+
+fn certified_fact_descriptor_hashes(
+    runtime_spec: &CertifiedRuntimeSpec,
+) -> BTreeSet<ContentDigest> {
+    runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .chain(runtime_spec.spec().remediations.values())
+        .flat_map(|node| {
+            node.fact_descriptor_allowlist
+                .iter()
+                .map(|reference| reference.descriptor_hash.clone())
+        })
+        .collect()
 }
 
 fn validate_launch_seed_artifacts<'a>(
@@ -981,8 +1132,8 @@ fn runner_output_commit_key(
     payloads: &[events::KernelEventPayload],
 ) -> Result<store::CommitKey> {
     let mut fragments = BTreeSet::new();
-    for payload in payloads {
-        fragments.insert(runner_output_commit_fragment(payload));
+    for (payload_ordinal, payload) in payloads.iter().enumerate() {
+        fragments.insert(runner_output_commit_fragment(payload_ordinal, payload)?);
     }
     if fragments.is_empty() {
         return Err(RuntimeError::InvalidRunnerOutput(format!(
@@ -999,8 +1150,11 @@ fn runner_output_commit_key(
     ))?)
 }
 
-fn runner_output_commit_fragment(payload: &events::KernelEventPayload) -> String {
-    match payload {
+fn runner_output_commit_fragment(
+    payload_ordinal: usize,
+    payload: &events::KernelEventPayload,
+) -> Result<String> {
+    Ok(match payload {
         events::KernelEventPayload::StateAttemptCompleted(payload) => {
             format!("completed:{}", payload.output_cell_id)
         }
@@ -1011,7 +1165,13 @@ fn runner_output_commit_fragment(payload: &events::KernelEventPayload) -> String
         events::KernelEventPayload::CellSkipped(payload) => {
             format!("cell-skipped:{}", payload.cell_id)
         }
-        events::KernelEventPayload::FactRecorded(payload) => format!("fact:{}", payload.fact_key),
+        events::KernelEventPayload::FactRecorded(payload) => {
+            let payload_hash = store::payload_canonical_json(
+                &events::KernelEventPayload::FactRecorded(payload.clone()),
+            )?
+            .content_digest();
+            format!("fact-payload:{}:{}", payload_ordinal, payload_hash)
+        }
         events::KernelEventPayload::ArtifactReferenced(payload) => {
             format!("artifact:{}", payload.artifact_ref.artifact_id)
         }
@@ -1099,7 +1259,7 @@ fn runner_output_commit_fragment(payload: &events::KernelEventPayload) -> String
         | events::KernelEventPayload::RunCompleted(_)
         | events::KernelEventPayload::StateAttemptStarted(_)
         | events::KernelEventPayload::StateAttemptInterrupted(_) => "scheduler-owned".to_owned(),
-    }
+    })
 }
 
 fn attempt_failure_commit_fragment(payload: &events::StateAttemptFailed) -> Result<String> {
@@ -1201,6 +1361,7 @@ fn framework_retention_manifest_artifact(
     run_id: &RunId,
     node: &spec::NodeSpec,
     pre_projection_stream: &[store::KernelEventEnvelope],
+    artifact_bytes: &store::ArtifactByteAuthorityMap,
     staged_artifacts: &[ValidatedStagedArtifact],
 ) -> Result<Option<RetentionManifestArtifact>> {
     let manifests = staged_artifacts
@@ -1241,7 +1402,12 @@ fn framework_retention_manifest_artifact(
             node.node_id
         )));
     };
-    let expected = build_retention_manifest_artifact(runtime_spec, run_id, pre_projection_stream)?;
+    let expected = build_retention_manifest_artifact(
+        runtime_spec,
+        run_id,
+        pre_projection_stream,
+        artifact_bytes,
+    )?;
     if staged.evidence != expected.evidence || bytes != expected.bytes.as_bytes() {
         return Err(RuntimeError::InvalidRunnerOutput(format!(
             "retention framework node {} staged manifest outside authoritative stream",
@@ -1304,6 +1470,9 @@ fn validate_staged_artifact_payload_bindings(
 ) -> Result<()> {
     let requirements = staged_payload_artifact_requirements(node, attempt_id, payloads)?;
     for staged in staged_artifacts {
+        if staged.binding == StagedArtifactBindingKind::FactQueryEvidence {
+            continue;
+        }
         if !requirements
             .iter()
             .any(|requirement| staged_artifact_matches_requirement(node, staged, requirement))
@@ -1597,6 +1766,7 @@ fn bind_staged_retention_refs(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
     node: &spec::NodeSpec,
+    projections: &store::ProjectionSnapshot,
     required_artifacts: &[store::ArtifactEvidenceRef],
     staged: Vec<StagedRetentionRefs>,
 ) -> Result<Vec<events::KernelEventPayload>> {
@@ -1610,20 +1780,29 @@ fn bind_staged_retention_refs(
                 node.node_id
             )));
         }
+        validate_fact_query_evidence_retention_set(projections, &staged_refs)?;
         for retention_ref in &staged_refs.refs {
-            let Some(artifact) =
+            if let Some(artifact) =
                 artifact_evidence_for_retention_ref(required_artifacts, retention_ref)
-            else {
+            {
+                if artifact.digest != retention_ref.content_digest
+                    || artifact.artifact_role != retention_ref.role
+                {
+                    return Err(RuntimeError::InvalidRunnerOutput(format!(
+                        "node {} staged retention evidence for artifact {} does not match artifact evidence",
+                        node.node_id, retention_ref.artifact_id
+                    )));
+                }
+                continue;
+            }
+
+            if !staged_retention_ref_authorized_by_existing_fact_query_evidence(
+                projections,
+                &staged_refs,
+                retention_ref,
+            ) {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
                     "node {} staged retention for artifact {} without staged artifact evidence",
-                    node.node_id, retention_ref.artifact_id
-                )));
-            };
-            if artifact.digest != retention_ref.content_digest
-                || artifact.artifact_role != retention_ref.role
-            {
-                return Err(RuntimeError::InvalidRunnerOutput(format!(
-                    "node {} staged retention evidence for artifact {} does not match artifact evidence",
                     node.node_id, retention_ref.artifact_id
                 )));
             }
@@ -1638,6 +1817,66 @@ fn bind_staged_retention_refs(
         ));
     }
     Ok(payloads)
+}
+
+fn validate_fact_query_evidence_retention_set(
+    projections: &store::ProjectionSnapshot,
+    staged_refs: &StagedRetentionRefs,
+) -> Result<()> {
+    let StagedRetentionRefAuthority::FactQueryEvidence { returned_refs } = &staged_refs.authority
+    else {
+        return Ok(());
+    };
+
+    if !staged_refs
+        .refs
+        .iter()
+        .any(|reference| reference.role == events::ArtifactRole::FactQueryEvidence)
+    {
+        return Err(RuntimeError::InvalidRunnerOutput(
+            "fact query evidence retention missing query evidence artifact".to_owned(),
+        ));
+    }
+
+    for fact_ref in returned_refs {
+        let [descriptor_ref, response_ref] =
+            fact_query_returned_ref_retention_refs(projections, fact_ref)?;
+        if !staged_refs.refs.contains(&descriptor_ref) {
+            return Err(RuntimeError::InvalidRunnerOutput(
+                "fact query evidence retention missing descriptor artifact authority".to_owned(),
+            ));
+        }
+
+        if !staged_refs.refs.contains(&response_ref) {
+            return Err(RuntimeError::InvalidRunnerOutput(
+                "fact query evidence retention missing response artifact authority".to_owned(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn staged_retention_ref_authorized_by_existing_fact_query_evidence(
+    projections: &store::ProjectionSnapshot,
+    staged_refs: &StagedRetentionRefs,
+    retention_ref: &events::RetentionRef,
+) -> bool {
+    let StagedRetentionRefAuthority::FactQueryEvidence { returned_refs } = &staged_refs.authority
+    else {
+        return false;
+    };
+
+    match retention_ref.role {
+        events::ArtifactRole::FactDescriptor | events::ArtifactRole::FactResponse => {
+            returned_refs.iter().any(|fact_ref| {
+                fact_query_returned_ref_retention_refs(projections, fact_ref)
+                    .map(|refs| refs.contains(retention_ref))
+                    .unwrap_or(false)
+            })
+        }
+        _ => false,
+    }
 }
 
 fn validate_staged_retention_reason(
@@ -1746,7 +1985,7 @@ fn runner_output_preconditions(
         &node.framework,
         Some(spec::FrameworkNodeSpec::CompleteRun(_))
     ) {
-        let completion = run_completion_evidence(runtime_spec, projections)?;
+        let completion = run_completion_evidence(runtime_spec, run_id, projections)?;
         let retention_manifest = projected_retention_manifest(run_id, projections)?;
         preconditions
             .required_present_logical_keys
@@ -1765,6 +2004,13 @@ fn runner_output_preconditions(
         &node.framework,
         Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
     ) {
+        preconditions.certified_run_authority =
+            Some(certified_run_authority(runtime_spec, run_id)?);
+    }
+    if payloads
+        .iter()
+        .any(|payload| matches!(payload, events::KernelEventPayload::FactRecorded(_)))
+    {
         preconditions.certified_run_authority =
             Some(certified_run_authority(runtime_spec, run_id)?);
     }
@@ -2195,19 +2441,21 @@ fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Result<()> {
             }
             events::KernelEventPayload::FactRecorded(payload) => {
                 require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
+                let fact_key = payload.claim.subject().fact_key();
                 if !recorded_facts.is_empty() {
                     return Err(RuntimeError::InvalidRunnerOutput(format!(
                         "node {} attempted to record fact {} after committed facts existed for the same attempt",
-                        node.node_id, payload.fact_key
+                        node.node_id, fact_key
                     )));
                 }
+                let producer = payload.claim.producer();
                 require_capability(
                     caps,
-                    &payload.capability_kind,
-                    &payload.capability_version,
+                    producer.capability_kind(),
+                    producer.capability_version(),
                     &node.node_id,
                 )?;
-                require_adapter(node, &payload.adapter_kind, &payload.adapter_version)?;
+                require_adapter(node, producer.adapter_kind(), producer.adapter_version())?;
             }
             events::KernelEventPayload::ArtifactReferenced(payload) => {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
@@ -2551,4 +2799,8 @@ fn validate_side_effect_verify_terminal_evidence(
             node.node_id
         )))
     }
+}
+
+fn runtime_fact_error(error: mfm_facts::FactError) -> RuntimeError {
+    RuntimeError::InvalidRunnerOutput(error.to_string())
 }

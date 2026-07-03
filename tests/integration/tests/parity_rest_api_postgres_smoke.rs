@@ -88,6 +88,7 @@ async fn parity_rest_postgres_smoke() {
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         store,
         runtime_config_path: None,
+        fact_query_receipt_trust_root: None,
     });
 
     let ready = app

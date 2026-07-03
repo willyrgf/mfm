@@ -17,6 +17,7 @@ thiserror = { workspace = true }
 mfm-canonical = { path = "../kernel/canonical" }
 mfm-capabilities = { path = "../kernel/capabilities" }
 mfm-events = { path = "../kernel/events" }
+mfm-facts = { path = "../kernel/facts" }
 mfm-ids = { path = "../kernel/ids" }
 mfm-spec = { path = "../kernel/spec" }
 mfm-store = { path = "../kernel/store" }

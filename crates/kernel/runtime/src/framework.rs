@@ -255,7 +255,9 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
             artifact_id,
             content_digest,
             ..
-        }) = ctx.projections().cell_terminal(&required.cell_id)
+        }) = ctx
+            .projections()
+            .cell_terminal_for_run(ctx.run_id(), &required.cell_id)
         else {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
                 "public-output render node {} required incomplete cell {}",
@@ -343,8 +345,12 @@ fn project_retention_manifest(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutpu
             ctx.node().node_id
         )));
     };
-    let manifest =
-        build_retention_manifest_artifact(ctx.runtime_spec(), ctx.run_id(), ctx.run_stream())?;
+    let manifest = build_retention_manifest_artifact(
+        ctx.runtime_spec(),
+        ctx.run_id(),
+        ctx.run_stream(),
+        ctx.artifact_byte_authority(),
+    )?;
     let manifest_artifact = StagedArtifact::inline_retention_manifest_artifact(
         &ctx,
         manifest.bytes.to_vec(),
@@ -397,7 +403,7 @@ fn complete_run_framework(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
             ctx.node().node_id
         )));
     };
-    let completion = run_completion_evidence(ctx.runtime_spec(), ctx.projections())?;
+    let completion = run_completion_evidence(ctx.runtime_spec(), ctx.run_id(), ctx.projections())?;
     let retention_manifest = projected_retention_manifest(ctx.run_id(), ctx.projections())?;
     let receipt_bytes =
         complete_run_receipt_json(&completion, retention_manifest, ctx.run_stream())?;
@@ -572,10 +578,11 @@ pub(crate) fn saga_terminal_proof(
 
 pub(crate) fn run_completion_evidence(
     runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
     projections: &store::ProjectionSnapshot,
 ) -> Result<events::PublicOutputCompletionEvidence> {
     let public_schema_id = runtime_spec.spec().public_outputs.public_schema_id.clone();
-    match projections.public_output(&public_schema_id) {
+    match projections.public_output(run_id, &public_schema_id) {
         Some(store::PublicOutputProjection::Produced { event_id, .. }) => {
             Ok(events::PublicOutputCompletionEvidence {
                 public_output_schema_id: public_schema_id,
@@ -625,7 +632,7 @@ pub(crate) fn framework_run_completed_payload(
                     node.node_id, complete.public_schema_id
                 )));
             }
-            let completion = run_completion_evidence(runtime_spec, projections)?;
+            let completion = run_completion_evidence(runtime_spec, run_id, projections)?;
             projected_retention_manifest(run_id, projections)?;
             events::RunCompletionOutcome::Completed(Box::new(completion))
         }
@@ -899,11 +906,12 @@ pub(crate) struct RetentionManifestArtifact {
 
 pub(crate) fn public_output_is_produced(
     runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
     projections: &store::ProjectionSnapshot,
 ) -> bool {
     let public_schema_id = &runtime_spec.spec().public_outputs.public_schema_id;
     matches!(
-        projections.public_output(public_schema_id),
+        projections.public_output(run_id, public_schema_id),
         Some(store::PublicOutputProjection::Produced { .. })
     )
 }
@@ -912,9 +920,13 @@ pub(crate) fn build_retention_manifest_artifact(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
+    artifact_bytes: &store::ArtifactByteAuthorityMap,
 ) -> Result<RetentionManifestArtifact> {
     store::ProjectionSnapshot::validate_run_stream(stream)?;
-    let projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
+    let projection = store::ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
+        stream,
+        artifact_bytes,
+    )?;
     let run_admitted = stream
         .iter()
         .find_map(|event| match event.payload() {

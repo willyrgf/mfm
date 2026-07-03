@@ -203,7 +203,7 @@ impl AttemptRecoveryLifecycle {
         projections: &store::ProjectionSnapshot,
     ) -> Result<()> {
         for node in recoverable_nodes(runtime_spec) {
-            if let Some(terminal) = projections.cell_terminal(&node.output_cell) {
+            if let Some(terminal) = projections.cell_terminal_for_run(run_id, &node.output_cell) {
                 let attempt_id = validate_terminal_cell_has_completed_attempt(
                     runtime_spec,
                     projections,
@@ -227,7 +227,10 @@ impl AttemptRecoveryLifecycle {
                 }
                 match &projection.status {
                     store::AttemptStatus::Started { .. } => {
-                        if projections.cell_terminal(&node.output_cell).is_some() {
+                        if projections
+                            .cell_terminal_for_run(run_id, &node.output_cell)
+                            .is_some()
+                        {
                             return Err(RuntimeError::InvalidRunStream(format!(
                                 "node {} has a started attempt after its output cell became terminal",
                                 node.node_id
@@ -241,7 +244,9 @@ impl AttemptRecoveryLifecycle {
                         }
                     }
                     store::AttemptStatus::Completed { output_cell_id }
-                        if projections.cell_terminal(output_cell_id).is_none() =>
+                        if projections
+                            .cell_terminal_for_run(run_id, output_cell_id)
+                            .is_none() =>
                     {
                         return Err(RuntimeError::InvalidRunStream(format!(
                             "node {} attempt {} completed without terminal cell projection",
@@ -370,7 +375,11 @@ fn open_started_attempt_for_node(
     node: &spec::NodeSpec,
     view: &RuntimeRunView,
 ) -> Result<Option<(AttemptId, u32)>> {
-    if view.projections.cell_terminal(&node.output_cell).is_some() {
+    if view
+        .projections
+        .cell_terminal_for_run(&view.run_admitted.run_id, &node.output_cell)
+        .is_some()
+    {
         return Ok(None);
     }
     let mut started = None;
@@ -404,8 +413,8 @@ fn open_started_attempt_for_node(
 
 fn attempt_has_committed_progress(view: &RuntimeRunView, attempt_id: &AttemptId) -> bool {
     view.projections
-        .facts()
-        .any(|((_, fact_attempt_id, _), _)| fact_attempt_id == attempt_id)
+        .fact_records()
+        .any(|(_, fact)| &fact.attempt_id == attempt_id)
         || view
             .artifact_refs
             .values()

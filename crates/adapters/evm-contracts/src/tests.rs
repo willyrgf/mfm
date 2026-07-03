@@ -1,9 +1,11 @@
 use super::*;
 use mfm_evm_capabilities::{
-    EvmBlockReadResponse, EvmCallReadResponse, EvmCapabilityFuture, EvmChainIdentityResponse,
-    EvmFeeReadResponse, EvmGasEstimateResponse, EvmLogsReadResponse, EvmNonceReadResponse,
-    EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef, RedactedEvmSourceEvidence,
+    EvmBlockReadResponse, EvmBlockSelector, EvmCallReadResponse, EvmCapabilityFuture,
+    EvmChainIdentityResponse, EvmFeeReadResponse, EvmGasEstimateResponse, EvmLogsReadResponse,
+    EvmNonceReadResponse, EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef,
+    RedactedEvmSourceEvidence,
 };
+use mfm_evm_contract_model::{BlockSelector, BlockTag};
 use mfm_evm_signing::{
     primitive_signature_from_bytes, recover_signing_address,
     EvmTransactionStyle as SigningTransactionStyle,
@@ -689,22 +691,8 @@ fn expected_test_signer_address(style: &str) -> String {
 
 fn adapter(providers: &TestEvmProviders) -> EvmContractLifecycleAdapter<'_> {
     EvmContractLifecycleAdapter::new(
-        EvmContractMutationProviders {
-            chain_identity: providers,
-            block: providers,
-            nonce: providers,
-            fee: providers,
-            gas: providers,
-            signer: providers,
-            submit: providers,
-            receipt: providers,
-            nonce_occupancy: providers,
-        },
-        EvmContractReadProviders {
-            chain_identity: providers,
-            call: providers,
-            logs: providers,
-        },
+        EvmContractMutationProviders::from_evm_and_signer(providers, providers),
+        EvmContractReadProviders::from_provider(providers),
     )
 }
 
@@ -717,6 +705,67 @@ fn executable_identity_summary_matches_golden() {
             "factory=read_external;cargo_digest=content:sha256-jcs-v1:685edb3e7cd5decfb0f17613a76568a2c5c572024d6db20bf0803d61ee0657e4;binary_digest=content:sha256-jcs-v1:4a583ef5eb9bb2ce3f01767ddffc34e0744290d029bde3d69967b272a74f302f;nix_derivation=false;nix_output=false",
         ]
     );
+}
+
+#[test]
+fn event_block_selector_preserves_supported_tags() {
+    assert_eq!(
+        block_selector(
+            Some(&BlockSelector::Tag {
+                tag: BlockTag::Earliest,
+            }),
+            false
+        )
+        .expect("earliest selector"),
+        EvmBlockSelector::Number(0)
+    );
+    assert_eq!(
+        block_selector(
+            Some(&BlockSelector::Tag {
+                tag: BlockTag::Latest,
+            }),
+            true
+        )
+        .expect("latest selector"),
+        EvmBlockSelector::Latest
+    );
+    assert_eq!(
+        block_selector(
+            Some(&BlockSelector::Tag {
+                tag: BlockTag::Pending,
+            }),
+            true
+        )
+        .expect("pending selector"),
+        EvmBlockSelector::Pending
+    );
+    assert_eq!(
+        block_selector(Some(&BlockSelector::Number { number: 42 }), false)
+            .expect("number selector"),
+        EvmBlockSelector::Number(42)
+    );
+}
+
+#[test]
+fn event_block_selector_rejects_unsupported_tags() {
+    assert!(matches!(
+        block_selector(
+            Some(&BlockSelector::Tag {
+                tag: BlockTag::Safe,
+            }),
+            true
+        ),
+        Err(EvmContractAdapterError::UnsupportedBlockTag)
+    ));
+    assert!(matches!(
+        block_selector(
+            Some(&BlockSelector::Tag {
+                tag: BlockTag::Finalized,
+            }),
+            false
+        ),
+        Err(EvmContractAdapterError::UnsupportedBlockTag)
+    ));
 }
 
 #[tokio::test]
@@ -808,15 +857,6 @@ async fn prepared_invocation_evidence_excludes_live_and_secret_surfaces() {
     assert_eq!(transaction.signing_digest.len(), 66);
     assert!(transaction.expected_transaction_hash.starts_with("0x"));
     assert_eq!(transaction.expected_transaction_hash.len(), 66);
-
-    let rendered = serde_json::to_string(prepared.evidence()).expect("json");
-    let rendered = rendered.to_ascii_lowercase();
-    for forbidden in forbidden_prepared_terms() {
-        assert!(
-            !rendered.contains(&forbidden),
-            "prepared invocation evidence contains forbidden runtime surface"
-        );
-    }
 }
 
 #[tokio::test]
@@ -932,20 +972,49 @@ async fn recovery_records_unknown_on_transient_anchor_read_failure() {
     assert_recovery_unknown(RecoveryReceiptMode::ProviderFailure, 7).await;
 }
 
-#[test]
-fn prepared_invocation_guard_rejects_forbidden_runtime_terms() {
-    for forbidden in forbidden_prepared_terms() {
-        let mut prepared = prepared_invocation_fixture();
-        prepared.signer_ref = format!("deployer-{forbidden}");
+type PreparedInvocationMutation = Box<dyn FnOnce(&mut PreparedContractInvocation)>;
 
-        assert!(
-            matches!(
-                ensure_prepared_invocation_public(&prepared),
-                Err(EvmContractAdapterError::PreparedInvocationLeak)
-            ),
-            "expected forbidden prepared term {forbidden} to be rejected"
-        );
+#[test]
+fn prepared_invocation_guard_rejects_malformed_public_contract() {
+    let cases: Vec<PreparedInvocationMutation> = vec![
+        Box::new(|prepared| prepared.prepared_version = 2),
+        Box::new(|prepared| {
+            prepared.expected_signer_address =
+                "0x0F65FE9276BC9A24AE7083AE28E2660EF72DF99E".to_owned();
+        }),
+        Box::new(|prepared| prepared.transactions[0].index = 7),
+        Box::new(|prepared| prepared.transactions[0].chain_id = 2),
+        Box::new(|prepared| prepared.transactions[0].value_wei = "0x1".to_owned()),
+        Box::new(|prepared| prepared.transactions[0].gas_price = Some("7".to_owned())),
+        Box::new(|prepared| prepared.transactions[0].data_digest = "not-a-digest".to_owned()),
+        Box::new(|prepared| prepared.transactions[0].signing_digest = "not-a-hash".to_owned()),
+    ];
+
+    for mutate in cases {
+        let mut prepared = prepared_invocation_fixture();
+        mutate(&mut prepared);
+        assert!(matches!(
+            ensure_prepared_invocation_public(&prepared),
+            Err(EvmContractAdapterError::InvalidPreparedInvocation)
+        ));
     }
+}
+
+#[test]
+fn prepared_invocation_deserialization_rejects_unknown_public_fields() {
+    let mut top_level = serde_json::to_value(prepared_invocation_fixture()).expect("json");
+    top_level
+        .as_object_mut()
+        .expect("object")
+        .insert("raw_transaction".to_owned(), serde_json::json!("0x01"));
+    assert!(serde_json::from_value::<PreparedContractInvocation>(top_level).is_err());
+
+    let mut nested = serde_json::to_value(prepared_invocation_fixture()).expect("json");
+    nested["transactions"][0]
+        .as_object_mut()
+        .expect("transaction object")
+        .insert("signature".to_owned(), serde_json::json!("0x01"));
+    assert!(serde_json::from_value::<PreparedContractInvocation>(nested).is_err());
 }
 
 fn prepared_invocation_fixture() -> PreparedContractInvocation {
@@ -1083,6 +1152,29 @@ async fn receipt_polling_does_not_retry_permanent_capability_failures() {
 }
 
 #[tokio::test]
+async fn receipt_polling_rejects_tampered_submission_before_provider_read() {
+    let reads = Arc::new(Mutex::new(0_u32));
+    let runtime = runtime_from_provider(TestEvmProviders::receipt_failure(Arc::clone(&reads)));
+    let prepared = receipt_polling_invocation(TEST_TRANSACTION_HASH);
+    let submissions = ContractTransactionSubmissions {
+        submissions_version: 1,
+        transactions: vec![ContractTransactionSubmission {
+            submission_version: 1,
+            transaction_hash: "0x2222222222222222222222222222222222222222222222222222222222222222"
+                .to_owned(),
+            signer_public_key: None,
+        }],
+    };
+
+    let error = read_receipts_with_poll(&runtime, &prepared, &submissions)
+        .await
+        .expect_err("tampered submission hash");
+
+    assert!(error.to_string().contains("EVM transaction hash mismatch"));
+    assert_eq!(*reads.lock().expect("reads"), 0);
+}
+
+#[tokio::test]
 async fn finality_confirmation_requires_certified_depth() {
     let runtime = runtime_from_provider(TestEvmProviders::finality());
     let receipt = finality_receipt();
@@ -1140,11 +1232,17 @@ fn adapter_source_has_no_concrete_store_or_signer_provider_coupling() {
 }
 
 fn executable_identity_summary(factories: [&str; 2]) -> Vec<String> {
+    let executable_identities = RunnerExecutableIdentityTemplate::new(
+        "mfm-adapters-evm-contracts",
+        "evm-contract-lifecycle",
+        env!("CARGO_PKG_VERSION"),
+    )
+    .expect("executable identity template");
     factories
         .into_iter()
         .map(|factory| {
-            let identity = executable(events::RunnerFactoryId::new(factory).expect("factory id"))
-                .expect("executable identity");
+            let identity = executable_identities
+                .executable(events::RunnerFactoryId::new(factory).expect("factory id"));
             format!(
                 "factory={};cargo_digest={};binary_digest={};nix_derivation={};nix_output={}",
                 identity.factory_id,

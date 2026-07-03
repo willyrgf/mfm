@@ -30,6 +30,18 @@ pub(super) fn require_admission_preconditions(
                 authority.terminal_policies(),
             )
         }
+        KernelEventPayload::FactRecorded(payload) => {
+            let authority = require_certified_run_authority(
+                projections,
+                run_id,
+                &payload.spec_hash,
+                certified_run_authority,
+            )?;
+            authority.require_fact_descriptor_allowed(
+                &payload.node_id,
+                payload.claim.fact_descriptor_hash(),
+            )
+        }
         KernelEventPayload::RunCompleted(payload) if certified_run_authority.is_some() => {
             let authority = require_certified_run_authority(
                 projections,
@@ -150,36 +162,36 @@ fn require_certified_run_authority<'a>(
     certified_run_authority: Option<&'a CertifiedRunStoreAuthority>,
 ) -> Result<&'a CertifiedRunStoreAuthority> {
     let token = certified_run_authority.ok_or_else(|| StoreError::ProjectionConflict {
-        key: format!("run:{run_id}:saga_policy"),
-        message: "certified run authority is required for saga admission".to_owned(),
+        key: format!("run:{run_id}:certified_authority"),
+        message: "certified run authority is required for store admission".to_owned(),
     })?;
     if token.run_id() != run_id || token.spec_hash() != spec_hash {
         return Err(StoreError::ProjectionConflict {
-            key: format!("run:{run_id}:saga_policy"),
+            key: format!("run:{run_id}:certified_authority"),
             message: "certified run authority run or spec hash does not match payload".to_owned(),
         });
     }
     let Some(projected_spec_hash) = projections.run_spec_hash(run_id) else {
         return Err(StoreError::ProjectionConflict {
-            key: format!("run:{run_id}:saga_policy"),
+            key: format!("run:{run_id}:certified_authority"),
             message: "run-start spec hash is not projected".to_owned(),
         });
     };
     if projected_spec_hash != token.spec_hash() {
         return Err(StoreError::ProjectionConflict {
-            key: format!("run:{run_id}:saga_policy"),
+            key: format!("run:{run_id}:certified_authority"),
             message: "certified run authority spec hash does not match run start".to_owned(),
         });
     }
     let Some(projected_digest) = projections.saga_policy_digest(run_id) else {
         return Err(StoreError::ProjectionConflict {
-            key: format!("run:{run_id}:saga_policy"),
+            key: format!("run:{run_id}:certified_authority"),
             message: "run-start saga policy digest is not projected".to_owned(),
         });
     };
     if projected_digest != token.saga_policy_digest() {
         return Err(StoreError::ProjectionConflict {
-            key: format!("run:{run_id}:saga_policy"),
+            key: format!("run:{run_id}:certified_authority"),
             message: "certified run authority digest does not match run start".to_owned(),
         });
     }

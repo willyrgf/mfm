@@ -1593,6 +1593,8 @@ pub mod v1 {
         pub effect_version: EffectVersion,
         /// Capability descriptor set.
         pub capabilities: CapabilitySetDescriptor,
+        /// Fact descriptors this state type is allowed to emit.
+        pub emitted_fact_descriptors: Vec<FactDescriptorRef>,
         /// Runner kind recorded by the registered state.
         pub runner: String,
         /// Side-effect contract digest for external mutations.
@@ -1609,6 +1611,10 @@ pub mod v1 {
                 "effect_kind": self.effect_kind.as_str(),
                 "effect_name": self.effect_name.as_str(),
                 "effect_version": self.effect_version.as_str(),
+                "emitted_fact_descriptors": self.emitted_fact_descriptors
+                    .iter()
+                    .map(FactDescriptorRef::json)
+                    .collect::<Vec<_>>(),
                 "input_schema_id": self.input_schema_id.as_str(),
                 "name": self.name.as_str(),
                 "output_schema_id": self.output_schema_id.as_str(),
@@ -1617,6 +1623,21 @@ pub mod v1 {
                 "side_effect_contract_digest": self.side_effect_contract_digest.as_ref().map(ContentDigest::as_str),
                 "state_kind": self.state_kind.as_str(),
                 "state_version": self.state_version.as_str(),
+            })
+        }
+    }
+
+    /// Content-addressed fact descriptor authority reference.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct FactDescriptorRef {
+        /// Canonical fact descriptor content hash.
+        pub descriptor_hash: ContentDigest,
+    }
+
+    impl FactDescriptorRef {
+        fn json(&self) -> serde_json::Value {
+            serde_json::json!({
+                "descriptor_hash": self.descriptor_hash.as_str(),
             })
         }
     }
@@ -1728,6 +1749,8 @@ pub mod v1 {
         pub capability_bindings: CapabilitySetDescriptor,
         /// Adapter bindings.
         pub adapter_bindings: Vec<AdapterBinding>,
+        /// Fact descriptors this producing node may emit.
+        pub fact_descriptor_allowlist: Vec<FactDescriptorRef>,
         /// Side-effect contract, when applicable.
         pub side_effect: Option<SideEffectContractSpec>,
         /// Framework node metadata, when framework-owned.
@@ -1749,6 +1772,10 @@ pub mod v1 {
                 "deterministic_predecessors": self.deterministic_predecessors
                     .iter()
                     .map(NodeId::as_str)
+                    .collect::<Vec<_>>(),
+                "fact_descriptor_allowlist": self.fact_descriptor_allowlist
+                    .iter()
+                    .map(FactDescriptorRef::json)
                     .collect::<Vec<_>>(),
                 "framework": self.framework.as_ref().map(FrameworkNodeSpec::json).transpose()?,
                 "input_bindings": self.input_bindings.json(),
@@ -3168,6 +3195,10 @@ pub mod v1 {
             effect_name: required_str(object, "effect_name")?.to_owned(),
             effect_version: version(required_str(object, "effect_version")?)?,
             capabilities: parse_capability_set(required(object, "capabilities")?)?,
+            emitted_fact_descriptors: parse_fact_descriptor_refs(required(
+                object,
+                "emitted_fact_descriptors",
+            )?)?,
             runner: required_str(object, "runner")?.to_owned(),
             side_effect_contract_digest: optional_identity(object, "side_effect_contract_digest")?,
         })
@@ -3228,6 +3259,10 @@ pub mod v1 {
                 required(object, "adapter_bindings")?,
                 parse_adapter_binding,
             )?,
+            fact_descriptor_allowlist: parse_fact_descriptor_refs(required(
+                object,
+                "fact_descriptor_allowlist",
+            )?)?,
             side_effect: optional_parse(object, "side_effect", parse_side_effect_contract)?,
             framework: optional_parse_with(object, "framework", |framework| {
                 parse_framework_node(framework, descriptors)
@@ -3237,6 +3272,17 @@ pub mod v1 {
                 object,
                 "deterministic_predecessors",
             )?)?,
+        })
+    }
+
+    fn parse_fact_descriptor_refs(value: &serde_json::Value) -> Result<Vec<FactDescriptorRef>> {
+        parse_vec(value, parse_fact_descriptor_ref)
+    }
+
+    fn parse_fact_descriptor_ref(value: &serde_json::Value) -> Result<FactDescriptorRef> {
+        let object = object(value, "fact descriptor ref")?;
+        Ok(FactDescriptorRef {
+            descriptor_hash: identity(required_str(object, "descriptor_hash")?)?,
         })
     }
 

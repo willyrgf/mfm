@@ -88,11 +88,11 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
                 attempt_id
             }
         };
-        let latest_stream = store
-            .load_run_stream(run_id)
+        let latest_committed = store
+            .load_committed_run_stream(run_id)
             .await
             .map_err(async_store_error)?;
-        let latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
+        let latest_view = RuntimeRunView::from_committed_stream(runtime_spec, &latest_committed)?;
         let failure_context = ObservedFailureContext {
             runtime_spec,
             run_id,
@@ -215,8 +215,9 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
         &self,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
-        stream: &[store::KernelEventEnvelope],
+        view: &RuntimeRunView,
     ) -> Result<Option<VerifiedManualResolutionForPrefix>> {
+        let stream = &view.stream;
         let Some((manual_index, manual_payload)) =
             stream
                 .iter()
@@ -238,7 +239,11 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
                 "manual resolution prefix index was outside the run stream".to_owned(),
             )
         })?;
-        let prefix_projection = store::ProjectionSnapshot::rebuild_from_run_stream(prefix_stream)?;
+        let prefix_projection =
+            store::ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
+                prefix_stream,
+                &view.artifact_byte_authority,
+            )?;
         let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
         let prefix_saga = prefix_projection.derive_saga_projection(
             run_id,
@@ -316,7 +321,7 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
         view: &RuntimeRunView,
     ) -> Result<store::SagaTerminalProof> {
         let manual = self
-            .verified_manual_resolution_for_terminal(runtime_spec, run_id, &view.stream)
+            .verified_manual_resolution_for_terminal(runtime_spec, run_id, view)
             .await?;
         crate::framework::saga_terminal_proof(
             runtime_spec,

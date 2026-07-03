@@ -29,6 +29,9 @@ pub(crate) fn production_entry_point_op_registry() -> Result<EntryPointOpRegistr
         mfm_op_evm_contract_lifecycle::plan_contract_lifecycle_entry_point,
         evm_contract_plan_error,
     )?)?;
+    // The Bitcoin chain-head collector op currently exposes a typed draft builder and
+    // certification descriptors, but no app-neutral public entry-point descriptor/planner.
+    // Keep it off the public entry-point registry until the op crate owns that public surface.
     Ok(registry)
 }
 
@@ -88,6 +91,19 @@ mod tests {
             op.accepted_config_formats(),
             &[AuthoredConfigFormat::Toml, AuthoredConfigFormat::Json]
         );
+    }
+
+    #[test]
+    fn production_registry_does_not_expose_btc_collector_without_op_entry_point() {
+        let registry = production_entry_point_op_registry().expect("registry");
+        let public_name = PublicOpName::new("btc_chain_head_collector").expect("name");
+
+        let error = match registry.resolve_latest(&public_name) {
+            Ok(_) => panic!("btc collector is not public entry point yet"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "EntryPointOpNotFound");
     }
 
     #[test]
@@ -226,11 +242,8 @@ mod tests {
         let fixture = EntryPointRunFixture::in_memory().await;
         let prepared = fixture.prepare_sample_portfolio(None);
         let run_id = prepared.request.run_id.clone();
-        let runners = crate::production_runner_registry(
-            crate::artifact_read_provider_from_retained(fixture.store.clone()),
-            None,
-        )
-        .expect("runners");
+        let runners = crate::production_runner_registry(Arc::new(fixture.store.clone()), None)
+            .expect("runners");
         let services = crate::make_run_services_with_certification_registry(
             runners,
             fixture.store.clone(),
@@ -586,7 +599,7 @@ mod tests {
             mfm_store::v1::AsyncInMemoryRunStore,
         > {
             let runners = crate::production_runner_registry(
-                crate::artifact_read_provider_from_retained(self.store.clone()),
+                Arc::new(self.store.clone()),
                 Some(&self.runtime_config_path),
             )
             .expect("runners");

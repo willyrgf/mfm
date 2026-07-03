@@ -8,22 +8,21 @@ use mfm_adapters_evm_contracts::{
     EvmContractRuntimeFactory, PreparedContractInvocation,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
-use mfm_capabilities::CapabilitySpec;
 use mfm_certify::CertificationRegistry;
 use mfm_core::crypto::EthereumPrivateKey;
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
     EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockReadResponse, EvmBlockSelector,
-    EvmCallReadCapability, EvmCallReadProvider, EvmCallReadRequest, EvmCallReadResponse,
-    EvmCapabilityError, EvmCapabilityFuture, EvmChainIdentityCapability, EvmChainIdentityProvider,
-    EvmChainIdentityRequest, EvmChainIdentityResponse, EvmFeeReadProvider, EvmFeeReadRequest,
-    EvmFeeReadResponse, EvmGasEstimateProvider, EvmGasEstimateRequest, EvmGasEstimateResponse,
-    EvmLogEntry, EvmLogsReadCapability, EvmLogsReadProvider, EvmLogsReadRequest,
-    EvmLogsReadResponse, EvmNonceOccupancy, EvmNonceOccupancyReadProvider,
-    EvmNonceOccupancyReadRequest, EvmNonceOccupancyReadResponse, EvmNonceReadProvider,
-    EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider, EvmReceiptReadRequest,
-    EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef, EvmTransactionSubmitProvider,
-    EvmTransactionSubmitRequest, EvmTransactionSubmitResponse, RedactedEvmSourceEvidence,
+    EvmCallReadProvider, EvmCallReadRequest, EvmCallReadResponse, EvmCapabilityError,
+    EvmCapabilityFuture, EvmChainIdentityProvider, EvmChainIdentityRequest,
+    EvmChainIdentityResponse, EvmFeeReadProvider, EvmFeeReadRequest, EvmFeeReadResponse,
+    EvmGasEstimateProvider, EvmGasEstimateRequest, EvmGasEstimateResponse, EvmLogEntry,
+    EvmLogsReadProvider, EvmLogsReadRequest, EvmLogsReadResponse, EvmNonceOccupancy,
+    EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest, EvmNonceOccupancyReadResponse,
+    EvmNonceReadProvider, EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider,
+    EvmReceiptReadRequest, EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef,
+    EvmTransactionSubmitProvider, EvmTransactionSubmitRequest, EvmTransactionSubmitResponse,
+    RedactedEvmSourceEvidence,
 };
 use mfm_evm_contract_config::{ConfigurePhaseConfig, DeployPhaseConfig, ValidatePhaseConfig};
 use mfm_evm_contract_model::{ConfiguredContract, DeployedContract};
@@ -39,7 +38,7 @@ use mfm_store::v1::{
 };
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const TEST_SIGNER_HEX: &str = "4c0883a69102937d6231471b5dbb6204fe512961708279c2f802d6a8ebf2d3a4";
@@ -271,10 +270,10 @@ fn contract_services(
 }
 
 fn contract_test_services(
-    make_factory: impl FnOnce(Arc<dyn ArtifactReadProvider>) -> TestRuntimeFactory,
+    make_factory: impl FnOnce(Arc<dyn store::RetainedArtifactReadProvider>) -> TestRuntimeFactory,
 ) -> (ContractRunStore, ContractRunServices) {
     let store = test_run_store();
-    let artifacts = crate::artifact_read_provider_from_retained(store.clone());
+    let artifacts = Arc::new(store.clone());
     let services = contract_services(&store, make_factory(artifacts));
     (store, services)
 }
@@ -293,7 +292,7 @@ async fn app_runner_resumes_replays_and_renders_validate_only_lifecycle_run() {
 #[tokio::test]
 async fn app_resume_completed_run_is_evidence_only_without_live_runners() {
     let store = test_run_store();
-    let artifacts = crate::artifact_read_provider_from_retained(store.clone());
+    let artifacts = Arc::new(store.clone());
     let certification = contract_lifecycle_certification_registry();
     let runners = contract_lifecycle_runners(TestRuntimeFactory::new(artifacts));
     let launch_services = contract_lifecycle_services(&store, runners, certification.clone());
@@ -388,7 +387,7 @@ async fn assert_resume_runtime_config_ingress_failure(
     runtime_config_path: Option<&std::path::Path>,
 ) {
     let store = test_run_store();
-    let artifacts = crate::artifact_read_provider_from_retained(store.clone());
+    let artifacts = Arc::new(store.clone());
     let certification = contract_lifecycle_certification_registry();
     let launch_runners = contract_lifecycle_runners(TestRuntimeFactory::new(artifacts.clone()));
     let launch_services =
@@ -430,8 +429,9 @@ async fn assert_resume_runtime_config_ingress_failure(
         "test setup must admit only RunAdmitted"
     );
 
-    let resume_runners = crate::production_runner_registry(artifacts, runtime_config_path)
-        .expect("production runners");
+    let resume_runners =
+        crate::production_runner_registry(Arc::new(store.clone()), runtime_config_path)
+            .expect("production runners");
     let resume_services = contract_lifecycle_services(&store, resume_runners, certification);
     let error = resume_services
         .resume_stored_run(&run_id)
@@ -451,40 +451,6 @@ async fn assert_resume_runtime_config_ingress_failure(
         )),
         "resume ingress failure must not append attempts"
     );
-}
-
-#[tokio::test]
-async fn app_runner_records_distinct_validation_capability_facts() {
-    let (_store, services) = contract_test_services(TestRuntimeFactory::new);
-    let request = prepare_validate_entry_point_request(
-        &services,
-        validate_config_with_assertions(),
-        configured_contract(),
-    )
-    .await;
-    let (run_id, _) = launch_completed(&services, request, "launch validate lifecycle").await;
-    let stream = services
-        .store()
-        .load_run_stream(&run_id)
-        .await
-        .expect("load run stream");
-    let fact_kinds = stream
-        .iter()
-        .filter_map(|event| match event.payload() {
-            events::KernelEventPayload::FactRecorded(fact) => Some(fact.capability_kind.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        fact_kinds.len(),
-        3,
-        "validation with chain, call, and logs must record separate facts"
-    );
-    assert!(fact_kinds
-        .contains(&EvmChainIdentityCapability::kind().expect("chain identity capability")));
-    assert!(fact_kinds.contains(&EvmCallReadCapability::kind().expect("call capability")));
-    assert!(fact_kinds.contains(&EvmLogsReadCapability::kind().expect("logs capability")));
 }
 
 #[tokio::test]
@@ -608,7 +574,7 @@ async fn app_runner_resumes_replays_and_renders_full_lifecycle_run() {
             "attempt-output:mfm.evm.contract/configure:side_effect.invocation_prepared+side_effect.invocation_started+retention_refs_appended[roles=prepared_invocation]",
             "attempt-output:mfm.evm.contract/configure:side_effect.submission_observed+retention_refs_appended[roles=submission]",
             "attempt-output:mfm.evm.contract/configure:cell_skipped+state_attempt_completed",
-            "attempt-output:mfm.evm.contract/validate:fact_recorded+cell_produced+state_attempt_completed+artifact_referenced[role=fact_response]+artifact_referenced[role=state_output]+retention_refs_appended[roles=fact_response]+retention_refs_appended[roles=state_output]",
+            "attempt-output:mfm.evm.contract/validate:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
         ]
     );
     let mut prepared_artifact_requirements = Vec::new();
@@ -661,25 +627,25 @@ async fn app_runner_resumes_replays_and_renders_full_lifecycle_run() {
 
 #[derive(Clone)]
 struct TestRuntimeFactory {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     read_runtime: EvmContractReadRuntime,
     runtime: EvmContractRuntime,
 }
 
 impl TestRuntimeFactory {
-    fn new(artifacts: Arc<dyn ArtifactReadProvider>) -> Self {
+    fn new(artifacts: Arc<dyn store::RetainedArtifactReadProvider>) -> Self {
         Self::with_options(artifacts, false, None)
     }
 
     fn with_chain_identity_delay(
-        artifacts: Arc<dyn ArtifactReadProvider>,
+        artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
         delay: Duration,
     ) -> Self {
         Self::with_options(artifacts, false, Some(delay))
     }
 
     fn with_options(
-        artifacts: Arc<dyn ArtifactReadProvider>,
+        artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
         mutation: bool,
         chain_identity_delay: Option<Duration>,
     ) -> Self {
@@ -693,7 +659,7 @@ impl TestRuntimeFactory {
     }
 
     fn with_signer(
-        artifacts: Arc<dyn ArtifactReadProvider>,
+        artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
         signer: Arc<dyn SigningProvider>,
         fail_repeated_prepare_reads: bool,
     ) -> Self {
@@ -701,7 +667,7 @@ impl TestRuntimeFactory {
     }
 
     fn with_runtime(
-        artifacts: Arc<dyn ArtifactReadProvider>,
+        artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
         signer: Arc<dyn SigningProvider>,
         mutation: bool,
         fail_repeated_prepare_reads: bool,
@@ -724,7 +690,7 @@ impl TestRuntimeFactory {
 }
 
 impl EvmContractRuntimeFactory for TestRuntimeFactory {
-    fn artifacts(&self) -> &dyn ArtifactReadProvider {
+    fn artifacts(&self) -> &dyn store::RetainedArtifactReadProvider {
         self.artifacts.as_ref()
     }
 
@@ -1099,31 +1065,6 @@ fn validate_config() -> ValidatePhaseConfig {
         "network": reth_network_json()
     }))
     .expect("validate config")
-}
-
-fn validate_config_with_assertions() -> ValidatePhaseConfig {
-    serde_json::from_value(json!({
-        "artifact": artifact_json(),
-        "network": reth_network_json(),
-        "validation": {
-            "read_assertions": [
-                {
-                    "function": "ready",
-                    "args": [],
-                    "expected": {
-                        "json_text": "true"
-                    }
-                }
-            ],
-            "event_assertions": [
-                {
-                    "event": "Configured",
-                    "min_count": 1
-                }
-            ]
-        }
-    }))
-    .expect("validate config with assertions")
 }
 
 fn deploy_config(expected_signer_address: &str) -> DeployPhaseConfig {

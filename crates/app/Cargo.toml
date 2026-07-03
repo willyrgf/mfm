@@ -6,6 +6,9 @@ edition = "2021"
 [package.metadata.mfm]
 category = "app"
 
+[features]
+test-support = ["mfm-store/test-support"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -14,19 +17,26 @@ toml = "0.8"
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"] }
 uuid = { version = "1.0", features = ["v4"] }
 thiserror = { workspace = true }
+zeroize = "1.7"
 
+mfm-adapters-btc-jsonrpc = { path = "../adapters/btc-jsonrpc" }
 mfm-adapters-evm-contracts = { path = "../adapters/evm-contracts" }
 mfm-adapters-portfolio = { path = "../adapters/portfolio" }
 mfm-authored-config = { path = "../authored-config" }
 mfm-artifact-capabilities = { path = "../artifact-capabilities" }
+mfm-btc-capabilities = { path = "../btc-capabilities" }
 mfm-canonical = { path = "../kernel/canonical" }
 mfm-capabilities = { path = "../kernel/capabilities" }
 mfm-certify = { path = "../kernel/certify" }
+mfm-collectors-btc-jsonrpc-http = { path = "../collectors/btc-jsonrpc-http" }
 mfm-events = { path = "../kernel/events" }
 mfm-evm-capabilities = { path = "../evm-capabilities" }
 mfm-evm-contract-config = { path = "../evm-contract-config" }
 mfm-evm-contract-model = { path = "../evm-contract-model" }
+mfm-fact-capabilities = { path = "../fact-capabilities" }
+mfm-facts = { path = "../kernel/facts" }
 mfm-ids = { path = "../kernel/ids" }
+mfm-op-btc-chain-head-collector = { path = "../ops/btc-chain-head-collector-op" }
 mfm-op-evm-contract-lifecycle = { path = "../ops/evm-contract-lifecycle-op" }
 mfm-op-portfolio-tracker = { path = "../ops/portfolio-tracker-op" }
 mfm-op-proof = { path = "../ops/proof-op" }
@@ -45,9 +55,12 @@ mfm-transports-evm = { path = "../transports/evm" }
 mfm-transports-proof = { path = "../transports/proof" }
 
 [dev-dependencies]
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
+mfm-effects = { path = "../kernel/effects" }
 mfm-manual-auth = { path = "../kernel/manual-auth" }
 mfm-store = { path = "../kernel/store", features = ["test-support"] }
+mfm-values = { path = "../kernel/values" }
 mfm_core = { path = "../core" }
 mfm-program-derive = { path = "../kernel/program-derive" }
 tempfile = "3.0"

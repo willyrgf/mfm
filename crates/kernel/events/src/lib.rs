@@ -5,6 +5,7 @@
 //! replay, resume, public output evidence, and retention projection.
 
 use mfm_canonical::PlainCanonicalJsonBytes;
+use mfm_facts as facts;
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
     ContentDigest, DescriptorId, DigestAlgorithm, EventId, IdentityError, LoweringVersion, NodeId,
@@ -154,11 +155,6 @@ pub mod v1 {
         /// Nix output hash or equivalent build output hash.
         NixOutputHash,
         "nix output hash"
-    );
-    checked_string_type!(
-        /// Capability-adapter fact key.
-        FactKey,
-        "fact key"
     );
     checked_string_type!(
         /// Side-effect ledger key.
@@ -1038,6 +1034,8 @@ pub mod v1 {
         pub certificate_artifact: RunArtifactEvidenceRef,
         /// Certified config artifact evidence.
         pub config_artifacts: Vec<RunArtifactEvidenceRef>,
+        /// Certified fact descriptor artifact evidence.
+        pub fact_descriptor_artifacts: Vec<RunArtifactEvidenceRef>,
         /// Certified spec version.
         pub spec_version: SpecVersion,
         /// Certified lowering version.
@@ -1132,30 +1130,12 @@ pub mod v1 {
     pub struct FactRecorded {
         /// Certified typed spec hash.
         pub spec_hash: SpecHash,
-        /// Node id that requested the fact.
+        /// Node id that produced the fact.
         pub node_id: NodeId,
-        /// Attempt id that requested the fact.
+        /// Attempt id that produced the fact.
         pub attempt_id: AttemptId,
-        /// Capability kind used.
-        pub capability_kind: CapabilityKind,
-        /// Capability version used.
-        pub capability_version: CapabilityVersion,
-        /// Adapter kind used.
-        pub adapter_kind: AdapterKind,
-        /// Adapter version used.
-        pub adapter_version: AdapterVersion,
-        /// Request schema id.
-        pub request_schema_id: SchemaId,
-        /// Canonical request hash.
-        pub request_hash: ContentDigest,
-        /// Response schema id.
-        pub response_schema_id: SchemaId,
-        /// Canonical response hash.
-        pub response_hash: ContentDigest,
-        /// Stable fact key.
-        pub fact_key: FactKey,
-        /// Response artifact id.
-        pub artifact_id: ArtifactId,
+        /// Normalized typed fact claim.
+        pub claim: facts::FactClaim,
     }
 
     /// Artifact reference event payload.
@@ -1466,12 +1446,16 @@ pub mod v1 {
         TypedSpecCertificate,
         /// Certified typed config artifact.
         TypedConfig,
+        /// Certified fact descriptor authority artifact.
+        FactDescriptor,
         /// Seed input artifact.
         SeedInput,
         /// State output value artifact.
         StateOutput,
         /// Read fact response artifact.
         FactResponse,
+        /// Private fact query replay evidence artifact.
+        FactQueryEvidence,
         /// Side-effect intent artifact.
         SideEffectIntent,
         /// Prepared invocation artifact.
@@ -1509,6 +1493,10 @@ pub mod v1 {
         ExactValueSchema,
         /// Schema must equal the event evidence schema.
         ExactEvidenceSchema,
+        /// Schema must equal the canonical fact descriptor schema.
+        ExactFactDescriptorSchema,
+        /// Schema must equal the canonical fact query evidence schema.
+        ExactFactQueryEvidenceSchema,
         /// Schema must be absent.
         Absent,
         /// Schema must equal the public-output schema.
@@ -1524,6 +1512,8 @@ pub mod v1 {
                 Self::ExactSeedSchema => "exact_seed_schema",
                 Self::ExactValueSchema => "exact_value_schema",
                 Self::ExactEvidenceSchema => "exact_evidence_schema",
+                Self::ExactFactDescriptorSchema => "exact_fact_descriptor_schema",
+                Self::ExactFactQueryEvidenceSchema => "exact_fact_query_evidence_schema",
                 Self::Absent => "absent",
                 Self::ExactPublicSchema => "exact_public_schema",
                 Self::ExactDiagnosticSchema => "exact_diagnostic_schema",
@@ -1593,6 +1583,8 @@ pub mod v1 {
         AttemptStateOutput,
         /// Attempt-produced fact response artifact.
         AttemptFactResponse,
+        /// Attempt-produced private fact query replay evidence artifact.
+        AttemptFactQueryEvidence,
         /// Side-effect intent artifact.
         SideEffectIntent,
         /// Side-effect prepared-invocation artifact.
@@ -1626,6 +1618,7 @@ pub mod v1 {
                 Self::RunAdmission => "run_admission",
                 Self::AttemptStateOutput => "attempt_state_output",
                 Self::AttemptFactResponse => "attempt_fact_response",
+                Self::AttemptFactQueryEvidence => "attempt_fact_query_evidence",
                 Self::SideEffectIntent => "side_effect_intent",
                 Self::SideEffectPreparedInvocation => "side_effect_prepared_invocation",
                 Self::SideEffectNotSubmittedProof => "side_effect_not_submitted_proof",
@@ -1722,9 +1715,11 @@ pub mod v1 {
             Self::TypedExecutionSpec,
             Self::TypedSpecCertificate,
             Self::TypedConfig,
+            Self::FactDescriptor,
             Self::SeedInput,
             Self::StateOutput,
             Self::FactResponse,
+            Self::FactQueryEvidence,
             Self::SideEffectIntent,
             Self::PreparedInvocation,
             Self::NotSubmittedProof,
@@ -1773,6 +1768,16 @@ pub mod v1 {
                     retention: ArtifactRetentionClass::FrameworkIgnored,
                     same_commit: ArtifactSameCommitPolicy::RunAdmittedArtifact,
                 },
+                Self::FactDescriptor => ArtifactRoleContract {
+                    role: self,
+                    tag: "fact_descriptor",
+                    schema: ArtifactSchemaPolicy::ExactFactDescriptorSchema,
+                    semantic: ArtifactSemanticPolicy::Absent,
+                    producer: ArtifactProducerScope::LaunchOrGlobalNoSeed,
+                    staging: ArtifactStagingClass::RunAdmission,
+                    retention: ArtifactRetentionClass::FrameworkIgnored,
+                    same_commit: ArtifactSameCommitPolicy::RunAdmittedArtifact,
+                },
                 Self::SeedInput => ArtifactRoleContract {
                     role: self,
                     tag: "seed_input",
@@ -1800,6 +1805,16 @@ pub mod v1 {
                     semantic: ArtifactSemanticPolicy::Absent,
                     producer: ArtifactProducerScope::NodeRequired,
                     staging: ArtifactStagingClass::AttemptFactResponse,
+                    retention: ArtifactRetentionClass::ValueArtifacts,
+                    same_commit: ArtifactSameCommitPolicy::PayloadRequiredArtifact,
+                },
+                Self::FactQueryEvidence => ArtifactRoleContract {
+                    role: self,
+                    tag: "fact_query_evidence",
+                    schema: ArtifactSchemaPolicy::ExactFactQueryEvidenceSchema,
+                    semantic: ArtifactSemanticPolicy::Absent,
+                    producer: ArtifactProducerScope::NodeRequired,
+                    staging: ArtifactStagingClass::AttemptFactQueryEvidence,
                     retention: ArtifactRetentionClass::ValueArtifacts,
                     same_commit: ArtifactSameCommitPolicy::PayloadRequiredArtifact,
                 },
@@ -1959,6 +1974,8 @@ pub mod v1 {
         RunCertificate,
         /// Certified config artifact from `RunAdmitted`.
         RunConfig,
+        /// Certified fact descriptor artifact from `RunAdmitted`.
+        FactDescriptor,
         /// Seed-cell artifact reference from `RunAdmitted`.
         SeedCell,
         /// Read-fact response artifact.
@@ -2087,6 +2104,13 @@ pub mod v1 {
                         artifact,
                     );
                 }
+                for artifact in &payload.fact_descriptor_artifacts {
+                    push_run_artifact(
+                        &mut requirements,
+                        EventArtifactReferenceSource::FactDescriptor,
+                        artifact,
+                    );
+                }
                 for seed in &payload.seed_cells {
                     push_event_artifact(
                         &mut requirements,
@@ -2098,13 +2122,14 @@ pub mod v1 {
                 }
             }
             KernelEventPayload::FactRecorded(payload) => {
+                let response = payload.claim.response();
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::FactResponse,
-                    artifact_id: payload.artifact_id.clone(),
-                    digest: Some(payload.response_hash.clone()),
+                    artifact_id: response.artifact_id().clone(),
+                    digest: Some(response.response_hash().clone()),
                     byte_len: None,
                     media_type: None,
-                    schema_id: Some(payload.response_schema_id.clone()),
+                    schema_id: Some(response.response_schema_id().clone()),
                     semantic_type_id: None,
                     producer_node_id: Some(payload.node_id.clone()),
                     producer_seed_id: None,
@@ -3243,9 +3268,9 @@ pub mod v1 {
     fn event_type_schema(type_name: &'static str) -> serde_json::Value {
         match type_name {
             "bool" | "u32" | "u64" => scalar_type(type_name),
-            "String" => serde_json::json!({
+            "String" | "PlainCanonicalJsonBytes" => serde_json::json!({
                 "kind": "string",
-                "name": "String",
+                "name": type_name,
             }),
             "AdapterKind" | "ArtifactId" | "AttemptId" | "CapabilityKind" | "CellId"
             | "ContentDigest" | "DescriptorId" | "EffectKind" | "EventId" | "NodeId"
@@ -3270,7 +3295,6 @@ pub mod v1 {
             "RunnerFactoryId"
             | "NixDerivationHash"
             | "NixOutputHash"
-            | "FactKey"
             | "SideEffectLedgerKey"
             | "ResourceKey"
             | "ResourceLaneClaimId"
@@ -3294,6 +3318,149 @@ pub mod v1 {
                     schema_field(
                         "entry_point_registry_digest",
                         "ContentDigest",
+                        EventFieldCardinality::Required,
+                    ),
+                ],
+            ),
+            "FactKind" | "FactKey" => visible_ascii_256_type(type_name),
+            "FactAudience" => unit_enum_type("FactAudience", &["control", "platform"]),
+            "FactVisibilityScope" => unit_enum_type("FactVisibilityScope", &["default"]),
+            "FactVisibility" => enum_type(
+                "FactVisibility",
+                vec![
+                    enum_variant("run_private", Vec::new()),
+                    enum_variant(
+                        "indexed",
+                        vec![
+                            schema_field(
+                                "audience",
+                                "FactAudience",
+                                EventFieldCardinality::Required,
+                            ),
+                            schema_field(
+                                "scope",
+                                "FactVisibilityScope",
+                                EventFieldCardinality::Required,
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+            "FactSubjectEvidence" => struct_type(
+                "FactSubjectEvidence",
+                vec![
+                    schema_field(
+                        "fact_subject_namespace_hash",
+                        "ContentDigest",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "subject_material",
+                        "PlainCanonicalJsonBytes",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "subject_material_hash",
+                        "ContentDigest",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field("fact_key", "FactKey", EventFieldCardinality::Required),
+                ],
+            ),
+            "FactRequestEvidence" => struct_type(
+                "FactRequestEvidence",
+                vec![
+                    schema_field(
+                        "request_schema_id",
+                        "SchemaId",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "request_hash",
+                        "ContentDigest",
+                        EventFieldCardinality::Required,
+                    ),
+                ],
+            ),
+            "FactResponseEvidence" => struct_type(
+                "FactResponseEvidence",
+                vec![
+                    schema_field(
+                        "response_schema_id",
+                        "SchemaId",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "response_hash",
+                        "ContentDigest",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field("artifact_id", "ArtifactId", EventFieldCardinality::Required),
+                    schema_field(
+                        "artifact_evidence_hash",
+                        "ContentDigest",
+                        EventFieldCardinality::Required,
+                    ),
+                ],
+            ),
+            "FactProducerProvenance" => struct_type(
+                "FactProducerProvenance",
+                vec![
+                    schema_field(
+                        "capability_kind",
+                        "CapabilityKind",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "capability_version",
+                        "CapabilityVersion",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "adapter_kind",
+                        "AdapterKind",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "adapter_version",
+                        "AdapterVersion",
+                        EventFieldCardinality::Required,
+                    ),
+                ],
+            ),
+            "FactClaim" => struct_type(
+                "FactClaim",
+                vec![
+                    schema_field(
+                        "visibility",
+                        "FactVisibility",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field("fact_kind", "FactKind", EventFieldCardinality::Required),
+                    schema_field(
+                        "fact_descriptor_hash",
+                        "ContentDigest",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "subject",
+                        "FactSubjectEvidence",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field("observed_at", "String", EventFieldCardinality::Optional),
+                    schema_field(
+                        "request",
+                        "FactRequestEvidence",
+                        EventFieldCardinality::Optional,
+                    ),
+                    schema_field(
+                        "response",
+                        "FactResponseEvidence",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "producer",
+                        "FactProducerProvenance",
                         EventFieldCardinality::Required,
                     ),
                 ],
@@ -3387,7 +3554,20 @@ pub mod v1 {
                         "CapabilitySetDescriptor",
                         EventFieldCardinality::Required,
                     ),
+                    schema_field(
+                        "emitted_fact_descriptors",
+                        "FactDescriptorRef",
+                        EventFieldCardinality::Repeated,
+                    ),
                 ],
+            ),
+            "FactDescriptorRef" => struct_type(
+                "FactDescriptorRef",
+                vec![schema_field(
+                    "descriptor_hash",
+                    "ContentDigest",
+                    EventFieldCardinality::Required,
+                )],
             ),
             "OperationDescriptorIdentity" => struct_type(
                 "OperationDescriptorIdentity",
@@ -3937,6 +4117,7 @@ pub mod v1 {
             EventFieldDescriptor::required("spec_artifact", "RunArtifactEvidenceRef"),
             EventFieldDescriptor::required("certificate_artifact", "RunArtifactEvidenceRef"),
             EventFieldDescriptor::repeated("config_artifacts", "RunArtifactEvidenceRef"),
+            EventFieldDescriptor::repeated("fact_descriptor_artifacts", "RunArtifactEvidenceRef"),
             EventFieldDescriptor::required("spec_version", "SpecVersion"),
             EventFieldDescriptor::required("lowering_version", "LoweringVersion"),
             EventFieldDescriptor::required("public_output_schema_id", "SchemaId"),
@@ -3971,16 +4152,7 @@ pub mod v1 {
             EventFieldDescriptor::required("spec_hash", "SpecHash"),
             EventFieldDescriptor::required("node_id", "NodeId"),
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
-            EventFieldDescriptor::required("capability_kind", "CapabilityKind"),
-            EventFieldDescriptor::required("capability_version", "CapabilityVersion"),
-            EventFieldDescriptor::required("adapter_kind", "AdapterKind"),
-            EventFieldDescriptor::required("adapter_version", "AdapterVersion"),
-            EventFieldDescriptor::required("request_schema_id", "SchemaId"),
-            EventFieldDescriptor::required("request_hash", "ContentDigest"),
-            EventFieldDescriptor::required("response_schema_id", "SchemaId"),
-            EventFieldDescriptor::required("response_hash", "ContentDigest"),
-            EventFieldDescriptor::required("fact_key", "FactKey"),
-            EventFieldDescriptor::required("artifact_id", "ArtifactId"),
+            EventFieldDescriptor::required("claim", "FactClaim"),
         ],
     };
 

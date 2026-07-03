@@ -8,9 +8,6 @@
 use std::{fmt, sync::Arc};
 
 use alloy_primitives::{Address, U256};
-use mfm_artifact_capabilities::{ArtifactReadProvider, ArtifactReadRequest};
-use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_capabilities::CapabilitySpec;
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
     EvmBalanceReadProvider, EvmBalanceReadRequest, EvmBlockReadProvider, EvmBlockReadRequest,
@@ -19,31 +16,29 @@ use mfm_evm_capabilities::{
 };
 use mfm_evm_core::encoding::{encode_erc20_balance_of, encode_erc20_decimals, parse_u8_u256};
 use mfm_evm_core::hex::hex_to_bytes;
-use mfm_ids::{ContentDigest, SchemaId};
+use mfm_ids::SchemaId;
 use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig};
 use mfm_portfolio_model::symbol::BalanceReaderConfig;
 use mfm_program::ValidatedConfig;
 use mfm_runtime::{
-    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
-    ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
-    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerIngressContext, RunnerOutputBuilder,
-    RunnerPayloadBuilder, RunnerRegistrationBuilder,
+    load_launch_config, load_materialized_input_value, load_materialized_struct_input,
+    load_non_empty_materialized_input, load_runner_config, CapabilityImplementationId,
+    ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
+    RunnerExecutableIdentityTemplate, RunnerIngressContext, RunnerRegistrationBuilder,
 };
 use mfm_state_portfolio::{
-    balance_reader_kind, evm_block_number_for, observe_batch_with_backend, pin_views_with_backend,
-    portfolio_adapter_kind, portfolio_adapter_version, prepare_sources_from_config,
-    resolve_subjects_from_config, resolve_valuations_from_config, AssembleSnapshotConfig,
-    AssembleSnapshotInput, AssembleSnapshotState, MergeObservationsConfig, MergeObservationsState,
-    ObservationBatch, ObservationRequest, ObservationResponse, ObserveBatchConfig,
-    ObserveBatchInput, ObserveBatchState, PinViewsConfig, PinViewsState, PortfolioReadBackend,
-    PortfolioReadCapability, PortfolioReadError, PortfolioReadFuture, PrepareSourcesConfig,
+    observe_batch_with_backend, pin_views_with_backend, portfolio_adapter_kind,
+    portfolio_adapter_version, prepare_sources_from_config, resolve_subjects_from_config,
+    resolve_valuations_from_config, AssembleSnapshotConfig, AssembleSnapshotInput,
+    AssembleSnapshotState, MergeObservationsConfig, MergeObservationsState, ObservationBatch,
+    ObserveBatchConfig, ObserveBatchInput, ObserveBatchState, PinViewsConfig, PinViewsState,
+    PortfolioReadBackend, PortfolioReadError, PortfolioReadFuture, PrepareSourcesConfig,
     PrepareSourcesState, ProjectReportConfig, ProjectReportInput, ProjectReportState,
     ResolveSubjectsConfig, ResolveSubjectsState, ResolveValuationsConfig, ResolveValuationsState,
-    SourcePreparationRequest, SourcePreparationResponse, ViewPinRequest, ViewPinResponse,
 };
-use mfm_values::{MfmConfig, MfmValue, NonEmpty};
+use mfm_store::v1 as store;
+use mfm_values::{MfmConfig, MfmValue};
 use serde::de::DeserializeOwned;
-use serde::Serialize;
 
 const READ_FACTORY: &str = "read_external";
 const PURE_FACTORY: &str = "pure";
@@ -96,22 +91,11 @@ pub fn evm_chain_guards_from_launch_config(
 ) -> Result<Vec<EvmChainGuard>, PortfolioAdapterError> {
     if schema_id == &config_schema::<PinViewsConfig>()? {
         let config = decode_replay_config::<PinViewsConfig>(bytes)?;
-        return config
-            .networks()
-            .iter()
-            .filter(|network| network.family() == NetworkFamilyConfig::Evm)
-            .map(|network| portfolio_evm_guard(network).map_err(portfolio_adapter_error))
-            .collect();
+        return pin_view_evm_guards(&config).map_err(portfolio_adapter_error);
     }
     if schema_id == &config_schema::<ObserveBatchConfig>()? {
         let config = decode_replay_config::<ObserveBatchConfig>(bytes)?;
-        return if observe_batch_requires_evm(&config) {
-            Ok(vec![
-                portfolio_evm_guard(config.network()).map_err(portfolio_adapter_error)?
-            ])
-        } else {
-            Ok(Vec::new())
-        };
+        return observe_batch_evm_guards(&config).map_err(portfolio_adapter_error);
     }
     Ok(Vec::new())
 }
@@ -119,7 +103,7 @@ pub fn evm_chain_guards_from_launch_config(
 /// Runtime capabilities used by portfolio adapter runners.
 #[derive(Clone)]
 pub struct PortfolioRunnerCapabilities {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     evm: Arc<dyn PortfolioEvmProvider>,
     runtime: Arc<dyn PortfolioRuntimeValidator>,
 }
@@ -127,7 +111,7 @@ pub struct PortfolioRunnerCapabilities {
 impl PortfolioRunnerCapabilities {
     /// Creates portfolio runner capabilities from artifact and EVM providers.
     pub fn new(
-        artifacts: Arc<dyn ArtifactReadProvider>,
+        artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
         evm: Arc<dyn PortfolioEvmProvider>,
         runtime: Arc<dyn PortfolioRuntimeValidator>,
     ) -> Self {
@@ -138,7 +122,7 @@ impl PortfolioRunnerCapabilities {
         }
     }
 
-    fn artifacts(&self) -> Arc<dyn ArtifactReadProvider> {
+    fn artifacts(&self) -> Arc<dyn store::RetainedArtifactReadProvider> {
         Arc::clone(&self.artifacts)
     }
 
@@ -161,176 +145,114 @@ pub fn register_portfolio_runners(
     let evm = capabilities.evm();
     let runtime = capabilities.runtime();
     let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
-    let read_factory = events::RunnerFactoryId::new(READ_FACTORY)?;
-    let pure_factory = events::RunnerFactoryId::new(PURE_FACTORY)?;
-    let adapter_factory = events::RunnerFactoryId::new(ADAPTER_FACTORY)?;
-    registrations.register_adapter_executable(
+    let executable_identities = RunnerExecutableIdentityTemplate::new(
+        "mfm-adapters-portfolio",
+        "typed-portfolio",
+        env!("CARGO_PKG_VERSION"),
+    )?;
+    let read_factory =
+        executable_identities.factory_binding(events::RunnerFactoryId::new(READ_FACTORY)?);
+    let pure_factory =
+        executable_identities.factory_binding(events::RunnerFactoryId::new(PURE_FACTORY)?);
+    let adapter_factory =
+        executable_identities.factory_binding(events::RunnerFactoryId::new(ADAPTER_FACTORY)?);
+    registrations.register_adapter_executable_with_factory(
         portfolio_adapter_kind()?,
         portfolio_adapter_version()?,
-        executable(adapter_factory)?,
+        &adapter_factory,
     )?;
-    let prepare_sources = mfm_program::registered_state_descriptor::<PrepareSourcesState>()
-        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    registrations.register_descriptor(
-        prepare_sources.descriptor_id().clone(),
-        prepare_sources.capabilities(),
-        read_factory.clone(),
-        executable(read_factory.clone())?,
+    registrations.register_state_descriptor_with_factory::<PrepareSourcesState>(
+        &read_factory,
         Arc::new(PrepareSourcesRunner {
             artifacts: artifacts.clone(),
         }),
     )?;
-    let resolve_subjects = mfm_program::registered_state_descriptor::<ResolveSubjectsState>()
-        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    registrations.register_descriptor(
-        resolve_subjects.descriptor_id().clone(),
-        resolve_subjects.capabilities(),
-        pure_factory.clone(),
-        executable(pure_factory.clone())?,
+    registrations.register_state_descriptor_with_factory::<ResolveSubjectsState>(
+        &pure_factory,
         Arc::new(ResolveSubjectsRunner {
             artifacts: artifacts.clone(),
         }),
     )?;
-    let pin_views = mfm_program::registered_state_descriptor::<PinViewsState>()
-        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    registrations.register_descriptor(
-        pin_views.descriptor_id().clone(),
-        pin_views.capabilities(),
-        read_factory.clone(),
-        executable(read_factory.clone())?,
+    registrations.register_state_descriptor_with_factory::<PinViewsState>(
+        &read_factory,
         Arc::new(PinViewsRunner {
             artifacts: artifacts.clone(),
             runtime: runtime.clone(),
             evm: evm.clone(),
         }),
     )?;
-    let resolve_valuations =
-        mfm_program::registered_state_descriptor::<ResolveValuationsState>()
-            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    registrations.register_descriptor(
-        resolve_valuations.descriptor_id().clone(),
-        resolve_valuations.capabilities(),
-        pure_factory.clone(),
-        executable(pure_factory.clone())?,
+    registrations.register_state_descriptor_with_factory::<ResolveValuationsState>(
+        &pure_factory,
         Arc::new(ResolveValuationsRunner {
             artifacts: artifacts.clone(),
         }),
     )?;
-    let observe_batch = mfm_program::registered_state_descriptor::<ObserveBatchState>()
-        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    registrations.register_descriptor(
-        observe_batch.descriptor_id().clone(),
-        observe_batch.capabilities(),
-        read_factory.clone(),
-        executable(read_factory)?,
+    registrations.register_state_descriptor_with_factory::<ObserveBatchState>(
+        &read_factory,
         Arc::new(ObserveBatchRunner {
             artifacts: artifacts.clone(),
             runtime,
             evm,
         }),
     )?;
-    let merge_observations =
-        mfm_program::registered_state_descriptor::<MergeObservationsState>()
-            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    registrations.register_descriptor(
-        merge_observations.descriptor_id().clone(),
-        merge_observations.capabilities(),
-        pure_factory.clone(),
-        executable(pure_factory.clone())?,
+    registrations.register_state_descriptor_with_factory::<MergeObservationsState>(
+        &pure_factory,
         Arc::new(MergeObservationsRunner {
             artifacts: artifacts.clone(),
         }),
     )?;
-    let assemble_snapshot = mfm_program::registered_state_descriptor::<AssembleSnapshotState>()
-        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    registrations.register_descriptor(
-        assemble_snapshot.descriptor_id().clone(),
-        assemble_snapshot.capabilities(),
-        pure_factory.clone(),
-        executable(pure_factory.clone())?,
+    registrations.register_state_descriptor_with_factory::<AssembleSnapshotState>(
+        &pure_factory,
         Arc::new(AssembleSnapshotRunner {
             artifacts: artifacts.clone(),
         }),
     )?;
-    let project_report = mfm_program::registered_state_descriptor::<ProjectReportState>()
-        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    registrations.register_descriptor(
-        project_report.descriptor_id().clone(),
-        project_report.capabilities(),
-        pure_factory.clone(),
-        executable(pure_factory)?,
+    registrations.register_state_descriptor_with_factory::<ProjectReportState>(
+        &pure_factory,
         Arc::new(ProjectReportRunner { artifacts }),
     )?;
     Ok(())
 }
 
-fn executable(
-    factory_id: events::RunnerFactoryId,
-) -> mfm_runtime::Result<events::ExecutableIdentity> {
-    Ok(events::ExecutableIdentity {
-        factory_id,
-        cargo_package_digest: digest_json(serde_json::json!({
-            "crate": "mfm-adapters-portfolio",
-            "version": env!("CARGO_PKG_VERSION"),
-        }))?,
-        binary_digest: digest_json(serde_json::json!({
-            "crate": "mfm-adapters-portfolio",
-            "runner": "typed-portfolio",
-            "version": env!("CARGO_PKG_VERSION"),
-        }))?,
-        nix_derivation_hash: None,
-        nix_output_hash: None,
-    })
-}
-
 struct PrepareSourcesRunner {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 }
 
 impl ErasedNodeRunner for PrepareSourcesRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config = load_config::<PrepareSourcesConfig>(&ctx, self.artifacts.as_ref()).await?;
+            let config =
+                load_runner_config::<PrepareSourcesConfig>(&ctx, self.artifacts.as_ref()).await?;
             let config = config.as_ref();
             let prepared = prepare_sources_from_config(config);
-            let request = SourcePreparationRequest {
-                network_ids: config
-                    .networks()
-                    .iter()
-                    .map(|network| network.network_id().to_string())
-                    .collect(),
-            };
-            let response = SourcePreparationResponse {
-                prepared: prepared.clone(),
-            };
-            read_output(ctx, request, response, prepared).await
+            state_output(ctx, &prepared)
         })
     }
 }
 
 struct ResolveSubjectsRunner {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 }
 
 impl ErasedNodeRunner for ResolveSubjectsRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
             let config =
-                load_config::<ResolveSubjectsConfig>(&ctx, self.artifacts.as_ref()).await?;
+                load_runner_config::<ResolveSubjectsConfig>(&ctx, self.artifacts.as_ref()).await?;
             let config = config.as_ref();
-            let _prepared = load_input_cell::<mfm_state_portfolio::PreparedSources>(
+            let _prepared = load_materialized_input_value::<mfm_state_portfolio::PreparedSources>(
                 ctx.inputs(),
                 self.artifacts.as_ref(),
             )
             .await?;
             let output = resolve_subjects_from_config(config);
-            state_output(ctx, &output).await
+            state_output(ctx, &output)
         })
     }
 }
 
 struct PinViewsRunner {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     runtime: Arc<dyn PortfolioRuntimeValidator>,
     evm: Arc<dyn PortfolioEvmProvider>,
 }
@@ -338,13 +260,9 @@ struct PinViewsRunner {
 impl ErasedNodeRunner for PinViewsRunner {
     fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
         let config = load_launch_config::<PinViewsConfig>(&ctx)?;
-        for network in config
-            .as_ref()
-            .networks()
-            .iter()
-            .filter(|network| network.family() == NetworkFamilyConfig::Evm)
+        for guard in
+            pin_view_evm_guards(config.as_ref()).map_err(portfolio_runtime_binding_error)?
         {
-            let guard = portfolio_evm_guard(network).map_err(portfolio_runtime_binding_error)?;
             self.runtime.validate_evm_guard(&guard)?;
         }
         Ok(())
@@ -352,9 +270,10 @@ impl ErasedNodeRunner for PinViewsRunner {
 
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config = load_config::<PinViewsConfig>(&ctx, self.artifacts.as_ref()).await?;
+            let config =
+                load_runner_config::<PinViewsConfig>(&ctx, self.artifacts.as_ref()).await?;
             let config = config.as_ref();
-            let _prepared = load_input_cell::<mfm_state_portfolio::PreparedSources>(
+            let _prepared = load_materialized_input_value::<mfm_state_portfolio::PreparedSources>(
                 ctx.inputs(),
                 self.artifacts.as_ref(),
             )
@@ -363,44 +282,35 @@ impl ErasedNodeRunner for PinViewsRunner {
             let output = pin_views_with_backend(config, &backend)
                 .await
                 .map_err(portfolio_read_runtime_error)?;
-            let request = ViewPinRequest {
-                network_ids: config
-                    .networks()
-                    .iter()
-                    .map(|network| network.network_id().to_string())
-                    .collect(),
-            };
-            let response = ViewPinResponse {
-                views: output.clone(),
-            };
-            read_output(ctx, request, response, output).await
+            state_output(ctx, &output)
         })
     }
 }
 
 struct ResolveValuationsRunner {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 }
 
 impl ErasedNodeRunner for ResolveValuationsRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
             let config =
-                load_config::<ResolveValuationsConfig>(&ctx, self.artifacts.as_ref()).await?;
+                load_runner_config::<ResolveValuationsConfig>(&ctx, self.artifacts.as_ref())
+                    .await?;
             let config = config.as_ref();
-            let views = load_input_cell::<mfm_state_portfolio::PinnedViews>(
+            let views = load_materialized_input_value::<mfm_state_portfolio::PinnedViews>(
                 ctx.inputs(),
                 self.artifacts.as_ref(),
             )
             .await?;
             let output = resolve_valuations_from_config(config, &views);
-            state_output(ctx, &output).await
+            state_output(ctx, &output)
         })
     }
 }
 
 struct ObserveBatchRunner {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     runtime: Arc<dyn PortfolioRuntimeValidator>,
     evm: Arc<dyn PortfolioEvmProvider>,
 }
@@ -408,9 +318,9 @@ struct ObserveBatchRunner {
 impl ErasedNodeRunner for ObserveBatchRunner {
     fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
         let config = load_launch_config::<ObserveBatchConfig>(&ctx)?;
-        if observe_batch_requires_evm(config.as_ref()) {
-            let guard = portfolio_evm_guard(config.as_ref().network())
-                .map_err(portfolio_runtime_binding_error)?;
+        for guard in
+            observe_batch_evm_guards(config.as_ref()).map_err(portfolio_runtime_binding_error)?
+        {
             self.runtime.validate_evm_guard(&guard)?;
         }
         Ok(())
@@ -418,185 +328,95 @@ impl ErasedNodeRunner for ObserveBatchRunner {
 
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config = load_config::<ObserveBatchConfig>(&ctx, self.artifacts.as_ref()).await?;
+            let config =
+                load_runner_config::<ObserveBatchConfig>(&ctx, self.artifacts.as_ref()).await?;
             let config = config.as_ref();
-            let input =
-                load_struct_input::<ObserveBatchInput>(ctx.inputs(), self.artifacts.as_ref())
-                    .await?;
-            let block_number = evm_block_number_for(&input.views, config.network().network_id());
+            let input = load_materialized_struct_input::<ObserveBatchInput>(
+                ctx.inputs(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
             let backend = EvmCapabilityPortfolioBackend::new(Arc::clone(&self.evm));
             let output = observe_batch_with_backend(config, &input, &backend)
                 .await
                 .map_err(portfolio_read_runtime_error)?;
-            let request = ObservationRequest {
-                wallet_id: config.wallet().wallet_id.to_string(),
-                symbol_id: config.symbol().symbol_id.to_string(),
-                network_id: config.network().network_id().to_string(),
-                balance_reader_kind: balance_reader_kind(&config.symbol().balance_reader)
-                    .to_owned(),
-                block_number: Some(block_number),
-            };
-            let response = ObservationResponse {
-                batch: output.clone(),
-            };
-            read_output(ctx, request, response, output).await
+            state_output(ctx, &output)
         })
     }
 }
 
 struct MergeObservationsRunner {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 }
 
 impl ErasedNodeRunner for MergeObservationsRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
             let _config =
-                load_config::<MergeObservationsConfig>(&ctx, self.artifacts.as_ref()).await?;
-            let batches =
-                load_non_empty_input::<ObservationBatch>(ctx.inputs(), self.artifacts.as_ref())
+                load_runner_config::<MergeObservationsConfig>(&ctx, self.artifacts.as_ref())
                     .await?;
+            let batches = load_non_empty_materialized_input::<ObservationBatch>(
+                ctx.inputs(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
             let output = mfm_state_portfolio::merge_observation_batches(batches);
-            state_output(ctx, &output).await
+            state_output(ctx, &output)
         })
     }
 }
 
 struct AssembleSnapshotRunner {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 }
 
 impl ErasedNodeRunner for AssembleSnapshotRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
             let config =
-                load_config::<AssembleSnapshotConfig>(&ctx, self.artifacts.as_ref()).await?;
+                load_runner_config::<AssembleSnapshotConfig>(&ctx, self.artifacts.as_ref()).await?;
             let config = config.as_ref();
-            let input =
-                load_struct_input::<AssembleSnapshotInput>(ctx.inputs(), self.artifacts.as_ref())
-                    .await?;
+            let input = load_materialized_struct_input::<AssembleSnapshotInput>(
+                ctx.inputs(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
             let output = mfm_state_portfolio::assemble_snapshot(config, input, 0);
-            state_output(ctx, &output).await
+            state_output(ctx, &output)
         })
     }
 }
 
 struct ProjectReportRunner {
-    artifacts: Arc<dyn ArtifactReadProvider>,
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 }
 
 impl ErasedNodeRunner for ProjectReportRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config = load_config::<ProjectReportConfig>(&ctx, self.artifacts.as_ref()).await?;
+            let config =
+                load_runner_config::<ProjectReportConfig>(&ctx, self.artifacts.as_ref()).await?;
             let config = config.as_ref();
-            let input =
-                load_struct_input::<ProjectReportInput>(ctx.inputs(), self.artifacts.as_ref())
-                    .await?;
+            let input = load_materialized_struct_input::<ProjectReportInput>(
+                ctx.inputs(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
             let output = mfm_state_portfolio::project_report_from_snapshot(
                 input.snapshot,
                 config.report_version(),
             )
             .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-            state_output(ctx, &output).await
+            state_output(ctx, &output)
         })
     }
 }
 
-async fn read_output<Request, Response, Output>(
-    ctx: ErasedRunCtx<'_>,
-    request: Request,
-    response: Response,
-    output: Output,
-) -> mfm_runtime::Result<ErasedRunnerOutput>
+fn state_output<T>(ctx: ErasedRunCtx<'_>, value: &T) -> mfm_runtime::Result<ErasedRunnerOutput>
 where
-    Request: MfmValue + Serialize,
-    Response: MfmValue + Serialize,
-    Output: MfmValue + Serialize,
+    T: MfmValue,
 {
-    let artifacts = RunnerArtifactBuilder::new(&ctx);
-    let payloads = RunnerPayloadBuilder::new(&ctx);
-    let response_artifact = artifacts.fact_response(&response)?;
-    let output_artifact = artifacts.state_output(&output)?;
-    let mut runner_output = RunnerOutputBuilder::new(&ctx);
-    runner_output.stage_attempt_artifact(&response_artifact)?;
-    runner_output.retain_runtime_evidence(&response_artifact);
-    runner_output.stage_attempt_artifact(&output_artifact)?;
-    runner_output.retain_runtime_evidence(&output_artifact);
-    runner_output.payload(payloads.fact_recorded(
-        events::FactKey::new(format!(
-            "mfm.portfolio.fact.{}",
-            ctx.node().node_id.as_str()
-        ))?,
-        &request,
-        &response_artifact,
-        portfolio_read_binding()?,
-    )?);
-    runner_output.payload(payloads.cell_produced(&output_artifact)?);
-    Ok(runner_output.finish())
-}
-
-async fn state_output<T>(
-    ctx: ErasedRunCtx<'_>,
-    value: &T,
-) -> mfm_runtime::Result<ErasedRunnerOutput>
-where
-    T: MfmValue + Serialize,
-{
-    let artifacts = RunnerArtifactBuilder::new(&ctx);
-    let payloads = RunnerPayloadBuilder::new(&ctx);
-    let artifact = artifacts.state_output(value)?;
-    let mut output = RunnerOutputBuilder::new(&ctx);
-    output.stage_attempt_artifact(&artifact)?;
-    output.retain_runtime_evidence(&artifact);
-    output.payload(payloads.cell_produced(&artifact)?);
-    Ok(output.finish())
-}
-
-async fn load_config<T>(
-    ctx: &ErasedRunCtx<'_>,
-    artifacts: &dyn ArtifactReadProvider,
-) -> mfm_runtime::Result<ValidatedConfig<T>>
-where
-    T: MfmConfig + DeserializeOwned,
-{
-    let request = ArtifactReadRequest::from_certified_config_ref(&ctx.node().config_ref);
-    let verified = artifacts
-        .read_artifact(&request)
-        .await
-        .map_err(runtime_artifact_read_error)?;
-    decode_config_bytes(verified.bytes())
-}
-
-fn load_launch_config<T>(ctx: &RunnerIngressContext<'_>) -> mfm_runtime::Result<ValidatedConfig<T>>
-where
-    T: MfmConfig + DeserializeOwned,
-{
-    let artifact = ctx.config_artifact()?;
-    let config: T = serde_json::from_slice(&artifact.bytes).map_err(|error| {
-        mfm_runtime::RuntimeError::RunnerBinding(format!(
-            "launch config for node {} failed to decode: {error}",
-            ctx.node().node_id
-        ))
-    })?;
-    ValidatedConfig::new(config).map_err(|error| {
-        mfm_runtime::RuntimeError::RunnerBinding(format!(
-            "portfolio config failed validation: {error}"
-        ))
-    })
-}
-
-fn decode_config_bytes<T>(bytes: &[u8]) -> mfm_runtime::Result<ValidatedConfig<T>>
-where
-    T: MfmConfig + DeserializeOwned,
-{
-    let config: T = serde_json::from_slice(bytes)
-        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    ValidatedConfig::new(config).map_err(|error| {
-        mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
-            "portfolio config failed validation: {error}"
-        ))
-    })
+    ErasedRunnerOutput::state_output(&ctx, value)
 }
 
 fn decode_replay_config<T>(bytes: &[u8]) -> Result<T, PortfolioAdapterError>
@@ -626,162 +446,23 @@ fn observe_batch_requires_evm(config: &ObserveBatchConfig) -> bool {
         )
 }
 
-async fn load_input_cell<T>(
-    inputs: &mfm_runtime::MaterializedInputs,
-    artifacts: &dyn ArtifactReadProvider,
-) -> mfm_runtime::Result<T>
-where
-    T: MfmValue + DeserializeOwned,
-{
-    load_value_from_node(&inputs.root, artifacts).await
+fn pin_view_evm_guards(config: &PinViewsConfig) -> Result<Vec<EvmChainGuard>, PortfolioReadError> {
+    config
+        .networks()
+        .iter()
+        .filter(|network| network.family() == NetworkFamilyConfig::Evm)
+        .map(portfolio_evm_guard)
+        .collect()
 }
 
-async fn load_struct_input<T>(
-    inputs: &mfm_runtime::MaterializedInputs,
-    artifacts: &dyn ArtifactReadProvider,
-) -> mfm_runtime::Result<T>
-where
-    T: DeserializeOwned,
-{
-    let value = materialized_node_json(&inputs.root, artifacts).await?;
-    serde_json::from_value(value)
-        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))
-}
-
-async fn load_non_empty_input<T>(
-    inputs: &mfm_runtime::MaterializedInputs,
-    artifacts: &dyn ArtifactReadProvider,
-) -> mfm_runtime::Result<NonEmpty<T>>
-where
-    T: MfmValue + DeserializeOwned,
-{
-    let MaterializedInputNode::NonEmptyVec(elements) = &inputs.root else {
-        return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
-            "portfolio merge input was not a non-empty vector".to_owned(),
-        ));
-    };
-    let mut values = Vec::with_capacity(elements.len());
-    for element in elements {
-        values.push(load_value_from_node(element, artifacts).await?);
+fn observe_batch_evm_guards(
+    config: &ObserveBatchConfig,
+) -> Result<Vec<EvmChainGuard>, PortfolioReadError> {
+    if observe_batch_requires_evm(config) {
+        portfolio_evm_guard(config.network()).map(|guard| vec![guard])
+    } else {
+        Ok(Vec::new())
     }
-    NonEmpty::try_from_vec(values)
-        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))
-}
-
-async fn materialized_node_json(
-    node: &MaterializedInputNode,
-    artifacts: &dyn ArtifactReadProvider,
-) -> mfm_runtime::Result<serde_json::Value> {
-    match node {
-        MaterializedInputNode::Unit => Ok(serde_json::Value::Null),
-        MaterializedInputNode::Cell(_) => {
-            let bytes = load_cell_bytes(node, artifacts).await?;
-            serde_json::from_slice(&bytes)
-                .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))
-        }
-        MaterializedInputNode::Tuple(elements) => {
-            let mut values = Vec::with_capacity(elements.len());
-            for element in elements {
-                values.push(Box::pin(materialized_node_json(element, artifacts)).await?);
-            }
-            Ok(serde_json::Value::Array(values))
-        }
-        MaterializedInputNode::Struct(fields) => {
-            let mut object = serde_json::Map::new();
-            for field in fields {
-                object.insert(
-                    field.field_path.as_str().to_owned(),
-                    Box::pin(materialized_node_json(&field.node, artifacts)).await?,
-                );
-            }
-            Ok(serde_json::Value::Object(object))
-        }
-        MaterializedInputNode::Vec(elements) | MaterializedInputNode::NonEmptyVec(elements) => {
-            let mut values = Vec::with_capacity(elements.len());
-            for element in elements {
-                values.push(Box::pin(materialized_node_json(element, artifacts)).await?);
-            }
-            Ok(serde_json::Value::Array(values))
-        }
-    }
-}
-
-async fn load_value_from_node<T>(
-    node: &MaterializedInputNode,
-    artifacts: &dyn ArtifactReadProvider,
-) -> mfm_runtime::Result<T>
-where
-    T: MfmValue + DeserializeOwned,
-{
-    let bytes = load_cell_bytes(node, artifacts).await?;
-    serde_json::from_slice(&bytes)
-        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))
-}
-
-async fn load_cell_bytes(
-    node: &MaterializedInputNode,
-    artifacts: &dyn ArtifactReadProvider,
-) -> mfm_runtime::Result<Vec<u8>> {
-    let MaterializedInputNode::Cell(cell) = node else {
-        return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
-            "portfolio input node was not a produced cell".to_owned(),
-        ));
-    };
-    let request = match &cell.terminal {
-        MaterializedCellTerminal::Produced {
-            producer_node_id,
-            artifact_id,
-            content_digest,
-        } => ArtifactReadRequest::from_materialized_produced_cell(
-            artifact_id.clone(),
-            content_digest.clone(),
-            cell.schema_id.clone(),
-            cell.semantic_type_id.clone(),
-            producer_node_id.clone(),
-        ),
-        MaterializedCellTerminal::Seed {
-            seed_id,
-            artifact_id,
-            content_digest,
-        } => ArtifactReadRequest::from_materialized_seed_cell(
-            artifact_id.clone(),
-            content_digest.clone(),
-            cell.schema_id.clone(),
-            cell.semantic_type_id.clone(),
-            seed_id.clone(),
-        ),
-        MaterializedCellTerminal::Skipped { .. } => {
-            return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
-                "portfolio input cell was skipped".to_owned(),
-            ))
-        }
-    };
-    let verified = artifacts
-        .read_artifact(&request)
-        .await
-        .map_err(runtime_artifact_read_error)?;
-    Ok(verified.into_bytes())
-}
-
-fn portfolio_read_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {
-    Ok(RunnerCapabilityBinding {
-        capability_kind: PortfolioReadCapability::kind().map_err(runtime_capability_error)?,
-        capability_version: PortfolioReadCapability::version().map_err(runtime_capability_error)?,
-        adapter_kind: portfolio_adapter_kind()?,
-        adapter_version: portfolio_adapter_version()?,
-    })
-}
-
-fn digest_json(value: serde_json::Value) -> mfm_runtime::Result<ContentDigest> {
-    let json = serde_json::to_string(&value)
-        .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))?;
-    Ok(PlainCanonicalJsonBytes::from_json_str(&json)
-        .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))?
-        .content_digest())
-}
-
-fn runtime_capability_error(error: mfm_capabilities::CapabilityError) -> mfm_runtime::RuntimeError {
-    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
 }
 
 fn portfolio_evm_guard(network: &NetworkConfig) -> Result<EvmChainGuard, PortfolioReadError> {
@@ -996,12 +677,6 @@ fn portfolio_evm_capability_error(error: EvmCapabilityError) -> PortfolioReadErr
     } else {
         error
     }
-}
-
-fn runtime_artifact_read_error(
-    error: mfm_artifact_capabilities::ArtifactReadError,
-) -> mfm_runtime::RuntimeError {
-    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
 }
 
 fn portfolio_read_runtime_error(error: PortfolioReadError) -> mfm_runtime::RuntimeError {

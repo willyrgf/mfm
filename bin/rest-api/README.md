@@ -24,6 +24,8 @@ Environment variables:
 - `DATABASE_URL`: Postgres URL for the certified run store (required)
 - `MFM_SOURCE_REVISION`: optional source revision evidence for typed run starts
 - `MFM_RUNTIME_CONFIG_FILE`: optional runtime config file path for live capability-backed runs
+- `MFM_FACT_RECEIPT_SIGNING_KEY_FILE`: optional Ed25519 signing-key file for authenticated fact
+  queries
 
 The REST API validates the PostgreSQL schema on startup and does not create or
 alter tables. Apply the `mfm-stream-store-postgres` migrations before starting
@@ -41,6 +43,11 @@ outside the typed run store are not read or migrated by the REST API.
 
 REST startup does not load or validate `MFM_RUNTIME_CONFIG_FILE`; malformed or missing runtime
 config is reported only when a live start/resume request needs the affected capability family.
+When `MFM_FACT_RECEIPT_SIGNING_KEY_FILE` is set, startup validates that the key matches the
+store-owned `fact_receipt_trust_root`. The public fact query endpoints (`GET /v1/facts/:kind` and
+`GET /v1/facts/:kind/latest`) require that matching signer because query execution issues
+authenticated receipts. The signer file may contain raw 32-byte Ed25519 key material or 64 hex
+characters.
 
 ## API
 
@@ -53,6 +60,11 @@ Endpoints:
 
 - `GET /v1/health`
 - `GET /v1/ready`
+- `GET /v1/facts/kinds`
+- `GET /v1/facts/kinds/:kind`
+- `GET /v1/facts/:kind?shape=<shape>&order=<ordering>&field=<field>&limit=<n>`
+- `GET /v1/facts/:kind/latest?shape=<shape>&order=<ordering>&field=<field>`
+- `GET /v1/facts/ref/:public_ref`
 - `GET /v1/runs?cursor=<opaque>&limit=<n>&wait_ms=<n>`
 - `POST /v1/runs/start`
 - `POST /v1/runs/:run_id/resume`
@@ -66,6 +78,99 @@ Probe semantics:
 
 - `/v1/health`: liveness only (process is running)
 - `/v1/ready`: run store probe must succeed
+
+## Public Facts
+
+The `/v1/facts/...` routes expose descriptor-scoped public Platform facts only. REST decodes path
+and query parameters into `mfm-app` public fact DTOs; descriptor resolution, field validation,
+query compilation, public ref resolution, and non-public filtering are owned by the app/facts
+services.
+
+Routes:
+
+- `GET /v1/facts/kinds`: list public fact kinds.
+- `GET /v1/facts/kinds/:kind`: describe public descriptors for one kind.
+- `GET /v1/facts/:kind`: query public fact history for one kind.
+- `GET /v1/facts/:kind/latest`: query one latest fact for one kind. This is `limit = 1` plus the
+  explicit `order` parameter; there is no mutable latest row.
+- `GET /v1/facts/ref/:public_ref`: resolve an opaque public fact reference.
+
+Query parameters for `GET /v1/facts/:kind` and `GET /v1/facts/:kind/latest`:
+
+- `shape`: optional descriptor shape selector, matching a descriptor schema id or compatibility
+  group.
+- `order`: required descriptor ordering policy name.
+- `field`: required and repeatable returnable field id.
+- `subject`: repeatable subject predicate, such as `chain=bitcoin` or `subject.chain.eq=bitcoin`.
+- `result`: repeatable result predicate, such as `amount_sat.gt=1000`.
+- `where`: repeatable fully qualified predicate, such as `subject.chain.eq=bitcoin`.
+- `limit`: optional non-zero limit for `GET /v1/facts/:kind`; ignored by `/latest`, which always
+  uses one result.
+
+Predicate operators use suffixes: `.eq`, `.lt`, `.lte`, `.gt`, and `.gte`. Values are inferred as
+booleans, signed or unsigned integers, decimal strings, or plain strings. Explicit typed values can
+use prefixes: `string:`, `bool:`, `i64:`, `u64:`, `timestamp:`, `decimal:`, or `digest:`.
+
+Examples:
+
+```bash
+curl -s "http://127.0.0.1:3001/v1/facts/kinds"
+
+curl -s "http://127.0.0.1:3001/v1/facts/kinds/wallet.balance"
+
+curl -s "http://127.0.0.1:3001/v1/facts/wallet.balance/latest?shape=mfm.wallet.balance.v1&order=result:block_number:desc&field=result.amount_sat&subject=chain%3Dbitcoin&subject=asset_ref%3Dbtc"
+
+curl -s "http://127.0.0.1:3001/v1/facts/weather.observation?shape=mfm.weather.observation.v1&order=metadata:observed_at:desc&field=result.temperature_celsius_milli&subject=country%3DIE&result=temperature_celsius_milli.lt%3D0&limit=20"
+
+curl -s "http://127.0.0.1:3001/v1/facts/ref/pfr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+```
+
+Query response shape:
+
+```json
+{
+  "facts": [
+    {
+      "public_ref": "pfr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fact_kind": "wallet.balance",
+      "descriptor": {
+        "descriptor_schema_id": "schema:mfm.wallet.balance.v1:...",
+        "subject_schema_id": "schema:mfm.wallet.balance.subject.v1:...",
+        "response_schema_id": "schema:mfm.wallet.balance.response.v1:..."
+      },
+      "recorded_at": "2026-07-02T00:00:00.000000Z",
+      "observed_at": "2026-07-02T00:00:00.000000Z",
+      "fields": [
+        {
+          "field_id": "result.amount_sat",
+          "path": "result.amount_sat",
+          "source": "result",
+          "value_type": "unsigned_integer",
+          "value": { "type": "unsigned_integer", "value": 1000 },
+          "unit": "sat",
+          "scale": null
+        }
+      ]
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+Privacy and error contract:
+
+- Public REST routes query only `audience = Platform` with the default public scope.
+- `Control` and `RunPrivate` facts are absent from kind discovery, descriptor descriptions,
+  queries, and exact-ref lookup.
+- Public outputs never include internal fact refs, descriptor hashes, fact keys, subject material,
+  subject hashes, response artifacts, request/response hashes, artifact ids, artifact evidence
+  hashes, raw run ids, event ids, source sequences, event ordinals, adapter routing, or capability
+  routing details.
+- Unknown public refs and refs that resolve only to non-public facts return the same redacted
+  `FactNotFound` class.
+- Malformed query parameters return `InvalidQuery`; malformed predicates return
+  `FactPredicateInvalid`; missing `order` returns `FactOrderingMissing`; missing `field` returns
+  `FactReturnFieldMissing`; zero limits return `FactQueryLimitInvalid`.
 
 ## List Runs
 

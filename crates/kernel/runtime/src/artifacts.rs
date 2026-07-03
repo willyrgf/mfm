@@ -17,6 +17,8 @@ pub enum StagedArtifactBindingKind {
     StateOutput,
     /// Artifact is an external read fact response.
     FactResponse,
+    /// Artifact is private replay evidence for a fact query.
+    FactQueryEvidence,
     /// Artifact is side-effect evidence bound to one ledger phase.
     SideEffectEvidence {
         /// Side-effect ledger the evidence belongs to.
@@ -355,6 +357,9 @@ pub(crate) fn staged_artifact_binding_kind(
         events::ArtifactStagingClass::AttemptFactResponse => {
             Some(StagedArtifactBindingKind::FactResponse)
         }
+        events::ArtifactStagingClass::AttemptFactQueryEvidence => {
+            Some(StagedArtifactBindingKind::FactQueryEvidence)
+        }
         events::ArtifactStagingClass::AttemptPublicOutput => {
             Some(StagedArtifactBindingKind::PublicOutput)
         }
@@ -406,6 +411,7 @@ pub(crate) fn staged_side_effect_artifact_phase(
         events::ArtifactStagingClass::RunAdmission
         | events::ArtifactStagingClass::AttemptStateOutput
         | events::ArtifactStagingClass::AttemptFactResponse
+        | events::ArtifactStagingClass::AttemptFactQueryEvidence
         | events::ArtifactStagingClass::ManualResolution
         | events::ArtifactStagingClass::AttemptPublicOutput
         | events::ArtifactStagingClass::AttemptRedactedDiagnostic
@@ -428,6 +434,9 @@ fn staged_artifact_binding_staging_class(
         StagedArtifactBindingKind::StateOutput => events::ArtifactStagingClass::AttemptStateOutput,
         StagedArtifactBindingKind::FactResponse => {
             events::ArtifactStagingClass::AttemptFactResponse
+        }
+        StagedArtifactBindingKind::FactQueryEvidence => {
+            events::ArtifactStagingClass::AttemptFactQueryEvidence
         }
         StagedArtifactBindingKind::SideEffectEvidence { phase, .. } => phase.staging_class(),
         StagedArtifactBindingKind::PublicOutput => {
@@ -476,6 +485,15 @@ pub(crate) fn artifact_role_name(role: events::ArtifactRole) -> &'static str {
 pub struct StagedRetentionRefs {
     pub(crate) refs: Vec<events::RetentionRef>,
     pub(crate) reason: events::RetentionReason,
+    pub(crate) authority: StagedRetentionRefAuthority,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StagedRetentionRefAuthority {
+    CurrentCommitArtifacts,
+    FactQueryEvidence {
+        returned_refs: Vec<mfm_facts::InternalFactRef>,
+    },
 }
 
 impl StagedRetentionRefs {
@@ -484,6 +502,7 @@ impl StagedRetentionRefs {
         Self {
             refs,
             reason: events::RetentionReason::RuntimeEvidence,
+            authority: StagedRetentionRefAuthority::CurrentCommitArtifacts,
         }
     }
 
@@ -501,6 +520,154 @@ impl StagedRetentionRefs {
         Self {
             refs,
             reason: events::RetentionReason::PublicOutput,
+            authority: StagedRetentionRefAuthority::CurrentCommitArtifacts,
         }
     }
+
+    pub(crate) fn fact_query_evidence(
+        refs: Vec<events::RetentionRef>,
+        returned_refs: Vec<mfm_facts::InternalFactRef>,
+    ) -> Self {
+        Self {
+            refs,
+            reason: events::RetentionReason::RuntimeEvidence,
+            authority: StagedRetentionRefAuthority::FactQueryEvidence { returned_refs },
+        }
+    }
+}
+
+pub(crate) fn validate_fact_query_returned_ref_authority(
+    projections: &store::ProjectionSnapshot,
+    fact_ref: &mfm_facts::InternalFactRef,
+) -> Result<()> {
+    let descriptor = projections
+        .fact_descriptor(fact_ref.fact_descriptor_hash())
+        .ok_or_else(|| fact_query_ref_authority_error("missing descriptor authority"))?;
+    if !fact_descriptor_projection_matches_returned_ref(descriptor, fact_ref) {
+        return Err(fact_query_ref_authority_error(
+            "descriptor authority does not match returned ref",
+        ));
+    }
+
+    let record = projections
+        .fact_record(fact_ref.fact_claim_id())
+        .ok_or_else(|| fact_query_ref_authority_error("missing source fact authority"))?;
+    if !fact_record_projection_matches_returned_ref(record, fact_ref) {
+        return Err(fact_query_ref_authority_error(
+            "source fact authority does not match returned ref",
+        ));
+    }
+
+    let index = projections
+        .fact_index_entry(fact_ref.fact_claim_id())
+        .ok_or_else(|| fact_query_ref_authority_error("missing indexed fact authority"))?;
+    if !fact_index_projection_matches_returned_ref(index, fact_ref) {
+        return Err(fact_query_ref_authority_error(
+            "indexed fact authority does not match returned ref",
+        ));
+    }
+
+    Ok(())
+}
+
+pub(crate) fn fact_query_returned_ref_retention_refs(
+    projections: &store::ProjectionSnapshot,
+    fact_ref: &mfm_facts::InternalFactRef,
+) -> Result<[events::RetentionRef; 2]> {
+    validate_fact_query_returned_ref_authority(projections, fact_ref)?;
+    let descriptor = projections
+        .fact_descriptor(fact_ref.fact_descriptor_hash())
+        .ok_or_else(|| fact_query_ref_authority_error("missing descriptor authority"))?;
+    Ok([
+        events::RetentionRef {
+            artifact_id: descriptor.descriptor_artifact_id.clone(),
+            role: events::ArtifactRole::FactDescriptor,
+            content_digest: descriptor.descriptor_hash.clone(),
+        },
+        events::RetentionRef {
+            artifact_id: fact_ref.artifact_id().clone(),
+            role: events::ArtifactRole::FactResponse,
+            content_digest: fact_ref.response_hash().clone(),
+        },
+    ])
+}
+
+fn fact_descriptor_projection_matches_returned_ref(
+    descriptor: &store::FactDescriptorProjection,
+    fact_ref: &mfm_facts::InternalFactRef,
+) -> bool {
+    &descriptor.descriptor_hash == fact_ref.fact_descriptor_hash()
+        && &descriptor.fact_kind == fact_ref.fact_kind()
+        && &descriptor.response_schema_id == fact_ref.response_schema_id()
+        && &descriptor.fact_subject_namespace_hash == fact_ref.fact_subject_namespace_hash()
+}
+
+fn fact_record_projection_matches_returned_ref(
+    record: &store::FactRecordProjection,
+    fact_ref: &mfm_facts::InternalFactRef,
+) -> bool {
+    let claim = &record.claim;
+    let request_schema_id = claim.request().map(|request| request.request_schema_id());
+    let request_hash = claim.request().map(|request| request.request_hash());
+    let subject_material_hash = claim.subject().subject_material().content_digest();
+    &record.fact_claim_id == fact_ref.fact_claim_id()
+        && &record.source_event_id == fact_ref.source_event_id()
+        && &record.source_run_id == fact_ref.fact_claim_id().source_run_id()
+        && record.source_seq == fact_ref.fact_claim_id().source_seq()
+        && record.source_ordinal == fact_ref.fact_claim_id().source_ordinal()
+        && claim.visibility() == fact_ref.visibility()
+        && claim.fact_kind() == fact_ref.fact_kind()
+        && claim.fact_descriptor_hash() == fact_ref.fact_descriptor_hash()
+        && claim.observed_at() == fact_ref.observed_at()
+        && claim.subject().fact_subject_namespace_hash() == fact_ref.fact_subject_namespace_hash()
+        && claim.subject().subject_material_hash() == fact_ref.subject_material_hash()
+        && &subject_material_hash == fact_ref.subject_material_hash()
+        && claim.subject().fact_key() == fact_ref.fact_key()
+        && request_schema_id == fact_ref.request_schema_id()
+        && request_hash == fact_ref.request_hash()
+        && claim.response().response_schema_id() == fact_ref.response_schema_id()
+        && claim.response().response_hash() == fact_ref.response_hash()
+        && claim.response().artifact_id() == fact_ref.artifact_id()
+        && claim.response().artifact_evidence_hash() == fact_ref.artifact_evidence_hash()
+        && &record.node_id == fact_ref.producer_node_id()
+        && claim.producer().capability_kind() == fact_ref.capability_kind()
+        && claim.producer().capability_version() == fact_ref.capability_version()
+        && claim.producer().adapter_kind() == fact_ref.adapter_kind()
+        && claim.producer().adapter_version() == fact_ref.adapter_version()
+}
+
+fn fact_index_projection_matches_returned_ref(
+    index: &store::FactIndexProjection,
+    fact_ref: &mfm_facts::InternalFactRef,
+) -> bool {
+    let index_visibility = mfm_facts::FactVisibility::indexed_default(index.audience);
+    &index.fact_claim_id == fact_ref.fact_claim_id()
+        && &index.source_run_id == fact_ref.fact_claim_id().source_run_id()
+        && index.source_seq == fact_ref.fact_claim_id().source_seq()
+        && index.source_ordinal == fact_ref.fact_claim_id().source_ordinal()
+        && &index.source_event_id == fact_ref.source_event_id()
+        && index.recorded_at == fact_ref.recorded_at()
+        && index.observed_at.as_deref() == fact_ref.observed_at()
+        && &index_visibility == fact_ref.visibility()
+        && index.visibility_scope == mfm_facts::FactVisibilityScope::Default
+        && &index.fact_kind == fact_ref.fact_kind()
+        && &index.fact_descriptor_hash == fact_ref.fact_descriptor_hash()
+        && &index.fact_subject_namespace_hash == fact_ref.fact_subject_namespace_hash()
+        && &index.fact_key == fact_ref.fact_key()
+        && &index.subject_material_hash == fact_ref.subject_material_hash()
+        && index.request_schema_id.as_ref() == fact_ref.request_schema_id()
+        && index.request_hash.as_ref() == fact_ref.request_hash()
+        && &index.response_schema_id == fact_ref.response_schema_id()
+        && &index.response_hash == fact_ref.response_hash()
+        && &index.artifact_id == fact_ref.artifact_id()
+        && &index.artifact_evidence_hash == fact_ref.artifact_evidence_hash()
+        && &index.producer_node_id == fact_ref.producer_node_id()
+        && &index.capability_kind == fact_ref.capability_kind()
+        && &index.capability_version == fact_ref.capability_version()
+        && &index.adapter_kind == fact_ref.adapter_kind()
+        && &index.adapter_version == fact_ref.adapter_version()
+}
+
+fn fact_query_ref_authority_error(message: &'static str) -> RuntimeError {
+    RuntimeError::InvalidRunnerOutput(format!("fact query evidence returned ref {message}"))
 }

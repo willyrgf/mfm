@@ -15,6 +15,7 @@ members = [
 	"crates/kernel/certify",
 	"crates/kernel/effects",
 	"crates/kernel/events",
+	"crates/kernel/facts",
 	"crates/kernel/ids",
 	"crates/kernel/manual-auth",
 	"crates/kernel/program",
@@ -27,9 +28,12 @@ members = [
 	"crates/evm-contract-model",
 	"crates/evm-contract-config",
 	"crates/evm-core",
+	"crates/btc-capabilities",
 	"crates/evm-capabilities",
+	"crates/fact-capabilities",
 	"crates/artifact-capabilities",
 	"crates/adapter-contracts",
+	"crates/adapters/btc-jsonrpc",
 	"crates/adapters/evm-contracts",
 	"crates/adapters/portfolio",
 	"crates/signing",
@@ -40,11 +44,13 @@ members = [
 	"crates/portfolio-config",
 	"crates/portfolio/model",
 	"crates/states/evm-contracts",
+	"crates/states/btc",
 	"crates/states/portfolio",
 	"crates/storages/stream-store-postgres",
 	"crates/transports/evm",
 	"crates/transports/proof",
 	"crates/ops/evm-contract-lifecycle-op",
+	"crates/ops/btc-chain-head-collector-op",
 	"crates/ops/portfolio-tracker-op",
 	"crates/ops/proof-op",
 ]
@@ -57,6 +63,7 @@ bech32 = "0.12"
 bs58 = "0.5.1"
 # Cryptography dependency
 ring = "0.17.14"
+ed25519-dalek = { version = "2.1", features = ["std"] }
 # Common dependencies
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.108"

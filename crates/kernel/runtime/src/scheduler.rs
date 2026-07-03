@@ -149,12 +149,12 @@ impl SerialTypedScheduler {
             .append_prepared_commit_bundle(bundle)
             .await
             .map_err(async_store_error)?;
-        let stream = store
-            .load_run_stream(&run_id)
+        let committed = store
+            .load_committed_run_stream(&run_id)
             .await
             .map_err(async_store_error)?;
         let bound_context = self.run_contexts.load_bound_context(runtime_spec)?;
-        RunAdmissionLifecycle::admitted_run_authority(runtime_spec, &run_id, &stream, bound_context)
+        RunAdmissionLifecycle::admitted_run_authority(runtime_spec, &committed, bound_context)
     }
 
     /// Appends a verified manual resolution through an async durable typed store.
@@ -172,17 +172,18 @@ impl SerialTypedScheduler {
             note,
         } = request;
         let manual = certified_manual_resolution_spec(&runtime_spec.spec().saga)?;
-        let stream = store
-            .load_run_stream(run_id)
+        let committed = store
+            .load_committed_run_stream(run_id)
             .await
             .map_err(async_store_error)?;
-        let expected_next_seq = expected_next_seq_from_stream(&stream)?;
-        let projection = store::ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
+        let stream = committed.events();
+        let expected_next_seq = committed.next_seq();
+        let projection = committed.projection().clone();
         let prefix = build_manual_resolution_prefix_authority_from_parts(
             runtime_spec,
             run_id,
             manual.clone(),
-            &stream,
+            stream,
             expected_next_seq,
             &projection,
         )?;
@@ -197,7 +198,7 @@ impl SerialTypedScheduler {
         let (commit, artifacts_to_stage) =
             prepare_manual_resolution_commit(ManualResolutionCommitInput {
                 runtime_spec,
-                stream: &stream,
+                stream,
                 projection: &projection,
                 saga: &saga,
                 expected_next_seq,
@@ -400,21 +401,4 @@ where
             "execution claim is unclaimed".to_owned(),
         )),
     }
-}
-
-fn expected_next_seq_from_stream(
-    stream: &[store::KernelEventEnvelope],
-) -> Result<store::StreamSeq> {
-    let next = stream
-        .last()
-        .map(|event| {
-            event.seq().as_u64().checked_add(1).ok_or_else(|| {
-                crate::RuntimeError::InvalidRunStream(
-                    "manual resolution stream sequence overflow".to_owned(),
-                )
-            })
-        })
-        .transpose()?
-        .unwrap_or(store::StreamSeq::FIRST.as_u64());
-    Ok(store::StreamSeq::new(next)?)
 }
