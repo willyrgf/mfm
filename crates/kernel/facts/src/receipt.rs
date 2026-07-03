@@ -246,9 +246,7 @@ impl StoreReceiptAuthentication {
 /// One returned field summary value used by query replay and public shaping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReturnedFieldValueSummary {
-    pub(crate) field_id: FactFieldId,
-    pub(crate) value_type: FactFieldValueType,
-    pub(crate) value: FactCanonicalScalar,
+    pub(crate) value: FactFieldValue,
 }
 
 impl ReturnedFieldValueSummary {
@@ -258,33 +256,24 @@ impl ReturnedFieldValueSummary {
         value_type: FactFieldValueType,
         value: FactCanonicalScalar,
     ) -> Result<Self> {
-        if value.value_type() != value_type {
-            return Err(FactDescriptorError::field(
-                field_id,
-                "returned summary value type mismatch",
-            ));
-        }
-        validate_scalar_size(&field_id, &value)?;
         Ok(Self {
-            field_id,
-            value_type,
-            value,
+            value: FactFieldValue::new(field_id, value_type, value)?,
         })
     }
 
     /// Returns the summarized field id.
     pub const fn field_id(&self) -> &FactFieldId {
-        &self.field_id
+        self.value.field_id()
     }
 
     /// Returns the summarized value type.
     pub const fn value_type(&self) -> FactFieldValueType {
-        self.value_type
+        self.value.value_type()
     }
 
     /// Returns the summarized value.
     pub const fn value(&self) -> &FactCanonicalScalar {
-        &self.value
+        self.value.value()
     }
 }
 
