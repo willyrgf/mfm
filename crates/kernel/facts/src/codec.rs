@@ -742,7 +742,7 @@ fn canonical_field_descriptor_value(field: &FactFieldDescriptor) -> Result<Canon
             "exposure",
             CanonicalValue::String(field.exposure.as_str().to_owned()),
         ),
-        ("unit", optional_checked_string_value(field.unit.as_ref())),
+        ("unit", optional_display_value(field.unit.as_ref())),
         ("scale", optional_scale_value(field.scale)),
         ("sortable", CanonicalValue::Bool(field.sortable)),
         ("required", CanonicalValue::Bool(field.required)),
@@ -821,7 +821,7 @@ fn canonical_subject_namespace_field_value(
             "value_type",
             CanonicalValue::String(field.value_type.as_str().to_owned()),
         ),
-        ("unit", optional_checked_string_value(field.unit.as_ref())),
+        ("unit", optional_display_value(field.unit.as_ref())),
         ("scale", optional_scale_value(field.scale)),
     ])
 }
@@ -2077,10 +2077,7 @@ fn canonical_store_receipt_authentication_value(
             "scheme",
             CanonicalValue::String(auth.scheme.as_str().to_owned()),
         ),
-        (
-            "key_id",
-            optional_checked_string_value(auth.key_id.as_ref()),
-        ),
+        ("key_id", optional_display_value(auth.key_id.as_ref())),
         (
             "signature_or_mac",
             CanonicalValue::Bytes(CanonicalBytes::new(auth.signature_or_mac.clone())),
@@ -2112,15 +2109,6 @@ fn canonical_fact_selection_evidence_value(
             optional_display_value(selection.selected_summaries_digest.as_ref()),
         ),
     ])
-}
-
-fn optional_checked_string_value<T>(value: Option<&T>) -> CanonicalValue
-where
-    T: AsRef<str>,
-{
-    value
-        .map(|value| CanonicalValue::String(value.as_ref().to_owned()))
-        .unwrap_or(CanonicalValue::Null)
 }
 
 fn optional_string_value(value: Option<&str>) -> CanonicalValue {
