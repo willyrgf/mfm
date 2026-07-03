@@ -59,21 +59,67 @@ mod scalar;
 mod subject;
 mod tags;
 
-pub use claim::*;
-pub use codec::*;
-pub use descriptor::*;
-pub use extraction::*;
-pub use ids::*;
-pub use query::*;
-pub use receipt::*;
-pub use scalar::*;
-pub use subject::*;
-pub use tags::*;
+pub use claim::{
+    FactClaim, FactClaimId, FactClaimParts, FactProducerProvenance, FactRequestEvidence,
+    FactResponseEvidence, FactSubjectEvidence, InternalFactRef, InternalFactRefParts,
+};
+pub use codec::{
+    canonical_fact_claim_id_bytes, canonical_fact_descriptor_bytes,
+    canonical_fact_query_evidence_bytes, canonical_fact_query_plan_bytes,
+    canonical_fact_query_receipt_body_bytes, canonical_fact_query_receipt_body_bytes_from_parts,
+    canonical_fact_query_result_set_bytes, canonical_fact_subject_material_bytes,
+    canonical_fact_subject_namespace_bytes, canonical_selected_returned_field_summaries_bytes,
+    compile_fact_query_plan, derive_fact_claim_id, derive_fact_key, extract_subject_material,
+    extract_terms, extract_terms_from_material, fact_descriptor_hash, fact_descriptor_schema_id,
+    fact_query_evidence_hash, fact_query_evidence_schema_id, fact_query_plan_hash,
+    fact_query_receipt_body_hash, fact_query_receipt_body_hash_from_parts,
+    fact_query_result_set_digest, fact_subject_evidence, fact_subject_evidence_from_material,
+    fact_subject_namespace, fact_subject_namespace_hash, parse_canonical_fact_descriptor_bytes,
+    parse_canonical_fact_query_evidence_bytes, parse_canonical_fact_query_shape,
+    parse_canonical_fact_response_bytes, parse_canonical_fact_subject_material_bytes,
+    selected_returned_field_summaries_digest, subject_material_hash, typed_fact_subject_evidence,
+    typed_fact_subject_value, validate_descriptor, validate_fact_query_evidence,
+};
+pub use descriptor::{FactDescriptor, FactFieldDescriptor, FactOrderingPolicy, FactOrderingTerm};
+pub use extraction::{FactExtractionMetadata, FactIndexTerm};
+pub use ids::{
+    CanonicalValuePath, FactCanonicalizerVersion, FactDescriptorError, FactFieldId, FactFieldPath,
+    FactKind, FactOrderingName, FactQueryCompilerVersion, FactUnit, Result, StoreIdentity,
+    StoreKeyId, StoreScopeRef,
+};
+pub use query::{
+    CanonicalFactQueryPlan, CompiledFactQueryShape, FactQueryInput, FactQueryPredicate,
+    FactQueryReturnField, FactQueryScope, ScopeDecisionEvidence,
+};
+pub use receipt::{
+    fact_query_result_rows_from_receipt, validate_fact_query_result_rows,
+    DescriptorCatalogWatermark, FactProjectionGeneration, FactQueryEvidence, FactQueryReceipt,
+    FactQueryReceiptMaterial, FactQueryReceiptTrustRootMaterial, FactQueryResult,
+    FactQueryResultMismatch, FactQueryResultRow, FactSelectionEvidence, QueryResultCardinality,
+    ReturnedFactFieldSummary, ReturnedFieldSummaries, ReturnedFieldValueSummary,
+    StoreCommitWatermark, StoreReadFrontier, StoreReadFrontierType, StoreReceiptAuthentication,
+    StoreReceiptAuthenticationScheme,
+};
+pub use scalar::FactCanonicalScalar;
+pub use subject::{
+    FactFieldValue, FactKey, FactSubjectMaterialV1, FactSubjectNamespaceFieldV1,
+    FactSubjectNamespaceV1, FactSubjectValueV1,
+};
+pub use tags::{
+    FactAudience, FactFieldExposure, FactFieldExtraction, FactFieldSource, FactFieldValueType,
+    FactMetadataField, FactQueryOperator, FactScale, FactVisibility, FactVisibilityScope,
+    NullOrdering, SortDirection,
+};
 
+pub(crate) use codec::canonical_object;
 #[cfg(test)]
 pub(crate) use codec::parse_canonical_scalar_value;
 #[cfg(test)]
 pub(crate) use extraction::json_to_typed_fact_scalar;
+pub(crate) use extraction::{
+    extract_field_scalar, json_to_fact_canonical_value, response_typed_paths, subject_typed_paths,
+    validate_extracted_scalar, validate_ordering, validate_scalar_size, FactJsonPathContext,
+};
 
 /// Stable facts-kernel contract version for the initial collectors RFC surface.
 pub const FACTS_KERNEL_CONTRACT_VERSION: &str = "mfm.facts.v1";
