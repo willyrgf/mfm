@@ -178,24 +178,34 @@ CREATE TABLE fact_descriptor_index (
   descriptor_hash TEXT PRIMARY KEY,
   descriptor_artifact_id TEXT NOT NULL,
   descriptor_artifact_evidence_hash TEXT NOT NULL,
-  source_run_id TEXT NOT NULL,
-  source_seq BIGINT NOT NULL,
-  source_ordinal INTEGER NOT NULL,
-  source_event_id TEXT NOT NULL,
-  commit_id TEXT NOT NULL,
   fact_kind TEXT NOT NULL,
   descriptor_schema_id TEXT NOT NULL,
   subject_schema_id TEXT NOT NULL,
   response_schema_id TEXT NOT NULL,
   fact_subject_namespace_hash TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
-  CONSTRAINT fact_descriptor_index_event_fk FOREIGN KEY (source_run_id, source_seq, source_ordinal) REFERENCES run_events(run_id, seq, ordinal) ON DELETE RESTRICT,
-  CONSTRAINT fact_descriptor_index_event_id_fk FOREIGN KEY (source_run_id, source_event_id) REFERENCES run_events(run_id, event_id) ON DELETE RESTRICT,
-  CONSTRAINT fact_descriptor_index_commit_fk FOREIGN KEY (commit_id) REFERENCES commits(commit_id) ON DELETE RESTRICT,
   CONSTRAINT fact_descriptor_index_artifact_fk FOREIGN KEY (descriptor_artifact_id, descriptor_artifact_evidence_hash) REFERENCES artifact_admissions(artifact_id, evidence_hash) ON DELETE RESTRICT,
-  CONSTRAINT fact_descriptor_index_seq_positive CHECK (source_seq >= 1),
-  CONSTRAINT fact_descriptor_index_ordinal_nonnegative CHECK (source_ordinal >= 0),
-  CONSTRAINT fact_descriptor_index_artifact_unique UNIQUE (descriptor_artifact_id, descriptor_artifact_evidence_hash)
+  CONSTRAINT fact_descriptor_index_artifact_unique UNIQUE (descriptor_artifact_id, descriptor_artifact_evidence_hash),
+  CONSTRAINT fact_descriptor_index_descriptor_artifact_unique UNIQUE (descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash)
+);
+
+CREATE TABLE run_fact_descriptor_admissions (
+  run_id TEXT NOT NULL,
+  descriptor_hash TEXT NOT NULL,
+  descriptor_artifact_id TEXT NOT NULL,
+  descriptor_artifact_evidence_hash TEXT NOT NULL,
+  source_seq BIGINT NOT NULL,
+  source_ordinal INTEGER NOT NULL,
+  source_event_id TEXT NOT NULL,
+  commit_id TEXT NOT NULL,
+  PRIMARY KEY (run_id, descriptor_hash),
+  CONSTRAINT run_fact_descriptor_admissions_descriptor_artifact_fk FOREIGN KEY (descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash) REFERENCES fact_descriptor_index(descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash) ON DELETE RESTRICT,
+  CONSTRAINT run_fact_descriptor_admissions_event_fk FOREIGN KEY (run_id, source_seq, source_ordinal) REFERENCES run_events(run_id, seq, ordinal) ON DELETE RESTRICT,
+  CONSTRAINT run_fact_descriptor_admissions_event_id_fk FOREIGN KEY (run_id, source_event_id) REFERENCES run_events(run_id, event_id) ON DELETE RESTRICT,
+  CONSTRAINT run_fact_descriptor_admissions_commit_fk FOREIGN KEY (commit_id) REFERENCES commits(commit_id) ON DELETE RESTRICT,
+  CONSTRAINT run_fact_descriptor_admissions_run_artifact_fk FOREIGN KEY (run_id, descriptor_artifact_id, descriptor_artifact_evidence_hash) REFERENCES run_artifact_admissions(run_id, artifact_id, evidence_hash) ON DELETE RESTRICT,
+  CONSTRAINT run_fact_descriptor_admissions_seq_positive CHECK (source_seq >= 1),
+  CONSTRAINT run_fact_descriptor_admissions_ordinal_nonnegative CHECK (source_ordinal >= 0)
 );
 
 CREATE TABLE fact_index (

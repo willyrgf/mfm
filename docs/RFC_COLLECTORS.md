@@ -1086,6 +1086,7 @@ Conceptual columns:
 ```text
 descriptor_hash
 descriptor_artifact_id
+descriptor_artifact_evidence_hash
 fact_kind
 descriptor_schema_id
 subject_schema_id
@@ -1095,9 +1096,29 @@ created_at
 ```
 
 A `FactRecorded` append is valid only when the descriptor is available to the
-store and certified for the producing node. The descriptor may already be
-present or be supplied and admitted in the same transaction, but store admission
-is necessary, not sufficient.
+store, admitted by the producing run, and certified for the producing node. The
+descriptor may already be present in the store-wide catalog or be supplied in
+the same transaction, but store admission is necessary, not sufficient.
+
+### run_fact_descriptor_admissions
+
+Stores the per-run link from `RunAdmitted.fact_descriptor_artifacts` to the
+store-wide descriptor catalog. This table is rebuildable projection/cache data;
+the semantic authority remains the run stream plus retained descriptor artifact
+evidence.
+
+Conceptual columns:
+
+```text
+run_id
+descriptor_hash
+descriptor_artifact_id
+descriptor_artifact_evidence_hash
+source_seq
+source_ordinal
+source_event_id
+commit_id
+```
 
 Canonical subject material is retained authority. It must be bounded,
 non-secret, and unavailable through generic public read APIs. Public access to
@@ -1828,7 +1849,7 @@ discarded with the old store baseline.
 5. Replace ad hoc `FactKey` construction with typed subject material.
 6. Require every `FactRecorded` to carry normalized `FactRecordedPayload` data.
 7. Add `ArtifactRole::FactDescriptor` descriptor authority artifacts plus
-   logical `fact_descriptor_index`, `fact_index`, and `fact_index_terms`
+   logical `fact_descriptor_index`, `run_fact_descriptor_admissions`, `fact_index`, and `fact_index_terms`
    projections.
 8. Populate projections in the same append transaction as `run_events`.
 9. Add projection validation and rebuild.
@@ -1939,7 +1960,7 @@ Suggested crate placement for the first planning pass:
 - `crates/kernel/store`: abstract append/query/rebuild contracts for fact
   authority and fact indexes.
 - `crates/storages/stream-store-postgres`: descriptor artifact admission,
-  `fact_descriptor_index`, `fact_index`, `fact_index_terms`, append projection,
+  `fact_descriptor_index`, `run_fact_descriptor_admissions`, `fact_index`, `fact_index_terms`, append projection,
   query execution, and rebuild.
 - `crates/app`, `bin/cli`, and `bin/rest-api`: transport-level command/API
   surfaces over the reusable facts-query contract and `PublicFactRef` output.
@@ -2000,7 +2021,7 @@ Gate 3: event reset and append projection.
 - `T::Response` to an `ArtifactEvidenceRef` with
   `ArtifactRole::FactResponse`
 - v1 one-claim-per-response-artifact rule
-- logical `fact_descriptor_index`, `fact_index`, and `fact_index_terms`
+- logical `fact_descriptor_index`, `run_fact_descriptor_admissions`, `fact_index`, and `fact_index_terms`
   projections in PostgreSQL
 - subject, result, and metadata term extraction in the append transaction
 - append rollback tests for descriptor, extraction, artifact, and projection

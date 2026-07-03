@@ -141,7 +141,7 @@ fn apply_run_admitted(
 ) -> Result<()> {
     apply_run_admitted_base(projections, run_id, event_id, payload)?;
     for artifact in &payload.fact_descriptor_artifacts {
-        apply_fact_descriptor_artifact(projections, event_id, artifact, artifact_bytes)?;
+        apply_fact_descriptor_artifact(projections, artifact, artifact_bytes)?;
     }
     Ok(())
 }
@@ -1361,7 +1361,6 @@ fn insert_fact_record_projection(
 
 fn apply_fact_descriptor_artifact(
     projections: &mut ProjectionSnapshot,
-    event_id: &EventId,
     artifact: &events::RunArtifactEvidenceRef,
     artifact_bytes: &ArtifactByteAuthorityMap,
 ) -> Result<()> {
@@ -1400,7 +1399,6 @@ fn apply_fact_descriptor_artifact(
         subject_schema_id: descriptor.subject_schema_id().clone(),
         response_schema_id: descriptor.response_schema_id().clone(),
         fact_subject_namespace_hash: namespace_hash,
-        source_event_id: event_id.clone(),
     };
     match projections
         .fact_descriptors

@@ -39,7 +39,6 @@ pub struct FactDescriptorProjectionFixtureForTest {
 /// Builds a descriptor projection fixture from a fact descriptor.
 pub fn fact_descriptor_projection_fixture_for_test(
     descriptor: mfm_facts::FactDescriptor,
-    source_event_id: EventId,
 ) -> Result<FactDescriptorProjectionFixtureForTest> {
     let descriptor_bytes = mfm_facts::canonical_fact_descriptor_bytes(&descriptor)
         .map_err(|error| StoreError::Identity(error.to_string()))?
@@ -92,7 +91,6 @@ pub fn fact_descriptor_projection_fixture_for_test(
         subject_schema_id: descriptor.subject_schema_id().clone(),
         response_schema_id: descriptor.response_schema_id().clone(),
         fact_subject_namespace_hash: subject_namespace_hash.clone(),
-        source_event_id,
     };
     Ok(FactDescriptorProjectionFixtureForTest {
         descriptor,
