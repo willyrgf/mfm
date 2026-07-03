@@ -3,11 +3,12 @@ use std::fmt;
 use std::str::FromStr;
 
 use mfm_canonical::{
-    sha256_digest_bytes, CanonicalBytes, CanonicalJsonBytes, CanonicalValue, DecimalString,
+    sha256_digest_bytes, CanonicalBytes, CanonicalJsonBytes, CanonicalValue,
     PlainCanonicalJsonBytes,
 };
 use mfm_ids::{ContentDigest, DigestAlgorithm, RunId, SchemaId};
 
+use crate::scalar::ScalarJsonContext;
 use crate::*;
 
 /// Validates a fact descriptor.
@@ -1029,9 +1030,9 @@ fn parse_field_value_type(value: &serde_json::Value) -> Result<FactFieldValueTyp
     let value = value
         .as_str()
         .ok_or_else(|| FactDescriptorError::descriptor("field value type must be a string"))?;
-    FactFieldValueType::from_tag(value).ok_or_else(|| {
-        FactDescriptorError::descriptor(format!("unknown field value type {value:?}"))
-    })
+    value
+        .parse::<FactFieldValueType>()
+        .map_err(|_| FactDescriptorError::descriptor(format!("unknown field value type {value:?}")))
 }
 
 pub(crate) fn parse_canonical_scalar_value(
@@ -1039,107 +1040,7 @@ pub(crate) fn parse_canonical_scalar_value(
     value: &serde_json::Value,
     field_id: &FactFieldId,
 ) -> Result<FactCanonicalScalar> {
-    canonical_scalar_from_json(value_type, value, ScalarJsonContext::Field(field_id))
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum ScalarJsonContext<'a> {
-    Field(&'a FactFieldId),
-    SubjectPath(&'a str),
-    ResponsePath(&'a str),
-}
-
-impl ScalarJsonContext<'_> {
-    fn string_value<'a>(
-        self,
-        value: &'a serde_json::Value,
-        field_error: &'static str,
-    ) -> Result<&'a str> {
-        value.as_str().ok_or_else(|| match self {
-            Self::Field(field_id) => FactDescriptorError::field(field_id.clone(), field_error),
-            Self::SubjectPath(path) => {
-                FactDescriptorError::descriptor(format!("fact subject path {path} is not a string"))
-            }
-            Self::ResponsePath(path) => FactDescriptorError::descriptor(format!(
-                "fact response path {path} is not a string"
-            )),
-        })
-    }
-
-    fn type_error(
-        self,
-        value_type: FactFieldValueType,
-        field_error: &'static str,
-    ) -> FactDescriptorError {
-        match self {
-            Self::Field(field_id) => FactDescriptorError::field(field_id.clone(), field_error),
-            Self::SubjectPath(path) => FactDescriptorError::descriptor(format!(
-                "fact subject path {path} does not match {value_type:?}"
-            )),
-            Self::ResponsePath(path) => fact_scalar_type_error(path, value_type),
-        }
-    }
-
-    fn decimal(self, value: &str) -> Result<FactCanonicalScalar> {
-        match self {
-            Self::Field(_) => FactCanonicalScalar::decimal_variable(value),
-            Self::SubjectPath(_) => DecimalString::new_variable(value)
-                .map(FactCanonicalScalar::DecimalString)
-                .map_err(|error| FactDescriptorError::descriptor(error.to_string())),
-            Self::ResponsePath(_) => DecimalString::new_variable(value)
-                .map(FactCanonicalScalar::DecimalString)
-                .map_err(|error| FactDescriptorError::descriptor(error.to_string())),
-        }
-    }
-
-    fn digest(self, value: &str) -> Result<FactCanonicalScalar> {
-        ContentDigest::parse(value)
-            .map(FactCanonicalScalar::Digest)
-            .map_err(|error| match self {
-                Self::Field(field_id) => {
-                    FactDescriptorError::field(field_id.clone(), format!("invalid digest: {error}"))
-                }
-                Self::SubjectPath(path) => FactDescriptorError::descriptor(format!(
-                    "fact subject path {path} contains invalid digest: {error}"
-                )),
-                Self::ResponsePath(path) => FactDescriptorError::descriptor(format!(
-                    "fact response path {path} contains invalid digest: {error}"
-                )),
-            })
-    }
-}
-
-pub(crate) fn canonical_scalar_from_json(
-    value_type: FactFieldValueType,
-    value: &serde_json::Value,
-    context: ScalarJsonContext<'_>,
-) -> Result<FactCanonicalScalar> {
-    match value_type {
-        FactFieldValueType::String => context
-            .string_value(value, "expected string value")
-            .map(|value| FactCanonicalScalar::String(value.to_owned())),
-        FactFieldValueType::Boolean => value
-            .as_bool()
-            .map(FactCanonicalScalar::Boolean)
-            .ok_or_else(|| context.type_error(value_type, "expected boolean value")),
-        FactFieldValueType::SignedInteger => value
-            .as_i64()
-            .map(FactCanonicalScalar::SignedInteger)
-            .ok_or_else(|| context.type_error(value_type, "expected signed integer value")),
-        FactFieldValueType::UnsignedInteger => value
-            .as_u64()
-            .map(FactCanonicalScalar::UnsignedInteger)
-            .ok_or_else(|| context.type_error(value_type, "expected unsigned integer value")),
-        FactFieldValueType::Timestamp => context
-            .string_value(value, "expected timestamp value")
-            .and_then(|value| FactCanonicalScalar::timestamp(value.to_owned())),
-        FactFieldValueType::DecimalString => context
-            .string_value(value, "expected decimal value")
-            .and_then(|value| context.decimal(value)),
-        FactFieldValueType::Digest => context
-            .string_value(value, "expected digest value")
-            .and_then(|value| context.digest(value)),
-    }
+    FactCanonicalScalar::from_json_value(value_type, value, ScalarJsonContext::Field(field_id))
 }
 
 fn parse_optional_u64_query_value(value: &serde_json::Value) -> Result<Option<u64>> {
@@ -1178,7 +1079,7 @@ fn parse_canonical_query_predicate(value: &serde_json::Value) -> Result<FactQuer
 }
 
 fn parse_query_operator(field_id: &FactFieldId, value: &str) -> Result<FactQueryOperator> {
-    FactQueryOperator::from_tag(value).ok_or_else(|| {
+    value.parse::<FactQueryOperator>().map_err(|_| {
         FactDescriptorError::field(
             field_id.clone(),
             format!("unknown query operator {value:?}"),
@@ -1474,18 +1375,19 @@ fn plain_json_to_canonical_value(value: &serde_json::Value) -> Result<CanonicalV
 }
 
 fn parse_fact_audience(value: &str) -> Result<FactAudience> {
-    FactAudience::from_tag(value)
-        .ok_or_else(|| FactDescriptorError::descriptor(format!("unknown fact audience {value:?}")))
+    value
+        .parse::<FactAudience>()
+        .map_err(|_| FactDescriptorError::descriptor(format!("unknown fact audience {value:?}")))
 }
 
 fn parse_fact_visibility_scope(value: &str) -> Result<FactVisibilityScope> {
-    FactVisibilityScope::from_tag(value).ok_or_else(|| {
+    value.parse::<FactVisibilityScope>().map_err(|_| {
         FactDescriptorError::descriptor(format!("unknown fact visibility scope {value:?}"))
     })
 }
 
 fn parse_store_read_frontier_type(value: &str) -> Result<StoreReadFrontierType> {
-    StoreReadFrontierType::from_tag(value).ok_or_else(|| {
+    value.parse::<StoreReadFrontierType>().map_err(|_| {
         FactDescriptorError::descriptor(format!("unknown store read frontier type {value:?}"))
     })
 }
@@ -1493,21 +1395,25 @@ fn parse_store_read_frontier_type(value: &str) -> Result<StoreReadFrontierType> 
 fn parse_store_receipt_authentication_scheme(
     value: &str,
 ) -> Result<StoreReceiptAuthenticationScheme> {
-    StoreReceiptAuthenticationScheme::from_tag(value).ok_or_else(|| {
-        FactDescriptorError::descriptor(format!(
-            "unknown store receipt authentication scheme {value:?}"
-        ))
-    })
+    value
+        .parse::<StoreReceiptAuthenticationScheme>()
+        .map_err(|_| {
+            FactDescriptorError::descriptor(format!(
+                "unknown store receipt authentication scheme {value:?}"
+            ))
+        })
 }
 
 fn parse_sort_direction(value: &str) -> Result<SortDirection> {
-    SortDirection::from_tag(value)
-        .ok_or_else(|| FactDescriptorError::descriptor(format!("unknown sort direction {value:?}")))
+    value
+        .parse::<SortDirection>()
+        .map_err(|_| FactDescriptorError::descriptor(format!("unknown sort direction {value:?}")))
 }
 
 fn parse_null_ordering(value: &str) -> Result<NullOrdering> {
-    NullOrdering::from_tag(value)
-        .ok_or_else(|| FactDescriptorError::descriptor(format!("unknown null ordering {value:?}")))
+    value
+        .parse::<NullOrdering>()
+        .map_err(|_| FactDescriptorError::descriptor(format!("unknown null ordering {value:?}")))
 }
 
 fn json_object<'a>(

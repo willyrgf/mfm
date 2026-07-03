@@ -17,27 +17,15 @@ pub enum FactFieldSource {
 impl FactFieldSource {
     /// Returns the stable source prefix used by public descriptor paths.
     pub const fn path_prefix(self) -> &'static str {
-        match self {
-            Self::Subject => "subject",
-            Self::Result => "result",
-            Self::Metadata => "metadata",
-        }
-    }
-
-    /// Parses a canonical source tag.
-    pub fn from_tag(value: &str) -> Option<Self> {
-        match value {
-            "subject" => Some(Self::Subject),
-            "result" => Some(Self::Result),
-            "metadata" => Some(Self::Metadata),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn as_str(self) -> &'static str {
-        self.path_prefix()
+        self.as_str()
     }
 }
+
+impl_fact_tag!(FactFieldSource, "fact field source", pub, "Returns the canonical source tag used in descriptors.", {
+    Self::Subject => "subject",
+    Self::Result => "result",
+    Self::Metadata => "metadata",
+});
 
 /// Declarative extraction recipe for a fact field value.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -84,15 +72,13 @@ impl FactMetadataField {
             Self::StoreCommitOrder => FactFieldValueType::UnsignedInteger,
         }
     }
-
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::RecordedAt => "recorded_at",
-            Self::ObservedAt => "observed_at",
-            Self::StoreCommitOrder => "store_commit_order",
-        }
-    }
 }
+
+impl_fact_tag!(FactMetadataField, "fact metadata field", pub(crate), "Returns the canonical metadata field tag used in descriptors.", {
+    Self::RecordedAt => "recorded_at",
+    Self::ObservedAt => "observed_at",
+    Self::StoreCommitOrder => "store_commit_order",
+});
 
 /// Scalar value type for an indexed fact field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -136,34 +122,17 @@ impl FactFieldValueType {
             Self::SignedInteger | Self::UnsignedInteger | Self::Timestamp | Self::DecimalString
         )
     }
-
-    /// Returns the canonical snake-case tag used in descriptors, queries, and receipts.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::String => "string",
-            Self::Boolean => "boolean",
-            Self::SignedInteger => "signed_integer",
-            Self::UnsignedInteger => "unsigned_integer",
-            Self::Timestamp => "timestamp",
-            Self::DecimalString => "decimal_string",
-            Self::Digest => "digest",
-        }
-    }
-
-    /// Parses a canonical value-type tag.
-    pub fn from_tag(value: &str) -> Option<Self> {
-        match value {
-            "string" => Some(Self::String),
-            "boolean" => Some(Self::Boolean),
-            "signed_integer" => Some(Self::SignedInteger),
-            "unsigned_integer" => Some(Self::UnsignedInteger),
-            "timestamp" => Some(Self::Timestamp),
-            "decimal_string" => Some(Self::DecimalString),
-            "digest" => Some(Self::Digest),
-            _ => None,
-        }
-    }
 }
+
+impl_fact_tag!(FactFieldValueType, "field value type", pub, "Returns the canonical snake-case tag used in descriptors, queries, and receipts.", {
+    Self::String => "string",
+    Self::Boolean => "boolean",
+    Self::SignedInteger => "signed_integer",
+    Self::UnsignedInteger => "unsigned_integer",
+    Self::Timestamp => "timestamp",
+    Self::DecimalString => "decimal_string",
+    Self::Digest => "digest",
+});
 
 /// Query operator allowed for a descriptor field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -181,30 +150,13 @@ pub enum FactQueryOperator {
     GreaterThanOrEqual,
 }
 
-impl FactQueryOperator {
-    /// Returns the canonical snake-case tag used in descriptors and queries.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Equal => "equal",
-            Self::LessThan => "less_than",
-            Self::LessThanOrEqual => "less_than_or_equal",
-            Self::GreaterThan => "greater_than",
-            Self::GreaterThanOrEqual => "greater_than_or_equal",
-        }
-    }
-
-    /// Parses a canonical query-operator tag.
-    pub fn from_tag(value: &str) -> Option<Self> {
-        match value {
-            "equal" => Some(Self::Equal),
-            "less_than" => Some(Self::LessThan),
-            "less_than_or_equal" => Some(Self::LessThanOrEqual),
-            "greater_than" => Some(Self::GreaterThan),
-            "greater_than_or_equal" => Some(Self::GreaterThanOrEqual),
-            _ => None,
-        }
-    }
-}
+impl_fact_tag!(FactQueryOperator, "query operator", pub, "Returns the canonical snake-case tag used in descriptors and queries.", {
+    Self::Equal => "equal",
+    Self::LessThan => "less_than",
+    Self::LessThanOrEqual => "less_than_or_equal",
+    Self::GreaterThan => "greater_than",
+    Self::GreaterThanOrEqual => "greater_than_or_equal",
+});
 
 /// Public exposure policy for a descriptor field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -218,16 +170,11 @@ pub enum FactFieldExposure {
     Hidden,
 }
 
-impl FactFieldExposure {
-    /// Returns the canonical snake-case tag used in descriptors.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Returnable => "returnable",
-            Self::QueryOnly => "query_only",
-            Self::Hidden => "hidden",
-        }
-    }
-}
+impl_fact_tag!(FactFieldExposure, "field exposure", pub, "Returns the canonical snake-case tag used in descriptors.", {
+    Self::Returnable => "returnable",
+    Self::QueryOnly => "query_only",
+    Self::Hidden => "hidden",
+});
 
 /// Base-10 scale attached to a fact field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -294,24 +241,10 @@ pub enum FactAudience {
     Platform,
 }
 
-impl FactAudience {
-    /// Returns the canonical snake-case tag used in query scopes and receipts.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Control => "control",
-            Self::Platform => "platform",
-        }
-    }
-
-    /// Parses a canonical audience tag.
-    pub fn from_tag(value: &str) -> Option<Self> {
-        match value {
-            "control" => Some(Self::Control),
-            "platform" => Some(Self::Platform),
-            _ => None,
-        }
-    }
-}
+impl_fact_tag!(FactAudience, "fact audience", pub, "Returns the canonical snake-case tag used in query scopes and receipts.", {
+    Self::Control => "control",
+    Self::Platform => "platform",
+});
 
 /// Visibility scope for an indexed fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -321,22 +254,9 @@ pub enum FactVisibilityScope {
     Default,
 }
 
-impl FactVisibilityScope {
-    /// Returns the canonical snake-case tag used in query scopes and receipts.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-        }
-    }
-
-    /// Parses a canonical visibility-scope tag.
-    pub fn from_tag(value: &str) -> Option<Self> {
-        match value {
-            "default" => Some(Self::Default),
-            _ => None,
-        }
-    }
-}
+impl_fact_tag!(FactVisibilityScope, "fact visibility scope", pub, "Returns the canonical snake-case tag used in query scopes and receipts.", {
+    Self::Default => "default",
+});
 
 /// Sort direction for a fact ordering term.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -348,24 +268,10 @@ pub enum SortDirection {
     Descending,
 }
 
-impl SortDirection {
-    /// Returns the canonical snake-case tag used in descriptor orderings.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Ascending => "ascending",
-            Self::Descending => "descending",
-        }
-    }
-
-    /// Parses a canonical sort-direction tag.
-    pub fn from_tag(value: &str) -> Option<Self> {
-        match value {
-            "ascending" => Some(Self::Ascending),
-            "descending" => Some(Self::Descending),
-            _ => None,
-        }
-    }
-}
+impl_fact_tag!(SortDirection, "sort direction", pub, "Returns the canonical snake-case tag used in descriptor orderings.", {
+    Self::Ascending => "ascending",
+    Self::Descending => "descending",
+});
 
 /// Null placement for a fact ordering term.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -377,21 +283,7 @@ pub enum NullOrdering {
     Last,
 }
 
-impl NullOrdering {
-    /// Returns the canonical snake-case tag used in descriptor orderings.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::First => "first",
-            Self::Last => "last",
-        }
-    }
-
-    /// Parses a canonical null-ordering tag.
-    pub fn from_tag(value: &str) -> Option<Self> {
-        match value {
-            "first" => Some(Self::First),
-            "last" => Some(Self::Last),
-            _ => None,
-        }
-    }
-}
+impl_fact_tag!(NullOrdering, "null ordering", pub, "Returns the canonical snake-case tag used in descriptor orderings.", {
+    Self::First => "first",
+    Self::Last => "last",
+});

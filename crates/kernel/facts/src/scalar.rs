@@ -88,6 +88,106 @@ impl FactCanonicalScalar {
             Self::Digest(value) => CanonicalValue::String(value.as_str().to_owned()),
         }
     }
+
+    pub(crate) fn from_json_value(
+        value_type: FactFieldValueType,
+        value: &serde_json::Value,
+        context: ScalarJsonContext<'_>,
+    ) -> Result<Self> {
+        match value_type {
+            FactFieldValueType::String => context
+                .string_value(value, "expected string value")
+                .map(|value| Self::String(value.to_owned())),
+            FactFieldValueType::Boolean => value
+                .as_bool()
+                .map(Self::Boolean)
+                .ok_or_else(|| context.type_error(value_type, "expected boolean value")),
+            FactFieldValueType::SignedInteger => value
+                .as_i64()
+                .map(Self::SignedInteger)
+                .ok_or_else(|| context.type_error(value_type, "expected signed integer value")),
+            FactFieldValueType::UnsignedInteger => value
+                .as_u64()
+                .map(Self::UnsignedInteger)
+                .ok_or_else(|| context.type_error(value_type, "expected unsigned integer value")),
+            FactFieldValueType::Timestamp => context
+                .string_value(value, "expected timestamp value")
+                .and_then(|value| Self::timestamp(value.to_owned())),
+            FactFieldValueType::DecimalString => context
+                .string_value(value, "expected decimal value")
+                .and_then(|value| context.decimal(value)),
+            FactFieldValueType::Digest => context
+                .string_value(value, "expected digest value")
+                .and_then(|value| context.digest(value)),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ScalarJsonContext<'a> {
+    Field(&'a FactFieldId),
+    SubjectPath(&'a str),
+    ResponsePath(&'a str),
+}
+
+impl ScalarJsonContext<'_> {
+    fn string_value<'a>(
+        self,
+        value: &'a serde_json::Value,
+        field_error: &'static str,
+    ) -> Result<&'a str> {
+        value.as_str().ok_or_else(|| match self {
+            Self::Field(field_id) => FactDescriptorError::field(field_id.clone(), field_error),
+            Self::SubjectPath(path) => {
+                FactDescriptorError::descriptor(format!("fact subject path {path} is not a string"))
+            }
+            Self::ResponsePath(path) => FactDescriptorError::descriptor(format!(
+                "fact response path {path} is not a string"
+            )),
+        })
+    }
+
+    fn type_error(
+        self,
+        value_type: FactFieldValueType,
+        field_error: &'static str,
+    ) -> FactDescriptorError {
+        match self {
+            Self::Field(field_id) => FactDescriptorError::field(field_id.clone(), field_error),
+            Self::SubjectPath(path) => FactDescriptorError::descriptor(format!(
+                "fact subject path {path} does not match {value_type:?}"
+            )),
+            Self::ResponsePath(path) => FactDescriptorError::descriptor(format!(
+                "fact response path {path} does not match declared value type {:?}",
+                value_type
+            )),
+        }
+    }
+
+    fn decimal(self, value: &str) -> Result<FactCanonicalScalar> {
+        match self {
+            Self::Field(_) => FactCanonicalScalar::decimal_variable(value),
+            Self::SubjectPath(_) | Self::ResponsePath(_) => DecimalString::new_variable(value)
+                .map(FactCanonicalScalar::DecimalString)
+                .map_err(|error| FactDescriptorError::descriptor(error.to_string())),
+        }
+    }
+
+    fn digest(self, value: &str) -> Result<FactCanonicalScalar> {
+        ContentDigest::parse(value)
+            .map(FactCanonicalScalar::Digest)
+            .map_err(|error| match self {
+                Self::Field(field_id) => {
+                    FactDescriptorError::field(field_id.clone(), format!("invalid digest: {error}"))
+                }
+                Self::SubjectPath(path) => FactDescriptorError::descriptor(format!(
+                    "fact subject path {path} contains invalid digest: {error}"
+                )),
+                Self::ResponsePath(path) => FactDescriptorError::descriptor(format!(
+                    "fact response path {path} contains invalid digest: {error}"
+                )),
+            })
+    }
 }
 
 /// Compares same-typed fact scalars using canonical fact-query semantics.

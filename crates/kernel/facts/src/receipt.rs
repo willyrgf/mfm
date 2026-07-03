@@ -59,22 +59,10 @@ pub enum StoreReadFrontierType {
     Prefix,
 }
 
-impl StoreReadFrontierType {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Snapshot => "snapshot",
-            Self::Prefix => "prefix",
-        }
-    }
-
-    pub(crate) fn from_tag(value: &str) -> Option<Self> {
-        match value {
-            "snapshot" => Some(Self::Snapshot),
-            "prefix" => Some(Self::Prefix),
-            _ => None,
-        }
-    }
-}
+impl_fact_tag!(StoreReadFrontierType, "store read frontier type", pub(crate), "Returns the canonical store read frontier type tag.", {
+    Self::Snapshot => "snapshot",
+    Self::Prefix => "prefix",
+});
 
 /// Semantic read frontier bound into a fact query receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,21 +133,9 @@ pub enum StoreReceiptAuthenticationScheme {
     LocalEd25519Sha256JcsV1,
 }
 
-impl StoreReceiptAuthenticationScheme {
-    /// Returns the canonical authentication scheme tag.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::LocalEd25519Sha256JcsV1 => "local_ed25519_sha256_jcs_v1",
-        }
-    }
-
-    pub(crate) fn from_tag(value: &str) -> Option<Self> {
-        match value {
-            "local_ed25519_sha256_jcs_v1" => Some(Self::LocalEd25519Sha256JcsV1),
-            _ => None,
-        }
-    }
-}
+impl_fact_tag!(StoreReceiptAuthenticationScheme, "store receipt authentication scheme", pub, "Returns the canonical authentication scheme tag.", {
+    Self::LocalEd25519Sha256JcsV1 => "local_ed25519_sha256_jcs_v1",
+});
 
 /// Store-neutral public trust-root material for fact query receipt authentication.
 #[derive(Debug, Clone, PartialEq, Eq)]
