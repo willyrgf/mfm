@@ -125,37 +125,20 @@ fn test_fact_query_evidence_with_returned_refs(
         mfm_facts::FactVisibilityScope::Default,
     );
     let store_scope = mfm_facts::StoreScopeRef::new("default").expect("store scope");
-    let ordering = mfm_facts::FactOrderingPolicy::new(
-        mfm_facts::FactOrderingName::new("metadata.store_order.asc").expect("ordering"),
-        vec![mfm_facts::FactOrderingTerm::new(
-            mfm_facts::FactFieldId::new("metadata.store_order").expect("field id"),
-            mfm_facts::SortDirection::Ascending,
-            mfm_facts::NullOrdering::Last,
-            true,
-        )],
-    )
-    .expect("fact ordering");
-    let canonical_query = mfm_canonical::CanonicalJsonBytes::from_value(
-        &mfm_canonical::CanonicalValue::object([(
-            "kind",
-            mfm_canonical::CanonicalValue::String("chain.head".to_owned()),
-        )])
-        .expect("canonical query value"),
-    );
-    let plan = mfm_facts::CanonicalFactQueryPlan::new(
+    let descriptor = test_fact_descriptor();
+    let input = mfm_facts::FactQueryInput::new(
         store_scope.clone(),
         query_scope.clone(),
-        mfm_facts::FactQueryCompilerVersion::new(mfm_facts::FACT_QUERY_COMPILER_VERSION)
-            .expect("query compiler version"),
-        mfm_facts::FactCanonicalizerVersion::new(mfm_facts::FACT_QUERY_CANONICALIZER_VERSION)
-            .expect("query canonicalizer version"),
-        test_fact_descriptor_hash(),
         mfm_facts::ScopeDecisionEvidence::new(content(0x42)),
-        canonical_query,
-        ordering,
+        Vec::new(),
+        vec![mfm_facts::FactQueryReturnField::new(
+            mfm_facts::FactFieldId::new("result.amount").expect("field id"),
+        )],
+        mfm_facts::FactOrderingName::new("result.amount.asc").expect("ordering"),
         Some(10),
     )
-    .expect("query plan");
+    .expect("query input");
+    let plan = mfm_facts::compile_fact_query_plan(&descriptor, input).expect("query plan");
     let frontier = mfm_facts::StoreReadFrontier::new(
         store_scope,
         query_scope,

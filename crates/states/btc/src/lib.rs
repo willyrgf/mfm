@@ -18,10 +18,10 @@ use mfm_capabilities::{CapabilitySpec, ManagedPlatformWriteRole};
 use mfm_effects::{ManagedPlatformWrite, ReadExternal};
 use mfm_fact_capabilities::{FactIndexReadCapability, FactIndexReadRequest, FactIndexReadResponse};
 use mfm_facts::{
-    fact_descriptor_hash, CanonicalFactQueryPlan, FactAudience, FactCanonicalScalar,
-    FactCanonicalizerVersion, FactFieldId, FactQueryCompilerVersion, FactQueryScope,
+    compile_fact_query_plan, FactAudience, FactCanonicalScalar, FactFieldId, FactOrderingName,
+    FactQueryInput, FactQueryOperator, FactQueryPredicate, FactQueryReturnField, FactQueryScope,
     FactSelectionEvidence, FactVisibility, FactVisibilityScope, ScopeDecisionEvidence,
-    StoreScopeRef, FACT_QUERY_CANONICALIZER_VERSION, FACT_QUERY_COMPILER_VERSION,
+    StoreScopeRef,
 };
 use mfm_ids::{AdapterKind, AdapterVersion, ContentDigest};
 use mfm_ids::{DigestAlgorithm, StateKind, StateVersion};
@@ -966,44 +966,10 @@ impl QueryCollectorCheckpointConfig {
             CollectorCheckpointFact::descriptor().map_err(|error| BtcStateError::InvalidInput {
                 reason: format!("collector checkpoint descriptor invalid: {error}"),
             })?;
-        let descriptor_hash =
-            fact_descriptor_hash(&descriptor).map_err(|error| BtcStateError::InvalidInput {
-                reason: format!("collector checkpoint descriptor hash invalid: {error}"),
-            })?;
-        let ordering = descriptor
-            .orderings()
-            .iter()
-            .find(|ordering| ordering.name().as_str() == "result.high_watermark_height.desc")
-            .cloned()
-            .ok_or_else(|| BtcStateError::InvalidInput {
-                reason: "collector checkpoint descriptor is missing high-watermark ordering"
-                    .to_owned(),
-            })?;
-        let query = collector_checkpoint_query_value(self, descriptor_hash.as_str())?;
-        let plan = CanonicalFactQueryPlan::new(
-            StoreScopeRef::new(&self.store_scope).map_err(|error| BtcStateError::InvalidInput {
+        let plan = compile_fact_query_plan(&descriptor, collector_checkpoint_query_input(self)?)
+            .map_err(|error| BtcStateError::InvalidInput {
                 reason: error.to_string(),
-            })?,
-            FactQueryScope::new(FactAudience::Control, FactVisibilityScope::Default),
-            FactQueryCompilerVersion::new(FACT_QUERY_COMPILER_VERSION).map_err(|error| {
-                BtcStateError::InvalidInput {
-                    reason: error.to_string(),
-                }
-            })?,
-            FactCanonicalizerVersion::new(FACT_QUERY_CANONICALIZER_VERSION).map_err(|error| {
-                BtcStateError::InvalidInput {
-                    reason: error.to_string(),
-                }
-            })?,
-            descriptor_hash,
-            ScopeDecisionEvidence::new(control_scope_decision_hash()),
-            CanonicalJsonBytes::from_value(&query),
-            ordering,
-            Some(1),
-        )
-        .map_err(|error| BtcStateError::InvalidInput {
-            reason: error.to_string(),
-        })?;
+            })?;
         FactIndexReadRequest::new(plan).map_err(|error| BtcStateError::InvalidInput {
             reason: error.to_string(),
         })
@@ -1432,74 +1398,52 @@ fn canonical_checkpoint_error(error: mfm_canonical::CanonicalError) -> BtcStateE
     }
 }
 
-fn collector_checkpoint_query_value(
+fn collector_checkpoint_query_input(
     config: &QueryCollectorCheckpointConfig,
-    descriptor_hash: &str,
-) -> Result<CanonicalValue, BtcStateError> {
-    CanonicalValue::object([
-        (
-            "version",
-            CanonicalValue::String("mfm.fact-query.v1".to_owned()),
-        ),
-        (
-            "fact_kind",
-            CanonicalValue::String("collector.checkpoint".to_owned()),
-        ),
-        (
-            "resolved_descriptor",
-            CanonicalValue::String(descriptor_hash.to_owned()),
-        ),
-        ("audience", CanonicalValue::String("control".to_owned())),
-        ("scope", CanonicalValue::String(DEFAULT_SCOPE.to_owned())),
-        (
-            "predicates",
-            CanonicalValue::Array(vec![
-                query_predicate(
-                    "subject.chain",
-                    FactCanonicalScalar::string(BtcChain::Bitcoin.as_str()),
-                )?,
-                query_predicate(
-                    "subject.collector_kind",
-                    FactCanonicalScalar::string(&config.collector_kind),
-                )?,
-                query_predicate(
-                    "subject.network",
-                    FactCanonicalScalar::string(&config.network),
-                )?,
-                query_predicate(
-                    "subject.partition",
-                    FactCanonicalScalar::string(&config.partition),
-                )?,
-                query_predicate("subject.scope", FactCanonicalScalar::string(DEFAULT_SCOPE))?,
-                query_predicate(
-                    "subject.semantic_source_identity",
-                    FactCanonicalScalar::string(&config.semantic_source_identity),
-                )?,
-            ]),
-        ),
-        (
-            "return_fields",
-            CanonicalValue::Array(vec![query_return_field("result.high_watermark_height")?]),
-        ),
-        (
-            "ordering",
-            CanonicalValue::String("result.high_watermark_height.desc".to_owned()),
-        ),
-        ("limit", CanonicalValue::Unsigned(1)),
-    ])
-    .map_err(|error| BtcStateError::InvalidInput {
-        reason: error.to_string(),
-    })
-}
-
-fn query_return_field(field_id: &str) -> Result<CanonicalValue, BtcStateError> {
-    let field_id = FactFieldId::new(field_id).map_err(|error| BtcStateError::InvalidInput {
-        reason: error.to_string(),
-    })?;
-    CanonicalValue::object([(
-        "field_id",
-        CanonicalValue::String(field_id.as_str().to_owned()),
-    )])
+) -> Result<FactQueryInput, BtcStateError> {
+    FactQueryInput::new(
+        StoreScopeRef::new(&config.store_scope).map_err(|error| BtcStateError::InvalidInput {
+            reason: error.to_string(),
+        })?,
+        FactQueryScope::new(FactAudience::Control, FactVisibilityScope::Default),
+        ScopeDecisionEvidence::new(control_scope_decision_hash()),
+        vec![
+            query_predicate(
+                "subject.chain",
+                FactCanonicalScalar::string(BtcChain::Bitcoin.as_str()),
+            )?,
+            query_predicate(
+                "subject.collector_kind",
+                FactCanonicalScalar::string(&config.collector_kind),
+            )?,
+            query_predicate(
+                "subject.network",
+                FactCanonicalScalar::string(&config.network),
+            )?,
+            query_predicate(
+                "subject.partition",
+                FactCanonicalScalar::string(&config.partition),
+            )?,
+            query_predicate("subject.scope", FactCanonicalScalar::string(DEFAULT_SCOPE))?,
+            query_predicate(
+                "subject.semantic_source_identity",
+                FactCanonicalScalar::string(&config.semantic_source_identity),
+            )?,
+        ],
+        vec![FactQueryReturnField::new(
+            FactFieldId::new("result.high_watermark_height").map_err(|error| {
+                BtcStateError::InvalidInput {
+                    reason: error.to_string(),
+                }
+            })?,
+        )],
+        FactOrderingName::new("result.high_watermark_height.desc").map_err(|error| {
+            BtcStateError::InvalidInput {
+                reason: error.to_string(),
+            }
+        })?,
+        Some(1),
+    )
     .map_err(|error| BtcStateError::InvalidInput {
         reason: error.to_string(),
     })
@@ -1508,49 +1452,15 @@ fn query_return_field(field_id: &str) -> Result<CanonicalValue, BtcStateError> {
 fn query_predicate(
     field_id: &str,
     value: FactCanonicalScalar,
-) -> Result<CanonicalValue, BtcStateError> {
+) -> Result<FactQueryPredicate, BtcStateError> {
     let field_id = FactFieldId::new(field_id).map_err(|error| BtcStateError::InvalidInput {
         reason: error.to_string(),
     })?;
-    CanonicalValue::object([
-        (
-            "field_id",
-            CanonicalValue::String(field_id.as_str().to_owned()),
-        ),
-        ("operator", CanonicalValue::String("equal".to_owned())),
-        (
-            "value_type",
-            CanonicalValue::String(fact_value_type_tag(value.value_type()).to_owned()),
-        ),
-        ("value", canonical_scalar_query_value(&value)),
-    ])
-    .map_err(|error| BtcStateError::InvalidInput {
-        reason: error.to_string(),
-    })
-}
-
-fn canonical_scalar_query_value(value: &FactCanonicalScalar) -> CanonicalValue {
-    match value {
-        FactCanonicalScalar::String(value) => CanonicalValue::String(value.clone()),
-        FactCanonicalScalar::Boolean(value) => CanonicalValue::Bool(*value),
-        FactCanonicalScalar::SignedInteger(value) => CanonicalValue::Signed(*value),
-        FactCanonicalScalar::UnsignedInteger(value) => CanonicalValue::Unsigned(*value),
-        FactCanonicalScalar::Timestamp(value) => CanonicalValue::String(value.clone()),
-        FactCanonicalScalar::DecimalString(value) => CanonicalValue::Decimal(value.clone()),
-        FactCanonicalScalar::Digest(value) => CanonicalValue::String(value.as_str().to_owned()),
-    }
-}
-
-fn fact_value_type_tag(value_type: mfm_facts::FactFieldValueType) -> &'static str {
-    match value_type {
-        mfm_facts::FactFieldValueType::String => "string",
-        mfm_facts::FactFieldValueType::Boolean => "boolean",
-        mfm_facts::FactFieldValueType::SignedInteger => "signed_integer",
-        mfm_facts::FactFieldValueType::UnsignedInteger => "unsigned_integer",
-        mfm_facts::FactFieldValueType::Timestamp => "timestamp",
-        mfm_facts::FactFieldValueType::DecimalString => "decimal_string",
-        mfm_facts::FactFieldValueType::Digest => "digest",
-    }
+    Ok(FactQueryPredicate::new(
+        field_id,
+        FactQueryOperator::Equal,
+        value,
+    ))
 }
 
 fn validate_collector_checkpoint_common(
@@ -1632,11 +1542,12 @@ mod tests {
     use mfm_capabilities::CapabilitySpec;
     use mfm_effects::EffectSpec;
     use mfm_facts::{
-        fact_query_plan_hash, DescriptorCatalogWatermark, FactClaimId, FactFieldExposure,
-        FactFieldExtraction, FactFieldValueType, FactProjectionGeneration, FactQueryReceipt,
-        FactQueryReceiptMaterial, InternalFactRef, InternalFactRefParts, StoreCommitWatermark,
-        StoreIdentity, StoreKeyId, StoreReadFrontier, StoreReadFrontierType,
-        StoreReceiptAuthentication, StoreReceiptAuthenticationScheme,
+        fact_descriptor_hash, fact_query_plan_hash, CanonicalFactQueryPlan,
+        DescriptorCatalogWatermark, FactClaimId, FactFieldExposure, FactFieldExtraction,
+        FactFieldValueType, FactProjectionGeneration, FactQueryReceipt, FactQueryReceiptMaterial,
+        InternalFactRef, InternalFactRefParts, StoreCommitWatermark, StoreIdentity, StoreKeyId,
+        StoreReadFrontier, StoreReadFrontierType, StoreReceiptAuthentication,
+        StoreReceiptAuthenticationScheme,
     };
     use mfm_ids::{
         ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest, DigestBytes, EventId, RunId,

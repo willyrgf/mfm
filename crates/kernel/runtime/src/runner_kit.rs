@@ -1708,42 +1708,61 @@ mod tests {
         }
     }
 
+    fn fact_query_descriptor() -> mfm_facts::FactDescriptor {
+        mfm_facts::FactDescriptor::new(
+            mfm_facts::FactKind::new("chain.head").expect("kind"),
+            mfm_facts::fact_descriptor_schema_id().expect("descriptor schema"),
+            schema_id(),
+            schema_id(),
+            vec![mfm_facts::FactFieldDescriptor::new(
+                mfm_facts::FactFieldId::new("result.height").expect("field"),
+                mfm_facts::FactFieldPath::new("result.height").expect("path"),
+                mfm_facts::FactFieldValueType::UnsignedInteger,
+                mfm_facts::FactFieldExtraction::ResponsePath(
+                    mfm_facts::CanonicalValuePath::new("height").expect("response path"),
+                ),
+                vec![mfm_facts::FactQueryOperator::Equal],
+                mfm_facts::FactFieldExposure::Returnable,
+                None,
+                None,
+                true,
+                true,
+            )
+            .expect("height field")],
+            vec![mfm_facts::FactOrderingPolicy::new(
+                mfm_facts::FactOrderingName::new("result.height.asc").expect("ordering"),
+                vec![mfm_facts::FactOrderingTerm::new(
+                    mfm_facts::FactFieldId::new("result.height").expect("field"),
+                    mfm_facts::SortDirection::Ascending,
+                    mfm_facts::NullOrdering::Last,
+                    false,
+                )],
+            )
+            .expect("ordering")],
+        )
+        .expect("descriptor")
+    }
+
     fn query_evidence(fact_ref: mfm_facts::InternalFactRef) -> mfm_facts::FactQueryEvidence {
         let query_scope = mfm_facts::FactQueryScope::new(
             mfm_facts::FactAudience::Platform,
             mfm_facts::FactVisibilityScope::Default,
         );
         let store_scope = mfm_facts::StoreScopeRef::new("default").expect("store scope");
-        let ordering = mfm_facts::FactOrderingPolicy::new(
-            mfm_facts::FactOrderingName::new("metadata.store_order.asc").expect("ordering"),
-            vec![mfm_facts::FactOrderingTerm::new(
-                mfm_facts::FactFieldId::new("metadata.store_order").expect("field"),
-                mfm_facts::SortDirection::Ascending,
-                mfm_facts::NullOrdering::Last,
-                true,
-            )],
-        )
-        .expect("ordering");
-        let plan = mfm_facts::CanonicalFactQueryPlan::new(
+        let descriptor = fact_query_descriptor();
+        let input = mfm_facts::FactQueryInput::new(
             store_scope.clone(),
             query_scope.clone(),
-            mfm_facts::FactQueryCompilerVersion::new(mfm_facts::FACT_QUERY_COMPILER_VERSION)
-                .expect("compiler"),
-            mfm_facts::FactCanonicalizerVersion::new(mfm_facts::FACT_QUERY_CANONICALIZER_VERSION)
-                .expect("canonicalizer"),
-            digest(0x12),
             mfm_facts::ScopeDecisionEvidence::new(digest(0x19)),
-            mfm_canonical::CanonicalJsonBytes::from_value(
-                &CanonicalValue::object([(
-                    "kind",
-                    CanonicalValue::String("chain.head".to_owned()),
-                )])
-                .expect("query"),
-            ),
-            ordering,
+            Vec::new(),
+            vec![mfm_facts::FactQueryReturnField::new(
+                mfm_facts::FactFieldId::new("result.height").expect("field"),
+            )],
+            mfm_facts::FactOrderingName::new("result.height.asc").expect("ordering"),
             Some(1),
         )
-        .expect("plan");
+        .expect("query input");
+        let plan = mfm_facts::compile_fact_query_plan(&descriptor, input).expect("plan");
         let frontier = mfm_facts::StoreReadFrontier::new(
             store_scope,
             query_scope,

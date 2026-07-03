@@ -396,16 +396,14 @@ fn receipt_error(reason: FactIndexReceiptFailure) -> FactIndexReadError {
 
 #[cfg(test)]
 mod tests {
-    use mfm_canonical::{CanonicalJsonBytes, CanonicalValue};
     use mfm_capabilities::{CapabilityRole, CapabilitySpec};
     use mfm_facts::{
-        DescriptorCatalogWatermark, FactCanonicalScalar, FactCanonicalizerVersion, FactClaimId,
-        FactFieldId, FactFieldValueType, FactOrderingName, FactOrderingPolicy, FactOrderingTerm,
-        FactProjectionGeneration, FactQueryCompilerVersion, FactQueryResultRow, FactQueryScope,
-        FactVisibility, FactVisibilityScope, InternalFactRefParts, NullOrdering,
-        ReturnedFactFieldSummary, ReturnedFieldSummaries, ScopeDecisionEvidence, SortDirection,
-        StoreCommitWatermark, StoreIdentity, StoreKeyId, StoreReadFrontier, StoreReadFrontierType,
-        StoreReceiptAuthentication, StoreScopeRef,
+        DescriptorCatalogWatermark, FactCanonicalScalar, FactClaimId, FactFieldId,
+        FactFieldValueType, FactProjectionGeneration, FactQueryResultRow, FactQueryScope,
+        FactVisibility, FactVisibilityScope, InternalFactRefParts, ReturnedFactFieldSummary,
+        ReturnedFieldSummaries, ScopeDecisionEvidence, StoreCommitWatermark, StoreIdentity,
+        StoreKeyId, StoreReadFrontier, StoreReadFrontierType, StoreReceiptAuthentication,
+        StoreScopeRef,
     };
     use mfm_ids::{
         AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
@@ -516,32 +514,68 @@ mod tests {
     }
 
     fn plan(audience: FactAudience) -> CanonicalFactQueryPlan {
-        let query = CanonicalValue::object([(
-            "kind",
-            CanonicalValue::String("collector.checkpoint".to_owned()),
-        )])
-        .expect("canonical query");
-        CanonicalFactQueryPlan::new(
-            StoreScopeRef::new("mfm.store.default").expect("store scope"),
-            FactQueryScope::new(audience, FactVisibilityScope::Default),
-            FactQueryCompilerVersion::new("mfm.facts.query.v1").expect("compiler"),
-            FactCanonicalizerVersion::new("mfm.canonical.v1").expect("canonicalizer"),
-            digest(0x20),
-            ScopeDecisionEvidence::new(digest(0x21)),
-            CanonicalJsonBytes::from_value(&query),
-            FactOrderingPolicy::new(
-                FactOrderingName::new("metadata.recorded_at.desc").expect("ordering"),
-                vec![FactOrderingTerm::new(
+        let descriptor = mfm_facts::FactDescriptor::new(
+            mfm_facts::FactKind::new("collector.checkpoint").expect("kind"),
+            mfm_facts::fact_descriptor_schema_id().expect("descriptor schema"),
+            schema_id(0x90),
+            schema_id(0x91),
+            vec![
+                mfm_facts::FactFieldDescriptor::new(
+                    FactFieldId::new("result.height").expect("field"),
+                    mfm_facts::FactFieldPath::new("result.height").expect("path"),
+                    FactFieldValueType::UnsignedInteger,
+                    mfm_facts::FactFieldExtraction::ResponsePath(
+                        mfm_facts::CanonicalValuePath::new("height").expect("response path"),
+                    ),
+                    vec![mfm_facts::FactQueryOperator::Equal],
+                    mfm_facts::FactFieldExposure::Returnable,
+                    None,
+                    None,
+                    true,
+                    true,
+                )
+                .expect("result field"),
+                mfm_facts::FactFieldDescriptor::new(
                     FactFieldId::new("metadata.recorded_at").expect("field"),
-                    SortDirection::Descending,
-                    NullOrdering::Last,
+                    mfm_facts::FactFieldPath::new("metadata.recorded_at").expect("path"),
+                    FactFieldValueType::Timestamp,
+                    mfm_facts::FactFieldExtraction::Metadata(
+                        mfm_facts::FactMetadataField::RecordedAt,
+                    ),
+                    vec![mfm_facts::FactQueryOperator::Equal],
+                    mfm_facts::FactFieldExposure::QueryOnly,
+                    None,
+                    None,
+                    true,
+                    false,
+                )
+                .expect("metadata field"),
+            ],
+            vec![mfm_facts::FactOrderingPolicy::new(
+                mfm_facts::FactOrderingName::new("metadata.recorded_at.desc").expect("ordering"),
+                vec![mfm_facts::FactOrderingTerm::new(
+                    FactFieldId::new("metadata.recorded_at").expect("field"),
+                    mfm_facts::SortDirection::Descending,
+                    mfm_facts::NullOrdering::Last,
                     true,
                 )],
             )
-            .expect("fact ordering"),
+            .expect("fact ordering")],
+        )
+        .expect("descriptor");
+        let input = mfm_facts::FactQueryInput::new(
+            StoreScopeRef::new("mfm.store.default").expect("store scope"),
+            FactQueryScope::new(audience, FactVisibilityScope::Default),
+            ScopeDecisionEvidence::new(digest(0x21)),
+            Vec::new(),
+            vec![mfm_facts::FactQueryReturnField::new(
+                FactFieldId::new("result.height").expect("field"),
+            )],
+            mfm_facts::FactOrderingName::new("metadata.recorded_at.desc").expect("ordering"),
             Some(1),
         )
-        .expect("plan")
+        .expect("query input");
+        mfm_facts::compile_fact_query_plan(&descriptor, input).expect("plan")
     }
 
     fn receipt_with_summary(

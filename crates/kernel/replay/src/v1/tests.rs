@@ -1302,37 +1302,49 @@ fn fact_query_evidence_artifact(
 }
 
 fn replay_fact_query_plan() -> mfm_facts::CanonicalFactQueryPlan {
-    let canonical_query = mfm_canonical::CanonicalJsonBytes::from_value(
-        &mfm_canonical::CanonicalValue::object([(
-            "kind",
-            mfm_canonical::CanonicalValue::String("mfm.replay.test.fact".to_owned()),
-        )])
-        .expect("query"),
-    );
-    mfm_facts::CanonicalFactQueryPlan::new(
+    let descriptor = replay_stream_fact_descriptor();
+    let input = mfm_facts::FactQueryInput::new(
         mfm_facts::StoreScopeRef::new("default").expect("store scope"),
         mfm_facts::FactQueryScope::new(
             mfm_facts::FactAudience::Platform,
             mfm_facts::FactVisibilityScope::Default,
         ),
-        mfm_facts::FactQueryCompilerVersion::new("mfm.facts.query.v1").expect("compiler"),
-        mfm_facts::FactCanonicalizerVersion::new("mfm.canonical.v1").expect("canonicalizer"),
-        mfm_facts::fact_descriptor_hash(&replay_stream_fact_descriptor()).expect("descriptor"),
         mfm_facts::ScopeDecisionEvidence::new(content_digest(0x46)),
-        canonical_query,
-        mfm_facts::FactOrderingPolicy::new(
-            mfm_facts::FactOrderingName::new("result.amount.desc").expect("ordering"),
-            vec![mfm_facts::FactOrderingTerm::new(
-                mfm_facts::FactFieldId::new("result.amount").expect("field"),
-                mfm_facts::SortDirection::Descending,
-                mfm_facts::NullOrdering::Last,
-                false,
-            )],
-        )
-        .expect("ordering"),
+        Vec::new(),
+        vec![mfm_facts::FactQueryReturnField::new(
+            mfm_facts::FactFieldId::new("result.amount").expect("field"),
+        )],
+        mfm_facts::FactOrderingName::new("result.amount.desc").expect("ordering"),
         Some(1),
     )
-    .expect("query plan")
+    .expect("query input");
+    mfm_facts::compile_fact_query_plan(&descriptor, input).expect("query plan")
+}
+
+fn result_amount_desc_ordering() -> mfm_facts::FactOrderingPolicy {
+    mfm_facts::FactOrderingPolicy::new(
+        mfm_facts::FactOrderingName::new("result.amount.desc").expect("ordering"),
+        vec![mfm_facts::FactOrderingTerm::new(
+            mfm_facts::FactFieldId::new("result.amount").expect("field"),
+            mfm_facts::SortDirection::Descending,
+            mfm_facts::NullOrdering::Last,
+            false,
+        )],
+    )
+    .expect("ordering")
+}
+
+fn result_amount_asc_ordering() -> mfm_facts::FactOrderingPolicy {
+    mfm_facts::FactOrderingPolicy::new(
+        mfm_facts::FactOrderingName::new("result.amount.asc").expect("ordering"),
+        vec![mfm_facts::FactOrderingTerm::new(
+            mfm_facts::FactFieldId::new("result.amount").expect("field"),
+            mfm_facts::SortDirection::Ascending,
+            mfm_facts::NullOrdering::Last,
+            false,
+        )],
+    )
+    .expect("ordering")
 }
 
 fn internal_fact_ref_for_fixture(fixture: &ReplayFactStreamFixture) -> mfm_facts::InternalFactRef {
@@ -1449,7 +1461,7 @@ fn replay_stream_fact_descriptor() -> mfm_facts::FactDescriptor {
             )
             .expect("result field"),
         ],
-        Vec::new(),
+        vec![result_amount_desc_ordering()],
     )
     .expect("fact descriptor")
 }
@@ -1462,7 +1474,7 @@ fn replay_stream_other_fact_descriptor() -> mfm_facts::FactDescriptor {
         descriptor.subject_schema_id().clone(),
         descriptor.response_schema_id().clone(),
         descriptor.fields().to_vec(),
-        descriptor.orderings().to_vec(),
+        vec![result_amount_asc_ordering()],
     )
     .expect("other fact descriptor")
 }
