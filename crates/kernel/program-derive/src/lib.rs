@@ -1643,14 +1643,16 @@ fn fact_field_accessor_tokens(field: &FactFieldAttr) -> syn::Result<proc_macro2:
     match field.source {
         FactFieldAttrSource::Subject => {
             let path = field.path.as_ref().expect("validated subject path");
-            Ok(quote!(::mfm_program::facts::FactFieldAccessor::SubjectPath(
-                ::mfm_program::facts::CanonicalValuePath::new(#path)?
-            )))
+            Ok(
+                quote!(::mfm_program::facts::FactFieldExtraction::SubjectPath(
+                    ::mfm_program::facts::CanonicalValuePath::new(#path)?
+                )),
+            )
         }
         FactFieldAttrSource::Result => {
             let path = field.path.as_ref().expect("validated result path");
             Ok(
-                quote!(::mfm_program::facts::FactFieldAccessor::ResponsePath(
+                quote!(::mfm_program::facts::FactFieldExtraction::ResponsePath(
                     ::mfm_program::facts::CanonicalValuePath::new(#path)?
                 )),
             )
@@ -1658,7 +1660,7 @@ fn fact_field_accessor_tokens(field: &FactFieldAttr) -> syn::Result<proc_macro2:
         FactFieldAttrSource::Metadata => {
             let metadata = field.metadata.as_ref().expect("validated metadata field");
             let metadata = fact_metadata_field_tokens(metadata, Span::call_site())?;
-            Ok(quote!(::mfm_program::facts::FactFieldAccessor::Metadata(#metadata)))
+            Ok(quote!(::mfm_program::facts::FactFieldExtraction::Metadata(#metadata)))
         }
     }
 }

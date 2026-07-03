@@ -776,7 +776,7 @@ fn rest_fact_descriptor() -> mfm_facts::FactDescriptor {
                 mfm_facts::FactFieldId::new("subject.account").expect("field"),
                 mfm_facts::FactFieldPath::new("subject.account").expect("path"),
                 mfm_facts::FactFieldValueType::String,
-                mfm_facts::FactFieldAccessor::SubjectPath(
+                mfm_facts::FactFieldExtraction::SubjectPath(
                     mfm_facts::CanonicalValuePath::new("account").expect("accessor"),
                 ),
                 vec![mfm_facts::FactQueryOperator::Equal],
@@ -791,7 +791,7 @@ fn rest_fact_descriptor() -> mfm_facts::FactDescriptor {
                 mfm_facts::FactFieldId::new("result.amount").expect("field"),
                 mfm_facts::FactFieldPath::new("result.amount").expect("path"),
                 mfm_facts::FactFieldValueType::UnsignedInteger,
-                mfm_facts::FactFieldAccessor::ResponsePath(
+                mfm_facts::FactFieldExtraction::ResponsePath(
                     mfm_facts::CanonicalValuePath::new("amount").expect("accessor"),
                 ),
                 vec![

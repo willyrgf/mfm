@@ -1232,7 +1232,7 @@ fn typed_fact_subject_value(
 ) -> std::result::Result<CanonicalValue, mfm_facts::FactDescriptorError> {
     let mut typed_paths = std::collections::BTreeMap::new();
     for field in descriptor.fields() {
-        let mfm_facts::FactFieldAccessor::SubjectPath(path) = field.accessor() else {
+        let mfm_facts::FactFieldExtraction::SubjectPath(path) = field.extraction() else {
             continue;
         };
         if let Some(previous) = typed_paths.insert(path.as_str().to_owned(), field.value_type()) {

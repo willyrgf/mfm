@@ -1438,7 +1438,7 @@ fn replay_stream_fact_descriptor() -> mfm_facts::FactDescriptor {
                 mfm_facts::FactFieldId::new("subject.account").expect("field id"),
                 mfm_facts::FactFieldPath::new("subject.account").expect("field path"),
                 mfm_facts::FactFieldValueType::String,
-                mfm_facts::FactFieldAccessor::SubjectPath(
+                mfm_facts::FactFieldExtraction::SubjectPath(
                     mfm_facts::CanonicalValuePath::new("account").expect("subject path"),
                 ),
                 vec![mfm_facts::FactQueryOperator::Equal],
@@ -1453,7 +1453,7 @@ fn replay_stream_fact_descriptor() -> mfm_facts::FactDescriptor {
                 mfm_facts::FactFieldId::new("result.amount").expect("field id"),
                 mfm_facts::FactFieldPath::new("result.amount").expect("field path"),
                 mfm_facts::FactFieldValueType::UnsignedInteger,
-                mfm_facts::FactFieldAccessor::ResponsePath(
+                mfm_facts::FactFieldExtraction::ResponsePath(
                     mfm_facts::CanonicalValuePath::new("amount").expect("response path"),
                 ),
                 vec![mfm_facts::FactQueryOperator::Equal],

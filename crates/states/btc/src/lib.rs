@@ -1633,8 +1633,8 @@ mod tests {
     use mfm_effects::EffectSpec;
     use mfm_facts::{
         fact_query_plan_hash, fact_query_receipt_body_hash_from_parts,
-        fact_query_result_set_digest, DescriptorCatalogWatermark, FactClaimId, FactFieldAccessor,
-        FactFieldExposure, FactFieldValueType, FactProjectionGeneration, FactQueryReceipt,
+        fact_query_result_set_digest, DescriptorCatalogWatermark, FactClaimId, FactFieldExposure,
+        FactFieldExtraction, FactFieldValueType, FactProjectionGeneration, FactQueryReceipt,
         InternalFactRef, InternalFactRefParts, QueryResultCardinality, StoreCommitWatermark,
         StoreIdentity, StoreKeyId, StoreReadFrontier, StoreReadFrontierType,
         StoreReceiptAuthentication, StoreReceiptAuthenticationScheme,
@@ -1719,7 +1719,7 @@ mod tests {
         assert_eq!(descriptor.fact_kind().as_str(), "chain.head");
         assert!(descriptor.fields().iter().any(|field| {
             field.field_id().as_str() == "subject.semantic_source_identity"
-                && matches!(field.accessor(), FactFieldAccessor::SubjectPath(_))
+                && matches!(field.extraction(), FactFieldExtraction::SubjectPath(_))
                 && field.exposure() == FactFieldExposure::QueryOnly
         }));
         assert!(descriptor.fields().iter().any(|field| {
@@ -1729,7 +1729,7 @@ mod tests {
         }));
         assert!(descriptor.fields().iter().any(|field| {
             field.field_id().as_str() == "metadata.observed_at"
-                && matches!(field.accessor(), FactFieldAccessor::Metadata(_))
+                && matches!(field.extraction(), FactFieldExtraction::Metadata(_))
                 && !field.required()
         }));
         assert_eq!(
@@ -1756,7 +1756,7 @@ mod tests {
                     .fields()
                     .iter()
                     .any(|field| field.field_id().as_str() == field_id
-                        && matches!(field.accessor(), FactFieldAccessor::SubjectPath(_))),
+                        && matches!(field.extraction(), FactFieldExtraction::SubjectPath(_))),
                 "missing subject field {field_id}"
             );
         }

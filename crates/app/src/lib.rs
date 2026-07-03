@@ -606,9 +606,10 @@ impl FactCatalogService {
             .iter()
             .filter(|(_hash, descriptor)| descriptor.fact_kind().as_str() == request.fact_kind)
             .filter(|(_hash, descriptor)| {
-                request.shape.as_ref().is_none_or(|shape| {
-                    descriptor.descriptor_schema_id().as_str() == shape
-                })
+                request
+                    .shape
+                    .as_ref()
+                    .is_none_or(|shape| descriptor.descriptor_schema_id().as_str() == shape)
             })
             .collect::<Vec<_>>();
         match matches.as_slice() {
@@ -4168,7 +4169,7 @@ fn public_field_summary(field: &mfm_facts::FactFieldDescriptor) -> PublicFactFie
     PublicFactFieldSummary {
         field_id: field.field_id().as_str().to_owned(),
         path: field.path().as_str().to_owned(),
-        source: field.accessor().source().path_prefix().to_owned(),
+        source: field.extraction().source().path_prefix().to_owned(),
         value_type: fact_value_type_str(field.value_type()).to_owned(),
         exposure: fact_exposure_str(field.exposure()).to_owned(),
         operators: field
@@ -4376,7 +4377,7 @@ fn public_field_value(
     Ok(PublicFactFieldValue {
         field_id: field.field_id().as_str().to_owned(),
         path: field.path().as_str().to_owned(),
-        source: field.accessor().source().path_prefix().to_owned(),
+        source: field.extraction().source().path_prefix().to_owned(),
         value_type: fact_value_type_str(field.value_type()).to_owned(),
         value: fact_scalar_to_public_scalar(value),
         unit: field.unit().map(|unit| unit.as_str().to_owned()),

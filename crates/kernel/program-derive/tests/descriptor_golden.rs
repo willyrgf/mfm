@@ -373,8 +373,8 @@ fn generated_fact_descriptor_is_canonical_descriptor_authority() {
     assert_eq!(fields.len(), 4);
     assert_eq!(fields[0].field_id().as_str(), "subject.chain");
     assert_eq!(
-        fields[0].accessor(),
-        &facts::FactFieldAccessor::SubjectPath(
+        fields[0].extraction(),
+        &facts::FactFieldExtraction::SubjectPath(
             facts::CanonicalValuePath::new("chain").expect("subject path")
         )
     );
@@ -398,8 +398,8 @@ fn generated_fact_descriptor_is_canonical_descriptor_authority() {
 
     assert_eq!(fields[3].field_id().as_str(), "metadata.observed_at");
     assert_eq!(
-        fields[3].accessor(),
-        &facts::FactFieldAccessor::Metadata(facts::FactMetadataField::ObservedAt)
+        fields[3].extraction(),
+        &facts::FactFieldExtraction::Metadata(facts::FactMetadataField::ObservedAt)
     );
     assert_eq!(fields[3].exposure(), facts::FactFieldExposure::QueryOnly);
     assert!(!fields[3].required());
