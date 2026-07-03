@@ -191,21 +191,38 @@ mod tests {
                 DigestBytes::from_array([0x42; 32]),
             )
             .expect("response schema"),
-            vec![mfm_facts::FactFieldDescriptor::new(
-                FactFieldId::new("result.height").expect("field"),
-                mfm_facts::FactFieldPath::new("result.height").expect("path"),
-                mfm_facts::FactFieldValueType::UnsignedInteger,
-                mfm_facts::FactFieldExtraction::ResponsePath(
-                    mfm_facts::CanonicalValuePath::new("height").expect("response path"),
-                ),
-                vec![mfm_facts::FactQueryOperator::Equal],
-                mfm_facts::FactFieldExposure::Returnable,
-                None,
-                None,
-                true,
-                true,
-            )
-            .expect("height field")],
+            vec![
+                mfm_facts::FactFieldDescriptor::new(
+                    FactFieldId::new("subject.source").expect("field"),
+                    mfm_facts::FactFieldPath::new("subject.source").expect("path"),
+                    mfm_facts::FactFieldValueType::String,
+                    mfm_facts::FactFieldExtraction::SubjectPath(
+                        mfm_facts::CanonicalValuePath::new("source").expect("subject path"),
+                    ),
+                    vec![mfm_facts::FactQueryOperator::Equal],
+                    mfm_facts::FactFieldExposure::QueryOnly,
+                    None,
+                    None,
+                    false,
+                    true,
+                )
+                .expect("source field"),
+                mfm_facts::FactFieldDescriptor::new(
+                    FactFieldId::new("result.height").expect("field"),
+                    mfm_facts::FactFieldPath::new("result.height").expect("path"),
+                    mfm_facts::FactFieldValueType::UnsignedInteger,
+                    mfm_facts::FactFieldExtraction::ResponsePath(
+                        mfm_facts::CanonicalValuePath::new("height").expect("response path"),
+                    ),
+                    vec![mfm_facts::FactQueryOperator::Equal],
+                    mfm_facts::FactFieldExposure::Returnable,
+                    None,
+                    None,
+                    true,
+                    true,
+                )
+                .expect("height field"),
+            ],
             vec![FactOrderingPolicy::new(
                 FactOrderingName::new("result.height.desc").expect("ordering"),
                 vec![FactOrderingTerm::new(

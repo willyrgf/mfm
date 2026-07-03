@@ -19,9 +19,8 @@ use mfm_effects::{ManagedPlatformWrite, ReadExternal};
 use mfm_fact_capabilities::{FactIndexReadCapability, FactIndexReadRequest, FactIndexReadResponse};
 use mfm_facts::{
     compile_fact_query_plan, FactAudience, FactCanonicalScalar, FactFieldId, FactOrderingName,
-    FactQueryInput, FactQueryOperator, FactQueryPredicate, FactQueryReturnField, FactQueryScope,
-    FactSelectionEvidence, FactVisibility, FactVisibilityScope, ScopeDecisionEvidence,
-    StoreScopeRef,
+    FactQueryInput, FactQueryOperator, FactQueryPredicate, FactQueryScope, FactSelectionEvidence,
+    FactVisibility, FactVisibilityScope, ScopeDecisionEvidence, StoreScopeRef,
 };
 use mfm_ids::{AdapterKind, AdapterVersion, ContentDigest};
 use mfm_ids::{DigestAlgorithm, StateKind, StateVersion};
@@ -1430,13 +1429,7 @@ fn collector_checkpoint_query_input(
                 FactCanonicalScalar::string(&config.semantic_source_identity),
             )?,
         ],
-        vec![FactQueryReturnField::new(
-            FactFieldId::new("result.high_watermark_height").map_err(|error| {
-                BtcStateError::InvalidInput {
-                    reason: error.to_string(),
-                }
-            })?,
-        )],
+        Vec::new(),
         FactOrderingName::new("result.high_watermark_height.desc").map_err(|error| {
             BtcStateError::InvalidInput {
                 reason: error.to_string(),
@@ -1732,16 +1725,14 @@ mod tests {
         let query: serde_json::Value =
             serde_json::from_slice(plan.canonical_query().as_bytes()).expect("query json");
         assert_eq!(query["fact_kind"], "collector.checkpoint");
-        assert_eq!(query["audience"], "control");
-        assert_eq!(query["scope"], "default");
         assert_eq!(query["limit"], 1);
         assert_eq!(query["ordering"], "result.high_watermark_height.desc");
         assert_eq!(
-            query["return_fields"][0]["field_id"],
-            "result.high_watermark_height"
+            query["return_fields"].as_array().expect("return fields"),
+            &[] as &[serde_json::Value]
         );
         let parsed_shape = mfm_facts::parse_canonical_fact_query_shape(plan).expect("query shape");
-        assert_eq!(parsed_shape.return_fields().len(), 1);
+        assert_eq!(parsed_shape.return_fields().len(), 0);
         assert!(query["predicates"]
             .as_array()
             .expect("predicates")

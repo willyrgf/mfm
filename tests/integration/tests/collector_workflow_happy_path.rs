@@ -18,9 +18,9 @@ use mfm_fact_capabilities::{
 use mfm_facts::{
     DescriptorCatalogWatermark, FactAudience, FactCanonicalScalar, FactClaimId,
     FactProjectionGeneration, FactQueryOperator, InternalFactRef, InternalFactRefParts,
-    NullOrdering, QueryResultCardinality, ReturnedFactFieldSummary, ReturnedFieldSummaries,
-    ReturnedFieldValueSummary, StoreCommitWatermark, StoreIdentity, StoreKeyId, StoreReadFrontier,
-    StoreReadFrontierType, StoreReceiptAuthentication, StoreReceiptAuthenticationScheme,
+    NullOrdering, ReturnedFactFieldSummary, ReturnedFieldSummaries, ReturnedFieldValueSummary,
+    StoreCommitWatermark, StoreIdentity, StoreKeyId, StoreReadFrontier, StoreReadFrontierType,
+    StoreReceiptAuthentication, StoreReceiptAuthenticationScheme,
 };
 use mfm_ids::SeedId;
 use mfm_op_btc_chain_head_collector::{
