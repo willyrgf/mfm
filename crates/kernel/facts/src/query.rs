@@ -83,6 +83,11 @@ impl FactQueryPredicate {
     pub const fn value(&self) -> &FactCanonicalScalar {
         &self.value
     }
+
+    /// Returns whether an actual scalar satisfies this predicate.
+    pub fn matches_scalar(&self, actual: &FactCanonicalScalar) -> bool {
+        actual.matches_query_operator(self.operator, &self.value)
+    }
 }
 
 /// One descriptor field requested in fact query results.

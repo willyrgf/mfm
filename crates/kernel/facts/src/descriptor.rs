@@ -50,6 +50,35 @@ impl FactOrderingTerm {
     pub const fn tie_breaker(&self) -> bool {
         self.tie_breaker
     }
+
+    /// Compares optional fact scalars using this ordering term's direction and null policy.
+    ///
+    /// Sort direction applies only to present scalar values. Null placement follows the term's
+    /// `NULLS FIRST`/`NULLS LAST` policy independently, matching SQL ordering semantics.
+    pub fn compare_values(
+        &self,
+        left: Option<&FactCanonicalScalar>,
+        right: Option<&FactCanonicalScalar>,
+    ) -> Option<std::cmp::Ordering> {
+        Some(match (left, right) {
+            (Some(left), Some(right)) => {
+                let ordering = left.query_cmp(right)?;
+                match self.direction {
+                    SortDirection::Ascending => ordering,
+                    SortDirection::Descending => ordering.reverse(),
+                }
+            }
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => match self.nulls {
+                NullOrdering::First => std::cmp::Ordering::Less,
+                NullOrdering::Last => std::cmp::Ordering::Greater,
+            },
+            (Some(_), None) => match self.nulls {
+                NullOrdering::First => std::cmp::Ordering::Greater,
+                NullOrdering::Last => std::cmp::Ordering::Less,
+            },
+        })
+    }
 }
 
 /// Descriptor-defined fact ordering policy.
