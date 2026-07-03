@@ -1,4 +1,4 @@
-use mfm_canonical::{CanonicalJsonBytes, CanonicalValue, DecimalString};
+use mfm_canonical::{CanonicalJsonBytes, CanonicalValue, DecimalString, PlainCanonicalJsonBytes};
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
     DigestAlgorithm, DigestBytes, EventId, NodeId, RunId, SchemaId,
@@ -28,6 +28,12 @@ fn event_id(byte: u8) -> EventId {
         DigestAlgorithm::Sha256JcsV1,
         DigestBytes::from_array([byte; 32]),
     )
+}
+
+fn plain_canonical_json(value: &CanonicalValue) -> PlainCanonicalJsonBytes {
+    let canonical = CanonicalJsonBytes::from_value(value);
+    PlainCanonicalJsonBytes::from_canonical_json_slice(canonical.as_bytes())
+        .expect("plain canonical json")
 }
 
 fn artifact_id(byte: u8) -> ArtifactId {
@@ -791,7 +797,7 @@ fn query_plan_computes_canonical_query_hash_and_rejects_zero_limit() {
         .first()
         .expect("descriptor ordering")
         .clone();
-    let canonical_query = CanonicalJsonBytes::from_value(
+    let canonical_query = plain_canonical_json(
         &CanonicalValue::object([("kind", CanonicalValue::String("chain.head".into()))])
             .expect("query value"),
     );
@@ -1077,7 +1083,7 @@ fn query_evidence_fixture() -> (CanonicalFactQueryPlan, FactQueryReceipt, FactQu
     ])
     .expect("descriptor");
     let ordering = descriptor.orderings().first().expect("ordering").clone();
-    let canonical_query = CanonicalJsonBytes::from_value(
+    let canonical_query = plain_canonical_json(
         &CanonicalValue::object([("kind", CanonicalValue::String("chain.head".into()))])
             .expect("query value"),
     );
