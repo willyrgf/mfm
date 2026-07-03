@@ -203,12 +203,12 @@ impl StoreReceiptAuthentication {
         match scheme {
             StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1 => {
                 if key_id.is_none() {
-                    return Err(FactDescriptorError::descriptor(
+                    return Err(FactError::descriptor(
                         "local Ed25519 receipt authentication requires a key id",
                     ));
                 }
                 if signature_or_mac.len() != 64 {
-                    return Err(FactDescriptorError::descriptor(
+                    return Err(FactError::descriptor(
                         "local Ed25519 receipt authentication requires a 64-byte signature",
                     ));
                 }
@@ -243,50 +243,16 @@ impl StoreReceiptAuthentication {
     }
 }
 
-/// One returned field summary value used by query replay and public shaping.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReturnedFieldValueSummary {
-    pub(crate) value: FactFieldValue,
-}
-
-impl ReturnedFieldValueSummary {
-    /// Creates a returned field value summary.
-    pub fn new(
-        field_id: FactFieldId,
-        value_type: FactFieldValueType,
-        value: FactCanonicalScalar,
-    ) -> Result<Self> {
-        Ok(Self {
-            value: FactFieldValue::new(field_id, value_type, value)?,
-        })
-    }
-
-    /// Returns the summarized field id.
-    pub const fn field_id(&self) -> &FactFieldId {
-        self.value.field_id()
-    }
-
-    /// Returns the summarized value type.
-    pub const fn value_type(&self) -> FactFieldValueType {
-        self.value.value_type()
-    }
-
-    /// Returns the summarized value.
-    pub const fn value(&self) -> &FactCanonicalScalar {
-        self.value.value()
-    }
-}
-
 /// Returned summaries for one fact ref.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReturnedFactFieldSummary {
     pub(crate) fact_claim_id: FactClaimId,
-    pub(crate) fields: Vec<ReturnedFieldValueSummary>,
+    pub(crate) fields: Vec<FactFieldValue>,
 }
 
 impl ReturnedFactFieldSummary {
     /// Creates returned field summaries for one fact.
-    pub fn new(fact_claim_id: FactClaimId, fields: Vec<ReturnedFieldValueSummary>) -> Self {
+    pub fn new(fact_claim_id: FactClaimId, fields: Vec<FactFieldValue>) -> Self {
         Self {
             fact_claim_id,
             fields,
@@ -299,7 +265,7 @@ impl ReturnedFactFieldSummary {
     }
 
     /// Returns summarized fields in retained order.
-    pub fn fields(&self) -> &[ReturnedFieldValueSummary] {
+    pub fn fields(&self) -> &[FactFieldValue] {
         &self.fields
     }
 }
@@ -413,12 +379,12 @@ impl FactQueryReceipt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactQueryResultRow {
     pub(crate) fact_ref: InternalFactRef,
-    pub(crate) returned_fields: Vec<ReturnedFieldValueSummary>,
+    pub(crate) returned_fields: Vec<FactFieldValue>,
 }
 
 impl FactQueryResultRow {
     /// Creates a fact query result row.
-    pub fn new(fact_ref: InternalFactRef, returned_fields: Vec<ReturnedFieldValueSummary>) -> Self {
+    pub fn new(fact_ref: InternalFactRef, returned_fields: Vec<FactFieldValue>) -> Self {
         Self {
             fact_ref,
             returned_fields,
@@ -431,7 +397,7 @@ impl FactQueryResultRow {
     }
 
     /// Returns requested returned field summaries present on this row.
-    pub fn returned_fields(&self) -> &[ReturnedFieldValueSummary] {
+    pub fn returned_fields(&self) -> &[FactFieldValue] {
         &self.returned_fields
     }
 }
@@ -548,9 +514,8 @@ fn returned_field_summaries_for_rows(
 }
 
 fn cardinality_for_rows(row_count: usize, limit: Option<u64>) -> Result<QueryResultCardinality> {
-    let row_count = u64::try_from(row_count).map_err(|_| {
-        FactDescriptorError::descriptor("fact query result row count overflowed u64")
-    })?;
+    let row_count = u64::try_from(row_count)
+        .map_err(|_| FactError::descriptor("fact query result row count overflowed u64"))?;
     match limit {
         Some(limit) if row_count == limit => Ok(QueryResultCardinality::AtLeast(row_count)),
         _ => Ok(QueryResultCardinality::Exact(row_count)),
@@ -651,7 +616,7 @@ pub fn validate_fact_query_result_rows(
     Ok(())
 }
 
-fn fact_query_result_mismatch_error(mismatch: FactQueryResultMismatch) -> FactDescriptorError {
+fn fact_query_result_mismatch_error(mismatch: FactQueryResultMismatch) -> FactError {
     let message = match mismatch {
         FactQueryResultMismatch::RowCountMismatch => {
             "fact query result rows must align one-for-one with returned refs"
@@ -672,7 +637,7 @@ fn fact_query_result_mismatch_error(mismatch: FactQueryResultMismatch) -> FactDe
             "fact query result row fields do not match returned field summaries"
         }
     };
-    FactDescriptorError::descriptor(message)
+    FactError::descriptor(message)
 }
 
 /// State-owned evidence describing selected receipt rows.
@@ -692,7 +657,7 @@ impl FactSelectionEvidence {
     ) -> Result<Self> {
         for window in selected_indices.windows(2) {
             if window[0] >= window[1] {
-                return Err(FactDescriptorError::descriptor(
+                return Err(FactError::descriptor(
                     "selected indices must be sorted and unique",
                 ));
             }

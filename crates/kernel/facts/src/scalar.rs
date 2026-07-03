@@ -32,9 +32,7 @@ impl FactCanonicalScalar {
     pub fn timestamp(value: impl Into<String>) -> Result<Self> {
         let value = value.into();
         if value.is_empty() {
-            return Err(FactDescriptorError::descriptor(
-                "timestamp scalar must not be empty",
-            ));
+            return Err(FactError::descriptor("timestamp scalar must not be empty"));
         }
         Ok(Self::Timestamp(value))
     }
@@ -43,7 +41,7 @@ impl FactCanonicalScalar {
     pub fn decimal_variable(value: impl Into<String>) -> Result<Self> {
         DecimalString::new_variable(value)
             .map(Self::DecimalString)
-            .map_err(|error| FactDescriptorError::canonical(error.to_string()))
+            .map_err(|error| FactError::canonical(error.to_string()))
     }
 
     /// Returns this scalar's fact field value type.
@@ -122,6 +120,33 @@ impl FactCanonicalScalar {
         }
     }
 
+    pub(crate) fn from_canonical_value(
+        value_type: FactFieldValueType,
+        value: &CanonicalValue,
+        context: ScalarJsonContext<'_>,
+    ) -> Result<Self> {
+        match (value_type, value) {
+            (FactFieldValueType::String, CanonicalValue::String(value)) => {
+                Ok(Self::String(value.clone()))
+            }
+            (FactFieldValueType::Boolean, CanonicalValue::Bool(value)) => Ok(Self::Boolean(*value)),
+            (FactFieldValueType::SignedInteger, CanonicalValue::Signed(value)) => {
+                Ok(Self::SignedInteger(*value))
+            }
+            (FactFieldValueType::UnsignedInteger, CanonicalValue::Unsigned(value)) => {
+                Ok(Self::UnsignedInteger(*value))
+            }
+            (FactFieldValueType::Timestamp, CanonicalValue::String(value)) => {
+                Self::timestamp(value.clone())
+            }
+            (FactFieldValueType::DecimalString, CanonicalValue::Decimal(value)) => {
+                Ok(Self::DecimalString(value.clone()))
+            }
+            (FactFieldValueType::Digest, CanonicalValue::String(value)) => context.digest(value),
+            _ => Err(context.canonical_type_error(value_type, value)),
+        }
+    }
+
     /// Compares this scalar with another scalar using canonical fact-query semantics.
     ///
     /// Decimal strings compare by numeric value rather than by canonical spelling, matching the
@@ -172,8 +197,8 @@ impl FactCanonicalScalar {
 #[derive(Clone, Copy)]
 pub(crate) enum ScalarJsonContext<'a> {
     Field(&'a FactFieldId),
-    SubjectPath(&'a str),
-    ResponsePath(&'a str),
+    Subject(&'a str),
+    Response(&'a str),
 }
 
 impl ScalarJsonContext<'_> {
@@ -183,27 +208,55 @@ impl ScalarJsonContext<'_> {
         field_error: &'static str,
     ) -> Result<&'a str> {
         value.as_str().ok_or_else(|| match self {
-            Self::Field(field_id) => FactDescriptorError::field(field_id.clone(), field_error),
-            Self::SubjectPath(path) => {
-                FactDescriptorError::descriptor(format!("fact subject path {path} is not a string"))
+            Self::Field(field_id) => FactError::field(field_id.clone(), field_error),
+            Self::Subject(path) => {
+                FactError::descriptor(format!("fact subject path {path} is not a string"))
             }
-            Self::ResponsePath(path) => FactDescriptorError::descriptor(format!(
-                "fact response path {path} is not a string"
-            )),
+            Self::Response(path) => {
+                FactError::descriptor(format!("fact response path {path} is not a string"))
+            }
         })
     }
 
-    fn type_error(
-        self,
-        value_type: FactFieldValueType,
-        field_error: &'static str,
-    ) -> FactDescriptorError {
+    fn type_error(self, value_type: FactFieldValueType, field_error: &'static str) -> FactError {
         match self {
-            Self::Field(field_id) => FactDescriptorError::field(field_id.clone(), field_error),
-            Self::SubjectPath(path) => FactDescriptorError::descriptor(format!(
+            Self::Field(field_id) => FactError::field(field_id.clone(), field_error),
+            Self::Subject(path) => FactError::descriptor(format!(
                 "fact subject path {path} does not match {value_type:?}"
             )),
-            Self::ResponsePath(path) => FactDescriptorError::descriptor(format!(
+            Self::Response(path) => FactError::descriptor(format!(
+                "fact response path {path} does not match declared value type {:?}",
+                value_type
+            )),
+        }
+    }
+
+    fn canonical_type_error(
+        self,
+        value_type: FactFieldValueType,
+        value: &CanonicalValue,
+    ) -> FactError {
+        match self {
+            Self::Field(field_id) => {
+                let message = match value {
+                    CanonicalValue::Array(_) => {
+                        "arrays, wildcards, slices, and repeated values are unsupported fact scalars"
+                            .to_owned()
+                    }
+                    CanonicalValue::Object(_) => {
+                        "object values are unsupported fact scalars".to_owned()
+                    }
+                    CanonicalValue::Null => {
+                        "null cannot be normalized as a fact scalar".to_owned()
+                    }
+                    _ => format!("scalar type does not match {value_type:?}"),
+                };
+                FactError::field(field_id.clone(), message)
+            }
+            Self::Subject(path) => FactError::descriptor(format!(
+                "fact subject path {path} does not match {value_type:?}"
+            )),
+            Self::Response(path) => FactError::descriptor(format!(
                 "fact response path {path} does not match declared value type {:?}",
                 value_type
             )),
@@ -213,9 +266,9 @@ impl ScalarJsonContext<'_> {
     fn decimal(self, value: &str) -> Result<FactCanonicalScalar> {
         match self {
             Self::Field(_) => FactCanonicalScalar::decimal_variable(value),
-            Self::SubjectPath(_) | Self::ResponsePath(_) => DecimalString::new_variable(value)
+            Self::Subject(_) | Self::Response(_) => DecimalString::new_variable(value)
                 .map(FactCanonicalScalar::DecimalString)
-                .map_err(|error| FactDescriptorError::descriptor(error.to_string())),
+                .map_err(|error| FactError::descriptor(error.to_string())),
         }
     }
 
@@ -224,12 +277,12 @@ impl ScalarJsonContext<'_> {
             .map(FactCanonicalScalar::Digest)
             .map_err(|error| match self {
                 Self::Field(field_id) => {
-                    FactDescriptorError::field(field_id.clone(), format!("invalid digest: {error}"))
+                    FactError::field(field_id.clone(), format!("invalid digest: {error}"))
                 }
-                Self::SubjectPath(path) => FactDescriptorError::descriptor(format!(
+                Self::Subject(path) => FactError::descriptor(format!(
                     "fact subject path {path} contains invalid digest: {error}"
                 )),
-                Self::ResponsePath(path) => FactDescriptorError::descriptor(format!(
+                Self::Response(path) => FactError::descriptor(format!(
                     "fact response path {path} contains invalid digest: {error}"
                 )),
             })

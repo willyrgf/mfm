@@ -33,10 +33,10 @@ impl_fact_tag!(FactFieldSource, "fact field source", pub, "Returns the canonical
 pub enum FactFieldExtraction {
     /// Extract the field from canonical subject material.
     #[serde(rename = "subject")]
-    SubjectPath(CanonicalValuePath),
+    Subject(CanonicalValuePath),
     /// Extract the field from canonical response material.
     #[serde(rename = "result")]
-    ResponsePath(CanonicalValuePath),
+    Response(CanonicalValuePath),
     /// Extract the field from claim or store metadata.
     Metadata(FactMetadataField),
 }
@@ -45,9 +45,18 @@ impl FactFieldExtraction {
     /// Returns the source category represented by this extraction recipe.
     pub const fn source(&self) -> FactFieldSource {
         match self {
-            Self::SubjectPath(_) => FactFieldSource::Subject,
-            Self::ResponsePath(_) => FactFieldSource::Result,
+            Self::Subject(_) => FactFieldSource::Subject,
+            Self::Response(_) => FactFieldSource::Result,
             Self::Metadata(_) => FactFieldSource::Metadata,
+        }
+    }
+
+    /// Returns the descriptor path represented by this extraction recipe.
+    pub fn path(&self) -> String {
+        match self {
+            Self::Subject(path) => format!("subject.{}", path.as_str()),
+            Self::Response(path) => format!("result.{}", path.as_str()),
+            Self::Metadata(field) => format!("metadata.{}", field.as_str()),
         }
     }
 }
@@ -191,7 +200,7 @@ impl FactScale {
     /// Creates a bounded base-10 field scale.
     pub fn new(exponent: i16) -> Result<Self> {
         if !(Self::MIN_EXPONENT..=Self::MAX_EXPONENT).contains(&exponent) {
-            return Err(FactDescriptorError::descriptor(format!(
+            return Err(FactError::descriptor(format!(
                 "scale exponent {exponent} outside supported range {}..={}",
                 Self::MIN_EXPONENT,
                 Self::MAX_EXPONENT

@@ -288,8 +288,8 @@ impl From<mfm_certify::CertifyError> for AppError {
     }
 }
 
-impl From<mfm_facts::FactDescriptorError> for AppError {
-    fn from(_error: mfm_facts::FactDescriptorError) -> Self {
+impl From<mfm_facts::FactError> for AppError {
+    fn from(_error: mfm_facts::FactError) -> Self {
         Self::backend(
             ErrorClass::BadRequest,
             "FactQueryInvalid",

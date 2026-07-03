@@ -79,8 +79,7 @@ pub fn fact_descriptor_projection_fixture_for_test(
         descriptor_evidence.clone(),
         &descriptor_requirement,
     )?;
-    let subject_namespace_hash = mfm_facts::fact_subject_namespace(&descriptor)
-        .and_then(|namespace| mfm_facts::fact_subject_namespace_hash(&namespace))
+    let subject_namespace_hash = mfm_facts::fact_subject_namespace_hash(&descriptor)
         .map_err(|error| StoreError::Identity(error.to_string()))?;
     let projection = FactDescriptorProjection {
         descriptor_hash: descriptor_hash.clone(),
@@ -917,15 +916,15 @@ fn returned_fields_from_projection(
     projection: &ProjectionSnapshot,
     entry: &FactIndexProjection,
     shape: &mfm_facts::CompiledFactQueryShape,
-) -> Result<Vec<mfm_facts::ReturnedFieldValueSummary>> {
+) -> Result<Vec<mfm_facts::FactFieldValue>> {
     shape
         .return_fields()
         .iter()
         .filter_map(|return_field| {
             projection
-                .fact_term(&entry.fact_claim_id, return_field.field_id())
+                .fact_term(&entry.fact_claim_id, return_field)
                 .map(|term| {
-                    mfm_facts::ReturnedFieldValueSummary::new(
+                    mfm_facts::FactFieldValue::new(
                         term.field_id.clone(),
                         term.value_type,
                         term.value.clone(),

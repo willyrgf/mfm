@@ -191,7 +191,12 @@ fn replay_rejects_fact_query_evidence_with_mismatched_returned_ref() {
     let fixture = replay_fact_stream_fixture();
     let query = fact_query_evidence_artifact(&fixture, |fact_ref| {
         let mut parts = internal_fact_ref_parts_from_ref(&fact_ref);
-        parts.response_hash = content_digest(0x44);
+        parts.response = mfm_facts::FactResponseEvidence::new(
+            parts.response.response_schema_id().clone(),
+            content_digest(0x44),
+            parts.response.artifact_id().clone(),
+            parts.response.artifact_evidence_hash().clone(),
+        );
         mfm_facts::InternalFactRef::new(parts).expect("mismatched returned ref")
     });
     let mut authority = fixture.authority();
@@ -1084,7 +1089,7 @@ fn fact_claim(artifact: &StoredArtifactEvidenceRef) -> mfm_facts::FactClaim {
 }
 
 fn fact_subject_evidence() -> mfm_facts::FactSubjectEvidence {
-    let material = mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactSubjectValueV1::new(
+    let material = mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactFieldValue::new(
         mfm_facts::FactFieldId::new("subject.account").expect("field id"),
         mfm_facts::FactFieldValueType::String,
         mfm_facts::FactCanonicalScalar::string("same-subject"),
@@ -1220,7 +1225,7 @@ fn fact_query_evidence_artifact(
     let returned_ref = mutate_ref(internal_fact_ref_for_fixture(fixture));
     let rows = [mfm_facts::FactQueryResultRow::new(
         returned_ref,
-        vec![mfm_facts::ReturnedFieldValueSummary::new(
+        vec![mfm_facts::FactFieldValue::new(
             mfm_facts::FactFieldId::new("result.amount").expect("field"),
             mfm_facts::FactFieldValueType::UnsignedInteger,
             mfm_facts::FactCanonicalScalar::UnsignedInteger(42),
@@ -1292,37 +1297,24 @@ fn fact_query_evidence_artifact(
 }
 
 fn replay_fact_query_plan() -> mfm_facts::CanonicalFactQueryPlan {
-    let canonical_query = mfm_canonical::CanonicalJsonBytes::from_value(
-        &mfm_canonical::CanonicalValue::object([(
-            "kind",
-            mfm_canonical::CanonicalValue::String("mfm.replay.test.fact".to_owned()),
-        )])
-        .expect("query"),
-    );
-    mfm_facts::CanonicalFactQueryPlan::new(
+    let input = mfm_facts::FactQueryInput::new(
         mfm_facts::StoreScopeRef::new("default").expect("store scope"),
         mfm_facts::FactQueryScope::new(
             mfm_facts::FactAudience::Platform,
             mfm_facts::FactVisibilityScope::Default,
         ),
-        mfm_facts::FactQueryCompilerVersion::new("mfm.facts.query.v1").expect("compiler"),
-        mfm_facts::FactCanonicalizerVersion::new("mfm.canonical.v1").expect("canonicalizer"),
-        mfm_facts::fact_descriptor_hash(&replay_stream_fact_descriptor()).expect("descriptor"),
         mfm_facts::ScopeDecisionEvidence::new(content_digest(0x46)),
-        canonical_query,
-        mfm_facts::FactOrderingPolicy::new(
-            mfm_facts::FactOrderingName::new("result.amount.desc").expect("ordering"),
-            vec![mfm_facts::FactOrderingTerm::new(
-                mfm_facts::FactFieldId::new("result.amount").expect("field"),
-                mfm_facts::SortDirection::Descending,
-                mfm_facts::NullOrdering::Last,
-                false,
-            )],
-        )
-        .expect("ordering"),
+        vec![mfm_facts::FactQueryPredicate::new(
+            mfm_facts::FactFieldId::new("subject.account").expect("field"),
+            mfm_facts::FactQueryOperator::Equal,
+            mfm_facts::FactCanonicalScalar::string("same-subject"),
+        )],
+        vec![mfm_facts::FactFieldId::new("result.amount").expect("field")],
+        mfm_facts::FactOrderingName::new("result.amount.desc").expect("ordering"),
         Some(1),
     )
-    .expect("query plan")
+    .expect("query input");
+    mfm_facts::compile_fact_query_plan(&replay_stream_fact_descriptor(), input).expect("query plan")
 }
 
 fn internal_fact_ref_for_fixture(fixture: &ReplayFactStreamFixture) -> mfm_facts::InternalFactRef {
@@ -1330,37 +1322,15 @@ fn internal_fact_ref_for_fixture(fixture: &ReplayFactStreamFixture) -> mfm_facts
     let KernelEventPayload::FactRecorded(fact) = event.payload() else {
         panic!("expected fact event");
     };
-    let claim = &fact.claim;
-    let response = claim.response();
-    let producer = claim.producer();
-    mfm_facts::InternalFactRef::new(mfm_facts::InternalFactRefParts {
-        fact_claim_id: fixture.claim_id.clone(),
-        source_event_id: event.event_id().clone(),
-        recorded_at: "2026-07-01T00:00:00Z".to_owned(),
-        producer_node_id: fact_node_id(),
-        observed_at: claim.observed_at().map(ToOwned::to_owned),
-        visibility: claim.visibility().clone(),
-        fact_kind: claim.fact_kind().clone(),
-        fact_descriptor_hash: claim.fact_descriptor_hash().clone(),
-        fact_subject_namespace_hash: claim.subject().fact_subject_namespace_hash().clone(),
-        fact_key: claim.subject().fact_key().clone(),
-        subject_material_hash: claim.subject().subject_material_hash().clone(),
-        request_schema_id: claim
-            .request()
-            .map(|request| request.request_schema_id().clone()),
-        request_hash: claim
-            .request()
-            .map(|request| request.request_hash().clone()),
-        response_schema_id: response.response_schema_id().clone(),
-        response_hash: response.response_hash().clone(),
-        artifact_id: response.artifact_id().clone(),
-        artifact_evidence_hash: response.artifact_evidence_hash().clone(),
-        capability_kind: producer.capability_kind().clone(),
-        capability_version: producer.capability_version().clone(),
-        adapter_kind: producer.adapter_kind().clone(),
-        adapter_version: producer.adapter_version().clone(),
-    })
+    mfm_facts::InternalFactRef::from_claim(
+        fixture.claim_id.clone(),
+        event.event_id().clone(),
+        "2026-07-01T00:00:00Z".to_owned(),
+        fact_node_id(),
+        &fact.claim,
+    )
     .expect("internal fact ref")
+    .expect("indexed fact ref")
 }
 
 fn internal_fact_ref_parts_from_ref(
@@ -1375,19 +1345,31 @@ fn internal_fact_ref_parts_from_ref(
         visibility: fact_ref.visibility().clone(),
         fact_kind: fact_ref.fact_kind().clone(),
         fact_descriptor_hash: fact_ref.fact_descriptor_hash().clone(),
-        fact_subject_namespace_hash: fact_ref.fact_subject_namespace_hash().clone(),
-        fact_key: fact_ref.fact_key().clone(),
-        subject_material_hash: fact_ref.subject_material_hash().clone(),
-        request_schema_id: fact_ref.request_schema_id().cloned(),
-        request_hash: fact_ref.request_hash().cloned(),
-        response_schema_id: fact_ref.response_schema_id().clone(),
-        response_hash: fact_ref.response_hash().clone(),
-        artifact_id: fact_ref.artifact_id().clone(),
-        artifact_evidence_hash: fact_ref.artifact_evidence_hash().clone(),
-        capability_kind: fact_ref.capability_kind().clone(),
-        capability_version: fact_ref.capability_version().clone(),
-        adapter_kind: fact_ref.adapter_kind().clone(),
-        adapter_version: fact_ref.adapter_version().clone(),
+        subject: mfm_facts::FactSubjectRef::new(
+            fact_ref.fact_subject_namespace_hash().clone(),
+            fact_ref.fact_key().clone(),
+            fact_ref.subject_material_hash().clone(),
+        ),
+        request: match (fact_ref.request_schema_id(), fact_ref.request_hash()) {
+            (Some(schema_id), Some(hash)) => Some(mfm_facts::FactRequestEvidence::new(
+                schema_id.clone(),
+                hash.clone(),
+            )),
+            (None, None) => None,
+            _ => unreachable!("internal fact refs cannot carry partial request evidence"),
+        },
+        response: mfm_facts::FactResponseEvidence::new(
+            fact_ref.response_schema_id().clone(),
+            fact_ref.response_hash().clone(),
+            fact_ref.artifact_id().clone(),
+            fact_ref.artifact_evidence_hash().clone(),
+        ),
+        producer: mfm_facts::FactProducerProvenance::new(
+            fact_ref.capability_kind().clone(),
+            fact_ref.capability_version().clone(),
+            fact_ref.adapter_kind().clone(),
+            fact_ref.adapter_version().clone(),
+        ),
     }
 }
 
@@ -1408,36 +1390,42 @@ fn replay_stream_fact_descriptor() -> mfm_facts::FactDescriptor {
         vec![
             mfm_facts::FactFieldDescriptor::new(
                 mfm_facts::FactFieldId::new("subject.account").expect("field id"),
-                mfm_facts::FactFieldPath::new("subject.account").expect("field path"),
                 mfm_facts::FactFieldValueType::String,
-                mfm_facts::FactFieldExtraction::SubjectPath(
+                mfm_facts::FactFieldExtraction::Subject(
                     mfm_facts::CanonicalValuePath::new("account").expect("subject path"),
                 ),
-                vec![mfm_facts::FactQueryOperator::Equal],
-                mfm_facts::FactFieldExposure::Returnable,
-                None,
-                None,
-                false,
-                true,
+                mfm_facts::FactFieldPolicy::new(
+                    vec![mfm_facts::FactQueryOperator::Equal],
+                    mfm_facts::FactFieldExposure::Returnable,
+                )
+                .required(),
             )
             .expect("subject field"),
             mfm_facts::FactFieldDescriptor::new(
                 mfm_facts::FactFieldId::new("result.amount").expect("field id"),
-                mfm_facts::FactFieldPath::new("result.amount").expect("field path"),
                 mfm_facts::FactFieldValueType::UnsignedInteger,
-                mfm_facts::FactFieldExtraction::ResponsePath(
+                mfm_facts::FactFieldExtraction::Response(
                     mfm_facts::CanonicalValuePath::new("amount").expect("response path"),
                 ),
-                vec![mfm_facts::FactQueryOperator::Equal],
-                mfm_facts::FactFieldExposure::Returnable,
-                None,
-                None,
-                true,
-                true,
+                mfm_facts::FactFieldPolicy::new(
+                    vec![mfm_facts::FactQueryOperator::Equal],
+                    mfm_facts::FactFieldExposure::Returnable,
+                )
+                .sortable()
+                .required(),
             )
             .expect("result field"),
         ],
-        Vec::new(),
+        vec![mfm_facts::FactOrderingPolicy::new(
+            mfm_facts::FactOrderingName::new("result.amount.desc").expect("ordering"),
+            vec![mfm_facts::FactOrderingTerm::new(
+                mfm_facts::FactFieldId::new("result.amount").expect("field"),
+                mfm_facts::SortDirection::Descending,
+                mfm_facts::NullOrdering::Last,
+                false,
+            )],
+        )
+        .expect("ordering")],
     )
     .expect("fact descriptor")
 }
@@ -1458,16 +1446,15 @@ fn replay_stream_other_fact_descriptor() -> mfm_facts::FactDescriptor {
 fn replay_stream_fact_subject_evidence(
     descriptor: &mfm_facts::FactDescriptor,
 ) -> mfm_facts::FactSubjectEvidence {
-    let material = mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactSubjectValueV1::new(
+    let material = mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactFieldValue::new(
         mfm_facts::FactFieldId::new("subject.account").expect("field id"),
         mfm_facts::FactFieldValueType::String,
         mfm_facts::FactCanonicalScalar::string("same-subject"),
     )
     .expect("subject value")])
     .expect("subject material");
-    let namespace = mfm_facts::fact_subject_namespace(descriptor).expect("subject namespace");
     let namespace_hash =
-        mfm_facts::fact_subject_namespace_hash(&namespace).expect("subject namespace hash");
+        mfm_facts::fact_subject_namespace_hash(descriptor).expect("subject namespace hash");
     mfm_facts::FactSubjectEvidence::from_material(namespace_hash, &material)
         .expect("subject evidence")
 }

@@ -2314,35 +2314,32 @@ fn fact_descriptor() -> mfm_facts::FactDescriptor {
         vec![
             mfm_facts::FactFieldDescriptor::new(
                 mfm_facts::FactFieldId::new("subject.chain").expect("field id"),
-                mfm_facts::FactFieldPath::new("subject.chain").expect("field path"),
                 mfm_facts::FactFieldValueType::String,
-                mfm_facts::FactFieldExtraction::SubjectPath(
+                mfm_facts::FactFieldExtraction::Subject(
                     mfm_facts::CanonicalValuePath::new("chain").expect("path"),
                 ),
-                vec![mfm_facts::FactQueryOperator::Equal],
-                mfm_facts::FactFieldExposure::Returnable,
-                None,
-                None,
-                false,
-                true,
+                mfm_facts::FactFieldPolicy::new(
+                    vec![mfm_facts::FactQueryOperator::Equal],
+                    mfm_facts::FactFieldExposure::Returnable,
+                )
+                .required(),
             )
             .expect("subject field"),
             mfm_facts::FactFieldDescriptor::new(
                 mfm_facts::FactFieldId::new("result.height").expect("field id"),
-                mfm_facts::FactFieldPath::new("result.height").expect("field path"),
                 mfm_facts::FactFieldValueType::UnsignedInteger,
-                mfm_facts::FactFieldExtraction::ResponsePath(
+                mfm_facts::FactFieldExtraction::Response(
                     mfm_facts::CanonicalValuePath::new("height").expect("path"),
                 ),
-                vec![
-                    mfm_facts::FactQueryOperator::Equal,
-                    mfm_facts::FactQueryOperator::GreaterThanOrEqual,
-                ],
-                mfm_facts::FactFieldExposure::Returnable,
-                None,
-                None,
-                true,
-                true,
+                mfm_facts::FactFieldPolicy::new(
+                    vec![
+                        mfm_facts::FactQueryOperator::Equal,
+                        mfm_facts::FactQueryOperator::GreaterThanOrEqual,
+                    ],
+                    mfm_facts::FactFieldExposure::Returnable,
+                )
+                .sortable()
+                .required(),
             )
             .expect("response field"),
         ],
@@ -2369,17 +2366,15 @@ fn fact_descriptor_fixture() -> mfm_store::v1::test_support::FactDescriptorProje
 }
 
 fn fact_subject_evidence() -> mfm_facts::FactSubjectEvidence {
-    let material = mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactSubjectValueV1::new(
+    let material = mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactFieldValue::new(
         mfm_facts::FactFieldId::new("subject.chain").expect("field"),
         mfm_facts::FactFieldValueType::String,
         mfm_facts::FactCanonicalScalar::string("store_test_chain"),
     )
     .expect("subject value")])
     .expect("subject material");
-    let namespace =
-        mfm_facts::fact_subject_namespace(&fact_descriptor()).expect("subject namespace");
     let namespace_hash =
-        mfm_facts::fact_subject_namespace_hash(&namespace).expect("subject namespace hash");
+        mfm_facts::fact_subject_namespace_hash(&fact_descriptor()).expect("subject namespace hash");
     mfm_facts::FactSubjectEvidence::from_material(namespace_hash, &material)
         .expect("subject evidence")
 }

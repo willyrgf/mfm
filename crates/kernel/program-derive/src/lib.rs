@@ -298,9 +298,9 @@ fn expand_mfm_fact_type_derive_result(input: DeriveInput) -> syn::Result<proc_ma
 
             fn descriptor() -> ::mfm_program::facts::Result<::mfm_program::facts::FactDescriptor> {
                 let subject_schema_id = <Self::Subject as ::mfm_values::MfmValue>::schema_id()
-                    .map_err(|error| ::mfm_program::facts::FactDescriptorError::descriptor(error.to_string()))?;
+                    .map_err(|error| ::mfm_program::facts::FactError::descriptor(error.to_string()))?;
                 let response_schema_id = <Self::Response as ::mfm_values::MfmValue>::schema_id()
-                    .map_err(|error| ::mfm_program::facts::FactDescriptorError::descriptor(error.to_string()))?;
+                    .map_err(|error| ::mfm_program::facts::FactError::descriptor(error.to_string()))?;
 
                 ::mfm_program::facts::FactDescriptor::new(
                     ::mfm_program::facts::FactKind::new(#fact_kind)?,
@@ -1645,15 +1645,13 @@ fn fact_field_descriptor_tokens(field: &FactFieldAttr) -> syn::Result<proc_macro
     Ok(quote! {
         ::mfm_program::facts::FactFieldDescriptor::new(
             ::mfm_program::facts::FactFieldId::new(#id)?,
-            ::mfm_program::facts::FactFieldPath::new(#id)?,
             #value_type,
             #extraction,
-            vec![#(#operators),*],
-            #exposure,
-            #unit,
-            #scale,
-            #sortable,
-            #required,
+            ::mfm_program::facts::FactFieldPolicy::new(vec![#(#operators),*], #exposure)
+                .with_optional_unit(#unit)
+                .with_optional_scale(#scale)
+                .with_sortable(#sortable)
+                .with_required(#required),
         )?
     })
 }
@@ -1662,19 +1660,15 @@ fn fact_field_extraction_tokens(field: &FactFieldAttr) -> syn::Result<proc_macro
     match field.source {
         FactFieldAttrSource::Subject => {
             let path = field.path.as_ref().expect("validated subject path");
-            Ok(
-                quote!(::mfm_program::facts::FactFieldExtraction::SubjectPath(
-                    ::mfm_program::facts::CanonicalValuePath::new(#path)?
-                )),
-            )
+            Ok(quote!(::mfm_program::facts::FactFieldExtraction::Subject(
+                ::mfm_program::facts::CanonicalValuePath::new(#path)?
+            )))
         }
         FactFieldAttrSource::Result => {
             let path = field.path.as_ref().expect("validated result path");
-            Ok(
-                quote!(::mfm_program::facts::FactFieldExtraction::ResponsePath(
-                    ::mfm_program::facts::CanonicalValuePath::new(#path)?
-                )),
-            )
+            Ok(quote!(::mfm_program::facts::FactFieldExtraction::Response(
+                ::mfm_program::facts::CanonicalValuePath::new(#path)?
+            )))
         }
         FactFieldAttrSource::Metadata => {
             let metadata = field.metadata.as_ref().expect("validated metadata field");

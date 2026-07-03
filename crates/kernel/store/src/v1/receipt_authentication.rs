@@ -172,16 +172,11 @@ fn receipt_authentication_error(message: impl Into<String>) -> StoreError {
 #[cfg(test)]
 mod tests {
     use ed25519_dalek::SigningKey;
-    use mfm_canonical::{CanonicalJsonBytes, CanonicalValue};
+    use mfm_facts::{DescriptorCatalogWatermark, FactProjectionGeneration, StoreCommitWatermark};
     use mfm_facts::{
-        DescriptorCatalogWatermark, FactProjectionGeneration, FactQueryCompilerVersion,
-        StoreCommitWatermark,
-    };
-    use mfm_facts::{
-        FactAudience, FactCanonicalizerVersion, FactFieldId, FactOrderingName, FactOrderingPolicy,
-        FactOrderingTerm, FactQueryEvidence, FactQueryScope, FactSelectionEvidence,
-        FactVisibilityScope, NullOrdering, ScopeDecisionEvidence, SortDirection, StoreReadFrontier,
-        StoreScopeRef,
+        FactAudience, FactFieldId, FactOrderingName, FactOrderingPolicy, FactOrderingTerm,
+        FactQueryEvidence, FactQueryScope, FactSelectionEvidence, FactVisibilityScope,
+        NullOrdering, ScopeDecisionEvidence, SortDirection, StoreReadFrontier, StoreScopeRef,
     };
     use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes};
 
@@ -204,21 +199,41 @@ mod tests {
     }
 
     fn plan() -> mfm_facts::CanonicalFactQueryPlan {
-        mfm_facts::CanonicalFactQueryPlan::new(
-            StoreScopeRef::new("default").expect("store scope"),
-            FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
-            FactQueryCompilerVersion::new("mfm.facts.query.v1").expect("compiler"),
-            FactCanonicalizerVersion::new("mfm.canonical.v1").expect("canonicalizer"),
-            digest(1),
-            ScopeDecisionEvidence::new(digest(2)),
-            CanonicalJsonBytes::from_value(
-                &CanonicalValue::object([(
-                    "kind",
-                    CanonicalValue::String("chain.head".to_owned()),
-                )])
-                .expect("query"),
-            ),
-            FactOrderingPolicy::new(
+        let descriptor = mfm_facts::FactDescriptor::new(
+            mfm_facts::FactKind::new("chain.head").expect("kind"),
+            mfm_facts::fact_descriptor_schema_id().expect("descriptor schema"),
+            schema_id("mfm.test.subject", 3),
+            schema_id("mfm.test.response", 4),
+            vec![
+                mfm_facts::FactFieldDescriptor::new(
+                    FactFieldId::new("subject.chain").expect("field"),
+                    mfm_facts::FactFieldValueType::String,
+                    mfm_facts::FactFieldExtraction::Subject(
+                        mfm_facts::CanonicalValuePath::new("chain").expect("path"),
+                    ),
+                    mfm_facts::FactFieldPolicy::new(
+                        vec![mfm_facts::FactQueryOperator::Equal],
+                        mfm_facts::FactFieldExposure::Returnable,
+                    )
+                    .required(),
+                )
+                .expect("subject field"),
+                mfm_facts::FactFieldDescriptor::new(
+                    FactFieldId::new("result.height").expect("field"),
+                    mfm_facts::FactFieldValueType::UnsignedInteger,
+                    mfm_facts::FactFieldExtraction::Response(
+                        mfm_facts::CanonicalValuePath::new("height").expect("path"),
+                    ),
+                    mfm_facts::FactFieldPolicy::new(
+                        vec![mfm_facts::FactQueryOperator::Equal],
+                        mfm_facts::FactFieldExposure::Returnable,
+                    )
+                    .sortable()
+                    .required(),
+                )
+                .expect("result field"),
+            ],
+            vec![FactOrderingPolicy::new(
                 FactOrderingName::new("result.height.desc").expect("ordering"),
                 vec![FactOrderingTerm::new(
                     FactFieldId::new("result.height").expect("field"),
@@ -227,10 +242,34 @@ mod tests {
                     false,
                 )],
             )
-            .expect("ordering"),
+            .expect("ordering")],
+        )
+        .expect("descriptor");
+        let input = mfm_facts::FactQueryInput::new(
+            StoreScopeRef::new("default").expect("store scope"),
+            FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
+            ScopeDecisionEvidence::new(digest(2)),
+            vec![mfm_facts::FactQueryPredicate::new(
+                FactFieldId::new("subject.chain").expect("field"),
+                mfm_facts::FactQueryOperator::Equal,
+                mfm_facts::FactCanonicalScalar::string("bitcoin"),
+            )],
+            vec![FactFieldId::new("result.height").expect("field")],
+            FactOrderingName::new("result.height.desc").expect("ordering"),
             Some(10),
         )
-        .expect("plan")
+        .expect("query input");
+        mfm_facts::compile_fact_query_plan(&descriptor, input).expect("plan")
+    }
+
+    fn schema_id(name: &'static str, byte: u8) -> mfm_ids::SchemaId {
+        mfm_ids::SchemaId::new(
+            name,
+            "mfm.test.v1",
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([byte; 32]),
+        )
+        .expect("schema id")
     }
 
     fn trust_root(key: &SigningKey) -> FactQueryReceiptTrustRoot {

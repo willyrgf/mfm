@@ -1386,9 +1386,7 @@ fn apply_fact_descriptor_artifact(
             field: "digest",
         });
     }
-    let namespace = mfm_facts::fact_subject_namespace(&descriptor)
-        .map_err(|error| StoreError::Identity(error.to_string()))?;
-    let namespace_hash = mfm_facts::fact_subject_namespace_hash(&namespace)
+    let namespace_hash = mfm_facts::fact_subject_namespace_hash(&descriptor)
         .map_err(|error| StoreError::Identity(error.to_string()))?;
     let projection = FactDescriptorProjection {
         descriptor_hash: descriptor_hash.clone(),

@@ -1,15 +1,14 @@
 use std::fmt;
-use std::ops::Deref;
 use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Result type for facts-kernel descriptor operations.
-pub type Result<T> = std::result::Result<T, FactDescriptorError>;
+pub type Result<T> = std::result::Result<T, FactError>;
 
 /// Error returned when fact descriptors or fact descriptor primitives are invalid.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum FactDescriptorError {
+pub enum FactError {
     /// A checked string primitive failed validation.
     #[error("{kind} {value:?} failed validation: {message}")]
     InvalidString {
@@ -50,7 +49,7 @@ pub enum FactDescriptorError {
     },
 }
 
-impl FactDescriptorError {
+impl FactError {
     fn invalid_string(kind: &'static str, value: &str, message: impl Into<String>) -> Self {
         Self::InvalidString {
             kind,
@@ -122,14 +121,6 @@ macro_rules! checked_fact_string {
             }
         }
 
-        impl Deref for $ty {
-            type Target = str;
-
-            fn deref(&self) -> &Self::Target {
-                self.as_str()
-            }
-        }
-
         impl fmt::Display for $ty {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str(self.as_str())
@@ -137,7 +128,7 @@ macro_rules! checked_fact_string {
         }
 
         impl FromStr for $ty {
-            type Err = FactDescriptorError;
+            type Err = FactError;
 
             fn from_str(value: &str) -> Result<Self> {
                 Self::new(value)
@@ -145,7 +136,7 @@ macro_rules! checked_fact_string {
         }
 
         impl TryFrom<String> for $ty {
-            type Error = FactDescriptorError;
+            type Error = FactError;
 
             fn try_from(value: String) -> Result<Self> {
                 Self::new(value)
@@ -153,7 +144,7 @@ macro_rules! checked_fact_string {
         }
 
         impl TryFrom<&str> for $ty {
-            type Error = FactDescriptorError;
+            type Error = FactError;
 
             fn try_from(value: &str) -> Result<Self> {
                 Self::new(value)
@@ -199,13 +190,6 @@ checked_fact_string!(
     "fact field id",
     validate_dot_path,
     "Descriptor-owned stable field identifier."
-);
-
-checked_fact_string!(
-    FactFieldPath,
-    "fact field path",
-    validate_qualified_field_path,
-    "Human-readable descriptor field path with a source prefix."
 );
 
 checked_fact_string!(
@@ -272,51 +256,17 @@ fn validate_dot_path(kind: &'static str, value: &str) -> Result<()> {
         saw_segment = true;
     }
     if !saw_segment {
-        return Err(FactDescriptorError::invalid_string(
-            kind,
-            value,
-            "empty value",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_qualified_field_path(kind: &'static str, value: &str) -> Result<()> {
-    validate_dot_path(kind, value)?;
-    let Some(prefix) = value.split('.').next() else {
-        return Err(FactDescriptorError::invalid_string(
-            kind,
-            value,
-            "missing source prefix",
-        ));
-    };
-    if !matches!(prefix, "subject" | "result" | "metadata") {
-        return Err(FactDescriptorError::invalid_string(
-            kind,
-            value,
-            "field path must start with subject, result, or metadata",
-        ));
-    }
-    if value.split('.').count() < 2 {
-        return Err(FactDescriptorError::invalid_string(
-            kind,
-            value,
-            "field path must include a field segment after the source prefix",
-        ));
+        return Err(FactError::invalid_string(kind, value, "empty value"));
     }
     Ok(())
 }
 
 fn validate_len(kind: &'static str, value: &str, max: usize) -> Result<()> {
     if value.is_empty() {
-        return Err(FactDescriptorError::invalid_string(
-            kind,
-            value,
-            "empty value",
-        ));
+        return Err(FactError::invalid_string(kind, value, "empty value"));
     }
     if value.len() > max {
-        return Err(FactDescriptorError::invalid_string(
+        return Err(FactError::invalid_string(
             kind,
             value,
             format!("too long; max {max} bytes"),
@@ -327,17 +277,13 @@ fn validate_len(kind: &'static str, value: &str, max: usize) -> Result<()> {
 
 fn validate_segment(kind: &'static str, whole: &str, segment: &str) -> Result<()> {
     if segment.is_empty() {
-        return Err(FactDescriptorError::invalid_string(
-            kind,
-            whole,
-            "empty path segment",
-        ));
+        return Err(FactError::invalid_string(kind, whole, "empty path segment"));
     }
 
     let mut chars = segment.chars();
     let first = chars.next().expect("segment is non-empty");
     if !first.is_ascii_lowercase() {
-        return Err(FactDescriptorError::invalid_string(
+        return Err(FactError::invalid_string(
             kind,
             whole,
             "segment must start with lowercase ascii",
@@ -346,7 +292,7 @@ fn validate_segment(kind: &'static str, whole: &str, segment: &str) -> Result<()
 
     for ch in chars {
         if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_') {
-            return Err(FactDescriptorError::invalid_string(
+            return Err(FactError::invalid_string(
                 kind,
                 whole,
                 format!("invalid segment character {ch:?}"),
@@ -355,10 +301,4 @@ fn validate_segment(kind: &'static str, whole: &str, segment: &str) -> Result<()
     }
 
     Ok(())
-}
-
-impl FactFieldPath {
-    pub(crate) fn source_prefix(&self) -> Option<&str> {
-        self.raw.split('.').next()
-    }
 }

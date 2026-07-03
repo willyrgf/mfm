@@ -90,24 +90,6 @@ impl FactQueryPredicate {
     }
 }
 
-/// One descriptor field requested in fact query results.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FactQueryReturnField {
-    pub(crate) field_id: FactFieldId,
-}
-
-impl FactQueryReturnField {
-    /// Creates a requested return field.
-    pub fn new(field_id: FactFieldId) -> Self {
-        Self { field_id }
-    }
-
-    /// Returns the descriptor field id.
-    pub const fn field_id(&self) -> &FactFieldId {
-        &self.field_id
-    }
-}
-
 /// Descriptor-scoped fact query request accepted by the v1 compiler.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactQueryInput {
@@ -115,7 +97,7 @@ pub struct FactQueryInput {
     pub(crate) query_scope: FactQueryScope,
     pub(crate) scope_decision_evidence: ScopeDecisionEvidence,
     pub(crate) predicates: Vec<FactQueryPredicate>,
-    pub(crate) return_fields: Vec<FactQueryReturnField>,
+    pub(crate) return_fields: Vec<FactFieldId>,
     pub(crate) ordering: FactOrderingName,
     pub(crate) limit: Option<u64>,
 }
@@ -128,17 +110,17 @@ impl FactQueryInput {
         query_scope: FactQueryScope,
         scope_decision_evidence: ScopeDecisionEvidence,
         predicates: Vec<FactQueryPredicate>,
-        return_fields: Vec<FactQueryReturnField>,
+        return_fields: Vec<FactFieldId>,
         ordering: FactOrderingName,
         limit: Option<u64>,
     ) -> Result<Self> {
         if return_fields.is_empty() {
-            return Err(FactDescriptorError::descriptor(
+            return Err(FactError::descriptor(
                 "fact query must request at least one return field",
             ));
         }
         if limit == Some(0) {
-            return Err(FactDescriptorError::descriptor(
+            return Err(FactError::descriptor(
                 "fact query limit must be non-zero when present",
             ));
         }
@@ -149,17 +131,17 @@ impl FactQueryInput {
                 predicate.operator,
                 predicate.value.clone(),
             )) {
-                return Err(FactDescriptorError::field(
+                return Err(FactError::field(
                     predicate.field_id.clone(),
                     "duplicate fact query predicate",
                 ));
             }
         }
         let mut seen_return_fields = BTreeSet::new();
-        for field in &return_fields {
-            if !seen_return_fields.insert(field.field_id.clone()) {
-                return Err(FactDescriptorError::field(
-                    field.field_id.clone(),
+        for field_id in &return_fields {
+            if !seen_return_fields.insert(field_id.clone()) {
+                return Err(FactError::field(
+                    field_id.clone(),
                     "duplicate fact query return field",
                 ));
             }
@@ -196,7 +178,7 @@ impl FactQueryInput {
     }
 
     /// Returns requested result fields in caller order.
-    pub fn return_fields(&self) -> &[FactQueryReturnField] {
+    pub fn return_fields(&self) -> &[FactFieldId] {
         &self.return_fields
     }
 
@@ -215,17 +197,16 @@ impl FactQueryInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledFactQueryShape {
     pub(crate) predicates: Vec<FactQueryPredicate>,
-    pub(crate) return_fields: Vec<FactQueryReturnField>,
+    pub(crate) return_fields: Vec<FactFieldId>,
 }
 
 impl CompiledFactQueryShape {
-    /// Creates a parsed query shape.
-    pub fn new(
+    pub(crate) fn new(
         predicates: Vec<FactQueryPredicate>,
-        return_fields: Vec<FactQueryReturnField>,
+        return_fields: Vec<FactFieldId>,
     ) -> Result<Self> {
         if return_fields.is_empty() {
-            return Err(FactDescriptorError::descriptor(
+            return Err(FactError::descriptor(
                 "compiled fact query shape must contain return fields",
             ));
         }
@@ -241,7 +222,7 @@ impl CompiledFactQueryShape {
     }
 
     /// Returns requested return fields.
-    pub fn return_fields(&self) -> &[FactQueryReturnField] {
+    pub fn return_fields(&self) -> &[FactFieldId] {
         &self.return_fields
     }
 }
@@ -262,9 +243,8 @@ pub struct CanonicalFactQueryPlan {
 }
 
 impl CanonicalFactQueryPlan {
-    /// Creates a canonical fact query plan and computes its query hash.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         store_scope: StoreScopeRef,
         query_scope: FactQueryScope,
         query_compiler_version: FactQueryCompilerVersion,
@@ -276,7 +256,7 @@ impl CanonicalFactQueryPlan {
         limit: Option<u64>,
     ) -> Result<Self> {
         if limit == Some(0) {
-            return Err(FactDescriptorError::descriptor(
+            return Err(FactError::descriptor(
                 "fact query limit must be non-zero when present",
             ));
         }

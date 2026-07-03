@@ -92,7 +92,7 @@ impl FactOrderingPolicy {
     /// Creates a descriptor-defined ordering policy.
     pub fn new(name: FactOrderingName, terms: Vec<FactOrderingTerm>) -> Result<Self> {
         if terms.is_empty() {
-            return Err(FactDescriptorError::ordering(
+            return Err(FactError::ordering(
                 name,
                 "ordering must contain at least one term",
             ));
@@ -112,11 +112,83 @@ impl FactOrderingPolicy {
     }
 }
 
+/// Query and exposure policy for one descriptor-declared fact field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactFieldPolicy {
+    pub(crate) operators: Vec<FactQueryOperator>,
+    pub(crate) exposure: FactFieldExposure,
+    pub(crate) unit: Option<FactUnit>,
+    pub(crate) scale: Option<FactScale>,
+    pub(crate) sortable: bool,
+    pub(crate) required: bool,
+}
+
+impl FactFieldPolicy {
+    /// Creates a field policy with required operators and exposure.
+    pub fn new(operators: Vec<FactQueryOperator>, exposure: FactFieldExposure) -> Self {
+        Self {
+            operators,
+            exposure,
+            unit: None,
+            scale: None,
+            sortable: false,
+            required: false,
+        }
+    }
+
+    /// Marks this field as required when extracting indexed facts.
+    pub const fn required(mut self) -> Self {
+        self.required = true;
+        self
+    }
+
+    /// Sets whether this field is required when extracting indexed facts.
+    pub const fn with_required(mut self, required: bool) -> Self {
+        self.required = required;
+        self
+    }
+
+    /// Marks this field as sortable by descriptor-defined orderings.
+    pub const fn sortable(mut self) -> Self {
+        self.sortable = true;
+        self
+    }
+
+    /// Sets whether this field is sortable by descriptor-defined orderings.
+    pub const fn with_sortable(mut self, sortable: bool) -> Self {
+        self.sortable = sortable;
+        self
+    }
+
+    /// Attaches a unit identifier to this field.
+    pub fn with_unit(mut self, unit: FactUnit) -> Self {
+        self.unit = Some(unit);
+        self
+    }
+
+    /// Attaches an optional unit identifier to this field.
+    pub fn with_optional_unit(mut self, unit: Option<FactUnit>) -> Self {
+        self.unit = unit;
+        self
+    }
+
+    /// Attaches a base-10 scale to this field.
+    pub const fn with_scale(mut self, scale: FactScale) -> Self {
+        self.scale = Some(scale);
+        self
+    }
+
+    /// Attaches an optional base-10 scale to this field.
+    pub const fn with_optional_scale(mut self, scale: Option<FactScale>) -> Self {
+        self.scale = scale;
+        self
+    }
+}
+
 /// One descriptor-declared field that can produce fact index terms.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactFieldDescriptor {
     pub(crate) field_id: FactFieldId,
-    pub(crate) path: FactFieldPath,
     pub(crate) value_type: FactFieldValueType,
     pub(crate) extraction: FactFieldExtraction,
     pub(crate) operators: Vec<FactQueryOperator>,
@@ -129,30 +201,22 @@ pub struct FactFieldDescriptor {
 
 impl FactFieldDescriptor {
     /// Creates a fact field descriptor with validation.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         field_id: FactFieldId,
-        path: FactFieldPath,
         value_type: FactFieldValueType,
         extraction: FactFieldExtraction,
-        operators: Vec<FactQueryOperator>,
-        exposure: FactFieldExposure,
-        unit: Option<FactUnit>,
-        scale: Option<FactScale>,
-        sortable: bool,
-        required: bool,
+        policy: FactFieldPolicy,
     ) -> Result<Self> {
         let descriptor = Self {
             field_id,
-            path,
             value_type,
             extraction,
-            operators,
-            exposure,
-            unit,
-            scale,
-            sortable,
-            required,
+            operators: policy.operators,
+            exposure: policy.exposure,
+            unit: policy.unit,
+            scale: policy.scale,
+            sortable: policy.sortable,
+            required: policy.required,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -164,8 +228,8 @@ impl FactFieldDescriptor {
     }
 
     /// Returns this field path.
-    pub const fn path(&self) -> &FactFieldPath {
-        &self.path
+    pub fn path(&self) -> String {
+        self.extraction.path()
     }
 
     /// Returns this field value type.
@@ -209,28 +273,17 @@ impl FactFieldDescriptor {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
-        let expected_prefix = self.extraction.source().path_prefix();
-        if self.path.source_prefix() != Some(expected_prefix) {
-            return Err(FactDescriptorError::field(
-                self.field_id.clone(),
-                format!(
-                    "path prefix must be {expected_prefix:?} for {:?} extraction",
-                    self.extraction.source()
-                ),
-            ));
-        }
-
         if matches!(self.extraction, FactFieldExtraction::Metadata(_))
             && self.extraction_metadata_value_type() != Some(self.value_type)
         {
-            return Err(FactDescriptorError::field(
+            return Err(FactError::field(
                 self.field_id.clone(),
                 "metadata field value type does not match metadata source",
             ));
         }
 
         if self.operators.is_empty() {
-            return Err(FactDescriptorError::field(
+            return Err(FactError::field(
                 self.field_id.clone(),
                 "field must allow at least one query operator",
             ));
@@ -239,13 +292,13 @@ impl FactFieldDescriptor {
         let mut seen = BTreeSet::new();
         for operator in &self.operators {
             if !seen.insert(*operator) {
-                return Err(FactDescriptorError::field(
+                return Err(FactError::field(
                     self.field_id.clone(),
                     format!("duplicate operator {operator:?}"),
                 ));
             }
             if !self.value_type.supports_operator(*operator) {
-                return Err(FactDescriptorError::field(
+                return Err(FactError::field(
                     self.field_id.clone(),
                     format!(
                         "operator {operator:?} is incompatible with value type {:?}",
@@ -256,7 +309,7 @@ impl FactFieldDescriptor {
         }
 
         if self.sortable && !self.value_type.is_sortable() {
-            return Err(FactDescriptorError::field(
+            return Err(FactError::field(
                 self.field_id.clone(),
                 format!("value type {:?} is not sortable", self.value_type),
             ));

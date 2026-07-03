@@ -1227,7 +1227,7 @@ async fn public_fact_query_filters_non_public_refs_and_redacts_internal_fields()
 fn returned_fields_for_entry(
     projection: &store::ProjectionSnapshot,
     entry: &store::FactIndexProjection,
-) -> Vec<mfm_facts::ReturnedFieldValueSummary> {
+) -> Vec<mfm_facts::FactFieldValue> {
     projection
         .fact_term_entries()
         .filter(|((claim_id, _field_id), _term)| claim_id == &entry.fact_claim_id)
@@ -1235,7 +1235,7 @@ fn returned_fields_for_entry(
             ["subject.amount", "result.amount"].contains(&field_id.as_str())
         })
         .map(|((_claim_id, _field_id), term)| {
-            mfm_facts::ReturnedFieldValueSummary::new(
+            mfm_facts::FactFieldValue::new(
                 term.field_id.clone(),
                 term.value_type,
                 term.value.clone(),
