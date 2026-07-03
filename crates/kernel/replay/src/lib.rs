@@ -2252,6 +2252,7 @@ pub mod v1 {
             let response = claim.response();
             let producer = claim.producer();
             if envelope.event_id() != fact_ref.source_event_id()
+                || fact_ref.producer_node_id() != &fact.node_id
                 || claim.visibility() != fact_ref.visibility()
                 || claim.fact_kind() != fact_ref.fact_kind()
                 || claim.fact_descriptor_hash() != fact_ref.fact_descriptor_hash()
@@ -2259,6 +2260,7 @@ pub mod v1 {
                     != fact_ref.fact_subject_namespace_hash()
                 || claim.subject().fact_key() != fact_ref.fact_key()
                 || claim.subject().subject_material_hash() != fact_ref.subject_material_hash()
+                || claim.observed_at() != fact_ref.observed_at()
                 || request.map(|request| request.request_schema_id())
                     != fact_ref.request_schema_id()
                 || request.map(|request| request.request_hash()) != fact_ref.request_hash()
