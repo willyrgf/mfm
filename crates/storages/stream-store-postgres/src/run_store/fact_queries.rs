@@ -458,7 +458,7 @@ fn push_sql_operator(builder: &mut QueryBuilder<Postgres>, operator: mfm_facts::
     });
 }
 
-fn push_ordering_clause(builder: &mut QueryBuilder<Postgres>, ordering: &mfm_facts::FactOrdering) {
+fn push_ordering_clause(builder: &mut QueryBuilder<Postgres>, ordering: &mfm_facts::FactOrderingPolicy) {
     builder.push(" ORDER BY ");
     for (index, term) in ordering.terms().iter().enumerate() {
         if index > 0 {

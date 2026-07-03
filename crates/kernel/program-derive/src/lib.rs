@@ -1673,7 +1673,7 @@ fn fact_ordering_descriptor_tokens(
         .map(fact_ordering_term_tokens)
         .collect::<syn::Result<Vec<_>>>()?;
     Ok(quote! {
-        ::mfm_program::facts::FactOrderingDescriptor::new(
+        ::mfm_program::facts::FactOrderingPolicy::new(
             ::mfm_program::facts::FactOrderingName::new(#name)?,
             vec![#(#terms),*],
         )?

@@ -301,7 +301,7 @@ pub fn compile_fact_query_plan(
         require_query_exposed(field, "ordering")?;
     }
 
-    let ordering = FactOrdering::from_descriptor(ordering_descriptor);
+    let ordering = ordering_descriptor.clone();
     let canonical_query = CompiledQueryWire::from_parts(
         descriptor,
         &descriptor_hash,
@@ -841,9 +841,7 @@ fn canonical_extraction_value(extraction: &FactFieldExtraction) -> Result<Canoni
     }
 }
 
-fn canonical_ordering_descriptor_value(
-    ordering: &FactOrderingDescriptor,
-) -> Result<CanonicalValue> {
+fn canonical_ordering_descriptor_value(ordering: &FactOrderingPolicy) -> Result<CanonicalValue> {
     let terms = ordering
         .terms
         .iter()
@@ -1729,16 +1727,16 @@ impl ScopeDecisionEvidenceWire {
 struct OrderingWire;
 
 impl OrderingWire {
-    fn parse(value: &serde_json::Value) -> Result<FactOrdering> {
+    fn parse(value: &serde_json::Value) -> Result<FactOrderingPolicy> {
         let object = json_object(value, "fact ordering")?;
         let terms = json_array(object, "terms")?
             .iter()
             .map(OrderingTermWire::parse)
             .collect::<Result<Vec<_>>>()?;
-        FactOrdering::new(FactOrderingName::new(json_str(object, "name")?)?, terms)
+        FactOrderingPolicy::new(FactOrderingName::new(json_str(object, "name")?)?, terms)
     }
 
-    fn canonical_value(ordering: &FactOrdering) -> Result<CanonicalValue> {
+    fn canonical_value(ordering: &FactOrderingPolicy) -> Result<CanonicalValue> {
         let terms = ordering
             .terms()
             .iter()

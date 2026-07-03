@@ -1336,7 +1336,7 @@ fn replay_fact_query_plan() -> mfm_facts::CanonicalFactQueryPlan {
         mfm_facts::fact_descriptor_hash(&replay_stream_fact_descriptor()).expect("descriptor"),
         mfm_facts::ScopeDecisionEvidence::new(content_digest(0x46)),
         canonical_query,
-        mfm_facts::FactOrdering::new(
+        mfm_facts::FactOrderingPolicy::new(
             mfm_facts::FactOrderingName::new("result.amount.desc").expect("ordering"),
             vec![mfm_facts::FactOrderingTerm::new(
                 mfm_facts::FactFieldId::new("result.amount").expect("field"),

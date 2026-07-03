@@ -4184,7 +4184,7 @@ fn public_field_summary(field: &mfm_facts::FactFieldDescriptor) -> PublicFactFie
 
 fn public_ordering_summary(
     descriptor: &mfm_facts::FactDescriptor,
-    ordering: &mfm_facts::FactOrderingDescriptor,
+    ordering: &mfm_facts::FactOrderingPolicy,
 ) -> Option<PublicFactOrderingSummary> {
     let fields = descriptor_fields_by_id(descriptor);
     let terms = ordering

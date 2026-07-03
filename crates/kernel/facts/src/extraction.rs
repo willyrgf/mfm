@@ -483,7 +483,7 @@ fn decimal_fraction_digits(value: &str) -> usize {
 }
 
 pub(crate) fn validate_ordering(
-    ordering: &FactOrderingDescriptor,
+    ordering: &FactOrderingPolicy,
     fields_by_id: &BTreeMap<FactFieldId, &FactFieldDescriptor>,
 ) -> Result<()> {
     let mut seen_fields = BTreeSet::new();
