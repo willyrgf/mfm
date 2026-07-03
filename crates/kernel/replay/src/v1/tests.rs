@@ -206,6 +206,56 @@ fn replay_rejects_fact_query_evidence_with_mismatched_returned_ref() {
 }
 
 #[test]
+fn replay_rejects_fact_query_evidence_with_mismatched_returned_ref_observed_at() {
+    let fixture = replay_fact_stream_fixture();
+    let query = fact_query_evidence_artifact(&fixture, |fact_ref| {
+        let mut parts = internal_fact_ref_parts_from_ref(&fact_ref);
+        parts.observed_at = Some("2026-07-02T00:00:00Z".to_owned());
+        mfm_facts::InternalFactRef::new(parts).expect("mismatched observed_at ref")
+    });
+    let mut authority = fixture.authority();
+    authority.stream.push(persisted_envelope(
+        &fixture.run_id,
+        4,
+        KernelEventPayload::ArtifactReferenced(query.event.clone()),
+    ));
+    authority.artifact_evidence.push(query.artifact.clone());
+    authority
+        .artifact_bytes
+        .insert(query.artifact.artifact_id.clone(), query.bytes);
+    authority.fact_query_receipt_trust_root = Some(query.trust_root);
+
+    let error = ReplayBroker::from_read_authority(authority)
+        .expect_err("mismatched returned ref observed_at rejects");
+    assert_eq!(error.kind, ReplayErrorKind::FactMismatch);
+}
+
+#[test]
+fn replay_rejects_fact_query_evidence_with_mismatched_returned_ref_producer_node_id() {
+    let fixture = replay_fact_stream_fixture();
+    let query = fact_query_evidence_artifact(&fixture, |fact_ref| {
+        let mut parts = internal_fact_ref_parts_from_ref(&fact_ref);
+        parts.producer_node_id = node_id(0x44);
+        mfm_facts::InternalFactRef::new(parts).expect("mismatched producer_node_id ref")
+    });
+    let mut authority = fixture.authority();
+    authority.stream.push(persisted_envelope(
+        &fixture.run_id,
+        4,
+        KernelEventPayload::ArtifactReferenced(query.event.clone()),
+    ));
+    authority.artifact_evidence.push(query.artifact.clone());
+    authority
+        .artifact_bytes
+        .insert(query.artifact.artifact_id.clone(), query.bytes);
+    authority.fact_query_receipt_trust_root = Some(query.trust_root);
+
+    let error = ReplayBroker::from_read_authority(authority)
+        .expect_err("mismatched returned ref producer_node_id rejects");
+    assert_eq!(error.kind, ReplayErrorKind::FactMismatch);
+}
+
+#[test]
 fn replay_rejects_fact_query_evidence_with_wrong_receipt_trust_root() {
     let fixture = replay_fact_stream_fixture();
     let query = fact_query_evidence_artifact(&fixture, |fact_ref| fact_ref);
