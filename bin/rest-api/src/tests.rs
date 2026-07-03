@@ -806,7 +806,7 @@ fn rest_fact_descriptor() -> mfm_facts::FactDescriptor {
             )
             .expect("result field"),
         ],
-        vec![mfm_facts::FactOrderingDescriptor::new(
+        vec![mfm_facts::FactOrderingPolicy::new(
             mfm_facts::FactOrderingName::new("result.amount.asc").expect("ordering"),
             vec![mfm_facts::FactOrderingTerm::new(
                 mfm_facts::FactFieldId::new("result.amount").expect("field"),

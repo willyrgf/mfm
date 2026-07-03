@@ -160,7 +160,7 @@ fn descriptor(fields: Vec<FactFieldDescriptor>) -> Result<FactDescriptor> {
         schema_id("mfm.test.subject"),
         schema_id("mfm.test.response"),
         fields,
-        vec![FactOrderingDescriptor::new(
+        vec![FactOrderingPolicy::new(
             FactOrderingName::new("result.height.desc")?,
             vec![FactOrderingTerm::new(
                 FactFieldId::new("result.height")?,
@@ -435,7 +435,7 @@ fn descriptor_rejects_ordering_for_non_sortable_field() {
         schema_id("mfm.test.subject"),
         schema_id("mfm.test.response"),
         vec![subject_field("subject.chain", "subject.chain")],
-        vec![FactOrderingDescriptor::new(
+        vec![FactOrderingPolicy::new(
             FactOrderingName::new("subject.chain.asc").expect("ordering"),
             vec![FactOrderingTerm::new(
                 FactFieldId::new("subject.chain").expect("field"),
@@ -786,8 +786,11 @@ fn query_plan_computes_canonical_query_hash_and_rejects_zero_limit() {
         sortable_result_field("result.height", "result.height"),
     ])
     .expect("descriptor");
-    let ordering =
-        FactOrdering::from_descriptor(descriptor.orderings().first().expect("descriptor ordering"));
+    let ordering = descriptor
+        .orderings()
+        .first()
+        .expect("descriptor ordering")
+        .clone();
     let canonical_query = CanonicalJsonBytes::from_value(
         &CanonicalValue::object([("kind", CanonicalValue::String("chain.head".into()))])
             .expect("query value"),
@@ -1073,7 +1076,7 @@ fn query_evidence_fixture() -> (CanonicalFactQueryPlan, FactQueryReceipt, FactQu
         sortable_result_field("result.height", "result.height"),
     ])
     .expect("descriptor");
-    let ordering = FactOrdering::from_descriptor(descriptor.orderings().first().expect("ordering"));
+    let ordering = descriptor.orderings().first().expect("ordering").clone();
     let canonical_query = CanonicalJsonBytes::from_value(
         &CanonicalValue::object([("kind", CanonicalValue::String("chain.head".into()))])
             .expect("query value"),

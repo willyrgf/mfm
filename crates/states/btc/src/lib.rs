@@ -19,7 +19,7 @@ use mfm_effects::{ManagedPlatformWrite, ReadExternal};
 use mfm_fact_capabilities::{FactIndexReadCapability, FactIndexReadRequest, FactIndexReadResponse};
 use mfm_facts::{
     fact_descriptor_hash, CanonicalFactQueryPlan, FactAudience, FactCanonicalScalar,
-    FactCanonicalizerVersion, FactFieldId, FactOrdering, FactQueryCompilerVersion, FactQueryScope,
+    FactCanonicalizerVersion, FactFieldId, FactQueryCompilerVersion, FactQueryScope,
     FactSelectionEvidence, FactVisibility, FactVisibilityScope, ScopeDecisionEvidence,
     StoreScopeRef, FACT_QUERY_CANONICALIZER_VERSION, FACT_QUERY_COMPILER_VERSION,
 };
@@ -974,7 +974,7 @@ impl QueryCollectorCheckpointConfig {
             .orderings()
             .iter()
             .find(|ordering| ordering.name().as_str() == "result.high_watermark_height.desc")
-            .map(FactOrdering::from_descriptor)
+            .cloned()
             .ok_or_else(|| BtcStateError::InvalidInput {
                 reason: "collector checkpoint descriptor is missing high-watermark ordering"
                     .to_owned(),

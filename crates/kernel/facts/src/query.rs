@@ -246,39 +246,6 @@ impl CompiledFactQueryShape {
     }
 }
 
-/// Ordering selected for a canonical fact query.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FactOrdering {
-    pub(crate) name: FactOrderingName,
-    pub(crate) terms: Vec<FactOrderingTerm>,
-}
-
-impl FactOrdering {
-    /// Creates a selected fact ordering.
-    pub fn new(name: FactOrderingName, terms: Vec<FactOrderingTerm>) -> Result<Self> {
-        FactOrderingDescriptor::new(name.clone(), terms.clone())?;
-        Ok(Self { name, terms })
-    }
-
-    /// Creates a selected fact ordering from a descriptor ordering.
-    pub fn from_descriptor(ordering: &FactOrderingDescriptor) -> Self {
-        Self {
-            name: ordering.name.clone(),
-            terms: ordering.terms.clone(),
-        }
-    }
-
-    /// Returns this ordering name.
-    pub const fn name(&self) -> &FactOrderingName {
-        &self.name
-    }
-
-    /// Returns ordering terms in retained order.
-    pub fn terms(&self) -> &[FactOrderingTerm] {
-        &self.terms
-    }
-}
-
 /// Canonical single-descriptor v1 fact query plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalFactQueryPlan {
@@ -290,7 +257,7 @@ pub struct CanonicalFactQueryPlan {
     pub(crate) scope_decision_evidence: ScopeDecisionEvidence,
     pub(crate) canonical_query: CanonicalJsonBytes,
     pub(crate) canonical_query_hash: ContentDigest,
-    pub(crate) ordering: FactOrdering,
+    pub(crate) ordering: FactOrderingPolicy,
     pub(crate) limit: Option<u64>,
 }
 
@@ -305,7 +272,7 @@ impl CanonicalFactQueryPlan {
         resolved_descriptor: ContentDigest,
         scope_decision_evidence: ScopeDecisionEvidence,
         canonical_query: CanonicalJsonBytes,
-        ordering: FactOrdering,
+        ordering: FactOrderingPolicy,
         limit: Option<u64>,
     ) -> Result<Self> {
         if limit == Some(0) {
@@ -369,7 +336,7 @@ impl CanonicalFactQueryPlan {
     }
 
     /// Returns the selected ordering.
-    pub const fn ordering(&self) -> &FactOrdering {
+    pub const fn ordering(&self) -> &FactOrderingPolicy {
         &self.ordering
     }
 

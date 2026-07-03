@@ -125,7 +125,7 @@ fn test_fact_query_evidence_with_returned_refs(
         mfm_facts::FactVisibilityScope::Default,
     );
     let store_scope = mfm_facts::StoreScopeRef::new("default").expect("store scope");
-    let ordering = mfm_facts::FactOrdering::new(
+    let ordering = mfm_facts::FactOrderingPolicy::new(
         mfm_facts::FactOrderingName::new("metadata.store_order.asc").expect("ordering"),
         vec![mfm_facts::FactOrderingTerm::new(
             mfm_facts::FactFieldId::new("metadata.store_order").expect("field id"),

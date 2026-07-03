@@ -158,7 +158,7 @@ mod tests {
         StoreCommitWatermark,
     };
     use mfm_facts::{
-        FactAudience, FactCanonicalizerVersion, FactFieldId, FactOrdering, FactOrderingName,
+        FactAudience, FactCanonicalizerVersion, FactFieldId, FactOrderingName, FactOrderingPolicy,
         FactOrderingTerm, FactQueryEvidence, FactQueryScope, FactSelectionEvidence,
         FactVisibilityScope, NullOrdering, QueryResultCardinality, ScopeDecisionEvidence,
         SortDirection, StoreReadFrontier, StoreReadFrontierType, StoreScopeRef,
@@ -193,7 +193,7 @@ mod tests {
                 )])
                 .expect("query"),
             ),
-            FactOrdering::new(
+            FactOrderingPolicy::new(
                 FactOrderingName::new("result.height.desc").expect("ordering"),
                 vec![FactOrderingTerm::new(
                     FactFieldId::new("result.height").expect("field"),

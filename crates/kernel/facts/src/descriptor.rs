@@ -83,12 +83,12 @@ impl FactOrderingTerm {
 
 /// Descriptor-defined fact ordering policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FactOrderingDescriptor {
+pub struct FactOrderingPolicy {
     pub(crate) name: FactOrderingName,
     pub(crate) terms: Vec<FactOrderingTerm>,
 }
 
-impl FactOrderingDescriptor {
+impl FactOrderingPolicy {
     /// Creates a descriptor-defined ordering policy.
     pub fn new(name: FactOrderingName, terms: Vec<FactOrderingTerm>) -> Result<Self> {
         if terms.is_empty() {
@@ -284,7 +284,7 @@ pub struct FactDescriptor {
     #[serde(with = "schema_id_serde")]
     pub(crate) response_schema_id: SchemaId,
     pub(crate) fields: Vec<FactFieldDescriptor>,
-    pub(crate) orderings: Vec<FactOrderingDescriptor>,
+    pub(crate) orderings: Vec<FactOrderingPolicy>,
 }
 
 impl FactDescriptor {
@@ -295,7 +295,7 @@ impl FactDescriptor {
         subject_schema_id: SchemaId,
         response_schema_id: SchemaId,
         fields: Vec<FactFieldDescriptor>,
-        orderings: Vec<FactOrderingDescriptor>,
+        orderings: Vec<FactOrderingPolicy>,
     ) -> Result<Self> {
         let descriptor = Self {
             fact_kind,
@@ -335,7 +335,7 @@ impl FactDescriptor {
     }
 
     /// Returns ordering policies in retained descriptor order.
-    pub fn orderings(&self) -> &[FactOrderingDescriptor] {
+    pub fn orderings(&self) -> &[FactOrderingPolicy] {
         &self.orderings
     }
 }

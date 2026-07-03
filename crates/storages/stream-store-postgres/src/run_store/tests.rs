@@ -704,7 +704,7 @@ fn fact_descriptor() -> mfm_facts::FactDescriptor {
             )
             .expect("response field"),
         ],
-        vec![mfm_facts::FactOrderingDescriptor::new(
+        vec![mfm_facts::FactOrderingPolicy::new(
             mfm_facts::FactOrderingName::new("result.height.desc").expect("ordering"),
             vec![mfm_facts::FactOrderingTerm::new(
                 mfm_facts::FactFieldId::new("result.height").expect("field id"),

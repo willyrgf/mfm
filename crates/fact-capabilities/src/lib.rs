@@ -400,7 +400,7 @@ mod tests {
     use mfm_capabilities::{CapabilityRole, CapabilitySpec};
     use mfm_facts::{
         DescriptorCatalogWatermark, FactCanonicalScalar, FactCanonicalizerVersion, FactClaimId,
-        FactFieldId, FactFieldValueType, FactOrdering, FactOrderingName, FactOrderingTerm,
+        FactFieldId, FactFieldValueType, FactOrderingName, FactOrderingPolicy, FactOrderingTerm,
         FactProjectionGeneration, FactQueryCompilerVersion, FactQueryScope, FactVisibility,
         FactVisibilityScope, InternalFactRefParts, NullOrdering, QueryResultCardinality,
         ReturnedFactFieldSummary, ReturnedFieldSummaries, ScopeDecisionEvidence, SortDirection,
@@ -529,7 +529,7 @@ mod tests {
             digest(0x20),
             ScopeDecisionEvidence::new(digest(0x21)),
             CanonicalJsonBytes::from_value(&query),
-            FactOrdering::new(
+            FactOrderingPolicy::new(
                 FactOrderingName::new("metadata.recorded_at.desc").expect("ordering"),
                 vec![FactOrderingTerm::new(
                     FactFieldId::new("metadata.recorded_at").expect("field"),
