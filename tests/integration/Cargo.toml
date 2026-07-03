@@ -11,6 +11,7 @@ parity-tests = []
 
 [dependencies]
 axum = "0.7"
+ed25519-dalek = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { version = "1.0", features = ["v4"] }
@@ -44,7 +45,6 @@ mfm-rest-api = { path = "../../bin/rest-api" }
 
 [dev-dependencies]
 alloy-primitives = { workspace = true }
-ed25519-dalek = { workspace = true }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-evm-contract-config = { path = "../../crates/evm-contract-config" }
 mfm-evm-contract-model = { path = "../../crates/evm-contract-model" }

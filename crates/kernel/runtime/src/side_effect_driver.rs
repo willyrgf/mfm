@@ -106,11 +106,7 @@ struct PreInvocationJsonArtifact {
 
 impl PreInvocationJsonArtifact {
     fn retention_ref(&self) -> events::RetentionRef {
-        events::RetentionRef {
-            artifact_id: self.evidence.artifact_id.clone(),
-            role: self.evidence.artifact_role,
-            content_digest: self.evidence.digest.clone(),
-        }
+        self.evidence.retention_ref()
     }
 }
 
@@ -180,7 +176,7 @@ where
             ledger_key: side_effect.ledger_key.clone(),
             ledger_purpose: side_effect.ledger_purpose.clone(),
             pair_id: side_effect.pair_id.clone(),
-            pair_role: side_effect.pair_role(events::SideEffectPairRole::Submit),
+            pair_role: events::SideEffectPairRole::Submit,
             invocation_epoch: side_effect.invocation_epoch,
             intent_schema_id: pre_invocation_artifact_schema_id(intent)?,
             intent_hash: intent.evidence.digest.clone(),
@@ -209,7 +205,7 @@ fn pre_invocation_side_effect_claimed(
         ledger_key: side_effect.ledger_key.clone(),
         ledger_purpose: side_effect.ledger_purpose.clone(),
         pair_id: side_effect.pair_id.clone(),
-        pair_role: side_effect.pair_role(events::SideEffectPairRole::Submit),
+        pair_role: events::SideEffectPairRole::Submit,
         claim_owner: claim.claim_owner,
         invocation_epoch: side_effect.invocation_epoch,
         claim_generation: claim.claim_generation,
@@ -232,7 +228,7 @@ fn pre_invocation_resource_lane_claim_intent(
             ledger_key: side_effect.ledger_key.clone(),
             ledger_purpose: side_effect.ledger_purpose.clone(),
             pair_id: side_effect.pair_id.clone(),
-            pair_role: side_effect.pair_role(events::SideEffectPairRole::Submit),
+            pair_role: events::SideEffectPairRole::Submit,
             invocation_epoch: side_effect.invocation_epoch,
             resource_key,
             requirement_digest: pre_invocation_resource_lane_requirement_digest(ctx)?,
@@ -1416,14 +1412,7 @@ fn build_side_effect_state_output<Output>(
 where
     Output: MfmValue,
 {
-    let artifacts = RunnerArtifactBuilder::new(ctx);
-    let payloads = RunnerPayloadBuilder::new(ctx);
-    let artifact = artifacts.state_output(output)?;
-    let mut runner_output = RunnerOutputBuilder::new(ctx);
-    runner_output.stage_attempt_artifact(&artifact)?;
-    runner_output.retain_runtime_evidence(&artifact);
-    runner_output.payload(payloads.cell_produced(&artifact)?);
-    Ok(runner_output.finish())
+    ErasedRunnerOutput::state_output(ctx, output)
 }
 
 fn build_side_effect_failed_with_release(
@@ -1778,19 +1767,9 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
         let claim = evidence.claim;
 
         let mut output = RunnerOutputBuilder::new(self.ctx);
-        output.stage_side_effect_artifact(
-            &intent_artifact,
-            side_effect.ledger_key.clone(),
-            side_effect.invocation_epoch,
-        )?;
-        output.retain_runtime_evidence(&intent_artifact);
+        output.stage_side_effect_runtime_evidence(&intent_artifact, &side_effect)?;
         if let Some(prepared_artifact) = &prepared_artifact {
-            output.stage_side_effect_artifact(
-                prepared_artifact,
-                side_effect.ledger_key.clone(),
-                side_effect.invocation_epoch,
-            )?;
-            output.retain_runtime_evidence(prepared_artifact);
+            output.stage_side_effect_runtime_evidence(prepared_artifact, &side_effect)?;
         }
         output.payload(payloads.side_effect_intent_persisted(
             side_effect.clone(),
@@ -1866,12 +1845,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     {
         let payloads = RunnerPayloadBuilder::new(self.ctx);
         let mut output = RunnerOutputBuilder::new(self.ctx);
-        output.stage_side_effect_artifact(
-            artifact,
-            side_effect.ledger_key.clone(),
-            side_effect.invocation_epoch,
-        )?;
-        output.retain_runtime_evidence(artifact);
+        output.stage_side_effect_runtime_evidence(artifact, &side_effect)?;
         if let Some(claim) = start_claim {
             output.payload(payloads.side_effect_invocation_started(side_effect.clone(), claim));
         }

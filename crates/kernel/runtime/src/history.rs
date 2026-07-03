@@ -364,77 +364,9 @@ fn projection_with_status_authority(
     projections: &store::ProjectionSnapshot,
     authority: &store::ProjectionSnapshot,
 ) -> Result<store::ProjectionSnapshot> {
-    store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
-        run_states: projections
-            .run_states()
-            .map(|(run_id, state)| (run_id.clone(), *state))
-            .collect(),
-        run_spec_hashes: projections
-            .run_spec_hashes()
-            .map(|(run_id, spec_hash)| (run_id.clone(), spec_hash.clone()))
-            .collect(),
-        saga_policy_digests: projections
-            .saga_policy_digests()
-            .map(|(run_id, digest)| (run_id.clone(), digest.clone()))
-            .collect(),
-        run_completions: projections
-            .run_completions()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-        saga_engagements: projections
-            .saga_engagements()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-        manual_resolutions: projections
-            .manual_resolutions()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-        attempts: projections
-            .attempts()
-            .map(|(key, projection)| (key.clone(), projection.clone()))
-            .collect(),
-        cells: projections
-            .cells()
-            .map(|(run_id, cell_id, projection)| {
-                ((run_id.clone(), cell_id.clone()), projection.clone())
-            })
-            .collect(),
-        fact_descriptors: authority
-            .fact_descriptors()
-            .map(|(descriptor_hash, projection)| (descriptor_hash.clone(), projection.clone()))
-            .collect(),
-        fact_records: authority
-            .fact_records()
-            .map(|(claim_id, projection)| (claim_id.clone(), projection.clone()))
-            .collect(),
-        fact_index_entries: authority
-            .fact_index_entries()
-            .map(|(claim_id, projection)| (claim_id.clone(), projection.clone()))
-            .collect(),
-        fact_term_entries: authority
-            .fact_term_entries()
-            .map(|(key, projection)| (key.clone(), projection.clone()))
-            .collect(),
-        side_effects: projections
-            .side_effects()
-            .map(|(ledger_ref, projection)| (ledger_ref.clone(), projection.clone()))
-            .collect(),
-        resource_lanes: authority
-            .resource_lanes()
-            .map(|(lane_key, projection)| (lane_key.clone(), projection.clone()))
-            .collect(),
-        public_outputs: projections
-            .public_outputs()
-            .map(|(run_id, schema_id, projection)| {
-                ((run_id.clone(), schema_id.clone()), projection.clone())
-            })
-            .collect(),
-        retentions: projections
-            .retentions()
-            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
-            .collect(),
-    })
-    .map_err(RuntimeError::from)
+    projections
+        .with_store_authority_from(authority)
+        .map_err(RuntimeError::from)
 }
 
 #[cfg(test)]

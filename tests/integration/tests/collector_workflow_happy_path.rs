@@ -1,9 +1,7 @@
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, VecDeque};
 use std::future;
 use std::sync::{Arc, Mutex};
 
-use ed25519_dalek::{Signer, SigningKey};
 use mfm_artifact_capabilities::ArtifactReadProvider;
 use mfm_btc_capabilities::{
     BtcBlockHash, BtcCapabilityFuture, BtcChainHeadReadProvider, BtcChainHeadRequest,
@@ -11,27 +9,15 @@ use mfm_btc_capabilities::{
 };
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1::{ArtifactRole, KernelEventPayload};
-use mfm_fact_capabilities::{
-    FactIndexReadProvider, FactIndexReadRequest, FactIndexReadResponse,
-    FactQueryReceiptTrustRootMaterial,
-};
-use mfm_facts::{
-    DescriptorCatalogWatermark, FactAudience, FactCanonicalScalar, FactClaimId,
-    FactProjectionGeneration, FactQueryOperator, InternalFactRef, InternalFactRefParts,
-    NullOrdering, ReturnedFactFieldSummary, ReturnedFieldSummaries, ReturnedFieldValueSummary,
-    StoreCommitWatermark, StoreIdentity, StoreKeyId, StoreReadFrontier, StoreReadFrontierType,
-    StoreReceiptAuthentication, StoreReceiptAuthenticationScheme,
-};
+use mfm_facts::{FactAudience, FactCanonicalScalar};
 use mfm_ids::SeedId;
+use mfm_integration_tests::test_support::{fact_query_evidences, InMemoryControlFactIndexProvider};
 use mfm_op_btc_chain_head_collector::{
     btc_chain_head_collector_cycle_program_draft, BtcChainHeadCollectorConfig,
-    BtcChainHeadObservationContext, QueryCollectorCheckpointContext,
+    BtcChainHeadObservationContext,
 };
 use mfm_program::CanonicalSeed;
-use mfm_store::v1::{
-    AsyncInMemoryRunStore, ProjectionSnapshot, RetainedArtifactReadProvider, RunEventStore,
-    TrustScopeStore,
-};
+use mfm_store::v1::{AsyncInMemoryRunStore, ProjectionSnapshot, RunEventStore, TrustScopeStore};
 use tokio::sync::oneshot;
 
 const FIRST_HASH: &str = "00000000000000000000000000000000000000000000000000000000000a0001";
@@ -139,20 +125,24 @@ async fn bitcoin_chain_head_collector_two_cycles_record_checkpoint_and_public_fa
     );
 
     let page = read_services
-        .query_public_facts(mfm_app::PublicFactQueryRequest {
-            fact_kind: "chain.head".to_owned(),
-            shape: None,
-            predicates: Vec::new(),
-            return_fields: vec![
-                "subject.chain".to_owned(),
-                "subject.network".to_owned(),
-                "subject.head_kind".to_owned(),
-                "result.block_height".to_owned(),
-                "result.block_hash".to_owned(),
-            ],
-            ordering: "result.block_height.desc".to_owned(),
-            limit: Some(1),
-        })
+        .query_public_facts(
+            mfm_app::PublicFactQueryRequest::from_selector(
+                "chain.head",
+                mfm_app::PublicFactQuerySelector {
+                    return_fields: vec![
+                        "subject.chain".to_owned(),
+                        "subject.network".to_owned(),
+                        "subject.head_kind".to_owned(),
+                        "result.block_height".to_owned(),
+                        "result.block_hash".to_owned(),
+                    ],
+                    ordering: Some("result.block_height.desc".to_owned()),
+                    limit: Some(1),
+                    ..mfm_app::PublicFactQuerySelector::default()
+                },
+            )
+            .expect("public chain.head request"),
+        )
         .await
         .expect("public chain.head query");
     assert_eq!(page.facts.len(), 1);
@@ -237,10 +227,7 @@ async fn bitcoin_chain_head_collector_recovers_interrupted_observation_without_p
     );
     assert_eq!(
         query_evidence[0].receipt().returned_refs()[0].visibility(),
-        &mfm_facts::FactVisibility::Indexed {
-            audience: FactAudience::Control,
-            scope: mfm_facts::FactVisibilityScope::Default,
-        }
+        &mfm_facts::FactVisibility::indexed_default(FactAudience::Control)
     );
 
     let interrupted_projection = store.projection_snapshot().expect("interrupted projection");
@@ -379,12 +366,6 @@ fn collector_seed_material(
         .iter()
         .map(|seed| {
             let bytes = match seed.key.as_str() {
-                "query_context" => CanonicalSeed::from_value(&QueryCollectorCheckpointContext {
-                    queried_at_unix_ms: None,
-                })
-                .expect("query seed")
-                .canonical_json()
-                .clone(),
                 "observation_context" => {
                     CanonicalSeed::from_value(&BtcChainHeadObservationContext {
                         observed_at_unix_ms: None,
@@ -519,384 +500,4 @@ impl BtcChainHeadReadProvider for BlockingBtcProvider {
             future::pending::<mfm_btc_capabilities::Result<BtcChainHeadResponse>>().await
         })
     }
-}
-
-struct InMemoryControlFactIndexProvider {
-    store: AsyncInMemoryRunStore,
-    signing_key: SigningKey,
-    store_identity: StoreIdentity,
-    key_id: StoreKeyId,
-    returned_row_counts: Mutex<Vec<usize>>,
-}
-
-impl InMemoryControlFactIndexProvider {
-    fn new(store: AsyncInMemoryRunStore) -> Self {
-        Self {
-            store,
-            signing_key: SigningKey::from_bytes(&[0x43; 32]),
-            store_identity: StoreIdentity::new("mfm.integration.in_memory")
-                .expect("store identity"),
-            key_id: StoreKeyId::new("integration.fact.read").expect("store key id"),
-            returned_row_counts: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn returned_row_counts(&self) -> Vec<usize> {
-        self.returned_row_counts.lock().expect("row counts").clone()
-    }
-}
-
-impl FactIndexReadProvider for InMemoryControlFactIndexProvider {
-    fn read_fact_index<'a>(
-        &'a self,
-        request: &'a FactIndexReadRequest,
-    ) -> mfm_fact_capabilities::FactIndexReadFuture<'a> {
-        Box::pin(async move {
-            let projection = self.store.projection_snapshot().expect("projection");
-            let shape =
-                mfm_facts::parse_canonical_fact_query_shape(request.plan()).expect("query shape");
-            let mut rows = projection
-                .fact_index_entries()
-                .filter(|(_claim_id, entry)| {
-                    entry.fact_descriptor_hash == *request.plan().resolved_descriptor()
-                        && entry.audience == request.plan().query_scope().audience()
-                        && entry.visibility_scope == request.plan().query_scope().scope()
-                })
-                .filter(|(_claim_id, entry)| entry_matches(&projection, entry, &shape))
-                .map(|(_claim_id, entry)| {
-                    let record = projection
-                        .fact_record(&entry.fact_claim_id)
-                        .expect("fact record");
-                    let fact_ref = internal_fact_ref_from_projection(entry, record)?;
-                    let returned_fields = returned_fields_from_projection(
-                        &projection,
-                        entry.fact_claim_id.clone(),
-                        shape.return_fields(),
-                    )?;
-                    Ok((fact_ref, returned_fields))
-                })
-                .collect::<mfm_facts::Result<Vec<_>>>()
-                .expect("fact rows");
-            rows.sort_by(|left, right| {
-                compare_fact_rows(&projection, request.plan(), &left.0, &right.0)
-            });
-            if let Some(limit) = request.plan().limit() {
-                rows.truncate(limit as usize);
-            }
-            self.returned_row_counts
-                .lock()
-                .expect("row counts")
-                .push(rows.len());
-            let response_rows = rows
-                .iter()
-                .map(|(fact_ref, returned_fields)| {
-                    mfm_fact_capabilities::FactIndexReadRow::new(
-                        fact_ref.clone(),
-                        returned_fields.clone(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let returned_refs = rows
-                .iter()
-                .map(|(fact_ref, _fields)| fact_ref.clone())
-                .collect::<Vec<_>>();
-            let returned_field_summaries = (!shape.return_fields().is_empty()).then(|| {
-                ReturnedFieldSummaries::new(
-                    rows.iter()
-                        .map(|(fact_ref, fields)| {
-                            ReturnedFactFieldSummary::new(
-                                fact_ref.fact_claim_id().clone(),
-                                fields.clone(),
-                            )
-                        })
-                        .collect(),
-                )
-            });
-            let receipt = self
-                .signed_receipt(
-                    request.plan(),
-                    &projection,
-                    returned_refs,
-                    returned_field_summaries,
-                )
-                .expect("signed receipt");
-            let trust_root = mfm_store::v1::FactQueryReceiptTrustRoot::new(
-                self.store_identity.clone(),
-                StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
-                self.key_id.clone(),
-                self.signing_key.verifying_key().to_bytes(),
-            )
-            .expect("trust root");
-            let plan_hash = mfm_facts::fact_query_plan_hash(request.plan()).expect("plan hash");
-            mfm_store::v1::verify_fact_query_receipt_authentication(
-                &plan_hash,
-                &receipt,
-                &trust_root,
-            )
-            .expect("receipt authentication");
-            Ok(
-                FactIndexReadResponse::new(response_rows, receipt, self.trust_root())
-                    .expect("fact index response"),
-            )
-        })
-    }
-}
-
-impl InMemoryControlFactIndexProvider {
-    fn trust_root(&self) -> FactQueryReceiptTrustRootMaterial {
-        FactQueryReceiptTrustRootMaterial::new(
-            self.store_identity.clone(),
-            StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
-            self.key_id.clone(),
-            self.signing_key.verifying_key().to_bytes(),
-        )
-    }
-
-    fn receipt_trust_root(&self) -> mfm_store::v1::FactQueryReceiptTrustRoot {
-        mfm_store::v1::FactQueryReceiptTrustRoot::new(
-            self.store_identity.clone(),
-            StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
-            self.key_id.clone(),
-            self.signing_key.verifying_key().to_bytes(),
-        )
-        .expect("receipt trust root")
-    }
-
-    fn signed_receipt(
-        &self,
-        plan: &mfm_facts::CanonicalFactQueryPlan,
-        projection: &ProjectionSnapshot,
-        returned_refs: Vec<InternalFactRef>,
-        returned_field_summaries: Option<ReturnedFieldSummaries>,
-    ) -> mfm_fact_capabilities::Result<mfm_facts::FactQueryReceipt> {
-        let rows = returned_refs
-            .into_iter()
-            .enumerate()
-            .map(|(index, fact_ref)| {
-                let fields = returned_field_summaries
-                    .as_ref()
-                    .and_then(|summaries| summaries.summaries().get(index))
-                    .map(|summary| summary.fields().to_vec())
-                    .unwrap_or_default();
-                mfm_facts::FactQueryResultRow::new(fact_ref, fields)
-            })
-            .collect::<Vec<_>>();
-        let max_order = projection
-            .fact_index_entries()
-            .filter(|(_claim_id, entry)| {
-                entry.audience == plan.query_scope().audience()
-                    && entry.visibility_scope == plan.query_scope().scope()
-            })
-            .map(|(_claim_id, entry)| entry.store_commit_order)
-            .max()
-            .unwrap_or_default();
-        let read_frontier = StoreReadFrontier::new(
-            plan.store_scope().clone(),
-            plan.query_scope().clone(),
-            DescriptorCatalogWatermark::new(projection.fact_descriptors().count() as u64),
-            FactProjectionGeneration::new(1),
-            max_order,
-            StoreCommitWatermark::new(max_order),
-        );
-        let plan_hash = mfm_facts::fact_query_plan_hash(plan)
-            .map_err(mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure)?;
-        let material = mfm_facts::FactQueryReceiptMaterial::from_rows(
-            &plan_hash,
-            read_frontier,
-            StoreReadFrontierType::Snapshot,
-            &rows,
-            returned_field_summaries.is_some(),
-            plan.limit(),
-        )
-        .map_err(mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure)?;
-        let message = mfm_store::v1::fact_query_receipt_authentication_message(
-            &self.store_identity,
-            StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
-            &self.key_id,
-            material.store_receipt_hash(),
-        )
-        .map_err(mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure)?;
-        let auth = StoreReceiptAuthentication::new(
-            self.store_identity.clone(),
-            StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
-            Some(self.key_id.clone()),
-            self.signing_key
-                .sign(message.as_bytes())
-                .to_bytes()
-                .to_vec(),
-        )
-        .map_err(mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure)?;
-        Ok(material.into_receipt(auth))
-    }
-}
-
-async fn fact_query_evidences(
-    store: &AsyncInMemoryRunStore,
-    stream: &[mfm_store::v1::KernelEventEnvelope],
-) -> Vec<mfm_facts::FactQueryEvidence> {
-    let mut evidences = Vec::new();
-    for event in stream {
-        let KernelEventPayload::ArtifactReferenced(payload) = event.payload() else {
-            continue;
-        };
-        if payload.artifact_ref.role != ArtifactRole::FactQueryEvidence {
-            continue;
-        }
-        let requirement = mfm_store::v1::event_artifact_requirements(event.payload())
-            .into_iter()
-            .next()
-            .expect("query evidence artifact requirement");
-        let artifact = store
-            .read_retained_artifact(&requirement)
-            .await
-            .expect("query evidence artifact");
-        evidences.push(
-            mfm_facts::parse_canonical_fact_query_evidence_bytes(artifact.bytes())
-                .expect("query evidence bytes"),
-        );
-    }
-    evidences
-}
-
-fn entry_matches(
-    projection: &ProjectionSnapshot,
-    entry: &mfm_store::v1::FactIndexProjection,
-    shape: &mfm_facts::CompiledFactQueryShape,
-) -> bool {
-    shape.predicates().iter().all(|predicate| {
-        projection
-            .fact_term_entries()
-            .find(|((claim_id, field_id), _term)| {
-                claim_id == &entry.fact_claim_id && field_id == predicate.field_id()
-            })
-            .is_some_and(|(_key, term)| {
-                scalar_matches_operator(&term.value, predicate.operator(), predicate.value())
-            })
-    })
-}
-
-fn scalar_matches_operator(
-    left: &FactCanonicalScalar,
-    operator: FactQueryOperator,
-    right: &FactCanonicalScalar,
-) -> bool {
-    if left.value_type() != right.value_type() {
-        return false;
-    }
-    match operator {
-        FactQueryOperator::Equal => left == right,
-        FactQueryOperator::LessThan => left < right,
-        FactQueryOperator::LessThanOrEqual => left <= right,
-        FactQueryOperator::GreaterThan => left > right,
-        FactQueryOperator::GreaterThanOrEqual => left >= right,
-    }
-}
-
-fn returned_fields_from_projection(
-    projection: &ProjectionSnapshot,
-    claim_id: FactClaimId,
-    return_fields: &[mfm_facts::FactQueryReturnField],
-) -> mfm_facts::Result<Vec<ReturnedFieldValueSummary>> {
-    return_fields
-        .iter()
-        .filter_map(|return_field| {
-            projection
-                .fact_term_entries()
-                .find(|((term_claim_id, field_id), _term)| {
-                    term_claim_id == &claim_id && field_id == return_field.field_id()
-                })
-                .map(|(_key, term)| {
-                    ReturnedFieldValueSummary::new(
-                        term.field_id.clone(),
-                        term.value_type,
-                        term.value.clone(),
-                    )
-                })
-        })
-        .collect()
-}
-
-fn compare_fact_rows(
-    projection: &ProjectionSnapshot,
-    plan: &mfm_facts::CanonicalFactQueryPlan,
-    left: &InternalFactRef,
-    right: &InternalFactRef,
-) -> Ordering {
-    for term in plan.ordering().terms() {
-        let left_value = fact_ordering_value(projection, left.fact_claim_id(), term.field_id());
-        let right_value = fact_ordering_value(projection, right.fact_claim_id(), term.field_id());
-        let ordering = compare_optional_scalars(left_value, right_value, term.nulls());
-        let ordering = match term.direction() {
-            mfm_facts::SortDirection::Ascending => ordering,
-            mfm_facts::SortDirection::Descending => ordering.reverse(),
-        };
-        if ordering != Ordering::Equal {
-            return ordering;
-        }
-    }
-    left.fact_claim_id().cmp(right.fact_claim_id())
-}
-
-fn fact_ordering_value<'a>(
-    projection: &'a ProjectionSnapshot,
-    claim_id: &FactClaimId,
-    field_id: &mfm_facts::FactFieldId,
-) -> Option<&'a FactCanonicalScalar> {
-    projection
-        .fact_term_entries()
-        .find(|((term_claim_id, term_field_id), _term)| {
-            term_claim_id == claim_id && term_field_id == field_id
-        })
-        .map(|(_key, term)| &term.value)
-}
-
-fn compare_optional_scalars(
-    left: Option<&FactCanonicalScalar>,
-    right: Option<&FactCanonicalScalar>,
-    nulls: NullOrdering,
-) -> Ordering {
-    match (left, right) {
-        (Some(left), Some(right)) => left.cmp(right),
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => match nulls {
-            NullOrdering::First => Ordering::Less,
-            NullOrdering::Last => Ordering::Greater,
-        },
-        (Some(_), None) => match nulls {
-            NullOrdering::First => Ordering::Greater,
-            NullOrdering::Last => Ordering::Less,
-        },
-    }
-}
-
-fn internal_fact_ref_from_projection(
-    entry: &mfm_store::v1::FactIndexProjection,
-    record: &mfm_store::v1::FactRecordProjection,
-) -> mfm_facts::Result<InternalFactRef> {
-    InternalFactRef::new(InternalFactRefParts {
-        fact_claim_id: entry.fact_claim_id.clone(),
-        source_event_id: entry.source_event_id.clone(),
-        recorded_at: entry.recorded_at.clone(),
-        producer_node_id: record.node_id.clone(),
-        observed_at: entry.observed_at.clone(),
-        visibility: mfm_facts::FactVisibility::Indexed {
-            audience: entry.audience,
-            scope: entry.visibility_scope,
-        },
-        fact_kind: entry.fact_kind.clone(),
-        fact_descriptor_hash: entry.fact_descriptor_hash.clone(),
-        fact_subject_namespace_hash: entry.fact_subject_namespace_hash.clone(),
-        fact_key: entry.fact_key.clone(),
-        subject_material_hash: entry.subject_material_hash.clone(),
-        request_schema_id: entry.request_schema_id.clone(),
-        request_hash: entry.request_hash.clone(),
-        response_schema_id: entry.response_schema_id.clone(),
-        response_hash: entry.response_hash.clone(),
-        artifact_id: entry.artifact_id.clone(),
-        artifact_evidence_hash: entry.artifact_evidence_hash.clone(),
-        capability_kind: entry.capability_kind.clone(),
-        capability_version: entry.capability_version.clone(),
-        adapter_kind: entry.adapter_kind.clone(),
-        adapter_version: entry.adapter_version.clone(),
-    })
 }

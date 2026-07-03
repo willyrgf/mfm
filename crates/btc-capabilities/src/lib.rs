@@ -96,98 +96,76 @@ impl fmt::Display for BtcChain {
     }
 }
 
-/// Semantic Bitcoin network id from authored workflow config.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BtcNetworkId(LocalPublicId);
+macro_rules! checked_btc_public_id {
+    (
+        $(#[$meta:meta])*
+        $name:ident,
+        $new_doc:literal,
+        $as_str_doc:literal
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(LocalPublicId);
 
-impl BtcNetworkId {
-    /// Creates a checked semantic Bitcoin network id.
-    pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        let value = LocalPublicId::new(value).map_err(invalid_identifier)?;
-        Ok(Self(value))
-    }
+        impl $name {
+            #[doc = $new_doc]
+            pub fn new(value: impl AsRef<str>) -> Result<Self> {
+                let value = LocalPublicId::new(value).map_err(invalid_identifier)?;
+                Ok(Self(value))
+            }
 
-    /// Returns the checked network id string.
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
+            #[doc = $as_str_doc]
+            pub fn as_str(&self) -> &str {
+                self.0.as_str()
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = BtcCapabilityError;
+
+            fn from_str(value: &str) -> Result<Self> {
+                Self::new(value)
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = BtcCapabilityError;
+
+            fn try_from(value: String) -> Result<Self> {
+                Self::new(value)
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(value: $name) -> Self {
+                value.0.into_string()
+            }
+        }
+    };
 }
 
-impl fmt::Display for BtcNetworkId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+checked_btc_public_id!(
+    /// Semantic Bitcoin network id from authored workflow config.
+    BtcNetworkId,
+    "Creates a checked semantic Bitcoin network id.",
+    "Returns the checked network id string."
+);
 
-impl FromStr for BtcNetworkId {
-    type Err = BtcCapabilityError;
-
-    fn from_str(value: &str) -> Result<Self> {
-        Self::new(value)
-    }
-}
-
-impl TryFrom<String> for BtcNetworkId {
-    type Error = BtcCapabilityError;
-
-    fn try_from(value: String) -> Result<Self> {
-        Self::new(value)
-    }
-}
-
-impl From<BtcNetworkId> for String {
-    fn from(value: BtcNetworkId) -> Self {
-        value.0.into_string()
-    }
-}
-
-/// Non-secret semantic Bitcoin source identity.
-///
-/// This identifies what was observed when source identity is part of the claim semantics. It is
-/// not a process-local route, URL, credential label, or deployment handle.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BtcSourceIdentity(LocalPublicId);
-
-impl BtcSourceIdentity {
-    /// Creates a checked semantic source identity.
-    pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        let value = LocalPublicId::new(value).map_err(invalid_identifier)?;
-        Ok(Self(value))
-    }
-
-    /// Returns the checked source identity string.
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-impl fmt::Display for BtcSourceIdentity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for BtcSourceIdentity {
-    type Err = BtcCapabilityError;
-
-    fn from_str(value: &str) -> Result<Self> {
-        Self::new(value)
-    }
-}
-
-impl TryFrom<String> for BtcSourceIdentity {
-    type Error = BtcCapabilityError;
-
-    fn try_from(value: String) -> Result<Self> {
-        Self::new(value)
-    }
-}
-
-impl From<BtcSourceIdentity> for String {
-    fn from(value: BtcSourceIdentity) -> Self {
-        value.0.into_string()
-    }
-}
+checked_btc_public_id!(
+    /// Non-secret semantic Bitcoin source identity.
+    ///
+    /// This identifies what was observed when source identity is part of the claim semantics. It is
+    /// not a process-local route, URL, credential label, or deployment handle.
+    BtcSourceIdentity,
+    "Creates a checked semantic source identity.",
+    "Returns the checked source identity string."
+);
 
 /// Semantic Bitcoin chain guard derived from workflow config.
 #[derive(Debug, Clone, PartialEq, Eq)]

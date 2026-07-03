@@ -3,11 +3,20 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use axum::body::Body;
 use axum::http::Request;
+use ed25519_dalek::SigningKey;
 use mfm_core::keystore::{Keystore, KeystoreConfig};
+use mfm_events::v1::{ArtifactRole, KernelEventPayload};
+use mfm_fact_capabilities::{
+    FactIndexReadProvider, FactIndexReadRequest, FactIndexReadResponse,
+    FactQueryReceiptTrustRootMaterial,
+};
+use mfm_facts::{StoreIdentity, StoreKeyId, StoreReceiptAuthenticationScheme};
 use mfm_store::v1 as store;
+use mfm_store::v1::RetainedArtifactReadProvider;
 
 #[path = "run_control_support.rs"]
 mod run_control_support;
@@ -28,7 +37,119 @@ pub fn in_memory_rest_app_state() -> InMemoryRestAppState {
     mfm_rest_api::AppState {
         store: store::AsyncInMemoryRunStore::default(),
         runtime_config_path: None,
+        fact_query_receipt_trust_root: None,
     }
+}
+
+/// Projection-backed Control fact-index provider for in-memory integration tests.
+pub struct InMemoryControlFactIndexProvider {
+    store: store::AsyncInMemoryRunStore,
+    signing_key: SigningKey,
+    store_identity: StoreIdentity,
+    key_id: StoreKeyId,
+    returned_row_counts: Mutex<Vec<usize>>,
+}
+
+impl InMemoryControlFactIndexProvider {
+    /// Builds a provider that reads fact rows from the supplied in-memory store projection.
+    pub fn new(store: store::AsyncInMemoryRunStore) -> Self {
+        Self {
+            store,
+            signing_key: SigningKey::from_bytes(&[0x43; 32]),
+            store_identity: StoreIdentity::new("mfm.integration.in_memory")
+                .expect("store identity"),
+            key_id: StoreKeyId::new("integration.fact.read").expect("store key id"),
+            returned_row_counts: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Returns one row count per fact-index read, in call order.
+    pub fn returned_row_counts(&self) -> Vec<usize> {
+        self.returned_row_counts.lock().expect("row counts").clone()
+    }
+
+    /// Returns the store trust root matching this provider's signed receipts.
+    pub fn receipt_trust_root(&self) -> store::FactQueryReceiptTrustRoot {
+        store::test_support::fact_query_receipt_trust_root_for_test(
+            &self.signing_key,
+            self.store_identity.clone(),
+            self.key_id.clone(),
+        )
+    }
+
+    fn trust_root(&self) -> FactQueryReceiptTrustRootMaterial {
+        FactQueryReceiptTrustRootMaterial::new(
+            self.store_identity.clone(),
+            StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
+            self.key_id.clone(),
+            self.signing_key.verifying_key().to_bytes(),
+        )
+    }
+}
+
+impl FactIndexReadProvider for InMemoryControlFactIndexProvider {
+    fn read_fact_index<'a>(
+        &'a self,
+        request: &'a FactIndexReadRequest,
+    ) -> mfm_fact_capabilities::FactIndexReadFuture<'a> {
+        Box::pin(async move {
+            let projection = self.store.projection_snapshot().expect("projection");
+            let rows = store::test_support::execute_fact_query_projection_for_test(
+                &projection,
+                request.plan(),
+            )
+            .expect("rows");
+            self.returned_row_counts
+                .lock()
+                .expect("row counts")
+                .push(rows.len());
+            let receipt = store::test_support::signed_fact_query_receipt_for_projection_for_test(
+                request.plan(),
+                &projection,
+                &self.signing_key,
+                self.store_identity.clone(),
+                self.key_id.clone(),
+                &rows,
+            );
+            let trust_root = self.receipt_trust_root();
+            let plan_hash = mfm_facts::fact_query_plan_hash(request.plan()).expect("plan hash");
+            store::verify_fact_query_receipt_authentication(&plan_hash, &receipt, &trust_root)
+                .expect("receipt authentication");
+            Ok(FactIndexReadResponse::from_receipt(
+                receipt,
+                self.trust_root(),
+            ))
+        })
+    }
+}
+
+/// Loads all retained fact-query evidence artifacts referenced by `stream`.
+pub async fn fact_query_evidences(
+    store: &store::AsyncInMemoryRunStore,
+    stream: &[store::KernelEventEnvelope],
+) -> Vec<mfm_facts::FactQueryEvidence> {
+    let mut evidences = Vec::new();
+    for event in stream {
+        let KernelEventPayload::ArtifactReferenced(payload) = event.payload() else {
+            continue;
+        };
+        if payload.artifact_ref.role != ArtifactRole::FactQueryEvidence {
+            continue;
+        }
+        let requirement = store::event_artifact_requirements(event.payload())
+            .into_iter()
+            .next()
+            .expect("query evidence artifact requirement");
+        let artifact = store
+            .read_retained_artifact(&requirement)
+            .await
+            .expect("query evidence artifact");
+        evidences.push(
+            mfm_facts::parse_canonical_fact_query_evidence_bytes(artifact.bytes())
+                .expect("query evidence bytes"),
+        );
+    }
+    evidences
 }
 
 /// Builds a JSON POST request for REST integration tests.

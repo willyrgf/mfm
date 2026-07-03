@@ -12,21 +12,24 @@ fn executable_identity_summary_matches_golden() {
 }
 
 #[test]
-fn decode_config_bytes_rejects_invalid_serialized_config() {
-    let error = decode_config_bytes::<ProjectReportConfig>(br#"{"report_version":0}"#)
+fn decode_replay_config_rejects_invalid_serialized_config() {
+    let error = decode_replay_config::<ProjectReportConfig>(br#"{"report_version":0}"#)
         .expect_err("zero report version must fail decoding");
-    let mfm_runtime::RuntimeError::InvalidRunnerOutput(message) = error else {
-        panic!("unexpected error: {error}");
-    };
-    assert!(message.contains("nonzero u64"));
+    assert!(error.to_string().contains("nonzero u64"));
 }
 
 fn executable_identity_summary(factories: [&str; 2]) -> Vec<String> {
+    let executable_identities = RunnerExecutableIdentityTemplate::new(
+        "mfm-adapters-portfolio",
+        "typed-portfolio",
+        env!("CARGO_PKG_VERSION"),
+    )
+    .expect("executable identity template");
     factories
         .into_iter()
         .map(|factory| {
-            let identity = executable(events::RunnerFactoryId::new(factory).expect("factory id"))
-                .expect("executable identity");
+            let identity = executable_identities
+                .executable(events::RunnerFactoryId::new(factory).expect("factory id"));
             format!(
                 "factory={};cargo_digest={};binary_digest={};nix_derivation={};nix_output={}",
                 identity.factory_id,

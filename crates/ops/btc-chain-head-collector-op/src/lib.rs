@@ -30,7 +30,7 @@ pub use mfm_states_btc::{
     BtcChainHeadFact, BtcChainHeadObservation, BtcChainHeadObservationContext,
     CollectorCheckpointFact, LoadedCollectorCheckpoint, ObserveBtcChainHeadConfig,
     ObserveBtcChainHeadInput, ObserveBtcChainHeadInputHandles, ObserveBtcChainHeadState,
-    QueryCollectorCheckpointConfig, QueryCollectorCheckpointContext, QueryCollectorCheckpointInput,
+    QueryCollectorCheckpointConfig, QueryCollectorCheckpointInput,
     QueryCollectorCheckpointInputHandles, QueryCollectorCheckpointState,
     RecordBtcChainHeadFactConfig, RecordBtcChainHeadFactInput, RecordBtcChainHeadFactInputHandles,
     RecordBtcChainHeadFactState, RecordCollectorCheckpointConfig, RecordCollectorCheckpointInput,
@@ -44,7 +44,6 @@ const OP_VERSION: &str = "mfm.bitcoin.operation.btc_chain_head_collector_cycle.v
 const ROOT_SCOPE: &str = "btc_chain_head_collector";
 const OP_KEY: &str = "btc_chain_head_collector_cycle";
 const PUBLIC_OUTPUT_KEY: &str = "collector_checkpoint";
-const QUERY_CONTEXT_SEED_KEY: &str = "query_context";
 const OBSERVATION_CONTEXT_SEED_KEY: &str = "observation_context";
 
 /// Planning config for one bounded Bitcoin chain-head collector cycle.
@@ -161,10 +160,7 @@ pub struct BtcChainHeadCollectorCycleOperation;
 
 impl Operation for BtcChainHeadCollectorCycleOperation {
     type Config = BtcChainHeadCollectorConfig;
-    type Input<'program, 'scope> = (
-        Handle<'program, 'scope, QueryCollectorCheckpointContext>,
-        Handle<'program, 'scope, BtcChainHeadObservationContext>,
-    );
+    type Input<'program, 'scope> = Handle<'program, 'scope, BtcChainHeadObservationContext>;
     type Output<'program, 'scope> = BtcChainHeadCollectorCycleOutputs<'program, 'scope>;
 
     fn kind() -> mfm_program::Result<OperationKind> {
@@ -191,7 +187,7 @@ impl Operation for BtcChainHeadCollectorCycleOperation {
     fn expand<'program, 'scope>(
         &self,
         config: mfm_program::ValidatedConfig<Self::Config>,
-        (query_context, observation_context): Self::Input<'program, 'scope>,
+        observation_context: Self::Input<'program, 'scope>,
         builder: &mut OperationExpansion<'program, 'scope>,
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
@@ -199,9 +195,7 @@ impl Operation for BtcChainHeadCollectorCycleOperation {
         let loaded_checkpoint = builder.state::<QueryCollectorCheckpointState, _>(
             StateKey::new("query_collector_checkpoint")?,
             config.checkpoint_query_config(),
-            QueryCollectorCheckpointInputHandles {
-                context: query_context,
-            },
+            QueryCollectorCheckpointInputHandles {},
         )?;
         let observation = builder.state::<ObserveBtcChainHeadState, _>(
             StateKey::new("observe_btc_chain_head")?,
@@ -254,12 +248,6 @@ pub fn btc_chain_head_collector_cycle_program_draft(
         btc_chain_head_collector_state_registry()?,
         btc_chain_head_collector_operation_registry()?,
         |root: &mut RootBuilder<'_, '_>| {
-            let query_context = root.seed(
-                SeedKey::new(QUERY_CONTEXT_SEED_KEY)?,
-                CanonicalSeed::from_value(&QueryCollectorCheckpointContext {
-                    queried_at_unix_ms: None,
-                })?,
-            )?;
             let observation_context = root.seed(
                 SeedKey::new(OBSERVATION_CONTEXT_SEED_KEY)?,
                 CanonicalSeed::from_value(&BtcChainHeadObservationContext {
@@ -272,7 +260,7 @@ pub fn btc_chain_head_collector_cycle_program_draft(
                     OperationKey::new(OP_KEY)?,
                     BtcChainHeadCollectorCycleOperation,
                     config,
-                    (query_context, observation_context),
+                    observation_context,
                 )?;
             root.bind_public_outputs(
                 PublicOutputKey::new(PUBLIC_OUTPUT_KEY)?,

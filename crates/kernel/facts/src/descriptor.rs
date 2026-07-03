@@ -1,11 +1,13 @@
 use std::collections::BTreeSet;
 
 use mfm_ids::SchemaId;
+use serde::{Deserialize, Serialize};
 
+use crate::serde_helpers::schema_id_serde;
 use crate::*;
 
 /// One term in a descriptor-defined fact ordering policy.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactOrderingTerm {
     pub(crate) field_id: FactFieldId,
     pub(crate) direction: SortDirection,
@@ -80,7 +82,7 @@ impl FactOrderingTerm {
 }
 
 /// Descriptor-defined fact ordering policy.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactOrderingPolicy {
     pub(crate) name: FactOrderingName,
     pub(crate) terms: Vec<FactOrderingTerm>,
@@ -111,7 +113,7 @@ impl FactOrderingPolicy {
 }
 
 /// One descriptor-declared field that can produce fact index terms.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactFieldDescriptor {
     pub(crate) field_id: FactFieldId,
     pub(crate) path: FactFieldPath,
@@ -272,11 +274,14 @@ impl FactFieldDescriptor {
 }
 
 /// Durable descriptor for a fact shape.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactDescriptor {
     pub(crate) fact_kind: FactKind,
+    #[serde(with = "schema_id_serde")]
     pub(crate) descriptor_schema_id: SchemaId,
+    #[serde(with = "schema_id_serde")]
     pub(crate) subject_schema_id: SchemaId,
+    #[serde(with = "schema_id_serde")]
     pub(crate) response_schema_id: SchemaId,
     pub(crate) fields: Vec<FactFieldDescriptor>,
     pub(crate) orderings: Vec<FactOrderingPolicy>,

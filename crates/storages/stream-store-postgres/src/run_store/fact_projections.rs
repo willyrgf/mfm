@@ -12,6 +12,49 @@ pub(super) struct PhysicalFactProjections {
     >,
 }
 
+impl PhysicalFactProjections {
+    #[cfg(all(test, feature = "parity-tests"))]
+    pub(super) fn from_snapshot(snapshot: &ProjectionSnapshot) -> Self {
+        Self {
+            fact_descriptors: snapshot
+                .fact_descriptors()
+                .map(|(descriptor_hash, projection)| (descriptor_hash.clone(), projection.clone()))
+                .collect(),
+            fact_records: snapshot
+                .fact_records()
+                .map(|(claim_id, projection)| (claim_id.clone(), projection.clone()))
+                .collect(),
+            fact_index_entries: snapshot
+                .fact_index_entries()
+                .map(|(claim_id, projection)| (claim_id.clone(), projection.clone()))
+                .collect(),
+            fact_term_entries: snapshot
+                .fact_term_entries()
+                .map(|(key, projection)| (key.clone(), projection.clone()))
+                .collect(),
+        }
+    }
+
+    pub(super) fn into_projection_snapshot(self) -> Result<ProjectionSnapshot> {
+        let mut parts = ProjectionSnapshotParts::default();
+        self.install_store_fact_authority(&mut parts);
+        Ok(ProjectionSnapshot::from_parts(parts)?)
+    }
+
+    pub(super) fn install_store_fact_authority(self, parts: &mut ProjectionSnapshotParts) {
+        parts.fact_descriptors = self.fact_descriptors;
+        parts.fact_records = self.fact_records;
+        parts.fact_index_entries = self.fact_index_entries;
+        parts.fact_term_entries = self.fact_term_entries;
+    }
+
+    pub(super) fn install_external_fact_indexes(self, parts: &mut ProjectionSnapshotParts) {
+        parts.fact_descriptors = self.fact_descriptors;
+        parts.fact_index_entries = self.fact_index_entries;
+        parts.fact_term_entries = self.fact_term_entries;
+    }
+}
+
 pub(super) async fn insert_fact_projection_rows_tx(
     tx: &mut Transaction<'_, Postgres>,
     before: &ProjectionSnapshot,
@@ -30,10 +73,8 @@ pub(super) async fn insert_fact_projection_rows_tx(
         }
     }
     for (key, projection) in after.fact_term_entries() {
-        if !before
-            .fact_term_entries()
-            .any(|(existing_key, _)| existing_key == key)
-        {
+        let (claim_id, field_id) = key;
+        if before.fact_term(claim_id, field_id).is_none() {
             insert_fact_term_projection_tx(tx, projection).await?;
         }
     }
@@ -44,28 +85,100 @@ pub(super) async fn load_fact_projection_tables_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
 ) -> Result<PhysicalFactProjections> {
-    let fact_index_entries = load_fact_index_tx(tx, Some(run_id)).await?;
-    let fact_records =
-        load_fact_record_projections_tx(tx, Some(run_id), &fact_index_entries).await?;
-    Ok(PhysicalFactProjections {
-        fact_descriptors: load_fact_descriptor_index_tx(tx, Some(run_id)).await?,
-        fact_records,
-        fact_index_entries,
-        fact_term_entries: load_fact_index_terms_tx(tx, Some(run_id)).await?,
-    })
+    load_fact_projection_tables_scoped_tx(tx, Some(run_id)).await
 }
 
 pub(super) async fn load_store_fact_projection_tables_tx(
     tx: &mut Transaction<'_, Postgres>,
 ) -> Result<PhysicalFactProjections> {
-    let fact_index_entries = load_fact_index_tx(tx, None).await?;
-    let fact_records = load_fact_record_projections_tx(tx, None, &fact_index_entries).await?;
-    Ok(PhysicalFactProjections {
-        fact_descriptors: load_fact_descriptor_index_tx(tx, None).await?,
+    load_fact_projection_tables_scoped_tx(tx, None).await
+}
+
+async fn load_fact_projection_tables_scoped_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: Option<&RunId>,
+) -> Result<PhysicalFactProjections> {
+    let fact_index_entries = load_fact_index_tx(tx, run_id).await?;
+    let fact_records = load_fact_record_projections_tx(tx, run_id).await?;
+    let projections = PhysicalFactProjections {
+        fact_descriptors: load_fact_descriptor_index_tx(tx, run_id).await?,
         fact_records,
         fact_index_entries,
-        fact_term_entries: load_fact_index_terms_tx(tx, None).await?,
-    })
+        fact_term_entries: load_fact_index_terms_tx(tx, run_id).await?,
+    };
+    validate_physical_fact_projections(&projections)?;
+    Ok(projections)
+}
+
+fn validate_physical_fact_projections(projections: &PhysicalFactProjections) -> Result<()> {
+    for (claim_id, record) in &projections.fact_records {
+        if !projections
+            .fact_descriptors
+            .contains_key(record.claim.fact_descriptor_hash())
+        {
+            return Err(PostgresStoreError::Corruption(format!(
+                "fact record {:?} references missing descriptor row",
+                claim_id
+            )));
+        }
+        let is_indexed = matches!(
+            record.claim.visibility(),
+            mfm_facts::FactVisibility::Indexed { .. }
+        );
+        match (is_indexed, projections.fact_index_entries.get(claim_id)) {
+            (true, None) => {
+                return Err(PostgresStoreError::Corruption(format!(
+                    "indexed fact record {:?} has no fact_index row",
+                    claim_id
+                )));
+            }
+            (true, Some(index)) if !record.matches_index_projection(index) => {
+                return Err(PostgresStoreError::Corruption(format!(
+                    "fact_index row {:?} does not match its FactRecorded payload",
+                    claim_id
+                )));
+            }
+            (false, Some(_)) => {
+                return Err(PostgresStoreError::Corruption(format!(
+                    "private fact record {:?} unexpectedly has a fact_index row",
+                    claim_id
+                )));
+            }
+            _ => {}
+        }
+    }
+    for (claim_id, index) in &projections.fact_index_entries {
+        if !projections.fact_records.contains_key(claim_id) {
+            return Err(PostgresStoreError::Corruption(format!(
+                "fact_index row {:?} has no FactRecorded payload",
+                claim_id
+            )));
+        }
+        if !projections
+            .fact_descriptors
+            .contains_key(&index.fact_descriptor_hash)
+        {
+            return Err(PostgresStoreError::Corruption(format!(
+                "fact_index row {:?} references missing descriptor row",
+                claim_id
+            )));
+        }
+    }
+    for ((claim_id, field_id), term) in &projections.fact_term_entries {
+        let Some(index) = projections.fact_index_entries.get(claim_id) else {
+            return Err(PostgresStoreError::Corruption(format!(
+                "fact_index_terms row {:?} has no fact_index row",
+                claim_id
+            )));
+        };
+        if term.fact_descriptor_hash != index.fact_descriptor_hash {
+            return Err(PostgresStoreError::Corruption(format!(
+                "fact_index_terms row {:?}/{} references descriptor {} but parent fact_index row references {}",
+                claim_id, field_id, term.fact_descriptor_hash, index.fact_descriptor_hash
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(all(test, feature = "parity-tests"))]
@@ -82,7 +195,7 @@ pub(super) async fn rebuild_fact_projection_tables_tx(
     insert_rebuilt_fact_projection_rows_tx(tx, &rebuilt, stream, &commit_ids).await?;
     increment_fact_projection_generation_tx(tx).await?;
     let actual = load_fact_projection_tables_tx(tx, run_id).await?;
-    let expected = physical_fact_projections_from_snapshot(&rebuilt);
+    let expected = PhysicalFactProjections::from_snapshot(&rebuilt);
     if actual != expected {
         return Err(PostgresStoreError::Corruption(
             "rebuilt fact projection tables did not match authoritative stream projection"
@@ -114,7 +227,7 @@ pub(super) async fn load_fact_rebuild_artifact_bytes_tx(
         match event.payload() {
             events::KernelEventPayload::RunAdmitted(payload) => {
                 for artifact in &payload.fact_descriptor_artifacts {
-                    let evidence = store_artifact_from_run_artifact(artifact);
+                    let evidence = ArtifactEvidenceRef::from_run_artifact(artifact);
                     let evidence_hash = evidence.evidence_hash()?;
                     let record =
                         load_artifact_record_tx(tx, &evidence.artifact_id, &evidence_hash).await?;
@@ -281,12 +394,9 @@ async fn load_commit_ids_by_event_tx(
     .map_err(|error| database_error("failed to load fact projection commit ids", error))?;
     let mut commit_ids = BTreeMap::new();
     for row in rows {
-        let event_id = parse_identity::<mfm_ids::EventId>(&required_string(
-            &row,
-            "event_id",
-            "run_events.event_id",
-        )?)?;
-        let commit_id = required_string(&row, "commit_id", "run_events.commit_id")?;
+        let row = PgRowReader::new(&row, "run_events");
+        let event_id = row.required_identity::<mfm_ids::EventId>("event_id")?;
+        let commit_id = row.required_string("commit_id")?;
         commit_ids.insert(event_id, commit_id);
     }
     Ok(commit_ids)
@@ -305,30 +415,6 @@ fn required_commit_id<'a>(
                 "event {event_id} missing commit id for fact projection rebuild"
             ))
         })
-}
-
-#[cfg(all(test, feature = "parity-tests"))]
-fn physical_fact_projections_from_snapshot(
-    snapshot: &ProjectionSnapshot,
-) -> PhysicalFactProjections {
-    PhysicalFactProjections {
-        fact_descriptors: snapshot
-            .fact_descriptors()
-            .map(|(descriptor_hash, projection)| (descriptor_hash.clone(), projection.clone()))
-            .collect(),
-        fact_records: snapshot
-            .fact_records()
-            .map(|(claim_id, projection)| (claim_id.clone(), projection.clone()))
-            .collect(),
-        fact_index_entries: snapshot
-            .fact_index_entries()
-            .map(|(claim_id, projection)| (claim_id.clone(), projection.clone()))
-            .collect(),
-        fact_term_entries: snapshot
-            .fact_term_entries()
-            .map(|(key, projection)| (key.clone(), projection.clone()))
-            .collect(),
-    }
 }
 
 fn insert_artifact_record_into_byte_authority(
@@ -433,8 +519,8 @@ async fn insert_fact_index_projection_tx(
     )?)
     .bind(&projection.recorded_at)
     .bind(projection.observed_at.as_deref())
-    .bind(fact_audience_tag(projection.audience))
-    .bind(fact_visibility_scope_tag(projection.visibility_scope))
+    .bind(projection.audience.as_str())
+    .bind(projection.visibility_scope.as_str())
     .bind(projection.fact_kind.as_str())
     .bind(projection.fact_descriptor_hash.as_str())
     .bind(projection.fact_subject_namespace_hash.as_str())
@@ -490,8 +576,8 @@ async fn insert_fact_term_projection_tx(
     )
     .bind(projection.fact_descriptor_hash.as_str())
     .bind(projection.field_id.as_str())
-    .bind(fact_field_source_tag(projection.source))
-    .bind(fact_field_value_type_tag(projection.value_type))
+    .bind(projection.source.path_prefix())
+    .bind(projection.value_type.as_str())
     .bind(value.value_text.as_deref())
     .bind(value.value_bool)
     .bind(value.value_i64)
@@ -534,21 +620,11 @@ async fn load_fact_descriptor_index_tx(
         .map_err(|error| database_error("failed to load fact descriptor projections", error))?;
     let mut projections = BTreeMap::new();
     for row in rows {
-        let descriptor_hash = parse_identity::<ContentDigest>(&required_string(
-            &row,
-            "descriptor_hash",
-            "fact_descriptor_index.descriptor_hash",
-        )?)?;
-        let descriptor_artifact_id = parse_identity(&required_string(
-            &row,
-            "descriptor_artifact_id",
-            "fact_descriptor_index.descriptor_artifact_id",
-        )?)?;
-        let descriptor_artifact_evidence_hash = parse_identity(&required_string(
-            &row,
-            "descriptor_artifact_evidence_hash",
-            "fact_descriptor_index.descriptor_artifact_evidence_hash",
-        )?)?;
+        let row = PgRowReader::new(&row, "fact_descriptor_index");
+        let descriptor_hash = row.required_identity::<ContentDigest>("descriptor_hash")?;
+        let descriptor_artifact_id = row.required_identity("descriptor_artifact_id")?;
+        let descriptor_artifact_evidence_hash =
+            row.required_identity("descriptor_artifact_evidence_hash")?;
         let descriptor_artifact = load_artifact_record_tx(
             tx,
             &descriptor_artifact_id,
@@ -559,37 +635,13 @@ async fn load_fact_descriptor_index_tx(
             descriptor_hash: descriptor_hash.clone(),
             descriptor_artifact_id,
             descriptor_artifact_evidence: descriptor_artifact.evidence,
-            fact_kind: mfm_facts::FactKind::new(required_string(
-                &row,
-                "fact_kind",
-                "fact_descriptor_index.fact_kind",
-            )?)
-            .map_err(fact_error)?,
-            descriptor_schema_id: parse_identity(&required_string(
-                &row,
-                "descriptor_schema_id",
-                "fact_descriptor_index.descriptor_schema_id",
-            )?)?,
-            subject_schema_id: parse_identity(&required_string(
-                &row,
-                "subject_schema_id",
-                "fact_descriptor_index.subject_schema_id",
-            )?)?,
-            response_schema_id: parse_identity(&required_string(
-                &row,
-                "response_schema_id",
-                "fact_descriptor_index.response_schema_id",
-            )?)?,
-            fact_subject_namespace_hash: parse_identity(&required_string(
-                &row,
-                "fact_subject_namespace_hash",
-                "fact_descriptor_index.fact_subject_namespace_hash",
-            )?)?,
-            source_event_id: parse_identity(&required_string(
-                &row,
-                "source_event_id",
-                "fact_descriptor_index.source_event_id",
-            )?)?,
+            fact_kind: mfm_facts::FactKind::new(row.required_string("fact_kind")?)
+                .map_err(fact_error)?,
+            descriptor_schema_id: row.required_identity("descriptor_schema_id")?,
+            subject_schema_id: row.required_identity("subject_schema_id")?,
+            response_schema_id: row.required_identity("response_schema_id")?,
+            fact_subject_namespace_hash: row.required_identity("fact_subject_namespace_hash")?,
+            source_event_id: row.required_identity("source_event_id")?,
         };
         projections.insert(descriptor_hash, projection);
     }
@@ -599,29 +651,17 @@ async fn load_fact_descriptor_index_tx(
 async fn load_fact_record_projections_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: Option<&RunId>,
-    fact_index_entries: &BTreeMap<mfm_facts::FactClaimId, mfm_store::v1::FactIndexProjection>,
 ) -> Result<BTreeMap<mfm_facts::FactClaimId, mfm_store::v1::FactRecordProjection>> {
-    if fact_index_entries.is_empty() {
-        return Ok(BTreeMap::new());
-    }
     let sql = if run_id.is_some() {
         "SELECT e.run_id, e.seq, e.ordinal, e.event_id, e.event_schema_id, e.spec_hash, \
          e.commit_key, e.logical_key, e.payload_hash, e.payload_canonical_json \
          FROM run_events e \
-         INNER JOIN fact_index f \
-           ON f.source_run_id = e.run_id \
-          AND f.source_seq = e.seq \
-          AND f.source_ordinal = e.ordinal \
-         WHERE f.source_run_id = $1 \
+         WHERE e.run_id = $1 \
          ORDER BY e.seq, e.ordinal"
     } else {
         "SELECT e.run_id, e.seq, e.ordinal, e.event_id, e.event_schema_id, e.spec_hash, \
          e.commit_key, e.logical_key, e.payload_hash, e.payload_canonical_json \
          FROM run_events e \
-         INNER JOIN fact_index f \
-           ON f.source_run_id = e.run_id \
-          AND f.source_seq = e.seq \
-          AND f.source_ordinal = e.ordinal \
          ORDER BY e.run_id, e.seq, e.ordinal"
     };
     let mut query = sqlx::query(sql);
@@ -636,16 +676,8 @@ async fn load_fact_record_projections_tx(
     for row in rows {
         let event = event_envelope_from_row(row)?;
         let events::KernelEventPayload::FactRecorded(payload) = event.payload() else {
-            return Err(PostgresStoreError::Corruption(
-                "fact_index references a non-FactRecorded event".to_owned(),
-            ));
+            continue;
         };
-        let claim_id = mfm_facts::derive_fact_claim_id(
-            event.run_id().clone(),
-            event.seq().as_u64(),
-            event.ordinal().as_u32(),
-        )
-        .map_err(fact_error)?;
         let response = payload.claim.response();
         let response_artifact = load_artifact_record_tx(
             tx,
@@ -653,29 +685,12 @@ async fn load_fact_record_projections_tx(
             response.artifact_evidence_hash(),
         )
         .await?;
-        let projection = mfm_store::v1::FactRecordProjection {
-            fact_claim_id: claim_id.clone(),
-            source_event_id: event.event_id().clone(),
-            source_run_id: event.run_id().clone(),
-            source_seq: event.seq().as_u64(),
-            source_ordinal: event.ordinal().as_u32(),
-            node_id: payload.node_id.clone(),
-            attempt_id: payload.attempt_id.clone(),
-            response_artifact_evidence: Some(response_artifact.evidence),
-            claim: payload.claim.clone(),
-        };
-        let Some(index) = fact_index_entries.get(&claim_id) else {
-            return Err(PostgresStoreError::Corruption(format!(
-                "loaded fact record {:?} has no fact_index row",
-                claim_id
-            )));
-        };
-        if !fact_record_projection_matches_index(&projection, index) {
-            return Err(PostgresStoreError::Corruption(format!(
-                "fact_index row {:?} does not match its FactRecorded payload",
-                claim_id
-            )));
-        }
+        let projection = mfm_store::v1::FactRecordProjection::from_recorded_event(
+            &event,
+            payload,
+            Some(response_artifact.evidence),
+        )?;
+        let claim_id = projection.fact_claim_id.clone();
         if projections.insert(claim_id.clone(), projection).is_some() {
             return Err(PostgresStoreError::Corruption(format!(
                 "duplicate fact record projection {:?}",
@@ -683,214 +698,143 @@ async fn load_fact_record_projections_tx(
             )));
         }
     }
-    for claim_id in fact_index_entries.keys() {
-        if !projections.contains_key(claim_id) {
-            return Err(PostgresStoreError::Corruption(format!(
-                "fact_index row {:?} has no FactRecorded payload",
-                claim_id
-            )));
-        }
-    }
     Ok(projections)
-}
-
-fn fact_record_projection_matches_index(
-    record: &mfm_store::v1::FactRecordProjection,
-    index: &mfm_store::v1::FactIndexProjection,
-) -> bool {
-    let mfm_facts::FactVisibility::Indexed { audience, scope } = record.claim.visibility() else {
-        return false;
-    };
-    let request = record.claim.request();
-    record.fact_claim_id == index.fact_claim_id
-        && record.source_run_id == index.source_run_id
-        && record.source_seq == index.source_seq
-        && record.source_ordinal == index.source_ordinal
-        && record.source_event_id == index.source_event_id
-        && record.node_id == index.producer_node_id
-        && audience == &index.audience
-        && scope == &index.visibility_scope
-        && record.claim.fact_kind() == &index.fact_kind
-        && record.claim.fact_descriptor_hash() == &index.fact_descriptor_hash
-        && record.claim.observed_at() == index.observed_at.as_deref()
-        && record.claim.subject().fact_subject_namespace_hash()
-            == &index.fact_subject_namespace_hash
-        && record.claim.subject().subject_material_hash() == &index.subject_material_hash
-        && record.claim.subject().fact_key() == &index.fact_key
-        && request.map(|request| request.request_schema_id()) == index.request_schema_id.as_ref()
-        && request.map(|request| request.request_hash()) == index.request_hash.as_ref()
-        && record.claim.response().response_schema_id() == &index.response_schema_id
-        && record.claim.response().response_hash() == &index.response_hash
-        && record.claim.response().artifact_id() == &index.artifact_id
-        && record.claim.response().artifact_evidence_hash() == &index.artifact_evidence_hash
-        && record.claim.producer().capability_kind() == &index.capability_kind
-        && record.claim.producer().capability_version() == &index.capability_version
-        && record.claim.producer().adapter_kind() == &index.adapter_kind
-        && record.claim.producer().adapter_version() == &index.adapter_version
 }
 
 async fn load_fact_index_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: Option<&RunId>,
 ) -> Result<BTreeMap<mfm_facts::FactClaimId, mfm_store::v1::FactIndexProjection>> {
-    let sql = if run_id.is_some() {
-        "SELECT source_run_id, source_seq, source_ordinal, source_event_id, commit_id, \
-         producer_node_id, commit_key, store_commit_order, recorded_at, observed_at, audience, visibility_scope, \
-         fact_kind, fact_descriptor_hash, fact_subject_namespace_hash, fact_key, \
-         subject_material_hash, request_schema_id, request_hash, response_schema_id, \
-         response_hash, response_artifact_id, response_artifact_evidence_hash, \
-         capability_kind, capability_version, adapter_kind, adapter_version \
-         FROM fact_index WHERE source_run_id = $1 ORDER BY source_seq, source_ordinal"
-    } else {
-        "SELECT source_run_id, source_seq, source_ordinal, source_event_id, commit_id, \
-         producer_node_id, commit_key, store_commit_order, recorded_at, observed_at, audience, visibility_scope, \
-         fact_kind, fact_descriptor_hash, fact_subject_namespace_hash, fact_key, \
-         subject_material_hash, request_schema_id, request_hash, response_schema_id, \
-         response_hash, response_artifact_id, response_artifact_evidence_hash, \
-         capability_kind, capability_version, adapter_kind, adapter_version \
-         FROM fact_index ORDER BY source_run_id, source_seq, source_ordinal"
-    };
-    let mut query = sqlx::query(sql);
+    let mut builder = QueryBuilder::new("SELECT ");
+    push_fact_index_projection_select_list(&mut builder, None);
+    builder.push(" FROM fact_index");
     if let Some(run_id) = run_id {
-        query = query.bind(run_id.as_str());
+        builder
+            .push(" WHERE source_run_id = ")
+            .push_bind(run_id.as_str().to_owned())
+            .push(" ORDER BY source_seq, source_ordinal");
+    } else {
+        builder.push(" ORDER BY source_run_id, source_seq, source_ordinal");
     }
-    let rows = query
+    let rows = builder
+        .build()
         .fetch_all(&mut **tx)
         .await
         .map_err(|error| database_error("failed to load fact index projections", error))?;
     let mut projections = BTreeMap::new();
     for row in rows {
-        let source_run_id = parse_identity::<RunId>(&required_string(
-            &row,
-            "source_run_id",
-            "fact_index.source_run_id",
-        )?)?;
-        let source_seq = i64_to_positive_u64(
-            required_i64(&row, "source_seq", "fact_index.source_seq")?,
-            "fact_index.source_seq",
-        )?;
-        let source_ordinal = i64_to_u32(
-            required_i32(&row, "source_ordinal", "fact_index.source_ordinal")?.into(),
-            "fact_index.source_ordinal",
-        )?;
-        let claim_id =
-            mfm_facts::FactClaimId::new(source_run_id.clone(), source_seq, source_ordinal)
-                .map_err(fact_error)?;
-        let projection = mfm_store::v1::FactIndexProjection {
-            fact_claim_id: claim_id.clone(),
-            source_run_id,
-            source_seq,
-            source_ordinal,
-            source_event_id: parse_identity(&required_string(
-                &row,
-                "source_event_id",
-                "fact_index.source_event_id",
-            )?)?,
-            producer_node_id: parse_identity(&required_string(
-                &row,
-                "producer_node_id",
-                "fact_index.producer_node_id",
-            )?)?,
-            commit_id: CommitKey::new(required_string(
-                &row,
-                "commit_key",
-                "fact_index.commit_key",
-            )?)?,
-            store_commit_order: i64_to_positive_u64(
-                required_i64(&row, "store_commit_order", "fact_index.store_commit_order")?,
-                "fact_index.store_commit_order",
-            )?,
-            recorded_at: required_string(&row, "recorded_at", "fact_index.recorded_at")?,
-            observed_at: optional_string(&row, "observed_at")?,
-            audience: parse_fact_audience(&required_string(
-                &row,
-                "audience",
-                "fact_index.audience",
-            )?)?,
-            visibility_scope: parse_fact_visibility_scope(&required_string(
-                &row,
-                "visibility_scope",
-                "fact_index.visibility_scope",
-            )?)?,
-            fact_kind: mfm_facts::FactKind::new(required_string(
-                &row,
-                "fact_kind",
-                "fact_index.fact_kind",
-            )?)
-            .map_err(fact_error)?,
-            fact_descriptor_hash: parse_identity(&required_string(
-                &row,
-                "fact_descriptor_hash",
-                "fact_index.fact_descriptor_hash",
-            )?)?,
-            fact_subject_namespace_hash: parse_identity(&required_string(
-                &row,
-                "fact_subject_namespace_hash",
-                "fact_index.fact_subject_namespace_hash",
-            )?)?,
-            fact_key: mfm_facts::FactKey::from_digest(parse_identity(&required_string(
-                &row,
-                "fact_key",
-                "fact_index.fact_key",
-            )?)?),
-            subject_material_hash: parse_identity(&required_string(
-                &row,
-                "subject_material_hash",
-                "fact_index.subject_material_hash",
-            )?)?,
-            request_schema_id: parse_optional_identity(optional_string(
-                &row,
-                "request_schema_id",
-            )?)?,
-            request_hash: parse_optional_identity(optional_string(&row, "request_hash")?)?,
-            response_schema_id: parse_identity(&required_string(
-                &row,
-                "response_schema_id",
-                "fact_index.response_schema_id",
-            )?)?,
-            response_hash: parse_identity(&required_string(
-                &row,
-                "response_hash",
-                "fact_index.response_hash",
-            )?)?,
-            artifact_id: parse_identity(&required_string(
-                &row,
-                "response_artifact_id",
-                "fact_index.response_artifact_id",
-            )?)?,
-            artifact_evidence_hash: parse_identity(&required_string(
-                &row,
-                "response_artifact_evidence_hash",
-                "fact_index.response_artifact_evidence_hash",
-            )?)?,
-            capability_kind: parse_identity(&required_string(
-                &row,
-                "capability_kind",
-                "fact_index.capability_kind",
-            )?)?,
-            capability_version: required_string(
-                &row,
-                "capability_version",
-                "fact_index.capability_version",
-            )?
-            .parse()
-            .map_err(|error| PostgresStoreError::Corruption(format!("{error}")))?,
-            adapter_kind: parse_identity(&required_string(
-                &row,
-                "adapter_kind",
-                "fact_index.adapter_kind",
-            )?)?,
-            adapter_version: required_string(
-                &row,
-                "adapter_version",
-                "fact_index.adapter_version",
-            )?
-            .parse()
-            .map_err(|error| PostgresStoreError::Corruption(format!("{error}")))?,
-        };
-        projections.insert(claim_id, projection);
+        let projection = fact_index_projection_from_row(&row)?;
+        projections.insert(projection.fact_claim_id.clone(), projection);
     }
     Ok(projections)
+}
+
+const FACT_INDEX_PROJECTION_COLUMNS: &[&str] = &[
+    "source_run_id",
+    "source_seq",
+    "source_ordinal",
+    "source_event_id",
+    "producer_node_id",
+    "commit_key",
+    "store_commit_order",
+    "recorded_at",
+    "observed_at",
+    "audience",
+    "visibility_scope",
+    "fact_kind",
+    "fact_descriptor_hash",
+    "fact_subject_namespace_hash",
+    "fact_key",
+    "subject_material_hash",
+    "request_schema_id",
+    "request_hash",
+    "response_schema_id",
+    "response_hash",
+    "response_artifact_id",
+    "response_artifact_evidence_hash",
+    "capability_kind",
+    "capability_version",
+    "adapter_kind",
+    "adapter_version",
+];
+
+pub(super) fn push_fact_index_projection_select_list(
+    builder: &mut QueryBuilder<Postgres>,
+    alias: Option<&str>,
+) {
+    for (index, column) in FACT_INDEX_PROJECTION_COLUMNS.iter().enumerate() {
+        if index > 0 {
+            builder.push(", ");
+        }
+        if let Some(alias) = alias {
+            builder
+                .push(alias)
+                .push(".")
+                .push(*column)
+                .push(" AS ")
+                .push(*column);
+        } else {
+            builder.push(*column);
+        }
+    }
+}
+
+struct FactClaimCoordinates {
+    source_run_id: RunId,
+    source_seq: u64,
+    source_ordinal: u32,
+    claim_id: mfm_facts::FactClaimId,
+}
+
+fn fact_claim_coordinates_from_row(row: &PgRowReader<'_>) -> Result<FactClaimCoordinates> {
+    let source_run_id = row.required_identity::<RunId>("source_run_id")?;
+    let source_seq = row.required_positive_u64("source_seq")?;
+    let source_ordinal = row.required_u32("source_ordinal")?;
+    let claim_id = mfm_facts::FactClaimId::new(source_run_id.clone(), source_seq, source_ordinal)
+        .map_err(fact_error)?;
+    Ok(FactClaimCoordinates {
+        source_run_id,
+        source_seq,
+        source_ordinal,
+        claim_id,
+    })
+}
+
+pub(super) fn fact_index_projection_from_row(
+    row: &PgRow,
+) -> Result<mfm_store::v1::FactIndexProjection> {
+    let row = PgRowReader::new(row, "fact_index");
+    let coordinates = fact_claim_coordinates_from_row(&row)?;
+    Ok(mfm_store::v1::FactIndexProjection {
+        fact_claim_id: coordinates.claim_id,
+        source_run_id: coordinates.source_run_id,
+        source_seq: coordinates.source_seq,
+        source_ordinal: coordinates.source_ordinal,
+        source_event_id: row.required_identity("source_event_id")?,
+        producer_node_id: row.required_identity("producer_node_id")?,
+        commit_id: CommitKey::new(row.required_string("commit_key")?)?,
+        store_commit_order: row.required_positive_u64("store_commit_order")?,
+        recorded_at: row.required_string("recorded_at")?,
+        observed_at: row.optional_string("observed_at")?,
+        audience: parse_fact_audience(&row.required_string("audience")?)?,
+        visibility_scope: parse_fact_visibility_scope(&row.required_string("visibility_scope")?)?,
+        fact_kind: mfm_facts::FactKind::new(row.required_string("fact_kind")?)
+            .map_err(fact_error)?,
+        fact_descriptor_hash: row.required_identity("fact_descriptor_hash")?,
+        fact_subject_namespace_hash: row.required_identity("fact_subject_namespace_hash")?,
+        fact_key: mfm_facts::FactKey::from_digest(row.required_identity("fact_key")?),
+        subject_material_hash: row.required_identity("subject_material_hash")?,
+        request_schema_id: row.optional_identity("request_schema_id")?,
+        request_hash: row.optional_identity("request_hash")?,
+        response_schema_id: row.required_identity("response_schema_id")?,
+        response_hash: row.required_identity("response_hash")?,
+        artifact_id: row.required_identity("response_artifact_id")?,
+        artifact_evidence_hash: row.required_identity("response_artifact_evidence_hash")?,
+        capability_kind: row.required_identity("capability_kind")?,
+        capability_version: row.required_parsed("capability_version")?,
+        adapter_kind: row.required_identity("adapter_kind")?,
+        adapter_version: row.required_parsed("adapter_version")?,
+    })
 }
 
 async fn load_fact_index_terms_tx(
@@ -902,75 +846,41 @@ async fn load_fact_index_terms_tx(
         mfm_store::v1::FactIndexTermProjection,
     >,
 > {
-    let sql = if run_id.is_some() {
-        "SELECT source_run_id, source_seq, source_ordinal, fact_descriptor_hash, field_id, \
-         source, value_type, value_text, value_bool, value_i64, value_u64, value_decimal, \
-         value_timestamp, value_digest, unit, scale \
-         FROM fact_index_terms WHERE source_run_id = $1 \
-         ORDER BY source_seq, source_ordinal, field_id"
-    } else {
-        "SELECT source_run_id, source_seq, source_ordinal, fact_descriptor_hash, field_id, \
-         source, value_type, value_text, value_bool, value_i64, value_u64, value_decimal, \
-         value_timestamp, value_digest, unit, scale \
-         FROM fact_index_terms ORDER BY source_run_id, source_seq, source_ordinal, field_id"
-    };
-    let mut query = sqlx::query(sql);
+    let mut builder = QueryBuilder::new("SELECT ");
+    push_fact_index_term_projection_select_list(&mut builder);
+    builder.push(" FROM fact_index_terms");
     if let Some(run_id) = run_id {
-        query = query.bind(run_id.as_str());
+        builder
+            .push(" WHERE source_run_id = ")
+            .push_bind(run_id.as_str().to_owned())
+            .push(" ORDER BY source_seq, source_ordinal, field_id");
+    } else {
+        builder.push(" ORDER BY source_run_id, source_seq, source_ordinal, field_id");
     }
-    let rows = query
+    let rows = builder
+        .build()
         .fetch_all(&mut **tx)
         .await
         .map_err(|error| database_error("failed to load fact term projections", error))?;
     let mut projections = BTreeMap::new();
     for row in rows {
-        let source_run_id = parse_identity::<RunId>(&required_string(
-            &row,
-            "source_run_id",
-            "fact_index_terms.source_run_id",
-        )?)?;
-        let source_seq = i64_to_positive_u64(
-            required_i64(&row, "source_seq", "fact_index_terms.source_seq")?,
-            "fact_index_terms.source_seq",
-        )?;
-        let source_ordinal = i64_to_u32(
-            required_i32(&row, "source_ordinal", "fact_index_terms.source_ordinal")?.into(),
-            "fact_index_terms.source_ordinal",
-        )?;
-        let claim_id = mfm_facts::FactClaimId::new(source_run_id, source_seq, source_ordinal)
-            .map_err(fact_error)?;
-        let field_id = mfm_facts::FactFieldId::new(required_string(
-            &row,
-            "field_id",
-            "fact_index_terms.field_id",
-        )?)
-        .map_err(fact_error)?;
-        let value_type = parse_fact_field_value_type(&required_string(
-            &row,
-            "value_type",
-            "fact_index_terms.value_type",
-        )?)?;
-        let value = parse_term_value(&row, value_type)?;
+        let row = PgRowReader::new(&row, "fact_index_terms");
+        let coordinates = fact_claim_coordinates_from_row(&row)?;
+        let (field_id, value_type, value) = fact_term_value_from_reader(&row)?;
         let projection = mfm_store::v1::FactIndexTermProjection {
-            fact_claim_id: claim_id.clone(),
-            fact_descriptor_hash: parse_identity(&required_string(
-                &row,
-                "fact_descriptor_hash",
-                "fact_index_terms.fact_descriptor_hash",
-            )?)?,
+            fact_claim_id: coordinates.claim_id.clone(),
+            fact_descriptor_hash: row.required_identity("fact_descriptor_hash")?,
             field_id: field_id.clone(),
-            source: parse_fact_field_source(&required_string(
-                &row,
-                "source",
-                "fact_index_terms.source",
-            )?)?,
+            source: parse_fact_field_source(&row.required_string("source")?)?,
             value_type,
             value,
-            unit: optional_string(&row, "unit")?
+            unit: row
+                .optional_string("unit")?
                 .map(mfm_facts::FactUnit::new)
                 .transpose()
                 .map_err(fact_error)?,
-            scale: optional_i32(&row, "scale")?
+            scale: row
+                .optional_i32("scale")?
                 .map(|value| {
                     i16::try_from(value)
                         .map_err(|_| {
@@ -982,9 +892,103 @@ async fn load_fact_index_terms_tx(
                 })
                 .transpose()?,
         };
-        projections.insert((claim_id, field_id), projection);
+        projections.insert((coordinates.claim_id, field_id), projection);
     }
     Ok(projections)
+}
+
+const FACT_INDEX_TERM_IDENTITY_COLUMNS: &[&str] = &[
+    "source_run_id",
+    "source_seq",
+    "source_ordinal",
+    "fact_descriptor_hash",
+    "field_id",
+    "source",
+    "value_type",
+];
+
+const FACT_INDEX_TERM_METADATA_COLUMNS: &[&str] = &["unit", "scale"];
+
+pub(super) fn push_fact_index_term_projection_select_list(builder: &mut QueryBuilder<Postgres>) {
+    let mut has_column = false;
+    for column in FACT_INDEX_TERM_IDENTITY_COLUMNS {
+        push_fact_index_term_select_column(builder, column, &mut has_column);
+    }
+    for column in FactTermValueColumn::ALL {
+        push_fact_index_term_select_column(builder, column.storage_column(), &mut has_column);
+    }
+    for column in FACT_INDEX_TERM_METADATA_COLUMNS {
+        push_fact_index_term_select_column(builder, column, &mut has_column);
+    }
+}
+
+pub(super) fn push_fact_index_term_value_select_list(builder: &mut QueryBuilder<Postgres>) {
+    for column in FactTermValueColumn::ALL {
+        builder.push(", ").push(column.storage_column());
+    }
+}
+
+fn push_fact_index_term_select_column(
+    builder: &mut QueryBuilder<Postgres>,
+    column: &str,
+    has_column: &mut bool,
+) {
+    if *has_column {
+        builder.push(", ");
+    }
+    builder.push(column);
+    *has_column = true;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FactTermValueColumn {
+    Text,
+    Bool,
+    I64,
+    U64,
+    Decimal,
+    Timestamp,
+    Digest,
+}
+
+impl FactTermValueColumn {
+    pub(super) const ALL: [Self; 7] = [
+        Self::Text,
+        Self::Bool,
+        Self::I64,
+        Self::U64,
+        Self::Decimal,
+        Self::Timestamp,
+        Self::Digest,
+    ];
+
+    pub(super) fn for_scalar(value: &mfm_facts::FactCanonicalScalar) -> Self {
+        Self::for_value_type(value.value_type())
+    }
+
+    fn for_value_type(value_type: mfm_facts::FactFieldValueType) -> Self {
+        match value_type {
+            mfm_facts::FactFieldValueType::String => Self::Text,
+            mfm_facts::FactFieldValueType::Boolean => Self::Bool,
+            mfm_facts::FactFieldValueType::SignedInteger => Self::I64,
+            mfm_facts::FactFieldValueType::UnsignedInteger => Self::U64,
+            mfm_facts::FactFieldValueType::Timestamp => Self::Timestamp,
+            mfm_facts::FactFieldValueType::DecimalString => Self::Decimal,
+            mfm_facts::FactFieldValueType::Digest => Self::Digest,
+        }
+    }
+
+    pub(super) fn storage_column(self) -> &'static str {
+        match self {
+            Self::Text => "value_text",
+            Self::Bool => "value_bool",
+            Self::I64 => "value_i64",
+            Self::U64 => "value_u64",
+            Self::Decimal => "value_decimal",
+            Self::Timestamp => "value_timestamp",
+            Self::Digest => "value_digest",
+        }
+    }
 }
 
 fn descriptor_evidence_hash(
@@ -1008,7 +1012,7 @@ fn descriptor_evidence_hash(
                 "fact descriptor projection missing RunAdmitted artifact evidence".to_owned(),
             )
         })?;
-    store_artifact_from_run_artifact(artifact)
+    ArtifactEvidenceRef::from_run_artifact(artifact)
         .evidence_hash()
         .map_err(Into::into)
 }
@@ -1023,22 +1027,6 @@ fn event_for_id<'a>(
         .ok_or_else(|| {
             PostgresStoreError::Corruption(format!("event {event_id} missing from staged batch"))
         })
-}
-
-fn store_artifact_from_run_artifact(
-    artifact: &events::RunArtifactEvidenceRef,
-) -> ArtifactEvidenceRef {
-    ArtifactEvidenceRef {
-        artifact_id: artifact.artifact_id.clone(),
-        digest: artifact.content_digest.clone(),
-        byte_len: artifact.byte_len,
-        media_type: artifact.media_type.clone(),
-        schema_id: artifact.schema_id.clone(),
-        semantic_type_id: artifact.semantic_type_id.clone(),
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: artifact.role,
-    }
 }
 
 struct TermValueColumns {
@@ -1087,169 +1075,312 @@ impl TermValueColumns {
     }
 }
 
-pub(super) fn parse_term_value(
+pub(super) fn returned_field_summary_from_row(
     row: &PgRow,
+) -> Result<mfm_facts::ReturnedFieldValueSummary> {
+    let (field_id, value_type, value) = fact_term_value_from_row(row)?;
+    mfm_facts::ReturnedFieldValueSummary::new(field_id, value_type, value).map_err(fact_error)
+}
+
+pub(super) fn fact_term_value_from_row(
+    row: &PgRow,
+) -> Result<(
+    mfm_facts::FactFieldId,
+    mfm_facts::FactFieldValueType,
+    mfm_facts::FactCanonicalScalar,
+)> {
+    let row = PgRowReader::new(row, "fact_index_terms");
+    fact_term_value_from_reader(&row)
+}
+
+fn fact_term_value_from_reader(
+    row: &PgRowReader<'_>,
+) -> Result<(
+    mfm_facts::FactFieldId,
+    mfm_facts::FactFieldValueType,
+    mfm_facts::FactCanonicalScalar,
+)> {
+    let field_id =
+        mfm_facts::FactFieldId::new(row.required_string("field_id")?).map_err(fact_error)?;
+    let value_type = parse_fact_field_value_type(&row.required_string("value_type")?)?;
+    let value = parse_term_value_from_reader(row, value_type)?;
+    Ok((field_id, value_type, value))
+}
+
+fn parse_term_value_from_reader(
+    row: &PgRowReader<'_>,
     value_type: mfm_facts::FactFieldValueType,
 ) -> Result<mfm_facts::FactCanonicalScalar> {
-    match value_type {
-        mfm_facts::FactFieldValueType::String => {
-            required_string(row, "value_text", "fact_index_terms.value_text")
-                .map(mfm_facts::FactCanonicalScalar::String)
-        }
-        mfm_facts::FactFieldValueType::Boolean => {
-            required_bool(row, "value_bool", "fact_index_terms.value_bool")
-                .map(mfm_facts::FactCanonicalScalar::Boolean)
-        }
-        mfm_facts::FactFieldValueType::SignedInteger => {
-            required_i64(row, "value_i64", "fact_index_terms.value_i64")
-                .map(mfm_facts::FactCanonicalScalar::SignedInteger)
-        }
-        mfm_facts::FactFieldValueType::UnsignedInteger => {
-            let value = required_string(row, "value_u64", "fact_index_terms.value_u64")?
+    let column = FactTermValueColumn::for_value_type(value_type);
+    match column {
+        FactTermValueColumn::Text => row
+            .required_string(column.storage_column())
+            .map(mfm_facts::FactCanonicalScalar::String),
+        FactTermValueColumn::Bool => row
+            .required_bool(column.storage_column())
+            .map(mfm_facts::FactCanonicalScalar::Boolean),
+        FactTermValueColumn::I64 => row
+            .required_i64(column.storage_column())
+            .map(mfm_facts::FactCanonicalScalar::SignedInteger),
+        FactTermValueColumn::U64 => {
+            let value = row
+                .required_string(column.storage_column())?
                 .parse::<u64>()
                 .map_err(|_| {
-                    PostgresStoreError::Corruption(
-                        "fact_index_terms.value_u64 was not a u64".to_owned(),
-                    )
+                    PostgresStoreError::Corruption(format!(
+                        "fact_index_terms.{} was not a u64",
+                        column.storage_column()
+                    ))
                 })?;
             Ok(mfm_facts::FactCanonicalScalar::UnsignedInteger(value))
         }
-        mfm_facts::FactFieldValueType::Timestamp => mfm_facts::FactCanonicalScalar::timestamp(
-            required_string(row, "value_timestamp", "fact_index_terms.value_timestamp")?,
+        FactTermValueColumn::Timestamp => {
+            mfm_facts::FactCanonicalScalar::timestamp(row.required_string(column.storage_column())?)
+                .map_err(fact_error)
+        }
+        FactTermValueColumn::Decimal => mfm_facts::FactCanonicalScalar::decimal_variable(
+            row.required_string(column.storage_column())?,
         )
         .map_err(fact_error),
-        mfm_facts::FactFieldValueType::DecimalString => {
-            mfm_facts::FactCanonicalScalar::decimal_variable(required_string(
-                row,
-                "value_decimal",
-                "fact_index_terms.value_decimal",
-            )?)
-            .map_err(fact_error)
-        }
-        mfm_facts::FactFieldValueType::Digest => {
-            let digest = parse_identity(&required_string(
-                row,
-                "value_digest",
-                "fact_index_terms.value_digest",
-            )?)?;
+        FactTermValueColumn::Digest => {
+            let digest = row.required_identity(column.storage_column())?;
             Ok(mfm_facts::FactCanonicalScalar::Digest(digest))
         }
     }
 }
 
-pub(super) fn fact_audience_tag(value: mfm_facts::FactAudience) -> &'static str {
-    match value {
-        mfm_facts::FactAudience::Control => "control",
-        mfm_facts::FactAudience::Platform => "platform",
-    }
-}
-
 pub(super) fn parse_fact_audience(value: &str) -> Result<mfm_facts::FactAudience> {
-    match value {
-        "control" => Ok(mfm_facts::FactAudience::Control),
-        "platform" => Ok(mfm_facts::FactAudience::Platform),
-        _ => Err(PostgresStoreError::Corruption(format!(
-            "unknown fact audience {value}"
-        ))),
-    }
-}
-
-pub(super) fn fact_visibility_scope_tag(value: mfm_facts::FactVisibilityScope) -> &'static str {
-    match value {
-        mfm_facts::FactVisibilityScope::Default => "default",
-    }
+    value
+        .parse::<mfm_facts::FactAudience>()
+        .map_err(|_| PostgresStoreError::Corruption(format!("unknown fact audience {value}")))
 }
 
 pub(super) fn parse_fact_visibility_scope(value: &str) -> Result<mfm_facts::FactVisibilityScope> {
-    match value {
-        "default" => Ok(mfm_facts::FactVisibilityScope::Default),
-        _ => Err(PostgresStoreError::Corruption(format!(
-            "unknown fact visibility scope {value}"
-        ))),
-    }
-}
-
-fn fact_field_source_tag(value: mfm_facts::FactFieldSource) -> &'static str {
-    match value {
-        mfm_facts::FactFieldSource::Subject => "subject",
-        mfm_facts::FactFieldSource::Result => "result",
-        mfm_facts::FactFieldSource::Metadata => "metadata",
-    }
+    value
+        .parse::<mfm_facts::FactVisibilityScope>()
+        .map_err(|_| {
+            PostgresStoreError::Corruption(format!("unknown fact visibility scope {value}"))
+        })
 }
 
 fn parse_fact_field_source(value: &str) -> Result<mfm_facts::FactFieldSource> {
-    match value {
-        "subject" => Ok(mfm_facts::FactFieldSource::Subject),
-        "result" => Ok(mfm_facts::FactFieldSource::Result),
-        "metadata" => Ok(mfm_facts::FactFieldSource::Metadata),
-        _ => Err(PostgresStoreError::Corruption(format!(
-            "unknown fact field source {value}"
-        ))),
-    }
-}
-
-fn fact_field_value_type_tag(value: mfm_facts::FactFieldValueType) -> &'static str {
-    match value {
-        mfm_facts::FactFieldValueType::String => "string",
-        mfm_facts::FactFieldValueType::Boolean => "boolean",
-        mfm_facts::FactFieldValueType::SignedInteger => "signed_integer",
-        mfm_facts::FactFieldValueType::UnsignedInteger => "unsigned_integer",
-        mfm_facts::FactFieldValueType::Timestamp => "timestamp",
-        mfm_facts::FactFieldValueType::DecimalString => "decimal_string",
-        mfm_facts::FactFieldValueType::Digest => "digest",
-    }
+    value
+        .parse::<mfm_facts::FactFieldSource>()
+        .map_err(|_| PostgresStoreError::Corruption(format!("unknown fact field source {value}")))
 }
 
 pub(super) fn parse_fact_field_value_type(value: &str) -> Result<mfm_facts::FactFieldValueType> {
-    match value {
-        "string" => Ok(mfm_facts::FactFieldValueType::String),
-        "boolean" => Ok(mfm_facts::FactFieldValueType::Boolean),
-        "signed_integer" => Ok(mfm_facts::FactFieldValueType::SignedInteger),
-        "unsigned_integer" => Ok(mfm_facts::FactFieldValueType::UnsignedInteger),
-        "timestamp" => Ok(mfm_facts::FactFieldValueType::Timestamp),
-        "decimal_string" => Ok(mfm_facts::FactFieldValueType::DecimalString),
-        "digest" => Ok(mfm_facts::FactFieldValueType::Digest),
-        _ => Err(PostgresStoreError::Corruption(format!(
-            "unknown fact field value type {value}"
-        ))),
-    }
-}
-
-fn required_string(row: &PgRow, column: &str, field: &'static str) -> Result<String> {
-    row.try_get::<String, _>(column)
-        .map_err(|_| PostgresStoreError::Corruption(format!("{field} was missing or invalid")))
-}
-
-fn optional_string(row: &PgRow, column: &str) -> Result<Option<String>> {
-    row.try_get::<Option<String>, _>(column)
-        .map_err(|_| PostgresStoreError::Corruption(format!("{column} was invalid")))
-}
-
-fn required_bool(row: &PgRow, column: &str, field: &'static str) -> Result<bool> {
-    row.try_get::<bool, _>(column)
-        .map_err(|_| PostgresStoreError::Corruption(format!("{field} was missing or invalid")))
-}
-
-fn required_i64(row: &PgRow, column: &str, field: &'static str) -> Result<i64> {
-    row.try_get::<i64, _>(column)
-        .map_err(|_| PostgresStoreError::Corruption(format!("{field} was missing or invalid")))
-}
-
-fn required_i32(row: &PgRow, column: &str, field: &'static str) -> Result<i32> {
-    row.try_get::<i32, _>(column)
-        .map_err(|_| PostgresStoreError::Corruption(format!("{field} was missing or invalid")))
-}
-
-fn optional_i32(row: &PgRow, column: &str) -> Result<Option<i32>> {
-    row.try_get::<Option<i32>, _>(column)
-        .map_err(|_| PostgresStoreError::Corruption(format!("{column} was invalid")))
-}
-
-fn i64_to_u32(value: i64, field: &'static str) -> Result<u32> {
-    u32::try_from(value)
-        .map_err(|_| PostgresStoreError::Corruption(format!("{field} outside u32 range")))
+    value.parse::<mfm_facts::FactFieldValueType>().map_err(|_| {
+        PostgresStoreError::Corruption(format!("unknown fact field value type {value}"))
+    })
 }
 
 pub(super) fn fact_error(error: mfm_facts::FactDescriptorError) -> PostgresStoreError {
     StoreError::Identity(error.to_string()).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn physical_fact_projection_validation_rejects_term_descriptor_mismatch() {
+        let mut projections = valid_physical_fact_projections();
+        let other_descriptor_fixture =
+            mfm_store::v1::test_support::fact_descriptor_projection_fixture_for_test(
+                fact_descriptor_with_seed(2),
+                event_id(11),
+            )
+            .expect("other descriptor fixture");
+        let mismatched_descriptor_hash = other_descriptor_fixture.descriptor_hash.clone();
+        projections.fact_descriptors.insert(
+            other_descriptor_fixture.descriptor_hash.clone(),
+            other_descriptor_fixture.projection,
+        );
+        let term = projections
+            .fact_term_entries
+            .values_mut()
+            .next()
+            .expect("index term");
+        term.fact_descriptor_hash = mismatched_descriptor_hash.clone();
+
+        let error = validate_physical_fact_projections(&projections)
+            .expect_err("term descriptor mismatch should reject");
+        assert!(
+            error
+                .to_string()
+                .contains(mismatched_descriptor_hash.as_str()),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn physical_fact_projection_validation_rejects_index_without_record() {
+        let mut projections = valid_physical_fact_projections();
+        let claim_id = projections
+            .fact_index_entries
+            .keys()
+            .next()
+            .expect("index claim id")
+            .clone();
+        projections.fact_records.remove(&claim_id);
+
+        let error = validate_physical_fact_projections(&projections)
+            .expect_err("index without record should reject");
+        assert!(
+            error.to_string().contains("has no FactRecorded payload"),
+            "{error}"
+        );
+    }
+
+    fn valid_physical_fact_projections() -> PhysicalFactProjections {
+        let descriptor = fact_descriptor();
+        let descriptor_fixture =
+            mfm_store::v1::test_support::fact_descriptor_projection_fixture_for_test(
+                descriptor.clone(),
+                event_id(10),
+            )
+            .expect("descriptor fixture");
+        let fact_fixture = mfm_store::v1::test_support::fact_projection_fixture_for_test(
+            &descriptor,
+            descriptor_fixture.descriptor_hash.clone(),
+            mfm_store::v1::test_support::FactProjectionFixtureInputForTest {
+                run_id: run_id(3),
+                source_seq: 7,
+                source_ordinal: 0,
+                source_event_id: event_id(12),
+                node_id: node_id(13),
+                attempt_id: attempt_id(14),
+                commit_id: CommitKey::new("fact-term-descriptor-mismatch").expect("commit key"),
+                store_commit_order: 1,
+                recorded_at: "2026-01-02T03:04:05Z".to_owned(),
+                observed_at: None,
+                visibility: mfm_facts::FactVisibility::indexed_default(
+                    mfm_facts::FactAudience::Platform,
+                ),
+                subject: mfm_canonical::CanonicalValue::object([(
+                    "account",
+                    mfm_canonical::CanonicalValue::String("alice".to_owned()),
+                )])
+                .expect("subject"),
+                response: mfm_canonical::CanonicalValue::object([(
+                    "ok",
+                    mfm_canonical::CanonicalValue::Bool(true),
+                )])
+                .expect("response"),
+                request: None,
+                response_schema_id: schema_id("response", 5),
+                response_artifact_id: None,
+                producer: producer(),
+            },
+        )
+        .expect("fact projection fixture");
+        let index = fact_fixture.index.expect("indexed fact projection");
+        let claim_id = index.fact_claim_id.clone();
+        let term = fact_fixture.terms.into_iter().next().expect("index term");
+        PhysicalFactProjections {
+            fact_descriptors: BTreeMap::from([(
+                descriptor_fixture.descriptor_hash.clone(),
+                descriptor_fixture.projection,
+            )]),
+            fact_records: BTreeMap::from([(claim_id.clone(), fact_fixture.record)]),
+            fact_index_entries: BTreeMap::from([(claim_id.clone(), index)]),
+            fact_term_entries: BTreeMap::from([((claim_id, term.field_id.clone()), term)]),
+        }
+    }
+
+    fn fact_descriptor() -> mfm_facts::FactDescriptor {
+        fact_descriptor_with_seed(1)
+    }
+
+    fn fact_descriptor_with_seed(seed: u8) -> mfm_facts::FactDescriptor {
+        mfm_facts::FactDescriptor::new(
+            fact_kind(),
+            schema_id("descriptor", seed),
+            schema_id("subject", seed + 1),
+            schema_id("response", 5),
+            vec![mfm_facts::FactFieldDescriptor::new(
+                mfm_facts::FactFieldId::new("subject.account").expect("field id"),
+                mfm_facts::FactFieldPath::new("subject.account").expect("field path"),
+                mfm_facts::FactFieldValueType::String,
+                mfm_facts::FactFieldExtraction::SubjectPath(
+                    mfm_facts::CanonicalValuePath::new("account").expect("extraction"),
+                ),
+                vec![mfm_facts::FactQueryOperator::Equal],
+                mfm_facts::FactFieldExposure::Returnable,
+                None,
+                None,
+                false,
+                true,
+            )
+            .expect("field descriptor")],
+            Vec::new(),
+        )
+        .expect("fact descriptor")
+    }
+
+    fn producer() -> mfm_facts::FactProducerProvenance {
+        mfm_facts::FactProducerProvenance::new(
+            capability_kind(31),
+            mfm_ids::CapabilityVersion::new("mfm.pg.test.capability.v1")
+                .expect("capability version"),
+            adapter_kind(32),
+            mfm_ids::AdapterVersion::new("mfm.pg.test.adapter.v1").expect("adapter version"),
+        )
+    }
+
+    fn fact_kind() -> mfm_facts::FactKind {
+        mfm_facts::FactKind::new("mfm.pg.test.fact").expect("fact kind")
+    }
+
+    fn schema_id(name: &str, seed: u8) -> SchemaId {
+        let schema_name = format!("mfm.pg.test.{name}");
+        SchemaId::new(
+            &schema_name,
+            "1",
+            mfm_ids::DigestAlgorithm::Sha256JcsV1,
+            digest_bytes(seed),
+        )
+        .expect("schema id")
+    }
+
+    fn capability_kind(seed: u8) -> mfm_ids::CapabilityKind {
+        mfm_ids::CapabilityKind::new(
+            "mfm.pg.test",
+            "capability",
+            mfm_ids::DigestAlgorithm::Sha256JcsV1,
+            digest_bytes(seed),
+        )
+        .expect("capability kind")
+    }
+
+    fn adapter_kind(seed: u8) -> mfm_ids::AdapterKind {
+        mfm_ids::AdapterKind::new(
+            "mfm.pg.test",
+            "adapter",
+            mfm_ids::DigestAlgorithm::Sha256JcsV1,
+            digest_bytes(seed),
+        )
+        .expect("adapter kind")
+    }
+
+    fn run_id(seed: u8) -> RunId {
+        RunId::from_digest(mfm_ids::DigestAlgorithm::Sha256JcsV1, digest_bytes(seed))
+    }
+
+    fn node_id(seed: u8) -> NodeId {
+        NodeId::from_digest(mfm_ids::DigestAlgorithm::Sha256JcsV1, digest_bytes(seed))
+    }
+
+    fn attempt_id(seed: u8) -> mfm_ids::AttemptId {
+        mfm_ids::AttemptId::from_digest(mfm_ids::DigestAlgorithm::Sha256JcsV1, digest_bytes(seed))
+    }
+
+    fn event_id(seed: u8) -> mfm_ids::EventId {
+        mfm_ids::EventId::from_digest(mfm_ids::DigestAlgorithm::Sha256JcsV1, digest_bytes(seed))
+    }
+
+    fn digest_bytes(seed: u8) -> mfm_ids::DigestBytes {
+        mfm_ids::DigestBytes::from_array([seed; 32])
+    }
 }

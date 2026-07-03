@@ -15,6 +15,7 @@ name = "mfm_runtime"
 path = "src/lib.rs"
 
 [dependencies]
+mfm-artifact-capabilities = { path = "../../artifact-capabilities" }
 mfm-canonical = { path = "../canonical" }
 mfm-capabilities = { path = "../capabilities" }
 mfm-certify = { path = "../certify" }

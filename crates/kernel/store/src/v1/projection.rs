@@ -1202,31 +1202,9 @@ fn apply_fact_recorded(
     artifact_bytes: &ArtifactByteAuthorityMap,
 ) -> Result<()> {
     let claim = &payload.claim;
-    let fact_key = claim.subject().fact_key();
-    let claim_id = mfm_facts::derive_fact_claim_id(
-        envelope.run_id().clone(),
-        envelope.seq().as_u64(),
-        envelope.ordinal().as_u32(),
-    )
-    .map_err(|error| StoreError::Identity(error.to_string()))?;
-    match projections.attempt(&payload.node_id, &payload.attempt_id) {
-        Some(AttemptProjection {
-            status: AttemptStatus::Started { .. },
-            ..
-        }) => {}
-        Some(_) => {
-            return Err(StoreError::ProjectionConflict {
-                key: fact_claim_projection_key("fact", &claim_id),
-                message: "fact requires an active started attempt".to_owned(),
-            });
-        }
-        None => {
-            return Err(StoreError::ProjectionConflict {
-                key: fact_claim_projection_key("fact", &claim_id),
-                message: "fact requires a started attempt".to_owned(),
-            });
-        }
-    }
+    let mut record = FactRecordProjection::from_recorded_event(envelope, payload, None)?;
+    let claim_id = record.fact_claim_id.clone();
+    require_started_fact_attempt(projections, payload, &claim_id)?;
 
     let descriptor_projection = projections
         .fact_descriptor(claim.fact_descriptor_hash())
@@ -1241,18 +1219,6 @@ fn apply_fact_recorded(
         claim.subject().subject_material().as_bytes(),
     )
     .map_err(|error| StoreError::Identity(error.to_string()))?;
-    if mfm_facts::subject_material_hash(&subject_material)
-        .map_err(|error| StoreError::Identity(error.to_string()))?
-        != *claim.subject().subject_material_hash()
-    {
-        return Err(StoreError::ProjectionConflict {
-            key: format!(
-                "fact:{}:subject_material_hash",
-                claim.fact_descriptor_hash()
-            ),
-            message: "fact subject material hash does not match subject material".to_owned(),
-        });
-    }
 
     let response = claim.response();
     let (response_bytes, response_evidence) = require_artifact_bytes_by_key(
@@ -1261,50 +1227,28 @@ fn apply_fact_recorded(
         response.artifact_evidence_hash(),
     )?;
     validate_fact_response_evidence(response, response_evidence)?;
-    if projections.fact_records.values().any(|record| {
-        record.claim.response().artifact_id() == response.artifact_id()
-            && record.claim.response().artifact_evidence_hash() == response.artifact_evidence_hash()
-    }) {
-        return Err(StoreError::ProjectionConflict {
-            key: format!(
-                "fact_response:{}:{}",
-                response.artifact_id(),
-                response.artifact_evidence_hash()
-            ),
-            message: "response artifact is already bound to a fact claim".to_owned(),
-        });
-    }
+    record.response_artifact_evidence = Some(response_evidence.clone());
 
-    if projections.fact_records.contains_key(&claim_id) {
-        return Err(StoreError::ProjectionConflict {
-            key: fact_claim_projection_key("fact_record", &claim_id),
-            message: "fact claim id is already projected".to_owned(),
-        });
-    }
-    let source_seq = envelope.seq().as_u64();
-    let source_ordinal = envelope.ordinal().as_u32();
-    projections.fact_records.insert(
-        claim_id.clone(),
-        FactRecordProjection {
-            fact_claim_id: claim_id.clone(),
-            source_event_id: envelope.event_id().clone(),
-            source_run_id: envelope.run_id().clone(),
-            source_seq,
-            source_ordinal,
-            node_id: payload.node_id.clone(),
-            attempt_id: payload.attempt_id.clone(),
-            response_artifact_evidence: Some(response_evidence.clone()),
-            claim: claim.clone(),
-        },
-    );
-    let mfm_facts::FactVisibility::Indexed { audience, scope } = claim.visibility() else {
+    insert_fact_record_projection(projections, record.clone())?;
+    if !matches!(
+        claim.visibility(),
+        mfm_facts::FactVisibility::Indexed { .. }
+    ) {
         return Ok(());
-    };
+    }
 
-    let request = claim.request();
-    let producer = claim.producer();
     let recorded_at = fact_recorded_at(envelope);
     let store_commit_order = envelope.seq().as_u64();
+    let index = FactIndexProjection::from_record_projection(
+        &record,
+        envelope.commit_key().clone(),
+        store_commit_order,
+        recorded_at.clone(),
+    )?
+    .ok_or_else(|| StoreError::ProjectionConflict {
+        key: fact_claim_projection_key("fact_index", &claim_id),
+        message: "indexed fact record did not produce an index projection".to_owned(),
+    })?;
     let metadata = mfm_facts::FactExtractionMetadata::new(
         recorded_at.clone(),
         claim.observed_at().map(str::to_owned),
@@ -1322,54 +1266,20 @@ fn apply_fact_recorded(
     )
     .map_err(|error| StoreError::Identity(error.to_string()))?;
 
-    projections.fact_index_entries.insert(
-        claim_id.clone(),
-        FactIndexProjection {
-            fact_claim_id: claim_id.clone(),
-            source_run_id: envelope.run_id().clone(),
-            source_seq,
-            source_ordinal,
-            source_event_id: envelope.event_id().clone(),
-            producer_node_id: payload.node_id.clone(),
-            commit_id: envelope.commit_key().clone(),
-            store_commit_order,
-            recorded_at,
-            observed_at: claim.observed_at().map(str::to_owned),
-            audience: *audience,
-            visibility_scope: *scope,
-            fact_kind: claim.fact_kind().clone(),
-            fact_descriptor_hash: claim.fact_descriptor_hash().clone(),
-            fact_subject_namespace_hash: claim.subject().fact_subject_namespace_hash().clone(),
-            fact_key: fact_key.clone(),
-            subject_material_hash: claim.subject().subject_material_hash().clone(),
-            request_schema_id: request.map(|evidence| evidence.request_schema_id().clone()),
-            request_hash: request.map(|evidence| evidence.request_hash().clone()),
-            response_schema_id: response.response_schema_id().clone(),
-            response_hash: response.response_hash().clone(),
-            artifact_id: response.artifact_id().clone(),
-            artifact_evidence_hash: response.artifact_evidence_hash().clone(),
-            capability_kind: producer.capability_kind().clone(),
-            capability_version: producer.capability_version().clone(),
-            adapter_kind: producer.adapter_kind().clone(),
-            adapter_version: producer.adapter_version().clone(),
-        },
-    );
+    projections
+        .fact_index_entries
+        .insert(claim_id.clone(), index);
     for term in terms {
         let key = (claim_id.clone(), term.field_id().clone());
         if projections
             .fact_term_entries
             .insert(
                 key.clone(),
-                FactIndexTermProjection {
-                    fact_claim_id: claim_id.clone(),
-                    fact_descriptor_hash: claim.fact_descriptor_hash().clone(),
-                    field_id: term.field_id().clone(),
-                    source: term.source(),
-                    value_type: term.value_type(),
-                    value: term.value().clone(),
-                    unit: term.unit().cloned(),
-                    scale: term.scale(),
-                },
+                FactIndexTermProjection::from_extracted_term(
+                    &claim_id,
+                    claim.fact_descriptor_hash(),
+                    &term,
+                ),
             )
             .is_some()
         {
@@ -1391,31 +1301,38 @@ fn apply_fact_recorded_record_only(
     envelope: &KernelEventEnvelope,
     payload: &events::FactRecorded,
 ) -> Result<()> {
-    let claim = &payload.claim;
-    let claim_id = mfm_facts::derive_fact_claim_id(
-        envelope.run_id().clone(),
-        envelope.seq().as_u64(),
-        envelope.ordinal().as_u32(),
-    )
-    .map_err(|error| StoreError::Identity(error.to_string()))?;
+    let record = FactRecordProjection::from_recorded_event(envelope, payload, None)?;
+    require_started_fact_attempt(projections, payload, &record.fact_claim_id)?;
+    insert_fact_record_projection(projections, record)
+}
+
+fn require_started_fact_attempt(
+    projections: &ProjectionSnapshot,
+    payload: &events::FactRecorded,
+    claim_id: &mfm_facts::FactClaimId,
+) -> Result<()> {
     match projections.attempt(&payload.node_id, &payload.attempt_id) {
         Some(AttemptProjection {
             status: AttemptStatus::Started { .. },
             ..
-        }) => {}
-        Some(_) => {
-            return Err(StoreError::ProjectionConflict {
-                key: fact_claim_projection_key("fact", &claim_id),
-                message: "fact requires an active started attempt".to_owned(),
-            });
-        }
-        None => {
-            return Err(StoreError::ProjectionConflict {
-                key: fact_claim_projection_key("fact", &claim_id),
-                message: "fact requires a started attempt".to_owned(),
-            });
-        }
+        }) => Ok(()),
+        Some(_) => Err(StoreError::ProjectionConflict {
+            key: fact_claim_projection_key("fact", claim_id),
+            message: "fact requires an active started attempt".to_owned(),
+        }),
+        None => Err(StoreError::ProjectionConflict {
+            key: fact_claim_projection_key("fact", claim_id),
+            message: "fact requires a started attempt".to_owned(),
+        }),
     }
+}
+
+fn insert_fact_record_projection(
+    projections: &mut ProjectionSnapshot,
+    record: FactRecordProjection,
+) -> Result<()> {
+    let claim = &record.claim;
+    let claim_id = &record.fact_claim_id;
     if projections.fact_records.values().any(|record| {
         record.claim.response().artifact_id() == claim.response().artifact_id()
             && record.claim.response().artifact_evidence_hash()
@@ -1430,26 +1347,15 @@ fn apply_fact_recorded_record_only(
             message: "response artifact is already bound to a fact claim".to_owned(),
         });
     }
-    if projections.fact_records.contains_key(&claim_id) {
+    if projections.fact_records.contains_key(claim_id) {
         return Err(StoreError::ProjectionConflict {
-            key: fact_claim_projection_key("fact_record", &claim_id),
+            key: fact_claim_projection_key("fact_record", claim_id),
             message: "fact claim id is already projected".to_owned(),
         });
     }
-    projections.fact_records.insert(
-        claim_id.clone(),
-        FactRecordProjection {
-            fact_claim_id: claim_id,
-            source_event_id: envelope.event_id().clone(),
-            source_run_id: envelope.run_id().clone(),
-            source_seq: envelope.seq().as_u64(),
-            source_ordinal: envelope.ordinal().as_u32(),
-            node_id: payload.node_id.clone(),
-            attempt_id: payload.attempt_id.clone(),
-            response_artifact_evidence: None,
-            claim: claim.clone(),
-        },
-    );
+    projections
+        .fact_records
+        .insert(record.fact_claim_id.clone(), record);
     Ok(())
 }
 
@@ -1461,7 +1367,7 @@ fn apply_fact_descriptor_artifact(
 ) -> Result<()> {
     let expected_schema = mfm_facts::fact_descriptor_schema_id()
         .map_err(|error| StoreError::Identity(error.to_string()))?;
-    let evidence = store_artifact_from_run_artifact(artifact);
+    let evidence = ArtifactEvidenceRef::from_run_artifact(artifact);
     if evidence.artifact_role != ArtifactRole::FactDescriptor
         || evidence.schema_id.as_ref() != Some(&expected_schema)
     {
@@ -1638,22 +1544,6 @@ fn require_artifact_bytes_by_key<'a>(
     };
     super::verify_retained_artifact_bytes(bytes, evidence)?;
     Ok((bytes.as_slice(), evidence))
-}
-
-fn store_artifact_from_run_artifact(
-    artifact: &events::RunArtifactEvidenceRef,
-) -> ArtifactEvidenceRef {
-    ArtifactEvidenceRef {
-        artifact_id: artifact.artifact_id.clone(),
-        digest: artifact.content_digest.clone(),
-        byte_len: artifact.byte_len,
-        media_type: artifact.media_type.clone(),
-        schema_id: artifact.schema_id.clone(),
-        semantic_type_id: artifact.semantic_type_id.clone(),
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: artifact.role,
-    }
 }
 
 fn fact_recorded_at(_envelope: &KernelEventEnvelope) -> String {

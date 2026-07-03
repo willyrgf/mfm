@@ -293,6 +293,19 @@ fn app_fact_runner_capability_binding() -> mfm_runtime::RunnerCapabilityBinding 
     }
 }
 
+fn app_launch_fact_query_request() -> PublicFactQueryRequest {
+    PublicFactQueryRequest::from_selector(
+        "mfm.app.test.launch",
+        PublicFactQuerySelector {
+            return_fields: vec!["subject.amount".to_owned(), "result.amount".to_owned()],
+            ordering: Some("result.amount.asc".to_owned()),
+            limit: Some(10),
+            ..PublicFactQuerySelector::default()
+        },
+    )
+    .expect("public fact request")
+}
+
 fn app_fact_runner_registry(
     runtime_spec: &CertifiedRuntimeSpec,
     visibility: mfm_program::facts::FactVisibility,
@@ -352,28 +365,16 @@ fn prepare_btc_collector_internal_test_launch() -> Result<RunLaunchRequest, AppE
         mfm_op_btc_chain_head_collector::BtcChainHeadCollectorConfig::default(),
     )
     .expect("btc collector draft");
-    let query_context_seed = CanonicalSeed::from_value(
-        &mfm_op_btc_chain_head_collector::QueryCollectorCheckpointContext {
-            queried_at_unix_ms: None,
-        },
-    )
-    .expect("query context seed");
     let observation_context_seed = CanonicalSeed::from_value(
         &mfm_op_btc_chain_head_collector::BtcChainHeadObservationContext {
             observed_at_unix_ms: None,
         },
     )
     .expect("observation context seed");
-    let seeds = BTreeMap::from([
-        (
-            draft.seeds()[0].seed_id.clone(),
-            query_context_seed.canonical_json().clone(),
-        ),
-        (
-            draft.seeds()[1].seed_id.clone(),
-            observation_context_seed.canonical_json().clone(),
-        ),
-    ]);
+    let seeds = BTreeMap::from([(
+        draft.seeds()[0].seed_id.clone(),
+        observation_context_seed.canonical_json().clone(),
+    )]);
     let plan = TypedProgramLaunchPlan::from_draft_and_seed_material(draft, seeds)
         .expect("btc collector launch plan");
     let registry = production_certification_registry().expect("production registry");
@@ -1004,10 +1005,9 @@ async fn run_read_services_load_public_fact_catalog_from_retained_projection_aut
         .fact_index_entries()
         .next()
         .expect("platform fact index entry");
-    let public_ref = public_ref_id(
-        &internal_fact_ref_for_entry(&projection, entry).expect("platform internal ref"),
-    )
-    .expect("public ref id");
+    let public_ref =
+        public_ref_id(&internal_fact_ref_for_entry(entry).expect("platform internal ref"))
+            .expect("public ref id");
     let resolved = services
         .resolve_public_fact_ref(&public_ref)
         .await
@@ -1016,14 +1016,7 @@ async fn run_read_services_load_public_fact_catalog_from_retained_projection_aut
     assert_eq!(resolved.fields.len(), 2);
 
     let rendered = serde_json::to_string(&resolved).expect("public fact JSON");
-    assert!(!rendered.contains("artifact_id"));
-    assert!(!rendered.contains("artifact_evidence_hash"));
-    assert!(!rendered.contains("fact_descriptor_hash"));
-    assert!(!rendered.contains("subject_material_hash"));
-    assert!(!rendered.contains("response_hash"));
-    assert!(!rendered.contains("source_run_id"));
-    assert!(!rendered.contains("source_seq"));
-    assert!(!rendered.contains("source_ordinal"));
+    assert_public_fact_json_redacts_private_tokens_for_test(&rendered, std::iter::empty::<&str>());
 }
 
 #[tokio::test]
@@ -1064,67 +1057,26 @@ async fn run_read_services_public_fact_reads_are_store_scoped_across_runs() {
         }]
     );
 
-    let projection = store.projection_snapshot().expect("projection snapshot");
-    let platform_entries = projection
-        .fact_index_entries()
-        .filter(|(_claim_id, entry)| entry.audience == mfm_facts::FactAudience::Platform)
-        .map(|(_claim_id, entry)| entry)
-        .collect::<Vec<_>>();
-    assert_eq!(platform_entries.len(), 2);
+    let page = services
+        .query_public_facts(app_launch_fact_query_request())
+        .await
+        .expect("public fact query");
 
-    let mut public_refs = BTreeSet::new();
-    for entry in &platform_entries {
-        let public_ref =
-            public_ref_id(&internal_fact_ref_for_entry(&projection, entry).expect("internal ref"))
-                .expect("public ref");
+    assert_eq!(page.facts.len(), 2);
+    let public_refs = page
+        .facts
+        .iter()
+        .map(|fact| fact.public_ref.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(public_refs.len(), 2);
+    for public_ref in public_refs {
         let resolved = services
             .resolve_public_fact_ref(&public_ref)
             .await
             .expect("resolve public ref");
         assert_eq!(resolved.fact_kind, "mfm.app.test.launch");
         assert_eq!(resolved.fields.len(), 2);
-        public_refs.insert(public_ref);
     }
-
-    let catalog = services
-        .public_fact_catalog()
-        .await
-        .expect("public catalog");
-    let executor = FakeFactQueryExecutor {
-        rows: platform_entries
-            .iter()
-            .map(|entry| AppFactQueryRow {
-                fact_ref: internal_fact_ref_for_entry(&projection, entry).expect("internal ref"),
-                returned_fields: returned_fields_for_entry(&projection, entry),
-            })
-            .collect(),
-    };
-    let page = query_public_facts(
-        &catalog,
-        &executor,
-        &mfm_facts::StoreScopeRef::new("mfm.store.default").expect("store scope"),
-        &mfm_facts::ScopeDecisionEvidence::new(content_digest_for_bytes(
-            b"mfm.public-facts.default-scope.v1",
-        )),
-        PublicFactQueryRequest {
-            fact_kind: "mfm.app.test.launch".to_owned(),
-            shape: None,
-            predicates: Vec::new(),
-            return_fields: vec!["subject.amount".to_owned(), "result.amount".to_owned()],
-            ordering: "result.amount.asc".to_owned(),
-            limit: Some(10),
-        },
-    )
-    .await
-    .expect("public fact query");
-
-    assert_eq!(page.facts.len(), 2);
-    let query_refs = page
-        .facts
-        .iter()
-        .map(|fact| fact.public_ref.clone())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(query_refs, public_refs);
 }
 
 #[tokio::test]
@@ -1160,10 +1112,9 @@ async fn run_read_services_do_not_disclose_control_facts() {
         .fact_index_entries()
         .next()
         .expect("control fact index entry");
-    let control_ref = public_ref_id(
-        &internal_fact_ref_for_entry(&projection, entry).expect("control internal ref"),
-    )
-    .expect("control public ref-shaped id");
+    let control_ref =
+        public_ref_id(&internal_fact_ref_for_entry(entry).expect("control internal ref"))
+            .expect("control public ref-shaped id");
     let error = services
         .resolve_public_fact_ref(&control_ref)
         .await
@@ -1207,15 +1158,13 @@ struct FakeFactQueryExecutor {
     rows: Vec<AppFactQueryRow>,
 }
 
-impl AppFactQueryExecutor for FakeFactQueryExecutor {
-    type Error = AppError;
-
-    fn execute_app_fact_query<'a>(
+impl PublicFactQueryExecutor for FakeFactQueryExecutor {
+    fn execute_public_fact_query_plan<'a>(
         &'a self,
         _plan: &'a mfm_facts::CanonicalFactQueryPlan,
-    ) -> AppFactQueryFuture<'a, Self::Error> {
+    ) -> PublicFactQueryFuture<'a> {
         let rows = self.rows.clone();
-        Box::pin(async move { Ok(AppFactQueryExecution { rows }) })
+        Box::pin(async move { Ok(rows) })
     }
 }
 
@@ -1230,23 +1179,15 @@ async fn public_fact_query_filters_non_public_refs_and_redacts_internal_fields()
         .fact_index_entries()
         .next()
         .expect("platform fact index entry");
-    let platform_ref =
-        internal_fact_ref_for_entry(&projection, platform_entry).expect("platform internal ref");
+    let platform_ref = internal_fact_ref_for_entry(platform_entry).expect("platform internal ref");
     let platform_fields = returned_fields_for_entry(&projection, platform_entry);
     let mut control_entry = platform_entry.clone();
     control_entry.audience = mfm_facts::FactAudience::Control;
-    let control_ref =
-        internal_fact_ref_for_entry(&projection, &control_entry).expect("control ref");
+    let control_ref = internal_fact_ref_for_entry(&control_entry).expect("control ref");
     let executor = FakeFactQueryExecutor {
         rows: vec![
-            AppFactQueryRow {
-                fact_ref: platform_ref,
-                returned_fields: platform_fields.clone(),
-            },
-            AppFactQueryRow {
-                fact_ref: control_ref,
-                returned_fields: platform_fields,
-            },
+            AppFactQueryRow::new(platform_ref, platform_fields.clone()),
+            AppFactQueryRow::new(control_ref, platform_fields),
         ],
     };
 
@@ -1257,14 +1198,7 @@ async fn public_fact_query_filters_non_public_refs_and_redacts_internal_fields()
         &mfm_facts::ScopeDecisionEvidence::new(content_digest_for_bytes(
             b"mfm.public-facts.default-scope.v1",
         )),
-        PublicFactQueryRequest {
-            fact_kind: "mfm.app.test.launch".to_owned(),
-            shape: None,
-            predicates: Vec::new(),
-            return_fields: vec!["subject.amount".to_owned(), "result.amount".to_owned()],
-            ordering: "result.amount.asc".to_owned(),
-            limit: Some(10),
-        },
+        app_launch_fact_query_request(),
     )
     .await
     .expect("public fact query");
@@ -1279,18 +1213,15 @@ async fn public_fact_query_filters_non_public_refs_and_redacts_internal_fields()
             && field.value == PublicFactScalarValue::UnsignedInteger(15)));
 
     let rendered = serde_json::to_string(&page).expect("public page JSON");
-    assert!(!rendered.contains("artifact_id"));
-    assert!(!rendered.contains("artifact_evidence_hash"));
-    assert!(!rendered.contains("fact_descriptor_hash"));
-    assert!(!rendered.contains("subject_material_hash"));
-    assert!(!rendered.contains("response_hash"));
-    assert!(!rendered.contains("source_run_id"));
-    assert!(!rendered.contains("source_seq"));
-    assert!(!rendered.contains("source_ordinal"));
-    assert!(!rendered.contains(platform_entry.artifact_id.as_str()));
-    assert!(!rendered.contains(platform_entry.artifact_evidence_hash.as_str()));
-    assert!(!rendered.contains(platform_entry.fact_descriptor_hash.as_str()));
-    assert!(!rendered.contains(platform_entry.subject_material_hash.as_str()));
+    assert_public_fact_json_redacts_private_tokens_for_test(
+        &rendered,
+        [
+            platform_entry.artifact_id.as_str(),
+            platform_entry.artifact_evidence_hash.as_str(),
+            platform_entry.fact_descriptor_hash.as_str(),
+            platform_entry.subject_material_hash.as_str(),
+        ],
+    );
 }
 
 fn returned_fields_for_entry(
@@ -1315,13 +1246,9 @@ fn returned_fields_for_entry(
 }
 
 fn internal_fact_ref_for_entry(
-    projection: &store::ProjectionSnapshot,
     entry: &store::FactIndexProjection,
 ) -> Result<mfm_facts::InternalFactRef, AppError> {
-    let record = projection
-        .fact_record(&entry.fact_claim_id)
-        .expect("fact record projection");
-    internal_fact_ref_from_projection(entry, record)
+    entry.internal_ref().map_err(AppError::from)
 }
 
 #[test]

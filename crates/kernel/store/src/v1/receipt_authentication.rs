@@ -39,6 +39,26 @@ impl FactQueryReceiptTrustRoot {
         })
     }
 
+    /// Creates a validated receipt trust root from store-neutral public material.
+    pub fn from_material(material: &mfm_facts::FactQueryReceiptTrustRootMaterial) -> Result<Self> {
+        Self::new(
+            material.store_identity().clone(),
+            material.scheme(),
+            material.key_id().clone(),
+            *material.verifying_key(),
+        )
+    }
+
+    /// Returns store-neutral public material for replay-capability handoff.
+    pub fn to_material(&self) -> mfm_facts::FactQueryReceiptTrustRootMaterial {
+        mfm_facts::FactQueryReceiptTrustRootMaterial::new(
+            self.store_identity.clone(),
+            self.scheme,
+            self.key_id.clone(),
+            self.verifying_key,
+        )
+    }
+
     /// Returns the store identity bound to this trust root.
     pub const fn store_identity(&self) -> &StoreIdentity {
         &self.store_identity
@@ -151,14 +171,24 @@ fn receipt_authentication_error(message: impl Into<String>) -> StoreError {
 
 #[cfg(test)]
 mod tests {
-    use ed25519_dalek::{Signer, SigningKey};
-    use mfm_facts::{DescriptorCatalogWatermark, FactProjectionGeneration, StoreCommitWatermark};
+    use ed25519_dalek::SigningKey;
+    use mfm_canonical::{CanonicalJsonBytes, CanonicalValue};
     use mfm_facts::{
-        FactAudience, FactFieldId, FactOrderingName, FactOrderingPolicy, FactOrderingTerm,
-        FactQueryEvidence, FactQueryScope, FactSelectionEvidence, FactVisibilityScope,
-        NullOrdering, ScopeDecisionEvidence, SortDirection, StoreReadFrontier, StoreScopeRef,
+        DescriptorCatalogWatermark, FactProjectionGeneration, FactQueryCompilerVersion,
+        StoreCommitWatermark,
+    };
+    use mfm_facts::{
+        FactAudience, FactCanonicalizerVersion, FactFieldId, FactOrderingName, FactOrderingPolicy,
+        FactOrderingTerm, FactQueryEvidence, FactQueryScope, FactSelectionEvidence,
+        FactVisibilityScope, NullOrdering, ScopeDecisionEvidence, SortDirection, StoreReadFrontier,
+        StoreScopeRef,
     };
     use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes};
+
+    use crate::v1::test_support::{
+        fact_query_receipt_trust_root_for_test, signed_fact_query_receipt_for_test,
+        SignedFactQueryReceiptFixtureInputForTest,
+    };
 
     use super::*;
 
@@ -174,56 +204,21 @@ mod tests {
     }
 
     fn plan() -> mfm_facts::CanonicalFactQueryPlan {
-        let descriptor = mfm_facts::FactDescriptor::new(
-            mfm_facts::FactKind::new("chain.head").expect("kind"),
-            mfm_facts::fact_descriptor_schema_id().expect("descriptor schema"),
-            mfm_ids::SchemaId::new(
-                "mfm.fact.test.subject",
-                "v1",
-                DigestAlgorithm::Sha256JcsV1,
-                DigestBytes::from_array([0x41; 32]),
-            )
-            .expect("subject schema"),
-            mfm_ids::SchemaId::new(
-                "mfm.fact.test.response",
-                "v1",
-                DigestAlgorithm::Sha256JcsV1,
-                DigestBytes::from_array([0x42; 32]),
-            )
-            .expect("response schema"),
-            vec![
-                mfm_facts::FactFieldDescriptor::new(
-                    FactFieldId::new("subject.source").expect("field"),
-                    mfm_facts::FactFieldPath::new("subject.source").expect("path"),
-                    mfm_facts::FactFieldValueType::String,
-                    mfm_facts::FactFieldExtraction::SubjectPath(
-                        mfm_facts::CanonicalValuePath::new("source").expect("subject path"),
-                    ),
-                    vec![mfm_facts::FactQueryOperator::Equal],
-                    mfm_facts::FactFieldExposure::QueryOnly,
-                    None,
-                    None,
-                    false,
-                    true,
-                )
-                .expect("source field"),
-                mfm_facts::FactFieldDescriptor::new(
-                    FactFieldId::new("result.height").expect("field"),
-                    mfm_facts::FactFieldPath::new("result.height").expect("path"),
-                    mfm_facts::FactFieldValueType::UnsignedInteger,
-                    mfm_facts::FactFieldExtraction::ResponsePath(
-                        mfm_facts::CanonicalValuePath::new("height").expect("response path"),
-                    ),
-                    vec![mfm_facts::FactQueryOperator::Equal],
-                    mfm_facts::FactFieldExposure::Returnable,
-                    None,
-                    None,
-                    true,
-                    true,
-                )
-                .expect("height field"),
-            ],
-            vec![FactOrderingPolicy::new(
+        mfm_facts::CanonicalFactQueryPlan::new(
+            StoreScopeRef::new("default").expect("store scope"),
+            FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
+            FactQueryCompilerVersion::new("mfm.facts.query.v1").expect("compiler"),
+            FactCanonicalizerVersion::new("mfm.canonical.v1").expect("canonicalizer"),
+            digest(1),
+            ScopeDecisionEvidence::new(digest(2)),
+            CanonicalJsonBytes::from_value(
+                &CanonicalValue::object([(
+                    "kind",
+                    CanonicalValue::String("chain.head".to_owned()),
+                )])
+                .expect("query"),
+            ),
+            FactOrderingPolicy::new(
                 FactOrderingName::new("result.height.desc").expect("ordering"),
                 vec![FactOrderingTerm::new(
                     FactFieldId::new("result.height").expect("field"),
@@ -232,32 +227,18 @@ mod tests {
                     false,
                 )],
             )
-            .expect("ordering")],
-        )
-        .expect("descriptor");
-        let input = mfm_facts::FactQueryInput::new(
-            StoreScopeRef::new("default").expect("store scope"),
-            FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
-            ScopeDecisionEvidence::new(digest(2)),
-            Vec::new(),
-            vec![mfm_facts::FactQueryReturnField::new(
-                FactFieldId::new("result.height").expect("field"),
-            )],
-            FactOrderingName::new("result.height.desc").expect("ordering"),
+            .expect("ordering"),
             Some(10),
         )
-        .expect("query input");
-        mfm_facts::compile_fact_query_plan(&descriptor, input).expect("plan")
+        .expect("plan")
     }
 
     fn trust_root(key: &SigningKey) -> FactQueryReceiptTrustRoot {
-        FactQueryReceiptTrustRoot::new(
+        fact_query_receipt_trust_root_for_test(
+            key,
             StoreIdentity::new("store.default").expect("store identity"),
-            StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
             StoreKeyId::new("key.default").expect("key id"),
-            key.verifying_key().to_bytes(),
         )
-        .expect("trust root")
     }
 
     fn signed_receipt(
@@ -275,30 +256,16 @@ mod tests {
             StoreCommitWatermark::new(0),
         );
         let rows: [mfm_facts::FactQueryResultRow; 0] = [];
-        let material = mfm_facts::FactQueryReceiptMaterial::from_rows(
+        signed_fact_query_receipt_for_test(SignedFactQueryReceiptFixtureInputForTest {
             plan_hash,
-            frontier,
-            mfm_facts::StoreReadFrontierType::Snapshot,
-            &rows,
-            false,
-            None,
-        )
-        .expect("receipt material");
-        let message = fact_query_receipt_authentication_message(
-            &store_identity,
-            StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
-            &key_id,
-            material.store_receipt_hash(),
-        )
-        .expect("message");
-        let auth = mfm_facts::StoreReceiptAuthentication::new(
+            key,
             store_identity,
-            StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
-            Some(key_id),
-            key.sign(message.as_bytes()).to_bytes().to_vec(),
-        )
-        .expect("auth");
-        material.into_receipt(auth)
+            key_id,
+            read_frontier: frontier,
+            rows: &rows,
+            include_returned_field_summaries: false,
+            limit: None,
+        })
     }
 
     #[test]

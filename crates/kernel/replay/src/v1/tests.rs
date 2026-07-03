@@ -1,5 +1,11 @@
 use super::*;
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::SigningKey;
+use mfm_store::v1::test_support::{
+    fact_query_receipt_trust_root_for_test,
+    persisted_kernel_event_envelope_for_test as store_persisted_kernel_event_envelope_for_test,
+    run_artifact_ref_from_store_artifact_for_test, signed_fact_query_receipt_for_test,
+    SignedFactQueryReceiptFixtureInputForTest,
+};
 
 #[test]
 fn recorded_fact_replay_uses_claim_id_not_fact_key() {
@@ -311,8 +317,8 @@ fn replay_rejects_fact_descriptor_allowed_only_for_other_node() {
     let run_admitted = fact_run_admitted_for_stream_with_descriptors(
         &certified_spec,
         vec![
-            run_artifact_ref_from_store(&descriptor_artifact),
-            run_artifact_ref_from_store(&other_descriptor_artifact),
+            run_artifact_ref_from_store_artifact_for_test(&descriptor_artifact),
+            run_artifact_ref_from_store_artifact_for_test(&other_descriptor_artifact),
         ],
     );
     let run_id = run_admitted.run_id.clone();
@@ -998,13 +1004,11 @@ fn fact_run_admitted() -> events::RunAdmitted {
         },
         spec_hash,
         spec_artifact: run_artifact_ref(
-            artifact_id(0xc3),
             ArtifactRole::TypedExecutionSpec,
             schema_id("mfm.replay.test.spec", 0xc4),
             content_digest(0xc5),
         ),
         certificate_artifact: run_artifact_ref(
-            artifact_id(0xc6),
             ArtifactRole::TypedSpecCertificate,
             schema_id("mfm.replay.test.certificate", 0xc7),
             content_digest(0xc8),
@@ -1027,11 +1031,11 @@ fn fact_run_admitted() -> events::RunAdmitted {
 }
 
 fn run_artifact_ref(
-    artifact_id: ArtifactId,
     role: ArtifactRole,
     schema_id: SchemaId,
     content_digest: ContentDigest,
 ) -> events::RunArtifactEvidenceRef {
+    let artifact_id = ArtifactId::from_digest(content_digest.algorithm(), *content_digest.digest());
     events::RunArtifactEvidenceRef {
         artifact_id,
         role,
@@ -1136,7 +1140,7 @@ fn replay_fact_stream_fixture() -> ReplayFactStreamFixture {
         None,
         descriptor_bytes.as_bytes().len() as u64,
     );
-    let descriptor_run_ref = run_artifact_ref_from_store(&descriptor_artifact);
+    let descriptor_run_ref = run_artifact_ref_from_store_artifact_for_test(&descriptor_artifact);
 
     let (response_artifact, response_bytes) = replay_stream_fact_response_artifact(&descriptor, 42);
     let certified_spec = hashed_fact_replay_spec();
@@ -1234,30 +1238,16 @@ fn fact_query_evidence_artifact(
         3,
         mfm_facts::StoreCommitWatermark::new(3),
     );
-    let material = mfm_facts::FactQueryReceiptMaterial::from_rows(
-        &plan_hash,
-        frontier,
-        mfm_facts::StoreReadFrontierType::Snapshot,
-        &rows,
-        true,
-        None,
-    )
-    .expect("receipt material");
-    let auth_message = store::fact_query_receipt_authentication_message(
-        trust_root.store_identity(),
-        trust_root.scheme(),
-        trust_root.key_id(),
-        material.store_receipt_hash(),
-    )
-    .expect("auth message");
-    let auth = mfm_facts::StoreReceiptAuthentication::new(
-        trust_root.store_identity().clone(),
-        trust_root.scheme(),
-        Some(trust_root.key_id().clone()),
-        key.sign(auth_message.as_bytes()).to_bytes().to_vec(),
-    )
-    .expect("receipt auth");
-    let receipt = material.into_receipt(auth);
+    let receipt = signed_fact_query_receipt_for_test(SignedFactQueryReceiptFixtureInputForTest {
+        plan_hash: &plan_hash,
+        key: &key,
+        store_identity: trust_root.store_identity().clone(),
+        key_id: trust_root.key_id().clone(),
+        read_frontier: frontier,
+        rows: &rows,
+        include_returned_field_summaries: true,
+        limit: None,
+    });
     let selected_summaries_digest = mfm_facts::selected_returned_field_summaries_digest(
         receipt.returned_field_summaries().expect("summaries"),
         &[0],
@@ -1302,49 +1292,37 @@ fn fact_query_evidence_artifact(
 }
 
 fn replay_fact_query_plan() -> mfm_facts::CanonicalFactQueryPlan {
-    let descriptor = replay_stream_fact_descriptor();
-    let input = mfm_facts::FactQueryInput::new(
+    let canonical_query = mfm_canonical::CanonicalJsonBytes::from_value(
+        &mfm_canonical::CanonicalValue::object([(
+            "kind",
+            mfm_canonical::CanonicalValue::String("mfm.replay.test.fact".to_owned()),
+        )])
+        .expect("query"),
+    );
+    mfm_facts::CanonicalFactQueryPlan::new(
         mfm_facts::StoreScopeRef::new("default").expect("store scope"),
         mfm_facts::FactQueryScope::new(
             mfm_facts::FactAudience::Platform,
             mfm_facts::FactVisibilityScope::Default,
         ),
+        mfm_facts::FactQueryCompilerVersion::new("mfm.facts.query.v1").expect("compiler"),
+        mfm_facts::FactCanonicalizerVersion::new("mfm.canonical.v1").expect("canonicalizer"),
+        mfm_facts::fact_descriptor_hash(&replay_stream_fact_descriptor()).expect("descriptor"),
         mfm_facts::ScopeDecisionEvidence::new(content_digest(0x46)),
-        Vec::new(),
-        vec![mfm_facts::FactQueryReturnField::new(
-            mfm_facts::FactFieldId::new("result.amount").expect("field"),
-        )],
-        mfm_facts::FactOrderingName::new("result.amount.desc").expect("ordering"),
+        canonical_query,
+        mfm_facts::FactOrderingPolicy::new(
+            mfm_facts::FactOrderingName::new("result.amount.desc").expect("ordering"),
+            vec![mfm_facts::FactOrderingTerm::new(
+                mfm_facts::FactFieldId::new("result.amount").expect("field"),
+                mfm_facts::SortDirection::Descending,
+                mfm_facts::NullOrdering::Last,
+                false,
+            )],
+        )
+        .expect("ordering"),
         Some(1),
     )
-    .expect("query input");
-    mfm_facts::compile_fact_query_plan(&descriptor, input).expect("query plan")
-}
-
-fn result_amount_desc_ordering() -> mfm_facts::FactOrderingPolicy {
-    mfm_facts::FactOrderingPolicy::new(
-        mfm_facts::FactOrderingName::new("result.amount.desc").expect("ordering"),
-        vec![mfm_facts::FactOrderingTerm::new(
-            mfm_facts::FactFieldId::new("result.amount").expect("field"),
-            mfm_facts::SortDirection::Descending,
-            mfm_facts::NullOrdering::Last,
-            false,
-        )],
-    )
-    .expect("ordering")
-}
-
-fn result_amount_asc_ordering() -> mfm_facts::FactOrderingPolicy {
-    mfm_facts::FactOrderingPolicy::new(
-        mfm_facts::FactOrderingName::new("result.amount.asc").expect("ordering"),
-        vec![mfm_facts::FactOrderingTerm::new(
-            mfm_facts::FactFieldId::new("result.amount").expect("field"),
-            mfm_facts::SortDirection::Ascending,
-            mfm_facts::NullOrdering::Last,
-            false,
-        )],
-    )
-    .expect("ordering")
+    .expect("query plan")
 }
 
 fn internal_fact_ref_for_fixture(fixture: &ReplayFactStreamFixture) -> mfm_facts::InternalFactRef {
@@ -1414,13 +1392,11 @@ fn internal_fact_ref_parts_from_ref(
 }
 
 fn test_fact_query_trust_root(key: &SigningKey) -> store::FactQueryReceiptTrustRoot {
-    store::FactQueryReceiptTrustRoot::new(
+    fact_query_receipt_trust_root_for_test(
+        key,
         mfm_facts::StoreIdentity::new("store.default").expect("store identity"),
-        mfm_facts::StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
         mfm_facts::StoreKeyId::new("key.default").expect("key id"),
-        key.verifying_key().to_bytes(),
     )
-    .expect("receipt trust root")
 }
 
 fn replay_stream_fact_descriptor() -> mfm_facts::FactDescriptor {
@@ -1461,7 +1437,7 @@ fn replay_stream_fact_descriptor() -> mfm_facts::FactDescriptor {
             )
             .expect("result field"),
         ],
-        vec![result_amount_desc_ordering()],
+        Vec::new(),
     )
     .expect("fact descriptor")
 }
@@ -1474,7 +1450,7 @@ fn replay_stream_other_fact_descriptor() -> mfm_facts::FactDescriptor {
         descriptor.subject_schema_id().clone(),
         descriptor.response_schema_id().clone(),
         descriptor.fields().to_vec(),
-        vec![result_amount_asc_ordering()],
+        descriptor.orderings().to_vec(),
     )
     .expect("other fact descriptor")
 }
@@ -1669,29 +1645,19 @@ fn stream_run_admitted_spec_artifact() -> events::RunArtifactEvidenceRef {
 fn stream_run_admitted_spec_artifact_for_hash(
     spec_hash: &SpecHash,
 ) -> events::RunArtifactEvidenceRef {
-    let digest = spec_digest(spec_hash);
-    events::RunArtifactEvidenceRef {
-        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
-        role: ArtifactRole::TypedExecutionSpec,
-        schema_id: Some(spec::typed_execution_spec_schema_id().expect("spec schema")),
-        semantic_type_id: None,
-        content_digest: digest,
-        byte_len: 2,
-        media_type: spec::MediaType::new("application/json").expect("media type"),
-    }
+    run_artifact_ref(
+        ArtifactRole::TypedExecutionSpec,
+        spec::typed_execution_spec_schema_id().expect("spec schema"),
+        spec_digest(spec_hash),
+    )
 }
 
 fn stream_run_admitted_certificate_artifact() -> events::RunArtifactEvidenceRef {
-    let digest = content_digest(0xc8);
-    events::RunArtifactEvidenceRef {
-        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
-        role: ArtifactRole::TypedSpecCertificate,
-        schema_id: Some(mfm_certify::typed_spec_certificate_schema_id().expect("cert schema")),
-        semantic_type_id: None,
-        content_digest: digest,
-        byte_len: 2,
-        media_type: spec::MediaType::new("application/json").expect("media type"),
-    }
+    run_artifact_ref(
+        ArtifactRole::TypedSpecCertificate,
+        mfm_certify::typed_spec_certificate_schema_id().expect("cert schema"),
+        content_digest(0xc8),
+    )
 }
 
 fn stored_artifact_from_run_ref(
@@ -1745,20 +1711,6 @@ fn stored_artifact_ref(
     }
 }
 
-fn run_artifact_ref_from_store(
-    artifact: &StoredArtifactEvidenceRef,
-) -> events::RunArtifactEvidenceRef {
-    events::RunArtifactEvidenceRef {
-        artifact_id: artifact.artifact_id.clone(),
-        role: artifact.artifact_role,
-        schema_id: artifact.schema_id.clone(),
-        semantic_type_id: artifact.semantic_type_id.clone(),
-        content_digest: artifact.digest.clone(),
-        byte_len: artifact.byte_len,
-        media_type: artifact.media_type.clone(),
-    }
-}
-
 fn descriptor_artifact_id(digest: &ContentDigest) -> ArtifactId {
     ArtifactId::from_digest(digest.algorithm(), *digest.digest())
 }
@@ -1768,77 +1720,12 @@ fn persisted_envelope(
     seq: u64,
     payload: KernelEventPayload,
 ) -> KernelEventEnvelope {
-    let seq = store::StreamSeq::new(seq).expect("stream seq");
-    let ordinal = store::CommitOrdinal::new(0);
-    let payload_hash = store::payload_canonical_json(&payload)
-        .expect("payload canonical")
-        .content_digest();
-    let event_schema_id = payload.event_schema_id().expect("event schema");
-    let event_id = event_id_for_payload(run_id, seq, ordinal, &event_schema_id, &payload_hash);
-    let logical_key = logical_key_for_payload(run_id, seq, ordinal, &payload);
-    KernelEventEnvelope::from_persisted_record(store::PersistedKernelEventRecord {
-        event_id,
-        event_schema_id,
-        run_id: run_id.clone(),
+    store_persisted_kernel_event_envelope_for_test(
+        run_id,
         seq,
-        ordinal,
-        spec_hash: payload.spec_hash().clone(),
-        commit_key: store::CommitKey::new(format!("replay-test:{seq}")).expect("commit key"),
-        logical_key,
-        payload_hash,
+        store::CommitKey::new(format!("replay-test:{seq}")).expect("commit key"),
         payload,
-    })
-    .expect("persisted envelope")
-}
-
-fn event_id_for_payload(
-    run_id: &RunId,
-    seq: store::StreamSeq,
-    ordinal: store::CommitOrdinal,
-    event_schema_id: &SchemaId,
-    payload_hash: &ContentDigest,
-) -> mfm_ids::EventId {
-    let json = serde_json::to_string(&serde_json::json!({
-        "event_schema_id": event_schema_id.as_str(),
-        "ordinal": ordinal.as_u32(),
-        "payload_hash": payload_hash.as_str(),
-        "run_id": run_id.as_str(),
-        "seq": seq.as_u64(),
-    }))
-    .expect("event id json");
-    let canonical =
-        mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&json).expect("canonical event id");
-    mfm_ids::EventId::from_digest(DigestAlgorithm::Sha256JcsV1, canonical.digest_bytes())
-}
-
-fn logical_key_for_payload(
-    run_id: &RunId,
-    seq: store::StreamSeq,
-    ordinal: store::CommitOrdinal,
-    payload: &KernelEventPayload,
-) -> store::LogicalEventKey {
-    let key = match payload {
-        KernelEventPayload::RunAdmitted(_) => "run:admission".to_owned(),
-        KernelEventPayload::StateAttemptStarted(payload) => {
-            format!("attempt:{}:{}", payload.node_id, payload.attempt_id)
-        }
-        KernelEventPayload::FactRecorded(_) => {
-            let claim_id =
-                mfm_facts::derive_fact_claim_id(run_id.clone(), seq.as_u64(), ordinal.as_u32())
-                    .expect("fact claim id");
-            format!(
-                "fact:{}:{}:{}",
-                claim_id.source_run_id(),
-                claim_id.source_seq(),
-                claim_id.source_ordinal()
-            )
-        }
-        KernelEventPayload::ArtifactReferenced(payload) => {
-            format!("artifact:{}:ref", payload.artifact_ref.artifact_id)
-        }
-        _ => panic!("unexpected replay fixture payload"),
-    };
-    store::LogicalEventKey::new(key).expect("logical key")
+    )
 }
 
 fn fact_response_artifact(byte: u8) -> StoredArtifactEvidenceRef {

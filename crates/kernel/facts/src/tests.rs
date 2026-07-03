@@ -1,4 +1,4 @@
-use mfm_canonical::{CanonicalJsonBytes, CanonicalValue, DecimalString, PlainCanonicalJsonBytes};
+use mfm_canonical::{CanonicalJsonBytes, CanonicalValue, DecimalString};
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
     DigestAlgorithm, DigestBytes, EventId, NodeId, RunId, SchemaId,
@@ -28,12 +28,6 @@ fn event_id(byte: u8) -> EventId {
         DigestAlgorithm::Sha256JcsV1,
         DigestBytes::from_array([byte; 32]),
     )
-}
-
-fn plain_canonical_json(value: &CanonicalValue) -> PlainCanonicalJsonBytes {
-    let canonical = CanonicalJsonBytes::from_value(value);
-    PlainCanonicalJsonBytes::from_canonical_json_slice(canonical.as_bytes())
-        .expect("plain canonical json")
 }
 
 fn artifact_id(byte: u8) -> ArtifactId {
@@ -519,11 +513,8 @@ fn canonical_descriptor_bytes_parse_back_to_descriptor_only_when_canonical() {
         fact_descriptor_hash(&descriptor).expect("descriptor hash")
     );
 
-    let pretty_json = serde_json::to_vec_pretty(
-        &serde_json::from_slice::<serde_json::Value>(canonical.as_bytes()).expect("json value"),
-    )
-    .expect("pretty descriptor");
-    assert!(parse_canonical_fact_descriptor_bytes(&pretty_json).is_err());
+    let serde_json = serde_json::to_vec(&descriptor).expect("serde descriptor");
+    assert!(parse_canonical_fact_descriptor_bytes(&serde_json).is_err());
 }
 
 #[test]
@@ -800,7 +791,7 @@ fn query_plan_computes_canonical_query_hash_and_rejects_zero_limit() {
         .first()
         .expect("descriptor ordering")
         .clone();
-    let canonical_query = plain_canonical_json(
+    let canonical_query = CanonicalJsonBytes::from_value(
         &CanonicalValue::object([("kind", CanonicalValue::String("chain.head".into()))])
             .expect("query value"),
     );
@@ -1086,7 +1077,7 @@ fn query_evidence_fixture() -> (CanonicalFactQueryPlan, FactQueryReceipt, FactQu
     ])
     .expect("descriptor");
     let ordering = descriptor.orderings().first().expect("ordering").clone();
-    let canonical_query = plain_canonical_json(
+    let canonical_query = CanonicalJsonBytes::from_value(
         &CanonicalValue::object([("kind", CanonicalValue::String("chain.head".into()))])
             .expect("query value"),
     );
