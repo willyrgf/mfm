@@ -1632,10 +1632,9 @@ mod tests {
     use mfm_capabilities::CapabilitySpec;
     use mfm_effects::EffectSpec;
     use mfm_facts::{
-        fact_query_plan_hash, fact_query_receipt_body_hash_from_parts,
-        fact_query_result_set_digest, DescriptorCatalogWatermark, FactClaimId, FactFieldExposure,
+        fact_query_plan_hash, DescriptorCatalogWatermark, FactClaimId, FactFieldExposure,
         FactFieldExtraction, FactFieldValueType, FactProjectionGeneration, FactQueryReceipt,
-        InternalFactRef, InternalFactRefParts, QueryResultCardinality, StoreCommitWatermark,
+        FactQueryReceiptMaterial, InternalFactRef, InternalFactRefParts, StoreCommitWatermark,
         StoreIdentity, StoreKeyId, StoreReadFrontier, StoreReadFrontierType,
         StoreReceiptAuthentication, StoreReceiptAuthenticationScheme,
     };
@@ -2209,8 +2208,10 @@ mod tests {
         plan: &CanonicalFactQueryPlan,
         returned_refs: Vec<InternalFactRef>,
     ) -> FactQueryReceipt {
-        let result_set_digest =
-            fact_query_result_set_digest(&returned_refs, None).expect("result set digest");
+        let rows = returned_refs
+            .into_iter()
+            .map(|fact_ref| mfm_facts::FactQueryResultRow::new(fact_ref, Vec::new()))
+            .collect::<Vec<_>>();
         let read_frontier = StoreReadFrontier::new(
             StoreScopeRef::new("mfm.store.default").expect("store scope"),
             FactQueryScope::new(FactAudience::Control, FactVisibilityScope::Default),
@@ -2220,25 +2221,16 @@ mod tests {
             StoreCommitWatermark::new(11),
         );
         let plan_hash = fact_query_plan_hash(plan).expect("plan hash");
-        let receipt_hash = fact_query_receipt_body_hash_from_parts(
+        let material = FactQueryReceiptMaterial::from_rows(
             &plan_hash,
-            &read_frontier,
-            StoreReadFrontierType::Snapshot,
-            &returned_refs,
-            None,
-            &result_set_digest,
-            QueryResultCardinality::Exact(returned_refs.len() as u64),
-        )
-        .expect("receipt hash");
-        let cardinality = QueryResultCardinality::Exact(returned_refs.len() as u64);
-        FactQueryReceipt::new(
             read_frontier,
             StoreReadFrontierType::Snapshot,
-            returned_refs,
+            &rows,
+            false,
             None,
-            result_set_digest,
-            cardinality,
-            receipt_hash,
+        )
+        .expect("receipt material");
+        material.into_receipt(
             StoreReceiptAuthentication::new(
                 StoreIdentity::new("store.default").expect("store identity"),
                 StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,

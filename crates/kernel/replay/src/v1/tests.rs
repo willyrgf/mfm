@@ -1214,21 +1214,15 @@ fn fact_query_evidence_artifact(
     let plan = replay_fact_query_plan();
     let plan_hash = mfm_facts::fact_query_plan_hash(&plan).expect("plan hash");
     let returned_ref = mutate_ref(internal_fact_ref_for_fixture(fixture));
-    let returned_refs = vec![returned_ref.clone()];
-    let returned_field_summaries = Some(mfm_facts::ReturnedFieldSummaries::new(vec![
-        mfm_facts::ReturnedFactFieldSummary::new(
-            returned_ref.fact_claim_id().clone(),
-            vec![mfm_facts::ReturnedFieldValueSummary::new(
-                mfm_facts::FactFieldId::new("result.amount").expect("field"),
-                mfm_facts::FactFieldValueType::UnsignedInteger,
-                mfm_facts::FactCanonicalScalar::UnsignedInteger(42),
-            )
-            .expect("field summary")],
-        ),
-    ]));
-    let result_set_digest =
-        mfm_facts::fact_query_result_set_digest(&returned_refs, returned_field_summaries.as_ref())
-            .expect("result-set digest");
+    let rows = [mfm_facts::FactQueryResultRow::new(
+        returned_ref,
+        vec![mfm_facts::ReturnedFieldValueSummary::new(
+            mfm_facts::FactFieldId::new("result.amount").expect("field"),
+            mfm_facts::FactFieldValueType::UnsignedInteger,
+            mfm_facts::FactCanonicalScalar::UnsignedInteger(42),
+        )
+        .expect("field summary")],
+    )];
     let frontier = mfm_facts::StoreReadFrontier::new(
         mfm_facts::StoreScopeRef::new("default").expect("store scope"),
         mfm_facts::FactQueryScope::new(
@@ -1240,21 +1234,20 @@ fn fact_query_evidence_artifact(
         3,
         mfm_facts::StoreCommitWatermark::new(3),
     );
-    let receipt_hash = mfm_facts::fact_query_receipt_body_hash_from_parts(
+    let material = mfm_facts::FactQueryReceiptMaterial::from_rows(
         &plan_hash,
-        &frontier,
+        frontier,
         mfm_facts::StoreReadFrontierType::Snapshot,
-        &returned_refs,
-        returned_field_summaries.as_ref(),
-        &result_set_digest,
-        mfm_facts::QueryResultCardinality::Exact(returned_refs.len() as u64),
+        &rows,
+        true,
+        None,
     )
-    .expect("receipt hash");
+    .expect("receipt material");
     let auth_message = store::fact_query_receipt_authentication_message(
         trust_root.store_identity(),
         trust_root.scheme(),
         trust_root.key_id(),
-        &receipt_hash,
+        material.store_receipt_hash(),
     )
     .expect("auth message");
     let auth = mfm_facts::StoreReceiptAuthentication::new(
@@ -1264,16 +1257,7 @@ fn fact_query_evidence_artifact(
         key.sign(auth_message.as_bytes()).to_bytes().to_vec(),
     )
     .expect("receipt auth");
-    let receipt = mfm_facts::FactQueryReceipt::new(
-        frontier,
-        mfm_facts::StoreReadFrontierType::Snapshot,
-        returned_refs,
-        returned_field_summaries,
-        result_set_digest,
-        mfm_facts::QueryResultCardinality::Exact(1),
-        receipt_hash,
-        auth,
-    );
+    let receipt = material.into_receipt(auth);
     let selected_summaries_digest = mfm_facts::selected_returned_field_summaries_digest(
         receipt.returned_field_summaries().expect("summaries"),
         &[0],

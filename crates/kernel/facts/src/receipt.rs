@@ -329,8 +329,6 @@ pub enum QueryResultCardinality {
     Exact(u64),
     /// The receipt hit a limit and represents at least this many matching rows.
     AtLeast(u64),
-    /// The receipt did not assert total matching row count.
-    NotCounted,
 }
 
 /// Store-owned receipt for a canonical fact query.
@@ -347,9 +345,8 @@ pub struct FactQueryReceipt {
 }
 
 impl FactQueryReceipt {
-    /// Creates a fact query receipt.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn from_parts(
         read_frontier: StoreReadFrontier,
         frontier_type: StoreReadFrontierType,
         returned_refs: Vec<InternalFactRef>,
@@ -439,44 +436,6 @@ impl FactQueryResultRow {
     }
 }
 
-/// Derives receipt returned refs from query result rows.
-pub fn fact_query_result_returned_refs(rows: &[FactQueryResultRow]) -> Vec<InternalFactRef> {
-    rows.iter().map(|row| row.fact_ref().clone()).collect()
-}
-
-/// Derives receipt returned field summaries from query result rows.
-pub fn fact_query_result_returned_field_summaries(
-    rows: &[FactQueryResultRow],
-    include_summaries: bool,
-) -> Option<ReturnedFieldSummaries> {
-    include_summaries.then(|| {
-        ReturnedFieldSummaries::new(
-            rows.iter()
-                .map(|row| {
-                    ReturnedFactFieldSummary::new(
-                        row.fact_ref().fact_claim_id().clone(),
-                        row.returned_fields().to_vec(),
-                    )
-                })
-                .collect(),
-        )
-    })
-}
-
-/// Derives the receipt cardinality statement for a possibly limited query result.
-pub fn fact_query_result_cardinality_for_rows(
-    row_count: usize,
-    limit: Option<u64>,
-) -> Result<QueryResultCardinality> {
-    let row_count = u64::try_from(row_count).map_err(|_| {
-        FactDescriptorError::descriptor("fact query result row count overflowed u64")
-    })?;
-    match limit {
-        Some(limit) if row_count == limit => Ok(QueryResultCardinality::AtLeast(row_count)),
-        _ => Ok(QueryResultCardinality::Exact(row_count)),
-    }
-}
-
 /// Unsigned material for a fact-query receipt body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactQueryReceiptMaterial {
@@ -490,8 +449,7 @@ pub struct FactQueryReceiptMaterial {
 }
 
 impl FactQueryReceiptMaterial {
-    /// Builds unsigned receipt material from explicit result parts.
-    pub fn from_parts(
+    fn from_result_parts(
         plan_hash: &ContentDigest,
         read_frontier: StoreReadFrontier,
         frontier_type: StoreReadFrontierType,
@@ -530,11 +488,11 @@ impl FactQueryReceiptMaterial {
         include_returned_field_summaries: bool,
         limit: Option<u64>,
     ) -> Result<Self> {
-        let returned_refs = fact_query_result_returned_refs(rows);
+        let returned_refs = returned_refs_for_rows(rows);
         let returned_field_summaries =
-            fact_query_result_returned_field_summaries(rows, include_returned_field_summaries);
-        let result_cardinality = fact_query_result_cardinality_for_rows(rows.len(), limit)?;
-        Self::from_parts(
+            returned_field_summaries_for_rows(rows, include_returned_field_summaries);
+        let result_cardinality = cardinality_for_rows(rows.len(), limit)?;
+        Self::from_result_parts(
             plan_hash,
             read_frontier,
             frontier_type,
@@ -554,7 +512,7 @@ impl FactQueryReceiptMaterial {
         self,
         store_receipt_authentication: StoreReceiptAuthentication,
     ) -> FactQueryReceipt {
-        FactQueryReceipt::new(
+        FactQueryReceipt::from_parts(
             self.read_frontier,
             self.frontier_type,
             self.returned_refs,
@@ -564,6 +522,38 @@ impl FactQueryReceiptMaterial {
             self.store_receipt_hash,
             store_receipt_authentication,
         )
+    }
+}
+
+fn returned_refs_for_rows(rows: &[FactQueryResultRow]) -> Vec<InternalFactRef> {
+    rows.iter().map(|row| row.fact_ref().clone()).collect()
+}
+
+fn returned_field_summaries_for_rows(
+    rows: &[FactQueryResultRow],
+    include_summaries: bool,
+) -> Option<ReturnedFieldSummaries> {
+    include_summaries.then(|| {
+        ReturnedFieldSummaries::new(
+            rows.iter()
+                .map(|row| {
+                    ReturnedFactFieldSummary::new(
+                        row.fact_ref().fact_claim_id().clone(),
+                        row.returned_fields().to_vec(),
+                    )
+                })
+                .collect(),
+        )
+    })
+}
+
+fn cardinality_for_rows(row_count: usize, limit: Option<u64>) -> Result<QueryResultCardinality> {
+    let row_count = u64::try_from(row_count).map_err(|_| {
+        FactDescriptorError::descriptor("fact query result row count overflowed u64")
+    })?;
+    match limit {
+        Some(limit) if row_count == limit => Ok(QueryResultCardinality::AtLeast(row_count)),
+        _ => Ok(QueryResultCardinality::Exact(row_count)),
     }
 }
 

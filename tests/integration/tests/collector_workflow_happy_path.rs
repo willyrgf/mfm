@@ -669,17 +669,18 @@ impl InMemoryControlFactIndexProvider {
         returned_refs: Vec<InternalFactRef>,
         returned_field_summaries: Option<ReturnedFieldSummaries>,
     ) -> mfm_fact_capabilities::Result<mfm_facts::FactQueryReceipt> {
-        let result_cardinality = match plan.limit() {
-            Some(limit) if returned_refs.len() as u64 == limit => {
-                QueryResultCardinality::AtLeast(returned_refs.len() as u64)
-            }
-            _ => QueryResultCardinality::Exact(returned_refs.len() as u64),
-        };
-        let result_set_digest = mfm_facts::fact_query_result_set_digest(
-            &returned_refs,
-            returned_field_summaries.as_ref(),
-        )
-        .map_err(mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure)?;
+        let rows = returned_refs
+            .into_iter()
+            .enumerate()
+            .map(|(index, fact_ref)| {
+                let fields = returned_field_summaries
+                    .as_ref()
+                    .and_then(|summaries| summaries.summaries().get(index))
+                    .map(|summary| summary.fields().to_vec())
+                    .unwrap_or_default();
+                mfm_facts::FactQueryResultRow::new(fact_ref, fields)
+            })
+            .collect::<Vec<_>>();
         let max_order = projection
             .fact_index_entries()
             .filter(|(_claim_id, entry)| {
@@ -699,21 +700,20 @@ impl InMemoryControlFactIndexProvider {
         );
         let plan_hash = mfm_facts::fact_query_plan_hash(plan)
             .map_err(mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure)?;
-        let receipt_hash = mfm_facts::fact_query_receipt_body_hash_from_parts(
+        let material = mfm_facts::FactQueryReceiptMaterial::from_rows(
             &plan_hash,
-            &read_frontier,
+            read_frontier,
             StoreReadFrontierType::Snapshot,
-            &returned_refs,
-            returned_field_summaries.as_ref(),
-            &result_set_digest,
-            result_cardinality,
+            &rows,
+            returned_field_summaries.is_some(),
+            plan.limit(),
         )
         .map_err(mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure)?;
         let message = mfm_store::v1::fact_query_receipt_authentication_message(
             &self.store_identity,
             StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
             &self.key_id,
-            &receipt_hash,
+            material.store_receipt_hash(),
         )
         .map_err(mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure)?;
         let auth = StoreReceiptAuthentication::new(
@@ -726,16 +726,7 @@ impl InMemoryControlFactIndexProvider {
                 .to_vec(),
         )
         .map_err(mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure)?;
-        Ok(mfm_facts::FactQueryReceipt::new(
-            read_frontier,
-            StoreReadFrontierType::Snapshot,
-            returned_refs,
-            returned_field_summaries,
-            result_set_digest,
-            result_cardinality,
-            receipt_hash,
-            auth,
-        ))
+        Ok(material.into_receipt(auth))
     }
 }
 

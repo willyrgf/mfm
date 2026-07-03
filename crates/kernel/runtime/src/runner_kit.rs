@@ -1752,14 +1752,18 @@ mod tests {
             1,
             mfm_facts::StoreCommitWatermark::new(1),
         );
-        let receipt = mfm_facts::FactQueryReceipt::new(
+        let plan_hash = mfm_facts::fact_query_plan_hash(&plan).expect("plan hash");
+        let rows = [mfm_facts::FactQueryResultRow::new(fact_ref, Vec::new())];
+        let material = mfm_facts::FactQueryReceiptMaterial::from_rows(
+            &plan_hash,
             frontier,
             mfm_facts::StoreReadFrontierType::Snapshot,
-            vec![fact_ref],
+            &rows,
+            false,
             None,
-            digest(0x20),
-            mfm_facts::QueryResultCardinality::Exact(1),
-            digest(0x21),
+        )
+        .expect("receipt material");
+        let receipt = material.into_receipt(
             mfm_facts::StoreReceiptAuthentication::new(
                 mfm_facts::StoreIdentity::new("store.default").expect("store"),
                 mfm_facts::StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,

@@ -8,8 +8,8 @@ use mfm_facts::{
     fact_descriptor_hash, DescriptorCatalogWatermark, FactAudience, FactClaimId,
     FactProjectionGeneration, FactQueryReceipt, FactQueryScope, FactSelectionEvidence,
     FactVisibility, FactVisibilityScope, InternalFactRef, InternalFactRefParts,
-    QueryResultCardinality, StoreCommitWatermark, StoreIdentity, StoreKeyId, StoreReadFrontier,
-    StoreReadFrontierType, StoreReceiptAuthentication, StoreScopeRef,
+    StoreCommitWatermark, StoreIdentity, StoreKeyId, StoreReadFrontier, StoreReceiptAuthentication,
+    StoreScopeRef,
 };
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
@@ -435,9 +435,10 @@ fn fact_query_receipt(
     plan: &mfm_facts::CanonicalFactQueryPlan,
     returned_refs: Vec<InternalFactRef>,
 ) -> FactQueryReceipt {
-    let cardinality = QueryResultCardinality::Exact(returned_refs.len() as u64);
-    let result_set_digest =
-        mfm_facts::fact_query_result_set_digest(&returned_refs, None).expect("result digest");
+    let rows = returned_refs
+        .into_iter()
+        .map(|fact_ref| mfm_facts::FactQueryResultRow::new(fact_ref, Vec::new()))
+        .collect::<Vec<_>>();
     let read_frontier = StoreReadFrontier::new(
         StoreScopeRef::new("mfm.store.default").expect("store scope"),
         FactQueryScope::new(FactAudience::Control, FactVisibilityScope::Default),
@@ -447,24 +448,16 @@ fn fact_query_receipt(
         StoreCommitWatermark::new(11),
     );
     let plan_hash = mfm_facts::fact_query_plan_hash(plan).expect("plan hash");
-    let receipt_hash = mfm_facts::fact_query_receipt_body_hash_from_parts(
+    let material = mfm_facts::FactQueryReceiptMaterial::from_rows(
         &plan_hash,
-        &read_frontier,
-        StoreReadFrontierType::Snapshot,
-        &returned_refs,
-        None,
-        &result_set_digest,
-        cardinality,
-    )
-    .expect("receipt hash");
-    FactQueryReceipt::new(
         read_frontier,
-        StoreReadFrontierType::Snapshot,
-        returned_refs,
+        mfm_facts::StoreReadFrontierType::Snapshot,
+        &rows,
+        false,
         None,
-        result_set_digest,
-        cardinality,
-        receipt_hash,
+    )
+    .expect("receipt material");
+    material.into_receipt(
         StoreReceiptAuthentication::new(
             StoreIdentity::new("store.default").expect("store identity"),
             mfm_facts::StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
