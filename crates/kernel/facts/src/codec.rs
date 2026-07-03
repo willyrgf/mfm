@@ -302,14 +302,15 @@ pub fn compile_fact_query_plan(
     }
 
     let ordering = FactOrdering::from_descriptor(ordering_descriptor);
-    let canonical_query = canonical_compiled_query_bytes(
+    let canonical_query = CompiledQueryWire::from_parts(
         descriptor,
         &descriptor_hash,
         &predicates,
         input.return_fields(),
         ordering.name(),
         input.limit(),
-    )?;
+    )
+    .canonical_bytes()?;
     CanonicalFactQueryPlan::new(
         input.store_scope,
         input.query_scope,
@@ -334,71 +335,9 @@ pub fn parse_canonical_fact_query_shape(
     }
     let value = serde_json::from_slice::<serde_json::Value>(plan.canonical_query().as_bytes())
         .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| FactDescriptorError::descriptor("canonical fact query must be an object"))?;
-    let version = object
-        .get("version")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            FactDescriptorError::descriptor("canonical fact query version is required")
-        })?;
-    if version != "mfm.fact-query.v1" {
-        return Err(FactDescriptorError::descriptor(format!(
-            "unsupported canonical fact query version {version:?}"
-        )));
-    }
-    let resolved_descriptor = object
-        .get("resolved_descriptor")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            FactDescriptorError::descriptor("canonical fact query descriptor hash is required")
-        })?;
-    if resolved_descriptor != plan.resolved_descriptor().as_str() {
-        return Err(FactDescriptorError::descriptor(
-            "canonical fact query descriptor hash does not match plan",
-        ));
-    }
-    let ordering = object
-        .get("ordering")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            FactDescriptorError::descriptor("canonical fact query ordering is required")
-        })?;
-    if ordering != plan.ordering().name().as_str() {
-        return Err(FactDescriptorError::descriptor(
-            "canonical fact query ordering does not match plan",
-        ));
-    }
-    let query_limit = object
-        .get("limit")
-        .ok_or_else(|| FactDescriptorError::descriptor("canonical fact query limit is required"))
-        .and_then(parse_optional_u64_query_value)?;
-    if query_limit != plan.limit() {
-        return Err(FactDescriptorError::descriptor(
-            "canonical fact query limit does not match plan",
-        ));
-    }
-
-    let predicates = object
-        .get("predicates")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| {
-            FactDescriptorError::descriptor("canonical fact query predicates are required")
-        })?
-        .iter()
-        .map(parse_canonical_query_predicate)
-        .collect::<Result<Vec<_>>>()?;
-    let return_fields = object
-        .get("return_fields")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| {
-            FactDescriptorError::descriptor("canonical fact query return fields are required")
-        })?
-        .iter()
-        .map(parse_canonical_query_return_field)
-        .collect::<Result<Vec<_>>>()?;
-    CompiledFactQueryShape::new(predicates, return_fields)
+    let query = CompiledQueryWire::parse(&value)?;
+    query.validate_plan(plan)?;
+    query.into_shape()
 }
 
 /// Parses canonical fact-query evidence bytes into the typed facts-kernel contract.
@@ -912,7 +851,7 @@ fn canonical_ordering_descriptor_value(
     let terms = ordering
         .terms
         .iter()
-        .map(canonical_ordering_term_value)
+        .map(OrderingTermWire::canonical_value)
         .collect::<Result<Vec<_>>>()?;
     canonical_object([
         (
@@ -920,24 +859,6 @@ fn canonical_ordering_descriptor_value(
             CanonicalValue::String(ordering.name.as_str().to_owned()),
         ),
         ("terms", CanonicalValue::Array(terms)),
-    ])
-}
-
-fn canonical_ordering_term_value(term: &FactOrderingTerm) -> Result<CanonicalValue> {
-    canonical_object([
-        (
-            "field_id",
-            CanonicalValue::String(term.field_id.as_str().to_owned()),
-        ),
-        (
-            "direction",
-            CanonicalValue::String(term.direction.as_str().to_owned()),
-        ),
-        (
-            "nulls",
-            CanonicalValue::String(term.nulls.as_str().to_owned()),
-        ),
-        ("tie_breaker", CanonicalValue::Bool(term.tie_breaker)),
     ])
 }
 
@@ -1043,41 +964,6 @@ pub(crate) fn parse_canonical_scalar_value(
     FactCanonicalScalar::from_json_value(value_type, value, ScalarJsonContext::Field(field_id))
 }
 
-fn parse_optional_u64_query_value(value: &serde_json::Value) -> Result<Option<u64>> {
-    if value.is_null() {
-        return Ok(None);
-    }
-    value
-        .as_u64()
-        .map(Some)
-        .ok_or_else(|| FactDescriptorError::descriptor("canonical fact query limit must be a u64"))
-}
-
-fn parse_canonical_query_predicate(value: &serde_json::Value) -> Result<FactQueryPredicate> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| FactDescriptorError::descriptor("query predicate must be an object"))?;
-    let field_id = object
-        .get("field_id")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| FactDescriptorError::descriptor("query predicate field_id is required"))
-        .and_then(FactFieldId::new)?;
-    let operator = object
-        .get("operator")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| FactDescriptorError::field(field_id.clone(), "query operator is required"))
-        .and_then(|value| parse_query_operator(&field_id, value))?;
-    let value_type = object
-        .get("value_type")
-        .ok_or_else(|| FactDescriptorError::field(field_id.clone(), "query value_type is required"))
-        .and_then(parse_field_value_type)?;
-    let scalar_value = object
-        .get("value")
-        .ok_or_else(|| FactDescriptorError::field(field_id.clone(), "query value is required"))?;
-    let scalar = parse_canonical_scalar_value(value_type, scalar_value, &field_id)?;
-    Ok(FactQueryPredicate::new(field_id, operator, scalar))
-}
-
 fn parse_query_operator(field_id: &FactFieldId, value: &str) -> Result<FactQueryOperator> {
     value.parse::<FactQueryOperator>().map_err(|_| {
         FactDescriptorError::field(
@@ -1085,18 +971,6 @@ fn parse_query_operator(field_id: &FactFieldId, value: &str) -> Result<FactQuery
             format!("unknown query operator {value:?}"),
         )
     })
-}
-
-fn parse_canonical_query_return_field(value: &serde_json::Value) -> Result<FactQueryReturnField> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| FactDescriptorError::descriptor("query return field must be an object"))?;
-    let field_id = object
-        .get("field_id")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| FactDescriptorError::descriptor("query return field_id is required"))
-        .and_then(FactFieldId::new)?;
-    Ok(FactQueryReturnField::new(field_id))
 }
 
 fn parse_canonical_fact_query_plan(value: &serde_json::Value) -> Result<CanonicalFactQueryPlan> {
@@ -1113,13 +987,13 @@ fn parse_canonical_fact_query_plan(value: &serde_json::Value) -> Result<Canonica
     }
     let plan = CanonicalFactQueryPlan::new(
         StoreScopeRef::new(json_str(object, "store_scope")?)?,
-        parse_fact_query_scope(json_required(object, "query_scope")?)?,
+        QueryScopeWire::parse(json_required(object, "query_scope")?)?,
         FactQueryCompilerVersion::new(json_str(object, "query_compiler_version")?)?,
         FactCanonicalizerVersion::new(json_str(object, "canonicalizer_version")?)?,
         parse_json_str(object, "resolved_descriptor")?,
-        parse_scope_decision_evidence(json_required(object, "scope_decision_evidence")?)?,
+        ScopeDecisionEvidenceWire::parse(json_required(object, "scope_decision_evidence")?)?,
         canonical_query,
-        parse_fact_ordering(json_required(object, "ordering")?)?,
+        OrderingWire::parse(json_required(object, "ordering")?)?,
         json_optional_u64(object, "limit")?,
     )?;
     Ok(plan)
@@ -1160,46 +1034,11 @@ fn parse_fact_selection_evidence(value: &serde_json::Value) -> Result<FactSelect
     )
 }
 
-fn parse_fact_query_scope(value: &serde_json::Value) -> Result<FactQueryScope> {
-    let object = json_object(value, "fact query scope")?;
-    Ok(FactQueryScope::new(
-        parse_fact_audience(json_str(object, "audience")?)?,
-        parse_fact_visibility_scope(json_str(object, "scope")?)?,
-    ))
-}
-
-fn parse_scope_decision_evidence(value: &serde_json::Value) -> Result<ScopeDecisionEvidence> {
-    let object = json_object(value, "scope decision evidence")?;
-    Ok(ScopeDecisionEvidence::new(parse_json_str(
-        object,
-        "decision_hash",
-    )?))
-}
-
-fn parse_fact_ordering(value: &serde_json::Value) -> Result<FactOrdering> {
-    let object = json_object(value, "fact ordering")?;
-    let terms = json_array(object, "terms")?
-        .iter()
-        .map(parse_fact_ordering_term)
-        .collect::<Result<Vec<_>>>()?;
-    FactOrdering::new(FactOrderingName::new(json_str(object, "name")?)?, terms)
-}
-
-fn parse_fact_ordering_term(value: &serde_json::Value) -> Result<FactOrderingTerm> {
-    let object = json_object(value, "fact ordering term")?;
-    Ok(FactOrderingTerm::new(
-        FactFieldId::new(json_str(object, "field_id")?)?,
-        parse_sort_direction(json_str(object, "direction")?)?,
-        parse_null_ordering(json_str(object, "nulls")?)?,
-        json_bool(object, "tie_breaker")?,
-    ))
-}
-
 fn parse_store_read_frontier(value: &serde_json::Value) -> Result<StoreReadFrontier> {
     let object = json_object(value, "store read frontier")?;
     Ok(StoreReadFrontier::new(
         StoreScopeRef::new(json_str(object, "store_scope")?)?,
-        parse_fact_query_scope(json_required(object, "query_scope")?)?,
+        QueryScopeWire::parse(json_required(object, "query_scope")?)?,
         DescriptorCatalogWatermark::new(json_u64(object, "descriptor_catalog_watermark")?),
         FactProjectionGeneration::new(json_u64(object, "projection_generation")?),
         json_u64(object, "max_included_store_commit_order")?,
@@ -1596,74 +1435,359 @@ fn require_query_exposed(field: &FactFieldDescriptor, context: &'static str) -> 
     Ok(())
 }
 
-fn canonical_compiled_query_bytes(
-    descriptor: &FactDescriptor,
-    descriptor_hash: &ContentDigest,
-    predicates: &[FactQueryPredicate],
-    return_fields: &[FactQueryReturnField],
-    ordering: &FactOrderingName,
+struct CompiledQueryWire {
+    fact_kind: FactKind,
+    resolved_descriptor: ContentDigest,
+    predicates: Vec<FactQueryPredicate>,
+    return_fields: Vec<FactQueryReturnField>,
+    ordering: FactOrderingName,
     limit: Option<u64>,
-) -> Result<CanonicalJsonBytes> {
-    let predicates = predicates
-        .iter()
-        .map(canonical_query_predicate_value)
-        .collect::<Result<Vec<_>>>()?;
-    let return_fields = return_fields
-        .iter()
-        .map(canonical_query_return_field_value)
-        .collect::<Result<Vec<_>>>()?;
-    let value = canonical_object([
-        (
-            "version",
-            CanonicalValue::String("mfm.fact-query.v1".to_owned()),
-        ),
-        (
-            "fact_kind",
-            CanonicalValue::String(descriptor.fact_kind().as_str().to_owned()),
-        ),
-        (
-            "resolved_descriptor",
-            CanonicalValue::String(descriptor_hash.as_str().to_owned()),
-        ),
-        ("predicates", CanonicalValue::Array(predicates)),
-        ("return_fields", CanonicalValue::Array(return_fields)),
-        (
-            "ordering",
-            CanonicalValue::String(ordering.as_str().to_owned()),
-        ),
-        (
-            "limit",
-            limit
-                .map(CanonicalValue::Unsigned)
-                .unwrap_or(CanonicalValue::Null),
-        ),
-    ])?;
-    Ok(CanonicalJsonBytes::from_value(&value))
 }
 
-fn canonical_query_predicate_value(predicate: &FactQueryPredicate) -> Result<CanonicalValue> {
-    canonical_object([
-        (
+impl CompiledQueryWire {
+    const VERSION: &'static str = "mfm.fact-query.v1";
+
+    fn from_parts(
+        descriptor: &FactDescriptor,
+        descriptor_hash: &ContentDigest,
+        predicates: &[FactQueryPredicate],
+        return_fields: &[FactQueryReturnField],
+        ordering: &FactOrderingName,
+        limit: Option<u64>,
+    ) -> Self {
+        Self {
+            fact_kind: descriptor.fact_kind().clone(),
+            resolved_descriptor: descriptor_hash.clone(),
+            predicates: predicates.to_vec(),
+            return_fields: return_fields.to_vec(),
+            ordering: ordering.clone(),
+            limit,
+        }
+    }
+
+    fn parse(value: &serde_json::Value) -> Result<Self> {
+        let object = value.as_object().ok_or_else(|| {
+            FactDescriptorError::descriptor("canonical fact query must be an object")
+        })?;
+        let version = object
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                FactDescriptorError::descriptor("canonical fact query version is required")
+            })?;
+        if version != Self::VERSION {
+            return Err(FactDescriptorError::descriptor(format!(
+                "unsupported canonical fact query version {version:?}"
+            )));
+        }
+        let fact_kind = object
+            .get("fact_kind")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                FactDescriptorError::descriptor("canonical fact query fact_kind is required")
+            })
+            .and_then(FactKind::new)?;
+        let resolved_descriptor = object
+            .get("resolved_descriptor")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                FactDescriptorError::descriptor("canonical fact query descriptor hash is required")
+            })?
+            .parse::<ContentDigest>()
+            .map_err(|error| {
+                FactDescriptorError::descriptor(format!(
+                    "canonical fact query descriptor hash failed validation: {error}"
+                ))
+            })?;
+        let predicates = object
+            .get("predicates")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                FactDescriptorError::descriptor("canonical fact query predicates are required")
+            })?
+            .iter()
+            .map(QueryPredicateWire::parse)
+            .collect::<Result<Vec<_>>>()?;
+        let return_fields = object
+            .get("return_fields")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                FactDescriptorError::descriptor("canonical fact query return fields are required")
+            })?
+            .iter()
+            .map(QueryReturnFieldWire::parse)
+            .collect::<Result<Vec<_>>>()?;
+        let ordering = object
+            .get("ordering")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                FactDescriptorError::descriptor("canonical fact query ordering is required")
+            })
+            .and_then(FactOrderingName::new)?;
+        let limit = Self::parse_limit(object)?;
+        Ok(Self {
+            fact_kind,
+            resolved_descriptor,
+            predicates,
+            return_fields,
+            ordering,
+            limit,
+        })
+    }
+
+    fn parse_limit(object: &serde_json::Map<String, serde_json::Value>) -> Result<Option<u64>> {
+        let value = object.get("limit").ok_or_else(|| {
+            FactDescriptorError::descriptor("canonical fact query limit is required")
+        })?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        value.as_u64().map(Some).ok_or_else(|| {
+            FactDescriptorError::descriptor("canonical fact query limit must be a u64")
+        })
+    }
+
+    fn validate_plan(&self, plan: &CanonicalFactQueryPlan) -> Result<()> {
+        if &self.resolved_descriptor != plan.resolved_descriptor() {
+            return Err(FactDescriptorError::descriptor(
+                "canonical fact query descriptor hash does not match plan",
+            ));
+        }
+        if &self.ordering != plan.ordering().name() {
+            return Err(FactDescriptorError::descriptor(
+                "canonical fact query ordering does not match plan",
+            ));
+        }
+        if self.limit != plan.limit() {
+            return Err(FactDescriptorError::descriptor(
+                "canonical fact query limit does not match plan",
+            ));
+        }
+        Ok(())
+    }
+
+    fn into_shape(self) -> Result<CompiledFactQueryShape> {
+        CompiledFactQueryShape::new(self.predicates, self.return_fields)
+    }
+
+    fn canonical_value(&self) -> Result<CanonicalValue> {
+        let predicates = self
+            .predicates
+            .iter()
+            .map(QueryPredicateWire::canonical_value)
+            .collect::<Result<Vec<_>>>()?;
+        let return_fields = self
+            .return_fields
+            .iter()
+            .map(QueryReturnFieldWire::canonical_value)
+            .collect::<Result<Vec<_>>>()?;
+        canonical_object([
+            ("version", CanonicalValue::String(Self::VERSION.to_owned())),
+            (
+                "fact_kind",
+                CanonicalValue::String(self.fact_kind.as_str().to_owned()),
+            ),
+            (
+                "resolved_descriptor",
+                CanonicalValue::String(self.resolved_descriptor.as_str().to_owned()),
+            ),
+            ("predicates", CanonicalValue::Array(predicates)),
+            ("return_fields", CanonicalValue::Array(return_fields)),
+            (
+                "ordering",
+                CanonicalValue::String(self.ordering.as_str().to_owned()),
+            ),
+            (
+                "limit",
+                self.limit
+                    .map(CanonicalValue::Unsigned)
+                    .unwrap_or(CanonicalValue::Null),
+            ),
+        ])
+    }
+
+    fn canonical_bytes(&self) -> Result<CanonicalJsonBytes> {
+        self.canonical_value()
+            .map(|value| CanonicalJsonBytes::from_value(&value))
+    }
+}
+
+struct QueryPredicateWire;
+
+impl QueryPredicateWire {
+    fn parse(value: &serde_json::Value) -> Result<FactQueryPredicate> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| FactDescriptorError::descriptor("query predicate must be an object"))?;
+        let field_id = object
+            .get("field_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| FactDescriptorError::descriptor("query predicate field_id is required"))
+            .and_then(FactFieldId::new)?;
+        let operator = object
+            .get("operator")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                FactDescriptorError::field(field_id.clone(), "query operator is required")
+            })
+            .and_then(|value| parse_query_operator(&field_id, value))?;
+        let value_type = object
+            .get("value_type")
+            .ok_or_else(|| {
+                FactDescriptorError::field(field_id.clone(), "query value_type is required")
+            })
+            .and_then(parse_field_value_type)?;
+        let scalar_value = object.get("value").ok_or_else(|| {
+            FactDescriptorError::field(field_id.clone(), "query value is required")
+        })?;
+        let value = parse_canonical_scalar_value(value_type, scalar_value, &field_id)?;
+        Ok(FactQueryPredicate::new(field_id, operator, value))
+    }
+
+    fn canonical_value(predicate: &FactQueryPredicate) -> Result<CanonicalValue> {
+        canonical_object([
+            (
+                "field_id",
+                CanonicalValue::String(predicate.field_id().as_str().to_owned()),
+            ),
+            (
+                "operator",
+                CanonicalValue::String(predicate.operator().as_str().to_owned()),
+            ),
+            (
+                "value_type",
+                CanonicalValue::String(predicate.value().value_type().as_str().to_owned()),
+            ),
+            ("value", predicate.value().canonical_value()),
+        ])
+    }
+}
+
+struct QueryReturnFieldWire;
+
+impl QueryReturnFieldWire {
+    fn parse(value: &serde_json::Value) -> Result<FactQueryReturnField> {
+        let object = value.as_object().ok_or_else(|| {
+            FactDescriptorError::descriptor("query return field must be an object")
+        })?;
+        let field_id = object
+            .get("field_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| FactDescriptorError::descriptor("query return field_id is required"))
+            .and_then(FactFieldId::new)?;
+        Ok(FactQueryReturnField::new(field_id))
+    }
+
+    fn canonical_value(field: &FactQueryReturnField) -> Result<CanonicalValue> {
+        canonical_object([(
             "field_id",
-            CanonicalValue::String(predicate.field_id.as_str().to_owned()),
-        ),
-        (
-            "operator",
-            CanonicalValue::String(predicate.operator.as_str().to_owned()),
-        ),
-        (
-            "value_type",
-            CanonicalValue::String(predicate.value.value_type().as_str().to_owned()),
-        ),
-        ("value", predicate.value.canonical_value()),
-    ])
+            CanonicalValue::String(field.field_id().as_str().to_owned()),
+        )])
+    }
 }
 
-fn canonical_query_return_field_value(field: &FactQueryReturnField) -> Result<CanonicalValue> {
-    canonical_object([(
-        "field_id",
-        CanonicalValue::String(field.field_id.as_str().to_owned()),
-    )])
+struct QueryScopeWire;
+
+impl QueryScopeWire {
+    fn parse(value: &serde_json::Value) -> Result<FactQueryScope> {
+        let object = json_object(value, "fact query scope")?;
+        Ok(FactQueryScope::new(
+            parse_fact_audience(json_str(object, "audience")?)?,
+            parse_fact_visibility_scope(json_str(object, "scope")?)?,
+        ))
+    }
+
+    fn canonical_value(scope: &FactQueryScope) -> Result<CanonicalValue> {
+        canonical_object([
+            (
+                "audience",
+                CanonicalValue::String(scope.audience().as_str().to_owned()),
+            ),
+            (
+                "scope",
+                CanonicalValue::String(scope.scope().as_str().to_owned()),
+            ),
+        ])
+    }
+}
+
+struct ScopeDecisionEvidenceWire;
+
+impl ScopeDecisionEvidenceWire {
+    fn parse(value: &serde_json::Value) -> Result<ScopeDecisionEvidence> {
+        let object = json_object(value, "scope decision evidence")?;
+        Ok(ScopeDecisionEvidence::new(parse_json_str(
+            object,
+            "decision_hash",
+        )?))
+    }
+
+    fn canonical_value(evidence: &ScopeDecisionEvidence) -> Result<CanonicalValue> {
+        canonical_object([(
+            "decision_hash",
+            CanonicalValue::String(evidence.decision_hash().as_str().to_owned()),
+        )])
+    }
+}
+
+struct OrderingWire;
+
+impl OrderingWire {
+    fn parse(value: &serde_json::Value) -> Result<FactOrdering> {
+        let object = json_object(value, "fact ordering")?;
+        let terms = json_array(object, "terms")?
+            .iter()
+            .map(OrderingTermWire::parse)
+            .collect::<Result<Vec<_>>>()?;
+        FactOrdering::new(FactOrderingName::new(json_str(object, "name")?)?, terms)
+    }
+
+    fn canonical_value(ordering: &FactOrdering) -> Result<CanonicalValue> {
+        let terms = ordering
+            .terms()
+            .iter()
+            .map(OrderingTermWire::canonical_value)
+            .collect::<Result<Vec<_>>>()?;
+        canonical_object([
+            (
+                "name",
+                CanonicalValue::String(ordering.name().as_str().to_owned()),
+            ),
+            ("terms", CanonicalValue::Array(terms)),
+        ])
+    }
+}
+
+struct OrderingTermWire;
+
+impl OrderingTermWire {
+    fn parse(value: &serde_json::Value) -> Result<FactOrderingTerm> {
+        let object = json_object(value, "fact ordering term")?;
+        Ok(FactOrderingTerm::new(
+            FactFieldId::new(json_str(object, "field_id")?)?,
+            parse_sort_direction(json_str(object, "direction")?)?,
+            parse_null_ordering(json_str(object, "nulls")?)?,
+            json_bool(object, "tie_breaker")?,
+        ))
+    }
+
+    fn canonical_value(term: &FactOrderingTerm) -> Result<CanonicalValue> {
+        canonical_object([
+            (
+                "field_id",
+                CanonicalValue::String(term.field_id().as_str().to_owned()),
+            ),
+            (
+                "direction",
+                CanonicalValue::String(term.direction().as_str().to_owned()),
+            ),
+            (
+                "nulls",
+                CanonicalValue::String(term.nulls().as_str().to_owned()),
+            ),
+            ("tie_breaker", CanonicalValue::Bool(term.tie_breaker())),
+        ])
+    }
 }
 
 fn canonical_query_plan_value(plan: &CanonicalFactQueryPlan) -> Result<CanonicalValue> {
@@ -1678,7 +1802,7 @@ fn canonical_query_plan_value(plan: &CanonicalFactQueryPlan) -> Result<Canonical
         ),
         (
             "query_scope",
-            canonical_query_scope_value(&plan.query_scope)?,
+            QueryScopeWire::canonical_value(&plan.query_scope)?,
         ),
         (
             "query_compiler_version",
@@ -1694,7 +1818,7 @@ fn canonical_query_plan_value(plan: &CanonicalFactQueryPlan) -> Result<Canonical
         ),
         (
             "scope_decision_evidence",
-            canonical_scope_decision_evidence_value(&plan.scope_decision_evidence)?,
+            ScopeDecisionEvidenceWire::canonical_value(&plan.scope_decision_evidence)?,
         ),
         (
             "canonical_query",
@@ -1704,50 +1828,13 @@ fn canonical_query_plan_value(plan: &CanonicalFactQueryPlan) -> Result<Canonical
             "canonical_query_hash",
             CanonicalValue::String(plan.canonical_query_hash.as_str().to_owned()),
         ),
-        ("ordering", canonical_fact_ordering_value(&plan.ordering)?),
+        ("ordering", OrderingWire::canonical_value(&plan.ordering)?),
         (
             "limit",
             plan.limit
                 .map(CanonicalValue::Unsigned)
                 .unwrap_or(CanonicalValue::Null),
         ),
-    ])
-}
-
-fn canonical_query_scope_value(scope: &FactQueryScope) -> Result<CanonicalValue> {
-    canonical_object([
-        (
-            "audience",
-            CanonicalValue::String(scope.audience.as_str().to_owned()),
-        ),
-        (
-            "scope",
-            CanonicalValue::String(scope.scope.as_str().to_owned()),
-        ),
-    ])
-}
-
-fn canonical_scope_decision_evidence_value(
-    evidence: &ScopeDecisionEvidence,
-) -> Result<CanonicalValue> {
-    canonical_object([(
-        "decision_hash",
-        CanonicalValue::String(evidence.decision_hash.as_str().to_owned()),
-    )])
-}
-
-fn canonical_fact_ordering_value(ordering: &FactOrdering) -> Result<CanonicalValue> {
-    let terms = ordering
-        .terms
-        .iter()
-        .map(canonical_ordering_term_value)
-        .collect::<Result<Vec<_>>>()?;
-    canonical_object([
-        (
-            "name",
-            CanonicalValue::String(ordering.name.as_str().to_owned()),
-        ),
-        ("terms", CanonicalValue::Array(terms)),
     ])
 }
 
@@ -1998,7 +2085,7 @@ fn canonical_store_read_frontier_value(frontier: &StoreReadFrontier) -> Result<C
         ),
         (
             "query_scope",
-            canonical_query_scope_value(&frontier.query_scope)?,
+            QueryScopeWire::canonical_value(&frontier.query_scope)?,
         ),
         (
             "descriptor_catalog_watermark",
