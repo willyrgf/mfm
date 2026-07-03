@@ -90,8 +90,9 @@ pub fn canonical_fact_descriptor_bytes(descriptor: &FactDescriptor) -> Result<Ca
 
 /// Decodes and validates canonical fact descriptor artifact bytes.
 pub fn parse_canonical_fact_descriptor_bytes(bytes: &[u8]) -> Result<FactDescriptor> {
-    let descriptor = serde_json::from_slice::<FactDescriptor>(bytes)
+    let value = serde_json::from_slice::<serde_json::Value>(bytes)
         .map_err(|error| FactDescriptorError::descriptor(error.to_string()))?;
+    let descriptor = parse_fact_descriptor(&value)?;
     let canonical = canonical_fact_descriptor_bytes(&descriptor)?;
     if canonical.as_bytes() != bytes {
         return Err(FactDescriptorError::descriptor(
@@ -781,6 +782,70 @@ fn canonical_descriptor_value(descriptor: &FactDescriptor) -> Result<CanonicalVa
     ])
 }
 
+fn parse_fact_descriptor(value: &serde_json::Value) -> Result<FactDescriptor> {
+    let object = json_object(value, "fact descriptor")?;
+    require_version(object, FACTS_KERNEL_CONTRACT_VERSION, "fact descriptor")?;
+    let fields = json_array(object, "fields")?
+        .iter()
+        .map(parse_fact_field_descriptor)
+        .collect::<Result<Vec<_>>>()?;
+    let orderings = json_array(object, "orderings")?
+        .iter()
+        .map(parse_ordering_policy)
+        .collect::<Result<Vec<_>>>()?;
+    FactDescriptor::new(
+        FactKind::new(json_str(object, "fact_kind")?)?,
+        parse_json_str(object, "descriptor_schema_id")?,
+        parse_json_str(object, "subject_schema_id")?,
+        parse_json_str(object, "response_schema_id")?,
+        fields,
+        orderings,
+    )
+}
+
+fn parse_fact_field_descriptor(value: &serde_json::Value) -> Result<FactFieldDescriptor> {
+    let object = json_object(value, "fact field descriptor")?;
+    let field_id = FactFieldId::new(json_str(object, "field_id")?)?;
+    let operators = json_array(object, "operators")?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| {
+                    FactDescriptorError::field(field_id.clone(), "operator must be a string")
+                })
+                .and_then(|value| parse_query_operator(&field_id, value))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    FactFieldDescriptor::new(
+        field_id,
+        FactFieldPath::new(json_str(object, "path")?)?,
+        parse_field_value_type(json_required(object, "value_type")?)?,
+        parse_field_extraction(json_required(object, "extraction")?)?,
+        operators,
+        parse_fact_field_exposure(json_str(object, "exposure")?)?,
+        parse_optional_checked_string::<FactUnit>(json_required(object, "unit")?)?,
+        parse_optional_scale(json_required(object, "scale")?)?,
+        json_bool(object, "sortable")?,
+        json_bool(object, "required")?,
+    )
+}
+
+fn parse_field_extraction(value: &serde_json::Value) -> Result<FactFieldExtraction> {
+    let object = json_object(value, "fact field extraction")?;
+    match parse_fact_field_source(json_str(object, "source")?)? {
+        FactFieldSource::Subject => Ok(FactFieldExtraction::SubjectPath(CanonicalValuePath::new(
+            json_str(object, "path")?,
+        )?)),
+        FactFieldSource::Result => Ok(FactFieldExtraction::ResponsePath(CanonicalValuePath::new(
+            json_str(object, "path")?,
+        )?)),
+        FactFieldSource::Metadata => Ok(FactFieldExtraction::Metadata(parse_fact_metadata_field(
+            json_str(object, "path")?,
+        )?)),
+    }
+}
+
 fn canonical_field_descriptor_value(field: &FactFieldDescriptor) -> Result<CanonicalValue> {
     let mut operators = field.operators.clone();
     operators.sort();
@@ -1173,6 +1238,24 @@ fn parse_fact_audience(value: &str) -> Result<FactAudience> {
         .map_err(|_| FactDescriptorError::descriptor(format!("unknown fact audience {value:?}")))
 }
 
+fn parse_fact_field_source(value: &str) -> Result<FactFieldSource> {
+    value.parse::<FactFieldSource>().map_err(|_| {
+        FactDescriptorError::descriptor(format!("unknown fact field source {value:?}"))
+    })
+}
+
+fn parse_fact_metadata_field(value: &str) -> Result<FactMetadataField> {
+    value.parse::<FactMetadataField>().map_err(|_| {
+        FactDescriptorError::descriptor(format!("unknown fact metadata field {value:?}"))
+    })
+}
+
+fn parse_fact_field_exposure(value: &str) -> Result<FactFieldExposure> {
+    value.parse::<FactFieldExposure>().map_err(|_| {
+        FactDescriptorError::descriptor(format!("unknown fact field exposure {value:?}"))
+    })
+}
+
 fn parse_fact_visibility_scope(value: &str) -> Result<FactVisibilityScope> {
     value.parse::<FactVisibilityScope>().map_err(|_| {
         FactDescriptorError::descriptor(format!("unknown fact visibility scope {value:?}"))
@@ -1339,6 +1422,18 @@ where
         FactDescriptorError::descriptor("optional checked string must be null or string")
     })?;
     T::try_from(raw.to_owned()).map(Some)
+}
+
+fn parse_optional_scale(value: &serde_json::Value) -> Result<Option<FactScale>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let exponent = value
+        .as_i64()
+        .ok_or_else(|| FactDescriptorError::descriptor("scale must be null or signed integer"))?;
+    let exponent = i16::try_from(exponent)
+        .map_err(|_| FactDescriptorError::descriptor("scale must fit in i16"))?;
+    FactScale::new(exponent).map(Some)
 }
 
 fn parse_optional_digest(value: &serde_json::Value) -> Result<Option<ContentDigest>> {

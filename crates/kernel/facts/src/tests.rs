@@ -519,8 +519,11 @@ fn canonical_descriptor_bytes_parse_back_to_descriptor_only_when_canonical() {
         fact_descriptor_hash(&descriptor).expect("descriptor hash")
     );
 
-    let serde_json = serde_json::to_vec(&descriptor).expect("serde descriptor");
-    assert!(parse_canonical_fact_descriptor_bytes(&serde_json).is_err());
+    let pretty_json = serde_json::to_vec_pretty(
+        &serde_json::from_slice::<serde_json::Value>(canonical.as_bytes()).expect("json value"),
+    )
+    .expect("pretty descriptor");
+    assert!(parse_canonical_fact_descriptor_bytes(&pretty_json).is_err());
 }
 
 #[test]
