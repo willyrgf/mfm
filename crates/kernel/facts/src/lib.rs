@@ -12,6 +12,42 @@
 //! assert_eq!(mfm_facts::FACTS_KERNEL_CONTRACT_VERSION, "mfm.facts.v1");
 //! ```
 
+macro_rules! impl_fact_tag {
+    ($ty:ty, $error_label:literal, $as_str_vis:vis, $as_str_doc:literal, {
+        $($variant:path => $tag:literal),+ $(,)?
+    }) => {
+        impl $ty {
+            #[doc = $as_str_doc]
+            $as_str_vis const fn as_str(self) -> &'static str {
+                match self {
+                    $($variant => $tag),+
+                }
+            }
+
+        }
+
+        impl ::std::fmt::Display for $ty {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl ::std::str::FromStr for $ty {
+            type Err = crate::FactDescriptorError;
+
+            fn from_str(value: &str) -> crate::Result<Self> {
+                match value {
+                    $($tag => Ok($variant),)+
+                    _ => Err(crate::FactDescriptorError::descriptor(format!(
+                        "unknown {} {value:?}",
+                        $error_label
+                    ))),
+                }
+            }
+        }
+    };
+}
+
 mod claim;
 mod codec;
 mod descriptor;

@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use mfm_canonical::CanonicalValue;
 use mfm_ids::ContentDigest;
 
+use crate::scalar::ScalarJsonContext;
 use crate::*;
 
 /// Claim and store metadata available to descriptor field extraction.
@@ -407,17 +408,8 @@ fn json_to_typed_fact_scalar_with_context(
     if value.is_null() && matches!(context, ScalarJsonContext::ResponsePath(_)) {
         return Ok(CanonicalValue::Null);
     }
-    canonical_scalar_from_json(value_type, value, context).map(|scalar| scalar.canonical_value())
-}
-
-pub(crate) fn fact_scalar_type_error(
-    path: &str,
-    value_type: FactFieldValueType,
-) -> FactDescriptorError {
-    FactDescriptorError::descriptor(format!(
-        "fact response path {path} does not match declared value type {:?}",
-        value_type
-    ))
+    FactCanonicalScalar::from_json_value(value_type, value, context)
+        .map(|scalar| scalar.canonical_value())
 }
 
 pub(crate) fn validate_extracted_scalar(
