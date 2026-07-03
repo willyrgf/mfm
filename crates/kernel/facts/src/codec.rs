@@ -149,22 +149,9 @@ pub fn canonical_fact_subject_material_bytes(
 pub fn parse_canonical_fact_subject_material_bytes(bytes: &[u8]) -> Result<FactSubjectMaterialV1> {
     let value = serde_json::from_slice::<serde_json::Value>(bytes)
         .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| FactDescriptorError::descriptor("subject material must be an object"))?;
-    let version = object
-        .get("version")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| FactDescriptorError::descriptor("subject material version is required"))?;
-    if version != FactSubjectMaterialV1::VERSION {
-        return Err(FactDescriptorError::descriptor(format!(
-            "unsupported subject material version {version:?}"
-        )));
-    }
-    let values = object
-        .get("values")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| FactDescriptorError::descriptor("subject material values are required"))?
+    let object = json_object(&value, "subject material")?;
+    require_version(object, FactSubjectMaterialV1::VERSION, "subject material")?;
+    let values = json_array(object, "values")?
         .iter()
         .map(parse_subject_material_value)
         .collect::<Result<Vec<_>>>()?;
@@ -220,22 +207,7 @@ pub fn derive_fact_claim_id(
 
 /// Returns canonical fact claim id bytes.
 pub fn canonical_fact_claim_id_bytes(claim_id: &FactClaimId) -> Result<CanonicalJsonBytes> {
-    let value = canonical_object([
-        (
-            "version",
-            CanonicalValue::String("mfm.fact-claim-id.v1".to_owned()),
-        ),
-        (
-            "source_run_id",
-            CanonicalValue::String(claim_id.source_run_id.as_str().to_owned()),
-        ),
-        ("source_seq", CanonicalValue::Unsigned(claim_id.source_seq)),
-        (
-            "source_ordinal",
-            CanonicalValue::Unsigned(u64::from(claim_id.source_ordinal)),
-        ),
-    ])?;
-    Ok(CanonicalJsonBytes::from_value(&value))
+    canonical_fact_claim_id_value(claim_id).map(|value| CanonicalJsonBytes::from_value(&value))
 }
 
 /// Returns canonical query plan bytes.
@@ -823,7 +795,7 @@ fn parse_fact_field_descriptor(value: &serde_json::Value) -> Result<FactFieldDes
         parse_field_value_type(json_required(object, "value_type")?)?,
         parse_field_extraction(json_required(object, "extraction")?)?,
         operators,
-        parse_fact_field_exposure(json_str(object, "exposure")?)?,
+        parse_descriptor_tag(json_str(object, "exposure")?, "fact field exposure")?,
         parse_optional_checked_string::<FactUnit>(json_required(object, "unit")?)?,
         parse_optional_scale(json_required(object, "scale")?)?,
         json_bool(object, "sortable")?,
@@ -833,15 +805,16 @@ fn parse_fact_field_descriptor(value: &serde_json::Value) -> Result<FactFieldDes
 
 fn parse_field_extraction(value: &serde_json::Value) -> Result<FactFieldExtraction> {
     let object = json_object(value, "fact field extraction")?;
-    match parse_fact_field_source(json_str(object, "source")?)? {
+    match parse_descriptor_tag(json_str(object, "source")?, "fact field source")? {
         FactFieldSource::Subject => Ok(FactFieldExtraction::SubjectPath(CanonicalValuePath::new(
             json_str(object, "path")?,
         )?)),
         FactFieldSource::Result => Ok(FactFieldExtraction::ResponsePath(CanonicalValuePath::new(
             json_str(object, "path")?,
         )?)),
-        FactFieldSource::Metadata => Ok(FactFieldExtraction::Metadata(parse_fact_metadata_field(
+        FactFieldSource::Metadata => Ok(FactFieldExtraction::Metadata(parse_descriptor_tag(
             json_str(object, "path")?,
+            "fact metadata field",
         )?)),
     }
 }
@@ -987,21 +960,10 @@ fn canonical_subject_value(value: &FactSubjectValueV1) -> Result<CanonicalValue>
 }
 
 fn parse_subject_material_value(value: &serde_json::Value) -> Result<FactSubjectValueV1> {
-    let object = value.as_object().ok_or_else(|| {
-        FactDescriptorError::descriptor("subject material value must be an object")
-    })?;
-    let field_id = object
-        .get("field_id")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| FactDescriptorError::descriptor("subject material field_id is required"))
-        .and_then(FactFieldId::new)?;
-    let value_type = object
-        .get("value_type")
-        .ok_or_else(|| FactDescriptorError::descriptor("subject material value_type is required"))
-        .and_then(parse_field_value_type)?;
-    let scalar_value = object
-        .get("value")
-        .ok_or_else(|| FactDescriptorError::descriptor("subject material value is required"))?;
+    let object = json_object(value, "subject material value")?;
+    let field_id = FactFieldId::new(json_str(object, "field_id")?)?;
+    let value_type = parse_field_value_type(json_required(object, "value_type")?)?;
+    let scalar_value = json_required(object, "value")?;
     let scalar = parse_canonical_scalar_value(value_type, scalar_value, &field_id)?;
     FactSubjectValueV1::new(field_id, value_type, scalar)
 }
@@ -1010,9 +972,7 @@ fn parse_field_value_type(value: &serde_json::Value) -> Result<FactFieldValueTyp
     let value = value
         .as_str()
         .ok_or_else(|| FactDescriptorError::descriptor("field value type must be a string"))?;
-    value
-        .parse::<FactFieldValueType>()
-        .map_err(|_| FactDescriptorError::descriptor(format!("unknown field value type {value:?}")))
+    parse_descriptor_tag(value, "field value type")
 }
 
 pub(crate) fn parse_canonical_scalar_value(
@@ -1147,8 +1107,8 @@ fn parse_fact_visibility(value: &serde_json::Value) -> Result<FactVisibility> {
     match json_str(object, "kind")? {
         "run_private" => Ok(FactVisibility::RunPrivate),
         "indexed" => Ok(FactVisibility::Indexed {
-            audience: parse_fact_audience(json_str(object, "audience")?)?,
-            scope: parse_fact_visibility_scope(json_str(object, "scope")?)?,
+            audience: parse_descriptor_tag(json_str(object, "audience")?, "fact audience")?,
+            scope: parse_descriptor_tag(json_str(object, "scope")?, "fact visibility scope")?,
         }),
         value => Err(FactDescriptorError::descriptor(format!(
             "unknown fact visibility kind {value:?}"
@@ -1213,7 +1173,10 @@ fn parse_store_receipt_authentication(
     value: &serde_json::Value,
 ) -> Result<StoreReceiptAuthentication> {
     let object = json_object(value, "store receipt authentication")?;
-    let scheme = parse_store_receipt_authentication_scheme(json_str(object, "scheme")?)?;
+    let scheme = parse_descriptor_tag(
+        json_str(object, "scheme")?,
+        "store receipt authentication scheme",
+    )?;
     let key_id = parse_optional_checked_string::<StoreKeyId>(json_required(object, "key_id")?)?;
     let signature = CanonicalBytes::from_base64url_no_pad(json_str(object, "signature_or_mac")?)
         .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
@@ -1232,64 +1195,13 @@ fn plain_canonical_json_bytes_from_canonical_json_str(
         .map_err(|error| FactDescriptorError::canonical(error.to_string()))
 }
 
-fn parse_fact_audience(value: &str) -> Result<FactAudience> {
+fn parse_descriptor_tag<T>(value: &str, label: &'static str) -> Result<T>
+where
+    T: FromStr,
+{
     value
-        .parse::<FactAudience>()
-        .map_err(|_| FactDescriptorError::descriptor(format!("unknown fact audience {value:?}")))
-}
-
-fn parse_fact_field_source(value: &str) -> Result<FactFieldSource> {
-    value.parse::<FactFieldSource>().map_err(|_| {
-        FactDescriptorError::descriptor(format!("unknown fact field source {value:?}"))
-    })
-}
-
-fn parse_fact_metadata_field(value: &str) -> Result<FactMetadataField> {
-    value.parse::<FactMetadataField>().map_err(|_| {
-        FactDescriptorError::descriptor(format!("unknown fact metadata field {value:?}"))
-    })
-}
-
-fn parse_fact_field_exposure(value: &str) -> Result<FactFieldExposure> {
-    value.parse::<FactFieldExposure>().map_err(|_| {
-        FactDescriptorError::descriptor(format!("unknown fact field exposure {value:?}"))
-    })
-}
-
-fn parse_fact_visibility_scope(value: &str) -> Result<FactVisibilityScope> {
-    value.parse::<FactVisibilityScope>().map_err(|_| {
-        FactDescriptorError::descriptor(format!("unknown fact visibility scope {value:?}"))
-    })
-}
-
-fn parse_store_read_frontier_type(value: &str) -> Result<StoreReadFrontierType> {
-    value.parse::<StoreReadFrontierType>().map_err(|_| {
-        FactDescriptorError::descriptor(format!("unknown store read frontier type {value:?}"))
-    })
-}
-
-fn parse_store_receipt_authentication_scheme(
-    value: &str,
-) -> Result<StoreReceiptAuthenticationScheme> {
-    value
-        .parse::<StoreReceiptAuthenticationScheme>()
-        .map_err(|_| {
-            FactDescriptorError::descriptor(format!(
-                "unknown store receipt authentication scheme {value:?}"
-            ))
-        })
-}
-
-fn parse_sort_direction(value: &str) -> Result<SortDirection> {
-    value
-        .parse::<SortDirection>()
-        .map_err(|_| FactDescriptorError::descriptor(format!("unknown sort direction {value:?}")))
-}
-
-fn parse_null_ordering(value: &str) -> Result<NullOrdering> {
-    value
-        .parse::<NullOrdering>()
-        .map_err(|_| FactDescriptorError::descriptor(format!("unknown null ordering {value:?}")))
+        .parse::<T>()
+        .map_err(|_| FactDescriptorError::descriptor(format!("unknown {label} {value:?}")))
 }
 
 fn json_object<'a>(
@@ -1648,8 +1560,8 @@ fn canonical_query_return_field_value(field: &FactQueryReturnField) -> Result<Ca
 fn parse_query_scope(value: &serde_json::Value) -> Result<FactQueryScope> {
     let object = json_object(value, "fact query scope")?;
     Ok(FactQueryScope::new(
-        parse_fact_audience(json_str(object, "audience")?)?,
-        parse_fact_visibility_scope(json_str(object, "scope")?)?,
+        parse_descriptor_tag(json_str(object, "audience")?, "fact audience")?,
+        parse_descriptor_tag(json_str(object, "scope")?, "fact visibility scope")?,
     ))
 }
 
@@ -1711,8 +1623,8 @@ fn parse_ordering_term(value: &serde_json::Value) -> Result<FactOrderingTerm> {
     let object = json_object(value, "fact ordering term")?;
     Ok(FactOrderingTerm::new(
         FactFieldId::new(json_str(object, "field_id")?)?,
-        parse_sort_direction(json_str(object, "direction")?)?,
-        parse_null_ordering(json_str(object, "nulls")?)?,
+        parse_descriptor_tag(json_str(object, "direction")?, "sort direction")?,
+        parse_descriptor_tag(json_str(object, "nulls")?, "null ordering")?,
         json_bool(object, "tie_breaker")?,
     ))
 }
@@ -1874,7 +1786,10 @@ impl OwnedFactQueryReceiptBodyParts {
         Ok(Self {
             plan_hash,
             read_frontier: parse_store_read_frontier(json_required(body, "read_frontier")?)?,
-            frontier_type: parse_store_read_frontier_type(json_str(body, "frontier_type")?)?,
+            frontier_type: parse_descriptor_tag(
+                json_str(body, "frontier_type")?,
+                "store read frontier type",
+            )?,
             returned_refs: json_array(body, "returned_refs")?
                 .iter()
                 .map(parse_internal_fact_ref)
