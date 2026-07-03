@@ -911,13 +911,13 @@ fn canonical_subject_value(value: &FactSubjectValueV1) -> Result<CanonicalValue>
     canonical_object([
         (
             "field_id",
-            CanonicalValue::String(value.field_id.as_str().to_owned()),
+            CanonicalValue::String(value.field_id().as_str().to_owned()),
         ),
         (
             "value_type",
-            CanonicalValue::String(value.value_type.as_str().to_owned()),
+            CanonicalValue::String(value.value_type().as_str().to_owned()),
         ),
-        ("value", value.value.canonical_value()),
+        ("value", value.value().canonical_value()),
     ])
 }
 
@@ -2266,13 +2266,13 @@ fn canonical_returned_field_value_summary_value(
     canonical_object([
         (
             "field_id",
-            CanonicalValue::String(summary.field_id.as_str().to_owned()),
+            CanonicalValue::String(summary.field_id().as_str().to_owned()),
         ),
         (
             "value_type",
-            CanonicalValue::String(summary.value_type.as_str().to_owned()),
+            CanonicalValue::String(summary.value_type().as_str().to_owned()),
         ),
-        ("value", summary.value.canonical_value()),
+        ("value", summary.value().canonical_value()),
     ])
 }
 

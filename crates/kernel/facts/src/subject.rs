@@ -100,59 +100,16 @@ impl FactSubjectNamespaceFieldV1 {
     }
 }
 
-/// Canonical subject material for one fact claim.
+/// Descriptor field value with its field id, declared type, and canonical scalar.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FactSubjectMaterialV1 {
-    pub(crate) values: Vec<FactSubjectValueV1>,
-}
-
-impl FactSubjectMaterialV1 {
-    /// Stable subject material version string.
-    pub const VERSION: &'static str = "mfm.fact-subject-material.v1";
-
-    /// Creates subject material and sorts values by field id.
-    pub fn new(values: Vec<FactSubjectValueV1>) -> Result<Self> {
-        let mut material = Self { values };
-        material.sort_and_validate()?;
-        Ok(material)
-    }
-
-    /// Returns subject values sorted by field id.
-    pub fn values(&self) -> &[FactSubjectValueV1] {
-        &self.values
-    }
-
-    fn sort_and_validate(&mut self) -> Result<()> {
-        self.values
-            .sort_by(|left, right| left.field_id.cmp(&right.field_id));
-        let mut seen = BTreeSet::new();
-        for value in &self.values {
-            if !seen.insert(value.field_id.clone()) {
-                return Err(FactDescriptorError::descriptor(format!(
-                    "duplicate subject material field {}",
-                    value.field_id
-                )));
-            }
-        }
-        if self.values.is_empty() {
-            return Err(FactDescriptorError::descriptor(
-                "subject material must contain at least one value",
-            ));
-        }
-        Ok(())
-    }
-}
-
-/// One canonical subject value for fact-key derivation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FactSubjectValueV1 {
+pub struct FactFieldValue {
     pub(crate) field_id: FactFieldId,
     pub(crate) value_type: FactFieldValueType,
     pub(crate) value: FactCanonicalScalar,
 }
 
-impl FactSubjectValueV1 {
-    /// Creates a subject value and checks that the scalar matches the declared value type.
+impl FactFieldValue {
+    /// Creates a field value and checks that the scalar matches the declared value type.
     pub fn new(
         field_id: FactFieldId,
         value_type: FactFieldValueType,
@@ -162,7 +119,7 @@ impl FactSubjectValueV1 {
             return Err(FactDescriptorError::field(
                 field_id,
                 format!(
-                    "subject value type {:?} does not match scalar type {:?}",
+                    "field value type {:?} does not match scalar type {:?}",
                     value_type,
                     value.value_type()
                 ),
@@ -189,6 +146,83 @@ impl FactSubjectValueV1 {
     /// Returns this value's scalar.
     pub const fn value(&self) -> &FactCanonicalScalar {
         &self.value
+    }
+}
+
+/// Canonical subject material for one fact claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactSubjectMaterialV1 {
+    pub(crate) values: Vec<FactSubjectValueV1>,
+}
+
+impl FactSubjectMaterialV1 {
+    /// Stable subject material version string.
+    pub const VERSION: &'static str = "mfm.fact-subject-material.v1";
+
+    /// Creates subject material and sorts values by field id.
+    pub fn new(values: Vec<FactSubjectValueV1>) -> Result<Self> {
+        let mut material = Self { values };
+        material.sort_and_validate()?;
+        Ok(material)
+    }
+
+    /// Returns subject values sorted by field id.
+    pub fn values(&self) -> &[FactSubjectValueV1] {
+        &self.values
+    }
+
+    fn sort_and_validate(&mut self) -> Result<()> {
+        self.values
+            .sort_by(|left, right| left.field_id().cmp(right.field_id()));
+        let mut seen = BTreeSet::new();
+        for value in &self.values {
+            if !seen.insert(value.field_id().clone()) {
+                return Err(FactDescriptorError::descriptor(format!(
+                    "duplicate subject material field {}",
+                    value.field_id()
+                )));
+            }
+        }
+        if self.values.is_empty() {
+            return Err(FactDescriptorError::descriptor(
+                "subject material must contain at least one value",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One canonical subject value for fact-key derivation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactSubjectValueV1 {
+    pub(crate) value: FactFieldValue,
+}
+
+impl FactSubjectValueV1 {
+    /// Creates a subject value and checks that the scalar matches the declared value type.
+    pub fn new(
+        field_id: FactFieldId,
+        value_type: FactFieldValueType,
+        value: FactCanonicalScalar,
+    ) -> Result<Self> {
+        Ok(Self {
+            value: FactFieldValue::new(field_id, value_type, value)?,
+        })
+    }
+
+    /// Returns this value's field id.
+    pub const fn field_id(&self) -> &FactFieldId {
+        self.value.field_id()
+    }
+
+    /// Returns this value's declared type.
+    pub const fn value_type(&self) -> FactFieldValueType {
+        self.value.value_type()
+    }
+
+    /// Returns this value's scalar.
+    pub const fn value(&self) -> &FactCanonicalScalar {
+        self.value.value()
     }
 }
 
