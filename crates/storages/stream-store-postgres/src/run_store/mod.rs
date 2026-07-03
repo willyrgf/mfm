@@ -28,6 +28,7 @@ use sqlx::{
     postgres::{PgListener, PgPoolOptions, PgRow},
     PgPool, Postgres, QueryBuilder, Row, Transaction,
 };
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::schema::{connect_pool, validate_pool};
 
@@ -213,6 +214,36 @@ impl PostgresRunStore {
             .await
             .map_err(|_| PostgresStoreError::Authority(PostgresStoreAuthorityError::Connection))?;
         let authority = validate_pool(&pool).await?;
+        require_fact_receipt_signer_matches_authority(&authority, &fact_receipt_signer)?;
+        Ok(Self {
+            pool,
+            authority,
+            fact_receipt_signer: Some(fact_receipt_signer),
+        })
+    }
+
+    /// Connects with an Ed25519 fact-receipt signing key bound to the store trust root.
+    ///
+    /// The store's persisted authority supplies the public store identity and key id. The supplied
+    /// secret signing key must produce the exact verifying key recorded in that authority.
+    pub async fn connect_with_fact_receipt_signing_key_bytes(
+        database_url: &str,
+        signing_key: [u8; 32],
+    ) -> Result<Self> {
+        let mut signing_key = Zeroizing::new(signing_key);
+        let pool = connect_pool(database_url)
+            .await
+            .map_err(|_| PostgresStoreError::Authority(PostgresStoreAuthorityError::Connection))?;
+        let authority = validate_pool(&pool).await?;
+        let trust_root = authority
+            .fact_receipt_trust_root()
+            .ok_or_else(|| receipt_authentication_store_error("missing fact receipt trust root"))?;
+        let fact_receipt_signer = PostgresFactReceiptSigner::from_ed25519_signing_key_bytes(
+            trust_root.store_identity().clone(),
+            trust_root.key_id().clone(),
+            *signing_key,
+        );
+        signing_key.zeroize();
         require_fact_receipt_signer_matches_authority(&authority, &fact_receipt_signer)?;
         Ok(Self {
             pool,

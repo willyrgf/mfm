@@ -102,6 +102,10 @@ failures return structured JSON responses. Parser failures use the stable error 
 - `FactDescriptorAmbiguous`: A public fact kind resolves to more than one descriptor; pass `--shape`
 - `FactQueryInvalid`: Fact query input was rejected by the app/facts query service
 - `FactPredicateInvalid`: A CLI fact predicate flag could not be decoded
+- `MissingFactReceiptSigningKey`: `mfm facts query/latest/history/top` requires `MFM_FACT_RECEIPT_SIGNING_KEY_FILE`
+- `FactReceiptSigningKeyReadFailed`: The fact receipt signing-key file could not be read
+- `FactReceiptSigningKeyInvalid`: The fact receipt signing-key file was not raw 32-byte Ed25519 material or 64 hex characters
+- `FactReceiptSignerInvalid`: The fact receipt signer did not match the run store trust root
 - `FactQueryLimitInvalid`: `--limit` must be greater than zero
 
 ## Facts Commands
@@ -158,6 +162,8 @@ mfm_cli facts explain <KIND> [--database-url <URL>]
 Runs a descriptor-scoped public fact query.
 
 ```sh
+export MFM_FACT_RECEIPT_SIGNING_KEY_FILE=/run/mfm/fact-receipt-signing-key
+
 mfm_cli facts query \
   --kind wallet.balance \
   --shape mfm.wallet.balance.v1 \
@@ -172,6 +178,10 @@ mfm_cli facts query \
 `--kind`, `--order`, and at least one `--field` are required. `--shape` is optional only when the
 kind resolves to exactly one public descriptor. The app service owns descriptor resolution, field
 validation, exposure checks, operator checks, ordering normalization, and query compilation.
+Query execution issues authenticated fact-query receipts, so `facts query`, `facts latest`,
+`facts history`, and `facts top` require `MFM_FACT_RECEIPT_SIGNING_KEY_FILE` to point at the
+matching Ed25519 signing key for the store's `fact_receipt_trust_root`. The file may contain either
+raw 32-byte key material or 64 hex characters. The key material is never printed.
 
 Predicate flags:
 
@@ -649,6 +659,11 @@ The CLI's process-level configuration is intentionally narrow.
   keystore_ref = "default"
   entry_id = "<uuid>"
   ```
+
+- **`MFM_FACT_RECEIPT_SIGNING_KEY_FILE`**: Secret file containing the Ed25519 signing key used to
+  issue authenticated fact-query receipts. Required by `facts query`, `facts latest`,
+  `facts history`, and `facts top`, and by live runs that configure collectors which read the fact
+  index. The key must match the store's persisted `fact_receipt_trust_root`; mismatches fail closed.
 
 - Direct keystore commands use either `--keystore <PATH>`, which prompts locally for credentials,
   or a runtime-config keystore profile selected by `--runtime-config <PATH>` or

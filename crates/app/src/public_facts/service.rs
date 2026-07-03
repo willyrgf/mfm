@@ -118,7 +118,10 @@ impl PublicFactQueryExecutor for ProductionRunStore {
         plan: &'a mfm_facts::CanonicalFactQueryPlan,
     ) -> PublicFactQueryFuture<'a> {
         Box::pin(async move {
-            let result = self.execute_fact_query(plan).await?;
+            let result = self
+                .execute_fact_query(plan)
+                .await
+                .map_err(crate::fact_query_execution_store_error)?;
             Ok(result.rows().to_vec())
         })
     }

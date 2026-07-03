@@ -39,6 +39,7 @@ use mfm_store::v1 as store;
 use serde::{Deserialize, Serialize};
 use serde_json::map::Entry;
 use serde_json::{Map, Value};
+use zeroize::{Zeroize, Zeroizing};
 
 pub use mfm_runtime::ErasedRunnerRegistry;
 pub use mfm_stream_store_postgres::PostgresRunStore as ProductionRunStore;
@@ -77,6 +78,9 @@ pub use entry_point::{
 
 /// Environment variable that selects the live runtime config file.
 pub const MFM_RUNTIME_CONFIG_FILE: &str = "MFM_RUNTIME_CONFIG_FILE";
+
+/// Environment variable that selects the Ed25519 fact-query receipt signing-key file.
+pub const MFM_FACT_RECEIPT_SIGNING_KEY_FILE: &str = "MFM_FACT_RECEIPT_SIGNING_KEY_FILE";
 
 /// Shared observability configuration used by typed binaries.
 pub mod observability;
@@ -406,17 +410,146 @@ pub type ProductionFactPublicQueryService = FactPublicQueryService<ProductionRun
 pub async fn connect_production_run_store(
     database_url: Option<&str>,
 ) -> Result<ProductionRunStore, AppError> {
-    let database_url = match database_url {
-        Some(database_url) => database_url.to_owned(),
+    let database_url = production_database_url(database_url)?;
+    Ok(ProductionRunStore::connect(&database_url).await?)
+}
+
+/// Connects the production Postgres run store with a signer for authenticated fact queries.
+pub async fn connect_production_fact_query_run_store(
+    database_url: Option<&str>,
+) -> Result<ProductionRunStore, AppError> {
+    let database_url = production_database_url(database_url)?;
+    let mut signing_key = load_fact_receipt_signing_key_from_env()?;
+    let store = ProductionRunStore::connect_with_fact_receipt_signing_key_bytes(
+        &database_url,
+        *signing_key,
+    )
+    .await
+    .map_err(fact_receipt_signer_store_error)?;
+    signing_key.zeroize();
+    Ok(store)
+}
+
+/// Connects the production Postgres run store with a fact-query signer when configured.
+pub async fn connect_production_run_store_with_optional_fact_query_signer(
+    database_url: Option<&str>,
+) -> Result<ProductionRunStore, AppError> {
+    if configured_fact_receipt_signing_key_file().is_some() {
+        connect_production_fact_query_run_store(database_url).await
+    } else {
+        connect_production_run_store(database_url).await
+    }
+}
+
+fn production_database_url(database_url: Option<&str>) -> Result<String, AppError> {
+    match database_url {
+        Some(database_url) => Ok(database_url.to_owned()),
         None => std::env::var("DATABASE_URL").map_err(|_| {
             AppError::new(
                 ErrorClass::BadRequest,
                 "MissingDatabaseUrl",
                 "Missing DATABASE_URL (or pass --database-url)",
             )
-        })?,
-    };
-    Ok(ProductionRunStore::connect(&database_url).await?)
+        }),
+    }
+}
+
+fn configured_fact_receipt_signing_key_file() -> Option<PathBuf> {
+    env::var_os(MFM_FACT_RECEIPT_SIGNING_KEY_FILE)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+fn load_fact_receipt_signing_key_from_env() -> Result<Zeroizing<[u8; 32]>, AppError> {
+    let path = configured_fact_receipt_signing_key_file().ok_or_else(|| {
+        AppError::new(
+            ErrorClass::BadRequest,
+            "MissingFactReceiptSigningKey",
+            format!("Missing {MFM_FACT_RECEIPT_SIGNING_KEY_FILE}"),
+        )
+    })?;
+    load_fact_receipt_signing_key_file(&path)
+}
+
+fn load_fact_receipt_signing_key_file(path: &Path) -> Result<Zeroizing<[u8; 32]>, AppError> {
+    let bytes = Zeroizing::new(std::fs::read(path).map_err(|_| {
+        AppError::backend(
+            ErrorClass::BadRequest,
+            "FactReceiptSigningKeyReadFailed",
+            "Failed to read fact receipt signing key",
+        )
+    })?);
+    decode_fact_receipt_signing_key_bytes(&bytes)
+}
+
+fn decode_fact_receipt_signing_key_bytes(bytes: &[u8]) -> Result<Zeroizing<[u8; 32]>, AppError> {
+    if bytes.len() == 32 {
+        let mut signing_key = [0_u8; 32];
+        signing_key.copy_from_slice(bytes);
+        return Ok(Zeroizing::new(signing_key));
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| invalid_fact_receipt_signing_key())?;
+    let hex = text
+        .trim()
+        .strip_prefix("0x")
+        .unwrap_or_else(|| text.trim());
+    if hex.len() != 64 {
+        return Err(invalid_fact_receipt_signing_key());
+    }
+    let mut signing_key = Zeroizing::new([0_u8; 32]);
+    for (index, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+        let high = fact_receipt_hex_nibble(chunk[0])?;
+        let low = fact_receipt_hex_nibble(chunk[1])?;
+        signing_key[index] = (high << 4) | low;
+    }
+    Ok(signing_key)
+}
+
+fn fact_receipt_hex_nibble(byte: u8) -> Result<u8, AppError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(invalid_fact_receipt_signing_key()),
+    }
+}
+
+fn invalid_fact_receipt_signing_key() -> AppError {
+    AppError::new(
+        ErrorClass::BadRequest,
+        "FactReceiptSigningKeyInvalid",
+        "Fact receipt signing key must be raw 32-byte Ed25519 material or 64 hex characters",
+    )
+}
+
+fn fact_receipt_signer_store_error(
+    error: mfm_stream_store_postgres::PostgresStoreError,
+) -> AppError {
+    match error {
+        mfm_stream_store_postgres::PostgresStoreError::Store(
+            store::StoreError::ReceiptAuthentication { .. },
+        ) => AppError::backend(
+            ErrorClass::BadRequest,
+            "FactReceiptSignerInvalid",
+            "Fact receipt signer does not match the run store trust root",
+        ),
+        error => AppError::from(error),
+    }
+}
+
+pub(crate) fn fact_query_execution_store_error(
+    error: mfm_stream_store_postgres::PostgresStoreError,
+) -> AppError {
+    match error {
+        mfm_stream_store_postgres::PostgresStoreError::Store(
+            store::StoreError::ReceiptAuthentication { .. },
+        ) => AppError::backend(
+            ErrorClass::BadRequest,
+            "MissingFactReceiptSigningKey",
+            "Fact receipt signing key is required for public fact queries",
+        ),
+        error => AppError::from(error),
+    }
 }
 
 /// Builds production typed run services backed by the Postgres run store.
@@ -424,9 +557,13 @@ pub async fn connect_production_run_services(
     database_url: Option<&str>,
     runtime_config_path: Option<&Path>,
 ) -> Result<ProductionRunServices, AppError> {
-    let store = connect_production_run_store(database_url).await?;
     let runtime_config = RuntimeConfigLoader::from_path_or_env(runtime_config_path);
     let btc_config = runtime_config.load_optional_btc()?;
+    let store = if btc_config.is_some() {
+        connect_production_fact_query_run_store(database_url).await?
+    } else {
+        connect_production_run_store(database_url).await?
+    };
     let fact_index = if btc_config.is_some() {
         Some(btc_collector::production_fact_index_read_provider(
             store.clone(),
@@ -458,6 +595,23 @@ pub async fn connect_production_run_read_services(
     database_url: Option<&str>,
 ) -> Result<ProductionRunReadServices, AppError> {
     let store = connect_production_run_store(database_url).await?;
+    let certification_registry = production_certification_registry()?;
+    let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
+    Ok(
+        make_run_read_services_with_certification_registry_and_fact_query_trust_root(
+            store.clone(),
+            store,
+            certification_registry,
+            fact_query_receipt_trust_root,
+        ),
+    )
+}
+
+/// Builds production read services with a signer for authenticated public fact queries.
+pub async fn connect_production_fact_query_run_read_services(
+    database_url: Option<&str>,
+) -> Result<ProductionRunReadServices, AppError> {
+    let store = connect_production_fact_query_run_store(database_url).await?;
     let certification_registry = production_certification_registry()?;
     let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
     Ok(
