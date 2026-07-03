@@ -58,26 +58,20 @@ pub fn validate_descriptor(descriptor: &FactDescriptor) -> Result<()> {
 
 /// Returns the schema id for fact descriptor artifacts.
 pub fn fact_descriptor_schema_id() -> Result<SchemaId> {
-    SchemaId::new(
-        "mfm.fact_descriptor",
-        FACTS_KERNEL_CONTRACT_VERSION,
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(
-            format!("schema:mfm.fact_descriptor:{FACTS_KERNEL_CONTRACT_VERSION}").as_bytes(),
-        ),
-    )
-    .map_err(|error| FactDescriptorError::descriptor(error.to_string()))
+    facts_schema_id("mfm.fact_descriptor")
 }
 
 /// Returns the schema id for canonical fact query evidence artifacts.
 pub fn fact_query_evidence_schema_id() -> Result<SchemaId> {
+    facts_schema_id("mfm.fact_query_evidence")
+}
+
+fn facts_schema_id(name: &'static str) -> Result<SchemaId> {
     SchemaId::new(
-        "mfm.fact_query_evidence",
+        name,
         FACTS_KERNEL_CONTRACT_VERSION,
         DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(
-            format!("schema:mfm.fact_query_evidence:{FACTS_KERNEL_CONTRACT_VERSION}").as_bytes(),
-        ),
+        sha256_digest_bytes(format!("schema:{name}:{FACTS_KERNEL_CONTRACT_VERSION}").as_bytes()),
     )
     .map_err(|error| FactDescriptorError::descriptor(error.to_string()))
 }
