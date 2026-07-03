@@ -949,12 +949,45 @@ fn parse_canonical_fact_query_plan(value: &serde_json::Value) -> Result<Canonica
 
 fn parse_fact_query_receipt(
     value: &serde_json::Value,
-    plan_hash: &ContentDigest,
+    expected_plan_hash: &ContentDigest,
 ) -> Result<FactQueryReceipt> {
     let object = json_object(value, "fact query receipt")?;
-    let body = OwnedFactQueryReceiptBodyParts::parse(json_required(object, "body")?, plan_hash)?;
+    let body = json_object(json_required(object, "body")?, "fact query receipt body")?;
+    require_version(
+        body,
+        "mfm.fact-query-receipt-body.v1",
+        "fact query receipt body",
+    )?;
+    let plan_hash = parse_json_str(body, "plan_hash")?;
+    if &plan_hash != expected_plan_hash {
+        return Err(FactDescriptorError::descriptor(
+            "fact query receipt body plan hash does not match plan",
+        ));
+    }
+    let read_frontier = parse_store_read_frontier(json_required(body, "read_frontier")?)?;
+    let frontier_type =
+        parse_descriptor_tag(json_str(body, "frontier_type")?, "store read frontier type")?;
+    let returned_refs = json_array(body, "returned_refs")?
+        .iter()
+        .map(parse_internal_fact_ref)
+        .collect::<Result<Vec<_>>>()?;
+    let returned_field_summaries =
+        parse_optional_returned_field_summaries(json_required(body, "returned_field_summaries")?)?;
+    let result_set_digest = parse_json_str(body, "result_set_digest")?;
+    let result_cardinality =
+        parse_query_result_cardinality(json_required(body, "result_cardinality")?)?;
+
     let store_receipt_hash = parse_json_str(object, "store_receipt_hash")?;
-    let expected_hash = body.as_borrowed().hash()?;
+    let expected_hash = FactQueryReceiptBodyParts::new(
+        &plan_hash,
+        &read_frontier,
+        frontier_type,
+        &returned_refs,
+        returned_field_summaries.as_ref(),
+        &result_set_digest,
+        result_cardinality,
+    )
+    .hash()?;
     if expected_hash != store_receipt_hash {
         return Err(FactDescriptorError::descriptor(
             "fact query receipt body hash does not match store receipt hash",
@@ -962,7 +995,16 @@ fn parse_fact_query_receipt(
     }
     let authentication =
         parse_store_receipt_authentication(json_required(object, "store_receipt_authentication")?)?;
-    Ok(body.into_receipt(store_receipt_hash, authentication))
+    Ok(FactQueryReceipt::from_parts(
+        read_frontier,
+        frontier_type,
+        returned_refs,
+        returned_field_summaries,
+        result_set_digest,
+        result_cardinality,
+        store_receipt_hash,
+        authentication,
+    ))
 }
 
 fn parse_fact_selection_evidence(value: &serde_json::Value) -> Result<FactSelectionEvidence> {
@@ -1846,80 +1888,6 @@ impl<'a> FactQueryReceiptBodyParts<'a> {
 
     fn hash(&self) -> Result<ContentDigest> {
         Ok(self.canonical_bytes()?.content_digest())
-    }
-}
-
-struct OwnedFactQueryReceiptBodyParts {
-    plan_hash: ContentDigest,
-    read_frontier: StoreReadFrontier,
-    frontier_type: StoreReadFrontierType,
-    returned_refs: Vec<InternalFactRef>,
-    returned_field_summaries: Option<ReturnedFieldSummaries>,
-    result_set_digest: ContentDigest,
-    result_cardinality: QueryResultCardinality,
-}
-
-impl OwnedFactQueryReceiptBodyParts {
-    fn parse(value: &serde_json::Value, expected_plan_hash: &ContentDigest) -> Result<Self> {
-        let body = json_object(value, "fact query receipt body")?;
-        require_version(
-            body,
-            "mfm.fact-query-receipt-body.v1",
-            "fact query receipt body",
-        )?;
-        let plan_hash = parse_json_str(body, "plan_hash")?;
-        if &plan_hash != expected_plan_hash {
-            return Err(FactDescriptorError::descriptor(
-                "fact query receipt body plan hash does not match plan",
-            ));
-        }
-        Ok(Self {
-            plan_hash,
-            read_frontier: parse_store_read_frontier(json_required(body, "read_frontier")?)?,
-            frontier_type: parse_store_read_frontier_type(json_str(body, "frontier_type")?)?,
-            returned_refs: json_array(body, "returned_refs")?
-                .iter()
-                .map(parse_internal_fact_ref)
-                .collect::<Result<Vec<_>>>()?,
-            returned_field_summaries: parse_optional_returned_field_summaries(json_required(
-                body,
-                "returned_field_summaries",
-            )?)?,
-            result_set_digest: parse_json_str(body, "result_set_digest")?,
-            result_cardinality: parse_query_result_cardinality(json_required(
-                body,
-                "result_cardinality",
-            )?)?,
-        })
-    }
-
-    fn as_borrowed(&self) -> FactQueryReceiptBodyParts<'_> {
-        FactQueryReceiptBodyParts::new(
-            &self.plan_hash,
-            &self.read_frontier,
-            self.frontier_type,
-            &self.returned_refs,
-            self.returned_field_summaries.as_ref(),
-            &self.result_set_digest,
-            self.result_cardinality,
-        )
-    }
-
-    fn into_receipt(
-        self,
-        store_receipt_hash: ContentDigest,
-        store_receipt_authentication: StoreReceiptAuthentication,
-    ) -> FactQueryReceipt {
-        FactQueryReceipt::from_parts(
-            self.read_frontier,
-            self.frontier_type,
-            self.returned_refs,
-            self.returned_field_summaries,
-            self.result_set_digest,
-            self.result_cardinality,
-            store_receipt_hash,
-            store_receipt_authentication,
-        )
     }
 }
 
