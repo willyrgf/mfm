@@ -223,13 +223,6 @@ checked_fact_string!(
 );
 
 checked_fact_string!(
-    FactCompatibilityGroup,
-    "fact compatibility group",
-    validate_dot_path,
-    "Descriptor compatibility group used for shape selection."
-);
-
-checked_fact_string!(
     CanonicalValuePath,
     "canonical value path",
     validate_dot_path,

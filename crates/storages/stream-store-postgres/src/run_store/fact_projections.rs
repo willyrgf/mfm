@@ -376,8 +376,8 @@ async fn insert_fact_descriptor_projection_tx(
          (descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash, \
           source_run_id, source_seq, source_ordinal, source_event_id, commit_id, fact_kind, \
           descriptor_schema_id, subject_schema_id, response_schema_id, \
-          fact_subject_namespace_hash, compatibility_group) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+          fact_subject_namespace_hash) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
     )
     .bind(projection.descriptor_hash.as_str())
     .bind(projection.descriptor_artifact_id.as_str())
@@ -397,12 +397,6 @@ async fn insert_fact_descriptor_projection_tx(
     .bind(projection.subject_schema_id.as_str())
     .bind(projection.response_schema_id.as_str())
     .bind(projection.fact_subject_namespace_hash.as_str())
-    .bind(
-        projection
-            .compatibility_group
-            .as_ref()
-            .map(|group| group.as_str()),
-    )
     .execute(&mut **tx)
     .await
     .map_err(|error| database_error("failed to insert fact descriptor projection", error))?;
@@ -521,13 +515,13 @@ async fn load_fact_descriptor_index_tx(
         "SELECT descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash, \
          source_event_id, fact_kind, \
          descriptor_schema_id, subject_schema_id, response_schema_id, \
-         fact_subject_namespace_hash, compatibility_group \
+         fact_subject_namespace_hash \
          FROM fact_descriptor_index WHERE source_run_id = $1 ORDER BY descriptor_hash"
     } else {
         "SELECT descriptor_hash, descriptor_artifact_id, descriptor_artifact_evidence_hash, \
          source_event_id, fact_kind, \
          descriptor_schema_id, subject_schema_id, response_schema_id, \
-         fact_subject_namespace_hash, compatibility_group \
+         fact_subject_namespace_hash \
          FROM fact_descriptor_index ORDER BY descriptor_hash"
     };
     let mut query = sqlx::query(sql);
@@ -591,10 +585,6 @@ async fn load_fact_descriptor_index_tx(
                 "fact_subject_namespace_hash",
                 "fact_descriptor_index.fact_subject_namespace_hash",
             )?)?,
-            compatibility_group: optional_string(&row, "compatibility_group")?
-                .map(mfm_facts::FactCompatibilityGroup::new)
-                .transpose()
-                .map_err(fact_error)?,
             source_event_id: parse_identity(&required_string(
                 &row,
                 "source_event_id",

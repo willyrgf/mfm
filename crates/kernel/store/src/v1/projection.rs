@@ -1494,7 +1494,6 @@ fn apply_fact_descriptor_artifact(
         subject_schema_id: descriptor.subject_schema_id().clone(),
         response_schema_id: descriptor.response_schema_id().clone(),
         fact_subject_namespace_hash: namespace_hash,
-        compatibility_group: descriptor.compatibility_group().cloned(),
         source_event_id: event_id.clone(),
     };
     match projections
@@ -1529,7 +1528,6 @@ fn equivalent_fact_descriptor_projection(
         && left.subject_schema_id == right.subject_schema_id
         && left.response_schema_id == right.response_schema_id
         && left.fact_subject_namespace_hash == right.fact_subject_namespace_hash
-        && left.compatibility_group == right.compatibility_group
 }
 
 fn load_projected_fact_descriptor(

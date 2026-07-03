@@ -188,7 +188,6 @@ CREATE TABLE fact_descriptor_index (
   subject_schema_id TEXT NOT NULL,
   response_schema_id TEXT NOT NULL,
   fact_subject_namespace_hash TEXT NOT NULL,
-  compatibility_group TEXT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
   CONSTRAINT fact_descriptor_index_event_fk FOREIGN KEY (source_run_id, source_seq, source_ordinal) REFERENCES run_events(run_id, seq, ordinal) ON DELETE RESTRICT,
   CONSTRAINT fact_descriptor_index_event_id_fk FOREIGN KEY (source_run_id, source_event_id) REFERENCES run_events(run_id, event_id) ON DELETE RESTRICT,

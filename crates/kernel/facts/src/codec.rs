@@ -776,10 +776,6 @@ fn canonical_descriptor_value(descriptor: &FactDescriptor) -> Result<CanonicalVa
             "response_schema_id",
             CanonicalValue::String(descriptor.response_schema_id.as_str().to_owned()),
         ),
-        (
-            "compatibility_group",
-            optional_checked_string_value(descriptor.compatibility_group.as_ref()),
-        ),
         ("fields", CanonicalValue::Array(fields)),
         ("orderings", CanonicalValue::Array(orderings)),
     ])

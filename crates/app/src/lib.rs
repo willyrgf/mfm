@@ -314,8 +314,6 @@ pub struct PublicFactDescriptorRef {
     pub subject_schema_id: String,
     /// Response schema id.
     pub response_schema_id: String,
-    /// Optional public compatibility group.
-    pub compatibility_group: Option<String>,
 }
 
 /// Public fact field descriptor summary.
@@ -610,9 +608,6 @@ impl FactCatalogService {
             .filter(|(_hash, descriptor)| {
                 request.shape.as_ref().is_none_or(|shape| {
                     descriptor.descriptor_schema_id().as_str() == shape
-                        || descriptor
-                            .compatibility_group()
-                            .is_some_and(|group| group.as_str() == shape)
                 })
             })
             .collect::<Vec<_>>();
@@ -4092,7 +4087,6 @@ fn validate_projected_fact_descriptor(
         || descriptor.subject_schema_id() != &projection.subject_schema_id
         || descriptor.response_schema_id() != &projection.response_schema_id
         || namespace_hash != projection.fact_subject_namespace_hash
-        || descriptor.compatibility_group() != projection.compatibility_group.as_ref()
     {
         return Err(AppError::backend(
             ErrorClass::Internal,
@@ -4167,9 +4161,6 @@ fn public_descriptor_ref(descriptor: &mfm_facts::FactDescriptor) -> PublicFactDe
         descriptor_schema_id: descriptor.descriptor_schema_id().as_str().to_owned(),
         subject_schema_id: descriptor.subject_schema_id().as_str().to_owned(),
         response_schema_id: descriptor.response_schema_id().as_str().to_owned(),
-        compatibility_group: descriptor
-            .compatibility_group()
-            .map(|group| group.as_str().to_owned()),
     }
 }
 

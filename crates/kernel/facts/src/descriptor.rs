@@ -283,7 +283,6 @@ pub struct FactDescriptor {
     pub(crate) subject_schema_id: SchemaId,
     #[serde(with = "schema_id_serde")]
     pub(crate) response_schema_id: SchemaId,
-    pub(crate) compatibility_group: Option<FactCompatibilityGroup>,
     pub(crate) fields: Vec<FactFieldDescriptor>,
     pub(crate) orderings: Vec<FactOrderingDescriptor>,
 }
@@ -295,7 +294,6 @@ impl FactDescriptor {
         descriptor_schema_id: SchemaId,
         subject_schema_id: SchemaId,
         response_schema_id: SchemaId,
-        compatibility_group: Option<FactCompatibilityGroup>,
         fields: Vec<FactFieldDescriptor>,
         orderings: Vec<FactOrderingDescriptor>,
     ) -> Result<Self> {
@@ -304,7 +302,6 @@ impl FactDescriptor {
             descriptor_schema_id,
             subject_schema_id,
             response_schema_id,
-            compatibility_group,
             fields,
             orderings,
         };
@@ -330,11 +327,6 @@ impl FactDescriptor {
     /// Returns the response schema id.
     pub const fn response_schema_id(&self) -> &SchemaId {
         &self.response_schema_id
-    }
-
-    /// Returns the descriptor compatibility group.
-    pub const fn compatibility_group(&self) -> Option<&FactCompatibilityGroup> {
-        self.compatibility_group.as_ref()
     }
 
     /// Returns fields in retained descriptor order.

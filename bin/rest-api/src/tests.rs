@@ -723,7 +723,6 @@ impl FactRouteFixture {
                     subject_schema_id: descriptor.subject_schema_id().clone(),
                     response_schema_id: descriptor.response_schema_id().clone(),
                     fact_subject_namespace_hash: namespace_hash,
-                    compatibility_group: descriptor.compatibility_group().cloned(),
                     source_event_id: event_id(90),
                 },
             )]),
@@ -772,7 +771,6 @@ fn rest_fact_descriptor() -> mfm_facts::FactDescriptor {
         schema_id("mfm.rest.test.fact.descriptor", 1),
         schema_id("mfm.rest.test.fact.subject", 2),
         schema_id("mfm.rest.test.fact.response", 3),
-        Some(mfm_facts::FactCompatibilityGroup::new("mfm.rest.test.fact.v1").expect("group")),
         vec![
             mfm_facts::FactFieldDescriptor::new(
                 mfm_facts::FactFieldId::new("subject.account").expect("field"),
@@ -1053,7 +1051,6 @@ fn public_fact_from_projection(
             response_schema_id: schema_id("mfm.rest.test.fact.response", 3)
                 .as_str()
                 .to_owned(),
-            compatibility_group: Some("mfm.rest.test.fact.v1".to_owned()),
         },
         recorded_at: entry.recorded_at.clone(),
         observed_at: entry.observed_at.clone(),
