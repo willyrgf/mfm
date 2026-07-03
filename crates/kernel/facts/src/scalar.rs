@@ -169,32 +169,6 @@ impl FactCanonicalScalar {
     }
 }
 
-/// Compares two fact scalars using canonical fact-query semantics.
-pub fn fact_query_scalar_cmp(
-    left: &FactCanonicalScalar,
-    right: &FactCanonicalScalar,
-) -> Option<std::cmp::Ordering> {
-    left.query_cmp(right)
-}
-
-/// Returns whether an actual scalar satisfies a query operator against an expected scalar.
-pub fn fact_query_scalar_matches_operator(
-    actual: &FactCanonicalScalar,
-    operator: FactQueryOperator,
-    expected: &FactCanonicalScalar,
-) -> bool {
-    actual.matches_query_operator(operator, expected)
-}
-
-/// Compares optional fact scalars using a descriptor ordering term.
-pub fn fact_query_ordering_term_cmp(
-    term: &FactOrderingTerm,
-    left: Option<&FactCanonicalScalar>,
-    right: Option<&FactCanonicalScalar>,
-) -> Option<std::cmp::Ordering> {
-    term.compare_values(left, right)
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum ScalarJsonContext<'a> {
     Field(&'a FactFieldId),
