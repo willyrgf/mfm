@@ -1433,7 +1433,6 @@ fn replay_stream_fact_descriptor() -> mfm_facts::FactDescriptor {
         mfm_facts::fact_descriptor_schema_id().expect("descriptor schema"),
         schema_id("mfm.replay.test.fact_subject", 0xe0),
         fact_response_schema_id(),
-        None,
         vec![
             mfm_facts::FactFieldDescriptor::new(
                 mfm_facts::FactFieldId::new("subject.account").expect("field id"),
@@ -1478,7 +1477,6 @@ fn replay_stream_other_fact_descriptor() -> mfm_facts::FactDescriptor {
         descriptor.descriptor_schema_id().clone(),
         descriptor.subject_schema_id().clone(),
         descriptor.response_schema_id().clone(),
-        descriptor.compatibility_group().cloned(),
         descriptor.fields().to_vec(),
         descriptor.orderings().to_vec(),
     )

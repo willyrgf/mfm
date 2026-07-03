@@ -3992,8 +3992,6 @@ pub struct FactDescriptorProjection {
     pub response_schema_id: SchemaId,
     /// Descriptor-derived subject namespace hash.
     pub fact_subject_namespace_hash: ContentDigest,
-    /// Optional descriptor compatibility group.
-    pub compatibility_group: Option<mfm_facts::FactCompatibilityGroup>,
     /// Run event that admitted the descriptor artifact.
     pub source_event_id: EventId,
 }

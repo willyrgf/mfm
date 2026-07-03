@@ -159,7 +159,6 @@ fn descriptor(fields: Vec<FactFieldDescriptor>) -> Result<FactDescriptor> {
         schema_id("mfm.test.fact.descriptor"),
         schema_id("mfm.test.subject"),
         schema_id("mfm.test.response"),
-        None,
         fields,
         vec![FactOrderingDescriptor::new(
             FactOrderingName::new("result.height.desc")?,
@@ -179,7 +178,6 @@ fn descriptor_without_orderings(fields: Vec<FactFieldDescriptor>) -> Result<Fact
         schema_id("mfm.test.fact.descriptor"),
         schema_id("mfm.test.subject"),
         schema_id("mfm.test.response"),
-        None,
         fields,
         Vec::new(),
     )
@@ -436,7 +434,6 @@ fn descriptor_rejects_ordering_for_non_sortable_field() {
         schema_id("mfm.test.fact.descriptor"),
         schema_id("mfm.test.subject"),
         schema_id("mfm.test.response"),
-        None,
         vec![subject_field("subject.chain", "subject.chain")],
         vec![FactOrderingDescriptor::new(
             FactOrderingName::new("subject.chain.asc").expect("ordering"),
@@ -1288,13 +1285,13 @@ fn canonical_goldens_match_expected_values() {
         canonical_fact_descriptor_bytes(&descriptor)
             .expect("descriptor bytes")
             .as_str(),
-        r#"{"compatibility_group":null,"descriptor_schema_id":"schema:mfm.test.fact.descriptor:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","fact_kind":"chain.head","fields":[{"exposure":"returnable","extraction":{"path":"height","source":"result"},"field_id":"result.height","operators":["equal","less_than","greater_than"],"path":"result.height","required":true,"scale":null,"sortable":true,"unit":null,"value_type":"unsigned_integer"},{"exposure":"returnable","extraction":{"path":"chain","source":"subject"},"field_id":"subject.chain","operators":["equal"],"path":"subject.chain","required":true,"scale":null,"sortable":false,"unit":null,"value_type":"string"}],"orderings":[{"name":"result.height.desc","terms":[{"direction":"descending","field_id":"result.height","nulls":"last","tie_breaker":false}]}],"response_schema_id":"schema:mfm.test.response:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","subject_schema_id":"schema:mfm.test.subject:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","version":"mfm.facts.v1"}"#
+        r#"{"descriptor_schema_id":"schema:mfm.test.fact.descriptor:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","fact_kind":"chain.head","fields":[{"exposure":"returnable","extraction":{"path":"height","source":"result"},"field_id":"result.height","operators":["equal","less_than","greater_than"],"path":"result.height","required":true,"scale":null,"sortable":true,"unit":null,"value_type":"unsigned_integer"},{"exposure":"returnable","extraction":{"path":"chain","source":"subject"},"field_id":"subject.chain","operators":["equal"],"path":"subject.chain","required":true,"scale":null,"sortable":false,"unit":null,"value_type":"string"}],"orderings":[{"name":"result.height.desc","terms":[{"direction":"descending","field_id":"result.height","nulls":"last","tie_breaker":false}]}],"response_schema_id":"schema:mfm.test.response:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","subject_schema_id":"schema:mfm.test.subject:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","version":"mfm.facts.v1"}"#
     );
     assert_eq!(
         fact_descriptor_hash(&descriptor)
             .expect("descriptor hash")
             .as_str(),
-        "content:sha256-jcs-v1:a6eae5116267b088b0905eb591dc30751cc0ba9c6d9e58b5cc41e7d7bc1d8275"
+        "content:sha256-jcs-v1:a01cb8123321722f75acc02c7e3ff1e605464f0136104572e25cd01c8ee55c16"
     );
     assert_eq!(
         canonical_fact_subject_namespace_bytes(&namespace)

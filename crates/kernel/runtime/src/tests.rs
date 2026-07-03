@@ -82,7 +82,6 @@ fn test_fact_descriptor_with_kind(kind: &str) -> mfm_facts::FactDescriptor {
         descriptor.descriptor_schema_id().clone(),
         descriptor.subject_schema_id().clone(),
         descriptor.response_schema_id().clone(),
-        descriptor.compatibility_group().cloned(),
         descriptor.fields().to_vec(),
         descriptor.orderings().to_vec(),
     )
@@ -393,7 +392,6 @@ fn test_returned_fact_authority(
         subject_schema_id: descriptor.subject_schema_id().clone(),
         response_schema_id: descriptor.response_schema_id().clone(),
         fact_subject_namespace_hash: subject.fact_subject_namespace_hash().clone(),
-        compatibility_group: descriptor.compatibility_group().cloned(),
         source_event_id: EventId::from_digest(
             DigestAlgorithm::Sha256JcsV1,
             DigestBytes::from_array([0x78; 32]),

@@ -654,16 +654,11 @@ fn write_descriptor(
 ) -> fmt::Result {
     writeln!(
         f,
-        "{} descriptor_schema={} subject_schema={} response_schema={} compatibility={}",
+        "{} descriptor_schema={} subject_schema={} response_schema={}",
         descriptor.fact_kind,
         descriptor.descriptor.descriptor_schema_id,
         descriptor.descriptor.subject_schema_id,
         descriptor.descriptor.response_schema_id,
-        descriptor
-            .descriptor
-            .compatibility_group
-            .as_deref()
-            .unwrap_or("none")
     )?;
     for field in &descriptor.fields {
         writeln!(
@@ -794,7 +789,6 @@ mod tests {
                 descriptor_schema_id: "mfm.wallet.balance.v1".to_owned(),
                 subject_schema_id: "mfm.wallet.balance.subject.v1".to_owned(),
                 response_schema_id: "mfm.wallet.balance.response.v1".to_owned(),
-                compatibility_group: None,
             },
             recorded_at: "2026-07-02T00:00:00Z".to_owned(),
             observed_at: Some("2026-07-02T00:00:00Z".to_owned()),

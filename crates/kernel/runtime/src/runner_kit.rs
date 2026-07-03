@@ -1567,7 +1567,6 @@ mod tests {
             subject_schema_id: schema_id(),
             response_schema_id: fact_ref.response_schema_id().clone(),
             fact_subject_namespace_hash: fact_ref.fact_subject_namespace_hash().clone(),
-            compatibility_group: None,
             source_event_id: event_id(0x41),
         };
         let record_projection = store::FactRecordProjection {

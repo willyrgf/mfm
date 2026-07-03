@@ -307,7 +307,6 @@ fn expand_mfm_fact_type_derive_result(input: DeriveInput) -> syn::Result<proc_ma
                     ::mfm_program::facts::fact_descriptor_schema_id()?,
                     subject_schema_id,
                     response_schema_id,
-                    None,
                     vec![#(#field_tokens),*],
                     vec![#(#ordering_tokens),*],
                 )

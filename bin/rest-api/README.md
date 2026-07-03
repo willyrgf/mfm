@@ -129,8 +129,7 @@ Query response shape:
       "descriptor": {
         "descriptor_schema_id": "schema:mfm.wallet.balance.v1:...",
         "subject_schema_id": "schema:mfm.wallet.balance.subject.v1:...",
-        "response_schema_id": "schema:mfm.wallet.balance.response.v1:...",
-        "compatibility_group": "mfm.wallet.balance.v1"
+        "response_schema_id": "schema:mfm.wallet.balance.response.v1:..."
       },
       "recorded_at": "2026-07-02T00:00:00.000000Z",
       "observed_at": "2026-07-02T00:00:00.000000Z",

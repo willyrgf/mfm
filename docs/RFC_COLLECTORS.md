@@ -159,7 +159,7 @@ collector.checkpoint
 ```
 
 Fact kind is the first user-facing query dimension. A fact kind can have
-multiple descriptor versions or compatibility groups.
+multiple descriptor versions.
 
 ### FactDescriptor
 
@@ -174,7 +174,7 @@ It binds:
 - subject fields, result fields, and metadata fields
 - field operators, type semantics, units/scales, and exposure policy
 - ordering policies and tie-breakers
-- compatibility group or schema version metadata
+- schema version metadata
 
 The descriptor hash is computed from canonical descriptor bytes. The descriptor
 hash is not embedded inside those canonical bytes.
@@ -560,7 +560,6 @@ pub struct FactDescriptor {
     pub descriptor_schema_id: SchemaId,
     pub subject_schema_id: SchemaId,
     pub response_schema_id: SchemaId,
-    pub compatibility_group: Option<FactCompatibilityGroup>,
     pub fields: &'static [FactFieldDescriptor],
     pub orderings: &'static [FactOrderingDescriptor],
 }
@@ -695,8 +694,8 @@ Both vectors are sorted by `field_id` before canonicalization. The namespace
 includes only descriptor fields whose extraction is `SubjectPath`; the material
 contains only values extracted for those fields from `T::Subject`. This excludes
 result fields, metadata fields, schema paths, extraction paths, ordering
-policies, allowed operators, exposure policy, compatibility group, descriptor
-schema id, response schema id, and descriptor hash. Those excluded fields may
+policies, allowed operators, exposure policy, descriptor schema id, response
+schema id, and descriptor hash. Those excluded fields may
 change query behavior or descriptor identity, but they do not change subject
 identity.
 
@@ -1092,7 +1091,6 @@ descriptor_schema_id
 subject_schema_id
 response_schema_id
 fact_subject_namespace_hash
-compatibility_group
 created_at
 ```
 
@@ -1561,9 +1559,8 @@ mfm facts explain wallet.balance
 
 `mfm facts describe wallet.balance` lists known descriptors/schema versions for
 the kind. A kind-only query is allowed only when the kind resolves
-unambiguously, or when a deterministic compatibility group is registered.
-Otherwise the CLI must return an ambiguity error and require `--shape` or a
-descriptor hash.
+unambiguously. Otherwise the CLI must return an ambiguity error and require
+`--shape` or a descriptor hash.
 
 `--shape` is a user-facing selector for one `FactDescriptor`: it may be a schema
 alias, compatibility-group version, or descriptor hash, but execution must

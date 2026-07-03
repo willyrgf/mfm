@@ -669,7 +669,6 @@ fn fact_descriptor() -> mfm_facts::FactDescriptor {
         mfm_facts::fact_descriptor_schema_id().expect("descriptor schema"),
         schema_id("mfm.test.fact_subject", 37),
         schema_id("mfm.test.fact_response", 36),
-        None,
         vec![
             mfm_facts::FactFieldDescriptor::new(
                 mfm_facts::FactFieldId::new("subject.chain").expect("field id"),
