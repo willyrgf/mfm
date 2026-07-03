@@ -959,8 +959,7 @@ fn parse_fact_query_receipt(
         ));
     }
     let read_frontier = parse_store_read_frontier(json_required(body, "read_frontier")?)?;
-    let frontier_type =
-        parse_descriptor_tag(json_str(body, "frontier_type")?, "store read frontier type")?;
+    let frontier_type = parse_store_read_frontier_type(json_str(body, "frontier_type")?)?;
     let returned_refs = json_array(body, "returned_refs")?
         .iter()
         .map(parse_internal_fact_ref)
