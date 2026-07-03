@@ -934,7 +934,7 @@ fn parse_fact_query_receipt(
         ));
     }
     let read_frontier = parse_store_read_frontier(json_required(body, "read_frontier")?)?;
-    let frontier_type = parse_store_read_frontier_type(json_str(body, "frontier_type")?)?;
+    let frontier_type = parse_tag(json_str(body, "frontier_type")?, "store read frontier type")?;
     let returned_refs = json_array(body, "returned_refs")?
         .iter()
         .map(parse_internal_fact_ref)
@@ -1046,8 +1046,8 @@ fn parse_fact_visibility(value: &serde_json::Value) -> Result<FactVisibility> {
     match json_str(object, "kind")? {
         "run_private" => Ok(FactVisibility::RunPrivate),
         "indexed" => Ok(FactVisibility::Indexed {
-            audience: parse_fact_audience(json_str(object, "audience")?)?,
-            scope: parse_fact_visibility_scope(json_str(object, "scope")?)?,
+            audience: parse_tag(json_str(object, "audience")?, "fact audience")?,
+            scope: parse_tag(json_str(object, "scope")?, "fact visibility scope")?,
         }),
         value => Err(FactDescriptorError::descriptor(format!(
             "unknown fact visibility kind {value:?}"
@@ -1112,7 +1112,10 @@ fn parse_store_receipt_authentication(
     value: &serde_json::Value,
 ) -> Result<StoreReceiptAuthentication> {
     let object = json_object(value, "store receipt authentication")?;
-    let scheme = parse_store_receipt_authentication_scheme(json_str(object, "scheme")?)?;
+    let scheme = parse_tag(
+        json_str(object, "scheme")?,
+        "store receipt authentication scheme",
+    )?;
     let key_id = parse_optional_checked_string::<StoreKeyId>(json_required(object, "key_id")?)?;
     let signature = CanonicalBytes::from_base64url_no_pad(json_str(object, "signature_or_mac")?)
         .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
@@ -1170,46 +1173,13 @@ fn plain_json_to_canonical_value(value: &serde_json::Value) -> Result<CanonicalV
     }
 }
 
-fn parse_fact_audience(value: &str) -> Result<FactAudience> {
+fn parse_tag<T>(value: &str, tag_name: &'static str) -> Result<T>
+where
+    T: FromStr,
+{
     value
-        .parse::<FactAudience>()
-        .map_err(|_| FactDescriptorError::descriptor(format!("unknown fact audience {value:?}")))
-}
-
-fn parse_fact_visibility_scope(value: &str) -> Result<FactVisibilityScope> {
-    value.parse::<FactVisibilityScope>().map_err(|_| {
-        FactDescriptorError::descriptor(format!("unknown fact visibility scope {value:?}"))
-    })
-}
-
-fn parse_store_read_frontier_type(value: &str) -> Result<StoreReadFrontierType> {
-    value.parse::<StoreReadFrontierType>().map_err(|_| {
-        FactDescriptorError::descriptor(format!("unknown store read frontier type {value:?}"))
-    })
-}
-
-fn parse_store_receipt_authentication_scheme(
-    value: &str,
-) -> Result<StoreReceiptAuthenticationScheme> {
-    value
-        .parse::<StoreReceiptAuthenticationScheme>()
-        .map_err(|_| {
-            FactDescriptorError::descriptor(format!(
-                "unknown store receipt authentication scheme {value:?}"
-            ))
-        })
-}
-
-fn parse_sort_direction(value: &str) -> Result<SortDirection> {
-    value
-        .parse::<SortDirection>()
-        .map_err(|_| FactDescriptorError::descriptor(format!("unknown sort direction {value:?}")))
-}
-
-fn parse_null_ordering(value: &str) -> Result<NullOrdering> {
-    value
-        .parse::<NullOrdering>()
-        .map_err(|_| FactDescriptorError::descriptor(format!("unknown null ordering {value:?}")))
+        .parse::<T>()
+        .map_err(|_| FactDescriptorError::descriptor(format!("unknown {tag_name} {value:?}")))
 }
 
 fn json_object<'a>(
@@ -1564,8 +1534,8 @@ impl QueryScopeWire {
     fn parse(value: &serde_json::Value) -> Result<FactQueryScope> {
         let object = json_object(value, "fact query scope")?;
         Ok(FactQueryScope::new(
-            parse_fact_audience(json_str(object, "audience")?)?,
-            parse_fact_visibility_scope(json_str(object, "scope")?)?,
+            parse_tag(json_str(object, "audience")?, "fact audience")?,
+            parse_tag(json_str(object, "scope")?, "fact visibility scope")?,
         ))
     }
 
@@ -1637,8 +1607,8 @@ impl OrderingTermWire {
         let object = json_object(value, "fact ordering term")?;
         Ok(FactOrderingTerm::new(
             FactFieldId::new(json_str(object, "field_id")?)?,
-            parse_sort_direction(json_str(object, "direction")?)?,
-            parse_null_ordering(json_str(object, "nulls")?)?,
+            parse_tag(json_str(object, "direction")?, "sort direction")?,
+            parse_tag(json_str(object, "nulls")?, "null ordering")?,
             json_bool(object, "tie_breaker")?,
         ))
     }
@@ -1953,11 +1923,11 @@ fn canonical_internal_fact_ref_value(reference: &InternalFactRef) -> Result<Cano
         ),
         (
             "request_schema_id",
-            optional_schema_id_value(parts.request_schema_id.as_ref()),
+            optional_display_value(parts.request_schema_id.as_ref()),
         ),
         (
             "request_hash",
-            optional_digest_value(parts.request_hash.as_ref()),
+            optional_display_value(parts.request_hash.as_ref()),
         ),
         (
             "response_schema_id",
@@ -2139,7 +2109,7 @@ fn canonical_fact_selection_evidence_value(
         ),
         (
             "selected_summaries_digest",
-            optional_digest_value(selection.selected_summaries_digest.as_ref()),
+            optional_display_value(selection.selected_summaries_digest.as_ref()),
         ),
     ])
 }
@@ -2159,15 +2129,12 @@ fn optional_string_value(value: Option<&str>) -> CanonicalValue {
         .unwrap_or(CanonicalValue::Null)
 }
 
-fn optional_schema_id_value(value: Option<&SchemaId>) -> CanonicalValue {
+fn optional_display_value<T>(value: Option<&T>) -> CanonicalValue
+where
+    T: fmt::Display,
+{
     value
-        .map(|value| CanonicalValue::String(value.as_str().to_owned()))
-        .unwrap_or(CanonicalValue::Null)
-}
-
-fn optional_digest_value(value: Option<&ContentDigest>) -> CanonicalValue {
-    value
-        .map(|value| CanonicalValue::String(value.as_str().to_owned()))
+        .map(|value| CanonicalValue::String(value.to_string()))
         .unwrap_or(CanonicalValue::Null)
 }
 
