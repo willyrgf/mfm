@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, VecDeque};
+use std::future;
 use std::sync::{Arc, Mutex};
 
 use ed25519_dalek::{Signer, SigningKey};
@@ -27,7 +28,11 @@ use mfm_op_btc_chain_head_collector::{
     BtcChainHeadObservationContext, QueryCollectorCheckpointContext,
 };
 use mfm_program::CanonicalSeed;
-use mfm_store::v1::{AsyncInMemoryRunStore, ProjectionSnapshot, RunEventStore, TrustScopeStore};
+use mfm_store::v1::{
+    AsyncInMemoryRunStore, ProjectionSnapshot, RetainedArtifactReadProvider, RunEventStore,
+    TrustScopeStore,
+};
+use tokio::sync::oneshot;
 
 const FIRST_HASH: &str = "00000000000000000000000000000000000000000000000000000000000a0001";
 const SECOND_HASH: &str = "00000000000000000000000000000000000000000000000000000000000a0002";
@@ -159,6 +164,131 @@ async fn bitcoin_chain_head_collector_two_cycles_record_checkpoint_and_public_fa
     assert!(!format!("{:?}", page).contains("collector.checkpoint"));
 }
 
+#[tokio::test]
+async fn bitcoin_chain_head_collector_recovers_interrupted_observation_without_partial_projection()
+{
+    let store = AsyncInMemoryRunStore::default();
+    let artifacts = mfm_app::artifact_read_provider_from_retained(store.clone());
+    let first_btc = Arc::new(MockBtcProvider::new(vec![MockHead {
+        height: 850_000,
+        hash: FIRST_HASH,
+        provider_time_unix_ms: Some(1_720_000_000_000),
+    }]));
+    let fact_index = Arc::new(InMemoryControlFactIndexProvider::new(store.clone()));
+    let first_services = collector_services(
+        store.clone(),
+        artifacts.clone(),
+        first_btc.clone(),
+        fact_index.clone(),
+    );
+
+    let first = launch_cycle(
+        &first_services,
+        &store,
+        "recovery-cycle-1",
+        BtcChainHeadCollectorConfig::default(),
+    )
+    .await;
+    assert_eq!(first.run_mode, mfm_app::RunModeStatus::Completed);
+    assert_eq!(first_btc.calls(), 1);
+    assert_eq!(fact_index.returned_row_counts(), vec![0]);
+
+    let (observe_called_tx, observe_called_rx) = oneshot::channel();
+    let blocking_btc = Arc::new(BlockingBtcProvider::new(observe_called_tx));
+    let blocking_services = collector_services(
+        store.clone(),
+        artifacts.clone(),
+        blocking_btc.clone(),
+        fact_index.clone(),
+    );
+    let request = collector_launch_request(
+        &store,
+        "recovery-cycle-2",
+        BtcChainHeadCollectorConfig::default(),
+    )
+    .await;
+    let interrupted_run_id = request.run_id.clone();
+    let interrupted_services = blocking_services.clone();
+    let launch_task = tokio::spawn(async move { interrupted_services.launch_run(request).await });
+    observe_called_rx.await.expect("observe attempt called BTC");
+    assert_eq!(blocking_btc.calls(), 1);
+
+    let interrupted_stream = store
+        .load_run_stream(&interrupted_run_id)
+        .await
+        .expect("interrupted stream");
+    assert!(
+        interrupted_stream.iter().any(|event| matches!(
+            event.payload(),
+            KernelEventPayload::StateAttemptStarted(payload)
+                if payload.state_kind.as_str().contains("chain_head.observe")
+        )),
+        "observe attempt should have started before simulated crash"
+    );
+    let query_evidence = fact_query_evidences(&store, &interrupted_stream).await;
+    assert_eq!(query_evidence.len(), 1);
+    assert_eq!(query_evidence[0].receipt().returned_refs().len(), 1);
+    assert_eq!(query_evidence[0].selection().selected_indices(), &[0]);
+    assert_eq!(
+        query_evidence[0].receipt().returned_refs()[0]
+            .fact_kind()
+            .as_str(),
+        "collector.checkpoint"
+    );
+    assert_eq!(
+        query_evidence[0].receipt().returned_refs()[0].visibility(),
+        &mfm_facts::FactVisibility::Indexed {
+            audience: FactAudience::Control,
+            scope: mfm_facts::FactVisibilityScope::Default,
+        }
+    );
+
+    let interrupted_projection = store.projection_snapshot().expect("interrupted projection");
+    assert_fact_projection_counts(&interrupted_projection, 1, 1);
+    assert_chain_head_height(&interrupted_projection, 850_000);
+    assert_checkpoint_height(&interrupted_projection, 850_000);
+
+    launch_task.abort();
+    let _ = launch_task.await;
+    assert!(
+        store
+            .expire_execution_claim_for_test(&interrupted_run_id)
+            .expect("expire interrupted claim"),
+        "interrupted run should hold an execution claim"
+    );
+
+    let resumed_btc = Arc::new(MockBtcProvider::new(vec![MockHead {
+        height: 850_001,
+        hash: SECOND_HASH,
+        provider_time_unix_ms: Some(1_720_000_600_000),
+    }]));
+    let resumed_services = collector_services(
+        store.clone(),
+        artifacts,
+        resumed_btc.clone(),
+        fact_index.clone(),
+    );
+    let resumed = resumed_services
+        .resume_stored_run(&interrupted_run_id)
+        .await
+        .expect("resume interrupted collector run");
+    assert_eq!(resumed.run_mode, mfm_app::RunModeStatus::Completed);
+    assert_eq!(resumed_btc.calls(), 1);
+    assert_eq!(fact_index.returned_row_counts(), vec![0, 1]);
+
+    let resumed_stream = store
+        .load_run_stream(&interrupted_run_id)
+        .await
+        .expect("resumed stream");
+    assert_eq!(fact_query_evidences(&store, &resumed_stream).await.len(), 1);
+    let projection = store.projection_snapshot().expect("resumed projection");
+    assert_fact_projection_counts(&projection, 2, 2);
+    assert_chain_head_height(&projection, 850_000);
+    assert_chain_head_height(&projection, 850_001);
+    assert_checkpoint_height(&projection, 850_000);
+    assert_checkpoint_height(&projection, 850_001);
+}
+
 fn collector_services(
     store: AsyncInMemoryRunStore,
     artifacts: Arc<dyn ArtifactReadProvider>,
@@ -187,23 +317,39 @@ async fn launch_cycle(
     distinct_key: &str,
     config: BtcChainHeadCollectorConfig,
 ) -> mfm_app::RunResponse {
-    let draft = btc_chain_head_collector_cycle_program_draft(config).expect("collector draft");
-    let seed_material = collector_seed_material(&draft);
-    let trust_scope_id = store.load_trust_scope_id().await.expect("trust scope id");
-    let request = mfm_app::prepare_typed_program_run_launch_for_test(
-        draft,
-        seed_material,
-        &mfm_app::production_certification_registry().expect("certification registry"),
-        trust_scope_id,
-        Some(mfm_app::DistinctRunKey::new(distinct_key).expect("distinct key")),
-    )
-    .expect("prepared collector launch");
+    let request = collector_launch_request(store, distinct_key, config).await;
     let response = services
         .launch_run(request)
         .await
         .unwrap_or_else(|error| panic!("{distinct_key} collector launch: {error:?}"))
         .into_response_parts()
         .1;
+    assert_completed_collector_launch(store, distinct_key, response).await
+}
+
+async fn collector_launch_request(
+    store: &AsyncInMemoryRunStore,
+    distinct_key: &str,
+    config: BtcChainHeadCollectorConfig,
+) -> mfm_app::RunLaunchRequest {
+    let draft = btc_chain_head_collector_cycle_program_draft(config).expect("collector draft");
+    let seed_material = collector_seed_material(&draft);
+    let trust_scope_id = store.load_trust_scope_id().await.expect("trust scope id");
+    mfm_app::prepare_typed_program_run_launch_for_test(
+        draft,
+        seed_material,
+        &mfm_app::production_certification_registry().expect("certification registry"),
+        trust_scope_id,
+        Some(mfm_app::DistinctRunKey::new(distinct_key).expect("distinct key")),
+    )
+    .expect("prepared collector launch")
+}
+
+async fn assert_completed_collector_launch(
+    store: &AsyncInMemoryRunStore,
+    distinct_key: &str,
+    response: mfm_app::RunResponse,
+) -> mfm_app::RunResponse {
     if response.run_mode != mfm_app::RunModeStatus::Completed {
         let run_id = response.run_id.parse().expect("run id");
         let stream = store.load_run_stream(&run_id).await.expect("run stream");
@@ -338,6 +484,39 @@ impl BtcChainHeadReadProvider for MockBtcProvider {
                 block_hash: BtcBlockHash::new(head.hash).expect("block hash"),
                 provider_time_unix_ms: head.provider_time_unix_ms,
             })
+        })
+    }
+}
+
+struct BlockingBtcProvider {
+    called: Mutex<Option<oneshot::Sender<()>>>,
+    calls: Mutex<usize>,
+}
+
+impl BlockingBtcProvider {
+    fn new(called: oneshot::Sender<()>) -> Self {
+        Self {
+            called: Mutex::new(Some(called)),
+            calls: Mutex::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        *self.calls.lock().expect("blocking btc calls")
+    }
+}
+
+impl BtcChainHeadReadProvider for BlockingBtcProvider {
+    fn read_chain_head<'a>(
+        &'a self,
+        _request: &'a BtcChainHeadRequest,
+    ) -> BtcCapabilityFuture<'a, BtcChainHeadResponse> {
+        Box::pin(async move {
+            *self.calls.lock().expect("blocking btc calls") += 1;
+            if let Some(called) = self.called.lock().expect("blocking btc signal").take() {
+                let _ = called.send(());
+            }
+            future::pending::<mfm_btc_capabilities::Result<BtcChainHeadResponse>>().await
         })
     }
 }
@@ -558,6 +737,34 @@ impl InMemoryControlFactIndexProvider {
             auth,
         ))
     }
+}
+
+async fn fact_query_evidences(
+    store: &AsyncInMemoryRunStore,
+    stream: &[mfm_store::v1::KernelEventEnvelope],
+) -> Vec<mfm_facts::FactQueryEvidence> {
+    let mut evidences = Vec::new();
+    for event in stream {
+        let KernelEventPayload::ArtifactReferenced(payload) = event.payload() else {
+            continue;
+        };
+        if payload.artifact_ref.role != ArtifactRole::FactQueryEvidence {
+            continue;
+        }
+        let requirement = mfm_store::v1::event_artifact_requirements(event.payload())
+            .into_iter()
+            .next()
+            .expect("query evidence artifact requirement");
+        let artifact = store
+            .read_retained_artifact(&requirement)
+            .await
+            .expect("query evidence artifact");
+        evidences.push(
+            mfm_facts::parse_canonical_fact_query_evidence_bytes(artifact.bytes())
+                .expect("query evidence bytes"),
+        );
+    }
+    evidences
 }
 
 fn entry_matches(
