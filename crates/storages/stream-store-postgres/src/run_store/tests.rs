@@ -674,7 +674,7 @@ fn fact_descriptor() -> mfm_facts::FactDescriptor {
                 mfm_facts::FactFieldId::new("subject.chain").expect("field id"),
                 mfm_facts::FactFieldPath::new("subject.chain").expect("field path"),
                 mfm_facts::FactFieldValueType::String,
-                mfm_facts::FactFieldAccessor::SubjectPath(
+                mfm_facts::FactFieldExtraction::SubjectPath(
                     mfm_facts::CanonicalValuePath::new("chain").expect("path"),
                 ),
                 vec![mfm_facts::FactQueryOperator::Equal],
@@ -689,7 +689,7 @@ fn fact_descriptor() -> mfm_facts::FactDescriptor {
                 mfm_facts::FactFieldId::new("result.height").expect("field id"),
                 mfm_facts::FactFieldPath::new("result.height").expect("field path"),
                 mfm_facts::FactFieldValueType::UnsignedInteger,
-                mfm_facts::FactFieldAccessor::ResponsePath(
+                mfm_facts::FactFieldExtraction::ResponsePath(
                     mfm_facts::CanonicalValuePath::new("height").expect("path"),
                 ),
                 vec![
