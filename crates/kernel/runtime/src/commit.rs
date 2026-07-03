@@ -2801,6 +2801,6 @@ fn validate_side_effect_verify_terminal_evidence(
     }
 }
 
-fn runtime_fact_error(error: mfm_facts::FactDescriptorError) -> RuntimeError {
+fn runtime_fact_error(error: mfm_facts::FactError) -> RuntimeError {
     RuntimeError::InvalidRunnerOutput(error.to_string())
 }

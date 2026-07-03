@@ -189,35 +189,32 @@ fn public_visibility_fact_descriptor() -> mfm_facts::FactDescriptor {
         vec![
             mfm_facts::FactFieldDescriptor::new(
                 mfm_facts::FactFieldId::new("subject.account").expect("field"),
-                mfm_facts::FactFieldPath::new("subject.account").expect("path"),
                 mfm_facts::FactFieldValueType::String,
-                mfm_facts::FactFieldExtraction::SubjectPath(
+                mfm_facts::FactFieldExtraction::Subject(
                     mfm_facts::CanonicalValuePath::new("account").expect("extraction"),
                 ),
-                vec![mfm_facts::FactQueryOperator::Equal],
-                mfm_facts::FactFieldExposure::Returnable,
-                None,
-                None,
-                false,
-                true,
+                mfm_facts::FactFieldPolicy::new(
+                    vec![mfm_facts::FactQueryOperator::Equal],
+                    mfm_facts::FactFieldExposure::Returnable,
+                )
+                .required(),
             )
             .expect("subject field"),
             mfm_facts::FactFieldDescriptor::new(
                 mfm_facts::FactFieldId::new("result.amount").expect("field"),
-                mfm_facts::FactFieldPath::new("result.amount").expect("path"),
                 mfm_facts::FactFieldValueType::UnsignedInteger,
-                mfm_facts::FactFieldExtraction::ResponsePath(
+                mfm_facts::FactFieldExtraction::Response(
                     mfm_facts::CanonicalValuePath::new("amount").expect("extraction"),
                 ),
-                vec![
-                    mfm_facts::FactQueryOperator::Equal,
-                    mfm_facts::FactQueryOperator::GreaterThanOrEqual,
-                ],
-                mfm_facts::FactFieldExposure::Returnable,
-                None,
-                None,
-                true,
-                true,
+                mfm_facts::FactFieldPolicy::new(
+                    vec![
+                        mfm_facts::FactQueryOperator::Equal,
+                        mfm_facts::FactQueryOperator::GreaterThanOrEqual,
+                    ],
+                    mfm_facts::FactFieldExposure::Returnable,
+                )
+                .sortable()
+                .required(),
             )
             .expect("result field"),
         ],

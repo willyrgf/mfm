@@ -18,7 +18,7 @@ impl FactClaimId {
     /// Creates a claim id from run-stream coordinates.
     pub fn new(source_run_id: RunId, source_seq: u64, source_ordinal: u32) -> Result<Self> {
         if source_seq == 0 {
-            return Err(FactDescriptorError::descriptor(
+            return Err(FactError::descriptor(
                 "fact claim source sequence must be non-zero",
             ));
         }
@@ -63,7 +63,7 @@ impl FactSubjectEvidence {
         let material_bytes = canonical_fact_subject_material_bytes(material)?;
         let subject_material =
             PlainCanonicalJsonBytes::from_canonical_json_slice(material_bytes.as_bytes())
-                .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
+                .map_err(|error| FactError::canonical(error.to_string()))?;
         let subject_material_hash = subject_material.content_digest();
         let fact_key = derive_fact_key(
             fact_subject_namespace_hash.clone(),
@@ -85,7 +85,7 @@ impl FactSubjectEvidence {
         fact_key: FactKey,
     ) -> Result<Self> {
         if subject_material.content_digest() != subject_material_hash {
-            return Err(FactDescriptorError::descriptor(
+            return Err(FactError::descriptor(
                 "subject material hash does not match subject material bytes",
             ));
         }
@@ -94,7 +94,7 @@ impl FactSubjectEvidence {
             subject_material_hash.clone(),
         )?;
         if expected_fact_key != fact_key {
-            return Err(FactDescriptorError::descriptor(
+            return Err(FactError::descriptor(
                 "fact key does not match subject namespace and material hashes",
             ));
         }
@@ -124,6 +124,53 @@ impl FactSubjectEvidence {
     /// Returns the derived subject fact key.
     pub const fn fact_key(&self) -> &FactKey {
         &self.fact_key
+    }
+}
+
+/// Compact subject identity carried by internal fact references.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactSubjectRef {
+    pub(crate) fact_subject_namespace_hash: ContentDigest,
+    pub(crate) fact_key: FactKey,
+    pub(crate) subject_material_hash: ContentDigest,
+}
+
+impl FactSubjectRef {
+    /// Creates a compact subject reference.
+    pub fn new(
+        fact_subject_namespace_hash: ContentDigest,
+        fact_key: FactKey,
+        subject_material_hash: ContentDigest,
+    ) -> Self {
+        Self {
+            fact_subject_namespace_hash,
+            fact_key,
+            subject_material_hash,
+        }
+    }
+
+    /// Creates a compact subject reference from recorded subject evidence.
+    pub fn from_evidence(evidence: &FactSubjectEvidence) -> Self {
+        Self::new(
+            evidence.fact_subject_namespace_hash().clone(),
+            evidence.fact_key().clone(),
+            evidence.subject_material_hash().clone(),
+        )
+    }
+
+    /// Returns the descriptor-derived subject namespace hash.
+    pub const fn fact_subject_namespace_hash(&self) -> &ContentDigest {
+        &self.fact_subject_namespace_hash
+    }
+
+    /// Returns the derived subject fact key.
+    pub const fn fact_key(&self) -> &FactKey {
+        &self.fact_key
+    }
+
+    /// Returns the canonical subject material hash.
+    pub const fn subject_material_hash(&self) -> &ContentDigest {
+        &self.subject_material_hash
     }
 }
 
@@ -281,7 +328,7 @@ impl FactClaim {
             .as_ref()
             .is_some_and(|value| value.is_empty())
         {
-            return Err(FactDescriptorError::descriptor(
+            return Err(FactError::descriptor(
                 "fact claim observed_at must be non-empty when present",
             ));
         }
@@ -348,32 +395,14 @@ pub struct InternalFactRefParts {
     pub fact_kind: FactKind,
     /// Fact descriptor hash.
     pub fact_descriptor_hash: ContentDigest,
-    /// Subject namespace hash.
-    pub fact_subject_namespace_hash: ContentDigest,
-    /// Subject fact key.
-    pub fact_key: FactKey,
-    /// Subject material hash.
-    pub subject_material_hash: ContentDigest,
-    /// Optional request schema id.
-    pub request_schema_id: Option<SchemaId>,
-    /// Optional request hash.
-    pub request_hash: Option<ContentDigest>,
-    /// Response schema id.
-    pub response_schema_id: SchemaId,
-    /// Response content hash.
-    pub response_hash: ContentDigest,
-    /// Response artifact id.
-    pub artifact_id: ArtifactId,
-    /// Response artifact evidence hash.
-    pub artifact_evidence_hash: ContentDigest,
-    /// Producing capability kind.
-    pub capability_kind: CapabilityKind,
-    /// Producing capability version.
-    pub capability_version: CapabilityVersion,
-    /// Producing adapter kind.
-    pub adapter_kind: AdapterKind,
-    /// Producing adapter version.
-    pub adapter_version: AdapterVersion,
+    /// Subject identity.
+    pub subject: FactSubjectRef,
+    /// Optional request evidence.
+    pub request: Option<FactRequestEvidence>,
+    /// Response artifact evidence.
+    pub response: FactResponseEvidence,
+    /// Producer provenance.
+    pub producer: FactProducerProvenance,
 }
 
 /// Internal trusted reference to an indexed fact projection row.
@@ -383,15 +412,43 @@ pub struct InternalFactRef {
 }
 
 impl InternalFactRef {
+    /// Builds an internal fact ref from a recorded fact claim.
+    pub fn from_claim(
+        fact_claim_id: FactClaimId,
+        source_event_id: EventId,
+        recorded_at: String,
+        producer_node_id: NodeId,
+        claim: &FactClaim,
+    ) -> Result<Option<Self>> {
+        if matches!(claim.visibility(), FactVisibility::RunPrivate) {
+            return Ok(None);
+        }
+        Self::new(InternalFactRefParts {
+            fact_claim_id,
+            source_event_id,
+            recorded_at,
+            producer_node_id,
+            observed_at: claim.observed_at().map(str::to_owned),
+            visibility: claim.visibility().clone(),
+            fact_kind: claim.fact_kind().clone(),
+            fact_descriptor_hash: claim.fact_descriptor_hash().clone(),
+            subject: FactSubjectRef::from_evidence(claim.subject()),
+            request: claim.request().cloned(),
+            response: claim.response().clone(),
+            producer: claim.producer().clone(),
+        })
+        .map(Some)
+    }
+
     /// Creates an internal fact ref from validated parts.
     pub fn new(parts: InternalFactRefParts) -> Result<Self> {
         if matches!(parts.visibility, FactVisibility::RunPrivate) {
-            return Err(FactDescriptorError::descriptor(
+            return Err(FactError::descriptor(
                 "internal fact refs require indexed visibility",
             ));
         }
         if parts.recorded_at.is_empty() {
-            return Err(FactDescriptorError::descriptor(
+            return Err(FactError::descriptor(
                 "internal fact refs require recorded_at",
             ));
         }
@@ -400,13 +457,8 @@ impl InternalFactRef {
             .as_ref()
             .is_some_and(|value| value.is_empty())
         {
-            return Err(FactDescriptorError::descriptor(
+            return Err(FactError::descriptor(
                 "internal fact refs require non-empty observed_at when present",
-            ));
-        }
-        if parts.request_schema_id.is_some() != parts.request_hash.is_some() {
-            return Err(FactDescriptorError::descriptor(
-                "request schema and hash must be present or absent together",
             ));
         }
         Ok(Self { parts })
@@ -454,66 +506,72 @@ impl InternalFactRef {
 
     /// Returns the fact key.
     pub const fn fact_key(&self) -> &FactKey {
-        &self.parts.fact_key
+        self.parts.subject.fact_key()
     }
 
     /// Returns the subject namespace hash.
     pub const fn fact_subject_namespace_hash(&self) -> &ContentDigest {
-        &self.parts.fact_subject_namespace_hash
+        self.parts.subject.fact_subject_namespace_hash()
     }
 
     /// Returns the subject material hash.
     pub const fn subject_material_hash(&self) -> &ContentDigest {
-        &self.parts.subject_material_hash
+        self.parts.subject.subject_material_hash()
     }
 
     /// Returns the optional request schema id.
     pub const fn request_schema_id(&self) -> Option<&SchemaId> {
-        self.parts.request_schema_id.as_ref()
+        match &self.parts.request {
+            Some(request) => Some(request.request_schema_id()),
+            None => None,
+        }
     }
 
     /// Returns the optional request hash.
     pub const fn request_hash(&self) -> Option<&ContentDigest> {
-        self.parts.request_hash.as_ref()
+        match &self.parts.request {
+            Some(request) => Some(request.request_hash()),
+            None => None,
+        }
     }
 
     /// Returns the response schema id.
     pub const fn response_schema_id(&self) -> &SchemaId {
-        &self.parts.response_schema_id
+        self.parts.response.response_schema_id()
     }
 
     /// Returns the response content hash.
     pub const fn response_hash(&self) -> &ContentDigest {
-        &self.parts.response_hash
+        self.parts.response.response_hash()
     }
 
     /// Returns the response artifact id.
     pub const fn artifact_id(&self) -> &ArtifactId {
-        &self.parts.artifact_id
+        self.parts.response.artifact_id()
     }
 
     /// Returns the response artifact evidence hash.
     pub const fn artifact_evidence_hash(&self) -> &ContentDigest {
-        &self.parts.artifact_evidence_hash
+        self.parts.response.artifact_evidence_hash()
     }
 
     /// Returns the producing capability kind.
     pub const fn capability_kind(&self) -> &CapabilityKind {
-        &self.parts.capability_kind
+        self.parts.producer.capability_kind()
     }
 
     /// Returns the producing capability version.
     pub const fn capability_version(&self) -> &CapabilityVersion {
-        &self.parts.capability_version
+        self.parts.producer.capability_version()
     }
 
     /// Returns the producing adapter kind.
     pub const fn adapter_kind(&self) -> &AdapterKind {
-        &self.parts.adapter_kind
+        self.parts.producer.adapter_kind()
     }
 
     /// Returns the producing adapter version.
     pub const fn adapter_version(&self) -> &AdapterVersion {
-        &self.parts.adapter_version
+        self.parts.producer.adapter_version()
     }
 }

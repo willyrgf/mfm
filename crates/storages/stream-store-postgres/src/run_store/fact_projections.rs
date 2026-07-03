@@ -1346,11 +1346,9 @@ impl TermValueColumns {
     }
 }
 
-pub(super) fn returned_field_summary_from_row(
-    row: &PgRow,
-) -> Result<mfm_facts::ReturnedFieldValueSummary> {
+pub(super) fn returned_field_summary_from_row(row: &PgRow) -> Result<mfm_facts::FactFieldValue> {
     let (field_id, value_type, value) = fact_term_value_from_row(row)?;
-    mfm_facts::ReturnedFieldValueSummary::new(field_id, value_type, value).map_err(fact_error)
+    mfm_facts::FactFieldValue::new(field_id, value_type, value).map_err(fact_error)
 }
 
 pub(super) fn fact_term_value_from_row(
@@ -1446,7 +1444,7 @@ pub(super) fn parse_fact_field_value_type(value: &str) -> Result<mfm_facts::Fact
     })
 }
 
-pub(super) fn fact_error(error: mfm_facts::FactDescriptorError) -> PostgresStoreError {
+pub(super) fn fact_error(error: mfm_facts::FactError) -> PostgresStoreError {
     StoreError::Identity(error.to_string()).into()
 }
 
@@ -1614,17 +1612,15 @@ mod tests {
             schema_id("response", 5),
             vec![mfm_facts::FactFieldDescriptor::new(
                 mfm_facts::FactFieldId::new("subject.account").expect("field id"),
-                mfm_facts::FactFieldPath::new("subject.account").expect("field path"),
                 mfm_facts::FactFieldValueType::String,
-                mfm_facts::FactFieldExtraction::SubjectPath(
+                mfm_facts::FactFieldExtraction::Subject(
                     mfm_facts::CanonicalValuePath::new("account").expect("extraction"),
                 ),
-                vec![mfm_facts::FactQueryOperator::Equal],
-                mfm_facts::FactFieldExposure::Returnable,
-                None,
-                None,
-                false,
-                true,
+                mfm_facts::FactFieldPolicy::new(
+                    vec![mfm_facts::FactQueryOperator::Equal],
+                    mfm_facts::FactFieldExposure::Returnable,
+                )
+                .required(),
             )
             .expect("field descriptor")],
             Vec::new(),

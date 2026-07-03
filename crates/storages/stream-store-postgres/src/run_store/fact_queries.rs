@@ -470,10 +470,10 @@ impl FactTermOrderingExpression {
 async fn load_returned_field_summaries_tx(
     tx: &mut Transaction<'_, Postgres>,
     fact_ref: &mfm_facts::InternalFactRef,
-    return_fields: &[mfm_facts::FactQueryReturnField],
-) -> Result<Vec<mfm_facts::ReturnedFieldValueSummary>> {
+    return_fields: &[mfm_facts::FactFieldId],
+) -> Result<Vec<mfm_facts::FactFieldValue>> {
     let mut summaries = Vec::new();
-    for field in return_fields {
+    for field_id in return_fields {
         let mut builder = QueryBuilder::new("SELECT field_id, value_type");
         super::fact_projections::push_fact_index_term_value_select_list(&mut builder);
         builder.push(
@@ -496,7 +496,7 @@ async fn load_returned_field_summaries_tx(
                 })?,
             )
             .push(" AND field_id = ")
-            .push_bind(field.field_id().as_str());
+            .push_bind(field_id.as_str());
         let row = builder
             .build()
             .fetch_optional(&mut **tx)

@@ -7,9 +7,10 @@ use mfm_btc_capabilities::{
 use mfm_canonical::sha256_digest_bytes;
 use mfm_facts::{
     fact_descriptor_hash, DescriptorCatalogWatermark, FactAudience, FactClaimId,
-    FactProjectionGeneration, FactQueryReceipt, FactQueryScope, FactSelectionEvidence,
-    FactVisibility, FactVisibilityScope, InternalFactRef, InternalFactRefParts,
-    StoreCommitWatermark, StoreIdentity, StoreKeyId, StoreReadFrontier, StoreScopeRef,
+    FactProducerProvenance, FactProjectionGeneration, FactQueryReceipt, FactQueryScope,
+    FactResponseEvidence, FactSelectionEvidence, FactSubjectRef, FactVisibility,
+    FactVisibilityScope, InternalFactRef, InternalFactRefParts, StoreCommitWatermark,
+    StoreIdentity, StoreKeyId, StoreReadFrontier, StoreScopeRef,
 };
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
@@ -499,33 +500,36 @@ fn internal_fact_ref(
         visibility: FactVisibility::indexed_default(FactAudience::Control),
         fact_kind: mfm_facts::FactKind::new("collector.checkpoint").expect("kind"),
         fact_descriptor_hash: descriptor_hash,
-        fact_subject_namespace_hash: digest(seed + 3),
-        fact_key: mfm_facts::FactKey::from_digest(digest(seed + 4)),
-        subject_material_hash: digest(seed + 5),
-        request_schema_id: None,
-        request_hash: None,
-        response_schema_id: CollectorCheckpointResponse::schema_id().expect("schema"),
-        response_hash,
-        artifact_id,
-        artifact_evidence_hash,
-        capability_kind: CapabilityKind::new(
-            "mfm.bitcoin",
-            "chain_head.read",
-            DigestAlgorithm::Sha256JcsV1,
-            digest_bytes(seed + 10),
-        )
-        .expect("capability kind"),
-        capability_version: CapabilityVersion::new("mfm.bitcoin.chain_head.read.v1")
-            .expect("capability version"),
-        adapter_kind: AdapterKind::new(
-            "mfm.bitcoin",
-            "jsonrpc",
-            DigestAlgorithm::Sha256JcsV1,
-            digest_bytes(seed + 11),
-        )
-        .expect("adapter kind"),
-        adapter_version: AdapterVersion::new("mfm.bitcoin.jsonrpc.adapter.v1")
-            .expect("adapter version"),
+        subject: FactSubjectRef::new(
+            digest(seed + 3),
+            mfm_facts::FactKey::from_digest(digest(seed + 4)),
+            digest(seed + 5),
+        ),
+        request: None,
+        response: FactResponseEvidence::new(
+            CollectorCheckpointResponse::schema_id().expect("schema"),
+            response_hash,
+            artifact_id,
+            artifact_evidence_hash,
+        ),
+        producer: FactProducerProvenance::new(
+            CapabilityKind::new(
+                "mfm.bitcoin",
+                "chain_head.read",
+                DigestAlgorithm::Sha256JcsV1,
+                digest_bytes(seed + 10),
+            )
+            .expect("capability kind"),
+            CapabilityVersion::new("mfm.bitcoin.chain_head.read.v1").expect("capability version"),
+            AdapterKind::new(
+                "mfm.bitcoin",
+                "jsonrpc",
+                DigestAlgorithm::Sha256JcsV1,
+                digest_bytes(seed + 11),
+            )
+            .expect("adapter kind"),
+            AdapterVersion::new("mfm.bitcoin.jsonrpc.adapter.v1").expect("adapter version"),
+        ),
     })
     .expect("fact ref")
 }

@@ -8,7 +8,12 @@ use mfm_canonical::{
 };
 use mfm_ids::{ContentDigest, DigestAlgorithm, RunId, SchemaId};
 
+use crate::extraction::{
+    extract_field_scalar, json_to_fact_canonical_value, response_typed_paths, subject_typed_paths,
+    validate_extracted_scalar, validate_ordering, FactJsonPathContext,
+};
 use crate::scalar::ScalarJsonContext;
+use crate::subject::{FactSubjectNamespaceFieldV1, FactSubjectNamespaceV1};
 use crate::*;
 
 /// Validates a fact descriptor.
@@ -19,16 +24,16 @@ pub fn validate_descriptor(descriptor: &FactDescriptor) -> Result<()> {
     for field in &descriptor.fields {
         field.validate()?;
         if fields_by_id.insert(field.field_id.clone(), field).is_some() {
-            return Err(FactDescriptorError::descriptor(format!(
+            return Err(FactError::descriptor(format!(
                 "duplicate field id {}",
                 field.field_id
             )));
         }
 
-        if matches!(field.extraction, FactFieldExtraction::SubjectPath(_)) {
+        if matches!(field.extraction, FactFieldExtraction::Subject(_)) {
             subject_fields += 1;
             if !field.required {
-                return Err(FactDescriptorError::field(
+                return Err(FactError::field(
                     field.field_id.clone(),
                     "subject fields must be required in v1",
                 ));
@@ -37,7 +42,7 @@ pub fn validate_descriptor(descriptor: &FactDescriptor) -> Result<()> {
     }
 
     if subject_fields == 0 {
-        return Err(FactDescriptorError::descriptor(
+        return Err(FactError::descriptor(
             "descriptor must contain at least one subject field",
         ));
     }
@@ -45,7 +50,7 @@ pub fn validate_descriptor(descriptor: &FactDescriptor) -> Result<()> {
     let mut ordering_names = BTreeSet::new();
     for ordering in &descriptor.orderings {
         if !ordering_names.insert(ordering.name.clone()) {
-            return Err(FactDescriptorError::descriptor(format!(
+            return Err(FactError::descriptor(format!(
                 "duplicate ordering name {}",
                 ordering.name
             )));
@@ -73,7 +78,7 @@ fn facts_schema_id(name: &'static str) -> Result<SchemaId> {
         DigestAlgorithm::Sha256JcsV1,
         sha256_digest_bytes(format!("schema:{name}:{FACTS_KERNEL_CONTRACT_VERSION}").as_bytes()),
     )
-    .map_err(|error| FactDescriptorError::descriptor(error.to_string()))
+    .map_err(|error| FactError::descriptor(error.to_string()))
 }
 
 /// Returns canonical descriptor bytes.
@@ -85,10 +90,10 @@ pub fn canonical_fact_descriptor_bytes(descriptor: &FactDescriptor) -> Result<Ca
 /// Decodes and validates canonical fact descriptor artifact bytes.
 pub fn parse_canonical_fact_descriptor_bytes(bytes: &[u8]) -> Result<FactDescriptor> {
     let descriptor = serde_json::from_slice::<FactDescriptor>(bytes)
-        .map_err(|error| FactDescriptorError::descriptor(error.to_string()))?;
+        .map_err(|error| FactError::descriptor(error.to_string()))?;
     let canonical = canonical_fact_descriptor_bytes(&descriptor)?;
     if canonical.as_bytes() != bytes {
-        return Err(FactDescriptorError::descriptor(
+        return Err(FactError::descriptor(
             "fact descriptor bytes are not canonical",
         ));
     }
@@ -100,13 +105,12 @@ pub fn fact_descriptor_hash(descriptor: &FactDescriptor) -> Result<ContentDigest
     Ok(canonical_fact_descriptor_bytes(descriptor)?.content_digest())
 }
 
-/// Builds the subject namespace for a validated fact descriptor.
-pub fn fact_subject_namespace(descriptor: &FactDescriptor) -> Result<FactSubjectNamespaceV1> {
+fn fact_subject_namespace(descriptor: &FactDescriptor) -> Result<FactSubjectNamespaceV1> {
     validate_descriptor(descriptor)?;
     let fields = descriptor
         .fields
         .iter()
-        .filter(|field| matches!(field.extraction, FactFieldExtraction::SubjectPath(_)))
+        .filter(|field| matches!(field.extraction, FactFieldExtraction::Subject(_)))
         .map(|field| {
             FactSubjectNamespaceFieldV1::new(
                 field.field_id.clone(),
@@ -119,16 +123,20 @@ pub fn fact_subject_namespace(descriptor: &FactDescriptor) -> Result<FactSubject
     FactSubjectNamespaceV1::new(descriptor.fact_kind.clone(), fields)
 }
 
-/// Returns canonical subject namespace bytes.
-pub fn canonical_fact_subject_namespace_bytes(
+fn canonical_fact_subject_namespace_bytes(
     namespace: &FactSubjectNamespaceV1,
 ) -> Result<CanonicalJsonBytes> {
     canonical_subject_namespace_value(namespace).map(|value| CanonicalJsonBytes::from_value(&value))
 }
 
-/// Derives the content digest for a subject namespace.
-pub fn fact_subject_namespace_hash(namespace: &FactSubjectNamespaceV1) -> Result<ContentDigest> {
+fn subject_namespace_hash(namespace: &FactSubjectNamespaceV1) -> Result<ContentDigest> {
     Ok(canonical_fact_subject_namespace_bytes(namespace)?.content_digest())
+}
+
+/// Derives the content digest for a descriptor's canonical subject namespace.
+pub fn fact_subject_namespace_hash(descriptor: &FactDescriptor) -> Result<ContentDigest> {
+    let namespace = fact_subject_namespace(descriptor)?;
+    subject_namespace_hash(&namespace)
 }
 
 /// Returns canonical subject material bytes.
@@ -141,30 +149,30 @@ pub fn canonical_fact_subject_material_bytes(
 /// Decodes and validates canonical subject material bytes.
 pub fn parse_canonical_fact_subject_material_bytes(bytes: &[u8]) -> Result<FactSubjectMaterialV1> {
     let value = serde_json::from_slice::<serde_json::Value>(bytes)
-        .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
+        .map_err(|error| FactError::canonical(error.to_string()))?;
     let object = value
         .as_object()
-        .ok_or_else(|| FactDescriptorError::descriptor("subject material must be an object"))?;
+        .ok_or_else(|| FactError::descriptor("subject material must be an object"))?;
     let version = object
         .get("version")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| FactDescriptorError::descriptor("subject material version is required"))?;
+        .ok_or_else(|| FactError::descriptor("subject material version is required"))?;
     if version != FactSubjectMaterialV1::VERSION {
-        return Err(FactDescriptorError::descriptor(format!(
+        return Err(FactError::descriptor(format!(
             "unsupported subject material version {version:?}"
         )));
     }
     let values = object
         .get("values")
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| FactDescriptorError::descriptor("subject material values are required"))?
+        .ok_or_else(|| FactError::descriptor("subject material values are required"))?
         .iter()
-        .map(parse_subject_material_value)
+        .map(|value| parse_fact_field_value(value, "subject material value"))
         .collect::<Result<Vec<_>>>()?;
     let material = FactSubjectMaterialV1::new(values)?;
     let canonical = canonical_fact_subject_material_bytes(&material)?;
     if canonical.as_bytes() != bytes {
-        return Err(FactDescriptorError::descriptor(
+        return Err(FactError::descriptor(
             "subject material bytes are not canonical",
         ));
     }
@@ -242,7 +250,7 @@ pub fn compile_fact_query_plan(
         .iter()
         .find(|ordering| ordering.name() == input.ordering())
         .ok_or_else(|| {
-            FactDescriptorError::ordering(
+            FactError::ordering(
                 input.ordering().clone(),
                 "fact query ordering is not declared by descriptor",
             )
@@ -254,7 +262,7 @@ pub fn compile_fact_query_plan(
         let field = required_query_field(&fields_by_id, predicate.field_id())?;
         require_query_exposed(field, "predicate")?;
         if !field.operators().contains(&predicate.operator()) {
-            return Err(FactDescriptorError::field(
+            return Err(FactError::field(
                 predicate.field_id().clone(),
                 format!(
                     "operator {:?} is not declared for field {}",
@@ -267,10 +275,10 @@ pub fn compile_fact_query_plan(
     }
 
     for return_field in input.return_fields() {
-        let field = required_query_field(&fields_by_id, return_field.field_id())?;
+        let field = required_query_field(&fields_by_id, return_field)?;
         if field.exposure() != FactFieldExposure::Returnable {
-            return Err(FactDescriptorError::field(
-                return_field.field_id().clone(),
+            return Err(FactError::field(
+                return_field.clone(),
                 "field is not returnable by descriptor exposure policy",
             ));
         }
@@ -309,12 +317,12 @@ pub fn parse_canonical_fact_query_shape(
     plan: &CanonicalFactQueryPlan,
 ) -> Result<CompiledFactQueryShape> {
     if plan.canonical_query().content_digest() != *plan.canonical_query_hash() {
-        return Err(FactDescriptorError::descriptor(
+        return Err(FactError::descriptor(
             "fact query plan canonical query hash mismatch",
         ));
     }
     let value = serde_json::from_slice::<serde_json::Value>(plan.canonical_query().as_bytes())
-        .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
+        .map_err(|error| FactError::canonical(error.to_string()))?;
     let query = CompiledQueryWire::parse(&value)?;
     query.validate_plan(plan)?;
     query.into_shape()
@@ -323,9 +331,9 @@ pub fn parse_canonical_fact_query_shape(
 /// Parses canonical fact-query evidence bytes into the typed facts-kernel contract.
 pub fn parse_canonical_fact_query_evidence_bytes(bytes: &[u8]) -> Result<FactQueryEvidence> {
     PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
-        .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
+        .map_err(|error| FactError::canonical(error.to_string()))?;
     let value = serde_json::from_slice::<serde_json::Value>(bytes)
-        .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
+        .map_err(|error| FactError::canonical(error.to_string()))?;
     let object = json_object(&value, "fact query evidence")?;
     require_version(object, "mfm.fact-query-evidence.v1", "fact query evidence")?;
     let plan = parse_canonical_fact_query_plan(json_required(object, "plan")?)?;
@@ -404,12 +412,12 @@ pub fn validate_fact_query_evidence(evidence: &FactQueryEvidence) -> Result<()> 
     let receipt = evidence.receipt();
 
     if receipt.read_frontier().store_scope() != evidence.plan().store_scope() {
-        return Err(FactDescriptorError::descriptor(
+        return Err(FactError::descriptor(
             "fact query receipt frontier store scope does not match plan",
         ));
     }
     if receipt.read_frontier().query_scope() != evidence.plan().query_scope() {
-        return Err(FactDescriptorError::descriptor(
+        return Err(FactError::descriptor(
             "fact query receipt frontier query scope does not match plan",
         ));
     }
@@ -417,14 +425,14 @@ pub fn validate_fact_query_evidence(evidence: &FactQueryEvidence) -> Result<()> 
     let expected_result_set_digest =
         fact_query_result_set_digest(receipt.returned_refs(), receipt.returned_field_summaries())?;
     if &expected_result_set_digest != receipt.result_set_digest() {
-        return Err(FactDescriptorError::descriptor(
+        return Err(FactError::descriptor(
             "fact query receipt result-set digest does not match returned refs and summaries",
         ));
     }
 
     let expected_receipt_hash = fact_query_receipt_body_hash(&plan_hash, receipt)?;
     if &expected_receipt_hash != receipt.store_receipt_hash() {
-        return Err(FactDescriptorError::descriptor(
+        return Err(FactError::descriptor(
             "fact query receipt body hash does not match store receipt hash",
         ));
     }
@@ -438,13 +446,13 @@ fn validate_returned_summaries(receipt: &FactQueryReceipt) -> Result<()> {
         return Ok(());
     };
     if summaries.summaries().len() != receipt.returned_refs().len() {
-        return Err(FactDescriptorError::descriptor(
+        return Err(FactError::descriptor(
             "returned field summaries must align one-for-one with returned refs",
         ));
     }
     for (summary, fact_ref) in summaries.summaries().iter().zip(receipt.returned_refs()) {
         if summary.fact_claim_id() != fact_ref.fact_claim_id() {
-            return Err(FactDescriptorError::descriptor(
+            return Err(FactError::descriptor(
                 "returned field summary claim id does not match returned ref",
             ));
         }
@@ -459,14 +467,14 @@ fn validate_fact_selection_evidence(
     let returned_len = receipt.returned_refs().len() as u64;
     for window in selection.selected_indices().windows(2) {
         if window[0] >= window[1] {
-            return Err(FactDescriptorError::descriptor(
+            return Err(FactError::descriptor(
                 "selected indices must be sorted and unique",
             ));
         }
     }
     for index in selection.selected_indices() {
         if *index >= returned_len {
-            return Err(FactDescriptorError::descriptor(
+            return Err(FactError::descriptor(
                 "selected index is outside returned refs",
             ));
         }
@@ -474,14 +482,12 @@ fn validate_fact_selection_evidence(
 
     if let Some(selected_digest) = selection.selected_summaries_digest() {
         let summaries = receipt.returned_field_summaries().ok_or_else(|| {
-            FactDescriptorError::descriptor(
-                "selected summaries digest requires returned field summaries",
-            )
+            FactError::descriptor("selected summaries digest requires returned field summaries")
         })?;
         let expected =
             selected_returned_field_summaries_digest(summaries, selection.selected_indices())?;
         if &expected != selected_digest {
-            return Err(FactDescriptorError::descriptor(
+            return Err(FactError::descriptor(
                 "selected summaries digest does not match selected returned summaries",
             ));
         }
@@ -496,15 +502,12 @@ pub fn selected_returned_field_summaries_digest(
 ) -> Result<ContentDigest> {
     let mut selected = Vec::with_capacity(selected_indices.len());
     for index in selected_indices {
-        let index = usize::try_from(*index).map_err(|_| {
-            FactDescriptorError::descriptor("selected summary index overflows usize")
-        })?;
+        let index = usize::try_from(*index)
+            .map_err(|_| FactError::descriptor("selected summary index overflows usize"))?;
         let summary = returned_field_summaries
             .summaries()
             .get(index)
-            .ok_or_else(|| {
-                FactDescriptorError::descriptor("selected summary index is outside summaries")
-            })?;
+            .ok_or_else(|| FactError::descriptor("selected summary index is outside summaries"))?;
         selected.push(canonical_returned_fact_field_summary_value(summary)?);
     }
     let value = canonical_object([
@@ -525,15 +528,15 @@ pub fn extract_subject_material(
     validate_descriptor(descriptor)?;
     let mut values = Vec::new();
     for field in &descriptor.fields {
-        if !matches!(field.extraction, FactFieldExtraction::SubjectPath(_)) {
+        if !matches!(field.extraction, FactFieldExtraction::Subject(_)) {
             continue;
         }
         let scalar = extract_field_scalar(field, subject, &CanonicalValue::Null, None)?
             .ok_or_else(|| {
-                FactDescriptorError::field(field.field_id.clone(), "required subject field missing")
+                FactError::field(field.field_id.clone(), "required subject field missing")
             })?;
         validate_extracted_scalar(field, &scalar)?;
-        values.push(FactSubjectValueV1::new(
+        values.push(FactFieldValue::new(
             field.field_id.clone(),
             field.value_type,
             scalar,
@@ -557,7 +560,7 @@ pub fn fact_subject_evidence_from_material(
     subject_material: &FactSubjectMaterialV1,
 ) -> Result<FactSubjectEvidence> {
     let subject_namespace = fact_subject_namespace(descriptor)?;
-    let subject_namespace_hash = fact_subject_namespace_hash(&subject_namespace)?;
+    let subject_namespace_hash = subject_namespace_hash(&subject_namespace)?;
     FactSubjectEvidence::from_material(subject_namespace_hash, subject_material)
 }
 
@@ -597,7 +600,7 @@ pub fn extract_terms(
         match extract_field_scalar(field, subject, response, Some(metadata))? {
             Some(scalar) => terms.push(FactIndexTerm::from_field(field, scalar)?),
             None if field.required => {
-                return Err(FactDescriptorError::field(
+                return Err(FactError::field(
                     field.field_id.clone(),
                     "required field missing",
                 ));
@@ -615,9 +618,9 @@ pub fn parse_canonical_fact_response_bytes(
 ) -> Result<CanonicalValue> {
     validate_descriptor(descriptor)?;
     PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
-        .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
+        .map_err(|error| FactError::canonical(error.to_string()))?;
     let value = serde_json::from_slice::<serde_json::Value>(bytes)
-        .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
+        .map_err(|error| FactError::canonical(error.to_string()))?;
     let typed_paths = response_typed_paths(descriptor)?;
     json_to_fact_canonical_value(&value, "", &typed_paths, FactJsonPathContext::Response)
 }
@@ -638,10 +641,10 @@ pub fn extract_terms_from_material(
     let mut terms = Vec::new();
     for field in &descriptor.fields {
         let scalar = match field.extraction() {
-            FactFieldExtraction::SubjectPath(_) => {
+            FactFieldExtraction::Subject(_) => {
                 let Some(value) = subject_values.get(field.field_id()) else {
                     if field.required() {
-                        return Err(FactDescriptorError::field(
+                        return Err(FactError::field(
                             field.field_id.clone(),
                             "required subject field missing",
                         ));
@@ -649,21 +652,21 @@ pub fn extract_terms_from_material(
                     continue;
                 };
                 if value.value_type() != field.value_type() {
-                    return Err(FactDescriptorError::field(
+                    return Err(FactError::field(
                         field.field_id.clone(),
                         "subject material value type does not match descriptor field",
                     ));
                 }
                 Some(value.value().clone())
             }
-            FactFieldExtraction::ResponsePath(_) | FactFieldExtraction::Metadata(_) => {
+            FactFieldExtraction::Response(_) | FactFieldExtraction::Metadata(_) => {
                 extract_field_scalar(field, &CanonicalValue::Null, response, Some(metadata))?
             }
         };
         match scalar {
             Some(scalar) => terms.push(FactIndexTerm::from_field(field, scalar)?),
             None if field.required() => {
-                return Err(FactDescriptorError::field(
+                return Err(FactError::field(
                     field.field_id.clone(),
                     "required field missing",
                 ));
@@ -729,10 +732,6 @@ fn canonical_field_descriptor_value(field: &FactFieldDescriptor) -> Result<Canon
             CanonicalValue::String(field.field_id.as_str().to_owned()),
         ),
         (
-            "path",
-            CanonicalValue::String(field.path.as_str().to_owned()),
-        ),
-        (
             "value_type",
             CanonicalValue::String(field.value_type.as_str().to_owned()),
         ),
@@ -751,14 +750,14 @@ fn canonical_field_descriptor_value(field: &FactFieldDescriptor) -> Result<Canon
 
 fn canonical_extraction_value(extraction: &FactFieldExtraction) -> Result<CanonicalValue> {
     match extraction {
-        FactFieldExtraction::SubjectPath(path) => canonical_object([
+        FactFieldExtraction::Subject(path) => canonical_object([
             (
                 "source",
                 CanonicalValue::String(FactFieldSource::Subject.as_str().to_owned()),
             ),
             ("path", CanonicalValue::String(path.as_str().to_owned())),
         ]),
-        FactFieldExtraction::ResponsePath(path) => canonical_object([
+        FactFieldExtraction::Response(path) => canonical_object([
             (
                 "source",
                 CanonicalValue::String(FactFieldSource::Result.as_str().to_owned()),
@@ -830,7 +829,7 @@ fn canonical_subject_material_value(material: &FactSubjectMaterialV1) -> Result<
     let values = material
         .values
         .iter()
-        .map(canonical_subject_value)
+        .map(canonical_fact_field_value)
         .collect::<Result<Vec<_>>>()?;
     canonical_object([
         (
@@ -841,7 +840,7 @@ fn canonical_subject_material_value(material: &FactSubjectMaterialV1) -> Result<
     ])
 }
 
-fn canonical_subject_value(value: &FactSubjectValueV1) -> Result<CanonicalValue> {
+fn canonical_fact_field_value(value: &FactFieldValue) -> Result<CanonicalValue> {
     canonical_object([
         (
             "field_id",
@@ -855,22 +854,25 @@ fn canonical_subject_value(value: &FactSubjectValueV1) -> Result<CanonicalValue>
     ])
 }
 
-fn parse_subject_material_value(value: &serde_json::Value) -> Result<FactSubjectValueV1> {
-    let object = json_object(value, "subject material value")?;
+fn parse_fact_field_value(
+    value: &serde_json::Value,
+    context: &'static str,
+) -> Result<FactFieldValue> {
+    let object = json_object(value, context)?;
     let field_id = FactFieldId::new(json_str(object, "field_id")?)?;
     let value_type = parse_field_value_type(json_required(object, "value_type")?)?;
     let scalar_value = json_required(object, "value")?;
     let scalar = parse_canonical_scalar_value(value_type, scalar_value, &field_id)?;
-    FactSubjectValueV1::new(field_id, value_type, scalar)
+    FactFieldValue::new(field_id, value_type, scalar)
 }
 
 fn parse_field_value_type(value: &serde_json::Value) -> Result<FactFieldValueType> {
     let value = value
         .as_str()
-        .ok_or_else(|| FactDescriptorError::descriptor("field value type must be a string"))?;
+        .ok_or_else(|| FactError::descriptor("field value type must be a string"))?;
     value
         .parse::<FactFieldValueType>()
-        .map_err(|_| FactDescriptorError::descriptor(format!("unknown field value type {value:?}")))
+        .map_err(|_| FactError::descriptor(format!("unknown field value type {value:?}")))
 }
 
 pub(crate) fn parse_canonical_scalar_value(
@@ -883,7 +885,7 @@ pub(crate) fn parse_canonical_scalar_value(
 
 fn parse_query_operator(field_id: &FactFieldId, value: &str) -> Result<FactQueryOperator> {
     value.parse::<FactQueryOperator>().map_err(|_| {
-        FactDescriptorError::field(
+        FactError::field(
             field_id.clone(),
             format!("unknown query operator {value:?}"),
         )
@@ -898,7 +900,7 @@ fn parse_canonical_fact_query_plan(value: &serde_json::Value) -> Result<Canonica
     let expected_query_hash: ContentDigest = parse_json_str(object, "canonical_query_hash")?;
     let query_hash = canonical_query.content_digest();
     if query_hash != expected_query_hash {
-        return Err(FactDescriptorError::descriptor(
+        return Err(FactError::descriptor(
             "fact query plan canonical query hash mismatch",
         ));
     }
@@ -929,7 +931,7 @@ fn parse_fact_query_receipt(
     )?;
     let plan_hash = parse_json_str(body, "plan_hash")?;
     if &plan_hash != expected_plan_hash {
-        return Err(FactDescriptorError::descriptor(
+        return Err(FactError::descriptor(
             "fact query receipt body plan hash does not match plan",
         ));
     }
@@ -957,7 +959,7 @@ fn parse_fact_query_receipt(
     )
     .hash()?;
     if expected_hash != store_receipt_hash {
-        return Err(FactDescriptorError::descriptor(
+        return Err(FactError::descriptor(
             "fact query receipt body hash does not match store receipt hash",
         ));
     }
@@ -980,9 +982,9 @@ fn parse_fact_selection_evidence(value: &serde_json::Value) -> Result<FactSelect
     let selected_indices = json_array(object, "selected_indices")?
         .iter()
         .map(|value| {
-            value.as_u64().ok_or_else(|| {
-                FactDescriptorError::descriptor("selected index must be an unsigned integer")
-            })
+            value
+                .as_u64()
+                .ok_or_else(|| FactError::descriptor("selected index must be an unsigned integer"))
         })
         .collect::<Result<Vec<_>>>()?;
     FactSelectionEvidence::new(
@@ -1006,6 +1008,19 @@ fn parse_store_read_frontier(value: &serde_json::Value) -> Result<StoreReadFront
 
 fn parse_internal_fact_ref(value: &serde_json::Value) -> Result<InternalFactRef> {
     let object = json_object(value, "internal fact ref")?;
+    let request_schema_id = parse_optional_identity(json_required(object, "request_schema_id")?)?;
+    let request_hash = parse_optional_digest(json_required(object, "request_hash")?)?;
+    let request = match (request_schema_id, request_hash) {
+        (Some(request_schema_id), Some(request_hash)) => {
+            Some(FactRequestEvidence::new(request_schema_id, request_hash))
+        }
+        (None, None) => None,
+        _ => {
+            return Err(FactError::descriptor(
+                "request schema and hash must be present or absent together",
+            ));
+        }
+    };
     InternalFactRef::new(InternalFactRefParts {
         fact_claim_id: parse_fact_claim_id(json_required(object, "fact_claim_id")?)?,
         source_event_id: parse_json_str(object, "source_event_id")?,
@@ -1015,19 +1030,24 @@ fn parse_internal_fact_ref(value: &serde_json::Value) -> Result<InternalFactRef>
         visibility: parse_fact_visibility(json_required(object, "visibility")?)?,
         fact_kind: FactKind::new(json_str(object, "fact_kind")?)?,
         fact_descriptor_hash: parse_json_str(object, "fact_descriptor_hash")?,
-        fact_subject_namespace_hash: parse_json_str(object, "fact_subject_namespace_hash")?,
-        fact_key: FactKey::from_digest(parse_json_str(object, "fact_key")?),
-        subject_material_hash: parse_json_str(object, "subject_material_hash")?,
-        request_schema_id: parse_optional_identity(json_required(object, "request_schema_id")?)?,
-        request_hash: parse_optional_digest(json_required(object, "request_hash")?)?,
-        response_schema_id: parse_json_str(object, "response_schema_id")?,
-        response_hash: parse_json_str(object, "response_hash")?,
-        artifact_id: parse_json_str(object, "artifact_id")?,
-        artifact_evidence_hash: parse_json_str(object, "artifact_evidence_hash")?,
-        capability_kind: parse_json_str(object, "capability_kind")?,
-        capability_version: parse_json_str(object, "capability_version")?,
-        adapter_kind: parse_json_str(object, "adapter_kind")?,
-        adapter_version: parse_json_str(object, "adapter_version")?,
+        subject: FactSubjectRef::new(
+            parse_json_str(object, "fact_subject_namespace_hash")?,
+            FactKey::from_digest(parse_json_str(object, "fact_key")?),
+            parse_json_str(object, "subject_material_hash")?,
+        ),
+        request,
+        response: FactResponseEvidence::new(
+            parse_json_str(object, "response_schema_id")?,
+            parse_json_str(object, "response_hash")?,
+            parse_json_str(object, "artifact_id")?,
+            parse_json_str(object, "artifact_evidence_hash")?,
+        ),
+        producer: FactProducerProvenance::new(
+            parse_json_str(object, "capability_kind")?,
+            parse_json_str(object, "capability_version")?,
+            parse_json_str(object, "adapter_kind")?,
+            parse_json_str(object, "adapter_version")?,
+        ),
     })
 }
 
@@ -1049,7 +1069,7 @@ fn parse_fact_visibility(value: &serde_json::Value) -> Result<FactVisibility> {
             audience: parse_tag(json_str(object, "audience")?, "fact audience")?,
             scope: parse_tag(json_str(object, "scope")?, "fact visibility scope")?,
         }),
-        value => Err(FactDescriptorError::descriptor(format!(
+        value => Err(FactError::descriptor(format!(
             "unknown fact visibility kind {value:?}"
         ))),
     }
@@ -1063,9 +1083,7 @@ fn parse_optional_returned_field_summaries(
     }
     let summaries = value
         .as_array()
-        .ok_or_else(|| {
-            FactDescriptorError::descriptor("returned field summaries must be an array")
-        })?
+        .ok_or_else(|| FactError::descriptor("returned field summaries must be an array"))?
         .iter()
         .map(parse_returned_fact_field_summary)
         .collect::<Result<Vec<_>>>()?;
@@ -1078,7 +1096,7 @@ fn parse_returned_fact_field_summary(
     let object = json_object(value, "returned fact field summary")?;
     let fields = json_array(object, "fields")?
         .iter()
-        .map(parse_returned_field_value_summary)
+        .map(|value| parse_fact_field_value(value, "returned field value summary"))
         .collect::<Result<Vec<_>>>()?;
     Ok(ReturnedFactFieldSummary::new(
         parse_fact_claim_id(json_required(object, "fact_claim_id")?)?,
@@ -1086,23 +1104,12 @@ fn parse_returned_fact_field_summary(
     ))
 }
 
-fn parse_returned_field_value_summary(
-    value: &serde_json::Value,
-) -> Result<ReturnedFieldValueSummary> {
-    let object = json_object(value, "returned field value summary")?;
-    let field_id = FactFieldId::new(json_str(object, "field_id")?)?;
-    let value_type = parse_field_value_type(json_required(object, "value_type")?)?;
-    let scalar =
-        parse_canonical_scalar_value(value_type, json_required(object, "value")?, &field_id)?;
-    ReturnedFieldValueSummary::new(field_id, value_type, scalar)
-}
-
 fn parse_query_result_cardinality(value: &serde_json::Value) -> Result<QueryResultCardinality> {
     let object = json_object(value, "query result cardinality")?;
     match json_str(object, "kind")? {
         "exact" => Ok(QueryResultCardinality::Exact(json_u64(object, "value")?)),
         "at_least" => Ok(QueryResultCardinality::AtLeast(json_u64(object, "value")?)),
-        value => Err(FactDescriptorError::descriptor(format!(
+        value => Err(FactError::descriptor(format!(
             "unknown query result cardinality kind {value:?}"
         ))),
     }
@@ -1118,7 +1125,7 @@ fn parse_store_receipt_authentication(
     )?;
     let key_id = parse_optional_checked_string::<StoreKeyId>(json_required(object, "key_id")?)?;
     let signature = CanonicalBytes::from_base64url_no_pad(json_str(object, "signature_or_mac")?)
-        .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
+        .map_err(|error| FactError::canonical(error.to_string()))?;
     StoreReceiptAuthentication::new(
         StoreIdentity::new(json_str(object, "store_identity")?)?,
         scheme,
@@ -1129,12 +1136,12 @@ fn parse_store_receipt_authentication(
 
 fn canonical_json_bytes_from_canonical_json_str(value: &str) -> Result<CanonicalJsonBytes> {
     PlainCanonicalJsonBytes::from_canonical_json_slice(value.as_bytes())
-        .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
+        .map_err(|error| FactError::canonical(error.to_string()))?;
     let json = serde_json::from_str::<serde_json::Value>(value)
-        .map_err(|error| FactDescriptorError::canonical(error.to_string()))?;
+        .map_err(|error| FactError::canonical(error.to_string()))?;
     let canonical = CanonicalJsonBytes::from_value(&plain_json_to_canonical_value(&json)?);
     if canonical.as_str() != value {
-        return Err(FactDescriptorError::canonical(
+        return Err(FactError::canonical(
             "canonical JSON value did not round-trip",
         ));
     }
@@ -1152,7 +1159,7 @@ fn plain_json_to_canonical_value(value: &serde_json::Value) -> Result<CanonicalV
             } else if let Some(value) = value.as_i64() {
                 Ok(CanonicalValue::Signed(value))
             } else {
-                Err(FactDescriptorError::canonical(
+                Err(FactError::canonical(
                     "floating-point numbers are not valid canonical fact query JSON",
                 ))
             }
@@ -1167,8 +1174,7 @@ fn plain_json_to_canonical_value(value: &serde_json::Value) -> Result<CanonicalV
                 .iter()
                 .map(|(key, value)| Ok((key.clone(), plain_json_to_canonical_value(value)?)))
                 .collect::<Result<Vec<_>>>()?;
-            CanonicalValue::object(entries)
-                .map_err(|error| FactDescriptorError::canonical(error.to_string()))
+            CanonicalValue::object(entries).map_err(|error| FactError::canonical(error.to_string()))
         }
     }
 }
@@ -1179,7 +1185,7 @@ where
 {
     value
         .parse::<T>()
-        .map_err(|_| FactDescriptorError::descriptor(format!("unknown {tag_name} {value:?}")))
+        .map_err(|_| FactError::descriptor(format!("unknown {tag_name} {value:?}")))
 }
 
 fn json_object<'a>(
@@ -1188,7 +1194,7 @@ fn json_object<'a>(
 ) -> Result<&'a serde_json::Map<String, serde_json::Value>> {
     value
         .as_object()
-        .ok_or_else(|| FactDescriptorError::descriptor(format!("{context} must be an object")))
+        .ok_or_else(|| FactError::descriptor(format!("{context} must be an object")))
 }
 
 fn require_version(
@@ -1200,7 +1206,7 @@ fn require_version(
     if actual == expected {
         Ok(())
     } else {
-        Err(FactDescriptorError::descriptor(format!(
+        Err(FactError::descriptor(format!(
             "{context} version {actual:?} is unsupported"
         )))
     }
@@ -1212,7 +1218,7 @@ fn json_required<'a>(
 ) -> Result<&'a serde_json::Value> {
     object
         .get(key)
-        .ok_or_else(|| FactDescriptorError::descriptor(format!("{key} is required")))
+        .ok_or_else(|| FactError::descriptor(format!("{key} is required")))
 }
 
 fn json_str<'a>(
@@ -1221,7 +1227,7 @@ fn json_str<'a>(
 ) -> Result<&'a str> {
     json_required(object, key)?
         .as_str()
-        .ok_or_else(|| FactDescriptorError::descriptor(format!("{key} must be a string")))
+        .ok_or_else(|| FactError::descriptor(format!("{key} must be a string")))
 }
 
 fn json_array<'a>(
@@ -1231,7 +1237,7 @@ fn json_array<'a>(
     json_required(object, key)?
         .as_array()
         .map(Vec::as_slice)
-        .ok_or_else(|| FactDescriptorError::descriptor(format!("{key} must be an array")))
+        .ok_or_else(|| FactError::descriptor(format!("{key} must be an array")))
 }
 
 fn json_bool(
@@ -1240,19 +1246,18 @@ fn json_bool(
 ) -> Result<bool> {
     json_required(object, key)?
         .as_bool()
-        .ok_or_else(|| FactDescriptorError::descriptor(format!("{key} must be a bool")))
+        .ok_or_else(|| FactError::descriptor(format!("{key} must be a bool")))
 }
 
 fn json_u64(object: &serde_json::Map<String, serde_json::Value>, key: &'static str) -> Result<u64> {
     json_required(object, key)?
         .as_u64()
-        .ok_or_else(|| FactDescriptorError::descriptor(format!("{key} must be a u64")))
+        .ok_or_else(|| FactError::descriptor(format!("{key} must be a u64")))
 }
 
 fn json_u32(object: &serde_json::Map<String, serde_json::Value>, key: &'static str) -> Result<u32> {
     let value = json_u64(object, key)?;
-    u32::try_from(value)
-        .map_err(|_| FactDescriptorError::descriptor(format!("{key} must fit in u32")))
+    u32::try_from(value).map_err(|_| FactError::descriptor(format!("{key} must fit in u32")))
 }
 
 fn json_optional_u64(
@@ -1266,7 +1271,7 @@ fn json_optional_u64(
         value
             .as_u64()
             .map(Some)
-            .ok_or_else(|| FactDescriptorError::descriptor(format!("{key} must be null or u64")))
+            .ok_or_else(|| FactError::descriptor(format!("{key} must be null or u64")))
     }
 }
 
@@ -1278,9 +1283,9 @@ where
     T: FromStr,
     T::Err: fmt::Display,
 {
-    json_str(object, key)?.parse::<T>().map_err(|error| {
-        FactDescriptorError::descriptor(format!("{key} failed validation: {error}"))
-    })
+    json_str(object, key)?
+        .parse::<T>()
+        .map_err(|error| FactError::descriptor(format!("{key} failed validation: {error}")))
 }
 
 fn parse_optional_identity<T>(value: &serde_json::Value) -> Result<Option<T>>
@@ -1293,24 +1298,22 @@ where
     }
     value
         .as_str()
-        .ok_or_else(|| FactDescriptorError::descriptor("optional identity must be null or string"))?
+        .ok_or_else(|| FactError::descriptor("optional identity must be null or string"))?
         .parse::<T>()
         .map(Some)
-        .map_err(|error| {
-            FactDescriptorError::descriptor(format!("identity failed validation: {error}"))
-        })
+        .map_err(|error| FactError::descriptor(format!("identity failed validation: {error}")))
 }
 
 fn parse_optional_checked_string<T>(value: &serde_json::Value) -> Result<Option<T>>
 where
-    T: TryFrom<String, Error = FactDescriptorError>,
+    T: TryFrom<String, Error = FactError>,
 {
     if value.is_null() {
         return Ok(None);
     }
-    let raw = value.as_str().ok_or_else(|| {
-        FactDescriptorError::descriptor("optional checked string must be null or string")
-    })?;
+    let raw = value
+        .as_str()
+        .ok_or_else(|| FactError::descriptor("optional checked string must be null or string"))?;
     T::try_from(raw.to_owned()).map(Some)
 }
 
@@ -1325,7 +1328,7 @@ fn parse_optional_string(value: &serde_json::Value) -> Result<Option<String>> {
     value
         .as_str()
         .map(|value| Some(value.to_owned()))
-        .ok_or_else(|| FactDescriptorError::descriptor("optional string must be null or string"))
+        .ok_or_else(|| FactError::descriptor("optional string must be null or string"))
 }
 
 fn descriptor_fields_by_id(
@@ -1334,7 +1337,7 @@ fn descriptor_fields_by_id(
     let mut fields = BTreeMap::new();
     for field in descriptor.fields() {
         if fields.insert(field.field_id().clone(), field).is_some() {
-            return Err(FactDescriptorError::field(
+            return Err(FactError::field(
                 field.field_id().clone(),
                 "duplicate descriptor field id",
             ));
@@ -1347,14 +1350,15 @@ fn required_query_field<'a>(
     fields_by_id: &'a BTreeMap<FactFieldId, &FactFieldDescriptor>,
     field_id: &FactFieldId,
 ) -> Result<&'a FactFieldDescriptor> {
-    fields_by_id.get(field_id).copied().ok_or_else(|| {
-        FactDescriptorError::field(field_id.clone(), "fact query references unknown field")
-    })
+    fields_by_id
+        .get(field_id)
+        .copied()
+        .ok_or_else(|| FactError::field(field_id.clone(), "fact query references unknown field"))
 }
 
 fn require_query_exposed(field: &FactFieldDescriptor, context: &'static str) -> Result<()> {
     if field.exposure() == FactFieldExposure::Hidden {
-        return Err(FactDescriptorError::field(
+        return Err(FactError::field(
             field.field_id().clone(),
             format!("hidden field cannot be used in fact query {context}"),
         ));
@@ -1366,7 +1370,7 @@ struct CompiledQueryWire {
     fact_kind: FactKind,
     resolved_descriptor: ContentDigest,
     predicates: Vec<FactQueryPredicate>,
-    return_fields: Vec<FactQueryReturnField>,
+    return_fields: Vec<FactFieldId>,
     ordering: FactOrderingName,
     limit: Option<u64>,
 }
@@ -1378,7 +1382,7 @@ impl CompiledQueryWire {
         descriptor: &FactDescriptor,
         descriptor_hash: &ContentDigest,
         predicates: &[FactQueryPredicate],
-        return_fields: &[FactQueryReturnField],
+        return_fields: &[FactFieldId],
         ordering: &FactOrderingName,
         limit: Option<u64>,
     ) -> Self {
@@ -1401,7 +1405,7 @@ impl CompiledQueryWire {
             .collect::<Result<Vec<_>>>()?;
         let return_fields = json_array(object, "return_fields")?
             .iter()
-            .map(QueryReturnFieldWire::parse)
+            .map(parse_query_return_field)
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             fact_kind: FactKind::new(json_str(object, "fact_kind")?)?,
@@ -1415,17 +1419,17 @@ impl CompiledQueryWire {
 
     fn validate_plan(&self, plan: &CanonicalFactQueryPlan) -> Result<()> {
         if &self.resolved_descriptor != plan.resolved_descriptor() {
-            return Err(FactDescriptorError::descriptor(
+            return Err(FactError::descriptor(
                 "canonical fact query descriptor hash does not match plan",
             ));
         }
         if &self.ordering != plan.ordering().name() {
-            return Err(FactDescriptorError::descriptor(
+            return Err(FactError::descriptor(
                 "canonical fact query ordering does not match plan",
             ));
         }
         if self.limit != plan.limit() {
-            return Err(FactDescriptorError::descriptor(
+            return Err(FactError::descriptor(
                 "canonical fact query limit does not match plan",
             ));
         }
@@ -1445,8 +1449,8 @@ impl CompiledQueryWire {
         let return_fields = self
             .return_fields
             .iter()
-            .map(QueryReturnFieldWire::canonical_value)
-            .collect::<Result<Vec<_>>>()?;
+            .map(|field_id| CanonicalValue::String(field_id.as_str().to_owned()))
+            .collect::<Vec<_>>();
         canonical_object([
             ("version", CanonicalValue::String(Self::VERSION.to_owned())),
             (
@@ -1510,22 +1514,11 @@ impl QueryPredicateWire {
     }
 }
 
-struct QueryReturnFieldWire;
-
-impl QueryReturnFieldWire {
-    fn parse(value: &serde_json::Value) -> Result<FactQueryReturnField> {
-        let object = json_object(value, "query return field")?;
-        Ok(FactQueryReturnField::new(FactFieldId::new(json_str(
-            object, "field_id",
-        )?)?))
-    }
-
-    fn canonical_value(field: &FactQueryReturnField) -> Result<CanonicalValue> {
-        canonical_object([(
-            "field_id",
-            CanonicalValue::String(field.field_id().as_str().to_owned()),
-        )])
-    }
+fn parse_query_return_field(value: &serde_json::Value) -> Result<FactFieldId> {
+    let value = value
+        .as_str()
+        .ok_or_else(|| FactError::descriptor("query return field must be a string"))?;
+    FactFieldId::new(value)
 }
 
 struct QueryScopeWire;
@@ -1911,55 +1904,71 @@ fn canonical_internal_fact_ref_value(reference: &InternalFactRef) -> Result<Cano
         ),
         (
             "fact_subject_namespace_hash",
-            CanonicalValue::String(parts.fact_subject_namespace_hash.as_str().to_owned()),
+            CanonicalValue::String(
+                parts
+                    .subject
+                    .fact_subject_namespace_hash()
+                    .as_str()
+                    .to_owned(),
+            ),
         ),
         (
             "fact_key",
-            CanonicalValue::String(parts.fact_key.as_str().to_owned()),
+            CanonicalValue::String(parts.subject.fact_key().as_str().to_owned()),
         ),
         (
             "subject_material_hash",
-            CanonicalValue::String(parts.subject_material_hash.as_str().to_owned()),
+            CanonicalValue::String(parts.subject.subject_material_hash().as_str().to_owned()),
         ),
         (
             "request_schema_id",
-            optional_display_value(parts.request_schema_id.as_ref()),
+            optional_display_value(
+                parts
+                    .request
+                    .as_ref()
+                    .map(FactRequestEvidence::request_schema_id),
+            ),
         ),
         (
             "request_hash",
-            optional_display_value(parts.request_hash.as_ref()),
+            optional_display_value(
+                parts
+                    .request
+                    .as_ref()
+                    .map(FactRequestEvidence::request_hash),
+            ),
         ),
         (
             "response_schema_id",
-            CanonicalValue::String(parts.response_schema_id.as_str().to_owned()),
+            CanonicalValue::String(parts.response.response_schema_id().as_str().to_owned()),
         ),
         (
             "response_hash",
-            CanonicalValue::String(parts.response_hash.as_str().to_owned()),
+            CanonicalValue::String(parts.response.response_hash().as_str().to_owned()),
         ),
         (
             "artifact_id",
-            CanonicalValue::String(parts.artifact_id.as_str().to_owned()),
+            CanonicalValue::String(parts.response.artifact_id().as_str().to_owned()),
         ),
         (
             "artifact_evidence_hash",
-            CanonicalValue::String(parts.artifact_evidence_hash.as_str().to_owned()),
+            CanonicalValue::String(parts.response.artifact_evidence_hash().as_str().to_owned()),
         ),
         (
             "capability_kind",
-            CanonicalValue::String(parts.capability_kind.as_str().to_owned()),
+            CanonicalValue::String(parts.producer.capability_kind().as_str().to_owned()),
         ),
         (
             "capability_version",
-            CanonicalValue::String(parts.capability_version.as_str().to_owned()),
+            CanonicalValue::String(parts.producer.capability_version().as_str().to_owned()),
         ),
         (
             "adapter_kind",
-            CanonicalValue::String(parts.adapter_kind.as_str().to_owned()),
+            CanonicalValue::String(parts.producer.adapter_kind().as_str().to_owned()),
         ),
         (
             "adapter_version",
-            CanonicalValue::String(parts.adapter_version.as_str().to_owned()),
+            CanonicalValue::String(parts.producer.adapter_version().as_str().to_owned()),
         ),
     ])
 }
@@ -2023,7 +2032,7 @@ fn canonical_returned_fact_field_summary_value(
     let fields = summary
         .fields
         .iter()
-        .map(canonical_returned_field_value_summary_value)
+        .map(canonical_fact_field_value)
         .collect::<Result<Vec<_>>>()?;
     canonical_object([
         (
@@ -2031,22 +2040,6 @@ fn canonical_returned_fact_field_summary_value(
             canonical_fact_claim_id_value(&summary.fact_claim_id)?,
         ),
         ("fields", CanonicalValue::Array(fields)),
-    ])
-}
-
-fn canonical_returned_field_value_summary_value(
-    summary: &ReturnedFieldValueSummary,
-) -> Result<CanonicalValue> {
-    canonical_object([
-        (
-            "field_id",
-            CanonicalValue::String(summary.field_id().as_str().to_owned()),
-        ),
-        (
-            "value_type",
-            CanonicalValue::String(summary.value_type().as_str().to_owned()),
-        ),
-        ("value", summary.value().canonical_value()),
     ])
 }
 
@@ -2135,6 +2128,5 @@ fn optional_scale_value(scale: Option<FactScale>) -> CanonicalValue {
 pub(crate) fn canonical_object(
     entries: impl IntoIterator<Item = (impl Into<String>, CanonicalValue)>,
 ) -> Result<CanonicalValue> {
-    CanonicalValue::object(entries)
-        .map_err(|error| FactDescriptorError::canonical(error.to_string()))
+    CanonicalValue::object(entries).map_err(|error| FactError::canonical(error.to_string()))
 }

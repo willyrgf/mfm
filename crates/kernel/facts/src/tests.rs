@@ -64,56 +64,48 @@ fn run_id(byte: u8) -> RunId {
     )
 }
 
-fn subject_field(id: &str, path: &str) -> FactFieldDescriptor {
+fn subject_field(id: &str, _path: &str) -> FactFieldDescriptor {
     FactFieldDescriptor::new(
         FactFieldId::new(id).expect("field id"),
-        FactFieldPath::new(path).expect("field path"),
         FactFieldValueType::String,
-        FactFieldExtraction::SubjectPath(CanonicalValuePath::new("chain").expect("path")),
-        vec![FactQueryOperator::Equal],
-        FactFieldExposure::Returnable,
-        None,
-        None,
-        false,
-        true,
+        FactFieldExtraction::Subject(CanonicalValuePath::new("chain").expect("path")),
+        FactFieldPolicy::new(
+            vec![FactQueryOperator::Equal],
+            FactFieldExposure::Returnable,
+        )
+        .required(),
     )
     .expect("subject field")
 }
 
-fn sortable_result_field(id: &str, path: &str) -> FactFieldDescriptor {
+fn sortable_result_field(id: &str, _path: &str) -> FactFieldDescriptor {
     FactFieldDescriptor::new(
         FactFieldId::new(id).expect("field id"),
-        FactFieldPath::new(path).expect("field path"),
         FactFieldValueType::UnsignedInteger,
-        FactFieldExtraction::ResponsePath(CanonicalValuePath::new("height").expect("path")),
-        vec![
-            FactQueryOperator::Equal,
-            FactQueryOperator::GreaterThan,
-            FactQueryOperator::LessThan,
-        ],
-        FactFieldExposure::Returnable,
-        None,
-        None,
-        true,
-        true,
+        FactFieldExtraction::Response(CanonicalValuePath::new("height").expect("path")),
+        FactFieldPolicy::new(
+            vec![
+                FactQueryOperator::Equal,
+                FactQueryOperator::GreaterThan,
+                FactQueryOperator::LessThan,
+            ],
+            FactFieldExposure::Returnable,
+        )
+        .sortable()
+        .required(),
     )
     .expect("result field")
 }
 
-fn optional_result_field(id: &str, path: &str, extraction_path: &str) -> FactFieldDescriptor {
+fn optional_result_field(id: &str, _path: &str, extraction_path: &str) -> FactFieldDescriptor {
     FactFieldDescriptor::new(
         FactFieldId::new(id).expect("field id"),
-        FactFieldPath::new(path).expect("field path"),
         FactFieldValueType::UnsignedInteger,
-        FactFieldExtraction::ResponsePath(
+        FactFieldExtraction::Response(
             CanonicalValuePath::new(extraction_path).expect("extraction path"),
         ),
-        vec![FactQueryOperator::Equal],
-        FactFieldExposure::QueryOnly,
-        None,
-        None,
-        true,
-        false,
+        FactFieldPolicy::new(vec![FactQueryOperator::Equal], FactFieldExposure::QueryOnly)
+            .sortable(),
     )
     .expect("optional result field")
 }
@@ -121,18 +113,17 @@ fn optional_result_field(id: &str, path: &str, extraction_path: &str) -> FactFie
 fn metadata_recorded_at_field() -> FactFieldDescriptor {
     FactFieldDescriptor::new(
         FactFieldId::new("metadata.recorded_at").expect("field id"),
-        FactFieldPath::new("metadata.recorded_at").expect("field path"),
         FactFieldValueType::Timestamp,
         FactFieldExtraction::Metadata(FactMetadataField::RecordedAt),
-        vec![
-            FactQueryOperator::Equal,
-            FactQueryOperator::GreaterThanOrEqual,
-        ],
-        FactFieldExposure::Hidden,
-        None,
-        None,
-        true,
-        true,
+        FactFieldPolicy::new(
+            vec![
+                FactQueryOperator::Equal,
+                FactQueryOperator::GreaterThanOrEqual,
+            ],
+            FactFieldExposure::Hidden,
+        )
+        .sortable()
+        .required(),
     )
     .expect("metadata field")
 }
@@ -140,15 +131,16 @@ fn metadata_recorded_at_field() -> FactFieldDescriptor {
 fn decimal_result_field() -> FactFieldDescriptor {
     FactFieldDescriptor::new(
         FactFieldId::new("result.price").expect("field id"),
-        FactFieldPath::new("result.price").expect("field path"),
         FactFieldValueType::DecimalString,
-        FactFieldExtraction::ResponsePath(CanonicalValuePath::new("price").expect("path")),
-        vec![FactQueryOperator::Equal, FactQueryOperator::GreaterThan],
-        FactFieldExposure::Returnable,
-        Some(FactUnit::new("usd").expect("unit")),
-        Some(FactScale::new(-2).expect("scale")),
-        true,
-        true,
+        FactFieldExtraction::Response(CanonicalValuePath::new("price").expect("path")),
+        FactFieldPolicy::new(
+            vec![FactQueryOperator::Equal, FactQueryOperator::GreaterThan],
+            FactFieldExposure::Returnable,
+        )
+        .with_unit(FactUnit::new("usd").expect("unit"))
+        .with_scale(FactScale::new(-2).expect("scale"))
+        .sortable()
+        .required(),
     )
     .expect("decimal field")
 }
@@ -358,15 +350,12 @@ fn descriptor_rejects_zero_subject_fields() {
 fn descriptor_rejects_optional_subject_fields() {
     let optional_subject = FactFieldDescriptor::new(
         FactFieldId::new("subject.chain").expect("field id"),
-        FactFieldPath::new("subject.chain").expect("field path"),
         FactFieldValueType::String,
-        FactFieldExtraction::SubjectPath(CanonicalValuePath::new("chain").expect("path")),
-        vec![FactQueryOperator::Equal],
-        FactFieldExposure::Returnable,
-        None,
-        None,
-        false,
-        false,
+        FactFieldExtraction::Subject(CanonicalValuePath::new("chain").expect("path")),
+        FactFieldPolicy::new(
+            vec![FactQueryOperator::Equal],
+            FactFieldExposure::Returnable,
+        ),
     )
     .expect("field constructor allows subject required check at descriptor level");
 
@@ -382,37 +371,33 @@ fn descriptor_rejects_optional_subject_fields() {
 }
 
 #[test]
-fn field_constructor_rejects_extraction_path_prefix_conflict() {
-    let error = FactFieldDescriptor::new(
+fn field_path_is_derived_from_extraction() {
+    let field = FactFieldDescriptor::new(
         FactFieldId::new("subject.chain").expect("field id"),
-        FactFieldPath::new("result.chain").expect("field path"),
         FactFieldValueType::String,
-        FactFieldExtraction::SubjectPath(CanonicalValuePath::new("chain").expect("path")),
-        vec![FactQueryOperator::Equal],
-        FactFieldExposure::Returnable,
-        None,
-        None,
-        false,
-        true,
+        FactFieldExtraction::Subject(CanonicalValuePath::new("chain").expect("path")),
+        FactFieldPolicy::new(
+            vec![FactQueryOperator::Equal],
+            FactFieldExposure::Returnable,
+        )
+        .required(),
     )
-    .expect_err("prefix mismatch");
+    .expect("field");
 
-    assert!(error.to_string().contains("path prefix"));
+    assert_eq!(field.path(), "subject.chain");
 }
 
 #[test]
 fn field_constructor_rejects_incompatible_operator() {
     let error = FactFieldDescriptor::new(
         FactFieldId::new("subject.chain").expect("field id"),
-        FactFieldPath::new("subject.chain").expect("field path"),
         FactFieldValueType::String,
-        FactFieldExtraction::SubjectPath(CanonicalValuePath::new("chain").expect("path")),
-        vec![FactQueryOperator::GreaterThan],
-        FactFieldExposure::Returnable,
-        None,
-        None,
-        false,
-        true,
+        FactFieldExtraction::Subject(CanonicalValuePath::new("chain").expect("path")),
+        FactFieldPolicy::new(
+            vec![FactQueryOperator::GreaterThan],
+            FactFieldExposure::Returnable,
+        )
+        .required(),
     )
     .expect_err("incompatible operator");
 
@@ -519,7 +504,7 @@ fn canonical_descriptor_bytes_parse_back_to_descriptor_only_when_canonical() {
 
 #[test]
 fn subject_evidence_carries_canonical_subject_material() {
-    let material = FactSubjectMaterialV1::new(vec![FactSubjectValueV1::new(
+    let material = FactSubjectMaterialV1::new(vec![FactFieldValue::new(
         FactFieldId::new("subject.chain").expect("field"),
         FactFieldValueType::String,
         FactCanonicalScalar::string("bitcoin"),
@@ -561,12 +546,9 @@ fn subject_namespace_excludes_result_fields() {
     ])
     .expect("descriptor");
 
-    let first_namespace = fact_subject_namespace(&first).expect("namespace");
-    let second_namespace = fact_subject_namespace(&second).expect("namespace");
-
     assert_eq!(
-        canonical_fact_subject_namespace_bytes(&first_namespace).expect("first bytes"),
-        canonical_fact_subject_namespace_bytes(&second_namespace).expect("second bytes")
+        fact_subject_namespace_hash(&first).expect("first hash"),
+        fact_subject_namespace_hash(&second).expect("second hash")
     );
 }
 
@@ -577,17 +559,16 @@ fn fact_key_changes_when_subject_value_changes() {
         sortable_result_field("result.height", "result.height"),
     ])
     .expect("descriptor");
-    let namespace = fact_subject_namespace(&descriptor).expect("namespace");
-    let namespace_hash = fact_subject_namespace_hash(&namespace).expect("namespace hash");
+    let namespace_hash = fact_subject_namespace_hash(&descriptor).expect("namespace hash");
 
-    let bitcoin = FactSubjectMaterialV1::new(vec![FactSubjectValueV1::new(
+    let bitcoin = FactSubjectMaterialV1::new(vec![FactFieldValue::new(
         FactFieldId::new("subject.chain").expect("field"),
         FactFieldValueType::String,
         FactCanonicalScalar::string("bitcoin"),
     )
     .expect("value")])
     .expect("material");
-    let ethereum = FactSubjectMaterialV1::new(vec![FactSubjectValueV1::new(
+    let ethereum = FactSubjectMaterialV1::new(vec![FactFieldValue::new(
         FactFieldId::new("subject.chain").expect("field"),
         FactFieldValueType::String,
         FactCanonicalScalar::string("ethereum"),
@@ -857,8 +838,8 @@ fn query_compiler_builds_descriptor_scoped_canonical_plan() {
             ),
         ],
         vec![
-            FactQueryReturnField::new(FactFieldId::new("subject.chain").expect("field")),
-            FactQueryReturnField::new(FactFieldId::new("result.height").expect("field")),
+            FactFieldId::new("subject.chain").expect("field"),
+            FactFieldId::new("result.height").expect("field"),
         ],
         FactOrderingName::new("result.height.desc").expect("ordering"),
         Some(25),
@@ -895,8 +876,8 @@ fn query_compiler_builds_descriptor_scoped_canonical_plan() {
     assert_eq!(predicates[0]["value_type"], "unsigned_integer");
     assert_eq!(predicates[1]["field_id"], "subject.chain");
     let return_fields = query["return_fields"].as_array().expect("return fields");
-    assert_eq!(return_fields[0]["field_id"], "subject.chain");
-    assert_eq!(return_fields[1]["field_id"], "result.height");
+    assert_eq!(return_fields[0], "subject.chain");
+    assert_eq!(return_fields[1], "result.height");
     let parsed = parse_canonical_fact_query_shape(&plan).expect("parsed query shape");
     assert_eq!(parsed.predicates().len(), 2);
     assert_eq!(parsed.return_fields().len(), 2);
@@ -925,9 +906,7 @@ fn query_compiler_enforces_exposure_policy() {
             FactQueryOperator::GreaterThanOrEqual,
             FactCanonicalScalar::timestamp("2026-01-02T00:00:00Z").expect("timestamp"),
         )],
-        vec![FactQueryReturnField::new(
-            FactFieldId::new("subject.chain").expect("field"),
-        )],
+        vec![FactFieldId::new("subject.chain").expect("field")],
         FactOrderingName::new("result.height.desc").expect("ordering"),
         Some(10),
     )
@@ -942,9 +921,7 @@ fn query_compiler_enforces_exposure_policy() {
         FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
         ScopeDecisionEvidence::new(digest(2)),
         Vec::new(),
-        vec![FactQueryReturnField::new(
-            FactFieldId::new("result.confirmations").expect("field"),
-        )],
+        vec![FactFieldId::new("result.confirmations").expect("field")],
         FactOrderingName::new("result.height.desc").expect("ordering"),
         Some(10),
     )
@@ -972,9 +949,7 @@ fn query_compiler_rejects_invalid_predicates() {
             FactQueryOperator::GreaterThanOrEqual,
             FactCanonicalScalar::UnsignedInteger(800_000),
         )],
-        vec![FactQueryReturnField::new(
-            FactFieldId::new("result.height").expect("field"),
-        )],
+        vec![FactFieldId::new("result.height").expect("field")],
         FactOrderingName::new("result.height.desc").expect("ordering"),
         Some(10),
     )
@@ -993,9 +968,7 @@ fn query_compiler_rejects_invalid_predicates() {
             FactQueryOperator::GreaterThan,
             FactCanonicalScalar::string("800000"),
         )],
-        vec![FactQueryReturnField::new(
-            FactFieldId::new("result.height").expect("field"),
-        )],
+        vec![FactFieldId::new("result.height").expect("field")],
         FactOrderingName::new("result.height.desc").expect("ordering"),
         Some(10),
     )
@@ -1053,20 +1026,20 @@ fn internal_ref_parts(visibility: FactVisibility) -> InternalFactRefParts {
         visibility,
         fact_kind: FactKind::new("chain.head").expect("kind"),
         fact_descriptor_hash: digest(12),
-        fact_subject_namespace_hash: digest(13),
-        fact_key: FactKey::from_digest(digest(14)),
-        subject_material_hash: digest(15),
-        request_schema_id: None,
-        request_hash: None,
-        response_schema_id: schema_id("mfm.test.response"),
-        response_hash: digest(16),
-        artifact_id: artifact_id(17),
-        artifact_evidence_hash: digest(18),
-        capability_kind: capability_kind(),
-        capability_version: CapabilityVersion::new("mfm.capability.test.v1")
-            .expect("capability version"),
-        adapter_kind: adapter_kind(),
-        adapter_version: AdapterVersion::new("mfm.adapter.test.v1").expect("adapter version"),
+        subject: FactSubjectRef::new(digest(13), FactKey::from_digest(digest(14)), digest(15)),
+        request: None,
+        response: FactResponseEvidence::new(
+            schema_id("mfm.test.response"),
+            digest(16),
+            artifact_id(17),
+            digest(18),
+        ),
+        producer: FactProducerProvenance::new(
+            capability_kind(),
+            CapabilityVersion::new("mfm.capability.test.v1").expect("capability version"),
+            adapter_kind(),
+            AdapterVersion::new("mfm.adapter.test.v1").expect("adapter version"),
+        ),
     }
 }
 
@@ -1107,7 +1080,7 @@ fn query_evidence_fixture() -> (CanonicalFactQueryPlan, FactQueryReceipt, FactQu
     .expect("returned ref");
     let rows = [FactQueryResultRow::new(
         returned_ref,
-        vec![ReturnedFieldValueSummary::new(
+        vec![FactFieldValue::new(
             FactFieldId::new("result.height").expect("field"),
             FactFieldValueType::UnsignedInteger,
             FactCanonicalScalar::UnsignedInteger(800_000),
@@ -1245,7 +1218,7 @@ fn fact_query_result_rejects_unpinned_field_summaries() {
 }
 
 #[test]
-fn internal_fact_ref_requires_indexed_visibility_and_request_pairing() {
+fn internal_fact_ref_requires_indexed_visibility() {
     assert!(
         InternalFactRef::new(internal_ref_parts(FactVisibility::indexed_default(
             FactAudience::Platform,
@@ -1253,10 +1226,6 @@ fn internal_fact_ref_requires_indexed_visibility_and_request_pairing() {
         .is_ok()
     );
     assert!(InternalFactRef::new(internal_ref_parts(FactVisibility::RunPrivate)).is_err());
-
-    let mut parts = internal_ref_parts(FactVisibility::indexed_default(FactAudience::Platform));
-    parts.request_schema_id = Some(schema_id("mfm.test.request"));
-    assert!(InternalFactRef::new(parts).is_err());
 }
 
 #[test]
@@ -1287,15 +1256,14 @@ fn canonical_goldens_match_expected_values() {
         sortable_result_field("result.height", "result.height"),
     ])
     .expect("descriptor");
-    let namespace = fact_subject_namespace(&descriptor).expect("namespace");
-    let material = FactSubjectMaterialV1::new(vec![FactSubjectValueV1::new(
+    let material = FactSubjectMaterialV1::new(vec![FactFieldValue::new(
         FactFieldId::new("subject.chain").expect("field"),
         FactFieldValueType::String,
         FactCanonicalScalar::string("bitcoin"),
     )
     .expect("value")])
     .expect("material");
-    let namespace_hash = fact_subject_namespace_hash(&namespace).expect("namespace hash");
+    let namespace_hash = fact_subject_namespace_hash(&descriptor).expect("namespace hash");
     let material_hash = subject_material_hash(&material).expect("material hash");
     let fact_key =
         derive_fact_key(namespace_hash.clone(), material_hash.clone()).expect("fact key");
@@ -1307,19 +1275,13 @@ fn canonical_goldens_match_expected_values() {
         canonical_fact_descriptor_bytes(&descriptor)
             .expect("descriptor bytes")
             .as_str(),
-        r#"{"descriptor_schema_id":"schema:mfm.test.fact.descriptor:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","fact_kind":"chain.head","fields":[{"exposure":"returnable","extraction":{"path":"height","source":"result"},"field_id":"result.height","operators":["equal","less_than","greater_than"],"path":"result.height","required":true,"scale":null,"sortable":true,"unit":null,"value_type":"unsigned_integer"},{"exposure":"returnable","extraction":{"path":"chain","source":"subject"},"field_id":"subject.chain","operators":["equal"],"path":"subject.chain","required":true,"scale":null,"sortable":false,"unit":null,"value_type":"string"}],"orderings":[{"name":"result.height.desc","terms":[{"direction":"descending","field_id":"result.height","nulls":"last","tie_breaker":false}]}],"response_schema_id":"schema:mfm.test.response:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","subject_schema_id":"schema:mfm.test.subject:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","version":"mfm.facts.v1"}"#
+        r#"{"descriptor_schema_id":"schema:mfm.test.fact.descriptor:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","fact_kind":"chain.head","fields":[{"exposure":"returnable","extraction":{"path":"height","source":"result"},"field_id":"result.height","operators":["equal","less_than","greater_than"],"required":true,"scale":null,"sortable":true,"unit":null,"value_type":"unsigned_integer"},{"exposure":"returnable","extraction":{"path":"chain","source":"subject"},"field_id":"subject.chain","operators":["equal"],"required":true,"scale":null,"sortable":false,"unit":null,"value_type":"string"}],"orderings":[{"name":"result.height.desc","terms":[{"direction":"descending","field_id":"result.height","nulls":"last","tie_breaker":false}]}],"response_schema_id":"schema:mfm.test.response:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","subject_schema_id":"schema:mfm.test.subject:mfm.test.v1:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","version":"mfm.facts.v1"}"#
     );
     assert_eq!(
         fact_descriptor_hash(&descriptor)
             .expect("descriptor hash")
             .as_str(),
-        "content:sha256-jcs-v1:a01cb8123321722f75acc02c7e3ff1e605464f0136104572e25cd01c8ee55c16"
-    );
-    assert_eq!(
-        canonical_fact_subject_namespace_bytes(&namespace)
-            .expect("namespace bytes")
-            .as_str(),
-        r#"{"fact_kind":"chain.head","fields":[{"field_id":"subject.chain","scale":null,"unit":null,"value_type":"string"}],"version":"mfm.fact-subject-namespace.v1"}"#
+        "content:sha256-jcs-v1:178704387523ebb4cb05d04b97d008de627acc90b8e80497fdacb2d27b2e038c"
     );
     assert_eq!(
         namespace_hash.as_str(),

@@ -237,14 +237,14 @@ Field source is defined by `FactFieldExtraction`:
 
 ```rust
 pub enum FactFieldExtraction {
-    SubjectPath(CanonicalValuePath),
-    ResponsePath(CanonicalValuePath),
+    Subject(CanonicalValuePath),
+    Response(CanonicalValuePath),
     Metadata(FactMetadataField),
 }
 ```
 
-- `SubjectPath` fields answer "what is this fact about?"
-- `ResponsePath` fields answer "what did this claim observe?"
+- `Subject` fields answer "what is this fact about?"
+- `Response` fields answer "what did this claim observe?"
 - `Metadata` fields answer "how, when, or where was this claim recorded?"
 
 Examples:
@@ -566,9 +566,12 @@ pub struct FactDescriptor {
 
 pub struct FactFieldDescriptor {
     pub field_id: FactFieldId,
-    pub path: FactFieldPath,
     pub value_type: FactFieldValueType,
     pub extraction: FactFieldExtraction,
+    pub policy: FactFieldPolicy,
+}
+
+pub struct FactFieldPolicy {
     pub operators: &'static [FactQueryOperator],
     pub exposure: FactFieldExposure,
     pub unit: Option<FactUnit>,
@@ -583,7 +586,7 @@ pub enum FactFieldExposure {
     Hidden,
 }
 
-pub struct FactOrderingDescriptor {
+pub struct FactOrderingPolicy {
     pub name: FactOrderingName,
     pub terms: &'static [FactOrderingTerm],
 }
@@ -596,21 +599,21 @@ pub struct FactOrderingTerm {
 }
 ```
 
-`field_id` is descriptor-owned stable identity. `path` is a human-readable and
-schema-facing pointer that may evolve across descriptor versions. Index rows,
+`field_id` is descriptor-owned stable identity. A field's human-readable path is
+derived from its extraction source and canonical value path. Index rows,
 ordering policies, compatibility rules, and query evidence bind to `field_id`.
 
 `extraction` is the single source of field extraction authority. Its variant
 defines whether the field is `Subject`, `Result`, or `Metadata`. In v1, every
-`SubjectPath` field is required and participates in `FactKey`; result and
+`Subject` field is required and participates in `FactKey`; result and
 metadata fields never participate in `FactKey`.
 
 V1 extraction grammar:
 
 ```rust
 pub enum FactFieldExtraction {
-    SubjectPath(CanonicalValuePath),
-    ResponsePath(CanonicalValuePath),
+    Subject(CanonicalValuePath),
+    Response(CanonicalValuePath),
     Metadata(FactMetadataField),
 }
 ```
@@ -639,9 +642,8 @@ deterministic, bounded, and replayable from retained authority.
 Descriptor validation must reject:
 
 - duplicate `field_id` values
-- zero `SubjectPath` fields
-- optional `SubjectPath` fields
-- descriptor paths whose prefix conflicts with the extraction source
+- zero `Subject` fields
+- optional `Subject` fields
 - ordering terms that reference missing or non-sortable fields
 - fields whose allowed operators conflict with their value type
 - unsupported timestamp, decimal, digest, numeric bound, or normalization rules
@@ -680,10 +682,10 @@ pub struct FactSubjectNamespaceFieldV1 {
 
 pub struct FactSubjectMaterialV1 {
     pub version: &'static str,              // "mfm.fact-subject-material.v1"
-    pub values: Vec<FactSubjectValueV1>,
+    pub values: Vec<FactFieldValue>,
 }
 
-pub struct FactSubjectValueV1 {
+pub struct FactFieldValue {
     pub field_id: FactFieldId,
     pub value_type: FactFieldValueType,
     pub value: FactCanonicalScalar,
@@ -691,7 +693,7 @@ pub struct FactSubjectValueV1 {
 ```
 
 Both vectors are sorted by `field_id` before canonicalization. The namespace
-includes only descriptor fields whose extraction is `SubjectPath`; the material
+includes only descriptor fields whose extraction is `Subject`; the material
 contains only values extracted for those fields from `T::Subject`. This excludes
 result fields, metadata fields, schema paths, extraction paths, ordering
 policies, allowed operators, exposure policy, descriptor schema id, response
@@ -972,12 +974,12 @@ pub trait FactDescriptorCatalog {
     fn admit_descriptor(
         &mut self,
         descriptor: &'static FactDescriptor,
-    ) -> Result<DescriptorAdmission, FactDescriptorError>;
+    ) -> Result<DescriptorAdmission, FactError>;
 
     fn resolve_descriptor(
         &self,
         selector: FactDescriptorSelector,
-    ) -> Result<ResolvedFactDescriptor, FactDescriptorError>;
+    ) -> Result<ResolvedFactDescriptor, FactError>;
 }
 ```
 
@@ -1034,7 +1036,7 @@ implementation as long as ownership boundaries stay intact.
 | `FactFieldExtraction` | new | `crates/kernel/facts` | Declarative kernel-owned extraction grammar. |
 | `FactVisibility`, `FactAudience`, `FactVisibilityScope` | new | `crates/kernel/facts` | Explicit visibility and query audience contract. |
 | `FactRecordedPayload` and `FactClaim` | new | `crates/kernel/events`, `crates/kernel/facts` | Normalized claim payload for every `FactRecorded`. |
-| `FactSubjectNamespaceV1`, `FactSubjectMaterialV1` | new | `crates/kernel/facts` | Canonical subject identity inputs for `FactKey`. |
+| `fact_subject_namespace_hash`, `FactSubjectMaterialV1` | new | `crates/kernel/facts` | Canonical subject identity inputs for `FactKey`; the namespace structure is kernel-internal. |
 | `FactKey` | new shape | `crates/kernel/facts` | Subject-only key after the destructive reset. |
 | `FactClaimId` | new | `crates/kernel/facts` | Derived for every `FactRecorded` from run-stream coordinates. |
 | `InternalFactRef` | new/internal | `crates/kernel/facts`, store | Full trusted projection/replay ref; may use the existing implementation name `FactRef`. |
@@ -1879,7 +1881,8 @@ discarded with the old store baseline.
   metadata fields, ordering, operators, units/scales, and exposure.
 - Field extraction is declarative and kernel-owned; append/rebuild must not call
   arbitrary domain crate code.
-- Fields have stable descriptor-owned ids; paths are UX/schema pointers.
+- Fields have stable descriptor-owned ids; display paths are derived from
+  descriptor extraction.
 - `FactKey` is derived only from canonical `FactSubjectNamespaceV1` and
   canonical subject material.
 - Observed-result indexing is in v1 through descriptor-declared result fields.

@@ -98,10 +98,6 @@ fn test_fact_key(subject_amount: u64) -> mfm_facts::FactKey {
         .clone()
 }
 
-fn test_fact_descriptor_hash() -> ContentDigest {
-    mfm_facts::fact_descriptor_hash(&test_fact_descriptor()).expect("descriptor hash")
-}
-
 fn test_fact_query_signing_key() -> SigningKey {
     SigningKey::from_bytes(&[0x52; 32])
 }
@@ -127,37 +123,22 @@ fn test_fact_query_evidence_with_returned_refs(
         mfm_facts::FactVisibilityScope::Default,
     );
     let store_scope = mfm_facts::StoreScopeRef::new("default").expect("store scope");
-    let ordering = mfm_facts::FactOrderingPolicy::new(
-        mfm_facts::FactOrderingName::new("metadata.store_order.asc").expect("ordering"),
-        vec![mfm_facts::FactOrderingTerm::new(
-            mfm_facts::FactFieldId::new("metadata.store_order").expect("field id"),
-            mfm_facts::SortDirection::Ascending,
-            mfm_facts::NullOrdering::Last,
-            true,
-        )],
-    )
-    .expect("fact ordering");
-    let canonical_query = mfm_canonical::CanonicalJsonBytes::from_value(
-        &mfm_canonical::CanonicalValue::object([(
-            "kind",
-            mfm_canonical::CanonicalValue::String("chain.head".to_owned()),
-        )])
-        .expect("canonical query value"),
-    );
-    let plan = mfm_facts::CanonicalFactQueryPlan::new(
+    let input = mfm_facts::FactQueryInput::new(
         store_scope.clone(),
         query_scope.clone(),
-        mfm_facts::FactQueryCompilerVersion::new(mfm_facts::FACT_QUERY_COMPILER_VERSION)
-            .expect("query compiler version"),
-        mfm_facts::FactCanonicalizerVersion::new(mfm_facts::FACT_QUERY_CANONICALIZER_VERSION)
-            .expect("query canonicalizer version"),
-        test_fact_descriptor_hash(),
         mfm_facts::ScopeDecisionEvidence::new(content(0x42)),
-        canonical_query,
-        ordering,
+        vec![mfm_facts::FactQueryPredicate::new(
+            mfm_facts::FactFieldId::new("subject.amount").expect("field id"),
+            mfm_facts::FactQueryOperator::Equal,
+            mfm_facts::FactCanonicalScalar::UnsignedInteger(42),
+        )],
+        vec![mfm_facts::FactFieldId::new("result.amount").expect("field id")],
+        mfm_facts::FactOrderingName::new("result.amount.asc").expect("ordering"),
         Some(10),
     )
-    .expect("query plan");
+    .expect("query input");
+    let plan =
+        mfm_facts::compile_fact_query_plan(&test_fact_descriptor(), input).expect("query plan");
     let frontier = mfm_facts::StoreReadFrontier::new(
         store_scope,
         query_scope,
@@ -262,16 +243,15 @@ fn test_fact_subject_evidence_for_descriptor(
     descriptor: &mfm_facts::FactDescriptor,
     subject_amount: u64,
 ) -> mfm_facts::FactSubjectEvidence {
-    let material = mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactSubjectValueV1::new(
+    let material = mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactFieldValue::new(
         mfm_facts::FactFieldId::new("subject.amount").expect("field"),
         mfm_facts::FactFieldValueType::UnsignedInteger,
         mfm_facts::FactCanonicalScalar::UnsignedInteger(subject_amount),
     )
     .expect("subject value")])
     .expect("subject material");
-    let namespace = mfm_facts::fact_subject_namespace(descriptor).expect("fact subject namespace");
     let namespace_hash =
-        mfm_facts::fact_subject_namespace_hash(&namespace).expect("fact subject namespace hash");
+        mfm_facts::fact_subject_namespace_hash(descriptor).expect("fact subject namespace hash");
     mfm_facts::FactSubjectEvidence::from_material(namespace_hash, &material)
         .expect("subject evidence")
 }

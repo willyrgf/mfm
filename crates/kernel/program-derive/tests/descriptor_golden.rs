@@ -374,7 +374,7 @@ fn generated_fact_descriptor_is_canonical_descriptor_authority() {
     assert_eq!(fields[0].field_id().as_str(), "subject.chain");
     assert_eq!(
         fields[0].extraction(),
-        &facts::FactFieldExtraction::SubjectPath(
+        &facts::FactFieldExtraction::Subject(
             facts::CanonicalValuePath::new("chain").expect("subject path")
         )
     );

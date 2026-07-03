@@ -254,8 +254,7 @@ fn validate_projected_fact_descriptor(
 ) -> Result<(), AppError> {
     let descriptor_hash = mfm_facts::fact_descriptor_hash(descriptor)
         .map_err(|_| fact_descriptor_artifact_invalid())?;
-    let namespace_hash = mfm_facts::fact_subject_namespace(descriptor)
-        .and_then(|namespace| mfm_facts::fact_subject_namespace_hash(&namespace))
+    let namespace_hash = mfm_facts::fact_subject_namespace_hash(descriptor)
         .map_err(|_| fact_descriptor_artifact_invalid())?;
     if descriptor_hash != projection.descriptor_hash
         || descriptor.fact_kind() != &projection.fact_kind
@@ -344,7 +343,7 @@ fn public_descriptor_ref(descriptor: &mfm_facts::FactDescriptor) -> PublicFactDe
 fn public_field_summary(field: &mfm_facts::FactFieldDescriptor) -> PublicFactFieldSummary {
     PublicFactFieldSummary {
         field_id: field.field_id().as_str().to_owned(),
-        path: field.path().as_str().to_owned(),
+        path: field.path(),
         source: field.extraction().source().path_prefix().to_owned(),
         value_type: field.value_type().as_str().to_owned(),
         exposure: field.exposure().as_str().to_owned(),
@@ -404,8 +403,8 @@ pub(super) fn public_query_input(
         .return_fields
         .iter()
         .cloned()
-        .map(mfm_facts::FactQueryReturnField::new)
-        .collect::<Vec<_>>();
+        .map(mfm_facts::FactFieldId::new)
+        .collect::<mfm_facts::Result<Vec<_>>>()?;
     Ok(mfm_facts::FactQueryInput::new(
         store_scope,
         public_fact_query_scope(),
@@ -448,7 +447,7 @@ fn public_fact_from_parts(
 
 fn public_fields_from_summaries(
     descriptor: &mfm_facts::FactDescriptor,
-    summaries: &[mfm_facts::ReturnedFieldValueSummary],
+    summaries: &[mfm_facts::FactFieldValue],
 ) -> Result<Vec<PublicFactFieldValue>, AppError> {
     public_fields_from_values(
         descriptor,

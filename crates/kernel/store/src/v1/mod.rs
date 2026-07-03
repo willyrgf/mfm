@@ -4096,41 +4096,14 @@ fn internal_fact_ref_from_record_projection(
     record: &FactRecordProjection,
     recorded_at: String,
 ) -> Result<Option<mfm_facts::InternalFactRef>> {
-    let mfm_facts::FactVisibility::Indexed { audience, scope } = record.claim.visibility() else {
-        return Ok(None);
-    };
-    let request = record.claim.request();
-    let response = record.claim.response();
-    let producer = record.claim.producer();
-    let parts = mfm_facts::InternalFactRefParts {
-        fact_claim_id: record.fact_claim_id.clone(),
-        source_event_id: record.source_event_id.clone(),
+    mfm_facts::InternalFactRef::from_claim(
+        record.fact_claim_id.clone(),
+        record.source_event_id.clone(),
         recorded_at,
-        producer_node_id: record.node_id.clone(),
-        observed_at: record.claim.observed_at().map(str::to_owned),
-        visibility: mfm_facts::FactVisibility::Indexed {
-            audience: *audience,
-            scope: *scope,
-        },
-        fact_kind: record.claim.fact_kind().clone(),
-        fact_descriptor_hash: record.claim.fact_descriptor_hash().clone(),
-        fact_subject_namespace_hash: record.claim.subject().fact_subject_namespace_hash().clone(),
-        fact_key: record.claim.subject().fact_key().clone(),
-        subject_material_hash: record.claim.subject().subject_material_hash().clone(),
-        request_schema_id: request.map(|request| request.request_schema_id().clone()),
-        request_hash: request.map(|request| request.request_hash().clone()),
-        response_schema_id: response.response_schema_id().clone(),
-        response_hash: response.response_hash().clone(),
-        artifact_id: response.artifact_id().clone(),
-        artifact_evidence_hash: response.artifact_evidence_hash().clone(),
-        capability_kind: producer.capability_kind().clone(),
-        capability_version: producer.capability_version().clone(),
-        adapter_kind: producer.adapter_kind().clone(),
-        adapter_version: producer.adapter_version().clone(),
-    };
-    mfm_facts::InternalFactRef::new(parts)
-        .map(Some)
-        .map_err(|error| StoreError::Identity(error.to_string()))
+        record.node_id.clone(),
+        &record.claim,
+    )
+    .map_err(|error| StoreError::Identity(error.to_string()))
 }
 
 /// Queryable indexed fact projection for one recorded claim.
@@ -4272,6 +4245,18 @@ impl FactIndexProjection {
 
     /// Builds the durable internal fact reference represented by this index row.
     pub fn internal_ref(&self) -> Result<mfm_facts::InternalFactRef> {
+        let request = match (&self.request_schema_id, &self.request_hash) {
+            (Some(schema_id), Some(hash)) => Some(mfm_facts::FactRequestEvidence::new(
+                schema_id.clone(),
+                hash.clone(),
+            )),
+            (None, None) => None,
+            _ => {
+                return Err(StoreError::Identity(
+                    "internal fact index row has partial request evidence".to_owned(),
+                ));
+            }
+        };
         let parts = mfm_facts::InternalFactRefParts {
             fact_claim_id: self.fact_claim_id.clone(),
             source_event_id: self.source_event_id.clone(),
@@ -4284,19 +4269,24 @@ impl FactIndexProjection {
             },
             fact_kind: self.fact_kind.clone(),
             fact_descriptor_hash: self.fact_descriptor_hash.clone(),
-            fact_subject_namespace_hash: self.fact_subject_namespace_hash.clone(),
-            fact_key: self.fact_key.clone(),
-            subject_material_hash: self.subject_material_hash.clone(),
-            request_schema_id: self.request_schema_id.clone(),
-            request_hash: self.request_hash.clone(),
-            response_schema_id: self.response_schema_id.clone(),
-            response_hash: self.response_hash.clone(),
-            artifact_id: self.artifact_id.clone(),
-            artifact_evidence_hash: self.artifact_evidence_hash.clone(),
-            capability_kind: self.capability_kind.clone(),
-            capability_version: self.capability_version.clone(),
-            adapter_kind: self.adapter_kind.clone(),
-            adapter_version: self.adapter_version.clone(),
+            subject: mfm_facts::FactSubjectRef::new(
+                self.fact_subject_namespace_hash.clone(),
+                self.fact_key.clone(),
+                self.subject_material_hash.clone(),
+            ),
+            request,
+            response: mfm_facts::FactResponseEvidence::new(
+                self.response_schema_id.clone(),
+                self.response_hash.clone(),
+                self.artifact_id.clone(),
+                self.artifact_evidence_hash.clone(),
+            ),
+            producer: mfm_facts::FactProducerProvenance::new(
+                self.capability_kind.clone(),
+                self.capability_version.clone(),
+                self.adapter_kind.clone(),
+                self.adapter_version.clone(),
+            ),
         };
         mfm_facts::InternalFactRef::new(parts)
             .map_err(|error| StoreError::Identity(error.to_string()))

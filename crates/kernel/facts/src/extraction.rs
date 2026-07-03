@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use mfm_canonical::CanonicalValue;
-use mfm_ids::ContentDigest;
 
+use crate::codec::canonical_object;
 use crate::scalar::ScalarJsonContext;
 use crate::*;
 
@@ -23,13 +23,13 @@ impl FactExtractionMetadata {
     ) -> Result<Self> {
         let recorded_at = recorded_at.into();
         if recorded_at.is_empty() {
-            return Err(FactDescriptorError::descriptor(
+            return Err(FactError::descriptor(
                 "recorded_at metadata must not be empty",
             ));
         }
         let observed_at = observed_at.map(Into::into);
         if observed_at.as_ref().is_some_and(|value| value.is_empty()) {
-            return Err(FactDescriptorError::descriptor(
+            return Err(FactError::descriptor(
                 "observed_at metadata must not be empty when present",
             ));
         }
@@ -119,11 +119,11 @@ pub(crate) fn extract_field_scalar(
     metadata: Option<&FactExtractionMetadata>,
 ) -> Result<Option<FactCanonicalScalar>> {
     match &field.extraction {
-        FactFieldExtraction::SubjectPath(path) => extract_path_scalar(field, subject, path),
-        FactFieldExtraction::ResponsePath(path) => extract_path_scalar(field, response, path),
+        FactFieldExtraction::Subject(path) => extract_path_scalar(field, subject, path),
+        FactFieldExtraction::Response(path) => extract_path_scalar(field, response, path),
         FactFieldExtraction::Metadata(metadata_field) => {
             let metadata = metadata.ok_or_else(|| {
-                FactDescriptorError::field(
+                FactError::field(
                     field.field_id.clone(),
                     "metadata extraction requires metadata",
                 )
@@ -167,13 +167,13 @@ fn extract_path_value<'a>(
             }
             CanonicalValue::Null => return Ok(None),
             CanonicalValue::Array(_) => {
-                return Err(FactDescriptorError::field(
+                return Err(FactError::field(
                     field.field_id.clone(),
                     "arrays, wildcards, slices, and repeated values are unsupported in fact paths",
                 ));
             }
             _ => {
-                return Err(FactDescriptorError::field(
+                return Err(FactError::field(
                     field.field_id.clone(),
                     format!("path segment {segment:?} traversed a non-object scalar"),
                 ));
@@ -210,59 +210,11 @@ fn scalar_from_value(
     field: &FactFieldDescriptor,
     value: &CanonicalValue,
 ) -> Result<FactCanonicalScalar> {
-    let scalar = match (field.value_type, value) {
-        (FactFieldValueType::String, CanonicalValue::String(value)) => {
-            FactCanonicalScalar::String(value.clone())
-        }
-        (FactFieldValueType::Boolean, CanonicalValue::Bool(value)) => {
-            FactCanonicalScalar::Boolean(*value)
-        }
-        (FactFieldValueType::SignedInteger, CanonicalValue::Signed(value)) => {
-            FactCanonicalScalar::SignedInteger(*value)
-        }
-        (FactFieldValueType::UnsignedInteger, CanonicalValue::Unsigned(value)) => {
-            FactCanonicalScalar::UnsignedInteger(*value)
-        }
-        (FactFieldValueType::Timestamp, CanonicalValue::String(value)) => {
-            FactCanonicalScalar::timestamp(value.clone())?
-        }
-        (FactFieldValueType::DecimalString, CanonicalValue::Decimal(value)) => {
-            FactCanonicalScalar::DecimalString(value.clone())
-        }
-        (FactFieldValueType::Digest, CanonicalValue::String(value)) => {
-            let digest = ContentDigest::parse(value).map_err(|error| {
-                FactDescriptorError::field(
-                    field.field_id.clone(),
-                    format!("invalid digest scalar: {error}"),
-                )
-            })?;
-            FactCanonicalScalar::Digest(digest)
-        }
-        (_, CanonicalValue::Array(_)) => {
-            return Err(FactDescriptorError::field(
-                field.field_id.clone(),
-                "arrays, wildcards, slices, and repeated values are unsupported fact scalars",
-            ));
-        }
-        (_, CanonicalValue::Object(_)) => {
-            return Err(FactDescriptorError::field(
-                field.field_id.clone(),
-                "object values are unsupported fact scalars",
-            ));
-        }
-        (_, CanonicalValue::Null) => {
-            return Err(FactDescriptorError::field(
-                field.field_id.clone(),
-                "null cannot be normalized as a fact scalar",
-            ));
-        }
-        _ => {
-            return Err(FactDescriptorError::field(
-                field.field_id.clone(),
-                format!("scalar type does not match {:?}", field.value_type),
-            ));
-        }
-    };
+    let scalar = FactCanonicalScalar::from_canonical_value(
+        field.value_type,
+        value,
+        ScalarJsonContext::Field(&field.field_id),
+    )?;
     validate_extracted_scalar(field, &scalar)?;
     Ok(scalar)
 }
@@ -295,8 +247,8 @@ impl FactJsonPathContext {
 
     const fn scalar_context<'a>(self, path: &'a str) -> ScalarJsonContext<'a> {
         match self {
-            Self::Subject => ScalarJsonContext::SubjectPath(path),
-            Self::Response => ScalarJsonContext::ResponsePath(path),
+            Self::Subject => ScalarJsonContext::Subject(path),
+            Self::Response => ScalarJsonContext::Response(path),
         }
     }
 }
@@ -308,13 +260,13 @@ fn typed_paths_for_extraction(
     let mut typed_paths = BTreeMap::new();
     for field in descriptor.fields() {
         let path = match (context, field.extraction()) {
-            (FactJsonPathContext::Subject, FactFieldExtraction::SubjectPath(path))
-            | (FactJsonPathContext::Response, FactFieldExtraction::ResponsePath(path)) => path,
+            (FactJsonPathContext::Subject, FactFieldExtraction::Subject(path))
+            | (FactJsonPathContext::Response, FactFieldExtraction::Response(path)) => path,
             _ => continue,
         };
         if let Some(previous) = typed_paths.insert(path.as_str().to_owned(), field.value_type()) {
             if previous != field.value_type() {
-                return Err(FactDescriptorError::field(
+                return Err(FactError::field(
                     field.field_id().clone(),
                     format!(
                         "{} path {} is declared with incompatible value types",
@@ -351,7 +303,7 @@ pub(crate) fn json_to_fact_canonical_value(
             } else if let Some(value) = value.as_i64() {
                 Ok(CanonicalValue::Signed(value))
             } else {
-                Err(FactDescriptorError::descriptor(format!(
+                Err(FactError::descriptor(format!(
                     "fact {} path {path} contains unsupported floating-point number",
                     context.label()
                 )))
@@ -397,7 +349,7 @@ pub(crate) fn json_to_typed_fact_scalar(
     value_type: FactFieldValueType,
     path: &str,
 ) -> Result<CanonicalValue> {
-    json_to_typed_fact_scalar_with_context(value, value_type, ScalarJsonContext::ResponsePath(path))
+    json_to_typed_fact_scalar_with_context(value, value_type, ScalarJsonContext::Response(path))
 }
 
 fn json_to_typed_fact_scalar_with_context(
@@ -405,7 +357,7 @@ fn json_to_typed_fact_scalar_with_context(
     value_type: FactFieldValueType,
     context: ScalarJsonContext<'_>,
 ) -> Result<CanonicalValue> {
-    if value.is_null() && matches!(context, ScalarJsonContext::ResponsePath(_)) {
+    if value.is_null() && matches!(context, ScalarJsonContext::Response(_)) {
         return Ok(CanonicalValue::Null);
     }
     FactCanonicalScalar::from_json_value(value_type, value, context)
@@ -417,7 +369,7 @@ pub(crate) fn validate_extracted_scalar(
     scalar: &FactCanonicalScalar,
 ) -> Result<()> {
     if scalar.value_type() != field.value_type {
-        return Err(FactDescriptorError::field(
+        return Err(FactError::field(
             field.field_id.clone(),
             format!(
                 "field expects {:?} but extracted {:?}",
@@ -437,7 +389,7 @@ pub(crate) fn validate_scalar_size(
 ) -> Result<()> {
     let len = scalar.canonical_text_len();
     if len > MAX_FACT_SCALAR_BYTES {
-        return Err(FactDescriptorError::field(
+        return Err(FactError::field(
             field_id.clone(),
             format!("scalar exceeds {MAX_FACT_SCALAR_BYTES} byte limit"),
         ));
@@ -454,7 +406,7 @@ fn validate_decimal_scale(field: &FactFieldDescriptor, scalar: &FactCanonicalSca
     };
     if scale.exponent() >= 0 {
         if decimal_fraction_digits(value.as_str()) != 0 {
-            return Err(FactDescriptorError::field(
+            return Err(FactError::field(
                 field.field_id.clone(),
                 "decimal field with non-negative scale exponent must not contain fractional digits",
             ));
@@ -465,7 +417,7 @@ fn validate_decimal_scale(field: &FactFieldDescriptor, scalar: &FactCanonicalSca
     let expected_digits = usize::from(scale.exponent().unsigned_abs());
     let actual_digits = decimal_fraction_digits(value.as_str());
     if actual_digits != expected_digits {
-        return Err(FactDescriptorError::field(
+        return Err(FactError::field(
             field.field_id.clone(),
             format!(
                 "decimal field scale expects {expected_digits} fractional digits but found {actual_digits}"
@@ -489,21 +441,21 @@ pub(crate) fn validate_ordering(
     let mut seen_fields = BTreeSet::new();
     for term in &ordering.terms {
         if !seen_fields.insert(term.field_id.clone()) {
-            return Err(FactDescriptorError::ordering(
+            return Err(FactError::ordering(
                 ordering.name.clone(),
                 format!("duplicate ordering field {}", term.field_id),
             ));
         }
 
         let Some(field) = fields_by_id.get(&term.field_id) else {
-            return Err(FactDescriptorError::ordering(
+            return Err(FactError::ordering(
                 ordering.name.clone(),
                 format!("ordering references unknown field {}", term.field_id),
             ));
         };
 
         if !field.sortable {
-            return Err(FactDescriptorError::ordering(
+            return Err(FactError::ordering(
                 ordering.name.clone(),
                 format!("ordering references non-sortable field {}", term.field_id),
             ));

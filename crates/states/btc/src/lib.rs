@@ -19,9 +19,8 @@ use mfm_effects::{ManagedPlatformWrite, ReadExternal};
 use mfm_fact_capabilities::{FactIndexReadCapability, FactIndexReadRequest, FactIndexReadResponse};
 use mfm_facts::{
     compile_fact_query_plan, FactAudience, FactCanonicalScalar, FactFieldId, FactOrderingName,
-    FactQueryInput, FactQueryOperator, FactQueryPredicate, FactQueryReturnField, FactQueryScope,
-    FactSelectionEvidence, FactVisibility, FactVisibilityScope, ScopeDecisionEvidence,
-    StoreScopeRef,
+    FactQueryInput, FactQueryOperator, FactQueryPredicate, FactQueryScope, FactSelectionEvidence,
+    FactVisibility, FactVisibilityScope, ScopeDecisionEvidence, StoreScopeRef,
 };
 use mfm_ids::{AdapterKind, AdapterVersion, ContentDigest};
 use mfm_ids::{DigestAlgorithm, StateKind, StateVersion};
@@ -1430,11 +1429,10 @@ fn collector_checkpoint_query_input(
     })
 }
 
-fn query_return_field(field_id: &str) -> Result<FactQueryReturnField, BtcStateError> {
-    let field_id = FactFieldId::new(field_id).map_err(|error| BtcStateError::InvalidInput {
+fn query_return_field(field_id: &str) -> Result<FactFieldId, BtcStateError> {
+    FactFieldId::new(field_id).map_err(|error| BtcStateError::InvalidInput {
         reason: error.to_string(),
-    })?;
-    Ok(FactQueryReturnField::new(field_id))
+    })
 }
 
 fn query_predicate(
@@ -1532,10 +1530,10 @@ mod tests {
     use mfm_facts::{
         fact_descriptor_hash, fact_query_plan_hash, CanonicalFactQueryPlan,
         DescriptorCatalogWatermark, FactClaimId, FactFieldExposure, FactFieldExtraction,
-        FactFieldValueType, FactProjectionGeneration, FactQueryReceipt, FactQueryReceiptMaterial,
-        InternalFactRef, InternalFactRefParts, StoreCommitWatermark, StoreIdentity, StoreKeyId,
-        StoreReadFrontier, StoreReadFrontierType, StoreReceiptAuthentication,
-        StoreReceiptAuthenticationScheme,
+        FactFieldValueType, FactProducerProvenance, FactProjectionGeneration, FactQueryReceipt,
+        FactQueryReceiptMaterial, FactResponseEvidence, FactSubjectRef, InternalFactRef,
+        InternalFactRefParts, StoreCommitWatermark, StoreIdentity, StoreKeyId, StoreReadFrontier,
+        StoreReadFrontierType, StoreReceiptAuthentication, StoreReceiptAuthenticationScheme,
     };
     use mfm_ids::{
         ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest, DigestBytes, EventId, RunId,
@@ -1617,7 +1615,7 @@ mod tests {
         assert_eq!(descriptor.fact_kind().as_str(), "chain.head");
         assert!(descriptor.fields().iter().any(|field| {
             field.field_id().as_str() == "subject.semantic_source_identity"
-                && matches!(field.extraction(), FactFieldExtraction::SubjectPath(_))
+                && matches!(field.extraction(), FactFieldExtraction::Subject(_))
                 && field.exposure() == FactFieldExposure::QueryOnly
         }));
         assert!(descriptor.fields().iter().any(|field| {
@@ -1654,7 +1652,7 @@ mod tests {
                     .fields()
                     .iter()
                     .any(|field| field.field_id().as_str() == field_id
-                        && matches!(field.extraction(), FactFieldExtraction::SubjectPath(_))),
+                        && matches!(field.extraction(), FactFieldExtraction::Subject(_))),
                 "missing subject field {field_id}"
             );
         }
@@ -1725,10 +1723,7 @@ mod tests {
         assert!(query.get("scope").is_none());
         assert_eq!(query["limit"], 1);
         assert_eq!(query["ordering"], "result.high_watermark_height.desc");
-        assert_eq!(
-            query["return_fields"][0]["field_id"],
-            "result.high_watermark_height"
-        );
+        assert_eq!(query["return_fields"][0], "result.high_watermark_height");
         let parsed_shape = mfm_facts::parse_canonical_fact_query_shape(plan).expect("query shape");
         assert_eq!(parsed_shape.return_fields().len(), 1);
         assert!(query["predicates"]
@@ -2166,36 +2161,36 @@ mod tests {
             visibility: FactVisibility::indexed_default(FactAudience::Control),
             fact_kind: mfm_facts::FactKind::new("collector.checkpoint").expect("kind"),
             fact_descriptor_hash: digest(seed + 2),
-            fact_subject_namespace_hash: digest(seed + 3),
-            fact_key: mfm_facts::FactKey::from_digest(digest(seed + 4)),
-            subject_material_hash: digest(seed + 5),
-            request_schema_id: None,
-            request_hash: None,
-            response_schema_id: schema_id(seed + 6),
-            response_hash: digest(seed + 7),
-            artifact_id: ArtifactId::from_digest(
-                DigestAlgorithm::Sha256JcsV1,
-                digest_bytes(seed + 8),
+            subject: FactSubjectRef::new(
+                digest(seed + 3),
+                mfm_facts::FactKey::from_digest(digest(seed + 4)),
+                digest(seed + 5),
             ),
-            artifact_evidence_hash: digest(seed + 9),
-            capability_kind: CapabilityKind::new(
-                "mfm.fact",
-                "index.read",
-                DigestAlgorithm::Sha256JcsV1,
-                digest_bytes(seed + 10),
-            )
-            .expect("capability kind"),
-            capability_version: CapabilityVersion::new("mfm.fact.index.read.v1")
-                .expect("capability version"),
-            adapter_kind: AdapterKind::new(
-                "mfm.fact",
-                "index.adapter",
-                DigestAlgorithm::Sha256JcsV1,
-                digest_bytes(seed + 11),
-            )
-            .expect("adapter kind"),
-            adapter_version: AdapterVersion::new("mfm.fact.index.adapter.v1")
-                .expect("adapter version"),
+            request: None,
+            response: FactResponseEvidence::new(
+                schema_id(seed + 6),
+                digest(seed + 7),
+                ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(seed + 8)),
+                digest(seed + 9),
+            ),
+            producer: FactProducerProvenance::new(
+                CapabilityKind::new(
+                    "mfm.fact",
+                    "index.read",
+                    DigestAlgorithm::Sha256JcsV1,
+                    digest_bytes(seed + 10),
+                )
+                .expect("capability kind"),
+                CapabilityVersion::new("mfm.fact.index.read.v1").expect("capability version"),
+                AdapterKind::new(
+                    "mfm.fact",
+                    "index.adapter",
+                    DigestAlgorithm::Sha256JcsV1,
+                    digest_bytes(seed + 11),
+                )
+                .expect("adapter kind"),
+                AdapterVersion::new("mfm.fact.index.adapter.v1").expect("adapter version"),
+            ),
         })
         .expect("fact ref")
     }

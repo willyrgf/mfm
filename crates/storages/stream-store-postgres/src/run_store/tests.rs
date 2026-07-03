@@ -24,11 +24,11 @@ use mfm_store::v1::test_support::{
     confirmation_terminal_policies_for_projection_for_test as confirmation_terminal_policies_for_projection,
     fact_descriptor_projection_fixture_for_test, fixed_attempt_id_for_test as attempt_id,
     fixed_cell_id_for_test as cell_id, fixed_descriptor_id_for_test as descriptor_id,
-    fixed_digest_bytes_for_test as digest_bytes, fixed_event_id_for_test as event_id,
-    fixed_node_id_for_test as node_id, fixed_schema_id_for_test as schema_id,
-    fixed_scope_id_for_test as scope_id, fixed_semantic_type_id_for_test as semantic_id,
-    fixed_spec_hash_for_test as spec_hash, fixed_state_kind_for_test as state_kind,
-    media_type_for_test as media_type, prepared_commit_plan_for_test as test_prepared_commit_plan,
+    fixed_digest_bytes_for_test as digest_bytes, fixed_node_id_for_test as node_id,
+    fixed_schema_id_for_test as schema_id, fixed_scope_id_for_test as scope_id,
+    fixed_semantic_type_id_for_test as semantic_id, fixed_spec_hash_for_test as spec_hash,
+    fixed_state_kind_for_test as state_kind, media_type_for_test as media_type,
+    prepared_commit_plan_for_test as test_prepared_commit_plan,
     run_artifact_ref_from_store_artifact_for_test as run_artifact_ref,
     run_identity_material_for_test, FactDescriptorProjectionFixtureForTest,
 };
@@ -757,35 +757,32 @@ fn fact_descriptor() -> mfm_facts::FactDescriptor {
         vec![
             mfm_facts::FactFieldDescriptor::new(
                 mfm_facts::FactFieldId::new("subject.chain").expect("field id"),
-                mfm_facts::FactFieldPath::new("subject.chain").expect("field path"),
                 mfm_facts::FactFieldValueType::String,
-                mfm_facts::FactFieldExtraction::SubjectPath(
+                mfm_facts::FactFieldExtraction::Subject(
                     mfm_facts::CanonicalValuePath::new("chain").expect("path"),
                 ),
-                vec![mfm_facts::FactQueryOperator::Equal],
-                mfm_facts::FactFieldExposure::Returnable,
-                None,
-                None,
-                false,
-                true,
+                mfm_facts::FactFieldPolicy::new(
+                    vec![mfm_facts::FactQueryOperator::Equal],
+                    mfm_facts::FactFieldExposure::Returnable,
+                )
+                .required(),
             )
             .expect("subject field"),
             mfm_facts::FactFieldDescriptor::new(
                 mfm_facts::FactFieldId::new("result.height").expect("field id"),
-                mfm_facts::FactFieldPath::new("result.height").expect("field path"),
                 mfm_facts::FactFieldValueType::UnsignedInteger,
-                mfm_facts::FactFieldExtraction::ResponsePath(
+                mfm_facts::FactFieldExtraction::Response(
                     mfm_facts::CanonicalValuePath::new("height").expect("path"),
                 ),
-                vec![
-                    mfm_facts::FactQueryOperator::Equal,
-                    mfm_facts::FactQueryOperator::GreaterThanOrEqual,
-                ],
-                mfm_facts::FactFieldExposure::Returnable,
-                None,
-                None,
-                true,
-                true,
+                mfm_facts::FactFieldPolicy::new(
+                    vec![
+                        mfm_facts::FactQueryOperator::Equal,
+                        mfm_facts::FactQueryOperator::GreaterThanOrEqual,
+                    ],
+                    mfm_facts::FactFieldExposure::Returnable,
+                )
+                .sortable()
+                .required(),
             )
             .expect("response field"),
         ],
@@ -820,17 +817,15 @@ fn fact_descriptor_fixture() -> FactDescriptorProjectionFixtureForTest {
 }
 
 fn fact_subject_evidence() -> mfm_facts::FactSubjectEvidence {
-    let material = mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactSubjectValueV1::new(
+    let material = mfm_facts::FactSubjectMaterialV1::new(vec![mfm_facts::FactFieldValue::new(
         mfm_facts::FactFieldId::new("subject.chain").expect("field"),
         mfm_facts::FactFieldValueType::String,
         mfm_facts::FactCanonicalScalar::string("postgres_test_chain"),
     )
     .expect("subject value")])
     .expect("subject material");
-    let namespace =
-        mfm_facts::fact_subject_namespace(&fact_descriptor()).expect("subject namespace");
     let namespace_hash =
-        mfm_facts::fact_subject_namespace_hash(&namespace).expect("subject namespace hash");
+        mfm_facts::fact_subject_namespace_hash(&fact_descriptor()).expect("subject namespace hash");
     mfm_facts::FactSubjectEvidence::from_material(namespace_hash, &material)
         .expect("subject evidence")
 }
@@ -895,12 +890,8 @@ fn fact_query_plan_with_limit(limit: Option<u64>) -> mfm_facts::CanonicalFactQue
             ),
         ],
         vec![
-            mfm_facts::FactQueryReturnField::new(
-                mfm_facts::FactFieldId::new("subject.chain").expect("field"),
-            ),
-            mfm_facts::FactQueryReturnField::new(
-                mfm_facts::FactFieldId::new("result.height").expect("field"),
-            ),
+            mfm_facts::FactFieldId::new("subject.chain").expect("field"),
+            mfm_facts::FactFieldId::new("result.height").expect("field"),
         ],
         mfm_facts::FactOrderingName::new("result.height.desc").expect("ordering"),
         limit,
