@@ -220,7 +220,7 @@ pub struct CompiledFactQueryShape {
 
 impl CompiledFactQueryShape {
     /// Creates a parsed query shape.
-    pub fn new(
+    pub(crate) fn new(
         predicates: Vec<FactQueryPredicate>,
         return_fields: Vec<FactQueryReturnField>,
     ) -> Result<Self> {
@@ -264,7 +264,7 @@ pub struct CanonicalFactQueryPlan {
 impl CanonicalFactQueryPlan {
     /// Creates a canonical fact query plan and computes its query hash.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         store_scope: StoreScopeRef,
         query_scope: FactQueryScope,
         query_compiler_version: FactQueryCompilerVersion,
