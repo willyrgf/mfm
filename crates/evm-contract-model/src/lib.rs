@@ -1376,8 +1376,8 @@ impl<'de> Deserialize<'de> for ImportFromMfmRun {
 pub struct ImportFromMfmRunEvidence {
     /// Source certified spec hash.
     pub source_spec_hash: LifecycleSpecHashRef,
-    /// Retained source spec certificate or export certificate.
-    pub source_spec_certificate_or_export_certificate_ref: LifecycleArtifactEvidenceRef,
+    /// Retained source typed-spec certificate verified against the compiled registry.
+    pub source_spec_certificate_ref: LifecycleArtifactEvidenceRef,
     /// Retained source run stream or export bundle.
     pub source_run_stream_ref_or_export_bundle_ref: LifecycleArtifactEvidenceRef,
     /// Source cell or output id.
@@ -1402,32 +1402,6 @@ pub struct ImportFromMfmRunEvidence {
     pub source_terminal_cell_or_output_event_ref: LifecycleEventIdRef,
     /// Certified import policy digest.
     pub import_policy_digest: ContractProfileDigestRef,
-}
-
-/// Retained certificate for a source-run lifecycle export bundle.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[mfm(
-    namespace = "mfm.evm.contract",
-    name = "source-run-export-certificate",
-    schema = "mfm.evm.contract.value.source_run_export_certificate"
-)]
-pub struct SourceRunExportCertificate {
-    /// Certificate contract version.
-    pub certificate_version: u64,
-    /// Source run id covered by the certificate.
-    pub source_run_id: LifecycleRunIdRef,
-    /// Source certified spec hash covered by the certificate.
-    pub source_spec_hash: LifecycleSpecHashRef,
-    /// Digest of the retained stream/export bundle this certificate authorizes.
-    pub export_bundle_digest: ContractProfileDigestRef,
-    /// Producer descriptors allowed to export lifecycle resources.
-    pub allowed_producer_descriptor_ids: Vec<LifecycleDescriptorIdRef>,
-    /// Context descriptors allowed by the source authority.
-    pub allowed_context_descriptor_ids: Vec<LifecycleContextDescriptorIdRef>,
-    /// Value schemas allowed by the source authority.
-    pub allowed_schema_ids: Vec<ArtifactEvidenceSchemaId>,
-    /// Value semantic types allowed by the source authority.
-    pub allowed_semantic_type_ids: Vec<ArtifactEvidenceSemanticTypeId>,
 }
 
 /// One terminal source-run cell or output event in a retained export bundle.
@@ -1472,6 +1446,8 @@ pub struct SourceRunExportBundle {
     pub source_run_id: LifecycleRunIdRef,
     /// Source certified spec hash covered by the bundle.
     pub source_spec_hash: LifecycleSpecHashRef,
+    /// Persisted canonical source typed spec JSON covered by the retained source spec certificate.
+    pub source_spec_canonical_json: String,
     /// Terminal lifecycle cell/output events exported from the source stream.
     pub terminal_events: Vec<SourceRunTerminalEvent>,
 }

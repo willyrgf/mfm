@@ -20,6 +20,7 @@ mfm-adapter-contracts = { path = "../../adapter-contracts" }
 mfm-artifact-capabilities = { path = "../../artifact-capabilities" }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-capabilities = { path = "../../kernel/capabilities" }
+mfm-certify = { path = "../../kernel/certify" }
 mfm-events = { path = "../../kernel/events" }
 mfm-evm-capabilities = { path = "../../evm-capabilities" }
 mfm-evm-contract-config = { path = "../../evm-contract-config" }

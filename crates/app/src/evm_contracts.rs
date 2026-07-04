@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use mfm_certify::CertificationRegistry;
 use mfm_evm_capabilities::EvmNetworkId;
 use mfm_signers_keystore::{KeystoreSignerProvider, KeystoreSignerRegistryEntry};
 use mfm_signing::SignerRef;
@@ -14,16 +15,19 @@ use mfm_evm_capabilities::EvmChainGuard;
 struct RuntimeConfigEvmContractRuntimeFactory {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     runtime_config: RuntimeConfigLoader,
+    source_run_registry: CertificationRegistry,
 }
 
 impl RuntimeConfigEvmContractRuntimeFactory {
     fn new(
         artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
         runtime_config: RuntimeConfigLoader,
+        source_run_registry: CertificationRegistry,
     ) -> Self {
         Self {
             artifacts,
             runtime_config,
+            source_run_registry,
         }
     }
 
@@ -43,6 +47,10 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
 {
     fn artifacts(&self) -> &dyn store::RetainedArtifactReadProvider {
         self.artifacts.as_ref()
+    }
+
+    fn source_run_import_registry(&self) -> Option<&CertificationRegistry> {
+        Some(&self.source_run_registry)
     }
 
     fn validate_runtime_for(
@@ -84,9 +92,12 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
         evm_provider
             .validate_route_binding(&network_id)
             .map_err(runtime_evm_transport_error)?;
-        Ok(mfm_adapters_evm_contracts::EvmContractReadRuntime::new(
-            Arc::new(evm_provider),
-        ))
+        Ok(
+            mfm_adapters_evm_contracts::EvmContractReadRuntime::new_with_source_run_import_registry(
+                Arc::new(evm_provider),
+                self.source_run_registry.clone(),
+            ),
+        )
     }
 
     fn runtime_for(
@@ -142,12 +153,14 @@ pub(crate) fn register_contract_lifecycle_runners(
     registry: &mut mfm_runtime::ErasedRunnerRegistry,
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     runtime_config: RuntimeConfigLoader,
+    source_run_registry: CertificationRegistry,
 ) -> mfm_runtime::Result<()> {
     mfm_adapters_evm_contracts::register_contract_lifecycle_runners_with_factory(
         registry,
         Arc::new(RuntimeConfigEvmContractRuntimeFactory::new(
             artifacts,
             runtime_config,
+            source_run_registry,
         )),
     )
 }

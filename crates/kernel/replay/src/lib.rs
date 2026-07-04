@@ -344,6 +344,8 @@ pub mod v1 {
         pub pair_id: SideEffectPairId,
         /// Invocation epoch to replay.
         pub invocation_epoch: u32,
+        /// Certified submit-node context and output resource authority for this side effect.
+        pub certified_context: CertifiedSideEffectContext,
         /// Evidence schema id expected by replay.
         pub evidence_schema_id: SchemaId,
         /// Canonical evidence hash expected by replay.
@@ -352,14 +354,35 @@ pub mod v1 {
         pub replay_verifier_id: Option<events::ReplayVerifierId>,
     }
 
+    /// Certified context authority for a side-effect submit node.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct CertifiedSideEffectContext {
+        /// Certified context required by the submit node.
+        pub node_context: spec::NodeContextSpec,
+        /// Certified context/resource/stage constraint for the submit node output cell.
+        pub output_context: spec::CellContextSpec,
+    }
+
+    impl CertifiedSideEffectContext {
+        /// Returns no-context side-effect authority for tests and no-context domains.
+        pub const fn no_context() -> Self {
+            Self {
+                node_context: spec::NodeContextSpec::NoContext,
+                output_context: spec::CellContextSpec::NoContext,
+            }
+        }
+    }
+
     /// Broker-indexed side-effect replay frame for one intent and invocation epoch.
     ///
     /// The frame borrows recorded, replay-authorized event payloads from [`ReplayBroker`]. Domain
     /// verifiers still own cardinality, missing-evidence policy, and evidence interpretation.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct SideEffectReplayFrame<'a> {
         /// Intent persisted event payload.
         pub intent: &'a side_effect::IntentPersisted,
+        /// Certified submit-node context and output resource authority.
+        pub certified_context: CertifiedSideEffectContext,
         /// Invocation prepared event payload, when present.
         pub prepared: Option<&'a side_effect::InvocationPrepared>,
         /// Submission observed event payload, when present.
@@ -380,6 +403,7 @@ pub mod v1 {
             let submission = self.submission?;
             Some(side_effect_evidence_replay_request(
                 self.intent,
+                self.certified_context.clone(),
                 submission.submission_schema_id.clone(),
                 submission.submission_hash.clone(),
                 None,
@@ -391,6 +415,7 @@ pub mod v1 {
             let receipt = self.receipt?;
             Some(side_effect_evidence_replay_request(
                 self.intent,
+                self.certified_context.clone(),
                 receipt.receipt_schema_id.clone(),
                 receipt.receipt_hash.clone(),
                 Some(receipt.replay_verifier_id.clone()),
@@ -402,6 +427,7 @@ pub mod v1 {
             let proof = self.not_submitted?;
             Some(side_effect_evidence_replay_request(
                 self.intent,
+                self.certified_context.clone(),
                 proof.proof_schema_id.clone(),
                 proof.proof_hash.clone(),
                 None,
@@ -413,6 +439,7 @@ pub mod v1 {
             let confirmation = self.confirmation?;
             Some(side_effect_evidence_replay_request(
                 self.intent,
+                self.certified_context.clone(),
                 confirmation.confirmation_schema_id.clone(),
                 confirmation.confirmation_hash.clone(),
                 Some(confirmation.replay_verifier_id.clone()),
@@ -424,6 +451,7 @@ pub mod v1 {
             let ambiguity = self.ambiguity?;
             Some(side_effect_evidence_replay_request(
                 self.intent,
+                self.certified_context.clone(),
                 ambiguity.evidence_schema_id.clone(),
                 ambiguity.evidence_hash.clone(),
                 None,
@@ -433,6 +461,7 @@ pub mod v1 {
 
     fn side_effect_evidence_replay_request(
         intent: &side_effect::IntentPersisted,
+        certified_context: CertifiedSideEffectContext,
         evidence_schema_id: SchemaId,
         evidence_hash: ContentDigest,
         replay_verifier_id: Option<events::ReplayVerifierId>,
@@ -440,6 +469,7 @@ pub mod v1 {
         SideEffectEvidenceReplayRequest {
             pair_id: intent.pair_id.clone(),
             invocation_epoch: intent.invocation_epoch,
+            certified_context,
             evidence_schema_id,
             evidence_hash,
             replay_verifier_id,
@@ -524,6 +554,8 @@ pub mod v1 {
     pub struct SideEffectReceiptReplayInput {
         /// Intent evidence for the side effect being verified.
         pub intent: SideEffectIntentReplayEvidence,
+        /// Certified submit-node context and output resource authority.
+        pub certified_context: CertifiedSideEffectContext,
         /// Prepared invocation evidence, when the side-effect protocol recorded one.
         pub prepared_invocation: Option<PreparedInvocationReplayEvidence>,
         /// Submission evidence when submission was observed before receipt.
@@ -537,6 +569,8 @@ pub mod v1 {
     pub struct SideEffectSubmissionReplayInput {
         /// Intent evidence for the side effect being verified.
         pub intent: SideEffectIntentReplayEvidence,
+        /// Certified submit-node context and output resource authority.
+        pub certified_context: CertifiedSideEffectContext,
         /// Prepared invocation evidence, when the side-effect protocol recorded one.
         pub prepared_invocation: Option<PreparedInvocationReplayEvidence>,
         /// Submission evidence being verified.
@@ -548,6 +582,8 @@ pub mod v1 {
     pub struct SideEffectConfirmationReplayInput {
         /// Intent evidence for the side effect being verified.
         pub intent: SideEffectIntentReplayEvidence,
+        /// Certified submit-node context and output resource authority.
+        pub certified_context: CertifiedSideEffectContext,
         /// Prepared invocation evidence, when the side-effect protocol recorded one.
         pub prepared_invocation: Option<PreparedInvocationReplayEvidence>,
         /// Submission evidence when submission was observed before confirmation.
@@ -977,8 +1013,11 @@ pub mod v1 {
                     continue;
                 }
                 let key = (intent.pair_id.clone(), intent.invocation_epoch);
+                let certified_context =
+                    self.certified_side_effect_context_for_pair(&intent.pair_id)?;
                 frames.push(SideEffectReplayFrame {
                     intent,
+                    certified_context,
                     prepared: self.prepared_invocations.get(&key),
                     submission: self.submissions.get(&key),
                     not_submitted: self.not_submitted.get(&key),
@@ -1050,6 +1089,7 @@ pub mod v1 {
             let submission = self.side_effect_submission(request)?;
             let input = SideEffectSubmissionReplayInput {
                 intent: self.side_effect_intent_evidence(request)?,
+                certified_context: request.certified_context.clone(),
                 prepared_invocation: self.side_effect_prepared_invocation_for(request)?,
                 submission: submission.clone(),
             };
@@ -1116,6 +1156,7 @@ pub mod v1 {
             let receipt = self.side_effect_receipt(&verifier_request)?;
             let input = SideEffectReceiptReplayInput {
                 intent: self.side_effect_intent_evidence(request)?,
+                certified_context: request.certified_context.clone(),
                 prepared_invocation: self.side_effect_prepared_invocation_for(request)?,
                 submission: self.side_effect_submission_for(request)?,
                 receipt: receipt.clone(),
@@ -1138,6 +1179,7 @@ pub mod v1 {
             let confirmation = self.side_effect_confirmation(&verifier_request)?;
             let input = SideEffectConfirmationReplayInput {
                 intent: self.side_effect_intent_evidence(request)?,
+                certified_context: request.certified_context.clone(),
                 prepared_invocation: self.side_effect_prepared_invocation_for(request)?,
                 submission: self.side_effect_submission_for(request)?,
                 receipt: self.side_effect_receipt_for(request)?,
@@ -1690,6 +1732,22 @@ pub mod v1 {
             Ok(pair.submit_contract.verification.clone())
         }
 
+        fn certified_side_effect_context_for_pair(
+            &self,
+            pair_id: &SideEffectPairId,
+        ) -> Result<CertifiedSideEffectContext> {
+            let pair = self
+                .certified_spec
+                .spec
+                .side_effect_verify_pair_for_pair_id(pair_id)
+                .map_err(certified_spec_error)?;
+            let output_cell = self.cell(pair.submit_output_cell)?;
+            Ok(CertifiedSideEffectContext {
+                node_context: pair.submit_node.context.clone(),
+                output_context: output_cell.context.clone(),
+            })
+        }
+
         fn verify_side_effect_intent(
             &self,
             request: &SideEffectEvidenceReplayRequest,
@@ -1703,6 +1761,13 @@ pub mod v1 {
             if intent.invocation_epoch != request.invocation_epoch {
                 return Err(side_effect_mismatch(
                     "side-effect intent does not match replay request",
+                ));
+            }
+            let certified_context =
+                self.certified_side_effect_context_for_pair(&request.pair_id)?;
+            if request.certified_context != certified_context {
+                return Err(side_effect_mismatch(
+                    "side-effect replay request does not match certified node context",
                 ));
             }
             Ok(())

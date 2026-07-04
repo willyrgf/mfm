@@ -55,7 +55,7 @@ use mfm_evm_contract_model::{
     ExternalAdoptionEvidence, ExternalCodeReadEvidence, ExternalEventAssertionEvidence,
     ExternalEvmSourceEvidence, ExternalReadAssertionEvidence, ImportFromMfmRun,
     ImportFromMfmRunEvidence, LifecycleArtifactEvidenceRef, LifecycleNodeIdRef, ParsedAbi,
-    ReadAssertionConfig, SourceRunExportBundle, SourceRunExportCertificate, SourceRunTerminalEvent,
+    ReadAssertionConfig, SourceCellOrOutputRef, SourceRunExportBundle, SourceRunTerminalEvent,
     ValidationEventResult, ValidationReadResult,
 };
 use mfm_evm_core::hex::bytes_to_hex_prefixed;
@@ -1019,6 +1019,7 @@ async fn import_deployed_with_reads(
     import: &ImportDeployedSpec,
     context: &mfm_program::CertifiedContext<EvmContractContext>,
     artifacts: &dyn store::RetainedArtifactReadProvider,
+    source_run_registry: Option<&mfm_certify::CertificationRegistry>,
 ) -> Result<DeployedContractInstance> {
     match import {
         ImportDeployedSpec::FromMfmRun { source, evidence } => {
@@ -1029,6 +1030,7 @@ async fn import_deployed_with_reads(
                 evidence,
                 context,
                 ContractLifecycleStage::Deployed,
+                source_run_registry,
             )
             .await?;
             ImportDeployedContractState::admit_verified_mfm_run_import(import, imported, context)
@@ -1059,6 +1061,7 @@ async fn import_configured_with_reads(
     context: &mfm_program::CertifiedContext<EvmContractContext>,
     artifact: Option<&ContractArtifactConfig>,
     artifacts: &dyn store::RetainedArtifactReadProvider,
+    source_run_registry: Option<&mfm_certify::CertificationRegistry>,
 ) -> Result<ConfiguredContractInstance> {
     match import {
         ImportConfiguredSpec::FromMfmRun { source, evidence } => {
@@ -1069,6 +1072,7 @@ async fn import_configured_with_reads(
                 evidence,
                 context,
                 ContractLifecycleStage::Configured,
+                source_run_registry,
             )
             .await?;
             ImportConfiguredContractState::admit_verified_mfm_run_import(import, imported, context)
@@ -1227,16 +1231,19 @@ async fn import_source_run_value<T>(
     evidence: &ImportFromMfmRunEvidence,
     context: &mfm_program::CertifiedContext<EvmContractContext>,
     required_stage: ContractLifecycleStage,
+    source_run_registry: Option<&mfm_certify::CertificationRegistry>,
 ) -> Result<T>
 where
     T: ContextBoundOutput + DeserializeOwned,
 {
+    let source_run_registry = source_run_registry.ok_or_else(|| {
+        EvmContractAdapterError::SourceRunImportEvidence(
+            "source-run import requires trusted certification registry authority".to_owned(),
+        )
+    })?;
     validate_source_run_import_evidence::<T>(source, evidence, context, required_stage)?;
-    let certificate = read_lifecycle_evidence_artifact(
-        artifacts,
-        &evidence.source_spec_certificate_or_export_certificate_ref,
-    )
-    .await?;
+    let certificate =
+        read_lifecycle_evidence_artifact(artifacts, &evidence.source_spec_certificate_ref).await?;
     let stream = read_lifecycle_evidence_artifact(
         artifacts,
         &evidence.source_run_stream_ref_or_export_bundle_ref,
@@ -1263,6 +1270,7 @@ where
         certificate.bytes(),
         stream.bytes(),
         required_stage,
+        source_run_registry,
     )?;
     Ok(value)
 }
@@ -1335,24 +1343,32 @@ fn validate_source_run_authority(
     certificate_bytes: &[u8],
     bundle_bytes: &[u8],
     required_stage: ContractLifecycleStage,
+    source_run_registry: &mfm_certify::CertificationRegistry,
 ) -> Result<()> {
-    let certificate: SourceRunExportCertificate = serde_json::from_slice(certificate_bytes)
-        .map_err(|error| EvmContractAdapterError::SourceRunImportEvidence(error.to_string()))?;
     let bundle: SourceRunExportBundle = serde_json::from_slice(bundle_bytes)
         .map_err(|error| EvmContractAdapterError::SourceRunImportEvidence(error.to_string()))?;
+    let source_spec_bytes =
+        PlainCanonicalJsonBytes::from_json_str(&bundle.source_spec_canonical_json)
+            .map_err(|error| EvmContractAdapterError::SourceRunImportEvidence(error.to_string()))?;
+    let certified_source_spec =
+        mfm_certify::verify_persisted_spec_certificate_with_trusted_registry(
+            source_spec_bytes.as_bytes(),
+            certificate_bytes,
+            source_run_registry,
+        )
+        .map_err(|error| EvmContractAdapterError::SourceRunImportEvidence(error.to_string()))?;
 
-    let bundle_digest = digest_for_value(&bundle)?;
-    if certificate.certificate_version != 1
-        || bundle.bundle_version != 1
-        || certificate.source_run_id != source.source_run_id
+    if bundle.bundle_version != 1
         || bundle.source_run_id != source.source_run_id
-        || certificate.source_spec_hash != source.source_spec_hash
         || bundle.source_spec_hash != source.source_spec_hash
-        || certificate.export_bundle_digest != bundle_digest
+        || certified_source_spec.spec_hash()
+            != &source
+                .source_spec_hash
+                .typed()
+                .map_err(EvmContractAdapterError::Model)?
     {
         return Err(EvmContractAdapterError::SourceRunImportEvidence(
-            "source-run export certificate does not authorize the retained stream bundle"
-                .to_owned(),
+            "source-run export bundle does not match trusted source spec authority".to_owned(),
         ));
     }
 
@@ -1367,29 +1383,127 @@ fn validate_source_run_authority(
             )
         })?;
 
-    if !certificate
-        .allowed_producer_descriptor_ids
-        .iter()
-        .any(|descriptor| descriptor == &terminal.source_producer_descriptor_id)
-        || !certificate
-            .allowed_context_descriptor_ids
+    verify_source_terminal_event_against_certified_spec(
+        &certified_source_spec,
+        terminal,
+        required_stage,
+    )?;
+
+    Ok(())
+}
+
+fn verify_source_terminal_event_against_certified_spec(
+    certified: &mfm_certify::CertifiedTypedSpec,
+    terminal: &SourceRunTerminalEvent,
+    required_stage: ContractLifecycleStage,
+) -> Result<()> {
+    let cell_id = match &terminal.source_cell_or_output_id {
+        SourceCellOrOutputRef::Cell { cell_id } => {
+            cell_id.typed().map_err(EvmContractAdapterError::Model)?
+        }
+        SourceCellOrOutputRef::PublicOutput { output_key } => certified
+            .envelope()
+            .spec
+            .public_outputs
+            .outputs
             .iter()
-            .any(|descriptor| descriptor == &terminal.source_context_descriptor_id)
-        || !certificate
-            .allowed_schema_ids
-            .iter()
-            .any(|schema| schema == &terminal.source_cell_schema_id)
-        || !certificate
-            .allowed_semantic_type_ids
-            .iter()
-            .any(|semantic| semantic == &terminal.source_cell_semantic_type_id)
+            .find(|output| output.public_field_path.as_str() == output_key.as_str())
+            .map(|output| output.cell_id.clone())
+            .ok_or_else(|| {
+                EvmContractAdapterError::SourceRunImportEvidence(
+                    "source-run public output is not declared by the certified source spec"
+                        .to_owned(),
+                )
+            })?,
+    };
+    let graph = certified.validated_spec().graph();
+    let cell = graph.cell(&cell_id).ok_or_else(|| {
+        EvmContractAdapterError::SourceRunImportEvidence(
+            "source-run terminal cell is not declared by the certified source spec".to_owned(),
+        )
+    })?;
+
+    if terminal
+        .source_cell_schema_id
+        .typed()
+        .map_err(EvmContractAdapterError::Model)?
+        != cell.schema_id
+        || terminal
+            .source_cell_semantic_type_id
+            .typed()
+            .map_err(EvmContractAdapterError::Model)?
+            != cell.semantic_type_id
     {
         return Err(EvmContractAdapterError::SourceRunImportEvidence(
-            "source-run export certificate does not authorize the claimed producer, context, or value type"
-                .to_owned(),
+            "source-run terminal type evidence does not match certified source cell".to_owned(),
         ));
     }
 
+    let spec::CellContextSpec::Bound {
+        context_ref,
+        resource_kind,
+        stage,
+        producer,
+    } = &cell.context
+    else {
+        return Err(EvmContractAdapterError::SourceRunImportEvidence(
+            "source-run terminal cell is not context-bound".to_owned(),
+        ));
+    };
+    if context_ref != terminal.source_context_ref.as_context_ref()
+        || resource_kind != mfm_evm_contract_model::contract_instance_resource_kind()
+        || stage != context_stage_for_lifecycle_stage(required_stage)
+    {
+        return Err(EvmContractAdapterError::SourceRunImportEvidence(
+            "source-run terminal context does not match certified source cell".to_owned(),
+        ));
+    }
+    let source_context_descriptor_id = terminal
+        .source_context_descriptor_id
+        .typed()
+        .map_err(EvmContractAdapterError::Model)?;
+    if !certified.envelope().spec.contexts.iter().any(|context| {
+        &context.context_ref == context_ref
+            && context.context_descriptor_id == source_context_descriptor_id
+    }) {
+        return Err(EvmContractAdapterError::SourceRunImportEvidence(
+            "source-run terminal context descriptor is not certified by source spec".to_owned(),
+        ));
+    }
+
+    let spec::CellProducer::Node(node_id) = &cell.producer else {
+        return Err(EvmContractAdapterError::SourceRunImportEvidence(
+            "source-run terminal cell was not produced by a certified lifecycle node".to_owned(),
+        ));
+    };
+    let node = graph.forward_node(node_id).ok_or_else(|| {
+        EvmContractAdapterError::SourceRunImportEvidence(
+            "source-run producer node is not certified by source spec".to_owned(),
+        )
+    })?;
+    let source_producer_descriptor_id = terminal
+        .source_producer_descriptor_id
+        .typed()
+        .map_err(EvmContractAdapterError::Model)?;
+    if node.output_cell != cell.cell_id
+        || !producer
+            .producer_descriptor_ids
+            .iter()
+            .any(|descriptor_id| descriptor_id == &source_producer_descriptor_id)
+    {
+        return Err(EvmContractAdapterError::SourceRunImportEvidence(
+            "source-run producer descriptor is not certified for the terminal cell".to_owned(),
+        ));
+    }
+    if node.context
+        != (spec::NodeContextSpec::Required {
+            context_ref: context_ref.clone(),
+        })
+    {
+        return Err(EvmContractAdapterError::SourceRunImportEvidence(
+            "source-run producer node context does not match terminal cell context".to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -1877,6 +1991,7 @@ impl replay::SideEffectReplayVerifier for EvmContractLifecycleReplayVerifier {
             "submission",
         )?;
         let prepared = replay_prepared_invocation(input.prepared_invocation.as_ref())?;
+        verify_prepared_matches_certified_side_effect_context(&input.certified_context, &prepared)?;
         verify_replay_intent_matches_prepared(&input.intent, &prepared)?;
         let submissions: ContractTransactionSubmissions =
             serde_json::from_slice(&input.submission.artifact_bytes).map_err(replay_json_error)?;
@@ -1887,6 +2002,7 @@ impl replay::SideEffectReplayVerifier for EvmContractLifecycleReplayVerifier {
     fn verify_receipt(&self, input: &replay::SideEffectReceiptReplayInput) -> replay::Result<()> {
         self.verify_adapter_binding(&input.intent)?;
         let prepared = replay_prepared_invocation(input.prepared_invocation.as_ref())?;
+        verify_prepared_matches_certified_side_effect_context(&input.certified_context, &prepared)?;
         verify_replay_intent_matches_prepared(&input.intent, &prepared)?;
         if let Some(submission) = &input.submission {
             let submissions: ContractTransactionSubmissions =
@@ -1916,6 +2032,7 @@ impl replay::SideEffectReplayVerifier for EvmContractLifecycleReplayVerifier {
             }
         };
         let prepared = replay_prepared_invocation(input.prepared_invocation.as_ref())?;
+        verify_prepared_matches_certified_side_effect_context(&input.certified_context, &prepared)?;
         verify_replay_intent_matches_prepared(&input.intent, &prepared)?;
         if let Some(submission) = &input.submission {
             let submissions: ContractTransactionSubmissions =
@@ -1950,6 +2067,49 @@ fn replay_prepared_invocation(
         serde_json::from_slice(&prepared.artifact_bytes).map_err(replay_json_error)?;
     ensure_prepared_invocation_public(&evidence).map_err(replay_adapter_error)?;
     Ok(evidence)
+}
+
+fn verify_prepared_matches_certified_side_effect_context(
+    certified: &replay::CertifiedSideEffectContext,
+    prepared: &PreparedContractInvocation,
+) -> replay::Result<()> {
+    ensure_prepared_invocation_public(prepared).map_err(replay_adapter_error)?;
+    let expected_stage = context_stage_for_lifecycle_stage(prepared.resource_stage);
+    let phase_stage_matches = matches!(
+        (prepared.phase, prepared.resource_stage),
+        (
+            ContractMutationPhase::Deploy,
+            ContractLifecycleStage::Deployed
+        ) | (
+            ContractMutationPhase::Configure,
+            ContractLifecycleStage::Configured
+        )
+    );
+    let (
+        spec::NodeContextSpec::Required { context_ref },
+        spec::CellContextSpec::Bound {
+            context_ref: output_context_ref,
+            resource_kind,
+            stage,
+            ..
+        },
+    ) = (&certified.node_context, &certified.output_context)
+    else {
+        return Err(replay_contract_mismatch(
+            "contract lifecycle side effect is missing certified context authority",
+        ));
+    };
+    if context_ref != output_context_ref
+        || prepared.context_ref.as_context_ref() != context_ref
+        || resource_kind != mfm_evm_contract_model::contract_instance_resource_kind()
+        || stage != expected_stage
+        || !phase_stage_matches
+    {
+        return Err(replay_contract_mismatch(
+            "prepared invocation context does not match certified node context",
+        ));
+    }
+    Ok(())
 }
 
 fn verify_replay_intent_matches_prepared(
@@ -2976,6 +3136,9 @@ pub trait EvmContractRuntimeFactory: Send + Sync {
     /// Returns the artifact reader used to materialize configs, inputs, and side-effect evidence.
     fn artifacts(&self) -> &dyn store::RetainedArtifactReadProvider;
 
+    /// Returns the trusted certification registry authority for source-run imports.
+    fn source_run_import_registry(&self) -> Option<&mfm_certify::CertificationRegistry>;
+
     /// Validates process-local runtime bindings for launch ingress before `RunAdmitted`.
     fn validate_runtime_for(
         &self,
@@ -2994,6 +3157,7 @@ pub trait EvmContractRuntimeFactory: Send + Sync {
 #[derive(Clone)]
 pub struct EvmContractReadRuntime {
     evm: Arc<dyn EvmContractReadProvider>,
+    source_run_registry: Option<mfm_certify::CertificationRegistry>,
 }
 
 impl fmt::Debug for EvmContractReadRuntime {
@@ -3006,7 +3170,21 @@ impl fmt::Debug for EvmContractReadRuntime {
 impl EvmContractReadRuntime {
     /// Creates an EVM contract read runtime from explicit process-local providers.
     pub fn new(evm: Arc<dyn EvmContractReadProvider>) -> Self {
-        Self { evm }
+        Self {
+            evm,
+            source_run_registry: None,
+        }
+    }
+
+    /// Creates an EVM contract read runtime with source-run import registry authority.
+    pub fn new_with_source_run_import_registry(
+        evm: Arc<dyn EvmContractReadProvider>,
+        source_run_registry: mfm_certify::CertificationRegistry,
+    ) -> Self {
+        Self {
+            evm,
+            source_run_registry: Some(source_run_registry),
+        }
     }
 
     /// Executes context-bound validation reads through this process-local read runtime.
@@ -3043,6 +3221,7 @@ impl EvmContractReadRuntime {
             import,
             context,
             artifacts,
+            self.source_run_registry.as_ref(),
         )
         .await
     }
@@ -3062,6 +3241,7 @@ impl EvmContractReadRuntime {
             context,
             artifact,
             artifacts,
+            self.source_run_registry.as_ref(),
         )
         .await
     }

@@ -297,7 +297,7 @@ where
     let semantic_type_id = T::semantic_id().expect("semantic").to_string();
     serde_json::json!({
         "source_spec_hash": &source.source_spec_hash,
-        "source_spec_certificate_or_export_certificate_ref": artifact_ref_json(
+        "source_spec_certificate_ref": artifact_ref_json(
             0x50,
             serde_json::json!(content_digest_str(0x51)),
             None,

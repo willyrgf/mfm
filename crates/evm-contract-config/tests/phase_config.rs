@@ -151,7 +151,7 @@ fn import_from_mfm_run_evidence_json(required_stage: &str) -> serde_json::Value 
     };
     serde_json::json!({
         "source_spec_hash": spec_hash_str(0x31),
-        "source_spec_certificate_or_export_certificate_ref": artifact_ref_json(0x50, 0x51, None, None),
+        "source_spec_certificate_ref": artifact_ref_json(0x50, 0x51, None, None),
         "source_run_stream_ref_or_export_bundle_ref": artifact_ref_json(0x52, 0x53, None, None),
         "source_cell_or_output_id": {
             "kind": "cell",
@@ -444,6 +444,45 @@ fn imports_default_to_exact_context_and_accept_explicit_cross_context_policy() {
     };
     assert_eq!(context_refs[0].as_str(), context_ref_str(0x44));
     assert_eq!(source.required_stage, ContractLifecycleStage::Configured);
+}
+
+#[test]
+fn source_run_imports_reject_non_authoritative_public_shapes() {
+    let identifier_only = serde_json::json!({
+        "kind": "from_mfm_run",
+        "source_run_id": run_id_str(0x30),
+        "source_cell_or_output_id": {
+            "kind": "cell",
+            "cell_id": cell_id_str(0x32),
+        },
+    });
+    let public_json = serde_json::json!({
+        "kind": "from_mfm_run",
+        "deployed": {
+            "address": "0x1111111111111111111111111111111111111111",
+            "context_ref": context_ref_str(0x34),
+        },
+    });
+    let projection_row = serde_json::json!({
+        "kind": "from_mfm_run",
+        "projection_row": {
+            "cell_id": cell_id_str(0x32),
+            "content_digest": content_digest_str(0x33),
+            "public_field_path": "deployed",
+        },
+    });
+    let raw_payload = serde_json::json!({
+        "kind": "from_mfm_run",
+        "source": import_from_mfm_run_json("deployed"),
+        "raw_payload": {
+            "address": "0x1111111111111111111111111111111111111111",
+        },
+    });
+
+    for shape in [identifier_only, public_json, projection_row, raw_payload] {
+        assert!(serde_json::from_value::<ImportDeployedSpec>(shape.clone()).is_err());
+        assert!(serde_json::from_value::<ImportConfiguredSpec>(shape).is_err());
+    }
 }
 
 #[test]
