@@ -2495,6 +2495,7 @@ pub mod v1 {
                 || cell.semantic_type_id != payload.semantic_type_id
                 || cell.schema_id != payload.schema_id
                 || cell.value_lineage != payload.value_lineage
+                || cell.context != payload.context
             {
                 return Err(certified_evidence_mismatch(
                     "produced cell does not match certified cell spec",
@@ -2516,6 +2517,7 @@ pub mod v1 {
                 || cell.semantic_type_id != payload.semantic_type_id
                 || cell.schema_id != payload.schema_id
                 || cell.value_lineage != payload.value_lineage
+                || cell.context != payload.context
             {
                 return Err(certified_evidence_mismatch(
                     "skipped cell does not match certified cell spec",

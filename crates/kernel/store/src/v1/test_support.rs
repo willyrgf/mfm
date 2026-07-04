@@ -646,8 +646,19 @@ pub fn persisted_kernel_event_envelope_for_test(
     commit_key: CommitKey,
     payload: events::KernelEventPayload,
 ) -> KernelEventEnvelope {
+    persisted_kernel_event_envelope_with_ordinal_for_test(run_id, seq, 0, commit_key, payload)
+}
+
+/// Builds a validated persisted event envelope from a typed payload and explicit commit ordinal.
+pub fn persisted_kernel_event_envelope_with_ordinal_for_test(
+    run_id: &RunId,
+    seq: u64,
+    ordinal: u32,
+    commit_key: CommitKey,
+    payload: events::KernelEventPayload,
+) -> KernelEventEnvelope {
     let seq = StreamSeq::new(seq).expect("stream seq");
-    let ordinal = CommitOrdinal::new(0);
+    let ordinal = CommitOrdinal::new(ordinal);
     let payload_hash = payload_canonical_json(&payload)
         .expect("payload canonical")
         .content_digest();
