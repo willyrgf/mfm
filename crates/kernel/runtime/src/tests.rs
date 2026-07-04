@@ -12029,6 +12029,7 @@ fn append_runtime_retention_lifecycle_node(
         terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
         storage_policy: spec::StoragePolicy::ContentAddressed,
         redaction_policy: spec::RedactionPolicy::Public,
+        context: spec::CellContextSpec::no_context(),
     });
     let predecessors = match &input_cell.producer {
         spec::CellProducer::Node(producer) => vec![producer.clone()],
@@ -12047,6 +12048,7 @@ fn append_runtime_retention_lifecycle_node(
         state_kind,
         state_version,
         descriptor_id,
+        context: spec::NodeContextSpec::no_context(),
         config_ref,
         input_bindings: input_binding,
         output_cell,
@@ -12147,6 +12149,7 @@ fn append_runtime_complete_lifecycle_node(
         terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
         storage_policy: spec::StoragePolicy::ContentAddressed,
         redaction_policy: spec::RedactionPolicy::Public,
+        context: spec::CellContextSpec::no_context(),
     });
     let predecessors = match &input_cell.producer {
         spec::CellProducer::Node(producer) => vec![producer.clone()],
@@ -12170,6 +12173,7 @@ fn append_runtime_complete_lifecycle_node(
         state_kind,
         state_version,
         descriptor_id,
+        context: spec::NodeContextSpec::no_context(),
         config_ref,
         input_bindings: input_binding,
         output_cell,
@@ -12260,6 +12264,7 @@ fn append_runtime_resolve_saga_terminal_lifecycle_node(
         terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
         storage_policy: spec::StoragePolicy::ContentAddressed,
         redaction_policy: spec::RedactionPolicy::Public,
+        context: spec::CellContextSpec::no_context(),
     });
     typed.nodes.push(spec::NodeSpec {
         node_id: node_id.clone(),
@@ -12269,6 +12274,7 @@ fn append_runtime_resolve_saga_terminal_lifecycle_node(
         state_kind,
         state_version,
         descriptor_id,
+        context: spec::NodeContextSpec::no_context(),
         config_ref,
         input_bindings: input_binding,
         output_cell,
@@ -12410,6 +12416,7 @@ fn fixture() -> Fixture {
             schema_id: public_output_cell.schema_id.clone(),
             required_terminal: public_output_cell.required_terminal,
             value_lineage: public_output_cell.value_lineage.clone(),
+            context: spec::InputContextSpec::no_context(),
         })),
     }]);
     let render_input_binding = spec::InputBindingSpec {
@@ -12482,6 +12489,7 @@ fn fixture() -> Fixture {
         state_kind: render_state_kind.clone(),
         state_version: render_state_version.clone(),
         descriptor_id: render_descriptor.clone(),
+        context: spec::NodeContextSpec::no_context(),
         config_ref: render_config_ref.clone(),
         input_bindings: render_input_binding,
         output_cell: render_cell.clone(),
@@ -12511,6 +12519,7 @@ fn fixture() -> Fixture {
             config_hash: content(0x60),
         },
         saga: spec::SagaPolicySpec::NoSideEffects,
+        contexts: Vec::new(),
         scopes: vec![spec::ScopeSpec {
             scope_id: scope.clone(),
             parent_scope_id: None,
@@ -12581,6 +12590,7 @@ fn fixture() -> Fixture {
                 terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
                 storage_policy: spec::StoragePolicy::ContentAddressed,
                 redaction_policy: spec::RedactionPolicy::Public,
+                context: spec::CellContextSpec::no_context(),
             },
             spec::CellSpec {
                 cell_id: cell_a.clone(),
@@ -12592,6 +12602,7 @@ fn fixture() -> Fixture {
                 terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
                 storage_policy: spec::StoragePolicy::ContentAddressed,
                 redaction_policy: spec::RedactionPolicy::Public,
+                context: spec::CellContextSpec::no_context(),
             },
             spec::CellSpec {
                 cell_id: cell_b.clone(),
@@ -12603,6 +12614,7 @@ fn fixture() -> Fixture {
                 terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
                 storage_policy: spec::StoragePolicy::ContentAddressed,
                 redaction_policy: spec::RedactionPolicy::Public,
+                context: spec::CellContextSpec::no_context(),
             },
             spec::CellSpec {
                 cell_id: render_cell.clone(),
@@ -12614,6 +12626,7 @@ fn fixture() -> Fixture {
                 terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
                 storage_policy: spec::StoragePolicy::PublicOutputArtifact,
                 redaction_policy: spec::RedactionPolicy::Public,
+                context: spec::CellContextSpec::no_context(),
             },
         ],
         value_lineages: vec![
@@ -13274,6 +13287,7 @@ fn node_spec(fixture: NodeSpecFixture) -> spec::NodeSpec {
         state_kind: fixture.state_kind,
         state_version: fixture.state_version,
         descriptor_id: fixture.descriptor_id,
+        context: spec::NodeContextSpec::no_context(),
         config_ref: fixture.config_ref,
         input_bindings: spec::InputBindingSpec {
             input_schema_id: fixture.input_schema,
@@ -13285,6 +13299,7 @@ fn node_spec(fixture: NodeSpecFixture) -> spec::NodeSpec {
                 schema_id: fixture.output_schema.clone(),
                 required_terminal: spec::RequiredTerminal::ProducedOnly,
                 value_lineage: fixture.input_lineage,
+                context: spec::InputContextSpec::no_context(),
             })),
             digest: content(0x73),
         },

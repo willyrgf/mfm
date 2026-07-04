@@ -8,14 +8,14 @@ The EVM lifecycle cutover is blocked until the kernel/program/certifier/runtime/
 phase 1 make context membership certified authority. A domain-only EVM refactor is non-compliant
 with the RFC.
 
-Old public configure and validate shapes are rejected, not translated:
+At the public cutover, old public configure and validate shapes are rejected, not translated:
 
 - `{ "config": ConfigurePhaseConfig, "deployed": DeployedContract }`
 - `{ "config": ValidatePhaseConfig, "configured": ConfiguredContract }`
 
-Rendered public JSON, projection rows, raw typed payloads, and copied `context_ref` fields are never
-import authority. Imports must use certified source-run evidence, a verified export bundle, or an
-explicit external adoption policy with replay-verifiable evidence.
+Rendered public JSON, public fact refs/DTOs, projection rows, raw typed payloads, and copied
+`context_ref` fields are never import authority. Imports must use certified source-run evidence, a
+verified export bundle, or an explicit external adoption policy with replay-verifiable evidence.
 
 ## validations that must stay
 
@@ -29,7 +29,8 @@ remain mandatory:
 - signer reference and expected public signer address validation
 - transaction, receipt, confirmation, idempotency, and nonce-lane validation
 - secret redaction on typed configs, events, artifacts, facts, public output, and errors
-- replay checks for facts, receipts, confirmations, imports, outputs, and public render evidence
+- replay checks for `FactRecorded`, `FactQueryEvidence`, receipts, confirmations, imports, outputs,
+  and public render evidence
 - public-output rendering checks that join certified context data without making rendered JSON
   authority
 
@@ -128,6 +129,9 @@ or raw input seed.
 - `crates/kernel/program-derive`
 - `crates/states/portfolio`
 - `crates/collectors/proof`
+- `crates/states/btc`
+- `crates/ops/btc-chain-head-collector-op`
+- `crates/kernel/facts` for state fact descriptor references that appear in descriptor evidence
 - `crates/states/evm-contracts` only for mechanical `NoContext` declarations before the EVM cutover
 - `crates/kernel/program/tests`
 - `crates/kernel/program/tests/ui`
@@ -159,8 +163,8 @@ or raw input seed.
 - Add a typed context-bound value extractor contract for runtime output admission. The extractor
   must decode the registered Rust value type and read typed `context_ref`/stage/resource metadata;
   runtime must not validate payload context with ad hoc JSON paths.
-- Update every existing state implementation to declare `type Context = NoContext` unless it is
-  converted later in the EVM cutover.
+- Update every existing state implementation, including BTC collector states, to declare
+  `type Context = NoContext` unless it is converted later in a domain cutover.
 - Update derive-generated state input and operation output helpers as needed so context metadata
   is carried on handles but cannot be forged from raw ids.
 
@@ -204,6 +208,7 @@ raw-seed lifecycle resources before runtime can invoke a state.
 - `crates/kernel/certify/src/framework_lifecycle.rs`
 - `crates/kernel/certify/tests.rs`
 - `crates/kernel/certify/tests/ui`
+- `crates/kernel/facts` only if context-bound fact descriptor/query constraints need shared types
 - `crates/kernel/spec/src/v1/tests.rs`
 - `docs/design.md`
 
@@ -234,6 +239,10 @@ raw-seed lifecycle resources before runtime can invoke a state.
   an import state, not a bridge.
 - Include context descriptor identities and context-bound value extractor identities in registry
   digests and certificates.
+- Preserve existing fact descriptor allow-list authority and extend it for context-bound facts:
+  `StateSpec::emitted_fact_descriptors` and node `fact_descriptor_allowlist` remain necessary, but a
+  context-bound fact also needs certified node context, descriptor, resource kind/stage, and
+  query/selection constraints.
 
 **validations/tests to add or update**
 
@@ -245,6 +254,7 @@ raw-seed lifecycle resources before runtime can invoke a state.
 - Certification-fail test for a context-bound output cell whose context differs from the node
   context.
 - Certification-fail test for a same-value bridge that attempts cross-context resource movement.
+- Certification-fail test for a context-bound fact/query result used under the wrong node context.
 - Positive tests for `NoContext` existing workflows.
 
 **deletion/removal work included**
@@ -279,6 +289,12 @@ Enforce certified context authority before runner invocation and at output admis
 - `crates/kernel/program`
 - `crates/states/portfolio`
 - `crates/collectors/proof`
+- `crates/states/btc`
+- `crates/ops/btc-chain-head-collector-op`
+- `crates/adapters/btc-jsonrpc`
+- `crates/btc-capabilities`
+- `crates/fact-capabilities`
+- `crates/kernel/facts`
 - `crates/states/evm-contracts` for mechanical `NoContext` invocation updates
 - adapters that call state execution traits, for mechanical `NoContext` invocation updates
 - `crates/kernel/events`
@@ -316,6 +332,10 @@ Enforce certified context authority before runner invocation and at output admis
 - Attempt-start and attempt-output preconditions remain store-owned and domain-agnostic.
 - Runtime does not read mutable runtime config, public output, projection rows, or live routing
   registries to materialize context.
+- Runtime records context-bound `FactRecorded` claims and `FactQueryEvidence` only through certified
+  descriptor/query authority. Existing `NoContext` collector workflows keep their typed fact
+  recording and authenticated query evidence, but those facts are not promoted to transition context
+  unless certified context constraints say so.
 - Output validation failures inside a valid started attempt follow the existing redacted
   `InvalidRunnerOutput` attempt-failure path when no side-effect boundary has been crossed.
 
@@ -331,6 +351,9 @@ Enforce certified context authority before runner invocation and at output admis
   extractor, not JSON field paths.
 - Runtime admission test that missing context descriptors/extractors block launch before
   `RunAdmitted`.
+- Runtime/runner-kit tests proving context-bound fact recording and fact-query evidence cannot bypass
+  descriptor/query authority.
+- BTC collector smoke test proving `NoContext` fact recording/query evidence still runs and replays.
 
 **deletion/removal work included**
 
@@ -357,9 +380,15 @@ identifier-only imports.
 **files/crates likely touched**
 
 - `crates/kernel/replay`
+- `crates/kernel/facts`
+- `crates/fact-capabilities`
+- `crates/kernel/store`
 - `crates/kernel/runtime/src/history.rs`
+- `crates/kernel/runtime/src/commit.rs`
 - `crates/app/src/lib.rs`
 - `crates/app/src/tests.rs`
+- `crates/adapters/btc-jsonrpc/src/tests.rs`
+- `tests/integration/tests/collector_workflow_happy_path.rs`
 - `crates/kernel/replay/tests`
 - `docs/design.md`
 
@@ -368,8 +397,12 @@ identifier-only imports.
 - `ReplayReadAuthority` carries certified context table authority from the verified runtime spec.
 - Replay stream validation verifies context-bound cell events against certified context/cell/output
   constraints.
-- Replay fact and side-effect evidence lookup includes expected node context and rejects recorded
-  evidence that decodes to another context when the evidence type is context-bound.
+- Replay `FactRecorded`, `FactQueryEvidence`, and side-effect evidence lookup includes expected node
+  context and rejects recorded evidence that decodes to another context when the evidence type is
+  context-bound.
+- Replay verifies authenticated fact-query receipts, returned refs, retained descriptor/response
+  artifacts, selection evidence, and `Control`/`Platform` visibility boundaries without consulting the
+  live fact index or collector providers.
 - Add generic import evidence verification contracts that require retained proof material:
   source spec hash, source certificate/export certificate, committed stream or export bundle ref,
   source cell/output id, source schema/semantic ids, source producer descriptor id, source stage,
@@ -382,8 +415,10 @@ identifier-only imports.
 **validations/tests to add or update**
 
 - Replay test that mismatched output context refs fail closed.
-- Replay test that mismatched fact, receipt, confirmation, or import evidence context refs fail
-  closed.
+- Replay test that mismatched `FactRecorded`, `FactQueryEvidence`, receipt, confirmation, or import
+  evidence context refs fail closed.
+- Replay test that collector checkpoint query evidence replays from retained receipt/source fact
+  authority and never queries the live fact index.
 - Replay test that source-run import with identifiers only is rejected.
 - Replay test that public-output JSON is rejected as import authority.
 - Positive replay test for `NoContext` existing workflows.
@@ -786,8 +821,8 @@ certified context authority and context-bound inputs.
 **validations/tests to add or update**
 
 - Adapter tests proving route selection uses certified context, not action config.
-- Adapter tests proving prepared invocation, receipt, confirmation, validation fact, and import
-  evidence reject mismatched `context_ref`.
+- Adapter tests proving prepared invocation, receipt, confirmation, validation read evidence, report
+  state-output evidence, and import evidence reject mismatched `context_ref`.
 - Adapter tests proving transport guard still rejects observed chain mismatch.
 - Adapter import-admission tests proving source-run and external adoption imports fail closed before
   output when proof material or certified policy is missing or mismatched.
@@ -818,8 +853,10 @@ certified context authority and context-bound inputs.
 
 **goal**
 
-Make EVM replay verify context-bound import, side-effect, validation, and output evidence from
-certified spec plus retained evidence only.
+Make EVM replay verify context-bound import, side-effect, validation read evidence, report
+state-output evidence, and output evidence from certified spec plus retained evidence only. Keep
+generic fact replay as `FactRecorded` and `FactQueryEvidence` verification rather than implying EVM
+validation always emits a fact.
 
 **files/crates likely touched**
 
@@ -837,7 +874,10 @@ certified spec plus retained evidence only.
   - stage identity
   - resource lane key context material
   - request hashes reconstructed from certified context and context-bound inputs
-- EVM read-fact replay checks validation request/response context refs and transport guard evidence.
+- EVM validation replay checks validation read request/response context refs, terminal
+  `ValidationReport` state-output evidence, and transport guard evidence.
+- Generic fact replay remains responsible for actual `FactRecorded` claims and pinned
+  `FactQueryEvidence` artifacts.
 - Import-from-MFM-run verifies source authority through committed run stream plus verified retained
   artifacts, or a certified export bundle. It does not trust rendered public JSON or projection
   rows.
@@ -856,8 +896,8 @@ certified spec plus retained evidence only.
 - Public JSON import attempts fail.
 - External address adoption replay fails if code-read evidence is absent when the policy requires
   code existence.
-- Replay fails on mismatched prepared invocation, receipt, confirmation, validation fact, import, or
-  output context refs.
+- Replay fails on mismatched prepared invocation, receipt, confirmation, validation read evidence,
+  report state-output evidence, import, or output context refs.
 - Replay continues to reject live capability construction.
 
 **deletion/removal work included**
@@ -887,7 +927,9 @@ Cut over CLI, REST, app registry, and public docs/tests to the new breaking EVM 
 - `crates/app/src/entry_points.rs`
 - `crates/app/src/entry_point.rs` tests as needed
 - `crates/app/src/evm_contracts.rs`
+- `crates/app/src/public_facts`
 - `bin/cli/src/commands/run/start.rs`
+- `bin/cli/src/commands/facts.rs`
 - `bin/cli/tests`
 - `bin/cli/README.md`
 - `bin/rest-api/src/lib.rs`
@@ -913,6 +955,9 @@ Cut over CLI, REST, app registry, and public docs/tests to the new breaking EVM 
 - CLI/REST decode errors for old shapes remain stable redacted errors; they do not translate old
   shapes to imports.
 - Output docs state that public output is render/cache material only.
+- Public fact CLI/REST output stays a public query surface only. `Platform` facts may be returned
+  through DTOs and opaque `PublicFactRefId` values; `Control` facts stay hidden; neither public fact
+  refs nor public fact JSON can satisfy source-run imports or lifecycle continuation.
 - Remove old EVM public planner registrations in this commit. There is no period after this commit
   where both old and new EVM public entry shapes are accepted.
 
@@ -925,6 +970,8 @@ Cut over CLI, REST, app registry, and public docs/tests to the new breaking EVM 
 - App entry-point tests proving configure/validate plans use import nodes and no seed material.
 - Public-output tests proving network data is rendered from certified context, not copied
   typestate fields.
+- Public fact tests proving `Control` facts remain hidden and public fact refs cannot be used as
+  import authority.
 - Error-code tests for malformed legacy shapes.
 - End-to-end app tests proving public configure/validate entry points produce import nodes and no
   raw seed material.
@@ -934,6 +981,8 @@ Cut over CLI, REST, app registry, and public docs/tests to the new breaking EVM 
 - Delete CLI/REST docs and fixtures for old `DeployPhaseConfig`, `ConfigurePhaseConfig`,
   `ValidatePhaseConfig`, `DeployedContract`, and `ConfiguredContract` entry JSON.
 - Delete tests that expect configure/validate entry points to stage raw seed material.
+- Delete or update any examples that imply public fact refs, fact DTOs, or fact projection rows are
+  lifecycle import authority.
 - Delete old public planner registrations and old public entry config types:
   - `ContractConfigureEntryPointConfig { config, deployed }`
   - `ContractValidateEntryPointConfig { config, configured }`
@@ -1006,11 +1055,18 @@ deletion by the RFC.
   - `cargo test -p mfm-certify`
   - `cargo test -p mfm-runtime`
   - `cargo test -p mfm-replay`
+  - `cargo test -p mfm-facts`
+  - `cargo test -p mfm-fact-capabilities`
+  - `cargo test -p mfm-btc-capabilities`
+  - `cargo test -p mfm-states-btc`
+  - `cargo test -p mfm-op-btc-chain-head-collector`
+  - `cargo test -p mfm-adapters-btc-jsonrpc`
   - `cargo test -p mfm-evm-capabilities`
   - `cargo test -p mfm-state-evm-contracts`
   - `cargo test -p mfm-op-evm-contract-lifecycle`
   - `cargo test -p mfm-adapters-evm-contracts`
   - `cargo test -p mfm-app evm_contracts`
+  - `cargo test -p mfm-integration-tests --test collector_workflow_happy_path`
   - CLI/REST focused tests for entry-point boundaries
 - Final merge-readiness gates:
   - `nix run .#check`
@@ -1031,6 +1087,7 @@ deletion by the RFC.
 - Delete repeated operation/state/adapter network-matching helpers.
 - Delete adapter runtime lookup by loose phase config network.
 - Delete imports from rendered public JSON, projection rows, or raw typestate payloads.
+- Delete imports from public fact refs, fact DTOs, or fact projection rows.
 - Delete language implying transport guards prove typestate/context membership.
 - Delete tests that only prove copied network fields agree in old shapes.
 
@@ -1073,7 +1130,9 @@ while implementing the required commits.
   producer, identifier-only input, public JSON, projections, and raw payloads before producing
   context-bound resources.
 - Import admission and replay are evidence-backed, not identifier-only.
-- Public JSON is never import authority.
+- Public JSON, public fact refs, and public fact DTOs are never import authority.
+- Context-bound fact/query evidence, when introduced, is certified through descriptor/query
+  constraints and replayed from retained `FactRecorded`/`FactQueryEvidence` authority.
 - Old local defensive network equality checks are removed only after certified invariants exist.
 - Tests prove fail-closed behavior at certification, runtime admission, import admission, replay,
   and public entry boundaries.

@@ -59,6 +59,7 @@ Typed-core code distinguishes data, evidence, authority, and implementation arti
 | `CertifiedSpecCertificate` bytes/evidence | no | Persisted certificate evidence. Hostile until the certifier verifier checks spec hash, certificate hash, registry digest, descriptor identities/digests, lowering/canonicalizer identity, public-output schema id, and audit metadata. |
 | `mfm_certify::CertifiedTypedSpec` | yes | Non-forgeable in-memory authority minted only by registry-backed certification or verified persisted spec/certificate evidence. |
 | `CertifiedDescriptorSet` / `CertifiedFrameworkLifecycle` | yes, within certified spec authority | Certified descriptor and framework lifecycle views derived from a validated spec. Runtime consumes these views instead of recertifying raw descriptor tables. |
+| `mfm_spec::v1::CertifiedContextSpec` / `ContextRef` | no, spec data until certified | Hash-defining transition-context table entries and content-addressed refs. They become execution authority only through certified spec validation plus node, cell, and input context constraints. |
 | `mfm_runtime::CertifiedRuntimeSpec` | yes, runtime-only | Runtime wrapper derived only from `CertifiedTypedSpec`; owns scheduler indexes and erased runner derivation. |
 | `PreparedCommit<Purpose>` / `PreparedCommitPlan` | yes, store mutation | Purpose-specific commit authority built by runtime/app authority. The store rejects mismatched payload purpose, missing saga proof, and missing admitted artifact evidence. |
 | `CertifiedRunStoreAuthority` | yes, store admission | Policy-bound run-start/certified run authority minted from the certified typed spec and tied to run id, certified spec hash, saga policy, and side-effect terminal policies. Store admission checks the token spec hash against the projected `RunAdmitted.spec_hash`, not only the incoming saga payload. |
@@ -285,6 +286,7 @@ independently proved external domain truth.
 `mfm-spec::v1::TypedExecutionSpec` is the persisted execution contract. It includes:
 
 - spec version and canonicalization identity
+- certified transition context table entries, context refs, and node/cell/input context constraints
 - certified descriptors and executable identity requirements
 - scopes, seeds, configs, nodes, cells, bridge nodes, and public outputs
 - input binding trees and value lineage

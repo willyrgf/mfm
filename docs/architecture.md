@@ -53,6 +53,8 @@ The typed boundary separates data, evidence, authority, and implementation artif
 - persisted `CertifiedSpecCertificate` bytes are evidence only until verified
 - `CertifiedTypedSpec` is the non-forgeable authority returned by `mfm-certify`
 - `CertifiedDescriptorSet` and `CertifiedFrameworkLifecycle` are certified spec authority views
+- `CertifiedContextSpec` and `ContextRef` are hash-defining spec data until certifier/runtime
+  authority validates them with node, cell, and input context constraints
 - `CertifiedRuntimeSpec` is runtime authority derived only from `CertifiedTypedSpec`
 - `PreparedCommit<Purpose>` and `PreparedCommitPlan` are store mutation authority built by runtime
 - `CertifiedRunStoreAuthority` is minted from the certified typed spec and is the store admission authority for

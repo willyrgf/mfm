@@ -6,7 +6,8 @@
 
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{
-    ContentDigest, DigestAlgorithm, FieldPath as CheckedFieldPath, IdentityError,
+    ContentDigest, ContextDescriptorId, ContextRef, ContextResourceKind, ContextStage,
+    DigestAlgorithm, FieldPath as CheckedFieldPath, IdentityError,
     ResourceNamespace as CheckedResourceNamespace, SchemaId, SemanticTypeId, SpecHash,
     StableAuthorKey as CheckedStableAuthorKey, VisibleAscii256 as CheckedVisibleAscii256,
 };
@@ -100,6 +101,7 @@ pub fn typed_execution_spec_schema_id() -> Result<SchemaId> {
             "spec_version",
             "lowering_version",
             "config_refs",
+            "contexts",
             "descriptor_identities",
             "nodes",
             "cells",
@@ -307,8 +309,8 @@ pub mod v1 {
     use super::{
         canonical_json, content_digest, spec_hash_from_canonical, CheckedFieldPath,
         CheckedResourceNamespace, CheckedStableAuthorKey, CheckedVisibleAscii256, ContentDigest,
-        DigestAlgorithm, PlainCanonicalJsonBytes, Result, SideEffectVerifyPairErrorKind, SpecError,
-        SpecHash,
+        ContextDescriptorId, ContextRef, ContextResourceKind, ContextStage, DigestAlgorithm,
+        PlainCanonicalJsonBytes, Result, SideEffectVerifyPairErrorKind, SpecError, SpecHash,
     };
     use mfm_capabilities::{CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor};
     use mfm_ids::{
@@ -322,7 +324,7 @@ pub mod v1 {
     /// v1 typed execution spec media type.
     pub const MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
     /// v1 lowering-version string.
-    pub const LOWERING_VERSION: &str = "mfm.typed.lowering.v1";
+    pub const LOWERING_VERSION: &str = "mfm.typed.lowering.v2";
 
     /// Returns the schema id for canonical persisted v1 typed execution specs.
     pub fn typed_execution_spec_schema_id() -> Result<SchemaId> {
@@ -503,6 +505,7 @@ pub mod v1 {
             schema_id: cell.schema_id.clone(),
             required_terminal,
             value_lineage: cell.value_lineage.clone(),
+            context: input_context_from_cell_context(&cell.context),
         }));
         Ok(InputBindingSpec {
             input_schema_id: cell.schema_id.clone(),
@@ -510,6 +513,7 @@ pub mod v1 {
                 kind,
                 serde_json::json!({
                     "cell_id": cell.cell_id.as_str(),
+                    "context": input_context_from_cell_context(&cell.context).json(),
                     "field_path": field_path.as_str(),
                     "input": input_kind,
                     "schema_id": cell.schema_id.as_str(),
@@ -525,11 +529,29 @@ pub mod v1 {
         content_digest(framework_lifecycle_input_digest_json(root))
     }
 
+    fn input_context_from_cell_context(context: &CellContextSpec) -> InputContextSpec {
+        match context {
+            CellContextSpec::NoContext => InputContextSpec::NoContext,
+            CellContextSpec::Bound {
+                context_ref,
+                resource_kind,
+                stage,
+                producer,
+            } => InputContextSpec::Required {
+                context_ref: context_ref.clone(),
+                resource_kind: resource_kind.clone(),
+                stage: stage.clone(),
+                producer: producer.clone(),
+            },
+        }
+    }
+
     fn framework_lifecycle_input_digest_json(root: &InputBindingNodeSpec) -> serde_json::Value {
         match root {
             InputBindingNodeSpec::Unit => serde_json::json!({ "kind": "unit" }),
             InputBindingNodeSpec::Cell(cell) => serde_json::json!({
                 "cell_id": cell.cell_id.as_str(),
+                "context": cell.context.json(),
                 "field_path": cell.field_path.as_str(),
                 "kind": "cell",
                 "required_terminal": cell.required_terminal.as_str(),
@@ -797,6 +819,8 @@ pub mod v1 {
         pub authoring: AuthoringProvenance,
         /// Certified run-level saga policy.
         pub saga: SagaPolicySpec,
+        /// Certified transition contexts available to nodes and cells.
+        pub contexts: Vec<CertifiedContextSpec>,
         /// Persisted scopes.
         pub scopes: Vec<ScopeSpec>,
         /// Declared seed cells.
@@ -822,13 +846,14 @@ pub mod v1 {
     impl TypedExecutionSpec {
         /// Creates a v1 spec with canonical version, media type, canonicalization, and lowering ids.
         pub fn new(parts: TypedExecutionSpecParts) -> Result<Self> {
-            Ok(Self {
+            let spec = Self {
                 spec_version: SpecVersion::new(SPEC_VERSION)?,
                 media_type: MediaType::new(MEDIA_TYPE)?,
                 canonicalization: DigestAlgorithm::Sha256JcsV1,
                 lowering_version: LoweringVersion::new(LOWERING_VERSION)?,
                 authoring: parts.authoring,
                 saga: parts.saga,
+                contexts: parts.contexts,
                 scopes: parts.scopes,
                 seeds: parts.seeds,
                 descriptor_identities: parts.descriptor_identities,
@@ -839,7 +864,9 @@ pub mod v1 {
                 value_lineages: parts.value_lineages,
                 planning_lineage: parts.planning_lineage,
                 public_outputs: parts.public_outputs,
-            })
+            };
+            spec.validate_context_references()?;
+            Ok(spec)
         }
 
         /// Returns canonical JSON bytes for the hash-defining spec.
@@ -955,12 +982,14 @@ pub mod v1 {
         }
 
         fn json(&self) -> Result<serde_json::Value> {
+            self.validate_context_references()?;
             let descriptor_index = DescriptorJsonIndex::new(&self.descriptor_identities)?;
             Ok(serde_json::json!({
                 "authoring": self.authoring.json(),
                 "canonicalization": self.canonicalization.as_str(),
                 "cells": self.cells.iter().map(CellSpec::json).collect::<Vec<_>>(),
                 "config_refs": self.config_refs.iter().map(ConfigRef::json).collect::<Vec<_>>(),
+                "contexts": self.contexts.iter().map(CertifiedContextSpec::json).collect::<Result<Vec<_>>>()?,
                 "descriptor_identities": self.descriptor_identities
                     .iter()
                     .map(DescriptorIdentity::json)
@@ -983,6 +1012,289 @@ pub mod v1 {
                 "spec_version": self.spec_version.as_str(),
                 "value_lineages": self.value_lineages.iter().map(ValueLineage::json).collect::<Vec<_>>(),
             }))
+        }
+
+        fn validate_context_references(&self) -> Result<()> {
+            let mut refs = BTreeMap::new();
+            for context in &self.contexts {
+                if refs
+                    .insert(context.context_ref.as_str().to_owned(), ())
+                    .is_some()
+                {
+                    return Err(json_error(format!(
+                        "duplicate certified context {}",
+                        context.context_ref
+                    )));
+                }
+                context.validate_digest_and_ref()?;
+            }
+
+            for node in &self.nodes {
+                node.context.validate_known_ref(&refs)?;
+                validate_input_context_refs(&node.input_bindings.root, &refs)?;
+            }
+            for node in self.remediations.values() {
+                node.context.validate_known_ref(&refs)?;
+                validate_input_context_refs(&node.input_bindings.root, &refs)?;
+            }
+            for cell in &self.cells {
+                cell.context.validate_known_ref(&refs)?;
+            }
+
+            Ok(())
+        }
+    }
+
+    /// Hash-defining certified transition context entry.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct CertifiedContextSpec {
+        /// Content-addressed context reference.
+        pub context_ref: ContextRef,
+        /// Descriptor identity for the typed context contract.
+        pub context_descriptor_id: ContextDescriptorId,
+        /// Schema identity for the context payload.
+        pub schema_id: SchemaId,
+        /// Semantic type identity for the context payload.
+        pub semantic_type_id: SemanticTypeId,
+        /// Canonicalizer identity used for the context payload.
+        pub canonicalizer_identity: CanonicalizerIdentity,
+        /// Canonical JSON context payload.
+        pub canonical_context: PlainCanonicalJsonBytes,
+        /// Digest of the canonical context payload bytes.
+        pub canonical_context_digest: ContentDigest,
+        /// Length of the canonical context payload bytes.
+        pub canonical_context_byte_len: u64,
+    }
+
+    impl CertifiedContextSpec {
+        /// Derives the stable context reference for a canonical context payload.
+        pub fn derive_context_ref(
+            context_descriptor_id: &ContextDescriptorId,
+            schema_id: &SchemaId,
+            semantic_type_id: &SemanticTypeId,
+            canonicalizer_identity: &CanonicalizerIdentity,
+            canonical_context: &PlainCanonicalJsonBytes,
+        ) -> Result<ContextRef> {
+            let digest = content_digest(serde_json::json!({
+                "canonical_context_digest": canonical_context.content_digest().as_str(),
+                "canonical_context_byte_len": canonical_context.as_bytes().len() as u64,
+                "canonicalizer_identity": canonicalizer_identity.as_str(),
+                "context_descriptor_id": context_descriptor_id.as_str(),
+                "domain_separator": "mfm.certified_transition_context.v1",
+                "schema_id": schema_id.as_str(),
+                "semantic_type_id": semantic_type_id.as_str(),
+            }))?;
+            Ok(ContextRef::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                *digest.digest(),
+            ))
+        }
+
+        fn json(&self) -> Result<serde_json::Value> {
+            let canonical_context: serde_json::Value =
+                serde_json::from_str(self.canonical_context.as_str())
+                    .map_err(|error| SpecError::Json(error.to_string()))?;
+            Ok(serde_json::json!({
+                "canonical_context": canonical_context,
+                "canonical_context_byte_len": self.canonical_context_byte_len,
+                "canonical_context_digest": self.canonical_context_digest.as_str(),
+                "canonicalizer_identity": self.canonicalizer_identity.as_str(),
+                "context_descriptor_id": self.context_descriptor_id.as_str(),
+                "context_ref": self.context_ref.as_str(),
+                "schema_id": self.schema_id.as_str(),
+                "semantic_type_id": self.semantic_type_id.as_str(),
+            }))
+        }
+
+        fn validate_digest_and_ref(&self) -> Result<()> {
+            let digest = self.canonical_context.content_digest();
+            if self.canonical_context_digest != digest {
+                return Err(json_error(format!(
+                    "certified context {} digest mismatch: expected {}, recomputed {}",
+                    self.context_ref, self.canonical_context_digest, digest
+                )));
+            }
+            let byte_len = self.canonical_context.as_bytes().len() as u64;
+            if self.canonical_context_byte_len != byte_len {
+                return Err(json_error(format!(
+                    "certified context {} byte length mismatch: expected {}, recomputed {}",
+                    self.context_ref, self.canonical_context_byte_len, byte_len
+                )));
+            }
+            let derived = Self::derive_context_ref(
+                &self.context_descriptor_id,
+                &self.schema_id,
+                &self.semantic_type_id,
+                &self.canonicalizer_identity,
+                &self.canonical_context,
+            )?;
+            if self.context_ref != derived {
+                return Err(json_error(format!(
+                    "certified context ref mismatch: expected {}, recomputed {}",
+                    self.context_ref, derived
+                )));
+            }
+            Ok(())
+        }
+    }
+
+    /// Context requirement for a certified node.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum NodeContextSpec {
+        /// Node executes outside a semantic transition context.
+        NoContext,
+        /// Node executes under a certified context reference.
+        Required {
+            /// Required certified context reference.
+            context_ref: ContextRef,
+        },
+    }
+
+    impl NodeContextSpec {
+        /// Returns a no-context node requirement.
+        pub const fn no_context() -> Self {
+            Self::NoContext
+        }
+
+        fn json(&self) -> serde_json::Value {
+            match self {
+                Self::NoContext => serde_json::json!({
+                    "kind": "no_context",
+                }),
+                Self::Required { context_ref } => serde_json::json!({
+                    "context_ref": context_ref.as_str(),
+                    "kind": "required",
+                }),
+            }
+        }
+
+        fn validate_known_ref(&self, refs: &BTreeMap<String, ()>) -> Result<()> {
+            if let Self::Required { context_ref } = self {
+                require_context_ref(refs, context_ref)?;
+            }
+            Ok(())
+        }
+    }
+
+    /// Certified producer constraint for a context-bound resource.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ContextProducerSpec {
+        /// Descriptor id authorized to produce this resource, when node-produced.
+        pub producer_descriptor_id: Option<DescriptorId>,
+        /// Whether seed producers can satisfy this context-bound resource.
+        pub seed_producers_allowed: bool,
+    }
+
+    impl ContextProducerSpec {
+        fn json(&self) -> serde_json::Value {
+            serde_json::json!({
+                "producer_descriptor_id": self.producer_descriptor_id.as_ref().map(DescriptorId::as_str),
+                "seed_producers_allowed": self.seed_producers_allowed,
+            })
+        }
+    }
+
+    /// Context constraint for a planned cell.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum CellContextSpec {
+        /// Cell is not context-bound.
+        NoContext,
+        /// Cell is bound to a certified context as a specific resource/stage.
+        Bound {
+            /// Certified context reference.
+            context_ref: ContextRef,
+            /// Domain resource kind.
+            resource_kind: ContextResourceKind,
+            /// Domain resource stage.
+            stage: ContextStage,
+            /// Producer constraint for this resource.
+            producer: Box<ContextProducerSpec>,
+        },
+    }
+
+    impl CellContextSpec {
+        /// Returns a no-context cell constraint.
+        pub const fn no_context() -> Self {
+            Self::NoContext
+        }
+
+        fn json(&self) -> serde_json::Value {
+            match self {
+                Self::NoContext => serde_json::json!({
+                    "kind": "no_context",
+                }),
+                Self::Bound {
+                    context_ref,
+                    resource_kind,
+                    stage,
+                    producer,
+                } => serde_json::json!({
+                    "context_ref": context_ref.as_str(),
+                    "kind": "bound",
+                    "producer": producer.json(),
+                    "resource_kind": resource_kind.as_str(),
+                    "stage": stage.as_str(),
+                }),
+            }
+        }
+
+        fn validate_known_ref(&self, refs: &BTreeMap<String, ()>) -> Result<()> {
+            if let Self::Bound { context_ref, .. } = self {
+                require_context_ref(refs, context_ref)?;
+            }
+            Ok(())
+        }
+    }
+
+    /// Context constraint for an input cell binding.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum InputContextSpec {
+        /// Input is not context-bound.
+        NoContext,
+        /// Input must consume a context-bound resource with these certified constraints.
+        Required {
+            /// Required certified context reference.
+            context_ref: ContextRef,
+            /// Required resource kind.
+            resource_kind: ContextResourceKind,
+            /// Required resource stage.
+            stage: ContextStage,
+            /// Required producer constraint.
+            producer: Box<ContextProducerSpec>,
+        },
+    }
+
+    impl InputContextSpec {
+        /// Returns a no-context input constraint.
+        pub const fn no_context() -> Self {
+            Self::NoContext
+        }
+
+        fn json(&self) -> serde_json::Value {
+            match self {
+                Self::NoContext => serde_json::json!({
+                    "kind": "no_context",
+                }),
+                Self::Required {
+                    context_ref,
+                    resource_kind,
+                    stage,
+                    producer,
+                } => serde_json::json!({
+                    "context_ref": context_ref.as_str(),
+                    "kind": "required",
+                    "producer": producer.json(),
+                    "resource_kind": resource_kind.as_str(),
+                    "stage": stage.as_str(),
+                }),
+            }
+        }
+
+        fn validate_known_ref(&self, refs: &BTreeMap<String, ()>) -> Result<()> {
+            if let Self::Required { context_ref, .. } = self {
+                require_context_ref(refs, context_ref)?;
+            }
+            Ok(())
         }
     }
 
@@ -1180,6 +1492,8 @@ pub mod v1 {
         pub authoring: AuthoringProvenance,
         /// Certified run-level saga policy.
         pub saga: SagaPolicySpec,
+        /// Certified transition contexts available to nodes and cells.
+        pub contexts: Vec<CertifiedContextSpec>,
         /// Persisted scopes.
         pub scopes: Vec<ScopeSpec>,
         /// Declared seed cells.
@@ -1737,6 +2051,8 @@ pub mod v1 {
         pub state_version: StateVersion,
         /// Descriptor id.
         pub descriptor_id: DescriptorId,
+        /// Certified transition-context requirement.
+        pub context: NodeContextSpec,
         /// Config reference.
         pub config_ref: ConfigRef,
         /// Input bindings.
@@ -1768,6 +2084,7 @@ pub mod v1 {
             Ok(serde_json::json!({
                 "adapter_bindings": self.adapter_bindings.iter().map(AdapterBinding::json).collect::<Vec<_>>(),
                 "config_ref": self.config_ref.json(),
+                "context": self.context.json(),
                 "descriptor_ref": descriptor_ref.json(),
                 "deterministic_predecessors": self.deterministic_predecessors
                     .iter()
@@ -2358,12 +2675,15 @@ pub mod v1 {
         pub required_terminal: RequiredTerminal,
         /// Value lineage ref.
         pub value_lineage: ValueLineageRef,
+        /// Certified context constraint for this input cell.
+        pub context: InputContextSpec,
     }
 
     impl InputBindingCellSpec {
         fn json(&self) -> serde_json::Value {
             serde_json::json!({
                 "cell_id": self.cell_id.as_str(),
+                "context": self.context.json(),
                 "field_path": self.field_path.as_str(),
                 "required_terminal": self.required_terminal.as_str(),
                 "schema_id": self.schema_id.as_str(),
@@ -2472,12 +2792,15 @@ pub mod v1 {
         pub storage_policy: StoragePolicy,
         /// Redaction policy.
         pub redaction_policy: RedactionPolicy,
+        /// Certified transition-context constraint.
+        pub context: CellContextSpec,
     }
 
     impl CellSpec {
         fn json(&self) -> serde_json::Value {
             serde_json::json!({
                 "cell_id": self.cell_id.as_str(),
+                "context": self.context.json(),
                 "producer": self.producer.json(),
                 "redaction_policy": self.redaction_policy.as_str(),
                 "schema_id": self.schema_id.as_str(),
@@ -2855,6 +3178,7 @@ pub mod v1 {
         TypedExecutionSpec::new(TypedExecutionSpecParts {
             authoring: parse_authoring(required(object, "authoring")?)?,
             saga: parse_saga_policy(required(object, "saga")?)?,
+            contexts: parse_vec(required(object, "contexts")?, parse_certified_context_spec)?,
             scopes: parse_vec(required(object, "scopes")?, parse_scope_spec)?,
             seeds: parse_vec(required(object, "seeds")?, parse_seed_spec)?,
             descriptor_identities,
@@ -3025,6 +3349,83 @@ pub mod v1 {
             byte_len: required_u64(object, "byte_len")?,
             media_type: MediaType::new(required_str(object, "media_type")?)?,
         })
+    }
+
+    fn parse_certified_context_spec(value: &serde_json::Value) -> Result<CertifiedContextSpec> {
+        let object = object(value, "certified context")?;
+        let canonical_context = canonical_json(required(object, "canonical_context")?.clone())?;
+        let context = CertifiedContextSpec {
+            context_ref: identity(required_str(object, "context_ref")?)?,
+            context_descriptor_id: identity(required_str(object, "context_descriptor_id")?)?,
+            schema_id: identity(required_str(object, "schema_id")?)?,
+            semantic_type_id: identity(required_str(object, "semantic_type_id")?)?,
+            canonicalizer_identity: CanonicalizerIdentity::new(required_str(
+                object,
+                "canonicalizer_identity",
+            )?)?,
+            canonical_context,
+            canonical_context_digest: identity(required_str(object, "canonical_context_digest")?)?,
+            canonical_context_byte_len: required_u64(object, "canonical_context_byte_len")?,
+        };
+        context.validate_digest_and_ref()?;
+        Ok(context)
+    }
+
+    fn parse_node_context(value: &serde_json::Value) -> Result<NodeContextSpec> {
+        let object = object(value, "node context")?;
+        match required_str(object, "kind")? {
+            "no_context" => Ok(NodeContextSpec::NoContext),
+            "required" => Ok(NodeContextSpec::Required {
+                context_ref: identity(required_str(object, "context_ref")?)?,
+            }),
+            kind => Err(json_error(format!(
+                "unsupported node context kind {kind:?}"
+            ))),
+        }
+    }
+
+    fn parse_context_producer(value: &serde_json::Value) -> Result<ContextProducerSpec> {
+        let object = object(value, "context producer constraint")?;
+        Ok(ContextProducerSpec {
+            producer_descriptor_id: optional_identity(object, "producer_descriptor_id")?,
+            seed_producers_allowed: required_bool(object, "seed_producers_allowed")?,
+        })
+    }
+
+    fn parse_cell_context(value: &serde_json::Value) -> Result<CellContextSpec> {
+        let object = object(value, "cell context")?;
+        match required_str(object, "kind")? {
+            "no_context" => Ok(CellContextSpec::NoContext),
+            "bound" => Ok(CellContextSpec::Bound {
+                context_ref: identity(required_str(object, "context_ref")?)?,
+                resource_kind: ContextResourceKind::new(required_str(object, "resource_kind")?)
+                    .map_err(|error| SpecError::Identity(error.to_string()))?,
+                stage: ContextStage::new(required_str(object, "stage")?)
+                    .map_err(|error| SpecError::Identity(error.to_string()))?,
+                producer: Box::new(parse_context_producer(required(object, "producer")?)?),
+            }),
+            kind => Err(json_error(format!(
+                "unsupported cell context kind {kind:?}"
+            ))),
+        }
+    }
+
+    fn parse_input_context(value: &serde_json::Value) -> Result<InputContextSpec> {
+        let object = object(value, "input context")?;
+        match required_str(object, "kind")? {
+            "no_context" => Ok(InputContextSpec::NoContext),
+            "required" => Ok(InputContextSpec::Required {
+                context_ref: identity(required_str(object, "context_ref")?)?,
+                resource_kind: ContextResourceKind::new(required_str(object, "resource_kind")?)
+                    .map_err(|error| SpecError::Identity(error.to_string()))?,
+                stage: ContextStage::new(required_str(object, "stage")?)
+                    .map_err(|error| SpecError::Identity(error.to_string()))?,
+                producer: Box::new(parse_context_producer(required(object, "producer")?)?),
+            }),
+            kind => Err(json_error(format!(
+                "unsupported input context kind {kind:?}"
+            ))),
+        }
     }
 
     fn parse_scope_spec(value: &serde_json::Value) -> Result<ScopeSpec> {
@@ -3250,6 +3651,7 @@ pub mod v1 {
             state_kind: descriptor.state_kind.clone(),
             state_version: descriptor.state_version.clone(),
             descriptor_id: descriptor.descriptor_id.clone(),
+            context: parse_node_context(required(object, "context")?)?,
             config_ref: parse_config_ref(required(object, "config_ref")?)?,
             input_bindings: parse_input_binding_spec(required(object, "input_bindings")?)?,
             output_cell: identity(required_str(object, "output_cell")?)?,
@@ -3504,6 +3906,43 @@ pub mod v1 {
         }
     }
 
+    fn validate_input_context_refs(
+        node: &InputBindingNodeSpec,
+        refs: &BTreeMap<String, ()>,
+    ) -> Result<()> {
+        match node {
+            InputBindingNodeSpec::Unit => {}
+            InputBindingNodeSpec::Cell(cell) => cell.context.validate_known_ref(refs)?,
+            InputBindingNodeSpec::Tuple(elements) => {
+                for element in elements {
+                    validate_input_context_refs(element, refs)?;
+                }
+            }
+            InputBindingNodeSpec::Struct(fields) => {
+                for field in fields {
+                    validate_input_context_refs(&field.node, refs)?;
+                }
+            }
+            InputBindingNodeSpec::Vec { elements, .. }
+            | InputBindingNodeSpec::NonEmptyVec { elements, .. } => {
+                for element in elements {
+                    validate_input_context_refs(element, refs)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn require_context_ref(refs: &BTreeMap<String, ()>, context_ref: &ContextRef) -> Result<()> {
+        if refs.contains_key(context_ref.as_str()) {
+            Ok(())
+        } else {
+            Err(json_error(format!(
+                "unknown certified context ref {context_ref}"
+            )))
+        }
+    }
+
     fn parse_input_binding_cell(value: &serde_json::Value) -> Result<InputBindingCellSpec> {
         let object = object(value, "input binding cell")?;
         Ok(InputBindingCellSpec {
@@ -3513,6 +3952,7 @@ pub mod v1 {
             schema_id: identity(required_str(object, "schema_id")?)?,
             required_terminal: parse_required_terminal(required_str(object, "required_terminal")?)?,
             value_lineage: parse_value_lineage_ref(required(object, "value_lineage")?)?,
+            context: parse_input_context(required(object, "context")?)?,
         })
     }
 
@@ -3559,6 +3999,7 @@ pub mod v1 {
             terminal_policy: parse_cell_terminal_policy(required_str(object, "terminal_policy")?)?,
             storage_policy: parse_storage_policy(required_str(object, "storage_policy")?)?,
             redaction_policy: parse_redaction_policy(required_str(object, "redaction_policy")?)?,
+            context: parse_cell_context(required(object, "context")?)?,
         })
     }
 
@@ -3889,6 +4330,15 @@ pub mod v1 {
         required(object, field)?
             .as_u64()
             .ok_or_else(|| json_error(format!("{field} must be an unsigned integer")))
+    }
+
+    fn required_bool(
+        object: &serde_json::Map<String, serde_json::Value>,
+        field: &'static str,
+    ) -> Result<bool> {
+        required(object, field)?
+            .as_bool()
+            .ok_or_else(|| json_error(format!("{field} must be a boolean")))
     }
 
     fn string<'a>(value: &'a serde_json::Value, field: &'static str) -> Result<&'a str> {

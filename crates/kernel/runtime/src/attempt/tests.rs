@@ -95,6 +95,7 @@ fn exclusive_resource_node(node_id: NodeId) -> spec::NodeSpec {
             DigestAlgorithm::Sha256JcsV1,
             DigestBytes::from_array([0x34; 32]),
         ),
+        context: spec::NodeContextSpec::no_context(),
         config_ref: spec::ConfigRef {
             schema_id: schema.clone(),
             artifact_id: ArtifactId::from_digest(

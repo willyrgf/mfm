@@ -2264,6 +2264,7 @@ struct CellInfo {
     semantic_type_id: SemanticTypeId,
     schema_id: SchemaId,
     value_lineage: spec::ValueLineageRef,
+    context: spec::CellContextSpec,
 }
 
 struct DraftLowerer<'a> {
@@ -2301,6 +2302,7 @@ impl<'a> DraftLowerer<'a> {
         spec::TypedExecutionSpec::new(spec::TypedExecutionSpecParts {
             authoring: self.authoring_provenance()?,
             saga: lower_saga_policy(self.draft.saga_policy()),
+            contexts: Vec::new(),
             scopes,
             seeds,
             descriptor_identities: self.descriptor_identities.values().cloned().collect(),
@@ -2354,6 +2356,7 @@ impl<'a> DraftLowerer<'a> {
                 terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
                 storage_policy: spec::StoragePolicy::ContentAddressed,
                 redaction_policy: spec::RedactionPolicy::Public,
+                context: spec::CellContextSpec::no_context(),
             })?;
             lowered.push(spec::SeedSpec {
                 seed_id: seed.seed_id.clone(),
@@ -2446,6 +2449,7 @@ impl<'a> DraftLowerer<'a> {
             terminal_policy,
             storage_policy: spec::StoragePolicy::ContentAddressed,
             redaction_policy: spec::RedactionPolicy::Public,
+            context: spec::CellContextSpec::no_context(),
         })?;
         self.insert_descriptor(spec::DescriptorIdentity::State(Box::new(
             state_descriptor_identity_from_program(node)?,
@@ -2489,6 +2493,7 @@ impl<'a> DraftLowerer<'a> {
             state_kind: node.state_kind.clone(),
             state_version: node.state_version.clone(),
             descriptor_id: node.state_descriptor_id.clone(),
+            context: spec::NodeContextSpec::no_context(),
             config_ref,
             input_bindings,
             output_cell: node.output_cell_id.clone(),
@@ -2601,6 +2606,7 @@ impl<'a> DraftLowerer<'a> {
             terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
             storage_policy: spec::StoragePolicy::ContentAddressed,
             redaction_policy: spec::RedactionPolicy::Public,
+            context: spec::CellContextSpec::no_context(),
         })?;
         Ok(spec::NodeSpec {
             node_id: verify.node_id.clone(),
@@ -2612,6 +2618,7 @@ impl<'a> DraftLowerer<'a> {
             state_kind: descriptor.state_kind,
             state_version: descriptor.state_version,
             descriptor_id: descriptor.descriptor_id,
+            context: spec::NodeContextSpec::no_context(),
             config_ref,
             input_bindings: input_binding,
             output_cell: verify.output_cell_id.clone(),
@@ -2672,6 +2679,7 @@ impl<'a> DraftLowerer<'a> {
                 terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
                 storage_policy: spec::StoragePolicy::ContentAddressed,
                 redaction_policy: spec::RedactionPolicy::Public,
+                context: spec::CellContextSpec::no_context(),
             })?;
             let descriptor = framework_bridge_descriptor(
                 &bridge.schema_id,
@@ -2689,6 +2697,7 @@ impl<'a> DraftLowerer<'a> {
                 state_kind: descriptor.state_kind,
                 state_version: descriptor.state_version,
                 descriptor_id: descriptor.descriptor_id,
+                context: spec::NodeContextSpec::no_context(),
                 config_ref,
                 input_bindings: input_binding,
                 output_cell: bridge.target_cell_id.clone(),
@@ -2809,6 +2818,7 @@ impl<'a> DraftLowerer<'a> {
                         schema_id: output.schema_id.clone(),
                         required_terminal: output.required_terminal,
                         value_lineage: output.value_lineage.clone(),
+                        context: spec::InputContextSpec::no_context(),
                     })),
                 })
                 .collect(),
@@ -2856,6 +2866,7 @@ impl<'a> DraftLowerer<'a> {
             terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
             storage_policy: spec::StoragePolicy::PublicOutputArtifact,
             redaction_policy: spec::RedactionPolicy::Public,
+            context: spec::CellContextSpec::no_context(),
         })?;
         let input_cell_ids = required_cells
             .iter()
@@ -2868,6 +2879,7 @@ impl<'a> DraftLowerer<'a> {
             state_kind: descriptor.state_kind,
             state_version: descriptor.state_version,
             descriptor_id: descriptor.descriptor_id,
+            context: spec::NodeContextSpec::no_context(),
             config_ref,
             input_bindings: input_binding,
             output_cell: output_cell.clone(),
@@ -2974,6 +2986,7 @@ impl<'a> DraftLowerer<'a> {
             terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
             storage_policy: spec::StoragePolicy::ContentAddressed,
             redaction_policy: spec::RedactionPolicy::Public,
+            context: spec::CellContextSpec::no_context(),
         })?;
         self.nodes.push(spec::NodeSpec {
             node_id,
@@ -2982,6 +2995,7 @@ impl<'a> DraftLowerer<'a> {
             state_kind: descriptor.state_kind,
             state_version: descriptor.state_version,
             descriptor_id: descriptor.descriptor_id,
+            context: spec::NodeContextSpec::no_context(),
             config_ref,
             input_bindings: input_binding,
             output_cell: output_cell.clone(),
@@ -3082,6 +3096,7 @@ impl<'a> DraftLowerer<'a> {
             terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
             storage_policy: spec::StoragePolicy::ContentAddressed,
             redaction_policy: spec::RedactionPolicy::Public,
+            context: spec::CellContextSpec::no_context(),
         })?;
         self.nodes.push(spec::NodeSpec {
             node_id,
@@ -3090,6 +3105,7 @@ impl<'a> DraftLowerer<'a> {
             state_kind: descriptor.state_kind,
             state_version: descriptor.state_version,
             descriptor_id: descriptor.descriptor_id,
+            context: spec::NodeContextSpec::no_context(),
             config_ref,
             input_bindings: input_binding,
             output_cell: output_cell.clone(),
@@ -3171,6 +3187,7 @@ impl<'a> DraftLowerer<'a> {
             terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
             storage_policy: spec::StoragePolicy::ContentAddressed,
             redaction_policy: spec::RedactionPolicy::Public,
+            context: spec::CellContextSpec::no_context(),
         })?;
         self.nodes.push(spec::NodeSpec {
             node_id,
@@ -3179,6 +3196,7 @@ impl<'a> DraftLowerer<'a> {
             state_kind: descriptor.state_kind,
             state_version: descriptor.state_version,
             descriptor_id: descriptor.descriptor_id,
+            context: spec::NodeContextSpec::no_context(),
             config_ref,
             input_bindings: input_binding,
             output_cell: output_cell.clone(),
@@ -3313,6 +3331,7 @@ impl<'a> DraftLowerer<'a> {
                 semantic_type_id: cell.semantic_type_id.clone(),
                 schema_id: cell.schema_id.clone(),
                 value_lineage: cell.value_lineage.clone(),
+                context: cell.context.clone(),
             },
         );
         self.cells.push(cell);
@@ -5232,6 +5251,7 @@ fn lower_input_node(node: &program::InputBindingNode) -> Result<spec::InputBindi
                 schema_id: cell.schema_id().clone(),
                 required_terminal: lower_required_terminal(cell.required_terminal()),
                 value_lineage: lineage_ref(cell.value_lineage().digest()),
+                context: spec::InputContextSpec::no_context(),
             },
         ))),
         program::InputBindingNodeRef::Tuple(elements) => elements
@@ -5288,6 +5308,7 @@ fn single_cell_input_binding(
         schema_id: source.schema_id.clone(),
         required_terminal: spec::RequiredTerminal::ProducedOnly,
         value_lineage: source.value_lineage.clone(),
+        context: input_context_from_cell_context(&source.context),
     }));
     let digest = content_digest_json(input_node_json(&node))?;
     Ok(spec::InputBindingSpec {
@@ -5305,6 +5326,23 @@ fn lower_required_terminal(value: program::RequiredTerminal) -> spec::RequiredTe
     match value {
         program::RequiredTerminal::ProducedOnly => spec::RequiredTerminal::ProducedOnly,
         program::RequiredTerminal::MaybeSkipped => spec::RequiredTerminal::MaybeSkipped,
+    }
+}
+
+fn input_context_from_cell_context(context: &spec::CellContextSpec) -> spec::InputContextSpec {
+    match context {
+        spec::CellContextSpec::NoContext => spec::InputContextSpec::NoContext,
+        spec::CellContextSpec::Bound {
+            context_ref,
+            resource_kind,
+            stage,
+            producer,
+        } => spec::InputContextSpec::Required {
+            context_ref: context_ref.clone(),
+            resource_kind: resource_kind.clone(),
+            stage: stage.clone(),
+            producer: producer.clone(),
+        },
     }
 }
 
@@ -6451,6 +6489,7 @@ fn input_node_json(node: &spec::InputBindingNodeSpec) -> serde_json::Value {
         spec::InputBindingNodeSpec::Unit => serde_json::json!({ "kind": "unit" }),
         spec::InputBindingNodeSpec::Cell(cell) => serde_json::json!({
             "cell_id": cell.cell_id.as_str(),
+            "context": input_context_json(&cell.context),
             "field_path": cell.field_path.as_str(),
             "kind": "cell",
             "required_terminal": match cell.required_terminal {
@@ -6495,6 +6534,36 @@ fn input_node_json(node: &spec::InputBindingNodeSpec) -> serde_json::Value {
             "ordering": ordering_json(*ordering),
         }),
     }
+}
+
+fn input_context_json(context: &spec::InputContextSpec) -> serde_json::Value {
+    match context {
+        spec::InputContextSpec::NoContext => serde_json::json!({
+            "kind": "no_context",
+        }),
+        spec::InputContextSpec::Required {
+            context_ref,
+            resource_kind,
+            stage,
+            producer,
+        } => serde_json::json!({
+            "context_ref": context_ref.as_str(),
+            "kind": "required",
+            "producer": context_producer_json(producer),
+            "resource_kind": resource_kind.as_str(),
+            "stage": stage.as_str(),
+        }),
+    }
+}
+
+fn context_producer_json(producer: &spec::ContextProducerSpec) -> serde_json::Value {
+    serde_json::json!({
+        "producer_descriptor_id": producer
+            .producer_descriptor_id
+            .as_ref()
+            .map(DescriptorId::as_str),
+        "seed_producers_allowed": producer.seed_producers_allowed,
+    })
 }
 
 fn domain_key_refs_json(domain_keys: &[spec::StableDomainKeyRef]) -> Vec<serde_json::Value> {
