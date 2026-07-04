@@ -2,7 +2,7 @@
 name = "mfm-evm-contract-config"
 version = "0.1.0"
 edition = "2021"
-description = "Reusable EVM contract lifecycle phase configs"
+description = "Reusable EVM contract lifecycle context, action, and import configs"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 

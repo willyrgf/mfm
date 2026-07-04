@@ -207,13 +207,24 @@ mod tests {
     #[tokio::test]
     async fn start_accepts_evm_entry_points_before_store_connection() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = mfm_app::production_entry_point_op_registry().expect("registry");
 
         for (index, (op, config)) in evm_entry_point_configs().into_iter().enumerate() {
+            let public_op_name = PublicOpName::new(op).expect("public op name");
+            let current_version = registry
+                .resolve_latest(&public_op_name)
+                .expect("EVM entry-point")
+                .version();
+            assert_eq!(current_version.get(), 2, "{op}");
+            registry
+                .resolve_version(&public_op_name, current_version)
+                .expect("explicit EVM entry-point version");
+
             let config_path = tmp.path().join(format!("{op}-{index}.json"));
             std::fs::write(&config_path, config.to_string()).expect("write config");
             let mut args = start_args(config_path, RunStoresArgs { database_url: None });
             args.op = op.to_owned();
-            args.op_version = Some(1);
+            args.op_version = Some(current_version.get());
             args.config_format = ConfigFormatArg::Json;
 
             let err = execute_internal(&args)

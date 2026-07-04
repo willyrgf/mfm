@@ -440,7 +440,7 @@ Examples:
 
 ```sh
 mfm_cli run start --op portfolio_snapshot --config portfolio.toml
-mfm_cli run start --op evm_contract_lifecycle --config lifecycle.toml --op-version 1
+mfm_cli run start --op evm_contract_lifecycle --config lifecycle.toml
 ```
 
 For local development against a managed persistent run-store database, use:
