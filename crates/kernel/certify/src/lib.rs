@@ -6789,10 +6789,11 @@ fn input_context_json(context: &spec::InputContextSpec) -> serde_json::Value {
 
 fn context_producer_json(producer: &spec::ContextProducerSpec) -> serde_json::Value {
     serde_json::json!({
-        "producer_descriptor_id": producer
-            .producer_descriptor_id
-            .as_ref()
-            .map(DescriptorId::as_str),
+        "producer_descriptor_ids": producer
+            .producer_descriptor_ids
+            .iter()
+            .map(DescriptorId::as_str)
+            .collect::<Vec<_>>(),
         "seed_producers_allowed": producer.seed_producers_allowed,
     })
 }

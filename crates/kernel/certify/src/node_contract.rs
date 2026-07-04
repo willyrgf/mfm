@@ -269,7 +269,8 @@ fn validate_user_state_output_context(
             if output_context_ref != context_ref
                 || output_resource_kind != resource_kind
                 || output_stage != stage
-                || producer.producer_descriptor_id.as_ref() != Some(&descriptor.descriptor_id)
+                || producer.producer_descriptor_ids.as_slice()
+                    != std::slice::from_ref(&descriptor.descriptor_id)
                 || producer.seed_producers_allowed
             {
                 return Err(problem(
@@ -663,7 +664,7 @@ fn validate_context_cell_producer_inner(
                     seen,
                 );
             }
-            let Some(required_descriptor_id) = &producer.producer_descriptor_id else {
+            if producer.producer_descriptor_ids.is_empty() {
                 return Err(problem(
                     ProblemClass::InvalidSemanticTransition,
                     format!(
@@ -671,8 +672,11 @@ fn validate_context_cell_producer_inner(
                         cell.cell_id
                     ),
                 ));
-            };
-            if producer_node.descriptor_id != *required_descriptor_id {
+            }
+            if !producer
+                .producer_descriptor_ids
+                .contains(&producer_node.descriptor_id)
+            {
                 return Err(problem(
                     ProblemClass::InvalidSemanticTransition,
                     format!(

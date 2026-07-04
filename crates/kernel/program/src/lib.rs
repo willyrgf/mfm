@@ -28,15 +28,16 @@ use mfm_ids::{
 };
 use mfm_spec::v1::MediaType;
 pub use mfm_spec::v1::{
-    CanonicalizerIdentity, CertifiedContextSpec, FactDescriptorRef, ManualAuthorizationVerifierId,
-    ManualSigningSchemeSpec, OperatorAuthorityId, OperatorAuthorityMemberSpec, OperatorId,
-    OperatorPublicIdentity, ResourceNamespace, SideEffectVerificationSpec,
+    CanonicalizerIdentity, CertifiedContextSpec, ContextProducerSpec, FactDescriptorRef,
+    ManualAuthorizationVerifierId, ManualSigningSchemeSpec, OperatorAuthorityId,
+    OperatorAuthorityMemberSpec, OperatorId, OperatorPublicIdentity, ResourceNamespace,
+    SideEffectVerificationSpec, StateContextDescriptorSpec, StateInputContextContractSpec,
+    StateOutputContextContractSpec,
 };
 use mfm_spec::v1::{
-    CellContextSpec, ContextProducerSpec, InputContextSpec, ManualAuthorizationQuorumSpec,
+    CellContextSpec, InputContextSpec, ManualAuthorizationQuorumSpec,
     ManualResolutionAuthorizationSpec, ManualResolutionEvidenceSpec, NodeContextSpec,
     OperatorAuthoritySnapshotSpec, ResourceClaimSpec, StateContextDescriptorRequirementSpec,
-    StateContextDescriptorSpec, StateInputContextContractSpec, StateOutputContextContractSpec,
 };
 use mfm_values::{
     MfmConfig, MfmValue, NumberPolicy, PersistedSurfacePolicy, SchemaDescriptor, SchemaKind,
@@ -3905,7 +3906,7 @@ fn output_context_from_contract(
                 resource_kind: resource_kind.clone(),
                 stage: stage.clone(),
                 producer: Box::new(ContextProducerSpec {
-                    producer_descriptor_id: Some(descriptor.descriptor_id().clone()),
+                    producer_descriptor_ids: vec![descriptor.descriptor_id().clone()],
                     seed_producers_allowed: false,
                 }),
             })
@@ -5985,10 +5986,11 @@ fn state_context_descriptor_json(context: &StateContextDescriptorSpec) -> serde_
 
 fn context_producer_json(producer: &ContextProducerSpec) -> serde_json::Value {
     serde_json::json!({
-        "producer_descriptor_id": producer
-            .producer_descriptor_id
-            .as_ref()
-            .map(DescriptorId::as_str),
+        "producer_descriptor_ids": producer
+            .producer_descriptor_ids
+            .iter()
+            .map(DescriptorId::as_str)
+            .collect::<Vec<_>>(),
         "seed_producers_allowed": producer.seed_producers_allowed,
     })
 }

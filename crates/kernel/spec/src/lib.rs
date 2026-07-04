@@ -1231,8 +1231,8 @@ pub mod v1 {
     /// Certified producer constraint for a context-bound resource.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct ContextProducerSpec {
-        /// Descriptor id authorized to produce this resource, when node-produced.
-        pub producer_descriptor_id: Option<DescriptorId>,
+        /// Descriptor ids authorized to produce this resource, when node-produced.
+        pub producer_descriptor_ids: Vec<DescriptorId>,
         /// Whether seed producers can satisfy this context-bound resource.
         pub seed_producers_allowed: bool,
     }
@@ -1240,7 +1240,7 @@ pub mod v1 {
     impl ContextProducerSpec {
         fn json(&self) -> serde_json::Value {
             serde_json::json!({
-                "producer_descriptor_id": self.producer_descriptor_id.as_ref().map(DescriptorId::as_str),
+                "producer_descriptor_ids": self.producer_descriptor_ids.iter().map(DescriptorId::as_str).collect::<Vec<_>>(),
                 "seed_producers_allowed": self.seed_producers_allowed,
             })
         }
@@ -3552,7 +3552,10 @@ pub mod v1 {
     fn parse_context_producer(value: &serde_json::Value) -> Result<ContextProducerSpec> {
         let object = object(value, "context producer constraint")?;
         Ok(ContextProducerSpec {
-            producer_descriptor_id: optional_identity(object, "producer_descriptor_id")?,
+            producer_descriptor_ids: parse_identity_vec(required(
+                object,
+                "producer_descriptor_ids",
+            )?)?,
             seed_producers_allowed: required_bool(object, "seed_producers_allowed")?,
         })
     }

@@ -10304,9 +10304,15 @@ fn parse_state_context_descriptor(
 
 fn parse_context_producer(json: &serde_json::Value) -> Result<spec::ContextProducerSpec> {
     Ok(spec::ContextProducerSpec {
-        producer_descriptor_id: optional_str(json, "producer_descriptor_id")?
-            .map(parse_identity)
-            .transpose()?,
+        producer_descriptor_ids: required_array(json, "producer_descriptor_ids")?
+            .iter()
+            .map(|value| {
+                let raw = value.as_str().ok_or_else(|| {
+                    StoreError::Event("producer_descriptor_ids entries must be strings".to_owned())
+                })?;
+                parse_identity(raw).map_err(StoreError::from)
+            })
+            .collect::<Result<Vec<_>>>()?,
         seed_producers_allowed: required_bool(json, "seed_producers_allowed")?,
     })
 }
@@ -11069,10 +11075,11 @@ fn state_context_descriptor_json(context: &spec::StateContextDescriptorSpec) -> 
 
 fn context_producer_json(producer: &spec::ContextProducerSpec) -> serde_json::Value {
     serde_json::json!({
-        "producer_descriptor_id": producer
-            .producer_descriptor_id
-            .as_ref()
-            .map(DescriptorId::as_str),
+        "producer_descriptor_ids": producer
+            .producer_descriptor_ids
+            .iter()
+            .map(DescriptorId::as_str)
+            .collect::<Vec<_>>(),
         "seed_producers_allowed": producer.seed_producers_allowed,
     })
 }

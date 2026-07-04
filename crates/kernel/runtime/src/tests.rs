@@ -1632,7 +1632,7 @@ impl StateSpec for RuntimeContextConsumerState {
             resource_kind: runtime_context_resource_kind(),
             stage: runtime_context_stage(),
             producer: Box::new(spec::ContextProducerSpec {
-                producer_descriptor_id: Some(runtime_context_source_descriptor_id()?),
+                producer_descriptor_ids: vec![runtime_context_source_descriptor_id()?],
                 seed_producers_allowed: false,
             }),
         })

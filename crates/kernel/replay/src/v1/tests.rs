@@ -1371,7 +1371,7 @@ fn mismatched_cell_context() -> spec::CellContextSpec {
             .expect("resource kind"),
         stage: mfm_ids::ContextStage::new("wrong_stage").expect("context stage"),
         producer: Box::new(spec::ContextProducerSpec {
-            producer_descriptor_id: Some(descriptor_id(0xe3)),
+            producer_descriptor_ids: vec![descriptor_id(0xe3)],
             seed_producers_allowed: false,
         }),
     }

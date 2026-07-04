@@ -3862,9 +3862,9 @@ pub mod v1 {
                 "ContextProducerSpec",
                 vec![
                     schema_field(
-                        "producer_descriptor_id",
+                        "producer_descriptor_ids",
                         "DescriptorId",
-                        EventFieldCardinality::Optional,
+                        EventFieldCardinality::Repeated,
                     ),
                     schema_field(
                         "seed_producers_allowed",
