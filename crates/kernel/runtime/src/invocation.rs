@@ -442,6 +442,16 @@ impl<'a> ErasedRunCtx<'a> {
         self.invocation.runtime_spec().node(node_id)
     }
 
+    /// Returns certified transition-context authority for another node in the same runtime spec.
+    pub fn invocation_context_for_node(
+        &self,
+        node: &spec::NodeSpec,
+    ) -> Result<CertifiedInvocationContext> {
+        self.invocation
+            .runtime_spec()
+            .invocation_context_for_node(node)
+    }
+
     /// Certified state descriptor identity for the node.
     pub fn descriptor(&self) -> &'a spec::StateDescriptorIdentity {
         self.invocation.descriptor()

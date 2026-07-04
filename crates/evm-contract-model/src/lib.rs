@@ -1163,6 +1163,8 @@ pub struct ContractProfile {
     pub profile_id: ContractProfileId,
     /// Optional retained artifact digest shared by lifecycle phases.
     pub artifact_digest: Option<ContractProfileDigestRef>,
+    /// Optional retained artifact evidence reference shared by executable lifecycle phases.
+    pub artifact_ref: Option<LifecycleArtifactEvidenceRef>,
     /// Optional ABI or interface digest.
     pub interface_digest: Option<ContractProfileDigestRef>,
     /// Optional creation bytecode digest.
@@ -1185,6 +1187,8 @@ impl<'de> Deserialize<'de> for ContractProfile {
             #[serde(default)]
             artifact_digest: Option<ContractProfileDigestRef>,
             #[serde(default)]
+            artifact_ref: Option<LifecycleArtifactEvidenceRef>,
+            #[serde(default)]
             interface_digest: Option<ContractProfileDigestRef>,
             #[serde(default)]
             creation_bytecode_digest: Option<ContractProfileDigestRef>,
@@ -1198,6 +1202,7 @@ impl<'de> Deserialize<'de> for ContractProfile {
         Ok(Self {
             profile_id: raw.profile_id,
             artifact_digest: raw.artifact_digest,
+            artifact_ref: raw.artifact_ref,
             interface_digest: raw.interface_digest,
             creation_bytecode_digest: raw.creation_bytecode_digest,
             deployed_code_hash: raw.deployed_code_hash,
