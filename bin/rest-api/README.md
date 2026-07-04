@@ -319,6 +319,8 @@ keystore paths, unlock files, and private material never belong in the entry-poi
 Source-run EVM imports use `kind: "from_mfm_run"` with both `source` and required retained
 `evidence`; identifiers, public output JSON, projection rows, and raw lifecycle payloads are not
 accepted as import authority.
+The full lifecycle contract is documented in
+[`../../docs/evm-contract-lifecycle.md`](../../docs/evm-contract-lifecycle.md).
 
 Stable launch error codes:
 

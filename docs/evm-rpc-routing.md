@@ -10,6 +10,7 @@ Normative architecture references:
 
 - `docs/design.md`
 - `docs/architecture.md`
+- `docs/evm-contract-lifecycle.md`
 
 ## Runtime Config File
 
@@ -80,9 +81,9 @@ transactions remain runtime-only and must be redacted from diagnostics.
 Replay uses the stored certified spec, typed run stream, typed artifacts, and replay verifiers. It
 must not open live RPC connections or consult runtime config.
 
-EVM contract replay recomputes expected validation-read requests from certified config and typestate
-artifacts, then checks stored fact evidence and terminal output artifacts against that expected
-request.
+EVM contract replay recomputes expected requests from the certified lifecycle context and
+context-bound artifacts, then checks stored fact evidence, side-effect evidence, import evidence,
+validation evidence, and terminal output artifacts against that expected authority.
 
 ## Contributor Guidance
 
