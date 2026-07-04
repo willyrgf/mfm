@@ -105,14 +105,6 @@ const REPLAY_VERIFIER_ID: &str = "mfm.evm.contract.replay.v1";
 /// Result type for lifecycle adapter operations.
 pub type Result<T> = std::result::Result<T, EvmContractAdapterError>;
 
-/// Extracts certified EVM guards from a contract lifecycle launch config artifact.
-pub fn evm_chain_guards_from_launch_config(
-    _schema_id: &SchemaId,
-    _bytes: &[u8],
-) -> Result<Vec<EvmChainGuard>> {
-    Ok(Vec::new())
-}
-
 /// Capability providers needed for mutation phases.
 #[derive(Clone, Copy)]
 pub struct EvmContractMutationProviders<'a> {
@@ -1090,7 +1082,10 @@ async fn import_configured_with_reads(
                 ContractLifecycleStage::Configured,
             )
             .await?;
-            let snapshot = if external_adoption_assertions_required(&adoption.evidence_policy) {
+            let snapshot = if validation_assertions_required(
+                &adoption.evidence_policy.initial_read_assertions,
+                &adoption.evidence_policy.initial_event_assertions,
+            ) {
                 let assertion_context = prepare_validation_assertion_context(
                     artifact,
                     adoption.address.as_str(),
@@ -1217,16 +1212,11 @@ fn external_evm_source_evidence(evidence: &RedactedEvmSourceEvidence) -> Externa
 fn import_configured_requires_artifact(import: &ImportConfiguredSpec) -> bool {
     match import {
         ImportConfiguredSpec::FromMfmRun { .. } => false,
-        ImportConfiguredSpec::AdoptExternalAddress { adoption } => {
-            external_adoption_assertions_required(&adoption.evidence_policy)
-        }
+        ImportConfiguredSpec::AdoptExternalAddress { adoption } => validation_assertions_required(
+            &adoption.evidence_policy.initial_read_assertions,
+            &adoption.evidence_policy.initial_event_assertions,
+        ),
     }
-}
-
-fn external_adoption_assertions_required(
-    policy: &mfm_evm_contract_model::ExternalAdoptionEvidencePolicy,
-) -> bool {
-    !policy.initial_read_assertions.is_empty() || !policy.initial_event_assertions.is_empty()
 }
 
 async fn import_source_run_value<T>(
@@ -2271,15 +2261,15 @@ fn verify_contract_deploy_receipt_matches_prepared(
     receipt: &ContractDeployReceipt,
     prepared: &PreparedContractInvocation,
 ) -> replay::Result<()> {
-    if prepared.phase != ContractMutationPhase::Deploy
-        || receipt.context_ref != prepared.context_ref
-        || receipt.evm_network_context_ref != prepared.evm_network_context_ref
-        || receipt.resource_stage != ContractLifecycleStage::Deployed
-    {
-        return Err(replay_contract_mismatch(
-            "deploy receipt context does not match prepared invocation",
-        ));
-    }
+    verify_prepared_context(
+        prepared,
+        ContractMutationPhase::Deploy,
+        &receipt.context_ref,
+        &receipt.evm_network_context_ref,
+        receipt.resource_stage,
+        ContractLifecycleStage::Deployed,
+        "deploy receipt context does not match prepared invocation",
+    )?;
     verify_transaction_receipts_match_prepared(prepared, std::slice::from_ref(&receipt.receipt))
 }
 
@@ -2287,15 +2277,15 @@ fn verify_contract_configure_receipt_matches_prepared(
     receipt: &ContextContractConfigureReceipt,
     prepared: &PreparedContractInvocation,
 ) -> replay::Result<()> {
-    if prepared.phase != ContractMutationPhase::Configure
-        || receipt.context_ref != prepared.context_ref
-        || receipt.evm_network_context_ref != prepared.evm_network_context_ref
-        || receipt.resource_stage != ContractLifecycleStage::Configured
-    {
-        return Err(replay_contract_mismatch(
-            "configure receipt context does not match prepared invocation",
-        ));
-    }
+    verify_prepared_context(
+        prepared,
+        ContractMutationPhase::Configure,
+        &receipt.context_ref,
+        &receipt.evm_network_context_ref,
+        receipt.resource_stage,
+        ContractLifecycleStage::Configured,
+        "configure receipt context does not match prepared invocation",
+    )?;
     verify_transaction_receipts_match_prepared(prepared, &receipt.receipts)
 }
 
@@ -2303,15 +2293,15 @@ fn verify_contract_deploy_confirmation_matches_prepared(
     confirmation: &ContractDeployConfirmation,
     prepared: &PreparedContractInvocation,
 ) -> replay::Result<()> {
-    if prepared.phase != ContractMutationPhase::Deploy
-        || confirmation.context_ref != prepared.context_ref
-        || confirmation.evm_network_context_ref != prepared.evm_network_context_ref
-        || confirmation.resource_stage != ContractLifecycleStage::Deployed
-    {
-        return Err(replay_contract_mismatch(
-            "deploy confirmation context does not match prepared invocation",
-        ));
-    }
+    verify_prepared_context(
+        prepared,
+        ContractMutationPhase::Deploy,
+        &confirmation.context_ref,
+        &confirmation.evm_network_context_ref,
+        confirmation.resource_stage,
+        ContractLifecycleStage::Deployed,
+        "deploy confirmation context does not match prepared invocation",
+    )?;
     verify_transaction_receipts_match_prepared(
         prepared,
         std::slice::from_ref(&confirmation.receipt),
@@ -2322,16 +2312,35 @@ fn verify_contract_configure_confirmation_matches_prepared(
     confirmation: &ContextContractConfigureConfirmation,
     prepared: &PreparedContractInvocation,
 ) -> replay::Result<()> {
-    if prepared.phase != ContractMutationPhase::Configure
-        || confirmation.context_ref != prepared.context_ref
-        || confirmation.evm_network_context_ref != prepared.evm_network_context_ref
-        || confirmation.resource_stage != ContractLifecycleStage::Configured
-    {
-        return Err(replay_contract_mismatch(
-            "configure confirmation context does not match prepared invocation",
-        ));
-    }
+    verify_prepared_context(
+        prepared,
+        ContractMutationPhase::Configure,
+        &confirmation.context_ref,
+        &confirmation.evm_network_context_ref,
+        confirmation.resource_stage,
+        ContractLifecycleStage::Configured,
+        "configure confirmation context does not match prepared invocation",
+    )?;
     verify_transaction_receipts_match_prepared(prepared, &confirmation.receipts)
+}
+
+fn verify_prepared_context(
+    prepared: &PreparedContractInvocation,
+    expected_phase: ContractMutationPhase,
+    actual_context_ref: &mfm_values::ContextRefValue,
+    actual_evm_network_context_ref: &str,
+    actual_resource_stage: ContractLifecycleStage,
+    expected_resource_stage: ContractLifecycleStage,
+    mismatch: &'static str,
+) -> replay::Result<()> {
+    if prepared.phase != expected_phase
+        || actual_context_ref != &prepared.context_ref
+        || actual_evm_network_context_ref != prepared.evm_network_context_ref
+        || actual_resource_stage != expected_resource_stage
+    {
+        return Err(replay_contract_mismatch(mismatch));
+    }
+    Ok(())
 }
 
 fn verify_transaction_receipts_match_prepared(
@@ -3814,9 +3823,6 @@ impl<T> EvmContractReadProvider for T where
 pub trait EvmContractRuntimeFactory: Send + Sync {
     /// Returns the artifact reader used to materialize configs, inputs, and side-effect evidence.
     fn artifacts(&self) -> &dyn store::RetainedArtifactReadProvider;
-
-    /// Returns the trusted certification registry authority for source-run imports.
-    fn source_run_import_registry(&self) -> Option<&mfm_certify::CertificationRegistry>;
 
     /// Validates process-local runtime bindings for launch ingress before `RunAdmitted`.
     fn validate_runtime_for(

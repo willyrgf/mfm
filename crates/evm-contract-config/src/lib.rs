@@ -397,52 +397,6 @@ impl<'de> Deserialize<'de> for ReceiptRetryPolicy {
     }
 }
 
-/// Validation assertion policy.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
-#[mfm(
-    namespace = "mfm.evm.contract",
-    name = "validation-policy",
-    schema = "mfm.evm.contract.config.validation_policy"
-)]
-pub struct ContractValidationPolicy {
-    read_assertions: Vec<ReadAssertionConfig>,
-    event_assertions: Vec<EventAssertionConfig>,
-}
-
-impl ContractValidationPolicy {
-    /// Returns read assertions evaluated with EVM calls.
-    pub fn read_assertions(&self) -> &[ReadAssertionConfig] {
-        &self.read_assertions
-    }
-
-    /// Returns event assertions evaluated with EVM log queries.
-    pub fn event_assertions(&self) -> &[EventAssertionConfig] {
-        &self.event_assertions
-    }
-}
-
-impl<'de> Deserialize<'de> for ContractValidationPolicy {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawValidationPolicy {
-            #[serde(default)]
-            read_assertions: Vec<ReadAssertionConfig>,
-            #[serde(default)]
-            event_assertions: Vec<EventAssertionConfig>,
-        }
-
-        let raw = RawValidationPolicy::deserialize(deserializer)?;
-        Ok(Self {
-            read_assertions: raw.read_assertions,
-            event_assertions: raw.event_assertions,
-        })
-    }
-}
-
 /// Deploy action executed inside a certified EVM contract context.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
 #[mfm(
@@ -598,14 +552,17 @@ impl<'de> Deserialize<'de> for ConfigureAction {
 }
 
 /// Validate action executed inside a certified EVM contract context.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmConfig)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "validate-action",
     schema = "mfm.evm.contract.config.validate_action"
 )]
 pub struct ValidateAction {
+    #[serde(default)]
     read_assertions: Vec<ReadAssertionConfig>,
+    #[serde(default)]
     event_assertions: Vec<EventAssertionConfig>,
 }
 
@@ -621,32 +578,10 @@ impl ValidateAction {
     }
 }
 
-impl<'de> Deserialize<'de> for ValidateAction {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawValidateAction {
-            #[serde(default)]
-            read_assertions: Vec<ReadAssertionConfig>,
-            #[serde(default)]
-            event_assertions: Vec<EventAssertionConfig>,
-        }
-
-        let raw = RawValidateAction::deserialize(deserializer)?;
-        Ok(Self {
-            read_assertions: raw.read_assertions,
-            event_assertions: raw.event_assertions,
-        })
-    }
-}
-
 /// Import spec for producing a deployed stage under a certified context.
 #[allow(clippy::large_enum_variant)]
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmConfig)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "import-deployed-spec",
@@ -667,39 +602,10 @@ pub enum ImportDeployedSpec {
     },
 }
 
-impl<'de> Deserialize<'de> for ImportDeployedSpec {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[allow(clippy::large_enum_variant)]
-        #[derive(Deserialize)]
-        #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-        enum RawImportDeployedSpec {
-            FromMfmRun {
-                source: ImportFromMfmRun,
-                evidence: ImportFromMfmRunEvidence,
-            },
-            AdoptExternalAddress {
-                adoption: AdoptExternalAddress,
-            },
-        }
-
-        match RawImportDeployedSpec::deserialize(deserializer)? {
-            RawImportDeployedSpec::FromMfmRun { source, evidence } => {
-                Ok(Self::FromMfmRun { source, evidence })
-            }
-            RawImportDeployedSpec::AdoptExternalAddress { adoption } => {
-                Ok(Self::AdoptExternalAddress { adoption })
-            }
-        }
-    }
-}
-
 /// Import spec for producing a configured stage under a certified context.
 #[allow(clippy::large_enum_variant)]
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmConfig)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "import-configured-spec",
@@ -720,37 +626,9 @@ pub enum ImportConfiguredSpec {
     },
 }
 
-impl<'de> Deserialize<'de> for ImportConfiguredSpec {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[allow(clippy::large_enum_variant)]
-        #[derive(Deserialize)]
-        #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-        enum RawImportConfiguredSpec {
-            FromMfmRun {
-                source: ImportFromMfmRun,
-                evidence: ImportFromMfmRunEvidence,
-            },
-            AdoptExternalAddress {
-                adoption: AdoptExternalAddress,
-            },
-        }
-
-        match RawImportConfiguredSpec::deserialize(deserializer)? {
-            RawImportConfiguredSpec::FromMfmRun { source, evidence } => {
-                Ok(Self::FromMfmRun { source, evidence })
-            }
-            RawImportConfiguredSpec::AdoptExternalAddress { adoption } => {
-                Ok(Self::AdoptExternalAddress { adoption })
-            }
-        }
-    }
-}
-
 /// New deploy-only entry-point config shape.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmConfig)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "deploy-entry-config",
@@ -773,28 +651,9 @@ impl EvmContractDeployEntryConfig {
     }
 }
 
-impl<'de> Deserialize<'de> for EvmContractDeployEntryConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawEvmContractDeployEntryConfig {
-            context: EvmContractContext,
-            deploy: DeployAction,
-        }
-
-        let raw = RawEvmContractDeployEntryConfig::deserialize(deserializer)?;
-        Ok(Self {
-            context: raw.context,
-            deploy: raw.deploy,
-        })
-    }
-}
-
 /// New configure-only entry-point config shape.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmConfig)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "configure-entry-config",
@@ -823,30 +682,9 @@ impl EvmContractConfigureEntryConfig {
     }
 }
 
-impl<'de> Deserialize<'de> for EvmContractConfigureEntryConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawEvmContractConfigureEntryConfig {
-            context: EvmContractContext,
-            import_deployed: ImportDeployedSpec,
-            configure: ConfigureAction,
-        }
-
-        let raw = RawEvmContractConfigureEntryConfig::deserialize(deserializer)?;
-        Ok(Self {
-            context: raw.context,
-            import_deployed: raw.import_deployed,
-            configure: raw.configure,
-        })
-    }
-}
-
 /// New validate-only entry-point config shape.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmConfig)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "validate-entry-config",
@@ -875,30 +713,9 @@ impl EvmContractValidateEntryConfig {
     }
 }
 
-impl<'de> Deserialize<'de> for EvmContractValidateEntryConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawEvmContractValidateEntryConfig {
-            context: EvmContractContext,
-            import_configured: ImportConfiguredSpec,
-            validate: ValidateAction,
-        }
-
-        let raw = RawEvmContractValidateEntryConfig::deserialize(deserializer)?;
-        Ok(Self {
-            context: raw.context,
-            import_configured: raw.import_configured,
-            validate: raw.validate,
-        })
-    }
-}
-
 /// New full lifecycle entry-point config shape.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmConfig)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "lifecycle-entry-config",
@@ -930,29 +747,5 @@ impl EvmContractLifecycleEntryConfig {
     /// Returns the validate action.
     pub const fn validate(&self) -> &ValidateAction {
         &self.validate
-    }
-}
-
-impl<'de> Deserialize<'de> for EvmContractLifecycleEntryConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawEvmContractLifecycleEntryConfig {
-            context: EvmContractContext,
-            deploy: DeployAction,
-            configure: ConfigureAction,
-            validate: ValidateAction,
-        }
-
-        let raw = RawEvmContractLifecycleEntryConfig::deserialize(deserializer)?;
-        Ok(Self {
-            context: raw.context,
-            deploy: raw.deploy,
-            configure: raw.configure,
-            validate: raw.validate,
-        })
     }
 }

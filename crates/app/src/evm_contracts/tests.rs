@@ -915,10 +915,6 @@ impl EvmContractRuntimeFactory for TestRuntimeFactory {
         self.artifacts.as_ref()
     }
 
-    fn source_run_import_registry(&self) -> Option<&mfm_certify::CertificationRegistry> {
-        None
-    }
-
     fn validate_runtime_for(
         &self,
         _network_id: &str,

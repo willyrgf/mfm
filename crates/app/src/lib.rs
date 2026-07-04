@@ -2726,13 +2726,6 @@ fn certified_evm_chain_guards_for_failed_node(
         runtime_spec,
         node,
     )?);
-    guards.extend(
-        mfm_adapters_evm_contracts::evm_chain_guards_from_launch_config(
-            &node.config_ref.schema_id,
-            &artifact.bytes,
-        )
-        .map_err(|_| replay_diagnostic_error())?,
-    );
     Ok(guards)
 }
 

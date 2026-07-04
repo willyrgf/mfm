@@ -49,10 +49,6 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
         self.artifacts.as_ref()
     }
 
-    fn source_run_import_registry(&self) -> Option<&CertificationRegistry> {
-        Some(&self.source_run_registry)
-    }
-
     fn validate_runtime_for(
         &self,
         network_id: &str,
