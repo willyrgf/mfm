@@ -188,6 +188,14 @@ pub(crate) struct InvocationBuilderInput<'a> {
     pub(crate) view: &'a RuntimeRunView,
 }
 
+struct InvocationMaterial {
+    config_artifact: store::ArtifactEvidenceRef,
+    inputs: MaterializedInputs,
+    caps: CertifiedRuntimeCapabilities,
+    recorded_facts: RecordedFacts,
+    context: CertifiedInvocationContext,
+}
+
 impl<'a> InvocationBuilder<'a> {
     /// Creates an invocation builder for one certified node attempt.
     pub(crate) fn new(input: InvocationBuilderInput<'a>) -> Self {
@@ -213,8 +221,7 @@ impl<'a> InvocationBuilder<'a> {
         }
     }
 
-    /// Builds the sealed invocation from certified spec and verified run-stream state.
-    pub(crate) fn build(self) -> Result<PreparedRunnerInvocation<'a>> {
+    fn materialize(&self) -> Result<InvocationMaterial> {
         let config_artifact = committed_config_artifact(self.node, self.view)?;
         let inputs = materialize_inputs(self.runtime_spec, self.node, self.view)?;
         let caps = CertifiedRuntimeCapabilities::new(
@@ -227,6 +234,18 @@ impl<'a> InvocationBuilder<'a> {
             self.attempt_id,
         )?;
         let context = self.runtime_spec.invocation_context_for_node(self.node)?;
+        Ok(InvocationMaterial {
+            config_artifact,
+            inputs,
+            caps,
+            recorded_facts,
+            context,
+        })
+    }
+
+    /// Builds the sealed invocation from certified spec and verified run-stream state.
+    pub(crate) fn build(self) -> Result<PreparedRunnerInvocation<'a>> {
+        let material = self.materialize()?;
         Ok(PreparedRunnerInvocation {
             runtime_spec: self.runtime_spec,
             run_id: self.run_id,
@@ -234,13 +253,13 @@ impl<'a> InvocationBuilder<'a> {
             node: self.node,
             descriptor: self.descriptor,
             output_cell: self.output_cell,
-            context,
+            context: material.context,
             attempt_id: self.attempt_id,
             attempt_no: self.attempt_no,
-            config_artifact,
-            inputs,
-            caps,
-            recorded_facts,
+            config_artifact: material.config_artifact,
+            inputs: material.inputs,
+            caps: material.caps,
+            recorded_facts: material.recorded_facts,
             projections: &self.view.projections,
             run_stream: &self.view.stream,
             view: self.view,
@@ -249,18 +268,7 @@ impl<'a> InvocationBuilder<'a> {
 
     /// Builds pure pre-invocation context for resource-lane preflight only.
     pub(crate) fn build_pre_invocation(self) -> Result<PreInvocationRunCtx<'a>> {
-        let config_artifact = committed_config_artifact(self.node, self.view)?;
-        let inputs = materialize_inputs(self.runtime_spec, self.node, self.view)?;
-        let caps = CertifiedRuntimeCapabilities::new(
-            self.node.node_id.clone(),
-            self.node.capability_bindings.clone(),
-        );
-        let recorded_facts = recorded_facts_for_attempt(
-            &self.view.projections,
-            &self.node.node_id,
-            self.attempt_id,
-        )?;
-        let context = self.runtime_spec.invocation_context_for_node(self.node)?;
+        let material = self.materialize()?;
         Ok(PreInvocationRunCtx {
             runtime_spec: self.runtime_spec,
             run_id: self.run_id,
@@ -268,13 +276,13 @@ impl<'a> InvocationBuilder<'a> {
             node: self.node,
             descriptor: self.descriptor,
             output_cell: self.output_cell,
-            context,
+            context: material.context,
             attempt_id: self.attempt_id,
             attempt_no: self.attempt_no,
-            config_artifact,
-            inputs,
-            caps,
-            recorded_facts,
+            config_artifact: material.config_artifact,
+            inputs: material.inputs,
+            caps: material.caps,
+            recorded_facts: material.recorded_facts,
             projections: &self.view.projections,
         })
     }
