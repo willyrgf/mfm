@@ -3940,8 +3940,7 @@ fn verify_external_source_evidence(
     Ok(())
 }
 
-/// Converts artifact capability evidence into lifecycle value evidence.
-pub fn lifecycle_evidence_ref(
+fn lifecycle_evidence_ref(
     evidence: &CapabilityArtifactEvidenceRef,
 ) -> LifecycleArtifactEvidenceRef {
     LifecycleArtifactEvidenceRef::new(
@@ -3953,10 +3952,7 @@ pub fn lifecycle_evidence_ref(
     )
 }
 
-/// Derives the deployed contract address from public prepared deploy evidence.
-pub fn deploy_contract_address_from_prepared(
-    prepared: &PreparedContractInvocation,
-) -> Result<String> {
+fn deploy_contract_address_from_prepared(prepared: &PreparedContractInvocation) -> Result<String> {
     ensure_prepared_invocation_public(prepared)?;
     if prepared.phase != ContractMutationPhase::Deploy || prepared.transactions.len() != 1 {
         return Err(EvmContractAdapterError::InvalidPreparedInvocation);
