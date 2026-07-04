@@ -94,7 +94,7 @@ fn test_context() -> CertifiedContextSpec {
 
 fn context_producer(descriptor_id: DescriptorId) -> ContextProducerSpec {
     ContextProducerSpec {
-        producer_descriptor_id: Some(descriptor_id),
+        producer_descriptor_ids: vec![descriptor_id],
         seed_producers_allowed: false,
     }
 }

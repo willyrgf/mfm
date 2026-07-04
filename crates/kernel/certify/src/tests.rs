@@ -308,7 +308,7 @@ impl StateSpec for ContextConsumerState {
             resource_kind: context_resource_kind(),
             stage: context_stage(),
             producer: Box::new(spec::ContextProducerSpec {
-                producer_descriptor_id: Some(context_source_descriptor_id()?),
+                producer_descriptor_ids: vec![context_source_descriptor_id()?],
                 seed_producers_allowed: false,
             }),
         })
@@ -899,7 +899,8 @@ fn certifies_context_bound_transition_graph() {
             ..
         } if resource_kind == &context_resource_kind()
             && stage == &context_stage()
-            && producer.producer_descriptor_id.as_ref() == Some(&source.descriptor_id)
+            && producer.producer_descriptor_ids.as_slice()
+                == std::slice::from_ref(&source.descriptor_id)
             && !producer.seed_producers_allowed
     ));
     let consumer = node_with_descriptor_name(typed, "mfm.certify.test.context_consumer");
@@ -1014,7 +1015,7 @@ fn certification_rejects_unauthorized_context_bound_seed() {
         resource_kind: context_resource_kind(),
         stage: context_stage(),
         producer: Box::new(spec::ContextProducerSpec {
-            producer_descriptor_id: Some(context_source_descriptor_id().expect("descriptor id")),
+            producer_descriptor_ids: vec![context_source_descriptor_id().expect("descriptor id")],
             seed_producers_allowed: false,
         }),
     };

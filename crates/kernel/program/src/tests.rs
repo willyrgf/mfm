@@ -1029,8 +1029,8 @@ fn state_in_context_emits_context_node_output_and_input_metadata() {
             assert_eq!(resource_kind, &context_resource_kind());
             assert_eq!(stage, &context_stage());
             assert_eq!(
-                producer.producer_descriptor_id.as_ref(),
-                Some(&context_node.state_descriptor_id)
+                producer.producer_descriptor_ids.as_slice(),
+                std::slice::from_ref(&context_node.state_descriptor_id)
             );
             assert!(!producer.seed_producers_allowed);
         }
@@ -1056,8 +1056,8 @@ fn state_in_context_emits_context_node_output_and_input_metadata() {
                     assert_eq!(resource_kind, &context_resource_kind());
                     assert_eq!(stage, &context_stage());
                     assert_eq!(
-                        producer.producer_descriptor_id.as_ref(),
-                        Some(&context_node.state_descriptor_id)
+                        producer.producer_descriptor_ids.as_slice(),
+                        std::slice::from_ref(&context_node.state_descriptor_id)
                     );
                     assert!(!producer.seed_producers_allowed);
                 }

@@ -303,8 +303,9 @@ Certification validates transition-context authority before a spec can become ru
 context refs must be content-derived from the certified context table, no-context descriptors cannot
 run under a semantic context, context-required nodes must match the registered context descriptor,
 context-bound user outputs and inputs must match their descriptor resource kind, stage, and approved
-producer contract, and raw seeds cannot produce context-bound resources unless the certified
-producer constraint explicitly permits seed producers. Framework same-value bridges and
+producer contract. The producer contract may list multiple approved state descriptors for a stage,
+and raw seeds cannot produce context-bound resources unless the certified producer constraint
+explicitly permits seed producers. Framework same-value bridges and
 side-effect verify nodes may only preserve an existing context binding; framework receipt nodes must
 remain no-context.
 
