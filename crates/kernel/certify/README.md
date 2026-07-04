@@ -17,5 +17,11 @@ metadata, and the typed spec itself against the registry. Hash match alone is no
 already-lowered descriptor identities, but persisted spec descriptors are not trusted registry input
 until the certifier verifier has accepted the spec/certificate pair.
 
+Transition-context metadata is certified here, not in domain crates or runtime routing. The
+certifier checks context table content addressing, node context requirements, context-bound
+input/output resource kind and stage contracts, approved producer descriptors, seed producer
+authorization, same-value bridge preservation, side-effect verify preservation, and no-context
+framework receipt outputs.
+
 `docs/design.md` is the normative typed-core authority contract. This crate is framework-owned and
 must remain domain-free.

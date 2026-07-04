@@ -1,12 +1,14 @@
 use super::*;
 use mfm_capabilities::{CapabilitySpec, ExternalMutationAuthorityRole, NoCaps};
 use mfm_ids::{
-    AdapterKind, AdapterVersion, CapabilityKind, CapabilityVersion, OperationKind, OperationVersion,
+    AdapterKind, AdapterVersion, CapabilityKind, CapabilityVersion, ContextResourceKind,
+    ContextStage, OperationKind, OperationVersion,
 };
 use mfm_program::{
-    build_root_with_registries, CanonicalSeed, IdempotencyKey, MfmFactType as _, NoContext,
-    Operation, OperationKey, OperationRegistryBuilder, PublicOutputKey, PureState, ResourceClaim,
-    RootBuilder, ScopeKey, SideEffectState, StateKey, StateRegistryBuilder, StateResult, StateSpec,
+    build_root_with_registries, CanonicalSeed, IdempotencyKey, MfmContext, MfmFactType as _,
+    NoContext, Operation, OperationKey, OperationRegistryBuilder, PublicOutputKey, PureState,
+    ResourceClaim, RootBuilder, ScopeKey, SideEffectState, StateKey, StateRegistryBuilder,
+    StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmFactType, MfmValue, OperationOutput, PublicOutputs};
 use serde::{Deserialize, Serialize};
@@ -35,6 +37,27 @@ macro_rules! assert_rejection_cases {
 struct TestValue {
     amount: u64,
 }
+
+fn context_resource_kind() -> ContextResourceKind {
+    ContextResourceKind::new("mfm.certify.test.contract_instance").expect("resource kind")
+}
+
+fn context_stage() -> ContextStage {
+    ContextStage::new("deployed").expect("context stage")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.certify.test",
+    name = "contract_context",
+    version = "1",
+    schema = "mfm.certify.test.contract_context"
+)]
+struct ContractContext {
+    network: String,
+}
+
+impl MfmContext for ContractContext {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[mfm(
@@ -186,6 +209,122 @@ impl PureState for MultiplyState {
             amount: input.amount * self.config.multiplier,
         })
     }
+}
+
+struct ContextSourceState {
+    config: TestConfig,
+}
+
+impl StateSpec for ContextSourceState {
+    type Config = TestConfig;
+    type Context = ContractContext;
+    type Input = TestValue;
+    type Output = TestValue;
+    type Effect = Pure;
+    type Caps = NoCaps;
+
+    fn kind() -> program::Result<StateKind> {
+        StateKind::new(
+            "mfm.certify.test",
+            "context-source",
+            DigestAlgorithm::Sha256JcsV1,
+            digest_byte(0x13),
+        )
+        .map_err(|error| program::PlanError::Key(error.to_string()))
+    }
+
+    fn version() -> program::Result<StateVersion> {
+        StateVersion::new("mfm.certify.test.context_source.v1")
+            .map_err(|error| program::PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.certify.test.context_source"
+    }
+
+    fn output_context_contract() -> program::Result<spec::StateOutputContextContractSpec> {
+        Ok(spec::StateOutputContextContractSpec::Produces {
+            resource_kind: context_resource_kind(),
+            stage: context_stage(),
+        })
+    }
+
+    fn new(config: program::ValidatedConfig<Self::Config>) -> program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
+    }
+}
+
+impl PureState for ContextSourceState {
+    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+        Ok(TestValue {
+            amount: input.amount * self.config.multiplier,
+        })
+    }
+}
+
+struct ContextConsumerState {
+    config: TestConfig,
+}
+
+impl StateSpec for ContextConsumerState {
+    type Config = TestConfig;
+    type Context = ContractContext;
+    type Input = TestValue;
+    type Output = TestValue;
+    type Effect = Pure;
+    type Caps = NoCaps;
+
+    fn kind() -> program::Result<StateKind> {
+        StateKind::new(
+            "mfm.certify.test",
+            "context-consumer",
+            DigestAlgorithm::Sha256JcsV1,
+            digest_byte(0x14),
+        )
+        .map_err(|error| program::PlanError::Key(error.to_string()))
+    }
+
+    fn version() -> program::Result<StateVersion> {
+        StateVersion::new("mfm.certify.test.context_consumer.v1")
+            .map_err(|error| program::PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.certify.test.context_consumer"
+    }
+
+    fn input_context_contract() -> program::Result<spec::StateInputContextContractSpec> {
+        Ok(spec::StateInputContextContractSpec::Required {
+            resource_kind: context_resource_kind(),
+            stage: context_stage(),
+            producer: Box::new(spec::ContextProducerSpec {
+                producer_descriptor_id: Some(context_source_descriptor_id()?),
+                seed_producers_allowed: false,
+            }),
+        })
+    }
+
+    fn new(config: program::ValidatedConfig<Self::Config>) -> program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
+    }
+}
+
+impl PureState for ContextConsumerState {
+    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+        Ok(TestValue {
+            amount: input.amount * self.config.multiplier,
+        })
+    }
+}
+
+fn context_source_descriptor_id() -> program::Result<DescriptorId> {
+    let mut states = StateRegistryBuilder::new();
+    let registered = states.register::<ContextSourceState>()?;
+    Ok(registered.descriptor().descriptor_id().clone())
 }
 
 struct FactEmittingState {
@@ -404,6 +543,56 @@ fn reference_draft() -> program::TypedProgramDraft {
         },
     )
     .expect("reference draft")
+}
+
+fn context_bound_draft(declare_second_context: bool) -> program::TypedProgramDraft {
+    let mut states = StateRegistryBuilder::new();
+    states
+        .register::<ContextSourceState>()
+        .expect("source state registration");
+    states
+        .register::<ContextConsumerState>()
+        .expect("consumer state registration");
+    build_root_with_registries(
+        ScopeKey::new("root").expect("root key"),
+        states.snapshot(),
+        OperationRegistryBuilder::new().snapshot(),
+        |root: &mut RootBuilder<'_, '_>| {
+            let seed = root.seed(
+                mfm_program::SeedKey::new("initial").expect("seed key"),
+                CanonicalSeed::from_value(&TestValue { amount: 2 }).expect("seed"),
+            )?;
+            let primary = root.scope().declare_context(ContractContext {
+                network: "primary".to_owned(),
+            })?;
+            if declare_second_context {
+                let _secondary = root.scope().declare_context(ContractContext {
+                    network: "secondary".to_owned(),
+                })?;
+            }
+            let produced = root
+                .scope()
+                .state_in_context::<ContextSourceState, _, ContractContext>(
+                    StateKey::new("context-source")?,
+                    &primary,
+                    TestConfig { multiplier: 3 },
+                    seed,
+                )?;
+            let consumed = root
+                .scope()
+                .state_in_context::<ContextConsumerState, _, ContractContext>(
+                    StateKey::new("context-consumer")?,
+                    &primary,
+                    TestConfig { multiplier: 5 },
+                    produced,
+                )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &TestPublicOutputs { result: consumed },
+            )
+        },
+    )
+    .expect("context-bound draft")
 }
 
 fn fact_emitting_draft() -> program::TypedProgramDraft {
@@ -663,6 +852,152 @@ fn certifies_reference_program_draft() {
         node.framework,
         Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
     )));
+}
+
+#[test]
+fn certifies_context_bound_transition_graph() {
+    let draft = context_bound_draft(false);
+    let certified = certify_program_draft(&draft).expect("context-bound draft certifies");
+    let typed = certified.validated_spec().spec();
+    assert_eq!(typed.contexts.len(), 1);
+    let source = node_with_descriptor_name(typed, "mfm.certify.test.context_source");
+    let source_output = typed
+        .cells
+        .iter()
+        .find(|cell| cell.cell_id == source.output_cell)
+        .expect("source output cell");
+    assert!(matches!(
+        &source_output.context,
+        spec::CellContextSpec::Bound {
+            resource_kind,
+            stage,
+            producer,
+            ..
+        } if resource_kind == &context_resource_kind()
+            && stage == &context_stage()
+            && producer.producer_descriptor_id.as_ref() == Some(&source.descriptor_id)
+            && !producer.seed_producers_allowed
+    ));
+    let consumer = node_with_descriptor_name(typed, "mfm.certify.test.context_consumer");
+    assert!(matches!(
+        &consumer.input_bindings.root,
+        spec::InputBindingNodeSpec::Cell(cell)
+            if matches!(cell.context, spec::InputContextSpec::Required { .. })
+    ));
+}
+
+#[test]
+fn certification_rejects_context_bound_output_under_wrong_node_context() {
+    let (registry, mut typed) = context_bound_registry_and_spec(true);
+    let other_context_ref = typed.contexts[1].context_ref.clone();
+    let source_output_cell = node_with_descriptor_name(&typed, "mfm.certify.test.context_source")
+        .output_cell
+        .clone();
+    let output = typed
+        .cells
+        .iter_mut()
+        .find(|cell| cell.cell_id == source_output_cell)
+        .expect("source output cell");
+    let spec::CellContextSpec::Bound { context_ref, .. } = &mut output.context else {
+        panic!("source output must be context-bound");
+    };
+    *context_ref = other_context_ref;
+
+    let error = certify_untrusted_typed_spec(typed, &registry)
+        .expect_err("wrong output context must reject");
+    assert_invalid_semantic_contains(error, "output context");
+}
+
+#[test]
+fn certification_rejects_no_context_state_consuming_context_bound_resource() {
+    let mut states = StateRegistryBuilder::new();
+    states
+        .register::<ContextSourceState>()
+        .expect("source state registration");
+    states
+        .register::<MultiplyState>()
+        .expect("multiply state registration");
+    let draft = build_root_with_registries(
+        ScopeKey::new("root").expect("root key"),
+        states.snapshot(),
+        OperationRegistryBuilder::new().snapshot(),
+        |root: &mut RootBuilder<'_, '_>| {
+            let seed = root.seed(
+                mfm_program::SeedKey::new("initial").expect("seed key"),
+                CanonicalSeed::from_value(&TestValue { amount: 2 }).expect("seed"),
+            )?;
+            let context = root.scope().declare_context(ContractContext {
+                network: "primary".to_owned(),
+            })?;
+            let produced = root
+                .scope()
+                .state_in_context::<ContextSourceState, _, ContractContext>(
+                    StateKey::new("context-source")?,
+                    &context,
+                    TestConfig { multiplier: 3 },
+                    seed,
+                )?;
+            let consumed = root.scope().state::<MultiplyState, _>(
+                StateKey::new("plain-consumer")?,
+                TestConfig { multiplier: 5 },
+                produced,
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &TestPublicOutputs { result: consumed },
+            )
+        },
+    )
+    .expect("draft builds before certification");
+
+    let error = certify_program_draft(&draft).expect_err("no-context consumer must reject");
+    assert_invalid_semantic_contains(error, "without a descriptor contract");
+}
+
+#[test]
+fn certification_rejects_input_context_that_does_not_match_source_cell() {
+    let (registry, mut typed) = context_bound_registry_and_spec(false);
+    let consumer = node_with_descriptor_name_mut(&mut typed, "mfm.certify.test.context_consumer");
+    let spec::InputBindingNodeSpec::Cell(cell) = &mut consumer.input_bindings.root else {
+        panic!("consumer input must be a cell");
+    };
+    cell.context = spec::InputContextSpec::no_context();
+    consumer.input_bindings.digest =
+        content_digest_json(input_node_json(&consumer.input_bindings.root)).expect("input digest");
+
+    let error =
+        certify_untrusted_typed_spec(typed, &registry).expect_err("input context must reject");
+    assert_eq!(
+        error.problem_class(),
+        Some(ProblemClass::InvalidInterfaceWiring),
+        "{error}"
+    );
+    assert!(error.to_string().contains("cell context"), "{error}");
+}
+
+#[test]
+fn certification_rejects_unauthorized_context_bound_seed() {
+    let (registry, mut typed) = context_bound_registry_and_spec(false);
+    let context_ref = typed.contexts[0].context_ref.clone();
+    let seed_cell_id = typed.seeds[0].cell_id.clone();
+    let seed_cell = typed
+        .cells
+        .iter_mut()
+        .find(|cell| cell.cell_id == seed_cell_id)
+        .expect("seed cell");
+    seed_cell.context = spec::CellContextSpec::Bound {
+        context_ref,
+        resource_kind: context_resource_kind(),
+        stage: context_stage(),
+        producer: Box::new(spec::ContextProducerSpec {
+            producer_descriptor_id: Some(context_source_descriptor_id().expect("descriptor id")),
+            seed_producers_allowed: false,
+        }),
+    };
+
+    let error =
+        certify_untrusted_typed_spec(typed, &registry).expect_err("seed context must reject");
+    assert_invalid_semantic_contains(error, "not authorized to produce context-bound cell");
 }
 
 #[test]
@@ -1984,6 +2319,56 @@ fn reference_registry_and_spec() -> (CertificationRegistry, spec::TypedExecution
         .spec()
         .clone();
     (registry, spec)
+}
+
+fn context_bound_registry_and_spec(
+    declare_second_context: bool,
+) -> (CertificationRegistry, spec::TypedExecutionSpec) {
+    let draft = context_bound_draft(declare_second_context);
+    let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
+    let spec = certify_program_draft(&draft)
+        .expect("certified")
+        .validated_spec()
+        .spec()
+        .clone();
+    (registry, spec)
+}
+
+fn descriptor_id_by_name(typed: &spec::TypedExecutionSpec, name: &str) -> DescriptorId {
+    typed
+        .descriptor_identities
+        .iter()
+        .find_map(|descriptor| match descriptor {
+            spec::DescriptorIdentity::State(state) if state.name == name => {
+                Some(state.descriptor_id.clone())
+            }
+            _ => None,
+        })
+        .expect("state descriptor by name")
+}
+
+fn node_with_descriptor_name<'a>(
+    typed: &'a spec::TypedExecutionSpec,
+    name: &str,
+) -> &'a spec::NodeSpec {
+    let descriptor_id = descriptor_id_by_name(typed, name);
+    typed
+        .nodes
+        .iter()
+        .find(|node| node.descriptor_id == descriptor_id)
+        .expect("node by descriptor name")
+}
+
+fn node_with_descriptor_name_mut<'a>(
+    typed: &'a mut spec::TypedExecutionSpec,
+    name: &str,
+) -> &'a mut spec::NodeSpec {
+    let descriptor_id = descriptor_id_by_name(typed, name);
+    typed
+        .nodes
+        .iter_mut()
+        .find(|node| node.descriptor_id == descriptor_id)
+        .expect("node by descriptor name")
 }
 
 fn compensating_registry_and_spec() -> (CertificationRegistry, spec::TypedExecutionSpec) {
