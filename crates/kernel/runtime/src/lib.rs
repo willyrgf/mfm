@@ -66,7 +66,7 @@ pub use runner_kit::{
     load_materialized_struct_input, load_non_empty_materialized_input, load_runner_config,
     load_runner_config_for_node, load_side_effect_artifact, load_side_effect_artifact_for_node,
     load_side_effect_value, load_side_effect_value_for_node, materialized_input_node_json,
-    ContextBoundOutput, FactRecordInput, RunnerArtifactBuilder, RunnerCapabilityBinding,
+    FactRecordInput, RunnerArtifactBuilder, RunnerCapabilityBinding,
     RunnerExecutableIdentityTemplate, RunnerFactoryBinding, RunnerJsonArtifact,
     RunnerOutputBuilder, RunnerPayloadBuilder, RunnerRegistrationBuilder, StagedFactRecord,
     TypedContextOutputExtractor,

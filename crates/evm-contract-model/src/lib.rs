@@ -58,8 +58,10 @@
 //! ```
 
 use std::fmt;
+use std::num::NonZeroU64;
 use std::ops::Deref;
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 use alloy_primitives::keccak256;
 use mfm_canonical::PlainCanonicalJsonBytes;
@@ -68,9 +70,13 @@ use mfm_evm_core::encoding;
 use mfm_evm_core::hex as common_hex;
 use mfm_evm_core::tx::parse_u128_quantity;
 use mfm_ids::{
-    ArtifactId, ContentDigest, LocalPublicId, SchemaId, SemanticTypeId, StableAuthorKey,
+    ArtifactId, CellId, ContentDigest, ContextDescriptorId, ContextRef, ContextResourceKind,
+    ContextStage, DescriptorId, EventId, LocalPublicId, NodeId, RunId, SchemaId, SemanticTypeId,
+    SpecHash, StableAuthorKey,
 };
+use mfm_program::MfmContext;
 use mfm_program_derive::{MfmConfig, MfmValue};
+use mfm_values::{ContextBoundOutput, ContextRefValue};
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -267,6 +273,51 @@ evm_string_scalar!(
     "Checked artifact context port name."
 );
 
+evm_string_scalar!(
+    LifecycleKey,
+    require_stable_author_key,
+    "lifecycle_key",
+    "lifecycle-key",
+    "mfm.evm.contract.id.lifecycle_key",
+    "Stable contract lifecycle context key."
+);
+
+evm_string_scalar!(
+    ContractProfileId,
+    require_stable_author_key,
+    "contract_profile_id",
+    "contract-profile-id",
+    "mfm.evm.contract.id.contract_profile",
+    "Stable contract profile identifier."
+);
+
+evm_string_scalar!(
+    ChainFingerprint,
+    require_non_empty,
+    "chain_fingerprint",
+    "chain-fingerprint",
+    "mfm.evm.contract.value.chain_fingerprint",
+    "Non-secret chain fingerprint value used by certified EVM contexts."
+);
+
+evm_string_scalar!(
+    ObservationPolicyId,
+    require_local_public_id,
+    "observation_policy_id",
+    "observation-policy-id",
+    "mfm.evm.contract.id.observation_policy",
+    "Checked observation policy identity used by certified EVM contexts."
+);
+
+evm_string_scalar!(
+    ProvenanceLabel,
+    require_non_empty,
+    "provenance_label",
+    "provenance-label",
+    "mfm.evm.contract.value.provenance_label",
+    "Redaction-safe lifecycle provenance label."
+);
+
 macro_rules! evidence_identity_scalar {
     (
         $ty:ident,
@@ -417,6 +468,78 @@ evidence_identity_scalar!(
     "Checked semantic type id reference carried by lifecycle evidence."
 );
 
+evidence_identity_scalar!(
+    ContractProfileDigestRef,
+    ContentDigest,
+    "contract_profile_digest",
+    "contract-profile-digest-ref",
+    "mfm.evm.contract.id.contract_profile_digest",
+    "Checked content digest reference carried by a contract profile."
+);
+
+evidence_identity_scalar!(
+    LifecycleRunIdRef,
+    RunId,
+    "run_id",
+    "lifecycle-run-id-ref",
+    "mfm.evm.contract.id.lifecycle_run",
+    "Checked source run id reference carried by lifecycle import evidence."
+);
+
+evidence_identity_scalar!(
+    LifecycleSpecHashRef,
+    SpecHash,
+    "spec_hash",
+    "lifecycle-spec-hash-ref",
+    "mfm.evm.contract.id.lifecycle_spec_hash",
+    "Checked source spec hash reference carried by lifecycle import evidence."
+);
+
+evidence_identity_scalar!(
+    LifecycleCellIdRef,
+    CellId,
+    "cell_id",
+    "lifecycle-cell-id-ref",
+    "mfm.evm.contract.id.lifecycle_cell",
+    "Checked source cell id reference carried by lifecycle import evidence."
+);
+
+evidence_identity_scalar!(
+    LifecycleNodeIdRef,
+    NodeId,
+    "node_id",
+    "lifecycle-node-id-ref",
+    "mfm.evm.contract.id.lifecycle_node",
+    "Checked lifecycle node id reference carried by provenance claims."
+);
+
+evidence_identity_scalar!(
+    LifecycleDescriptorIdRef,
+    DescriptorId,
+    "descriptor_id",
+    "lifecycle-descriptor-id-ref",
+    "mfm.evm.contract.id.lifecycle_descriptor",
+    "Checked lifecycle descriptor id reference carried by import evidence."
+);
+
+evidence_identity_scalar!(
+    LifecycleContextDescriptorIdRef,
+    ContextDescriptorId,
+    "context_descriptor_id",
+    "lifecycle-context-descriptor-id-ref",
+    "mfm.evm.contract.id.lifecycle_context_descriptor",
+    "Checked context descriptor id reference carried by import evidence."
+);
+
+evidence_identity_scalar!(
+    LifecycleEventIdRef,
+    EventId,
+    "event_id",
+    "lifecycle-event-id-ref",
+    "mfm.evm.contract.id.lifecycle_event",
+    "Checked terminal event id reference carried by lifecycle import evidence."
+);
+
 /// Checked wei quantity rendered in the authored EVM quantity format.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, MfmValue)]
 #[serde(try_from = "String", into = "String")]
@@ -492,6 +615,176 @@ impl TryFrom<String> for WeiAmount {
 
 impl From<WeiAmount> for String {
     fn from(value: WeiAmount) -> Self {
+        value.raw
+    }
+}
+
+/// Normalized lowercase `0x`-prefixed EVM contract address.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, MfmValue)]
+#[serde(try_from = "String", into = "String")]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "contract-address",
+    schema = "mfm.evm.contract.value.contract_address",
+    transparent_string
+)]
+pub struct ContractAddress {
+    raw: String,
+}
+
+impl ContractAddress {
+    /// Creates a normalized EVM contract address.
+    pub fn new(value: impl Into<String>) -> Result<Self, EvmContractScalarError> {
+        let raw = value.into();
+        let normalized = encoding::normalize_address(&raw).map_err(|error| {
+            EvmContractScalarError::InvalidString {
+                kind: "contract_address",
+                message: error.message,
+            }
+        })?;
+        Ok(Self { raw: normalized })
+    }
+
+    /// Returns the canonical lowercase address.
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    /// Consumes this authority into its canonical string representation.
+    pub fn into_string(self) -> String {
+        self.raw
+    }
+}
+
+impl AsRef<str> for ContractAddress {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Deref for ContractAddress {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for ContractAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ContractAddress {
+    type Err = EvmContractScalarError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for ContractAddress {
+    type Error = EvmContractScalarError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<ContractAddress> for String {
+    fn from(value: ContractAddress) -> Self {
+        value.raw
+    }
+}
+
+/// Normalized lowercase `0x`-prefixed 32-byte EVM code hash.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, MfmValue)]
+#[serde(try_from = "String", into = "String")]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "evm-code-hash",
+    schema = "mfm.evm.contract.value.evm_code_hash",
+    transparent_string
+)]
+pub struct EvmCodeHash {
+    raw: String,
+}
+
+impl EvmCodeHash {
+    /// Creates a normalized 32-byte EVM code hash.
+    pub fn new(value: impl Into<String>) -> Result<Self, EvmContractScalarError> {
+        let raw = value.into();
+        let normalized = common_hex::normalize_hex_str(&raw).map_err(|error| {
+            EvmContractScalarError::InvalidString {
+                kind: "evm_code_hash",
+                message: error.message,
+            }
+        })?;
+        let bytes = common_hex::hex_to_bytes(&normalized).map_err(|error| {
+            EvmContractScalarError::InvalidString {
+                kind: "evm_code_hash",
+                message: error.message,
+            }
+        })?;
+        if bytes.len() != 32 {
+            return Err(EvmContractScalarError::InvalidString {
+                kind: "evm_code_hash",
+                message: "code hash must be 32 bytes".to_owned(),
+            });
+        }
+        Ok(Self { raw: normalized })
+    }
+
+    /// Returns the canonical lowercase code hash.
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    /// Consumes this authority into its canonical string representation.
+    pub fn into_string(self) -> String {
+        self.raw
+    }
+}
+
+impl AsRef<str> for EvmCodeHash {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Deref for EvmCodeHash {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for EvmCodeHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for EvmCodeHash {
+    type Err = EvmContractScalarError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for EvmCodeHash {
+    type Error = EvmContractScalarError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<EvmCodeHash> for String {
+    fn from(value: EvmCodeHash) -> Self {
         value.raw
     }
 }
@@ -756,6 +1049,495 @@ impl LifecycleArtifactEvidenceRef {
             .map(ArtifactEvidenceSemanticTypeId::typed)
             .transpose()
     }
+}
+
+/// Shared observation identity for EVM lifecycle reads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "observation-policy",
+    schema = "mfm.evm.contract.value.observation_policy"
+)]
+pub struct FinalityOrObservationPolicy {
+    /// Stable policy identity.
+    pub policy_id: ObservationPolicyId,
+    /// Optional shared block anchor for read observations.
+    pub block_anchor: Option<BlockSelector>,
+}
+
+/// Certified EVM network context shared by contract lifecycle phases.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "network-context",
+    schema = "mfm.evm.contract.value.network_context"
+)]
+pub struct EvmNetworkContext {
+    /// Stable semantic network identifier.
+    pub network_id: EvmNetworkId,
+    /// Expected EVM chain id observed by live or replayed capabilities.
+    pub expected_chain_id: NonZeroU64,
+    /// Optional non-secret chain fingerprint, such as genesis hash.
+    pub chain_fingerprint: Option<ChainFingerprint>,
+    /// Optional shared observation policy.
+    pub finality_or_observation_policy: Option<FinalityOrObservationPolicy>,
+}
+
+impl EvmNetworkContext {
+    /// Creates a certified EVM network context.
+    pub fn new(network_id: EvmNetworkId, expected_chain_id: u64) -> Result<Self, String> {
+        let expected_chain_id = NonZeroU64::new(expected_chain_id)
+            .ok_or_else(|| "expected_chain_id must be non-zero".to_owned())?;
+        Ok(Self {
+            network_id,
+            expected_chain_id,
+            chain_fingerprint: None,
+            finality_or_observation_policy: None,
+        })
+    }
+
+    /// Returns the expected EVM chain id.
+    pub const fn expected_chain_id(&self) -> u64 {
+        self.expected_chain_id.get()
+    }
+}
+
+/// Digest-oriented contract profile identity shared by lifecycle phases.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "contract-profile",
+    schema = "mfm.evm.contract.value.contract_profile"
+)]
+pub struct ContractProfile {
+    /// Stable profile identifier.
+    pub profile_id: ContractProfileId,
+    /// Optional retained artifact digest shared by lifecycle phases.
+    pub artifact_digest: Option<ContractProfileDigestRef>,
+    /// Optional ABI or interface digest.
+    pub interface_digest: Option<ContractProfileDigestRef>,
+    /// Optional creation bytecode digest.
+    pub creation_bytecode_digest: Option<ContractProfileDigestRef>,
+    /// Optional expected deployed code hash.
+    pub deployed_code_hash: Option<EvmCodeHash>,
+    /// Optional selector/event compatibility policy digest.
+    pub selector_event_policy_digest: Option<ContractProfileDigestRef>,
+}
+
+/// Certified EVM contract lifecycle context.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "contract-context",
+    schema = "mfm.evm.contract.value.contract_context"
+)]
+pub struct EvmContractContext {
+    /// Stable lifecycle key within the authored workflow.
+    pub lifecycle_key: LifecycleKey,
+    /// Semantic network context.
+    pub network: EvmNetworkContext,
+    /// Required contract profile identity.
+    pub contract_profile: ContractProfile,
+}
+
+impl MfmContext for EvmContractContext {}
+
+/// Lifecycle stage required or produced by an import/transition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "lifecycle-stage",
+    schema = "mfm.evm.contract.value.lifecycle_stage"
+)]
+pub enum ContractLifecycleStage {
+    /// Deployed contract instance stage.
+    Deployed,
+    /// Configured contract instance stage.
+    Configured,
+}
+
+/// Source cell or public output selected for an MFM-run import.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "source-cell-or-output-ref",
+    schema = "mfm.evm.contract.value.source_cell_or_output_ref"
+)]
+pub enum SourceCellOrOutputRef {
+    /// Source cell id inside the source run authority.
+    Cell {
+        /// Source cell id.
+        cell_id: LifecycleCellIdRef,
+    },
+    /// Source terminal public-output binding key.
+    PublicOutput {
+        /// Source public output key.
+        output_key: ArtifactPort,
+    },
+}
+
+/// Certified policy for accepting a source-run context during import.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "accepted-context-policy",
+    schema = "mfm.evm.contract.value.accepted_context_policy"
+)]
+pub enum AcceptedContextPolicy {
+    /// Source context must equal the importing context.
+    ExactContext {},
+    /// Source context must be one of these explicit context refs.
+    AcceptedContextRefs {
+        /// Accepted source context refs.
+        context_refs: Vec<ContextRefValue>,
+    },
+}
+
+/// Import request for a lifecycle value produced by another verified MFM run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "import-from-mfm-run",
+    schema = "mfm.evm.contract.value.import_from_mfm_run"
+)]
+pub struct ImportFromMfmRun {
+    /// Source run id.
+    pub source_run_id: LifecycleRunIdRef,
+    /// Source certified spec hash.
+    pub source_spec_hash: LifecycleSpecHashRef,
+    /// Source cell or output id.
+    pub source_cell_or_output_id: SourceCellOrOutputRef,
+    /// Source value digest.
+    pub source_value_digest: ContractProfileDigestRef,
+    /// Source context ref.
+    pub source_context_ref: ContextRefValue,
+    /// Required source lifecycle stage.
+    pub required_stage: ContractLifecycleStage,
+    /// Certified context acceptance policy.
+    pub accepted_context_policy: AcceptedContextPolicy,
+}
+
+/// Replayable evidence for importing a lifecycle value from another MFM run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "import-from-mfm-run-evidence",
+    schema = "mfm.evm.contract.value.import_from_mfm_run_evidence"
+)]
+pub struct ImportFromMfmRunEvidence {
+    /// Source certified spec hash.
+    pub source_spec_hash: LifecycleSpecHashRef,
+    /// Retained source spec certificate or export certificate.
+    pub source_spec_certificate_or_export_certificate_ref: LifecycleArtifactEvidenceRef,
+    /// Retained source run stream or export bundle.
+    pub source_run_stream_ref_or_export_bundle_ref: LifecycleArtifactEvidenceRef,
+    /// Source cell or output id.
+    pub source_cell_or_output_id: SourceCellOrOutputRef,
+    /// Source value schema id.
+    pub source_cell_schema_id: ArtifactEvidenceSchemaId,
+    /// Source value semantic type id.
+    pub source_cell_semantic_type_id: ArtifactEvidenceSemanticTypeId,
+    /// Source producer descriptor id.
+    pub source_producer_descriptor_id: LifecycleDescriptorIdRef,
+    /// Source lifecycle stage.
+    pub source_stage: ContractLifecycleStage,
+    /// Source context ref.
+    pub source_context_ref: ContextRefValue,
+    /// Source context descriptor id.
+    pub source_context_descriptor_id: LifecycleContextDescriptorIdRef,
+    /// Source value digest.
+    pub source_value_digest: ContractProfileDigestRef,
+    /// Retained source value artifact or inline canonical value evidence.
+    pub source_value_artifact_ref_or_inline_canonical_value: LifecycleArtifactEvidenceRef,
+    /// Source terminal cell or output event id.
+    pub source_terminal_cell_or_output_event_ref: LifecycleEventIdRef,
+    /// Certified import policy digest.
+    pub import_policy_digest: ContractProfileDigestRef,
+}
+
+/// Certified evidence policy for adopting an external EVM address.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "external-adoption-evidence-policy",
+    schema = "mfm.evm.contract.value.external_adoption_evidence_policy"
+)]
+pub struct ExternalAdoptionEvidencePolicy {
+    /// Whether code must be observed at the adopted address.
+    pub require_code: bool,
+    /// Optional expected deployed code hash.
+    pub expected_code_hash: Option<EvmCodeHash>,
+    /// Optional observation block anchor.
+    pub block_anchor: Option<BlockSelector>,
+    /// Initial read assertions required before adoption.
+    pub initial_read_assertions: Vec<ReadAssertionConfig>,
+    /// Initial event assertions required before adoption.
+    pub initial_event_assertions: Vec<EventAssertionConfig>,
+    /// Whether an unverified configured claim is allowed.
+    pub allow_external_claimed_configured: bool,
+}
+
+/// Request to adopt an external EVM address under a certified lifecycle context.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "adopt-external-address",
+    schema = "mfm.evm.contract.value.adopt_external_address"
+)]
+pub struct AdoptExternalAddress {
+    /// Normalized address being adopted.
+    pub address: ContractAddress,
+    /// Redaction-safe provenance label.
+    pub provenance_label: ProvenanceLabel,
+    /// Certified evidence policy.
+    pub evidence_policy: ExternalAdoptionEvidencePolicy,
+}
+
+/// Replayable evidence captured while adopting an external EVM address.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "external-adoption-evidence",
+    schema = "mfm.evm.contract.value.external_adoption_evidence"
+)]
+pub struct ExternalAdoptionEvidence {
+    /// Certified evidence policy digest.
+    pub evidence_policy_digest: ContractProfileDigestRef,
+    /// Optional code-read evidence.
+    pub code_evidence: Option<LifecycleArtifactEvidenceRef>,
+    /// Optional observed code hash.
+    pub observed_code_hash: Option<EvmCodeHash>,
+    /// Read assertion evidence refs.
+    pub read_evidence_refs: Vec<LifecycleArtifactEvidenceRef>,
+    /// Event assertion evidence refs.
+    pub event_evidence_refs: Vec<LifecycleArtifactEvidenceRef>,
+}
+
+/// Claim describing why an instance is considered configured.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "configuration-claim",
+    schema = "mfm.evm.contract.value.configuration_claim"
+)]
+pub enum ConfigurationClaim {
+    /// Configuration was performed by an MFM configure transition.
+    MfmConfigured {
+        /// Configure node id.
+        configure_node: LifecycleNodeIdRef,
+        /// Digest of the configure action.
+        configure_action_digest: ContractProfileDigestRef,
+        /// Configuration call evidence refs.
+        call_evidence_refs: Vec<LifecycleArtifactEvidenceRef>,
+        /// Confirmation read/event evidence refs.
+        confirmation_evidence_refs: Vec<LifecycleArtifactEvidenceRef>,
+    },
+    /// Configuration provenance was imported from another verified MFM run.
+    ImportedMfmConfigured {
+        /// Source run id.
+        source_run_id: LifecycleRunIdRef,
+        /// Source spec hash.
+        source_spec_hash: LifecycleSpecHashRef,
+        /// Source cell or output id.
+        source_cell_or_output_id: SourceCellOrOutputRef,
+        /// Source value digest.
+        source_value_digest: ContractProfileDigestRef,
+        /// Source context ref.
+        source_context_ref: ContextRefValue,
+    },
+    /// External adoption observed configured-state evidence.
+    ExternalObservedConfigured {
+        /// Redaction-safe provenance label.
+        provenance_label: ProvenanceLabel,
+        /// Certified evidence policy digest.
+        evidence_policy_digest: ContractProfileDigestRef,
+        /// Assertion evidence refs that support the observation.
+        assertion_evidence_refs: Vec<LifecycleArtifactEvidenceRef>,
+    },
+    /// External adoption made an explicitly unverified configured claim.
+    ExternalClaimedConfigured {
+        /// Redaction-safe provenance label.
+        provenance_label: ProvenanceLabel,
+        /// Certified evidence policy digest permitting this claim.
+        evidence_policy_digest: ContractProfileDigestRef,
+    },
+}
+
+impl ConfigurationClaim {
+    /// Returns true when this claim proves MFM configuration provenance.
+    pub const fn proves_mfm_configuration(&self) -> bool {
+        matches!(
+            self,
+            Self::MfmConfigured { .. } | Self::ImportedMfmConfigured { .. }
+        )
+    }
+}
+
+/// Provenance for a deployed contract instance.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "deploy-provenance",
+    schema = "mfm.evm.contract.value.deploy_provenance"
+)]
+pub enum DeployProvenance {
+    /// Contract was deployed by an MFM deploy transition.
+    MfmDeploy {
+        /// Deployment transaction hash.
+        deploy_tx_hash: String,
+    },
+    /// Deployed instance was imported from another verified MFM run.
+    ImportedMfmRun {
+        /// Imported source context ref.
+        source_context_ref: ContextRefValue,
+        /// Imported source value digest.
+        source_value_digest: ContractProfileDigestRef,
+        /// Certified import policy digest.
+        import_policy_digest: ContractProfileDigestRef,
+    },
+    /// Deployed instance was externally adopted.
+    ExternalAdoption {
+        /// Redaction-safe provenance label.
+        provenance_label: ProvenanceLabel,
+        /// Certified evidence policy digest.
+        evidence_policy_digest: ContractProfileDigestRef,
+    },
+}
+
+/// Context-bound deployed contract instance.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "deployed-contract-instance",
+    schema = "mfm.evm.contract.value.deployed_contract_instance"
+)]
+pub struct DeployedContractInstance {
+    /// Lifecycle value contract version.
+    pub lifecycle_version: u64,
+    /// Certified context ref.
+    pub context_ref: ContextRefValue,
+    /// Normalized contract address.
+    pub address: ContractAddress,
+    /// Deployment or import provenance.
+    pub deploy_provenance: DeployProvenance,
+    /// Deployment or import evidence refs.
+    pub deploy_evidence: Vec<LifecycleArtifactEvidenceRef>,
+    /// Optional block number that confirmed deployment or adoption.
+    pub deployed_block_number: Option<u64>,
+}
+
+/// Configured instance lineage back to a same-context deployed address.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "configured-from",
+    schema = "mfm.evm.contract.value.configured_from"
+)]
+pub struct ConfiguredFrom {
+    /// Deployed instance context ref.
+    pub deployed_context_ref: ContextRefValue,
+    /// Deployed instance address.
+    pub deployed_address: ContractAddress,
+}
+
+/// Optional configured-state evidence snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "configuration-snapshot",
+    schema = "mfm.evm.contract.value.configuration_snapshot"
+)]
+pub struct ConfigurationSnapshot {
+    /// Read assertion results proving configured state.
+    pub read_results: Vec<ValidationReadResult>,
+    /// Event assertion results proving configured state.
+    pub event_results: Vec<ValidationEventResult>,
+}
+
+/// Context-bound configured contract instance.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "configured-contract-instance",
+    schema = "mfm.evm.contract.value.configured_contract_instance"
+)]
+pub struct ConfiguredContractInstance {
+    /// Lifecycle value contract version.
+    pub lifecycle_version: u64,
+    /// Certified context ref.
+    pub context_ref: ContextRefValue,
+    /// Normalized contract address.
+    pub address: ContractAddress,
+    /// Deployed instance identity that configuration builds from.
+    pub configured_from: ConfiguredFrom,
+    /// Honest configuration provenance claim.
+    pub configuration_claim: ConfigurationClaim,
+    /// Configuration or import evidence refs.
+    pub configure_or_import_evidence: Vec<LifecycleArtifactEvidenceRef>,
+    /// Optional highest block number that confirmed configuration or adoption.
+    pub configured_block_number: Option<u64>,
+    /// Optional configured-state assertion snapshot.
+    pub asserted_configuration_snapshot: Option<ConfigurationSnapshot>,
+}
+
+/// Configured instance identity consumed by validation reports.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "configured-contract-instance-ref",
+    schema = "mfm.evm.contract.value.configured_contract_instance_ref"
+)]
+pub struct ConfiguredContractInstanceRef {
+    /// Certified context ref.
+    pub context_ref: ContextRefValue,
+    /// Normalized configured contract address.
+    pub address: ContractAddress,
+    /// Honest configuration provenance claim.
+    pub configuration_claim: ConfigurationClaim,
+}
+
+impl ConfiguredContractInstanceRef {
+    /// Builds a configured instance reference from a configured instance.
+    pub fn from_configured(configured: &ConfiguredContractInstance) -> Self {
+        Self {
+            context_ref: configured.context_ref.clone(),
+            address: configured.address.clone(),
+            configuration_claim: configured.configuration_claim.clone(),
+        }
+    }
+}
+
+/// Context-bound terminal validation report for a configured contract instance.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "context-bound-validation-report",
+    schema = "mfm.evm.contract.value.context_bound_validation_report"
+)]
+pub struct ContextBoundValidationReport {
+    /// Validation report contract version.
+    pub report_version: u64,
+    /// Certified context ref.
+    pub context_ref: ContextRefValue,
+    /// Configured contract instance that was validated.
+    pub configured_instance: ConfiguredContractInstanceRef,
+    /// Results for configuration-intent read confirmations stored on the configured instance.
+    pub configuration_read_results: Vec<ValidationReadResult>,
+    /// Results for configuration-intent event confirmations stored on the configured instance.
+    pub configuration_event_results: Vec<ValidationEventResult>,
+    /// Additional read assertion results from validation action.
+    pub read_results: Vec<ValidationReadResult>,
+    /// Additional event assertion results from validation action.
+    pub event_results: Vec<ValidationEventResult>,
+    /// Evidence refs for reads, logs, and retained validation report material.
+    pub evidence_refs: Vec<LifecycleArtifactEvidenceRef>,
+    /// Whether all validation checks passed.
+    pub valid: bool,
 }
 
 /// JSON contract artifact used by lifecycle phases.
@@ -1101,6 +1883,84 @@ pub struct ValidationReport {
     pub event_results: Vec<ValidationEventResult>,
     /// Whether all validation checks passed.
     pub valid: bool,
+}
+
+/// Returns the certified resource kind for EVM contract instances.
+pub fn contract_instance_resource_kind() -> &'static ContextResourceKind {
+    static KIND: OnceLock<ContextResourceKind> = OnceLock::new();
+    KIND.get_or_init(|| {
+        ContextResourceKind::new("mfm.evm.contract.instance")
+            .expect("hardcoded context resource kind is valid")
+    })
+}
+
+/// Returns the certified resource kind for terminal EVM validation reports.
+pub fn validation_report_resource_kind() -> &'static ContextResourceKind {
+    static KIND: OnceLock<ContextResourceKind> = OnceLock::new();
+    KIND.get_or_init(|| {
+        ContextResourceKind::new("mfm.evm.contract.validation_report")
+            .expect("hardcoded context resource kind is valid")
+    })
+}
+
+/// Returns the certified lifecycle stage for deployed instances.
+pub fn deployed_contract_stage() -> &'static ContextStage {
+    static STAGE: OnceLock<ContextStage> = OnceLock::new();
+    STAGE.get_or_init(|| ContextStage::new("deployed").expect("hardcoded context stage is valid"))
+}
+
+/// Returns the certified lifecycle stage for configured instances.
+pub fn configured_contract_stage() -> &'static ContextStage {
+    static STAGE: OnceLock<ContextStage> = OnceLock::new();
+    STAGE.get_or_init(|| ContextStage::new("configured").expect("hardcoded context stage is valid"))
+}
+
+/// Returns the certified terminal stage for validation reports.
+pub fn validation_report_stage() -> &'static ContextStage {
+    static STAGE: OnceLock<ContextStage> = OnceLock::new();
+    STAGE.get_or_init(|| ContextStage::new("validated").expect("hardcoded context stage is valid"))
+}
+
+impl ContextBoundOutput for DeployedContractInstance {
+    fn context_ref(&self) -> &ContextRef {
+        self.context_ref.as_context_ref()
+    }
+
+    fn context_resource_kind(&self) -> &ContextResourceKind {
+        contract_instance_resource_kind()
+    }
+
+    fn context_stage(&self) -> &ContextStage {
+        deployed_contract_stage()
+    }
+}
+
+impl ContextBoundOutput for ConfiguredContractInstance {
+    fn context_ref(&self) -> &ContextRef {
+        self.context_ref.as_context_ref()
+    }
+
+    fn context_resource_kind(&self) -> &ContextResourceKind {
+        contract_instance_resource_kind()
+    }
+
+    fn context_stage(&self) -> &ContextStage {
+        configured_contract_stage()
+    }
+}
+
+impl ContextBoundOutput for ContextBoundValidationReport {
+    fn context_ref(&self) -> &ContextRef {
+        self.context_ref.as_context_ref()
+    }
+
+    fn context_resource_kind(&self) -> &ContextResourceKind {
+        validation_report_resource_kind()
+    }
+
+    fn context_stage(&self) -> &ContextStage {
+        validation_report_stage()
+    }
 }
 
 /// Prepared read assertion ready for runtime execution.

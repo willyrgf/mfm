@@ -24,8 +24,8 @@ use std::marker::PhantomData;
 
 use mfm_canonical::{CanonicalJsonBytes, CanonicalValue};
 use mfm_ids::{
-    ArtifactId, ContentDigest, DigestAlgorithm, DigestBytes, NameToken, SchemaId, SchemaVersion,
-    SemanticTypeId,
+    ArtifactId, ContentDigest, ContextRef, ContextResourceKind, ContextStage, DigestAlgorithm,
+    DigestBytes, NameToken, SchemaId, SchemaVersion, SemanticTypeId,
 };
 use serde::de::{self, DeserializeOwned, Deserializer};
 use serde::ser::{SerializeStruct, Serializer};
@@ -172,6 +172,100 @@ pub trait MfmValue: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// Derives this value's schema id from its schema descriptor identity.
     fn schema_id() -> Result<SchemaId> {
         Self::schema_descriptor()?.schema_id()
+    }
+}
+
+/// Typed state output that carries certified context-resource metadata.
+pub trait ContextBoundOutput: MfmValue {
+    /// Returns the context ref embedded in the output value.
+    fn context_ref(&self) -> &ContextRef;
+
+    /// Returns the context resource kind embedded in the output value.
+    fn context_resource_kind(&self) -> &ContextResourceKind;
+
+    /// Returns the context resource stage embedded in the output value.
+    fn context_stage(&self) -> &ContextStage;
+}
+
+/// Typed value wrapper for a certified transition context reference.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContextRefValue {
+    value: ContextRef,
+}
+
+impl ContextRefValue {
+    /// Creates a context-ref value from a checked context ref.
+    pub const fn new(value: ContextRef) -> Self {
+        Self { value }
+    }
+
+    /// Parses a context-ref value from its persisted string form.
+    pub fn parse(value: impl AsRef<str>) -> Result<Self> {
+        ContextRef::parse(value.as_ref())
+            .map(Self::new)
+            .map_err(|error| ValueError::Identity(error.to_string()))
+    }
+
+    /// Returns the checked context ref.
+    pub const fn as_context_ref(&self) -> &ContextRef {
+        &self.value
+    }
+
+    /// Returns the persisted string form.
+    pub fn as_str(&self) -> &str {
+        self.value.as_str()
+    }
+
+    /// Consumes the wrapper into the checked context ref.
+    pub fn into_context_ref(self) -> ContextRef {
+        self.value
+    }
+}
+
+impl From<ContextRef> for ContextRefValue {
+    fn from(value: ContextRef) -> Self {
+        Self::new(value)
+    }
+}
+
+impl Serialize for ContextRefValue {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ContextRefValue {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(de::Error::custom)
+    }
+}
+
+impl MfmValue for ContextRefValue {
+    fn schema_descriptor() -> Result<SchemaDescriptor> {
+        framework_value_descriptor(
+            Self::semantic_id()?,
+            "mfm.kernel.context_ref_value",
+            SchemaShape::String,
+            "mfm_values::ContextRefValue",
+        )
+    }
+
+    fn semantic_id() -> Result<SemanticTypeId> {
+        SemanticTypeId::new(
+            "mfm.kernel",
+            "context-ref-value",
+            "1",
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0x33; 32]),
+        )
+        .map_err(|error| ValueError::Identity(error.to_string()))
     }
 }
 

@@ -24,6 +24,9 @@ error[E0277]: the trait bound `serde_json::Value: mfm_values::StateInput` is not
 help: the following other types implement trait `mfm_values::MfmValue`
  --> $WORKSPACE/crates/kernel/values/src/lib.rs
   |
+  | impl MfmValue for ContextRefValue {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::ContextRefValue`
+...
   | impl<T: MfmValue> MfmValue for MaybeValue<T> {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::MaybeValue<T>`
 ...
@@ -53,6 +56,9 @@ error[E0277]: the trait bound `serde_json::Value: mfm_values::MfmValue` is not s
 help: the following other types implement trait `mfm_values::MfmValue`
  --> $WORKSPACE/crates/kernel/values/src/lib.rs
   |
+  | impl MfmValue for ContextRefValue {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::ContextRefValue`
+...
   | impl<T: MfmValue> MfmValue for MaybeValue<T> {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::MaybeValue<T>`
 ...

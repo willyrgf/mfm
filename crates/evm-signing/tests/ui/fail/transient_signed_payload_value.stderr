@@ -125,6 +125,9 @@ help: the following other types implement trait `MfmValue`
    |
   ::: $WORKSPACE/crates/kernel/values/src/lib.rs
    |
+   | impl MfmValue for ContextRefValue {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ContextRefValue`
+...
    | impl<T: MfmValue> MfmValue for MaybeValue<T> {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `MaybeValue<T>`
 ...
