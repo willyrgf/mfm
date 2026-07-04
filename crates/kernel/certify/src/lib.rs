@@ -2571,11 +2571,16 @@ impl<'a> DraftLowerer<'a> {
             &submit_output_cell,
         )
         .map_err(|error| CertifyError::Spec(error.to_string()))?;
+        let node_context = node_context_from_cell_context(&submit_output_cell.context);
         let descriptor = framework_side_effect_verify_descriptor(
             &source.output_schema_id,
             &source.output_semantic_type_id,
             &config_ref.schema_id,
             &input_binding.input_schema_id,
+            state_context_descriptor_from_cell_context(
+                &submit_output_cell.context,
+                self.draft.contexts(),
+            )?,
         )?;
         self.insert_descriptor(spec::DescriptorIdentity::State(Box::new(
             descriptor.clone(),
@@ -2618,7 +2623,7 @@ impl<'a> DraftLowerer<'a> {
             state_kind: descriptor.state_kind,
             state_version: descriptor.state_version,
             descriptor_id: descriptor.descriptor_id,
-            context: spec::NodeContextSpec::no_context(),
+            context: node_context,
             config_ref,
             input_bindings: input_binding,
             output_cell: verify.output_cell_id.clone(),
@@ -2846,11 +2851,17 @@ impl<'a> DraftLowerer<'a> {
             digest: content_digest_json(input_node_json(&input_root))?,
             root: input_root,
         };
+        let (node_context, descriptor_context) = render_context_contract_for_public_outputs(
+            &required_cells,
+            &self.cells,
+            self.draft.contexts(),
+        )?;
         let descriptor = framework_render_descriptor(
             &receipt_schema_id,
             &semantic_type_id,
             &config_ref.schema_id,
             &input_binding.input_schema_id,
+            descriptor_context,
         )?;
         self.insert_descriptor(spec::DescriptorIdentity::State(Box::new(
             descriptor.clone(),
@@ -2893,7 +2904,7 @@ impl<'a> DraftLowerer<'a> {
             state_kind: descriptor.state_kind,
             state_version: descriptor.state_version,
             descriptor_id: descriptor.descriptor_id,
-            context: spec::NodeContextSpec::no_context(),
+            context: node_context,
             config_ref,
             input_bindings: input_binding,
             output_cell: output_cell.clone(),
@@ -3934,12 +3945,14 @@ fn validate_builtin_framework_state_descriptor(
             &descriptor.output_semantic_type_id,
             &descriptor.config_schema_id,
             &descriptor.input_schema_id,
+            descriptor.context.clone(),
         )?),
         "mfm.framework.render_public_outputs" => Some(framework_render_descriptor(
             &descriptor.output_schema_id,
             &descriptor.output_semantic_type_id,
             &descriptor.config_schema_id,
             &descriptor.input_schema_id,
+            descriptor.context.clone(),
         )?),
         "mfm.framework.project_retention_manifest" => {
             Some(framework_project_retention_manifest_descriptor(
@@ -5481,6 +5494,94 @@ fn input_context_from_cell_context(context: &spec::CellContextSpec) -> spec::Inp
     }
 }
 
+fn node_context_from_cell_context(context: &spec::CellContextSpec) -> spec::NodeContextSpec {
+    match context {
+        spec::CellContextSpec::NoContext => spec::NodeContextSpec::no_context(),
+        spec::CellContextSpec::Bound { context_ref, .. } => spec::NodeContextSpec::Required {
+            context_ref: context_ref.clone(),
+        },
+    }
+}
+
+fn state_context_descriptor_from_cell_context(
+    context: &spec::CellContextSpec,
+    contexts: &[spec::CertifiedContextSpec],
+) -> Result<spec::StateContextDescriptorSpec> {
+    match context {
+        spec::CellContextSpec::NoContext => Ok(spec::StateContextDescriptorSpec::no_context()),
+        spec::CellContextSpec::Bound { context_ref, .. } => {
+            let context = contexts
+                .iter()
+                .find(|context| context.context_ref == *context_ref)
+                .ok_or_else(|| {
+                    problem(
+                        ProblemClass::InvalidTopology,
+                        format!(
+                            "context-bound side-effect verify output references missing context {}",
+                            context_ref
+                        ),
+                    )
+                })?;
+            Ok(spec::StateContextDescriptorSpec::Required(Box::new(
+                spec::StateContextDescriptorRequirementSpec {
+                    context_descriptor_id: context.context_descriptor_id.clone(),
+                    schema_id: context.schema_id.clone(),
+                    semantic_type_id: context.semantic_type_id.clone(),
+                    canonicalizer_identity: context.canonicalizer_identity.clone(),
+                },
+            )))
+        }
+    }
+}
+
+fn render_context_contract_for_public_outputs(
+    required_cells: &[spec::PublicOutputCell],
+    cells: &[spec::CellSpec],
+    contexts: &[spec::CertifiedContextSpec],
+) -> Result<(spec::NodeContextSpec, spec::StateContextDescriptorSpec)> {
+    let mut context = None::<spec::CellContextSpec>;
+    for output in required_cells {
+        let cell = cells
+            .iter()
+            .find(|cell| cell.cell_id == output.cell_id)
+            .ok_or_else(|| {
+                problem(
+                    ProblemClass::InvalidTopology,
+                    format!("public output cell {} is missing", output.cell_id),
+                )
+            })?;
+        let spec::CellContextSpec::Bound { context_ref, .. } = &cell.context else {
+            continue;
+        };
+        match &context {
+            Some(spec::CellContextSpec::Bound {
+                context_ref: existing,
+                ..
+            }) if existing != context_ref => {
+                return Err(problem(
+                    ProblemClass::InvalidSemanticTransition,
+                    format!(
+                        "public output render node cannot consume multiple context refs: {} and {}",
+                        existing, context_ref
+                    ),
+                ));
+            }
+            Some(_) => {}
+            None => context = Some(cell.context.clone()),
+        }
+    }
+    let Some(context) = context else {
+        return Ok((
+            spec::NodeContextSpec::no_context(),
+            spec::StateContextDescriptorSpec::no_context(),
+        ));
+    };
+    Ok((
+        node_context_from_cell_context(&context),
+        state_context_descriptor_from_cell_context(&context, contexts)?,
+    ))
+}
+
 fn lower_ordering_evidence(value: &program::OrderingEvidence) -> spec::OrderingEvidence {
     match value {
         program::OrderingEvidence::ExplicitAuthorOrder => {
@@ -6204,6 +6305,7 @@ fn framework_bridge_descriptor(
         input_schema_id,
         output_schema_id,
         output_semantic_type_id,
+        context: spec::StateContextDescriptorSpec::no_context(),
         effect_kind: Pure::descriptor()
             .map_err(|error| lower(error.to_string()))?
             .kind,
@@ -6217,6 +6319,7 @@ fn framework_side_effect_verify_descriptor(
     output_semantic_type_id: &SemanticTypeId,
     config_schema_id: &SchemaId,
     input_schema_id: &SchemaId,
+    context: spec::StateContextDescriptorSpec,
 ) -> Result<spec::StateDescriptorIdentity> {
     let state_kind = state_kind_json(
         "side_effect_verify",
@@ -6232,6 +6335,7 @@ fn framework_side_effect_verify_descriptor(
         input_schema_id,
         output_schema_id,
         output_semantic_type_id,
+        context,
         effect_kind: mfm_effects::ReadExternal::descriptor()
             .map_err(|error| lower(error.to_string()))?
             .kind,
@@ -6245,6 +6349,7 @@ fn framework_render_descriptor(
     output_semantic_type_id: &SemanticTypeId,
     config_schema_id: &SchemaId,
     input_schema_id: &SchemaId,
+    context: spec::StateContextDescriptorSpec,
 ) -> Result<spec::StateDescriptorIdentity> {
     let state_kind = state_kind_json(
         "render_public_outputs",
@@ -6260,6 +6365,7 @@ fn framework_render_descriptor(
         input_schema_id,
         output_schema_id,
         output_semantic_type_id,
+        context,
         effect_kind: ManagedPlatformWrite::descriptor()
             .map_err(|error| lower(error.to_string()))?
             .kind,
@@ -6288,6 +6394,7 @@ fn framework_project_retention_manifest_descriptor(
         input_schema_id,
         output_schema_id,
         output_semantic_type_id,
+        context: spec::StateContextDescriptorSpec::no_context(),
         effect_kind: ManagedPlatformWrite::descriptor()
             .map_err(|error| lower(error.to_string()))?
             .kind,
@@ -6316,6 +6423,7 @@ fn framework_complete_run_descriptor(
         input_schema_id,
         output_schema_id,
         output_semantic_type_id,
+        context: spec::StateContextDescriptorSpec::no_context(),
         effect_kind: ManagedPlatformWrite::descriptor()
             .map_err(|error| lower(error.to_string()))?
             .kind,
@@ -6344,6 +6452,7 @@ fn framework_resolve_saga_terminal_descriptor(
         input_schema_id,
         output_schema_id,
         output_semantic_type_id,
+        context: spec::StateContextDescriptorSpec::no_context(),
         effect_kind: ManagedPlatformWrite::descriptor()
             .map_err(|error| lower(error.to_string()))?
             .kind,
@@ -6366,6 +6475,7 @@ struct FrameworkStateDescriptorParts<'a> {
     input_schema_id: &'a SchemaId,
     output_schema_id: &'a SchemaId,
     output_semantic_type_id: &'a SemanticTypeId,
+    context: spec::StateContextDescriptorSpec,
     effect_kind: EffectKind,
     runner: &'static str,
     capabilities: CapabilitySetDescriptor,
@@ -6382,6 +6492,7 @@ fn framework_state_descriptor(
         input_schema_id,
         output_schema_id,
         output_semantic_type_id,
+        context,
         effect_kind,
         runner,
         capabilities,
@@ -6397,7 +6508,7 @@ fn framework_state_descriptor(
             })
         }).collect::<Vec<_>>(),
         "config_schema_id": config_schema_id.as_str(),
-        "context": state_context_descriptor_json(&spec::StateContextDescriptorSpec::no_context()),
+        "context": state_context_descriptor_json(&context),
         "effect": {
             "class": effect.class.as_str(),
             "kind": effect.kind.as_str(),
@@ -6421,7 +6532,7 @@ fn framework_state_descriptor(
         name: name.to_owned(),
         state_kind,
         state_version,
-        context: spec::StateContextDescriptorSpec::no_context(),
+        context,
         input_context: spec::StateInputContextContractSpec::no_context(),
         output_context: spec::StateOutputContextContractSpec::no_context(),
         config_schema_id: config_schema_id.clone(),

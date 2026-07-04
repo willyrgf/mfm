@@ -45,14 +45,15 @@ use mfm_evm_contract_config::{
     ReceiptRetryPolicy, ValidateAction,
 };
 use mfm_evm_contract_model::{
-    constructor_data, decode_single_output_to_json, expected_matches, hex_to_bytes,
-    normalize_address, parse_artifact, prepare_validate_assertions, resolve_function_call,
-    AcceptedContextPolicy, ConfigurationClaim, ConfigurationSnapshot, ConfiguredContractInstance,
-    ConfiguredFrom, ContractArtifactConfig, ContractCallConfig, ContractLifecycleStage,
-    ContractProfileDigestRef, DeployProvenance, DeployedContractInstance, EventAssertionConfig,
-    EvmCodeHash, EvmContractContext, EvmNetworkContext, ExpectedValue, ImportFromMfmRun,
-    LifecycleArtifactEvidenceRef, LifecycleNodeIdRef, ParsedAbi, ReadAssertionConfig,
-    ValidationEventResult, ValidationReadResult,
+    configured_contract_stage, constructor_data, decode_single_output_to_json,
+    deployed_contract_stage, expected_matches, hex_to_bytes, normalize_address, parse_artifact,
+    prepare_validate_assertions, resolve_function_call, validation_report_stage,
+    AcceptedContextPolicy, ConfigurationSnapshot, ConfiguredContractInstance,
+    ContextBoundValidationReport, ContractArtifactConfig, ContractCallConfig,
+    ContractLifecycleStage, ContractProfileDigestRef, DeployedContractInstance,
+    EventAssertionConfig, EvmCodeHash, EvmContractContext, EvmNetworkContext, ExpectedValue,
+    ImportFromMfmRun, ImportFromMfmRunEvidence, LifecycleArtifactEvidenceRef, LifecycleNodeIdRef,
+    ParsedAbi, ReadAssertionConfig, ValidationEventResult, ValidationReadResult,
 };
 use mfm_evm_core::hex::bytes_to_hex_prefixed;
 use mfm_evm_core::rlp::{rlp_encode_list, u64_to_min_be};
@@ -74,6 +75,7 @@ use mfm_runtime::{
     SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
     SideEffectSubmissionDecisionFuture, SideEffectUnknownSubmissionDecision,
     SideEffectUnknownSubmissionDecisionFuture, SideEffectVerifyCallbacks, SideEffectVerifyDriver,
+    TypedContextOutputExtractor,
 };
 use mfm_signing::{PublicKeyBytes, SignerRef, SigningProvider};
 use mfm_spec::v1 as spec;
@@ -83,13 +85,14 @@ use mfm_state_evm_contracts::{
     ContextBoundValidateContractState, ContextConfigureContractInput,
     ContextContractConfigureConfirmation, ContextContractConfigureIntent,
     ContextContractConfigureReceipt, ContextContractDeployIntent,
-    ContextContractValidationReadRequest, ContextValidateContractInput,
-    ContractDeployConfirmation, ContractDeployReceipt,
-    ContractTransactionIdempotency, ContractTransactionReceipt, ContractTransactionSubmission,
-    ContractTransactionSubmissions, ContractValidationReadResponse,
+    ContextContractValidationReadRequest, ContextValidateContractInput, ContractDeployConfirmation,
+    ContractDeployReceipt, ContractTransactionIdempotency, ContractTransactionReceipt,
+    ContractTransactionSubmission, ContractTransactionSubmissions, ContractValidationReadResponse,
+    ImportConfiguredContractState, ImportDeployedContractState,
 };
 use mfm_store::v1 as store;
-use mfm_values::{MfmConfig, MfmValue};
+use mfm_values::{ContextBoundOutput, MfmConfig, MfmValue};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
@@ -1003,25 +1006,32 @@ async fn import_deployed_with_reads(
     reads: EvmContractReadProviders<'_>,
     import: &ImportDeployedSpec,
     context: &mfm_program::CertifiedContext<EvmContractContext>,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> Result<DeployedContractInstance> {
     match import {
-        ImportDeployedSpec::FromMfmRun { source } => {
+        ImportDeployedSpec::FromMfmRun { source, evidence } => {
             validate_source_run_import_policy(source, context, ContractLifecycleStage::Deployed)?;
-            Err(EvmContractAdapterError::MissingSourceRunImportEvidence)
+            let imported = import_source_run_value::<DeployedContractInstance>(
+                artifacts,
+                source,
+                evidence,
+                context,
+                ContractLifecycleStage::Deployed,
+            )
+            .await?;
+            ImportDeployedContractState::admit_verified_mfm_run_import(import, imported, context)
+                .map_err(Into::into)
         }
         ImportDeployedSpec::AdoptExternalAddress { adoption } => {
             verify_external_adoption(reads, adoption, context).await?;
-            Ok(DeployedContractInstance {
-                lifecycle_version: 1,
-                context_ref: mfm_values::ContextRefValue::from(context.context_ref().clone()),
-                address: adoption.address.clone(),
-                deploy_provenance: DeployProvenance::ExternalAdoption {
-                    provenance_label: adoption.provenance_label.clone(),
-                    evidence_policy_digest: digest_for_value(&adoption.evidence_policy)?,
-                },
-                deploy_evidence: Vec::new(),
-                deployed_block_number: None,
-            })
+            ImportDeployedContractState::admit_verified_external_adoption(
+                import,
+                context,
+                digest_for_value(&adoption.evidence_policy)?,
+                Vec::new(),
+                None,
+            )
+            .map_err(Into::into)
         }
     }
 }
@@ -1031,18 +1041,26 @@ async fn import_configured_with_reads(
     import: &ImportConfiguredSpec,
     context: &mfm_program::CertifiedContext<EvmContractContext>,
     artifact: Option<&ContractArtifactConfig>,
+    artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> Result<ConfiguredContractInstance> {
     match import {
-        ImportConfiguredSpec::FromMfmRun { source } => {
+        ImportConfiguredSpec::FromMfmRun { source, evidence } => {
             validate_source_run_import_policy(source, context, ContractLifecycleStage::Configured)?;
-            Err(EvmContractAdapterError::MissingSourceRunImportEvidence)
+            let imported = import_source_run_value::<ConfiguredContractInstance>(
+                artifacts,
+                source,
+                evidence,
+                context,
+                ContractLifecycleStage::Configured,
+            )
+            .await?;
+            ImportConfiguredContractState::admit_verified_mfm_run_import(import, imported, context)
+                .map_err(Into::into)
         }
         ImportConfiguredSpec::AdoptExternalAddress { adoption } => {
             let guard = verify_external_adoption(reads, adoption, context).await?;
             let policy_digest = digest_for_value(&adoption.evidence_policy)?;
-            let (claim, snapshot) = if external_adoption_assertions_required(
-                &adoption.evidence_policy,
-            ) {
+            let snapshot = if external_adoption_assertions_required(&adoption.evidence_policy) {
                 let assertion_context = prepare_validation_assertion_context(
                     artifact,
                     adoption.address.as_str(),
@@ -1061,44 +1079,24 @@ async fn import_configured_with_reads(
                 if !all_passed {
                     return Err(EvmContractAdapterError::ExternalAdoptionAssertionsFailed);
                 }
-                (
-                    ConfigurationClaim::ExternalObservedConfigured {
-                        provenance_label: adoption.provenance_label.clone(),
-                        evidence_policy_digest: policy_digest.clone(),
-                        assertion_evidence_refs: Vec::new(),
-                    },
-                    Some(ConfigurationSnapshot {
-                        read_results,
-                        event_results,
-                    }),
-                )
+                Some(ConfigurationSnapshot {
+                    read_results,
+                    event_results,
+                })
             } else if adoption.evidence_policy.allow_external_claimed_configured {
-                (
-                    ConfigurationClaim::ExternalClaimedConfigured {
-                        provenance_label: adoption.provenance_label.clone(),
-                        evidence_policy_digest: policy_digest.clone(),
-                    },
-                    None,
-                )
+                None
             } else {
                 return Err(EvmContractAdapterError::ExternalConfiguredClaimNotAllowed);
             };
-
-            Ok(ConfiguredContractInstance {
-                lifecycle_version: 1,
-                context_ref: mfm_values::ContextRefValue::from(context.context_ref().clone()),
-                address: adoption.address.clone(),
-                configured_from: ConfiguredFrom {
-                    deployed_context_ref: mfm_values::ContextRefValue::from(
-                        context.context_ref().clone(),
-                    ),
-                    deployed_address: adoption.address.clone(),
-                },
-                configuration_claim: claim,
-                configure_or_import_evidence: Vec::new(),
-                configured_block_number: None,
-                asserted_configuration_snapshot: snapshot,
-            })
+            ImportConfiguredContractState::admit_verified_external_adoption(
+                import,
+                context,
+                policy_digest,
+                Vec::new(),
+                snapshot,
+                None,
+            )
+            .map_err(Into::into)
         }
     }
 }
@@ -1115,7 +1113,8 @@ async fn verify_external_adoption(
     )
     .await?;
     let guard = chain.guard;
-    if adoption.evidence_policy.require_code || adoption.evidence_policy.expected_code_hash.is_some()
+    if adoption.evidence_policy.require_code
+        || adoption.evidence_policy.expected_code_hash.is_some()
     {
         let address = parse_address(adoption.address.as_str(), "address")
             .map_err(|error| EvmContractAdapterError::Model(error.message))?;
@@ -1155,6 +1154,153 @@ fn external_adoption_assertions_required(
     policy: &mfm_evm_contract_model::ExternalAdoptionEvidencePolicy,
 ) -> bool {
     !policy.initial_read_assertions.is_empty() || !policy.initial_event_assertions.is_empty()
+}
+
+async fn import_source_run_value<T>(
+    artifacts: &dyn store::RetainedArtifactReadProvider,
+    source: &ImportFromMfmRun,
+    evidence: &ImportFromMfmRunEvidence,
+    context: &mfm_program::CertifiedContext<EvmContractContext>,
+    required_stage: ContractLifecycleStage,
+) -> Result<T>
+where
+    T: ContextBoundOutput + DeserializeOwned,
+{
+    validate_source_run_import_evidence::<T>(source, evidence, context, required_stage)?;
+    let _certificate = read_lifecycle_evidence_artifact(
+        artifacts,
+        &evidence.source_spec_certificate_or_export_certificate_ref,
+    )
+    .await?;
+    let _stream = read_lifecycle_evidence_artifact(
+        artifacts,
+        &evidence.source_run_stream_ref_or_export_bundle_ref,
+    )
+    .await?;
+    let source_value = read_lifecycle_evidence_artifact(
+        artifacts,
+        &evidence.source_value_artifact_ref_or_inline_canonical_value,
+    )
+    .await?;
+    let value = serde_json::from_slice::<T>(source_value.bytes())
+        .map_err(|error| EvmContractAdapterError::SourceRunImportEvidence(error.to_string()))?;
+    if value.context_ref() != evidence.source_context_ref.as_context_ref()
+        || value.context_resource_kind()
+            != mfm_evm_contract_model::contract_instance_resource_kind()
+        || value.context_stage() != context_stage_for_lifecycle_stage(required_stage)
+    {
+        return Err(EvmContractAdapterError::ContextMismatch);
+    }
+    Ok(value)
+}
+
+fn validate_source_run_import_evidence<T>(
+    source: &ImportFromMfmRun,
+    evidence: &ImportFromMfmRunEvidence,
+    context: &mfm_program::CertifiedContext<EvmContractContext>,
+    required_stage: ContractLifecycleStage,
+) -> Result<()>
+where
+    T: ContextBoundOutput,
+{
+    if evidence.source_spec_hash != source.source_spec_hash
+        || evidence.source_cell_or_output_id != source.source_cell_or_output_id
+        || evidence.source_stage != required_stage
+        || evidence.source_context_ref != source.source_context_ref
+        || evidence.source_value_digest != source.source_value_digest
+        || evidence.import_policy_digest != digest_for_value(source)?
+    {
+        return Err(EvmContractAdapterError::SourceRunImportEvidence(
+            "source-run import evidence does not match certified import policy".to_owned(),
+        ));
+    }
+    if evidence.source_context_ref.as_context_ref() == context.context_ref()
+        && evidence
+            .source_context_descriptor_id
+            .typed()
+            .map_err(EvmContractAdapterError::Model)?
+            != *context.context_descriptor_id()
+    {
+        return Err(EvmContractAdapterError::ContextMismatch);
+    }
+    let value_ref = &evidence.source_value_artifact_ref_or_inline_canonical_value;
+    if value_ref
+        .content_digest()
+        .map_err(EvmContractAdapterError::Model)?
+        != evidence
+            .source_value_digest
+            .typed()
+            .map_err(EvmContractAdapterError::Model)?
+    {
+        return Err(EvmContractAdapterError::SourceRunImportEvidence(
+            "source value artifact digest does not match import evidence".to_owned(),
+        ));
+    }
+    if evidence
+        .source_cell_schema_id
+        .typed()
+        .map_err(EvmContractAdapterError::Model)?
+        != T::schema_id().map_err(|error| EvmContractAdapterError::Model(error.to_string()))?
+        || evidence
+            .source_cell_semantic_type_id
+            .typed()
+            .map_err(EvmContractAdapterError::Model)?
+            != T::semantic_id()
+                .map_err(|error| EvmContractAdapterError::Model(error.to_string()))?
+    {
+        return Err(EvmContractAdapterError::SourceRunImportEvidence(
+            "source-run import evidence value type does not match requested lifecycle stage"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+async fn read_lifecycle_evidence_artifact(
+    artifacts: &dyn store::RetainedArtifactReadProvider,
+    evidence: &LifecycleArtifactEvidenceRef,
+) -> Result<store::VerifiedRunArtifactBytes> {
+    let requirement = lifecycle_artifact_requirement(evidence)?;
+    artifacts
+        .read_retained_artifact(&requirement)
+        .await
+        .map_err(|error| EvmContractAdapterError::SourceRunImportEvidence(error.to_string()))
+}
+
+fn lifecycle_artifact_requirement(
+    evidence: &LifecycleArtifactEvidenceRef,
+) -> Result<events::EventArtifactRequirement> {
+    Ok(events::EventArtifactRequirement {
+        source: events::EventArtifactReferenceSource::ArtifactReferenced,
+        artifact_id: evidence
+            .artifact_id()
+            .map_err(EvmContractAdapterError::Model)?,
+        digest: Some(
+            evidence
+                .content_digest()
+                .map_err(EvmContractAdapterError::Model)?,
+        ),
+        byte_len: Some(evidence.byte_len()),
+        media_type: None,
+        schema_id: evidence
+            .schema_id()
+            .map_err(EvmContractAdapterError::Model)?,
+        semantic_type_id: evidence
+            .semantic_type_id()
+            .map_err(EvmContractAdapterError::Model)?,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: None,
+    })
+}
+
+fn context_stage_for_lifecycle_stage(
+    stage: ContractLifecycleStage,
+) -> &'static mfm_ids::ContextStage {
+    match stage {
+        ContractLifecycleStage::Deployed => deployed_contract_stage(),
+        ContractLifecycleStage::Configured => configured_contract_stage(),
+    }
 }
 
 fn validate_source_run_import_policy(
@@ -2421,10 +2567,16 @@ impl EvmContractReadRuntime {
         &self,
         import: &ImportDeployedSpec,
         context: &mfm_program::CertifiedContext<EvmContractContext>,
+        artifacts: &dyn store::RetainedArtifactReadProvider,
     ) -> Result<DeployedContractInstance> {
         let evm = self.evm.as_ref();
-        import_deployed_with_reads(EvmContractReadProviders::from_provider(evm), import, context)
-            .await
+        import_deployed_with_reads(
+            EvmContractReadProviders::from_provider(evm),
+            import,
+            context,
+            artifacts,
+        )
+        .await
     }
 
     /// Admits a configured-stage import through this process-local read runtime.
@@ -2433,6 +2585,7 @@ impl EvmContractReadRuntime {
         import: &ImportConfiguredSpec,
         context: &mfm_program::CertifiedContext<EvmContractContext>,
         artifact: Option<&ContractArtifactConfig>,
+        artifacts: &dyn store::RetainedArtifactReadProvider,
     ) -> Result<ConfiguredContractInstance> {
         let evm = self.evm.as_ref();
         import_configured_with_reads(
@@ -2440,6 +2593,7 @@ impl EvmContractReadRuntime {
             import,
             context,
             artifact,
+            artifacts,
         )
         .await
     }
@@ -2503,6 +2657,7 @@ pub fn register_contract_lifecycle_runners_with_factory(
             &side_effect_factory,
             Arc::new(ContractMutationRunner::<ContextDeployMutationPlan> {
                 factory: factory.clone(),
+                extractor: TypedContextOutputExtractor::new(),
                 _phase: PhantomData,
             }),
         )?;
@@ -2511,6 +2666,7 @@ pub fn register_contract_lifecycle_runners_with_factory(
             &side_effect_factory,
             Arc::new(ContractMutationRunner::<ContextConfigureMutationPlan> {
                 factory: factory.clone(),
+                extractor: TypedContextOutputExtractor::new(),
                 _phase: PhantomData,
             }),
         )?;
@@ -2518,18 +2674,21 @@ pub fn register_contract_lifecycle_runners_with_factory(
         &read_factory,
         Arc::new(ContextContractValidateRunner {
             factory: factory.clone(),
+            extractor: TypedContextOutputExtractor::new(),
         }),
     )?;
     registrations.register_state_descriptor_with_factory::<mfm_state_evm_contracts::ImportDeployedContractState>(
         &read_factory,
         Arc::new(ImportDeployedRunner {
             factory: factory.clone(),
+            extractor: TypedContextOutputExtractor::new(),
         }),
     )?;
     registrations.register_state_descriptor_with_factory::<mfm_state_evm_contracts::ImportConfiguredContractState>(
         &read_factory,
         Arc::new(ImportConfiguredRunner {
             factory: factory.clone(),
+            extractor: TypedContextOutputExtractor::new(),
         }),
     )?;
     registrations.register_side_effect_verify_runner_with_factory(
@@ -2537,18 +2696,23 @@ pub fn register_contract_lifecycle_runners_with_factory(
         &read_factory,
         Arc::new(ContextContractVerifyRunner {
             factory: factory.clone(),
+            extractor: ContractLifecycleContextOutputExtractor::new(),
         }),
     )?;
     registrations.register_side_effect_verify_runner_with_factory(
         configure.descriptor_id().clone(),
         &read_factory,
-        Arc::new(ContextContractVerifyRunner { factory }),
+        Arc::new(ContextContractVerifyRunner {
+            factory,
+            extractor: ContractLifecycleContextOutputExtractor::new(),
+        }),
     )?;
     Ok(())
 }
 
 struct ContextContractValidateRunner {
     factory: Arc<dyn EvmContractRuntimeFactory>,
+    extractor: TypedContextOutputExtractor<ContextBoundValidationReport>,
 }
 
 impl ErasedNodeRunner for ContextContractValidateRunner {
@@ -2559,6 +2723,10 @@ impl ErasedNodeRunner for ContextContractValidateRunner {
             .map(|_| ())
     }
 
+    fn context_output_extractor(&self) -> Option<&dyn mfm_runtime::ContextOutputExtractor> {
+        Some(&self.extractor)
+    }
+
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move { run_context_validate(ctx, self.factory.as_ref()).await })
     }
@@ -2566,6 +2734,7 @@ impl ErasedNodeRunner for ContextContractValidateRunner {
 
 struct ImportDeployedRunner {
     factory: Arc<dyn EvmContractRuntimeFactory>,
+    extractor: TypedContextOutputExtractor<DeployedContractInstance>,
 }
 
 impl ErasedNodeRunner for ImportDeployedRunner {
@@ -2576,6 +2745,10 @@ impl ErasedNodeRunner for ImportDeployedRunner {
             .map(|_| ())
     }
 
+    fn context_output_extractor(&self) -> Option<&dyn mfm_runtime::ContextOutputExtractor> {
+        Some(&self.extractor)
+    }
+
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move { run_import_deployed(ctx, self.factory.as_ref()).await })
     }
@@ -2583,6 +2756,7 @@ impl ErasedNodeRunner for ImportDeployedRunner {
 
 struct ImportConfiguredRunner {
     factory: Arc<dyn EvmContractRuntimeFactory>,
+    extractor: TypedContextOutputExtractor<ConfiguredContractInstance>,
 }
 
 impl ErasedNodeRunner for ImportConfiguredRunner {
@@ -2593,6 +2767,10 @@ impl ErasedNodeRunner for ImportConfiguredRunner {
             .map(|_| ())
     }
 
+    fn context_output_extractor(&self) -> Option<&dyn mfm_runtime::ContextOutputExtractor> {
+        Some(&self.extractor)
+    }
+
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move { run_import_configured(ctx, self.factory.as_ref()).await })
     }
@@ -2600,6 +2778,7 @@ impl ErasedNodeRunner for ImportConfiguredRunner {
 
 struct ContextContractVerifyRunner {
     factory: Arc<dyn EvmContractRuntimeFactory>,
+    extractor: ContractLifecycleContextOutputExtractor,
 }
 
 impl ErasedNodeRunner for ContextContractVerifyRunner {
@@ -2608,13 +2787,66 @@ impl ErasedNodeRunner for ContextContractVerifyRunner {
         validate_context_mutation_runtime_for_node(&ctx, submit_node, self.factory.as_ref())
     }
 
+    fn context_output_extractor(&self) -> Option<&dyn mfm_runtime::ContextOutputExtractor> {
+        Some(&self.extractor)
+    }
+
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move { run_context_verify(ctx, self.factory.as_ref()).await })
     }
 }
 
-struct ContractMutationRunner<P> {
+struct ContractLifecycleContextOutputExtractor {
+    deployed: TypedContextOutputExtractor<DeployedContractInstance>,
+    configured: TypedContextOutputExtractor<ConfiguredContractInstance>,
+    validation_report: TypedContextOutputExtractor<ContextBoundValidationReport>,
+}
+
+impl ContractLifecycleContextOutputExtractor {
+    const fn new() -> Self {
+        Self {
+            deployed: TypedContextOutputExtractor::new(),
+            configured: TypedContextOutputExtractor::new(),
+            validation_report: TypedContextOutputExtractor::new(),
+        }
+    }
+}
+
+impl mfm_runtime::ContextOutputExtractor for ContractLifecycleContextOutputExtractor {
+    fn validate_context_output(
+        &self,
+        cell_context: &spec::CellContextSpec,
+        artifact: &store::ArtifactEvidenceRef,
+        bytes: &[u8],
+    ) -> mfm_runtime::Result<()> {
+        let spec::CellContextSpec::Bound { stage, .. } = cell_context else {
+            return Ok(());
+        };
+        if stage == deployed_contract_stage() {
+            return self
+                .deployed
+                .validate_context_output(cell_context, artifact, bytes);
+        }
+        if stage == configured_contract_stage() {
+            return self
+                .configured
+                .validate_context_output(cell_context, artifact, bytes);
+        }
+        if stage == validation_report_stage() {
+            return self
+                .validation_report
+                .validate_context_output(cell_context, artifact, bytes);
+        }
+        Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+            "unsupported EVM contract context output stage {}",
+            stage
+        )))
+    }
+}
+
+struct ContractMutationRunner<P: ContractMutationPlanOps> {
     factory: Arc<dyn EvmContractRuntimeFactory>,
+    extractor: TypedContextOutputExtractor<<P as ContractMutationPlanOps>::Output>,
     _phase: PhantomData<P>,
 }
 
@@ -2624,6 +2856,10 @@ where
 {
     fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
         P::validate_ingress(&ctx, self.factory.as_ref())
+    }
+
+    fn context_output_extractor(&self) -> Option<&dyn mfm_runtime::ContextOutputExtractor> {
+        Some(&self.extractor)
     }
 
     fn preclaim_resource_lane<'a>(
@@ -2895,6 +3131,7 @@ struct ContractMutationSideEffectCallbacks<'a, P> {
 
 trait ContractMutationPlanOps: Send + Sync {
     type Intent: MfmValue + Clone + Send + Sync + 'static;
+    type Output: mfm_values::ContextBoundOutput + 'static;
 
     fn validate_ingress(
         ctx: &RunnerIngressContext<'_>,
@@ -2940,6 +3177,7 @@ trait ContractMutationPlanOps: Send + Sync {
 
 impl ContractMutationPlanOps for ContextDeployMutationPlan {
     type Intent = ContextContractDeployIntent;
+    type Output = DeployedContractInstance;
 
     fn validate_ingress(
         ctx: &RunnerIngressContext<'_>,
@@ -3024,6 +3262,7 @@ impl ContractMutationPlanOps for ContextDeployMutationPlan {
 
 impl ContractMutationPlanOps for ContextConfigureMutationPlan {
     type Intent = ContextContractConfigureIntent;
+    type Output = ConfiguredContractInstance;
 
     fn validate_ingress(
         ctx: &RunnerIngressContext<'_>,
@@ -3266,7 +3505,7 @@ where
     type Submission = ContractTransactionSubmissions;
     type Receipt = P::Receipt;
     type Confirmation = P::Confirmation;
-    type Output = P::Output;
+    type Output = <P as ContractMutationPlanOps>::Output;
     type NotSubmittedProof = ContractNotSubmittedProof;
     type AmbiguityEvidence = ContractTransactionSubmissions;
 
@@ -3410,7 +3649,6 @@ where
 trait ContractVerifyPhase: ContractMutationPlanOps + Sized + Send + Sync + 'static {
     type Receipt: MfmValue + Send + Sync + 'static;
     type Confirmation: MfmValue + Send + Sync + 'static;
-    type Output: MfmValue + Send + Sync + 'static;
 
     fn receipt_from_observed(
         &self,
@@ -3427,18 +3665,20 @@ trait ContractVerifyPhase: ContractMutationPlanOps + Sized + Send + Sync + 'stat
 
     fn confirmation_from_receipt(receipt: Self::Receipt, confirmations: u64) -> Self::Confirmation;
 
-    fn output_from_receipt(&self, receipt: &Self::Receipt) -> mfm_runtime::Result<Self::Output>;
+    fn output_from_receipt(
+        &self,
+        receipt: &Self::Receipt,
+    ) -> mfm_runtime::Result<<Self as ContractMutationPlanOps>::Output>;
 
     fn output_from_confirmation(
         &self,
         confirmation: &Self::Confirmation,
-    ) -> mfm_runtime::Result<Self::Output>;
+    ) -> mfm_runtime::Result<<Self as ContractMutationPlanOps>::Output>;
 }
 
 impl ContractVerifyPhase for ContextDeployMutationPlan {
     type Receipt = ContractDeployReceipt;
     type Confirmation = ContractDeployConfirmation;
-    type Output = DeployedContractInstance;
 
     fn receipt_from_observed(
         &self,
@@ -3472,7 +3712,10 @@ impl ContractVerifyPhase for ContextDeployMutationPlan {
         }
     }
 
-    fn output_from_receipt(&self, receipt: &Self::Receipt) -> mfm_runtime::Result<Self::Output> {
+    fn output_from_receipt(
+        &self,
+        receipt: &Self::Receipt,
+    ) -> mfm_runtime::Result<<Self as ContractMutationPlanOps>::Output> {
         self.state
             .output_from_receipt(&(), &self.intent, receipt, &self.context)
             .map_err(runtime_state_error)
@@ -3481,7 +3724,7 @@ impl ContractVerifyPhase for ContextDeployMutationPlan {
     fn output_from_confirmation(
         &self,
         confirmation: &Self::Confirmation,
-    ) -> mfm_runtime::Result<Self::Output> {
+    ) -> mfm_runtime::Result<<Self as ContractMutationPlanOps>::Output> {
         self.state
             .output_from_confirmation(&(), &self.intent, confirmation, &self.context)
             .map_err(runtime_state_error)
@@ -3491,7 +3734,6 @@ impl ContractVerifyPhase for ContextDeployMutationPlan {
 impl ContractVerifyPhase for ContextConfigureMutationPlan {
     type Receipt = ContextContractConfigureReceipt;
     type Confirmation = ContextContractConfigureConfirmation;
-    type Output = ConfiguredContractInstance;
 
     fn receipt_from_observed(
         &self,
@@ -3535,7 +3777,10 @@ impl ContractVerifyPhase for ContextConfigureMutationPlan {
         }
     }
 
-    fn output_from_receipt(&self, receipt: &Self::Receipt) -> mfm_runtime::Result<Self::Output> {
+    fn output_from_receipt(
+        &self,
+        receipt: &Self::Receipt,
+    ) -> mfm_runtime::Result<<Self as ContractMutationPlanOps>::Output> {
         self.state
             .output_from_receipt(&self.input, &self.intent, receipt, &self.context)
             .map_err(runtime_state_error)
@@ -3544,7 +3789,7 @@ impl ContractVerifyPhase for ContextConfigureMutationPlan {
     fn output_from_confirmation(
         &self,
         confirmation: &Self::Confirmation,
-    ) -> mfm_runtime::Result<Self::Output> {
+    ) -> mfm_runtime::Result<<Self as ContractMutationPlanOps>::Output> {
         self.state
             .output_from_confirmation(&self.input, &self.intent, confirmation, &self.context)
             .map_err(runtime_state_error)
@@ -3649,7 +3894,9 @@ async fn run_import_deployed(
     let import = load_runner_config::<ImportDeployedSpec>(&ctx, factory.artifacts()).await?;
     let context = ctx.certified_context::<EvmContractContext>()?;
     let runtime = factory.read_runtime_for(context.value().network.network_id.as_str())?;
-    let deployed = runtime.import_deployed(import.as_ref(), &context).await?;
+    let deployed = runtime
+        .import_deployed(import.as_ref(), &context, factory.artifacts())
+        .await?;
     ErasedRunnerOutput::state_output(&ctx, &deployed)
 }
 
@@ -3666,7 +3913,12 @@ async fn run_import_configured(
     };
     let runtime = factory.read_runtime_for(context.value().network.network_id.as_str())?;
     let configured = runtime
-        .import_configured(import.as_ref(), &context, artifact.as_ref())
+        .import_configured(
+            import.as_ref(),
+            &context,
+            artifact.as_ref(),
+            factory.artifacts(),
+        )
         .await?;
     ErasedRunnerOutput::state_output(&ctx, &configured)
 }
@@ -3991,9 +4243,9 @@ pub enum EvmContractAdapterError {
     /// Required contract artifact was absent.
     #[error("contract artifact is required for this lifecycle phase")]
     MissingContractArtifact,
-    /// Source-run imports did not include replay-verifiable evidence.
-    #[error("source-run import evidence is required")]
-    MissingSourceRunImportEvidence,
+    /// Source-run import evidence was missing, unreadable, or mismatched.
+    #[error("source-run import evidence failed validation: {0}")]
+    SourceRunImportEvidence(String),
     /// Import evidence targeted a different lifecycle stage.
     #[error("contract import stage mismatch")]
     ImportStageMismatch,

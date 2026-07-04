@@ -458,7 +458,7 @@ mod tests {
             let op = registry
                 .resolve_latest(&PublicOpName::new(name).expect("name"))
                 .expect("EVM contract op");
-            assert_eq!(op.version(), OpVersion::new(1).unwrap());
+            assert_eq!(op.version(), OpVersion::new(2).unwrap());
         }
     }
 
@@ -487,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn evm_contract_entry_point_plans_configure_and_validate_with_seed_material() {
+    fn evm_contract_entry_point_plans_configure_and_validate_with_imports_without_seeds() {
         let registry = production_entry_point_op_registry().expect("registry");
 
         for (name, config) in [
@@ -507,13 +507,14 @@ mod tests {
                 AuthoredConfig::new(AuthoredConfigFormat::Json, config).expect("authored");
             let plan = op.plan(authored).expect("EVM contract plan");
 
-            assert_eq!(plan.seed_material.len(), 1);
-            assert_eq!(
-                plan.seed_material[0].media_type.as_str(),
-                "application/json"
-            );
-            assert_eq!(plan.seed_material[0].seed_id, plan.draft.seeds()[0].seed_id);
+            assert!(plan.seed_material.is_empty());
+            assert!(plan.draft.seeds().is_empty());
             assert!(!plan.config_material.is_empty());
+            assert!(plan
+                .draft
+                .state_nodes()
+                .iter()
+                .any(|node| node.state_descriptor_name.contains("import_")));
         }
     }
 
@@ -737,10 +738,27 @@ source_ref = "ethereum-mainnet"
         .to_string()
     }
 
-    fn network_json() -> serde_json::Value {
+    fn content_digest_str(byte: u8) -> String {
+        format!("content:sha256-jcs-v1:{}", format!("{byte:02x}").repeat(32))
+    }
+
+    fn context_json() -> serde_json::Value {
         serde_json::json!({
-            "network_id": "ethereum-mainnet",
-            "expected_chain_id": 1,
+            "lifecycle_key": "app-entry-test-lifecycle",
+            "network": {
+                "network_id": "ethereum-mainnet",
+                "expected_chain_id": 1,
+                "chain_fingerprint": null,
+                "finality_or_observation_policy": null,
+            },
+            "contract_profile": {
+                "profile_id": "app-entry-test-contract",
+                "artifact_digest": content_digest_str(0x20),
+                "interface_digest": content_digest_str(0x21),
+                "creation_bytecode_digest": null,
+                "deployed_code_hash": null,
+                "selector_event_policy_digest": null,
+            },
         })
     }
 
@@ -751,71 +769,79 @@ source_ref = "ethereum-mainnet"
         })
     }
 
-    fn deploy_config_json() -> serde_json::Value {
+    fn deploy_action_json() -> serde_json::Value {
         serde_json::json!({
-            "network": network_json(),
             "signer": signer_json(),
         })
     }
 
-    fn configure_config_json() -> serde_json::Value {
+    fn configure_action_json() -> serde_json::Value {
         serde_json::json!({
-            "network": network_json(),
             "signer": signer_json(),
             "calls": [],
         })
     }
 
-    fn validate_config_json() -> serde_json::Value {
+    fn validate_action_json() -> serde_json::Value {
+        serde_json::json!({})
+    }
+
+    fn deploy_config_json() -> serde_json::Value {
         serde_json::json!({
-            "network": network_json(),
+            "context": context_json(),
+            "deploy": deploy_action_json(),
         })
     }
 
     fn lifecycle_config_json() -> serde_json::Value {
         serde_json::json!({
-            "deploy": deploy_config_json(),
-            "configure": configure_config_json(),
-            "validate": validate_config_json(),
+            "context": context_json(),
+            "deploy": deploy_action_json(),
+            "configure": configure_action_json(),
+            "validate": validate_action_json(),
         })
     }
 
-    fn deployed_contract_json() -> serde_json::Value {
+    fn import_deployed_json() -> serde_json::Value {
         serde_json::json!({
-            "lifecycle_version": 1,
-            "network_id": "ethereum-mainnet",
-            "expected_chain_id": 1,
-            "contract_address": "0x000000000000000000000000000000000000dead",
-            "deploy_tx_hash": "0x01",
-            "deploy_receipt_evidence": null,
-            "deployed_block_number": 1,
+            "kind": "adopt_external_address",
+            "adoption": {
+                "address": "0x000000000000000000000000000000000000dead",
+                "provenance_label": "app-entry-test-external",
+                "evidence_policy": {
+                    "require_code": false
+                }
+            },
         })
     }
 
-    fn configured_contract_json() -> serde_json::Value {
+    fn import_configured_json() -> serde_json::Value {
         serde_json::json!({
-            "lifecycle_version": 1,
-            "deployed": deployed_contract_json(),
-            "configure_calls": [],
-            "confirmation_read_assertions": [],
-            "confirmation_event_assertions": [],
-            "configure_tx_hashes": [],
-            "configure_receipt_evidence": [],
-            "configured_block_number": 2,
+            "kind": "adopt_external_address",
+            "adoption": {
+                "address": "0x000000000000000000000000000000000000dead",
+                "provenance_label": "app-entry-test-external",
+                "evidence_policy": {
+                    "require_code": false,
+                    "allow_external_claimed_configured": true
+                }
+            },
         })
     }
 
     fn configure_entry_config_json() -> serde_json::Value {
         serde_json::json!({
-            "config": configure_config_json(),
-            "deployed": deployed_contract_json(),
+            "context": context_json(),
+            "import_deployed": import_deployed_json(),
+            "configure": configure_action_json(),
         })
     }
 
     fn validate_entry_config_json() -> serde_json::Value {
         serde_json::json!({
-            "config": validate_config_json(),
-            "configured": configured_contract_json(),
+            "context": context_json(),
+            "import_configured": import_configured_json(),
+            "validate": validate_action_json(),
         })
     }
 }

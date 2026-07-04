@@ -1,35 +1,30 @@
 #![warn(missing_docs)]
-//! Reusable EVM contract lifecycle phase configs.
+//! Reusable EVM contract lifecycle action and entry configs.
 //!
-//! This crate owns deterministic, non-secret phase config types for deploy,
-//! configure, and validate phases. It does not carry runtime endpoints, provider
-//! lookup details, signer material locations, artifact store handles, machine ids,
-//! or workflow topology.
+//! This crate owns deterministic, non-secret action and entry config types for
+//! context-bound deploy, configure, validate, and import workflows. It does not
+//! carry runtime endpoints, provider lookup details, signer material locations,
+//! artifact store handles, machine ids, or workflow topology.
 //!
 //! ```rust
-//! use mfm_evm_contract_config::{DeployPhaseConfig, EvmTransactionStyle};
+//! use mfm_evm_contract_config::{DeployAction, EvmTransactionStyle};
 //!
-//! let deploy: DeployPhaseConfig = serde_json::from_value(serde_json::json!({
-//!     "network": {
-//!         "network_id": "ethereum-mainnet",
-//!         "expected_chain_id": 1
-//!     },
+//! let deploy: DeployAction = serde_json::from_value(serde_json::json!({
 //!     "signer": {
 //!         "signer_ref": "deployer",
 //!         "expected_signer_address": "0x000000000000000000000000000000000000dead"
 //!     }
 //! }))?;
 //!
-//! assert_eq!(deploy.network().expected_chain_id(), 1);
 //! assert_eq!(deploy.transaction().style(), EvmTransactionStyle::Eip1559);
 //! # Ok::<(), serde_json::Error>(())
 //! ```
 
 use alloy_primitives::Address;
 use mfm_evm_contract_model::{
-    AbiArgumentValue, AdoptExternalAddress, ContractArtifactConfig, ContractCallConfig,
-    EventAssertionConfig, EvmContractContext, EvmContractScalarError, EvmNetworkId,
-    ImportFromMfmRun, ReadAssertionConfig, WeiAmount,
+    AbiArgumentValue, AdoptExternalAddress, ContractCallConfig, EventAssertionConfig,
+    EvmContractContext, EvmContractScalarError, ImportFromMfmRun, ImportFromMfmRunEvidence,
+    ReadAssertionConfig, WeiAmount,
 };
 use mfm_evm_core::encoding::address_hex_lower;
 use mfm_evm_core::tx::parse_address;
@@ -85,60 +80,6 @@ fn optional_wei_amount(
     field: &'static str,
 ) -> Result<Option<WeiAmount>, String> {
     value.map(|value| wei_amount(value, field)).transpose()
-}
-
-/// Semantic EVM network intent.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
-#[mfm(
-    namespace = "mfm.evm.contract",
-    name = "network-intent",
-    schema = "mfm.evm.contract.config.network_intent"
-)]
-pub struct EvmNetworkIntent {
-    network_id: EvmNetworkId,
-    expected_chain_id: NonZeroU64,
-}
-
-impl EvmNetworkIntent {
-    /// Creates validated semantic network intent.
-    pub fn new(network_id: impl AsRef<str>, expected_chain_id: u64) -> Result<Self, String> {
-        Ok(Self {
-            network_id: EvmNetworkId::new(network_id.as_ref())
-                .map_err(|error| error.to_string())?,
-            expected_chain_id: nonzero_u64(expected_chain_id, "expected_chain_id")?,
-        })
-    }
-
-    /// Returns the stable semantic network id.
-    pub fn network_id(&self) -> &str {
-        self.network_id.as_str()
-    }
-
-    /// Returns the expected EVM chain id.
-    pub const fn expected_chain_id(&self) -> u64 {
-        self.expected_chain_id.get()
-    }
-}
-
-impl<'de> Deserialize<'de> for EvmNetworkIntent {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawNetworkIntent {
-            network_id: EvmNetworkId,
-            expected_chain_id: u64,
-        }
-
-        let raw = RawNetworkIntent::deserialize(deserializer)?;
-        Ok(Self {
-            network_id: raw.network_id,
-            expected_chain_id: nonzero_u64(raw.expected_chain_id, "expected_chain_id")
-                .map_err(de::Error::custom)?,
-        })
-    }
 }
 
 /// Signer intent for EVM contract transaction phases.
@@ -703,6 +644,7 @@ impl<'de> Deserialize<'de> for ValidateAction {
 }
 
 /// Import spec for producing a deployed stage under a certified context.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[mfm(
@@ -715,6 +657,8 @@ pub enum ImportDeployedSpec {
     FromMfmRun {
         /// Source-run import request.
         source: ImportFromMfmRun,
+        /// Replay-verifiable source-run import evidence.
+        evidence: ImportFromMfmRunEvidence,
     },
     /// Adopt an external address as a deployed instance.
     AdoptExternalAddress {
@@ -728,15 +672,23 @@ impl<'de> Deserialize<'de> for ImportDeployedSpec {
     where
         D: Deserializer<'de>,
     {
+        #[allow(clippy::large_enum_variant)]
         #[derive(Deserialize)]
         #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
         enum RawImportDeployedSpec {
-            FromMfmRun { source: ImportFromMfmRun },
-            AdoptExternalAddress { adoption: AdoptExternalAddress },
+            FromMfmRun {
+                source: ImportFromMfmRun,
+                evidence: ImportFromMfmRunEvidence,
+            },
+            AdoptExternalAddress {
+                adoption: AdoptExternalAddress,
+            },
         }
 
         match RawImportDeployedSpec::deserialize(deserializer)? {
-            RawImportDeployedSpec::FromMfmRun { source } => Ok(Self::FromMfmRun { source }),
+            RawImportDeployedSpec::FromMfmRun { source, evidence } => {
+                Ok(Self::FromMfmRun { source, evidence })
+            }
             RawImportDeployedSpec::AdoptExternalAddress { adoption } => {
                 Ok(Self::AdoptExternalAddress { adoption })
             }
@@ -745,6 +697,7 @@ impl<'de> Deserialize<'de> for ImportDeployedSpec {
 }
 
 /// Import spec for producing a configured stage under a certified context.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[mfm(
@@ -757,6 +710,8 @@ pub enum ImportConfiguredSpec {
     FromMfmRun {
         /// Source-run import request.
         source: ImportFromMfmRun,
+        /// Replay-verifiable source-run import evidence.
+        evidence: ImportFromMfmRunEvidence,
     },
     /// Adopt an external address as a configured instance.
     AdoptExternalAddress {
@@ -770,15 +725,23 @@ impl<'de> Deserialize<'de> for ImportConfiguredSpec {
     where
         D: Deserializer<'de>,
     {
+        #[allow(clippy::large_enum_variant)]
         #[derive(Deserialize)]
         #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
         enum RawImportConfiguredSpec {
-            FromMfmRun { source: ImportFromMfmRun },
-            AdoptExternalAddress { adoption: AdoptExternalAddress },
+            FromMfmRun {
+                source: ImportFromMfmRun,
+                evidence: ImportFromMfmRunEvidence,
+            },
+            AdoptExternalAddress {
+                adoption: AdoptExternalAddress,
+            },
         }
 
         match RawImportConfiguredSpec::deserialize(deserializer)? {
-            RawImportConfiguredSpec::FromMfmRun { source } => Ok(Self::FromMfmRun { source }),
+            RawImportConfiguredSpec::FromMfmRun { source, evidence } => {
+                Ok(Self::FromMfmRun { source, evidence })
+            }
             RawImportConfiguredSpec::AdoptExternalAddress { adoption } => {
                 Ok(Self::AdoptExternalAddress { adoption })
             }
@@ -990,248 +953,6 @@ impl<'de> Deserialize<'de> for EvmContractLifecycleEntryConfig {
             deploy: raw.deploy,
             configure: raw.configure,
             validate: raw.validate,
-        })
-    }
-}
-
-/// Deploy phase config.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
-#[mfm(
-    namespace = "mfm.evm.contract",
-    name = "deploy-phase-config",
-    schema = "mfm.evm.contract.config.deploy_phase"
-)]
-pub struct DeployPhaseConfig {
-    artifact: Option<ContractArtifactConfig>,
-    network: EvmNetworkIntent,
-    signer: EvmSignerIntent,
-    constructor_args: Vec<AbiArgumentValue>,
-    value_wei: Option<WeiAmount>,
-    transaction: EvmTransactionPolicy,
-    receipt: ReceiptRetryPolicy,
-}
-
-impl DeployPhaseConfig {
-    /// Returns the optional inline contract artifact.
-    pub const fn artifact(&self) -> Option<&ContractArtifactConfig> {
-        self.artifact.as_ref()
-    }
-
-    /// Returns semantic network intent.
-    pub const fn network(&self) -> &EvmNetworkIntent {
-        &self.network
-    }
-
-    /// Returns signer intent.
-    pub const fn signer(&self) -> &EvmSignerIntent {
-        &self.signer
-    }
-
-    /// Returns constructor arguments.
-    pub fn constructor_args(&self) -> &[AbiArgumentValue] {
-        &self.constructor_args
-    }
-
-    /// Returns optional deployment value in wei.
-    pub fn value_wei(&self) -> Option<&str> {
-        self.value_wei.as_ref().map(WeiAmount::as_str)
-    }
-
-    /// Returns transaction policy.
-    pub const fn transaction(&self) -> &EvmTransactionPolicy {
-        &self.transaction
-    }
-
-    /// Returns receipt retry policy.
-    pub const fn receipt(&self) -> &ReceiptRetryPolicy {
-        &self.receipt
-    }
-}
-
-impl<'de> Deserialize<'de> for DeployPhaseConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawDeployPhaseConfig {
-            #[serde(default)]
-            artifact: Option<ContractArtifactConfig>,
-            network: EvmNetworkIntent,
-            signer: EvmSignerIntent,
-            #[serde(default)]
-            constructor_args: Vec<AbiArgumentValue>,
-            #[serde(default)]
-            value_wei: Option<String>,
-            #[serde(default)]
-            transaction: EvmTransactionPolicy,
-            #[serde(default)]
-            receipt: ReceiptRetryPolicy,
-        }
-
-        let raw = RawDeployPhaseConfig::deserialize(deserializer)?;
-        Ok(Self {
-            artifact: raw.artifact,
-            network: raw.network,
-            signer: raw.signer,
-            constructor_args: raw.constructor_args,
-            value_wei: optional_wei_amount(raw.value_wei, "value_wei")
-                .map_err(de::Error::custom)?,
-            transaction: raw.transaction,
-            receipt: raw.receipt,
-        })
-    }
-}
-
-/// Configure phase config.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
-#[mfm(
-    namespace = "mfm.evm.contract",
-    name = "configure-phase-config",
-    schema = "mfm.evm.contract.config.configure_phase"
-)]
-pub struct ConfigurePhaseConfig {
-    artifact: Option<ContractArtifactConfig>,
-    network: EvmNetworkIntent,
-    signer: EvmSignerIntent,
-    calls: Vec<ContractCallConfig>,
-    confirmation_read_assertions: Vec<ReadAssertionConfig>,
-    confirmation_event_assertions: Vec<EventAssertionConfig>,
-    transaction: EvmTransactionPolicy,
-    receipt: ReceiptRetryPolicy,
-}
-
-impl ConfigurePhaseConfig {
-    /// Returns the optional inline contract artifact.
-    pub const fn artifact(&self) -> Option<&ContractArtifactConfig> {
-        self.artifact.as_ref()
-    }
-
-    /// Returns semantic network intent.
-    pub const fn network(&self) -> &EvmNetworkIntent {
-        &self.network
-    }
-
-    /// Returns signer intent.
-    pub const fn signer(&self) -> &EvmSignerIntent {
-        &self.signer
-    }
-
-    /// Returns configured contract calls.
-    pub fn calls(&self) -> &[ContractCallConfig] {
-        &self.calls
-    }
-
-    /// Returns read confirmation assertions.
-    pub fn confirmation_read_assertions(&self) -> &[ReadAssertionConfig] {
-        &self.confirmation_read_assertions
-    }
-
-    /// Returns event confirmation assertions.
-    pub fn confirmation_event_assertions(&self) -> &[EventAssertionConfig] {
-        &self.confirmation_event_assertions
-    }
-
-    /// Returns transaction policy.
-    pub const fn transaction(&self) -> &EvmTransactionPolicy {
-        &self.transaction
-    }
-
-    /// Returns receipt retry policy.
-    pub const fn receipt(&self) -> &ReceiptRetryPolicy {
-        &self.receipt
-    }
-}
-
-impl<'de> Deserialize<'de> for ConfigurePhaseConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawConfigurePhaseConfig {
-            #[serde(default)]
-            artifact: Option<ContractArtifactConfig>,
-            network: EvmNetworkIntent,
-            signer: EvmSignerIntent,
-            #[serde(default)]
-            calls: Vec<ContractCallConfig>,
-            #[serde(default)]
-            confirmation_read_assertions: Vec<ReadAssertionConfig>,
-            #[serde(default)]
-            confirmation_event_assertions: Vec<EventAssertionConfig>,
-            #[serde(default)]
-            transaction: EvmTransactionPolicy,
-            #[serde(default)]
-            receipt: ReceiptRetryPolicy,
-        }
-
-        let raw = RawConfigurePhaseConfig::deserialize(deserializer)?;
-        Ok(Self {
-            artifact: raw.artifact,
-            network: raw.network,
-            signer: raw.signer,
-            calls: raw.calls,
-            confirmation_read_assertions: raw.confirmation_read_assertions,
-            confirmation_event_assertions: raw.confirmation_event_assertions,
-            transaction: raw.transaction,
-            receipt: raw.receipt,
-        })
-    }
-}
-
-/// Validate phase config.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
-#[mfm(
-    namespace = "mfm.evm.contract",
-    name = "validate-phase-config",
-    schema = "mfm.evm.contract.config.validate_phase"
-)]
-pub struct ValidatePhaseConfig {
-    artifact: Option<ContractArtifactConfig>,
-    network: EvmNetworkIntent,
-    validation: ContractValidationPolicy,
-}
-
-impl ValidatePhaseConfig {
-    /// Returns the optional inline contract artifact.
-    pub const fn artifact(&self) -> Option<&ContractArtifactConfig> {
-        self.artifact.as_ref()
-    }
-
-    /// Returns semantic network intent.
-    pub const fn network(&self) -> &EvmNetworkIntent {
-        &self.network
-    }
-
-    /// Returns validation assertion policy.
-    pub const fn validation(&self) -> &ContractValidationPolicy {
-        &self.validation
-    }
-}
-
-impl<'de> Deserialize<'de> for ValidatePhaseConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawValidatePhaseConfig {
-            #[serde(default)]
-            artifact: Option<ContractArtifactConfig>,
-            network: EvmNetworkIntent,
-            #[serde(default)]
-            validation: ContractValidationPolicy,
-        }
-
-        let raw = RawValidatePhaseConfig::deserialize(deserializer)?;
-        Ok(Self {
-            artifact: raw.artifact,
-            network: raw.network,
-            validation: raw.validation,
         })
     }
 }

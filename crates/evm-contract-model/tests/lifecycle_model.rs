@@ -392,15 +392,6 @@ fn lifecycle_values_have_contract_and_abi_schema_ids() {
         ContextBoundValidationReport::schema_id()
             .expect("schema")
             .to_string(),
-        DeployedContract::schema_id().expect("schema").to_string(),
-        ConfiguredContract::schema_id().expect("schema").to_string(),
-        ConfiguredContractRef::schema_id()
-            .expect("schema")
-            .to_string(),
-        ExistingConfiguredContractRef::schema_id()
-            .expect("schema")
-            .to_string(),
-        ValidationReport::schema_id().expect("schema").to_string(),
     ];
 
     assert!(schema_ids.iter().all(

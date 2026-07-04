@@ -3,11 +3,13 @@ use crate::{
     make_run_services_with_certification_registry, prepare_entry_point_run_launch,
     EntryPointRunLaunchInput, ErrorClass, RunLaunchRequest, RunModeStatus, RunServices,
 };
+use alloy_primitives::keccak256;
 use mfm_adapters_evm_contracts::{
     ensure_prepared_invocation_public, EvmContractReadRuntime, EvmContractRuntime,
     EvmContractRuntimeFactory, PreparedContractInvocation,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_certify::CertificationRegistry;
 use mfm_core::crypto::EthereumPrivateKey;
 use mfm_events::v1 as events;
@@ -15,27 +17,28 @@ use mfm_evm_capabilities::{
     EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockReadResponse, EvmBlockSelector,
     EvmCallReadProvider, EvmCallReadRequest, EvmCallReadResponse, EvmCapabilityError,
     EvmCapabilityFuture, EvmChainIdentityProvider, EvmChainIdentityRequest,
-    EvmChainIdentityResponse, EvmFeeReadProvider, EvmFeeReadRequest, EvmFeeReadResponse,
-    EvmGasEstimateProvider, EvmGasEstimateRequest, EvmGasEstimateResponse, EvmLogEntry,
-    EvmLogsReadProvider, EvmLogsReadRequest, EvmLogsReadResponse, EvmNonceOccupancy,
-    EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest, EvmNonceOccupancyReadResponse,
-    EvmNonceReadProvider, EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider,
-    EvmReceiptReadRequest, EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef,
-    EvmTransactionSubmitProvider, EvmTransactionSubmitRequest, EvmTransactionSubmitResponse,
-    RedactedEvmSourceEvidence,
+    EvmChainIdentityResponse, EvmCodeReadProvider, EvmCodeReadRequest, EvmCodeReadResponse,
+    EvmFeeReadProvider, EvmFeeReadRequest, EvmFeeReadResponse, EvmGasEstimateProvider,
+    EvmGasEstimateRequest, EvmGasEstimateResponse, EvmLogEntry, EvmLogsReadProvider,
+    EvmLogsReadRequest, EvmLogsReadResponse, EvmNonceOccupancy, EvmNonceOccupancyReadProvider,
+    EvmNonceOccupancyReadRequest, EvmNonceOccupancyReadResponse, EvmNonceReadProvider,
+    EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider, EvmReceiptReadRequest,
+    EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef, EvmTransactionSubmitProvider,
+    EvmTransactionSubmitRequest, EvmTransactionSubmitResponse, RedactedEvmSourceEvidence,
 };
-use mfm_evm_contract_config::{ConfigurePhaseConfig, DeployPhaseConfig, ValidatePhaseConfig};
-use mfm_evm_contract_model::{ConfiguredContract, DeployedContract};
-use mfm_op_evm_contract_lifecycle::ContractLifecycleConfig;
+use mfm_evm_contract_model::{ContractArtifactConfig, LifecycleArtifactEvidenceRef};
+use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm};
 use mfm_runtime::{CertifiedRuntimeSpec, ErasedRunnerRegistry};
 use mfm_signing::{
     PublicSigningIdentity, SignatureBytes, SignerRef, SigningError, SigningFuture, SigningProvider,
     SigningRequest, SigningResult,
 };
+use mfm_spec::v1 as spec;
 use mfm_store::v1::{
     self as store, ExecutionClaimStatus, ExecutionClaimStore, RetainedArtifactReadProvider,
     RunEventStore,
 };
+use mfm_values::MfmConfig;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -125,26 +128,6 @@ where
     .request
 }
 
-async fn prepare_validate_entry_point_request<S, A>(
-    services: &RunServices<S, A>,
-    config: ValidatePhaseConfig,
-    configured: ConfiguredContract,
-) -> RunLaunchRequest
-where
-    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
-    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
-{
-    prepare_evm_entry_point_request(
-        services,
-        "evm_contract_validate",
-        json!({
-            "config": config,
-            "configured": configured,
-        }),
-    )
-    .await
-}
-
 fn public_schema_id(request: &RunLaunchRequest) -> mfm_ids::SchemaId {
     request
         .certified_spec
@@ -162,11 +145,8 @@ async fn launch_completed(
 ) -> (mfm_ids::RunId, mfm_ids::SchemaId) {
     let run_id = request.run_id.clone();
     let public_schema_id = public_schema_id(&request);
-    let (_, launched) = services
-        .launch_run(request)
-        .await
-        .expect(label)
-        .into_response_parts();
+    let outcome = services.launch_run(request).await.expect(label);
+    let (_, launched) = outcome.into_response_parts();
     assert_eq!(launched.run_mode, RunModeStatus::Completed);
     (run_id, public_schema_id)
 }
@@ -273,17 +253,94 @@ fn contract_test_services(
     make_factory: impl FnOnce(Arc<dyn store::RetainedArtifactReadProvider>) -> TestRuntimeFactory,
 ) -> (ContractRunStore, ContractRunServices) {
     let store = test_run_store();
-    let artifacts = Arc::new(store.clone());
+    let artifacts: Arc<dyn store::RetainedArtifactReadProvider> =
+        Arc::new(ContractArtifactOverlay::new(Arc::new(store.clone())));
     let services = contract_services(&store, make_factory(artifacts));
     (store, services)
+}
+
+#[derive(Clone)]
+struct ContractArtifactMaterial {
+    reference: LifecycleArtifactEvidenceRef,
+    bytes: Vec<u8>,
+    evidence: store::ArtifactEvidenceRef,
+}
+
+fn contract_artifact_material() -> ContractArtifactMaterial {
+    let artifact: ContractArtifactConfig =
+        serde_json::from_value(artifact_json()).expect("artifact config");
+    let json = serde_json::to_string(&artifact).expect("artifact json");
+    let canonical = PlainCanonicalJsonBytes::from_json_str(&json).expect("canonical artifact");
+    let bytes = canonical.as_bytes().to_vec();
+    let digest =
+        ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(&bytes));
+    let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
+    let schema_id = <ContractArtifactConfig as MfmConfig>::schema_id().expect("artifact schema");
+    let reference = LifecycleArtifactEvidenceRef::new(
+        artifact_id.clone(),
+        digest.clone(),
+        bytes.len() as u64,
+        Some(schema_id.clone()),
+        None,
+    );
+    let evidence = store::ArtifactEvidenceRef {
+        artifact_id,
+        digest,
+        byte_len: bytes.len() as u64,
+        media_type: spec::MediaType::new("application/json").expect("media type"),
+        schema_id: Some(schema_id),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::TypedConfig,
+    };
+    ContractArtifactMaterial {
+        reference,
+        bytes,
+        evidence,
+    }
+}
+
+#[derive(Clone)]
+struct ContractArtifactOverlay {
+    inner: Arc<dyn store::RetainedArtifactReadProvider>,
+    material: ContractArtifactMaterial,
+}
+
+impl ContractArtifactOverlay {
+    fn new(inner: Arc<dyn store::RetainedArtifactReadProvider>) -> Self {
+        Self {
+            inner,
+            material: contract_artifact_material(),
+        }
+    }
+}
+
+impl store::RetainedArtifactReadProvider for ContractArtifactOverlay {
+    fn read_retained_artifact<'a>(
+        &'a self,
+        requirement: &'a store::EventArtifactRequirement,
+    ) -> store::RetainedArtifactReadFuture<'a> {
+        if requirement.artifact_id == self.material.evidence.artifact_id {
+            return Box::pin(std::future::ready(store::VerifiedRunArtifactBytes::new(
+                self.material.bytes.clone(),
+                self.material.evidence.clone(),
+                requirement,
+            )));
+        }
+        self.inner.read_retained_artifact(requirement)
+    }
 }
 
 #[tokio::test]
 async fn app_runner_resumes_replays_and_renders_validate_only_lifecycle_run() {
     let (store, services) = contract_test_services(TestRuntimeFactory::new);
-    let request =
-        prepare_validate_entry_point_request(&services, validate_config(), configured_contract())
-            .await;
+    let request = prepare_evm_entry_point_request(
+        &services,
+        "evm_contract_validate",
+        validate_entry_config_json(),
+    )
+    .await;
     let (run_id, rendered) = launch_replay_and_render(&services, request, "validate").await;
     assert_execution_claim_unclaimed(&store, &run_id).await;
     assert_rendered_contains(&rendered, "\"valid\":true");
@@ -296,10 +353,10 @@ async fn app_resume_completed_run_is_evidence_only_without_live_runners() {
     let certification = contract_lifecycle_certification_registry();
     let runners = contract_lifecycle_runners(TestRuntimeFactory::new(artifacts));
     let launch_services = contract_lifecycle_services(&store, runners, certification.clone());
-    let request = prepare_validate_entry_point_request(
+    let request = prepare_evm_entry_point_request(
         &launch_services,
-        validate_config(),
-        configured_contract(),
+        "evm_contract_validate",
+        validate_entry_config_json(),
     )
     .await;
     let run_id = request.run_id.clone();
@@ -356,9 +413,12 @@ async fn app_runner_reports_execution_claim_lost_after_renewal_failure() {
         TestRuntimeFactory::with_chain_identity_delay(artifacts, Duration::from_millis(100))
     });
     services.execution_claim_heartbeat_interval = Duration::from_millis(10);
-    let request =
-        prepare_validate_entry_point_request(&services, validate_config(), configured_contract())
-            .await;
+    let request = prepare_evm_entry_point_request(
+        &services,
+        "evm_contract_validate",
+        validate_entry_config_json(),
+    )
+    .await;
     let run_id = request.run_id.clone();
     let services_for_launch = services.clone();
     let launch = tokio::spawn(async move {
@@ -392,10 +452,10 @@ async fn assert_resume_runtime_config_ingress_failure(
     let launch_runners = contract_lifecycle_runners(TestRuntimeFactory::new(artifacts.clone()));
     let launch_services =
         contract_lifecycle_services(&store, launch_runners, certification.clone());
-    let request = prepare_validate_entry_point_request(
+    let request = prepare_evm_entry_point_request(
         &launch_services,
-        validate_config(),
-        configured_contract(),
+        "evm_contract_validate",
+        validate_entry_config_json(),
     )
     .await;
     let run_id = request.run_id.clone();
@@ -456,32 +516,30 @@ async fn assert_resume_runtime_config_ingress_failure(
 #[tokio::test]
 async fn app_runner_resumes_replays_and_renders_deploy_lifecycle_run() {
     let signer = test_contract_signer();
-    let config = deploy_config(&signer.address);
     let (_store, services) = contract_test_services(|artifacts| {
         TestRuntimeFactory::with_signer(artifacts, Arc::new(signer.provider), true)
     });
     let request = prepare_evm_entry_point_request(
         &services,
         "evm_contract_deploy",
-        serde_json::to_value(config).expect("deploy config json"),
+        deploy_entry_config_json(&signer.address),
     )
     .await;
     let (_, rendered) = launch_replay_and_render(&services, request, "deploy").await;
-    assert_rendered_contains(&rendered, "contract_address");
-    assert_rendered_contains(&rendered, "deploy_receipt_evidence");
+    assert_rendered_contains(&rendered, "\"address\"");
+    assert_rendered_contains(&rendered, "deploy_evidence");
 }
 
 #[tokio::test]
 async fn replay_diagnostic_resolves_evm_guard_from_side_effect_submit_node() {
     let signer = test_contract_signer();
-    let config = deploy_config(&signer.address);
     let (_store, services) = contract_test_services(|artifacts| {
         TestRuntimeFactory::with_signer(artifacts, Arc::new(signer.provider), true)
     });
     let request = prepare_evm_entry_point_request(
         &services,
         "evm_contract_deploy",
-        serde_json::to_value(config).expect("deploy config json"),
+        deploy_entry_config_json(&signer.address),
     )
     .await;
     let runtime_spec =
@@ -538,24 +596,19 @@ async fn replay_diagnostic_resolves_evm_guard_from_side_effect_submit_node() {
 #[tokio::test]
 async fn app_runner_resumes_replays_and_renders_full_lifecycle_run() {
     let signer = test_contract_signer();
-    let config = ContractLifecycleConfig::new(
-        deploy_config(&signer.address),
-        configure_config(&signer.address),
-        validate_config(),
-    );
     let (_store, services) = contract_test_services(|artifacts| {
         TestRuntimeFactory::with_signer(artifacts, Arc::new(signer.provider), false)
     });
     let request = prepare_evm_entry_point_request(
         &services,
         "evm_contract_lifecycle",
-        serde_json::to_value(config).expect("lifecycle config json"),
+        lifecycle_entry_config_json(&signer.address),
     )
     .await;
     let (run_id, rendered) = launch_replay_and_render(&services, request, "full").await;
     assert_rendered_contains(&rendered, "\"valid\":true");
-    assert_rendered_contains(&rendered, "configure_tx_hashes");
-    assert_rendered_contains(&rendered, "configure_receipt_evidence");
+    assert_rendered_contains(&rendered, "configuration_claim");
+    assert_rendered_contains(&rendered, "configure_or_import_evidence");
     assert_no_evm_runtime_surface("contract public output", &rendered);
 
     let stream = services
@@ -566,15 +619,15 @@ async fn app_runner_resumes_replays_and_renders_full_lifecycle_run() {
     assert_eq!(
         contract_lifecycle_runner_output_summary(&stream),
         [
-            "attempt-output:mfm.evm.contract/deploy:side_effect.intent_persisted+side_effect.claimed+resource_lane.claimed+retention_refs_appended[roles=side_effect_intent]",
-            "attempt-output:mfm.evm.contract/deploy:side_effect.invocation_prepared+side_effect.invocation_started+retention_refs_appended[roles=prepared_invocation]",
-            "attempt-output:mfm.evm.contract/deploy:side_effect.submission_observed+retention_refs_appended[roles=submission]",
-            "attempt-output:mfm.evm.contract/deploy:cell_skipped+state_attempt_completed",
-            "attempt-output:mfm.evm.contract/configure:side_effect.intent_persisted+side_effect.claimed+resource_lane.claimed+retention_refs_appended[roles=side_effect_intent]",
-            "attempt-output:mfm.evm.contract/configure:side_effect.invocation_prepared+side_effect.invocation_started+retention_refs_appended[roles=prepared_invocation]",
-            "attempt-output:mfm.evm.contract/configure:side_effect.submission_observed+retention_refs_appended[roles=submission]",
-            "attempt-output:mfm.evm.contract/configure:cell_skipped+state_attempt_completed",
-            "attempt-output:mfm.evm.contract/validate:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
+            "attempt-output:mfm.evm.contract/context_deploy:side_effect.intent_persisted+side_effect.claimed+resource_lane.claimed+retention_refs_appended[roles=side_effect_intent]",
+            "attempt-output:mfm.evm.contract/context_deploy:side_effect.invocation_prepared+side_effect.invocation_started+retention_refs_appended[roles=prepared_invocation]",
+            "attempt-output:mfm.evm.contract/context_deploy:side_effect.submission_observed+retention_refs_appended[roles=submission]",
+            "attempt-output:mfm.evm.contract/context_deploy:cell_skipped+state_attempt_completed",
+            "attempt-output:mfm.evm.contract/context_configure:side_effect.intent_persisted+side_effect.claimed+resource_lane.claimed+retention_refs_appended[roles=side_effect_intent]",
+            "attempt-output:mfm.evm.contract/context_configure:side_effect.invocation_prepared+side_effect.invocation_started+retention_refs_appended[roles=prepared_invocation]",
+            "attempt-output:mfm.evm.contract/context_configure:side_effect.submission_observed+retention_refs_appended[roles=submission]",
+            "attempt-output:mfm.evm.contract/context_configure:cell_skipped+state_attempt_completed",
+            "attempt-output:mfm.evm.contract/context_validate:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
         ]
     );
     let mut prepared_artifact_requirements = Vec::new();
@@ -948,6 +1001,22 @@ impl EvmCallReadProvider for TestEvmProvider {
     }
 }
 
+impl EvmCodeReadProvider for TestEvmProvider {
+    fn read_code<'a>(
+        &'a self,
+        request: &'a EvmCodeReadRequest,
+    ) -> EvmCapabilityFuture<'a, EvmCodeReadResponse> {
+        Box::pin(async move {
+            let code = vec![0x60, 0x00];
+            Ok(EvmCodeReadResponse {
+                evidence: self.evidence(&request.guard),
+                code_hash: keccak256(&code),
+                code,
+            })
+        })
+    }
+}
+
 impl EvmLogsReadProvider for TestEvmProvider {
     fn read_logs<'a>(
         &'a self,
@@ -1046,10 +1115,25 @@ impl LocalTestSigner {
     }
 }
 
-fn reth_network_json() -> serde_json::Value {
+fn contract_context_json() -> serde_json::Value {
+    let material = contract_artifact_material();
     json!({
-        "network_id": "reth-dev",
-        "expected_chain_id": 31337
+        "lifecycle_key": "reth-dev-contract",
+        "network": {
+            "network_id": "reth-dev",
+            "expected_chain_id": 31337,
+            "chain_fingerprint": null,
+            "finality_or_observation_policy": null
+        },
+        "contract_profile": {
+            "profile_id": "reth-dev-contract-profile",
+            "artifact_digest": material.evidence.digest.to_string(),
+            "artifact_ref": material.reference,
+            "interface_digest": null,
+            "creation_bytecode_digest": null,
+            "deployed_code_hash": null,
+            "selector_event_policy_digest": null
+        }
     })
 }
 
@@ -1060,44 +1144,64 @@ fn deployer_signer_json(expected_signer_address: &str) -> serde_json::Value {
     })
 }
 
-fn validate_config() -> ValidatePhaseConfig {
-    serde_json::from_value(json!({
-        "network": reth_network_json()
-    }))
-    .expect("validate config")
-}
-
-fn deploy_config(expected_signer_address: &str) -> DeployPhaseConfig {
-    serde_json::from_value(json!({
-        "artifact": artifact_json(),
-        "network": reth_network_json(),
-        "signer": deployer_signer_json(expected_signer_address),
-        "transaction": {
-            "style": "eip1559",
-            "max_fee_per_gas": "11",
-            "max_priority_fee_per_gas": "3"
-        }
-    }))
-    .expect("deploy config")
-}
-
-fn configure_config(expected_signer_address: &str) -> ConfigurePhaseConfig {
-    serde_json::from_value(json!({
-        "artifact": artifact_json(),
-        "network": reth_network_json(),
-        "signer": deployer_signer_json(expected_signer_address),
-        "calls": [
-            {
-                "function": "configure",
-                "args": []
-            },
-            {
-                "function": "configure",
-                "args": []
+fn deploy_entry_config_json(expected_signer_address: &str) -> serde_json::Value {
+    json!({
+        "context": contract_context_json(),
+        "deploy": {
+            "signer": deployer_signer_json(expected_signer_address),
+            "transaction": {
+                "style": "eip1559",
+                "max_fee_per_gas": "11",
+                "max_priority_fee_per_gas": "3"
             }
-        ]
-    }))
-    .expect("configure config")
+        }
+    })
+}
+
+fn validate_entry_config_json() -> serde_json::Value {
+    json!({
+        "context": contract_context_json(),
+        "import_configured": {
+            "kind": "adopt_external_address",
+            "adoption": {
+                "address": "0x000000000000000000000000000000000000dead",
+                "provenance_label": "test-configured",
+                "evidence_policy": {
+                    "require_code": false,
+                    "allow_external_claimed_configured": true
+                }
+            }
+        },
+        "validate": {}
+    })
+}
+
+fn lifecycle_entry_config_json(expected_signer_address: &str) -> serde_json::Value {
+    json!({
+        "context": contract_context_json(),
+        "deploy": {
+            "signer": deployer_signer_json(expected_signer_address),
+            "transaction": {
+                "style": "eip1559",
+                "max_fee_per_gas": "11",
+                "max_priority_fee_per_gas": "3"
+            }
+        },
+        "configure": {
+        "signer": deployer_signer_json(expected_signer_address),
+            "calls": [
+                {
+                    "function": "configure",
+                    "args": []
+                },
+                {
+                    "function": "configure",
+                    "args": []
+                }
+            ]
+        },
+        "validate": {}
+    })
 }
 
 fn artifact_json() -> serde_json::Value {
@@ -1139,27 +1243,6 @@ fn artifact_json() -> serde_json::Value {
             "json_text": json!({"object": "0x6000"}).to_string()
         }
     })
-}
-
-fn configured_contract() -> ConfiguredContract {
-    ConfiguredContract {
-        lifecycle_version: 1,
-        deployed: DeployedContract {
-            lifecycle_version: 1,
-            network_id: "reth-dev".to_owned(),
-            expected_chain_id: 31337,
-            contract_address: "0x000000000000000000000000000000000000dead".to_owned(),
-            deploy_tx_hash: "0x01".to_owned(),
-            deploy_receipt_evidence: None,
-            deployed_block_number: Some(1),
-        },
-        configure_calls: Vec::new(),
-        confirmation_read_assertions: Vec::new(),
-        confirmation_event_assertions: Vec::new(),
-        configure_tx_hashes: Vec::new(),
-        configure_receipt_evidence: Vec::new(),
-        configured_block_number: Some(1),
-    }
 }
 
 fn contract_lifecycle_runner_output_summary(stream: &[store::KernelEventEnvelope]) -> Vec<String> {

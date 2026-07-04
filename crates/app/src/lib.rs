@@ -2747,13 +2747,11 @@ fn certified_contract_evm_chain_guards_for_node(
         .materialize::<mfm_evm_contract_model::EvmContractContext>()
         .map_err(|_| replay_diagnostic_error())?;
     let network = &context.value().network;
-    Ok(vec![
-        EvmChainGuard::new(
-            EvmNetworkId::new(network.network_id.as_str()).map_err(|_| replay_diagnostic_error())?,
-            network.expected_chain_id(),
-        )
-        .map_err(|_| replay_diagnostic_error())?,
-    ])
+    Ok(vec![EvmChainGuard::new(
+        EvmNetworkId::new(network.network_id.as_str()).map_err(|_| replay_diagnostic_error())?,
+        network.expected_chain_id(),
+    )
+    .map_err(|_| replay_diagnostic_error())?])
 }
 
 fn certified_evm_guard_node_for_failed_node<'a>(

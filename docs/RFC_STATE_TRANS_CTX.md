@@ -554,6 +554,15 @@ Two import families are expected.
 
 ### Import From MFM Run
 
+The public import config is a single `from_mfm_run` envelope with both required parts:
+
+```text
+ImportDeployedSpec::FromMfmRun { source: ImportFromMfmRun, evidence: ImportFromMfmRunEvidence }
+ImportConfiguredSpec::FromMfmRun { source: ImportFromMfmRun, evidence: ImportFromMfmRunEvidence }
+```
+
+Omitting `evidence` is invalid. There is no identifier-only source-run import shape.
+
 ```text
 ImportFromMfmRun
   source_run_id
@@ -565,8 +574,10 @@ ImportFromMfmRun
   accepted_context_policy
 ```
 
-Admission verifies the source run, certified spec, stream evidence, value digest, stage, and context
-reference. The imported resource is valid only if the source material was produced for the same
+Admission verifies the certified import policy, retained source spec certificate or certified export
+certificate artifact, retained source run stream or certified export bundle artifact, source value
+artifact, value digest, schema and semantic ids, lifecycle stage, context ref, and context
+descriptor. The imported resource is valid only if the source material was produced for the same
 certified context or for a context explicitly accepted by the import policy.
 
 This import proves MFM provenance.
@@ -602,8 +613,10 @@ ImportFromMfmRunEvidence
 ```
 
 Replay verifies the imported resource from that recorded evidence plus the certified import config.
-It does not trust identifiers alone, and it does not query a live store, current runtime config, or
-current public-output renderer.
+Missing retained proof, mismatched digest, wrong type, wrong stage, wrong context, public JSON,
+projection rows, raw payloads, and identifiers alone all fail closed before any lifecycle resource is
+produced. Replay does not query a live store, current runtime config, or current public-output
+renderer.
 
 `accepted_context_policy` is hash-defining certified config. The default policy is exact context
 ref equality. Any cross-context adoption must name explicit accepted context refs or a typed,
@@ -1163,17 +1176,16 @@ context-bound cell constraints, input context constraints, and producer/stage co
 crates define the concrete context and resource types. A domain-only convention is not sufficient
 for this RFC, because it would leave the core invariant outside the certified runtime contract.
 
-Until those certified constraints exist, the EVM lifecycle cutover should not land behind local
-helper checks that imitate the new model.
+The EVM lifecycle cutover is implemented on those certified constraints, not on local helper checks
+that imitate the new model.
 
 ## Cutover Plan
 
 This is not a compatibility migration.
 
-Steps 4-11 are blocked until steps 1-3 include certification, runtime/admission, and replay tests
-that prove the old bad shapes cannot be certified, invoked, admitted, or replayed. In particular, the
-EVM schema and entry-point break must not land before kernel/program/certifier/runtime support can
-enforce context-bound inputs, outputs, producer/stage constraints, and import evidence.
+The implemented order keeps the EVM schema and entry-point break after kernel/program/certifier/
+runtime support can enforce context-bound inputs, outputs, producer/stage constraints, and import
+evidence.
 
 1. Add the context-bound model and certified context constraints.
 2. Add EVM context, action, resource, import, report, and evidence model types.

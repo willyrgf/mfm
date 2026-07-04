@@ -263,7 +263,8 @@ EVM contract deploy:
   "op": "evm_contract_deploy",
   "config_format": "json",
   "config": {
-    "...": "DeployPhaseConfig JSON"
+    "context": { "...": "EvmContractContext JSON" },
+    "deploy": { "...": "DeployAction JSON" }
   }
 }
 ```
@@ -275,12 +276,9 @@ EVM contract configure:
   "op": "evm_contract_configure",
   "config_format": "json",
   "config": {
-    "config": {
-      "...": "ConfigurePhaseConfig JSON"
-    },
-    "deployed": {
-      "...": "DeployedContract JSON"
-    }
+    "context": { "...": "EvmContractContext JSON" },
+    "import_deployed": { "...": "ImportDeployedSpec JSON" },
+    "configure": { "...": "ConfigureAction JSON" }
   }
 }
 ```
@@ -292,12 +290,9 @@ EVM contract validate:
   "op": "evm_contract_validate",
   "config_format": "json",
   "config": {
-    "config": {
-      "...": "ValidatePhaseConfig JSON"
-    },
-    "configured": {
-      "...": "ConfiguredContract JSON"
-    }
+    "context": { "...": "EvmContractContext JSON" },
+    "import_configured": { "...": "ImportConfiguredSpec JSON" },
+    "validate": { "...": "ValidateAction JSON" }
   }
 }
 ```
@@ -309,15 +304,21 @@ EVM contract lifecycle:
   "op": "evm_contract_lifecycle",
   "config_format": "json",
   "config": {
-    "...": "ContractLifecycleConfig JSON"
+    "context": { "...": "EvmContractContext JSON" },
+    "deploy": { "...": "DeployAction JSON" },
+    "configure": { "...": "ConfigureAction JSON" },
+    "validate": { "...": "ValidateAction JSON" }
   }
 }
 ```
 
-EVM configs carry semantic network intent, expected chain id, artifact refs, and non-secret signer
-intent. The runtime resolves the config's `network.network_id` and `signer.signer_ref` through
-`MFM_RUNTIME_CONFIG_FILE`. Process-local RPC endpoints, auth headers, keystore paths, unlock files,
-and private material never belong in the entry-point config.
+EVM contract entry configs carry certified lifecycle context, action specs, import specs, artifact
+evidence refs, and non-secret signer intent. The runtime resolves the certified context network id
+and action signer ref through `MFM_RUNTIME_CONFIG_FILE`. Process-local RPC endpoints, auth headers,
+keystore paths, unlock files, and private material never belong in the entry-point config.
+Source-run EVM imports use `kind: "from_mfm_run"` with both `source` and required retained
+`evidence`; identifiers, public output JSON, projection rows, and raw lifecycle payloads are not
+accepted as import authority.
 
 Stable launch error codes:
 

@@ -1,8 +1,12 @@
 use mfm_evm_contract_config::*;
 use mfm_evm_contract_model::{
-    AcceptedContextPolicy, ContractLifecycleStage, SourceCellOrOutputRef,
+    AcceptedContextPolicy, ConfiguredContractInstance, ContractLifecycleStage,
+    DeployedContractInstance, SourceCellOrOutputRef,
 };
-use mfm_ids::{CellId, ContentDigest, ContextRef, DigestAlgorithm, DigestBytes, RunId, SpecHash};
+use mfm_ids::{
+    ArtifactId, CellId, ContentDigest, ContextDescriptorId, ContextRef, DescriptorId,
+    DigestAlgorithm, DigestBytes, EventId, RunId, SpecHash,
+};
 use mfm_values::MfmConfig;
 
 fn digest_with(byte: u8) -> DigestBytes {
@@ -27,6 +31,22 @@ fn spec_hash_str(byte: u8) -> String {
 
 fn cell_id_str(byte: u8) -> String {
     CellId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte)).to_string()
+}
+
+fn artifact_id_str(byte: u8) -> String {
+    ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte)).to_string()
+}
+
+fn descriptor_id_str(byte: u8) -> String {
+    DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte)).to_string()
+}
+
+fn context_descriptor_id_str(byte: u8) -> String {
+    ContextDescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte)).to_string()
+}
+
+fn event_id_str(byte: u8) -> String {
+    EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte)).to_string()
 }
 
 fn network_json(chain_id: u64) -> serde_json::Value {
@@ -65,23 +85,19 @@ fn signer_json() -> serde_json::Value {
 
 fn deploy_json() -> serde_json::Value {
     serde_json::json!({
-        "network": network_json(1),
         "signer": signer_json(),
     })
 }
 
 fn configure_json() -> serde_json::Value {
     serde_json::json!({
-        "network": network_json(1),
         "signer": signer_json(),
         "calls": [],
     })
 }
 
 fn validate_json() -> serde_json::Value {
-    serde_json::json!({
-        "network": network_json(1),
-    })
+    serde_json::json!({})
 }
 
 fn import_from_mfm_run_json(required_stage: &str) -> serde_json::Value {
@@ -98,39 +114,73 @@ fn import_from_mfm_run_json(required_stage: &str) -> serde_json::Value {
     })
 }
 
-#[test]
-fn phase_configs_require_expected_chain_id() {
-    let network_without_chain = serde_json::json!({"network_id": "ethereum-mainnet"});
+fn artifact_ref_json(
+    byte: u8,
+    digest_byte: u8,
+    schema_id: Option<String>,
+    semantic_type_id: Option<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "artifact_id": artifact_id_str(byte),
+        "content_digest": content_digest_str(digest_byte),
+        "byte_len": 128,
+        "schema_id": schema_id,
+        "semantic_type_id": semantic_type_id,
+    })
+}
 
-    assert!(
-        serde_json::from_value::<DeployPhaseConfig>(serde_json::json!({
-            "network": network_without_chain,
-            "signer": signer_json(),
-        }))
-        .is_err()
-    );
-    assert!(
-        serde_json::from_value::<ConfigurePhaseConfig>(serde_json::json!({
-            "network": serde_json::json!({"network_id": "ethereum-mainnet"}),
-            "signer": signer_json(),
-        }))
-        .is_err()
-    );
-    assert!(
-        serde_json::from_value::<ValidatePhaseConfig>(serde_json::json!({
-            "network": serde_json::json!({"network_id": "ethereum-mainnet"}),
-        }))
-        .is_err()
-    );
+fn import_from_mfm_run_evidence_json(required_stage: &str) -> serde_json::Value {
+    let (schema_id, semantic_type_id) = match required_stage {
+        "deployed" => (
+            <DeployedContractInstance as mfm_values::MfmValue>::schema_id()
+                .expect("deployed schema")
+                .to_string(),
+            <DeployedContractInstance as mfm_values::MfmValue>::semantic_id()
+                .expect("deployed semantic")
+                .to_string(),
+        ),
+        "configured" => (
+            <ConfiguredContractInstance as mfm_values::MfmValue>::schema_id()
+                .expect("configured schema")
+                .to_string(),
+            <ConfiguredContractInstance as mfm_values::MfmValue>::semantic_id()
+                .expect("configured semantic")
+                .to_string(),
+        ),
+        _ => panic!("unsupported stage"),
+    };
+    serde_json::json!({
+        "source_spec_hash": spec_hash_str(0x31),
+        "source_spec_certificate_or_export_certificate_ref": artifact_ref_json(0x50, 0x51, None, None),
+        "source_run_stream_ref_or_export_bundle_ref": artifact_ref_json(0x52, 0x53, None, None),
+        "source_cell_or_output_id": {
+            "kind": "cell",
+            "cell_id": cell_id_str(0x32),
+        },
+        "source_cell_schema_id": schema_id,
+        "source_cell_semantic_type_id": semantic_type_id,
+        "source_producer_descriptor_id": descriptor_id_str(0x54),
+        "source_stage": required_stage,
+        "source_context_ref": context_ref_str(0x34),
+        "source_context_descriptor_id": context_descriptor_id_str(0x55),
+        "source_value_digest": content_digest_str(0x33),
+        "source_value_artifact_ref_or_inline_canonical_value": artifact_ref_json(
+            0x56,
+            0x33,
+            Some(schema_id),
+            Some(semantic_type_id),
+        ),
+        "source_terminal_cell_or_output_event_ref": event_id_str(0x57),
+        "import_policy_digest": content_digest_str(0x58),
+    })
 }
 
 #[test]
-fn eip1559_transaction_policy_is_default() {
-    let deploy: DeployPhaseConfig = serde_json::from_value(deploy_json()).expect("deploy");
+fn eip1559_transaction_policy_is_default_for_deploy_action() {
+    let deploy: DeployAction = serde_json::from_value(deploy_json()).expect("deploy");
 
     assert_eq!(deploy.transaction().style(), EvmTransactionStyle::Eip1559);
     assert_eq!(deploy.receipt().poll_interval_ms(), 500);
-    assert_eq!(deploy.network().expected_chain_id(), 1);
     assert_eq!(deploy.signer().signer_ref_str(), "deployer");
 }
 
@@ -140,23 +190,19 @@ fn receipt_policy_rejects_unbounded_waits() {
     assert!(ReceiptRetryPolicy::new(1, MAX_RECEIPT_POLLS + 1).is_err());
     assert!(ReceiptRetryPolicy::new(MAX_RECEIPT_POLL_INTERVAL_MS, 62).is_err());
     assert!(ReceiptRetryPolicy::new(MAX_RECEIPT_POLL_INTERVAL_MS, 61).is_ok());
-    assert!(
-        serde_json::from_value::<DeployPhaseConfig>(serde_json::json!({
-            "network": network_json(1),
-            "signer": signer_json(),
-            "receipt": {
-                "poll_interval_ms": MAX_RECEIPT_POLL_INTERVAL_MS + 1,
-                "max_receipt_polls": 1
-            }
-        }))
-        .is_err()
-    );
+    assert!(serde_json::from_value::<DeployAction>(serde_json::json!({
+        "signer": signer_json(),
+        "receipt": {
+            "poll_interval_ms": MAX_RECEIPT_POLL_INTERVAL_MS + 1,
+            "max_receipt_polls": 1
+        }
+    }))
+    .is_err());
 }
 
 #[test]
 fn legacy_transaction_style_remains_accepted() {
-    let deploy: DeployPhaseConfig = serde_json::from_value(serde_json::json!({
-        "network": network_json(1),
+    let deploy: DeployAction = serde_json::from_value(serde_json::json!({
         "signer": signer_json(),
         "transaction": {
             "style": "legacy",
@@ -171,17 +217,14 @@ fn legacy_transaction_style_remains_accepted() {
 
 #[test]
 fn eip1559_transaction_policy_rejects_legacy_fee_field() {
-    assert!(
-        serde_json::from_value::<DeployPhaseConfig>(serde_json::json!({
-            "network": network_json(1),
-            "signer": signer_json(),
-            "transaction": {
-                "style": "eip1559",
-                "gas_price": "1000000000",
-            },
-        }))
-        .is_err()
-    );
+    assert!(serde_json::from_value::<DeployAction>(serde_json::json!({
+        "signer": signer_json(),
+        "transaction": {
+            "style": "eip1559",
+            "gas_price": "1000000000",
+        },
+    }))
+    .is_err());
 }
 
 #[test]
@@ -193,7 +236,7 @@ fn configs_deny_provider_and_runtime_fields() {
         .and_then(serde_json::Value::as_object_mut)
         .expect("signer object")
         .insert(provider_key, serde_json::json!("MFM_SIGNER_FILE"));
-    assert!(serde_json::from_value::<DeployPhaseConfig>(deploy).is_err());
+    assert!(serde_json::from_value::<DeployAction>(deploy).is_err());
 
     let mut validate = validate_json();
     let routing_key = ["rpc", "_url"].concat();
@@ -201,17 +244,16 @@ fn configs_deny_provider_and_runtime_fields() {
         .as_object_mut()
         .expect("validate object")
         .insert(routing_key, serde_json::json!("http://127.0.0.1:8545"));
-    assert!(serde_json::from_value::<ValidatePhaseConfig>(validate).is_err());
+    assert!(serde_json::from_value::<ValidateAction>(validate).is_err());
 }
 
 #[test]
-fn configure_and_validate_phase_configs_parse() {
-    let configure: ConfigurePhaseConfig =
-        serde_json::from_value(configure_json()).expect("configure");
-    let validate: ValidatePhaseConfig = serde_json::from_value(validate_json()).expect("validate");
+fn configure_and_validate_actions_parse() {
+    let configure: ConfigureAction = serde_json::from_value(configure_json()).expect("configure");
+    let validate: ValidateAction = serde_json::from_value(validate_json()).expect("validate");
 
     assert_eq!(configure.calls().len(), 0);
-    assert_eq!(validate.validation().read_assertions().len(), 0);
+    assert_eq!(validate.read_assertions().len(), 0);
 }
 
 #[test]
@@ -252,6 +294,7 @@ fn context_entry_configs_parse_new_shapes() {
         "import_deployed": {
             "kind": "from_mfm_run",
             "source": import_from_mfm_run_json("deployed"),
+            "evidence": import_from_mfm_run_evidence_json("deployed"),
         },
         "configure": {
             "signer": signer_json(),
@@ -266,6 +309,7 @@ fn context_entry_configs_parse_new_shapes() {
         "import_configured": {
             "kind": "from_mfm_run",
             "source": import_from_mfm_run_json("configured"),
+            "evidence": import_from_mfm_run_evidence_json("configured"),
         },
         "validate": {},
     }))
@@ -355,9 +399,10 @@ fn imports_default_to_exact_context_and_accept_explicit_cross_context_policy() {
     let deployed: ImportDeployedSpec = serde_json::from_value(serde_json::json!({
         "kind": "from_mfm_run",
         "source": import_from_mfm_run_json("deployed"),
+        "evidence": import_from_mfm_run_evidence_json("deployed"),
     }))
     .expect("deployed import");
-    let ImportDeployedSpec::FromMfmRun { source } = deployed else {
+    let ImportDeployedSpec::FromMfmRun { source, .. } = deployed else {
         panic!("expected MFM-run import");
     };
     assert_eq!(
@@ -386,9 +431,10 @@ fn imports_default_to_exact_context_and_accept_explicit_cross_context_policy() {
     let configured: ImportConfiguredSpec = serde_json::from_value(serde_json::json!({
         "kind": "from_mfm_run",
         "source": configured_source,
+        "evidence": import_from_mfm_run_evidence_json("configured"),
     }))
     .expect("configured import");
-    let ImportConfiguredSpec::FromMfmRun { source } = configured else {
+    let ImportConfiguredSpec::FromMfmRun { source, .. } = configured else {
         panic!("expected MFM-run import");
     };
     let AcceptedContextPolicy::AcceptedContextRefs { context_refs } =
@@ -422,14 +468,6 @@ fn external_adoption_defaults_require_code_and_reject_claimed_configured() {
 #[test]
 fn schema_ids_use_contract_config_namespace() {
     let schema_ids = [
-        DeployPhaseConfig::schema_id().expect("schema").to_string(),
-        ConfigurePhaseConfig::schema_id()
-            .expect("schema")
-            .to_string(),
-        ValidatePhaseConfig::schema_id()
-            .expect("schema")
-            .to_string(),
-        EvmNetworkIntent::schema_id().expect("schema").to_string(),
         EvmSignerIntent::schema_id().expect("schema").to_string(),
         EvmTransactionPolicy::schema_id()
             .expect("schema")

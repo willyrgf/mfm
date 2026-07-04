@@ -2173,6 +2173,7 @@ dependencies = [
 name = "mfm-app"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "ed25519-dalek",
  "k256",
  "mfm-adapters-btc-jsonrpc",
