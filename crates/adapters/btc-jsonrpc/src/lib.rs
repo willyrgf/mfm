@@ -368,7 +368,7 @@ where
     let state = S::new(config)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
     let input = load_materialized_struct_input::<S::Input>(ctx.inputs(), artifacts).await?;
-    let context = ctx.state_context::<S::Context>()?;
+    let context = ctx.certified_context::<S::Context>()?;
     let fact = state
         .run(input, &(BtcFactRecordCapability,), &context)
         .await
