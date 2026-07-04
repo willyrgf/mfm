@@ -3410,6 +3410,7 @@ fn validate_typed_spec(
     spec.spec_hash()
         .map_err(|error| CertifyError::Spec(error.to_string()))?;
     validate_contract_header(spec)?;
+    let context_index = validate_contexts(&spec.contexts)?;
     let scope_ids = validate_scopes(&spec.scopes)?;
     let descriptor_index = DescriptorIndex::new(&spec.descriptor_identities)?;
     validate_descriptor_authority(&descriptor_index, registry)?;
@@ -3423,6 +3424,7 @@ fn validate_typed_spec(
             remediations: &spec.remediations,
             scope_ids: &scope_ids,
             descriptors: &descriptor_index,
+            contexts: &context_index,
             config_refs: &config_refs,
             cells: &cell_index,
             lineages: &lineage_index,
@@ -3433,6 +3435,7 @@ fn validate_typed_spec(
         typed: spec,
         scope_ids: &scope_ids,
         descriptors: &descriptor_index,
+        contexts: &context_index,
         config_refs: &config_refs,
         cells: &cell_index,
         lineages: &lineage_index,
@@ -3612,6 +3615,78 @@ fn validate_config_refs(config_refs: &[spec::ConfigRef]) -> Result<ConfigIndex> 
         ref_digests.insert(config_ref_digest(config)?.as_str().to_owned());
     }
     Ok(ConfigIndex { keys, ref_digests })
+}
+
+#[derive(Debug)]
+struct ContextIndex<'a> {
+    by_ref: BTreeMap<String, &'a spec::CertifiedContextSpec>,
+}
+
+impl<'a> ContextIndex<'a> {
+    fn get(&self, context_ref: &mfm_ids::ContextRef) -> Result<&'a spec::CertifiedContextSpec> {
+        self.by_ref
+            .get(context_ref.as_str())
+            .copied()
+            .ok_or_else(|| {
+                problem(
+                    ProblemClass::InvalidSemanticTransition,
+                    format!("missing certified context {context_ref}"),
+                )
+            })
+    }
+}
+
+fn validate_contexts(contexts: &[spec::CertifiedContextSpec]) -> Result<ContextIndex<'_>> {
+    let mut by_ref = BTreeMap::new();
+    for context in contexts {
+        let digest = context.canonical_context.content_digest();
+        if context.canonical_context_digest != digest {
+            return Err(problem(
+                ProblemClass::InvalidDataShape,
+                format!(
+                    "certified context {} digest mismatch: expected {}, recomputed {}",
+                    context.context_ref, context.canonical_context_digest, digest
+                ),
+            ));
+        }
+        let byte_len = context.canonical_context.as_bytes().len() as u64;
+        if context.canonical_context_byte_len != byte_len {
+            return Err(problem(
+                ProblemClass::InvalidDataShape,
+                format!(
+                    "certified context {} byte length mismatch: expected {}, recomputed {}",
+                    context.context_ref, context.canonical_context_byte_len, byte_len
+                ),
+            ));
+        }
+        let derived = spec::CertifiedContextSpec::derive_context_ref(
+            &context.context_descriptor_id,
+            &context.schema_id,
+            &context.semantic_type_id,
+            &context.canonicalizer_identity,
+            &context.canonical_context,
+        )
+        .map_err(|error| CertifyError::Spec(error.to_string()))?;
+        if context.context_ref != derived {
+            return Err(problem(
+                ProblemClass::InvalidDataShape,
+                format!(
+                    "certified context ref mismatch: expected {}, recomputed {}",
+                    context.context_ref, derived
+                ),
+            ));
+        }
+        if by_ref
+            .insert(context.context_ref.as_str().to_owned(), context)
+            .is_some()
+        {
+            return Err(problem(
+                ProblemClass::InvalidDataShape,
+                format!("duplicate certified context {}", context.context_ref),
+            ));
+        }
+    }
+    Ok(ContextIndex { by_ref })
 }
 
 #[derive(Debug)]
@@ -4030,6 +4105,17 @@ fn validate_seeds(
                 format!("seed {} cell metadata mismatch", seed.seed_id),
             ));
         }
+        if let spec::CellContextSpec::Bound { producer, .. } = &cell.context {
+            if !producer.seed_producers_allowed {
+                return Err(problem(
+                    ProblemClass::InvalidSemanticTransition,
+                    format!(
+                        "seed {} is not authorized to produce context-bound cell {}",
+                        seed.seed_id, seed.cell_id
+                    ),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -4043,6 +4129,7 @@ struct StateNodeContractInput<'a> {
     nodes: &'a [spec::NodeSpec],
     node: &'a spec::NodeSpec,
     descriptor: &'a spec::StateDescriptorIdentity,
+    contexts: &'a ContextIndex<'a>,
     config_ref_digest: &'a ContentDigest,
     cells: &'a BTreeMap<String, spec::CellSpec>,
     lineages: &'a BTreeMap<String, spec::ValueLineage>,
@@ -4058,6 +4145,7 @@ struct NodeValidationContext<'a, 'd> {
     remediations: &'a BTreeMap<NodeId, spec::NodeSpec>,
     scope_ids: &'a BTreeSet<String>,
     descriptors: &'a DescriptorIndex<'d>,
+    contexts: &'a ContextIndex<'a>,
     config_refs: &'a ConfigIndex,
     cells: &'a BTreeMap<String, spec::CellSpec>,
     lineages: &'a BTreeMap<String, spec::ValueLineage>,
@@ -4072,6 +4160,7 @@ fn validate_nodes(
         remediations,
         scope_ids,
         descriptors,
+        contexts,
         config_refs,
         cells,
         lineages,
@@ -4108,6 +4197,7 @@ fn validate_nodes(
             nodes,
             node,
             descriptor,
+            contexts,
             config_ref_digest: &config_ref_digest,
             cells,
             lineages,
@@ -4141,6 +4231,7 @@ struct SagaValidationContext<'a, 'd> {
     typed: &'a spec::TypedExecutionSpec,
     scope_ids: &'a BTreeSet<String>,
     descriptors: &'a DescriptorIndex<'d>,
+    contexts: &'a ContextIndex<'a>,
     config_refs: &'a ConfigIndex,
     cells: &'a BTreeMap<String, spec::CellSpec>,
     lineages: &'a BTreeMap<String, spec::ValueLineage>,
@@ -4227,11 +4318,15 @@ fn validate_saga_structure(context: SagaValidationContext<'_, '_>) -> Result<()>
         }
         validate_remediation_node_contract(
             remediation,
-            context.scope_ids,
-            context.descriptors,
-            context.config_refs,
-            context.cells,
-            context.lineages,
+            RemediationNodeValidationContext {
+                forward_nodes: &context.typed.nodes,
+                scope_ids: context.scope_ids,
+                descriptors: context.descriptors,
+                contexts: context.contexts,
+                config_refs: context.config_refs,
+                cells: context.cells,
+                lineages: context.lineages,
+            },
         )?;
         validate_remediation_binding_scope(
             forward,
@@ -4386,14 +4481,29 @@ fn validate_operator_authority_snapshot(
     Ok(())
 }
 
+struct RemediationNodeValidationContext<'a, 'd> {
+    forward_nodes: &'a [spec::NodeSpec],
+    scope_ids: &'a BTreeSet<String>,
+    descriptors: &'a DescriptorIndex<'d>,
+    contexts: &'a ContextIndex<'a>,
+    config_refs: &'a ConfigIndex,
+    cells: &'a BTreeMap<String, spec::CellSpec>,
+    lineages: &'a BTreeMap<String, spec::ValueLineage>,
+}
+
 fn validate_remediation_node_contract(
     node: &spec::NodeSpec,
-    scope_ids: &BTreeSet<String>,
-    descriptors: &DescriptorIndex<'_>,
-    config_refs: &ConfigIndex,
-    cells: &BTreeMap<String, spec::CellSpec>,
-    lineages: &BTreeMap<String, spec::ValueLineage>,
+    context: RemediationNodeValidationContext<'_, '_>,
 ) -> Result<()> {
+    let RemediationNodeValidationContext {
+        forward_nodes,
+        scope_ids,
+        descriptors,
+        contexts,
+        config_refs,
+        cells,
+        lineages,
+    } = context;
     if node.framework.is_some() {
         return Err(problem(
             ProblemClass::InvalidSemanticTransition,
@@ -4430,9 +4540,10 @@ fn validate_remediation_node_contract(
         ));
     }
     node_contract::validate_state_node_contract(StateNodeContractInput {
-        nodes: &[],
+        nodes: forward_nodes,
         node,
         descriptor,
+        contexts,
         config_ref_digest: &config_ref_digest,
         cells,
         lineages,
@@ -5056,6 +5167,16 @@ fn validate_input_node(
                     ProblemClass::InvalidInterfaceWiring,
                     format!(
                         "input binding for cell {} does not match cell metadata",
+                        cell.cell_id
+                    ),
+                ));
+            }
+            let expected_context = input_context_from_cell_context(&produced.context);
+            if cell.context != expected_context {
+                return Err(problem(
+                    ProblemClass::InvalidInterfaceWiring,
+                    format!(
+                        "input binding for cell {} does not match cell context",
                         cell.cell_id
                     ),
                 ));

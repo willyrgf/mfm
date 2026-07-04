@@ -50,38 +50,35 @@ pub(super) fn validate_framework_nodes(
                     descriptor,
                     "mfm.framework.bridge_same_value",
                 )?;
+                let target_cell = cells.get(node.output_cell.as_str()).ok_or_else(|| {
+                    problem(
+                        ProblemClass::InvalidTopology,
+                        format!("bridge node {} missing target cell", node.node_id),
+                    )
+                })?;
+                let source_cell = cells.get(bridge.source_cell_id.as_str()).ok_or_else(|| {
+                    problem(
+                        ProblemClass::InvalidTopology,
+                        format!("bridge node {} source cell is missing", node.node_id),
+                    )
+                })?;
                 if bridge.target_cell_id != node.output_cell
                     || bridge.target_scope_id != node.scope_id
-                    || bridge.schema_id
-                        != cells
-                            .get(node.output_cell.as_str())
-                            .map(|cell| cell.schema_id.clone())
-                            .ok_or_else(|| {
-                                problem(
-                                    ProblemClass::InvalidTopology,
-                                    format!("bridge node {} missing target cell", node.node_id),
-                                )
-                            })?
-                    || bridge.semantic_type_id
-                        != cells
-                            .get(node.output_cell.as_str())
-                            .map(|cell| cell.semantic_type_id.clone())
-                            .ok_or_else(|| {
-                                problem(
-                                    ProblemClass::InvalidTopology,
-                                    format!("bridge node {} missing target cell", node.node_id),
-                                )
-                            })?
+                    || bridge.schema_id != target_cell.schema_id
+                    || bridge.semantic_type_id != target_cell.semantic_type_id
                 {
                     return Err(problem(
                         ProblemClass::InvalidSemanticTransition,
                         format!("bridge node {} metadata mismatch", node.node_id),
                     ));
                 }
-                if !cells.contains_key(bridge.source_cell_id.as_str()) {
+                if target_cell.context != source_cell.context {
                     return Err(problem(
-                        ProblemClass::InvalidTopology,
-                        format!("bridge node {} source cell is missing", node.node_id),
+                        ProblemClass::InvalidSemanticTransition,
+                        format!(
+                            "bridge node {} does not preserve source cell context",
+                            node.node_id
+                        ),
                     ));
                 }
             }
@@ -96,7 +93,12 @@ pub(super) fn validate_framework_nodes(
                     .map_err(side_effect_verify_pair_problem)?;
                 let submit = pair.submit_node;
                 let submit_descriptor = descriptors.state(&submit.descriptor_id)?;
-                validate_side_effect_verify_output_cell(node, submit_descriptor, cells)?;
+                validate_side_effect_verify_output_cell(
+                    node,
+                    submit_descriptor,
+                    pair.submit_output_cell,
+                    cells,
+                )?;
                 let submit_output_cell =
                     cells.get(pair.submit_output_cell.as_str()).ok_or_else(|| {
                         problem(
@@ -154,6 +156,7 @@ pub(super) fn validate_framework_nodes(
                         .map_err(|error| CertifyError::Spec(error.to_string()))?,
                     spec::StoragePolicy::PublicOutputArtifact,
                 )?;
+                validate_framework_output_no_context(node, cells)?;
                 validate_framework_receipt_consumers(
                     node,
                     &all_input_cells,
@@ -194,6 +197,7 @@ pub(super) fn validate_framework_nodes(
                         .map_err(|error| CertifyError::Spec(error.to_string()))?,
                     spec::StoragePolicy::ContentAddressed,
                 )?;
+                validate_framework_output_no_context(node, cells)?;
                 let public_output_receipt_cell = cells
                     .get(retention.public_output_receipt_cell.as_str())
                     .ok_or_else(|| {
@@ -277,6 +281,7 @@ pub(super) fn validate_framework_nodes(
                         .map_err(|error| CertifyError::Spec(error.to_string()))?,
                     spec::StoragePolicy::ContentAddressed,
                 )?;
+                validate_framework_output_no_context(node, cells)?;
                 let retention_manifest_receipt_cell = cells
                     .get(complete.retention_manifest_receipt_cell.as_str())
                     .ok_or_else(|| {
@@ -353,6 +358,7 @@ pub(super) fn validate_framework_nodes(
                         .map_err(|error| CertifyError::Spec(error.to_string()))?,
                     spec::StoragePolicy::ContentAddressed,
                 )?;
+                validate_framework_output_no_context(node, cells)?;
                 validate_framework_input_binding(
                     node,
                     &spec::framework_lifecycle_unit_input_binding("resolve_saga_terminal")
@@ -699,6 +705,7 @@ fn validate_framework_output_cell(
 fn validate_side_effect_verify_output_cell(
     verify_node: &spec::NodeSpec,
     submit_descriptor: &spec::StateDescriptorIdentity,
+    submit_output_cell: &CellId,
     cells: &BTreeMap<String, spec::CellSpec>,
 ) -> Result<()> {
     validate_framework_output_cell(
@@ -707,7 +714,54 @@ fn validate_side_effect_verify_output_cell(
         &submit_descriptor.output_schema_id,
         &submit_descriptor.output_semantic_type_id,
         spec::StoragePolicy::ContentAddressed,
-    )
+    )?;
+    let submit = cells.get(submit_output_cell.as_str()).ok_or_else(|| {
+        problem(
+            ProblemClass::InvalidTopology,
+            format!(
+                "verify node {} missing submit output cell {}",
+                verify_node.node_id, submit_output_cell
+            ),
+        )
+    })?;
+    let output = cells.get(verify_node.output_cell.as_str()).ok_or_else(|| {
+        problem(
+            ProblemClass::InvalidTopology,
+            format!("verify node {} missing output cell", verify_node.node_id),
+        )
+    })?;
+    if output.context != submit.context {
+        return Err(problem(
+            ProblemClass::InvalidSemanticTransition,
+            format!(
+                "side-effect verify node {} does not preserve submit output context",
+                verify_node.node_id
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_framework_output_no_context(
+    node: &spec::NodeSpec,
+    cells: &BTreeMap<String, spec::CellSpec>,
+) -> Result<()> {
+    let output = cells.get(node.output_cell.as_str()).ok_or_else(|| {
+        problem(
+            ProblemClass::InvalidTopology,
+            format!("framework node {} missing output cell", node.node_id),
+        )
+    })?;
+    if output.context != spec::CellContextSpec::NoContext {
+        return Err(problem(
+            ProblemClass::InvalidSemanticTransition,
+            format!(
+                "framework receipt node {} output cell must not be context-bound",
+                node.node_id
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_submit_output_consumers(

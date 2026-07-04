@@ -299,6 +299,15 @@ The spec hash is computed from canonical bytes. The erased runner plan must be r
 from the certified spec and runner registry. It must not carry semantics missing from the certified
 spec.
 
+Certification validates transition-context authority before a spec can become runtime authority:
+context refs must be content-derived from the certified context table, no-context descriptors cannot
+run under a semantic context, context-required nodes must match the registered context descriptor,
+context-bound user outputs and inputs must match their descriptor resource kind, stage, and approved
+producer contract, and raw seeds cannot produce context-bound resources unless the certified
+producer constraint explicitly permits seed producers. Framework same-value bridges and
+side-effect verify nodes may only preserve an existing context binding; framework receipt nodes must
+remain no-context.
+
 `mfm_spec::v1::HashedSpecEnvelope` is not certification authority. Persisted spec bytes, hash-only
 envelopes, and persisted certificate bytes are hostile data until `mfm-certify` verifies them
 against a registry and returns `CertifiedTypedSpec`.
