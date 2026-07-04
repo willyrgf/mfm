@@ -58,6 +58,47 @@ fn semantic(name: &str, byte: u8) -> SemanticTypeId {
     .expect("semantic id")
 }
 
+fn context_descriptor(byte: u8) -> ContextDescriptorId {
+    ContextDescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(byte))
+}
+
+fn test_context() -> CertifiedContextSpec {
+    let context_descriptor_id = context_descriptor(0xa0);
+    let schema_id = schema("mfm.spec.test.context", 0xa1);
+    let semantic_type_id = semantic("context", 0xa2);
+    let canonicalizer_identity =
+        CanonicalizerIdentity::new("sha256-jcs-v1").expect("canonicalizer");
+    let canonical_context = PlainCanonicalJsonBytes::from_json_str(
+        r#"{"expected_chain_id":31337,"network_id":"local"}"#,
+    )
+    .expect("canonical context");
+    let context_ref = CertifiedContextSpec::derive_context_ref(
+        &context_descriptor_id,
+        &schema_id,
+        &semantic_type_id,
+        &canonicalizer_identity,
+        &canonical_context,
+    )
+    .expect("context ref");
+    CertifiedContextSpec {
+        context_ref,
+        context_descriptor_id,
+        schema_id,
+        semantic_type_id,
+        canonicalizer_identity,
+        canonical_context_digest: canonical_context.content_digest(),
+        canonical_context_byte_len: canonical_context.as_bytes().len() as u64,
+        canonical_context,
+    }
+}
+
+fn context_producer(descriptor_id: DescriptorId) -> ContextProducerSpec {
+    ContextProducerSpec {
+        producer_descriptor_id: Some(descriptor_id),
+        seed_producers_allowed: false,
+    }
+}
+
 fn test_spec() -> TypedExecutionSpec {
     let scope_id = scope(0x01);
     let seed_id = seed(0x02);
@@ -135,6 +176,7 @@ fn test_spec() -> TypedExecutionSpec {
             value_lineage: ValueLineageRef {
                 lineage_digest: content(0x20),
             },
+            context: InputContextSpec::no_context(),
         })),
         digest: content(0x42),
     };
@@ -149,6 +191,7 @@ fn test_spec() -> TypedExecutionSpec {
             config_hash: content(0x51),
         },
         saga: SagaPolicySpec::NoSideEffects,
+        contexts: Vec::new(),
         scopes: vec![ScopeSpec {
             scope_id: scope_id.clone(),
             parent_scope_id: None,
@@ -293,6 +336,7 @@ fn test_spec() -> TypedExecutionSpec {
                 state_version: StateVersion::new("mfm.spec.test.state.multiply.v1")
                     .expect("state version"),
                 descriptor_id: state_descriptor,
+                context: NodeContextSpec::no_context(),
                 config_ref: config_ref.clone(),
                 input_bindings: input_binding.clone(),
                 output_cell: output_cell.clone(),
@@ -325,6 +369,7 @@ fn test_spec() -> TypedExecutionSpec {
                 state_version: StateVersion::new("mfm.framework.state.same_value_bridge.v1")
                     .expect("bridge state version"),
                 descriptor_id: bridge_state_descriptor,
+                context: NodeContextSpec::no_context(),
                 config_ref: config_ref.clone(),
                 input_bindings: InputBindingSpec {
                     input_schema_id: value_schema.clone(),
@@ -338,6 +383,7 @@ fn test_spec() -> TypedExecutionSpec {
                         value_lineage: ValueLineageRef {
                             lineage_digest: content(0x21),
                         },
+                        context: InputContextSpec::no_context(),
                     })),
                     digest: content(0x46),
                 },
@@ -381,6 +427,7 @@ fn test_spec() -> TypedExecutionSpec {
                 state_version: StateVersion::new("mfm.framework.state.render_public_outputs.v1")
                     .expect("render state version"),
                 descriptor_id: render_state_descriptor,
+                context: NodeContextSpec::no_context(),
                 config_ref: config_ref.clone(),
                 input_bindings: InputBindingSpec {
                     input_schema_id: public_schema.clone(),
@@ -426,6 +473,7 @@ fn test_spec() -> TypedExecutionSpec {
                 terminal_policy: CellTerminalPolicy::ProducedOnly,
                 storage_policy: StoragePolicy::ContentAddressed,
                 redaction_policy: RedactionPolicy::Public,
+                context: CellContextSpec::no_context(),
             },
             CellSpec {
                 cell_id: output_cell.clone(),
@@ -439,6 +487,7 @@ fn test_spec() -> TypedExecutionSpec {
                 terminal_policy: CellTerminalPolicy::ProducedOnly,
                 storage_policy: StoragePolicy::ContentAddressed,
                 redaction_policy: RedactionPolicy::Public,
+                context: CellContextSpec::no_context(),
             },
             CellSpec {
                 cell_id: bridged_cell.clone(),
@@ -452,6 +501,7 @@ fn test_spec() -> TypedExecutionSpec {
                 terminal_policy: CellTerminalPolicy::ProducedOnly,
                 storage_policy: StoragePolicy::ContentAddressed,
                 redaction_policy: RedactionPolicy::Public,
+                context: CellContextSpec::no_context(),
             },
             CellSpec {
                 cell_id: receipt_cell,
@@ -465,6 +515,7 @@ fn test_spec() -> TypedExecutionSpec {
                 terminal_policy: CellTerminalPolicy::ProducedOnly,
                 storage_policy: StoragePolicy::PublicOutputArtifact,
                 redaction_policy: RedactionPolicy::Public,
+                context: CellContextSpec::no_context(),
             },
         ],
         value_lineages: vec![
@@ -547,7 +598,7 @@ fn certified_spec_hash_golden() {
     );
     assert_eq!(
         spec.spec_hash().expect("spec hash").as_str(),
-        "spec:sha256-jcs-v1:b9d680fecf828eda65c3635451134c8396cc1d8c02092ce5c78ce7082e37085d"
+        "spec:sha256-jcs-v1:6175bdc7d0e6d7ad56b07d8777f4836a80cdd6af757877d895cc0188ba02abab"
     );
     assert!(canonical
         .as_str()
@@ -604,6 +655,156 @@ fn fact_descriptor_allowlists_are_hash_defining() {
         .expect("canonical spec")
         .as_str()
         .contains(r#""fact_descriptor_allowlist":[{"descriptor_hash":"content:"#));
+}
+
+#[test]
+fn certified_contexts_and_constraints_are_hash_defining() {
+    let base = test_spec();
+    let base_hash = base.spec_hash().expect("base hash");
+    let context = test_context();
+    let context_ref = context.context_ref.clone();
+    let producer_descriptor_id = base.nodes[0].descriptor_id.clone();
+
+    let mut contexted = base.clone();
+    contexted.contexts.push(context);
+    contexted.nodes[0].context = NodeContextSpec::Required {
+        context_ref: context_ref.clone(),
+    };
+    contexted.cells[1].context = CellContextSpec::Bound {
+        context_ref: context_ref.clone(),
+        resource_kind: ContextResourceKind::new("contract_instance").expect("resource kind"),
+        stage: ContextStage::new("deployed").expect("stage"),
+        producer: Box::new(context_producer(producer_descriptor_id.clone())),
+    };
+    let InputBindingNodeSpec::Cell(input_cell) = &mut contexted.nodes[1].input_bindings.root else {
+        panic!("bridge input is a cell");
+    };
+    input_cell.context = InputContextSpec::Required {
+        context_ref,
+        resource_kind: ContextResourceKind::new("contract_instance").expect("resource kind"),
+        stage: ContextStage::new("deployed").expect("stage"),
+        producer: Box::new(context_producer(producer_descriptor_id)),
+    };
+
+    let contexted_hash = contexted.spec_hash().expect("contexted hash");
+    assert_ne!(
+        contexted_hash, base_hash,
+        "certified context table and constraints must be hash-defining"
+    );
+
+    let canonical = contexted.canonical_json().expect("contexted canonical");
+    assert!(canonical.as_str().contains(r#""contexts":[{"#));
+    assert!(canonical.as_str().contains(r#""kind":"required""#));
+    assert!(canonical
+        .as_str()
+        .contains(r#""context":{"context_ref":"context:"#));
+    let parsed =
+        TypedExecutionSpec::from_json_slice(canonical.as_bytes()).expect("parse contexted spec");
+    assert_eq!(parsed, contexted);
+}
+
+#[test]
+fn certified_context_table_rejects_duplicate_unknown_or_mismatched_refs() {
+    let context = test_context();
+
+    let mut duplicate = test_spec();
+    duplicate.contexts.push(context.clone());
+    duplicate.contexts.push(context.clone());
+    let err = duplicate
+        .spec_hash()
+        .expect_err("duplicate context refs reject");
+    assert!(
+        err.to_string().contains("duplicate certified context"),
+        "{err}"
+    );
+
+    let mut unknown_node = test_spec();
+    unknown_node.nodes[0].context = NodeContextSpec::Required {
+        context_ref: context.context_ref.clone(),
+    };
+    let err = unknown_node
+        .spec_hash()
+        .expect_err("unknown node context ref rejects");
+    assert!(
+        err.to_string().contains("unknown certified context ref"),
+        "{err}"
+    );
+
+    let mut unknown_cell = test_spec();
+    unknown_cell.cells[0].context = CellContextSpec::Bound {
+        context_ref: context.context_ref.clone(),
+        resource_kind: ContextResourceKind::new("contract_instance").expect("resource kind"),
+        stage: ContextStage::new("deployed").expect("stage"),
+        producer: Box::new(context_producer(descriptor(0xa5))),
+    };
+    let err = unknown_cell
+        .spec_hash()
+        .expect_err("unknown cell context ref rejects");
+    assert!(
+        err.to_string().contains("unknown certified context ref"),
+        "{err}"
+    );
+
+    let mut bad_digest = test_spec();
+    bad_digest.contexts.push(CertifiedContextSpec {
+        canonical_context_digest: content(0xaf),
+        ..context.clone()
+    });
+    let err = bad_digest
+        .spec_hash()
+        .expect_err("context digest mismatch rejects");
+    assert!(err.to_string().contains("digest mismatch"), "{err}");
+
+    let mut bad_ref = test_spec();
+    bad_ref.contexts.push(CertifiedContextSpec {
+        context_ref: ContextRef::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xae)),
+        ..context
+    });
+    let err = bad_ref
+        .spec_hash()
+        .expect_err("context ref mismatch rejects");
+    assert!(err.to_string().contains("context ref mismatch"), "{err}");
+}
+
+#[test]
+fn persisted_specs_without_context_table_or_with_float_contexts_reject() {
+    let spec = test_spec();
+    let canonical = spec.canonical_json().expect("canonical spec");
+    let mut value: serde_json::Value = serde_json::from_str(canonical.as_str()).expect("spec JSON");
+    value
+        .as_object_mut()
+        .expect("spec object")
+        .remove("contexts");
+    let input = serde_json::to_string(&value).expect("JSON");
+    let err = TypedExecutionSpec::from_json_str(&input).expect_err("missing contexts rejects");
+    assert!(err.to_string().contains("contexts"), "{err}");
+
+    let mut floated = test_spec();
+    let mut context = test_context();
+    context.canonical_context = PlainCanonicalJsonBytes::from_json_str(r#"{"network_id":"local"}"#)
+        .expect("canonical context");
+    context.canonical_context_digest = context.canonical_context.content_digest();
+    context.canonical_context_byte_len = context.canonical_context.as_bytes().len() as u64;
+    context.context_ref = CertifiedContextSpec::derive_context_ref(
+        &context.context_descriptor_id,
+        &context.schema_id,
+        &context.semantic_type_id,
+        &context.canonicalizer_identity,
+        &context.canonical_context,
+    )
+    .expect("context ref");
+    floated.contexts.push(context);
+    let canonical = floated.canonical_json().expect("canonical floated base");
+    let mut value: serde_json::Value = serde_json::from_str(canonical.as_str()).expect("spec JSON");
+    value["contexts"][0]["canonical_context"] =
+        serde_json::json!({"expected_chain_id": 31337.5, "network_id": "local"});
+    let input = serde_json::to_string(&value).expect("JSON");
+    let err = TypedExecutionSpec::from_json_str(&input).expect_err("float context rejects");
+    assert!(
+        err.to_string().contains("floats are not allowed")
+            || err.to_string().contains("number forms are not allowed"),
+        "{err}"
+    );
 }
 
 #[test]

@@ -918,6 +918,7 @@ fn fact_replay_spec() -> HashedSpecEnvelope {
         state_version: mfm_ids::StateVersion::new("mfm.replay.test.fact_state.v1")
             .expect("state version"),
         descriptor_id: descriptor_id(0xba),
+        context: spec::NodeContextSpec::no_context(),
         config_ref: config_ref.clone(),
         input_bindings,
         output_cell: cell_id(0xbb),
@@ -967,6 +968,7 @@ fn fact_replay_spec() -> HashedSpecEnvelope {
             config_hash: content_digest(0xbf),
         },
         saga: spec::SagaPolicySpec::NoSideEffects,
+        contexts: Vec::new(),
         scopes: Vec::new(),
         seeds: Vec::new(),
         descriptor_identities: vec![state_identity],
@@ -1539,6 +1541,7 @@ fn hashed_fact_replay_spec_with_other_node_descriptor(
         state_kind: template.state_kind.clone(),
         state_version: template.state_version.clone(),
         descriptor_id: other_descriptor_id.clone(),
+        context: spec::NodeContextSpec::no_context(),
         config_ref: template.config_ref.clone(),
         input_bindings: template.input_bindings.clone(),
         output_cell: cell_id(0xdf),

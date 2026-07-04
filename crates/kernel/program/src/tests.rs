@@ -1171,7 +1171,7 @@ fn stable_ids_and_value_lineage_golden_vectors() {
             "config_digest": node.config.config_ref_digest.as_str(),
             "input_binding_digest": node.input.digest.as_str(),
             "local_node_key": node.key.as_str(),
-            "lowering_version": "mfm.typed.lowering.v2",
+            "lowering_version": "mfm.typed.lowering.v1",
             "scope_id": node.scope_id.as_str(),
             "state_kind": node.state_kind.as_str(),
             "state_version": node.state_version.as_str(),
@@ -1189,15 +1189,15 @@ fn stable_ids_and_value_lineage_golden_vectors() {
     );
     assert_eq!(
         seed.seed_id.as_str(),
-        "seed:sha256-jcs-v1:f13eb7cea8383588ea4b87607db8074478c8212ee4ce3660220224fd0636d745"
+        "seed:sha256-jcs-v1:b5a83431eb098643947f99b1962264571edec7395ac616391543e829bf5c5b4e"
     );
     assert_eq!(
         seed.cell_id.as_str(),
-        "cell:sha256-jcs-v1:86089606d76c84a3924bda1ab24ae860ef0d66c7bf14451ac064c4fc1f19760e"
+        "cell:sha256-jcs-v1:ee1c049a22d8dfa96c72d97d539d1dbd00de32d8b97beee7d5f33640e071b3d9"
     );
     assert_eq!(
         seed.value_lineage.digest().as_str(),
-        "content:sha256-jcs-v1:f35696d73ebd308f69af9d2b4b42a016759cea2e69310fdbec2dbe52edb7bb4e"
+        "content:sha256-jcs-v1:8bc9b7d9cd6230a162050711b9e2f524c51595835e98105ac0de96fbfa7b4806"
     );
     assert_eq!(
         frame.config.config_ref_digest.as_str(),
@@ -1209,20 +1209,20 @@ fn stable_ids_and_value_lineage_golden_vectors() {
     );
     assert_eq!(
         frame.input.digest.as_str(),
-        "content:sha256-jcs-v1:b3988b494d3c450e6e2680efb2ebec83a9129f704116680472a32806dc24deef"
+        "content:sha256-jcs-v1:31ec5fdd663005e338311043edf8cd20d4f0458087879322c3986d77aa5d8847"
     );
     assert_eq!(node.input.digest, frame.input.digest);
     assert_eq!(
         frame.operation_instance_id.as_str(),
-        "op:sha256-jcs-v1:57877ac1c44ef94d0d6e6320c61aca5a8ff4a5f37ee38ea02216ecff4d0d0451"
+        "op:sha256-jcs-v1:c050bfea69048432a471bd87a76cf268c28ef44158f2b1612bdd84e30ee64190"
     );
     assert_eq!(
         active_lineage.digest.as_str(),
-        "content:sha256-jcs-v1:e1211f3c4792a461bc050586526a47ee9d1eaac84458216ccd00fb99054be255"
+        "content:sha256-jcs-v1:68d4be45f0125749d4d04a8a44a0923e6238a1d0ad98671e389803b60ccc425d"
     );
     assert_eq!(
         node.node_id.as_str(),
-        "node:sha256-jcs-v1:a872a89920a12d479b7d06db18fe6deaede7ed9d3dcc5ef42dcf27ca43705ede"
+        "node:sha256-jcs-v1:5dc13aa0cf883c534bb193465ed78bf7aee5ab8a10a76c4c9147cd983832457d"
     );
     assert_ne!(
         node.node_id, alternate_lowering_node_id,
@@ -1230,15 +1230,15 @@ fn stable_ids_and_value_lineage_golden_vectors() {
     );
     assert_eq!(
         node.output_cell_id.as_str(),
-        "cell:sha256-jcs-v1:65e23302a4adad175b2d48f1ebd3fd5cab8cc84654a2ba3da5a6030ae3def70d"
+        "cell:sha256-jcs-v1:79affe5044036f83e8ff751dd9287d97746d3b6d50bb62718639049add2bd106"
     );
     assert_eq!(
         node.output_value_lineage.digest().as_str(),
-        "content:sha256-jcs-v1:e8b5b0fd85e431bf6a3c23d368b81518b7b8956f8c090f4c5f940899323b9c32"
+        "content:sha256-jcs-v1:84adddf8606ad8e4a44521bd27bb86c60ccabcde71f360e7490f99cdec07ef04"
     );
     assert_eq!(
         frame.lineage_digest.as_str(),
-        "content:sha256-jcs-v1:2f9cc86db1d0d772f4c60bd2466fca3c48ec82fdb521226556f177ae1654e469"
+        "content:sha256-jcs-v1:9a35808c7151a6a33afbb7aea9d12344254e5128df9a19712b330700fb312b74"
     );
 }
 
@@ -1301,7 +1301,7 @@ fn domain_keyed_handles_sort_canonically_and_reject_duplicates() {
         assert_eq!(elements.len(), 2);
         assert_eq!(
             binding.digest().as_str(),
-            "content:sha256-jcs-v1:66cab7f584757aa11417aee5f695d9b9bb823b4ee39104196d66cb6c2798db89"
+            "content:sha256-jcs-v1:422c5aedbcf6740a6de87d7efeebe548ab81245c4572ec1c76b8e322678e07e4"
         );
         assert_eq!(
             domain_keys[0].content_digest.as_str(),

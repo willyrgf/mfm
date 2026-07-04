@@ -639,7 +639,7 @@ fn certifies_reference_program_draft() {
     );
     assert_eq!(
         certified.certificate_hash().as_str(),
-        "content:sha256-jcs-v1:fc957b695e686ce67be0f53c4a7a2374f2c80b31153d92b3fc93d5dc9b2cbe8f"
+        "content:sha256-jcs-v1:582d3b707fd869ed96e100701369c718a17328d98afa1d5e5bc36e0bc2f175c9"
     );
     assert_eq!(
         certified.envelope().spec.public_outputs.public_schema_id,
@@ -1177,6 +1177,7 @@ fn certification_rejects_forged_lifecycle_input_binding() {
                         schema_id: input_cell.schema_id,
                         required_terminal: spec::RequiredTerminal::ProducedOnly,
                         value_lineage: input_cell.value_lineage,
+                        context: spec::InputContextSpec::no_context(),
                     })),
                 }]);
             node.input_bindings.digest =
@@ -2142,6 +2143,7 @@ fn retarget_first_remediation_input(typed: &mut spec::TypedExecutionSpec, cell_i
         schema_id: input_cell.schema_id,
         required_terminal: spec::RequiredTerminal::ProducedOnly,
         value_lineage: input_cell.value_lineage,
+        context: spec::InputContextSpec::no_context(),
     }));
     let digest = content_digest_json(input_node_json(&root)).expect("input digest");
     let predecessors = predecessors_for_test_inputs(typed, std::slice::from_ref(&cell_id));
@@ -2421,6 +2423,7 @@ fn push_lifecycle_node(parts: LifecycleNodeParts<'_>) {
         terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
         storage_policy: spec::StoragePolicy::ContentAddressed,
         redaction_policy: spec::RedactionPolicy::Public,
+        context: spec::CellContextSpec::no_context(),
     });
     typed.value_lineages.push(spec::ValueLineage {
         lineage_ref: lineage,
@@ -2439,6 +2442,7 @@ fn push_lifecycle_node(parts: LifecycleNodeParts<'_>) {
         state_kind: descriptor.state_kind,
         state_version: descriptor.state_version,
         descriptor_id: descriptor.descriptor_id,
+        context: spec::NodeContextSpec::no_context(),
         config_ref,
         input_bindings: input_binding,
         output_cell,
@@ -2507,6 +2511,7 @@ fn append_user_receipt_consumer(
         schema_id: input_cell.schema_id.clone(),
         required_terminal: spec::RequiredTerminal::ProducedOnly,
         value_lineage: input_cell.value_lineage.clone(),
+        context: spec::InputContextSpec::no_context(),
     }));
     let input_binding = spec::InputBindingSpec {
         input_schema_id: descriptor.input_schema_id.clone(),
@@ -2527,6 +2532,7 @@ fn append_user_receipt_consumer(
         state_kind: descriptor.state_kind.clone(),
         state_version: descriptor.state_version.clone(),
         descriptor_id: descriptor.descriptor_id.clone(),
+        context: spec::NodeContextSpec::no_context(),
         config_ref: template.config_ref.clone(),
         input_bindings: input_binding,
         output_cell: CellId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_byte(0xf1)),
@@ -2568,6 +2574,7 @@ fn append_user_receipt_consumer(
         terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
         storage_policy: spec::StoragePolicy::ContentAddressed,
         redaction_policy: spec::RedactionPolicy::Public,
+        context: spec::CellContextSpec::no_context(),
     });
     typed.value_lineages.push(spec::ValueLineage {
         lineage_ref: lineage,
@@ -2612,6 +2619,7 @@ fn append_independent_user_node(typed: &mut spec::TypedExecutionSpec, stable_key
         state_kind: descriptor.state_kind.clone(),
         state_version: descriptor.state_version.clone(),
         descriptor_id: descriptor.descriptor_id.clone(),
+        context: spec::NodeContextSpec::no_context(),
         config_ref: template.config_ref.clone(),
         input_bindings: template.input_bindings.clone(),
         output_cell: CellId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_byte(0xe1)),
@@ -2650,6 +2658,7 @@ fn append_independent_user_node(typed: &mut spec::TypedExecutionSpec, stable_key
         terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
         storage_policy: spec::StoragePolicy::ContentAddressed,
         redaction_policy: spec::RedactionPolicy::Public,
+        context: spec::CellContextSpec::no_context(),
     });
     typed.value_lineages.push(spec::ValueLineage {
         lineage_ref: lineage,

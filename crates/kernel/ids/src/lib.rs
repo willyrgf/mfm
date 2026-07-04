@@ -333,6 +333,20 @@ checked_string_type!(
     "Checked operational runtime token."
 );
 
+checked_string_type!(
+    ContextResourceKind,
+    "context resource kind",
+    validate_context_component,
+    "Checked certified transition-context resource kind."
+);
+
+checked_string_type!(
+    ContextStage,
+    "context stage",
+    validate_context_component,
+    "Checked certified transition-context resource stage."
+);
+
 /// Checked visible ASCII token with a caller-selected maximum byte length.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VisibleAscii<const MAX: usize> {
@@ -928,6 +942,12 @@ pub enum DescriptorKind {}
 /// Marker for typed execution spec hashes.
 pub enum SpecHashKind {}
 
+/// Marker for certified transition context refs.
+pub enum ContextRefKind {}
+
+/// Marker for certified transition context descriptor ids.
+pub enum ContextDescriptorKind {}
+
 /// Marker for certified side-effect submit/verify pair ids.
 pub enum SideEffectPairIdKind {}
 
@@ -1014,6 +1034,12 @@ pub type DescriptorId = Identity<DescriptorKind>;
 
 /// Digest of a certified typed execution spec.
 pub type SpecHash = Identity<SpecHashKind>;
+
+/// Content-addressed certified transition context reference.
+pub type ContextRef = Identity<ContextRefKind>;
+
+/// Certified transition context descriptor identity.
+pub type ContextDescriptorId = Identity<ContextDescriptorKind>;
 
 /// Certified side-effect submit/verify pair identity.
 pub type SideEffectPairId = Identity<SideEffectPairIdKind>;
@@ -1436,6 +1462,39 @@ fn validate_runtime_token(grammar: &'static str, value: &str) -> CheckedStringRe
     validate_runtime_identifier(grammar, value, 512)
 }
 
+fn validate_context_component(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
+    validate_len(value, grammar, 256)?;
+    for segment in value.split('/') {
+        validate_segment_len(grammar, segment, 64)?;
+        let mut chars = segment.chars();
+        let Some(first) = chars.next() else {
+            return Err(CheckedStringError::new(
+                grammar,
+                CheckedStringErrorReason::EmptySegment,
+            ));
+        };
+        if !is_lower_or_digit(first) {
+            return Err(CheckedStringError::new(
+                grammar,
+                CheckedStringErrorReason::InvalidStart,
+            ));
+        }
+        for (offset, ch) in chars.enumerate() {
+            if is_lower_or_digit(ch) || matches!(ch, '.' | '_' | '-') {
+                continue;
+            }
+            return Err(CheckedStringError::new(
+                grammar,
+                CheckedStringErrorReason::InvalidCharacter {
+                    ch,
+                    index: offset + 1,
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_runtime_identifier(
     grammar: &'static str,
     value: &str,
@@ -1593,6 +1652,8 @@ impl_identity_category!(OperationKindKind, "operation", NamespaceNameDigest);
 impl_digest_only_category!(OperationInstanceIdKind, "op");
 impl_digest_only_category!(DescriptorKind, "descriptor");
 impl_digest_only_category!(SpecHashKind, "spec");
+impl_digest_only_category!(ContextRefKind, "context");
+impl_digest_only_category!(ContextDescriptorKind, "context_descriptor");
 impl_digest_only_category!(SideEffectPairIdKind, "side_effect_pair");
 impl_digest_only_category!(NodeIdKind, "node");
 impl_digest_only_category!(CellIdKind, "cell");

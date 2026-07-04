@@ -44,7 +44,7 @@ pub use mfm_values::{NonEmpty, ValidatedConfig};
 #[cfg(test)]
 mod tests;
 
-const LOWERING_VERSION: &str = "mfm.typed.lowering.v1";
+const LOWERING_VERSION: &str = "mfm.typed.lowering.v2";
 
 /// Result type for typed program authoring operations.
 pub type Result<T> = std::result::Result<T, PlanError>;
@@ -5814,6 +5814,7 @@ fn input_binding_node_json(node: &InputBindingNode) -> serde_json::Value {
         }),
         InputBindingNodeKind::Cell(cell) => serde_json::json!({
             "cell_id": cell.cell_id.as_str(),
+            "context": { "kind": "no_context" },
             "field_path": cell.field_path.as_str(),
             "kind": "cell",
             "required_terminal": cell.required_terminal.as_str(),

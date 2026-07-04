@@ -44,6 +44,13 @@ ordinary lifecycle transitions.
 This is a breaking design. No compatibility shim, fallback old entry point, or duplicate legacy
 shape should be preserved.
 
+The collector/facts work adds an adjacent authority surface that this RFC must account for:
+`FactRecorded` claims, fact descriptor allow-lists, `FactQueryEvidence`, store-authenticated query
+receipts, and public fact DTOs. Those facts can be replay and continuation evidence, such as a
+collector checkpoint, but they are not automatically certified transition context. If a fact or fact
+query is used inside a context-scoped workflow, the context binding must be explicit in certified
+node/cell/query authority, not inferred from public fact output or projection rows.
+
 ## Problem
 
 MFM currently treats EVM contract lifecycle phase configs and lifecycle typestates as independently
@@ -186,6 +193,14 @@ Examples:
 - Portfolio valuation context.
 - Protocol market context.
 - Account or signer lane context when it is part of domain identity.
+- Recurring collector source/checkpoint context when checkpoint identity is part of workflow
+  continuation.
+
+Current BTC collector checkpoints are encoded as `Control` facts with typed subject/query evidence.
+That is valid fact-query replay authority, but it is not the same thing as
+`CertifiedTransitionContext`. A future collector context cutover should either model that source and
+checkpoint partition as certified context, or explicitly keep it as fact-query authority outside the
+context-bound transition model.
 
 A context has a stable digest:
 
@@ -244,6 +259,13 @@ The certified context is materialized by runtime from the certified spec. It is 
 mutable runtime config and is not separately authored by the caller. The resource's `context_ref`,
 the node's required context, and the materialized context value must all identify the same certified
 context before the runner is invoked.
+
+The same rule applies when a state consumes facts or fact-query results as workflow continuation
+material. A fact subject, internal fact ref, `PublicFactRefId`, or returned projection row can carry
+domain-scoping fields, but those fields do not become certified context by themselves. Context-bound
+fact consumption must be represented by certified query/selection policy and retained
+`FactQueryEvidence`, and any context-bearing fact payload must be validated against the consuming
+node's certified context before it can drive a context-bound transition.
 
 The intended API shape is a separate certified invocation binding, not another user config field or
 input cell:
@@ -487,6 +509,10 @@ carry `context_ref`, the configured instance identity, assertion result evidence
 capability evidence refs. Public renderers can turn it into JSON, but rendered public JSON is not
 authority for later imports or replay.
 
+Validation reports are state-output evidence unless an implementation deliberately adds a separate
+typed validation fact descriptor. References to validation evidence in this RFC mean validation read
+evidence plus the terminal report/output evidence, not an implicit `FactRecorded` event.
+
 ### Public Entry Shapes
 
 The public EVM lifecycle inputs should have one context object and phase-local action objects.
@@ -648,6 +674,7 @@ At minimum, certified lifecycle specs need to represent:
 - import policy material for externally admitted stages
 - lineage from import/deploy/configure outputs to later configure/validate inputs
 - side-effect resource lane derivation inputs when the state crosses an external mutation boundary
+- context-bound fact/query constraints when facts participate in a context-scoped workflow
 
 The certifier should reject any graph where a transition consumes a context-bound resource under a
 different context than the transition requires.
@@ -659,6 +686,12 @@ The certifier should also reject unapproved producers. For EVM contract lifecycl
 - validate consumes configured instances but does not mint lifecycle instances.
 
 This avoids a weak model where any seed with the right schema can masquerade as a lifecycle stage.
+
+Fact descriptor allow-lists certify which fact shapes a node may emit, but they are not a substitute
+for context membership. If a fact claim, fact response artifact, or fact-query result is
+context-bound, the certified spec must say which node context, fact descriptor, resource kind/stage,
+and query/selection policy are allowed. Replay must then verify the retained fact authority and
+authenticated query receipt against those constraints.
 
 A `context_ref` field inside a resource payload is not enough. The certified output cell descriptor
 must say that the cell is bound to a specific context ref and stage. Runtime must validate committed
@@ -763,6 +796,8 @@ Runtime owns:
 - enforcing certified producer/input/context requirements before runner invocation
 - validating committed outputs against certified cell/context expectations
 - preparing import evidence and side-effect evidence under certified node context
+- staging context-bound `FactRecorded` claims and `FactQueryEvidence` only through certified
+  descriptor/query authority
 
 Store owns:
 
@@ -770,11 +805,17 @@ Store owns:
 - artifact evidence admission
 - atomic commit behavior
 - projection rebuild from stream authority
+- fact descriptor, fact response, and fact query evidence artifacts as strict authority
+- fact indexes, terms, descriptor catalogs, and public fact refs as rebuildable/query surfaces, not
+  lifecycle import authority
 
 Replay owns:
 
 - reconstructing expected requests from certified context and recorded inputs
-- verifying facts, receipts, confirmations, imports, and outputs from recorded evidence only
+- verifying `FactRecorded`, `FactQueryEvidence`, receipts, confirmations, imports, and outputs from
+  recorded evidence only
+- verifying authenticated fact-query receipts, retained returned refs, and `Control`/`Platform`
+  visibility boundaries without consulting the live fact index
 - verifying source-run imports from recorded import evidence or certified export bundles
 - never consulting live routing, mutable environment config, current source registries, or public
   output renderers
@@ -943,7 +984,7 @@ context-bound evidence validation:
 ```text
 prepared invocation context_ref matches certified node context
 receipt/submission/confirmation evidence context_ref matches certified node context
-validation fact evidence context_ref matches certified node context
+validation read evidence and report state-output evidence context_ref match certified node context
 input resource context_ref matches certified node context
 ```
 
@@ -985,8 +1026,8 @@ Keep:
 - EVM transport guard checks for observed chain id and optional chain fingerprint
 - evidence and artifact digest verification
 - prepared invocation public-surface and secret-leak checks
-- replay checks that facts, receipts, confirmations, imports, and outputs match certified context
-  and recorded evidence
+- replay checks that `FactRecorded`, `FactQueryEvidence`, receipts, confirmations, imports, and
+  outputs match certified context and recorded evidence
 - public output rendering checks that join context data without making rendered JSON authority
 
 The cleanup target is local defensive equality code caused by duplicate authorities. The new
@@ -1051,6 +1092,12 @@ This keeps audit output useful without making copied fields a second authority s
 Rendered output may include both the `context_ref` and selected context fields for auditability.
 Those rendered fields are not import authority. A later run that wants to continue from a previous
 run must import from typed run evidence or a certified export bundle, not from copied public JSON.
+
+Public fact APIs are the same kind of public surface. `Platform` fact DTOs and opaque
+`PublicFactRefId` values can help users find recorded facts, but they are not source-run evidence,
+artifact authority, or lifecycle continuation authority. `Control` facts may be used by internal
+collector/runtime workflows through authenticated query evidence; they must stay hidden from public
+fact APIs and must still be replayed from retained `FactQueryEvidence`, not from live projections.
 
 ## Resource Lane Implications
 

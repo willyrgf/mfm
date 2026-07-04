@@ -10,5 +10,9 @@ Parsed persisted typed spec bytes are typed data only and remain hostile until v
 `mfm-certify` against a registry and certificate. Hash matches, audit metadata, summaries, or
 source scans do not certify this data.
 
+The v1 spec shape includes an explicit certified transition-context table plus node, cell, and input
+context constraints. Specs with implicit context absence are rejected; ordinary states carry explicit
+`NoContext` metadata.
+
 `docs/design.md` is the normative typed-core authority contract. This crate is framework-owned and
 must remain domain-free.
