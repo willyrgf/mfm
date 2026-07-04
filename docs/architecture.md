@@ -448,6 +448,8 @@ Additional dependency rules:
 
 - kernel crates must not depend on app, binaries, domain models, states, operations, transports,
   signers, or storage implementations
+- context-bound output value traits belong in `mfm-values`; runtime owns extractor registration,
+  artifact decoding, and invocation-time enforcement
 - states must not depend on runtime, store implementations, app, binaries, transport
   implementations, signer implementations, or operation crates
 - states may depend on capability contract crates, because those crates define typed authority

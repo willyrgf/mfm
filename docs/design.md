@@ -83,7 +83,7 @@ Typed kernel crates are framework-owned and domain-free:
 |---|---|
 | `crates/kernel/ids` | Strong identity types for specs, states, events, values, artifacts, runs, and digests |
 | `crates/kernel/canonical` | Canonical JSON bytes and content digests |
-| `crates/kernel/values` | Typed value, config, artifact reference, and public-output descriptors |
+| `crates/kernel/values` | Typed value, context-bound output, config, artifact reference, and public-output descriptors |
 | `crates/kernel/effects` | Framework-owned effect classes |
 | `crates/kernel/capabilities` | Capability descriptors, roles, and effect-checked capability sets |
 | `crates/kernel/program` | Typed state-program authoring, handles, scopes, registries, lineage, and lowering evidence |
@@ -451,6 +451,9 @@ graph. Before `RunAdmitted`, the assembly/runtime boundary verifies:
 - runner registry availability
 - capability registry availability
 - context-bound output extractor availability
+
+Context-bound output value traits live in `mfm-values`. Runtime owns extractor registration,
+artifact decoding, and admission checks against certified context-bound cell constraints.
 
 After launch, runtime advances only from the append-only run stream authority. It loads the stream,
 delegates spec-independent ordering and projection checks to `mfm-store`, then performs

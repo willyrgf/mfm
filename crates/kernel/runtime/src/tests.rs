@@ -38,6 +38,7 @@ use mfm_store::v1::{
     },
     RunEventStore,
 };
+use mfm_values::ContextBoundOutput;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 

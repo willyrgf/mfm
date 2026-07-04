@@ -34,6 +34,9 @@ help: the trait `mfm_values::MfmValue` is not implemented for `ContextKey`
 help: the following other types implement trait `mfm_values::MfmValue`
  --> $WORKSPACE/crates/kernel/values/src/lib.rs
   |
+  | impl MfmValue for ContextRefValue {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::ContextRefValue`
+...
   | impl<T: MfmValue> MfmValue for MaybeValue<T> {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::MaybeValue<T>`
 ...
@@ -66,6 +69,9 @@ help: the trait `mfm_values::MfmValue` is not implemented for `ContextKey`
 help: the following other types implement trait `mfm_values::MfmValue`
  --> $WORKSPACE/crates/kernel/values/src/lib.rs
   |
+  | impl MfmValue for ContextRefValue {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::ContextRefValue`
+...
   | impl<T: MfmValue> MfmValue for MaybeValue<T> {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::MaybeValue<T>`
 ...

@@ -7,12 +7,12 @@ use mfm_capabilities::{CapabilitySetDescriptor, CapabilitySetFor, CapabilitySpec
 use mfm_events::v1::{self as events, side_effect};
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
-    ContextRef, ContextResourceKind, ContextStage, DescriptorId, DigestAlgorithm, NodeId, SchemaId,
+    DescriptorId, DigestAlgorithm, NodeId, SchemaId,
 };
 use mfm_program::{EffectRunner, MfmFactType, StateSpec};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
-use mfm_values::{MfmConfig, MfmValue, NonEmpty, ValidatedConfig};
+use mfm_values::{ContextBoundOutput, MfmConfig, MfmValue, NonEmpty, ValidatedConfig};
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{
@@ -29,18 +29,6 @@ use crate::{
 pub struct RunnerJsonArtifact {
     bytes: Vec<u8>,
     evidence: store::ArtifactEvidenceRef,
-}
-
-/// Typed state output that carries certified context-resource metadata.
-pub trait ContextBoundOutput: MfmValue {
-    /// Returns the context ref embedded in the output value.
-    fn context_ref(&self) -> &ContextRef;
-
-    /// Returns the context resource kind embedded in the output value.
-    fn context_resource_kind(&self) -> &ContextResourceKind;
-
-    /// Returns the context resource stage embedded in the output value.
-    fn context_stage(&self) -> &ContextStage;
 }
 
 /// Reusable output extractor for values implementing [`ContextBoundOutput`].
