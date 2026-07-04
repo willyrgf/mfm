@@ -491,7 +491,7 @@ pub fn contract_lifecycle_program_draft(
 /// Plans a deploy-only EVM contract entry-point program.
 pub fn plan_contract_deploy_entry_point(
     config: EvmContractDeployEntryConfig,
-) -> Result<TypedProgramLaunchPlan, ContractLifecyclePlanError> {
+) -> mfm_program::Result<TypedProgramLaunchPlan> {
     Ok(TypedProgramLaunchPlan::from_draft(
         deploy_contract_program_draft(config)?,
     )?)
@@ -500,7 +500,7 @@ pub fn plan_contract_deploy_entry_point(
 /// Plans a configure-only EVM contract entry-point program through a deployed import node.
 pub fn plan_contract_configure_entry_point(
     config: EvmContractConfigureEntryConfig,
-) -> Result<TypedProgramLaunchPlan, ContractLifecyclePlanError> {
+) -> mfm_program::Result<TypedProgramLaunchPlan> {
     Ok(TypedProgramLaunchPlan::from_draft(
         configure_contract_program_draft(config)?,
     )?)
@@ -509,7 +509,7 @@ pub fn plan_contract_configure_entry_point(
 /// Plans a validate-only EVM contract entry-point program through a configured import node.
 pub fn plan_contract_validate_entry_point(
     config: EvmContractValidateEntryConfig,
-) -> Result<TypedProgramLaunchPlan, ContractLifecyclePlanError> {
+) -> mfm_program::Result<TypedProgramLaunchPlan> {
     Ok(TypedProgramLaunchPlan::from_draft(
         validate_contract_program_draft(config)?,
     )?)
@@ -518,18 +518,10 @@ pub fn plan_contract_validate_entry_point(
 /// Plans a full lifecycle EVM contract entry-point program.
 pub fn plan_contract_lifecycle_entry_point(
     config: EvmContractLifecycleEntryConfig,
-) -> Result<TypedProgramLaunchPlan, ContractLifecyclePlanError> {
+) -> mfm_program::Result<TypedProgramLaunchPlan> {
     Ok(TypedProgramLaunchPlan::from_draft(
         contract_lifecycle_program_draft(config)?,
     )?)
-}
-
-/// Error returned while planning a contract lifecycle entry point.
-#[derive(Debug, thiserror::Error)]
-pub enum ContractLifecyclePlanError {
-    /// Program planning failed.
-    #[error("contract lifecycle planning failed: {0}")]
-    Plan(#[from] mfm_program::PlanError),
 }
 
 fn build_program(
