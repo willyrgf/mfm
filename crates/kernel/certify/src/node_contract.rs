@@ -488,7 +488,7 @@ fn validate_user_state_input_context_cell(
             if input_context_ref != context_ref
                 || input_resource_kind != resource_kind
                 || input_stage != stage
-                || input_producer != producer
+                || !context_producer_satisfies_contract(input_producer, producer)
             {
                 return Err(problem(
                     ProblemClass::InvalidSemanticTransition,
@@ -509,6 +509,22 @@ fn validate_user_state_input_context_cell(
             )
         }
     }
+}
+
+fn context_producer_satisfies_contract(
+    actual: &spec::ContextProducerSpec,
+    contract: &spec::ContextProducerSpec,
+) -> bool {
+    if actual.producer_descriptor_ids.is_empty() && !actual.seed_producers_allowed {
+        return false;
+    }
+    if actual.seed_producers_allowed && !contract.seed_producers_allowed {
+        return false;
+    }
+    actual
+        .producer_descriptor_ids
+        .iter()
+        .all(|descriptor_id| contract.producer_descriptor_ids.contains(descriptor_id))
 }
 
 fn validate_context_cell_producer(

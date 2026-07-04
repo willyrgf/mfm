@@ -2809,19 +2809,33 @@ impl<'a> DraftLowerer<'a> {
         let input_root = spec::InputBindingNodeSpec::Struct(
             required_cells
                 .iter()
-                .map(|output| spec::NamedInputBindingSpec {
-                    field_path: output.public_field_path.clone(),
-                    node: spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
+                .map(|output| {
+                    let cell = self
+                        .cells
+                        .iter()
+                        .find(|cell| cell.cell_id == output.cell_id)
+                        .ok_or_else(|| {
+                            problem(
+                                ProblemClass::InvalidTopology,
+                                format!("public output cell {} is missing", output.cell_id),
+                            )
+                        })?;
+                    Ok(spec::NamedInputBindingSpec {
                         field_path: output.public_field_path.clone(),
-                        cell_id: output.cell_id.clone(),
-                        semantic_type_id: output.semantic_type_id.clone(),
-                        schema_id: output.schema_id.clone(),
-                        required_terminal: output.required_terminal,
-                        value_lineage: output.value_lineage.clone(),
-                        context: spec::InputContextSpec::no_context(),
-                    })),
+                        node: spec::InputBindingNodeSpec::Cell(Box::new(
+                            spec::InputBindingCellSpec {
+                                field_path: output.public_field_path.clone(),
+                                cell_id: output.cell_id.clone(),
+                                semantic_type_id: output.semantic_type_id.clone(),
+                                schema_id: output.schema_id.clone(),
+                                required_terminal: output.required_terminal,
+                                value_lineage: output.value_lineage.clone(),
+                                context: input_context_from_cell_context(&cell.context),
+                            },
+                        )),
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>>>()?,
         );
         let input_binding = spec::InputBindingSpec {
             input_schema_id: public_outputs.public_schema_id.clone(),
