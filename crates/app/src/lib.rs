@@ -667,10 +667,12 @@ fn production_runner_registry_inner(
         portfolio_runtime,
     );
     mfm_adapters_portfolio::register_portfolio_runners(&mut registry, portfolio_capabilities)?;
+    let source_run_registry = production_certification_registry()?;
     evm_contracts::register_contract_lifecycle_runners(
         &mut registry,
         artifacts.clone(),
         runtime_config.clone(),
+        source_run_registry,
     )?;
     btc_collector::register_btc_collector_runners_if_configured(
         &mut registry,

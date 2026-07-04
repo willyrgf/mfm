@@ -454,6 +454,7 @@ fn side_effect_frame_requests_are_pair_keyed() {
     };
     let frame = SideEffectReplayFrame {
         intent: &intent,
+        certified_context: CertifiedSideEffectContext::no_context(),
         prepared: None,
         submission: Some(&submission),
         not_submitted: None,
@@ -491,6 +492,7 @@ fn side_effect_frame_not_submitted_requests_are_pair_keyed() {
     };
     let frame = SideEffectReplayFrame {
         intent: &intent,
+        certified_context: CertifiedSideEffectContext::no_context(),
         prepared: None,
         submission: None,
         not_submitted: Some(&proof),
@@ -533,6 +535,7 @@ fn side_effect_frame_receipt_request_uses_recorded_verify_evidence() {
     };
     let frame = SideEffectReplayFrame {
         intent: &intent,
+        certified_context: CertifiedSideEffectContext::no_context(),
         prepared: None,
         submission: None,
         not_submitted: None,

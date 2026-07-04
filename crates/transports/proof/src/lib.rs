@@ -760,11 +760,11 @@ pub fn verify_deterministic_proof_replay(broker: &replay::ReplayBroker) -> repla
             "multiple deterministic proof side-effect intents in one run",
         ));
     }
-    let frames = frames[0];
-    match deterministic_proof_action(frames.intent)? {
-        DeterministicProofAction::Accept => verify_accepted_proof_replay(broker, &frames)?,
+    let frame = &frames[0];
+    match deterministic_proof_action(frame.intent)? {
+        DeterministicProofAction::Accept => verify_accepted_proof_replay(broker, frame)?,
         DeterministicProofAction::ManualResolution => {
-            verify_manual_resolution_proof_replay(broker, &frames)?
+            verify_manual_resolution_proof_replay(broker, frame)?
         }
     }
     Ok(true)
