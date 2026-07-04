@@ -53,6 +53,7 @@ mfm-store = { path = "../kernel/store" }
 mfm-stream-store-postgres = { path = "../storages/stream-store-postgres" }
 mfm-transports-evm = { path = "../transports/evm" }
 mfm-transports-proof = { path = "../transports/proof" }
+mfm-values = { path = "../kernel/values" }
 
 [dev-dependencies]
 alloy-primitives = { workspace = true }
@@ -61,7 +62,6 @@ k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-effects = { path = "../kernel/effects" }
 mfm-manual-auth = { path = "../kernel/manual-auth" }
 mfm-store = { path = "../kernel/store", features = ["test-support"] }
-mfm-values = { path = "../kernel/values" }
 mfm_core = { path = "../core" }
 mfm-program-derive = { path = "../kernel/program-derive" }
 tempfile = "3.0"

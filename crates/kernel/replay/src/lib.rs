@@ -159,6 +159,7 @@ pub mod v1 {
         adapter_executables: Vec<events::ExecutableIdentity>,
         artifact_evidence: Vec<StoredArtifactEvidenceRef>,
         artifact_bytes: BTreeMap<ArtifactId, Vec<u8>>,
+        additional_artifact_evidence: Vec<StoredArtifactEvidenceRef>,
         fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
         source_fact_events: Vec<RetainedSourceFactReplayEvent>,
     }
@@ -183,10 +184,11 @@ pub mod v1 {
             verified_view: &mfm_runtime::VerifiedRunHistoryView,
             fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
         ) -> Result<Self> {
-            Self::from_verified_run_history_view_with_fact_query_receipt_trust_root_and_source_facts(
+            Self::from_verified_run_history_view_with_fact_query_receipt_trust_root_source_facts_and_artifacts(
                 runtime_spec,
                 verified_view,
                 fact_query_receipt_trust_root,
+                Vec::new(),
                 Vec::new(),
             )
         }
@@ -199,6 +201,24 @@ pub mod v1 {
             fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
             source_fact_events: Vec<RetainedSourceFactReplayEvent>,
         ) -> Result<Self> {
+            Self::from_verified_run_history_view_with_fact_query_receipt_trust_root_source_facts_and_artifacts(
+                runtime_spec,
+                verified_view,
+                fact_query_receipt_trust_root,
+                source_fact_events,
+                Vec::new(),
+            )
+        }
+
+        /// Mints replay read authority with explicit fact-query receipt trust root, retained
+        /// source fact events, and additional artifacts certified outside the run-event stream.
+        pub fn from_verified_run_history_view_with_fact_query_receipt_trust_root_source_facts_and_artifacts(
+            runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
+            verified_view: &mfm_runtime::VerifiedRunHistoryView,
+            fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+            source_fact_events: Vec<RetainedSourceFactReplayEvent>,
+            additional_artifacts: Vec<store::VerifiedRunArtifactBytes>,
+        ) -> Result<Self> {
             if runtime_spec.spec_hash() != verified_view.spec_hash() {
                 return Err(ReplayError::new(
                     ReplayErrorKind::SpecHashMismatch,
@@ -206,12 +226,12 @@ pub mod v1 {
                 ));
             }
             let run_admitted = verified_view.run_admitted();
-            let artifact_evidence = verified_view
+            let mut artifact_evidence = verified_view
                 .artifact_store()
                 .artifacts()
                 .map(|(_, artifact)| artifact.evidence().clone())
                 .collect::<Vec<_>>();
-            let artifact_bytes = verified_view
+            let mut artifact_bytes = verified_view
                 .artifact_store()
                 .artifacts()
                 .map(|(_, artifact)| ReplayArtifactBytes {
@@ -220,8 +240,23 @@ pub mod v1 {
                 })
                 .collect::<Vec<_>>();
             let artifacts = artifact_map(artifact_evidence.clone())?;
-            let artifact_bytes = artifact_bytes_map(artifact_bytes)?;
             verify_replay_artifact_authority(verified_view, &artifacts)?;
+            let additional_artifact_evidence = additional_artifacts
+                .iter()
+                .map(|artifact| artifact.evidence().clone())
+                .collect::<Vec<_>>();
+            artifact_evidence.extend(
+                additional_artifacts
+                    .iter()
+                    .map(|artifact| artifact.evidence().clone()),
+            );
+            artifact_bytes.extend(additional_artifacts.into_iter().map(|artifact| {
+                ReplayArtifactBytes {
+                    artifact_id: artifact.evidence().artifact_id.clone(),
+                    bytes: artifact.into_bytes(),
+                }
+            }));
+            let artifact_bytes = artifact_bytes_map(artifact_bytes)?;
             Ok(Self {
                 certified_spec: runtime_spec.envelope().clone(),
                 stream: verified_view.events().to_vec(),
@@ -236,6 +271,7 @@ pub mod v1 {
                 adapter_executables: run_admitted.adapter_executables.clone(),
                 artifact_evidence,
                 artifact_bytes,
+                additional_artifact_evidence,
                 fact_query_receipt_trust_root,
                 source_fact_events,
             })
@@ -913,6 +949,7 @@ pub mod v1 {
                 manual_resolutions: BTreeMap::new(),
             };
             broker.authorize_certified_spec_artifacts()?;
+            broker.authorize_additional_artifacts(&authority.additional_artifact_evidence)?;
             broker.index_retained_source_fact_events(&authority.source_fact_events)?;
             broker.index_stream(&stream)?;
             broker.verify_terminal_outcome_agreement()?;
@@ -1300,6 +1337,16 @@ pub mod v1 {
                     producer_node_id: None,
                     producer_seed_id: None,
                 })?;
+            }
+            Ok(())
+        }
+
+        fn authorize_additional_artifacts(
+            &mut self,
+            artifacts: &[StoredArtifactEvidenceRef],
+        ) -> Result<()> {
+            for artifact in artifacts {
+                self.insert_authorized_artifact(artifact.clone())?;
             }
             Ok(())
         }

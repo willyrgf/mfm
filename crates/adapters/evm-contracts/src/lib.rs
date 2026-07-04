@@ -6368,7 +6368,12 @@ fn contract_profile_artifact_requirement(
         .ok_or(EvmContractAdapterError::MissingContractArtifact)?;
     let expected_schema = <ContractArtifactConfig as MfmConfig>::schema_id()
         .map_err(|error| EvmContractAdapterError::Model(error.to_string()))?;
-    if schema_id != expected_schema {
+    if schema_id != expected_schema
+        || reference
+            .semantic_type_id()
+            .map_err(EvmContractAdapterError::Model)?
+            .is_some()
+    {
         return Err(EvmContractAdapterError::MissingContractArtifact);
     }
     Ok(store::EventArtifactRequirement {
@@ -6387,12 +6392,10 @@ fn contract_profile_artifact_requirement(
                 .map_err(|error| EvmContractAdapterError::Model(error.to_string()))?,
         ),
         schema_id: Some(schema_id),
-        semantic_type_id: reference
-            .semantic_type_id()
-            .map_err(EvmContractAdapterError::Model)?,
+        semantic_type_id: None,
         producer_node_id: None,
         producer_seed_id: None,
-        artifact_role: None,
+        artifact_role: Some(events::ArtifactRole::TypedConfig),
     })
 }
 

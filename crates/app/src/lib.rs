@@ -22,6 +22,9 @@ use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_certify::{CertificationRegistry, CertifiedTypedSpec};
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{EvmChainGuard, EvmNetworkId, EvmSourcePolicyId, EvmSourceRef};
+use mfm_evm_contract_model::{
+    ContractArtifactConfig, EvmContractContext, LifecycleArtifactEvidenceRef,
+};
 use mfm_ids::{
     ArtifactId, ContentDigest, DigestAlgorithm, EventId, RunId, SchemaId, SeedId, SemanticTypeId,
     SpecHash, TrustScopeId,
@@ -36,6 +39,7 @@ use mfm_runtime::{
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
+use mfm_values::MfmConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::map::Entry;
 use serde_json::{Map, Value};
@@ -3069,12 +3073,105 @@ where
     let source_fact_events =
         retained_source_fact_events_from_query_evidence(store, artifacts, verified_view.events())
             .await?;
-    Ok(ReplayReadAuthority::from_verified_run_history_view_with_fact_query_receipt_trust_root_and_source_facts(
+    let context_artifacts =
+        certified_evm_context_artifacts_for_replay(artifacts, runtime_spec).await?;
+    Ok(ReplayReadAuthority::from_verified_run_history_view_with_fact_query_receipt_trust_root_source_facts_and_artifacts(
         runtime_spec,
         verified_view,
         fact_query_receipt_trust_root,
         source_fact_events,
+        context_artifacts,
     )?)
+}
+
+async fn certified_evm_context_artifacts_for_replay(
+    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
+    runtime_spec: &CertifiedRuntimeSpec,
+) -> Result<Vec<store::VerifiedRunArtifactBytes>, AppError> {
+    let descriptor = evm_contract_context_descriptor()?;
+    let mut retained = Vec::new();
+    for context in &runtime_spec.envelope().spec.contexts {
+        if context.context_descriptor_id != descriptor.context_descriptor_id
+            || context.schema_id != descriptor.schema_id
+            || context.semantic_type_id != descriptor.semantic_type_id
+            || context.canonicalizer_identity != descriptor.canonicalizer_identity
+        {
+            continue;
+        }
+        let context =
+            mfm_program::CertifiedContext::<EvmContractContext>::from_certified_spec(context)
+                .map_err(|_| certified_evm_context_artifact_error())?;
+        let Some(reference) = context.value().contract_profile.artifact_ref.as_ref() else {
+            continue;
+        };
+        let requirement = evm_contract_profile_artifact_requirement(reference)?;
+        retained.push(
+            artifacts
+                .read_retained_artifact(&requirement)
+                .await
+                .map_err(async_app_store_error)?,
+        );
+    }
+    Ok(retained)
+}
+
+fn evm_contract_context_descriptor() -> Result<spec::StateContextDescriptorRequirementSpec, AppError>
+{
+    let spec::StateContextDescriptorSpec::Required(descriptor) =
+        <EvmContractContext as mfm_program::StateContext>::descriptor()
+            .map_err(|_| certified_evm_context_artifact_error())?
+    else {
+        return Err(certified_evm_context_artifact_error());
+    };
+    Ok(*descriptor)
+}
+
+fn evm_contract_profile_artifact_requirement(
+    reference: &LifecycleArtifactEvidenceRef,
+) -> Result<store::EventArtifactRequirement, AppError> {
+    let schema_id = reference
+        .schema_id()
+        .map_err(|_| certified_evm_context_artifact_error())?
+        .ok_or_else(certified_evm_context_artifact_error)?;
+    let expected_schema = <ContractArtifactConfig as MfmConfig>::schema_id()
+        .map_err(|_| certified_evm_context_artifact_error())?;
+    if schema_id != expected_schema
+        || reference
+            .semantic_type_id()
+            .map_err(|_| certified_evm_context_artifact_error())?
+            .is_some()
+    {
+        return Err(certified_evm_context_artifact_error());
+    }
+    Ok(store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::ArtifactReferenced,
+        artifact_id: reference
+            .artifact_id()
+            .map_err(|_| certified_evm_context_artifact_error())?,
+        digest: Some(
+            reference
+                .content_digest()
+                .map_err(|_| certified_evm_context_artifact_error())?,
+        ),
+        byte_len: Some(reference.byte_len()),
+        media_type: Some(
+            spec::MediaType::new("application/json")
+                .map_err(|_| certified_evm_context_artifact_error())?,
+        ),
+        schema_id: Some(schema_id),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: Some(events::ArtifactRole::TypedConfig),
+    })
+}
+
+fn certified_evm_context_artifact_error() -> AppError {
+    AppError::backend(
+        ErrorClass::Internal,
+        "CertifiedEvmContextArtifactInvalid",
+        "Certified EVM context artifact failed replay verification",
+    )
 }
 
 async fn retained_source_fact_events_from_query_evidence<S, A>(
