@@ -6,7 +6,7 @@ use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
     ContentDigest, NodeId, RunId, SchemaId, SpecHash,
 };
-use mfm_program::{CertifiedContext, MfmContext, NoContext, StateContext};
+use mfm_program::{CertifiedContext, StateContext};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
@@ -52,32 +52,8 @@ impl CertifiedInvocationContext {
         self.spec.as_ref()
     }
 
-    /// Returns framework-owned no-context authority.
-    pub fn no_context(&self) -> Result<CertifiedContext<NoContext>> {
-        if self.spec.is_some() {
-            return Err(crate::RuntimeError::InvalidRunnerOutput(
-                "context-bound invocation requested no-context authority".to_owned(),
-            ));
-        }
-        Ok(CertifiedContext::no_context())
-    }
-
-    /// Materializes typed context authority from the certified context table entry.
-    pub fn materialize<C>(&self) -> Result<CertifiedContext<C>>
-    where
-        C: MfmContext,
-    {
-        let spec = self.spec.as_ref().ok_or_else(|| {
-            crate::RuntimeError::InvalidRunnerOutput(
-                "no-context invocation requested typed context authority".to_owned(),
-            )
-        })?;
-        CertifiedContext::from_certified_spec(spec)
-            .map_err(|error| crate::RuntimeError::InvalidRunnerOutput(error.to_string()))
-    }
-
     /// Materializes state context authority for either no-context or typed-context states.
-    pub fn materialize_state_context<C>(&self) -> Result<CertifiedContext<C>>
+    pub fn certified_context<C>(&self) -> Result<CertifiedContext<C>>
     where
         C: StateContext,
     {
@@ -467,25 +443,12 @@ impl<'a> ErasedRunCtx<'a> {
         self.invocation.context()
     }
 
-    /// Materializes typed context authority for this runner invocation.
+    /// Materializes certified context authority for this runner invocation.
     pub fn certified_context<C>(&self) -> Result<CertifiedContext<C>>
-    where
-        C: MfmContext,
-    {
-        self.context().materialize::<C>()
-    }
-
-    /// Returns framework-owned no-context authority for ordinary states.
-    pub fn no_context(&self) -> Result<CertifiedContext<NoContext>> {
-        self.context().no_context()
-    }
-
-    /// Materializes state context authority for either no-context or typed-context states.
-    pub fn state_context<C>(&self) -> Result<CertifiedContext<C>>
     where
         C: StateContext,
     {
-        self.context().materialize_state_context::<C>()
+        self.context().certified_context::<C>()
     }
 
     /// Store-owned attempt id minted by the scheduler.
