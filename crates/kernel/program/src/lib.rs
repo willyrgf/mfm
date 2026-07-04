@@ -613,11 +613,6 @@ impl ContextValidatorSpec {
         &self.requirement
     }
 
-    /// Validates a certified context table entry through the registered typed context.
-    pub fn validate(&self, spec: &CertifiedContextSpec) -> Result<()> {
-        (self.validate)(spec)
-    }
-
     /// Returns the type-erased validation callback.
     pub const fn validate_fn(&self) -> fn(&CertifiedContextSpec) -> Result<()> {
         self.validate
