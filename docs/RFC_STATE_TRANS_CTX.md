@@ -1,6 +1,6 @@
 # RFC: State Transition Contexts
 
-Status: proposed
+Status: implemented
 
 ## Summary
 
@@ -574,11 +574,13 @@ ImportFromMfmRun
   accepted_context_policy
 ```
 
-Admission verifies the certified import policy, retained source spec certificate or certified export
-certificate artifact, retained source run stream or certified export bundle artifact, source value
-artifact, value digest, schema and semantic ids, lifecycle stage, context ref, and context
-descriptor. The imported resource is valid only if the source material was produced for the same
-certified context or for a context explicitly accepted by the import policy.
+Admission verifies the certified import policy, retained source typed-spec certificate artifact,
+retained source run stream or certified export bundle artifact, source value artifact, value digest,
+schema and semantic ids, lifecycle stage, context ref, and context descriptor. For certified export
+bundles, the bundle carries canonical source typed-spec JSON; replay verifies that spec and
+certificate against the compiled certification registry before accepting any terminal event. The
+imported resource is valid only if the source material was produced for the same certified context
+or for a context explicitly accepted by the import policy.
 
 This import proves MFM provenance.
 
@@ -586,8 +588,8 @@ The source must be verified through authoritative typed evidence, not rendered p
 source authority is either:
 
 - a `CommittedRunStream` plus `VerifiedRunArtifactStore` from a trusted MFM store boundary
-- an explicitly certified export/import bundle whose certificate and retained artifacts verify
-  against the compiled registry
+- an explicitly certified export/import bundle whose retained typed-spec certificate, embedded
+  canonical source spec, and retained artifacts verify against the compiled registry
 
 `source_cell_or_output_id` means a typed cell or typed terminal output binding in that authority
 surface. It does not mean a CLI/REST JSON field, cached public-output document, or projection row.
@@ -597,7 +599,7 @@ The import state records an import evidence bundle with enough retained proof ma
 ```text
 ImportFromMfmRunEvidence
   source_spec_hash
-  source_spec_certificate_or_export_certificate_ref
+  source_spec_certificate_ref
   source_run_stream_ref_or_export_bundle_ref
   source_cell_or_output_id
   source_cell_schema_id
