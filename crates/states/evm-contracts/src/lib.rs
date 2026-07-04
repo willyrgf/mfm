@@ -33,13 +33,13 @@ use mfm_evm_contract_config::{
 };
 use mfm_evm_contract_model::{
     configured_contract_stage, contract_instance_resource_kind, deployed_contract_stage,
-    validation_report_resource_kind, validation_report_stage, AdoptExternalAddress,
-    ConfigurationClaim, ConfigurationSnapshot, ConfiguredContractInstance,
+    expected_matches, validation_report_resource_kind, validation_report_stage,
+    AdoptExternalAddress, ConfigurationClaim, ConfigurationSnapshot, ConfiguredContractInstance,
     ConfiguredContractInstanceRef, ConfiguredFrom, ContextBoundValidationReport, ContractAddress,
     ContractCallConfig, ContractLifecycleStage, ContractProfileDigestRef, DeployProvenance,
     DeployedContractInstance, EventAssertionConfig, EvmContractContext, ExternalAdoptionEvidence,
-    ExternalEventAssertionEvidence, ExternalReadAssertionEvidence, ImportFromMfmRun,
-    ImportFromMfmRunEvidence, LifecycleArtifactEvidenceRef, LifecycleNodeIdRef,
+    ExternalEventAssertionEvidence, ExternalEvmSourceEvidence, ExternalReadAssertionEvidence,
+    ImportFromMfmRun, ImportFromMfmRunEvidence, LifecycleArtifactEvidenceRef, LifecycleNodeIdRef,
     ReadAssertionConfig, ValidationEventResult, ValidationReadResult,
 };
 use mfm_ids::{
@@ -439,6 +439,8 @@ pub struct ContextContractValidationReadRequest {
     pub request_version: u64,
     /// Certified contract lifecycle context ref.
     pub context_ref: ContextRefValue,
+    /// Digest of the configured input value this read request was derived from.
+    pub configured_input_digest: ContractProfileDigestRef,
     /// Configured contract instance being validated.
     pub configured_instance: ConfiguredContractInstanceRef,
     /// Stable semantic network id from the certified context.
@@ -463,6 +465,8 @@ pub struct ContractValidationReadResponse {
     pub response_version: u64,
     /// Certified contract lifecycle context ref.
     pub context_ref: ContextRefValue,
+    /// Digest of the configured input value this response is bound to.
+    pub configured_input_digest: ContractProfileDigestRef,
     /// Canonical content ref string for the certified EVM network context.
     pub evm_network_context_ref: String,
     /// Context resource stage being validated.
@@ -485,6 +489,60 @@ pub struct ContractValidationReadResponse {
     pub validation_event_evidence: Vec<ExternalEventAssertionEvidence>,
     /// Retained lifecycle evidence refs available to the terminal report.
     pub evidence_refs: Vec<LifecycleArtifactEvidenceRef>,
+}
+
+/// Recomputes whether a read validation result passes.
+pub fn validation_read_result_passes(result: &ValidationReadResult) -> bool {
+    expected_matches(&result.actual, &result.expected)
+}
+
+/// Recomputes whether an event validation result passes.
+pub fn validation_event_result_passes(result: &ValidationEventResult) -> bool {
+    result.observed_count >= result.min_count
+}
+
+/// Requires a read validation result's retained `passed` field to match recomputation.
+pub fn require_validation_read_result_canonical_passed(
+    result: &ValidationReadResult,
+) -> StateResult<()> {
+    if result.passed == validation_read_result_passes(result) {
+        Ok(())
+    } else {
+        Err(StateError::Message(
+            "validation read result passed flag does not match recomputed value".to_owned(),
+        ))
+    }
+}
+
+/// Requires an event validation result's retained `passed` field to match recomputation.
+pub fn require_validation_event_result_canonical_passed(
+    result: &ValidationEventResult,
+) -> StateResult<()> {
+    if result.passed == validation_event_result_passes(result) {
+        Ok(())
+    } else {
+        Err(StateError::Message(
+            "validation event result passed flag does not match recomputed value".to_owned(),
+        ))
+    }
+}
+
+fn require_validation_read_results_canonical_passed(
+    results: &[ValidationReadResult],
+) -> StateResult<()> {
+    for result in results {
+        require_validation_read_result_canonical_passed(result)?;
+    }
+    Ok(())
+}
+
+fn require_validation_event_results_canonical_passed(
+    results: &[ValidationEventResult],
+) -> StateResult<()> {
+    for result in results {
+        require_validation_event_result_canonical_passed(result)?;
+    }
+    Ok(())
 }
 
 /// Context-bound state that prepares and submits contract deployment transactions.
@@ -782,6 +840,7 @@ impl ContextBoundValidateContractState {
         Ok(ContextContractValidationReadRequest {
             request_version: 1,
             context_ref: ContextRefValue::from(context.context_ref().clone()),
+            configured_input_digest: digest_for_config(&input.configured)?,
             configured_instance: ConfiguredContractInstanceRef::from_configured(&input.configured),
             network_id: context.value().network.network_id.as_str().to_owned(),
             expected_chain_id: context.value().network.expected_chain_id(),
@@ -797,24 +856,37 @@ impl ContextBoundValidateContractState {
         response: ContractValidationReadResponse,
         context: &mfm_program::CertifiedContext<EvmContractContext>,
     ) -> StateResult<ContextBoundValidationReport> {
+        let configured_input_digest = digest_for_config(&input.configured)?;
         if response.context_ref.as_context_ref() != context.context_ref()
+            || response.configured_input_digest != configured_input_digest
             || response.resource_stage != ContractLifecycleStage::Configured
         {
             return Err(StateError::Message(
                 "validation read response context does not match certified invocation".to_owned(),
             ));
         }
+        require_validation_read_results_canonical_passed(&response.configuration_read_results)?;
+        require_validation_event_results_canonical_passed(&response.configuration_event_results)?;
+        require_validation_read_results_canonical_passed(&response.read_results)?;
+        require_validation_event_results_canonical_passed(&response.event_results)?;
+
         let valid = response.observed_chain_id == context.value().network.expected_chain_id()
             && response
                 .configuration_read_results
                 .iter()
-                .all(|result| result.passed)
+                .all(validation_read_result_passes)
             && response
                 .configuration_event_results
                 .iter()
-                .all(|result| result.passed)
-            && response.read_results.iter().all(|result| result.passed)
-            && response.event_results.iter().all(|result| result.passed);
+                .all(validation_event_result_passes)
+            && response
+                .read_results
+                .iter()
+                .all(validation_read_result_passes)
+            && response
+                .event_results
+                .iter()
+                .all(validation_event_result_passes);
 
         Ok(ContextBoundValidationReport {
             report_version: 1,
@@ -1433,6 +1505,15 @@ fn source_run_import_evidence_refs(
     ]
 }
 
+fn external_source_matches_context(
+    source: &ExternalEvmSourceEvidence,
+    context: &mfm_program::CertifiedContext<EvmContractContext>,
+) -> bool {
+    source.network_id.as_str() == context.value().network.network_id.as_str()
+        && source.expected_chain_id == context.value().network.expected_chain_id()
+        && source.observed_chain_id == context.value().network.expected_chain_id()
+}
+
 fn ensure_external_adoption_evidence(
     evidence: &ExternalAdoptionEvidence,
     context: &mfm_program::CertifiedContext<EvmContractContext>,
@@ -1454,9 +1535,7 @@ fn ensure_external_adoption_evidence(
             return Err(import_admission_error("external adoption"));
         };
         if code.address != adoption.address
-            || code.source.network_id != context.value().network.network_id.to_string()
-            || code.source.expected_chain_id != context.value().network.expected_chain_id()
-            || code.source.observed_chain_id != context.value().network.expected_chain_id()
+            || !external_source_matches_context(&code.source, context)
             || (policy.require_code && code.observed_code_byte_len == 0)
         {
             return Err(import_admission_error("external adoption"));
@@ -1469,16 +1548,44 @@ fn ensure_external_adoption_evidence(
     }
     if evidence.read_assertion_evidence.len() != policy.initial_read_assertions.len()
         || evidence.event_assertion_evidence.len() != policy.initial_event_assertions.len()
-        || evidence
-            .read_assertion_evidence
-            .iter()
-            .any(|record| !record.result.passed)
-        || evidence
-            .event_assertion_evidence
-            .iter()
-            .any(|record| !record.result.passed)
     {
         return Err(import_admission_error("external adoption"));
+    }
+    for (record, assertion) in evidence
+        .read_assertion_evidence
+        .iter()
+        .zip(policy.initial_read_assertions.iter())
+    {
+        if !external_source_matches_context(&record.source, context)
+            || record.result.function.as_str() != assertion.function.as_str()
+            || record.result.args != assertion.args
+            || record.result.expected != assertion.expected
+        {
+            return Err(import_admission_error("external adoption"));
+        }
+        require_validation_read_result_canonical_passed(&record.result)?;
+        if !validation_read_result_passes(&record.result) {
+            return Err(import_admission_error("external adoption"));
+        }
+    }
+    for (record, assertion) in evidence
+        .event_assertion_evidence
+        .iter()
+        .zip(policy.initial_event_assertions.iter())
+    {
+        if assertion.from_block.is_some() || assertion.to_block.is_some() {
+            return Err(import_admission_error("external adoption"));
+        }
+        if !external_source_matches_context(&record.source, context)
+            || record.result.event.as_str() != assertion.event.as_str()
+            || record.result.min_count != assertion.min_count
+        {
+            return Err(import_admission_error("external adoption"));
+        }
+        require_validation_event_result_canonical_passed(&record.result)?;
+        if !validation_event_result_passes(&record.result) {
+            return Err(import_admission_error("external adoption"));
+        }
     }
     Ok(())
 }

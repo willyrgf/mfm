@@ -757,6 +757,17 @@ fn deploy_action_for_style(style: &str, chain_id: u64) -> ValidatedConfig<Deploy
     .expect("valid deploy action")
 }
 
+fn configure_action(calls: serde_json::Value) -> ConfigureAction {
+    serde_json::from_value(json!({
+        "signer": {
+            "signer_ref": "deployer",
+            "expected_signer_address": "0x0000000000000000000000000000000000000000",
+        },
+        "calls": calls,
+    }))
+    .expect("configure action")
+}
+
 fn contract_artifact_config() -> ContractArtifactConfig {
     serde_json::from_value(artifact_json()).expect("artifact config")
 }
@@ -1467,6 +1478,43 @@ fn event_block_selector_rejects_unsupported_tags() {
             false
         ),
         Err(EvmContractAdapterError::UnsupportedBlockTag)
+    ));
+}
+
+#[test]
+fn configure_action_transaction_inputs_accepts_empty_calls_without_artifact() {
+    let action = configure_action(json!([]));
+
+    let inputs = configure_action_transaction_inputs(
+        &action,
+        None,
+        "0x000000000000000000000000000000000000beef",
+    )
+    .expect("empty configure calls should not require artifact");
+
+    assert!(inputs.is_empty());
+}
+
+#[test]
+fn configure_action_transaction_inputs_rejects_calls_without_artifact() {
+    let action = configure_action(json!([
+        {
+            "function": "configure",
+        }
+    ]));
+
+    let error = match configure_action_transaction_inputs(
+        &action,
+        None,
+        "0x000000000000000000000000000000000000beef",
+    ) {
+        Ok(_) => panic!("non-empty configure calls require artifact"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        EvmContractAdapterError::MissingContractArtifact
     ));
 }
 

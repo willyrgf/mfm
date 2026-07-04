@@ -1,5 +1,8 @@
 use super::*;
 use mfm_capabilities::CapabilitySet;
+use mfm_evm_contract_model::{
+    BlockSelector, EventName, ExpectedValue, ExternalAdoptionEvidencePolicy, FunctionName,
+};
 use mfm_ids::{
     ArtifactId, CellId, ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, EventId, NodeId,
     RunId, SpecHash,
@@ -28,6 +31,13 @@ fn lifecycle_artifact_ref(byte: u8) -> LifecycleArtifactEvidenceRef {
         None,
         None,
     )
+}
+
+fn contract_profile_digest_ref(byte: u8) -> ContractProfileDigestRef {
+    ContractProfileDigestRef::from(ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        digest_with(byte),
+    ))
 }
 
 fn cell_id_str(byte: u8) -> String {
@@ -248,6 +258,140 @@ fn external_adoption_evidence(
         }),
         read_assertion_evidence: Vec::new(),
         event_assertion_evidence: Vec::new(),
+    }
+}
+
+fn expected_value(value: serde_json::Value) -> ExpectedValue {
+    ExpectedValue::from_json_value(&value).expect("expected value")
+}
+
+fn read_assertion(function: &str, expected: ExpectedValue) -> ReadAssertionConfig {
+    ReadAssertionConfig {
+        function: FunctionName::new(function).expect("function"),
+        args: Vec::new(),
+        expected,
+    }
+}
+
+fn event_assertion(
+    event: &str,
+    min_count: u64,
+    from_block: Option<BlockSelector>,
+) -> EventAssertionConfig {
+    EventAssertionConfig {
+        event: EventName::new(event).expect("event"),
+        min_count,
+        from_block,
+        to_block: None,
+    }
+}
+
+fn external_adoption_policy(
+    reads: Vec<ReadAssertionConfig>,
+    events: Vec<EventAssertionConfig>,
+) -> ExternalAdoptionEvidencePolicy {
+    ExternalAdoptionEvidencePolicy {
+        initial_read_assertions: reads,
+        initial_event_assertions: events,
+        ..Default::default()
+    }
+}
+
+fn import_configured_with_policy(policy: &ExternalAdoptionEvidencePolicy) -> ImportConfiguredSpec {
+    serde_json::from_value(serde_json::json!({
+        "kind": "adopt_external_address",
+        "adoption": {
+            "address": "0x000000000000000000000000000000000000beef",
+            "provenance_label": "audited-external",
+            "evidence_policy": policy,
+        },
+    }))
+    .expect("import configured")
+}
+
+fn external_source_evidence(
+    context: &mfm_program::CertifiedContext<EvmContractContext>,
+) -> ExternalEvmSourceEvidence {
+    ExternalEvmSourceEvidence {
+        network_id: context.value().network.network_id.to_string(),
+        expected_chain_id: context.value().network.expected_chain_id(),
+        observed_chain_id: context.value().network.expected_chain_id(),
+        source_ref: "test-source".to_owned(),
+        policy_id: "test-policy".to_owned(),
+    }
+}
+
+fn external_read_assertion_evidence(
+    context: &mfm_program::CertifiedContext<EvmContractContext>,
+    function: &str,
+    expected: ExpectedValue,
+    actual: ExpectedValue,
+    passed: bool,
+) -> ExternalReadAssertionEvidence {
+    ExternalReadAssertionEvidence {
+        source: external_source_evidence(context),
+        result: ValidationReadResult {
+            function: function.to_owned(),
+            args: Vec::new(),
+            expected,
+            actual,
+            passed,
+        },
+    }
+}
+
+fn external_event_assertion_evidence(
+    context: &mfm_program::CertifiedContext<EvmContractContext>,
+    event: &str,
+    min_count: u64,
+    observed_count: u64,
+    passed: bool,
+) -> ExternalEventAssertionEvidence {
+    ExternalEventAssertionEvidence {
+        source: external_source_evidence(context),
+        result: ValidationEventResult {
+            event: event.to_owned(),
+            min_count,
+            observed_count,
+            passed,
+        },
+    }
+}
+
+fn snapshot_from_external_evidence(evidence: &ExternalAdoptionEvidence) -> ConfigurationSnapshot {
+    ConfigurationSnapshot {
+        read_results: evidence
+            .read_assertion_evidence
+            .iter()
+            .map(|record| record.result.clone())
+            .collect(),
+        event_results: evidence
+            .event_assertion_evidence
+            .iter()
+            .map(|record| record.result.clone())
+            .collect(),
+    }
+}
+
+fn validation_read_response(
+    context: &mfm_program::CertifiedContext<EvmContractContext>,
+    input: &ContextValidateContractInput,
+) -> ContractValidationReadResponse {
+    ContractValidationReadResponse {
+        response_version: 1,
+        context_ref: ContextRefValue::from(context.context_ref().clone()),
+        configured_input_digest: digest_for_config(&input.configured).expect("configured digest"),
+        evm_network_context_ref: test_evm_network_context_ref(context),
+        resource_stage: ContractLifecycleStage::Configured,
+        observed_chain_id: context.value().network.expected_chain_id(),
+        client_version: "redacted-client".to_owned(),
+        configuration_read_results: Vec::new(),
+        configuration_event_results: Vec::new(),
+        read_results: Vec::new(),
+        event_results: Vec::new(),
+        validation_read_evidence: Vec::new(),
+        validation_event_evidence: Vec::new(),
+        evidence_refs: input.configured.configure_or_import_evidence.clone(),
     }
 }
 
@@ -603,34 +747,75 @@ fn context_validate_request_and_report_use_certified_context() {
     let request = state.read_request(&input, &context).expect("request");
 
     assert_eq!(request.context_ref.as_context_ref(), context.context_ref());
+    assert_eq!(
+        request.configured_input_digest,
+        digest_for_config(&input.configured).expect("configured digest")
+    );
     assert_eq!(request.network_id, "ethereum-mainnet");
     assert_eq!(request.expected_chain_id, 1);
 
+    let mut response = validation_read_response(&context, &input);
+    response.observed_chain_id = 2;
     let report = state
-        .report_from_response(
-            &input,
-            ContractValidationReadResponse {
-                response_version: 1,
-                context_ref: ContextRefValue::from(context.context_ref().clone()),
-                evm_network_context_ref: test_evm_network_context_ref(&context),
-                resource_stage: ContractLifecycleStage::Configured,
-                observed_chain_id: 2,
-                client_version: "redacted-client".to_owned(),
-                configuration_read_results: Vec::new(),
-                configuration_event_results: Vec::new(),
-                read_results: Vec::new(),
-                event_results: Vec::new(),
-                validation_read_evidence: Vec::new(),
-                validation_event_evidence: Vec::new(),
-                evidence_refs: input.configured.configure_or_import_evidence.clone(),
-            },
-            &context,
-        )
+        .report_from_response(&input, response, &context)
         .expect("report");
 
     assert_eq!(report.context_ref(), context.context_ref());
     assert!(!report.valid);
     assert_eq!(report.evidence_refs, vec![evidence_ref]);
+}
+
+#[test]
+fn context_validate_report_rejects_wrong_configured_input_digest() {
+    let state =
+        ContextBoundValidateContractState::new(validated_config(validate_action())).expect("state");
+    let context = certified_contract_context();
+    let input = ContextValidateContractInput {
+        configured: configured_instance(&context),
+    };
+    let mut response = validation_read_response(&context, &input);
+    response.configured_input_digest = contract_profile_digest_ref(0x99);
+
+    let error = state
+        .report_from_response(&input, response, &context)
+        .expect_err("configured input digest mismatch rejected");
+
+    assert!(error.to_string().contains("validation read response"));
+}
+
+#[test]
+fn context_validate_report_rejects_forged_passed_flags() {
+    let state =
+        ContextBoundValidateContractState::new(validated_config(validate_action())).expect("state");
+    let context = certified_contract_context();
+    let input = ContextValidateContractInput {
+        configured: configured_instance(&context),
+    };
+    let expected_true = expected_value(serde_json::json!(true));
+    let actual_false = expected_value(serde_json::json!(false));
+
+    let mut forged_read = validation_read_response(&context, &input);
+    forged_read.read_results = vec![ValidationReadResult {
+        function: "isConfigured".to_owned(),
+        args: Vec::new(),
+        expected: expected_true,
+        actual: actual_false,
+        passed: true,
+    }];
+    assert!(state
+        .report_from_response(&input, forged_read, &context)
+        .is_err());
+
+    let mut forged_event = validation_read_response(&context, &input);
+    forged_event.event_results = vec![ValidationEventResult {
+        event: "Configured".to_owned(),
+        min_count: 2,
+        observed_count: 1,
+        passed: true,
+    }];
+    assert!(state
+        .report_from_response(&input, forged_event, &context)
+        .is_err());
 }
 
 #[test]
@@ -750,6 +935,155 @@ fn import_configured_external_claim_requires_certified_policy() {
         ConfigurationClaim::ExternalClaimedConfigured { .. }
     ));
     assert_eq!(admitted.context_ref(), context.context_ref());
+}
+
+#[test]
+fn external_adoption_rejects_forged_assertion_passed_flags() {
+    let context = certified_contract_context();
+    let expected_true = expected_value(serde_json::json!(true));
+    let actual_false = expected_value(serde_json::json!(false));
+    let read_policy = external_adoption_policy(
+        vec![read_assertion("isConfigured", expected_true.clone())],
+        Vec::new(),
+    );
+    let read_import = import_configured_with_policy(&read_policy);
+    let mut read_evidence =
+        external_adoption_evidence(&context, &read_policy, ContractLifecycleStage::Configured);
+    read_evidence.read_assertion_evidence = vec![external_read_assertion_evidence(
+        &context,
+        "isConfigured",
+        expected_true,
+        actual_false,
+        true,
+    )];
+    let read_snapshot = snapshot_from_external_evidence(&read_evidence);
+
+    assert!(
+        ImportConfiguredContractState::admit_verified_external_adoption(
+            &read_import,
+            &context,
+            read_evidence,
+            Some(read_snapshot),
+            None,
+        )
+        .is_err()
+    );
+
+    let event_policy =
+        external_adoption_policy(Vec::new(), vec![event_assertion("Configured", 2, None)]);
+    let event_import = import_configured_with_policy(&event_policy);
+    let mut event_evidence =
+        external_adoption_evidence(&context, &event_policy, ContractLifecycleStage::Configured);
+    event_evidence.event_assertion_evidence = vec![external_event_assertion_evidence(
+        &context,
+        "Configured",
+        2,
+        1,
+        true,
+    )];
+    let event_snapshot = snapshot_from_external_evidence(&event_evidence);
+
+    assert!(
+        ImportConfiguredContractState::admit_verified_external_adoption(
+            &event_import,
+            &context,
+            event_evidence,
+            Some(event_snapshot),
+            None,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn external_adoption_rejects_mismatched_read_assertion_content() {
+    let context = certified_contract_context();
+    let expected_true = expected_value(serde_json::json!(true));
+    let policy = external_adoption_policy(
+        vec![read_assertion("isConfigured", expected_true.clone())],
+        Vec::new(),
+    );
+    let import = import_configured_with_policy(&policy);
+    let mut evidence =
+        external_adoption_evidence(&context, &policy, ContractLifecycleStage::Configured);
+    evidence.read_assertion_evidence = vec![external_read_assertion_evidence(
+        &context,
+        "isAdmin",
+        expected_true.clone(),
+        expected_true,
+        true,
+    )];
+    let snapshot = snapshot_from_external_evidence(&evidence);
+
+    let error = ImportConfiguredContractState::admit_verified_external_adoption(
+        &import,
+        &context,
+        evidence,
+        Some(snapshot),
+        None,
+    )
+    .expect_err("mismatched read assertion rejected");
+
+    assert!(error.to_string().contains("external adoption"));
+}
+
+#[test]
+fn external_adoption_rejects_mismatched_event_assertion_content() {
+    let context = certified_contract_context();
+    let policy = external_adoption_policy(Vec::new(), vec![event_assertion("Configured", 1, None)]);
+    let import = import_configured_with_policy(&policy);
+    let mut evidence =
+        external_adoption_evidence(&context, &policy, ContractLifecycleStage::Configured);
+    evidence.event_assertion_evidence = vec![external_event_assertion_evidence(
+        &context, "Upgraded", 1, 1, true,
+    )];
+    let snapshot = snapshot_from_external_evidence(&evidence);
+
+    let error = ImportConfiguredContractState::admit_verified_external_adoption(
+        &import,
+        &context,
+        evidence,
+        Some(snapshot),
+        None,
+    )
+    .expect_err("mismatched event assertion rejected");
+
+    assert!(error.to_string().contains("external adoption"));
+}
+
+#[test]
+fn external_adoption_event_assertion_with_bounds_fails_closed() {
+    let context = certified_contract_context();
+    let policy = external_adoption_policy(
+        Vec::new(),
+        vec![event_assertion(
+            "Configured",
+            1,
+            Some(BlockSelector::Number { number: 1 }),
+        )],
+    );
+    let import = import_configured_with_policy(&policy);
+    let mut evidence =
+        external_adoption_evidence(&context, &policy, ContractLifecycleStage::Configured);
+    evidence.event_assertion_evidence = vec![external_event_assertion_evidence(
+        &context,
+        "Configured",
+        1,
+        1,
+        true,
+    )];
+    let snapshot = snapshot_from_external_evidence(&evidence);
+
+    let error = ImportConfiguredContractState::admit_verified_external_adoption(
+        &import,
+        &context,
+        evidence,
+        Some(snapshot),
+        None,
+    )
+    .expect_err("bounded event assertion rejected");
+
+    assert!(error.to_string().contains("external adoption"));
 }
 
 #[test]
