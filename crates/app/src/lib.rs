@@ -2720,6 +2720,10 @@ fn certified_evm_chain_guards_for_failed_node(
         &artifact.bytes,
     )
     .map_err(|_| replay_diagnostic_error())?;
+    guards.extend(certified_contract_evm_chain_guards_for_node(
+        runtime_spec,
+        node,
+    )?);
     guards.extend(
         mfm_adapters_evm_contracts::evm_chain_guards_from_launch_config(
             &node.config_ref.schema_id,
@@ -2728,6 +2732,28 @@ fn certified_evm_chain_guards_for_failed_node(
         .map_err(|_| replay_diagnostic_error())?,
     );
     Ok(guards)
+}
+
+fn certified_contract_evm_chain_guards_for_node(
+    runtime_spec: &CertifiedRuntimeSpec,
+    node: &spec::NodeSpec,
+) -> Result<Vec<EvmChainGuard>, AppError> {
+    if matches!(node.context, spec::NodeContextSpec::NoContext) {
+        return Ok(Vec::new());
+    }
+    let context = runtime_spec
+        .invocation_context_for_node(node)
+        .map_err(|_| replay_diagnostic_error())?
+        .materialize::<mfm_evm_contract_model::EvmContractContext>()
+        .map_err(|_| replay_diagnostic_error())?;
+    let network = &context.value().network;
+    Ok(vec![
+        EvmChainGuard::new(
+            EvmNetworkId::new(network.network_id.as_str()).map_err(|_| replay_diagnostic_error())?,
+            network.expected_chain_id(),
+        )
+        .map_err(|_| replay_diagnostic_error())?,
+    ])
 }
 
 fn certified_evm_guard_node_for_failed_node<'a>(
