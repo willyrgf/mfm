@@ -49,6 +49,7 @@ fn contract_profile() -> ContractProfile {
     ContractProfile {
         profile_id: ContractProfileId::new("example-profile").expect("profile"),
         artifact_digest: Some(profile_digest(0x20)),
+        artifact_ref: None,
         interface_digest: Some(profile_digest(0x21)),
         creation_bytecode_digest: Some(profile_digest(0x22)),
         deployed_code_hash: Some(EvmCodeHash::new(format!("0x{}", "11".repeat(32))).expect("hash")),

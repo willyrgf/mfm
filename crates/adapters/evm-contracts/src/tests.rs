@@ -10,6 +10,8 @@ use mfm_evm_signing::{
     primitive_signature_from_bytes, recover_signing_address,
     EvmTransactionStyle as SigningTransactionStyle,
 };
+use mfm_ids::{ArtifactId, ContextRef, DigestAlgorithm, DigestBytes, NodeId};
+use mfm_program::StateContext;
 use mfm_replay::v1::SideEffectReplayVerifier;
 use mfm_signing::{
     PublicSigningIdentity, SignatureBytes, SigningError, SigningRequest, SigningResult,
@@ -66,6 +68,102 @@ fn artifact_json() -> serde_json::Value {
             "json_text": json!({"object": "0x6000"}).to_string()
         }
     })
+}
+
+fn digest_with(byte: u8) -> DigestBytes {
+    DigestBytes::from_array([byte; 32])
+}
+
+fn content_digest(byte: u8) -> ContentDigest {
+    ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte))
+}
+
+fn node_id(byte: u8) -> NodeId {
+    NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte))
+}
+
+fn artifact_evidence_ref(byte: u8, byte_len: u64) -> LifecycleArtifactEvidenceRef {
+    let digest = content_digest(byte);
+    LifecycleArtifactEvidenceRef::new(
+        ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+        digest,
+        byte_len,
+        Some(<ContractArtifactConfig as MfmConfig>::schema_id().expect("artifact schema")),
+        None,
+    )
+}
+
+fn context_json(network_id: &str, expected_chain_id: u64) -> serde_json::Value {
+    json!({
+        "lifecycle_key": "adapter-test-lifecycle",
+        "network": {
+            "network_id": network_id,
+            "expected_chain_id": expected_chain_id,
+            "chain_fingerprint": null,
+            "finality_or_observation_policy": null,
+        },
+        "contract_profile": {
+            "profile_id": "adapter-test-profile",
+            "artifact_digest": content_digest(0x42).to_string(),
+            "artifact_ref": artifact_evidence_ref(0x42, 123),
+            "interface_digest": null,
+            "creation_bytecode_digest": null,
+            "deployed_code_hash": null,
+            "selector_event_policy_digest": null,
+        },
+    })
+}
+
+fn certified_contract_context(
+    network_id: &str,
+    expected_chain_id: u64,
+) -> mfm_program::CertifiedContext<EvmContractContext> {
+    let value: EvmContractContext =
+        serde_json::from_value(context_json(network_id, expected_chain_id)).expect("context");
+    let mfm_program::StateContextDescriptorSpec::Required(requirement) =
+        <EvmContractContext as StateContext>::descriptor().expect("descriptor")
+    else {
+        panic!("EVM contract context must require context");
+    };
+    let json = serde_json::to_string(&value).expect("context json");
+    let canonical = PlainCanonicalJsonBytes::from_json_str(&json).expect("canonical context json");
+    let context_ref = mfm_program::CertifiedContextSpec::derive_context_ref(
+        &requirement.context_descriptor_id,
+        &requirement.schema_id,
+        &requirement.semantic_type_id,
+        &requirement.canonicalizer_identity,
+        &canonical,
+    )
+    .expect("context ref");
+    let spec = mfm_program::CertifiedContextSpec {
+        context_ref,
+        context_descriptor_id: requirement.context_descriptor_id,
+        schema_id: requirement.schema_id,
+        semantic_type_id: requirement.semantic_type_id,
+        canonicalizer_identity: requirement.canonicalizer_identity,
+        canonical_context_digest: canonical.content_digest(),
+        canonical_context_byte_len: canonical.as_bytes().len() as u64,
+        canonical_context: canonical,
+    };
+    mfm_program::CertifiedContext::from_certified_spec(&spec).expect("certified context")
+}
+
+fn deploy_action(chain_id: u64) -> ValidatedConfig<DeployAction> {
+    ValidatedConfig::new(
+        serde_json::from_value(json!({
+            "signer": {
+                "signer_ref": "deployer",
+                "expected_signer_address": expected_test_signer_address_for_chain("eip1559", chain_id),
+            },
+            "transaction": {"style": "eip1559", "max_fee_per_gas": "11", "max_priority_fee_per_gas": "3"},
+        }))
+        .expect("deploy action"),
+    )
+    .expect("valid deploy action")
+}
+
+fn contract_artifact_config() -> ContractArtifactConfig {
+    serde_json::from_value(artifact_json()).expect("artifact config")
 }
 
 fn deploy_config(style: &str) -> DeployPhaseConfig {
@@ -651,6 +749,10 @@ fn test_signing_result(request: &SigningRequest) -> mfm_signing::Result<SigningR
 }
 
 fn expected_test_signer_address(style: &str) -> String {
+    expected_test_signer_address_for_chain(style, 1)
+}
+
+fn expected_test_signer_address_for_chain(style: &str, chain_id: u64) -> String {
     let signer_ref = SignerRef::new("deployer").expect("signer ref");
     let expected_from = Address::from([0_u8; 20]);
     let data = vec![0x60, 0x00];
@@ -660,7 +762,7 @@ fn expected_test_signer_address(style: &str) -> String {
             LegacyTxToSign {
                 to: None,
                 value_wei: 0,
-                chain_id: 1,
+                chain_id,
                 nonce: 7,
                 gas_price_wei: 7,
                 gas_limit: 21_000,
@@ -673,7 +775,7 @@ fn expected_test_signer_address(style: &str) -> String {
             Eip1559TxToSign {
                 to: None,
                 value_wei: 0,
-                chain_id: 1,
+                chain_id,
                 nonce: 7,
                 max_fee_per_gas: 11,
                 max_priority_fee_per_gas: 3,
@@ -800,6 +902,76 @@ async fn deploy_preparation_supports_legacy_contract_creation() {
 }
 
 #[tokio::test]
+async fn context_deploy_preparation_routes_from_certified_context() {
+    let providers = TestEvmProviders::preparation();
+    let adapter = adapter(&providers);
+    let context = certified_contract_context("reth-dev", 31337);
+    let action = deploy_action(31337);
+    let state = ContextBoundDeployContractState::new(action.clone()).expect("state");
+    let intent = state.prepare_intent(&(), &context).expect("intent");
+    let artifact = contract_artifact_config();
+
+    let prepared = adapter
+        .prepare_context_deploy_invocation(&action, &context, &artifact, &intent)
+        .await
+        .expect("prepared");
+
+    assert_eq!(prepared.evidence().network_id, "reth-dev");
+    assert_eq!(prepared.evidence().expected_chain_id, 31337);
+    assert_eq!(
+        prepared
+            .evidence()
+            .context_ref
+            .as_ref()
+            .expect("context ref")
+            .as_context_ref(),
+        context.context_ref()
+    );
+    assert_eq!(
+        prepared.evidence().resource_stage,
+        Some(ContractLifecycleStage::Deployed)
+    );
+    assert_eq!(
+        prepared.evidence().transactions[0].chain_id,
+        31337,
+        "transaction signing chain id must come from certified context"
+    );
+    assert!(prepared
+        .evidence()
+        .evm_network_context_ref
+        .as_ref()
+        .expect("network context ref")
+        .starts_with("content:sha256-jcs-v1:"));
+}
+
+#[tokio::test]
+async fn context_prepared_reconstruction_rejects_mismatched_context_ref() {
+    let providers = TestEvmProviders::preparation();
+    let adapter = adapter(&providers);
+    let context = certified_contract_context("reth-dev", 31337);
+    let action = deploy_action(31337);
+    let state = ContextBoundDeployContractState::new(action.clone()).expect("state");
+    let intent = state.prepare_intent(&(), &context).expect("intent");
+    let artifact = contract_artifact_config();
+    let prepared = adapter
+        .prepare_context_deploy_invocation(&action, &context, &artifact, &intent)
+        .await
+        .expect("prepared");
+    let mut evidence = prepared.evidence().clone();
+    evidence.context_ref = Some(mfm_values::ContextRefValue::from(ContextRef::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        digest_with(0x99),
+    )));
+
+    assert!(matches!(
+        adapter.reconstruct_context_deploy_invocation(
+            &action, &context, &artifact, &intent, &evidence
+        ),
+        Err(EvmContractAdapterError::InvalidPreparedInvocation)
+    ));
+}
+
+#[tokio::test]
 async fn prepared_invocation_evidence_excludes_live_and_secret_surfaces() {
     let (_fixture, prepared) = prepared_deploy_fixture("eip1559").await;
 
@@ -809,6 +981,8 @@ async fn prepared_invocation_evidence_excludes_live_and_secret_surfaces() {
     assert_eq!(
         sorted_json_keys(&rendered_value),
         vec![
+            "context_ref",
+            "evm_network_context_ref",
             "expected_chain_id",
             "expected_signer_address",
             "max_receipt_polls",
@@ -816,6 +990,7 @@ async fn prepared_invocation_evidence_excludes_live_and_secret_surfaces() {
             "phase",
             "poll_interval_ms",
             "prepared_version",
+            "resource_stage",
             "signer_ref",
             "transactions",
         ]
@@ -1018,10 +1193,31 @@ fn prepared_invocation_deserialization_rejects_unknown_public_fields() {
     assert!(serde_json::from_value::<PreparedContractInvocation>(nested).is_err());
 }
 
+#[test]
+fn context_nonce_resource_key_uses_network_context_ref_and_account() {
+    let key = account_nonce_resource_key(
+        &ContractNonceResourceScope::EvmNetworkContextRef(
+            "content:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+        ),
+        "0x000000000000000000000000000000000000dead",
+    )
+    .expect("resource key");
+
+    assert_eq!(
+        key.as_str(),
+        r#"{"account":"0x000000000000000000000000000000000000dead","evm_network_context_ref":"content:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#
+    );
+    assert!(!key.as_str().contains("\"chain_id\""));
+}
+
 fn prepared_invocation_fixture() -> PreparedContractInvocation {
     PreparedContractInvocation {
         prepared_version: 1,
         phase: ContractMutationPhase::Deploy,
+        context_ref: None,
+        evm_network_context_ref: None,
+        resource_stage: None,
         network_id: "ethereum-mainnet".to_owned(),
         expected_chain_id: 1,
         signer_ref: "deployer".to_owned(),
@@ -1127,6 +1323,31 @@ fn replay_verifier_uses_contract_namespace() {
         .verifier_id()
         .as_str()
         .contains(&["d", "cv"].concat()));
+}
+
+#[test]
+fn replay_verifier_accepts_context_configure_schemas() {
+    let receipt_schema = ContextContractConfigureReceipt::schema_id().expect("receipt schema");
+    verify_contract_receipt_schema(&receipt_schema).expect("context configure receipt schema");
+
+    let confirmation = ContextContractConfigureConfirmation {
+        confirmation_version: 1,
+        confirmations: 3,
+        configure_node: LifecycleNodeIdRef::from(node_id(0x44)),
+        receipts: Vec::new(),
+        call_evidence_refs: Vec::new(),
+        confirmation_evidence_refs: Vec::new(),
+        configured_block_number: None,
+    };
+    let confirmation_schema =
+        ContextContractConfigureConfirmation::schema_id().expect("confirmation schema");
+    let confirmation_bytes = serde_json::to_vec(&confirmation).expect("confirmation json");
+
+    verify_contract_confirmation_schema(&confirmation_schema, &confirmation_bytes, 3)
+        .expect("sufficient context configure confirmation depth");
+    let error = verify_contract_confirmation_schema(&confirmation_schema, &confirmation_bytes, 4)
+        .expect_err("insufficient context configure confirmation depth");
+    assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
 }
 
 #[tokio::test]
