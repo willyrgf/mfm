@@ -13,6 +13,7 @@ fn capability_names_are_authority_names_not_workflow_names() {
             "mfm.evm.block.read",
             "mfm.evm.balance.read",
             "mfm.evm.call.read",
+            "mfm.evm.code.read",
             "mfm.evm.logs.read",
             "mfm.evm.nonce.read",
             "mfm.evm.fee.read",
@@ -75,12 +76,13 @@ fn signed_payload_debug_redacts_bytes() {
     assert!(!rendered.contains("1, 2, 3"));
 }
 
-fn capability_names() -> [&'static str; 11] {
+fn capability_names() -> [&'static str; 12] {
     [
         EvmChainIdentityCapability::name(),
         EvmBlockReadCapability::name(),
         EvmBalanceReadCapability::name(),
         EvmCallReadCapability::name(),
+        EvmCodeReadCapability::name(),
         EvmLogsReadCapability::name(),
         EvmNonceReadCapability::name(),
         EvmFeeReadCapability::name(),

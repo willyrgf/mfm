@@ -32,20 +32,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use alloy_primitives::B256;
+use alloy_primitives::{keccak256, B256};
 use mfm_evm_capabilities::{
     EvmBalanceReadProvider, EvmBalanceReadRequest, EvmBalanceReadResponse, EvmBlockReadProvider,
     EvmBlockReadRequest, EvmBlockReadResponse, EvmBlockSelector, EvmCallReadProvider,
     EvmCallReadRequest, EvmCallReadResponse, EvmCapabilityError, EvmCapabilityFuture,
     EvmChainGuard, EvmChainIdentityProvider, EvmChainIdentityRequest, EvmChainIdentityResponse,
-    EvmFeeReadProvider, EvmFeeReadRequest, EvmFeeReadResponse, EvmGasEstimateProvider,
-    EvmGasEstimateRequest, EvmGasEstimateResponse, EvmLogEntry, EvmLogsReadProvider,
-    EvmLogsReadRequest, EvmLogsReadResponse, EvmNetworkId, EvmNonceOccupancy,
-    EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest, EvmNonceOccupancyReadResponse,
-    EvmNonceReadProvider, EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider,
-    EvmReceiptReadRequest, EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef,
-    EvmTransactionSubmitProvider, EvmTransactionSubmitRequest, EvmTransactionSubmitResponse,
-    RedactedEvmSourceEvidence,
+    EvmCodeReadProvider, EvmCodeReadRequest, EvmCodeReadResponse, EvmFeeReadProvider,
+    EvmFeeReadRequest, EvmFeeReadResponse, EvmGasEstimateProvider, EvmGasEstimateRequest,
+    EvmGasEstimateResponse, EvmLogEntry, EvmLogsReadProvider, EvmLogsReadRequest,
+    EvmLogsReadResponse, EvmNetworkId, EvmNonceOccupancy, EvmNonceOccupancyReadProvider,
+    EvmNonceOccupancyReadRequest, EvmNonceOccupancyReadResponse, EvmNonceReadProvider,
+    EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider, EvmReceiptReadRequest,
+    EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef, EvmTransactionSubmitProvider,
+    EvmTransactionSubmitRequest, EvmTransactionSubmitResponse, RedactedEvmSourceEvidence,
 };
 use mfm_evm_core::encoding::parse_u256_hex;
 use mfm_evm_core::hex::{bytes_to_hex_prefixed, hex_to_bytes};
@@ -390,6 +390,31 @@ impl EvmJsonRpcClient {
         Ok(EvmCallReadResponse {
             evidence: selected.evidence,
             return_data: hex_to_bytes(raw).map_err(|_| EvmTransportError::InvalidResponse)?,
+        })
+    }
+
+    async fn code_read_impl(
+        &self,
+        request: &EvmCodeReadRequest,
+    ) -> TransportResult<EvmCodeReadResponse> {
+        let selected = self.verified_source(&request.guard).await?;
+        let result = self
+            .rpc_call(
+                selected.source,
+                "eth_getCode",
+                json!([
+                    format!("{:?}", request.address),
+                    block_selector_tag(&request.block)
+                ]),
+            )
+            .await?;
+        let raw = result.as_str().ok_or(EvmTransportError::InvalidResponse)?;
+        let code = hex_to_bytes(raw).map_err(|_| EvmTransportError::InvalidResponse)?;
+        let code_hash = keccak256(&code);
+        Ok(EvmCodeReadResponse {
+            evidence: selected.evidence,
+            code,
+            code_hash,
         })
     }
 
@@ -834,6 +859,13 @@ impl_provider!(
     EvmCallReadRequest,
     EvmCallReadResponse,
     call_read_impl
+);
+impl_provider!(
+    EvmCodeReadProvider,
+    read_code,
+    EvmCodeReadRequest,
+    EvmCodeReadResponse,
+    code_read_impl
 );
 impl_provider!(
     EvmLogsReadProvider,

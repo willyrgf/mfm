@@ -85,6 +85,12 @@ evm_capability!(
     "call.read"
 );
 evm_capability!(
+    /// EVM contract bytecode read authority.
+    EvmCodeReadCapability,
+    ReadExternalRole,
+    "code.read"
+);
+evm_capability!(
     /// EVM log read authority.
     EvmLogsReadCapability,
     ReadExternalRole,
@@ -176,6 +182,15 @@ pub trait EvmCallReadProvider: Send + Sync {
         &'a self,
         request: &'a EvmCallReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmCallReadResponse>;
+}
+
+/// Provider interface for EVM contract code reads.
+pub trait EvmCodeReadProvider: Send + Sync {
+    /// Reads deployed bytecode at an address and block.
+    fn read_code<'a>(
+        &'a self,
+        request: &'a EvmCodeReadRequest,
+    ) -> EvmCapabilityFuture<'a, EvmCodeReadResponse>;
 }
 
 /// Provider interface for EVM log reads.
@@ -551,6 +566,28 @@ pub struct EvmCallReadResponse {
     pub evidence: RedactedEvmSourceEvidence,
     /// Returned call data.
     pub return_data: Vec<u8>,
+}
+
+/// Request for deployed EVM bytecode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvmCodeReadRequest {
+    /// Semantic chain guard.
+    pub guard: EvmChainGuard,
+    /// Contract/account address to inspect.
+    pub address: Address,
+    /// Block selector.
+    pub block: EvmBlockSelector,
+}
+
+/// Response for deployed EVM bytecode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvmCodeReadResponse {
+    /// Redacted source evidence.
+    pub evidence: RedactedEvmSourceEvidence,
+    /// Deployed bytecode bytes. Empty bytes mean no code was observed.
+    pub code: Vec<u8>,
+    /// Keccak-256 hash of `code`.
+    pub code_hash: B256,
 }
 
 /// Request for EVM logs.

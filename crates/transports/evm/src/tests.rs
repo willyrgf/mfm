@@ -93,6 +93,17 @@ async fn supports_core_evm_json_rpc_calls() {
         .expect("call");
     assert_eq!(call.return_data, vec![0x12, 0x34]);
 
+    let code = client
+        .read_code(&EvmCodeReadRequest {
+            guard: guard.clone(),
+            address,
+            block: EvmBlockSelector::Latest,
+        })
+        .await
+        .expect("code");
+    assert_eq!(code.code, vec![0xde, 0xad, 0xbe, 0xef]);
+    assert_eq!(code.code_hash, alloy_primitives::keccak256(&code.code));
+
     let logs = client
         .read_logs(&EvmLogsReadRequest {
             guard: guard.clone(),
@@ -168,6 +179,8 @@ async fn supports_core_evm_json_rpc_calls() {
             "eth_chainId",
             "eth_call",
             "eth_chainId",
+            "eth_getCode",
+            "eth_chainId",
             "eth_getLogs",
             "eth_chainId",
             "eth_getTransactionCount",
@@ -203,6 +216,40 @@ async fn pending_receipt_is_typed_capability_error() {
         .expect_err("pending receipt");
 
     assert_eq!(error, EvmCapabilityError::ReceiptPending);
+}
+
+#[tokio::test]
+async fn code_read_preserves_empty_code_observation() {
+    let server = TestRpcServer::spawn_empty_code("0x1").await;
+    let client = client_for(&server.url, "primary", "mainnet", 1);
+    let response = client
+        .read_code(&EvmCodeReadRequest {
+            guard: guard("mainnet", 1),
+            address: address!("0x1111111111111111111111111111111111111111"),
+            block: EvmBlockSelector::Latest,
+        })
+        .await
+        .expect("empty code response");
+
+    assert!(response.code.is_empty());
+    assert_eq!(response.code_hash, alloy_primitives::keccak256([]));
+}
+
+#[tokio::test]
+async fn code_read_rejects_chain_id_mismatch_without_code_authority() {
+    let server = TestRpcServer::spawn("0x2").await;
+    let client = client_for(&server.url, "primary", "mainnet", 1);
+    let error = client
+        .read_code(&EvmCodeReadRequest {
+            guard: guard("mainnet", 1),
+            address: address!("0x1111111111111111111111111111111111111111"),
+            block: EvmBlockSelector::Latest,
+        })
+        .await
+        .expect_err("chain mismatch");
+
+    assert!(matches!(error, EvmCapabilityError::ChainMismatch { .. }));
+    assert_eq!(server.methods(), ["eth_chainId"]);
 }
 
 #[tokio::test]
@@ -471,6 +518,10 @@ impl TestRpcServer {
         Self::spawn_with_mode(TestRpcMode::PendingReceipt { chain_id }).await
     }
 
+    async fn spawn_empty_code(chain_id: &'static str) -> Self {
+        Self::spawn_with_mode(TestRpcMode::EmptyCode { chain_id }).await
+    }
+
     async fn spawn_nonce_occupancy(chain_id: &'static str) -> Self {
         Self::spawn_with_mode(TestRpcMode::NonceOccupancy { chain_id }).await
     }
@@ -580,6 +631,24 @@ impl TestRpcServer {
                                 body
                             )
                         }
+                        TestRpcMode::EmptyCode { chain_id } => {
+                            let result = if method == "eth_getCode" {
+                                json!("0x")
+                            } else {
+                                rpc_result(chain_id, &method)
+                            };
+                            let body = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "result": result,
+                            })
+                            .to_string();
+                            format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                                body.len(),
+                                body
+                            )
+                        }
                         TestRpcMode::NonceOccupancy { chain_id } => {
                             let result = nonce_occupancy_rpc_result(chain_id, &method);
                             let body = serde_json::json!({
@@ -661,6 +730,7 @@ enum TestRpcMode {
     Ok { chain_id: &'static str },
     LegacyFee { chain_id: &'static str },
     PendingReceipt { chain_id: &'static str },
+    EmptyCode { chain_id: &'static str },
     NonceOccupancy { chain_id: &'static str },
     BlockIdentityMismatch { chain_id: &'static str },
     ReceiptHashMismatch { chain_id: &'static str },
@@ -710,6 +780,7 @@ fn rpc_result(chain_id: &str, method: &str) -> Value {
         }),
         "eth_getBalance" => json!("0xde0b6b3a7640000"),
         "eth_call" => json!("0x1234"),
+        "eth_getCode" => json!("0xdeadbeef"),
         "eth_getLogs" => json!([{
             "address": "0x1111111111111111111111111111111111111111",
             "topics": [HASH_HEX],
