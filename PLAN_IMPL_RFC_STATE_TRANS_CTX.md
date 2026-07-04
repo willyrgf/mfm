@@ -17,23 +17,26 @@ exists.
 The fresh architect audit gaps are implemented as part of the final completion state:
 
 - Source-run imports now fail closed unless retained authority artifacts verify the claimed source
-  run/export certificate, export bundle digest, terminal event, producer descriptor, source
-  cell/output id, source stage, source schema/semantic ids, source context ref, source value digest,
-  source context descriptor, and import policy digest. Identifier-only, public JSON, projection-row,
-  and raw-payload imports remain non-authoritative.
+  typed-spec certificate, export bundle with canonical source spec JSON, terminal event, producer
+  descriptor, source cell/output id, source stage, source schema/semantic ids, source context ref,
+  source value digest, source context descriptor, and import policy digest against the compiled
+  certification registry. Identifier-only, public JSON, projection-row, raw-payload, and
+  domain-local self-minted certificate imports remain non-authoritative.
 - External address adoption now records replayable code-read evidence on the produced lifecycle
   resource. The stored evidence includes the certified context ref, EVM network context ref,
   lifecycle stage, observed chain id, policy digest, observed code hash, and observed code byte
   length.
 - EVM submission, receipt, confirmation, and validation-read evidence now carries the certified
   context ref, EVM network context ref, and lifecycle stage identity.
-- Generic replay side-effect inputs now expose retained prepared-invocation artifacts and retained
-  submission/receipt artifact bytes to domain replay verifiers.
-- The EVM replay verifier now reconstructs and checks lifecycle side-effect requests from the
-  certified prepared invocation and rejects mismatched prepared, submission, receipt, and
-  confirmation context or stage evidence.
-- Regression tests cover retained source-run export authority, tampered source terminal events,
-  persisted external-adoption evidence, and mismatched replay submission/receipt context evidence.
+- Generic replay side-effect inputs now expose certified submit-node/output context authority,
+  retained prepared-invocation artifacts, and retained submission/receipt artifact bytes to domain
+  replay verifiers.
+- The EVM replay verifier now checks lifecycle side-effect requests against the certified node
+  context and rejects mismatched prepared, submission, receipt, and confirmation context or stage
+  evidence even when those artifacts agree with each other.
+- Regression tests cover retained source-run registry authority, domain-local certificate rejection,
+  public/projection/raw source-value rejection, tampered source terminal events, persisted
+  external-adoption evidence, and mismatched replay submission/receipt context evidence.
 
 At the public cutover, old public configure and validate shapes are rejected, not translated:
 
@@ -428,7 +431,7 @@ identifier-only imports.
   artifacts, selection evidence, and `Control`/`Platform` visibility boundaries without consulting the
   live fact index or collector providers.
 - Add generic import evidence verification contracts that require retained proof material:
-  source spec hash, source certificate/export certificate, committed stream or export bundle ref,
+  source spec hash, source typed-spec certificate, committed stream or certified export bundle ref,
   source cell/output id, source schema/semantic ids, source producer descriptor id, source stage,
   source context ref, source value digest, source terminal event ref, and import policy digest.
 - Reject import replay when only `source_run_id`, `source_cell_or_output_id`, or rendered JSON is
@@ -1129,10 +1132,11 @@ deletion by the RFC.
 ## implementation notes
 
 - Source-run imports require both certified import policy and retained source evidence refs:
-  source spec certificate or certified export certificate, source run stream or certified export
-  bundle, and source value artifact. Missing proof, mismatched digest, wrong schema/semantic id,
-  wrong stage, wrong context, public JSON, projection rows, raw payloads, and identifiers alone fail
-  closed before a resource is produced.
+  source typed-spec certificate, source run stream or certified export bundle with canonical source
+  spec JSON, and source value artifact. The source spec and certificate
+  must verify against the compiled certification registry. Missing proof, mismatched digest, wrong
+  schema/semantic id, wrong stage, wrong context, public JSON, projection rows, raw payloads,
+  domain-local certificates, and identifiers alone fail closed before a resource is produced.
 - Optional `chain_fingerprint` enforcement remains tied to capability evidence. Contexts without a
   fingerprint still require the chain-id guard.
 - Cross-context source-run adoption is limited to explicit accepted context refs in the certified
