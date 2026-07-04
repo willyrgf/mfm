@@ -2739,7 +2739,7 @@ fn certified_contract_evm_chain_guards_for_node(
     let context = runtime_spec
         .invocation_context_for_node(node)
         .map_err(|_| replay_diagnostic_error())?
-        .materialize::<mfm_evm_contract_model::EvmContractContext>()
+        .certified_context::<mfm_evm_contract_model::EvmContractContext>()
         .map_err(|_| replay_diagnostic_error())?;
     let network = &context.value().network;
     Ok(vec![EvmChainGuard::new(
