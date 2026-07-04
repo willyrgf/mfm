@@ -162,6 +162,14 @@ fn certified_contract_context() -> mfm_program::CertifiedContext<EvmContractCont
     mfm_program::CertifiedContext::from_certified_spec(&spec).expect("certified context")
 }
 
+fn test_evm_network_context_ref(
+    context: &mfm_program::CertifiedContext<EvmContractContext>,
+) -> String {
+    digest_for_config(&context.value().network)
+        .expect("network digest")
+        .to_string()
+}
+
 fn deployed_instance(
     context: &mfm_program::CertifiedContext<EvmContractContext>,
 ) -> DeployedContractInstance {
@@ -174,6 +182,7 @@ fn deployed_instance(
             deploy_tx_hash: "0x01".to_owned(),
         },
         deploy_evidence: Vec::new(),
+        external_adoption_evidence: None,
         deployed_block_number: Some(1),
     }
 }
@@ -200,8 +209,45 @@ fn configured_instance(
             confirmation_evidence_refs: Vec::new(),
         },
         configure_or_import_evidence: Vec::new(),
+        external_adoption_evidence: None,
         configured_block_number: Some(2),
         asserted_configuration_snapshot: None,
+    }
+}
+
+fn external_adoption_evidence(
+    context: &mfm_program::CertifiedContext<EvmContractContext>,
+    policy: &mfm_evm_contract_model::ExternalAdoptionEvidencePolicy,
+    stage: ContractLifecycleStage,
+) -> ExternalAdoptionEvidence {
+    ExternalAdoptionEvidence {
+        evidence_policy_digest: digest_for_config(policy).expect("policy digest"),
+        context_ref: ContextRefValue::from(context.context_ref().clone()),
+        evm_network_context_ref: test_evm_network_context_ref(context),
+        resource_stage: stage,
+        observed_chain_id: context.value().network.expected_chain_id(),
+        code_read_evidence: Some(mfm_evm_contract_model::ExternalCodeReadEvidence {
+            address: ContractAddress::new("0x000000000000000000000000000000000000beef")
+                .expect("address"),
+            block: mfm_evm_contract_model::BlockSelector::Tag {
+                tag: mfm_evm_contract_model::BlockTag::Latest,
+            },
+            source: mfm_evm_contract_model::ExternalEvmSourceEvidence {
+                network_id: context.value().network.network_id.to_string(),
+                expected_chain_id: context.value().network.expected_chain_id(),
+                observed_chain_id: context.value().network.expected_chain_id(),
+                source_ref: "test-source".to_owned(),
+                policy_id: "test-policy".to_owned(),
+            },
+            observed_code_hash: mfm_evm_contract_model::EvmCodeHash::new(format!(
+                "0x{}",
+                "11".repeat(32)
+            ))
+            .expect("code hash"),
+            observed_code_byte_len: 1,
+        }),
+        read_assertion_evidence: Vec::new(),
+        event_assertion_evidence: Vec::new(),
     }
 }
 
@@ -455,9 +501,15 @@ fn context_deploy_intent_and_output_use_certified_context() {
             &intent,
             &ContractDeployReceipt {
                 receipt_version: 1,
+                context_ref: ContextRefValue::from(context.context_ref().clone()),
+                evm_network_context_ref: test_evm_network_context_ref(&context),
+                resource_stage: ContractLifecycleStage::Deployed,
                 contract_address: "0X000000000000000000000000000000000000BEEF".to_owned(),
                 receipt: ContractTransactionReceipt {
                     receipt_version: 1,
+                    context_ref: ContextRefValue::from(context.context_ref().clone()),
+                    evm_network_context_ref: test_evm_network_context_ref(&context),
+                    resource_stage: ContractLifecycleStage::Deployed,
                     transaction_hash: "0x01".to_owned(),
                     block_number: 3,
                     status: true,
@@ -505,9 +557,15 @@ fn context_configure_intent_and_output_use_context_bound_input() {
             &intent,
             &ContextContractConfigureReceipt {
                 receipt_version: 1,
+                context_ref: ContextRefValue::from(context.context_ref().clone()),
+                evm_network_context_ref: test_evm_network_context_ref(&context),
+                resource_stage: ContractLifecycleStage::Configured,
                 configure_node: LifecycleNodeIdRef::from(node_id(0x51)),
                 receipts: vec![ContractTransactionReceipt {
                     receipt_version: 1,
+                    context_ref: ContextRefValue::from(context.context_ref().clone()),
+                    evm_network_context_ref: test_evm_network_context_ref(&context),
+                    resource_stage: ContractLifecycleStage::Configured,
                     transaction_hash: "0x02".to_owned(),
                     block_number: 4,
                     status: true,
@@ -552,6 +610,9 @@ fn context_validate_request_and_report_use_certified_context() {
             &input,
             ContractValidationReadResponse {
                 response_version: 1,
+                context_ref: ContextRefValue::from(context.context_ref().clone()),
+                evm_network_context_ref: test_evm_network_context_ref(&context),
+                resource_stage: ContractLifecycleStage::Configured,
                 observed_chain_id: 2,
                 client_version: "redacted-client".to_owned(),
                 configuration_read_results: Vec::new(),
@@ -654,27 +715,37 @@ fn import_admission_rejects_source_value_digest_mismatch() {
 #[test]
 fn import_configured_external_claim_requires_certified_policy() {
     let context = certified_contract_context();
+    let rejected_import = import_configured_spec();
+    let rejected_policy = match &rejected_import {
+        ImportConfiguredSpec::AdoptExternalAddress { adoption } => &adoption.evidence_policy,
+        _ => panic!("external adoption import expected"),
+    };
     let rejected = ImportConfiguredContractState::admit_verified_external_adoption(
-        &import_configured_spec(),
+        &rejected_import,
         &context,
-        ContractProfileDigestRef::from(ContentDigest::from_digest(
-            DigestAlgorithm::Sha256JcsV1,
-            digest_with(0x80),
-        )),
-        Vec::new(),
+        external_adoption_evidence(
+            &context,
+            rejected_policy,
+            ContractLifecycleStage::Configured,
+        ),
         None,
         None,
     );
     assert!(rejected.is_err());
 
+    let admitted_import = import_configured_claimed_spec();
+    let admitted_policy = match &admitted_import {
+        ImportConfiguredSpec::AdoptExternalAddress { adoption } => &adoption.evidence_policy,
+        _ => panic!("external adoption import expected"),
+    };
     let admitted = ImportConfiguredContractState::admit_verified_external_adoption(
-        &import_configured_claimed_spec(),
+        &admitted_import,
         &context,
-        ContractProfileDigestRef::from(ContentDigest::from_digest(
-            DigestAlgorithm::Sha256JcsV1,
-            digest_with(0x81),
-        )),
-        Vec::new(),
+        external_adoption_evidence(
+            &context,
+            admitted_policy,
+            ContractLifecycleStage::Configured,
+        ),
         None,
         None,
     )

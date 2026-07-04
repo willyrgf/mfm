@@ -208,6 +208,7 @@ fn deployed_source_value(
             deploy_tx_hash: TEST_TRANSACTION_HASH.to_owned(),
         },
         deploy_evidence: Vec::new(),
+        external_adoption_evidence: None,
         deployed_block_number: Some(1),
     }
 }
@@ -311,6 +312,162 @@ impl store::RetainedArtifactReadProvider for MissingRetainedArtifacts {
             })
         })
     }
+}
+
+struct StaticRetainedArtifacts {
+    artifacts: Vec<(LifecycleArtifactEvidenceRef, Vec<u8>)>,
+}
+
+impl store::RetainedArtifactReadProvider for StaticRetainedArtifacts {
+    fn read_retained_artifact<'a>(
+        &'a self,
+        requirement: &'a store::EventArtifactRequirement,
+    ) -> store::RetainedArtifactReadFuture<'a> {
+        Box::pin(async move {
+            let (evidence, bytes) = self
+                .artifacts
+                .iter()
+                .find(|(evidence, _)| {
+                    evidence
+                        .artifact_id()
+                        .map(|artifact_id| artifact_id == requirement.artifact_id)
+                        .unwrap_or(false)
+                })
+                .ok_or_else(|| store::StoreError::MissingArtifact {
+                    artifact_id: requirement.artifact_id.clone(),
+                })?;
+            store::VerifiedRunArtifactBytes::new(
+                bytes.clone(),
+                store_artifact_evidence(evidence),
+                requirement,
+            )
+        })
+    }
+}
+
+fn store_artifact_evidence(evidence: &LifecycleArtifactEvidenceRef) -> store::ArtifactEvidenceRef {
+    store::ArtifactEvidenceRef {
+        artifact_id: evidence.artifact_id().expect("artifact id"),
+        digest: evidence.content_digest().expect("content digest"),
+        byte_len: evidence.byte_len(),
+        media_type: spec::MediaType::new("application/json").expect("media type"),
+        schema_id: evidence.schema_id().expect("schema id"),
+        semantic_type_id: evidence.semantic_type_id().expect("semantic type id"),
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::StateOutput,
+    }
+}
+
+fn canonical_value_bytes<T: Serialize>(value: &T) -> Vec<u8> {
+    let json = serde_json::to_string(value).expect("json");
+    PlainCanonicalJsonBytes::from_json_str(&json)
+        .expect("canonical json")
+        .as_bytes()
+        .to_vec()
+}
+
+fn artifact_ref_for_bytes<T: MfmValue>(bytes: &[u8]) -> LifecycleArtifactEvidenceRef {
+    let digest =
+        ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes));
+    LifecycleArtifactEvidenceRef::new(
+        ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, *digest.digest()),
+        digest,
+        bytes.len() as u64,
+        Some(T::schema_id().expect("schema id")),
+        Some(T::semantic_id().expect("semantic type id")),
+    )
+}
+
+fn source_run_import_with_authority<T>(
+    context: &mfm_program::CertifiedContext<EvmContractContext>,
+    required_stage: ContractLifecycleStage,
+    source_value: &T,
+    mutate_bundle: impl FnOnce(&mut SourceRunExportBundle),
+) -> (ImportDeployedSpec, StaticRetainedArtifacts)
+where
+    T: MfmValue + Serialize,
+{
+    let source_value_digest = digest_for_value(source_value).expect("value digest");
+    let source_json = source_run_import_source_json(
+        context,
+        match required_stage {
+            ContractLifecycleStage::Deployed => "deployed",
+            ContractLifecycleStage::Configured => "configured",
+        },
+        &source_value_digest,
+    );
+    let source: ImportFromMfmRun = serde_json::from_value(source_json).expect("source");
+    let import_policy_digest = digest_for_value(&source).expect("policy digest");
+    let evidence_json = source_run_import_evidence_json::<T>(
+        context,
+        &source,
+        match required_stage {
+            ContractLifecycleStage::Deployed => "deployed",
+            ContractLifecycleStage::Configured => "configured",
+        },
+        &import_policy_digest,
+    );
+    let evidence: ImportFromMfmRunEvidence =
+        serde_json::from_value(evidence_json).expect("evidence");
+    let mut bundle = SourceRunExportBundle {
+        bundle_version: 1,
+        source_run_id: source.source_run_id.clone(),
+        source_spec_hash: source.source_spec_hash.clone(),
+        terminal_events: vec![SourceRunTerminalEvent {
+            source_terminal_cell_or_output_event_ref: evidence
+                .source_terminal_cell_or_output_event_ref
+                .clone(),
+            source_cell_or_output_id: evidence.source_cell_or_output_id.clone(),
+            source_cell_schema_id: evidence.source_cell_schema_id.clone(),
+            source_cell_semantic_type_id: evidence.source_cell_semantic_type_id.clone(),
+            source_producer_descriptor_id: evidence.source_producer_descriptor_id.clone(),
+            source_stage: evidence.source_stage,
+            source_context_ref: evidence.source_context_ref.clone(),
+            source_context_descriptor_id: evidence.source_context_descriptor_id.clone(),
+            source_value_digest: evidence.source_value_digest.clone(),
+        }],
+    };
+    mutate_bundle(&mut bundle);
+    let bundle_bytes = canonical_value_bytes(&bundle);
+    let bundle_ref = artifact_ref_for_bytes::<SourceRunExportBundle>(&bundle_bytes);
+    let certificate = SourceRunExportCertificate {
+        certificate_version: 1,
+        source_run_id: source.source_run_id.clone(),
+        source_spec_hash: source.source_spec_hash.clone(),
+        export_bundle_digest: ContractProfileDigestRef::from(
+            PlainCanonicalJsonBytes::from_canonical_json_slice(&bundle_bytes)
+                .expect("bundle canonical")
+                .content_digest(),
+        ),
+        allowed_producer_descriptor_ids: vec![evidence.source_producer_descriptor_id.clone()],
+        allowed_context_descriptor_ids: vec![evidence.source_context_descriptor_id.clone()],
+        allowed_schema_ids: vec![evidence.source_cell_schema_id.clone()],
+        allowed_semantic_type_ids: vec![evidence.source_cell_semantic_type_id.clone()],
+    };
+    let certificate_bytes = canonical_value_bytes(&certificate);
+    let certificate_ref = artifact_ref_for_bytes::<SourceRunExportCertificate>(&certificate_bytes);
+    let value_bytes = canonical_value_bytes(source_value);
+    let value_ref = artifact_ref_for_bytes::<T>(&value_bytes);
+    let import = ImportDeployedSpec::FromMfmRun {
+        source,
+        evidence: ImportFromMfmRunEvidence {
+            source_spec_certificate_or_export_certificate_ref: certificate_ref.clone(),
+            source_run_stream_ref_or_export_bundle_ref: bundle_ref.clone(),
+            source_value_artifact_ref_or_inline_canonical_value: value_ref.clone(),
+            ..evidence
+        },
+    };
+    (
+        import,
+        StaticRetainedArtifacts {
+            artifacts: vec![
+                (certificate_ref, certificate_bytes),
+                (bundle_ref, bundle_bytes),
+                (value_ref, value_bytes),
+            ],
+        },
+    )
 }
 
 fn deploy_action(chain_id: u64) -> ValidatedConfig<DeployAction> {
@@ -1138,6 +1295,94 @@ async fn source_run_import_rejects_missing_retained_evidence() {
 }
 
 #[tokio::test]
+async fn source_run_import_accepts_retained_export_authority() {
+    let context = certified_contract_context("ethereum-mainnet", 1);
+    let source_value = deployed_source_value(&context);
+    let (import, artifacts) = source_run_import_with_authority(
+        &context,
+        ContractLifecycleStage::Deployed,
+        &source_value,
+        |_| {},
+    );
+    let evm: Arc<dyn EvmContractReadProvider> = Arc::new(TestEvmProviders::preparation());
+    let runtime = EvmContractReadRuntime::new(evm);
+
+    let imported = runtime
+        .import_deployed(&import, &context, &artifacts)
+        .await
+        .expect("source-run import");
+
+    assert_eq!(imported.context_ref.as_context_ref(), context.context_ref());
+    assert_eq!(imported.address, source_value.address);
+    assert_eq!(imported.deploy_evidence.len(), 3);
+}
+
+#[tokio::test]
+async fn source_run_import_rejects_stream_without_claimed_terminal_event() {
+    let context = certified_contract_context("ethereum-mainnet", 1);
+    let source_value = deployed_source_value(&context);
+    let (import, artifacts) = source_run_import_with_authority(
+        &context,
+        ContractLifecycleStage::Deployed,
+        &source_value,
+        |bundle| {
+            bundle.terminal_events[0].source_terminal_cell_or_output_event_ref =
+                mfm_evm_contract_model::LifecycleEventIdRef::from(EventId::from_digest(
+                    DigestAlgorithm::Sha256JcsV1,
+                    digest_with(0x7f),
+                ));
+        },
+    );
+    let evm: Arc<dyn EvmContractReadProvider> = Arc::new(TestEvmProviders::preparation());
+    let runtime = EvmContractReadRuntime::new(evm);
+
+    let error = runtime
+        .import_deployed(&import, &context, &artifacts)
+        .await
+        .expect_err("tampered terminal event must fail");
+
+    assert!(matches!(
+        error,
+        EvmContractAdapterError::SourceRunImportEvidence(_)
+    ));
+}
+
+#[tokio::test]
+async fn external_adoption_records_replayable_code_evidence() {
+    let context = certified_contract_context("ethereum-mainnet", 1);
+    let import: ImportDeployedSpec = serde_json::from_value(json!({
+        "kind": "adopt_external_address",
+        "adoption": {
+            "address": "0x000000000000000000000000000000000000beef",
+            "provenance_label": "audited-external"
+        }
+    }))
+    .expect("external adoption import");
+    let evm: Arc<dyn EvmContractReadProvider> = Arc::new(TestEvmProviders::preparation());
+    let runtime = EvmContractReadRuntime::new(evm);
+
+    let imported = runtime
+        .import_deployed(&import, &context, &MissingRetainedArtifacts)
+        .await
+        .expect("external adoption");
+    let evidence = imported
+        .external_adoption_evidence
+        .expect("external adoption evidence");
+
+    assert_eq!(evidence.context_ref.as_context_ref(), context.context_ref());
+    assert_eq!(evidence.resource_stage, ContractLifecycleStage::Deployed);
+    assert_eq!(evidence.observed_chain_id, 1);
+    let code = evidence.code_read_evidence.expect("code-read evidence");
+    assert_eq!(
+        code.address.as_str(),
+        "0x000000000000000000000000000000000000beef"
+    );
+    assert_eq!(code.observed_code_byte_len, 2);
+    assert_eq!(code.source.observed_chain_id, 1);
+    assert_eq!(code.source.network_id, "ethereum-mainnet");
+}
+
+#[tokio::test]
 async fn context_prepared_reconstruction_rejects_mismatched_context_ref() {
     let providers = TestEvmProviders::preparation();
     let adapter = adapter(&providers);
@@ -1473,6 +1718,9 @@ fn receipt_polling_invocation(transaction_hash: &str) -> PreparedContractInvocat
 fn finality_receipt() -> ContractTransactionReceipt {
     ContractTransactionReceipt {
         receipt_version: 1,
+        context_ref: prepared_invocation_fixture().context_ref,
+        evm_network_context_ref: prepared_invocation_fixture().evm_network_context_ref,
+        resource_stage: ContractLifecycleStage::Deployed,
         transaction_hash: TEST_TRANSACTION_HASH.to_owned(),
         block_number: 63,
         status: true,
@@ -1537,6 +1785,9 @@ fn replay_verifier_accepts_context_configure_schemas() {
 
     let confirmation = ContextContractConfigureConfirmation {
         confirmation_version: 1,
+        context_ref: prepared_invocation_fixture().context_ref,
+        evm_network_context_ref: prepared_invocation_fixture().evm_network_context_ref,
+        resource_stage: ContractLifecycleStage::Configured,
         confirmations: 3,
         configure_node: LifecycleNodeIdRef::from(node_id(0x44)),
         receipts: Vec::new(),
@@ -1555,6 +1806,53 @@ fn replay_verifier_accepts_context_configure_schemas() {
     assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
 }
 
+#[test]
+fn replay_submission_rejects_context_mismatch() {
+    let prepared = prepared_invocation_fixture();
+    let mut submissions = prepared_anchor_submissions(&prepared).expect("submissions");
+    submissions.context_ref = mfm_values::ContextRefValue::from(ContextRef::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        digest_with(0x90),
+    ));
+
+    assert!(matches!(
+        verify_prepared_submissions(&prepared, &submissions),
+        Err(EvmContractAdapterError::InvalidPreparedInvocation)
+    ));
+}
+
+#[test]
+fn replay_receipt_rejects_context_mismatch() {
+    let prepared = prepared_invocation_fixture();
+    let mut receipt = ContractDeployReceipt {
+        receipt_version: 1,
+        context_ref: prepared.context_ref.clone(),
+        evm_network_context_ref: prepared.evm_network_context_ref.clone(),
+        resource_stage: ContractLifecycleStage::Deployed,
+        contract_address: "0x000000000000000000000000000000000000beef".to_owned(),
+        receipt: ContractTransactionReceipt {
+            receipt_version: 1,
+            context_ref: prepared.context_ref.clone(),
+            evm_network_context_ref: prepared.evm_network_context_ref.clone(),
+            resource_stage: ContractLifecycleStage::Deployed,
+            transaction_hash: prepared.transactions[0].expected_transaction_hash.clone(),
+            block_number: 7,
+            status: true,
+            receipt_evidence: None,
+        },
+    };
+    receipt.context_ref = mfm_values::ContextRefValue::from(ContextRef::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        digest_with(0x91),
+    ));
+    let schema = ContractDeployReceipt::schema_id().expect("schema");
+    let bytes = serde_json::to_vec(&receipt).expect("receipt json");
+
+    let error = verify_contract_receipt_artifact(&schema, &bytes, &prepared)
+        .expect_err("mismatched receipt context");
+    assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
+}
+
 #[tokio::test]
 async fn receipt_polling_does_not_retry_permanent_capability_failures() {
     let reads = Arc::new(Mutex::new(0_u32));
@@ -1563,8 +1861,14 @@ async fn receipt_polling_does_not_retry_permanent_capability_failures() {
     let prepared = receipt_polling_invocation(transaction_hash);
     let submissions = ContractTransactionSubmissions {
         submissions_version: 1,
+        context_ref: prepared.context_ref.clone(),
+        evm_network_context_ref: prepared.evm_network_context_ref.clone(),
+        resource_stage: prepared.resource_stage,
         transactions: vec![ContractTransactionSubmission {
             submission_version: 1,
+            context_ref: prepared.context_ref.clone(),
+            evm_network_context_ref: prepared.evm_network_context_ref.clone(),
+            resource_stage: prepared.resource_stage,
             transaction_hash: transaction_hash.to_owned(),
             signer_public_key: None,
         }],
@@ -1585,8 +1889,14 @@ async fn receipt_polling_rejects_tampered_submission_before_provider_read() {
     let prepared = receipt_polling_invocation(TEST_TRANSACTION_HASH);
     let submissions = ContractTransactionSubmissions {
         submissions_version: 1,
+        context_ref: prepared.context_ref.clone(),
+        evm_network_context_ref: prepared.evm_network_context_ref.clone(),
+        resource_stage: prepared.resource_stage,
         transactions: vec![ContractTransactionSubmission {
             submission_version: 1,
+            context_ref: prepared.context_ref.clone(),
+            evm_network_context_ref: prepared.evm_network_context_ref.clone(),
+            resource_stage: prepared.resource_stage,
             transaction_hash: "0x2222222222222222222222222222222222222222222222222222222222222222"
                 .to_owned(),
             signer_public_key: None,

@@ -37,7 +37,7 @@ use mfm_evm_capabilities::{
     EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest, EvmNonceReadProvider,
     EvmNonceReadRequest, EvmReceiptReadProvider, EvmReceiptReadRequest, EvmReceiptReadResponse,
     EvmTransactionSubmitCapability, EvmTransactionSubmitProvider, EvmTransactionSubmitRequest,
-    SignedEvmPayload,
+    RedactedEvmSourceEvidence, SignedEvmPayload,
 };
 use mfm_evm_contract_config::{
     ConfigureAction, DeployAction, EvmSignerIntent, EvmTransactionPolicy,
@@ -48,12 +48,15 @@ use mfm_evm_contract_model::{
     configured_contract_stage, constructor_data, decode_single_output_to_json,
     deployed_contract_stage, expected_matches, hex_to_bytes, normalize_address, parse_artifact,
     prepare_validate_assertions, resolve_function_call, validation_report_stage,
-    AcceptedContextPolicy, ConfigurationSnapshot, ConfiguredContractInstance,
-    ContextBoundValidationReport, ContractArtifactConfig, ContractCallConfig,
-    ContractLifecycleStage, ContractProfileDigestRef, DeployedContractInstance,
+    AcceptedContextPolicy, BlockSelector as ModelBlockSelector, BlockTag, ConfigurationSnapshot,
+    ConfiguredContractInstance, ContextBoundValidationReport, ContractArtifactConfig,
+    ContractCallConfig, ContractLifecycleStage, ContractProfileDigestRef, DeployedContractInstance,
     EventAssertionConfig, EvmCodeHash, EvmContractContext, EvmNetworkContext, ExpectedValue,
-    ImportFromMfmRun, ImportFromMfmRunEvidence, LifecycleArtifactEvidenceRef, LifecycleNodeIdRef,
-    ParsedAbi, ReadAssertionConfig, ValidationEventResult, ValidationReadResult,
+    ExternalAdoptionEvidence, ExternalCodeReadEvidence, ExternalEventAssertionEvidence,
+    ExternalEvmSourceEvidence, ExternalReadAssertionEvidence, ImportFromMfmRun,
+    ImportFromMfmRunEvidence, LifecycleArtifactEvidenceRef, LifecycleNodeIdRef, ParsedAbi,
+    ReadAssertionConfig, SourceRunExportBundle, SourceRunExportCertificate, SourceRunTerminalEvent,
+    ValidationEventResult, ValidationReadResult,
 };
 use mfm_evm_core::hex::bytes_to_hex_prefixed;
 use mfm_evm_core::rlp::{rlp_encode_list, u64_to_min_be};
@@ -580,6 +583,9 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             }
             submissions.push(ContractTransactionSubmission {
                 submission_version: 1,
+                context_ref: prepared.evidence().context_ref.clone(),
+                evm_network_context_ref: prepared.evidence().evm_network_context_ref.clone(),
+                resource_stage: prepared.evidence().resource_stage,
                 transaction_hash: format!("{expected_hash:?}"),
                 signer_public_key: public_key_hex(result.public_identity().public_key()),
             });
@@ -608,6 +614,9 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             let response = verify_receipt_response(&guard, transaction_hash, response)?;
             receipts.push(ContractTransactionReceipt {
                 receipt_version: 1,
+                context_ref: prepared.context_ref.clone(),
+                evm_network_context_ref: prepared.evm_network_context_ref.clone(),
+                resource_stage: prepared.resource_stage,
                 transaction_hash: format!("{:?}", response.transaction_hash),
                 block_number: response.block_number,
                 status: response.status,
@@ -968,7 +977,7 @@ async fn validate_context_contract_with_reads(
         input.configured.address.as_str(),
         validation_assertions_required(&request.read_assertions, &request.event_assertions),
     )?;
-    let (read_results, event_results) = evaluate_assertions(
+    let evaluated = evaluate_assertions(
         reads,
         assertion_context.as_ref(),
         &chain.guard,
@@ -990,6 +999,9 @@ async fn validate_context_contract_with_reads(
 
     Ok(ContractValidationReadResponse {
         response_version: 1,
+        context_ref: mfm_values::ContextRefValue::from(context.context_ref().clone()),
+        evm_network_context_ref: evm_network_context_ref(&context.value().network)?,
+        resource_stage: ContractLifecycleStage::Configured,
         observed_chain_id: chain.response.chain_id,
         client_version: chain
             .response
@@ -997,8 +1009,8 @@ async fn validate_context_contract_with_reads(
             .unwrap_or_else(|| "unknown".to_owned()),
         configuration_read_results,
         configuration_event_results,
-        read_results,
-        event_results,
+        read_results: evaluated.read_results,
+        event_results: evaluated.event_results,
     })
 }
 
@@ -1023,12 +1035,17 @@ async fn import_deployed_with_reads(
                 .map_err(Into::into)
         }
         ImportDeployedSpec::AdoptExternalAddress { adoption } => {
-            verify_external_adoption(reads, adoption, context).await?;
+            let verified = verify_external_adoption(
+                reads,
+                adoption,
+                context,
+                ContractLifecycleStage::Deployed,
+            )
+            .await?;
             ImportDeployedContractState::admit_verified_external_adoption(
                 import,
                 context,
-                digest_for_value(&adoption.evidence_policy)?,
-                Vec::new(),
+                verified.evidence,
                 None,
             )
             .map_err(Into::into)
@@ -1058,30 +1075,37 @@ async fn import_configured_with_reads(
                 .map_err(Into::into)
         }
         ImportConfiguredSpec::AdoptExternalAddress { adoption } => {
-            let guard = verify_external_adoption(reads, adoption, context).await?;
-            let policy_digest = digest_for_value(&adoption.evidence_policy)?;
+            let mut verified = verify_external_adoption(
+                reads,
+                adoption,
+                context,
+                ContractLifecycleStage::Configured,
+            )
+            .await?;
             let snapshot = if external_adoption_assertions_required(&adoption.evidence_policy) {
                 let assertion_context = prepare_validation_assertion_context(
                     artifact,
                     adoption.address.as_str(),
                     true,
                 )?;
-                let (read_results, event_results) = evaluate_assertions(
+                let evaluated = evaluate_assertions(
                     reads,
                     assertion_context.as_ref(),
-                    &guard,
+                    &verified.guard,
                     &adoption.evidence_policy.initial_read_assertions,
                     &adoption.evidence_policy.initial_event_assertions,
                 )
                 .await?;
-                let all_passed = read_results.iter().all(|result| result.passed)
-                    && event_results.iter().all(|result| result.passed);
+                let all_passed = evaluated.read_results.iter().all(|result| result.passed)
+                    && evaluated.event_results.iter().all(|result| result.passed);
                 if !all_passed {
                     return Err(EvmContractAdapterError::ExternalAdoptionAssertionsFailed);
                 }
+                verified.evidence.read_assertion_evidence = evaluated.read_evidence;
+                verified.evidence.event_assertion_evidence = evaluated.event_evidence;
                 Some(ConfigurationSnapshot {
-                    read_results,
-                    event_results,
+                    read_results: evaluated.read_results,
+                    event_results: evaluated.event_results,
                 })
             } else if adoption.evidence_policy.allow_external_claimed_configured {
                 None
@@ -1091,8 +1115,7 @@ async fn import_configured_with_reads(
             ImportConfiguredContractState::admit_verified_external_adoption(
                 import,
                 context,
-                policy_digest,
-                Vec::new(),
+                verified.evidence,
                 snapshot,
                 None,
             )
@@ -1101,11 +1124,17 @@ async fn import_configured_with_reads(
     }
 }
 
+struct VerifiedExternalAdoption {
+    guard: EvmChainGuard,
+    evidence: ExternalAdoptionEvidence,
+}
+
 async fn verify_external_adoption(
     reads: EvmContractReadProviders<'_>,
     adoption: &mfm_evm_contract_model::AdoptExternalAddress,
     context: &mfm_program::CertifiedContext<EvmContractContext>,
-) -> Result<EvmChainGuard> {
+    resource_stage: ContractLifecycleStage,
+) -> Result<VerifiedExternalAdoption> {
     let chain = verified_chain_identity(
         reads.chain_identity,
         context.value().network.network_id.as_str(),
@@ -1113,17 +1142,26 @@ async fn verify_external_adoption(
     )
     .await?;
     let guard = chain.guard;
+    let mut code_read_evidence = None;
     if adoption.evidence_policy.require_code
         || adoption.evidence_policy.expected_code_hash.is_some()
     {
         let address = parse_address(adoption.address.as_str(), "address")
             .map_err(|error| EvmContractAdapterError::Model(error.message))?;
+        let block =
+            adoption
+                .evidence_policy
+                .block_anchor
+                .clone()
+                .unwrap_or(ModelBlockSelector::Tag {
+                    tag: BlockTag::Latest,
+                });
         let response = reads
             .code
             .read_code(&EvmCodeReadRequest {
                 guard: guard.clone(),
                 address,
-                block: block_selector(adoption.evidence_policy.block_anchor.as_ref(), true)?,
+                block: block_selector(Some(&block), true)?,
             })
             .await?;
         response.evidence.verify_guard(&guard)?;
@@ -1137,8 +1175,35 @@ async fn verify_external_adoption(
                 return Err(EvmContractAdapterError::ExternalCodeHashMismatch);
             }
         }
+        code_read_evidence = Some(ExternalCodeReadEvidence {
+            address: adoption.address.clone(),
+            block,
+            source: external_evm_source_evidence(&response.evidence),
+            observed_code_hash: observed,
+            observed_code_byte_len: response.code.len() as u64,
+        });
     }
-    Ok(guard)
+    let evidence = ExternalAdoptionEvidence {
+        evidence_policy_digest: digest_for_value(&adoption.evidence_policy)?,
+        context_ref: mfm_values::ContextRefValue::from(context.context_ref().clone()),
+        evm_network_context_ref: evm_network_context_ref(&context.value().network)?,
+        resource_stage,
+        observed_chain_id: chain.response.chain_id,
+        code_read_evidence,
+        read_assertion_evidence: Vec::new(),
+        event_assertion_evidence: Vec::new(),
+    };
+    Ok(VerifiedExternalAdoption { guard, evidence })
+}
+
+fn external_evm_source_evidence(evidence: &RedactedEvmSourceEvidence) -> ExternalEvmSourceEvidence {
+    ExternalEvmSourceEvidence {
+        network_id: evidence.network_id.to_string(),
+        expected_chain_id: evidence.expected_chain_id,
+        observed_chain_id: evidence.observed_chain_id,
+        source_ref: evidence.source_ref.to_string(),
+        policy_id: evidence.policy_id.to_string(),
+    }
 }
 
 fn import_configured_requires_artifact(import: &ImportConfiguredSpec) -> bool {
@@ -1167,12 +1232,12 @@ where
     T: ContextBoundOutput + DeserializeOwned,
 {
     validate_source_run_import_evidence::<T>(source, evidence, context, required_stage)?;
-    let _certificate = read_lifecycle_evidence_artifact(
+    let certificate = read_lifecycle_evidence_artifact(
         artifacts,
         &evidence.source_spec_certificate_or_export_certificate_ref,
     )
     .await?;
-    let _stream = read_lifecycle_evidence_artifact(
+    let stream = read_lifecycle_evidence_artifact(
         artifacts,
         &evidence.source_run_stream_ref_or_export_bundle_ref,
     )
@@ -1188,9 +1253,17 @@ where
         || value.context_resource_kind()
             != mfm_evm_contract_model::contract_instance_resource_kind()
         || value.context_stage() != context_stage_for_lifecycle_stage(required_stage)
+        || digest_for_value(&value)? != evidence.source_value_digest
     {
         return Err(EvmContractAdapterError::ContextMismatch);
     }
+    validate_source_run_authority(
+        source,
+        evidence,
+        certificate.bytes(),
+        stream.bytes(),
+        required_stage,
+    )?;
     Ok(value)
 }
 
@@ -1254,6 +1327,88 @@ where
         ));
     }
     Ok(())
+}
+
+fn validate_source_run_authority(
+    source: &ImportFromMfmRun,
+    evidence: &ImportFromMfmRunEvidence,
+    certificate_bytes: &[u8],
+    bundle_bytes: &[u8],
+    required_stage: ContractLifecycleStage,
+) -> Result<()> {
+    let certificate: SourceRunExportCertificate = serde_json::from_slice(certificate_bytes)
+        .map_err(|error| EvmContractAdapterError::SourceRunImportEvidence(error.to_string()))?;
+    let bundle: SourceRunExportBundle = serde_json::from_slice(bundle_bytes)
+        .map_err(|error| EvmContractAdapterError::SourceRunImportEvidence(error.to_string()))?;
+
+    let bundle_digest = digest_for_value(&bundle)?;
+    if certificate.certificate_version != 1
+        || bundle.bundle_version != 1
+        || certificate.source_run_id != source.source_run_id
+        || bundle.source_run_id != source.source_run_id
+        || certificate.source_spec_hash != source.source_spec_hash
+        || bundle.source_spec_hash != source.source_spec_hash
+        || certificate.export_bundle_digest != bundle_digest
+    {
+        return Err(EvmContractAdapterError::SourceRunImportEvidence(
+            "source-run export certificate does not authorize the retained stream bundle"
+                .to_owned(),
+        ));
+    }
+
+    let terminal = bundle
+        .terminal_events
+        .iter()
+        .find(|event| source_run_terminal_event_matches(event, evidence, required_stage))
+        .ok_or_else(|| {
+            EvmContractAdapterError::SourceRunImportEvidence(
+                "source-run stream bundle does not contain the claimed terminal lifecycle event"
+                    .to_owned(),
+            )
+        })?;
+
+    if !certificate
+        .allowed_producer_descriptor_ids
+        .iter()
+        .any(|descriptor| descriptor == &terminal.source_producer_descriptor_id)
+        || !certificate
+            .allowed_context_descriptor_ids
+            .iter()
+            .any(|descriptor| descriptor == &terminal.source_context_descriptor_id)
+        || !certificate
+            .allowed_schema_ids
+            .iter()
+            .any(|schema| schema == &terminal.source_cell_schema_id)
+        || !certificate
+            .allowed_semantic_type_ids
+            .iter()
+            .any(|semantic| semantic == &terminal.source_cell_semantic_type_id)
+    {
+        return Err(EvmContractAdapterError::SourceRunImportEvidence(
+            "source-run export certificate does not authorize the claimed producer, context, or value type"
+                .to_owned(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn source_run_terminal_event_matches(
+    event: &SourceRunTerminalEvent,
+    evidence: &ImportFromMfmRunEvidence,
+    required_stage: ContractLifecycleStage,
+) -> bool {
+    event.source_terminal_cell_or_output_event_ref
+        == evidence.source_terminal_cell_or_output_event_ref
+        && event.source_cell_or_output_id == evidence.source_cell_or_output_id
+        && event.source_cell_schema_id == evidence.source_cell_schema_id
+        && event.source_cell_semantic_type_id == evidence.source_cell_semantic_type_id
+        && event.source_producer_descriptor_id == evidence.source_producer_descriptor_id
+        && event.source_stage == required_stage
+        && event.source_stage == evidence.source_stage
+        && event.source_context_ref == evidence.source_context_ref
+        && event.source_context_descriptor_id == evidence.source_context_descriptor_id
+        && event.source_value_digest == evidence.source_value_digest
 }
 
 async fn read_lifecycle_evidence_artifact(
@@ -1374,6 +1529,13 @@ struct ValidationAssertionContext {
     address: Address,
 }
 
+struct EvaluatedAssertions {
+    read_results: Vec<ValidationReadResult>,
+    event_results: Vec<ValidationEventResult>,
+    read_evidence: Vec<ExternalReadAssertionEvidence>,
+    event_evidence: Vec<ExternalEventAssertionEvidence>,
+}
+
 fn prepare_validation_assertion_context(
     artifact: Option<&ContractArtifactConfig>,
     contract_address: &str,
@@ -1402,9 +1564,14 @@ async fn evaluate_assertions(
     guard: &EvmChainGuard,
     read_assertions: &[ReadAssertionConfig],
     event_assertions: &[EventAssertionConfig],
-) -> Result<(Vec<ValidationReadResult>, Vec<ValidationEventResult>)> {
+) -> Result<EvaluatedAssertions> {
     if !validation_assertions_required(read_assertions, event_assertions) {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(EvaluatedAssertions {
+            read_results: Vec::new(),
+            event_results: Vec::new(),
+            read_evidence: Vec::new(),
+            event_evidence: Vec::new(),
+        });
     }
     let context = context.ok_or(EvmContractAdapterError::MissingContractArtifact)?;
     let (prepared_reads, prepared_events) =
@@ -1412,6 +1579,7 @@ async fn evaluate_assertions(
             .map_err(EvmContractAdapterError::Model)?;
 
     let mut read_results = Vec::with_capacity(prepared_reads.len());
+    let mut read_evidence = Vec::with_capacity(prepared_reads.len());
     for (assertion, prepared) in read_assertions.iter().zip(prepared_reads.iter()) {
         let response = reads
             .call
@@ -1431,16 +1599,22 @@ async fn evaluate_assertions(
         .map_err(EvmContractAdapterError::Model)?;
         let actual =
             ExpectedValue::from_json_value(&actual_json).map_err(EvmContractAdapterError::Model)?;
-        read_results.push(ValidationReadResult {
+        let result = ValidationReadResult {
             function: assertion.function.to_string(),
             args: assertion.args.clone(),
             expected: assertion.expected.clone(),
             passed: expected_matches(&actual, &assertion.expected),
             actual,
+        };
+        read_evidence.push(ExternalReadAssertionEvidence {
+            source: external_evm_source_evidence(&response.evidence),
+            result: result.clone(),
         });
+        read_results.push(result);
     }
 
     let mut event_results = Vec::with_capacity(prepared_events.len());
+    let mut event_evidence = Vec::with_capacity(prepared_events.len());
     for (assertion, prepared) in event_assertions.iter().zip(prepared_events.iter()) {
         let topic = prepared
             .topic0_hex
@@ -1458,15 +1632,25 @@ async fn evaluate_assertions(
             .await?;
         logs.evidence.verify_guard(guard)?;
         let observed_count = logs.logs.len() as u64;
-        event_results.push(ValidationEventResult {
+        let result = ValidationEventResult {
             event: prepared.event.clone(),
             min_count: prepared.min_count,
             observed_count,
             passed: observed_count >= prepared.min_count,
+        };
+        event_evidence.push(ExternalEventAssertionEvidence {
+            source: external_evm_source_evidence(&logs.evidence),
+            result: result.clone(),
         });
+        event_results.push(result);
     }
 
-    Ok((read_results, event_results))
+    Ok(EvaluatedAssertions {
+        read_results,
+        event_results,
+        read_evidence,
+        event_evidence,
+    })
 }
 
 struct PreparedTransactionInput {
@@ -1691,12 +1875,30 @@ impl replay::SideEffectReplayVerifier for EvmContractLifecycleReplayVerifier {
             &input.submission.submission.submission_schema_id,
             &ContractTransactionSubmissions::schema_id().map_err(replay_value_error)?,
             "submission",
-        )
+        )?;
+        let prepared = replay_prepared_invocation(input.prepared_invocation.as_ref())?;
+        verify_replay_intent_matches_prepared(&input.intent, &prepared)?;
+        let submissions: ContractTransactionSubmissions =
+            serde_json::from_slice(&input.submission.artifact_bytes).map_err(replay_json_error)?;
+        verify_prepared_submissions(&prepared, &submissions).map_err(replay_adapter_error)?;
+        Ok(())
     }
 
     fn verify_receipt(&self, input: &replay::SideEffectReceiptReplayInput) -> replay::Result<()> {
         self.verify_adapter_binding(&input.intent)?;
-        verify_contract_receipt_schema(&input.receipt.receipt.receipt_schema_id)
+        let prepared = replay_prepared_invocation(input.prepared_invocation.as_ref())?;
+        verify_replay_intent_matches_prepared(&input.intent, &prepared)?;
+        if let Some(submission) = &input.submission {
+            let submissions: ContractTransactionSubmissions =
+                serde_json::from_slice(&submission.artifact_bytes).map_err(replay_json_error)?;
+            verify_prepared_submissions(&prepared, &submissions).map_err(replay_adapter_error)?;
+        }
+        verify_contract_receipt_schema(&input.receipt.receipt.receipt_schema_id)?;
+        verify_contract_receipt_artifact(
+            &input.receipt.receipt.receipt_schema_id,
+            &input.receipt.artifact_bytes,
+            &prepared,
+        )
     }
 
     fn verify_confirmation(
@@ -1713,12 +1915,106 @@ impl replay::SideEffectReplayVerifier for EvmContractLifecycleReplayVerifier {
                 ));
             }
         };
+        let prepared = replay_prepared_invocation(input.prepared_invocation.as_ref())?;
+        verify_replay_intent_matches_prepared(&input.intent, &prepared)?;
+        if let Some(submission) = &input.submission {
+            let submissions: ContractTransactionSubmissions =
+                serde_json::from_slice(&submission.artifact_bytes).map_err(replay_json_error)?;
+            verify_prepared_submissions(&prepared, &submissions).map_err(replay_adapter_error)?;
+        }
+        if let Some(receipt) = &input.receipt {
+            verify_contract_receipt_artifact(
+                &receipt.receipt.receipt_schema_id,
+                &receipt.artifact_bytes,
+                &prepared,
+            )?;
+        }
         verify_contract_confirmation_schema(
             &input.confirmation.confirmation.confirmation_schema_id,
             &input.confirmation.artifact_bytes,
             required_depth,
+        )?;
+        verify_contract_confirmation_artifact(
+            &input.confirmation.confirmation.confirmation_schema_id,
+            &input.confirmation.artifact_bytes,
+            &prepared,
         )
     }
+}
+
+fn replay_prepared_invocation(
+    prepared: Option<&replay::PreparedInvocationReplayEvidence>,
+) -> replay::Result<PreparedContractInvocation> {
+    let prepared = prepared.ok_or_else(|| contract_lifecycle_side_effect_missing("prepared"))?;
+    let evidence: PreparedContractInvocation =
+        serde_json::from_slice(&prepared.artifact_bytes).map_err(replay_json_error)?;
+    ensure_prepared_invocation_public(&evidence).map_err(replay_adapter_error)?;
+    Ok(evidence)
+}
+
+fn verify_replay_intent_matches_prepared(
+    intent: &replay::SideEffectIntentReplayEvidence,
+    prepared: &PreparedContractInvocation,
+) -> replay::Result<()> {
+    if intent.intent.intent_schema_id
+        == ContextContractDeployIntent::schema_id().map_err(replay_value_error)?
+    {
+        let deploy: ContextContractDeployIntent =
+            serde_json::from_slice(&intent.artifact_bytes).map_err(replay_json_error)?;
+        verify_transaction_intent_matches_prepared(&deploy.transaction, prepared)?;
+        if prepared.phase != ContractMutationPhase::Deploy
+            || prepared.resource_stage != ContractLifecycleStage::Deployed
+            || deploy.transaction.to_address.is_some()
+        {
+            return Err(replay::ReplayError::new(
+                replay::ReplayErrorKind::SideEffectMismatch,
+                "deploy intent does not match prepared invocation context",
+            ));
+        }
+        return Ok(());
+    }
+    if intent.intent.intent_schema_id
+        == ContextContractConfigureIntent::schema_id().map_err(replay_value_error)?
+    {
+        let configure: ContextContractConfigureIntent =
+            serde_json::from_slice(&intent.artifact_bytes).map_err(replay_json_error)?;
+        if prepared.phase != ContractMutationPhase::Configure
+            || prepared.resource_stage != ContractLifecycleStage::Configured
+            || configure.deployed.context_ref != prepared.context_ref
+        {
+            return Err(replay::ReplayError::new(
+                replay::ReplayErrorKind::SideEffectMismatch,
+                "configure intent does not match prepared invocation context",
+            ));
+        }
+        for transaction in &configure.transactions {
+            verify_transaction_intent_matches_prepared(transaction, prepared)?;
+        }
+        return Ok(());
+    }
+    Err(replay::ReplayError::new(
+        replay::ReplayErrorKind::SideEffectMismatch,
+        "contract lifecycle side-effect intent schema did not match deploy or configure intent",
+    ))
+}
+
+fn verify_transaction_intent_matches_prepared(
+    intent: &mfm_state_evm_contracts::ContextContractTransactionIntent,
+    prepared: &PreparedContractInvocation,
+) -> replay::Result<()> {
+    if intent.context_ref != prepared.context_ref
+        || intent.network_id != prepared.network_id
+        || intent.expected_chain_id != prepared.expected_chain_id
+        || intent.signer_ref != prepared.signer_ref
+        || normalize_address(&intent.expected_signer_address).map_err(replay_model_error)?
+            != prepared.expected_signer_address
+    {
+        return Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::SideEffectMismatch,
+            "contract lifecycle intent context does not match prepared invocation",
+        ));
+    }
+    Ok(())
 }
 
 fn verify_contract_receipt_schema(schema: &SchemaId) -> replay::Result<()> {
@@ -1727,6 +2023,30 @@ fn verify_contract_receipt_schema(schema: &SchemaId) -> replay::Result<()> {
         ContextContractConfigureReceipt::schema_id().map_err(replay_value_error)?;
     if schema == &deploy || schema == &context_configure {
         Ok(())
+    } else {
+        Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::SideEffectMismatch,
+            "receipt schema did not match contract lifecycle schemas",
+        ))
+    }
+}
+
+fn verify_contract_receipt_artifact(
+    schema: &SchemaId,
+    artifact_bytes: &[u8],
+    prepared: &PreparedContractInvocation,
+) -> replay::Result<()> {
+    let deploy = ContractDeployReceipt::schema_id().map_err(replay_value_error)?;
+    let context_configure =
+        ContextContractConfigureReceipt::schema_id().map_err(replay_value_error)?;
+    if schema == &deploy {
+        let receipt: ContractDeployReceipt =
+            serde_json::from_slice(artifact_bytes).map_err(replay_json_error)?;
+        verify_contract_deploy_receipt_matches_prepared(&receipt, prepared)
+    } else if schema == &context_configure {
+        let receipt: ContextContractConfigureReceipt =
+            serde_json::from_slice(artifact_bytes).map_err(replay_json_error)?;
+        verify_contract_configure_receipt_matches_prepared(&receipt, prepared)
     } else {
         Err(replay::ReplayError::new(
             replay::ReplayErrorKind::SideEffectMismatch,
@@ -1757,6 +2077,122 @@ fn verify_contract_confirmation_schema(
             "confirmation schema did not match contract lifecycle schemas",
         ))
     }
+}
+
+fn verify_contract_confirmation_artifact(
+    schema: &SchemaId,
+    artifact_bytes: &[u8],
+    prepared: &PreparedContractInvocation,
+) -> replay::Result<()> {
+    let deploy = ContractDeployConfirmation::schema_id().map_err(replay_value_error)?;
+    let context_configure =
+        ContextContractConfigureConfirmation::schema_id().map_err(replay_value_error)?;
+    if schema == &deploy {
+        let confirmation: ContractDeployConfirmation =
+            serde_json::from_slice(artifact_bytes).map_err(replay_json_error)?;
+        verify_contract_deploy_confirmation_matches_prepared(&confirmation, prepared)
+    } else if schema == &context_configure {
+        let confirmation: ContextContractConfigureConfirmation =
+            serde_json::from_slice(artifact_bytes).map_err(replay_json_error)?;
+        verify_contract_configure_confirmation_matches_prepared(&confirmation, prepared)
+    } else {
+        Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::SideEffectMismatch,
+            "confirmation schema did not match contract lifecycle schemas",
+        ))
+    }
+}
+
+fn verify_contract_deploy_receipt_matches_prepared(
+    receipt: &ContractDeployReceipt,
+    prepared: &PreparedContractInvocation,
+) -> replay::Result<()> {
+    if prepared.phase != ContractMutationPhase::Deploy
+        || receipt.context_ref != prepared.context_ref
+        || receipt.evm_network_context_ref != prepared.evm_network_context_ref
+        || receipt.resource_stage != ContractLifecycleStage::Deployed
+    {
+        return Err(replay_contract_mismatch(
+            "deploy receipt context does not match prepared invocation",
+        ));
+    }
+    verify_transaction_receipts_match_prepared(prepared, std::slice::from_ref(&receipt.receipt))
+}
+
+fn verify_contract_configure_receipt_matches_prepared(
+    receipt: &ContextContractConfigureReceipt,
+    prepared: &PreparedContractInvocation,
+) -> replay::Result<()> {
+    if prepared.phase != ContractMutationPhase::Configure
+        || receipt.context_ref != prepared.context_ref
+        || receipt.evm_network_context_ref != prepared.evm_network_context_ref
+        || receipt.resource_stage != ContractLifecycleStage::Configured
+    {
+        return Err(replay_contract_mismatch(
+            "configure receipt context does not match prepared invocation",
+        ));
+    }
+    verify_transaction_receipts_match_prepared(prepared, &receipt.receipts)
+}
+
+fn verify_contract_deploy_confirmation_matches_prepared(
+    confirmation: &ContractDeployConfirmation,
+    prepared: &PreparedContractInvocation,
+) -> replay::Result<()> {
+    if prepared.phase != ContractMutationPhase::Deploy
+        || confirmation.context_ref != prepared.context_ref
+        || confirmation.evm_network_context_ref != prepared.evm_network_context_ref
+        || confirmation.resource_stage != ContractLifecycleStage::Deployed
+    {
+        return Err(replay_contract_mismatch(
+            "deploy confirmation context does not match prepared invocation",
+        ));
+    }
+    verify_transaction_receipts_match_prepared(
+        prepared,
+        std::slice::from_ref(&confirmation.receipt),
+    )
+}
+
+fn verify_contract_configure_confirmation_matches_prepared(
+    confirmation: &ContextContractConfigureConfirmation,
+    prepared: &PreparedContractInvocation,
+) -> replay::Result<()> {
+    if prepared.phase != ContractMutationPhase::Configure
+        || confirmation.context_ref != prepared.context_ref
+        || confirmation.evm_network_context_ref != prepared.evm_network_context_ref
+        || confirmation.resource_stage != ContractLifecycleStage::Configured
+    {
+        return Err(replay_contract_mismatch(
+            "configure confirmation context does not match prepared invocation",
+        ));
+    }
+    verify_transaction_receipts_match_prepared(prepared, &confirmation.receipts)
+}
+
+fn verify_transaction_receipts_match_prepared(
+    prepared: &PreparedContractInvocation,
+    receipts: &[ContractTransactionReceipt],
+) -> replay::Result<()> {
+    if receipts.len() != prepared.transactions.len() {
+        return Err(replay_contract_mismatch(
+            "contract receipt count does not match prepared transactions",
+        ));
+    }
+    for (prepared_transaction, receipt) in prepared.transactions.iter().zip(receipts) {
+        if receipt.receipt_version != 1
+            || receipt.context_ref != prepared.context_ref
+            || receipt.evm_network_context_ref != prepared.evm_network_context_ref
+            || receipt.resource_stage != prepared.resource_stage
+            || !receipt.status
+            || receipt.transaction_hash != prepared_transaction.expected_transaction_hash
+        {
+            return Err(replay_contract_mismatch(
+                "contract receipt transaction evidence does not match prepared invocation",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Returns the stable replay verifier id.
@@ -2147,7 +2583,10 @@ fn prepared_anchor_submissions(
     prepared: &PreparedContractInvocation,
 ) -> Result<ContractTransactionSubmissions> {
     let transaction_hashes = prepared_transaction_hashes(prepared)?;
-    Ok(transaction_hashes_to_submissions(transaction_hashes))
+    Ok(transaction_hashes_to_submissions(
+        prepared,
+        transaction_hashes,
+    ))
 }
 
 fn prepared_transaction_hashes(prepared: &PreparedContractInvocation) -> Result<Vec<B256>> {
@@ -2163,7 +2602,11 @@ fn verify_prepared_submissions(
     prepared: &PreparedContractInvocation,
     submissions: &ContractTransactionSubmissions,
 ) -> Result<Vec<B256>> {
-    if submissions.submissions_version != 1 {
+    if submissions.submissions_version != 1
+        || submissions.context_ref != prepared.context_ref
+        || submissions.evm_network_context_ref != prepared.evm_network_context_ref
+        || submissions.resource_stage != prepared.resource_stage
+    {
         return Err(EvmContractAdapterError::InvalidPreparedInvocation);
     }
     verify_prepared_submission_transactions(prepared, &submissions.transactions)
@@ -2179,7 +2622,11 @@ fn verify_prepared_submission_transactions(
     }
     let mut transaction_hashes = Vec::with_capacity(submissions.len());
     for (prepared_transaction, submission) in prepared.transactions.iter().zip(submissions) {
-        if submission.submission_version != 1 {
+        if submission.submission_version != 1
+            || submission.context_ref != prepared.context_ref
+            || submission.evm_network_context_ref != prepared.evm_network_context_ref
+            || submission.resource_stage != prepared.resource_stage
+        {
             return Err(EvmContractAdapterError::InvalidPreparedInvocation);
         }
         let expected_hash =
@@ -2195,14 +2642,21 @@ fn verify_prepared_submission_transactions(
 }
 
 fn transaction_hashes_to_submissions(
+    prepared: &PreparedContractInvocation,
     transaction_hashes: Vec<B256>,
 ) -> ContractTransactionSubmissions {
     ContractTransactionSubmissions {
         submissions_version: 1,
+        context_ref: prepared.context_ref.clone(),
+        evm_network_context_ref: prepared.evm_network_context_ref.clone(),
+        resource_stage: prepared.resource_stage,
         transactions: transaction_hashes
             .into_iter()
             .map(|transaction_hash| ContractTransactionSubmission {
                 submission_version: 1,
+                context_ref: prepared.context_ref.clone(),
+                evm_network_context_ref: prepared.evm_network_context_ref.clone(),
+                resource_stage: prepared.resource_stage,
                 transaction_hash: format!("{transaction_hash:?}"),
                 signer_public_key: None,
             })
@@ -2281,6 +2735,9 @@ async fn submit_prepared_contract_submission(
         Ok(transactions) => Ok(SideEffectSubmissionDecision::Observed(
             ContractTransactionSubmissions {
                 submissions_version: 1,
+                context_ref: prepared.evidence().context_ref.clone(),
+                evm_network_context_ref: prepared.evidence().evm_network_context_ref.clone(),
+                resource_stage: prepared.evidence().resource_stage,
                 transactions,
             },
         )),
@@ -2419,11 +2876,22 @@ fn ensure_schema(
     }
 }
 
-fn replay_adapter_error(error: mfm_adapter_contracts::AdapterContractError) -> replay::ReplayError {
+fn replay_adapter_error(error: impl fmt::Display) -> replay::ReplayError {
     replay::ReplayError::new(
         replay::ReplayErrorKind::SideEffectMismatch,
         error.to_string(),
     )
+}
+
+fn replay_model_error(error: impl fmt::Display) -> replay::ReplayError {
+    replay::ReplayError::new(
+        replay::ReplayErrorKind::SideEffectMismatch,
+        error.to_string(),
+    )
+}
+
+fn replay_contract_mismatch(message: &'static str) -> replay::ReplayError {
+    replay::ReplayError::new(replay::ReplayErrorKind::SideEffectMismatch, message)
 }
 
 fn replay_value_error(error: mfm_values::ValueError) -> replay::ReplayError {
@@ -3687,6 +4155,9 @@ impl ContractVerifyPhase for ContextDeployMutationPlan {
     ) -> mfm_runtime::Result<Self::Receipt> {
         Ok(ContractDeployReceipt {
             receipt_version: 1,
+            context_ref: prepared.context_ref.clone(),
+            evm_network_context_ref: prepared.evm_network_context_ref.clone(),
+            resource_stage: prepared.resource_stage,
             contract_address: deploy_contract_address_from_prepared(prepared)?,
             receipt: single_receipt(receipts)?,
         })
@@ -3706,6 +4177,9 @@ impl ContractVerifyPhase for ContextDeployMutationPlan {
     fn confirmation_from_receipt(receipt: Self::Receipt, confirmations: u64) -> Self::Confirmation {
         ContractDeployConfirmation {
             confirmation_version: 1,
+            context_ref: receipt.context_ref,
+            evm_network_context_ref: receipt.evm_network_context_ref,
+            resource_stage: receipt.resource_stage,
             confirmations,
             contract_address: receipt.contract_address,
             receipt: receipt.receipt,
@@ -3742,6 +4216,9 @@ impl ContractVerifyPhase for ContextConfigureMutationPlan {
     ) -> mfm_runtime::Result<Self::Receipt> {
         Ok(ContextContractConfigureReceipt {
             receipt_version: 1,
+            context_ref: _prepared.context_ref.clone(),
+            evm_network_context_ref: _prepared.evm_network_context_ref.clone(),
+            resource_stage: _prepared.resource_stage,
             configure_node: LifecycleNodeIdRef::from(self.node_id.clone()),
             configured_block_number: receipts.iter().map(|receipt| receipt.block_number).max(),
             receipts,
@@ -3768,6 +4245,9 @@ impl ContractVerifyPhase for ContextConfigureMutationPlan {
     fn confirmation_from_receipt(receipt: Self::Receipt, confirmations: u64) -> Self::Confirmation {
         ContextContractConfigureConfirmation {
             confirmation_version: 1,
+            context_ref: receipt.context_ref,
+            evm_network_context_ref: receipt.evm_network_context_ref,
+            resource_stage: receipt.resource_stage,
             confirmations,
             configure_node: receipt.configure_node,
             receipts: receipt.receipts,

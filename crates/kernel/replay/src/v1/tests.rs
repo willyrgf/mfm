@@ -454,6 +454,7 @@ fn side_effect_frame_requests_are_pair_keyed() {
     };
     let frame = SideEffectReplayFrame {
         intent: &intent,
+        prepared: None,
         submission: Some(&submission),
         not_submitted: None,
         receipt: None,
@@ -490,6 +491,7 @@ fn side_effect_frame_not_submitted_requests_are_pair_keyed() {
     };
     let frame = SideEffectReplayFrame {
         intent: &intent,
+        prepared: None,
         submission: None,
         not_submitted: Some(&proof),
         receipt: None,
@@ -531,6 +533,7 @@ fn side_effect_frame_receipt_request_uses_recorded_verify_evidence() {
     };
     let frame = SideEffectReplayFrame {
         intent: &intent,
+        prepared: None,
         submission: None,
         not_submitted: None,
         receipt: Some(&receipt),
@@ -899,6 +902,7 @@ fn replay_broker_with_facts(
         facts: fact_map,
         fact_events: BTreeMap::new(),
         intents: BTreeMap::new(),
+        prepared_invocations: BTreeMap::new(),
         submissions: BTreeMap::new(),
         not_submitted: BTreeMap::new(),
         receipts: BTreeMap::new(),

@@ -12,6 +12,29 @@ The EVM lifecycle cutover is implemented on top of kernel/program/certifier/runt
 authority. Context membership is certified authority; a domain-only EVM continuation path no longer
 exists.
 
+## fresh audit completion addendum
+
+The fresh architect audit gaps are implemented as part of the final completion state:
+
+- Source-run imports now fail closed unless retained authority artifacts verify the claimed source
+  run/export certificate, export bundle digest, terminal event, producer descriptor, source
+  cell/output id, source stage, source schema/semantic ids, source context ref, source value digest,
+  source context descriptor, and import policy digest. Identifier-only, public JSON, projection-row,
+  and raw-payload imports remain non-authoritative.
+- External address adoption now records replayable code-read evidence on the produced lifecycle
+  resource. The stored evidence includes the certified context ref, EVM network context ref,
+  lifecycle stage, observed chain id, policy digest, observed code hash, and observed code byte
+  length.
+- EVM submission, receipt, confirmation, and validation-read evidence now carries the certified
+  context ref, EVM network context ref, and lifecycle stage identity.
+- Generic replay side-effect inputs now expose retained prepared-invocation artifacts and retained
+  submission/receipt artifact bytes to domain replay verifiers.
+- The EVM replay verifier now reconstructs and checks lifecycle side-effect requests from the
+  certified prepared invocation and rejects mismatched prepared, submission, receipt, and
+  confirmation context or stage evidence.
+- Regression tests cover retained source-run export authority, tampered source terminal events,
+  persisted external-adoption evidence, and mismatched replay submission/receipt context evidence.
+
 At the public cutover, old public configure and validate shapes are rejected, not translated:
 
 - `{ "config": ConfigurePhaseConfig, "deployed": DeployedContract }`

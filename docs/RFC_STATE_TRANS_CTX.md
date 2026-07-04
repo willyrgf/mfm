@@ -441,7 +441,7 @@ ConfigurationClaim
   ExternalObservedConfigured
     provenance_label
     evidence_policy_digest
-    assertion_evidence_refs
+    external_adoption_evidence_digest
 
   ExternalClaimedConfigured
     provenance_label
