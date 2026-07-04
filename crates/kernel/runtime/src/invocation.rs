@@ -42,11 +42,6 @@ impl CertifiedInvocationContext {
         }
     }
 
-    /// Returns the certified context table entry, if this invocation is context-bound.
-    pub fn spec(&self) -> Option<&spec::CertifiedContextSpec> {
-        self.spec.as_ref()
-    }
-
     /// Materializes state context authority for either no-context or typed-context states.
     pub fn certified_context<C>(&self) -> Result<CertifiedContext<C>>
     where
