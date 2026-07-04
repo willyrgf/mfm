@@ -242,6 +242,7 @@ fn context_bound_instances_expose_typed_context_metadata() {
                 .to_owned(),
         },
         deploy_evidence: Vec::new(),
+        external_adoption_evidence: None,
         deployed_block_number: Some(10),
     };
     let configured = ConfiguredContractInstance {
@@ -254,6 +255,7 @@ fn context_bound_instances_expose_typed_context_metadata() {
         },
         configuration_claim: configured_claim(),
         configure_or_import_evidence: Vec::new(),
+        external_adoption_evidence: None,
         configured_block_number: Some(11),
         asserted_configuration_snapshot: None,
     };
@@ -299,11 +301,11 @@ fn configuration_claims_distinguish_mfm_provenance_from_external_adoption() {
     let observed = ConfigurationClaim::ExternalObservedConfigured {
         provenance_label: ProvenanceLabel::new("audited-external").expect("label"),
         evidence_policy_digest: profile_digest(0x45),
-        assertion_evidence_refs: Vec::new(),
+        external_adoption_evidence_digest: profile_digest(0x46),
     };
     let claimed = ConfigurationClaim::ExternalClaimedConfigured {
         provenance_label: ProvenanceLabel::new("claimed-external").expect("label"),
-        evidence_policy_digest: profile_digest(0x46),
+        evidence_policy_digest: profile_digest(0x47),
     };
 
     assert!(configured_claim().proves_mfm_configuration());

@@ -360,6 +360,8 @@ pub mod v1 {
     pub struct SideEffectReplayFrame<'a> {
         /// Intent persisted event payload.
         pub intent: &'a side_effect::IntentPersisted,
+        /// Invocation prepared event payload, when present.
+        pub prepared: Option<&'a side_effect::InvocationPrepared>,
         /// Submission observed event payload, when present.
         pub submission: Option<&'a side_effect::SubmissionObserved>,
         /// Not-submitted proof payload, when present.
@@ -451,6 +453,19 @@ pub mod v1 {
         pub submission: side_effect::SubmissionObserved,
         /// Retained submission artifact evidence.
         pub artifact: StoredArtifactEvidenceRef,
+        /// Retained submission artifact bytes.
+        pub artifact_bytes: Vec<u8>,
+    }
+
+    /// Replay evidence returned for a prepared side-effect invocation.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct PreparedInvocationReplayEvidence {
+        /// Invocation prepared event payload.
+        pub prepared: side_effect::InvocationPrepared,
+        /// Retained prepared invocation artifact evidence.
+        pub artifact: StoredArtifactEvidenceRef,
+        /// Retained prepared invocation artifact bytes.
+        pub artifact_bytes: Vec<u8>,
     }
 
     /// Replay evidence returned for a side effect proven not submitted.
@@ -469,6 +484,8 @@ pub mod v1 {
         pub receipt: side_effect::ReceiptObserved,
         /// Retained receipt artifact evidence.
         pub artifact: StoredArtifactEvidenceRef,
+        /// Retained receipt artifact bytes.
+        pub artifact_bytes: Vec<u8>,
     }
 
     /// Replay evidence returned for an observed side-effect confirmation.
@@ -498,6 +515,8 @@ pub mod v1 {
         pub intent: side_effect::IntentPersisted,
         /// Retained intent artifact evidence.
         pub artifact: StoredArtifactEvidenceRef,
+        /// Retained intent artifact bytes.
+        pub artifact_bytes: Vec<u8>,
     }
 
     /// Evidence-only receipt verifier input.
@@ -505,6 +524,8 @@ pub mod v1 {
     pub struct SideEffectReceiptReplayInput {
         /// Intent evidence for the side effect being verified.
         pub intent: SideEffectIntentReplayEvidence,
+        /// Prepared invocation evidence, when the side-effect protocol recorded one.
+        pub prepared_invocation: Option<PreparedInvocationReplayEvidence>,
         /// Submission evidence when submission was observed before receipt.
         pub submission: Option<SubmissionReplayEvidence>,
         /// Receipt evidence being verified.
@@ -516,6 +537,8 @@ pub mod v1 {
     pub struct SideEffectSubmissionReplayInput {
         /// Intent evidence for the side effect being verified.
         pub intent: SideEffectIntentReplayEvidence,
+        /// Prepared invocation evidence, when the side-effect protocol recorded one.
+        pub prepared_invocation: Option<PreparedInvocationReplayEvidence>,
         /// Submission evidence being verified.
         pub submission: SubmissionReplayEvidence,
     }
@@ -525,6 +548,8 @@ pub mod v1 {
     pub struct SideEffectConfirmationReplayInput {
         /// Intent evidence for the side effect being verified.
         pub intent: SideEffectIntentReplayEvidence,
+        /// Prepared invocation evidence, when the side-effect protocol recorded one.
+        pub prepared_invocation: Option<PreparedInvocationReplayEvidence>,
         /// Submission evidence when submission was observed before confirmation.
         pub submission: Option<SubmissionReplayEvidence>,
         /// Receipt evidence observed before confirmation.
@@ -753,6 +778,7 @@ pub mod v1 {
         facts: BTreeMap<FactReplayKey, events::FactRecorded>,
         fact_events: BTreeMap<FactReplayKey, KernelEventEnvelope>,
         intents: BTreeMap<SideEffectPairId, side_effect::IntentPersisted>,
+        prepared_invocations: BTreeMap<SideEffectKey, side_effect::InvocationPrepared>,
         submissions: BTreeMap<SideEffectKey, side_effect::SubmissionObserved>,
         not_submitted: BTreeMap<SideEffectKey, side_effect::NotSubmittedProven>,
         receipts: BTreeMap<SideEffectKey, side_effect::ReceiptObserved>,
@@ -818,6 +844,7 @@ pub mod v1 {
                 facts: BTreeMap::new(),
                 fact_events: BTreeMap::new(),
                 intents: BTreeMap::new(),
+                prepared_invocations: BTreeMap::new(),
                 submissions: BTreeMap::new(),
                 not_submitted: BTreeMap::new(),
                 receipts: BTreeMap::new(),
@@ -952,6 +979,7 @@ pub mod v1 {
                 let key = (intent.pair_id.clone(), intent.invocation_epoch);
                 frames.push(SideEffectReplayFrame {
                     intent,
+                    prepared: self.prepared_invocations.get(&key),
                     submission: self.submissions.get(&key),
                     not_submitted: self.not_submitted.get(&key),
                     receipt: self.receipts.get(&key),
@@ -973,7 +1001,24 @@ pub mod v1 {
             Ok(SubmissionReplayEvidence {
                 submission: submission.clone(),
                 artifact: self.verify_requested_side_effect_artifact(request, submission)?,
+                artifact_bytes: self
+                    .artifact_bytes(&submission.submission_artifact_id)?
+                    .to_vec(),
             })
+        }
+
+        /// Returns prepared side-effect invocation evidence from replay records only.
+        pub fn side_effect_prepared_invocation(
+            &self,
+            request: &SideEffectEvidenceReplayRequest,
+        ) -> Result<PreparedInvocationReplayEvidence> {
+            self.verify_side_effect_intent(request)?;
+            let prepared = self.required_side_effect_record(
+                &self.prepared_invocations,
+                request,
+                "prepared invocation",
+            )?;
+            self.verify_prepared_invocation_artifact(prepared)
         }
 
         /// Returns side-effect not-submitted proof evidence from replay records only.
@@ -1005,6 +1050,7 @@ pub mod v1 {
             let submission = self.side_effect_submission(request)?;
             let input = SideEffectSubmissionReplayInput {
                 intent: self.side_effect_intent_evidence(request)?,
+                prepared_invocation: self.side_effect_prepared_invocation_for(request)?,
                 submission: submission.clone(),
             };
             verifier.verify_submission(&input)?;
@@ -1021,6 +1067,7 @@ pub mod v1 {
             Ok(ReceiptReplayEvidence {
                 receipt: receipt.clone(),
                 artifact: self.verify_requested_side_effect_artifact(request, receipt)?,
+                artifact_bytes: self.artifact_bytes(&receipt.receipt_artifact_id)?.to_vec(),
             })
         }
 
@@ -1069,6 +1116,7 @@ pub mod v1 {
             let receipt = self.side_effect_receipt(&verifier_request)?;
             let input = SideEffectReceiptReplayInput {
                 intent: self.side_effect_intent_evidence(request)?,
+                prepared_invocation: self.side_effect_prepared_invocation_for(request)?,
                 submission: self.side_effect_submission_for(request)?,
                 receipt: receipt.clone(),
             };
@@ -1090,6 +1138,7 @@ pub mod v1 {
             let confirmation = self.side_effect_confirmation(&verifier_request)?;
             let input = SideEffectConfirmationReplayInput {
                 intent: self.side_effect_intent_evidence(request)?,
+                prepared_invocation: self.side_effect_prepared_invocation_for(request)?,
                 submission: self.side_effect_submission_for(request)?,
                 receipt: self.side_effect_receipt_for(request)?,
                 verification: self.side_effect_verification_for_pair(&request.pair_id)?,
@@ -1287,6 +1336,13 @@ pub mod v1 {
                         )?;
                         self.verify_invocation_prepared_resource_key(payload, &resource_keys)?;
                         self.authorize_event_artifacts(envelope.payload())?;
+                        insert_unique(
+                            &mut self.prepared_invocations,
+                            (payload.pair_id.clone(), payload.invocation_epoch),
+                            payload.clone(),
+                            ReplayErrorKind::InvalidRunStream,
+                            "duplicate side-effect prepared invocation replay event",
+                        )?;
                     }
                     KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
                         self.verify_side_effect_event_against_intent(
@@ -1483,6 +1539,7 @@ pub mod v1 {
                     producer_node_id: Some(&intent.node_id),
                     producer_seed_id: None,
                 })?,
+                artifact_bytes: self.artifact_bytes(&intent.intent_artifact_id)?.to_vec(),
             })
         }
 
@@ -1544,6 +1601,40 @@ pub mod v1 {
             })
         }
 
+        fn verify_prepared_invocation_artifact(
+            &self,
+            prepared: &side_effect::InvocationPrepared,
+        ) -> Result<PreparedInvocationReplayEvidence> {
+            let artifact_id = prepared.prepared_artifact_id.as_ref().ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::SideEffectMissing,
+                    format!("missing prepared invocation artifact {}", prepared.pair_id),
+                )
+            })?;
+            let digest = prepared.prepared_hash.as_ref().ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::SideEffectMissing,
+                    format!(
+                        "missing prepared invocation artifact hash {}",
+                        prepared.pair_id
+                    ),
+                )
+            })?;
+            Ok(PreparedInvocationReplayEvidence {
+                prepared: prepared.clone(),
+                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
+                    artifact_id,
+                    digest,
+                    schema_id: None,
+                    semantic_type_id: None,
+                    role: ArtifactRole::PreparedInvocation,
+                    producer_node_id: Some(&prepared.node_id),
+                    producer_seed_id: None,
+                })?,
+                artifact_bytes: self.artifact_bytes(artifact_id)?.to_vec(),
+            })
+        }
+
         fn side_effect_submission_for(
             &self,
             request: &SideEffectEvidenceReplayRequest,
@@ -1555,7 +1646,22 @@ pub mod v1 {
             Ok(Some(SubmissionReplayEvidence {
                 submission: submission.clone(),
                 artifact: self.verify_side_effect_artifact(submission)?,
+                artifact_bytes: self
+                    .artifact_bytes(&submission.submission_artifact_id)?
+                    .to_vec(),
             }))
+        }
+
+        fn side_effect_prepared_invocation_for(
+            &self,
+            request: &SideEffectEvidenceReplayRequest,
+        ) -> Result<Option<PreparedInvocationReplayEvidence>> {
+            let Some(prepared) =
+                self.optional_side_effect_record(&self.prepared_invocations, request)
+            else {
+                return Ok(None);
+            };
+            self.verify_prepared_invocation_artifact(prepared).map(Some)
         }
 
         fn side_effect_receipt_for(
@@ -1568,6 +1674,7 @@ pub mod v1 {
             Ok(Some(ReceiptReplayEvidence {
                 receipt: receipt.clone(),
                 artifact: self.verify_side_effect_artifact(receipt)?,
+                artifact_bytes: self.artifact_bytes(&receipt.receipt_artifact_id)?.to_vec(),
             }))
         }
 

@@ -1404,6 +1404,78 @@ pub struct ImportFromMfmRunEvidence {
     pub import_policy_digest: ContractProfileDigestRef,
 }
 
+/// Retained certificate for a source-run lifecycle export bundle.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "source-run-export-certificate",
+    schema = "mfm.evm.contract.value.source_run_export_certificate"
+)]
+pub struct SourceRunExportCertificate {
+    /// Certificate contract version.
+    pub certificate_version: u64,
+    /// Source run id covered by the certificate.
+    pub source_run_id: LifecycleRunIdRef,
+    /// Source certified spec hash covered by the certificate.
+    pub source_spec_hash: LifecycleSpecHashRef,
+    /// Digest of the retained stream/export bundle this certificate authorizes.
+    pub export_bundle_digest: ContractProfileDigestRef,
+    /// Producer descriptors allowed to export lifecycle resources.
+    pub allowed_producer_descriptor_ids: Vec<LifecycleDescriptorIdRef>,
+    /// Context descriptors allowed by the source authority.
+    pub allowed_context_descriptor_ids: Vec<LifecycleContextDescriptorIdRef>,
+    /// Value schemas allowed by the source authority.
+    pub allowed_schema_ids: Vec<ArtifactEvidenceSchemaId>,
+    /// Value semantic types allowed by the source authority.
+    pub allowed_semantic_type_ids: Vec<ArtifactEvidenceSemanticTypeId>,
+}
+
+/// One terminal source-run cell or output event in a retained export bundle.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "source-run-terminal-event",
+    schema = "mfm.evm.contract.value.source_run_terminal_event"
+)]
+pub struct SourceRunTerminalEvent {
+    /// Source terminal cell or output event id.
+    pub source_terminal_cell_or_output_event_ref: LifecycleEventIdRef,
+    /// Source cell or output id.
+    pub source_cell_or_output_id: SourceCellOrOutputRef,
+    /// Source value schema id.
+    pub source_cell_schema_id: ArtifactEvidenceSchemaId,
+    /// Source value semantic type id.
+    pub source_cell_semantic_type_id: ArtifactEvidenceSemanticTypeId,
+    /// Source producer descriptor id.
+    pub source_producer_descriptor_id: LifecycleDescriptorIdRef,
+    /// Source lifecycle stage.
+    pub source_stage: ContractLifecycleStage,
+    /// Source context ref.
+    pub source_context_ref: ContextRefValue,
+    /// Source context descriptor id.
+    pub source_context_descriptor_id: LifecycleContextDescriptorIdRef,
+    /// Source value digest.
+    pub source_value_digest: ContractProfileDigestRef,
+}
+
+/// Retained stream/export authority for source-run lifecycle imports.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "source-run-export-bundle",
+    schema = "mfm.evm.contract.value.source_run_export_bundle"
+)]
+pub struct SourceRunExportBundle {
+    /// Bundle contract version.
+    pub bundle_version: u64,
+    /// Source run id covered by the bundle.
+    pub source_run_id: LifecycleRunIdRef,
+    /// Source certified spec hash covered by the bundle.
+    pub source_spec_hash: LifecycleSpecHashRef,
+    /// Terminal lifecycle cell/output events exported from the source stream.
+    pub terminal_events: Vec<SourceRunTerminalEvent>,
+}
+
 /// Certified evidence policy for adopting an external EVM address.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue)]
 #[mfm(
@@ -1516,6 +1588,74 @@ impl<'de> Deserialize<'de> for AdoptExternalAddress {
     }
 }
 
+/// Redacted EVM source evidence captured with an external adoption read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "external-evm-source-evidence",
+    schema = "mfm.evm.contract.value.external_evm_source_evidence"
+)]
+pub struct ExternalEvmSourceEvidence {
+    /// Semantic network id supplied to the provider guard.
+    pub network_id: String,
+    /// Expected EVM chain id supplied to the provider guard.
+    pub expected_chain_id: u64,
+    /// Observed EVM chain id reported by the provider.
+    pub observed_chain_id: u64,
+    /// Redacted provider source reference.
+    pub source_ref: String,
+    /// Redacted provider source policy id.
+    pub policy_id: String,
+}
+
+/// Replayable code-read evidence captured while adopting an external EVM address.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "external-code-read-evidence",
+    schema = "mfm.evm.contract.value.external_code_read_evidence"
+)]
+pub struct ExternalCodeReadEvidence {
+    /// Address whose deployed bytecode was read.
+    pub address: ContractAddress,
+    /// Block selector used for the code read.
+    pub block: BlockSelector,
+    /// Redacted source evidence for the provider read.
+    pub source: ExternalEvmSourceEvidence,
+    /// Observed bytecode hash.
+    pub observed_code_hash: EvmCodeHash,
+    /// Observed bytecode length.
+    pub observed_code_byte_len: u64,
+}
+
+/// Replayable read-assertion evidence captured during external configured adoption.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "external-read-assertion-evidence",
+    schema = "mfm.evm.contract.value.external_read_assertion_evidence"
+)]
+pub struct ExternalReadAssertionEvidence {
+    /// Redacted source evidence for the provider read.
+    pub source: ExternalEvmSourceEvidence,
+    /// Decoded assertion result.
+    pub result: ValidationReadResult,
+}
+
+/// Replayable event-assertion evidence captured during external configured adoption.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "external-event-assertion-evidence",
+    schema = "mfm.evm.contract.value.external_event_assertion_evidence"
+)]
+pub struct ExternalEventAssertionEvidence {
+    /// Redacted source evidence for the provider read.
+    pub source: ExternalEvmSourceEvidence,
+    /// Decoded assertion result.
+    pub result: ValidationEventResult,
+}
+
 /// Replayable evidence captured while adopting an external EVM address.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[mfm(
@@ -1526,14 +1666,20 @@ impl<'de> Deserialize<'de> for AdoptExternalAddress {
 pub struct ExternalAdoptionEvidence {
     /// Certified evidence policy digest.
     pub evidence_policy_digest: ContractProfileDigestRef,
-    /// Optional code-read evidence.
-    pub code_evidence: Option<LifecycleArtifactEvidenceRef>,
-    /// Optional observed code hash.
-    pub observed_code_hash: Option<EvmCodeHash>,
-    /// Read assertion evidence refs.
-    pub read_evidence_refs: Vec<LifecycleArtifactEvidenceRef>,
-    /// Event assertion evidence refs.
-    pub event_evidence_refs: Vec<LifecycleArtifactEvidenceRef>,
+    /// Certified contract lifecycle context ref.
+    pub context_ref: ContextRefValue,
+    /// Canonical content ref string for the certified EVM network context.
+    pub evm_network_context_ref: String,
+    /// Lifecycle stage admitted by this external adoption.
+    pub resource_stage: ContractLifecycleStage,
+    /// Observed EVM chain id.
+    pub observed_chain_id: u64,
+    /// Replayable code-read evidence when the policy required a code observation.
+    pub code_read_evidence: Option<ExternalCodeReadEvidence>,
+    /// Replayable read assertion evidence.
+    pub read_assertion_evidence: Vec<ExternalReadAssertionEvidence>,
+    /// Replayable event assertion evidence.
+    pub event_assertion_evidence: Vec<ExternalEventAssertionEvidence>,
 }
 
 /// Claim describing why an instance is considered configured.
@@ -1575,8 +1721,8 @@ pub enum ConfigurationClaim {
         provenance_label: ProvenanceLabel,
         /// Certified evidence policy digest.
         evidence_policy_digest: ContractProfileDigestRef,
-        /// Assertion evidence refs that support the observation.
-        assertion_evidence_refs: Vec<LifecycleArtifactEvidenceRef>,
+        /// Digest of the inline external adoption evidence that supports the observation.
+        external_adoption_evidence_digest: ContractProfileDigestRef,
     },
     /// External adoption made an explicitly unverified configured claim.
     ExternalClaimedConfigured {
@@ -1647,6 +1793,8 @@ pub struct DeployedContractInstance {
     pub deploy_provenance: DeployProvenance,
     /// Deployment or import evidence refs.
     pub deploy_evidence: Vec<LifecycleArtifactEvidenceRef>,
+    /// Replayable external-adoption evidence when this instance was adopted externally.
+    pub external_adoption_evidence: Option<ExternalAdoptionEvidence>,
     /// Optional block number that confirmed deployment or adoption.
     pub deployed_block_number: Option<u64>,
 }
@@ -1699,6 +1847,8 @@ pub struct ConfiguredContractInstance {
     pub configuration_claim: ConfigurationClaim,
     /// Configuration or import evidence refs.
     pub configure_or_import_evidence: Vec<LifecycleArtifactEvidenceRef>,
+    /// Replayable external-adoption evidence when this instance was adopted externally.
+    pub external_adoption_evidence: Option<ExternalAdoptionEvidence>,
     /// Optional highest block number that confirmed configuration or adoption.
     pub configured_block_number: Option<u64>,
     /// Optional configured-state assertion snapshot.
