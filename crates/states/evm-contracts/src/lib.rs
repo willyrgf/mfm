@@ -550,13 +550,6 @@ pub struct ContextBoundDeployContractState {
     action: DeployAction,
 }
 
-impl ContextBoundDeployContractState {
-    /// Returns the deploy action config.
-    pub const fn action(&self) -> &DeployAction {
-        &self.action
-    }
-}
-
 impl StateSpec for ContextBoundDeployContractState {
     type Config = DeployAction;
     type Context = EvmContractContext;
@@ -666,13 +659,6 @@ impl SideEffectState for ContextBoundDeployContractState {
 /// Context-bound state that prepares and submits contract configuration transactions.
 pub struct ContextBoundConfigureContractState {
     action: ConfigureAction,
-}
-
-impl ContextBoundConfigureContractState {
-    /// Returns the configure action config.
-    pub const fn action(&self) -> &ConfigureAction {
-        &self.action
-    }
 }
 
 impl StateSpec for ContextBoundConfigureContractState {
@@ -826,11 +812,6 @@ pub struct ContextBoundValidateContractState {
 }
 
 impl ContextBoundValidateContractState {
-    /// Returns the validate action config.
-    pub const fn action(&self) -> &ValidateAction {
-        &self.action
-    }
-
     /// Builds the deterministic read request an adapter must execute.
     pub fn read_request(
         &self,
@@ -966,16 +947,9 @@ impl ReadState for ContextBoundValidateContractState {
 }
 
 /// Context-bound state that imports a deployed contract instance from certified evidence.
-pub struct ImportDeployedContractState {
-    import: ImportDeployedSpec,
-}
+pub struct ImportDeployedContractState;
 
 impl ImportDeployedContractState {
-    /// Returns the deployed import spec.
-    pub const fn import(&self) -> &ImportDeployedSpec {
-        &self.import
-    }
-
     /// Projects a deployed instance from already verified source-run evidence.
     pub fn admit_verified_mfm_run_import(
         import: &ImportDeployedSpec,
@@ -1055,10 +1029,8 @@ impl StateSpec for ImportDeployedContractState {
         produces_context(contract_instance_resource_kind(), deployed_contract_stage())
     }
 
-    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
-        Ok(Self {
-            import: config.into_inner(),
-        })
+    fn new(_config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self)
     }
 }
 
@@ -1076,16 +1048,9 @@ impl ReadState for ImportDeployedContractState {
 }
 
 /// Context-bound state that imports a configured contract instance from certified evidence.
-pub struct ImportConfiguredContractState {
-    import: ImportConfiguredSpec,
-}
+pub struct ImportConfiguredContractState;
 
 impl ImportConfiguredContractState {
-    /// Returns the configured import spec.
-    pub const fn import(&self) -> &ImportConfiguredSpec {
-        &self.import
-    }
-
     /// Projects a configured instance from already verified source-run evidence.
     pub fn admit_verified_mfm_run_import(
         import: &ImportConfiguredSpec,
@@ -1246,10 +1211,8 @@ impl StateSpec for ImportConfiguredContractState {
         )
     }
 
-    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
-        Ok(Self {
-            import: config.into_inner(),
-        })
+    fn new(_config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self)
     }
 }
 
