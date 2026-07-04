@@ -16,8 +16,8 @@ use mfm_ids::{
     StateKind, StateVersion,
 };
 use mfm_program::{
-    AdapterBindingSpec, IdempotencyKey, PureState, ReadState, SideEffectState, StateResult,
-    StateSpec,
+    AdapterBindingSpec, IdempotencyKey, NoContext, PureState, ReadState, SideEffectState,
+    StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs, StateInput};
 use serde::{Deserialize, Serialize};
@@ -479,6 +479,7 @@ pub struct ProofReadFactState {
 
 impl StateSpec for ProofReadFactState {
     type Config = ProofReadConfig;
+    type Context = NoContext;
     type Input = ();
     type Output = ProofFact;
     type Effect = ReadExternal;
@@ -524,6 +525,7 @@ pub struct ProofApplySideEffectState {
 
 impl StateSpec for ProofApplySideEffectState {
     type Config = ProofApplyConfig;
+    type Context = NoContext;
     type Input = ProofFact;
     type Output = ProofSideEffectResult;
     type Effect = ApplySideEffect;
@@ -622,6 +624,7 @@ pub struct ProofAssembleOutputState;
 
 impl StateSpec for ProofAssembleOutputState {
     type Config = ProofAssembleConfig;
+    type Context = NoContext;
     type Input = ProofAssembleInput;
     type Output = ProofOutput;
     type Effect = Pure;

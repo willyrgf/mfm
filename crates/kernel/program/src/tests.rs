@@ -1,6 +1,8 @@
 use super::*;
 use mfm_capabilities::{CapabilitySpec, ExternalMutationAuthorityRole};
-use mfm_ids::{CapabilityKind, CapabilityVersion, DigestBytes, SchemaId};
+use mfm_ids::{
+    CapabilityKind, CapabilityVersion, ContextResourceKind, ContextStage, DigestBytes, SchemaId,
+};
 use mfm_program_derive::{
     MfmConfig, MfmValue, OperationOutput as OperationOutputDerive,
     PublicOutputs as PublicOutputsDerive, StateInput as StateInputDerive,
@@ -223,6 +225,7 @@ struct MultiplyState {
 
 impl StateSpec for MultiplyState {
     type Config = LaunchConfig;
+    type Context = NoContext;
     type Input = LaunchValue;
     type Output = LaunchValue;
     type Effect = Pure;
@@ -249,6 +252,80 @@ impl StateSpec for MultiplyState {
 }
 
 impl PureState for MultiplyState {
+    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+        Ok(LaunchValue {
+            amount: input.amount * self.config.multiplier,
+            label: input.label,
+        })
+    }
+}
+
+fn context_resource_kind() -> ContextResourceKind {
+    ContextResourceKind::new("mfm.program.test.balance").expect("context resource kind")
+}
+
+fn context_stage() -> ContextStage {
+    ContextStage::new("resolved").expect("context stage")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.program.test",
+    name = "chain_context",
+    version = "1",
+    schema = "mfm.program.test.chain_context"
+)]
+struct ChainContext {
+    chain_id: u64,
+    network: String,
+}
+
+impl MfmContext for ChainContext {}
+
+#[derive(Debug, Clone)]
+struct ContextualMultiplyState {
+    config: LaunchConfig,
+}
+
+impl StateSpec for ContextualMultiplyState {
+    type Config = LaunchConfig;
+    type Context = ChainContext;
+    type Input = LaunchValue;
+    type Output = LaunchValue;
+    type Effect = Pure;
+    type Caps = NoCaps;
+
+    fn kind() -> Result<StateKind> {
+        test_state_kind(
+            "contextual_multiply",
+            b"mfm.program.test.state:contextual_multiply",
+        )
+    }
+
+    fn version() -> Result<StateVersion> {
+        StateVersion::new("mfm.program.test.state.contextual_multiply.v1")
+            .map_err(|error| PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "contextual_multiply"
+    }
+
+    fn output_context_contract() -> Result<StateOutputContextContractSpec> {
+        Ok(StateOutputContextContractSpec::Produces {
+            resource_kind: context_resource_kind(),
+            stage: context_stage(),
+        })
+    }
+
+    fn new(config: ValidatedConfig<Self::Config>) -> Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
+    }
+}
+
+impl PureState for ContextualMultiplyState {
     fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
         Ok(LaunchValue {
             amount: input.amount * self.config.multiplier,
@@ -296,6 +373,7 @@ macro_rules! impl_side_effect_state_spec {
     ($state:ty, $kind:literal, $version:literal, $name:literal, $digest:literal) => {
         impl StateSpec for $state {
             type Config = LaunchConfig;
+            type Context = NoContext;
             type Input = LaunchValue;
             type Output = LaunchValue;
             type Effect = ApplySideEffect;
@@ -469,6 +547,14 @@ fn register_multiply_state(registry: &mut StateRegistryBuilder) -> RegisteredSta
     registry
         .register::<MultiplyState>()
         .expect("state registers")
+}
+
+fn register_contextual_multiply_state(
+    registry: &mut StateRegistryBuilder,
+) -> RegisteredState<ContextualMultiplyState> {
+    registry
+        .register::<ContextualMultiplyState>()
+        .expect("contextual state registers")
 }
 
 fn multiply_state_registry() -> StateRegistrySnapshot {
@@ -795,6 +881,203 @@ fn explicit_registered_state_token_plans_without_builder_registry() {
 
     assert_eq!(draft.state_nodes().len(), 1);
     assert_eq!(draft.state_nodes()[0].key.as_str(), "multiply");
+}
+
+#[test]
+fn declared_context_refs_are_stable_and_duplicates_reject() {
+    fn draft_with_context(chain_id: u64) -> TypedProgramDraft {
+        build_root(ScopeKey::new("root").expect("scope key"), |root| {
+            let input = root.seed(SeedKey::new("input")?, launch_seed(1, "context"))?;
+            let _context = root.scope().declare_context(ChainContext {
+                chain_id,
+                network: "local".to_owned(),
+            })?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &LaunchPublicOutputs { result: input },
+            )
+        })
+        .expect("root builds")
+    }
+
+    let first = draft_with_context(31337);
+    let second = draft_with_context(31337);
+    let different = draft_with_context(1);
+    assert_eq!(first.contexts().len(), 1);
+    assert_eq!(
+        first.contexts()[0].context_ref,
+        second.contexts()[0].context_ref
+    );
+    assert_ne!(
+        first.contexts()[0].context_ref,
+        different.contexts()[0].context_ref
+    );
+
+    build_root(ScopeKey::new("root").expect("scope key"), |root| {
+        let input = root.seed(SeedKey::new("input")?, launch_seed(1, "duplicate"))?;
+        let context = ChainContext {
+            chain_id: 31337,
+            network: "local".to_owned(),
+        };
+        let _first = root.scope().declare_context(context.clone())?;
+        let error = root
+            .scope()
+            .declare_context(context)
+            .expect_err("duplicate context ref rejects");
+        assert!(matches!(error, PlanError::DuplicateContextRef(_)));
+        root.bind_public_outputs(
+            PublicOutputKey::new("terminal")?,
+            &LaunchPublicOutputs { result: input },
+        )
+    })
+    .expect("root still builds after handled duplicate");
+}
+
+#[test]
+fn state_in_context_emits_context_node_output_and_input_metadata() {
+    let mut registry = StateRegistryBuilder::new();
+    let registered = register_contextual_multiply_state(&mut registry);
+    let descriptor = registered.descriptor().clone();
+    register_multiply_state(&mut registry);
+
+    let draft = build_root_with_registry(
+        ScopeKey::new("root").expect("scope key"),
+        registry.snapshot(),
+        |root| {
+            let input = root.seed(SeedKey::new("input")?, launch_seed(2, "contextual"))?;
+            let context = root.scope().declare_context(ChainContext {
+                chain_id: 31337,
+                network: "local".to_owned(),
+            })?;
+            let context_bound = root
+                .scope()
+                .state_in_context::<ContextualMultiplyState, _, ChainContext>(
+                    StateKey::new("contextual")?,
+                    &context,
+                    LaunchConfig { multiplier: 5 },
+                    input,
+                )?;
+            let result = root.scope().state::<MultiplyState, _>(
+                StateKey::new("consume-contextual")?,
+                LaunchConfig { multiplier: 2 },
+                context_bound,
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &LaunchPublicOutputs { result },
+            )
+        },
+    )
+    .expect("root builds");
+
+    assert_eq!(draft.contexts().len(), 1);
+    let context = &draft.contexts()[0];
+    match descriptor.context() {
+        StateContextDescriptorSpec::Required(requirement) => {
+            assert_eq!(
+                &context.context_descriptor_id,
+                &requirement.context_descriptor_id
+            );
+            assert_eq!(&context.schema_id, &requirement.schema_id);
+            assert_eq!(&context.semantic_type_id, &requirement.semantic_type_id);
+            assert_eq!(
+                &context.canonicalizer_identity,
+                &requirement.canonicalizer_identity
+            );
+        }
+        StateContextDescriptorSpec::NoContext => panic!("contextual state must require context"),
+    }
+
+    let context_node = draft
+        .state_nodes()
+        .iter()
+        .find(|node| node.key.as_str() == "contextual")
+        .expect("contextual node");
+    assert_eq!(&context_node.context_descriptor, descriptor.context());
+    assert_eq!(
+        &context_node.output_context_contract,
+        descriptor.output_context()
+    );
+    assert!(matches!(
+        &context_node.context,
+        NodeContextSpec::Required { context_ref } if context_ref == &context.context_ref
+    ));
+    match &context_node.output_context {
+        CellContextSpec::Bound {
+            context_ref,
+            resource_kind,
+            stage,
+            producer,
+        } => {
+            assert_eq!(context_ref, &context.context_ref);
+            assert_eq!(resource_kind, &context_resource_kind());
+            assert_eq!(stage, &context_stage());
+            assert_eq!(
+                producer.producer_descriptor_id.as_ref(),
+                Some(&context_node.state_descriptor_id)
+            );
+            assert!(!producer.seed_producers_allowed);
+        }
+        CellContextSpec::NoContext => panic!("contextual output must be bound"),
+    }
+
+    let consumer = draft
+        .state_nodes()
+        .iter()
+        .find(|node| node.key.as_str() == "consume-contextual")
+        .expect("consumer node");
+    match consumer.input.root.as_ref() {
+        InputBindingNodeRef::Cell(cell) => {
+            assert_eq!(cell.cell_id(), &context_node.output_cell_id);
+            match cell.context() {
+                InputContextSpec::Required {
+                    context_ref,
+                    resource_kind,
+                    stage,
+                    producer,
+                } => {
+                    assert_eq!(context_ref, &context.context_ref);
+                    assert_eq!(resource_kind, &context_resource_kind());
+                    assert_eq!(stage, &context_stage());
+                    assert_eq!(
+                        producer.producer_descriptor_id.as_ref(),
+                        Some(&context_node.state_descriptor_id)
+                    );
+                    assert!(!producer.seed_producers_allowed);
+                }
+                InputContextSpec::NoContext => panic!("consumer input must carry context"),
+            }
+        }
+        other => panic!("unexpected consumer input binding: {other:?}"),
+    }
+}
+
+#[test]
+fn context_required_state_rejects_plain_state_authoring() {
+    let mut registry = StateRegistryBuilder::new();
+    register_contextual_multiply_state(&mut registry);
+
+    let error = build_root_with_registry(
+        ScopeKey::new("root").expect("scope key"),
+        registry.snapshot(),
+        |root| {
+            let input = root.seed(SeedKey::new("input")?, launch_seed(2, "missing-context"))?;
+            let result = root.scope().state::<ContextualMultiplyState, _>(
+                StateKey::new("contextual")?,
+                LaunchConfig { multiplier: 5 },
+                input,
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &LaunchPublicOutputs { result },
+            )
+        },
+    )
+    .expect_err("missing context rejects");
+
+    assert!(
+        matches!(error, PlanError::ContextContract(message) if message.contains("requires a certified context"))
+    );
 }
 
 #[test]
@@ -1222,7 +1505,7 @@ fn stable_ids_and_value_lineage_golden_vectors() {
     );
     assert_eq!(
         node.node_id.as_str(),
-        "node:sha256-jcs-v1:5dc13aa0cf883c534bb193465ed78bf7aee5ab8a10a76c4c9147cd983832457d"
+        "node:sha256-jcs-v1:dd367a529f7a8d1a7f6bcefd688941942649409bf8e28f3a528af0495c99af89"
     );
     assert_ne!(
         node.node_id, alternate_lowering_node_id,
@@ -1230,15 +1513,15 @@ fn stable_ids_and_value_lineage_golden_vectors() {
     );
     assert_eq!(
         node.output_cell_id.as_str(),
-        "cell:sha256-jcs-v1:79affe5044036f83e8ff751dd9287d97746d3b6d50bb62718639049add2bd106"
+        "cell:sha256-jcs-v1:a0a425a1ed0ef57383e669b3c789759b51ce17d6e77b4821fd149649d83b12cc"
     );
     assert_eq!(
         node.output_value_lineage.digest().as_str(),
-        "content:sha256-jcs-v1:84adddf8606ad8e4a44521bd27bb86c60ccabcde71f360e7490f99cdec07ef04"
+        "content:sha256-jcs-v1:e00a1480e94ca6d223f96afdbf1a036960cdc3757314da1aa3e8b7af78077af0"
     );
     assert_eq!(
         frame.lineage_digest.as_str(),
-        "content:sha256-jcs-v1:9a35808c7151a6a33afbb7aea9d12344254e5128df9a19712b330700fb312b74"
+        "content:sha256-jcs-v1:b5340c50d16a162c62ef1bdecdf1340de59f1a188e2a57be337ce068d7e5aa53"
     );
 }
 

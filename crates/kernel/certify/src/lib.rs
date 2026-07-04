@@ -2302,7 +2302,7 @@ impl<'a> DraftLowerer<'a> {
         spec::TypedExecutionSpec::new(spec::TypedExecutionSpecParts {
             authoring: self.authoring_provenance()?,
             saga: lower_saga_policy(self.draft.saga_policy()),
-            contexts: Vec::new(),
+            contexts: self.draft.contexts().to_vec(),
             scopes,
             seeds,
             descriptor_identities: self.descriptor_identities.values().cloned().collect(),
@@ -2449,7 +2449,7 @@ impl<'a> DraftLowerer<'a> {
             terminal_policy,
             storage_policy: spec::StoragePolicy::ContentAddressed,
             redaction_policy: spec::RedactionPolicy::Public,
-            context: spec::CellContextSpec::no_context(),
+            context: node.output_context.clone(),
         })?;
         self.insert_descriptor(spec::DescriptorIdentity::State(Box::new(
             state_descriptor_identity_from_program(node)?,
@@ -2493,7 +2493,7 @@ impl<'a> DraftLowerer<'a> {
             state_kind: node.state_kind.clone(),
             state_version: node.state_version.clone(),
             descriptor_id: node.state_descriptor_id.clone(),
-            context: spec::NodeContextSpec::no_context(),
+            context: node.context.clone(),
             config_ref,
             input_bindings,
             output_cell: node.output_cell_id.clone(),
@@ -2606,7 +2606,7 @@ impl<'a> DraftLowerer<'a> {
             terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
             storage_policy: spec::StoragePolicy::ContentAddressed,
             redaction_policy: spec::RedactionPolicy::Public,
-            context: spec::CellContextSpec::no_context(),
+            context: verify.output_context.clone(),
         })?;
         Ok(spec::NodeSpec {
             node_id: verify.node_id.clone(),
@@ -2679,7 +2679,7 @@ impl<'a> DraftLowerer<'a> {
                 terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
                 storage_policy: spec::StoragePolicy::ContentAddressed,
                 redaction_policy: spec::RedactionPolicy::Public,
-                context: spec::CellContextSpec::no_context(),
+                context: bridge.context.clone(),
             })?;
             let descriptor = framework_bridge_descriptor(
                 &bridge.schema_id,
@@ -5251,7 +5251,7 @@ fn lower_input_node(node: &program::InputBindingNode) -> Result<spec::InputBindi
                 schema_id: cell.schema_id().clone(),
                 required_terminal: lower_required_terminal(cell.required_terminal()),
                 value_lineage: lineage_ref(cell.value_lineage().digest()),
-                context: spec::InputContextSpec::no_context(),
+                context: cell.context().clone(),
             },
         ))),
         program::InputBindingNodeRef::Tuple(elements) => elements
@@ -5397,6 +5397,9 @@ fn state_descriptor_identity_from_program(
         name: node.state_descriptor_name.clone(),
         state_kind: node.state_kind.clone(),
         state_version: node.state_version.clone(),
+        context: node.context_descriptor.clone(),
+        input_context: node.input_context_contract.clone(),
+        output_context: node.output_context_contract.clone(),
         config_schema_id: node.config.schema_id.clone(),
         input_schema_id: node.input.input_schema_id.clone(),
         output_schema_id: node.output_schema_id.clone(),
@@ -5422,6 +5425,9 @@ fn state_descriptor_identity_from_registered(
         name: descriptor.name().to_owned(),
         state_kind: descriptor.kind().clone(),
         state_version: descriptor.version().clone(),
+        context: descriptor.context().clone(),
+        input_context: descriptor.input_context().clone(),
+        output_context: descriptor.output_context().clone(),
         config_schema_id: descriptor.config_schema_id().clone(),
         input_schema_id: descriptor.input_schema_id().clone(),
         output_schema_id: descriptor.output_schema_id().clone(),
@@ -5905,6 +5911,7 @@ fn state_descriptor_id_from_spec(
     descriptor_id_json(serde_json::json!({
         "capabilities": capability_set_json(&descriptor.capabilities),
         "config_schema_id": descriptor.config_schema_id.as_str(),
+        "context": state_context_descriptor_json(&descriptor.context),
         "effect": {
             "class": descriptor.effect_class.as_str(),
             "kind": descriptor.effect_kind.as_str(),
@@ -5912,15 +5919,78 @@ fn state_descriptor_id_from_spec(
             "version": descriptor.effect_version.as_str(),
         },
         "emitted_fact_descriptors": fact_descriptor_refs_json(&descriptor.emitted_fact_descriptors),
+        "input_context": state_input_context_contract_json(&descriptor.input_context),
         "input_schema_id": descriptor.input_schema_id.as_str(),
         "kind": descriptor.state_kind.as_str(),
         "name": descriptor.name.as_str(),
+        "output_context": state_output_context_contract_json(&descriptor.output_context),
         "output_schema_id": descriptor.output_schema_id.as_str(),
         "output_semantic_type_id": descriptor.output_semantic_type_id.as_str(),
         "runner": descriptor.runner.as_str(),
         "side_effect_contract_digest": descriptor.side_effect_contract_digest.as_ref().map(ContentDigest::as_str),
         "version": descriptor.state_version.as_str(),
     }))
+}
+
+fn state_context_descriptor_json(context: &spec::StateContextDescriptorSpec) -> serde_json::Value {
+    match context {
+        spec::StateContextDescriptorSpec::NoContext => serde_json::json!({
+            "kind": "no_context",
+        }),
+        spec::StateContextDescriptorSpec::Required(requirement) => {
+            let spec::StateContextDescriptorRequirementSpec {
+                context_descriptor_id,
+                schema_id,
+                semantic_type_id,
+                canonicalizer_identity,
+            } = requirement.as_ref();
+            serde_json::json!({
+                "canonicalizer_identity": canonicalizer_identity.as_str(),
+                "context_descriptor_id": context_descriptor_id.as_str(),
+                "kind": "required",
+                "schema_id": schema_id.as_str(),
+                "semantic_type_id": semantic_type_id.as_str(),
+            })
+        }
+    }
+}
+
+fn state_input_context_contract_json(
+    contract: &spec::StateInputContextContractSpec,
+) -> serde_json::Value {
+    match contract {
+        spec::StateInputContextContractSpec::NoContext => serde_json::json!({
+            "kind": "no_context",
+        }),
+        spec::StateInputContextContractSpec::Required {
+            resource_kind,
+            stage,
+            producer,
+        } => serde_json::json!({
+            "kind": "required",
+            "producer": context_producer_json(producer),
+            "resource_kind": resource_kind.as_str(),
+            "stage": stage.as_str(),
+        }),
+    }
+}
+
+fn state_output_context_contract_json(
+    contract: &spec::StateOutputContextContractSpec,
+) -> serde_json::Value {
+    match contract {
+        spec::StateOutputContextContractSpec::NoContext => serde_json::json!({
+            "kind": "no_context",
+        }),
+        spec::StateOutputContextContractSpec::Produces {
+            resource_kind,
+            stage,
+        } => serde_json::json!({
+            "kind": "produces",
+            "resource_kind": resource_kind.as_str(),
+            "stage": stage.as_str(),
+        }),
+    }
 }
 
 fn operation_descriptor_id_from_spec(
@@ -6192,6 +6262,7 @@ fn framework_state_descriptor(
             })
         }).collect::<Vec<_>>(),
         "config_schema_id": config_schema_id.as_str(),
+        "context": state_context_descriptor_json(&spec::StateContextDescriptorSpec::no_context()),
         "effect": {
             "class": effect.class.as_str(),
             "kind": effect.kind.as_str(),
@@ -6199,9 +6270,11 @@ fn framework_state_descriptor(
             "version": effect.version.as_str(),
         },
         "emitted_fact_descriptors": [],
+        "input_context": state_input_context_contract_json(&spec::StateInputContextContractSpec::no_context()),
         "input_schema_id": input_schema_id.as_str(),
         "kind": state_kind.as_str(),
         "name": name,
+        "output_context": state_output_context_contract_json(&spec::StateOutputContextContractSpec::no_context()),
         "output_schema_id": output_schema_id.as_str(),
         "output_semantic_type_id": output_semantic_type_id.as_str(),
         "runner": runner,
@@ -6213,6 +6286,9 @@ fn framework_state_descriptor(
         name: name.to_owned(),
         state_kind,
         state_version,
+        context: spec::StateContextDescriptorSpec::no_context(),
+        input_context: spec::StateInputContextContractSpec::no_context(),
+        output_context: spec::StateOutputContextContractSpec::no_context(),
         config_schema_id: config_schema_id.clone(),
         input_schema_id: input_schema_id.clone(),
         output_schema_id: output_schema_id.clone(),
@@ -6310,6 +6386,7 @@ fn state_node_id_from_spec(
         digest_bytes_json(serde_json::json!({
             "alg": DigestAlgorithm::Sha256JcsV1.as_str(),
             "config_digest": config_ref_digest.as_str(),
+            "context": node_context_json(&node.context),
             "input_binding_digest": node.input_bindings.digest.as_str(),
             "local_node_key": node.stable_key.as_str(),
             "lowering_version": spec::LOWERING_VERSION,
@@ -6382,6 +6459,7 @@ fn operation_lineage_frame_digest_from_spec(
                 })?;
                 Ok(serde_json::json!({
                     "cell_id": cell.cell_id.as_str(),
+                    "context": cell_context_json(&cell.context),
                     "schema_id": cell.schema_id.as_str(),
                     "scope_id": cell.scope_id.as_str(),
                     "semantic_type_id": cell.semantic_type_id.as_str(),
@@ -6391,6 +6469,26 @@ fn operation_lineage_frame_digest_from_spec(
             .collect::<Result<Vec<_>>>()?,
         "scope_id": frame.scope_id.as_str(),
     }))
+}
+
+fn cell_context_json(context: &spec::CellContextSpec) -> serde_json::Value {
+    match context {
+        spec::CellContextSpec::NoContext => serde_json::json!({
+            "kind": "no_context",
+        }),
+        spec::CellContextSpec::Bound {
+            context_ref,
+            resource_kind,
+            stage,
+            producer,
+        } => serde_json::json!({
+            "context_ref": context_ref.as_str(),
+            "kind": "bound",
+            "producer": context_producer_json(producer),
+            "resource_kind": resource_kind.as_str(),
+            "stage": stage.as_str(),
+        }),
+    }
 }
 
 fn framework_cell_id(
@@ -6532,6 +6630,18 @@ fn input_node_json(node: &spec::InputBindingNodeSpec) -> serde_json::Value {
             "elements": elements.iter().map(input_node_json).collect::<Vec<_>>(),
             "kind": "non_empty_vec",
             "ordering": ordering_json(*ordering),
+        }),
+    }
+}
+
+fn node_context_json(context: &spec::NodeContextSpec) -> serde_json::Value {
+    match context {
+        spec::NodeContextSpec::NoContext => serde_json::json!({
+            "kind": "no_context",
+        }),
+        spec::NodeContextSpec::Required { context_ref } => serde_json::json!({
+            "context_ref": context_ref.as_str(),
+            "kind": "required",
         }),
     }
 }

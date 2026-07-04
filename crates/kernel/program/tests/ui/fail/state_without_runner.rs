@@ -7,6 +7,7 @@ struct StateWithoutRunner;
 
 impl mfm_program::StateSpec for StateWithoutRunner {
     type Config = TryConfig;
+    type Context = mfm_program::NoContext;
     type Input = TryValue;
     type Output = TryValue;
     type Effect = mfm_effects::Pure;

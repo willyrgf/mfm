@@ -13,9 +13,9 @@ use mfm_capabilities::{CapabilityDescriptor, CapabilityRole, CapabilitySetDescri
 use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPayload};
 use mfm_ids::{
     short_stable_id_fragment, AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind,
-    CapabilityVersion, CellId, ContentDigest, DigestAlgorithm, EventId, IdentityError, NodeId,
-    RunId, SchemaId, ScopeId, SeedId, SemanticTypeId, SideEffectPairId, SpecHash, StateKind,
-    StateVersion, VisibleAscii512,
+    CapabilityVersion, CellId, ContentDigest, ContextResourceKind, ContextStage, DescriptorId,
+    DigestAlgorithm, EventId, IdentityError, NodeId, RunId, SchemaId, ScopeId, SeedId,
+    SemanticTypeId, SideEffectPairId, SpecHash, StateKind, StateVersion, VisibleAscii512,
 };
 use mfm_manual_auth::{ManualResolutionBlockReason, VerifiedManualResolutionForPrefix};
 use mfm_spec::v1::{
@@ -10207,6 +10207,15 @@ fn parse_descriptor_identity(json: &serde_json::Value) -> Result<DescriptorIdent
                 name: required_str(json, "name")?.to_owned(),
                 state_kind: parse_identity(required_str(json, "state_kind")?)?,
                 state_version: parse_identity(required_str(json, "state_version")?)?,
+                context: parse_state_context_descriptor(required_obj(json, "context")?)?,
+                input_context: parse_state_input_context_contract(required_obj(
+                    json,
+                    "input_context",
+                )?)?,
+                output_context: parse_state_output_context_contract(required_obj(
+                    json,
+                    "output_context",
+                )?)?,
                 config_schema_id: parse_identity(required_str(json, "config_schema_id")?)?,
                 input_schema_id: parse_identity(required_str(json, "input_schema_id")?)?,
                 output_schema_id: parse_identity(required_str(json, "output_schema_id")?)?,
@@ -10259,6 +10268,76 @@ fn parse_descriptor_identity(json: &serde_json::Value) -> Result<DescriptorIdent
         ))),
         other => Err(StoreError::Identity(format!(
             "unknown descriptor identity family {other}"
+        ))),
+    }
+}
+
+fn parse_state_context_descriptor(
+    json: &serde_json::Value,
+) -> Result<spec::StateContextDescriptorSpec> {
+    match required_str(json, "kind")? {
+        "no_context" => Ok(spec::StateContextDescriptorSpec::no_context()),
+        "required" => Ok(spec::StateContextDescriptorSpec::Required(Box::new(
+            spec::StateContextDescriptorRequirementSpec {
+                context_descriptor_id: parse_identity(required_str(
+                    json,
+                    "context_descriptor_id",
+                )?)?,
+                schema_id: parse_identity(required_str(json, "schema_id")?)?,
+                semantic_type_id: parse_identity(required_str(json, "semantic_type_id")?)?,
+                canonicalizer_identity: CanonicalizerIdentity::new(required_str(
+                    json,
+                    "canonicalizer_identity",
+                )?)
+                .map_err(|error| StoreError::Identity(error.to_string()))?,
+            },
+        ))),
+        kind => Err(StoreError::Event(format!(
+            "unknown state context descriptor kind {kind}"
+        ))),
+    }
+}
+
+fn parse_context_producer(json: &serde_json::Value) -> Result<spec::ContextProducerSpec> {
+    Ok(spec::ContextProducerSpec {
+        producer_descriptor_id: optional_str(json, "producer_descriptor_id")?
+            .map(parse_identity)
+            .transpose()?,
+        seed_producers_allowed: required_bool(json, "seed_producers_allowed")?,
+    })
+}
+
+fn parse_state_input_context_contract(
+    json: &serde_json::Value,
+) -> Result<spec::StateInputContextContractSpec> {
+    match required_str(json, "kind")? {
+        "no_context" => Ok(spec::StateInputContextContractSpec::no_context()),
+        "required" => Ok(spec::StateInputContextContractSpec::Required {
+            resource_kind: ContextResourceKind::new(required_str(json, "resource_kind")?)
+                .map_err(|error| StoreError::Identity(error.to_string()))?,
+            stage: ContextStage::new(required_str(json, "stage")?)
+                .map_err(|error| StoreError::Identity(error.to_string()))?,
+            producer: Box::new(parse_context_producer(required_obj(json, "producer")?)?),
+        }),
+        kind => Err(StoreError::Event(format!(
+            "unknown state input context contract kind {kind}"
+        ))),
+    }
+}
+
+fn parse_state_output_context_contract(
+    json: &serde_json::Value,
+) -> Result<spec::StateOutputContextContractSpec> {
+    match required_str(json, "kind")? {
+        "no_context" => Ok(spec::StateOutputContextContractSpec::no_context()),
+        "produces" => Ok(spec::StateOutputContextContractSpec::Produces {
+            resource_kind: ContextResourceKind::new(required_str(json, "resource_kind")?)
+                .map_err(|error| StoreError::Identity(error.to_string()))?,
+            stage: ContextStage::new(required_str(json, "stage")?)
+                .map_err(|error| StoreError::Identity(error.to_string()))?,
+        }),
+        kind => Err(StoreError::Event(format!(
+            "unknown state output context contract kind {kind}"
         ))),
     }
 }
@@ -10910,6 +10989,7 @@ fn descriptor_identity_json(identity: &DescriptorIdentity) -> serde_json::Value 
         DescriptorIdentity::State(identity) => serde_json::json!({
             "capabilities": capability_set_json(&identity.capabilities),
             "config_schema_id": identity.config_schema_id.as_str(),
+            "context": state_context_descriptor_json(&identity.context),
             "descriptor_family": "state",
             "descriptor_id": identity.descriptor_id.as_str(),
             "effect_class": identity.effect_class.as_str(),
@@ -10917,8 +10997,10 @@ fn descriptor_identity_json(identity: &DescriptorIdentity) -> serde_json::Value 
             "effect_name": identity.effect_name.as_str(),
             "effect_version": identity.effect_version.as_str(),
             "emitted_fact_descriptors": fact_descriptor_refs_json(&identity.emitted_fact_descriptors),
+            "input_context": state_input_context_contract_json(&identity.input_context),
             "input_schema_id": identity.input_schema_id.as_str(),
             "name": identity.name.as_str(),
+            "output_context": state_output_context_contract_json(&identity.output_context),
             "output_schema_id": identity.output_schema_id.as_str(),
             "output_semantic_type_id": identity.output_semantic_type_id.as_str(),
             "runner": identity.runner.as_str(),
@@ -10938,6 +11020,77 @@ fn descriptor_identity_json(identity: &DescriptorIdentity) -> serde_json::Value 
             "output_schema_id": identity.output_schema_id.as_str(),
         }),
         DescriptorIdentity::Renderer(identity) => renderer_descriptor_json(identity),
+    }
+}
+
+fn state_context_descriptor_json(context: &spec::StateContextDescriptorSpec) -> serde_json::Value {
+    match context {
+        spec::StateContextDescriptorSpec::NoContext => serde_json::json!({
+            "kind": "no_context",
+        }),
+        spec::StateContextDescriptorSpec::Required(requirement) => {
+            let spec::StateContextDescriptorRequirementSpec {
+                context_descriptor_id,
+                schema_id,
+                semantic_type_id,
+                canonicalizer_identity,
+            } = requirement.as_ref();
+            serde_json::json!({
+                "canonicalizer_identity": canonicalizer_identity.as_str(),
+                "context_descriptor_id": context_descriptor_id.as_str(),
+                "kind": "required",
+                "schema_id": schema_id.as_str(),
+                "semantic_type_id": semantic_type_id.as_str(),
+            })
+        }
+    }
+}
+
+fn context_producer_json(producer: &spec::ContextProducerSpec) -> serde_json::Value {
+    serde_json::json!({
+        "producer_descriptor_id": producer
+            .producer_descriptor_id
+            .as_ref()
+            .map(DescriptorId::as_str),
+        "seed_producers_allowed": producer.seed_producers_allowed,
+    })
+}
+
+fn state_input_context_contract_json(
+    contract: &spec::StateInputContextContractSpec,
+) -> serde_json::Value {
+    match contract {
+        spec::StateInputContextContractSpec::NoContext => serde_json::json!({
+            "kind": "no_context",
+        }),
+        spec::StateInputContextContractSpec::Required {
+            resource_kind,
+            stage,
+            producer,
+        } => serde_json::json!({
+            "kind": "required",
+            "producer": context_producer_json(producer),
+            "resource_kind": resource_kind.as_str(),
+            "stage": stage.as_str(),
+        }),
+    }
+}
+
+fn state_output_context_contract_json(
+    contract: &spec::StateOutputContextContractSpec,
+) -> serde_json::Value {
+    match contract {
+        spec::StateOutputContextContractSpec::NoContext => serde_json::json!({
+            "kind": "no_context",
+        }),
+        spec::StateOutputContextContractSpec::Produces {
+            resource_kind,
+            stage,
+        } => serde_json::json!({
+            "kind": "produces",
+            "resource_kind": resource_kind.as_str(),
+            "stage": stage.as_str(),
+        }),
     }
 }
 

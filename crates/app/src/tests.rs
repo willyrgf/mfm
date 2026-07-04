@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use ed25519_dalek::SigningKey;
 use mfm_capabilities::{CapabilitySpec, ReadExternalRole};
 use mfm_program::{
-    build_root_with_registries, AdapterBindingSpec, CanonicalSeed, MfmFactType as _,
+    build_root_with_registries, AdapterBindingSpec, CanonicalSeed, MfmFactType as _, NoContext,
     PublicOutputKey, ReadState, RootBuilder, ScopeKey, StateKey, StateRegistryBuilder, StateResult,
     StateSpec, TypedProgramLaunchPlan,
 };
@@ -147,6 +147,7 @@ struct AppFactState {
 
 impl StateSpec for AppFactState {
     type Config = AppFactStateConfig;
+    type Context = NoContext;
     type Input = AppFactValue;
     type Output = AppFactValue;
     type Effect = mfm_effects::ReadExternal;

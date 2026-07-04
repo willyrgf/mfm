@@ -44,7 +44,9 @@ use mfm_portfolio_model::symbol::{
     ValuationReaderConfig, ValuationSourceRegistry,
 };
 use mfm_portfolio_model::wallet::{WalletConfig, WalletImplementationConfig, WalletSubjectKind};
-use mfm_program::{AdapterBindingSpec, PureState, ReadState, StateError, StateResult, StateSpec};
+use mfm_program::{
+    AdapterBindingSpec, NoContext, PureState, ReadState, StateError, StateResult, StateSpec,
+};
 use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs, StateInput};
 use mfm_values::{ConfigError, NonEmpty};
 use num_bigint::BigInt;
@@ -879,6 +881,7 @@ pub struct PrepareSourcesState {
 
 impl StateSpec for PrepareSourcesState {
     type Config = PrepareSourcesConfig;
+    type Context = NoContext;
     type Input = ();
     type Output = PreparedSources;
     type Effect = ReadExternal;
@@ -922,6 +925,7 @@ pub struct ResolveSubjectsState {
 
 impl StateSpec for ResolveSubjectsState {
     type Config = ResolveSubjectsConfig;
+    type Context = NoContext;
     type Input = PreparedSources;
     type Output = ResolvedSubjects;
     type Effect = Pure;
@@ -959,6 +963,7 @@ pub struct PinViewsState {
 
 impl StateSpec for PinViewsState {
     type Config = PinViewsConfig;
+    type Context = NoContext;
     type Input = PreparedSources;
     type Output = PinnedViews;
     type Effect = ReadExternal;
@@ -1006,6 +1011,7 @@ pub struct ResolveValuationsState {
 
 impl StateSpec for ResolveValuationsState {
     type Config = ResolveValuationsConfig;
+    type Context = NoContext;
     type Input = PinnedViews;
     type Output = ResolvedValuations;
     type Effect = Pure;
@@ -1043,6 +1049,7 @@ pub struct ObserveBatchState {
 
 impl StateSpec for ObserveBatchState {
     type Config = ObserveBatchConfig;
+    type Context = NoContext;
     type Input = ObserveBatchInput;
     type Output = ObservationBatch;
     type Effect = ReadExternal;
@@ -1088,6 +1095,7 @@ pub struct MergeObservationsState;
 
 impl StateSpec for MergeObservationsState {
     type Config = MergeObservationsConfig;
+    type Context = NoContext;
     type Input = NonEmpty<ObservationBatch>;
     type Output = MergedObservations;
     type Effect = Pure;
@@ -1124,6 +1132,7 @@ pub struct AssembleSnapshotState {
 
 impl StateSpec for AssembleSnapshotState {
     type Config = AssembleSnapshotConfig;
+    type Context = NoContext;
     type Input = AssembleSnapshotInput;
     type Output = PortfolioSnapshot;
     type Effect = Pure;
@@ -1161,6 +1170,7 @@ pub struct ProjectReportState {
 
 impl StateSpec for ProjectReportState {
     type Config = ProjectReportConfig;
+    type Context = NoContext;
     type Input = ProjectReportInput;
     type Output = PortfolioReport;
     type Effect = Pure;
