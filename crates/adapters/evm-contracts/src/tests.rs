@@ -93,9 +93,10 @@ fn validated_deploy_config(style: &str) -> ValidatedConfig<DeployPhaseConfig> {
 }
 
 fn deploy_intent(config: &ValidatedConfig<DeployPhaseConfig>) -> ContractDeployIntent {
+    let context = mfm_program::CertifiedContext::no_context();
     DeployContractState::new(config.clone())
         .expect("state")
-        .prepare_intent(&())
+        .prepare_intent(&(), &context)
         .expect("intent")
 }
 

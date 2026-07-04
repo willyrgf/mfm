@@ -193,7 +193,12 @@ impl StateSpec for AppFactState {
 impl ReadState for AppFactState {
     type RunFuture<'a> = std::future::Ready<StateResult<Self::Output>>;
 
-    fn run<'a>(&'a self, input: Self::Input, _caps: &'a Self::Caps) -> Self::RunFuture<'a> {
+    fn run<'a>(
+        &'a self,
+        input: Self::Input,
+        _caps: &'a Self::Caps,
+        _context: &'a mfm_program::CertifiedContext<Self::Context>,
+    ) -> Self::RunFuture<'a> {
         std::future::ready(Ok(AppFactValue {
             amount: input.amount * self.config.multiplier,
         }))

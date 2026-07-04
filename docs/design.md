@@ -308,6 +308,15 @@ producer constraint explicitly permits seed producers. Framework same-value brid
 side-effect verify nodes may only preserve an existing context binding; framework receipt nodes must
 remain no-context.
 
+Runtime preserves that authority after certification. `CertifiedRuntimeSpec` indexes certified
+context table entries by `ContextRef`, sealed runner invocations materialize typed
+`CertifiedContext<C>` values only from the certified node context, and no-context states receive only
+explicit no-context authority. Input materialization rechecks that each input binding context matches
+the certified source cell and that required context-bound inputs are consumed under the same node
+context ref. Context-bound state-output cells also require a registered runner extractor; terminal
+output admission checks the `CellProduced` context against the certified cell and validates the
+staged state-output artifact bytes against the certified context ref, resource kind, and stage.
+
 `mfm_spec::v1::HashedSpecEnvelope` is not certification authority. Persisted spec bytes, hash-only
 envelopes, and persisted certificate bytes are hostile data until `mfm-certify` verifies them
 against a registry and returns `CertifiedTypedSpec`.
@@ -441,6 +450,7 @@ graph. Before `RunAdmitted`, the assembly/runtime boundary verifies:
 - descriptor identities and executable identity requirements
 - runner registry availability
 - capability registry availability
+- context-bound output extractor availability
 
 After launch, runtime advances only from the append-only run stream authority. It loads the stream,
 delegates spec-independent ordering and projection checks to `mfm-store`, then performs
@@ -481,16 +491,19 @@ cleanup and must not change lifecycle semantics.
 
 For a new ordinary runnable node attempt, runtime first appends `StateAttemptStarted` from
 certified attempt authority. It then materializes state inputs from certified binding trees and
-prior typed cell evidence, checks runner identity and capability availability, and constructs a
-sealed runner invocation. If post-start materialization, runner-output validation, or runtime
-validation fails inside a valid started attempt and no side-effect authority has been acquired,
-runtime stages a redacted diagnostic artifact and records a non-retryable `StateAttemptFailed` plus
-runtime-evidence retention from minimal trusted attempt authority. Corrupt history before a valid
+prior typed cell evidence, materializes the certified node context, checks runner identity and
+capability availability, and constructs a sealed runner invocation. If post-start materialization,
+runner-output validation, or runtime validation fails inside a valid started attempt and no
+side-effect authority has been acquired, runtime stages a redacted diagnostic artifact and records a
+failure-safe `StateAttemptFailed` plus runtime-evidence retention from minimal trusted attempt
+authority. Corrupt history before a valid
 attempt context, missing deployment bindings, storage/artifact outages before terminal evidence
 commits, and side-effect attempts with acquired ledger authority remain non-semantic runtime or
 recovery concerns. Runners receive only scoped typed inputs, allowed capabilities, and erased
 context surfaces. They return typed payload intent, staged artifacts, side-effect evidence, or
-sealed handles but cannot append to the run stream.
+sealed handles but cannot append to the run stream. Context-bound output artifacts are accepted only
+when the runner's registered extractor can recover the certified context metadata from the staged
+bytes and it matches the output cell's certified context binding.
 
 The commit planner owns all production execution appends. `RunAdmissionLifecycle` verifies and
 stages launch material, then commits exactly one `RunAdmitted` root event with certified spec,

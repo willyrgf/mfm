@@ -447,7 +447,11 @@ impl SideEffectState for DeployContractState {
     type Confirmation = ContractDeployConfirmation;
     type SubmitFuture<'a> = future::Ready<StateResult<Self::Submission>>;
 
-    fn prepare_intent(&self, _input: &Self::Input) -> StateResult<Self::Intent> {
+    fn prepare_intent(
+        &self,
+        _input: &Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Intent> {
         Ok(ContractDeployIntent {
             intent_version: 1,
             transaction: transaction_intent_from_deploy_config(&self.config, None),
@@ -460,6 +464,7 @@ impl SideEffectState for DeployContractState {
         &self,
         _input: &Self::Input,
         intent: &Self::Intent,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::IdempotencyInput> {
         idempotency_from_intent(intent)
     }
@@ -469,6 +474,7 @@ impl SideEffectState for DeployContractState {
         _intent: &'a Self::Intent,
         _key: &'a IdempotencyKey<Self::IdempotencyInput>,
         _caps: &'a Self::Caps,
+        _context: &'a mfm_program::CertifiedContext<Self::Context>,
     ) -> Self::SubmitFuture<'a> {
         future::ready(Err(adapter_required_error(Self::name())))
     }
@@ -478,6 +484,7 @@ impl SideEffectState for DeployContractState {
         _input: &Self::Input,
         _intent: &Self::Intent,
         receipt: &Self::Receipt,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
         Ok(DeployedContract {
             lifecycle_version: 1,
@@ -495,6 +502,7 @@ impl SideEffectState for DeployContractState {
         _input: &Self::Input,
         _intent: &Self::Intent,
         confirmation: &Self::Confirmation,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
         Ok(DeployedContract {
             lifecycle_version: 1,
@@ -559,7 +567,11 @@ impl SideEffectState for ConfigureContractState {
     type Confirmation = ContractConfigureConfirmation;
     type SubmitFuture<'a> = future::Ready<StateResult<Self::Submission>>;
 
-    fn prepare_intent(&self, input: &Self::Input) -> StateResult<Self::Intent> {
+    fn prepare_intent(
+        &self,
+        input: &Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Intent> {
         ensure_network_matches(
             self.config.network(),
             &input.deployed.network_id,
@@ -583,6 +595,7 @@ impl SideEffectState for ConfigureContractState {
         &self,
         _input: &Self::Input,
         intent: &Self::Intent,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::IdempotencyInput> {
         idempotency_from_intent(intent)
     }
@@ -592,6 +605,7 @@ impl SideEffectState for ConfigureContractState {
         _intent: &'a Self::Intent,
         _key: &'a IdempotencyKey<Self::IdempotencyInput>,
         _caps: &'a Self::Caps,
+        _context: &'a mfm_program::CertifiedContext<Self::Context>,
     ) -> Self::SubmitFuture<'a> {
         future::ready(Err(adapter_required_error(Self::name())))
     }
@@ -601,6 +615,7 @@ impl SideEffectState for ConfigureContractState {
         input: &Self::Input,
         _intent: &Self::Intent,
         receipt: &Self::Receipt,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
         ensure_network_matches(
             self.config.network(),
@@ -638,6 +653,7 @@ impl SideEffectState for ConfigureContractState {
         input: &Self::Input,
         _intent: &Self::Intent,
         confirmation: &Self::Confirmation,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
         ensure_network_matches(
             self.config.network(),
@@ -773,7 +789,12 @@ impl StateSpec for ValidateContractState {
 impl ReadState for ValidateContractState {
     type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
 
-    fn run<'a>(&'a self, _input: Self::Input, _caps: &'a Self::Caps) -> Self::RunFuture<'a> {
+    fn run<'a>(
+        &'a self,
+        _input: Self::Input,
+        _caps: &'a Self::Caps,
+        _context: &'a mfm_program::CertifiedContext<Self::Context>,
+    ) -> Self::RunFuture<'a> {
         future::ready(Err(adapter_required_error(Self::name())))
     }
 }
@@ -812,7 +833,11 @@ impl StateSpec for ProjectConfiguredContractRefState {
 }
 
 impl PureState for ProjectConfiguredContractRefState {
-    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+    fn run(
+        &self,
+        input: Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
         Ok(ConfiguredContractRef::from_configured(&input))
     }
 }

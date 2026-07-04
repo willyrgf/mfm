@@ -9307,6 +9307,7 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "artifact_id": payload.artifact_id.as_str(),
             "attempt_id": payload.attempt_id.as_str(),
             "cell_id": payload.cell_id.as_str(),
+            "context": cell_context_json(&payload.context),
             "content_digest": payload.content_digest.as_str(),
             "node_id": payload.node_id.as_str(),
             "producer_state_kind": payload.producer_state_kind.as_ref().map(|value| value.as_str()),
@@ -9321,6 +9322,7 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
         KernelEventPayload::CellSkipped(payload) => serde_json::json!({
             "attempt_id": payload.attempt_id.as_str(),
             "cell_id": payload.cell_id.as_str(),
+            "context": cell_context_json(&payload.context),
             "node_id": payload.node_id.as_str(),
             "schema_id": payload.schema_id.as_str(),
             "scope_id": payload.scope_id.as_str(),
@@ -9738,6 +9740,7 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
             semantic_type_id: parse_identity(required_str(json, "semantic_type_id")?)?,
             schema_id: parse_identity(required_str(json, "schema_id")?)?,
             value_lineage: parse_value_lineage(required_obj(json, "value_lineage")?)?,
+            context: parse_cell_context(required_obj(json, "context")?)?,
             artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
             content_digest: parse_identity(required_str(json, "content_digest")?)?,
             producer_state_kind: optional_str(json, "producer_state_kind")?
@@ -9756,6 +9759,7 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
             semantic_type_id: parse_identity(required_str(json, "semantic_type_id")?)?,
             schema_id: parse_identity(required_str(json, "schema_id")?)?,
             value_lineage: parse_value_lineage(required_obj(json, "value_lineage")?)?,
+            context: parse_cell_context(required_obj(json, "context")?)?,
             skip_reason: parse_skip_reason(required_obj(json, "skip_reason")?)?,
         })),
         "SideEffectIntentPersisted" => Ok(KernelEventPayload::SideEffectIntentPersisted(
@@ -10338,6 +10342,23 @@ fn parse_state_output_context_contract(
         }),
         kind => Err(StoreError::Event(format!(
             "unknown state output context contract kind {kind}"
+        ))),
+    }
+}
+
+fn parse_cell_context(json: &serde_json::Value) -> Result<spec::CellContextSpec> {
+    match required_str(json, "kind")? {
+        "no_context" => Ok(spec::CellContextSpec::no_context()),
+        "bound" => Ok(spec::CellContextSpec::Bound {
+            context_ref: parse_identity(required_str(json, "context_ref")?)?,
+            resource_kind: ContextResourceKind::new(required_str(json, "resource_kind")?)
+                .map_err(|error| StoreError::Identity(error.to_string()))?,
+            stage: ContextStage::new(required_str(json, "stage")?)
+                .map_err(|error| StoreError::Identity(error.to_string()))?,
+            producer: Box::new(parse_context_producer(required_obj(json, "producer")?)?),
+        }),
+        kind => Err(StoreError::Event(format!(
+            "unknown cell context kind {kind}"
         ))),
     }
 }
@@ -11088,6 +11109,26 @@ fn state_output_context_contract_json(
             stage,
         } => serde_json::json!({
             "kind": "produces",
+            "resource_kind": resource_kind.as_str(),
+            "stage": stage.as_str(),
+        }),
+    }
+}
+
+fn cell_context_json(context: &spec::CellContextSpec) -> serde_json::Value {
+    match context {
+        spec::CellContextSpec::NoContext => serde_json::json!({
+            "kind": "no_context",
+        }),
+        spec::CellContextSpec::Bound {
+            context_ref,
+            resource_kind,
+            stage,
+            producer,
+        } => serde_json::json!({
+            "context_ref": context_ref.as_str(),
+            "kind": "bound",
+            "producer": context_producer_json(producer),
             "resource_kind": resource_kind.as_str(),
             "stage": stage.as_str(),
         }),

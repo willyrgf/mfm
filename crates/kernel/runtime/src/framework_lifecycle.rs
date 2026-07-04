@@ -206,6 +206,7 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
             caps: invocation.caps(),
             recorded_facts: invocation.recorded_facts(),
             view: latest_view,
+            context_output_extractor: binding.runner.context_output_extractor(),
             saga_terminal_proof: proof,
             output,
         })

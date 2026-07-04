@@ -52,9 +52,9 @@ pub use commit::{PreparedRunLaunch, RunLaunchArtifact, RunLaunchEvidence, RunLau
 pub use error::{RuntimeDiagnosticDetails, RuntimeError};
 pub use history::{VerifiedRunContext, VerifiedRunContextLoader, VerifiedRunHistoryView};
 pub use invocation::{
-    CertifiedRuntimeCapabilities, ErasedRunCtx, MaterializedCell, MaterializedCellTerminal,
-    MaterializedInputNode, MaterializedInputs, NamedMaterializedInput, PreInvocationRunCtx,
-    PreparedRunnerInvocation, RecordedFact, RecordedFacts,
+    CertifiedInvocationContext, CertifiedRuntimeCapabilities, ErasedRunCtx, MaterializedCell,
+    MaterializedCellTerminal, MaterializedInputNode, MaterializedInputs, NamedMaterializedInput,
+    PreInvocationRunCtx, PreparedRunnerInvocation, RecordedFact, RecordedFacts,
 };
 pub use manual_resolution::{
     manual_resolution_block_reason, manual_resolution_stream_prefix_digest,
@@ -66,15 +66,16 @@ pub use runner_kit::{
     load_materialized_struct_input, load_non_empty_materialized_input, load_runner_config,
     load_runner_config_for_node, load_side_effect_artifact, load_side_effect_artifact_for_node,
     load_side_effect_value, load_side_effect_value_for_node, materialized_input_node_json,
-    FactRecordInput, RunnerArtifactBuilder, RunnerCapabilityBinding,
+    ContextBoundOutput, FactRecordInput, RunnerArtifactBuilder, RunnerCapabilityBinding,
     RunnerExecutableIdentityTemplate, RunnerFactoryBinding, RunnerJsonArtifact,
     RunnerOutputBuilder, RunnerPayloadBuilder, RunnerRegistrationBuilder, StagedFactRecord,
+    TypedContextOutputExtractor,
 };
 pub use runners::{
     AdapterExecutableBinding, CapabilityImplementationBinding, CapabilityImplementationId,
-    ErasedNodeRunner, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
-    ErasedRunnerRegistry, PreInvocationRunnerFuture, RunnerEventPayload, RunnerFactRecorded,
-    RunnerIngressContext,
+    ContextOutputExtractor, ErasedNodeRunner, ErasedRunnerBinding, ErasedRunnerFuture,
+    ErasedRunnerOutput, ErasedRunnerRegistry, PreInvocationRunnerFuture, RunnerEventPayload,
+    RunnerFactRecorded, RunnerIngressContext,
 };
 pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
 pub use side_effect_driver::{

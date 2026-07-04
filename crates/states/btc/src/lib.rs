@@ -852,7 +852,12 @@ impl StateSpec for ObserveBtcChainHeadState {
 impl ReadState for ObserveBtcChainHeadState {
     type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
 
-    fn run<'a>(&'a self, input: Self::Input, _caps: &'a Self::Caps) -> Self::RunFuture<'a> {
+    fn run<'a>(
+        &'a self,
+        input: Self::Input,
+        _caps: &'a Self::Caps,
+        _context: &'a mfm_program::CertifiedContext<Self::Context>,
+    ) -> Self::RunFuture<'a> {
         if let Err(error) = self.request().and_then(|request| {
             validate_loaded_checkpoint_for_request(&request, &input.loaded_checkpoint)
         }) {
@@ -914,7 +919,12 @@ impl StateSpec for RecordBtcChainHeadFactState {
 impl ManagedWriteState for RecordBtcChainHeadFactState {
     type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
 
-    fn run<'a>(&'a self, input: Self::Input, _caps: &'a Self::Caps) -> Self::RunFuture<'a> {
+    fn run<'a>(
+        &'a self,
+        input: Self::Input,
+        _caps: &'a Self::Caps,
+        _context: &'a mfm_program::CertifiedContext<Self::Context>,
+    ) -> Self::RunFuture<'a> {
         future::ready(Ok(input.observation.into_fact()))
     }
 }
@@ -1175,7 +1185,12 @@ impl StateSpec for QueryCollectorCheckpointState {
 impl ReadState for QueryCollectorCheckpointState {
     type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
 
-    fn run<'a>(&'a self, _input: Self::Input, _caps: &'a Self::Caps) -> Self::RunFuture<'a> {
+    fn run<'a>(
+        &'a self,
+        _input: Self::Input,
+        _caps: &'a Self::Caps,
+        _context: &'a mfm_program::CertifiedContext<Self::Context>,
+    ) -> Self::RunFuture<'a> {
         let _request = self.request();
         future::ready(Err(adapter_required_error(Self::name())))
     }
@@ -1274,7 +1289,12 @@ impl StateSpec for RecordCollectorCheckpointState {
 impl ManagedWriteState for RecordCollectorCheckpointState {
     type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
 
-    fn run<'a>(&'a self, input: Self::Input, _caps: &'a Self::Caps) -> Self::RunFuture<'a> {
+    fn run<'a>(
+        &'a self,
+        input: Self::Input,
+        _caps: &'a Self::Caps,
+        _context: &'a mfm_program::CertifiedContext<Self::Context>,
+    ) -> Self::RunFuture<'a> {
         future::ready(
             build_checkpoint_fact_from_outputs(
                 &self.config,
@@ -1851,11 +1871,13 @@ mod tests {
         )
         .expect("state");
         let caps = (BtcFactRecordCapability,);
+        let context = mfm_program::CertifiedContext::no_context();
         let fact = poll_ready(chain_head_state.run(
             RecordBtcChainHeadFactInput {
                 observation: observation.clone(),
             },
             &caps,
+            &context,
         ))
         .expect("chain head fact");
         assert_eq!(fact.subject(), observation.subject());
@@ -1871,6 +1893,7 @@ mod tests {
                 loaded_checkpoint: LoadedCollectorCheckpoint::new(None),
             },
             &caps,
+            &context,
         ))
         .expect("checkpoint fact");
 
@@ -1899,12 +1922,14 @@ mod tests {
         .expect("state");
 
         let caps = (BtcFactRecordCapability,);
+        let context = mfm_program::CertifiedContext::no_context();
         let checkpoint = poll_ready(state.run(
             RecordCollectorCheckpointInput {
                 chain_head_fact: fact,
                 loaded_checkpoint: LoadedCollectorCheckpoint::new(Some(previous.clone())),
             },
             &caps,
+            &context,
         ))
         .expect("checkpoint");
 
@@ -1926,6 +1951,7 @@ mod tests {
         .expect("state");
 
         let caps = (BtcFactRecordCapability,);
+        let context = mfm_program::CertifiedContext::no_context();
         let error = poll_ready(state.run(
             RecordCollectorCheckpointInput {
                 chain_head_fact: observation.to_fact(),
@@ -1939,6 +1965,7 @@ mod tests {
                 )),
             },
             &caps,
+            &context,
         ))
         .expect_err("incompatible checkpoint");
 

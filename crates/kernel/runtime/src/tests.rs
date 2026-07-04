@@ -12,17 +12,18 @@ use mfm_capabilities::{
     ExternalMutationAuthorityRole, ManagedPlatformWrite, ReadExternalRole,
 };
 use mfm_ids::{
-    ArtifactId, DigestBytes, EffectKind, EffectVersion, EventId, SchemaId, ScopeId, SeedId,
-    SemanticTypeId, SideEffectPairId, StateKind, StateVersion, TrustScopeId,
+    ArtifactId, ContextRef, ContextResourceKind, ContextStage, DigestBytes, EffectKind,
+    EffectVersion, EventId, SchemaId, ScopeId, SeedId, SemanticTypeId, SideEffectPairId, StateKind,
+    StateVersion, TrustScopeId,
 };
 use mfm_manual_auth::{
     ManualAuthorizationSignatureBytes, ManualResolutionAuthorizationProof,
     ManualResolutionAuthorizationSignature, ManualResolutionEvidenceRef,
 };
 use mfm_program::{
-    build_root_with_registries, AdapterBindingSpec, CanonicalSeed, IdempotencyKey, NoContext,
-    PublicOutputKey, PureState, ReadState, RemediationNodeParams, ResourceClaim, RootBuilder,
-    ScopeKey, SideEffectNodeParams, SideEffectSagaPolicy, SideEffectState, StateKey,
+    build_root_with_registries, AdapterBindingSpec, CanonicalSeed, IdempotencyKey, MfmContext,
+    NoContext, PublicOutputKey, PureState, ReadState, RemediationNodeParams, ResourceClaim,
+    RootBuilder, ScopeKey, SideEffectNodeParams, SideEffectSagaPolicy, SideEffectState, StateKey,
     StateRegistryBuilder, StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmFactType, MfmValue, PublicOutputs};
@@ -37,6 +38,7 @@ use mfm_store::v1::{
     },
     RunEventStore,
 };
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 
 use crate::commit::{CommitPlanner, RunnerOutputCommitInput};
@@ -1280,6 +1282,100 @@ struct CertifierValue {
     amount: u64,
 }
 
+fn runtime_context_resource_kind() -> ContextResourceKind {
+    ContextResourceKind::new("mfm.runtime.test.contract_instance").expect("context resource kind")
+}
+
+fn runtime_context_stage() -> ContextStage {
+    ContextStage::new("deployed").expect("context stage")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.runtime.test",
+    name = "contract_context",
+    version = "1",
+    schema = "mfm.runtime.test.contract_context"
+)]
+struct RuntimeContractContext {
+    network: String,
+}
+
+impl MfmContext for RuntimeContractContext {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeContextOutput {
+    amount: u64,
+    context_ref: ContextRef,
+    resource_kind: ContextResourceKind,
+    stage: ContextStage,
+}
+
+impl Serialize for RuntimeContextOutput {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("RuntimeContextOutput", 4)?;
+        state.serialize_field("amount", &self.amount)?;
+        state.serialize_field("context_ref", self.context_ref.as_str())?;
+        state.serialize_field("resource_kind", &self.resource_kind)?;
+        state.serialize_field("stage", &self.stage)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for RuntimeContextOutput {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawRuntimeContextOutput {
+            amount: u64,
+            context_ref: String,
+            resource_kind: ContextResourceKind,
+            stage: ContextStage,
+        }
+
+        let raw = RawRuntimeContextOutput::deserialize(deserializer)?;
+        Ok(Self {
+            amount: raw.amount,
+            context_ref: ContextRef::parse(raw.context_ref).map_err(serde::de::Error::custom)?,
+            resource_kind: raw.resource_kind,
+            stage: raw.stage,
+        })
+    }
+}
+
+impl mfm_values::MfmValue for RuntimeContextOutput {
+    fn schema_descriptor() -> mfm_values::Result<mfm_values::SchemaDescriptor> {
+        <CertifierValue as mfm_values::MfmValue>::schema_descriptor()
+    }
+
+    fn schema_id() -> mfm_values::Result<SchemaId> {
+        <CertifierValue as mfm_values::MfmValue>::schema_id()
+    }
+
+    fn semantic_id() -> mfm_values::Result<SemanticTypeId> {
+        <CertifierValue as mfm_values::MfmValue>::semantic_id()
+    }
+}
+
+impl ContextBoundOutput for RuntimeContextOutput {
+    fn context_ref(&self) -> &ContextRef {
+        &self.context_ref
+    }
+
+    fn context_resource_kind(&self) -> &ContextResourceKind {
+        &self.resource_kind
+    }
+
+    fn context_stage(&self) -> &ContextStage {
+        &self.stage
+    }
+}
+
 #[allow(clippy::duplicated_attributes)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue, MfmFactType)]
 #[mfm(
@@ -1440,11 +1536,131 @@ impl StateSpec for CertifierState {
 }
 
 impl PureState for CertifierState {
-    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+    fn run(
+        &self,
+        input: Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
         Ok(CertifierValue {
             amount: input.amount * self.config.multiplier,
         })
     }
+}
+
+struct RuntimeContextSourceState {
+    config: CertifierConfig,
+}
+
+impl StateSpec for RuntimeContextSourceState {
+    type Config = CertifierConfig;
+    type Context = RuntimeContractContext;
+    type Input = CertifierValue;
+    type Output = RuntimeContextOutput;
+    type Effect = mfm_effects::Pure;
+    type Caps = mfm_capabilities::NoCaps;
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        runtime_state_kind("context-source", DigestBytes::from_array([0xc1; 32]))
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        StateVersion::new("mfm.runtime.test.context_source.v1")
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.runtime.test.context_source"
+    }
+
+    fn output_context_contract() -> mfm_program::Result<spec::StateOutputContextContractSpec> {
+        Ok(spec::StateOutputContextContractSpec::Produces {
+            resource_kind: runtime_context_resource_kind(),
+            stage: runtime_context_stage(),
+        })
+    }
+
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
+    }
+}
+
+impl PureState for RuntimeContextSourceState {
+    fn run(
+        &self,
+        input: Self::Input,
+        context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        Ok(RuntimeContextOutput {
+            amount: input.amount * self.config.multiplier,
+            context_ref: context.context_ref().clone(),
+            resource_kind: runtime_context_resource_kind(),
+            stage: runtime_context_stage(),
+        })
+    }
+}
+
+struct RuntimeContextConsumerState {
+    config: CertifierConfig,
+}
+
+impl StateSpec for RuntimeContextConsumerState {
+    type Config = CertifierConfig;
+    type Context = RuntimeContractContext;
+    type Input = RuntimeContextOutput;
+    type Output = CertifierValue;
+    type Effect = mfm_effects::Pure;
+    type Caps = mfm_capabilities::NoCaps;
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        runtime_state_kind("context-consumer", DigestBytes::from_array([0xc2; 32]))
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        StateVersion::new("mfm.runtime.test.context_consumer.v1")
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.runtime.test.context_consumer"
+    }
+
+    fn input_context_contract() -> mfm_program::Result<spec::StateInputContextContractSpec> {
+        Ok(spec::StateInputContextContractSpec::Required {
+            resource_kind: runtime_context_resource_kind(),
+            stage: runtime_context_stage(),
+            producer: Box::new(spec::ContextProducerSpec {
+                producer_descriptor_id: Some(runtime_context_source_descriptor_id()?),
+                seed_producers_allowed: false,
+            }),
+        })
+    }
+
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
+    }
+}
+
+impl PureState for RuntimeContextConsumerState {
+    fn run(
+        &self,
+        input: Self::Input,
+        context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        assert_eq!(context.value().network, "primary");
+        Ok(CertifierValue {
+            amount: input.amount * self.config.multiplier,
+        })
+    }
+}
+
+fn runtime_context_source_descriptor_id() -> mfm_program::Result<DescriptorId> {
+    let mut states = StateRegistryBuilder::new();
+    let registered = states.register::<RuntimeContextSourceState>()?;
+    Ok(registered.descriptor().descriptor_id().clone())
 }
 
 #[derive(PublicOutputs)]
@@ -1559,6 +1775,7 @@ macro_rules! impl_runtime_read_state {
                 &'a self,
                 _input: Self::Input,
                 _caps: &'a Self::Caps,
+                _context: &'a mfm_program::CertifiedContext<Self::Context>,
             ) -> Self::RunFuture<'a> {
                 std::future::ready(Ok(fixture_output_value(
                     self.config.multiplier,
@@ -1618,7 +1835,11 @@ macro_rules! impl_runtime_side_effect_state {
             type Confirmation = FixtureSideEffectEvidence;
             type SubmitFuture<'a> = std::future::Ready<StateResult<Self::Submission>>;
 
-            fn prepare_intent(&self, input: &Self::Input) -> StateResult<Self::Intent> {
+            fn prepare_intent(
+                &self,
+                input: &Self::Input,
+                _context: &mfm_program::CertifiedContext<Self::Context>,
+            ) -> StateResult<Self::Intent> {
                 let amount = serde_json::to_value(input)
                     .ok()
                     .and_then(|value| value.get("amount").and_then(serde_json::Value::as_u64))
@@ -1630,6 +1851,7 @@ macro_rules! impl_runtime_side_effect_state {
                 &self,
                 _input: &Self::Input,
                 intent: &Self::Intent,
+                _context: &mfm_program::CertifiedContext<Self::Context>,
             ) -> StateResult<Self::IdempotencyInput> {
                 Ok(intent.clone())
             }
@@ -1639,6 +1861,7 @@ macro_rules! impl_runtime_side_effect_state {
                 intent: &'a Self::Intent,
                 _key: &'a IdempotencyKey<Self::IdempotencyInput>,
                 _caps: &'a Self::Caps,
+                _context: &'a mfm_program::CertifiedContext<Self::Context>,
             ) -> Self::SubmitFuture<'a> {
                 std::future::ready(Ok(intent.clone()))
             }
@@ -1648,6 +1871,7 @@ macro_rules! impl_runtime_side_effect_state {
                 _input: &Self::Input,
                 _intent: &Self::Intent,
                 receipt: &Self::Receipt,
+                _context: &mfm_program::CertifiedContext<Self::Context>,
             ) -> StateResult<Self::Output> {
                 Ok(receipt.into())
             }
@@ -1657,6 +1881,7 @@ macro_rules! impl_runtime_side_effect_state {
                 _input: &Self::Input,
                 _intent: &Self::Intent,
                 confirmation: &Self::Confirmation,
+                _context: &mfm_program::CertifiedContext<Self::Context>,
             ) -> StateResult<Self::Output> {
                 Ok(confirmation.into())
             }
@@ -1730,7 +1955,11 @@ impl StateSpec for RuntimeTailState {
 }
 
 impl PureState for RuntimeTailState {
-    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+    fn run(
+        &self,
+        input: Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
         Ok(fixture_output_value(
             input.amount * self.config.multiplier,
             input.node_id,
@@ -1865,12 +2094,87 @@ impl ErasedNodeRunner for RecordingRunner {
                     semantic_type_id: ctx.descriptor().output_semantic_type_id.clone(),
                     schema_id: ctx.descriptor().output_schema_id.clone(),
                     value_lineage: ctx.output_cell().value_lineage.clone(),
+                    context: ctx.output_cell().context.clone(),
                     artifact_id: self.output_artifact.clone(),
                     content_digest: self.output_digest.clone(),
                     producer_state_kind: Some(ctx.node().state_kind.clone()),
                     producer_state_version: Some(ctx.node().state_version.clone()),
                 })],
             })
+        })
+    }
+}
+
+struct ContextSourceRunner {
+    stage: ContextStage,
+    payload_context: Option<spec::CellContextSpec>,
+    extractor: TypedContextOutputExtractor<RuntimeContextOutput>,
+}
+
+impl ContextSourceRunner {
+    fn new() -> Self {
+        Self {
+            stage: runtime_context_stage(),
+            payload_context: None,
+            extractor: TypedContextOutputExtractor::new(),
+        }
+    }
+
+    fn with_stage(stage: ContextStage) -> Self {
+        Self {
+            stage,
+            ..Self::new()
+        }
+    }
+
+    fn with_payload_context(payload_context: spec::CellContextSpec) -> Self {
+        Self {
+            payload_context: Some(payload_context),
+            ..Self::new()
+        }
+    }
+}
+
+impl ErasedNodeRunner for ContextSourceRunner {
+    fn context_output_extractor(&self) -> Option<&dyn ContextOutputExtractor> {
+        Some(&self.extractor)
+    }
+
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            let context = ctx.certified_context::<RuntimeContractContext>()?;
+            assert_eq!(context.value().network, "primary");
+            let value = RuntimeContextOutput {
+                amount: 6,
+                context_ref: context.context_ref().clone(),
+                resource_kind: runtime_context_resource_kind(),
+                stage: self.stage.clone(),
+            };
+            let mut builder = RunnerOutputBuilder::new(&ctx);
+            builder.state_output(&value)?;
+            let mut output = builder.finish();
+            if let Some(payload_context) = &self.payload_context {
+                for payload in &mut output.payloads {
+                    if let RunnerEventPayload::CellProduced(produced) = payload {
+                        produced.context = payload_context.clone();
+                    }
+                }
+            }
+            Ok(output)
+        })
+    }
+}
+
+struct ContextConsumerRunner;
+
+impl ErasedNodeRunner for ContextConsumerRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            let context = ctx.certified_context::<RuntimeContractContext>()?;
+            assert_eq!(context.value().network, "primary");
+            let mut builder = RunnerOutputBuilder::new(&ctx);
+            builder.state_output(&CertifierValue { amount: 30 })?;
+            Ok(builder.finish())
         })
     }
 }
@@ -1953,6 +2257,7 @@ fn runner_kit_input_cell(
         value_lineage: spec::ValueLineageRef {
             lineage_digest: evidence.digest.clone(),
         },
+        context: spec::CellContextSpec::no_context(),
         terminal,
     }))
 }
@@ -1965,6 +2270,7 @@ fn runner_kit_skipped_cell() -> MaterializedInputNode {
         value_lineage: spec::ValueLineageRef {
             lineage_digest: content(0x78),
         },
+        context: spec::CellContextSpec::no_context(),
         terminal: MaterializedCellTerminal::Skipped {
             skip_reason: events::SkipReason {
                 code: events::ErrorCode::new("runner_kit_skip").expect("skip code"),
@@ -2662,6 +2968,10 @@ async fn fact_query_evidence_prepares_private_artifact_reference_without_fact_re
         node,
         descriptor,
         output_cell,
+        context: fixture
+            .runtime_spec
+            .invocation_context_for_node(node)
+            .expect("invocation context"),
         attempt_id: &attempt_id,
         attempt_no: 1,
         config_artifact,
@@ -2804,6 +3114,10 @@ async fn fact_query_evidence_retains_non_empty_returned_fact_authority() {
         node,
         descriptor,
         output_cell,
+        context: fixture
+            .runtime_spec
+            .invocation_context_for_node(node)
+            .expect("invocation context"),
         attempt_id: &attempt_id,
         attempt_no: 1,
         config_artifact,
@@ -4002,6 +4316,10 @@ macro_rules! with_prepared_runner_ctx {
             node: invocation_node,
             descriptor,
             output_cell,
+            context: $fixture
+                .runtime_spec
+                .invocation_context_for_node(invocation_node)
+                .expect("invocation context"),
             attempt_id: $attempt_id,
             attempt_no: 1,
             config_artifact,
@@ -4285,6 +4603,129 @@ fn runner_registration_builder_preserves_explicit_binding_authority() {
         RuntimeError::RunnerBinding(message)
             if message.contains("does not match binding factory")
     ));
+}
+
+#[tokio::test]
+async fn launch_rejects_context_bound_output_runner_without_extractor() {
+    let fixture = fixture_with_context_bound_states();
+    let mut registry = ErasedRunnerRegistry::new();
+    register_spec_capabilities(&mut registry, &fixture.runtime_spec);
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            RecordingRunner {
+                expected_caps: Vec::new(),
+                output_artifact: artifact(0xa1),
+                output_digest: content(0xa2),
+            },
+        ))
+        .expect("source binding");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "pure",
+            ContextConsumerRunner,
+        ))
+        .expect("consumer binding");
+    let scheduler = test_scheduler(registry);
+    let store = TestTypedRunStore::new();
+
+    let error = match prepare_fixture_launch(
+        &scheduler,
+        &store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    ) {
+        Ok(_) => panic!("context-bound output runner without extractor must reject launch"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        RuntimeError::RunnerBinding(message)
+            if message.contains("context-bound output cell")
+                && message.contains("context output extractor")
+    ));
+}
+
+#[tokio::test]
+async fn context_bound_output_artifact_must_match_certified_context() {
+    let fixture = fixture_with_context_bound_states();
+    let wrong_stage = ContextStage::new("wrong_stage").expect("wrong stage");
+    let registry = registered_context_bound_fixture_runners(
+        &fixture,
+        ContextSourceRunner::with_stage(wrong_stage),
+    );
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
+
+    assert_first_node_invalid_after_drive!(
+        scheduler,
+        store,
+        fixture,
+        "terminalize wrong context-bound output artifact"
+    );
+}
+
+#[tokio::test]
+async fn context_bound_output_payload_context_must_match_certified_cell() {
+    let fixture = fixture_with_context_bound_states();
+    let registry = registered_context_bound_fixture_runners(
+        &fixture,
+        ContextSourceRunner::with_payload_context(spec::CellContextSpec::no_context()),
+    );
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
+
+    assert_first_node_invalid_after_drive!(
+        scheduler,
+        store,
+        fixture,
+        "terminalize mismatched context-bound payload"
+    );
+}
+
+#[tokio::test]
+async fn materialization_rejects_context_bound_input_under_wrong_node_context() {
+    let mut fixture = fixture_with_context_bound_states();
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    let consumer = envelope
+        .spec
+        .nodes
+        .iter_mut()
+        .find(|node| node.descriptor_id == fixture.descriptor_b)
+        .expect("consumer node");
+    consumer.context = spec::NodeContextSpec::no_context();
+    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+    fixture.runtime_spec =
+        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("tampered runtime spec");
+    refresh_fixture_run_id(&mut fixture);
+
+    let registry = registered_context_bound_fixture_runners(&fixture, ContextSourceRunner::new());
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        Advanced,
+        "produce context-bound input"
+    );
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        Advanced,
+        "terminalize context input materialization failure"
+    );
+    let consumer = node_by_output(&fixture, &fixture.cell_b);
+    assert_node_failed_with_code_and_retryable(
+        &store,
+        &consumer.node_id,
+        "input_materialization_failed",
+        true,
+    );
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&consumer.output_cell)
+        .is_none());
 }
 
 #[tokio::test]
@@ -5388,6 +5829,7 @@ async fn rejected_staged_payload_mismatch_does_not_admit_artifact_evidence() {
                 semantic_type_id: descriptor.output_semantic_type_id.clone(),
                 schema_id: descriptor.output_schema_id.clone(),
                 value_lineage: output_cell.value_lineage.clone(),
+                context: output_cell.context.clone(),
                 artifact_id: staged_artifact.clone(),
                 content_digest: staged_digest,
                 producer_state_kind: Some(node.state_kind.clone()),
@@ -6156,6 +6598,7 @@ async fn replay_rejects_terminal_cell_producer_outside_certified_spec() {
                     semantic_type_id: certified_cell.semantic_type_id.clone(),
                     schema_id: certified_cell.schema_id.clone(),
                     value_lineage: certified_cell.value_lineage.clone(),
+                    context: certified_cell.context.clone(),
                     artifact_id,
                     content_digest: artifact_digest,
                     producer_state_kind: Some(forged_node.state_kind.clone()),
@@ -6301,6 +6744,7 @@ async fn replay_rejects_public_output_without_render_attempt() {
                     semantic_type_id: output_cell.semantic_type_id.clone(),
                     schema_id: output_cell.schema_id.clone(),
                     value_lineage: output_cell.value_lineage.clone(),
+                    context: output_cell.context.clone(),
                     artifact_id: receipt_artifact,
                     content_digest: receipt_digest,
                     producer_state_kind: Some(non_render_node.state_kind.clone()),
@@ -6451,6 +6895,7 @@ async fn replay_rejects_public_output_with_forged_rendered_digest() {
                     semantic_type_id: output_cell.semantic_type_id.clone(),
                     schema_id: output_cell.schema_id.clone(),
                     value_lineage: output_cell.value_lineage.clone(),
+                    context: output_cell.context.clone(),
                     artifact_id: bad_receipt_artifact,
                     content_digest: bad_receipt_digest,
                     producer_state_kind: Some(render_node.state_kind.clone()),
@@ -10135,6 +10580,7 @@ fn terminal_payloads(
         semantic_type_id: ctx.descriptor().output_semantic_type_id.clone(),
         schema_id: ctx.descriptor().output_schema_id.clone(),
         value_lineage: ctx.output_cell().value_lineage.clone(),
+        context: ctx.output_cell().context.clone(),
         artifact_id: output_artifact,
         content_digest: output_digest,
         producer_state_kind: Some(ctx.node().state_kind.clone()),
@@ -10171,6 +10617,7 @@ fn prepare_runner_output_for_invocation(
         caps: &invocation.caps,
         recorded_facts: &invocation.recorded_facts,
         view: invocation.view,
+        context_output_extractor: None,
         saga_terminal_proof: None,
         output,
     })
@@ -10902,6 +11349,7 @@ fn append_synthetic_submit_boundary_skipped(
                     semantic_type_id: output_cell.semantic_type_id.clone(),
                     schema_id: output_cell.schema_id.clone(),
                     value_lineage: output_cell.value_lineage.clone(),
+                    context: output_cell.context.clone(),
                     skip_reason: events::SkipReason {
                         code: events::ErrorCode::new("side_effect_submission_boundary")
                             .expect("skip code"),
@@ -11391,6 +11839,7 @@ fn append_terminal(
                     semantic_type_id: descriptor.output_semantic_type_id.clone(),
                     schema_id: descriptor.output_schema_id.clone(),
                     value_lineage: output_cell.value_lineage.clone(),
+                    context: output_cell.context.clone(),
                     artifact_id,
                     content_digest: output_digest,
                     producer_state_kind: Some(node.state_kind.clone()),
@@ -11772,6 +12221,25 @@ fn registered_fixture_runners_with_adapter_executable(
     );
     register_default_fixture_pure_runner(&mut registry, fixture);
     register_default_fixture_read_runner(&mut registry, fixture);
+    registry
+}
+
+fn registered_context_bound_fixture_runners(
+    fixture: &Fixture,
+    source_runner: ContextSourceRunner,
+) -> ErasedRunnerRegistry {
+    let mut registry = ErasedRunnerRegistry::new();
+    register_spec_capabilities(&mut registry, &fixture.runtime_spec);
+    registry
+        .register(binding(fixture.descriptor_a.clone(), "pure", source_runner))
+        .expect("context source binding");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "pure",
+            ContextConsumerRunner,
+        ))
+        .expect("context consumer binding");
     registry
 }
 
@@ -12994,6 +13462,117 @@ fn runtime_side_effect_fixture(
     let certified = mfm_certify::certify_program_draft(&draft).expect("certified side-effect spec");
     let runtime_spec = CertifiedRuntimeSpec::new(certified).expect("runtime spec");
     fixture_from_runtime_spec(shape, runtime_spec, seed_digest, seed_byte_len)
+}
+
+fn fixture_with_context_bound_states() -> Fixture {
+    let mut states = StateRegistryBuilder::new();
+    states
+        .register::<RuntimeContextSourceState>()
+        .expect("context source registration");
+    states
+        .register::<RuntimeContextConsumerState>()
+        .expect("context consumer registration");
+    let seed = CanonicalSeed::from_value(&CertifierValue { amount: 2 }).expect("seed");
+    let seed_digest = seed.content_digest().clone();
+    let seed_byte_len = seed.byte_len() as u64;
+    let draft = build_root_with_registries(
+        ScopeKey::new("root").expect("root key"),
+        states.snapshot(),
+        mfm_program::OperationRegistryBuilder::new().snapshot(),
+        |root: &mut RootBuilder<'_, '_>| {
+            let input = root.seed(mfm_program::SeedKey::new("initial")?, seed.clone())?;
+            let context = root.scope().declare_context(RuntimeContractContext {
+                network: "primary".to_owned(),
+            })?;
+            let produced = root
+                .scope()
+                .state_in_context::<RuntimeContextSourceState, _, RuntimeContractContext>(
+                    StateKey::new("context-source")?,
+                    &context,
+                    CertifierConfig { multiplier: 3 },
+                    input,
+                )?;
+            let result = root
+                .scope()
+                .state_in_context::<RuntimeContextConsumerState, _, RuntimeContractContext>(
+                    StateKey::new("context-consumer")?,
+                    &context,
+                    CertifierConfig { multiplier: 5 },
+                    produced,
+                )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &CertifierPublicOutputs { result },
+            )
+        },
+    )
+    .expect("context-bound draft");
+    let certified = mfm_certify::certify_program_draft(&draft).expect("certified context spec");
+    let runtime_spec = CertifiedRuntimeSpec::new(certified).expect("runtime spec");
+    fixture_from_context_runtime_spec(runtime_spec, seed_digest, seed_byte_len)
+}
+
+fn fixture_from_context_runtime_spec(
+    runtime_spec: CertifiedRuntimeSpec,
+    seed_digest: ContentDigest,
+    seed_byte_len: u64,
+) -> Fixture {
+    let spec = runtime_spec.spec();
+    let seed = spec.seeds.first().expect("seed");
+    let seed_ref = events::SeedCellRef {
+        seed_id: seed.seed_id.clone(),
+        cell_id: seed.cell_id.clone(),
+        scope_id: seed.scope_id.clone(),
+        semantic_type_id: seed.semantic_type_id.clone(),
+        schema_id: seed.schema_id.clone(),
+        digest: seed_digest.clone(),
+        seed_artifact: events::ArtifactEvidenceRef {
+            artifact_id: ArtifactId::from_digest(seed_digest.algorithm(), *seed_digest.digest()),
+            role: events::ArtifactRole::SeedInput,
+            schema_id: seed.schema_id.clone(),
+            semantic_type_id: Some(seed.semantic_type_id.clone()),
+            content_digest: seed_digest,
+            byte_len: seed_byte_len,
+            media_type: spec::MediaType::new("application/json").expect("media"),
+        },
+    };
+    let node_a = runtime_node_by_descriptor_name(&runtime_spec, "mfm.runtime.test.context_source");
+    let node_b =
+        runtime_node_by_descriptor_name(&runtime_spec, "mfm.runtime.test.context_consumer");
+    let render = runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.framework,
+                Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
+            )
+        })
+        .expect("render node");
+    let render_node = render.node_id.clone();
+    let render_cell = render.output_cell.clone();
+    let identity_material = run_identity_material(&runtime_spec);
+    let run_id = identity_material.derive_run_id().expect("run id");
+    let adapter_binding = runtime_adapter_binding();
+    Fixture {
+        runtime_spec,
+        run_id,
+        distinct_run_key_digest: None,
+        seed_ref,
+        descriptor_a: node_a.descriptor_id.clone(),
+        descriptor_b: node_b.descriptor_id.clone(),
+        descriptor_c: None,
+        render_node,
+        render_cell,
+        cell_a: node_a.output_cell.clone(),
+        cell_b: node_b.output_cell.clone(),
+        cell_c: None,
+        cap_kind: RuntimeReadCap::kind().expect("read cap kind"),
+        cap_version: RuntimeReadCap::version().expect("read cap version"),
+        adapter_kind: adapter_binding.adapter_kind,
+        adapter_version: adapter_binding.adapter_version,
+    }
 }
 
 fn fixture_from_runtime_spec(

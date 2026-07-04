@@ -252,7 +252,11 @@ impl StateSpec for MultiplyState {
 }
 
 impl PureState for MultiplyState {
-    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+    fn run(
+        &self,
+        input: Self::Input,
+        _context: &CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
         Ok(LaunchValue {
             amount: input.amount * self.config.multiplier,
             label: input.label,
@@ -326,7 +330,11 @@ impl StateSpec for ContextualMultiplyState {
 }
 
 impl PureState for ContextualMultiplyState {
-    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+    fn run(
+        &self,
+        input: Self::Input,
+        _context: &CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
         Ok(LaunchValue {
             amount: input.amount * self.config.multiplier,
             label: input.label,
@@ -406,7 +414,11 @@ macro_rules! impl_side_effect_state_spec {
             type Confirmation = LaunchValue;
             type SubmitFuture<'a> = std::future::Ready<StateResult<Self::Submission>>;
 
-            fn prepare_intent(&self, input: &Self::Input) -> StateResult<Self::Intent> {
+            fn prepare_intent(
+                &self,
+                input: &Self::Input,
+                _context: &CertifiedContext<Self::Context>,
+            ) -> StateResult<Self::Intent> {
                 Ok(LaunchValue {
                     amount: input.amount + self.config.multiplier,
                     label: input.label.clone(),
@@ -417,6 +429,7 @@ macro_rules! impl_side_effect_state_spec {
                 &self,
                 _input: &Self::Input,
                 intent: &Self::Intent,
+                _context: &CertifiedContext<Self::Context>,
             ) -> StateResult<Self::IdempotencyInput> {
                 Ok(intent.clone())
             }
@@ -426,6 +439,7 @@ macro_rules! impl_side_effect_state_spec {
                 intent: &'a Self::Intent,
                 _key: &'a IdempotencyKey<Self::IdempotencyInput>,
                 _caps: &'a Self::Caps,
+                _context: &'a CertifiedContext<Self::Context>,
             ) -> Self::SubmitFuture<'a> {
                 std::future::ready(Ok(intent.clone()))
             }
@@ -435,6 +449,7 @@ macro_rules! impl_side_effect_state_spec {
                 _input: &Self::Input,
                 _intent: &Self::Intent,
                 receipt: &Self::Receipt,
+                _context: &CertifiedContext<Self::Context>,
             ) -> StateResult<Self::Output> {
                 Ok(receipt.clone())
             }
@@ -444,6 +459,7 @@ macro_rules! impl_side_effect_state_spec {
                 _input: &Self::Input,
                 _intent: &Self::Intent,
                 confirmation: &Self::Confirmation,
+                _context: &CertifiedContext<Self::Context>,
             ) -> StateResult<Self::Output> {
                 Ok(confirmation.clone())
             }

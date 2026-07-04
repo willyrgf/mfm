@@ -419,14 +419,30 @@ pub trait MfmContext: MfmValue + Clone {
 }
 
 /// Context contract accepted by a state descriptor.
-pub trait StateContext: Send + Sync + 'static {
+pub trait StateContext: Send + Sync + Sized + 'static {
     /// Returns the descriptor-level state context contract.
     fn descriptor() -> Result<StateContextDescriptorSpec>;
+
+    /// Materializes state-facing context authority from an optional certified context spec.
+    fn materialize_certified(spec: Option<&CertifiedContextSpec>)
+        -> Result<CertifiedContext<Self>>;
 }
 
 impl StateContext for NoContext {
     fn descriptor() -> Result<StateContextDescriptorSpec> {
         Ok(StateContextDescriptorSpec::no_context())
+    }
+
+    fn materialize_certified(
+        spec: Option<&CertifiedContextSpec>,
+    ) -> Result<CertifiedContext<Self>> {
+        if let Some(context) = spec {
+            return Err(PlanError::ContextContract(format!(
+                "NoContext state received certified context {}",
+                context.context_ref
+            )));
+        }
+        Ok(CertifiedContext::no_context())
     }
 }
 
@@ -437,48 +453,114 @@ where
     fn descriptor() -> Result<StateContextDescriptorSpec> {
         context_descriptor_for::<C>()
     }
+
+    fn materialize_certified(
+        spec: Option<&CertifiedContextSpec>,
+    ) -> Result<CertifiedContext<Self>> {
+        let spec = spec.ok_or_else(|| {
+            PlanError::ContextContract(
+                "typed context state received no-context authority".to_owned(),
+            )
+        })?;
+        CertifiedContext::from_certified_spec(spec)
+    }
 }
 
 /// State-facing typed context authority materialized from a certified spec.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CertifiedContext<C: MfmContext> {
-    context_ref: mfm_ids::ContextRef,
-    context_descriptor_id: ContextDescriptorId,
-    schema_id: SchemaId,
-    semantic_type_id: SemanticTypeId,
-    canonicalizer_identity: CanonicalizerIdentity,
-    value: C,
+pub struct CertifiedContext<C: StateContext> {
+    context_ref: Option<mfm_ids::ContextRef>,
+    context_descriptor_id: Option<ContextDescriptorId>,
+    schema_id: Option<SchemaId>,
+    semantic_type_id: Option<SemanticTypeId>,
+    canonicalizer_identity: Option<CanonicalizerIdentity>,
+    value: Option<C>,
+}
+
+impl CertifiedContext<NoContext> {
+    /// Creates framework-owned no-context invocation authority.
+    pub fn no_context() -> Self {
+        Self {
+            context_ref: None,
+            context_descriptor_id: None,
+            schema_id: None,
+            semantic_type_id: None,
+            canonicalizer_identity: None,
+            value: None,
+        }
+    }
 }
 
 impl<C: MfmContext> CertifiedContext<C> {
+    /// Materializes typed context authority from a certified context table entry.
+    pub fn from_certified_spec(spec: &CertifiedContextSpec) -> Result<Self> {
+        let StateContextDescriptorSpec::Required(requirement) = C::descriptor()? else {
+            return Err(PlanError::ContextContract(
+                "typed context resolved to no-context descriptor".to_owned(),
+            ));
+        };
+        if spec.context_descriptor_id != requirement.context_descriptor_id
+            || spec.schema_id != requirement.schema_id
+            || spec.semantic_type_id != requirement.semantic_type_id
+            || spec.canonicalizer_identity != requirement.canonicalizer_identity
+        {
+            return Err(PlanError::ContextContract(format!(
+                "certified context {} does not match requested typed context descriptor",
+                spec.context_ref
+            )));
+        }
+        let value = serde_json::from_slice::<C>(spec.canonical_context.as_bytes())
+            .map_err(|error| PlanError::Value(error.to_string()))?;
+        Ok(Self {
+            context_ref: Some(spec.context_ref.clone()),
+            context_descriptor_id: Some(spec.context_descriptor_id.clone()),
+            schema_id: Some(spec.schema_id.clone()),
+            semantic_type_id: Some(spec.semantic_type_id.clone()),
+            canonicalizer_identity: Some(spec.canonicalizer_identity.clone()),
+            value: Some(value),
+        })
+    }
+
     /// Returns the content-addressed certified context ref.
     pub fn context_ref(&self) -> &mfm_ids::ContextRef {
-        &self.context_ref
+        self.context_ref
+            .as_ref()
+            .expect("typed certified context must carry a context ref")
     }
 
     /// Returns the context descriptor identity.
     pub fn context_descriptor_id(&self) -> &ContextDescriptorId {
-        &self.context_descriptor_id
+        self.context_descriptor_id
+            .as_ref()
+            .expect("typed certified context must carry a descriptor id")
     }
 
     /// Returns the context schema id.
     pub fn schema_id(&self) -> &SchemaId {
-        &self.schema_id
+        self.schema_id
+            .as_ref()
+            .expect("typed certified context must carry a schema id")
     }
 
     /// Returns the context semantic type id.
     pub fn semantic_type_id(&self) -> &SemanticTypeId {
-        &self.semantic_type_id
+        self.semantic_type_id
+            .as_ref()
+            .expect("typed certified context must carry a semantic type id")
     }
 
     /// Returns the context canonicalizer identity.
     pub fn canonicalizer_identity(&self) -> &CanonicalizerIdentity {
-        &self.canonicalizer_identity
+        self.canonicalizer_identity
+            .as_ref()
+            .expect("typed certified context must carry a canonicalizer identity")
     }
 
     /// Returns the decoded typed context value.
     pub fn value(&self) -> &C {
-        &self.value
+        self.value
+            .as_ref()
+            .expect("typed certified context must carry a decoded value")
     }
 }
 
@@ -1687,7 +1769,11 @@ pub trait EffectRunner<S: StateSpec>: private::EffectRunnerSealed<S> {
 /// Pure deterministic state runner.
 pub trait PureState: StateSpec<Effect = Pure, Caps = NoCaps> {
     /// Executes this pure state.
-    fn run(&self, input: Self::Input) -> StateResult<Self::Output>;
+    fn run(
+        &self,
+        input: Self::Input,
+        context: &CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output>;
 }
 
 /// External read state runner.
@@ -1698,7 +1784,12 @@ pub trait ReadState: StateSpec<Effect = ReadExternal> {
         Self: 'a;
 
     /// Executes this read state through declared capabilities.
-    fn run<'a>(&'a self, input: Self::Input, caps: &'a Self::Caps) -> Self::RunFuture<'a>;
+    fn run<'a>(
+        &'a self,
+        input: Self::Input,
+        caps: &'a Self::Caps,
+        context: &'a CertifiedContext<Self::Context>,
+    ) -> Self::RunFuture<'a>;
 }
 
 /// MFM-managed platform write state runner.
@@ -1709,7 +1800,12 @@ pub trait ManagedWriteState: StateSpec<Effect = ManagedPlatformWrite> {
         Self: 'a;
 
     /// Executes this managed write through declared capabilities.
-    fn run<'a>(&'a self, input: Self::Input, caps: &'a Self::Caps) -> Self::RunFuture<'a>;
+    fn run<'a>(
+        &'a self,
+        input: Self::Input,
+        caps: &'a Self::Caps,
+        context: &'a CertifiedContext<Self::Context>,
+    ) -> Self::RunFuture<'a>;
 }
 
 /// Typed idempotency key for side-effect submission protocols.
@@ -1752,13 +1848,18 @@ pub trait SideEffectState: StateSpec<Effect = ApplySideEffect> {
         Self: 'a;
 
     /// Builds a deterministic mutation intent from materialized input.
-    fn prepare_intent(&self, input: &Self::Input) -> StateResult<Self::Intent>;
+    fn prepare_intent(
+        &self,
+        input: &Self::Input,
+        context: &CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Intent>;
 
     /// Builds deterministic idempotency input from materialized input and intent.
     fn idempotency_input(
         &self,
         input: &Self::Input,
         intent: &Self::Intent,
+        context: &CertifiedContext<Self::Context>,
     ) -> StateResult<Self::IdempotencyInput>;
 
     /// Submits the intent through declared capabilities.
@@ -1767,6 +1868,7 @@ pub trait SideEffectState: StateSpec<Effect = ApplySideEffect> {
         intent: &'a Self::Intent,
         key: &'a IdempotencyKey<Self::IdempotencyInput>,
         caps: &'a Self::Caps,
+        context: &'a CertifiedContext<Self::Context>,
     ) -> Self::SubmitFuture<'a>;
 
     /// Constructs terminal output from receipt-level side-effect evidence.
@@ -1775,6 +1877,7 @@ pub trait SideEffectState: StateSpec<Effect = ApplySideEffect> {
         input: &Self::Input,
         intent: &Self::Intent,
         receipt: &Self::Receipt,
+        context: &CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output>;
 
     /// Constructs terminal output from confirmed side-effect evidence.
@@ -1783,6 +1886,7 @@ pub trait SideEffectState: StateSpec<Effect = ApplySideEffect> {
         input: &Self::Input,
         intent: &Self::Intent,
         confirmation: &Self::Confirmation,
+        context: &CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output>;
 }
 

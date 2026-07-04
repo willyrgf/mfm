@@ -415,7 +415,8 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         config: &ValidatedConfig<DeployPhaseConfig>,
         intent: &ContractDeployIntent,
     ) -> Result<PreparedContractMutation> {
-        let expected = DeployContractState::new(config.clone())?.prepare_intent(&())?;
+        let context = mfm_program::CertifiedContext::no_context();
+        let expected = DeployContractState::new(config.clone())?.prepare_intent(&(), &context)?;
         if &expected != intent {
             return Err(EvmContractAdapterError::IntentMismatch);
         }
@@ -440,7 +441,9 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         input: &ConfigureContractInput,
         intent: &ContractConfigureIntent,
     ) -> Result<PreparedContractMutation> {
-        let expected = ConfigureContractState::new(config.clone())?.prepare_intent(input)?;
+        let context = mfm_program::CertifiedContext::no_context();
+        let expected =
+            ConfigureContractState::new(config.clone())?.prepare_intent(input, &context)?;
         if &expected != intent {
             return Err(EvmContractAdapterError::IntentMismatch);
         }
@@ -461,7 +464,8 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         intent: &ContractDeployIntent,
         evidence: &PreparedContractInvocation,
     ) -> Result<PreparedContractMutation> {
-        let expected = DeployContractState::new(config.clone())?.prepare_intent(&())?;
+        let context = mfm_program::CertifiedContext::no_context();
+        let expected = DeployContractState::new(config.clone())?.prepare_intent(&(), &context)?;
         if &expected != intent {
             return Err(EvmContractAdapterError::IntentMismatch);
         }
@@ -486,7 +490,9 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         intent: &ContractConfigureIntent,
         evidence: &PreparedContractInvocation,
     ) -> Result<PreparedContractMutation> {
-        let expected = ConfigureContractState::new(config.clone())?.prepare_intent(input)?;
+        let context = mfm_program::CertifiedContext::no_context();
+        let expected =
+            ConfigureContractState::new(config.clone())?.prepare_intent(input, &context)?;
         if &expected != intent {
             return Err(EvmContractAdapterError::IntentMismatch);
         }
@@ -2947,8 +2953,9 @@ impl ContractVerifyPhase for DeployMutationPlan {
     }
 
     fn output_from_receipt(&self, receipt: &Self::Receipt) -> mfm_runtime::Result<Self::Output> {
+        let context = mfm_program::CertifiedContext::no_context();
         self.state
-            .output_from_receipt(&(), &self.intent, receipt)
+            .output_from_receipt(&(), &self.intent, receipt, &context)
             .map_err(runtime_state_error)
     }
 
@@ -2956,8 +2963,9 @@ impl ContractVerifyPhase for DeployMutationPlan {
         &self,
         confirmation: &Self::Confirmation,
     ) -> mfm_runtime::Result<Self::Output> {
+        let context = mfm_program::CertifiedContext::no_context();
         self.state
-            .output_from_confirmation(&(), &self.intent, confirmation)
+            .output_from_confirmation(&(), &self.intent, confirmation, &context)
             .map_err(runtime_state_error)
     }
 }
@@ -2999,8 +3007,9 @@ impl ContractVerifyPhase for ConfigureMutationPlan {
     }
 
     fn output_from_receipt(&self, receipt: &Self::Receipt) -> mfm_runtime::Result<Self::Output> {
+        let context = mfm_program::CertifiedContext::no_context();
         self.state
-            .output_from_receipt(&self.input, &self.intent, receipt)
+            .output_from_receipt(&self.input, &self.intent, receipt, &context)
             .map_err(runtime_state_error)
     }
 
@@ -3008,8 +3017,9 @@ impl ContractVerifyPhase for ConfigureMutationPlan {
         &self,
         confirmation: &Self::Confirmation,
     ) -> mfm_runtime::Result<Self::Output> {
+        let context = mfm_program::CertifiedContext::no_context();
         self.state
-            .output_from_confirmation(&self.input, &self.intent, confirmation)
+            .output_from_confirmation(&self.input, &self.intent, confirmation, &context)
             .map_err(runtime_state_error)
     }
 }
@@ -3020,9 +3030,12 @@ async fn deploy_mutation_plan_for_node(
 ) -> mfm_runtime::Result<DeployMutationPlan> {
     let config = load_runner_config_for_node::<DeployPhaseConfig>(node, artifacts).await?;
     let state = DeployContractState::new(config.clone()).map_err(runtime_plan_error)?;
-    let intent = state.prepare_intent(&()).map_err(runtime_state_error)?;
+    let context = mfm_program::CertifiedContext::no_context();
+    let intent = state
+        .prepare_intent(&(), &context)
+        .map_err(runtime_state_error)?;
     let idempotency = state
-        .idempotency_input(&(), &intent)
+        .idempotency_input(&(), &intent, &context)
         .map_err(runtime_state_error)?;
     Ok(DeployMutationPlan {
         config,
@@ -3043,9 +3056,12 @@ async fn configure_mutation_plan_for_inputs(
             .await?;
     let input = ConfigureContractInput { deployed };
     let state = ConfigureContractState::new(config.clone()).map_err(runtime_plan_error)?;
-    let intent = state.prepare_intent(&input).map_err(runtime_state_error)?;
+    let context = mfm_program::CertifiedContext::no_context();
+    let intent = state
+        .prepare_intent(&input, &context)
+        .map_err(runtime_state_error)?;
     let idempotency = state
-        .idempotency_input(&input, &intent)
+        .idempotency_input(&input, &intent, &context)
         .map_err(runtime_state_error)?;
     Ok(ConfigureMutationPlan {
         config,

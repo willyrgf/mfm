@@ -8,14 +8,15 @@ use mfm_capabilities::{CapabilityDescriptor, CapabilitySetDescriptor};
 use mfm_events::v1 as events;
 use mfm_ids::{AdapterKind, AdapterVersion, DescriptorId, RuntimeBindingId};
 use mfm_spec::v1 as spec;
+use mfm_store::v1 as store;
 
 use crate::framework::{
     framework_complete_run_binding, framework_public_output_binding,
     framework_resolve_saga_terminal_binding, framework_retention_manifest_binding,
 };
 use crate::{
-    CertifiedRuntimeSpec, ErasedRunCtx, PreInvocationRunCtx, Result, RunLaunchArtifact,
-    RunLaunchEvidence, RuntimeError, StagedArtifact, StagedRetentionRefs,
+    CertifiedInvocationContext, CertifiedRuntimeSpec, ErasedRunCtx, PreInvocationRunCtx, Result,
+    RunLaunchArtifact, RunLaunchEvidence, RuntimeError, StagedArtifact, StagedRetentionRefs,
 };
 
 /// Boxed future returned by an erased typed runner.
@@ -25,6 +26,17 @@ pub type ErasedRunnerFuture<'a> =
 /// Boxed future returned by a pre-invocation resource-lane hook.
 pub type PreInvocationRunnerFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ErasedRunnerOutput>> + Send + 'a>>;
+
+/// Type-aware validator for context-bound state-output artifacts.
+pub trait ContextOutputExtractor: Send + Sync {
+    /// Validates decoded output context metadata against the certified output-cell context.
+    fn validate_context_output(
+        &self,
+        cell_context: &spec::CellContextSpec,
+        artifact: &store::ArtifactEvidenceRef,
+        bytes: &[u8],
+    ) -> Result<()>;
+}
 
 /// Pre-admission context supplied to runner ingress validators.
 ///
@@ -59,6 +71,11 @@ impl<'a> RunnerIngressContext<'a> {
     /// Returns the certified node bound to the runner.
     pub fn node(&self) -> &'a spec::NodeSpec {
         self.node
+    }
+
+    /// Returns certified transition-context authority for this ingress node.
+    pub fn context(&self) -> Result<CertifiedInvocationContext> {
+        self.runtime_spec.invocation_context_for_node(self.node)
     }
 
     /// Returns the launch artifact matching this node's certified config ref.
@@ -99,6 +116,11 @@ pub trait ErasedNodeRunner: Send + Sync {
     /// Validates process-local capability required to admit this certified node.
     fn validate_ingress(&self, _ctx: RunnerIngressContext<'_>) -> Result<()> {
         Ok(())
+    }
+
+    /// Returns type-aware output context validation for context-bound state outputs.
+    fn context_output_extractor(&self) -> Option<&dyn ContextOutputExtractor> {
+        None
     }
 
     /// Emits pre-invocation resource-lane claim evidence, if this runner owns such a claim.

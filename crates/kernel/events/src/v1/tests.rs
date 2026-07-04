@@ -769,8 +769,8 @@ fn event_schema_descriptor_requirement_sources_golden() {
 mfm.events.v1.state_attempt_started schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b []
 mfm.events.v1.fact_recorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:f66fc733963d3564fe94bcd8c5d80c489405ddc63c34002a9c6af381cf8f1734 [FactResponse]
 mfm.events.v1.artifact_referenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:3467e9d93a82b31967749282034ed4e9d4fb1816de477cc01eb7ba1f4146a531 [ArtifactReferenced]
-mfm.events.v1.cell_produced schema:mfm.events.v1.cell_produced:1:sha256-jcs-v1:9a2b250e7a5270bb302ae76a06091873dc50644855bace41bab97dcce311f07a [StateOutput]
-mfm.events.v1.cell_skipped schema:mfm.events.v1.cell_skipped:1:sha256-jcs-v1:89a4f88a28553875c2dc9a0248dea47985cc7f7bf17f4e2999bc67a97b0917ea []
+mfm.events.v1.cell_produced schema:mfm.events.v1.cell_produced:1:sha256-jcs-v1:dae830d5b1657071a6b8c4a3430f742ad863cd3c8fa29d2bfc2740005a2b9150 [StateOutput]
+mfm.events.v1.cell_skipped schema:mfm.events.v1.cell_skipped:1:sha256-jcs-v1:84f82927661232f25086c5e5ab3520fdf51533c4d4b136e9f77b7795a3bce445 []
 mfm.events.v1.side_effect.intent_persisted schema:mfm.events.v1.side_effect.intent_persisted:1:sha256-jcs-v1:34b33c16f7f4272e0c43406bd1c8788ec896a7a5cf1d19ce7c0041f168dd1d57 [SideEffectIntent]
 mfm.events.v1.side_effect.claimed schema:mfm.events.v1.side_effect.claimed:1:sha256-jcs-v1:793b4e2c8a58d2acef7cd4500fe7b20a1cf6dfd57386ccb8ef47cf64b3feb862 []
 mfm.events.v1.side_effect.claim_taken_over schema:mfm.events.v1.side_effect.claim_taken_over:1:sha256-jcs-v1:abdc3cb22d1022954df00d0fa18ea5ddf0f71f576b9a9c7e0dca08de2a0f5acf []
@@ -848,8 +848,8 @@ fn v1_event_schema_golden() {
 mfm_events::v1::StateAttemptStarted schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b
 mfm_events::v1::FactRecorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:f66fc733963d3564fe94bcd8c5d80c489405ddc63c34002a9c6af381cf8f1734
 mfm_events::v1::ArtifactReferenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:3467e9d93a82b31967749282034ed4e9d4fb1816de477cc01eb7ba1f4146a531
-mfm_events::v1::CellProduced schema:mfm.events.v1.cell_produced:1:sha256-jcs-v1:9a2b250e7a5270bb302ae76a06091873dc50644855bace41bab97dcce311f07a
-mfm_events::v1::CellSkipped schema:mfm.events.v1.cell_skipped:1:sha256-jcs-v1:89a4f88a28553875c2dc9a0248dea47985cc7f7bf17f4e2999bc67a97b0917ea
+mfm_events::v1::CellProduced schema:mfm.events.v1.cell_produced:1:sha256-jcs-v1:dae830d5b1657071a6b8c4a3430f742ad863cd3c8fa29d2bfc2740005a2b9150
+mfm_events::v1::CellSkipped schema:mfm.events.v1.cell_skipped:1:sha256-jcs-v1:84f82927661232f25086c5e5ab3520fdf51533c4d4b136e9f77b7795a3bce445
 mfm_events::v1::side_effect::IntentPersisted schema:mfm.events.v1.side_effect.intent_persisted:1:sha256-jcs-v1:34b33c16f7f4272e0c43406bd1c8788ec896a7a5cf1d19ce7c0041f168dd1d57
 mfm_events::v1::side_effect::Claimed schema:mfm.events.v1.side_effect.claimed:1:sha256-jcs-v1:793b4e2c8a58d2acef7cd4500fe7b20a1cf6dfd57386ccb8ef47cf64b3feb862
 mfm_events::v1::side_effect::ClaimTakenOver schema:mfm.events.v1.side_effect.claim_taken_over:1:sha256-jcs-v1:abdc3cb22d1022954df00d0fa18ea5ddf0f71f576b9a9c7e0dca08de2a0f5acf
@@ -1093,6 +1093,7 @@ fn artifact_requirement_accessor_covers_artifact_bearing_variants() {
                 value_lineage: ValueLineageRef {
                     lineage_digest: content_digest(63),
                 },
+                context: mfm_spec::v1::CellContextSpec::no_context(),
                 artifact_id: artifact_id(64),
                 content_digest: content_digest(65),
                 producer_state_kind: None,
