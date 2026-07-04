@@ -423,6 +423,7 @@ fn replay_rejects_fact_descriptor_allowed_only_for_other_node() {
             ),
             (response_artifact.artifact_id.clone(), response_bytes),
         ]),
+        additional_artifact_evidence: Vec::new(),
         fact_query_receipt_trust_root: None,
         source_fact_events: Vec::new(),
     };
@@ -1174,6 +1175,7 @@ impl ReplayFactStreamFixture {
             adapter_executables: Vec::new(),
             artifact_evidence: self.artifact_evidence.clone(),
             artifact_bytes: self.artifact_bytes.clone(),
+            additional_artifact_evidence: Vec::new(),
             fact_query_receipt_trust_root: None,
             source_fact_events: Vec::new(),
         }
@@ -1306,6 +1308,7 @@ fn cell_replay_authority(
             descriptor_artifact_id(&descriptor_digest),
             descriptor_bytes.to_vec(),
         )]),
+        additional_artifact_evidence: Vec::new(),
         fact_query_receipt_trust_root: None,
         source_fact_events: Vec::new(),
     }

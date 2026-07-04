@@ -49,7 +49,7 @@ use std::time::Duration;
 const TEST_SIGNER_HEX: &str = "4c0883a69102937d6231471b5dbb6204fe512961708279c2f802d6a8ebf2d3a4";
 
 type ContractRunStore = store::AsyncInMemoryRunStore;
-type ContractRunServices = RunServices<ContractRunStore, ContractRunStore>;
+type ContractRunServices = RunServices<ContractRunStore, ContractArtifactOverlay>;
 
 fn evm_forbidden_runtime_terms() -> Vec<String> {
     vec![
@@ -260,23 +260,21 @@ fn contract_lifecycle_runners(
 
 fn contract_lifecycle_services(
     store: &ContractRunStore,
+    artifacts: ContractArtifactOverlay,
     runners: ErasedRunnerRegistry,
     certification: CertificationRegistry,
 ) -> ContractRunServices {
-    make_run_services_with_certification_registry(
-        runners,
-        store.clone(),
-        store.clone(),
-        certification,
-    )
+    make_run_services_with_certification_registry(runners, store.clone(), artifacts, certification)
 }
 
 fn contract_services(
     store: &ContractRunStore,
+    artifacts: ContractArtifactOverlay,
     factory: impl EvmContractRuntimeFactory + 'static,
 ) -> ContractRunServices {
     contract_lifecycle_services(
         store,
+        artifacts,
         contract_lifecycle_runners(factory),
         contract_lifecycle_certification_registry(),
     )
@@ -286,20 +284,23 @@ fn contract_test_services(
     make_factory: impl FnOnce(Arc<dyn store::RetainedArtifactReadProvider>) -> TestRuntimeFactory,
 ) -> (ContractRunStore, ContractRunServices) {
     let store = test_run_store();
-    let artifacts: Arc<dyn store::RetainedArtifactReadProvider> =
-        Arc::new(ContractArtifactOverlay::new(Arc::new(store.clone())));
-    let services = contract_services(&store, make_factory(artifacts));
+    let artifacts = ContractArtifactOverlay::new(Arc::new(store.clone()));
+    let services = contract_services(&store, artifacts.clone(), make_factory(Arc::new(artifacts)));
     (store, services)
 }
 
 #[derive(Clone)]
 struct MissingValidationReportArtifactStore {
-    inner: ContractRunStore,
+    store: ContractRunStore,
+    artifacts: ContractArtifactOverlay,
 }
 
 impl MissingValidationReportArtifactStore {
     fn new(inner: ContractRunStore) -> Self {
-        Self { inner }
+        Self {
+            store: inner.clone(),
+            artifacts: ContractArtifactOverlay::new(Arc::new(inner)),
+        }
     }
 }
 
@@ -310,41 +311,41 @@ impl store::RunEventStore for MissingValidationReportArtifactStore {
         &'a self,
         bundle: store::PreparedCommitBundle,
     ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
-        self.inner.append_prepared_commit_bundle(bundle)
+        self.store.append_prepared_commit_bundle(bundle)
     }
 
     fn load_run_stream<'a>(
         &'a self,
         run_id: &'a mfm_ids::RunId,
     ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
-        self.inner.load_run_stream(run_id)
+        self.store.load_run_stream(run_id)
     }
 
     fn load_committed_run_stream<'a>(
         &'a self,
         run_id: &'a mfm_ids::RunId,
     ) -> store::AsyncStoreFuture<'a, store::CommittedRunStream, Self::Error> {
-        self.inner.load_committed_run_stream(run_id)
+        self.store.load_committed_run_stream(run_id)
     }
 
     fn expected_next_seq<'a>(
         &'a self,
         run_id: &'a mfm_ids::RunId,
     ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
-        self.inner.expected_next_seq(run_id)
+        self.store.expected_next_seq(run_id)
     }
 
     fn status_projection_snapshot<'a>(
         &'a self,
         run_id: &'a mfm_ids::RunId,
     ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
-        self.inner.status_projection_snapshot(run_id)
+        self.store.status_projection_snapshot(run_id)
     }
 
     fn fact_projection_snapshot<'a>(
         &'a self,
     ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
-        self.inner.fact_projection_snapshot()
+        self.store.fact_projection_snapshot()
     }
 }
 
@@ -354,7 +355,7 @@ impl store::TrustScopeStore for MissingValidationReportArtifactStore {
     fn load_trust_scope_id<'a>(
         &'a self,
     ) -> store::AsyncStoreFuture<'a, store::TrustScopeId, Self::Error> {
-        self.inner.load_trust_scope_id()
+        self.store.load_trust_scope_id()
     }
 }
 
@@ -373,7 +374,7 @@ impl store::RetainedArtifactReadProvider for MissingValidationReportArtifactStor
                 async move { Err(store::StoreError::MissingArtifact { artifact_id }) },
             );
         }
-        self.inner.read_retained_artifact(requirement)
+        self.artifacts.read_retained_artifact(requirement)
     }
 }
 
@@ -492,11 +493,11 @@ async fn app_replay_rejects_missing_validation_report_retained_artifact() {
 #[tokio::test]
 async fn app_resume_completed_run_is_evidence_only_without_live_runners() {
     let store = test_run_store();
-    let artifacts: Arc<dyn store::RetainedArtifactReadProvider> =
-        Arc::new(ContractArtifactOverlay::new(Arc::new(store.clone())));
+    let artifacts = ContractArtifactOverlay::new(Arc::new(store.clone()));
     let certification = contract_lifecycle_certification_registry();
-    let runners = contract_lifecycle_runners(TestRuntimeFactory::new(artifacts));
-    let launch_services = contract_lifecycle_services(&store, runners, certification.clone());
+    let runners = contract_lifecycle_runners(TestRuntimeFactory::new(Arc::new(artifacts.clone())));
+    let launch_services =
+        contract_lifecycle_services(&store, artifacts.clone(), runners, certification.clone());
     let request = prepare_evm_entry_point_request(
         &launch_services,
         "evm_contract_validate",
@@ -517,8 +518,12 @@ async fn app_resume_completed_run_is_evidence_only_without_live_runners() {
         .await
         .expect("completed stream");
 
-    let resume_services =
-        contract_lifecycle_services(&store, ErasedRunnerRegistry::new(), certification);
+    let resume_services = contract_lifecycle_services(
+        &store,
+        artifacts,
+        ErasedRunnerRegistry::new(),
+        certification,
+    );
     assert!(
         completed_stream
             .iter()
@@ -605,11 +610,16 @@ async fn assert_resume_runtime_config_ingress_failure(
     runtime_config_path: Option<&std::path::Path>,
 ) {
     let store = test_run_store();
-    let artifacts = Arc::new(store.clone());
+    let artifacts = ContractArtifactOverlay::new(Arc::new(store.clone()));
     let certification = contract_lifecycle_certification_registry();
-    let launch_runners = contract_lifecycle_runners(TestRuntimeFactory::new(artifacts.clone()));
-    let launch_services =
-        contract_lifecycle_services(&store, launch_runners, certification.clone());
+    let launch_runners =
+        contract_lifecycle_runners(TestRuntimeFactory::new(Arc::new(artifacts.clone())));
+    let launch_services = contract_lifecycle_services(
+        &store,
+        artifacts.clone(),
+        launch_runners,
+        certification.clone(),
+    );
     let request = prepare_evm_entry_point_request(
         &launch_services,
         "evm_contract_validate",
@@ -648,9 +658,10 @@ async fn assert_resume_runtime_config_ingress_failure(
     );
 
     let resume_runners =
-        crate::production_runner_registry(Arc::new(store.clone()), runtime_config_path)
+        crate::production_runner_registry(Arc::new(artifacts.clone()), runtime_config_path)
             .expect("production runners");
-    let resume_services = contract_lifecycle_services(&store, resume_runners, certification);
+    let resume_services =
+        contract_lifecycle_services(&store, artifacts, resume_runners, certification);
     let error = resume_services
         .resume_stored_run(&run_id)
         .await
