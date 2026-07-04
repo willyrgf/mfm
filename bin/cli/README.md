@@ -443,6 +443,9 @@ mfm_cli run start --op portfolio_snapshot --config portfolio.toml
 mfm_cli run start --op evm_contract_lifecycle --config lifecycle.toml
 ```
 
+EVM contract entry-point config shapes and import authority rules are documented in
+[`../../docs/evm-contract-lifecycle.md`](../../docs/evm-contract-lifecycle.md).
+
 For local development against a managed persistent run-store database, use:
 
 ```sh
