@@ -620,13 +620,7 @@ impl ContextValidatorSpec {
 }
 
 impl<'program, 'scope, C: MfmContext> DeclaredContext<'program, 'scope, C> {
-    /// Returns the content-addressed certified context ref.
-    pub fn context_ref(&self) -> &mfm_ids::ContextRef {
-        &self.spec.context_ref
-    }
-
-    /// Returns the persisted certified context table entry.
-    pub fn spec(&self) -> &CertifiedContextSpec {
+    fn spec(&self) -> &CertifiedContextSpec {
         &self.spec
     }
 }
