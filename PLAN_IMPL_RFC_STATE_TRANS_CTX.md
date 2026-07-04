@@ -34,9 +34,21 @@ The fresh architect audit gaps are implemented as part of the final completion s
 - The EVM replay verifier now checks lifecycle side-effect requests against the certified node
   context and rejects mismatched prepared, submission, receipt, and confirmation context or stage
   evidence even when those artifacts agree with each other.
+- EVM replay also verifies lifecycle state-output artifacts, validation read/event evidence,
+  validation report evidence refs, source-run import bundles, and external adoption read/code
+  evidence from retained replay artifacts only. Report replay rejects missing retained output
+  artifacts, mismatched context refs, wrong stages, and observed read/event results that do not
+  match the certified validate action.
+- Validation reports retain the configured lifecycle evidence refs and the validation read/event
+  replay evidence that produced them; reports no longer project an empty evidence list.
+- The certifier validates every certified context table entry through the registered typed context
+  descriptor path after checking descriptor metadata, canonical bytes, digest, byte length, and
+  derived context ref.
 - Regression tests cover retained source-run registry authority, domain-local certificate rejection,
   public/projection/raw source-value rejection, tampered source terminal events, persisted
-  external-adoption evidence, and mismatched replay submission/receipt context evidence.
+  external-adoption evidence, mismatched replay submission/receipt context evidence, validation
+  report retained artifacts, validation read/event result mismatches, external adoption code-policy
+  replay failures, and typed context-table decode failures.
 
 At the public cutover, old public configure and validate shapes are rejected, not translated:
 
@@ -1143,6 +1155,10 @@ deletion by the RFC.
   import policy. No implicit compatibility relation is available.
 - Context-bound value extraction is implemented through the typed extractor contract rather than
   JSON-path predicates.
+- Context-table certification validates through registered typed descriptors rather than accepting
+  digest/ref/length agreement alone.
+- Validation reports retain lifecycle evidence refs plus validation read/event evidence, and replay
+  verifies those report artifacts against certified context and retained artifacts only.
 
 ## final review checklist
 
@@ -1150,12 +1166,17 @@ deletion by the RFC.
 - EVM cutover commits depend on certified context primitives.
 - Certification rejects wrong-context consumers, unapproved producers, wrong stages, and raw-seed
   masquerading.
+- Certification rejects context table entries that do not decode through their registered typed
+  descriptor.
 - Runtime rejects mismatched context-bound inputs before runner invocation.
 - Runtime rejects output payload context mismatches before admitting cells.
 - Import admission rejects missing policy, missing proof, wrong context, wrong stage, unapproved
   producer, identifier-only input, public JSON, projections, and raw payloads before producing
   context-bound resources.
 - Import admission and replay are evidence-backed, not identifier-only.
+- Replay verifies validation read/event evidence, validation report state-output evidence,
+  source-run import evidence, external adoption read/code evidence, and side-effect evidence from
+  retained artifacts only.
 - Public JSON, public fact refs, and public fact DTOs are never import authority.
 - Public fact refs and DTOs remain non-authoritative for lifecycle imports. Fact/query replay
   authority stays with retained `FactRecorded`/`FactQueryEvidence` evidence, not public projections.

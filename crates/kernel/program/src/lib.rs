@@ -9,6 +9,7 @@
 extern crate self as mfm_program;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
@@ -572,6 +573,55 @@ pub struct DeclaredContext<'program, 'scope, C: MfmContext> {
     _program: PhantomData<fn(&'program ()) -> &'program ()>,
     _scope: PhantomData<fn(&'scope ()) -> &'scope ()>,
     _context: PhantomData<fn(C) -> C>,
+}
+
+/// Type-erased context descriptor validator retained by in-memory program drafts.
+#[derive(Clone)]
+pub struct ContextValidatorSpec {
+    requirement: StateContextDescriptorRequirementSpec,
+    validate: fn(&CertifiedContextSpec) -> Result<()>,
+}
+
+impl fmt::Debug for ContextValidatorSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ContextValidatorSpec")
+            .field(
+                "context_descriptor_id",
+                &self.requirement.context_descriptor_id,
+            )
+            .field("schema_id", &self.requirement.schema_id)
+            .field("semantic_type_id", &self.requirement.semantic_type_id)
+            .field(
+                "canonicalizer_identity",
+                &self.requirement.canonicalizer_identity,
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for ContextValidatorSpec {
+    fn eq(&self, other: &Self) -> bool {
+        self.requirement == other.requirement
+    }
+}
+
+impl Eq for ContextValidatorSpec {}
+
+impl ContextValidatorSpec {
+    /// Returns the context descriptor requirement this validator decodes.
+    pub const fn requirement(&self) -> &StateContextDescriptorRequirementSpec {
+        &self.requirement
+    }
+
+    /// Validates a certified context table entry through the registered typed context.
+    pub fn validate(&self, spec: &CertifiedContextSpec) -> Result<()> {
+        (self.validate)(spec)
+    }
+
+    /// Returns the type-erased validation callback.
+    pub const fn validate_fn(&self) -> fn(&CertifiedContextSpec) -> Result<()> {
+        self.validate
+    }
 }
 
 impl<'program, 'scope, C: MfmContext> DeclaredContext<'program, 'scope, C> {
@@ -3752,6 +3802,7 @@ pub struct TypedProgramDraft {
     root_scope_id: ScopeId,
     saga_policy: SagaPolicy,
     contexts: Vec<CertifiedContextSpec>,
+    context_validators: Vec<ContextValidatorSpec>,
     seeds: Vec<RootSeedSpec>,
     scopes: Vec<ScopeSpec>,
     state_nodes: Vec<StateNodeSpec>,
@@ -3780,6 +3831,11 @@ impl TypedProgramDraft {
     /// Returns certified transition contexts declared by the draft.
     pub fn contexts(&self) -> &[CertifiedContextSpec] {
         &self.contexts
+    }
+
+    /// Returns typed context validators retained by this in-memory draft.
+    pub fn context_validators(&self) -> &[ContextValidatorSpec] {
+        &self.context_validators
     }
 
     /// Returns root seed specs.
@@ -4136,6 +4192,7 @@ pub struct ScopeBuilder<'program, 'scope> {
     operation_keys: BTreeSet<String>,
     context_refs: BTreeSet<String>,
     contexts: Vec<CertifiedContextSpec>,
+    context_validators: Vec<ContextValidatorSpec>,
     state_nodes: Vec<StateNodeSpec>,
     remediation_nodes: BTreeMap<NodeId, StateNodeSpec>,
     operation_lineage: Vec<OperationLineageFrameSpec>,
@@ -4153,6 +4210,7 @@ struct ScopeBuilderCheckpoint {
     operation_keys: BTreeSet<String>,
     context_refs: BTreeSet<String>,
     contexts: Vec<CertifiedContextSpec>,
+    context_validators: Vec<ContextValidatorSpec>,
     state_nodes: Vec<StateNodeSpec>,
     remediation_nodes: BTreeMap<NodeId, StateNodeSpec>,
     operation_lineage: Vec<OperationLineageFrameSpec>,
@@ -4210,6 +4268,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
                 operation_keys: BTreeSet::new(),
                 context_refs: BTreeSet::new(),
                 contexts: Vec::new(),
+                context_validators: Vec::new(),
                 state_nodes: Vec::new(),
                 remediation_nodes: BTreeMap::new(),
                 operation_lineage: Vec::new(),
@@ -4246,6 +4305,8 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         self.remediation_nodes.extend(child.scope.remediation_nodes);
         self.context_refs.extend(child.scope.context_refs);
         self.contexts.extend(child.scope.contexts);
+        self.context_validators
+            .extend(child.scope.context_validators);
         self.operation_lineage.extend(child.scope.operation_lineage);
         self.child_scopes.extend(child.scope.child_scopes);
         self.bridge_nodes.extend(child.bridge_nodes);
@@ -4259,6 +4320,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         C: MfmContext,
     {
         let spec = certified_context_spec(value)?;
+        let validator = context_validator_spec_for::<C>()?;
         if !self
             .context_refs
             .insert(spec.context_ref.as_str().to_owned())
@@ -4268,6 +4330,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             ));
         }
         self.contexts.push(spec.clone());
+        self.context_validators.push(validator);
         Ok(DeclaredContext {
             spec,
             _program: PhantomData,
@@ -5037,6 +5100,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             operation_keys: self.operation_keys.clone(),
             context_refs: self.context_refs.clone(),
             contexts: self.contexts.clone(),
+            context_validators: self.context_validators.clone(),
             state_nodes: self.state_nodes.clone(),
             remediation_nodes: self.remediation_nodes.clone(),
             operation_lineage: self.operation_lineage.clone(),
@@ -5052,6 +5116,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         self.operation_keys = checkpoint.operation_keys;
         self.context_refs = checkpoint.context_refs;
         self.contexts = checkpoint.contexts;
+        self.context_validators = checkpoint.context_validators;
         self.state_nodes = checkpoint.state_nodes;
         self.remediation_nodes = checkpoint.remediation_nodes;
         self.operation_lineage = checkpoint.operation_lineage;
@@ -5629,6 +5694,7 @@ where
             operation_keys: BTreeSet::new(),
             context_refs: BTreeSet::new(),
             contexts: Vec::new(),
+            context_validators: Vec::new(),
             state_nodes: Vec::new(),
             remediation_nodes: BTreeMap::new(),
             operation_lineage: Vec::new(),
@@ -5651,6 +5717,7 @@ where
         root_scope_id: root_scope_id.clone(),
         saga_policy,
         contexts: builder.scope.contexts,
+        context_validators: builder.scope.context_validators,
         seeds: builder.seeds,
         scopes: {
             let mut scopes = vec![ScopeSpec {
@@ -6023,6 +6090,22 @@ fn context_descriptor_for<C: MfmContext>() -> Result<StateContextDescriptorSpec>
             canonicalizer_identity,
         },
     )))
+}
+
+fn context_validator_spec_for<C: MfmContext>() -> Result<ContextValidatorSpec> {
+    let StateContextDescriptorSpec::Required(requirement) = context_descriptor_for::<C>()? else {
+        return Err(PlanError::ContextContract(
+            "semantic context resolved to no-context descriptor".to_owned(),
+        ));
+    };
+    Ok(ContextValidatorSpec {
+        requirement: *requirement,
+        validate: validate_context_spec_for::<C>,
+    })
+}
+
+fn validate_context_spec_for<C: MfmContext>(spec: &CertifiedContextSpec) -> Result<()> {
+    <C as StateContext>::materialize_certified(Some(spec)).map(|_| ())
 }
 
 fn context_descriptor_id(

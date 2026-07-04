@@ -2366,6 +2366,75 @@ fn finality_receipt() -> ContractTransactionReceipt {
     }
 }
 
+fn external_source_evidence_for_context(
+    context: &mfm_program::CertifiedContext<EvmContractContext>,
+) -> ExternalEvmSourceEvidence {
+    ExternalEvmSourceEvidence {
+        network_id: context.value().network.network_id.as_str().to_owned(),
+        expected_chain_id: context.value().network.expected_chain_id(),
+        observed_chain_id: context.value().network.expected_chain_id(),
+        source_ref: "adapter-test".to_owned(),
+        policy_id: "adapter-test".to_owned(),
+    }
+}
+
+fn expected_bool(value: bool) -> ExpectedValue {
+    ExpectedValue::from_json_value(&json!(value)).expect("expected bool")
+}
+
+fn expected_bool_json(value: bool) -> serde_json::Value {
+    json!({ "json_text": value.to_string() })
+}
+
+fn validation_read_result(passed: bool) -> ValidationReadResult {
+    ValidationReadResult {
+        function: "owner".to_owned(),
+        args: Vec::new(),
+        expected: expected_bool(true),
+        actual: expected_bool(passed),
+        passed,
+    }
+}
+
+fn validation_event_result(passed: bool) -> ValidationEventResult {
+    ValidationEventResult {
+        event: "Configured".to_owned(),
+        min_count: 1,
+        observed_count: if passed { 1 } else { 0 },
+        passed,
+    }
+}
+
+fn external_adoption_for_replay(
+    evidence_policy: serde_json::Value,
+) -> mfm_evm_contract_model::AdoptExternalAddress {
+    serde_json::from_value(json!({
+        "address": "0x000000000000000000000000000000000000beef",
+        "provenance_label": "adapter-test",
+        "evidence_policy": evidence_policy,
+    }))
+    .expect("external adoption")
+}
+
+fn external_adoption_evidence_for_replay(
+    context: &mfm_program::CertifiedContext<EvmContractContext>,
+    stage: ContractLifecycleStage,
+    adoption: &mfm_evm_contract_model::AdoptExternalAddress,
+) -> ExternalAdoptionEvidence {
+    ExternalAdoptionEvidence {
+        evidence_policy_digest: digest_for_value(&adoption.evidence_policy)
+            .expect("evidence policy digest"),
+        context_ref: mfm_values::ContextRefValue::from(context.context_ref().clone()),
+        evm_network_context_ref: evm_network_context_ref(&context.value().network)
+            .expect("network context ref"),
+        resource_stage: stage,
+        observed_chain_id: context.value().network.expected_chain_id(),
+        code_read_evidence: None,
+        read_assertion_evidence: Vec::new(),
+        event_assertion_evidence: Vec::new(),
+    }
+}
+
 async fn verified_test_finality(
     runtime: &EvmContractRuntime,
     receipt: &ContractTransactionReceipt,
@@ -2441,6 +2510,210 @@ fn replay_verifier_accepts_context_configure_schemas() {
         .expect("sufficient context configure confirmation depth");
     let error = verify_contract_confirmation_schema(&confirmation_schema, &confirmation_bytes, 4)
         .expect_err("insufficient context configure confirmation depth");
+    assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
+}
+
+#[test]
+fn replay_validation_report_evidence_must_match_retained_read_and_event_results() {
+    let context = certified_contract_context("reth-dev", 31337);
+    let read_result = validation_read_result(true);
+    let event_result = validation_event_result(true);
+    let read_evidence = ExternalReadAssertionEvidence {
+        source: external_source_evidence_for_context(&context),
+        result: read_result.clone(),
+    };
+    let event_evidence = ExternalEventAssertionEvidence {
+        source: external_source_evidence_for_context(&context),
+        result: event_result.clone(),
+    };
+
+    verify_validation_source_evidence(
+        &context,
+        std::slice::from_ref(&read_result),
+        std::slice::from_ref(&read_evidence),
+        std::slice::from_ref(&event_result),
+        std::slice::from_ref(&event_evidence),
+    )
+    .expect("matching validation evidence");
+
+    let missing = verify_validation_source_evidence(
+        &context,
+        std::slice::from_ref(&read_result),
+        &[],
+        std::slice::from_ref(&event_result),
+        std::slice::from_ref(&event_evidence),
+    )
+    .expect_err("missing validation read evidence must reject");
+    assert_eq!(missing.kind, replay::ReplayErrorKind::SideEffectMismatch);
+
+    let mut mismatched = read_evidence.clone();
+    mismatched.result = validation_read_result(false);
+    let error = verify_validation_source_evidence(
+        &context,
+        std::slice::from_ref(&read_result),
+        std::slice::from_ref(&mismatched),
+        std::slice::from_ref(&event_result),
+        std::slice::from_ref(&event_evidence),
+    )
+    .expect_err("mismatched validation read evidence must reject");
+    assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
+
+    let mut wrong_context = read_evidence;
+    wrong_context.source.observed_chain_id += 1;
+    let error = verify_validation_source_evidence(
+        &context,
+        std::slice::from_ref(&read_result),
+        std::slice::from_ref(&wrong_context),
+        std::slice::from_ref(&event_result),
+        std::slice::from_ref(&event_evidence),
+    )
+    .expect_err("wrong-context validation read evidence must reject");
+    assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
+}
+
+#[test]
+fn replay_validation_report_results_must_match_certified_validate_action() {
+    let action: ValidateAction = serde_json::from_value(json!({
+        "read_assertions": [
+            {
+                "function": "owner",
+                "expected": expected_bool_json(true)
+            }
+        ],
+        "event_assertions": [
+            {
+                "event": "Configured",
+                "min_count": 1
+            }
+        ]
+    }))
+    .expect("validate action");
+    let context = certified_contract_context("reth-dev", 31337);
+    let report = ContextBoundValidationReport {
+        report_version: 1,
+        context_ref: mfm_values::ContextRefValue::from(context.context_ref().clone()),
+        configured_instance: mfm_evm_contract_model::ConfiguredContractInstanceRef {
+            context_ref: mfm_values::ContextRefValue::from(context.context_ref().clone()),
+            address: ContractAddress::new("0x000000000000000000000000000000000000beef")
+                .expect("address"),
+            configuration_claim: ConfigurationClaim::ExternalClaimedConfigured {
+                provenance_label: serde_json::from_value(json!("adapter-test"))
+                    .expect("provenance label"),
+                evidence_policy_digest: digest_for_value(&json!({"adapter": "test"}))
+                    .expect("digest"),
+            },
+        },
+        observed_chain_id: 31337,
+        configuration_read_results: Vec::new(),
+        configuration_event_results: Vec::new(),
+        read_results: vec![validation_read_result(true)],
+        event_results: vec![validation_event_result(true)],
+        validation_read_evidence: Vec::new(),
+        validation_event_evidence: Vec::new(),
+        evidence_refs: Vec::new(),
+        valid: true,
+    };
+
+    verify_validation_results_match_action(&report, &action)
+        .expect("report results match validate action");
+
+    let mut mismatched = report;
+    mismatched.read_results[0].expected = expected_bool(false);
+    let error = verify_validation_results_match_action(&mismatched, &action)
+        .expect_err("mismatched read action evidence must reject");
+    assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
+}
+
+#[test]
+fn replay_external_adoption_evidence_must_match_context_stage_and_policy() {
+    let context = certified_contract_context("reth-dev", 31337);
+    let adoption = external_adoption_for_replay(json!({
+        "require_code": false,
+        "allow_external_claimed_configured": true,
+        "initial_read_assertions": [
+            {
+                "function": "owner",
+                "expected": expected_bool_json(true)
+            }
+        ]
+    }));
+    let mut evidence = external_adoption_evidence_for_replay(
+        &context,
+        ContractLifecycleStage::Configured,
+        &adoption,
+    );
+    evidence
+        .read_assertion_evidence
+        .push(ExternalReadAssertionEvidence {
+            source: external_source_evidence_for_context(&context),
+            result: validation_read_result(true),
+        });
+
+    verify_replayed_external_adoption(
+        &evidence,
+        &context,
+        ContractLifecycleStage::Configured,
+        &adoption,
+    )
+    .expect("matching external adoption evidence");
+
+    let mut missing = evidence.clone();
+    missing.read_assertion_evidence.clear();
+    let error = verify_replayed_external_adoption(
+        &missing,
+        &context,
+        ContractLifecycleStage::Configured,
+        &adoption,
+    )
+    .expect_err("missing external adoption assertion evidence must reject");
+    assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
+
+    let mut wrong_context = evidence.clone();
+    wrong_context.context_ref = mfm_values::ContextRefValue::from(ContextRef::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        digest_with(0x92),
+    ));
+    let error = verify_replayed_external_adoption(
+        &wrong_context,
+        &context,
+        ContractLifecycleStage::Configured,
+        &adoption,
+    )
+    .expect_err("wrong-context external adoption evidence must reject");
+    assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
+
+    let mut wrong_stage = evidence;
+    wrong_stage.resource_stage = ContractLifecycleStage::Deployed;
+    let error = verify_replayed_external_adoption(
+        &wrong_stage,
+        &context,
+        ContractLifecycleStage::Configured,
+        &adoption,
+    )
+    .expect_err("wrong-stage external adoption evidence must reject");
+    assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
+}
+
+#[test]
+fn replay_external_adoption_requires_code_evidence_when_policy_requires_code() {
+    let context = certified_contract_context("reth-dev", 31337);
+    let adoption = external_adoption_for_replay(json!({
+        "require_code": true,
+        "allow_external_claimed_configured": true
+    }));
+    let evidence = external_adoption_evidence_for_replay(
+        &context,
+        ContractLifecycleStage::Configured,
+        &adoption,
+    );
+
+    let error = verify_replayed_external_adoption(
+        &evidence,
+        &context,
+        ContractLifecycleStage::Configured,
+        &adoption,
+    )
+    .expect_err("missing required code evidence must reject");
     assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
 }
 
