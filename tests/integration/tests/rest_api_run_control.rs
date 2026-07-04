@@ -12,7 +12,7 @@ use mfm_ids::RunId;
 use mfm_integration_tests::test_support::{self, empty_post, json_post, response_json};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
-use mfm_store::v1::{RetainedArtifactReadProvider, RunEventStore};
+use mfm_store::v1::{RetainedArtifactReadProvider, RunEventStore, RunObservationStore};
 use tower::ServiceExt;
 
 const VALID_RUN_ID: &str =
@@ -215,6 +215,15 @@ async fn assert_evm_start_fails_before_admission(
         .await
         .expect("run stream");
     assert!(stream.is_empty(), "{message}");
+}
+
+async fn assert_no_run_observations(state: &test_support::InMemoryRestAppState, message: &str) {
+    let page = state
+        .store
+        .read_run_observations(store::RunObservationQuery::new(None, 100, 0))
+        .await
+        .expect("run observations");
+    assert!(page.runs.is_empty(), "{message}: {:?}", page.runs);
 }
 
 async fn assert_absent_run_routes_not_found(app: &axum::Router, include_resume: bool) {
@@ -569,6 +578,31 @@ async fn evm_contract_start_requires_capability_before_admission_for_all_entry_p
             &format!("{op} must fail capability ingress before RunAdmitted"),
         )
         .await;
+    }
+}
+
+#[tokio::test]
+async fn evm_contract_start_rejects_old_configure_validate_envelopes_before_admission() {
+    let state = in_memory_state();
+    let app = mfm_rest_api::make_app(state.clone());
+
+    for (op, config) in [
+        (
+            "evm_contract_configure",
+            evm_old_configure_entry_config_json(),
+        ),
+        (
+            "evm_contract_validate",
+            evm_old_validate_entry_config_json(),
+        ),
+    ] {
+        let (status, body) = start_entry_point(&app, op, config).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["status"], "error");
+        assert_eq!(body["error"]["code"], "AuthoredConfigDecodeFailed");
+        assert_no_run_observations(&state, &format!("{op} old envelope must not admit a run"))
+            .await;
     }
 }
 
@@ -1047,6 +1081,52 @@ fn evm_validate_entry_config_json() -> serde_json::Value {
         "context": evm_context_json(),
         "import_configured": evm_import_configured_json(),
         "validate": evm_validate_action_json(),
+    })
+}
+
+fn evm_old_network_json() -> serde_json::Value {
+    serde_json::json!({
+        "network_id": "ethereum-mainnet",
+        "expected_chain_id": 1,
+    })
+}
+
+fn evm_old_deployed_contract_json() -> serde_json::Value {
+    serde_json::json!({
+        "network_id": "ethereum-mainnet",
+        "expected_chain_id": 1,
+        "contract_address": "0x000000000000000000000000000000000000dead",
+    })
+}
+
+fn evm_old_configured_contract_json() -> serde_json::Value {
+    serde_json::json!({
+        "deployed": evm_old_deployed_contract_json(),
+        "network_id": "ethereum-mainnet",
+        "expected_chain_id": 1,
+        "contract_address": "0x000000000000000000000000000000000000dead",
+    })
+}
+
+fn evm_old_configure_entry_config_json() -> serde_json::Value {
+    serde_json::json!({
+        "config": {
+            "network": evm_old_network_json(),
+            "signer": evm_signer_json(),
+            "calls": [],
+        },
+        "deployed": evm_old_deployed_contract_json(),
+    })
+}
+
+fn evm_old_validate_entry_config_json() -> serde_json::Value {
+    serde_json::json!({
+        "config": {
+            "network": evm_old_network_json(),
+            "read_assertions": [],
+            "event_assertions": [],
+        },
+        "configured": evm_old_configured_contract_json(),
     })
 }
 

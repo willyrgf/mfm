@@ -235,6 +235,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn start_rejects_old_evm_configure_validate_envelopes_at_public_schema_boundary() {
+        for (op, config) in [
+            ("evm_contract_configure", old_configure_entry_config_json()),
+            ("evm_contract_validate", old_validate_entry_config_json()),
+        ] {
+            let Err(err) = prepare_cli_entry_point_for_test(op, config) else {
+                panic!("{op} old envelope must not prepare a launch");
+            };
+
+            assert_eq!(err.code, "AuthoredConfigDecodeFailed", "{op}");
+        }
+    }
+
+    fn prepare_cli_entry_point_for_test(
+        op: &str,
+        config: serde_json::Value,
+    ) -> Result<mfm_app::PreparedEntryPointRunLaunch, CommandError> {
+        let entry_point_registry = mfm_app::production_entry_point_op_registry()?;
+        let certification_registry = mfm_app::production_certification_registry()?;
+        let authored_config = AuthoredConfig::new(
+            AuthoredConfigFormat::Json,
+            serde_json::to_vec(&config).expect("config json"),
+        )?;
+        let trust_scope_id =
+            mfm_ids::TrustScopeId::new("mfm.trust_scope.v1:43434343434343434343434343434343")
+                .expect("trust scope");
+
+        mfm_app::prepare_entry_point_run_launch(EntryPointRunLaunchInput {
+            entry_point_registry: &entry_point_registry,
+            public_op_name: PublicOpName::new(op)?,
+            op_version: Some(mfm_app::OpVersion::new(2)?),
+            authored_config,
+            certification_registry: &certification_registry,
+            trust_scope_id,
+            distinct_run_key: None,
+        })
+        .map_err(CommandError::from)
+    }
+
     fn start_args(config: PathBuf, stores: RunStoresArgs) -> StartArgs {
         StartArgs {
             op: "portfolio_snapshot".to_owned(),
@@ -478,6 +518,52 @@ sources = []
             "context": context_json(),
             "import_configured": import_configured_json(),
             "validate": validate_action_json(),
+        })
+    }
+
+    fn old_network_json() -> serde_json::Value {
+        serde_json::json!({
+            "network_id": "ethereum-mainnet",
+            "expected_chain_id": 1,
+        })
+    }
+
+    fn old_deployed_contract_json() -> serde_json::Value {
+        serde_json::json!({
+            "network_id": "ethereum-mainnet",
+            "expected_chain_id": 1,
+            "contract_address": "0x000000000000000000000000000000000000dead",
+        })
+    }
+
+    fn old_configured_contract_json() -> serde_json::Value {
+        serde_json::json!({
+            "deployed": old_deployed_contract_json(),
+            "network_id": "ethereum-mainnet",
+            "expected_chain_id": 1,
+            "contract_address": "0x000000000000000000000000000000000000dead",
+        })
+    }
+
+    fn old_configure_entry_config_json() -> serde_json::Value {
+        serde_json::json!({
+            "config": {
+                "network": old_network_json(),
+                "signer": signer_json(),
+                "calls": [],
+            },
+            "deployed": old_deployed_contract_json(),
+        })
+    }
+
+    fn old_validate_entry_config_json() -> serde_json::Value {
+        serde_json::json!({
+            "config": {
+                "network": old_network_json(),
+                "read_assertions": [],
+                "event_assertions": [],
+            },
+            "configured": old_configured_contract_json(),
         })
     }
 }

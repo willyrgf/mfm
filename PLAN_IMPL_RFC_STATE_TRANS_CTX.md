@@ -44,6 +44,9 @@ The fresh architect audit gaps are implemented as part of the final completion s
 - The certifier validates every certified context table entry through the registered typed context
   descriptor path after checking descriptor metadata, canonical bytes, digest, byte length, and
   derived context ref.
+- CLI and REST public-boundary regression tests submit the old configure/validate envelopes through
+  `evm_contract_configure` and `evm_contract_validate`; they fail at authored-config schema decode
+  before run admission rather than becoming weak imports or raw seed material.
 - Regression tests cover retained source-run registry authority, domain-local certificate rejection,
   public/projection/raw source-value rejection, tampered source terminal events, persisted
   external-adoption evidence, mismatched replay submission/receipt context evidence, validation
