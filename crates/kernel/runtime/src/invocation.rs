@@ -42,11 +42,6 @@ impl CertifiedInvocationContext {
         }
     }
 
-    /// Returns true when this invocation runs outside a semantic transition context.
-    pub fn is_no_context(&self) -> bool {
-        self.spec.is_none()
-    }
-
     /// Returns the certified context table entry, if this invocation is context-bound.
     pub fn spec(&self) -> Option<&spec::CertifiedContextSpec> {
         self.spec.as_ref()
