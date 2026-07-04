@@ -1,9 +1,39 @@
 use mfm_authored_config::TOML_JSON_AUTHORED_CONFIG_FORMATS;
 use mfm_certify::certify_program_draft;
-use mfm_evm_contract_config::{ConfigurePhaseConfig, DeployPhaseConfig, ValidatePhaseConfig};
+use mfm_evm_contract_config::{
+    ConfigurePhaseConfig, DeployPhaseConfig, EvmContractConfigureEntryConfig,
+    EvmContractDeployEntryConfig, EvmContractLifecycleEntryConfig, EvmContractValidateEntryConfig,
+    ValidatePhaseConfig,
+};
 use mfm_evm_contract_model::{ConfiguredContract, DeployedContract};
+use mfm_ids::{CellId, ContentDigest, ContextRef, DigestAlgorithm, DigestBytes, RunId, SpecHash};
 use mfm_op_evm_contract_lifecycle::*;
-use mfm_program::Operation;
+use mfm_program::{InputBindingNodeRef, Operation};
+use mfm_spec::v1::{CellContextSpec, InputContextSpec, NodeContextSpec};
+
+fn digest_with(byte: u8) -> DigestBytes {
+    DigestBytes::from_array([byte; 32])
+}
+
+fn content_digest_str(byte: u8) -> String {
+    ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte)).to_string()
+}
+
+fn context_ref_str(byte: u8) -> String {
+    ContextRef::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte)).to_string()
+}
+
+fn run_id_str(byte: u8) -> String {
+    RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte)).to_string()
+}
+
+fn spec_hash_str(byte: u8) -> String {
+    SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte)).to_string()
+}
+
+fn cell_id_str(byte: u8) -> String {
+    CellId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte)).to_string()
+}
 
 fn network_json() -> serde_json::Value {
     network_json_for_chain(1)
@@ -20,6 +50,40 @@ fn signer_json() -> serde_json::Value {
     serde_json::json!({
         "signer_ref": "deployer",
         "expected_signer_address": "0x000000000000000000000000000000000000dead",
+    })
+}
+
+fn context_json() -> serde_json::Value {
+    serde_json::json!({
+        "lifecycle_key": "example-lifecycle",
+        "network": {
+            "network_id": "ethereum-mainnet",
+            "expected_chain_id": 1,
+            "chain_fingerprint": null,
+            "finality_or_observation_policy": null,
+        },
+        "contract_profile": {
+            "profile_id": "example-profile",
+            "artifact_digest": content_digest_str(0x20),
+            "interface_digest": content_digest_str(0x21),
+            "creation_bytecode_digest": null,
+            "deployed_code_hash": null,
+            "selector_event_policy_digest": null,
+        },
+    })
+}
+
+fn import_from_mfm_run_json(required_stage: &str, context_byte: u8) -> serde_json::Value {
+    serde_json::json!({
+        "source_run_id": run_id_str(0x30),
+        "source_spec_hash": spec_hash_str(0x31),
+        "source_cell_or_output_id": {
+            "kind": "cell",
+            "cell_id": cell_id_str(0x32),
+        },
+        "source_value_digest": content_digest_str(0x33),
+        "source_context_ref": context_ref_str(context_byte),
+        "required_stage": required_stage,
     })
 }
 
@@ -53,6 +117,58 @@ fn validate_config_for_chain(chain_id: u64) -> ValidatePhaseConfig {
         "network": network_json_for_chain(chain_id),
     }))
     .expect("validate config")
+}
+
+fn context_deploy_entry_config() -> EvmContractDeployEntryConfig {
+    serde_json::from_value(serde_json::json!({
+        "context": context_json(),
+        "deploy": {
+            "signer": signer_json(),
+        },
+    }))
+    .expect("context deploy entry")
+}
+
+fn context_configure_entry_config() -> EvmContractConfigureEntryConfig {
+    serde_json::from_value(serde_json::json!({
+        "context": context_json(),
+        "import_deployed": {
+            "kind": "from_mfm_run",
+            "source": import_from_mfm_run_json("deployed", 0x34),
+        },
+        "configure": {
+            "signer": signer_json(),
+            "calls": [],
+        },
+    }))
+    .expect("context configure entry")
+}
+
+fn context_validate_entry_config() -> EvmContractValidateEntryConfig {
+    serde_json::from_value(serde_json::json!({
+        "context": context_json(),
+        "import_configured": {
+            "kind": "from_mfm_run",
+            "source": import_from_mfm_run_json("configured", 0x35),
+        },
+        "validate": {},
+    }))
+    .expect("context validate entry")
+}
+
+fn context_lifecycle_entry_config() -> EvmContractLifecycleEntryConfig {
+    serde_json::from_value(serde_json::json!({
+        "context": context_json(),
+        "deploy": {
+            "signer": signer_json(),
+        },
+        "configure": {
+            "signer": signer_json(),
+            "calls": [],
+        },
+        "validate": {},
+    }))
+    .expect("context lifecycle entry")
 }
 
 fn lifecycle_config() -> ContractLifecycleConfig {
@@ -90,6 +206,57 @@ fn configured_contract_on_chain(chain_id: u64) -> ConfiguredContract {
         configure_receipt_evidence: Vec::new(),
         configured_block_number: Some(2),
     }
+}
+
+fn assert_node_requires_draft_context(draft: &mfm_program::TypedProgramDraft, key: &str) {
+    let node = draft
+        .state_nodes()
+        .iter()
+        .find(|node| node.key.as_str() == key)
+        .expect("state node");
+    assert!(matches!(
+        &node.context,
+        NodeContextSpec::Required { context_ref } if context_ref == &draft.contexts()[0].context_ref
+    ));
+}
+
+fn assert_node_output_bound_to_draft_context(draft: &mfm_program::TypedProgramDraft, key: &str) {
+    let node = draft
+        .state_nodes()
+        .iter()
+        .find(|node| node.key.as_str() == key)
+        .expect("state node");
+    assert!(matches!(
+        &node.output_context,
+        CellContextSpec::Bound { context_ref, .. } if context_ref == &draft.contexts()[0].context_ref
+    ));
+}
+
+fn assert_struct_input_bound_to_draft_context(
+    draft: &mfm_program::TypedProgramDraft,
+    key: &str,
+    field: &str,
+) {
+    let node = draft
+        .state_nodes()
+        .iter()
+        .find(|node| node.key.as_str() == key)
+        .expect("state node");
+    let field = match node.input.root.as_ref() {
+        InputBindingNodeRef::Struct(fields) => fields
+            .iter()
+            .find(|binding| binding.field_path.as_str() == field)
+            .expect("input field"),
+        other => panic!("expected struct input binding, got {other:?}"),
+    };
+    let cell = match field.node.as_ref() {
+        InputBindingNodeRef::Cell(cell) => cell,
+        other => panic!("expected cell input binding, got {other:?}"),
+    };
+    assert!(matches!(
+        cell.context(),
+        InputContextSpec::Required { context_ref, .. } if context_ref == &draft.contexts()[0].context_ref
+    ));
 }
 
 #[test]
@@ -157,6 +324,116 @@ fn full_lifecycle_program_lowers_to_three_ordered_states() {
 }
 
 #[test]
+fn context_full_lifecycle_program_lowers_to_context_bound_states() {
+    let draft =
+        context_contract_lifecycle_program_draft(context_lifecycle_entry_config()).expect("draft");
+
+    assert_eq!(draft.contexts().len(), 1);
+    assert!(draft.seeds().is_empty());
+    assert_eq!(draft.state_nodes().len(), 3);
+    assert_eq!(draft.state_nodes()[0].key.as_str(), "deploy");
+    assert_eq!(draft.state_nodes()[1].key.as_str(), "configure");
+    assert_eq!(draft.state_nodes()[2].key.as_str(), "validate");
+    assert_eq!(
+        draft
+            .state_nodes()
+            .iter()
+            .map(|node| node.state_descriptor_name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "mfm.evm.contract.context_deploy",
+            "mfm.evm.contract.context_configure",
+            "mfm.evm.contract.context_validate"
+        ]
+    );
+    for key in ["deploy", "configure", "validate"] {
+        assert_node_requires_draft_context(&draft, key);
+        assert_node_output_bound_to_draft_context(&draft, key);
+    }
+    assert_struct_input_bound_to_draft_context(&draft, "configure", "deployed");
+    assert_struct_input_bound_to_draft_context(&draft, "validate", "configured");
+
+    let certified = certify_program_draft(&draft).expect("certified");
+    certified.envelope().verify_hash().expect("hash verifies");
+}
+
+#[test]
+fn context_deploy_program_declares_context_without_seeds() {
+    let draft =
+        context_deploy_contract_program_draft(context_deploy_entry_config()).expect("draft");
+
+    assert_eq!(draft.contexts().len(), 1);
+    assert!(draft.seeds().is_empty());
+    assert_eq!(draft.state_nodes().len(), 1);
+    assert_eq!(draft.state_nodes()[0].key.as_str(), "deploy");
+    assert_eq!(
+        draft.state_nodes()[0].state_descriptor_name,
+        "mfm.evm.contract.context_deploy"
+    );
+    assert_node_requires_draft_context(&draft, "deploy");
+    assert_node_output_bound_to_draft_context(&draft, "deploy");
+    certify_program_draft(&draft).expect("certified");
+}
+
+#[test]
+fn context_configure_program_imports_deployed_without_seed_material() {
+    let draft =
+        context_configure_contract_program_draft(context_configure_entry_config()).expect("draft");
+
+    assert_eq!(draft.contexts().len(), 1);
+    assert!(draft.seeds().is_empty());
+    assert_eq!(draft.state_nodes().len(), 2);
+    assert_eq!(draft.state_nodes()[0].key.as_str(), "import_deployed");
+    assert_eq!(draft.state_nodes()[1].key.as_str(), "configure");
+    assert_eq!(
+        draft
+            .state_nodes()
+            .iter()
+            .map(|node| node.state_descriptor_name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "mfm.evm.contract.import_deployed",
+            "mfm.evm.contract.context_configure"
+        ]
+    );
+    assert_node_requires_draft_context(&draft, "import_deployed");
+    assert_node_requires_draft_context(&draft, "configure");
+    assert_node_output_bound_to_draft_context(&draft, "import_deployed");
+    assert_node_output_bound_to_draft_context(&draft, "configure");
+    assert_struct_input_bound_to_draft_context(&draft, "configure", "deployed");
+    certify_program_draft(&draft).expect("certified");
+}
+
+#[test]
+fn context_validate_program_imports_configured_without_seed_material() {
+    let draft =
+        context_validate_contract_program_draft(context_validate_entry_config()).expect("draft");
+
+    assert_eq!(draft.contexts().len(), 1);
+    assert!(draft.seeds().is_empty());
+    assert_eq!(draft.state_nodes().len(), 2);
+    assert_eq!(draft.state_nodes()[0].key.as_str(), "import_configured");
+    assert_eq!(draft.state_nodes()[1].key.as_str(), "validate");
+    assert_eq!(
+        draft
+            .state_nodes()
+            .iter()
+            .map(|node| node.state_descriptor_name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "mfm.evm.contract.import_configured",
+            "mfm.evm.contract.context_validate"
+        ]
+    );
+    assert_node_requires_draft_context(&draft, "import_configured");
+    assert_node_requires_draft_context(&draft, "validate");
+    assert_node_output_bound_to_draft_context(&draft, "import_configured");
+    assert_node_output_bound_to_draft_context(&draft, "validate");
+    assert_struct_input_bound_to_draft_context(&draft, "validate", "configured");
+    certify_program_draft(&draft).expect("certified");
+}
+
+#[test]
 fn phase_program_helpers_are_planning_only() {
     let deploy = deploy_contract_program_draft(deploy_config()).expect("deploy draft");
     let configure = configure_contract_program_draft(configure_config(), deployed_contract())
@@ -207,6 +484,41 @@ fn entry_point_plan_helpers_are_draft_only_and_preserve_seeds() {
 }
 
 #[test]
+fn context_entry_plan_helpers_do_not_emit_legacy_seed_material() {
+    let deploy =
+        plan_context_contract_deploy_entry_point(context_deploy_entry_config()).expect("deploy");
+    let configure = plan_context_contract_configure_entry_point(context_configure_entry_config())
+        .expect("configure");
+    let validate = plan_context_contract_validate_entry_point(context_validate_entry_config())
+        .expect("validate");
+    let lifecycle = plan_context_contract_lifecycle_entry_point(context_lifecycle_entry_config())
+        .expect("lifecycle");
+
+    assert_eq!(deploy.draft.state_nodes().len(), 1);
+    assert!(deploy.draft.seeds().is_empty());
+    assert!(deploy.seed_material.is_empty());
+    assert_eq!(configure.draft.state_nodes().len(), 2);
+    assert!(configure.draft.seeds().is_empty());
+    assert!(configure.seed_material.is_empty());
+    assert_eq!(validate.draft.state_nodes().len(), 2);
+    assert!(validate.draft.seeds().is_empty());
+    assert!(validate.seed_material.is_empty());
+    assert_eq!(lifecycle.draft.state_nodes().len(), 3);
+    assert!(lifecycle.draft.seeds().is_empty());
+    assert!(lifecycle.seed_material.is_empty());
+
+    for plan in [&deploy, &configure, &validate, &lifecycle] {
+        assert!(!plan.config_material.is_empty());
+        assert!(plan
+            .draft
+            .seeds()
+            .iter()
+            .all(|seed| seed.key.as_str() != "deployed_contract"
+                && seed.key.as_str() != "configured_contract"));
+    }
+}
+
+#[test]
 fn entry_point_descriptors_are_public_launch_surface() {
     assert_eq!(
         CONTRACT_ENTRY_POINTS
@@ -234,6 +546,10 @@ fn operation_ids_use_contract_lifecycle_namespace() {
         ConfigureContractOperation::name(),
         ValidateContractOperation::name(),
         ContractLifecycleOperation::name(),
+        ContextDeployContractOperation::name(),
+        ContextConfigureContractOperation::name(),
+        ContextValidateContractOperation::name(),
+        ContextContractLifecycleOperation::name(),
     ];
     assert!(names
         .iter()
@@ -244,6 +560,10 @@ fn operation_ids_use_contract_lifecycle_namespace() {
         ConfigureContractOperation::version().expect("configure"),
         ValidateContractOperation::version().expect("validate"),
         ContractLifecycleOperation::version().expect("lifecycle"),
+        ContextDeployContractOperation::version().expect("context deploy"),
+        ContextConfigureContractOperation::version().expect("context configure"),
+        ContextValidateContractOperation::version().expect("context validate"),
+        ContextContractLifecycleOperation::version().expect("context lifecycle"),
     ];
     assert!(versions
         .iter()

@@ -377,6 +377,11 @@ struct CompensationMutationState {
     config: LaunchConfig,
 }
 
+#[derive(Debug, Clone)]
+struct ContextualMutationState {
+    config: LaunchConfig,
+}
+
 macro_rules! impl_side_effect_state_spec {
     ($state:ty, $kind:literal, $version:literal, $name:literal, $digest:literal) => {
         impl StateSpec for $state {
@@ -482,6 +487,103 @@ impl_side_effect_state_spec!(
     b"mfm.program.test.state:compensation_mutation"
 );
 
+impl StateSpec for ContextualMutationState {
+    type Config = LaunchConfig;
+    type Context = ChainContext;
+    type Input = LaunchValue;
+    type Output = LaunchValue;
+    type Effect = ApplySideEffect;
+    type Caps = (TestMutationCap,);
+
+    fn kind() -> Result<StateKind> {
+        test_state_kind(
+            "contextual_mutation",
+            b"mfm.program.test.state:contextual_mutation",
+        )
+    }
+
+    fn version() -> Result<StateVersion> {
+        StateVersion::new("mfm.program.test.state.contextual_mutation.v1")
+            .map_err(|error| PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "contextual_mutation"
+    }
+
+    fn output_context_contract() -> Result<StateOutputContextContractSpec> {
+        Ok(StateOutputContextContractSpec::Produces {
+            resource_kind: context_resource_kind(),
+            stage: context_stage(),
+        })
+    }
+
+    fn new(config: ValidatedConfig<Self::Config>) -> Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
+    }
+}
+
+impl SideEffectState for ContextualMutationState {
+    type Intent = LaunchValue;
+    type IdempotencyInput = LaunchValue;
+    type Submission = LaunchValue;
+    type Receipt = LaunchValue;
+    type Confirmation = LaunchValue;
+    type SubmitFuture<'a> = std::future::Ready<StateResult<Self::Submission>>;
+
+    fn prepare_intent(
+        &self,
+        input: &Self::Input,
+        _context: &CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Intent> {
+        Ok(LaunchValue {
+            amount: input.amount + self.config.multiplier,
+            label: input.label.clone(),
+        })
+    }
+
+    fn idempotency_input(
+        &self,
+        _input: &Self::Input,
+        intent: &Self::Intent,
+        _context: &CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::IdempotencyInput> {
+        Ok(intent.clone())
+    }
+
+    fn submit<'a>(
+        &'a self,
+        intent: &'a Self::Intent,
+        _key: &'a IdempotencyKey<Self::IdempotencyInput>,
+        _caps: &'a Self::Caps,
+        _context: &'a CertifiedContext<Self::Context>,
+    ) -> Self::SubmitFuture<'a> {
+        std::future::ready(Ok(intent.clone()))
+    }
+
+    fn output_from_receipt(
+        &self,
+        _input: &Self::Input,
+        _intent: &Self::Intent,
+        receipt: &Self::Receipt,
+        _context: &CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        Ok(receipt.clone())
+    }
+
+    fn output_from_confirmation(
+        &self,
+        _input: &Self::Input,
+        _intent: &Self::Intent,
+        confirmation: &Self::Confirmation,
+        _context: &CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        Ok(confirmation.clone())
+    }
+}
+
 #[derive(Debug, Clone)]
 struct MultiplyOperation;
 
@@ -515,6 +617,55 @@ impl Operation for MultiplyOperation {
             config.into_inner(),
             input,
         )?;
+        Ok(LaunchOperationOutputs { result })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ContextualMutationOperation;
+
+impl Operation for ContextualMutationOperation {
+    type Config = LaunchConfig;
+    type Input<'program, 'scope> = Handle<'program, 'scope, LaunchValue>;
+    type Output<'program, 'scope> = LaunchOperationOutputs<'program, 'scope>;
+
+    fn kind() -> Result<OperationKind> {
+        test_operation_kind(
+            "contextual_mutation",
+            b"mfm.program.test.operation:contextual_mutation",
+        )
+    }
+
+    fn version() -> Result<OperationVersion> {
+        OperationVersion::new("mfm.program.test.operation.contextual_mutation.v1")
+            .map_err(|error| PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "contextual_mutation"
+    }
+
+    fn expand<'program, 'scope>(
+        &self,
+        config: ValidatedConfig<Self::Config>,
+        input: Self::Input<'program, 'scope>,
+        builder: &mut OperationExpansion<'program, 'scope>,
+        _dispatch: OperationExpansionDispatch<Self>,
+    ) -> Result<Self::Output<'program, 'scope>> {
+        let context = builder.declare_context(ChainContext {
+            chain_id: 31337,
+            network: "local".to_owned(),
+        })?;
+        let result = builder
+            .side_effect_in_context::<ContextualMutationState, _, ChainContext>(
+                StateKey::new("contextual-mutation-operation/state")?,
+                &context,
+                config.into_inner(),
+                input,
+                manual_resource_claim(),
+                SideEffectVerificationSpec::Receipt,
+            )?
+            .into_handle();
         Ok(LaunchOperationOutputs { result })
     }
 }
@@ -605,6 +756,12 @@ fn register_compensation_mutation_state(registry: &mut StateRegistryBuilder) {
         .expect("compensation registers");
 }
 
+fn register_contextual_mutation_state(registry: &mut StateRegistryBuilder) {
+    registry
+        .register::<ContextualMutationState>()
+        .expect("contextual mutation registers");
+}
+
 fn forward_mutation_registry() -> StateRegistrySnapshot {
     let mut registry = StateRegistryBuilder::new();
     register_forward_mutation_state(&mut registry);
@@ -616,6 +773,16 @@ fn compensation_registry() -> StateRegistrySnapshot {
     register_forward_mutation_state(&mut registry);
     register_compensation_mutation_state(&mut registry);
     registry.into_snapshot()
+}
+
+fn contextual_mutation_registries() -> (StateRegistrySnapshot, OperationRegistrySnapshot) {
+    let mut states = StateRegistryBuilder::new();
+    register_contextual_mutation_state(&mut states);
+    let mut operations = OperationRegistryBuilder::new();
+    operations
+        .register::<ContextualMutationOperation>()
+        .expect("contextual operation registers");
+    (states.into_snapshot(), operations.into_snapshot())
 }
 
 fn set_compensating_policy(root: &mut RootBuilder<'_, '_>) -> Result<()> {
@@ -1066,6 +1233,53 @@ fn state_in_context_emits_context_node_output_and_input_metadata() {
         }
         other => panic!("unexpected consumer input binding: {other:?}"),
     }
+}
+
+#[test]
+fn operation_expansion_can_declare_context_and_plan_context_side_effect() {
+    let (states, operations) = contextual_mutation_registries();
+    let draft = build_root_with_registries(
+        ScopeKey::new("root").expect("scope key"),
+        states,
+        operations,
+        |root| {
+            root.set_saga_policy(SideEffectSagaPolicy::FailWithoutAcdcClaim)?;
+            let input = root.seed(SeedKey::new("input")?, launch_seed(2, "contextual"))?;
+            let result = root.scope().call::<ContextualMutationOperation, _>(
+                OperationKey::new("contextual-mutation-operation")?,
+                ContextualMutationOperation,
+                LaunchConfig { multiplier: 5 },
+                input,
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &LaunchPublicOutputs {
+                    result: result.result,
+                },
+            )
+        },
+    )
+    .expect("root builds");
+
+    assert_eq!(draft.contexts().len(), 1);
+    let node = draft
+        .state_nodes()
+        .iter()
+        .find(|node| node.key.as_str() == "contextual-mutation-operation/state")
+        .expect("contextual side-effect node");
+    assert!(matches!(
+        &node.context,
+        NodeContextSpec::Required { context_ref } if context_ref == &draft.contexts()[0].context_ref
+    ));
+    assert!(node.side_effect_resource_claim.is_some());
+    assert_eq!(
+        node.side_effect_verification.as_ref(),
+        Some(&SideEffectVerificationSpec::Receipt)
+    );
+    assert!(matches!(
+        &node.output_context,
+        CellContextSpec::Bound { context_ref, .. } if context_ref == &draft.contexts()[0].context_ref
+    ));
 }
 
 #[test]

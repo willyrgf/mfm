@@ -4416,6 +4416,76 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         Ok(handle)
     }
 
+    /// Plans a registered side-effect state under an explicitly declared certified context.
+    pub fn side_effect_in_context<S, I, C>(
+        &mut self,
+        key: StateKey,
+        context: &DeclaredContext<'program, 'scope, C>,
+        config: S::Config,
+        input: I,
+        resource_claim: ResourceClaim,
+        verification: SideEffectVerificationSpec,
+    ) -> Result<ForwardSideEffectHandle<'program, 'scope, S::Output>>
+    where
+        S: SideEffectState<Context = C>,
+        C: MfmContext,
+        S::Caps: CapabilitySetFor<ApplySideEffect>,
+        I: IntoStateInput<'program, 'scope, S::Input>,
+    {
+        let registered = self.state_registry.registered_state::<S>()?;
+        self.side_effect_registered_in_context(
+            registered,
+            context,
+            SideEffectNodeParams {
+                key,
+                config,
+                input,
+                resource_claim,
+                verification,
+            },
+        )
+    }
+
+    /// Plans a side-effect state from an explicit registration token under a declared context.
+    pub fn side_effect_registered_in_context<S, I, C>(
+        &mut self,
+        registered: RegisteredState<S>,
+        context: &DeclaredContext<'program, 'scope, C>,
+        params: SideEffectNodeParams<S, I>,
+    ) -> Result<ForwardSideEffectHandle<'program, 'scope, S::Output>>
+    where
+        S: SideEffectState<Context = C>,
+        C: MfmContext,
+        S::Caps: CapabilitySetFor<ApplySideEffect>,
+        I: IntoStateInput<'program, 'scope, S::Input>,
+    {
+        let SideEffectNodeParams {
+            key,
+            config,
+            input,
+            resource_claim,
+            verification,
+        } = params;
+        let key_string = key.as_str().to_owned();
+        if self.state_keys.contains(&key_string) {
+            return Err(PlanError::DuplicateStateKey(key.as_str().to_owned()));
+        }
+        let (node, handle) = self.plan_state_node(
+            key,
+            registered,
+            config,
+            input,
+            StateNodePlanningOptions {
+                context: Some(context.spec().clone()),
+                side_effect_contract: Some((resource_claim, verification)),
+                ..StateNodePlanningOptions::default()
+            },
+        )?;
+        self.state_keys.insert(key_string);
+        self.state_nodes.push(node.clone());
+        Ok(ForwardSideEffectHandle::new(node.node_id, handle))
+    }
+
     /// Plans one forward side-effect state and one structurally separate remediation state.
     ///
     /// The forward node is appended to the ordinary forward graph. The remediation node is keyed
@@ -5041,6 +5111,14 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
         self.scope_mut().child_scope(key, f)
     }
 
+    /// Declares one typed certified transition context in the current expansion scope.
+    pub fn declare_context<C>(&mut self, value: C) -> Result<DeclaredContext<'program, 'scope, C>>
+    where
+        C: MfmContext,
+    {
+        self.scope_mut().declare_context(value)
+    }
+
     /// Plans a registered typed state by resolving `S` through this expansion's registry.
     pub fn state<S, I>(
         &mut self,
@@ -5120,6 +5198,45 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
             )
     }
 
+    /// Plans a registered typed state under an explicitly declared certified context.
+    pub fn state_in_context<S, I, C>(
+        &mut self,
+        key: StateKey,
+        context: &DeclaredContext<'program, 'scope, C>,
+        config: S::Config,
+        input: I,
+    ) -> Result<Handle<'program, 'scope, S::Output>>
+    where
+        S: StateSpec<Context = C>,
+        C: MfmContext,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
+        I: IntoStateInput<'program, 'scope, S::Input>,
+    {
+        self.scope_mut()
+            .state_in_context::<S, I, C>(key, context, config, input)
+    }
+
+    /// Plans a typed state from an explicit registration token under a declared context.
+    pub fn state_registered_in_context<S, I, C>(
+        &mut self,
+        key: StateKey,
+        registered: RegisteredState<S>,
+        context: &DeclaredContext<'program, 'scope, C>,
+        config: S::Config,
+        input: I,
+    ) -> Result<Handle<'program, 'scope, S::Output>>
+    where
+        S: StateSpec<Context = C>,
+        C: MfmContext,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
+        I: IntoStateInput<'program, 'scope, S::Input>,
+    {
+        self.scope_mut()
+            .state_registered_in_context::<S, I, C>(key, registered, context, config, input)
+    }
+
     /// Plans a registered side-effect state with an explicit resource claim.
     pub fn side_effect<S, I>(
         &mut self,
@@ -5136,6 +5253,49 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
     {
         self.scope_mut()
             .side_effect::<S, I>(key, config, input, resource_claim, verification)
+    }
+
+    /// Plans a registered side-effect state under an explicitly declared certified context.
+    pub fn side_effect_in_context<S, I, C>(
+        &mut self,
+        key: StateKey,
+        context: &DeclaredContext<'program, 'scope, C>,
+        config: S::Config,
+        input: I,
+        resource_claim: ResourceClaim,
+        verification: SideEffectVerificationSpec,
+    ) -> Result<ForwardSideEffectHandle<'program, 'scope, S::Output>>
+    where
+        S: SideEffectState<Context = C>,
+        C: MfmContext,
+        S::Caps: CapabilitySetFor<ApplySideEffect>,
+        I: IntoStateInput<'program, 'scope, S::Input>,
+    {
+        self.scope_mut().side_effect_in_context::<S, I, C>(
+            key,
+            context,
+            config,
+            input,
+            resource_claim,
+            verification,
+        )
+    }
+
+    /// Plans a side-effect state from an explicit registration token under a declared context.
+    pub fn side_effect_registered_in_context<S, I, C>(
+        &mut self,
+        registered: RegisteredState<S>,
+        context: &DeclaredContext<'program, 'scope, C>,
+        params: SideEffectNodeParams<S, I>,
+    ) -> Result<ForwardSideEffectHandle<'program, 'scope, S::Output>>
+    where
+        S: SideEffectState<Context = C>,
+        C: MfmContext,
+        S::Caps: CapabilitySetFor<ApplySideEffect>,
+        I: IntoStateInput<'program, 'scope, S::Input>,
+    {
+        self.scope_mut()
+            .side_effect_registered_in_context::<S, I, C>(registered, context, params)
     }
 
     /// Plans a linked forward/remediation side-effect pair.
