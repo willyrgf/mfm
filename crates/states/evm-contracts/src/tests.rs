@@ -1,6 +1,9 @@
 use super::*;
 use mfm_capabilities::CapabilitySet;
-use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, NodeId};
+use mfm_ids::{
+    ArtifactId, CellId, ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, EventId, NodeId,
+    RunId, SpecHash,
+};
 use mfm_program::StateContext;
 use mfm_values::{ContextBoundOutput, MfmValue};
 
@@ -12,19 +15,36 @@ fn content_digest_str(byte: u8) -> String {
     ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte)).to_string()
 }
 
+fn artifact_id_str(byte: u8) -> String {
+    ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte)).to_string()
+}
+
+fn cell_id_str(byte: u8) -> String {
+    CellId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte)).to_string()
+}
+
+fn descriptor_id_str(byte: u8) -> String {
+    DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte)).to_string()
+}
+
+fn event_id_str(byte: u8) -> String {
+    EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte)).to_string()
+}
+
+fn run_id_str(byte: u8) -> String {
+    RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte)).to_string()
+}
+
+fn spec_hash_str(byte: u8) -> String {
+    SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte)).to_string()
+}
+
 fn node_id(byte: u8) -> NodeId {
     NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte))
 }
 
 fn validated_config<T: mfm_values::MfmConfig>(config: T) -> mfm_program::ValidatedConfig<T> {
     mfm_program::ValidatedConfig::new(config).expect("valid config")
-}
-
-fn network_json() -> serde_json::Value {
-    serde_json::json!({
-        "network_id": "ethereum-mainnet",
-        "expected_chain_id": 1,
-    })
 }
 
 fn signer_json() -> serde_json::Value {
@@ -52,33 +72,6 @@ fn context_json() -> serde_json::Value {
             "selector_event_policy_digest": null,
         },
     })
-}
-
-fn deploy_config() -> DeployPhaseConfig {
-    serde_json::from_value(serde_json::json!({
-        "network": network_json(),
-        "signer": signer_json(),
-    }))
-    .expect("deploy config")
-}
-
-fn configure_config() -> ConfigurePhaseConfig {
-    serde_json::from_value(serde_json::json!({
-        "network": network_json(),
-        "signer": signer_json(),
-        "calls": [{
-            "function": "configure",
-            "args": [],
-        }],
-    }))
-    .expect("configure config")
-}
-
-fn validate_config() -> ValidatePhaseConfig {
-    serde_json::from_value(serde_json::json!({
-        "network": network_json(),
-    }))
-    .expect("validate config")
 }
 
 fn deploy_action() -> DeployAction {
@@ -125,6 +118,20 @@ fn import_configured_spec() -> ImportConfiguredSpec {
     .expect("import configured")
 }
 
+fn import_configured_claimed_spec() -> ImportConfiguredSpec {
+    serde_json::from_value(serde_json::json!({
+        "kind": "adopt_external_address",
+        "adoption": {
+            "address": "0x000000000000000000000000000000000000beef",
+            "provenance_label": "audited-external",
+            "evidence_policy": {
+                "allow_external_claimed_configured": true
+            }
+        },
+    }))
+    .expect("import configured")
+}
+
 fn certified_contract_context() -> mfm_program::CertifiedContext<EvmContractContext> {
     let value: EvmContractContext = serde_json::from_value(context_json()).expect("context");
     let mfm_program::StateContextDescriptorSpec::Required(requirement) =
@@ -153,45 +160,6 @@ fn certified_contract_context() -> mfm_program::CertifiedContext<EvmContractCont
         canonical_context: canonical,
     };
     mfm_program::CertifiedContext::from_certified_spec(&spec).expect("certified context")
-}
-
-fn deployed_contract() -> DeployedContract {
-    DeployedContract {
-        lifecycle_version: 1,
-        network_id: "ethereum-mainnet".to_owned(),
-        expected_chain_id: 1,
-        contract_address: "0x000000000000000000000000000000000000dead".to_owned(),
-        deploy_tx_hash: "0x01".to_owned(),
-        deploy_receipt_evidence: None,
-        deployed_block_number: Some(1),
-    }
-}
-
-fn deployed_contract_on_chain(chain_id: u64) -> DeployedContract {
-    DeployedContract {
-        expected_chain_id: chain_id,
-        ..deployed_contract()
-    }
-}
-
-fn configured_contract() -> ConfiguredContract {
-    ConfiguredContract {
-        lifecycle_version: 1,
-        deployed: deployed_contract(),
-        configure_calls: Vec::new(),
-        confirmation_read_assertions: Vec::new(),
-        confirmation_event_assertions: Vec::new(),
-        configure_tx_hashes: Vec::new(),
-        configure_receipt_evidence: Vec::new(),
-        configured_block_number: Some(2),
-    }
-}
-
-fn configured_contract_on_chain(chain_id: u64) -> ConfiguredContract {
-    ConfiguredContract {
-        deployed: deployed_contract_on_chain(chain_id),
-        ..configured_contract()
-    }
 }
 
 fn deployed_instance(
@@ -237,13 +205,110 @@ fn configured_instance(
     }
 }
 
+fn artifact_ref_json(
+    byte: u8,
+    content_digest: serde_json::Value,
+    schema_id: Option<String>,
+    semantic_type_id: Option<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "artifact_id": artifact_id_str(byte),
+        "content_digest": content_digest,
+        "byte_len": 128,
+        "schema_id": schema_id,
+        "semantic_type_id": semantic_type_id,
+    })
+}
+
+fn source_run_import_spec_json(
+    context: &mfm_program::CertifiedContext<EvmContractContext>,
+    required_stage: &str,
+    value_digest: &ContractProfileDigestRef,
+) -> serde_json::Value {
+    serde_json::json!({
+        "source_run_id": run_id_str(0x30),
+        "source_spec_hash": spec_hash_str(0x31),
+        "source_cell_or_output_id": {
+            "kind": "cell",
+            "cell_id": cell_id_str(0x32),
+        },
+        "source_value_digest": value_digest,
+        "source_context_ref": context.context_ref().to_string(),
+        "required_stage": required_stage,
+    })
+}
+
+fn source_run_import_evidence_json<T>(
+    context: &mfm_program::CertifiedContext<EvmContractContext>,
+    source: &ImportFromMfmRun,
+    required_stage: &str,
+    import_policy_digest: &ContractProfileDigestRef,
+) -> serde_json::Value
+where
+    T: MfmValue,
+{
+    let schema_id = T::schema_id().expect("schema").to_string();
+    let semantic_type_id = T::semantic_id().expect("semantic").to_string();
+    serde_json::json!({
+        "source_spec_hash": &source.source_spec_hash,
+        "source_spec_certificate_or_export_certificate_ref": artifact_ref_json(
+            0x50,
+            serde_json::json!(content_digest_str(0x51)),
+            None,
+            None,
+        ),
+        "source_run_stream_ref_or_export_bundle_ref": artifact_ref_json(
+            0x52,
+            serde_json::json!(content_digest_str(0x53)),
+            None,
+            None,
+        ),
+        "source_cell_or_output_id": &source.source_cell_or_output_id,
+        "source_cell_schema_id": schema_id,
+        "source_cell_semantic_type_id": semantic_type_id,
+        "source_producer_descriptor_id": descriptor_id_str(0x54),
+        "source_stage": required_stage,
+        "source_context_ref": &source.source_context_ref,
+        "source_context_descriptor_id": context.context_descriptor_id().to_string(),
+        "source_value_digest": &source.source_value_digest,
+        "source_value_artifact_ref_or_inline_canonical_value": artifact_ref_json(
+            0x56,
+            serde_json::to_value(&source.source_value_digest).expect("digest json"),
+            Some(schema_id),
+            Some(semantic_type_id),
+        ),
+        "source_terminal_cell_or_output_event_ref": event_id_str(0x57),
+        "import_policy_digest": import_policy_digest,
+    })
+}
+
+fn source_run_import_json<T>(
+    context: &mfm_program::CertifiedContext<EvmContractContext>,
+    required_stage: &str,
+    value_digest: &ContractProfileDigestRef,
+) -> serde_json::Value
+where
+    T: MfmValue,
+{
+    let source_json = source_run_import_spec_json(context, required_stage, value_digest);
+    let source: ImportFromMfmRun = serde_json::from_value(source_json).expect("source");
+    let import_policy_digest = digest_for_config(&source).expect("policy digest");
+    let evidence_json = source_run_import_evidence_json::<T>(
+        context,
+        &source,
+        required_stage,
+        &import_policy_digest,
+    );
+    serde_json::json!({
+        "kind": "from_mfm_run",
+        "source": source,
+        "evidence": evidence_json,
+    })
+}
+
 #[test]
 fn state_schemas_and_names_use_contract_lifecycle_namespace() {
     let state_names = [
-        DeployContractState::name(),
-        ConfigureContractState::name(),
-        ValidateContractState::name(),
-        ProjectConfiguredContractRefState::name(),
         ContextBoundDeployContractState::name(),
         ContextBoundConfigureContractState::name(),
         ContextBoundValidateContractState::name(),
@@ -255,22 +320,7 @@ fn state_schemas_and_names_use_contract_lifecycle_namespace() {
         .all(|name| name.starts_with("mfm.evm.contract.")));
 
     let schema_ids = [
-        ContractTransactionIntent::schema_id()
-            .expect("schema")
-            .to_string(),
-        ContractDeployIntent::schema_id()
-            .expect("schema")
-            .to_string(),
-        ContractConfigureIntent::schema_id()
-            .expect("schema")
-            .to_string(),
         ContractDeployReceipt::schema_id()
-            .expect("schema")
-            .to_string(),
-        ContractConfigureReceipt::schema_id()
-            .expect("schema")
-            .to_string(),
-        ContractValidationReadRequest::schema_id()
             .expect("schema")
             .to_string(),
         ContractValidationReadResponse::schema_id()
@@ -305,9 +355,6 @@ fn mutation_states_use_lifecycle_adapter_binding() {
     let expected = evm_contract_lifecycle_adapter_binding().expect("binding");
 
     for bindings in [
-        DeployContractState::adapter_bindings().expect("bindings"),
-        ConfigureContractState::adapter_bindings().expect("bindings"),
-        ValidateContractState::adapter_bindings().expect("bindings"),
         ContextBoundDeployContractState::adapter_bindings().expect("bindings"),
         ContextBoundConfigureContractState::adapter_bindings().expect("bindings"),
         ContextBoundValidateContractState::adapter_bindings().expect("bindings"),
@@ -532,6 +579,115 @@ fn import_states_fail_closed_without_verified_evidence() {
 }
 
 #[test]
+fn import_deployed_admits_verified_source_run_evidence() {
+    let context = certified_contract_context();
+    let source_value = deployed_instance(&context);
+    let value_digest = digest_for_config(&source_value).expect("value digest");
+    let import: ImportDeployedSpec = serde_json::from_value(source_run_import_json::<
+        DeployedContractInstance,
+    >(
+        &context, "deployed", &value_digest
+    ))
+    .expect("source-run import");
+
+    let admitted =
+        ImportDeployedContractState::admit_verified_mfm_run_import(&import, source_value, &context)
+            .expect("admitted");
+
+    assert_eq!(admitted.context_ref(), context.context_ref());
+    assert_eq!(admitted.deploy_evidence.len(), 3);
+    assert!(matches!(
+        admitted.deploy_provenance,
+        DeployProvenance::ImportedMfmRun { .. }
+    ));
+}
+
+#[test]
+fn import_configured_admits_verified_source_run_evidence() {
+    let context = certified_contract_context();
+    let source_value = configured_instance(&context);
+    let value_digest = digest_for_config(&source_value).expect("value digest");
+    let import: ImportConfiguredSpec =
+        serde_json::from_value(source_run_import_json::<ConfiguredContractInstance>(
+            &context,
+            "configured",
+            &value_digest,
+        ))
+        .expect("source-run import");
+
+    let admitted = ImportConfiguredContractState::admit_verified_mfm_run_import(
+        &import,
+        source_value,
+        &context,
+    )
+    .expect("admitted");
+
+    assert_eq!(admitted.context_ref(), context.context_ref());
+    assert_eq!(admitted.configure_or_import_evidence.len(), 3);
+    assert!(matches!(
+        admitted.configuration_claim,
+        ConfigurationClaim::ImportedMfmConfigured { .. }
+    ));
+}
+
+#[test]
+fn import_admission_rejects_source_value_digest_mismatch() {
+    let context = certified_contract_context();
+    let source_value = deployed_instance(&context);
+    let value_digest = digest_for_config(&source_value).expect("value digest");
+    let import: ImportDeployedSpec = serde_json::from_value(source_run_import_json::<
+        DeployedContractInstance,
+    >(
+        &context, "deployed", &value_digest
+    ))
+    .expect("source-run import");
+    let mut mismatched = source_value;
+    mismatched.deployed_block_number = Some(99);
+
+    let error =
+        ImportDeployedContractState::admit_verified_mfm_run_import(&import, mismatched, &context)
+            .expect_err("digest mismatch rejected");
+
+    assert!(error.to_string().contains("source-run import"));
+}
+
+#[test]
+fn import_configured_external_claim_requires_certified_policy() {
+    let context = certified_contract_context();
+    let rejected = ImportConfiguredContractState::admit_verified_external_adoption(
+        &import_configured_spec(),
+        &context,
+        ContractProfileDigestRef::from(ContentDigest::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            digest_with(0x80),
+        )),
+        Vec::new(),
+        None,
+        None,
+    );
+    assert!(rejected.is_err());
+
+    let admitted = ImportConfiguredContractState::admit_verified_external_adoption(
+        &import_configured_claimed_spec(),
+        &context,
+        ContractProfileDigestRef::from(ContentDigest::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            digest_with(0x81),
+        )),
+        Vec::new(),
+        None,
+        None,
+    )
+    .expect("claimed configured policy admits");
+
+    assert!(matches!(
+        admitted.configuration_claim,
+        ConfigurationClaim::ExternalClaimedConfigured { .. }
+    ));
+    assert_eq!(admitted.context_ref(), context.context_ref());
+}
+
+#[test]
 fn idempotency_digest_uses_canonical_json() {
     #[derive(Serialize)]
     struct First {
@@ -549,198 +705,4 @@ fn idempotency_digest_uses_canonical_json() {
     let second = idempotency_from_intent(&Second { a: 1, b: 2 }).expect("second");
 
     assert_eq!(first.key, second.key);
-}
-
-#[test]
-fn deploy_intent_contains_no_signed_payload_or_secret_material() {
-    let state = DeployContractState::new(validated_config(deploy_config())).expect("state");
-    let context = mfm_program::CertifiedContext::no_context();
-    let intent = state.prepare_intent(&(), &context).expect("intent");
-    let json = serde_json::to_string(&intent).expect("intent json");
-
-    for forbidden in [
-        ["raw", "_transaction"].concat(),
-        "signature".to_owned(),
-        ["private", "_key"].concat(),
-        ["pass", "word"].concat(),
-        ["rpc", "_url"].concat(),
-        ["keystore", "_path"].concat(),
-    ] {
-        assert!(!json.contains(&forbidden), "{json} contains {forbidden}");
-    }
-}
-
-#[test]
-fn deploy_receipt_projects_deployed_typestate() {
-    let state = DeployContractState::new(validated_config(deploy_config())).expect("state");
-    let context = mfm_program::CertifiedContext::no_context();
-    let intent = state.prepare_intent(&(), &context).expect("intent");
-    let output = state
-        .output_from_receipt(
-            &(),
-            &intent,
-            &ContractDeployReceipt {
-                receipt_version: 1,
-                contract_address: "0x000000000000000000000000000000000000beef".to_owned(),
-                receipt: ContractTransactionReceipt {
-                    receipt_version: 1,
-                    transaction_hash: "0x01".to_owned(),
-                    block_number: 3,
-                    status: true,
-                    receipt_evidence: None,
-                },
-            },
-            &context,
-        )
-        .expect("deployed");
-
-    assert_eq!(
-        output.contract_address,
-        "0x000000000000000000000000000000000000beef"
-    );
-    assert_eq!(output.deploy_tx_hash, "0x01");
-    assert_eq!(output.deployed_block_number, Some(3));
-}
-
-#[test]
-fn configure_receipt_projects_configured_typestate() {
-    let state = ConfigureContractState::new(validated_config(configure_config())).expect("state");
-    let input = ConfigureContractInput {
-        deployed: deployed_contract(),
-    };
-    let context = mfm_program::CertifiedContext::no_context();
-    let intent = state.prepare_intent(&input, &context).expect("intent");
-    let output = state
-        .output_from_receipt(
-            &input,
-            &intent,
-            &ContractConfigureReceipt {
-                receipt_version: 1,
-                receipts: vec![ContractTransactionReceipt {
-                    receipt_version: 1,
-                    transaction_hash: "0x02".to_owned(),
-                    block_number: 3,
-                    status: true,
-                    receipt_evidence: None,
-                }],
-                configured_block_number: None,
-            },
-            &context,
-        )
-        .expect("configured");
-
-    assert_eq!(output.configure_tx_hashes, vec!["0x02"]);
-    assert_eq!(output.configured_block_number, Some(3));
-    assert_eq!(intent.transactions.len(), 1);
-}
-
-#[test]
-fn configure_confirmation_projects_configured_typestate() {
-    let state = ConfigureContractState::new(validated_config(configure_config())).expect("state");
-    let input = ConfigureContractInput {
-        deployed: deployed_contract(),
-    };
-    let context = mfm_program::CertifiedContext::no_context();
-    let intent = state.prepare_intent(&input, &context).expect("intent");
-    let output = state
-        .output_from_confirmation(
-            &input,
-            &intent,
-            &ContractConfigureConfirmation {
-                confirmation_version: 1,
-                confirmations: 1,
-                receipts: vec![ContractTransactionReceipt {
-                    receipt_version: 1,
-                    transaction_hash: "0x02".to_owned(),
-                    block_number: 3,
-                    status: true,
-                    receipt_evidence: None,
-                }],
-                configured_block_number: None,
-            },
-            &context,
-        )
-        .expect("configured");
-
-    assert_eq!(output.configure_tx_hashes, vec!["0x02"]);
-    assert_eq!(output.configured_block_number, Some(3));
-    assert_eq!(intent.transactions.len(), 1);
-}
-
-#[test]
-fn configure_rejects_typestate_network_mismatch() {
-    let state = ConfigureContractState::new(validated_config(configure_config())).expect("state");
-    let input = ConfigureContractInput {
-        deployed: deployed_contract_on_chain(2),
-    };
-    let context = mfm_program::CertifiedContext::no_context();
-
-    assert!(state.prepare_intent(&input, &context).is_err());
-    assert!(state
-        .output_from_confirmation(
-            &input,
-            &ContractConfigureIntent {
-                intent_version: 1,
-                deployed: input.deployed.clone(),
-                transactions: Vec::new(),
-                has_inline_artifact: false,
-            },
-            &ContractConfigureConfirmation {
-                confirmation_version: 1,
-                confirmations: 1,
-                receipts: Vec::new(),
-                configured_block_number: None,
-            },
-            &context,
-        )
-        .is_err());
-}
-
-#[test]
-fn validate_report_projection_fails_closed_on_wrong_chain() {
-    let state = ValidateContractState::new(validated_config(validate_config())).expect("state");
-    let input = ValidateContractInput {
-        configured: configured_contract(),
-    };
-    let response = ContractValidationReadResponse {
-        response_version: 1,
-        observed_chain_id: 2,
-        client_version: "redacted-client".to_owned(),
-        configuration_read_results: Vec::new(),
-        configuration_event_results: Vec::new(),
-        read_results: Vec::new(),
-        event_results: Vec::new(),
-    };
-    let report = state
-        .report_from_response(&input, response)
-        .expect("validation report");
-
-    assert!(!report.valid);
-    assert_eq!(
-        state
-            .read_request(&input)
-            .expect("read request")
-            .expected_chain_id,
-        1
-    );
-}
-
-#[test]
-fn validate_rejects_typestate_network_mismatch() {
-    let state = ValidateContractState::new(validated_config(validate_config())).expect("state");
-    let input = ValidateContractInput {
-        configured: configured_contract_on_chain(2),
-    };
-    let response = ContractValidationReadResponse {
-        response_version: 1,
-        observed_chain_id: 1,
-        client_version: "redacted-client".to_owned(),
-        configuration_read_results: Vec::new(),
-        configuration_event_results: Vec::new(),
-        read_results: Vec::new(),
-        event_results: Vec::new(),
-    };
-
-    assert!(state.read_request(&input).is_err());
-    assert!(state.report_from_response(&input, response).is_err());
 }

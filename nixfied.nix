@@ -315,19 +315,6 @@ in
       env = postgresEnv;
       requires = [ "postgres" ];
     };
-    parity-reth-contracts = cargoLeaf {
-      tools = rethTools;
-      run = [
-        "bash"
-        "-lc"
-        ''
-          ${writeRethRuntimeConfig}
-          cargo test -p mfm-integration-tests --features parity-tests --test parity_evm_contract_lifecycle_reth -- --nocapture
-        ''
-      ];
-      env = rethEnv;
-      requires = [ "reth" ];
-    };
     parity-reth-portfolio = cargoLeaf {
       tools = rethTools;
       run = [
@@ -406,13 +393,9 @@ in
           task = "test-db";
           dependsOn = [ "parity-cli-keystore" ];
         };
-        parity-reth-contracts = {
-          task = "parity-reth-contracts";
-          dependsOn = [ "test-db" ];
-        };
         parity-reth-portfolio = {
           task = "parity-reth-portfolio";
-          dependsOn = [ "parity-reth-contracts" ];
+          dependsOn = [ "test-db" ];
         };
       };
     };

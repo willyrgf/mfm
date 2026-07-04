@@ -1,12 +1,16 @@
-# implementation plan for `docs/RFC_STATE_TRANS_CTX.md`
+# implementation completion record for `docs/RFC_STATE_TRANS_CTX.md`
 
-This is a planning-only document. It intentionally describes a full breaking implementation of
-`docs/RFC_STATE_TRANS_CTX.md`; it does not preserve old persisted specs, old public JSON contracts,
-old raw typestate seeds, compatibility wrappers, fallback entry points, or schema shims.
+This document records the full breaking implementation of `docs/RFC_STATE_TRANS_CTX.md`. All plan
+items are complete. The implementation does not preserve old persisted specs, old public JSON
+contracts, old raw typestate seeds, compatibility wrappers, fallback entry points, or schema shims.
 
-The EVM lifecycle cutover is blocked until the kernel/program/certifier/runtime/replay commits in
-phase 1 make context membership certified authority. A domain-only EVM refactor is non-compliant
-with the RFC.
+The legacy names that remain in this document are historical deletion criteria and old-shape
+examples that are explicitly rejected by the implemented public contract. They are not active
+production APIs, fixtures, or compatibility paths.
+
+The EVM lifecycle cutover is implemented on top of kernel/program/certifier/runtime/replay context
+authority. Context membership is certified authority; a domain-only EVM continuation path no longer
+exists.
 
 At the public cutover, old public configure and validate shapes are rejected, not translated:
 
@@ -39,12 +43,11 @@ remain mandatory:
 This phase establishes the reusable context contract before any EVM lifecycle cutover. It must be
 complete before commits that remove the old EVM local network equality checks.
 
-Each implementation commit should compile and pass its focused tests. Where a change would otherwise
-break multiple ownership layers at once, the plan uses additive, unregistered staging commits
-followed by one explicit cutover commit. Those staging commits are not compatibility shims: they do
-not translate old shapes, do not register fallback public entry points, and do not make public JSON
-or raw seeds authoritative. They only keep the review stack buildable until the cutover removes the
-old public contract.
+Each implementation commit compiles and passes its focused tests. Where a change would otherwise
+break multiple ownership layers at once, the sequence used additive, unregistered staging commits
+followed by one explicit cutover commit. Those staging commits were not compatibility shims: they did
+not translate old shapes, did not register fallback public entry points, and did not make public JSON
+or raw seeds authoritative. The cutover removed the old public contract.
 
 ### commit 1: `spec: add certified transition context specs`
 
@@ -146,9 +149,8 @@ or raw input seed.
 - Add `CertifiedContext<C>` as the state-facing typed invocation authority. It contains the
   context ref, descriptor ids, schema ids, and typed context value materialized from the certified
   spec. It is not constructible by domain crates from public JSON.
-- Record the context contract in state descriptors and state registration evidence, but do not yet
-  change executable state trait method signatures. Runtime invocation signature changes land with
-  runtime materialization in commit 4 so the workspace stays buildable without temporary adapters.
+- Record the context contract in state descriptors and state registration evidence. Runtime
+  invocation materializes certified contexts before state execution.
 - Add typed authoring APIs for declaring one context value and binding nodes to it. The API should
   make the common shape explicit, for example:
   - declare `EvmContractContext` once at the root or operation planning boundary
@@ -190,9 +192,8 @@ or raw input seed.
 
 **rollback/review risk notes**
 
-- This is a source break for `StateSpec` implementers, but executable state method signatures are
-  intentionally deferred to commit 4. Reviewers should focus on preserving crate boundaries: states
-  depend on program/capability contracts only, not runtime/store/app.
+- This is a source break for `StateSpec` implementers. Reviewers should focus on preserving crate
+  boundaries: states depend on program/capability contracts only, not runtime/store/app.
 
 ### commit 3: `certify: enforce context graph constraints`
 
@@ -1102,21 +1103,19 @@ deletion by the RFC.
   guards, evidence verification, nonce lanes, schema/canonical/no-float checks, secret redaction, or
   replay checks.
 
-## intentionally deferred implementation risks
+## implementation notes
 
-These are not permission to ship a non-compliant implementation. They are review risks to track
-while implementing the required commits.
-
-- Portable export bundle UX can be minimal for the first cutover, but import-from-MFM-run must still
-  verify either committed source-run stream/artifact authority or a certified export/import bundle.
-  It must never fall back to identifiers or public JSON.
-- Optional `chain_fingerprint` enforcement depends on capability evidence being available. If a
-  context specifies a fingerprint, transport/replay evidence must verify it; contexts without a
-  fingerprint still rely on the required chain-id guard.
-- Cross-context adoption beyond exact context-ref equality should remain unavailable unless a typed,
-  certified compatibility relation with replay-verifiable evidence is implemented.
-- A richer context-bound value derive may be useful later. The first implementation should prefer a
-  small typed extractor contract over generic JSON-path predicates.
+- Source-run imports require both certified import policy and retained source evidence refs:
+  source spec certificate or certified export certificate, source run stream or certified export
+  bundle, and source value artifact. Missing proof, mismatched digest, wrong schema/semantic id,
+  wrong stage, wrong context, public JSON, projection rows, raw payloads, and identifiers alone fail
+  closed before a resource is produced.
+- Optional `chain_fingerprint` enforcement remains tied to capability evidence. Contexts without a
+  fingerprint still require the chain-id guard.
+- Cross-context source-run adoption is limited to explicit accepted context refs in the certified
+  import policy. No implicit compatibility relation is available.
+- Context-bound value extraction is implemented through the typed extractor contract rather than
+  JSON-path predicates.
 
 ## final review checklist
 
@@ -1131,8 +1130,8 @@ while implementing the required commits.
   context-bound resources.
 - Import admission and replay are evidence-backed, not identifier-only.
 - Public JSON, public fact refs, and public fact DTOs are never import authority.
-- Context-bound fact/query evidence, when introduced, is certified through descriptor/query
-  constraints and replayed from retained `FactRecorded`/`FactQueryEvidence` authority.
+- Public fact refs and DTOs remain non-authoritative for lifecycle imports. Fact/query replay
+  authority stays with retained `FactRecorded`/`FactQueryEvidence` evidence, not public projections.
 - Old local defensive network equality checks are removed only after certified invariants exist.
 - Tests prove fail-closed behavior at certification, runtime admission, import admission, replay,
   and public entry boundaries.

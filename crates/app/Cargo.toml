@@ -55,6 +55,7 @@ mfm-transports-evm = { path = "../transports/evm" }
 mfm-transports-proof = { path = "../transports/proof" }
 
 [dev-dependencies]
+alloy-primitives = { workspace = true }
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-effects = { path = "../kernel/effects" }

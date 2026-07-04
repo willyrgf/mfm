@@ -121,7 +121,7 @@ async fn start_entry_point(
             "/v1/runs/start",
             serde_json::json!({
                 "op": op,
-                "op_version": 1,
+                "op_version": 2,
                 "config_format": "json",
                 "config": config,
             }),
@@ -197,7 +197,7 @@ async fn assert_evm_start_fails_before_admission(
     let prepared = test_support::prepare_entry_point_launch_for_store(
         &state.store,
         op,
-        Some(mfm_app::OpVersion::new(1).expect("op version")),
+        Some(mfm_app::OpVersion::new(2).expect("op version")),
         &config,
         None,
     )
@@ -907,10 +907,27 @@ fn evm_entry_point_configs() -> [(&'static str, serde_json::Value); 4] {
     ]
 }
 
-fn evm_network_json() -> serde_json::Value {
+fn evm_content_digest_str(byte: u8) -> String {
+    format!("content:sha256-jcs-v1:{}", format!("{byte:02x}").repeat(32))
+}
+
+fn evm_context_json() -> serde_json::Value {
     serde_json::json!({
-        "network_id": "ethereum-mainnet",
-        "expected_chain_id": 1,
+        "lifecycle_key": "rest-test-lifecycle",
+        "network": {
+            "network_id": "ethereum-mainnet",
+            "expected_chain_id": 1,
+            "chain_fingerprint": null,
+            "finality_or_observation_policy": null,
+        },
+        "contract_profile": {
+            "profile_id": "rest-test-contract",
+            "artifact_digest": evm_content_digest_str(0x20),
+            "interface_digest": evm_content_digest_str(0x21),
+            "creation_bytecode_digest": null,
+            "deployed_code_hash": null,
+            "selector_event_policy_digest": null,
+        },
     })
 }
 
@@ -921,32 +938,36 @@ fn evm_signer_json() -> serde_json::Value {
     })
 }
 
-fn evm_deploy_config_json() -> serde_json::Value {
+fn evm_deploy_action_json() -> serde_json::Value {
     serde_json::json!({
-        "network": evm_network_json(),
         "signer": evm_signer_json(),
     })
 }
 
-fn evm_configure_config_json() -> serde_json::Value {
+fn evm_configure_action_json() -> serde_json::Value {
     serde_json::json!({
-        "network": evm_network_json(),
         "signer": evm_signer_json(),
         "calls": [],
     })
 }
 
-fn evm_validate_config_json() -> serde_json::Value {
+fn evm_validate_action_json() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+fn evm_deploy_config_json() -> serde_json::Value {
     serde_json::json!({
-        "network": evm_network_json(),
+        "context": evm_context_json(),
+        "deploy": evm_deploy_action_json(),
     })
 }
 
 fn evm_lifecycle_config_json() -> serde_json::Value {
     serde_json::json!({
-        "deploy": evm_deploy_config_json(),
-        "configure": evm_configure_config_json(),
-        "validate": evm_validate_config_json(),
+        "context": evm_context_json(),
+        "deploy": evm_deploy_action_json(),
+        "configure": evm_configure_action_json(),
+        "validate": evm_validate_action_json(),
     })
 }
 
@@ -986,42 +1007,46 @@ fn diagnostic_artifact_requirement(
     }
 }
 
-fn evm_deployed_contract_json() -> serde_json::Value {
+fn evm_import_deployed_json() -> serde_json::Value {
     serde_json::json!({
-        "lifecycle_version": 1,
-        "network_id": "ethereum-mainnet",
-        "expected_chain_id": 1,
-        "contract_address": "0x000000000000000000000000000000000000dead",
-        "deploy_tx_hash": "0x01",
-        "deploy_receipt_evidence": null,
-        "deployed_block_number": 1,
+        "kind": "adopt_external_address",
+        "adoption": {
+            "address": "0x000000000000000000000000000000000000dead",
+            "provenance_label": "rest-test-external",
+            "evidence_policy": {
+                "require_code": false
+            }
+        },
     })
 }
 
-fn evm_configured_contract_json() -> serde_json::Value {
+fn evm_import_configured_json() -> serde_json::Value {
     serde_json::json!({
-        "lifecycle_version": 1,
-        "deployed": evm_deployed_contract_json(),
-        "configure_calls": [],
-        "confirmation_read_assertions": [],
-        "confirmation_event_assertions": [],
-        "configure_tx_hashes": [],
-        "configure_receipt_evidence": [],
-        "configured_block_number": 2,
+        "kind": "adopt_external_address",
+        "adoption": {
+            "address": "0x000000000000000000000000000000000000dead",
+            "provenance_label": "rest-test-external",
+            "evidence_policy": {
+                "require_code": false,
+                "allow_external_claimed_configured": true
+            }
+        },
     })
 }
 
 fn evm_configure_entry_config_json() -> serde_json::Value {
     serde_json::json!({
-        "config": evm_configure_config_json(),
-        "deployed": evm_deployed_contract_json(),
+        "context": evm_context_json(),
+        "import_deployed": evm_import_deployed_json(),
+        "configure": evm_configure_action_json(),
     })
 }
 
 fn evm_validate_entry_config_json() -> serde_json::Value {
     serde_json::json!({
-        "config": evm_validate_config_json(),
-        "configured": evm_configured_contract_json(),
+        "context": evm_context_json(),
+        "import_configured": evm_import_configured_json(),
+        "validate": evm_validate_action_json(),
     })
 }
 
@@ -1031,7 +1056,7 @@ fn assert_evm_entry_point_evidence(evidence: &mfm_app::EntryPointLaunchEvidence,
     let op = registry
         .resolve(
             &public_name,
-            Some(mfm_app::OpVersion::new(1).expect("op version")),
+            Some(mfm_app::OpVersion::new(2).expect("op version")),
         )
         .expect("EVM entry-point op");
 
