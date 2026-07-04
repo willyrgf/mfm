@@ -2689,6 +2689,33 @@ fn replay_intent_rejects_prepared_policy_mismatch() {
     assert!(verify_replay_intent_matches_prepared(&intent, &prepared).is_err());
 }
 
+#[test]
+fn replay_prepared_transaction_data_must_match_certified_inputs() {
+    let tx_inputs = vec![PreparedTransactionInput {
+        to: None,
+        value_wei: 0,
+        data: vec![0x60, 0x00],
+    }];
+    let mut prepared = prepared_invocation_fixture();
+    prepared.transactions[0].data_digest = digest_bytes(&tx_inputs[0].data).to_string();
+    prepared.transactions[0].data_len = tx_inputs[0].data.len() as u64;
+
+    verify_prepared_transaction_data_matches_inputs(&prepared, &tx_inputs)
+        .expect("matching prepared transaction data");
+
+    let mut wrong_digest = prepared.clone();
+    wrong_digest.transactions[0].data_digest = digest_bytes(&[0x61, 0x00]).to_string();
+    let error = verify_prepared_transaction_data_matches_inputs(&wrong_digest, &tx_inputs)
+        .expect_err("mismatched data digest rejects");
+    assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
+
+    let mut wrong_len = prepared;
+    wrong_len.transactions[0].data_len += 1;
+    let error = verify_prepared_transaction_data_matches_inputs(&wrong_len, &tx_inputs)
+        .expect_err("mismatched data length rejects");
+    assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
+}
+
 fn replay_prepared_evidence(
     prepared: &PreparedContractInvocation,
 ) -> replay::PreparedInvocationReplayEvidence {

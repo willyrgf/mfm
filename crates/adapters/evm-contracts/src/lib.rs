@@ -2468,6 +2468,94 @@ fn verify_replay_intent_matches_prepared(
     ))
 }
 
+fn verify_replay_prepared_transaction_data_matches_certified_inputs(
+    broker: &replay::ReplayBroker,
+    submit_node: &spec::NodeSpec,
+    intent: &VerifiedContractSideEffectIntent,
+    prepared: &PreparedContractInvocation,
+) -> replay::Result<()> {
+    let context = certified_evm_context_for_ref(broker, prepared.context_ref.as_context_ref())?;
+    match intent {
+        VerifiedContractSideEffectIntent::Deploy(intent) => {
+            let action: DeployAction = replay_node_config(broker, submit_node)?;
+            let state = ContextBoundDeployContractState::new(
+                ValidatedConfig::new(action.clone()).map_err(replay_adapter_error)?,
+            )
+            .map_err(replay_adapter_error)?;
+            let expected_intent = state
+                .prepare_intent(&(), &context)
+                .map_err(replay_adapter_error)?;
+            if &expected_intent != intent.as_ref() {
+                return Err(replay_contract_mismatch(
+                    "deploy intent does not match certified node config",
+                ));
+            }
+            let artifact = replay_context_profile_artifact(broker, &context)?;
+            let tx_inputs = vec![PreparedTransactionInput {
+                to: None,
+                value_wei: parse_optional_wei(action.value_wei()).map_err(replay_adapter_error)?,
+                data: deploy_action_data(&action, &artifact).map_err(replay_adapter_error)?,
+            }];
+            verify_prepared_transaction_data_matches_inputs(prepared, &tx_inputs)
+        }
+        VerifiedContractSideEffectIntent::Configure(intent) => {
+            let action: ConfigureAction = replay_node_config(broker, submit_node)?;
+            let deployed = configured_deployed_input_for_node(broker, submit_node, &context)?;
+            let input = ContextConfigureContractInput { deployed };
+            let state = ContextBoundConfigureContractState::new(
+                ValidatedConfig::new(action.clone()).map_err(replay_adapter_error)?,
+            )
+            .map_err(replay_adapter_error)?;
+            let expected_intent = state
+                .prepare_intent(&input, &context)
+                .map_err(replay_adapter_error)?;
+            if &expected_intent != intent.as_ref() {
+                return Err(replay_contract_mismatch(
+                    "configure intent does not match certified node config and inputs",
+                ));
+            }
+            let artifact = if configure_action_requires_artifact(&action) {
+                Some(replay_context_profile_artifact(broker, &context)?)
+            } else {
+                None
+            };
+            let tx_inputs = configure_action_transaction_inputs(
+                &action,
+                artifact.as_ref(),
+                input.deployed.address.as_str(),
+            )
+            .map_err(replay_adapter_error)?;
+            verify_prepared_transaction_data_matches_inputs(prepared, &tx_inputs)
+        }
+    }
+}
+
+fn verify_prepared_transaction_data_matches_inputs(
+    prepared: &PreparedContractInvocation,
+    tx_inputs: &[PreparedTransactionInput],
+) -> replay::Result<()> {
+    if prepared.transactions.len() != tx_inputs.len() {
+        return Err(replay_contract_mismatch(
+            "prepared transaction count does not match certified transaction inputs",
+        ));
+    }
+    for (index, (transaction, input)) in prepared.transactions.iter().zip(tx_inputs).enumerate() {
+        let expected_to = input.to.as_ref().map(|address| format!("{address:?}"));
+        if transaction.index != index as u64
+            || transaction.chain_id != prepared.expected_chain_id
+            || transaction.to_address != expected_to
+            || transaction.value_wei != input.value_wei.to_string()
+            || transaction.data_digest != digest_bytes(&input.data).to_string()
+            || transaction.data_len != input.data.len() as u64
+        {
+            return Err(replay_contract_mismatch(
+                "prepared transaction data does not match certified transaction inputs",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn verify_transaction_intent_matches_prepared(
     intent: &mfm_state_evm_contracts::ContextContractTransactionIntent,
     transaction: &PreparedContractTransactionEvidence,
@@ -2831,6 +2919,11 @@ fn verify_contract_lifecycle_replay_frame(
     verifier: &EvmContractLifecycleReplayVerifier,
     frame: &replay::SideEffectReplayFrame<'_>,
 ) -> replay::Result<VerifiedContractSideEffectFrame> {
+    let pair = broker
+        .certified_spec()
+        .spec
+        .side_effect_verify_pair_for_pair_id(&frame.intent.pair_id)
+        .map_err(replay_adapter_error)?;
     let Some(submission_request) = frame.submission_request() else {
         return Err(contract_lifecycle_side_effect_missing("submission"));
     };
@@ -2852,6 +2945,12 @@ fn verify_contract_lifecycle_replay_frame(
     let prepared = replay_prepared_invocation(Some(&prepared))?;
     let intent_evidence = replay_side_effect_intent(broker, frame.intent)?;
     let intent = verify_replay_intent_matches_prepared(&intent_evidence, &prepared)?;
+    verify_replay_prepared_transaction_data_matches_certified_inputs(
+        broker,
+        pair.submit_node,
+        &intent,
+        &prepared,
+    )?;
     Ok(VerifiedContractSideEffectFrame {
         pair_id: frame.intent.pair_id.clone(),
         node_id: frame.intent.node_id.clone(),
@@ -3706,6 +3805,23 @@ fn replay_lifecycle_artifact(
 ) -> replay::Result<replay::ArtifactReplayEvidence> {
     let requirement = lifecycle_artifact_requirement(evidence).map_err(replay_adapter_error)?;
     broker.retained_artifact(&requirement)
+}
+
+fn replay_context_profile_artifact(
+    broker: &replay::ReplayBroker,
+    context: &mfm_program::CertifiedContext<EvmContractContext>,
+) -> replay::Result<ContractArtifactConfig> {
+    let reference = context
+        .value()
+        .contract_profile
+        .artifact_ref
+        .as_ref()
+        .ok_or_else(|| replay_adapter_error(EvmContractAdapterError::MissingContractArtifact))?;
+    let requirement =
+        contract_profile_artifact_requirement(reference).map_err(replay_adapter_error)?;
+    let artifact = broker.retained_artifact(&requirement)?;
+    serde_json::from_slice::<ContractArtifactConfig>(&artifact.artifact_bytes)
+        .map_err(replay_json_error)
 }
 
 fn replay_source_run_artifact(
