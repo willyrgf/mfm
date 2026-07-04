@@ -107,17 +107,6 @@ fn validate_action() -> ValidateAction {
     serde_json::from_value(serde_json::json!({})).expect("validate action")
 }
 
-fn import_deployed_spec() -> ImportDeployedSpec {
-    serde_json::from_value(serde_json::json!({
-        "kind": "adopt_external_address",
-        "adoption": {
-            "address": "0x000000000000000000000000000000000000beef",
-            "provenance_label": "audited-external",
-        },
-    }))
-    .expect("import deployed")
-}
-
 fn import_configured_spec() -> ImportConfiguredSpec {
     serde_json::from_value(serde_json::json!({
         "kind": "adopt_external_address",
@@ -642,17 +631,6 @@ fn context_validate_request_and_report_use_certified_context() {
     assert_eq!(report.context_ref(), context.context_ref());
     assert!(!report.valid);
     assert_eq!(report.evidence_refs, vec![evidence_ref]);
-}
-
-#[test]
-fn import_states_fail_closed_without_verified_evidence() {
-    let deployed = ImportDeployedContractState::new(validated_config(import_deployed_spec()))
-        .expect("deployed import state");
-    let configured = ImportConfiguredContractState::new(validated_config(import_configured_spec()))
-        .expect("configured import state");
-
-    assert!(deployed.reject_without_verified_evidence().is_err());
-    assert!(configured.reject_without_verified_evidence().is_err());
 }
 
 #[test]

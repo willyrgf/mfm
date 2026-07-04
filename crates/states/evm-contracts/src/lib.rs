@@ -42,7 +42,10 @@ use mfm_evm_contract_model::{
     ImportFromMfmRunEvidence, LifecycleArtifactEvidenceRef, LifecycleNodeIdRef,
     ReadAssertionConfig, ValidationEventResult, ValidationReadResult,
 };
-use mfm_ids::{DescriptorId, DigestAlgorithm, SchemaId, StateKind, StateVersion};
+use mfm_ids::{
+    ContextResourceKind, ContextStage, DescriptorId, DigestAlgorithm, SchemaId, StateKind,
+    StateVersion,
+};
 use mfm_program::{
     AdapterBindingSpec, IdempotencyKey, ReadState, ResourceClaim, ResourceNamespace,
     SideEffectState, StateError, StateResult, StateSpec,
@@ -133,6 +136,31 @@ fn adapter_required_error(state_name: &'static str) -> StateError {
     StateError::Message(format!(
         "{state_name} requires an EVM contract lifecycle adapter runner"
     ))
+}
+
+fn requires_context(
+    resource_kind: &ContextResourceKind,
+    stage: &ContextStage,
+    producer_descriptor_ids: Vec<DescriptorId>,
+) -> mfm_program::Result<mfm_program::StateInputContextContractSpec> {
+    Ok(mfm_program::StateInputContextContractSpec::Required {
+        resource_kind: resource_kind.clone(),
+        stage: stage.clone(),
+        producer: Box::new(mfm_program::ContextProducerSpec {
+            producer_descriptor_ids: sorted_descriptor_ids(producer_descriptor_ids),
+            seed_producers_allowed: false,
+        }),
+    })
+}
+
+fn produces_context(
+    resource_kind: &ContextResourceKind,
+    stage: &ContextStage,
+) -> mfm_program::Result<mfm_program::StateOutputContextContractSpec> {
+    Ok(mfm_program::StateOutputContextContractSpec::Produces {
+        resource_kind: resource_kind.clone(),
+        stage: stage.clone(),
+    })
 }
 
 /// Input consumed by context-bound contract configuration states.
@@ -497,10 +525,7 @@ impl StateSpec for ContextBoundDeployContractState {
 
     fn output_context_contract() -> mfm_program::Result<mfm_program::StateOutputContextContractSpec>
     {
-        Ok(mfm_program::StateOutputContextContractSpec::Produces {
-            resource_kind: contract_instance_resource_kind().clone(),
-            stage: deployed_contract_stage().clone(),
-        })
+        produces_context(contract_instance_resource_kind(), deployed_contract_stage())
     }
 
     fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
@@ -617,25 +642,22 @@ impl StateSpec for ContextBoundConfigureContractState {
     }
 
     fn input_context_contract() -> mfm_program::Result<mfm_program::StateInputContextContractSpec> {
-        Ok(mfm_program::StateInputContextContractSpec::Required {
-            resource_kind: contract_instance_resource_kind().clone(),
-            stage: deployed_contract_stage().clone(),
-            producer: Box::new(mfm_program::ContextProducerSpec {
-                producer_descriptor_ids: sorted_descriptor_ids(vec![
-                    descriptor_id_for_state::<ContextBoundDeployContractState>()?,
-                    descriptor_id_for_state::<ImportDeployedContractState>()?,
-                ]),
-                seed_producers_allowed: false,
-            }),
-        })
+        requires_context(
+            contract_instance_resource_kind(),
+            deployed_contract_stage(),
+            vec![
+                descriptor_id_for_state::<ContextBoundDeployContractState>()?,
+                descriptor_id_for_state::<ImportDeployedContractState>()?,
+            ],
+        )
     }
 
     fn output_context_contract() -> mfm_program::Result<mfm_program::StateOutputContextContractSpec>
     {
-        Ok(mfm_program::StateOutputContextContractSpec::Produces {
-            resource_kind: contract_instance_resource_kind().clone(),
-            stage: configured_contract_stage().clone(),
-        })
+        produces_context(
+            contract_instance_resource_kind(),
+            configured_contract_stage(),
+        )
     }
 
     fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
@@ -836,25 +858,19 @@ impl StateSpec for ContextBoundValidateContractState {
     }
 
     fn input_context_contract() -> mfm_program::Result<mfm_program::StateInputContextContractSpec> {
-        Ok(mfm_program::StateInputContextContractSpec::Required {
-            resource_kind: contract_instance_resource_kind().clone(),
-            stage: configured_contract_stage().clone(),
-            producer: Box::new(mfm_program::ContextProducerSpec {
-                producer_descriptor_ids: sorted_descriptor_ids(vec![
-                    descriptor_id_for_state::<ContextBoundConfigureContractState>()?,
-                    descriptor_id_for_state::<ImportConfiguredContractState>()?,
-                ]),
-                seed_producers_allowed: false,
-            }),
-        })
+        requires_context(
+            contract_instance_resource_kind(),
+            configured_contract_stage(),
+            vec![
+                descriptor_id_for_state::<ContextBoundConfigureContractState>()?,
+                descriptor_id_for_state::<ImportConfiguredContractState>()?,
+            ],
+        )
     }
 
     fn output_context_contract() -> mfm_program::Result<mfm_program::StateOutputContextContractSpec>
     {
-        Ok(mfm_program::StateOutputContextContractSpec::Produces {
-            resource_kind: validation_report_resource_kind().clone(),
-            stage: validation_report_stage().clone(),
-        })
+        produces_context(validation_report_resource_kind(), validation_report_stage())
     }
 
     fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
@@ -936,11 +952,6 @@ impl ImportDeployedContractState {
             deployed_block_number,
         )
     }
-
-    /// Fails closed until an adapter supplies verified import evidence.
-    pub fn reject_without_verified_evidence(&self) -> StateResult<DeployedContractInstance> {
-        Err(import_admission_error(Self::name()))
-    }
 }
 
 impl StateSpec for ImportDeployedContractState {
@@ -969,10 +980,7 @@ impl StateSpec for ImportDeployedContractState {
 
     fn output_context_contract() -> mfm_program::Result<mfm_program::StateOutputContextContractSpec>
     {
-        Ok(mfm_program::StateOutputContextContractSpec::Produces {
-            resource_kind: contract_instance_resource_kind().clone(),
-            stage: deployed_contract_stage().clone(),
-        })
+        produces_context(contract_instance_resource_kind(), deployed_contract_stage())
     }
 
     fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
@@ -1132,11 +1140,6 @@ impl ImportConfiguredContractState {
             asserted_configuration_snapshot,
         })
     }
-
-    /// Fails closed until an adapter supplies verified import evidence.
-    pub fn reject_without_verified_evidence(&self) -> StateResult<ConfiguredContractInstance> {
-        Err(import_admission_error(Self::name()))
-    }
 }
 
 impl StateSpec for ImportConfiguredContractState {
@@ -1165,10 +1168,10 @@ impl StateSpec for ImportConfiguredContractState {
 
     fn output_context_contract() -> mfm_program::Result<mfm_program::StateOutputContextContractSpec>
     {
-        Ok(mfm_program::StateOutputContextContractSpec::Produces {
-            resource_kind: contract_instance_resource_kind().clone(),
-            stage: configured_contract_stage().clone(),
-        })
+        produces_context(
+            contract_instance_resource_kind(),
+            configured_contract_stage(),
+        )
     }
 
     fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
