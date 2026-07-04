@@ -27,8 +27,9 @@
 
 use alloy_primitives::Address;
 use mfm_evm_contract_model::{
-    AbiArgumentValue, ContractArtifactConfig, ContractCallConfig, EventAssertionConfig,
-    EvmContractScalarError, EvmNetworkId, ReadAssertionConfig, WeiAmount,
+    AbiArgumentValue, AdoptExternalAddress, ContractArtifactConfig, ContractCallConfig,
+    EventAssertionConfig, EvmContractContext, EvmContractScalarError, EvmNetworkId,
+    ImportFromMfmRun, ReadAssertionConfig, WeiAmount,
 };
 use mfm_evm_core::encoding::address_hex_lower;
 use mfm_evm_core::tx::parse_address;
@@ -497,6 +498,498 @@ impl<'de> Deserialize<'de> for ContractValidationPolicy {
         Ok(Self {
             read_assertions: raw.read_assertions,
             event_assertions: raw.event_assertions,
+        })
+    }
+}
+
+/// Deploy action executed inside a certified EVM contract context.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "deploy-action",
+    schema = "mfm.evm.contract.config.deploy_action"
+)]
+pub struct DeployAction {
+    signer: EvmSignerIntent,
+    constructor_args: Vec<AbiArgumentValue>,
+    value_wei: Option<WeiAmount>,
+    transaction: EvmTransactionPolicy,
+    receipt: ReceiptRetryPolicy,
+}
+
+impl DeployAction {
+    /// Returns signer intent.
+    pub const fn signer(&self) -> &EvmSignerIntent {
+        &self.signer
+    }
+
+    /// Returns constructor arguments.
+    pub fn constructor_args(&self) -> &[AbiArgumentValue] {
+        &self.constructor_args
+    }
+
+    /// Returns optional deployment value in wei.
+    pub fn value_wei(&self) -> Option<&str> {
+        self.value_wei.as_ref().map(WeiAmount::as_str)
+    }
+
+    /// Returns transaction policy.
+    pub const fn transaction(&self) -> &EvmTransactionPolicy {
+        &self.transaction
+    }
+
+    /// Returns receipt retry policy.
+    pub const fn receipt(&self) -> &ReceiptRetryPolicy {
+        &self.receipt
+    }
+}
+
+impl<'de> Deserialize<'de> for DeployAction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawDeployAction {
+            signer: EvmSignerIntent,
+            #[serde(default)]
+            constructor_args: Vec<AbiArgumentValue>,
+            #[serde(default)]
+            value_wei: Option<String>,
+            #[serde(default)]
+            transaction: EvmTransactionPolicy,
+            #[serde(default)]
+            receipt: ReceiptRetryPolicy,
+        }
+
+        let raw = RawDeployAction::deserialize(deserializer)?;
+        Ok(Self {
+            signer: raw.signer,
+            constructor_args: raw.constructor_args,
+            value_wei: optional_wei_amount(raw.value_wei, "value_wei")
+                .map_err(de::Error::custom)?,
+            transaction: raw.transaction,
+            receipt: raw.receipt,
+        })
+    }
+}
+
+/// Configure action executed inside a certified EVM contract context.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "configure-action",
+    schema = "mfm.evm.contract.config.configure_action"
+)]
+pub struct ConfigureAction {
+    signer: EvmSignerIntent,
+    calls: Vec<ContractCallConfig>,
+    confirmation_read_assertions: Vec<ReadAssertionConfig>,
+    confirmation_event_assertions: Vec<EventAssertionConfig>,
+    transaction: EvmTransactionPolicy,
+    receipt: ReceiptRetryPolicy,
+}
+
+impl ConfigureAction {
+    /// Returns signer intent.
+    pub const fn signer(&self) -> &EvmSignerIntent {
+        &self.signer
+    }
+
+    /// Returns configured contract calls.
+    pub fn calls(&self) -> &[ContractCallConfig] {
+        &self.calls
+    }
+
+    /// Returns read confirmation assertions.
+    pub fn confirmation_read_assertions(&self) -> &[ReadAssertionConfig] {
+        &self.confirmation_read_assertions
+    }
+
+    /// Returns event confirmation assertions.
+    pub fn confirmation_event_assertions(&self) -> &[EventAssertionConfig] {
+        &self.confirmation_event_assertions
+    }
+
+    /// Returns transaction policy.
+    pub const fn transaction(&self) -> &EvmTransactionPolicy {
+        &self.transaction
+    }
+
+    /// Returns receipt retry policy.
+    pub const fn receipt(&self) -> &ReceiptRetryPolicy {
+        &self.receipt
+    }
+}
+
+impl<'de> Deserialize<'de> for ConfigureAction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawConfigureAction {
+            signer: EvmSignerIntent,
+            #[serde(default)]
+            calls: Vec<ContractCallConfig>,
+            #[serde(default)]
+            confirmation_read_assertions: Vec<ReadAssertionConfig>,
+            #[serde(default)]
+            confirmation_event_assertions: Vec<EventAssertionConfig>,
+            #[serde(default)]
+            transaction: EvmTransactionPolicy,
+            #[serde(default)]
+            receipt: ReceiptRetryPolicy,
+        }
+
+        let raw = RawConfigureAction::deserialize(deserializer)?;
+        Ok(Self {
+            signer: raw.signer,
+            calls: raw.calls,
+            confirmation_read_assertions: raw.confirmation_read_assertions,
+            confirmation_event_assertions: raw.confirmation_event_assertions,
+            transaction: raw.transaction,
+            receipt: raw.receipt,
+        })
+    }
+}
+
+/// Validate action executed inside a certified EVM contract context.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "validate-action",
+    schema = "mfm.evm.contract.config.validate_action"
+)]
+pub struct ValidateAction {
+    read_assertions: Vec<ReadAssertionConfig>,
+    event_assertions: Vec<EventAssertionConfig>,
+}
+
+impl ValidateAction {
+    /// Returns read assertions evaluated with EVM calls.
+    pub fn read_assertions(&self) -> &[ReadAssertionConfig] {
+        &self.read_assertions
+    }
+
+    /// Returns event assertions evaluated with EVM log queries.
+    pub fn event_assertions(&self) -> &[EventAssertionConfig] {
+        &self.event_assertions
+    }
+}
+
+impl<'de> Deserialize<'de> for ValidateAction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawValidateAction {
+            #[serde(default)]
+            read_assertions: Vec<ReadAssertionConfig>,
+            #[serde(default)]
+            event_assertions: Vec<EventAssertionConfig>,
+        }
+
+        let raw = RawValidateAction::deserialize(deserializer)?;
+        Ok(Self {
+            read_assertions: raw.read_assertions,
+            event_assertions: raw.event_assertions,
+        })
+    }
+}
+
+/// Import spec for producing a deployed stage under a certified context.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "import-deployed-spec",
+    schema = "mfm.evm.contract.config.import_deployed"
+)]
+pub enum ImportDeployedSpec {
+    /// Import a deployed instance from another verified MFM run.
+    FromMfmRun {
+        /// Source-run import request.
+        source: ImportFromMfmRun,
+    },
+    /// Adopt an external address as a deployed instance.
+    AdoptExternalAddress {
+        /// External address adoption request.
+        adoption: AdoptExternalAddress,
+    },
+}
+
+impl<'de> Deserialize<'de> for ImportDeployedSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+        enum RawImportDeployedSpec {
+            FromMfmRun { source: ImportFromMfmRun },
+            AdoptExternalAddress { adoption: AdoptExternalAddress },
+        }
+
+        match RawImportDeployedSpec::deserialize(deserializer)? {
+            RawImportDeployedSpec::FromMfmRun { source } => Ok(Self::FromMfmRun { source }),
+            RawImportDeployedSpec::AdoptExternalAddress { adoption } => {
+                Ok(Self::AdoptExternalAddress { adoption })
+            }
+        }
+    }
+}
+
+/// Import spec for producing a configured stage under a certified context.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "import-configured-spec",
+    schema = "mfm.evm.contract.config.import_configured"
+)]
+pub enum ImportConfiguredSpec {
+    /// Import a configured instance from another verified MFM run.
+    FromMfmRun {
+        /// Source-run import request.
+        source: ImportFromMfmRun,
+    },
+    /// Adopt an external address as a configured instance.
+    AdoptExternalAddress {
+        /// External address adoption request.
+        adoption: AdoptExternalAddress,
+    },
+}
+
+impl<'de> Deserialize<'de> for ImportConfiguredSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+        enum RawImportConfiguredSpec {
+            FromMfmRun { source: ImportFromMfmRun },
+            AdoptExternalAddress { adoption: AdoptExternalAddress },
+        }
+
+        match RawImportConfiguredSpec::deserialize(deserializer)? {
+            RawImportConfiguredSpec::FromMfmRun { source } => Ok(Self::FromMfmRun { source }),
+            RawImportConfiguredSpec::AdoptExternalAddress { adoption } => {
+                Ok(Self::AdoptExternalAddress { adoption })
+            }
+        }
+    }
+}
+
+/// New deploy-only entry-point config shape.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "deploy-entry-config",
+    schema = "mfm.evm.contract.config.deploy_entry"
+)]
+pub struct EvmContractDeployEntryConfig {
+    context: EvmContractContext,
+    deploy: DeployAction,
+}
+
+impl EvmContractDeployEntryConfig {
+    /// Returns the certified lifecycle context.
+    pub const fn context(&self) -> &EvmContractContext {
+        &self.context
+    }
+
+    /// Returns the deploy action.
+    pub const fn deploy(&self) -> &DeployAction {
+        &self.deploy
+    }
+}
+
+impl<'de> Deserialize<'de> for EvmContractDeployEntryConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawEvmContractDeployEntryConfig {
+            context: EvmContractContext,
+            deploy: DeployAction,
+        }
+
+        let raw = RawEvmContractDeployEntryConfig::deserialize(deserializer)?;
+        Ok(Self {
+            context: raw.context,
+            deploy: raw.deploy,
+        })
+    }
+}
+
+/// New configure-only entry-point config shape.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "configure-entry-config",
+    schema = "mfm.evm.contract.config.configure_entry"
+)]
+pub struct EvmContractConfigureEntryConfig {
+    context: EvmContractContext,
+    import_deployed: ImportDeployedSpec,
+    configure: ConfigureAction,
+}
+
+impl EvmContractConfigureEntryConfig {
+    /// Returns the certified lifecycle context.
+    pub const fn context(&self) -> &EvmContractContext {
+        &self.context
+    }
+
+    /// Returns the deployed-stage import spec.
+    pub const fn import_deployed(&self) -> &ImportDeployedSpec {
+        &self.import_deployed
+    }
+
+    /// Returns the configure action.
+    pub const fn configure(&self) -> &ConfigureAction {
+        &self.configure
+    }
+}
+
+impl<'de> Deserialize<'de> for EvmContractConfigureEntryConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawEvmContractConfigureEntryConfig {
+            context: EvmContractContext,
+            import_deployed: ImportDeployedSpec,
+            configure: ConfigureAction,
+        }
+
+        let raw = RawEvmContractConfigureEntryConfig::deserialize(deserializer)?;
+        Ok(Self {
+            context: raw.context,
+            import_deployed: raw.import_deployed,
+            configure: raw.configure,
+        })
+    }
+}
+
+/// New validate-only entry-point config shape.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "validate-entry-config",
+    schema = "mfm.evm.contract.config.validate_entry"
+)]
+pub struct EvmContractValidateEntryConfig {
+    context: EvmContractContext,
+    import_configured: ImportConfiguredSpec,
+    validate: ValidateAction,
+}
+
+impl EvmContractValidateEntryConfig {
+    /// Returns the certified lifecycle context.
+    pub const fn context(&self) -> &EvmContractContext {
+        &self.context
+    }
+
+    /// Returns the configured-stage import spec.
+    pub const fn import_configured(&self) -> &ImportConfiguredSpec {
+        &self.import_configured
+    }
+
+    /// Returns the validate action.
+    pub const fn validate(&self) -> &ValidateAction {
+        &self.validate
+    }
+}
+
+impl<'de> Deserialize<'de> for EvmContractValidateEntryConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawEvmContractValidateEntryConfig {
+            context: EvmContractContext,
+            import_configured: ImportConfiguredSpec,
+            validate: ValidateAction,
+        }
+
+        let raw = RawEvmContractValidateEntryConfig::deserialize(deserializer)?;
+        Ok(Self {
+            context: raw.context,
+            import_configured: raw.import_configured,
+            validate: raw.validate,
+        })
+    }
+}
+
+/// New full lifecycle entry-point config shape.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "lifecycle-entry-config",
+    schema = "mfm.evm.contract.config.lifecycle_entry"
+)]
+pub struct EvmContractLifecycleEntryConfig {
+    context: EvmContractContext,
+    deploy: DeployAction,
+    configure: ConfigureAction,
+    validate: ValidateAction,
+}
+
+impl EvmContractLifecycleEntryConfig {
+    /// Returns the certified lifecycle context.
+    pub const fn context(&self) -> &EvmContractContext {
+        &self.context
+    }
+
+    /// Returns the deploy action.
+    pub const fn deploy(&self) -> &DeployAction {
+        &self.deploy
+    }
+
+    /// Returns the configure action.
+    pub const fn configure(&self) -> &ConfigureAction {
+        &self.configure
+    }
+
+    /// Returns the validate action.
+    pub const fn validate(&self) -> &ValidateAction {
+        &self.validate
+    }
+}
+
+impl<'de> Deserialize<'de> for EvmContractLifecycleEntryConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawEvmContractLifecycleEntryConfig {
+            context: EvmContractContext,
+            deploy: DeployAction,
+            configure: ConfigureAction,
+            validate: ValidateAction,
+        }
+
+        let raw = RawEvmContractLifecycleEntryConfig::deserialize(deserializer)?;
+        Ok(Self {
+            context: raw.context,
+            deploy: raw.deploy,
+            configure: raw.configure,
+            validate: raw.validate,
         })
     }
 }

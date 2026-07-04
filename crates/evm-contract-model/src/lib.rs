@@ -1052,7 +1052,7 @@ impl LifecycleArtifactEvidenceRef {
 }
 
 /// Shared observation identity for EVM lifecycle reads.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "observation-policy",
@@ -1065,8 +1065,29 @@ pub struct FinalityOrObservationPolicy {
     pub block_anchor: Option<BlockSelector>,
 }
 
+impl<'de> Deserialize<'de> for FinalityOrObservationPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawFinalityOrObservationPolicy {
+            policy_id: ObservationPolicyId,
+            #[serde(default)]
+            block_anchor: Option<BlockSelector>,
+        }
+
+        let raw = RawFinalityOrObservationPolicy::deserialize(deserializer)?;
+        Ok(Self {
+            policy_id: raw.policy_id,
+            block_anchor: raw.block_anchor,
+        })
+    }
+}
+
 /// Certified EVM network context shared by contract lifecycle phases.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "network-context",
@@ -1102,8 +1123,36 @@ impl EvmNetworkContext {
     }
 }
 
+impl<'de> Deserialize<'de> for EvmNetworkContext {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawEvmNetworkContext {
+            network_id: EvmNetworkId,
+            expected_chain_id: u64,
+            #[serde(default)]
+            chain_fingerprint: Option<ChainFingerprint>,
+            #[serde(default)]
+            finality_or_observation_policy: Option<FinalityOrObservationPolicy>,
+        }
+
+        let raw = RawEvmNetworkContext::deserialize(deserializer)?;
+        let expected_chain_id = NonZeroU64::new(raw.expected_chain_id)
+            .ok_or_else(|| de::Error::custom("expected_chain_id must be non-zero"))?;
+        Ok(Self {
+            network_id: raw.network_id,
+            expected_chain_id,
+            chain_fingerprint: raw.chain_fingerprint,
+            finality_or_observation_policy: raw.finality_or_observation_policy,
+        })
+    }
+}
+
 /// Digest-oriented contract profile identity shared by lifecycle phases.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "contract-profile",
@@ -1124,8 +1173,41 @@ pub struct ContractProfile {
     pub selector_event_policy_digest: Option<ContractProfileDigestRef>,
 }
 
+impl<'de> Deserialize<'de> for ContractProfile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawContractProfile {
+            profile_id: ContractProfileId,
+            #[serde(default)]
+            artifact_digest: Option<ContractProfileDigestRef>,
+            #[serde(default)]
+            interface_digest: Option<ContractProfileDigestRef>,
+            #[serde(default)]
+            creation_bytecode_digest: Option<ContractProfileDigestRef>,
+            #[serde(default)]
+            deployed_code_hash: Option<EvmCodeHash>,
+            #[serde(default)]
+            selector_event_policy_digest: Option<ContractProfileDigestRef>,
+        }
+
+        let raw = RawContractProfile::deserialize(deserializer)?;
+        Ok(Self {
+            profile_id: raw.profile_id,
+            artifact_digest: raw.artifact_digest,
+            interface_digest: raw.interface_digest,
+            creation_bytecode_digest: raw.creation_bytecode_digest,
+            deployed_code_hash: raw.deployed_code_hash,
+            selector_event_policy_digest: raw.selector_event_policy_digest,
+        })
+    }
+}
+
 /// Certified EVM contract lifecycle context.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "contract-context",
@@ -1138,6 +1220,28 @@ pub struct EvmContractContext {
     pub network: EvmNetworkContext,
     /// Required contract profile identity.
     pub contract_profile: ContractProfile,
+}
+
+impl<'de> Deserialize<'de> for EvmContractContext {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawEvmContractContext {
+            lifecycle_key: LifecycleKey,
+            network: EvmNetworkContext,
+            contract_profile: ContractProfile,
+        }
+
+        let raw = RawEvmContractContext::deserialize(deserializer)?;
+        Ok(Self {
+            lifecycle_key: raw.lifecycle_key,
+            network: raw.network,
+            contract_profile: raw.contract_profile,
+        })
+    }
 }
 
 impl MfmContext for EvmContractContext {}
@@ -1196,8 +1300,14 @@ pub enum AcceptedContextPolicy {
     },
 }
 
+impl Default for AcceptedContextPolicy {
+    fn default() -> Self {
+        Self::ExactContext {}
+    }
+}
+
 /// Import request for a lifecycle value produced by another verified MFM run.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "import-from-mfm-run",
@@ -1218,6 +1328,37 @@ pub struct ImportFromMfmRun {
     pub required_stage: ContractLifecycleStage,
     /// Certified context acceptance policy.
     pub accepted_context_policy: AcceptedContextPolicy,
+}
+
+impl<'de> Deserialize<'de> for ImportFromMfmRun {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawImportFromMfmRun {
+            source_run_id: LifecycleRunIdRef,
+            source_spec_hash: LifecycleSpecHashRef,
+            source_cell_or_output_id: SourceCellOrOutputRef,
+            source_value_digest: ContractProfileDigestRef,
+            source_context_ref: ContextRefValue,
+            required_stage: ContractLifecycleStage,
+            #[serde(default)]
+            accepted_context_policy: AcceptedContextPolicy,
+        }
+
+        let raw = RawImportFromMfmRun::deserialize(deserializer)?;
+        Ok(Self {
+            source_run_id: raw.source_run_id,
+            source_spec_hash: raw.source_spec_hash,
+            source_cell_or_output_id: raw.source_cell_or_output_id,
+            source_value_digest: raw.source_value_digest,
+            source_context_ref: raw.source_context_ref,
+            required_stage: raw.required_stage,
+            accepted_context_policy: raw.accepted_context_policy,
+        })
+    }
 }
 
 /// Replayable evidence for importing a lifecycle value from another MFM run.
@@ -1259,7 +1400,7 @@ pub struct ImportFromMfmRunEvidence {
 }
 
 /// Certified evidence policy for adopting an external EVM address.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "external-adoption-evidence-policy",
@@ -1280,8 +1421,59 @@ pub struct ExternalAdoptionEvidencePolicy {
     pub allow_external_claimed_configured: bool,
 }
 
+fn default_require_code() -> bool {
+    true
+}
+
+impl Default for ExternalAdoptionEvidencePolicy {
+    fn default() -> Self {
+        Self {
+            require_code: true,
+            expected_code_hash: None,
+            block_anchor: None,
+            initial_read_assertions: Vec::new(),
+            initial_event_assertions: Vec::new(),
+            allow_external_claimed_configured: false,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ExternalAdoptionEvidencePolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawExternalAdoptionEvidencePolicy {
+            #[serde(default = "default_require_code")]
+            require_code: bool,
+            #[serde(default)]
+            expected_code_hash: Option<EvmCodeHash>,
+            #[serde(default)]
+            block_anchor: Option<BlockSelector>,
+            #[serde(default)]
+            initial_read_assertions: Vec<ReadAssertionConfig>,
+            #[serde(default)]
+            initial_event_assertions: Vec<EventAssertionConfig>,
+            #[serde(default)]
+            allow_external_claimed_configured: bool,
+        }
+
+        let raw = RawExternalAdoptionEvidencePolicy::deserialize(deserializer)?;
+        Ok(Self {
+            require_code: raw.require_code,
+            expected_code_hash: raw.expected_code_hash,
+            block_anchor: raw.block_anchor,
+            initial_read_assertions: raw.initial_read_assertions,
+            initial_event_assertions: raw.initial_event_assertions,
+            allow_external_claimed_configured: raw.allow_external_claimed_configured,
+        })
+    }
+}
+
 /// Request to adopt an external EVM address under a certified lifecycle context.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "adopt-external-address",
@@ -1294,6 +1486,29 @@ pub struct AdoptExternalAddress {
     pub provenance_label: ProvenanceLabel,
     /// Certified evidence policy.
     pub evidence_policy: ExternalAdoptionEvidencePolicy,
+}
+
+impl<'de> Deserialize<'de> for AdoptExternalAddress {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawAdoptExternalAddress {
+            address: ContractAddress,
+            provenance_label: ProvenanceLabel,
+            #[serde(default)]
+            evidence_policy: ExternalAdoptionEvidencePolicy,
+        }
+
+        let raw = RawAdoptExternalAddress::deserialize(deserializer)?;
+        Ok(Self {
+            address: raw.address,
+            provenance_label: raw.provenance_label,
+            evidence_policy: raw.evidence_policy,
+        })
+    }
 }
 
 /// Replayable evidence captured while adopting an external EVM address.
