@@ -2218,21 +2218,6 @@ pub fn parse_abi(abi: &AbiJson) -> Result<ParsedAbi, String> {
     common_abi::parse_abi(&abi).map_err(|error| error.message)
 }
 
-/// Normalizes a hex string to lowercase `0x`-prefixed form.
-pub fn normalize_hex_str(value: &str) -> Result<String, String> {
-    common_hex::normalize_hex_str(value).map_err(|error| error.message)
-}
-
-/// Decodes a hex string into bytes.
-pub fn hex_to_bytes(value: &str) -> Result<Vec<u8>, String> {
-    common_hex::hex_to_bytes(value).map_err(|error| error.message)
-}
-
-/// Encodes bytes as a lowercase `0x`-prefixed hex string.
-pub fn bytes_to_hex_prefixed(bytes: &[u8]) -> String {
-    common_hex::bytes_to_hex_prefixed(bytes)
-}
-
 /// Resolves and encodes a function call from ABI name plus typed JSON arguments.
 pub fn resolve_function_call<T>(
     abi: &ParsedAbi,
@@ -2297,7 +2282,7 @@ pub fn prepare_validate_assertions(
             resolve_function_call(abi, assertion.function.as_str(), &assertion.args)
                 .map_err(|_| "read assertion did not match ABI".to_string())?;
         reads.push(PreparedReadAssertion {
-            data_hex: bytes_to_hex_prefixed(&call_data),
+            data_hex: common_hex::bytes_to_hex_prefixed(&call_data),
             expected: assertion.expected.clone(),
             outputs,
         });
@@ -2315,7 +2300,7 @@ pub fn prepare_validate_assertions(
         }
         let signature = format!("{}({})", event.name, event.inputs.join(","));
         let topic0 = keccak256(signature.as_bytes());
-        let topic0_hex = bytes_to_hex_prefixed(topic0.as_slice());
+        let topic0_hex = common_hex::bytes_to_hex_prefixed(topic0.as_slice());
         let from_block = block_selector_to_rpc_value(&assertion.from_block, false);
         let to_block = block_selector_to_rpc_value(&assertion.to_block, true);
         events.push(PreparedEventAssertion {
@@ -2328,11 +2313,6 @@ pub fn prepare_validate_assertions(
     }
 
     Ok((reads, events))
-}
-
-/// Normalizes an EVM address to canonical lowercase `0x`-prefixed form.
-pub fn normalize_address(value: &str) -> Result<String, String> {
-    encoding::normalize_address(value).map_err(|error| error.message)
 }
 
 /// Decodes a single-output EVM call response into JSON.
@@ -2375,7 +2355,8 @@ pub fn expected_matches(actual: &ExpectedValue, expected: &ExpectedValue) -> boo
         (Value::String(actual), Value::String(expected))
             if actual.starts_with("0x") && expected.starts_with("0x") =>
         {
-            normalize_hex_str(actual).ok() == normalize_hex_str(expected).ok()
+            common_hex::normalize_hex_str(actual).ok()
+                == common_hex::normalize_hex_str(expected).ok()
         }
         _ => false,
     }
