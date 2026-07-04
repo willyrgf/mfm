@@ -50,9 +50,7 @@ fn portfolio_snapshot_plan_error(
     }
 }
 
-fn evm_contract_plan_error(
-    _error: mfm_op_evm_contract_lifecycle::ContractLifecyclePlanError,
-) -> OpLaunchError {
+fn evm_contract_plan_error(_error: mfm_program::PlanError) -> OpLaunchError {
     OpLaunchError::new(
         "EvmContractPlanFailed",
         "EVM contract entry-point planning failed",
