@@ -443,7 +443,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         action: &ValidatedConfig<ConfigureAction>,
         input: &ContextConfigureContractInput,
         context: &mfm_program::CertifiedContext<EvmContractContext>,
-        artifact: &ContractArtifactConfig,
+        artifact: Option<&ContractArtifactConfig>,
         intent: &ContextContractConfigureIntent,
     ) -> Result<PreparedContractMutation> {
         let expected = ContextBoundConfigureContractState::new(action.clone())?
@@ -504,7 +504,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         action: &ValidatedConfig<ConfigureAction>,
         input: &ContextConfigureContractInput,
         context: &mfm_program::CertifiedContext<EvmContractContext>,
-        artifact: &ContractArtifactConfig,
+        artifact: Option<&ContractArtifactConfig>,
         intent: &ContextContractConfigureIntent,
         evidence: &PreparedContractInvocation,
     ) -> Result<PreparedContractMutation> {
@@ -994,6 +994,7 @@ async fn validate_context_contract_with_reads(
     Ok(ContractValidationReadResponse {
         response_version: 1,
         context_ref: mfm_values::ContextRefValue::from(context.context_ref().clone()),
+        configured_input_digest: request.configured_input_digest.clone(),
         evm_network_context_ref: evm_network_context_ref(&context.value().network)?,
         resource_stage: ContractLifecycleStage::Configured,
         observed_chain_id: chain.response.chain_id,
@@ -3249,14 +3250,19 @@ fn deploy_action_data(action: &DeployAction, artifact: &ContractArtifactConfig) 
         .map_err(EvmContractAdapterError::Model)
 }
 
+fn configure_action_requires_artifact(action: &ConfigureAction) -> bool {
+    !action.calls().is_empty()
+}
+
 fn configure_action_transaction_inputs(
     action: &ConfigureAction,
-    artifact: &ContractArtifactConfig,
+    artifact: Option<&ContractArtifactConfig>,
     contract_address: &str,
 ) -> Result<Vec<PreparedTransactionInput>> {
-    if action.calls().is_empty() {
+    if !configure_action_requires_artifact(action) {
         return Ok(Vec::new());
     }
+    let artifact = artifact.ok_or(EvmContractAdapterError::MissingContractArtifact)?;
     let (abi, _) = parse_artifact(artifact).map_err(EvmContractAdapterError::Model)?;
     let to = parse_address(contract_address, "contract_address")
         .map_err(|error| EvmContractAdapterError::Model(error.message))?;
@@ -4387,7 +4393,7 @@ struct ContextConfigureMutationPlan {
     state: ContextBoundConfigureContractState,
     input: ContextConfigureContractInput,
     context: mfm_program::CertifiedContext<EvmContractContext>,
-    artifact: ContractArtifactConfig,
+    artifact: Option<ContractArtifactConfig>,
     intent: ContextContractConfigureIntent,
     idempotency: ContractTransactionIdempotency,
 }
@@ -4655,7 +4661,7 @@ impl ContractMutationPlanOps for ContextConfigureMutationPlan {
                     &self.action,
                     &self.input,
                     &self.context,
-                    &self.artifact,
+                    self.artifact.as_ref(),
                     &self.intent,
                 )
                 .await
@@ -4674,7 +4680,7 @@ impl ContractMutationPlanOps for ContextConfigureMutationPlan {
                 &self.action,
                 &self.input,
                 &self.context,
-                &self.artifact,
+                self.artifact.as_ref(),
                 &self.intent,
                 prepared,
             )
@@ -5182,7 +5188,11 @@ async fn context_configure_mutation_plan_for_inputs(
     let input = ContextConfigureContractInput { deployed };
     let context = invocation_context.certified_context::<EvmContractContext>()?;
     ensure_deployed_input_context(&input, &context).map_err(mfm_runtime::RuntimeError::from)?;
-    let artifact = load_context_profile_artifact(&context, artifacts).await?;
+    let artifact = if configure_action_requires_artifact(action.as_ref()) {
+        Some(load_context_profile_artifact(&context, artifacts).await?)
+    } else {
+        None
+    };
     let state =
         ContextBoundConfigureContractState::new(action.clone()).map_err(runtime_plan_error)?;
     let intent = state
