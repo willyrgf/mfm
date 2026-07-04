@@ -749,12 +749,14 @@ fn checkpoint_record_fixture_uses_recorded_chain_head_fact() {
     .expect("state");
 
     let caps = (BtcFactRecordCapability,);
+    let context = mfm_program::CertifiedContext::no_context();
     let checkpoint = poll_ready(state.run(
         RecordCollectorCheckpointInput {
             chain_head_fact,
             loaded_checkpoint: LoadedCollectorCheckpoint::new(Some(checkpoint_fact(849_999))),
         },
         &caps,
+        &context,
     ))
     .expect("checkpoint fact");
 

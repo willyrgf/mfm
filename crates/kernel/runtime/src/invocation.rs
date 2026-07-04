@@ -6,6 +6,7 @@ use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
     ContentDigest, NodeId, RunId, SchemaId, SpecHash,
 };
+use mfm_program::{CertifiedContext, MfmContext, NoContext, StateContext};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
@@ -13,6 +14,77 @@ use crate::history::{
     committed_config_artifact, materialize_inputs, recorded_facts_for_attempt, RuntimeRunView,
 };
 use crate::{CertifiedRuntimeSpec, Result};
+
+/// Certified transition context authority for one runner invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedInvocationContext {
+    spec: Option<spec::CertifiedContextSpec>,
+}
+
+impl CertifiedInvocationContext {
+    pub(crate) fn for_node(
+        runtime_spec: &CertifiedRuntimeSpec,
+        node: &spec::NodeSpec,
+    ) -> Result<Self> {
+        match &node.context {
+            spec::NodeContextSpec::NoContext => Ok(Self { spec: None }),
+            spec::NodeContextSpec::Required { context_ref } => {
+                let context = runtime_spec.context(context_ref).ok_or_else(|| {
+                    crate::RuntimeError::InvalidSpec(format!(
+                        "node {} requires missing certified context {}",
+                        node.node_id, context_ref
+                    ))
+                })?;
+                Ok(Self {
+                    spec: Some(context.clone()),
+                })
+            }
+        }
+    }
+
+    /// Returns true when this invocation runs outside a semantic transition context.
+    pub fn is_no_context(&self) -> bool {
+        self.spec.is_none()
+    }
+
+    /// Returns the certified context table entry, if this invocation is context-bound.
+    pub fn spec(&self) -> Option<&spec::CertifiedContextSpec> {
+        self.spec.as_ref()
+    }
+
+    /// Returns framework-owned no-context authority.
+    pub fn no_context(&self) -> Result<CertifiedContext<NoContext>> {
+        if self.spec.is_some() {
+            return Err(crate::RuntimeError::InvalidRunnerOutput(
+                "context-bound invocation requested no-context authority".to_owned(),
+            ));
+        }
+        Ok(CertifiedContext::no_context())
+    }
+
+    /// Materializes typed context authority from the certified context table entry.
+    pub fn materialize<C>(&self) -> Result<CertifiedContext<C>>
+    where
+        C: MfmContext,
+    {
+        let spec = self.spec.as_ref().ok_or_else(|| {
+            crate::RuntimeError::InvalidRunnerOutput(
+                "no-context invocation requested typed context authority".to_owned(),
+            )
+        })?;
+        CertifiedContext::from_certified_spec(spec)
+            .map_err(|error| crate::RuntimeError::InvalidRunnerOutput(error.to_string()))
+    }
+
+    /// Materializes state context authority for either no-context or typed-context states.
+    pub fn materialize_state_context<C>(&self) -> Result<CertifiedContext<C>>
+    where
+        C: StateContext,
+    {
+        C::materialize_certified(self.spec.as_ref())
+            .map_err(|error| crate::RuntimeError::InvalidRunnerOutput(error.to_string()))
+    }
+}
 
 /// Prepared, store-verified invocation supplied to an erased node runner.
 ///
@@ -27,6 +99,7 @@ pub struct PreparedRunnerInvocation<'a> {
     pub(crate) node: &'a spec::NodeSpec,
     pub(crate) descriptor: &'a spec::StateDescriptorIdentity,
     pub(crate) output_cell: &'a spec::CellSpec,
+    pub(crate) context: CertifiedInvocationContext,
     pub(crate) attempt_id: &'a AttemptId,
     pub(crate) attempt_no: u32,
     pub(crate) config_artifact: store::ArtifactEvidenceRef,
@@ -62,6 +135,11 @@ impl<'a> PreparedRunnerInvocation<'a> {
     /// Certified output cell spec for the node.
     pub fn output_cell(&self) -> &'a spec::CellSpec {
         self.output_cell
+    }
+
+    /// Certified semantic transition context for this invocation.
+    pub fn context(&self) -> &CertifiedInvocationContext {
+        &self.context
     }
 
     /// Store-owned attempt id minted by the scheduler.
@@ -182,6 +260,7 @@ impl<'a> InvocationBuilder<'a> {
             &self.node.node_id,
             self.attempt_id,
         )?;
+        let context = self.runtime_spec.invocation_context_for_node(self.node)?;
         Ok(PreparedRunnerInvocation {
             runtime_spec: self.runtime_spec,
             run_id: self.run_id,
@@ -189,6 +268,7 @@ impl<'a> InvocationBuilder<'a> {
             node: self.node,
             descriptor: self.descriptor,
             output_cell: self.output_cell,
+            context,
             attempt_id: self.attempt_id,
             attempt_no: self.attempt_no,
             config_artifact,
@@ -214,6 +294,7 @@ impl<'a> InvocationBuilder<'a> {
             &self.node.node_id,
             self.attempt_id,
         )?;
+        let context = self.runtime_spec.invocation_context_for_node(self.node)?;
         Ok(PreInvocationRunCtx {
             runtime_spec: self.runtime_spec,
             run_id: self.run_id,
@@ -221,6 +302,7 @@ impl<'a> InvocationBuilder<'a> {
             node: self.node,
             descriptor: self.descriptor,
             output_cell: self.output_cell,
+            context,
             attempt_id: self.attempt_id,
             attempt_no: self.attempt_no,
             config_artifact,
@@ -244,6 +326,7 @@ pub struct PreInvocationRunCtx<'a> {
     pub(crate) node: &'a spec::NodeSpec,
     pub(crate) descriptor: &'a spec::StateDescriptorIdentity,
     pub(crate) output_cell: &'a spec::CellSpec,
+    pub(crate) context: CertifiedInvocationContext,
     pub(crate) attempt_id: &'a AttemptId,
     pub(crate) attempt_no: u32,
     pub(crate) config_artifact: store::ArtifactEvidenceRef,
@@ -277,6 +360,11 @@ impl<'a> PreInvocationRunCtx<'a> {
     /// Certified output cell spec for the node.
     pub fn output_cell(&self) -> &'a spec::CellSpec {
         self.output_cell
+    }
+
+    /// Certified semantic transition context for this pre-invocation hook.
+    pub fn context(&self) -> &CertifiedInvocationContext {
+        &self.context
     }
 
     /// Store-owned attempt id minted by the scheduler.
@@ -362,6 +450,32 @@ impl<'a> ErasedRunCtx<'a> {
     /// Certified output cell spec for the node.
     pub fn output_cell(&self) -> &'a spec::CellSpec {
         self.invocation.output_cell()
+    }
+
+    /// Certified semantic transition context for this runner invocation.
+    pub fn context(&self) -> &CertifiedInvocationContext {
+        self.invocation.context()
+    }
+
+    /// Materializes typed context authority for this runner invocation.
+    pub fn certified_context<C>(&self) -> Result<CertifiedContext<C>>
+    where
+        C: MfmContext,
+    {
+        self.context().materialize::<C>()
+    }
+
+    /// Returns framework-owned no-context authority for ordinary states.
+    pub fn no_context(&self) -> Result<CertifiedContext<NoContext>> {
+        self.context().no_context()
+    }
+
+    /// Materializes state context authority for either no-context or typed-context states.
+    pub fn state_context<C>(&self) -> Result<CertifiedContext<C>>
+    where
+        C: StateContext,
+    {
+        self.context().materialize_state_context::<C>()
     }
 
     /// Store-owned attempt id minted by the scheduler.
@@ -557,6 +671,8 @@ pub struct MaterializedCell {
     pub semantic_type_id: mfm_ids::SemanticTypeId,
     /// Value lineage ref.
     pub value_lineage: spec::ValueLineageRef,
+    /// Certified context constraint carried by the cell.
+    pub context: spec::CellContextSpec,
     /// Terminal evidence.
     pub terminal: MaterializedCellTerminal,
 }

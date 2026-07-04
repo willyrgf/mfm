@@ -24,7 +24,7 @@ use crate::history::{
     store_seed_artifact, validate_certificate_artifact, validate_config_artifacts,
     validate_seed_cells, validate_spec_artifact, RuntimeRunView,
 };
-use crate::runners::{ErasedRunnerOutput, RunnerEventPayload};
+use crate::runners::{ContextOutputExtractor, ErasedRunnerOutput, RunnerEventPayload};
 use crate::side_effect_lifecycle::SideEffectLifecycle;
 use crate::side_effects::{side_effect_artifact_binding, validate_runner_side_effect_payload};
 use crate::{
@@ -82,6 +82,7 @@ pub(crate) struct RunnerOutputCommitInput<'a> {
     pub(crate) caps: &'a CertifiedRuntimeCapabilities,
     pub(crate) recorded_facts: &'a RecordedFacts,
     pub(crate) view: &'a RuntimeRunView,
+    pub(crate) context_output_extractor: Option<&'a dyn ContextOutputExtractor>,
     pub(crate) saga_terminal_proof: Option<store::SagaTerminalProof>,
     pub(crate) output: ErasedRunnerOutput,
 }
@@ -431,6 +432,12 @@ impl CommitPlanner {
             input.attempt_id,
             &runner_payloads,
             &payload_bound_artifacts,
+        )?;
+        validate_context_bound_output_artifacts(
+            input.node,
+            &runner_payloads,
+            &payload_bound_artifacts,
+            input.context_output_extractor,
         )?;
         let mut payloads = Vec::new();
         payloads.extend(runner_payloads);
@@ -1498,6 +1505,58 @@ fn validate_staged_artifact_payload_bindings(
     Ok(())
 }
 
+fn validate_context_bound_output_artifacts(
+    node: &spec::NodeSpec,
+    payloads: &[events::KernelEventPayload],
+    staged_artifacts: &[ValidatedStagedArtifact],
+    extractor: Option<&dyn ContextOutputExtractor>,
+) -> Result<()> {
+    let output_context = payloads.iter().find_map(|payload| match payload {
+        events::KernelEventPayload::CellProduced(payload)
+            if payload.cell_id == node.output_cell =>
+        {
+            Some((
+                &payload.context,
+                &payload.artifact_id,
+                &payload.content_digest,
+            ))
+        }
+        _ => None,
+    });
+    let Some((context, artifact_id, digest)) = output_context else {
+        return Ok(());
+    };
+    if matches!(context, spec::CellContextSpec::NoContext) {
+        return Ok(());
+    }
+    let extractor = extractor.ok_or_else(|| {
+        RuntimeError::InvalidRunnerOutput(format!(
+            "node {} produced context-bound output without a registered context output extractor",
+            node.node_id
+        ))
+    })?;
+    let staged = staged_artifacts
+        .iter()
+        .find(|artifact| {
+            artifact.binding == StagedArtifactBindingKind::StateOutput
+                && artifact.evidence.artifact_id == *artifact_id
+                && artifact.evidence.digest == *digest
+        })
+        .ok_or_else(|| {
+            RuntimeError::InvalidRunnerOutput(format!(
+                "node {} produced context-bound artifact {} without staged artifact evidence",
+                node.node_id, artifact_id
+            ))
+        })?;
+    let bytes = staged.bytes.as_deref().ok_or_else(|| {
+        RuntimeError::InvalidRunnerOutput(format!(
+            "node {} produced context-bound artifact {} without staged bytes",
+            node.node_id, artifact_id
+        ))
+    })?;
+    extractor.validate_context_output(context, &staged.evidence, bytes)
+}
+
 fn staged_artifact_matches_requirement(
     node: &spec::NodeSpec,
     staged: &ValidatedStagedArtifact,
@@ -2408,6 +2467,7 @@ fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Result<()> {
                     || cell.schema_id != payload.schema_id
                     || cell.semantic_type_id != payload.semantic_type_id
                     || cell.value_lineage != payload.value_lineage
+                    || cell.context != payload.context
                 {
                     return Err(RuntimeError::InvalidRunnerOutput(format!(
                         "node {} produced cell metadata outside certified spec",
@@ -2430,6 +2490,7 @@ fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Result<()> {
                     || cell.schema_id != payload.schema_id
                     || cell.semantic_type_id != payload.semantic_type_id
                     || cell.value_lineage != payload.value_lineage
+                    || cell.context != payload.context
                     || cell.terminal_policy == spec::CellTerminalPolicy::ProducedOnly
                 {
                     return Err(RuntimeError::InvalidRunnerOutput(format!(

@@ -439,24 +439,25 @@ pub(crate) fn materialize_inputs(
 ) -> Result<MaterializedInputs> {
     Ok(MaterializedInputs {
         input_schema_id: node.input_bindings.input_schema_id.clone(),
-        root: materialize_input_node(runtime_spec, &node.input_bindings.root, view)?,
+        root: materialize_input_node(runtime_spec, node, &node.input_bindings.root, view)?,
     })
 }
 
 fn materialize_input_node(
     runtime_spec: &CertifiedRuntimeSpec,
+    node: &spec::NodeSpec,
     input: &spec::InputBindingNodeSpec,
     view: &RuntimeRunView,
 ) -> Result<MaterializedInputNode> {
     match input {
         spec::InputBindingNodeSpec::Unit => Ok(MaterializedInputNode::Unit),
         spec::InputBindingNodeSpec::Cell(cell) => Ok(MaterializedInputNode::Cell(Box::new(
-            materialize_cell(runtime_spec, cell, view)?,
+            materialize_cell(runtime_spec, node, cell, view)?,
         ))),
         spec::InputBindingNodeSpec::Tuple(elements) => Ok(MaterializedInputNode::Tuple(
             elements
                 .iter()
-                .map(|element| materialize_input_node(runtime_spec, element, view))
+                .map(|element| materialize_input_node(runtime_spec, node, element, view))
                 .collect::<Result<Vec<_>>>()?,
         )),
         spec::InputBindingNodeSpec::Struct(fields) => Ok(MaterializedInputNode::Struct(
@@ -465,7 +466,7 @@ fn materialize_input_node(
                 .map(|field| {
                     Ok(NamedMaterializedInput {
                         field_path: field.field_path.clone(),
-                        node: materialize_input_node(runtime_spec, &field.node, view)?,
+                        node: materialize_input_node(runtime_spec, node, &field.node, view)?,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?,
@@ -473,14 +474,14 @@ fn materialize_input_node(
         spec::InputBindingNodeSpec::Vec { elements, .. } => Ok(MaterializedInputNode::Vec(
             elements
                 .iter()
-                .map(|element| materialize_input_node(runtime_spec, element, view))
+                .map(|element| materialize_input_node(runtime_spec, node, element, view))
                 .collect::<Result<Vec<_>>>()?,
         )),
         spec::InputBindingNodeSpec::NonEmptyVec { elements, .. } => {
             Ok(MaterializedInputNode::NonEmptyVec(
                 elements
                     .iter()
-                    .map(|element| materialize_input_node(runtime_spec, element, view))
+                    .map(|element| materialize_input_node(runtime_spec, node, element, view))
                     .collect::<Result<Vec<_>>>()?,
             ))
         }
@@ -489,6 +490,7 @@ fn materialize_input_node(
 
 fn materialize_cell(
     runtime_spec: &CertifiedRuntimeSpec,
+    node: &spec::NodeSpec,
     cell: &spec::InputBindingCellSpec,
     view: &RuntimeRunView,
 ) -> Result<MaterializedCell> {
@@ -507,6 +509,7 @@ fn materialize_cell(
             cell.cell_id
         )));
     }
+    validate_materialized_input_context(node, cell, certified)?;
     let terminal = match &certified.producer {
         spec::CellProducer::Seed(seed_id) => {
             let seed = view.seed_cells.get(&cell.cell_id).ok_or_else(|| {
@@ -645,8 +648,65 @@ fn materialize_cell(
         schema_id: cell.schema_id.clone(),
         semantic_type_id: cell.semantic_type_id.clone(),
         value_lineage: cell.value_lineage.clone(),
+        context: certified.context.clone(),
         terminal,
     })
+}
+
+fn validate_materialized_input_context(
+    node: &spec::NodeSpec,
+    input: &spec::InputBindingCellSpec,
+    certified: &spec::CellSpec,
+) -> Result<()> {
+    if !input_context_matches_cell_context(&input.context, &certified.context) {
+        return Err(RuntimeError::InputMaterialization(format!(
+            "input cell {} context does not match certified cell context",
+            input.cell_id
+        )));
+    }
+    if let spec::InputContextSpec::Required { context_ref, .. } = &input.context {
+        match &node.context {
+            spec::NodeContextSpec::Required {
+                context_ref: node_context_ref,
+            } if node_context_ref == context_ref => {}
+            _ => {
+                return Err(RuntimeError::InputMaterialization(format!(
+                    "input cell {} context does not match consuming node {} context",
+                    input.cell_id, node.node_id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn input_context_matches_cell_context(
+    input: &spec::InputContextSpec,
+    cell: &spec::CellContextSpec,
+) -> bool {
+    match (input, cell) {
+        (spec::InputContextSpec::NoContext, spec::CellContextSpec::NoContext) => true,
+        (
+            spec::InputContextSpec::Required {
+                context_ref,
+                resource_kind,
+                stage,
+                producer,
+            },
+            spec::CellContextSpec::Bound {
+                context_ref: cell_context_ref,
+                resource_kind: cell_resource_kind,
+                stage: cell_stage,
+                producer: cell_producer,
+            },
+        ) => {
+            context_ref == cell_context_ref
+                && resource_kind == cell_resource_kind
+                && stage == cell_stage
+                && producer == cell_producer
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn validate_seed_cells(
@@ -2511,6 +2571,7 @@ fn validate_historical_produced_cell(
         || cell.schema_id != payload.schema_id
         || cell.semantic_type_id != payload.semantic_type_id
         || cell.value_lineage != payload.value_lineage
+        || cell.context != payload.context
     {
         return Err(RuntimeError::InvalidRunStream(format!(
             "produced cell {} does not match certified cell metadata",
@@ -2564,6 +2625,7 @@ fn validate_historical_skipped_cell(
         || cell.schema_id != payload.schema_id
         || cell.semantic_type_id != payload.semantic_type_id
         || cell.value_lineage != payload.value_lineage
+        || cell.context != payload.context
         || cell.terminal_policy == spec::CellTerminalPolicy::ProducedOnly
     {
         return Err(RuntimeError::InvalidRunStream(format!(

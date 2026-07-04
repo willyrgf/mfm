@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use mfm_certify::{
     CertifiedDescriptorSet, CertifiedSpecCertificate, CertifiedSpecGraph, CertifiedTypedSpec,
 };
-use mfm_ids::{CellId, DescriptorId, NodeId, SideEffectPairId, SpecHash};
+use mfm_ids::{CellId, ContextRef, DescriptorId, NodeId, SideEffectPairId, SpecHash};
 #[cfg(test)]
 use mfm_ids::{ContentDigest, DigestAlgorithm};
 use mfm_spec::v1 as spec;
@@ -16,6 +16,7 @@ pub struct CertifiedRuntimeSpec {
     envelope: spec::HashedSpecEnvelope,
     certificate: CertifiedSpecCertificate,
     state_descriptors: BTreeMap<DescriptorId, spec::StateDescriptorIdentity>,
+    contexts: BTreeMap<ContextRef, spec::CertifiedContextSpec>,
     nodes: BTreeMap<NodeId, spec::NodeSpec>,
     remediations: BTreeMap<NodeId, spec::NodeSpec>,
     cells: BTreeMap<CellId, spec::CellSpec>,
@@ -85,11 +86,13 @@ impl CertifiedRuntimeSpec {
             }
         }
         let remediations = envelope.spec.remediations.clone();
+        let contexts = certified_contexts(&envelope.spec)?;
 
         Self::from_verified_indexes(
             envelope,
             certificate,
             state_descriptors,
+            contexts,
             nodes,
             remediations,
             cells,
@@ -114,11 +117,13 @@ impl CertifiedRuntimeSpec {
             .remediations()
             .map(|(forward_node_id, node)| (forward_node_id.clone(), node.clone()))
             .collect();
+        let contexts = certified_contexts(&envelope.spec)?;
 
         Self::from_verified_indexes(
             envelope,
             certificate,
             state_descriptors,
+            contexts,
             nodes,
             remediations,
             cells,
@@ -129,6 +134,7 @@ impl CertifiedRuntimeSpec {
         envelope: spec::HashedSpecEnvelope,
         certificate: CertifiedSpecCertificate,
         state_descriptors: BTreeMap<DescriptorId, spec::StateDescriptorIdentity>,
+        contexts: BTreeMap<ContextRef, spec::CertifiedContextSpec>,
         nodes: BTreeMap<NodeId, spec::NodeSpec>,
         remediations: BTreeMap<NodeId, spec::NodeSpec>,
         cells: BTreeMap<CellId, spec::CellSpec>,
@@ -139,6 +145,7 @@ impl CertifiedRuntimeSpec {
             envelope,
             certificate,
             state_descriptors,
+            contexts,
             nodes,
             remediations,
             cells,
@@ -224,6 +231,19 @@ impl CertifiedRuntimeSpec {
     /// Returns a certified cell by id.
     pub fn cell(&self, cell_id: &CellId) -> Option<&spec::CellSpec> {
         self.cells.get(cell_id)
+    }
+
+    /// Returns a certified transition context by ref.
+    pub fn context(&self, context_ref: &ContextRef) -> Option<&spec::CertifiedContextSpec> {
+        self.contexts.get(context_ref)
+    }
+
+    /// Returns the certified invocation context required by a node.
+    pub fn invocation_context_for_node(
+        &self,
+        node: &spec::NodeSpec,
+    ) -> Result<crate::CertifiedInvocationContext> {
+        crate::CertifiedInvocationContext::for_node(self, node)
     }
 
     /// Returns the certified state descriptor for a node.
@@ -353,6 +373,24 @@ fn certified_state_descriptors(
         .state_descriptors()
         .map(|(descriptor_id, descriptor)| (descriptor_id.clone(), descriptor.clone()))
         .collect()
+}
+
+fn certified_contexts(
+    spec: &spec::TypedExecutionSpec,
+) -> Result<BTreeMap<ContextRef, spec::CertifiedContextSpec>> {
+    let mut contexts = BTreeMap::new();
+    for context in &spec.contexts {
+        if contexts
+            .insert(context.context_ref.clone(), context.clone())
+            .is_some()
+        {
+            return Err(RuntimeError::InvalidSpec(format!(
+                "duplicate certified context {}",
+                context.context_ref
+            )));
+        }
+    }
+    Ok(contexts)
 }
 
 #[cfg(test)]

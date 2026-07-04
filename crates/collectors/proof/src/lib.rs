@@ -511,7 +511,12 @@ impl StateSpec for ProofReadFactState {
 impl ReadState for ProofReadFactState {
     type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
 
-    fn run<'a>(&'a self, _input: Self::Input, _caps: &'a Self::Caps) -> Self::RunFuture<'a> {
+    fn run<'a>(
+        &'a self,
+        _input: Self::Input,
+        _caps: &'a Self::Caps,
+        _context: &'a mfm_program::CertifiedContext<Self::Context>,
+    ) -> Self::RunFuture<'a> {
         future::ready(Ok(ProofFact {
             n: self.config.fact_n,
         }))
@@ -562,7 +567,11 @@ impl SideEffectState for ProofApplySideEffectState {
     type Confirmation = ProofConfirmation;
     type SubmitFuture<'a> = future::Ready<StateResult<Self::Submission>>;
 
-    fn prepare_intent(&self, input: &Self::Input) -> StateResult<Self::Intent> {
+    fn prepare_intent(
+        &self,
+        input: &Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Intent> {
         Ok(ProofIntent {
             fact_n: input.n,
             action: self.config.action.to_string(),
@@ -573,6 +582,7 @@ impl SideEffectState for ProofApplySideEffectState {
         &self,
         _input: &Self::Input,
         intent: &Self::Intent,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::IdempotencyInput> {
         Ok(ProofIdempotencyInput {
             fact_n: intent.fact_n,
@@ -585,6 +595,7 @@ impl SideEffectState for ProofApplySideEffectState {
         intent: &'a Self::Intent,
         key: &'a IdempotencyKey<Self::IdempotencyInput>,
         _caps: &'a Self::Caps,
+        _context: &'a mfm_program::CertifiedContext<Self::Context>,
     ) -> Self::SubmitFuture<'a> {
         future::ready(Ok(ProofSubmission {
             submission_id: format!("proof-submission-{}-{}", intent.action, intent.fact_n),
@@ -597,6 +608,7 @@ impl SideEffectState for ProofApplySideEffectState {
         _input: &Self::Input,
         _intent: &Self::Intent,
         receipt: &Self::Receipt,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
         Ok(ProofSideEffectResult {
             tx_hash: receipt.tx_hash.clone(),
@@ -610,6 +622,7 @@ impl SideEffectState for ProofApplySideEffectState {
         _input: &Self::Input,
         _intent: &Self::Intent,
         confirmation: &Self::Confirmation,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
         Ok(ProofSideEffectResult {
             tx_hash: confirmation.tx_hash.clone(),
@@ -648,7 +661,11 @@ impl StateSpec for ProofAssembleOutputState {
 }
 
 impl PureState for ProofAssembleOutputState {
-    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+    fn run(
+        &self,
+        input: Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
         Ok(ProofOutput {
             fact: input.fact,
             side_effect: input.side_effect,
@@ -743,7 +760,8 @@ mod tests {
         )
         .expect("state");
         let input = ProofFact { n: 7 };
-        let intent = state.prepare_intent(&input).expect("intent");
+        let context = mfm_program::CertifiedContext::no_context();
+        let intent = state.prepare_intent(&input, &context).expect("intent");
 
         let receipt = state
             .output_from_receipt(
@@ -753,6 +771,7 @@ mod tests {
                     tx_hash: "0xreceipt".to_owned(),
                     submission_id: "proof-submission-accept-7".to_owned(),
                 },
+                &context,
             )
             .expect("receipt output");
         let confirmation = state
@@ -763,6 +782,7 @@ mod tests {
                     tx_hash: "0xconfirmed".to_owned(),
                     confirmations: 3,
                 },
+                &context,
             )
             .expect("confirmation output");
 

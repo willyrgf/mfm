@@ -913,7 +913,12 @@ impl StateSpec for PrepareSourcesState {
 impl ReadState for PrepareSourcesState {
     type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
 
-    fn run<'a>(&'a self, _input: Self::Input, _caps: &'a Self::Caps) -> Self::RunFuture<'a> {
+    fn run<'a>(
+        &'a self,
+        _input: Self::Input,
+        _caps: &'a Self::Caps,
+        _context: &'a mfm_program::CertifiedContext<Self::Context>,
+    ) -> Self::RunFuture<'a> {
         future::ready(Ok(prepare_sources_from_config(&self.config)))
     }
 }
@@ -951,7 +956,11 @@ impl StateSpec for ResolveSubjectsState {
 }
 
 impl PureState for ResolveSubjectsState {
-    fn run(&self, _input: Self::Input) -> StateResult<Self::Output> {
+    fn run(
+        &self,
+        _input: Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
         Ok(resolve_subjects_from_config(&self.config))
     }
 }
@@ -995,7 +1004,12 @@ impl StateSpec for PinViewsState {
 impl ReadState for PinViewsState {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = StateResult<Self::Output>> + Send + 'a>>;
 
-    fn run<'a>(&'a self, _input: Self::Input, _caps: &'a Self::Caps) -> Self::RunFuture<'a> {
+    fn run<'a>(
+        &'a self,
+        _input: Self::Input,
+        _caps: &'a Self::Caps,
+        _context: &'a mfm_program::CertifiedContext<Self::Context>,
+    ) -> Self::RunFuture<'a> {
         Box::pin(async move {
             pin_views_with_backend(&self.config, &UnavailablePortfolioReadBackend)
                 .await
@@ -1037,7 +1051,11 @@ impl StateSpec for ResolveValuationsState {
 }
 
 impl PureState for ResolveValuationsState {
-    fn run(&self, views: Self::Input) -> StateResult<Self::Output> {
+    fn run(
+        &self,
+        views: Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
         Ok(resolve_valuations_from_config(&self.config, &views))
     }
 }
@@ -1081,7 +1099,12 @@ impl StateSpec for ObserveBatchState {
 impl ReadState for ObserveBatchState {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = StateResult<Self::Output>> + Send + 'a>>;
 
-    fn run<'a>(&'a self, input: Self::Input, _caps: &'a Self::Caps) -> Self::RunFuture<'a> {
+    fn run<'a>(
+        &'a self,
+        input: Self::Input,
+        _caps: &'a Self::Caps,
+        _context: &'a mfm_program::CertifiedContext<Self::Context>,
+    ) -> Self::RunFuture<'a> {
         Box::pin(async move {
             observe_batch_with_backend(&self.config, &input, &UnavailablePortfolioReadBackend)
                 .await
@@ -1120,7 +1143,11 @@ impl StateSpec for MergeObservationsState {
 }
 
 impl PureState for MergeObservationsState {
-    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+    fn run(
+        &self,
+        input: Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
         Ok(merge_observation_batches(input))
     }
 }
@@ -1158,7 +1185,11 @@ impl StateSpec for AssembleSnapshotState {
 }
 
 impl PureState for AssembleSnapshotState {
-    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+    fn run(
+        &self,
+        input: Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
         Ok(assemble_snapshot(&self.config, input, 0))
     }
 }
@@ -1196,7 +1227,11 @@ impl StateSpec for ProjectReportState {
 }
 
 impl PureState for ProjectReportState {
-    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+    fn run(
+        &self,
+        input: Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
         project_report_from_snapshot(input.snapshot, self.config.report_version())
     }
 }

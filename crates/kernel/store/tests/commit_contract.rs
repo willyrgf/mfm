@@ -764,6 +764,7 @@ fn cell_produced(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventP
         value_lineage: ValueLineageRef {
             lineage_digest: content_digest(26),
         },
+        context: spec::CellContextSpec::no_context(),
         artifact_id,
         content_digest: digest,
         producer_state_kind: None,

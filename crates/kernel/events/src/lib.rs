@@ -14,8 +14,8 @@ use mfm_ids::{
     StateKind, StateVersion, TrustScopeId, VisibleAscii256 as CheckedVisibleAscii256,
 };
 use mfm_spec::v1::{
-    CanonicalizerIdentity, CellProducer, DescriptorIdentity, MediaType, PublicFieldPath,
-    ResourceNamespace, ValueLineageRef,
+    CanonicalizerIdentity, CellContextSpec, CellProducer, DescriptorIdentity, MediaType,
+    PublicFieldPath, ResourceNamespace, ValueLineageRef,
 };
 
 /// Result type for typed kernel event helpers.
@@ -1170,6 +1170,8 @@ pub mod v1 {
         pub schema_id: SchemaId,
         /// Value lineage reference.
         pub value_lineage: ValueLineageRef,
+        /// Certified context constraint for this terminal cell.
+        pub context: CellContextSpec,
         /// Value artifact id.
         pub artifact_id: ArtifactId,
         /// Canonical value content digest.
@@ -1199,6 +1201,8 @@ pub mod v1 {
         pub schema_id: SchemaId,
         /// Value lineage reference.
         pub value_lineage: ValueLineageRef,
+        /// Certified context constraint for this terminal cell.
+        pub context: CellContextSpec,
         /// Typed skip reason.
         pub skip_reason: SkipReason,
     }
@@ -3273,9 +3277,9 @@ pub mod v1 {
                 "name": type_name,
             }),
             "AdapterKind" | "ArtifactId" | "AttemptId" | "CapabilityKind" | "CellId"
-            | "ContentDigest" | "DescriptorId" | "EffectKind" | "EventId" | "NodeId"
-            | "OperationKind" | "RunId" | "SchemaId" | "ScopeId" | "SeedId" | "SemanticTypeId"
-            | "SideEffectPairId" | "SpecHash" | "StateKind" | "TrustScopeId" => {
+            | "ContentDigest" | "ContextRef" | "DescriptorId" | "EffectKind" | "EventId"
+            | "NodeId" | "OperationKind" | "RunId" | "SchemaId" | "ScopeId" | "SeedId"
+            | "SemanticTypeId" | "SideEffectPairId" | "SpecHash" | "StateKind" | "TrustScopeId" => {
                 mfm_identity_type(type_name)
             }
             "AdapterVersion" | "CapabilityVersion" | "LoweringVersion" | "OperationVersion"
@@ -3286,9 +3290,11 @@ pub mod v1 {
                 "ResourceLaneReleaseAuthority",
                 &["verify_terminal", "manual_resolution"],
             ),
-            "MediaType" | "CanonicalizerIdentity" | "RendererVersion" => {
-                visible_ascii_256_type(type_name)
-            }
+            "MediaType"
+            | "CanonicalizerIdentity"
+            | "ContextResourceKind"
+            | "ContextStage"
+            | "RendererVersion" => visible_ascii_256_type(type_name),
             "PublicFieldPath" => public_field_path_type(),
             "ResourceNamespace" => resource_namespace_type(),
             "RendererKind" => stable_author_key_type(type_name),
@@ -3852,6 +3858,48 @@ pub mod v1 {
                     EventFieldCardinality::Required,
                 )],
             ),
+            "ContextProducerSpec" => struct_type(
+                "ContextProducerSpec",
+                vec![
+                    schema_field(
+                        "producer_descriptor_id",
+                        "DescriptorId",
+                        EventFieldCardinality::Optional,
+                    ),
+                    schema_field(
+                        "seed_producers_allowed",
+                        "bool",
+                        EventFieldCardinality::Required,
+                    ),
+                ],
+            ),
+            "CellContextSpec" => enum_type(
+                "CellContextSpec",
+                vec![
+                    enum_variant("no_context", Vec::new()),
+                    enum_variant(
+                        "bound",
+                        vec![
+                            schema_field(
+                                "context_ref",
+                                "ContextRef",
+                                EventFieldCardinality::Required,
+                            ),
+                            schema_field(
+                                "resource_kind",
+                                "ContextResourceKind",
+                                EventFieldCardinality::Required,
+                            ),
+                            schema_field("stage", "ContextStage", EventFieldCardinality::Required),
+                            schema_field(
+                                "producer",
+                                "ContextProducerSpec",
+                                EventFieldCardinality::Required,
+                            ),
+                        ],
+                    ),
+                ],
+            ),
             "MfmErrorInfo" => struct_type(
                 "MfmErrorInfo",
                 vec![
@@ -4181,6 +4229,7 @@ pub mod v1 {
             EventFieldDescriptor::required("semantic_type_id", "SemanticTypeId"),
             EventFieldDescriptor::required("schema_id", "SchemaId"),
             EventFieldDescriptor::required("value_lineage", "ValueLineageRef"),
+            EventFieldDescriptor::required("context", "CellContextSpec"),
             EventFieldDescriptor::required("artifact_id", "ArtifactId"),
             EventFieldDescriptor::required("content_digest", "ContentDigest"),
             EventFieldDescriptor::optional("producer_state_kind", "StateKind"),
@@ -4201,6 +4250,7 @@ pub mod v1 {
             EventFieldDescriptor::required("semantic_type_id", "SemanticTypeId"),
             EventFieldDescriptor::required("schema_id", "SchemaId"),
             EventFieldDescriptor::required("value_lineage", "ValueLineageRef"),
+            EventFieldDescriptor::required("context", "CellContextSpec"),
             EventFieldDescriptor::required("skip_reason", "SkipReason"),
         ],
     };

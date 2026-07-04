@@ -340,6 +340,20 @@ fn bind_node(
 ) -> Result<()> {
     let descriptor = runtime_spec.state_descriptor_for_node(node)?;
     let binding = runners.resolve(runtime_spec, node, descriptor)?;
+    let output_cell = runtime_spec.cell(&node.output_cell).ok_or_else(|| {
+        RuntimeError::InvalidSpec(format!(
+            "node {} references missing output cell {}",
+            node.node_id, node.output_cell
+        ))
+    })?;
+    if matches!(output_cell.context, spec::CellContextSpec::Bound { .. })
+        && binding.runner.context_output_extractor().is_none()
+    {
+        return Err(RuntimeError::RunnerBinding(format!(
+            "node {} produces context-bound output cell {} without a registered context output extractor",
+            node.node_id, output_cell.cell_id
+        )));
+    }
     let capability_implementations = runners.resolve_capability_implementations(node)?;
     let adapter_executables = runners.resolve_adapter_executables(node)?;
     if accumulator

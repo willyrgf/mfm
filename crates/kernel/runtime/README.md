@@ -10,10 +10,10 @@ construct runtime authority from a parsed `TypedExecutionSpec`, a hash-only
 `mfm_spec::v1::HashedSpecEnvelope`, or parsed persisted spec/certificate data. Persisted
 spec/certificate bytes must pass through the certifier verifier before they can reach this crate.
 
-`CertifiedRuntimeSpec` indexes certified semantics and derives erased runner plans for execution.
-The runner plan is not authority by itself. Runtime-only checks remain runtime-owned: runner
-availability, capability availability, seed/config evidence, stream drift, and execution contract
-validation.
+`CertifiedRuntimeSpec` indexes certified semantics, including transition contexts, and derives
+erased runner plans for execution. The runner plan is not authority by itself. Runtime-only checks
+remain runtime-owned: runner availability, capability availability, seed/config evidence, stream
+drift, context materialization, and execution contract validation.
 
 The visible runtime model is:
 
@@ -30,10 +30,12 @@ The certified spec is the static certified transition graph. The verified run hi
 from the append-only run stream authority before the scheduler decides whether the run is blocked,
 completed, or ready to execute one certified node. The bound runtime context proves runner binding
 availability and executable identity for every certified executable node before run admission or
-resume dispatch. Runner invocation is sealed by runtime-owned materialization, runner identity
-checks, and capability scoping. The commit planner verifies typed payloads, side-effect protocol
-rules, staged artifacts, references, retention bindings, and commit preconditions before building
-purpose-specific `PreparedCommit<Purpose>` values and submitting them through `PreparedCommitPlan`.
+resume dispatch, and rejects context-bound output nodes whose runners do not expose a context-output
+extractor. Runner invocation is sealed by runtime-owned input and certified-context
+materialization, runner identity checks, and capability scoping. The commit planner verifies typed
+payloads, side-effect protocol rules, staged artifacts, context-bound output evidence, references,
+retention bindings, and commit preconditions before building purpose-specific
+`PreparedCommit<Purpose>` values and submitting them through `PreparedCommitPlan`.
 
 Launch is a pre-FSM admission lifecycle, not a scheduler-dispatched state attempt.
 `RunAdmissionLifecycle` verifies the certified spec, launch artifacts, seeds, configs, executable
@@ -47,10 +49,10 @@ saga terminal path resolves compensation, manual resolution, or failure without 
 
 Module roles:
 
-- `spec_authority`: runtime authority wrapper over `CertifiedTypedSpec`
+- `spec_authority`: runtime authority wrapper over `CertifiedTypedSpec` and certified contexts
 - `binding`: bound runner identity and executable availability for a certified runtime spec
 - `admission`: pre-FSM run-start admission lifecycle
-- `history`: spec-aware verified history and input materialization
+- `history`: spec-aware verified history and context-aware input materialization
 - `frontier`: pure scheduler decision and attempt planning
 - `transition`: closed transition decisions over certified spec and verified history
 - `attempt`: ordinary attempt lifecycle from selection through terminal commit
@@ -59,7 +61,7 @@ Module roles:
 - `recovery`: open-attempt recovery frontier validation
 - `side_effect_lifecycle`: side-effect attempt uncertainty and recovery evidence guards
 - `scheduler`: serial orchestration over admission, transition, lifecycle dispatch, and store
-- `invocation`: sealed runner context builder and materialized input surfaces
+- `invocation`: sealed runner context builder, certified context handles, and materialized inputs
 - `commit`: launch and runner-output commit planning
 - `side_effects`: runtime protocol guards for durable side-effect ledgers
 - `framework`: certified framework lifecycle states

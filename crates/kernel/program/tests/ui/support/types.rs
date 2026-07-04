@@ -69,7 +69,11 @@ impl mfm_program::StateSpec for TryPureState {
 }
 
 impl mfm_program::PureState for TryPureState {
-    fn run(&self, input: Self::Input) -> mfm_program::StateResult<Self::Output> {
+    fn run(
+        &self,
+        input: Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> mfm_program::StateResult<Self::Output> {
         Ok(TryValue {
             amount: input.amount * self.config.multiplier,
         })
@@ -113,7 +117,7 @@ macro_rules! impl_try_side_effect_state {
     ($state:ty, $kind:literal, $version:literal, $name:literal, $digest:literal) => {
         impl mfm_program::StateSpec for $state {
             type Config = TryConfig;
-    type Context = mfm_program::NoContext;
+            type Context = mfm_program::NoContext;
             type Input = TryValue;
             type Output = TryValue;
             type Effect = mfm_effects::ApplySideEffect;
@@ -153,7 +157,11 @@ macro_rules! impl_try_side_effect_state {
             type Confirmation = TryValue;
             type SubmitFuture<'a> = std::future::Ready<mfm_program::StateResult<Self::Submission>>;
 
-            fn prepare_intent(&self, input: &Self::Input) -> mfm_program::StateResult<Self::Intent> {
+            fn prepare_intent(
+                &self,
+                input: &Self::Input,
+                _context: &mfm_program::CertifiedContext<Self::Context>,
+            ) -> mfm_program::StateResult<Self::Intent> {
                 Ok(TryValue {
                     amount: input.amount * self.config.multiplier,
                 })
@@ -163,6 +171,7 @@ macro_rules! impl_try_side_effect_state {
                 &self,
                 _input: &Self::Input,
                 intent: &Self::Intent,
+                _context: &mfm_program::CertifiedContext<Self::Context>,
             ) -> mfm_program::StateResult<Self::IdempotencyInput> {
                 Ok(intent.clone())
             }
@@ -172,6 +181,7 @@ macro_rules! impl_try_side_effect_state {
                 intent: &'a Self::Intent,
                 _key: &'a mfm_program::IdempotencyKey<Self::IdempotencyInput>,
                 _caps: &'a Self::Caps,
+                _context: &'a mfm_program::CertifiedContext<Self::Context>,
             ) -> Self::SubmitFuture<'a> {
                 std::future::ready(Ok(intent.clone()))
             }
@@ -181,6 +191,7 @@ macro_rules! impl_try_side_effect_state {
                 _input: &Self::Input,
                 _intent: &Self::Intent,
                 receipt: &Self::Receipt,
+                _context: &mfm_program::CertifiedContext<Self::Context>,
             ) -> mfm_program::StateResult<Self::Output> {
                 Ok(receipt.clone())
             }
@@ -190,6 +201,7 @@ macro_rules! impl_try_side_effect_state {
                 _input: &Self::Input,
                 _intent: &Self::Intent,
                 confirmation: &Self::Confirmation,
+                _context: &mfm_program::CertifiedContext<Self::Context>,
             ) -> mfm_program::StateResult<Self::Output> {
                 Ok(confirmation.clone())
             }

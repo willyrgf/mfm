@@ -737,6 +737,7 @@ fn cell_produced(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventP
         value_lineage: ValueLineageRef {
             lineage_digest: content_digest(26),
         },
+        context: spec::CellContextSpec::no_context(),
         artifact_id,
         content_digest: digest,
         producer_state_kind: None,
@@ -1728,6 +1729,7 @@ fn side_effect_submit_boundary_output_skipped() -> KernelEventPayload {
         value_lineage: ValueLineageRef {
             lineage_digest: content_digest(99),
         },
+        context: spec::CellContextSpec::no_context(),
         skip_reason: events::SkipReason {
             code: events::ErrorCode::new("side_effect_submission_boundary")
                 .expect("skip reason code"),

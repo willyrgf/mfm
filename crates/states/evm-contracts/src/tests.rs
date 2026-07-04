@@ -176,7 +176,8 @@ fn idempotency_digest_uses_canonical_json() {
 #[test]
 fn deploy_intent_contains_no_signed_payload_or_secret_material() {
     let state = DeployContractState::new(validated_config(deploy_config())).expect("state");
-    let intent = state.prepare_intent(&()).expect("intent");
+    let context = mfm_program::CertifiedContext::no_context();
+    let intent = state.prepare_intent(&(), &context).expect("intent");
     let json = serde_json::to_string(&intent).expect("intent json");
 
     for forbidden in [
@@ -194,7 +195,8 @@ fn deploy_intent_contains_no_signed_payload_or_secret_material() {
 #[test]
 fn deploy_receipt_projects_deployed_typestate() {
     let state = DeployContractState::new(validated_config(deploy_config())).expect("state");
-    let intent = state.prepare_intent(&()).expect("intent");
+    let context = mfm_program::CertifiedContext::no_context();
+    let intent = state.prepare_intent(&(), &context).expect("intent");
     let output = state
         .output_from_receipt(
             &(),
@@ -210,6 +212,7 @@ fn deploy_receipt_projects_deployed_typestate() {
                     receipt_evidence: None,
                 },
             },
+            &context,
         )
         .expect("deployed");
 
@@ -227,7 +230,8 @@ fn configure_receipt_projects_configured_typestate() {
     let input = ConfigureContractInput {
         deployed: deployed_contract(),
     };
-    let intent = state.prepare_intent(&input).expect("intent");
+    let context = mfm_program::CertifiedContext::no_context();
+    let intent = state.prepare_intent(&input, &context).expect("intent");
     let output = state
         .output_from_receipt(
             &input,
@@ -243,6 +247,7 @@ fn configure_receipt_projects_configured_typestate() {
                 }],
                 configured_block_number: None,
             },
+            &context,
         )
         .expect("configured");
 
@@ -257,7 +262,8 @@ fn configure_confirmation_projects_configured_typestate() {
     let input = ConfigureContractInput {
         deployed: deployed_contract(),
     };
-    let intent = state.prepare_intent(&input).expect("intent");
+    let context = mfm_program::CertifiedContext::no_context();
+    let intent = state.prepare_intent(&input, &context).expect("intent");
     let output = state
         .output_from_confirmation(
             &input,
@@ -274,6 +280,7 @@ fn configure_confirmation_projects_configured_typestate() {
                 }],
                 configured_block_number: None,
             },
+            &context,
         )
         .expect("configured");
 
@@ -288,8 +295,9 @@ fn configure_rejects_typestate_network_mismatch() {
     let input = ConfigureContractInput {
         deployed: deployed_contract_on_chain(2),
     };
+    let context = mfm_program::CertifiedContext::no_context();
 
-    assert!(state.prepare_intent(&input).is_err());
+    assert!(state.prepare_intent(&input, &context).is_err());
     assert!(state
         .output_from_confirmation(
             &input,
@@ -305,6 +313,7 @@ fn configure_rejects_typestate_network_mismatch() {
                 receipts: Vec::new(),
                 configured_block_number: None,
             },
+            &context,
         )
         .is_err());
 }

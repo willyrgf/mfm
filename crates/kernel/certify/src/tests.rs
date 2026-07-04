@@ -204,7 +204,11 @@ impl_test_state_spec!(
 );
 
 impl PureState for MultiplyState {
-    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+    fn run(
+        &self,
+        input: Self::Input,
+        _context: &program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
         Ok(TestValue {
             amount: input.amount * self.config.multiplier,
         })
@@ -257,7 +261,11 @@ impl StateSpec for ContextSourceState {
 }
 
 impl PureState for ContextSourceState {
-    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+    fn run(
+        &self,
+        input: Self::Input,
+        _context: &program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
         Ok(TestValue {
             amount: input.amount * self.config.multiplier,
         })
@@ -314,7 +322,11 @@ impl StateSpec for ContextConsumerState {
 }
 
 impl PureState for ContextConsumerState {
-    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+    fn run(
+        &self,
+        input: Self::Input,
+        _context: &program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
         Ok(TestValue {
             amount: input.amount * self.config.multiplier,
         })
@@ -370,7 +382,11 @@ impl StateSpec for FactEmittingState {
 }
 
 impl PureState for FactEmittingState {
-    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+    fn run(
+        &self,
+        input: Self::Input,
+        _context: &program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
         Ok(TestValue {
             amount: input.amount * self.config.multiplier,
         })
@@ -424,7 +440,11 @@ impl SideEffectState for MutatingState {
     type Confirmation = TestValue;
     type SubmitFuture<'a> = std::future::Ready<StateResult<Self::Submission>>;
 
-    fn prepare_intent(&self, input: &Self::Input) -> StateResult<Self::Intent> {
+    fn prepare_intent(
+        &self,
+        input: &Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Intent> {
         Ok(TestValue {
             amount: input.amount * self.config.multiplier,
         })
@@ -434,6 +454,7 @@ impl SideEffectState for MutatingState {
         &self,
         _input: &Self::Input,
         intent: &Self::Intent,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::IdempotencyInput> {
         Ok(intent.clone())
     }
@@ -443,6 +464,7 @@ impl SideEffectState for MutatingState {
         intent: &'a Self::Intent,
         _key: &'a IdempotencyKey<Self::IdempotencyInput>,
         _caps: &'a Self::Caps,
+        _context: &'a mfm_program::CertifiedContext<Self::Context>,
     ) -> Self::SubmitFuture<'a> {
         std::future::ready(Ok(intent.clone()))
     }
@@ -452,6 +474,7 @@ impl SideEffectState for MutatingState {
         _input: &Self::Input,
         _intent: &Self::Intent,
         receipt: &Self::Receipt,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
         Ok(receipt.clone())
     }
@@ -461,6 +484,7 @@ impl SideEffectState for MutatingState {
         _input: &Self::Input,
         _intent: &Self::Intent,
         confirmation: &Self::Confirmation,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
         Ok(confirmation.clone())
     }

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
@@ -6,7 +7,7 @@ use mfm_capabilities::{CapabilitySetDescriptor, CapabilitySetFor, CapabilitySpec
 use mfm_events::v1::{self as events, side_effect};
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
-    DescriptorId, DigestAlgorithm, NodeId, SchemaId,
+    ContextRef, ContextResourceKind, ContextStage, DescriptorId, DigestAlgorithm, NodeId, SchemaId,
 };
 use mfm_program::{EffectRunner, MfmFactType, StateSpec};
 use mfm_spec::v1 as spec;
@@ -16,10 +17,11 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{
     artifacts::fact_query_returned_ref_retention_refs, AdapterExecutableBinding,
-    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding,
-    ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCell, MaterializedCellTerminal,
-    MaterializedInputNode, MaterializedInputs, Result, RunnerEventPayload, RunnerFactRecorded,
-    RunnerIngressContext, RuntimeError, StagedArtifact, StagedRetentionRefs,
+    CapabilityImplementationId, ContextOutputExtractor, ErasedNodeRunner, ErasedRunCtx,
+    ErasedRunnerBinding, ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCell,
+    MaterializedCellTerminal, MaterializedInputNode, MaterializedInputs, Result,
+    RunnerEventPayload, RunnerFactRecorded, RunnerIngressContext, RuntimeError, StagedArtifact,
+    StagedRetentionRefs,
 };
 
 /// Canonical JSON artifact prepared by a typed runner before runtime staging.
@@ -27,6 +29,66 @@ use crate::{
 pub struct RunnerJsonArtifact {
     bytes: Vec<u8>,
     evidence: store::ArtifactEvidenceRef,
+}
+
+/// Typed state output that carries certified context-resource metadata.
+pub trait ContextBoundOutput: MfmValue {
+    /// Returns the context ref embedded in the output value.
+    fn context_ref(&self) -> &ContextRef;
+
+    /// Returns the context resource kind embedded in the output value.
+    fn context_resource_kind(&self) -> &ContextResourceKind;
+
+    /// Returns the context resource stage embedded in the output value.
+    fn context_stage(&self) -> &ContextStage;
+}
+
+/// Reusable output extractor for values implementing [`ContextBoundOutput`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TypedContextOutputExtractor<T> {
+    _output: PhantomData<fn(T) -> T>,
+}
+
+impl<T> TypedContextOutputExtractor<T> {
+    /// Creates a typed context-output extractor.
+    pub const fn new() -> Self {
+        Self {
+            _output: PhantomData,
+        }
+    }
+}
+
+impl<T> ContextOutputExtractor for TypedContextOutputExtractor<T>
+where
+    T: ContextBoundOutput,
+{
+    fn validate_context_output(
+        &self,
+        cell_context: &spec::CellContextSpec,
+        artifact: &store::ArtifactEvidenceRef,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let spec::CellContextSpec::Bound {
+            context_ref,
+            resource_kind,
+            stage,
+            ..
+        } = cell_context
+        else {
+            return Ok(());
+        };
+        let output = decode_json_bytes::<T>(bytes)?;
+        if output.context_ref() != context_ref
+            || output.context_resource_kind() != resource_kind
+            || output.context_stage() != stage
+        {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "context-bound output artifact {} does not match certified output cell context",
+                artifact.artifact_id
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl RunnerJsonArtifact {
@@ -485,7 +547,14 @@ fn decode_verified_json<T>(artifact: &store::VerifiedRunArtifactBytes) -> Result
 where
     T: DeserializeOwned,
 {
-    serde_json::from_slice(artifact.bytes())
+    decode_json_bytes(artifact.bytes())
+}
+
+fn decode_json_bytes<T>(bytes: &[u8]) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_slice(bytes)
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
@@ -908,6 +977,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
             semantic_type_id: self.ctx.output_cell().semantic_type_id.clone(),
             schema_id: self.ctx.output_cell().schema_id.clone(),
             value_lineage: self.ctx.output_cell().value_lineage.clone(),
+            context: self.ctx.output_cell().context.clone(),
             artifact_id: artifact.evidence.artifact_id.clone(),
             content_digest: artifact.evidence.digest.clone(),
             producer_state_kind: Some(self.ctx.node().state_kind.clone()),
@@ -926,6 +996,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
             semantic_type_id: self.ctx.output_cell().semantic_type_id.clone(),
             schema_id: self.ctx.output_cell().schema_id.clone(),
             value_lineage: self.ctx.output_cell().value_lineage.clone(),
+            context: self.ctx.output_cell().context.clone(),
             skip_reason,
         })
     }
