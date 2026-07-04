@@ -46,20 +46,21 @@ use mfm_evm_contract_config::{
 };
 use mfm_evm_contract_model::{
     configured_contract_stage, constructor_data, contract_instance_resource_kind,
-    decode_single_output_to_json, deployed_contract_stage, expected_matches, hex_to_bytes,
-    normalize_address, parse_artifact, prepare_validate_assertions, resolve_function_call,
-    validation_report_resource_kind, validation_report_stage, AcceptedContextPolicy,
-    BlockSelector as ModelBlockSelector, BlockTag, ConfigurationClaim, ConfigurationSnapshot,
-    ConfiguredContractInstance, ContextBoundValidationReport, ContractArtifactConfig,
-    ContractCallConfig, ContractLifecycleStage, ContractProfileDigestRef, DeployProvenance,
-    DeployedContractInstance, EventAssertionConfig, EvmCodeHash, EvmContractContext,
-    EvmNetworkContext, ExpectedValue, ExternalAdoptionEvidence, ExternalCodeReadEvidence,
-    ExternalEventAssertionEvidence, ExternalEvmSourceEvidence, ExternalReadAssertionEvidence,
-    ImportFromMfmRun, ImportFromMfmRunEvidence, LifecycleArtifactEvidenceRef, LifecycleNodeIdRef,
-    ParsedAbi, ReadAssertionConfig, SourceCellOrOutputRef, SourceRunExportBundle,
-    SourceRunTerminalEvent, ValidationEventResult, ValidationReadResult,
+    decode_single_output_to_json, deployed_contract_stage, expected_matches, parse_artifact,
+    prepare_validate_assertions, resolve_function_call, validation_report_resource_kind,
+    validation_report_stage, AcceptedContextPolicy, BlockSelector as ModelBlockSelector, BlockTag,
+    ConfigurationClaim, ConfigurationSnapshot, ConfiguredContractInstance,
+    ContextBoundValidationReport, ContractArtifactConfig, ContractCallConfig,
+    ContractLifecycleStage, ContractProfileDigestRef, DeployProvenance, DeployedContractInstance,
+    EventAssertionConfig, EvmCodeHash, EvmContractContext, EvmNetworkContext, ExpectedValue,
+    ExternalAdoptionEvidence, ExternalCodeReadEvidence, ExternalEventAssertionEvidence,
+    ExternalEvmSourceEvidence, ExternalReadAssertionEvidence, ImportFromMfmRun,
+    ImportFromMfmRunEvidence, LifecycleArtifactEvidenceRef, LifecycleNodeIdRef, ParsedAbi,
+    ReadAssertionConfig, SourceCellOrOutputRef, SourceRunExportBundle, SourceRunTerminalEvent,
+    ValidationEventResult, ValidationReadResult,
 };
-use mfm_evm_core::hex::bytes_to_hex_prefixed;
+use mfm_evm_core::encoding::normalize_address;
+use mfm_evm_core::hex::{bytes_to_hex_prefixed, hex_to_bytes};
 use mfm_evm_core::rlp::{rlp_encode_list, u64_to_min_be};
 use mfm_evm_core::tx::{parse_address, parse_u128_quantity, Eip1559TxToSign, LegacyTxToSign};
 use mfm_evm_signing::EvmSigningRequest;
@@ -918,7 +919,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                 expected_chain_id,
                 signer_ref: signer_ref.to_string(),
                 expected_signer_address: normalize_address(expected_signer_text)
-                    .map_err(EvmContractAdapterError::Model)?,
+                    .map_err(|error| EvmContractAdapterError::Model(error.message))?,
                 transactions: evidence,
                 poll_interval_ms,
                 max_receipt_polls,
@@ -1695,7 +1696,7 @@ async fn evaluate_assertions(
                 guard: guard.clone(),
                 to: context.address,
                 calldata: hex_to_bytes(&prepared.data_hex)
-                    .map_err(EvmContractAdapterError::Model)?,
+                    .map_err(|error| EvmContractAdapterError::Model(error.message))?,
                 block: EvmBlockSelector::Latest,
             })
             .await?;
@@ -2160,7 +2161,8 @@ fn verify_transaction_intent_matches_prepared(
         || intent.network_id != prepared.network_id
         || intent.expected_chain_id != prepared.expected_chain_id
         || intent.signer_ref != prepared.signer_ref
-        || normalize_address(&intent.expected_signer_address).map_err(replay_model_error)?
+        || normalize_address(&intent.expected_signer_address)
+            .map_err(|error| replay_model_error(error.message))?
             != prepared.expected_signer_address
     {
         return Err(replay::ReplayError::new(
@@ -3122,7 +3124,7 @@ pub fn deploy_contract_address_from_prepared(
         "{:?}",
         created_contract_address(signer, transaction.nonce)
     ))
-    .map_err(EvmContractAdapterError::Model)
+    .map_err(|error| EvmContractAdapterError::Model(error.message))
 }
 
 fn created_contract_address(sender: Address, nonce: u64) -> Address {
@@ -3296,8 +3298,8 @@ fn reconstruct_prepared_mutation(
         tx_inputs,
     } = request;
     ensure_prepared_invocation_public(evidence)?;
-    let expected_signer_address =
-        normalize_address(expected_signer_text).map_err(EvmContractAdapterError::Model)?;
+    let expected_signer_address = normalize_address(expected_signer_text)
+        .map_err(|error| EvmContractAdapterError::Model(error.message))?;
     if evidence.phase != phase
         || evidence.network_id != network_id
         || evidence.expected_chain_id != expected_chain_id
@@ -4420,8 +4422,8 @@ fn account_nonce_resource_key_for_node(
         ));
     }
 
-    let account =
-        normalize_address(expected_signer_address).map_err(EvmContractAdapterError::Model)?;
+    let account = normalize_address(expected_signer_address)
+        .map_err(|error| EvmContractAdapterError::Model(error.message))?;
     let key = account_nonce_resource_key(scope, &account)?;
 
     Ok(Some(events::ResourceKeyEvidence {
