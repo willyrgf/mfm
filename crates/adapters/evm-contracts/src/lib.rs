@@ -4050,7 +4050,7 @@ struct ContextContractValidateRunner {
 
 impl ErasedNodeRunner for ContextContractValidateRunner {
     fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
-        let context = ctx.context()?.materialize::<EvmContractContext>()?;
+        let context = ctx.context()?.certified_context::<EvmContractContext>()?;
         self.factory
             .validate_runtime_for(context.value().network.network_id.as_str(), None)
             .map(|_| ())
@@ -4072,7 +4072,7 @@ struct ImportDeployedRunner {
 
 impl ErasedNodeRunner for ImportDeployedRunner {
     fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
-        let context = ctx.context()?.materialize::<EvmContractContext>()?;
+        let context = ctx.context()?.certified_context::<EvmContractContext>()?;
         self.factory
             .validate_runtime_for(context.value().network.network_id.as_str(), None)
             .map(|_| ())
@@ -4094,7 +4094,7 @@ struct ImportConfiguredRunner {
 
 impl ErasedNodeRunner for ImportConfiguredRunner {
     fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
-        let context = ctx.context()?.materialize::<EvmContractContext>()?;
+        let context = ctx.context()?.certified_context::<EvmContractContext>()?;
         self.factory
             .validate_runtime_for(context.value().network.network_id.as_str(), None)
             .map(|_| ())
@@ -4325,7 +4325,7 @@ fn validate_context_mutation_runtime_for_node(
     let context = ctx
         .runtime_spec()
         .invocation_context_for_node(node)?
-        .materialize::<EvmContractContext>()?;
+        .certified_context::<EvmContractContext>()?;
     let signer_ref = match context_mutation_phase_for_submit_node(node)? {
         ContractMutationPhase::Deploy => {
             let action = load_launch_config_for_node::<DeployAction>(ctx, node)?;
@@ -5147,7 +5147,7 @@ async fn context_deploy_mutation_plan_for_node(
     artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> mfm_runtime::Result<ContextDeployMutationPlan> {
     let action = load_runner_config_for_node::<DeployAction>(node, artifacts).await?;
-    let context = invocation_context.materialize::<EvmContractContext>()?;
+    let context = invocation_context.certified_context::<EvmContractContext>()?;
     let artifact = load_context_profile_artifact(&context, artifacts).await?;
     let state = ContextBoundDeployContractState::new(action.clone()).map_err(runtime_plan_error)?;
     let intent = state
@@ -5178,7 +5178,7 @@ async fn context_configure_mutation_plan_for_inputs(
     )
     .await?;
     let input = ContextConfigureContractInput { deployed };
-    let context = invocation_context.materialize::<EvmContractContext>()?;
+    let context = invocation_context.certified_context::<EvmContractContext>()?;
     ensure_deployed_input_context(&input, &context).map_err(mfm_runtime::RuntimeError::from)?;
     let artifact = load_context_profile_artifact(&context, artifacts).await?;
     let state =
