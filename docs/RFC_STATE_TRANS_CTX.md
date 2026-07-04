@@ -574,12 +574,12 @@ ImportFromMfmRun
   accepted_context_policy
 ```
 
-Admission verifies the certified import policy, retained source typed-spec certificate artifact,
-retained source run stream or certified export bundle artifact, source value artifact, value digest,
-schema and semantic ids, lifecycle stage, context ref, and context descriptor. For certified export
-bundles, the bundle carries canonical source typed-spec JSON; replay verifies that spec and
-certificate against the compiled certification registry before accepting any terminal event. The
-imported resource is valid only if the source material was produced for the same certified context
+Admission verifies the certified import policy, retained source typed-spec artifact, retained
+source typed-spec certificate artifact, retained committed source run stream artifact, source value
+artifact, value digest, schema and semantic ids, lifecycle stage, context ref, and context
+descriptor. Replay verifies the retained source spec and certificate against the compiled
+certification registry before accepting any terminal event. The imported resource is valid only if
+the source material was produced for the same certified context
 or for a context explicitly accepted by the import policy.
 
 This import proves MFM provenance.
@@ -587,9 +587,8 @@ This import proves MFM provenance.
 The source must be verified through authoritative typed evidence, not rendered public JSON. Valid
 source authority is either:
 
-- a `CommittedRunStream` plus `VerifiedRunArtifactStore` from a trusted MFM store boundary
-- an explicitly certified export/import bundle whose retained typed-spec certificate, embedded
-  canonical source spec, and retained artifacts verify against the compiled registry
+- a `CommittedRunStream` plus retained source spec, certificate, and value artifacts from a trusted
+  MFM store boundary
 
 `source_cell_or_output_id` means a typed cell or typed terminal output binding in that authority
 surface. It does not mean a CLI/REST JSON field, cached public-output document, or projection row.
@@ -599,8 +598,9 @@ The import state records an import evidence bundle with enough retained proof ma
 ```text
 ImportFromMfmRunEvidence
   source_spec_hash
+  source_spec_artifact_ref
   source_spec_certificate_ref
-  source_run_stream_ref_or_export_bundle_ref
+  source_run_stream_ref
   source_cell_or_output_id
   source_cell_schema_id
   source_cell_semantic_type_id
@@ -831,7 +831,7 @@ Replay owns:
   recorded evidence only
 - verifying authenticated fact-query receipts, retained returned refs, and `Control`/`Platform`
   visibility boundaries without consulting the live fact index
-- verifying source-run imports from recorded import evidence or certified export bundles
+- verifying source-run imports from recorded committed-stream import evidence
 - never consulting live routing, mutable environment config, current source registries, or public
   output renderers
 
@@ -1111,7 +1111,7 @@ This keeps audit output useful without making copied fields a second authority s
 
 Rendered output may include both the `context_ref` and selected context fields for auditability.
 Those rendered fields are not import authority. A later run that wants to continue from a previous
-run must import from typed run evidence or a certified export bundle, not from copied public JSON.
+run must import from typed committed-run evidence, not from copied public JSON.
 
 Public fact APIs are the same kind of public surface. `Platform` fact DTOs and opaque
 `PublicFactRefId` values can help users find recorded facts, but they are not source-run evidence,

@@ -1376,10 +1376,12 @@ impl<'de> Deserialize<'de> for ImportFromMfmRun {
 pub struct ImportFromMfmRunEvidence {
     /// Source certified spec hash.
     pub source_spec_hash: LifecycleSpecHashRef,
+    /// Retained source typed-spec artifact verified against the source stream admission event.
+    pub source_spec_artifact_ref: LifecycleArtifactEvidenceRef,
     /// Retained source typed-spec certificate verified against the compiled registry.
     pub source_spec_certificate_ref: LifecycleArtifactEvidenceRef,
-    /// Retained source run stream or export bundle.
-    pub source_run_stream_ref_or_export_bundle_ref: LifecycleArtifactEvidenceRef,
+    /// Retained canonical committed source run stream.
+    pub source_run_stream_ref: LifecycleArtifactEvidenceRef,
     /// Source cell or output id.
     pub source_cell_or_output_id: SourceCellOrOutputRef,
     /// Source value schema id.
@@ -1404,7 +1406,7 @@ pub struct ImportFromMfmRunEvidence {
     pub import_policy_digest: ContractProfileDigestRef,
 }
 
-/// One terminal source-run cell or output event in a retained export bundle.
+/// One terminal source-run cell or output event derived from a committed source stream.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[mfm(
     namespace = "mfm.evm.contract",
@@ -1430,26 +1432,6 @@ pub struct SourceRunTerminalEvent {
     pub source_context_descriptor_id: LifecycleContextDescriptorIdRef,
     /// Source value digest.
     pub source_value_digest: ContractProfileDigestRef,
-}
-
-/// Retained stream/export authority for source-run lifecycle imports.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[mfm(
-    namespace = "mfm.evm.contract",
-    name = "source-run-export-bundle",
-    schema = "mfm.evm.contract.value.source_run_export_bundle"
-)]
-pub struct SourceRunExportBundle {
-    /// Bundle contract version.
-    pub bundle_version: u64,
-    /// Source run id covered by the bundle.
-    pub source_run_id: LifecycleRunIdRef,
-    /// Source certified spec hash covered by the bundle.
-    pub source_spec_hash: LifecycleSpecHashRef,
-    /// Persisted canonical source typed spec JSON covered by the retained source spec certificate.
-    pub source_spec_canonical_json: String,
-    /// Terminal lifecycle cell/output events exported from the source stream.
-    pub terminal_events: Vec<SourceRunTerminalEvent>,
 }
 
 /// Certified evidence policy for adopting an external EVM address.

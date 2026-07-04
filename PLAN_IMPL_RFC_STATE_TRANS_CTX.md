@@ -17,7 +17,7 @@ exists.
 The fresh architect audit gaps are implemented as part of the final completion state:
 
 - Source-run imports now fail closed unless retained authority artifacts verify the claimed source
-  typed-spec certificate, export bundle with canonical source spec JSON, terminal event, producer
+  typed-spec artifact, typed-spec certificate, committed source stream, terminal event, producer
   descriptor, source cell/output id, source stage, source schema/semantic ids, source context ref,
   source value digest, source context descriptor, and import policy digest against the compiled
   certification registry. Identifier-only, public JSON, projection-row, raw-payload, and
@@ -59,8 +59,8 @@ At the public cutover, old public configure and validate shapes are rejected, no
 - `{ "config": ValidatePhaseConfig, "configured": ConfiguredContract }`
 
 Rendered public JSON, public fact refs/DTOs, projection rows, raw typed payloads, and copied
-`context_ref` fields are never import authority. Imports must use certified source-run evidence, a
-verified export bundle, or an explicit external adoption policy with replay-verifiable evidence.
+`context_ref` fields are never import authority. Imports must use committed source-run evidence or
+an explicit external adoption policy with replay-verifiable evidence.
 
 ## validations that must stay
 
@@ -446,7 +446,7 @@ identifier-only imports.
   artifacts, selection evidence, and `Control`/`Platform` visibility boundaries without consulting the
   live fact index or collector providers.
 - Add generic import evidence verification contracts that require retained proof material:
-  source spec hash, source typed-spec certificate, committed stream or certified export bundle ref,
+  source spec hash, source typed-spec artifact, source typed-spec certificate, committed stream ref,
   source cell/output id, source schema/semantic ids, source producer descriptor id, source stage,
   source context ref, source value digest, source terminal event ref, and import policy digest.
 - Reject import replay when only `source_run_id`, `source_cell_or_output_id`, or rendered JSON is
@@ -701,8 +701,8 @@ Add context-bound EVM lifecycle state contracts and fail-closed import admission
   - never accept raw typestate seeds as continuation authority
 - Import admission must verify certified policy and evidence before returning any context-bound
   resource:
-  - source-run imports require verified source spec/certificate, committed stream or certified
-    export bundle evidence, source cell/output id, source value digest, producer descriptor,
+  - source-run imports require verified source spec/certificate, committed stream evidence,
+    source cell/output id, source value digest, producer descriptor,
     source stage, source context ref, terminal event ref, and import policy digest
   - external address adoption requires the certified evidence policy, chain guard evidence,
     address normalization, code existence/code hash evidence when required, block anchor when
@@ -921,8 +921,7 @@ validation always emits a fact.
 - Generic fact replay remains responsible for actual `FactRecorded` claims and pinned
   `FactQueryEvidence` artifacts.
 - Import-from-MFM-run verifies source authority through committed run stream plus verified retained
-  artifacts, or a certified export bundle. It does not trust rendered public JSON or projection
-  rows.
+  artifacts. It does not trust rendered public JSON or projection rows.
 - External adoption replay verifies code existence/code hash/block/read/event evidence according to
   the certified import policy.
 - Public output rendering may show `context_ref`, `network_id`, `expected_chain_id`, observed chain
@@ -954,9 +953,8 @@ validation always emits a fact.
 
 **rollback/review risk notes**
 
-- Source-run imports are replay-proof only if retained proof material is sufficient. If a portable
-  export bundle format is missing, implement the minimal certified export/import bundle in this
-  commit rather than falling back to identifiers or public JSON.
+- Source-run imports are replay-proof only if retained committed-stream proof material is
+  sufficient. Do not fall back to identifiers, public JSON, or projection rows.
 
 ### commit 13: `public: expose context-based evm entry points`
 
@@ -1147,8 +1145,8 @@ deletion by the RFC.
 ## implementation notes
 
 - Source-run imports require both certified import policy and retained source evidence refs:
-  source typed-spec certificate, source run stream or certified export bundle with canonical source
-  spec JSON, and source value artifact. The source spec and certificate
+  source typed-spec artifact, source typed-spec certificate, committed source run stream, and source
+  value artifact. The source spec and certificate
   must verify against the compiled certification registry. Missing proof, mismatched digest, wrong
   schema/semantic id, wrong stage, wrong context, public JSON, projection rows, raw payloads,
   domain-local certificates, and identifiers alone fail closed before a resource is produced.

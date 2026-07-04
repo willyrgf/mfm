@@ -441,13 +441,19 @@ where
     let semantic_type_id = T::semantic_id().expect("semantic").to_string();
     serde_json::json!({
         "source_spec_hash": &source.source_spec_hash,
+        "source_spec_artifact_ref": artifact_ref_json(
+            0x4e,
+            serde_json::json!(content_digest_str(0x4f)),
+            None,
+            None,
+        ),
         "source_spec_certificate_ref": artifact_ref_json(
             0x50,
             serde_json::json!(content_digest_str(0x51)),
             None,
             None,
         ),
-        "source_run_stream_ref_or_export_bundle_ref": artifact_ref_json(
+        "source_run_stream_ref": artifact_ref_json(
             0x52,
             serde_json::json!(content_digest_str(0x53)),
             None,
@@ -835,7 +841,7 @@ fn import_deployed_admits_verified_source_run_evidence() {
             .expect("admitted");
 
     assert_eq!(admitted.context_ref(), context.context_ref());
-    assert_eq!(admitted.deploy_evidence.len(), 3);
+    assert_eq!(admitted.deploy_evidence.len(), 4);
     assert!(matches!(
         admitted.deploy_provenance,
         DeployProvenance::ImportedMfmRun { .. }
@@ -863,7 +869,7 @@ fn import_configured_admits_verified_source_run_evidence() {
     .expect("admitted");
 
     assert_eq!(admitted.context_ref(), context.context_ref());
-    assert_eq!(admitted.configure_or_import_evidence.len(), 3);
+    assert_eq!(admitted.configure_or_import_evidence.len(), 4);
     assert!(matches!(
         admitted.configuration_claim,
         ConfigurationClaim::ImportedMfmConfigured { .. }

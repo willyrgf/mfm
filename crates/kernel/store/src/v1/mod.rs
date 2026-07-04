@@ -5171,6 +5171,54 @@ impl CommittedRunStream {
     }
 }
 
+/// Returns canonical JSON bytes for a committed run stream.
+///
+/// The encoded shape contains store envelope fields plus canonical typed payload JSON. Decoding it
+/// with [`committed_run_stream_from_canonical_json_slice`] re-derives event ids, payload hashes,
+/// logical keys, projection state, and commit grouping through the normal store authority path.
+pub fn committed_run_stream_canonical_json(
+    committed: &CommittedRunStream,
+) -> Result<PlainCanonicalJsonBytes> {
+    canonical_json(serde_json::json!({
+        "stream_version": 1,
+        "run_id": committed.run_id().as_str(),
+        "events": committed.events().iter().map(kernel_event_envelope_json).collect::<Vec<_>>(),
+    }))
+}
+
+/// Rebuilds store-owned stream authority from canonical committed-stream JSON.
+///
+/// `artifact_bytes` must contain exact byte authority for artifact-bearing events such as terminal
+/// state-output cells. The decoder fails closed when the embedded run id differs from
+/// `expected_run_id` or when any envelope field no longer derives from its typed payload.
+pub fn committed_run_stream_from_canonical_json_slice(
+    expected_run_id: &RunId,
+    bytes: &[u8],
+    artifact_bytes: &ArtifactByteAuthorityMap,
+) -> Result<CommittedRunStream> {
+    let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
+        .map_err(|error| StoreError::Identity(error.to_string()))?;
+    let json: serde_json::Value = serde_json::from_slice(canonical.as_bytes())
+        .map_err(|error| StoreError::Identity(error.to_string()))?;
+    if required_u64(&json, "stream_version")? != 1 {
+        return Err(StoreError::Identity(
+            "unsupported committed stream version".to_owned(),
+        ));
+    }
+    let run_id: RunId = parse_identity(required_str(&json, "run_id")?)?;
+    if &run_id != expected_run_id {
+        return Err(StoreError::PersistedEventMismatch {
+            field: "run_id",
+            message: format!(
+                "committed stream artifact covers run {} but import expected {}",
+                run_id, expected_run_id
+            ),
+        });
+    }
+    let events = parse_vec(&json, "events", parse_kernel_event_envelope)?;
+    CommittedRunStream::from_events_with_artifact_bytes(run_id, events, artifact_bytes)
+}
+
 /// Boxed future returned by retained artifact read providers.
 pub type RetainedArtifactReadFuture<'a> =
     Pin<Box<dyn Future<Output = Result<VerifiedRunArtifactBytes>> + Send + 'a>>;
@@ -8964,6 +9012,39 @@ fn payload_spec_hash(payload: &KernelEventPayload) -> SpecHash {
 /// Returns canonical JSON bytes for a typed event payload.
 pub fn payload_canonical_json(payload: &KernelEventPayload) -> Result<PlainCanonicalJsonBytes> {
     canonical_json(payload_json(payload))
+}
+
+fn kernel_event_envelope_json(envelope: &KernelEventEnvelope) -> serde_json::Value {
+    serde_json::json!({
+        "commit_key": envelope.commit_key().as_str(),
+        "event_id": envelope.event_id().as_str(),
+        "event_schema_id": envelope.event_schema_id().as_str(),
+        "logical_key": envelope.logical_key().as_str(),
+        "ordinal": envelope.ordinal().as_u32(),
+        "payload": payload_json(envelope.payload()),
+        "payload_hash": envelope.payload_hash().as_str(),
+        "run_id": envelope.run_id().as_str(),
+        "seq": envelope.seq().as_u64(),
+        "spec_hash": envelope.spec_hash().as_str(),
+    })
+}
+
+fn parse_kernel_event_envelope(json: &serde_json::Value) -> Result<KernelEventEnvelope> {
+    let seq = StreamSeq::new(required_u64(json, "seq")?)?;
+    let ordinal = CommitOrdinal::new(required_u32(json, "ordinal")?);
+    let payload = payload_from_json_value(required_obj(json, "payload")?)?;
+    KernelEventEnvelope::from_persisted_record(PersistedKernelEventRecord {
+        event_id: parse_identity(required_str(json, "event_id")?)?,
+        event_schema_id: parse_identity(required_str(json, "event_schema_id")?)?,
+        run_id: parse_identity(required_str(json, "run_id")?)?,
+        seq,
+        ordinal,
+        spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+        commit_key: CommitKey::new(required_str(json, "commit_key")?)?,
+        logical_key: LogicalEventKey::new(required_str(json, "logical_key")?)?,
+        payload_hash: parse_identity(required_str(json, "payload_hash")?)?,
+        payload,
+    })
 }
 
 /// Computes the canonical idempotency fingerprint for a purpose-specific prepared commit plan.

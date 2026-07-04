@@ -15,7 +15,7 @@ use mfm_evm_signing::{
 };
 use mfm_ids::{
     ArtifactId, AttemptId, CellId, ContextRef, DescriptorId, DigestAlgorithm, DigestBytes, EventId,
-    NodeId, RunId, SchemaId, ScopeId, SideEffectPairId, SpecHash,
+    NodeId, RunId, SchemaId, ScopeId, SideEffectPairId, SpecHash, TrustScopeId,
 };
 use mfm_program::StateContext;
 use mfm_replay::v1::SideEffectReplayVerifier;
@@ -246,13 +246,19 @@ where
     let semantic_type_id = T::semantic_id().expect("semantic").to_string();
     json!({
         "source_spec_hash": &source.source_spec_hash,
+        "source_spec_artifact_ref": source_artifact_ref_json(
+            0x4e,
+            json!(content_digest_str(0x4f)),
+            None,
+            None,
+        ),
         "source_spec_certificate_ref": source_artifact_ref_json(
             0x50,
             json!(content_digest_str(0x51)),
             None,
             None,
         ),
-        "source_run_stream_ref_or_export_bundle_ref": source_artifact_ref_json(
+        "source_run_stream_ref": source_artifact_ref_json(
             0x52,
             json!(content_digest_str(0x53)),
             None,
@@ -462,11 +468,20 @@ impl<'program, 'scope> mfm_program::PublicOutputs<'program, 'scope>
 }
 
 struct CertifiedSourceRunAuthority {
+    source_run_id: RunId,
     source_spec_hash: mfm_evm_contract_model::LifecycleSpecHashRef,
     source_cell_or_output_id: SourceCellOrOutputRef,
+    source_cell_id: CellId,
+    source_scope_id: ScopeId,
+    source_value_lineage: spec::ValueLineageRef,
+    source_cell_context: spec::CellContextSpec,
+    source_producer_node: spec::NodeSpec,
     source_producer_descriptor_id: mfm_evm_contract_model::LifecycleDescriptorIdRef,
-    source_spec_canonical_json: String,
+    source_spec_bytes: Vec<u8>,
+    source_spec_artifact: store::ArtifactEvidenceRef,
     certificate_bytes: Vec<u8>,
+    certificate_artifact: store::ArtifactEvidenceRef,
+    source_spec: spec::TypedExecutionSpec,
 }
 
 fn certified_source_run_authority(
@@ -495,25 +510,38 @@ fn certified_source_run_authority(
         .scoped_for_spec(lowered.spec())
         .expect("scoped source registry");
     let certified = mfm_certify::certify_typed_spec(lowered, &scoped).expect("certified source");
-    let (cell_id, producer_descriptor_id) =
+    let (cell, producer_node, producer_descriptor_id) =
         certified_lifecycle_source_cell(&certified, context, required_stage);
     let persisted = certified
         .to_persisted_parts()
         .expect("persisted source spec certificate");
+    let source_spec_bytes = persisted.spec_bytes().to_vec();
+    let certificate_bytes = persisted.certificate_bytes().to_vec();
+    let source_spec_artifact = source_spec_artifact_evidence(&source_spec_bytes);
+    let certificate_artifact = source_certificate_artifact_evidence(&certificate_bytes);
+    let identity_material = source_run_identity_material(certified.spec_hash());
+    let source_run_id = identity_material.derive_run_id().expect("source run id");
     CertifiedSourceRunAuthority {
+        source_run_id,
         source_spec_hash: mfm_evm_contract_model::LifecycleSpecHashRef::from(
             certified.spec_hash().clone(),
         ),
         source_cell_or_output_id: SourceCellOrOutputRef::Cell {
-            cell_id: mfm_evm_contract_model::LifecycleCellIdRef::from(cell_id),
+            cell_id: mfm_evm_contract_model::LifecycleCellIdRef::from(cell.cell_id.clone()),
         },
+        source_cell_id: cell.cell_id,
+        source_scope_id: cell.scope_id,
+        source_value_lineage: cell.value_lineage,
+        source_cell_context: cell.context,
+        source_producer_node: producer_node,
         source_producer_descriptor_id: mfm_evm_contract_model::LifecycleDescriptorIdRef::from(
             producer_descriptor_id,
         ),
-        source_spec_canonical_json: std::str::from_utf8(persisted.spec_bytes())
-            .expect("source spec utf-8")
-            .to_owned(),
-        certificate_bytes: persisted.certificate_bytes().to_vec(),
+        source_spec_bytes,
+        source_spec_artifact,
+        certificate_bytes,
+        certificate_artifact,
+        source_spec: certified.envelope().spec.clone(),
     }
 }
 
@@ -572,7 +600,7 @@ fn certified_lifecycle_source_cell(
     certified: &mfm_certify::CertifiedTypedSpec,
     context: &mfm_program::CertifiedContext<EvmContractContext>,
     required_stage: ContractLifecycleStage,
-) -> (CellId, DescriptorId) {
+) -> (spec::CellSpec, spec::NodeSpec, DescriptorId) {
     let expected_stage = context_stage_for_lifecycle_stage(required_stage);
     let (_, cell) = certified
         .validated_spec()
@@ -595,11 +623,12 @@ fn certified_lifecycle_source_cell(
     let spec::CellProducer::Node(node_id) = &cell.producer else {
         panic!("source lifecycle cell must be node-produced");
     };
-    certified
+    let node = certified
         .validated_spec()
         .graph()
         .forward_node(node_id)
-        .expect("source producer node");
+        .expect("source producer node")
+        .clone();
     let spec::CellContextSpec::Bound { producer, .. } = &cell.context else {
         panic!("source lifecycle cell must be context-bound");
     };
@@ -608,14 +637,360 @@ fn certified_lifecycle_source_cell(
         .first()
         .cloned()
         .expect("source producer descriptor");
-    (cell.cell_id.clone(), producer_descriptor_id)
+    (cell.clone(), node, producer_descriptor_id)
 }
 
-fn source_run_import_with_authority<T>(
+fn source_run_identity_material(spec_hash: &SpecHash) -> events::RunIdentityMaterialV1 {
+    events::RunIdentityMaterialV1 {
+        certified_spec_hash: spec_hash.clone(),
+        trust_scope_id: TrustScopeId::new("mfm.trust_scope.v1:30303030303030303030303030303030")
+            .expect("trust scope"),
+        distinct_run_key_digest: Some(content_digest(0x30)),
+    }
+}
+
+fn store_artifact_evidence_for_bytes(
+    bytes: &[u8],
+    role: events::ArtifactRole,
+    media_type: spec::MediaType,
+    schema_id: Option<SchemaId>,
+    semantic_type_id: Option<mfm_ids::SemanticTypeId>,
+    producer_node_id: Option<NodeId>,
+) -> store::ArtifactEvidenceRef {
+    let digest =
+        ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes));
+    store::ArtifactEvidenceRef {
+        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+        digest,
+        byte_len: bytes.len() as u64,
+        media_type,
+        schema_id,
+        semantic_type_id,
+        producer_node_id,
+        producer_seed_id: None,
+        artifact_role: role,
+    }
+}
+
+fn source_spec_artifact_evidence(bytes: &[u8]) -> store::ArtifactEvidenceRef {
+    store_artifact_evidence_for_bytes(
+        bytes,
+        events::ArtifactRole::TypedExecutionSpec,
+        spec::MediaType::new(spec::MEDIA_TYPE).expect("spec media type"),
+        Some(spec::typed_execution_spec_schema_id().expect("typed spec schema")),
+        None,
+        None,
+    )
+}
+
+fn source_certificate_artifact_evidence(bytes: &[u8]) -> store::ArtifactEvidenceRef {
+    store_artifact_evidence_for_bytes(
+        bytes,
+        events::ArtifactRole::TypedSpecCertificate,
+        spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE).expect("certificate media type"),
+        Some(mfm_certify::typed_spec_certificate_schema_id().expect("certificate schema")),
+        None,
+        None,
+    )
+}
+
+fn source_value_artifact_evidence<T>(
+    bytes: &[u8],
+    producer_node_id: NodeId,
+) -> store::ArtifactEvidenceRef
+where
+    T: MfmValue,
+{
+    store_artifact_evidence_for_bytes(
+        bytes,
+        events::ArtifactRole::StateOutput,
+        spec::MediaType::new("application/json").expect("json media type"),
+        Some(T::schema_id().expect("source value schema")),
+        Some(T::semantic_id().expect("source value semantic")),
+        Some(producer_node_id),
+    )
+}
+
+fn lifecycle_ref_from_store_artifact(
+    evidence: &store::ArtifactEvidenceRef,
+) -> LifecycleArtifactEvidenceRef {
+    LifecycleArtifactEvidenceRef::new(
+        evidence.artifact_id.clone(),
+        evidence.digest.clone(),
+        evidence.byte_len,
+        evidence.schema_id.clone(),
+        evidence.semantic_type_id.clone(),
+    )
+}
+
+fn run_artifact_ref_from_store(
+    evidence: &store::ArtifactEvidenceRef,
+) -> events::RunArtifactEvidenceRef {
+    events::RunArtifactEvidenceRef {
+        artifact_id: evidence.artifact_id.clone(),
+        role: evidence.artifact_role,
+        schema_id: evidence.schema_id.clone(),
+        semantic_type_id: evidence.semantic_type_id.clone(),
+        content_digest: evidence.digest.clone(),
+        byte_len: evidence.byte_len,
+        media_type: evidence.media_type.clone(),
+    }
+}
+
+async fn source_run_stream_artifact<T>(
+    authority: &CertifiedSourceRunAuthority,
+    source_value_bytes: &[u8],
+    source_value_artifact: store::ArtifactEvidenceRef,
+) -> (LifecycleArtifactEvidenceRef, Vec<u8>, EventId)
+where
+    T: MfmValue,
+{
+    let store = store::AsyncInMemoryRunStore::new();
+    let run_authority = store::CertifiedRunStoreAuthority::from_spec(
+        authority.source_run_id.clone(),
+        &authority.source_spec,
+    )
+    .expect("source run store authority");
+    let run_admission = events::KernelEventPayload::RunAdmitted(Box::new(events::RunAdmitted {
+        run_id: authority.source_run_id.clone(),
+        identity_material: source_run_identity_material(
+            &authority
+                .source_spec_hash
+                .typed()
+                .expect("source spec hash"),
+        ),
+        entry_point: events::EntryPointLaunchEvidence {
+            resolved_op_id: events::EntryPointOpId::new("mfm.test:source_run")
+                .expect("entry point"),
+            entry_point_registry_digest: content_digest(0x61),
+        },
+        spec_hash: authority
+            .source_spec_hash
+            .typed()
+            .expect("source spec hash"),
+        spec_artifact: run_artifact_ref_from_store(&authority.source_spec_artifact),
+        certificate_artifact: run_artifact_ref_from_store(&authority.certificate_artifact),
+        config_artifacts: Vec::new(),
+        fact_descriptor_artifacts: Vec::new(),
+        spec_version: authority.source_spec.spec_version.clone(),
+        lowering_version: authority.source_spec.lowering_version.clone(),
+        public_output_schema_id: authority
+            .source_spec
+            .public_outputs
+            .public_schema_id
+            .clone(),
+        saga_policy_digest: authority
+            .source_spec
+            .saga
+            .saga_policy_digest()
+            .expect("saga policy digest"),
+        descriptor_identities: authority.source_spec.descriptor_identities.clone(),
+        runner_executables: Vec::new(),
+        adapter_executables: Vec::new(),
+        admitted_binding_digest: content_digest(0x62),
+        canonicalizer_identity: authority
+            .source_spec
+            .public_outputs
+            .renderer_descriptor
+            .canonicalizer_identity
+            .clone(),
+        seed_cells: Vec::new(),
+    }));
+    append_source_run_commit(SourceRunCommitAppend {
+        store: &store,
+        run_id: &authority.source_run_id,
+        expected_next_seq: store::StreamSeq::FIRST,
+        commit_key: "source-run-admission",
+        payloads: vec![run_admission],
+        required_artifacts: vec![
+            authority.source_spec_artifact.clone(),
+            authority.certificate_artifact.clone(),
+        ],
+        artifact_bytes: vec![
+            (
+                authority.source_spec_bytes.clone(),
+                authority.source_spec_artifact.clone(),
+            ),
+            (
+                authority.certificate_bytes.clone(),
+                authority.certificate_artifact.clone(),
+            ),
+        ],
+        preconditions: store::CommitPreconditions {
+            required_run_state: store::RequiredRunState::Absent,
+            certified_run_authority: Some(run_authority),
+            ..store::CommitPreconditions::default()
+        },
+    })
+    .await;
+
+    let attempt_id = AttemptId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(0x63));
+    append_source_run_commit(SourceRunCommitAppend {
+        store: &store,
+        run_id: &authority.source_run_id,
+        expected_next_seq: store::StreamSeq::new(2).expect("seq 2"),
+        commit_key: "source-run-attempt-start",
+        payloads: vec![events::KernelEventPayload::StateAttemptStarted(
+            events::StateAttemptStarted {
+                spec_hash: authority
+                    .source_spec_hash
+                    .typed()
+                    .expect("source spec hash"),
+                node_id: authority.source_producer_node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+                attempt_no: 1,
+                state_kind: authority.source_producer_node.state_kind.clone(),
+                state_version: authority.source_producer_node.state_version.clone(),
+            },
+        )],
+        required_artifacts: Vec::new(),
+        artifact_bytes: Vec::new(),
+        preconditions: store::CommitPreconditions {
+            required_run_state: store::RequiredRunState::NotCompleted,
+            ..store::CommitPreconditions::default()
+        },
+    })
+    .await;
+
+    append_source_run_commit(SourceRunCommitAppend {
+        store: &store,
+        run_id: &authority.source_run_id,
+        expected_next_seq: store::StreamSeq::new(3).expect("seq 3"),
+        commit_key: "source-run-terminal",
+        payloads: vec![
+            events::KernelEventPayload::CellProduced(events::CellProduced {
+                spec_hash: authority
+                    .source_spec_hash
+                    .typed()
+                    .expect("source spec hash"),
+                node_id: authority.source_producer_node.node_id.clone(),
+                cell_id: authority.source_cell_id.clone(),
+                scope_id: authority.source_scope_id.clone(),
+                attempt_id: attempt_id.clone(),
+                semantic_type_id: T::semantic_id().expect("source value semantic"),
+                schema_id: T::schema_id().expect("source value schema"),
+                value_lineage: authority.source_value_lineage.clone(),
+                context: authority.source_cell_context.clone(),
+                artifact_id: source_value_artifact.artifact_id.clone(),
+                content_digest: source_value_artifact.digest.clone(),
+                producer_state_kind: Some(authority.source_producer_node.state_kind.clone()),
+                producer_state_version: Some(authority.source_producer_node.state_version.clone()),
+            }),
+            events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
+                spec_hash: authority
+                    .source_spec_hash
+                    .typed()
+                    .expect("source spec hash"),
+                node_id: authority.source_producer_node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+                output_cell_id: authority.source_cell_id.clone(),
+            }),
+        ],
+        required_artifacts: vec![source_value_artifact.clone()],
+        artifact_bytes: vec![(source_value_bytes.to_vec(), source_value_artifact)],
+        preconditions: store::CommitPreconditions {
+            required_run_state: store::RequiredRunState::NotCompleted,
+            required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                "attempt:{}:{}",
+                authority.source_producer_node.node_id, attempt_id
+            ))
+            .expect("attempt logical key")],
+            required_cell_states: vec![store::CellStatePrecondition {
+                cell_id: authority.source_cell_id.clone(),
+                required: store::RequiredCellState::Absent,
+            }],
+            ..store::CommitPreconditions::default()
+        },
+    })
+    .await;
+
+    let committed =
+        store::RunEventStore::load_committed_run_stream(&store, &authority.source_run_id)
+            .await
+            .expect("source committed stream");
+    let terminal_event_id = committed
+        .events()
+        .iter()
+        .find_map(|event| {
+            matches!(event.payload(), events::KernelEventPayload::CellProduced(_))
+                .then(|| event.event_id().clone())
+        })
+        .expect("terminal cell event");
+    let bytes = store::committed_run_stream_canonical_json(&committed)
+        .expect("committed stream json")
+        .to_vec();
+    (artifact_ref_for_raw_bytes(&bytes), bytes, terminal_event_id)
+}
+
+struct SourceRunCommitAppend<'a> {
+    store: &'a store::AsyncInMemoryRunStore,
+    run_id: &'a RunId,
+    expected_next_seq: store::StreamSeq,
+    commit_key: &'static str,
+    payloads: Vec<events::KernelEventPayload>,
+    required_artifacts: Vec<store::ArtifactEvidenceRef>,
+    artifact_bytes: Vec<(Vec<u8>, store::ArtifactEvidenceRef)>,
+    preconditions: store::CommitPreconditions,
+}
+
+async fn append_source_run_commit(input: SourceRunCommitAppend<'_>) {
+    let SourceRunCommitAppend {
+        store,
+        run_id,
+        expected_next_seq,
+        commit_key,
+        payloads,
+        required_artifacts,
+        artifact_bytes,
+        preconditions,
+    } = input;
+    let request = store::CommitRequest::from_payloads(
+        run_id.clone(),
+        expected_next_seq,
+        store::CommitKey::new(commit_key).expect("commit key"),
+        payloads,
+        required_artifacts.clone(),
+        preconditions,
+    )
+    .expect("commit request");
+    let artifacts =
+        store::CommitArtifactEvidenceSet::new(required_artifacts.clone(), required_artifacts)
+            .expect("artifact evidence set");
+    let plan = match commit_key {
+        "source-run-admission" => {
+            store::PreparedCommit::<store::RunAdmission>::new(request, artifacts)
+                .expect("run admission commit")
+                .into()
+        }
+        "source-run-attempt-start" => {
+            store::PreparedCommit::<store::StateAttemptStarted>::new(request, artifacts)
+                .expect("attempt start commit")
+                .into()
+        }
+        "source-run-terminal" => {
+            store::PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)
+                .expect("terminal commit")
+                .into()
+        }
+        _ => panic!("unknown source run commit"),
+    };
+    let artifact_bytes = artifact_bytes
+        .into_iter()
+        .map(|(bytes, evidence)| store::PreparedArtifactBytes::new(bytes, evidence))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect("prepared artifacts");
+    let bundle = store::PreparedCommitBundle::new(plan, artifact_bytes, Vec::new())
+        .expect("prepared bundle");
+    store::RunEventStore::append_prepared_commit_bundle(store, bundle)
+        .await
+        .expect("append source commit");
+}
+
+async fn source_run_import_with_authority<T>(
     context: &mfm_program::CertifiedContext<EvmContractContext>,
     required_stage: ContractLifecycleStage,
     source_value: &T,
-    mutate_bundle: impl FnOnce(&mut SourceRunExportBundle),
+    mutate_evidence: impl FnOnce(&mut ImportFromMfmRunEvidence),
 ) -> (ImportDeployedSpec, StaticRetainedArtifacts)
 where
     T: MfmValue + Serialize,
@@ -623,9 +998,9 @@ where
     let source_value_digest = digest_for_value(source_value).expect("value digest");
     let authority = certified_source_run_authority(context, required_stage);
     let source_json = json!({
-        "source_run_id": run_id_str(0x30),
-        "source_spec_hash": authority.source_spec_hash,
-        "source_cell_or_output_id": authority.source_cell_or_output_id,
+        "source_run_id": authority.source_run_id.to_string(),
+        "source_spec_hash": &authority.source_spec_hash,
+        "source_cell_or_output_id": &authority.source_cell_or_output_id,
         "source_value_digest": source_value_digest,
         "source_context_ref": context.context_ref().to_string(),
         "required_stage": match required_stage {
@@ -646,38 +1021,27 @@ where
     );
     let mut evidence: ImportFromMfmRunEvidence =
         serde_json::from_value(evidence_json).expect("evidence");
-    evidence.source_producer_descriptor_id = authority.source_producer_descriptor_id;
-    let mut bundle = SourceRunExportBundle {
-        bundle_version: 1,
-        source_run_id: source.source_run_id.clone(),
-        source_spec_hash: source.source_spec_hash.clone(),
-        source_spec_canonical_json: authority.source_spec_canonical_json,
-        terminal_events: vec![SourceRunTerminalEvent {
-            source_terminal_cell_or_output_event_ref: evidence
-                .source_terminal_cell_or_output_event_ref
-                .clone(),
-            source_cell_or_output_id: evidence.source_cell_or_output_id.clone(),
-            source_cell_schema_id: evidence.source_cell_schema_id.clone(),
-            source_cell_semantic_type_id: evidence.source_cell_semantic_type_id.clone(),
-            source_producer_descriptor_id: evidence.source_producer_descriptor_id.clone(),
-            source_stage: evidence.source_stage,
-            source_context_ref: evidence.source_context_ref.clone(),
-            source_context_descriptor_id: evidence.source_context_descriptor_id.clone(),
-            source_value_digest: evidence.source_value_digest.clone(),
-        }],
-    };
-    mutate_bundle(&mut bundle);
-    let bundle_bytes = canonical_value_bytes(&bundle);
-    let bundle_ref = artifact_ref_for_bytes::<SourceRunExportBundle>(&bundle_bytes);
-    let certificate_bytes = authority.certificate_bytes;
-    let certificate_ref = artifact_ref_for_raw_bytes(&certificate_bytes);
+    evidence.source_producer_descriptor_id = authority.source_producer_descriptor_id.clone();
     let value_bytes = canonical_value_bytes(source_value);
     let value_ref = artifact_ref_for_bytes::<T>(&value_bytes);
+    let source_value_store_artifact = source_value_artifact_evidence::<T>(
+        &value_bytes,
+        authority.source_producer_node.node_id.clone(),
+    );
+    let (stream_ref, stream_bytes, terminal_event_id) =
+        source_run_stream_artifact::<T>(&authority, &value_bytes, source_value_store_artifact)
+            .await;
+    evidence.source_terminal_cell_or_output_event_ref =
+        mfm_evm_contract_model::LifecycleEventIdRef::from(terminal_event_id);
+    mutate_evidence(&mut evidence);
+    let source_spec_ref = lifecycle_ref_from_store_artifact(&authority.source_spec_artifact);
+    let certificate_ref = lifecycle_ref_from_store_artifact(&authority.certificate_artifact);
     let import = ImportDeployedSpec::FromMfmRun {
         source,
         evidence: ImportFromMfmRunEvidence {
+            source_spec_artifact_ref: source_spec_ref.clone(),
             source_spec_certificate_ref: certificate_ref.clone(),
-            source_run_stream_ref_or_export_bundle_ref: bundle_ref.clone(),
+            source_run_stream_ref: stream_ref.clone(),
             source_value_artifact_ref_or_inline_canonical_value: value_ref.clone(),
             ..evidence
         },
@@ -686,8 +1050,9 @@ where
         import,
         StaticRetainedArtifacts {
             artifacts: vec![
-                (certificate_ref, certificate_bytes),
-                (bundle_ref, bundle_bytes),
+                (source_spec_ref, authority.source_spec_bytes),
+                (certificate_ref, authority.certificate_bytes),
+                (stream_ref, stream_bytes),
                 (value_ref, value_bytes),
             ],
         },
@@ -721,15 +1086,7 @@ fn source_run_import_with_retargeted_source_value_payload(
     evidence.source_value_artifact_ref_or_inline_canonical_value = raw_ref.clone();
     evidence.import_policy_digest = digest_for_value(&source).expect("import policy digest");
 
-    let mut bundle: SourceRunExportBundle =
-        serde_json::from_slice(&artifacts.artifacts[1].1).expect("source bundle");
-    bundle.terminal_events[0].source_value_digest = raw_digest;
-    let bundle_bytes = canonical_value_bytes(&bundle);
-    let bundle_ref = artifact_ref_for_bytes::<SourceRunExportBundle>(&bundle_bytes);
-    evidence.source_run_stream_ref_or_export_bundle_ref = bundle_ref.clone();
-
-    artifacts.artifacts[1] = (bundle_ref, bundle_bytes);
-    artifacts.artifacts[2] = (raw_ref, raw_bytes);
+    artifacts.artifacts[3] = (raw_ref, raw_bytes);
     (
         ImportDeployedSpec::FromMfmRun { source, evidence },
         artifacts,
@@ -1620,7 +1977,8 @@ async fn source_run_import_accepts_retained_export_authority() {
         ContractLifecycleStage::Deployed,
         &source_value,
         |_| {},
-    );
+    )
+    .await;
     let evm: Arc<dyn EvmContractReadProvider> = Arc::new(TestEvmProviders::preparation());
     let runtime = EvmContractReadRuntime::new_with_source_run_import_registry(
         evm,
@@ -1634,7 +1992,7 @@ async fn source_run_import_accepts_retained_export_authority() {
 
     assert_eq!(imported.context_ref.as_context_ref(), context.context_ref());
     assert_eq!(imported.address, source_value.address);
-    assert_eq!(imported.deploy_evidence.len(), 3);
+    assert_eq!(imported.deploy_evidence.len(), 4);
 }
 
 #[tokio::test]
@@ -1646,7 +2004,8 @@ async fn source_run_import_without_registry_authority_fails_closed() {
         ContractLifecycleStage::Deployed,
         &source_value,
         |_| {},
-    );
+    )
+    .await;
     let evm: Arc<dyn EvmContractReadProvider> = Arc::new(TestEvmProviders::preparation());
     let runtime = EvmContractReadRuntime::new(evm);
 
@@ -1670,7 +2029,8 @@ async fn source_run_import_rejects_domain_local_export_certificate() {
         ContractLifecycleStage::Deployed,
         &source_value,
         |_| {},
-    );
+    )
+    .await;
     let ImportDeployedSpec::FromMfmRun {
         source,
         mut evidence,
@@ -1682,7 +2042,7 @@ async fn source_run_import_rejects_domain_local_export_certificate() {
         "certificate_version": 1,
         "source_run_id": source.source_run_id.clone(),
         "source_spec_hash": source.source_spec_hash.clone(),
-        "export_bundle_digest": content_digest_str(0x5c),
+        "committed_stream_digest": content_digest_str(0x5c),
         "allowed_producer_descriptor_ids": [evidence.source_producer_descriptor_id.clone()],
         "allowed_context_descriptor_ids": [evidence.source_context_descriptor_id.clone()],
         "allowed_schema_ids": [evidence.source_cell_schema_id.clone()],
@@ -1694,7 +2054,7 @@ async fn source_run_import_rejects_domain_local_export_certificate() {
     .expect("old certificate canonical")
     .to_vec();
     let old_certificate_ref = artifact_ref_for_raw_bytes(&old_certificate_bytes);
-    artifacts.artifacts[0] = (old_certificate_ref.clone(), old_certificate_bytes);
+    artifacts.artifacts[1] = (old_certificate_ref.clone(), old_certificate_bytes);
     evidence.source_spec_certificate_ref = old_certificate_ref;
     let import = ImportDeployedSpec::FromMfmRun { source, evidence };
     let evm: Arc<dyn EvmContractReadProvider> = Arc::new(TestEvmProviders::preparation());
@@ -1748,7 +2108,8 @@ async fn source_run_import_rejects_public_projection_and_raw_value_payloads() {
             ContractLifecycleStage::Deployed,
             &source_value,
             |_| {},
-        );
+        )
+        .await;
         let (import, artifacts) =
             source_run_import_with_retargeted_source_value_payload(import, artifacts, payload);
         let evm: Arc<dyn EvmContractReadProvider> = Arc::new(TestEvmProviders::preparation());
@@ -1777,14 +2138,15 @@ async fn source_run_import_rejects_stream_without_claimed_terminal_event() {
         &context,
         ContractLifecycleStage::Deployed,
         &source_value,
-        |bundle| {
-            bundle.terminal_events[0].source_terminal_cell_or_output_event_ref =
+        |evidence| {
+            evidence.source_terminal_cell_or_output_event_ref =
                 mfm_evm_contract_model::LifecycleEventIdRef::from(EventId::from_digest(
                     DigestAlgorithm::Sha256JcsV1,
                     digest_with(0x7f),
                 ));
         },
-    );
+    )
+    .await;
     let evm: Arc<dyn EvmContractReadProvider> = Arc::new(TestEvmProviders::preparation());
     let runtime = EvmContractReadRuntime::new_with_source_run_import_registry(
         evm,
@@ -2289,6 +2651,42 @@ fn replay_intent_evidence(
         artifact,
         artifact_bytes,
     }
+}
+
+#[test]
+fn replay_intent_rejects_prepared_transaction_count_mismatch() {
+    let original = prepared_invocation_fixture();
+    let intent = replay_intent_evidence(&original);
+    let mut prepared = original.clone();
+    let mut extra = prepared.transactions[0].clone();
+    extra.index = 1;
+    prepared.transactions.push(extra);
+
+    assert!(verify_replay_intent_matches_prepared(&intent, &prepared).is_err());
+}
+
+#[test]
+fn replay_intent_rejects_prepared_destination_mismatch() {
+    let original = prepared_invocation_fixture();
+    let intent = replay_intent_evidence(&original);
+    let mut prepared = original;
+    prepared.transactions[0].to_address =
+        Some("0x000000000000000000000000000000000000beef".to_owned());
+
+    assert!(verify_replay_intent_matches_prepared(&intent, &prepared).is_err());
+}
+
+#[test]
+fn replay_intent_rejects_prepared_policy_mismatch() {
+    let original = prepared_invocation_fixture();
+    let intent = replay_intent_evidence(&original);
+    let mut prepared = original;
+    prepared.transactions[0].style = PreparedContractTransactionStyle::Legacy;
+    prepared.transactions[0].gas_price = Some("9".to_owned());
+    prepared.transactions[0].max_fee_per_gas = None;
+    prepared.transactions[0].max_priority_fee_per_gas = None;
+
+    assert!(verify_replay_intent_matches_prepared(&intent, &prepared).is_err());
 }
 
 fn replay_prepared_evidence(
