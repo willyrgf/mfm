@@ -100,12 +100,10 @@ pub struct ContextContractDeployOperationOutputs<'program, 'scope> {
     pub deployed: Handle<'program, 'scope, DeployedContractInstance>,
 }
 
-/// Public output handles for context-bound deploy-only programs.
 #[derive(PublicOutputs)]
 #[mfm(schema = "mfm.evm.contract.public_outputs.context_deploy")]
-pub struct ContextContractDeployPublicOutputs<'program, 'scope> {
-    /// Context-bound deployed contract instance.
-    pub deployed: Handle<'program, 'scope, DeployedContractInstance>,
+struct ContextContractDeployPublicOutputs<'program, 'scope> {
+    deployed: Handle<'program, 'scope, DeployedContractInstance>,
 }
 
 /// Output handles produced by context-bound configure-only operation planning.
@@ -116,12 +114,10 @@ pub struct ContextContractConfigureOperationOutputs<'program, 'scope> {
     pub configured: Handle<'program, 'scope, ConfiguredContractInstance>,
 }
 
-/// Public output handles for context-bound configure-only programs.
 #[derive(PublicOutputs)]
 #[mfm(schema = "mfm.evm.contract.public_outputs.context_configure")]
-pub struct ContextContractConfigurePublicOutputs<'program, 'scope> {
-    /// Context-bound configured contract instance.
-    pub configured: Handle<'program, 'scope, ConfiguredContractInstance>,
+struct ContextContractConfigurePublicOutputs<'program, 'scope> {
+    configured: Handle<'program, 'scope, ConfiguredContractInstance>,
 }
 
 /// Output handles produced by context-bound validate-only operation planning.
@@ -132,12 +128,10 @@ pub struct ContextContractValidateOperationOutputs<'program, 'scope> {
     pub validation_report: Handle<'program, 'scope, ContextBoundValidationReport>,
 }
 
-/// Public output handles for context-bound validate-only programs.
 #[derive(PublicOutputs)]
 #[mfm(schema = "mfm.evm.contract.public_outputs.context_validate")]
-pub struct ContextContractValidatePublicOutputs<'program, 'scope> {
-    /// Context-bound validation report.
-    pub validation_report: Handle<'program, 'scope, ContextBoundValidationReport>,
+struct ContextContractValidatePublicOutputs<'program, 'scope> {
+    validation_report: Handle<'program, 'scope, ContextBoundValidationReport>,
 }
 
 /// Output handles produced by context-bound full lifecycle operation planning.
@@ -152,16 +146,12 @@ pub struct ContextContractLifecycleOperationOutputs<'program, 'scope> {
     pub validation_report: Handle<'program, 'scope, ContextBoundValidationReport>,
 }
 
-/// Public output handles for context-bound full lifecycle programs.
 #[derive(PublicOutputs)]
 #[mfm(schema = "mfm.evm.contract.public_outputs.context_lifecycle")]
-pub struct ContextContractLifecyclePublicOutputs<'program, 'scope> {
-    /// Context-bound deployed contract instance.
-    pub deployed: Handle<'program, 'scope, DeployedContractInstance>,
-    /// Context-bound configured contract instance.
-    pub configured: Handle<'program, 'scope, ConfiguredContractInstance>,
-    /// Context-bound validation report.
-    pub validation_report: Handle<'program, 'scope, ContextBoundValidationReport>,
+struct ContextContractLifecyclePublicOutputs<'program, 'scope> {
+    deployed: Handle<'program, 'scope, DeployedContractInstance>,
+    configured: Handle<'program, 'scope, ConfiguredContractInstance>,
+    validation_report: Handle<'program, 'scope, ContextBoundValidationReport>,
 }
 
 /// Context-bound deploy-only EVM contract planning operation.
