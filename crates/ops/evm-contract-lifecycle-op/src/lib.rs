@@ -492,36 +492,28 @@ pub fn contract_lifecycle_program_draft(
 pub fn plan_contract_deploy_entry_point(
     config: EvmContractDeployEntryConfig,
 ) -> mfm_program::Result<TypedProgramLaunchPlan> {
-    Ok(TypedProgramLaunchPlan::from_draft(
-        deploy_contract_program_draft(config)?,
-    )?)
+    TypedProgramLaunchPlan::from_draft(deploy_contract_program_draft(config)?)
 }
 
 /// Plans a configure-only EVM contract entry-point program through a deployed import node.
 pub fn plan_contract_configure_entry_point(
     config: EvmContractConfigureEntryConfig,
 ) -> mfm_program::Result<TypedProgramLaunchPlan> {
-    Ok(TypedProgramLaunchPlan::from_draft(
-        configure_contract_program_draft(config)?,
-    )?)
+    TypedProgramLaunchPlan::from_draft(configure_contract_program_draft(config)?)
 }
 
 /// Plans a validate-only EVM contract entry-point program through a configured import node.
 pub fn plan_contract_validate_entry_point(
     config: EvmContractValidateEntryConfig,
 ) -> mfm_program::Result<TypedProgramLaunchPlan> {
-    Ok(TypedProgramLaunchPlan::from_draft(
-        validate_contract_program_draft(config)?,
-    )?)
+    TypedProgramLaunchPlan::from_draft(validate_contract_program_draft(config)?)
 }
 
 /// Plans a full lifecycle EVM contract entry-point program.
 pub fn plan_contract_lifecycle_entry_point(
     config: EvmContractLifecycleEntryConfig,
 ) -> mfm_program::Result<TypedProgramLaunchPlan> {
-    Ok(TypedProgramLaunchPlan::from_draft(
-        contract_lifecycle_program_draft(config)?,
-    )?)
+    TypedProgramLaunchPlan::from_draft(contract_lifecycle_program_draft(config)?)
 }
 
 fn build_program(
