@@ -2537,7 +2537,7 @@ where
         .await?;
         let broker = ReplayBroker::from_read_authority(authority)?;
         let stream = context.events();
-        mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&broker)?;
+        mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&broker, self.registry)?;
         mfm_transports_proof::verify_deterministic_proof_replay(&broker)?;
         let projection = broker.projection_snapshot();
         let terminal_policies =

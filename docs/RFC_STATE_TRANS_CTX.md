@@ -1043,6 +1043,11 @@ Keep:
 - prepared invocation public-surface and secret-leak checks
 - replay checks that `FactRecorded`, `FactQueryEvidence`, receipts, confirmations, imports, and
   outputs match certified context and recorded evidence
+- EVM replay checks for retained validation read/event evidence, validation report state-output
+  artifacts, source-run import evidence bundles, external adoption read/code evidence, and
+  side-effect frames
+- certifier checks that certified context table entries decode through their registered typed
+  context descriptors, not just that their digest/ref/length fields agree
 - public output rendering checks that join context data without making rendered JSON authority
 
 The cleanup target is local defensive equality code caused by duplicate authorities. The new
@@ -1221,8 +1226,8 @@ Required tests:
   certified evidence policy
 - adapter route selection uses certified context, not phase action config
 - transport guard still rejects observed chain mismatch
-- replay verifies context refs and fails closed on mismatched import, fact, receipt, or output
-  evidence
+- replay verifies context refs and fails closed on mismatched import, fact, receipt, validation
+  read, validation report state-output, external adoption, or output evidence
 - public output renders network data from context, not copied typestate fields
 - public output is rejected as import authority
 - old `{ config, deployed }` and `{ config, configured }` public input shapes are rejected

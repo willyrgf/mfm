@@ -19,6 +19,17 @@ fn artifact_id_str(byte: u8) -> String {
     ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte)).to_string()
 }
 
+fn lifecycle_artifact_ref(byte: u8) -> LifecycleArtifactEvidenceRef {
+    let digest = ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte));
+    LifecycleArtifactEvidenceRef::new(
+        ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+        digest,
+        32,
+        None,
+        None,
+    )
+}
+
 fn cell_id_str(byte: u8) -> String {
     CellId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte)).to_string()
 }
@@ -596,9 +607,10 @@ fn context_validate_request_and_report_use_certified_context() {
     let state =
         ContextBoundValidateContractState::new(validated_config(validate_action())).expect("state");
     let context = certified_contract_context();
-    let input = ContextValidateContractInput {
-        configured: configured_instance(&context),
-    };
+    let evidence_ref = lifecycle_artifact_ref(0x88);
+    let mut configured = configured_instance(&context);
+    configured.configure_or_import_evidence = vec![evidence_ref.clone()];
+    let input = ContextValidateContractInput { configured };
     let request = state.read_request(&input, &context).expect("request");
 
     assert_eq!(request.context_ref.as_context_ref(), context.context_ref());
@@ -619,6 +631,9 @@ fn context_validate_request_and_report_use_certified_context() {
                 configuration_event_results: Vec::new(),
                 read_results: Vec::new(),
                 event_results: Vec::new(),
+                validation_read_evidence: Vec::new(),
+                validation_event_evidence: Vec::new(),
+                evidence_refs: input.configured.configure_or_import_evidence.clone(),
             },
             &context,
         )
@@ -626,6 +641,7 @@ fn context_validate_request_and_report_use_certified_context() {
 
     assert_eq!(report.context_ref(), context.context_ref());
     assert!(!report.valid);
+    assert_eq!(report.evidence_refs, vec![evidence_ref]);
 }
 
 #[test]

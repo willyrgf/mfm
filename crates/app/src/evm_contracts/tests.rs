@@ -26,7 +26,9 @@ use mfm_evm_capabilities::{
     EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef, EvmTransactionSubmitProvider,
     EvmTransactionSubmitRequest, EvmTransactionSubmitResponse, RedactedEvmSourceEvidence,
 };
-use mfm_evm_contract_model::{ContractArtifactConfig, LifecycleArtifactEvidenceRef};
+use mfm_evm_contract_model::{
+    ContextBoundValidationReport, ContractArtifactConfig, LifecycleArtifactEvidenceRef,
+};
 use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm};
 use mfm_runtime::{CertifiedRuntimeSpec, ErasedRunnerRegistry};
 use mfm_signing::{
@@ -38,7 +40,7 @@ use mfm_store::v1::{
     self as store, ExecutionClaimStatus, ExecutionClaimStore, RetainedArtifactReadProvider,
     RunEventStore,
 };
-use mfm_values::MfmConfig;
+use mfm_values::{MfmConfig, MfmValue};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -184,6 +186,37 @@ async fn public_output_string(
         .to_string()
 }
 
+async fn retained_validation_reports(
+    services: &ContractRunServices,
+    stream: &[store::KernelEventEnvelope],
+) -> Vec<ContextBoundValidationReport> {
+    let schema = ContextBoundValidationReport::schema_id().expect("validation report schema");
+    let mut reports = Vec::new();
+    for event in stream {
+        let events::KernelEventPayload::CellProduced(payload) = event.payload() else {
+            continue;
+        };
+        if payload.schema_id != schema {
+            continue;
+        }
+        let requirement = event
+            .payload()
+            .artifact_requirements()
+            .into_iter()
+            .find(|requirement| requirement.artifact_id == payload.artifact_id)
+            .expect("validation report artifact requirement");
+        let artifact = services
+            .artifacts()
+            .read_retained_artifact(&requirement)
+            .await
+            .expect("validation report artifact");
+        reports.push(
+            serde_json::from_slice(artifact.bytes()).expect("validation report artifact json"),
+        );
+    }
+    reports
+}
+
 async fn launch_replay_and_render(
     services: &ContractRunServices,
     request: RunLaunchRequest,
@@ -257,6 +290,91 @@ fn contract_test_services(
         Arc::new(ContractArtifactOverlay::new(Arc::new(store.clone())));
     let services = contract_services(&store, make_factory(artifacts));
     (store, services)
+}
+
+#[derive(Clone)]
+struct MissingValidationReportArtifactStore {
+    inner: ContractRunStore,
+}
+
+impl MissingValidationReportArtifactStore {
+    fn new(inner: ContractRunStore) -> Self {
+        Self { inner }
+    }
+}
+
+impl store::RunEventStore for MissingValidationReportArtifactStore {
+    type Error = store::StoreError;
+
+    fn append_prepared_commit_bundle<'a>(
+        &'a self,
+        bundle: store::PreparedCommitBundle,
+    ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
+        self.inner.append_prepared_commit_bundle(bundle)
+    }
+
+    fn load_run_stream<'a>(
+        &'a self,
+        run_id: &'a mfm_ids::RunId,
+    ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
+        self.inner.load_run_stream(run_id)
+    }
+
+    fn load_committed_run_stream<'a>(
+        &'a self,
+        run_id: &'a mfm_ids::RunId,
+    ) -> store::AsyncStoreFuture<'a, store::CommittedRunStream, Self::Error> {
+        self.inner.load_committed_run_stream(run_id)
+    }
+
+    fn expected_next_seq<'a>(
+        &'a self,
+        run_id: &'a mfm_ids::RunId,
+    ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
+        self.inner.expected_next_seq(run_id)
+    }
+
+    fn status_projection_snapshot<'a>(
+        &'a self,
+        run_id: &'a mfm_ids::RunId,
+    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        self.inner.status_projection_snapshot(run_id)
+    }
+
+    fn fact_projection_snapshot<'a>(
+        &'a self,
+    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        self.inner.fact_projection_snapshot()
+    }
+}
+
+impl store::TrustScopeStore for MissingValidationReportArtifactStore {
+    type Error = store::StoreError;
+
+    fn load_trust_scope_id<'a>(
+        &'a self,
+    ) -> store::AsyncStoreFuture<'a, store::TrustScopeId, Self::Error> {
+        self.inner.load_trust_scope_id()
+    }
+}
+
+impl store::RetainedArtifactReadProvider for MissingValidationReportArtifactStore {
+    fn read_retained_artifact<'a>(
+        &'a self,
+        requirement: &'a store::EventArtifactRequirement,
+    ) -> store::RetainedArtifactReadFuture<'a> {
+        let report_schema =
+            ContextBoundValidationReport::schema_id().expect("validation report schema");
+        if requirement.artifact_role == Some(events::ArtifactRole::StateOutput)
+            && requirement.schema_id.as_ref() == Some(&report_schema)
+        {
+            let artifact_id = requirement.artifact_id.clone();
+            return Box::pin(
+                async move { Err(store::StoreError::MissingArtifact { artifact_id }) },
+            );
+        }
+        self.inner.read_retained_artifact(requirement)
+    }
 }
 
 #[derive(Clone)]
@@ -347,9 +465,35 @@ async fn app_runner_resumes_replays_and_renders_validate_only_lifecycle_run() {
 }
 
 #[tokio::test]
+async fn app_replay_rejects_missing_validation_report_retained_artifact() {
+    let (store, services) = contract_test_services(TestRuntimeFactory::new);
+    let request = prepare_evm_entry_point_request(
+        &services,
+        "evm_contract_validate",
+        validate_entry_config_json(),
+    )
+    .await;
+    let (run_id, _) = launch_completed(&services, request, "launch validate lifecycle").await;
+    let missing = MissingValidationReportArtifactStore::new(store);
+    let replay_services = crate::make_run_read_services_with_certification_registry(
+        missing.clone(),
+        missing,
+        contract_lifecycle_certification_registry(),
+    );
+
+    let error = replay_services
+        .verify_replay_for_run(&run_id)
+        .await
+        .expect_err("replay must reject missing retained validation report artifact");
+
+    assert_eq!(error.code, "ArtifactNotFound");
+}
+
+#[tokio::test]
 async fn app_resume_completed_run_is_evidence_only_without_live_runners() {
     let store = test_run_store();
-    let artifacts = Arc::new(store.clone());
+    let artifacts: Arc<dyn store::RetainedArtifactReadProvider> =
+        Arc::new(ContractArtifactOverlay::new(Arc::new(store.clone())));
     let certification = contract_lifecycle_certification_registry();
     let runners = contract_lifecycle_runners(TestRuntimeFactory::new(artifacts));
     let launch_services = contract_lifecycle_services(&store, runners, certification.clone());
@@ -375,6 +519,20 @@ async fn app_resume_completed_run_is_evidence_only_without_live_runners() {
 
     let resume_services =
         contract_lifecycle_services(&store, ErasedRunnerRegistry::new(), certification);
+    assert!(
+        completed_stream
+            .iter()
+            .any(|event| matches!(event.payload(), events::KernelEventPayload::RunCompleted(_))),
+        "launch must persist terminal completion before evidence-only resume"
+    );
+    assert_eq!(
+        resume_services
+            .run_status(&run_id)
+            .await
+            .expect("observed terminal status before resume")
+            .run_mode,
+        RunModeStatus::Completed
+    );
     let resumed = resume_services
         .resume_stored_run(&run_id)
         .await
@@ -616,6 +774,7 @@ async fn app_runner_resumes_replays_and_renders_full_lifecycle_run() {
         .load_run_stream(&run_id)
         .await
         .expect("load run stream");
+    let reports = retained_validation_reports(&services, &stream).await;
     assert_eq!(
         contract_lifecycle_runner_output_summary(&stream),
         [
@@ -629,6 +788,15 @@ async fn app_runner_resumes_replays_and_renders_full_lifecycle_run() {
             "attempt-output:mfm.evm.contract/context_configure:cell_skipped+state_attempt_completed",
             "attempt-output:mfm.evm.contract/context_validate:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
         ]
+    );
+    assert_eq!(
+        reports.len(),
+        1,
+        "full lifecycle should retain one validation report"
+    );
+    assert!(
+        !reports[0].validation_read_evidence.is_empty(),
+        "validation report must retain validation read evidence"
     );
     let mut prepared_artifact_requirements = Vec::new();
     for event in &stream {
@@ -1176,7 +1344,7 @@ fn validate_entry_config_json() -> serde_json::Value {
                 }
             }
         },
-        "validate": {}
+        "validate": validate_action_json()
     })
 }
 
@@ -1204,7 +1372,20 @@ fn lifecycle_entry_config_json(expected_signer_address: &str) -> serde_json::Val
                 }
             ]
         },
-        "validate": {}
+        "validate": validate_action_json()
+    })
+}
+
+fn validate_action_json() -> serde_json::Value {
+    json!({
+        "read_assertions": [
+            {
+                "function": "ready",
+                "expected": {
+                    "json_text": "true"
+                }
+            }
+        ]
     })
 }
 

@@ -1,8 +1,8 @@
 use super::*;
 use mfm_capabilities::{CapabilitySpec, ExternalMutationAuthorityRole, NoCaps};
 use mfm_ids::{
-    AdapterKind, AdapterVersion, CapabilityKind, CapabilityVersion, ContextResourceKind,
-    ContextStage, OperationKind, OperationVersion,
+    AdapterKind, AdapterVersion, CapabilityKind, CapabilityVersion, ContextRef,
+    ContextResourceKind, ContextStage, OperationKind, OperationVersion,
 };
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, IdempotencyKey, MfmContext, MfmFactType as _,
@@ -854,7 +854,7 @@ fn certifies_reference_program_draft() {
     );
     assert_eq!(
         certified.certificate_hash().as_str(),
-        "content:sha256-jcs-v1:3782018d98a8c5ba247d7e798553f8b1b58e2016fe5fbe90264eabaa081989de"
+        "content:sha256-jcs-v1:9df4bb9724a7c4c452319e57e897cfee33c88120ce9a2f98a25a16f8f42c6b97"
     );
     assert_eq!(
         certified.envelope().spec.public_outputs.public_schema_id,
@@ -909,6 +909,39 @@ fn certifies_context_bound_transition_graph() {
         spec::InputBindingNodeSpec::Cell(cell)
             if matches!(cell.context, spec::InputContextSpec::Required { .. })
     ));
+}
+
+#[test]
+fn certification_rejects_context_table_entry_that_fails_registered_typed_decode() {
+    let (registry, mut typed) = context_bound_registry_and_spec(false);
+    let invalid_context =
+        PlainCanonicalJsonBytes::from_json_str(r#"{"network":7}"#).expect("canonical context");
+    let old_context_ref = typed.contexts[0].context_ref.clone();
+    let new_context_ref = {
+        let context = &mut typed.contexts[0];
+        context.canonical_context = invalid_context;
+        context.canonical_context_digest = context.canonical_context.content_digest();
+        context.canonical_context_byte_len = context.canonical_context.as_bytes().len() as u64;
+        context.context_ref = spec::CertifiedContextSpec::derive_context_ref(
+            &context.context_descriptor_id,
+            &context.schema_id,
+            &context.semantic_type_id,
+            &context.canonicalizer_identity,
+            &context.canonical_context,
+        )
+        .expect("context ref");
+        context.context_ref.clone()
+    };
+    retarget_context_ref(&mut typed, &old_context_ref, &new_context_ref);
+
+    let error = certify_untrusted_typed_spec(typed, &registry)
+        .expect_err("registered context descriptor must decode context payload");
+
+    assert_problem_contains(
+        error,
+        ProblemClass::InvalidDataShape,
+        "registered descriptor",
+    );
 }
 
 #[test]
@@ -2357,6 +2390,59 @@ fn context_bound_registry_and_spec(
         .spec()
         .clone();
     (registry, spec)
+}
+
+fn retarget_context_ref(typed: &mut spec::TypedExecutionSpec, old: &ContextRef, new: &ContextRef) {
+    for node in &mut typed.nodes {
+        if let spec::NodeContextSpec::Required { context_ref } = &mut node.context {
+            if context_ref == old {
+                *context_ref = new.clone();
+            }
+        }
+        retarget_input_binding_context_ref(&mut node.input_bindings.root, old, new);
+        node.input_bindings.digest =
+            content_digest_json(input_node_json(&node.input_bindings.root)).expect("input digest");
+    }
+    for cell in &mut typed.cells {
+        if let spec::CellContextSpec::Bound { context_ref, .. } = &mut cell.context {
+            if context_ref == old {
+                *context_ref = new.clone();
+            }
+        }
+    }
+}
+
+fn retarget_input_binding_context_ref(
+    node: &mut spec::InputBindingNodeSpec,
+    old: &ContextRef,
+    new: &ContextRef,
+) {
+    match node {
+        spec::InputBindingNodeSpec::Unit => {}
+        spec::InputBindingNodeSpec::Cell(cell) => {
+            if let spec::InputContextSpec::Required { context_ref, .. } = &mut cell.context {
+                if context_ref == old {
+                    *context_ref = new.clone();
+                }
+            }
+        }
+        spec::InputBindingNodeSpec::Tuple(elements) => {
+            for element in elements {
+                retarget_input_binding_context_ref(element, old, new);
+            }
+        }
+        spec::InputBindingNodeSpec::Struct(fields) => {
+            for field in fields {
+                retarget_input_binding_context_ref(&mut field.node, old, new);
+            }
+        }
+        spec::InputBindingNodeSpec::Vec { elements, .. }
+        | spec::InputBindingNodeSpec::NonEmptyVec { elements, .. } => {
+            for element in elements {
+                retarget_input_binding_context_ref(element, old, new);
+            }
+        }
+    }
 }
 
 fn descriptor_id_by_name(typed: &spec::TypedExecutionSpec, name: &str) -> DescriptorId {

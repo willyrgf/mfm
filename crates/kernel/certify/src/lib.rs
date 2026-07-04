@@ -1344,6 +1344,37 @@ impl PartialEq for ConfigValidator {
 
 impl Eq for ConfigValidator {}
 
+#[derive(Clone)]
+struct ContextValidator {
+    requirement: spec::StateContextDescriptorRequirementSpec,
+    validate: fn(&spec::CertifiedContextSpec) -> program::Result<()>,
+}
+
+impl fmt::Debug for ContextValidator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ContextValidator")
+            .field(
+                "context_descriptor_id",
+                &self.requirement.context_descriptor_id,
+            )
+            .field("schema_id", &self.requirement.schema_id)
+            .field("semantic_type_id", &self.requirement.semantic_type_id)
+            .field(
+                "canonicalizer_identity",
+                &self.requirement.canonicalizer_identity,
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for ContextValidator {
+    fn eq(&self, other: &Self) -> bool {
+        self.requirement == other.requirement
+    }
+}
+
+impl Eq for ContextValidator {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TrustedConfigRef {
     schema_id: SchemaId,
@@ -1358,6 +1389,7 @@ pub struct CertificationRegistry {
     operations: BTreeMap<String, spec::OperationDescriptorIdentity>,
     fact_descriptor_artifacts: BTreeMap<String, FactDescriptorArtifact>,
     config_validators: BTreeMap<String, ConfigValidator>,
+    context_validators: BTreeMap<String, ContextValidator>,
     trusted_config_refs: BTreeMap<String, TrustedConfigRef>,
     schema_roles: BTreeMap<String, BTreeSet<CertifiedSchemaRole>>,
     manual_authorization_verifiers: BTreeSet<String>,
@@ -1385,6 +1417,11 @@ impl CertificationRegistry {
         content_digest_json(serde_json::json!({
             "algorithm": REGISTRY_DIGEST_ALGORITHM,
             "operations": operations,
+            "contexts": self
+                .context_validators
+                .values()
+                .map(context_validator_ref_json)
+                .collect::<Vec<_>>(),
             "manual_authorization_verifiers": self
                 .manual_authorization_verifiers
                 .iter()
@@ -1419,7 +1456,11 @@ impl CertificationRegistry {
             registered.descriptor(),
             registered.runner(),
         )?)?;
-        self.insert_config_validator(config_validator_for::<S::Config>()?)
+        self.insert_config_validator(config_validator_for::<S::Config>()?)?;
+        if let Some(validator) = context_validator_for::<S::Context>()? {
+            self.insert_context_validator(validator)?;
+        }
+        Ok(())
     }
 
     /// Adds a framework-validated registered operation descriptor to this registry.
@@ -1528,6 +1569,12 @@ impl CertificationRegistry {
             registry.insert_state(state_descriptor_identity_from_program(node)?)?;
             registry.insert_trusted_config_binding(&node.config)?;
         }
+        for validator in draft.context_validators() {
+            registry.insert_context_validator(ContextValidator {
+                requirement: validator.requirement().clone(),
+                validate: validator.validate_fn(),
+            })?;
+        }
         for frame in draft.operation_lineage() {
             registry.insert_operation(operation_descriptor_identity_from_program(frame))?;
             registry.insert_trusted_config_binding(&frame.config)?;
@@ -1558,6 +1605,16 @@ impl CertificationRegistry {
                             .get(trusted.config_schema_id.as_str())
                         {
                             scoped.insert_config_validator(validator.clone())?;
+                        }
+                        if let spec::StateContextDescriptorSpec::Required(requirement) =
+                            &trusted.context
+                        {
+                            if let Some(validator) = self
+                                .context_validators
+                                .get(requirement.context_descriptor_id.as_str())
+                            {
+                                scoped.insert_context_validator(validator.clone())?;
+                            }
                         }
                     }
                 }
@@ -1604,6 +1661,18 @@ impl CertificationRegistry {
                 }
                 scoped.trusted_config_refs.insert(key, trusted.clone());
             }
+        }
+        for context in &spec.contexts {
+            let Some(validator) = self
+                .context_validators
+                .get(context.context_descriptor_id.as_str())
+            else {
+                return Err(certificate(format!(
+                    "context descriptor {} is not present in the trusted registry",
+                    context.context_descriptor_id
+                )));
+            };
+            scoped.insert_context_validator(validator.clone())?;
         }
         for manual in manual_resolution_specs(spec) {
             scoped.copy_schema_role_from(
@@ -1696,6 +1765,25 @@ impl CertificationRegistry {
             }
         } else {
             self.config_validators.insert(key, validator);
+        }
+        Ok(())
+    }
+
+    fn insert_context_validator(&mut self, validator: ContextValidator) -> Result<()> {
+        let key = validator
+            .requirement
+            .context_descriptor_id
+            .as_str()
+            .to_owned();
+        if let Some(existing) = self.context_validators.get(&key) {
+            if existing != &validator {
+                return Err(problem(
+                    ProblemClass::InvalidSemanticTransition,
+                    format!("conflicting registered context validator {key}"),
+                ));
+            }
+        } else {
+            self.context_validators.insert(key, validator);
         }
         Ok(())
     }
@@ -1819,6 +1907,28 @@ fn config_validator_for<C: MfmConfig>() -> Result<ConfigValidator> {
         schema_id,
         validate: validate_config_bytes_for::<C>,
     })
+}
+
+fn context_validator_for<C: program::StateContext>() -> Result<Option<ContextValidator>> {
+    let descriptor = C::descriptor().map_err(|error| {
+        problem(
+            ProblemClass::InvalidDataShape,
+            format!("context schema descriptor invalid: {error}"),
+        )
+    })?;
+    let spec::StateContextDescriptorSpec::Required(requirement) = descriptor else {
+        return Ok(None);
+    };
+    Ok(Some(ContextValidator {
+        requirement: *requirement,
+        validate: validate_context_spec_for::<C>,
+    }))
+}
+
+fn validate_context_spec_for<C: program::StateContext>(
+    context: &spec::CertifiedContextSpec,
+) -> program::Result<()> {
+    C::materialize_certified(Some(context)).map(|_| ())
 }
 
 fn validate_config_bytes_for<C: MfmConfig>(bytes: &[u8]) -> Result<()> {
@@ -3435,10 +3545,10 @@ fn validate_typed_spec(
     spec.spec_hash()
         .map_err(|error| CertifyError::Spec(error.to_string()))?;
     validate_contract_header(spec)?;
-    let context_index = validate_contexts(&spec.contexts)?;
-    let scope_ids = validate_scopes(&spec.scopes)?;
     let descriptor_index = DescriptorIndex::new(&spec.descriptor_identities)?;
     validate_descriptor_authority(&descriptor_index, registry)?;
+    let context_index = validate_contexts(&spec.contexts, registry)?;
+    let scope_ids = validate_scopes(&spec.scopes)?;
     let config_refs = validate_config_refs(&spec.config_refs)?;
     let lineage_index = validate_value_lineages(&spec.value_lineages, &scope_ids)?;
     let cell_index = validate_cells(&spec.cells, &scope_ids, &lineage_index)?;
@@ -3661,9 +3771,36 @@ impl<'a> ContextIndex<'a> {
     }
 }
 
-fn validate_contexts(contexts: &[spec::CertifiedContextSpec]) -> Result<ContextIndex<'_>> {
+fn validate_contexts<'a>(
+    contexts: &'a [spec::CertifiedContextSpec],
+    registry: &CertificationRegistry,
+) -> Result<ContextIndex<'a>> {
     let mut by_ref = BTreeMap::new();
     for context in contexts {
+        let validator = registry
+            .context_validators
+            .get(context.context_descriptor_id.as_str())
+            .ok_or_else(|| {
+                problem(
+                    ProblemClass::InvalidSemanticTransition,
+                    format!(
+                        "certified context {} uses unregistered context descriptor {}",
+                        context.context_ref, context.context_descriptor_id
+                    ),
+                )
+            })?;
+        if validator.requirement.schema_id != context.schema_id
+            || validator.requirement.semantic_type_id != context.semantic_type_id
+            || validator.requirement.canonicalizer_identity != context.canonicalizer_identity
+        {
+            return Err(problem(
+                ProblemClass::InvalidSemanticTransition,
+                format!(
+                    "certified context {} descriptor metadata does not match registry authority",
+                    context.context_ref
+                ),
+            ));
+        }
         let digest = context.canonical_context.content_digest();
         if context.canonical_context_digest != digest {
             return Err(problem(
@@ -3684,6 +3821,43 @@ fn validate_contexts(contexts: &[spec::CertifiedContextSpec]) -> Result<ContextI
                 ),
             ));
         }
+        let value: serde_json::Value = serde_json::from_slice(context.canonical_context.as_bytes())
+            .map_err(|error| {
+                problem(
+                    ProblemClass::InvalidDataShape,
+                    format!(
+                        "certified context {} JSON did not decode: {error}",
+                        context.context_ref
+                    ),
+                )
+            })?;
+        let encoded = serde_json::to_string(&value).map_err(|error| {
+            problem(
+                ProblemClass::InvalidDataShape,
+                format!(
+                    "certified context {} could not be serialized canonically: {error}",
+                    context.context_ref
+                ),
+            )
+        })?;
+        let expected = PlainCanonicalJsonBytes::from_json_str(&encoded).map_err(|error| {
+            problem(
+                ProblemClass::InvalidDataShape,
+                format!(
+                    "certified context {} canonical encoding was invalid: {error}",
+                    context.context_ref
+                ),
+            )
+        })?;
+        if expected.as_bytes() != context.canonical_context.as_bytes() {
+            return Err(problem(
+                ProblemClass::InvalidDataShape,
+                format!(
+                    "certified context {} did not match registered canonical encoding",
+                    context.context_ref
+                ),
+            ));
+        }
         let derived = spec::CertifiedContextSpec::derive_context_ref(
             &context.context_descriptor_id,
             &context.schema_id,
@@ -3701,6 +3875,15 @@ fn validate_contexts(contexts: &[spec::CertifiedContextSpec]) -> Result<ContextI
                 ),
             ));
         }
+        (validator.validate)(context).map_err(|error| {
+            problem(
+                ProblemClass::InvalidDataShape,
+                format!(
+                    "certified context {} did not decode through registered descriptor: {error}",
+                    context.context_ref
+                ),
+            )
+        })?;
         if by_ref
             .insert(context.context_ref.as_str().to_owned(), context)
             .is_some()
@@ -5925,6 +6108,16 @@ fn descriptor_ref_json(reference: spec::DescriptorRef) -> serde_json::Value {
         "descriptor_digest": reference.descriptor_digest.as_str(),
         "descriptor_family": reference.family.as_str(),
         "descriptor_id": reference.descriptor_id.as_str(),
+    })
+}
+
+fn context_validator_ref_json(validator: &ContextValidator) -> serde_json::Value {
+    let requirement = &validator.requirement;
+    serde_json::json!({
+        "canonicalizer_identity": requirement.canonicalizer_identity.as_str(),
+        "context_descriptor_id": requirement.context_descriptor_id.as_str(),
+        "schema_id": requirement.schema_id.as_str(),
+        "semantic_type_id": requirement.semantic_type_id.as_str(),
     })
 }
 

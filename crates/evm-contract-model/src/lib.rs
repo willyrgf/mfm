@@ -1872,6 +1872,8 @@ pub struct ContextBoundValidationReport {
     pub context_ref: ContextRefValue,
     /// Configured contract instance that was validated.
     pub configured_instance: ConfiguredContractInstanceRef,
+    /// Observed EVM chain id from validation read evidence.
+    pub observed_chain_id: u64,
     /// Results for configuration-intent read confirmations stored on the configured instance.
     pub configuration_read_results: Vec<ValidationReadResult>,
     /// Results for configuration-intent event confirmations stored on the configured instance.
@@ -1880,7 +1882,11 @@ pub struct ContextBoundValidationReport {
     pub read_results: Vec<ValidationReadResult>,
     /// Additional event assertion results from validation action.
     pub event_results: Vec<ValidationEventResult>,
-    /// Evidence refs for reads, logs, and retained validation report material.
+    /// Replayable read assertion evidence from validation reads.
+    pub validation_read_evidence: Vec<ExternalReadAssertionEvidence>,
+    /// Replayable event assertion evidence from validation log reads.
+    pub validation_event_evidence: Vec<ExternalEventAssertionEvidence>,
+    /// Retained lifecycle evidence refs that support the configured input being validated.
     pub evidence_refs: Vec<LifecycleArtifactEvidenceRef>,
     /// Whether all validation checks passed.
     pub valid: bool,

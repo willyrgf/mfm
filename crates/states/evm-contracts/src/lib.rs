@@ -38,7 +38,8 @@ use mfm_evm_contract_model::{
     ConfiguredContractInstanceRef, ConfiguredFrom, ContextBoundValidationReport, ContractAddress,
     ContractCallConfig, ContractLifecycleStage, ContractProfileDigestRef, DeployProvenance,
     DeployedContractInstance, EventAssertionConfig, EvmContractContext, ExternalAdoptionEvidence,
-    ImportFromMfmRun, ImportFromMfmRunEvidence, LifecycleArtifactEvidenceRef, LifecycleNodeIdRef,
+    ExternalEventAssertionEvidence, ExternalReadAssertionEvidence, ImportFromMfmRun,
+    ImportFromMfmRunEvidence, LifecycleArtifactEvidenceRef, LifecycleNodeIdRef,
     ReadAssertionConfig, ValidationEventResult, ValidationReadResult,
 };
 use mfm_ids::{DescriptorId, DigestAlgorithm, SchemaId, StateKind, StateVersion};
@@ -450,6 +451,12 @@ pub struct ContractValidationReadResponse {
     pub read_results: Vec<ValidationReadResult>,
     /// Results for validation event assertions.
     pub event_results: Vec<ValidationEventResult>,
+    /// Replayable read assertion evidence.
+    pub validation_read_evidence: Vec<ExternalReadAssertionEvidence>,
+    /// Replayable event assertion evidence.
+    pub validation_event_evidence: Vec<ExternalEventAssertionEvidence>,
+    /// Retained lifecycle evidence refs available to the terminal report.
+    pub evidence_refs: Vec<LifecycleArtifactEvidenceRef>,
 }
 
 /// Context-bound state that prepares and submits contract deployment transactions.
@@ -791,11 +798,14 @@ impl ContextBoundValidateContractState {
             report_version: 1,
             context_ref: ContextRefValue::from(context.context_ref().clone()),
             configured_instance: ConfiguredContractInstanceRef::from_configured(&input.configured),
+            observed_chain_id: response.observed_chain_id,
             configuration_read_results: response.configuration_read_results,
             configuration_event_results: response.configuration_event_results,
             read_results: response.read_results,
             event_results: response.event_results,
-            evidence_refs: Vec::new(),
+            validation_read_evidence: response.validation_read_evidence,
+            validation_event_evidence: response.validation_event_evidence,
+            evidence_refs: response.evidence_refs,
             valid,
         })
     }

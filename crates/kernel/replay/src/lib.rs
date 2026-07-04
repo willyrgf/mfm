@@ -634,6 +634,30 @@ pub mod v1 {
         pub producer_seed_id: Option<SeedId>,
     }
 
+    /// Retained artifact evidence plus bytes returned by replay authority.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ArtifactReplayEvidence {
+        /// Retained artifact evidence.
+        pub artifact: StoredArtifactEvidenceRef,
+        /// Retained artifact bytes.
+        pub artifact_bytes: Vec<u8>,
+    }
+
+    /// Replay-authorized state-output cell artifact.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ProducedCellReplayFrame {
+        /// Certified producer node.
+        pub node: spec::NodeSpec,
+        /// Certified output cell.
+        pub cell: spec::CellSpec,
+        /// Recorded cell-produced event payload.
+        pub produced: events::CellProduced,
+        /// Retained state-output artifact evidence.
+        pub artifact: StoredArtifactEvidenceRef,
+        /// Retained state-output artifact bytes.
+        pub artifact_bytes: Vec<u8>,
+    }
+
     #[derive(Debug, Clone, Copy)]
     struct ArtifactEvidenceExpectation<'a> {
         artifact_id: &'a ArtifactId,
@@ -930,6 +954,72 @@ pub mod v1 {
                 producer_node_id: request.producer_node_id.as_ref(),
                 producer_seed_id: request.producer_seed_id.as_ref(),
             })
+        }
+
+        /// Returns retained artifact evidence and bytes for an explicit event requirement.
+        pub fn retained_artifact(
+            &self,
+            requirement: &store::EventArtifactRequirement,
+        ) -> Result<ArtifactReplayEvidence> {
+            let evidence = self
+                .artifacts
+                .values()
+                .find(|evidence| {
+                    store::validate_artifact_requirement_against_evidence(requirement, evidence)
+                        .is_ok()
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    ReplayError::new(
+                        ReplayErrorKind::ArtifactMissing,
+                        format!(
+                            "missing replay-authorized artifact evidence for {}",
+                            requirement.artifact_id
+                        ),
+                    )
+                })?;
+            Ok(ArtifactReplayEvidence {
+                artifact_bytes: self.artifact_bytes(&evidence.artifact_id)?.to_vec(),
+                artifact: evidence,
+            })
+        }
+
+        /// Returns retained produced-cell frames whose certified node/cell/event match a predicate.
+        pub fn produced_cell_frames_matching<F>(
+            &self,
+            mut matches_cell: F,
+        ) -> Result<Vec<ProducedCellReplayFrame>>
+        where
+            F: FnMut(&spec::NodeSpec, &spec::CellSpec, &events::CellProduced) -> Result<bool>,
+        {
+            let mut frames = Vec::new();
+            for envelope in &self.stream {
+                let KernelEventPayload::CellProduced(produced) = envelope.payload() else {
+                    continue;
+                };
+                let node = self.node(&produced.node_id)?;
+                let cell = self.cell(&produced.cell_id)?;
+                if !matches_cell(node, cell, produced)? {
+                    continue;
+                }
+                let artifact = self.verify_artifact(ArtifactEvidenceExpectation {
+                    artifact_id: &produced.artifact_id,
+                    digest: &produced.content_digest,
+                    schema_id: Some(&produced.schema_id),
+                    semantic_type_id: Some(&produced.semantic_type_id),
+                    role: ArtifactRole::StateOutput,
+                    producer_node_id: Some(&produced.node_id),
+                    producer_seed_id: None,
+                })?;
+                frames.push(ProducedCellReplayFrame {
+                    node: node.clone(),
+                    cell: cell.clone(),
+                    produced: produced.clone(),
+                    artifact_bytes: self.artifact_bytes(&produced.artifact_id)?.to_vec(),
+                    artifact,
+                });
+            }
+            Ok(frames)
         }
 
         /// Returns a recorded fact from replay evidence only.

@@ -263,10 +263,13 @@ fn context_bound_instances_expose_typed_context_metadata() {
         report_version: 1,
         context_ref: context_ref_value,
         configured_instance: ConfiguredContractInstanceRef::from_configured(&configured),
+        observed_chain_id: 1,
         configuration_read_results: Vec::new(),
         configuration_event_results: Vec::new(),
         read_results: Vec::new(),
         event_results: Vec::new(),
+        validation_read_evidence: Vec::new(),
+        validation_event_evidence: Vec::new(),
         evidence_refs: Vec::new(),
         valid: true,
     };
