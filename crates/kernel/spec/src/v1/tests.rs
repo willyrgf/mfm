@@ -220,6 +220,9 @@ fn test_spec() -> TypedExecutionSpec {
                 .expect("state kind"),
                 state_version: StateVersion::new("mfm.spec.test.state.multiply.v1")
                     .expect("state version"),
+                context: StateContextDescriptorSpec::no_context(),
+                input_context: StateInputContextContractSpec::no_context(),
+                output_context: StateOutputContextContractSpec::no_context(),
                 config_schema_id: config_schema.clone(),
                 input_schema_id: input_schema.clone(),
                 output_schema_id: value_schema.clone(),
@@ -251,6 +254,9 @@ fn test_spec() -> TypedExecutionSpec {
                 .expect("bridge state kind"),
                 state_version: StateVersion::new("mfm.framework.state.same_value_bridge.v1")
                     .expect("bridge state version"),
+                context: StateContextDescriptorSpec::no_context(),
+                input_context: StateInputContextContractSpec::no_context(),
+                output_context: StateOutputContextContractSpec::no_context(),
                 config_schema_id: config_schema.clone(),
                 input_schema_id: value_schema.clone(),
                 output_schema_id: value_schema.clone(),
@@ -282,6 +288,9 @@ fn test_spec() -> TypedExecutionSpec {
                 .expect("render state kind"),
                 state_version: StateVersion::new("mfm.framework.state.render_public_outputs.v1")
                     .expect("render state version"),
+                context: StateContextDescriptorSpec::no_context(),
+                input_context: StateInputContextContractSpec::no_context(),
+                output_context: StateOutputContextContractSpec::no_context(),
                 config_schema_id: config_schema.clone(),
                 input_schema_id: public_schema.clone(),
                 output_schema_id: public_schema.clone(),
@@ -598,7 +607,7 @@ fn certified_spec_hash_golden() {
     );
     assert_eq!(
         spec.spec_hash().expect("spec hash").as_str(),
-        "spec:sha256-jcs-v1:6175bdc7d0e6d7ad56b07d8777f4836a80cdd6af757877d895cc0188ba02abab"
+        "spec:sha256-jcs-v1:b02b860002e89c1904df121fd4d9a9686c79d3b504e5cb27de824761d15f9a8c"
     );
     assert!(canonical
         .as_str()

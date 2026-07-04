@@ -20,10 +20,10 @@ use mfm_manual_auth::{
     ManualResolutionAuthorizationSignature, ManualResolutionEvidenceRef,
 };
 use mfm_program::{
-    build_root_with_registries, AdapterBindingSpec, CanonicalSeed, IdempotencyKey, PublicOutputKey,
-    PureState, ReadState, RemediationNodeParams, ResourceClaim, RootBuilder, ScopeKey,
-    SideEffectNodeParams, SideEffectSagaPolicy, SideEffectState, StateKey, StateRegistryBuilder,
-    StateResult, StateSpec,
+    build_root_with_registries, AdapterBindingSpec, CanonicalSeed, IdempotencyKey, NoContext,
+    PublicOutputKey, PureState, ReadState, RemediationNodeParams, ResourceClaim, RootBuilder,
+    ScopeKey, SideEffectNodeParams, SideEffectSagaPolicy, SideEffectState, StateKey,
+    StateRegistryBuilder, StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmFactType, MfmValue, PublicOutputs};
 use mfm_store::v1::{
@@ -1407,6 +1407,7 @@ struct CertifierState {
 
 impl StateSpec for CertifierState {
     type Config = CertifierConfig;
+    type Context = NoContext;
     type Input = CertifierValue;
     type Output = CertifierValue;
     type Effect = mfm_effects::Pure;
@@ -1523,6 +1524,7 @@ macro_rules! impl_runtime_read_state {
 
         impl StateSpec for $state {
             type Config = CertifierConfig;
+            type Context = NoContext;
             type Input = $input;
             type Output = FixtureOutputValue;
             type Effect = mfm_effects::ReadExternal;
@@ -1576,6 +1578,7 @@ macro_rules! impl_runtime_side_effect_state {
 
         impl StateSpec for $state {
             type Config = CertifierConfig;
+            type Context = NoContext;
             type Input = $input;
             type Output = FixtureOutputValue;
             type Effect = mfm_effects::ApplySideEffect;
@@ -1700,6 +1703,7 @@ struct RuntimeTailState {
 
 impl StateSpec for RuntimeTailState {
     type Config = CertifierConfig;
+    type Context = NoContext;
     type Input = FixtureOutputValue;
     type Output = FixtureOutputValue;
     type Effect = mfm_effects::Pure;
@@ -12002,6 +12006,9 @@ fn append_runtime_retention_lifecycle_node(
                 name: "mfm.framework.project_retention_manifest".to_owned(),
                 state_kind: state_kind.clone(),
                 state_version: state_version.clone(),
+                context: spec::StateContextDescriptorSpec::no_context(),
+                input_context: spec::StateInputContextContractSpec::no_context(),
+                output_context: spec::StateOutputContextContractSpec::no_context(),
                 config_schema_id: config_ref.schema_id.clone(),
                 input_schema_id: input_binding.input_schema_id.clone(),
                 output_schema_id: receipt_schema.clone(),
@@ -12122,6 +12129,9 @@ fn append_runtime_complete_lifecycle_node(
                 name: "mfm.framework.complete_run".to_owned(),
                 state_kind: state_kind.clone(),
                 state_version: state_version.clone(),
+                context: spec::StateContextDescriptorSpec::no_context(),
+                input_context: spec::StateInputContextContractSpec::no_context(),
+                output_context: spec::StateOutputContextContractSpec::no_context(),
                 config_schema_id: config_ref.schema_id.clone(),
                 input_schema_id: input_binding.input_schema_id.clone(),
                 output_schema_id: receipt_schema.clone(),
@@ -12236,6 +12246,9 @@ fn append_runtime_resolve_saga_terminal_lifecycle_node(
                 name: "mfm.framework.resolve_saga_terminal".to_owned(),
                 state_kind: state_kind.clone(),
                 state_version: state_version.clone(),
+                context: spec::StateContextDescriptorSpec::no_context(),
+                input_context: spec::StateInputContextContractSpec::no_context(),
+                output_context: spec::StateOutputContextContractSpec::no_context(),
                 config_schema_id: config_ref.schema_id.clone(),
                 input_schema_id: input_binding.input_schema_id.clone(),
                 output_schema_id: receipt_schema.clone(),
@@ -12557,6 +12570,9 @@ fn fixture() -> Fixture {
                 name: "mfm.framework.render_public_outputs".to_owned(),
                 state_kind: render_state_kind,
                 state_version: render_state_version,
+                context: spec::StateContextDescriptorSpec::no_context(),
+                input_context: spec::StateInputContextContractSpec::no_context(),
+                output_context: spec::StateOutputContextContractSpec::no_context(),
                 config_schema_id: render_config_ref.schema_id.clone(),
                 input_schema_id: public_schema.clone(),
                 output_schema_id: receipt_schema.clone(),
@@ -13328,6 +13344,9 @@ fn state_descriptor(
         name: name.to_owned(),
         state_kind: node.state_kind.clone(),
         state_version: node.state_version.clone(),
+        context: spec::StateContextDescriptorSpec::no_context(),
+        input_context: spec::StateInputContextContractSpec::no_context(),
+        output_context: spec::StateOutputContextContractSpec::no_context(),
         config_schema_id: node.config_ref.schema_id.clone(),
         input_schema_id: node.input_bindings.input_schema_id.clone(),
         output_schema_id: node

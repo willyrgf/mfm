@@ -26,7 +26,7 @@ use mfm_ids::{AdapterKind, AdapterVersion, ContentDigest};
 use mfm_ids::{DigestAlgorithm, StateKind, StateVersion};
 use mfm_program::{
     fact_descriptor_ref, AdapterBindingSpec, CanonicalSeed, FactDescriptorRef, ManagedWriteState,
-    MfmFactType, ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
+    MfmFactType, NoContext, ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
 };
 use mfm_program_derive::{MfmConfig, MfmFactType, MfmValue, StateInput};
 use serde::{Deserialize, Serialize};
@@ -820,6 +820,7 @@ impl ObserveBtcChainHeadState {
 
 impl StateSpec for ObserveBtcChainHeadState {
     type Config = ObserveBtcChainHeadConfig;
+    type Context = NoContext;
     type Input = ObserveBtcChainHeadInput;
     type Output = BtcChainHeadObservation;
     type Effect = ReadExternal;
@@ -879,6 +880,7 @@ pub struct RecordBtcChainHeadFactState;
 
 impl StateSpec for RecordBtcChainHeadFactState {
     type Config = RecordBtcChainHeadFactConfig;
+    type Context = NoContext;
     type Input = RecordBtcChainHeadFactInput;
     type Output = BtcChainHeadFact;
     type Effect = ManagedPlatformWrite;
@@ -1145,6 +1147,7 @@ fn latest_checkpoint_response_ref(
 
 impl StateSpec for QueryCollectorCheckpointState {
     type Config = QueryCollectorCheckpointConfig;
+    type Context = NoContext;
     type Input = QueryCollectorCheckpointInput;
     type Output = LoadedCollectorCheckpoint;
     type Effect = ReadExternal;
@@ -1235,6 +1238,7 @@ pub struct RecordCollectorCheckpointState {
 
 impl StateSpec for RecordCollectorCheckpointState {
     type Config = RecordCollectorCheckpointConfig;
+    type Context = NoContext;
     type Input = RecordCollectorCheckpointInput;
     type Output = CollectorCheckpointFact;
     type Effect = ManagedPlatformWrite;

@@ -4,9 +4,9 @@ use mfm_ids::{
     AdapterKind, AdapterVersion, CapabilityKind, CapabilityVersion, OperationKind, OperationVersion,
 };
 use mfm_program::{
-    build_root_with_registries, CanonicalSeed, IdempotencyKey, MfmFactType as _, Operation,
-    OperationKey, OperationRegistryBuilder, PublicOutputKey, PureState, ResourceClaim, RootBuilder,
-    ScopeKey, SideEffectState, StateKey, StateRegistryBuilder, StateResult, StateSpec,
+    build_root_with_registries, CanonicalSeed, IdempotencyKey, MfmFactType as _, NoContext,
+    Operation, OperationKey, OperationRegistryBuilder, PublicOutputKey, PureState, ResourceClaim,
+    RootBuilder, ScopeKey, SideEffectState, StateKey, StateRegistryBuilder, StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmFactType, MfmValue, OperationOutput, PublicOutputs};
 use serde::{Deserialize, Serialize};
@@ -132,6 +132,7 @@ macro_rules! impl_test_state_spec {
     ) => {
         impl StateSpec for $state {
             type Config = TestConfig;
+            type Context = NoContext;
             type Input = TestValue;
             type Output = TestValue;
             type Effect = $effect;
@@ -193,6 +194,7 @@ struct FactEmittingState {
 
 impl StateSpec for FactEmittingState {
     type Config = TestConfig;
+    type Context = NoContext;
     type Input = TestValue;
     type Output = TestValue;
     type Effect = Pure;
@@ -639,7 +641,7 @@ fn certifies_reference_program_draft() {
     );
     assert_eq!(
         certified.certificate_hash().as_str(),
-        "content:sha256-jcs-v1:582d3b707fd869ed96e100701369c718a17328d98afa1d5e5bc36e0bc2f175c9"
+        "content:sha256-jcs-v1:3782018d98a8c5ba247d7e798553f8b1b58e2016fe5fbe90264eabaa081989de"
     );
     assert_eq!(
         certified.envelope().spec.public_outputs.public_schema_id,

@@ -12,4 +12,4 @@ error: cannot construct `TypedHandleRef` with struct literal syntax due to priva
 30 |         semantic_type_id,
    |         ---------------- private field
    |
-   = note: ...and other private field `value_lineage` that was not provided
+   = note: ...and other private fields `value_lineage` and `context` that were not provided

@@ -36,6 +36,7 @@ pub struct TryPureState {
 
 impl mfm_program::StateSpec for TryPureState {
     type Config = TryConfig;
+    type Context = mfm_program::NoContext;
     type Input = TryValue;
     type Output = TryValue;
     type Effect = mfm_effects::Pure;
@@ -112,6 +113,7 @@ macro_rules! impl_try_side_effect_state {
     ($state:ty, $kind:literal, $version:literal, $name:literal, $digest:literal) => {
         impl mfm_program::StateSpec for $state {
             type Config = TryConfig;
+    type Context = mfm_program::NoContext;
             type Input = TryValue;
             type Output = TryValue;
             type Effect = mfm_effects::ApplySideEffect;

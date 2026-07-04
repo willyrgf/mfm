@@ -1176,6 +1176,58 @@ pub mod v1 {
         }
     }
 
+    /// Descriptor-level context contract for a state type.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum StateContextDescriptorSpec {
+        /// State executes outside a semantic transition context.
+        NoContext,
+        /// State requires a certified context value with this descriptor contract.
+        Required(Box<StateContextDescriptorRequirementSpec>),
+    }
+
+    /// Descriptor-level requirement for a typed state transition context.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct StateContextDescriptorRequirementSpec {
+        /// Typed context descriptor identity.
+        pub context_descriptor_id: ContextDescriptorId,
+        /// Context value schema identity.
+        pub schema_id: SchemaId,
+        /// Context value semantic identity.
+        pub semantic_type_id: SemanticTypeId,
+        /// Canonicalizer used for context values.
+        pub canonicalizer_identity: CanonicalizerIdentity,
+    }
+
+    impl StateContextDescriptorSpec {
+        /// Returns the framework-owned no-context descriptor contract.
+        pub const fn no_context() -> Self {
+            Self::NoContext
+        }
+
+        fn json(&self) -> serde_json::Value {
+            match self {
+                Self::NoContext => serde_json::json!({
+                    "kind": "no_context",
+                }),
+                Self::Required(requirement) => {
+                    let StateContextDescriptorRequirementSpec {
+                        context_descriptor_id,
+                        schema_id,
+                        semantic_type_id,
+                        canonicalizer_identity,
+                    } = requirement.as_ref();
+                    serde_json::json!({
+                        "canonicalizer_identity": canonicalizer_identity.as_str(),
+                        "context_descriptor_id": context_descriptor_id.as_str(),
+                        "kind": "required",
+                        "schema_id": schema_id.as_str(),
+                        "semantic_type_id": semantic_type_id.as_str(),
+                    })
+                }
+            }
+        }
+    }
+
     /// Certified producer constraint for a context-bound resource.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct ContextProducerSpec {
@@ -1191,6 +1243,84 @@ pub mod v1 {
                 "producer_descriptor_id": self.producer_descriptor_id.as_ref().map(DescriptorId::as_str),
                 "seed_producers_allowed": self.seed_producers_allowed,
             })
+        }
+    }
+
+    /// Descriptor-level context contract for a state input.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum StateInputContextContractSpec {
+        /// Input does not require a context-bound resource.
+        NoContext,
+        /// Input must consume a context-bound resource matching this contract.
+        Required {
+            /// Required resource kind.
+            resource_kind: ContextResourceKind,
+            /// Required resource stage.
+            stage: ContextStage,
+            /// Required producer contract.
+            producer: Box<ContextProducerSpec>,
+        },
+    }
+
+    impl StateInputContextContractSpec {
+        /// Returns the no-context input contract.
+        pub const fn no_context() -> Self {
+            Self::NoContext
+        }
+
+        fn json(&self) -> serde_json::Value {
+            match self {
+                Self::NoContext => serde_json::json!({
+                    "kind": "no_context",
+                }),
+                Self::Required {
+                    resource_kind,
+                    stage,
+                    producer,
+                } => serde_json::json!({
+                    "kind": "required",
+                    "producer": producer.json(),
+                    "resource_kind": resource_kind.as_str(),
+                    "stage": stage.as_str(),
+                }),
+            }
+        }
+    }
+
+    /// Descriptor-level context contract for a state output.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum StateOutputContextContractSpec {
+        /// Output is not context-bound.
+        NoContext,
+        /// Output produces a context-bound resource under the node's context.
+        Produces {
+            /// Produced resource kind.
+            resource_kind: ContextResourceKind,
+            /// Produced resource stage.
+            stage: ContextStage,
+        },
+    }
+
+    impl StateOutputContextContractSpec {
+        /// Returns the no-context output contract.
+        pub const fn no_context() -> Self {
+            Self::NoContext
+        }
+
+        fn json(&self) -> serde_json::Value {
+            match self {
+                Self::NoContext => serde_json::json!({
+                    "kind": "no_context",
+                }),
+                Self::Produces {
+                    resource_kind,
+                    stage,
+                } => serde_json::json!({
+                    "kind": "produces",
+                    "resource_kind": resource_kind.as_str(),
+                    "stage": stage.as_str(),
+                }),
+            }
         }
     }
 
@@ -1889,6 +2019,12 @@ pub mod v1 {
         pub state_kind: StateKind,
         /// State version.
         pub state_version: StateVersion,
+        /// State transition-context descriptor contract.
+        pub context: StateContextDescriptorSpec,
+        /// State input context-resource contract.
+        pub input_context: StateInputContextContractSpec,
+        /// State output context-resource contract.
+        pub output_context: StateOutputContextContractSpec,
         /// Config schema id.
         pub config_schema_id: SchemaId,
         /// Input schema id.
@@ -1920,6 +2056,7 @@ pub mod v1 {
             serde_json::json!({
                 "capabilities": capability_set_json(&self.capabilities),
                 "config_schema_id": self.config_schema_id.as_str(),
+                "context": self.context.json(),
                 "descriptor_id": self.descriptor_id.as_str(),
                 "effect_class": self.effect_class.as_str(),
                 "effect_kind": self.effect_kind.as_str(),
@@ -1929,8 +2066,10 @@ pub mod v1 {
                     .iter()
                     .map(FactDescriptorRef::json)
                     .collect::<Vec<_>>(),
+                "input_context": self.input_context.json(),
                 "input_schema_id": self.input_schema_id.as_str(),
                 "name": self.name.as_str(),
+                "output_context": self.output_context.json(),
                 "output_schema_id": self.output_schema_id.as_str(),
                 "output_semantic_type_id": self.output_semantic_type_id.as_str(),
                 "runner": self.runner.as_str(),
@@ -3384,12 +3523,75 @@ pub mod v1 {
         }
     }
 
+    fn parse_state_context_descriptor(
+        value: &serde_json::Value,
+    ) -> Result<StateContextDescriptorSpec> {
+        let object = object(value, "state context descriptor")?;
+        match required_str(object, "kind")? {
+            "no_context" => Ok(StateContextDescriptorSpec::NoContext),
+            "required" => Ok(StateContextDescriptorSpec::Required(Box::new(
+                StateContextDescriptorRequirementSpec {
+                    context_descriptor_id: identity(required_str(
+                        object,
+                        "context_descriptor_id",
+                    )?)?,
+                    schema_id: identity(required_str(object, "schema_id")?)?,
+                    semantic_type_id: identity(required_str(object, "semantic_type_id")?)?,
+                    canonicalizer_identity: CanonicalizerIdentity::new(required_str(
+                        object,
+                        "canonicalizer_identity",
+                    )?)?,
+                },
+            ))),
+            kind => Err(json_error(format!(
+                "unsupported state context descriptor kind {kind:?}"
+            ))),
+        }
+    }
+
     fn parse_context_producer(value: &serde_json::Value) -> Result<ContextProducerSpec> {
         let object = object(value, "context producer constraint")?;
         Ok(ContextProducerSpec {
             producer_descriptor_id: optional_identity(object, "producer_descriptor_id")?,
             seed_producers_allowed: required_bool(object, "seed_producers_allowed")?,
         })
+    }
+
+    fn parse_state_input_context_contract(
+        value: &serde_json::Value,
+    ) -> Result<StateInputContextContractSpec> {
+        let object = object(value, "state input context contract")?;
+        match required_str(object, "kind")? {
+            "no_context" => Ok(StateInputContextContractSpec::NoContext),
+            "required" => Ok(StateInputContextContractSpec::Required {
+                resource_kind: ContextResourceKind::new(required_str(object, "resource_kind")?)
+                    .map_err(|error| SpecError::Identity(error.to_string()))?,
+                stage: ContextStage::new(required_str(object, "stage")?)
+                    .map_err(|error| SpecError::Identity(error.to_string()))?,
+                producer: Box::new(parse_context_producer(required(object, "producer")?)?),
+            }),
+            kind => Err(json_error(format!(
+                "unsupported state input context contract kind {kind:?}"
+            ))),
+        }
+    }
+
+    fn parse_state_output_context_contract(
+        value: &serde_json::Value,
+    ) -> Result<StateOutputContextContractSpec> {
+        let object = object(value, "state output context contract")?;
+        match required_str(object, "kind")? {
+            "no_context" => Ok(StateOutputContextContractSpec::NoContext),
+            "produces" => Ok(StateOutputContextContractSpec::Produces {
+                resource_kind: ContextResourceKind::new(required_str(object, "resource_kind")?)
+                    .map_err(|error| SpecError::Identity(error.to_string()))?,
+                stage: ContextStage::new(required_str(object, "stage")?)
+                    .map_err(|error| SpecError::Identity(error.to_string()))?,
+            }),
+            kind => Err(json_error(format!(
+                "unsupported state output context contract kind {kind:?}"
+            ))),
+        }
     }
 
     fn parse_cell_context(value: &serde_json::Value) -> Result<CellContextSpec> {
@@ -3587,6 +3789,12 @@ pub mod v1 {
             name: required_str(object, "name")?.to_owned(),
             state_kind: identity(required_str(object, "state_kind")?)?,
             state_version: version(required_str(object, "state_version")?)?,
+            context: parse_state_context_descriptor(required(object, "context")?)?,
+            input_context: parse_state_input_context_contract(required(object, "input_context")?)?,
+            output_context: parse_state_output_context_contract(required(
+                object,
+                "output_context",
+            )?)?,
             config_schema_id: identity(required_str(object, "config_schema_id")?)?,
             input_schema_id: identity(required_str(object, "input_schema_id")?)?,
             output_schema_id: identity(required_str(object, "output_schema_id")?)?,

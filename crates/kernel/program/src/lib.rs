@@ -20,24 +20,27 @@ use mfm_effects::{
 };
 pub use mfm_facts as facts;
 use mfm_ids::{
-    AdapterKind, AdapterVersion, CellId, ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes,
-    EffectKind, FieldPath as CheckedFieldPath, FieldSegment as CheckedFieldSegment, NodeId,
-    OperationInstanceId, OperationKind, OperationVersion, SchemaId, ScopeId, SeedId,
-    SemanticTypeId, SideEffectPairId, StableAuthorKey as CheckedStableAuthorKey, StateKind,
-    StateVersion,
+    AdapterKind, AdapterVersion, CellId, ContentDigest, ContextDescriptorId, DescriptorId,
+    DigestAlgorithm, DigestBytes, EffectKind, FieldPath as CheckedFieldPath,
+    FieldSegment as CheckedFieldSegment, NodeId, OperationInstanceId, OperationKind,
+    OperationVersion, SchemaId, ScopeId, SeedId, SemanticTypeId, SideEffectPairId,
+    StableAuthorKey as CheckedStableAuthorKey, StateKind, StateVersion,
 };
 use mfm_spec::v1::MediaType;
 pub use mfm_spec::v1::{
-    FactDescriptorRef, ManualAuthorizationVerifierId, ManualSigningSchemeSpec, OperatorAuthorityId,
-    OperatorAuthorityMemberSpec, OperatorId, OperatorPublicIdentity, ResourceNamespace,
-    SideEffectVerificationSpec,
+    CanonicalizerIdentity, CertifiedContextSpec, FactDescriptorRef, ManualAuthorizationVerifierId,
+    ManualSigningSchemeSpec, OperatorAuthorityId, OperatorAuthorityMemberSpec, OperatorId,
+    OperatorPublicIdentity, ResourceNamespace, SideEffectVerificationSpec,
 };
 use mfm_spec::v1::{
-    ManualAuthorizationQuorumSpec, ManualResolutionAuthorizationSpec, ManualResolutionEvidenceSpec,
-    OperatorAuthoritySnapshotSpec, ResourceClaimSpec,
+    CellContextSpec, ContextProducerSpec, InputContextSpec, ManualAuthorizationQuorumSpec,
+    ManualResolutionAuthorizationSpec, ManualResolutionEvidenceSpec, NodeContextSpec,
+    OperatorAuthoritySnapshotSpec, ResourceClaimSpec, StateContextDescriptorRequirementSpec,
+    StateContextDescriptorSpec, StateInputContextContractSpec, StateOutputContextContractSpec,
 };
 use mfm_values::{
-    MfmConfig, MfmValue, SchemaDescriptor, SchemaShape, StateInput, ValueTerminalPolicy,
+    MfmConfig, MfmValue, NumberPolicy, PersistedSurfacePolicy, SchemaDescriptor, SchemaKind,
+    SchemaShape, SecretPolicy, StateInput, ValueTerminalPolicy,
 };
 pub use mfm_values::{NonEmpty, ValidatedConfig};
 
@@ -122,6 +125,12 @@ pub enum PlanError {
     /// A public output field path was declared more than once.
     #[error("duplicate public output field path {0}")]
     DuplicatePublicOutputPath(String),
+    /// A certified context ref was declared more than once.
+    #[error("duplicate certified context ref {0}")]
+    DuplicateContextRef(String),
+    /// State context binding disagreed with the registered descriptor contract.
+    #[error("state context contract mismatch: {0}")]
+    ContextContract(String),
     /// Root public outputs were bound more than once.
     #[error("root public outputs already bound")]
     PublicOutputsAlreadyBound,
@@ -393,10 +402,113 @@ pub enum StateError {
 /// Result type returned by executable state traits.
 pub type StateResult<T> = std::result::Result<T, StateError>;
 
+/// Framework-owned marker for states that do not execute under semantic transition context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NoContext;
+
+/// Marker contract for typed, canonical, non-secret context values.
+///
+/// Implementing this trait is an explicit opt-in: ordinary persisted values do not become
+/// transition contexts automatically.
+pub trait MfmContext: MfmValue + Clone {
+    /// Returns the canonicalizer identity used for context values.
+    fn canonicalizer_identity() -> Result<CanonicalizerIdentity> {
+        CanonicalizerIdentity::new("sha256-jcs-v1")
+            .map_err(|error| PlanError::Value(error.to_string()))
+    }
+}
+
+/// Context contract accepted by a state descriptor.
+pub trait StateContext: Send + Sync + 'static {
+    /// Returns the descriptor-level state context contract.
+    fn descriptor() -> Result<StateContextDescriptorSpec>;
+}
+
+impl StateContext for NoContext {
+    fn descriptor() -> Result<StateContextDescriptorSpec> {
+        Ok(StateContextDescriptorSpec::no_context())
+    }
+}
+
+impl<C> StateContext for C
+where
+    C: MfmContext,
+{
+    fn descriptor() -> Result<StateContextDescriptorSpec> {
+        context_descriptor_for::<C>()
+    }
+}
+
+/// State-facing typed context authority materialized from a certified spec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedContext<C: MfmContext> {
+    context_ref: mfm_ids::ContextRef,
+    context_descriptor_id: ContextDescriptorId,
+    schema_id: SchemaId,
+    semantic_type_id: SemanticTypeId,
+    canonicalizer_identity: CanonicalizerIdentity,
+    value: C,
+}
+
+impl<C: MfmContext> CertifiedContext<C> {
+    /// Returns the content-addressed certified context ref.
+    pub fn context_ref(&self) -> &mfm_ids::ContextRef {
+        &self.context_ref
+    }
+
+    /// Returns the context descriptor identity.
+    pub fn context_descriptor_id(&self) -> &ContextDescriptorId {
+        &self.context_descriptor_id
+    }
+
+    /// Returns the context schema id.
+    pub fn schema_id(&self) -> &SchemaId {
+        &self.schema_id
+    }
+
+    /// Returns the context semantic type id.
+    pub fn semantic_type_id(&self) -> &SemanticTypeId {
+        &self.semantic_type_id
+    }
+
+    /// Returns the context canonicalizer identity.
+    pub fn canonicalizer_identity(&self) -> &CanonicalizerIdentity {
+        &self.canonicalizer_identity
+    }
+
+    /// Returns the decoded typed context value.
+    pub fn value(&self) -> &C {
+        &self.value
+    }
+}
+
+/// Scope-bound declared certified context handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredContext<'program, 'scope, C: MfmContext> {
+    spec: CertifiedContextSpec,
+    _program: PhantomData<fn(&'program ()) -> &'program ()>,
+    _scope: PhantomData<fn(&'scope ()) -> &'scope ()>,
+    _context: PhantomData<fn(C) -> C>,
+}
+
+impl<'program, 'scope, C: MfmContext> DeclaredContext<'program, 'scope, C> {
+    /// Returns the content-addressed certified context ref.
+    pub fn context_ref(&self) -> &mfm_ids::ContextRef {
+        &self.spec.context_ref
+    }
+
+    /// Returns the persisted certified context table entry.
+    pub fn spec(&self) -> &CertifiedContextSpec {
+        &self.spec
+    }
+}
+
 /// Descriptive contract for a versioned executable state.
 pub trait StateSpec: Send + Sync + 'static {
     /// Deterministic planning config type.
     type Config: MfmConfig;
+    /// Semantic transition context required by this state.
+    type Context: StateContext;
     /// Runtime input type materialized from certified input bindings.
     type Input: StateInput;
     /// Runtime output value type.
@@ -423,6 +535,16 @@ pub trait StateSpec: Send + Sync + 'static {
     /// Returns fact descriptor hashes this state type may emit.
     fn emitted_fact_descriptors() -> Result<Vec<FactDescriptorRef>> {
         Ok(Vec::new())
+    }
+
+    /// Returns the context-bound input resource contract for this state.
+    fn input_context_contract() -> Result<StateInputContextContractSpec> {
+        Ok(StateInputContextContractSpec::no_context())
+    }
+
+    /// Returns the context-bound output resource contract for this state.
+    fn output_context_contract() -> Result<StateOutputContextContractSpec> {
+        Ok(StateOutputContextContractSpec::no_context())
     }
 
     /// Constructs the executable state from validated config authority.
@@ -864,6 +986,9 @@ pub struct StateDescriptorIdentity {
     kind: StateKind,
     version: StateVersion,
     name: &'static str,
+    context: StateContextDescriptorSpec,
+    input_context: StateInputContextContractSpec,
+    output_context: StateOutputContextContractSpec,
     config_schema_id: SchemaId,
     input_schema_id: SchemaId,
     output_schema_id: SchemaId,
@@ -902,10 +1027,16 @@ impl StateDescriptorIdentity {
             <S::Effect as EffectRunner<S>>::side_effect_contract_digest()?;
         let emitted_fact_descriptors =
             canonical_fact_descriptor_refs(S::emitted_fact_descriptors()?)?;
+        let context = S::Context::descriptor()?;
+        let input_context = S::input_context_contract()?;
+        let output_context = S::output_context_contract()?;
         let descriptor_id = state_descriptor_id(StateDescriptorIdParts {
             kind: &kind,
             version: &version,
             name: S::name(),
+            context: &context,
+            input_context: &input_context,
+            output_context: &output_context,
             config_schema_id: &config_schema_id,
             input_schema_id: &input_schema_id,
             output_schema_id: &output_schema_id,
@@ -921,6 +1052,9 @@ impl StateDescriptorIdentity {
             kind,
             version,
             name: S::name(),
+            context,
+            input_context,
+            output_context,
             config_schema_id,
             input_schema_id,
             output_schema_id,
@@ -951,6 +1085,21 @@ impl StateDescriptorIdentity {
     /// Returns the stable state descriptor name.
     pub fn name(&self) -> &'static str {
         self.name
+    }
+
+    /// Returns this state's context descriptor contract.
+    pub fn context(&self) -> &StateContextDescriptorSpec {
+        &self.context
+    }
+
+    /// Returns this state's input context contract.
+    pub fn input_context(&self) -> &StateInputContextContractSpec {
+        &self.input_context
+    }
+
+    /// Returns this state's output context contract.
+    pub fn output_context(&self) -> &StateOutputContextContractSpec {
+        &self.output_context
     }
 
     /// Returns the config schema id.
@@ -1869,6 +2018,7 @@ pub struct Handle<'program, 'scope, T: MfmValue> {
     schema_id: SchemaId,
     semantic_type_id: SemanticTypeId,
     value_lineage: ValueLineageRef,
+    context: CellContextSpec,
     origin: HandleOrigin,
     _program: PhantomData<fn(&'program ()) -> &'program ()>,
     _scope: PhantomData<fn(&'scope ()) -> &'scope ()>,
@@ -1883,6 +2033,7 @@ impl<'program, 'scope, T: MfmValue> Clone for Handle<'program, 'scope, T> {
             schema_id: self.schema_id.clone(),
             semantic_type_id: self.semantic_type_id.clone(),
             value_lineage: self.value_lineage.clone(),
+            context: self.context.clone(),
             origin: self.origin.clone(),
             _program: PhantomData,
             _scope: PhantomData,
@@ -1898,6 +2049,7 @@ impl<'program, 'scope, T: MfmValue> Handle<'program, 'scope, T> {
         schema_id: SchemaId,
         semantic_type_id: SemanticTypeId,
         value_lineage: ValueLineageRef,
+        context: CellContextSpec,
     ) -> Self {
         Self {
             cell_id,
@@ -1905,6 +2057,7 @@ impl<'program, 'scope, T: MfmValue> Handle<'program, 'scope, T> {
             schema_id,
             semantic_type_id,
             value_lineage,
+            context,
             origin: HandleOrigin::Local,
             _program: PhantomData,
             _scope: PhantomData,
@@ -1918,6 +2071,7 @@ impl<'program, 'scope, T: MfmValue> Handle<'program, 'scope, T> {
         schema_id: SchemaId,
         semantic_type_id: SemanticTypeId,
         value_lineage: ValueLineageRef,
+        context: CellContextSpec,
         evidence: BridgeEvidenceCore,
     ) -> Self {
         Self {
@@ -1926,6 +2080,7 @@ impl<'program, 'scope, T: MfmValue> Handle<'program, 'scope, T> {
             schema_id,
             semantic_type_id,
             value_lineage,
+            context,
             origin: HandleOrigin::Bridge {
                 evidence: Box::new(evidence),
             },
@@ -1943,6 +2098,7 @@ impl<'program, 'scope, T: MfmValue> Handle<'program, 'scope, T> {
             schema_id: self.schema_id.clone(),
             semantic_type_id: self.semantic_type_id.clone(),
             value_lineage: self.value_lineage.clone(),
+            context: self.context.clone(),
         }
     }
 }
@@ -2089,6 +2245,8 @@ pub struct TypedHandleRef {
     semantic_type_id: SemanticTypeId,
     /// Value lineage reference.
     value_lineage: ValueLineageRef,
+    /// Certified context constraint carried by the planned cell.
+    context: CellContextSpec,
 }
 
 impl TypedHandleRef {
@@ -2115,6 +2273,11 @@ impl TypedHandleRef {
     /// Returns the value lineage reference.
     pub fn value_lineage(&self) -> &ValueLineageRef {
         &self.value_lineage
+    }
+
+    /// Returns the certified context constraint carried by the planned cell.
+    pub fn context(&self) -> &CellContextSpec {
+        &self.context
     }
 }
 
@@ -2150,6 +2313,7 @@ impl RootSeedSpec {
             schema_id: self.schema_id.clone(),
             semantic_type_id: self.semantic_type_id.clone(),
             value_lineage: self.value_lineage.clone(),
+            context: CellContextSpec::no_context(),
         }
     }
 }
@@ -2199,6 +2363,14 @@ pub struct StateNodeSpec {
     pub state_descriptor_id: DescriptorId,
     /// Stable registered state descriptor name.
     pub state_descriptor_name: String,
+    /// Registered state context descriptor contract.
+    pub context_descriptor: StateContextDescriptorSpec,
+    /// Registered state input context contract.
+    pub input_context_contract: StateInputContextContractSpec,
+    /// Registered state output context contract.
+    pub output_context_contract: StateOutputContextContractSpec,
+    /// Certified transition-context requirement for this node.
+    pub context: NodeContextSpec,
     /// Registered runner kind.
     pub runner: RunnerKind,
     /// Framework effect kind required by the registered state.
@@ -2229,6 +2401,8 @@ pub struct StateNodeSpec {
     pub output_semantic_type_id: SemanticTypeId,
     /// Output value lineage ref.
     pub output_value_lineage: ValueLineageRef,
+    /// Certified transition-context constraint for the output cell.
+    pub output_context: CellContextSpec,
     /// Stable domain keys associated with the output value lineage.
     pub output_domain_keys: Vec<StableDomainKeyRef>,
     /// Planning lineage active while this node was emitted.
@@ -2246,6 +2420,8 @@ pub struct SideEffectVerifyDraftSpec {
     pub output_cell_id: CellId,
     /// Verify framework output value lineage ref.
     pub output_value_lineage: ValueLineageRef,
+    /// Certified transition-context constraint for the verify output cell.
+    pub output_context: CellContextSpec,
     /// Stable domain keys associated with the verify output value lineage.
     pub output_domain_keys: Vec<StableDomainKeyRef>,
 }
@@ -2368,6 +2544,8 @@ pub struct BridgeNodeSpec {
     pub semantic_type_id: SemanticTypeId,
     /// Value schema id.
     pub schema_id: SchemaId,
+    /// Certified transition-context constraint preserved by the same-value bridge.
+    pub context: CellContextSpec,
     /// Bridge direction.
     pub bridge_kind: BridgeKind,
     /// Same-value bridge policy.
@@ -2573,6 +2751,7 @@ struct InputCellBinding {
     schema_id: SchemaId,
     value_lineage: ValueLineageRef,
     required_terminal: RequiredTerminal,
+    context: InputContextSpec,
 }
 
 /// Read-only view over a typed input cell binding.
@@ -2610,6 +2789,11 @@ impl<'a> InputCellBindingRef<'a> {
     /// Returns the required terminal policy.
     pub fn required_terminal(&self) -> RequiredTerminal {
         self.binding.required_terminal
+    }
+
+    /// Returns the certified context constraint required by this input cell.
+    pub fn context(&self) -> &InputContextSpec {
+        &self.binding.context
     }
 }
 
@@ -2672,6 +2856,7 @@ impl InputBindingNode {
         schema_id: SchemaId,
         value_lineage: ValueLineageRef,
         required_terminal: RequiredTerminal,
+        context: InputContextSpec,
     ) -> Self {
         Self {
             kind: InputBindingNodeKind::Cell(Box::new(InputCellBinding {
@@ -2681,6 +2866,7 @@ impl InputBindingNode {
                 schema_id,
                 value_lineage,
                 required_terminal,
+                context,
             })),
         }
     }
@@ -2937,6 +3123,7 @@ where
             typed_ref.schema_id,
             typed_ref.value_lineage,
             RequiredTerminal::from_value_policy(T::terminal_policy()),
+            input_context_from_cell_context(&typed_ref.context),
         ))
     }
 }
@@ -3459,6 +3646,7 @@ pub struct TypedProgramDraft {
     root_key: ScopeKey,
     root_scope_id: ScopeId,
     saga_policy: SagaPolicy,
+    contexts: Vec<CertifiedContextSpec>,
     seeds: Vec<RootSeedSpec>,
     scopes: Vec<ScopeSpec>,
     state_nodes: Vec<StateNodeSpec>,
@@ -3482,6 +3670,11 @@ impl TypedProgramDraft {
     /// Returns the run-level saga policy for this draft.
     pub fn saga_policy(&self) -> &SagaPolicy {
         &self.saga_policy
+    }
+
+    /// Returns certified transition contexts declared by the draft.
+    pub fn contexts(&self) -> &[CertifiedContextSpec] {
+        &self.contexts
     }
 
     /// Returns root seed specs.
@@ -3551,6 +3744,68 @@ impl TypedProgramDraft {
             )));
         }
         Ok(())
+    }
+}
+
+fn validate_state_context_binding(
+    descriptor: &StateDescriptorIdentity,
+    context: Option<&CertifiedContextSpec>,
+) -> Result<()> {
+    match (descriptor.context(), context) {
+        (StateContextDescriptorSpec::NoContext, None) => Ok(()),
+        (StateContextDescriptorSpec::NoContext, Some(context)) => {
+            Err(PlanError::ContextContract(format!(
+                "state {} is NoContext but was planned with {}",
+                descriptor.name(),
+                context.context_ref
+            )))
+        }
+        (StateContextDescriptorSpec::Required(_), None) => Err(PlanError::ContextContract(
+            format!("state {} requires a certified context", descriptor.name()),
+        )),
+        (StateContextDescriptorSpec::Required(requirement), Some(context)) => {
+            if context.context_descriptor_id != requirement.context_descriptor_id
+                || context.schema_id != requirement.schema_id
+                || context.semantic_type_id != requirement.semantic_type_id
+                || context.canonicalizer_identity != requirement.canonicalizer_identity
+            {
+                return Err(PlanError::ContextContract(format!(
+                    "state {} context descriptor mismatch for {}",
+                    descriptor.name(),
+                    context.context_ref
+                )));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn output_context_from_contract(
+    descriptor: &StateDescriptorIdentity,
+    context: Option<&CertifiedContextSpec>,
+) -> Result<CellContextSpec> {
+    match descriptor.output_context() {
+        StateOutputContextContractSpec::NoContext => Ok(CellContextSpec::NoContext),
+        StateOutputContextContractSpec::Produces {
+            resource_kind,
+            stage,
+        } => {
+            let context = context.ok_or_else(|| {
+                PlanError::ContextContract(format!(
+                    "state {} produces a context-bound resource without context",
+                    descriptor.name()
+                ))
+            })?;
+            Ok(CellContextSpec::Bound {
+                context_ref: context.context_ref.clone(),
+                resource_kind: resource_kind.clone(),
+                stage: stage.clone(),
+                producer: Box::new(ContextProducerSpec {
+                    producer_descriptor_id: Some(descriptor.descriptor_id().clone()),
+                    seed_producers_allowed: false,
+                }),
+            })
+        }
     }
 }
 
@@ -3722,6 +3977,7 @@ impl<'program, 'scope> RootBuilder<'program, 'scope> {
             spec.schema_id.clone(),
             spec.semantic_type_id.clone(),
             value_lineage,
+            CellContextSpec::no_context(),
         );
         self.seeds.push(spec);
         Ok(handle)
@@ -3773,6 +4029,8 @@ pub struct ScopeBuilder<'program, 'scope> {
     operation_registry: OperationRegistrySnapshot,
     state_keys: BTreeSet<String>,
     operation_keys: BTreeSet<String>,
+    context_refs: BTreeSet<String>,
+    contexts: Vec<CertifiedContextSpec>,
     state_nodes: Vec<StateNodeSpec>,
     remediation_nodes: BTreeMap<NodeId, StateNodeSpec>,
     operation_lineage: Vec<OperationLineageFrameSpec>,
@@ -3788,6 +4046,8 @@ pub struct ScopeBuilder<'program, 'scope> {
 struct ScopeBuilderCheckpoint {
     state_keys: BTreeSet<String>,
     operation_keys: BTreeSet<String>,
+    context_refs: BTreeSet<String>,
+    contexts: Vec<CertifiedContextSpec>,
     state_nodes: Vec<StateNodeSpec>,
     remediation_nodes: BTreeMap<NodeId, StateNodeSpec>,
     operation_lineage: Vec<OperationLineageFrameSpec>,
@@ -3795,6 +4055,13 @@ struct ScopeBuilderCheckpoint {
     child_scope_keys: BTreeSet<String>,
     child_scopes: Vec<ScopeSpec>,
     bridge_nodes: Vec<BridgeNodeSpec>,
+}
+
+#[derive(Debug, Default)]
+struct StateNodePlanningOptions {
+    context: Option<CertifiedContextSpec>,
+    output_domain_keys: Vec<StableDomainKeyRef>,
+    side_effect_contract: Option<(ResourceClaim, SideEffectVerificationSpec)>,
 }
 
 impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
@@ -3836,6 +4103,8 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
                 operation_registry: self.operation_registry.clone(),
                 state_keys: BTreeSet::new(),
                 operation_keys: BTreeSet::new(),
+                context_refs: BTreeSet::new(),
+                contexts: Vec::new(),
                 state_nodes: Vec::new(),
                 remediation_nodes: BTreeMap::new(),
                 operation_lineage: Vec::new(),
@@ -3861,13 +4130,45 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             parent_scope_id: Some(self.scope_id.clone()),
             planning_lineage: operation_lineage,
         });
+        for context in &child.scope.contexts {
+            if self.context_refs.contains(context.context_ref.as_str()) {
+                return Err(PlanError::DuplicateContextRef(
+                    context.context_ref.as_str().to_owned(),
+                ));
+            }
+        }
         self.state_nodes.extend(child.scope.state_nodes);
         self.remediation_nodes.extend(child.scope.remediation_nodes);
+        self.context_refs.extend(child.scope.context_refs);
+        self.contexts.extend(child.scope.contexts);
         self.operation_lineage.extend(child.scope.operation_lineage);
         self.child_scopes.extend(child.scope.child_scopes);
         self.bridge_nodes.extend(child.bridge_nodes);
         self.bridge_nodes.extend(child.scope.bridge_nodes);
         Ok(bridged.value)
+    }
+
+    /// Declares one typed certified transition context in this scope.
+    pub fn declare_context<C>(&mut self, value: C) -> Result<DeclaredContext<'program, 'scope, C>>
+    where
+        C: MfmContext,
+    {
+        let spec = certified_context_spec(value)?;
+        if !self
+            .context_refs
+            .insert(spec.context_ref.as_str().to_owned())
+        {
+            return Err(PlanError::DuplicateContextRef(
+                spec.context_ref.as_str().to_owned(),
+            ));
+        }
+        self.contexts.push(spec.clone());
+        Ok(DeclaredContext {
+            spec,
+            _program: PhantomData,
+            _scope: PhantomData,
+            _context: PhantomData,
+        })
     }
 
     /// Plans a registered typed state by resolving `S` through this builder's registry.
@@ -3956,6 +4257,60 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         )
     }
 
+    /// Plans a registered typed state under an explicitly declared certified context.
+    pub fn state_in_context<S, I, C>(
+        &mut self,
+        key: StateKey,
+        context: &DeclaredContext<'program, 'scope, C>,
+        config: S::Config,
+        input: I,
+    ) -> Result<Handle<'program, 'scope, S::Output>>
+    where
+        S: StateSpec<Context = C>,
+        C: MfmContext,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
+        I: IntoStateInput<'program, 'scope, S::Input>,
+    {
+        let registered = self.state_registry.registered_state::<S>()?;
+        self.state_registered_in_context(key, registered, context, config, input)
+    }
+
+    /// Plans a typed state from an explicit registration token under a declared context.
+    pub fn state_registered_in_context<S, I, C>(
+        &mut self,
+        key: StateKey,
+        registered: RegisteredState<S>,
+        context: &DeclaredContext<'program, 'scope, C>,
+        config: S::Config,
+        input: I,
+    ) -> Result<Handle<'program, 'scope, S::Output>>
+    where
+        S: StateSpec<Context = C>,
+        C: MfmContext,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
+        I: IntoStateInput<'program, 'scope, S::Input>,
+    {
+        let key_string = key.as_str().to_owned();
+        if self.state_keys.contains(&key_string) {
+            return Err(PlanError::DuplicateStateKey(key.as_str().to_owned()));
+        }
+        let (node, handle) = self.plan_state_node(
+            key,
+            registered,
+            config,
+            input,
+            StateNodePlanningOptions {
+                context: Some(context.spec().clone()),
+                ..StateNodePlanningOptions::default()
+            },
+        )?;
+        self.state_keys.insert(key_string);
+        self.state_nodes.push(node);
+        Ok(handle)
+    }
+
     /// Plans one forward side-effect state and one structurally separate remediation state.
     ///
     /// The forward node is appended to the ordinary forward graph. The remediation node is keyed
@@ -4012,8 +4367,10 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             forward_registered,
             forward_config,
             forward_input,
-            Vec::new(),
-            Some((forward_resource_claim, forward_verification)),
+            StateNodePlanningOptions {
+                side_effect_contract: Some((forward_resource_claim, forward_verification)),
+                ..StateNodePlanningOptions::default()
+            },
         )?;
         let forward = ForwardSideEffectHandle::new(forward_node.node_id.clone(), forward_handle);
         let remediation_input = match build_remediation_input(forward.clone()) {
@@ -4036,8 +4393,10 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             remediation_registered,
             remediation_config,
             remediation_input,
-            Vec::new(),
-            Some((remediation_resource_claim, remediation_verification)),
+            StateNodePlanningOptions {
+                side_effect_contract: Some((remediation_resource_claim, remediation_verification)),
+                ..StateNodePlanningOptions::default()
+            },
         ) {
             Ok(planned) => planned,
             Err(error) => {
@@ -4088,8 +4447,16 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         if self.state_keys.contains(&key_string) {
             return Err(PlanError::DuplicateStateKey(key.as_str().to_owned()));
         }
-        let (node, handle) =
-            self.plan_state_node(key, registered, config, input, output_domain_keys, None)?;
+        let (node, handle) = self.plan_state_node(
+            key,
+            registered,
+            config,
+            input,
+            StateNodePlanningOptions {
+                output_domain_keys,
+                ..StateNodePlanningOptions::default()
+            },
+        )?;
         self.state_keys.insert(key_string);
         self.state_nodes.push(node);
         Ok(handle)
@@ -4119,8 +4486,10 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             registered,
             config,
             input,
-            Vec::new(),
-            Some((resource_claim, verification)),
+            StateNodePlanningOptions {
+                side_effect_contract: Some((resource_claim, verification)),
+                ..StateNodePlanningOptions::default()
+            },
         )?;
         self.state_keys.insert(key_string);
         self.state_nodes.push(node.clone());
@@ -4133,8 +4502,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         registered: RegisteredState<S>,
         config: S::Config,
         input: I,
-        output_domain_keys: Vec<StableDomainKeyRef>,
-        side_effect_contract: Option<(ResourceClaim, SideEffectVerificationSpec)>,
+        options: StateNodePlanningOptions,
     ) -> Result<(StateNodeSpec, Handle<'program, 'scope, S::Output>)>
     where
         S: StateSpec,
@@ -4149,8 +4517,14 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         let adapter_bindings = S::adapter_bindings()?;
         let state = S::new(config)?;
         drop(state);
+        let StateNodePlanningOptions {
+            context,
+            output_domain_keys,
+            side_effect_contract,
+        } = options;
 
         let descriptor = registered.descriptor();
+        validate_state_context_binding(descriptor, context.as_ref())?;
         let side_effect_contract_digest = descriptor.side_effect_contract_digest().cloned();
         let side_effect_contract =
             side_effect_contract.map(|(claim, verification)| (claim.into_spec(), verification));
@@ -4169,6 +4543,12 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
                 )));
             }
         }
+        let node_context = context
+            .as_ref()
+            .map(|context| NodeContextSpec::Required {
+                context_ref: context.context_ref.clone(),
+            })
+            .unwrap_or_else(NodeContextSpec::no_context);
         let node_id = state_node_id(
             &self.scope_id,
             &key,
@@ -4176,6 +4556,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             descriptor.version(),
             &config_binding.config_ref_digest,
             input.digest(),
+            &node_context,
         )?;
         let output_schema_id =
             S::Output::schema_id().map_err(|error| PlanError::Value(error.to_string()))?;
@@ -4201,6 +4582,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             },
         )?;
         let value_lineage = value_lineage_ref(&lineage)?;
+        let output_context = output_context_from_contract(descriptor, context.as_ref())?;
         let side_effect_verify = match (
             side_effect_contract_digest.as_ref(),
             side_effect_contract.as_ref(),
@@ -4238,6 +4620,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
                     node_id: verify_node_id,
                     output_cell_id: verify_output_cell_id,
                     output_value_lineage: value_lineage_ref(&verify_lineage)?,
+                    output_context: output_context.clone(),
                     output_domain_keys: output_domain_keys.clone(),
                 })
             }
@@ -4258,6 +4641,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             output_schema_id.clone(),
             output_semantic_type_id.clone(),
             handle_value_lineage,
+            output_context.clone(),
         );
         let planning_lineage = self.current_operation_lineage()?;
         Ok((
@@ -4269,6 +4653,10 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
                 state_version: descriptor.version().clone(),
                 state_descriptor_id: descriptor.descriptor_id().clone(),
                 state_descriptor_name: descriptor.name().to_owned(),
+                context_descriptor: descriptor.context().clone(),
+                input_context_contract: descriptor.input_context().clone(),
+                output_context_contract: descriptor.output_context().clone(),
+                context: node_context,
                 runner: registered.runner(),
                 effect_kind: descriptor.effect().kind.clone(),
                 capability_bindings: descriptor.capabilities().clone(),
@@ -4288,6 +4676,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
                 output_schema_id,
                 output_semantic_type_id,
                 output_value_lineage: value_lineage,
+                output_context,
                 output_domain_keys: if side_effect_is_paired {
                     Vec::new()
                 } else {
@@ -4471,6 +4860,8 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         ScopeBuilderCheckpoint {
             state_keys: self.state_keys.clone(),
             operation_keys: self.operation_keys.clone(),
+            context_refs: self.context_refs.clone(),
+            contexts: self.contexts.clone(),
             state_nodes: self.state_nodes.clone(),
             remediation_nodes: self.remediation_nodes.clone(),
             operation_lineage: self.operation_lineage.clone(),
@@ -4484,6 +4875,8 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
     fn restore(&mut self, checkpoint: ScopeBuilderCheckpoint) {
         self.state_keys = checkpoint.state_keys;
         self.operation_keys = checkpoint.operation_keys;
+        self.context_refs = checkpoint.context_refs;
+        self.contexts = checkpoint.contexts;
         self.state_nodes = checkpoint.state_nodes;
         self.remediation_nodes = checkpoint.remediation_nodes;
         self.operation_lineage = checkpoint.operation_lineage;
@@ -4741,6 +5134,7 @@ impl<'program, 'parent, 'child> ChildScopeBuilder<'program, 'parent, 'child> {
             target.schema_id,
             target.semantic_type_id,
             target.value_lineage,
+            target.context,
             evidence,
         ))
     }
@@ -4767,6 +5161,7 @@ impl<'program, 'parent, 'child> ChildScopeBuilder<'program, 'parent, 'child> {
             target.schema_id,
             target.semantic_type_id,
             target.value_lineage,
+            target.context,
             evidence,
         ))
     }
@@ -4838,6 +5233,7 @@ impl<'program, 'parent, 'child> ChildScopeBuilder<'program, 'parent, 'child> {
             target_value_lineage: target_value_lineage.clone(),
             semantic_type_id: source.semantic_type_id.clone(),
             schema_id: source.schema_id.clone(),
+            context: source.context.clone(),
             bridge_kind,
             policy,
             provenance: BridgeProvenance::FrameworkChildScopeV1,
@@ -4852,6 +5248,7 @@ impl<'program, 'parent, 'child> ChildScopeBuilder<'program, 'parent, 'child> {
             schema_id: source.schema_id,
             semantic_type_id: source.semantic_type_id,
             value_lineage: target_value_lineage,
+            context: source.context,
         };
         let evidence = BridgeEvidenceCore {
             bridge_ref,
@@ -4965,6 +5362,8 @@ where
             operation_registry,
             state_keys: BTreeSet::new(),
             operation_keys: BTreeSet::new(),
+            context_refs: BTreeSet::new(),
+            contexts: Vec::new(),
             state_nodes: Vec::new(),
             remediation_nodes: BTreeMap::new(),
             operation_lineage: Vec::new(),
@@ -4986,6 +5385,7 @@ where
         root_key: builder.root_key,
         root_scope_id: root_scope_id.clone(),
         saga_policy,
+        contexts: builder.scope.contexts,
         seeds: builder.seeds,
         scopes: {
             let mut scopes = vec![ScopeSpec {
@@ -5324,10 +5724,102 @@ fn canonical_config_binding<C: MfmConfig>(
     })
 }
 
+fn context_descriptor_for<C: MfmContext>() -> Result<StateContextDescriptorSpec> {
+    let descriptor = C::schema_descriptor().map_err(|error| PlanError::Value(error.to_string()))?;
+    if descriptor.identity.schema_kind != SchemaKind::Value {
+        return Err(PlanError::ContextContract(
+            "context descriptors must use value schema kind".to_owned(),
+        ));
+    }
+    if descriptor.identity.persisted_surface != PersistedSurfacePolicy::strict() {
+        return Err(PlanError::ContextContract(
+            "context descriptors must use strict no-secret/no-float persisted policy".to_owned(),
+        ));
+    }
+    if descriptor.identity.persisted_surface.secrets != SecretPolicy::NoSecrets
+        || descriptor.identity.persisted_surface.numbers != NumberPolicy::NoFloats
+    {
+        return Err(PlanError::ContextContract(
+            "context descriptors must reject secrets and floats".to_owned(),
+        ));
+    }
+    let schema_id = descriptor
+        .schema_id()
+        .map_err(|error| PlanError::Value(error.to_string()))?;
+    let semantic_type_id = C::semantic_id().map_err(|error| PlanError::Value(error.to_string()))?;
+    let canonicalizer_identity = C::canonicalizer_identity()?;
+    let context_descriptor_id =
+        context_descriptor_id(&schema_id, &semantic_type_id, &canonicalizer_identity)?;
+    Ok(StateContextDescriptorSpec::Required(Box::new(
+        StateContextDescriptorRequirementSpec {
+            context_descriptor_id,
+            schema_id,
+            semantic_type_id,
+            canonicalizer_identity,
+        },
+    )))
+}
+
+fn context_descriptor_id(
+    schema_id: &SchemaId,
+    semantic_type_id: &SemanticTypeId,
+    canonicalizer_identity: &CanonicalizerIdentity,
+) -> Result<ContextDescriptorId> {
+    let digest = canonical_digest(serde_json::json!({
+        "canonicalizer_identity": canonicalizer_identity.as_str(),
+        "domain_separator": "mfm.state_context_descriptor.v1",
+        "schema_id": schema_id.as_str(),
+        "semantic_type_id": semantic_type_id.as_str(),
+    }))?;
+    Ok(ContextDescriptorId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        *digest.digest(),
+    ))
+}
+
+fn certified_context_spec<C: MfmContext>(value: C) -> Result<CertifiedContextSpec> {
+    let StateContextDescriptorSpec::Required(requirement) = context_descriptor_for::<C>()? else {
+        return Err(PlanError::ContextContract(
+            "semantic context resolved to no-context descriptor".to_owned(),
+        ));
+    };
+    let StateContextDescriptorRequirementSpec {
+        context_descriptor_id,
+        schema_id,
+        semantic_type_id,
+        canonicalizer_identity,
+    } = *requirement;
+    let json =
+        serde_json::to_string(&value).map_err(|error| PlanError::Serialize(error.to_string()))?;
+    let canonical_context = PlainCanonicalJsonBytes::from_json_str(&json)
+        .map_err(|error| PlanError::Canonical(error.to_string()))?;
+    let context_ref = CertifiedContextSpec::derive_context_ref(
+        &context_descriptor_id,
+        &schema_id,
+        &semantic_type_id,
+        &canonicalizer_identity,
+        &canonical_context,
+    )
+    .map_err(|error| PlanError::Value(error.to_string()))?;
+    Ok(CertifiedContextSpec {
+        context_ref,
+        context_descriptor_id,
+        schema_id,
+        semantic_type_id,
+        canonicalizer_identity,
+        canonical_context_digest: canonical_context.content_digest(),
+        canonical_context_byte_len: canonical_context.as_bytes().len() as u64,
+        canonical_context,
+    })
+}
+
 struct StateDescriptorIdParts<'a> {
     kind: &'a StateKind,
     version: &'a StateVersion,
     name: &'static str,
+    context: &'a StateContextDescriptorSpec,
+    input_context: &'a StateInputContextContractSpec,
+    output_context: &'a StateOutputContextContractSpec,
     config_schema_id: &'a SchemaId,
     input_schema_id: &'a SchemaId,
     output_schema_id: &'a SchemaId,
@@ -5364,6 +5856,77 @@ fn fact_descriptor_refs_json(refs: &[FactDescriptorRef]) -> Vec<serde_json::Valu
         .collect()
 }
 
+fn state_context_descriptor_json(context: &StateContextDescriptorSpec) -> serde_json::Value {
+    match context {
+        StateContextDescriptorSpec::NoContext => serde_json::json!({
+            "kind": "no_context",
+        }),
+        StateContextDescriptorSpec::Required(requirement) => {
+            let StateContextDescriptorRequirementSpec {
+                context_descriptor_id,
+                schema_id,
+                semantic_type_id,
+                canonicalizer_identity,
+            } = requirement.as_ref();
+            serde_json::json!({
+                "canonicalizer_identity": canonicalizer_identity.as_str(),
+                "context_descriptor_id": context_descriptor_id.as_str(),
+                "kind": "required",
+                "schema_id": schema_id.as_str(),
+                "semantic_type_id": semantic_type_id.as_str(),
+            })
+        }
+    }
+}
+
+fn context_producer_json(producer: &ContextProducerSpec) -> serde_json::Value {
+    serde_json::json!({
+        "producer_descriptor_id": producer
+            .producer_descriptor_id
+            .as_ref()
+            .map(DescriptorId::as_str),
+        "seed_producers_allowed": producer.seed_producers_allowed,
+    })
+}
+
+fn state_input_context_contract_json(
+    contract: &StateInputContextContractSpec,
+) -> serde_json::Value {
+    match contract {
+        StateInputContextContractSpec::NoContext => serde_json::json!({
+            "kind": "no_context",
+        }),
+        StateInputContextContractSpec::Required {
+            resource_kind,
+            stage,
+            producer,
+        } => serde_json::json!({
+            "kind": "required",
+            "producer": context_producer_json(producer),
+            "resource_kind": resource_kind.as_str(),
+            "stage": stage.as_str(),
+        }),
+    }
+}
+
+fn state_output_context_contract_json(
+    contract: &StateOutputContextContractSpec,
+) -> serde_json::Value {
+    match contract {
+        StateOutputContextContractSpec::NoContext => serde_json::json!({
+            "kind": "no_context",
+        }),
+        StateOutputContextContractSpec::Produces {
+            resource_kind,
+            stage,
+        } => serde_json::json!({
+            "kind": "produces",
+            "resource_kind": resource_kind.as_str(),
+            "stage": stage.as_str(),
+        }),
+    }
+}
+
 fn state_descriptor_id(parts: StateDescriptorIdParts<'_>) -> Result<DescriptorId> {
     let json = serde_json::json!({
         "capabilities": parts.capabilities
@@ -5379,6 +5942,7 @@ fn state_descriptor_id(parts: StateDescriptorIdParts<'_>) -> Result<DescriptorId
             })
             .collect::<Vec<_>>(),
         "config_schema_id": parts.config_schema_id.as_str(),
+        "context": state_context_descriptor_json(parts.context),
         "effect": {
             "class": parts.effect.class.as_str(),
             "kind": parts.effect.kind.as_str(),
@@ -5386,9 +5950,11 @@ fn state_descriptor_id(parts: StateDescriptorIdParts<'_>) -> Result<DescriptorId
             "version": parts.effect.version.as_str(),
         },
         "emitted_fact_descriptors": fact_descriptor_refs_json(parts.emitted_fact_descriptors),
+        "input_context": state_input_context_contract_json(parts.input_context),
         "input_schema_id": parts.input_schema_id.as_str(),
         "kind": parts.kind.as_str(),
         "name": parts.name,
+        "output_context": state_output_context_contract_json(parts.output_context),
         "output_schema_id": parts.output_schema_id.as_str(),
         "output_semantic_type_id": parts.output_semantic_type_id.as_str(),
         "runner": parts.runner.as_str(),
@@ -5444,12 +6010,14 @@ fn state_node_id(
     state_version: &StateVersion,
     config_digest: &ContentDigest,
     input_digest: &ContentDigest,
+    context: &NodeContextSpec,
 ) -> Result<NodeId> {
     Ok(NodeId::from_digest(
         DigestAlgorithm::Sha256JcsV1,
         canonical_digest_bytes(serde_json::json!({
             "alg": DigestAlgorithm::Sha256JcsV1.as_str(),
             "config_digest": config_digest.as_str(),
+            "context": node_context_json(context),
             "input_binding_digest": input_digest.as_str(),
             "local_node_key": key.as_str(),
             "lowering_version": LOWERING_VERSION,
@@ -5458,6 +6026,18 @@ fn state_node_id(
             "state_version": state_version.as_str(),
         }))?,
     ))
+}
+
+fn node_context_json(context: &NodeContextSpec) -> serde_json::Value {
+    match context {
+        NodeContextSpec::NoContext => serde_json::json!({
+            "kind": "no_context",
+        }),
+        NodeContextSpec::Required { context_ref } => serde_json::json!({
+            "context_ref": context_ref.as_str(),
+            "kind": "required",
+        }),
+    }
 }
 
 fn state_output_cell_id(
@@ -5611,6 +6191,7 @@ fn operation_lineage_frame_digest(
             .map(|handle| {
                 serde_json::json!({
                     "cell_id": handle.cell_id().as_str(),
+                    "context": cell_context_json(handle.context()),
                     "schema_id": handle.schema_id().as_str(),
                     "scope_id": handle.scope_id().as_str(),
                     "semantic_type_id": handle.semantic_type_id().as_str(),
@@ -5625,6 +6206,26 @@ fn operation_lineage_frame_digest(
     let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
         .map_err(|error| PlanError::Canonical(error.to_string()))?;
     Ok(canonical.content_digest())
+}
+
+fn cell_context_json(context: &CellContextSpec) -> serde_json::Value {
+    match context {
+        CellContextSpec::NoContext => serde_json::json!({
+            "kind": "no_context",
+        }),
+        CellContextSpec::Bound {
+            context_ref,
+            resource_kind,
+            stage,
+            producer,
+        } => serde_json::json!({
+            "context_ref": context_ref.as_str(),
+            "kind": "bound",
+            "producer": context_producer_json(producer),
+            "resource_kind": resource_kind.as_str(),
+            "stage": stage.as_str(),
+        }),
+    }
 }
 
 fn input_descriptor_id(input_schema_id: &SchemaId) -> Result<DescriptorId> {
@@ -5814,7 +6415,7 @@ fn input_binding_node_json(node: &InputBindingNode) -> serde_json::Value {
         }),
         InputBindingNodeKind::Cell(cell) => serde_json::json!({
             "cell_id": cell.cell_id.as_str(),
-            "context": { "kind": "no_context" },
+            "context": input_context_json(&cell.context),
             "field_path": cell.field_path.as_str(),
             "kind": "cell",
             "required_terminal": cell.required_terminal.as_str(),
@@ -5857,6 +6458,43 @@ fn input_binding_node_json(node: &InputBindingNode) -> serde_json::Value {
             "elements": elements.iter().map(input_binding_node_json).collect::<Vec<_>>(),
             "kind": "non_empty_vec",
             "ordering": ordering.as_str(),
+        }),
+    }
+}
+
+fn input_context_from_cell_context(context: &CellContextSpec) -> InputContextSpec {
+    match context {
+        CellContextSpec::NoContext => InputContextSpec::NoContext,
+        CellContextSpec::Bound {
+            context_ref,
+            resource_kind,
+            stage,
+            producer,
+        } => InputContextSpec::Required {
+            context_ref: context_ref.clone(),
+            resource_kind: resource_kind.clone(),
+            stage: stage.clone(),
+            producer: producer.clone(),
+        },
+    }
+}
+
+fn input_context_json(context: &InputContextSpec) -> serde_json::Value {
+    match context {
+        InputContextSpec::NoContext => serde_json::json!({
+            "kind": "no_context",
+        }),
+        InputContextSpec::Required {
+            context_ref,
+            resource_kind,
+            stage,
+            producer,
+        } => serde_json::json!({
+            "context_ref": context_ref.as_str(),
+            "kind": "required",
+            "producer": context_producer_json(producer),
+            "resource_kind": resource_kind.as_str(),
+            "stage": stage.as_str(),
         }),
     }
 }

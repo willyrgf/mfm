@@ -35,8 +35,8 @@ use mfm_evm_contract_model::{
 };
 use mfm_ids::{DigestAlgorithm, SchemaId, StateKind, StateVersion};
 use mfm_program::{
-    AdapterBindingSpec, IdempotencyKey, PureState, ReadState, ResourceClaim, ResourceNamespace,
-    SideEffectState, StateError, StateResult, StateSpec,
+    AdapterBindingSpec, IdempotencyKey, NoContext, PureState, ReadState, ResourceClaim,
+    ResourceNamespace, SideEffectState, StateError, StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs, StateInput};
 use mfm_signing::SigningCapability;
@@ -410,6 +410,7 @@ impl DeployContractState {
 
 impl StateSpec for DeployContractState {
     type Config = DeployPhaseConfig;
+    type Context = NoContext;
     type Input = ();
     type Output = DeployedContract;
     type Effect = ApplySideEffect;
@@ -521,6 +522,7 @@ impl ConfigureContractState {
 
 impl StateSpec for ConfigureContractState {
     type Config = ConfigurePhaseConfig;
+    type Context = NoContext;
     type Input = ConfigureContractInput;
     type Output = ConfiguredContract;
     type Effect = ApplySideEffect;
@@ -739,6 +741,7 @@ impl ValidateContractState {
 
 impl StateSpec for ValidateContractState {
     type Config = ValidatePhaseConfig;
+    type Context = NoContext;
     type Input = ValidateContractInput;
     type Output = ValidationReport;
     type Effect = ReadExternal;
@@ -785,6 +788,7 @@ pub struct ProjectConfiguredContractRefConfig {}
 
 impl StateSpec for ProjectConfiguredContractRefState {
     type Config = ProjectConfiguredContractRefConfig;
+    type Context = NoContext;
     type Input = ConfiguredContract;
     type Output = ConfiguredContractRef;
     type Effect = Pure;

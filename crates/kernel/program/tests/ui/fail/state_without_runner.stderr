@@ -1,7 +1,7 @@
 error[E0277]: the trait bound `StateWithoutRunner: PureState` is not satisfied
-  --> tests/ui/fail/state_without_runner.rs:41:25
+  --> tests/ui/fail/state_without_runner.rs:42:25
    |
-41 |     registry.register::<StateWithoutRunner>().unwrap();
+42 |     registry.register::<StateWithoutRunner>().unwrap();
    |                         ^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
 help: the trait `PureState` is not implemented for `StateWithoutRunner`
@@ -25,9 +25,9 @@ note: required by a bound in `StateRegistryBuilder::register`
    |                    ^^^^^^^^^^^^^^^ required by this bound in `StateRegistryBuilder::register`
 
 error[E0277]: the trait bound `StateWithoutRunner: PureState` is not satisfied
-  --> tests/ui/fail/state_without_runner.rs:48:47
+  --> tests/ui/fail/state_without_runner.rs:49:47
    |
-48 |             let result = root.scope().state::<StateWithoutRunner, _>(
+49 |             let result = root.scope().state::<StateWithoutRunner, _>(
    |                                               ^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
 help: the trait `PureState` is not implemented for `StateWithoutRunner`
