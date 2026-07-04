@@ -233,8 +233,7 @@ impl CertifiedRuntimeSpec {
         self.cells.get(cell_id)
     }
 
-    /// Returns a certified transition context by ref.
-    pub fn context(&self, context_ref: &ContextRef) -> Option<&spec::CertifiedContextSpec> {
+    pub(crate) fn context(&self, context_ref: &ContextRef) -> Option<&spec::CertifiedContextSpec> {
         self.contexts.get(context_ref)
     }
 
