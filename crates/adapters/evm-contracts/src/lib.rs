@@ -2219,14 +2219,12 @@ struct PreparedTransaction {
     gas_price: Option<u128>,
 }
 
-/// Evidence-only replay verifier for contract lifecycle side effects.
-pub struct EvmContractLifecycleReplayVerifier {
+struct EvmContractLifecycleReplayVerifier {
     verifier_id: events::ReplayVerifierId,
 }
 
 impl EvmContractLifecycleReplayVerifier {
-    /// Creates a lifecycle replay verifier.
-    pub fn new() -> Result<Self> {
+    fn new() -> Result<Self> {
         Ok(Self {
             verifier_id: replay_verifier_id()?,
         })
