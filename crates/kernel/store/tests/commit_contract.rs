@@ -36,20 +36,21 @@ use mfm_store::v1::test_support::{
     run_identity_material_for_test,
 };
 use mfm_store::v1::{
-    admission_advisory_lock_key, admission_waiter_id, event_artifact_requirements,
+    admission_advisory_lock_key, admission_waiter_id, committed_run_stream_canonical_json,
+    committed_run_stream_from_canonical_json_slice, event_artifact_requirements,
     payload_canonical_json, payload_from_json_value, resource_wait_fifo_admission_token,
-    AdmissionLaneClass, AdmissionLaneMode, AdmissionToken, ArtifactEvidenceRef,
-    AsyncInMemoryRunStore, AttemptStatus, AttemptTerminal, CellTerminalProjection,
-    CertifiedRunStoreAuthority, CommitArtifactEvidenceSet, CommitKey, CommitOutcome,
-    CommitPreconditions, CommitRequest, CommittedRunStream, EventArtifactReferenceSource,
-    ExecutionClaimAdmissionLane, ExistingArtifactAdmission, ForwardLedgerClassification,
-    KernelEventEnvelope, ManualBlockReason, ManualResolution, ManualResolutionProjection,
-    PreparedArtifactBytes, PreparedCommit, PreparedCommitBundle, PreparedCommitPlan,
-    ProjectionSnapshot, PublicOutputProjection, RequiredRunState, ResourceAdmissionLane,
-    ResourceLaneKey, RunAdmission, RunCompletionProjection, RunEventStore, RunMode, RunState,
-    SagaEngagementProjection, SagaEngagementReason, SagaTerminal, SagaTerminalProof,
-    SideEffectLedgerPhase, SideEffectPairLedgerRef, SideEffectPhase, SideEffectTerminal,
-    StateAttemptStarted, StoreError, StreamSeq, TrustScopeId, TrustScopeStore,
+    AdmissionLaneClass, AdmissionLaneMode, AdmissionToken, ArtifactByteAuthorityMap,
+    ArtifactEvidenceRef, AsyncInMemoryRunStore, AttemptStatus, AttemptTerminal,
+    CellTerminalProjection, CertifiedRunStoreAuthority, CommitArtifactEvidenceSet, CommitKey,
+    CommitOutcome, CommitPreconditions, CommitRequest, CommittedRunStream,
+    EventArtifactReferenceSource, ExecutionClaimAdmissionLane, ExistingArtifactAdmission,
+    ForwardLedgerClassification, KernelEventEnvelope, ManualBlockReason, ManualResolution,
+    ManualResolutionProjection, PreparedArtifactBytes, PreparedCommit, PreparedCommitBundle,
+    PreparedCommitPlan, ProjectionSnapshot, PublicOutputProjection, RequiredRunState,
+    ResourceAdmissionLane, ResourceLaneKey, RunAdmission, RunCompletionProjection, RunEventStore,
+    RunMode, RunState, SagaEngagementProjection, SagaEngagementReason, SagaTerminal,
+    SagaTerminalProof, SideEffectLedgerPhase, SideEffectPairLedgerRef, SideEffectPhase,
+    SideEffectTerminal, StateAttemptStarted, StoreError, StreamSeq, TrustScopeId, TrustScopeStore,
     EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS, EXECUTION_CLAIM_LEASE_TTL_SECS,
 };
 
@@ -2901,6 +2902,61 @@ fn committed_run_stream_exposes_store_owned_authority() {
         requirement.source == EventArtifactReferenceSource::SideEffectIntent
             && requirement.artifact_role == Some(ArtifactRole::SideEffectIntent)
     }));
+}
+
+#[test]
+fn committed_run_stream_canonical_json_roundtrips_store_authority() {
+    let run_id = run_id(144);
+    let mut store = admitted_store(&run_id, "committed-stream-json-run-start");
+    append_side_effect_prepare(&mut store, &run_id);
+    let committed = CommittedRunStream::from_events(run_id.clone(), store.load_run_stream(&run_id))
+        .expect("committed stream");
+
+    let encoded = committed_run_stream_canonical_json(&committed).expect("committed stream json");
+    let decoded = committed_run_stream_from_canonical_json_slice(
+        &run_id,
+        encoded.as_bytes(),
+        &ArtifactByteAuthorityMap::new(),
+    )
+    .expect("decode committed stream json");
+
+    assert_eq!(decoded.run_id(), committed.run_id());
+    assert_eq!(decoded.events(), committed.events());
+    assert_eq!(decoded.commits(), committed.commits());
+    assert_eq!(decoded.projection(), committed.projection());
+    assert_eq!(decoded.next_seq(), committed.next_seq());
+}
+
+#[test]
+fn committed_run_stream_canonical_json_rejects_tampered_event_authority() {
+    let run_id = run_id(145);
+    let mut store = admitted_store(&run_id, "committed-stream-json-tamper-run-start");
+    append_side_effect_prepare(&mut store, &run_id);
+    let committed = CommittedRunStream::from_events(run_id.clone(), store.load_run_stream(&run_id))
+        .expect("committed stream");
+    let encoded = committed_run_stream_canonical_json(&committed).expect("committed stream json");
+    let mut json: serde_json::Value =
+        serde_json::from_slice(encoded.as_bytes()).expect("committed stream value");
+    json["events"][0]["payload_hash"] = serde_json::Value::String(content_digest(146).to_string());
+    let tampered = PlainCanonicalJsonBytes::from_json_str(
+        &serde_json::to_string(&json).expect("tampered json"),
+    )
+    .expect("tampered canonical json");
+
+    let error = committed_run_stream_from_canonical_json_slice(
+        &run_id,
+        tampered.as_bytes(),
+        &ArtifactByteAuthorityMap::new(),
+    )
+    .expect_err("tampered envelope rejects");
+
+    assert!(matches!(
+        error,
+        StoreError::PersistedEventMismatch {
+            field: "payload_hash",
+            ..
+        }
+    ));
 }
 
 #[test]

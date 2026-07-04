@@ -37,3 +37,6 @@ mfm-spec = { path = "../../kernel/spec" }
 mfm-state-evm-contracts = { path = "../../states/evm-contracts" }
 mfm-store = { path = "../../kernel/store" }
 mfm-values = { path = "../../kernel/values" }
+
+[dev-dependencies]
+mfm-store = { path = "../../kernel/store", features = ["test-support"] }

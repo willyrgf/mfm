@@ -1497,8 +1497,9 @@ fn source_run_import_evidence_refs(
     evidence: &ImportFromMfmRunEvidence,
 ) -> Vec<LifecycleArtifactEvidenceRef> {
     vec![
+        evidence.source_spec_artifact_ref.clone(),
         evidence.source_spec_certificate_ref.clone(),
-        evidence.source_run_stream_ref_or_export_bundle_ref.clone(),
+        evidence.source_run_stream_ref.clone(),
         evidence
             .source_value_artifact_ref_or_inline_canonical_value
             .clone(),

@@ -131,8 +131,9 @@ fn import_from_mfm_run_evidence_json(required_stage: &str, context_byte: u8) -> 
     };
     serde_json::json!({
         "source_spec_hash": spec_hash_str(0x31),
+        "source_spec_artifact_ref": artifact_ref_json(0x4e, 0x4f, None, None),
         "source_spec_certificate_ref": artifact_ref_json(0x50, 0x51, None, None),
-        "source_run_stream_ref_or_export_bundle_ref": artifact_ref_json(0x52, 0x53, None, None),
+        "source_run_stream_ref": artifact_ref_json(0x52, 0x53, None, None),
         "source_cell_or_output_id": {
             "kind": "cell",
             "cell_id": cell_id_str(0x32),
