@@ -12,7 +12,6 @@ use mfm_ids::{
     DescriptorId, DigestAlgorithm, NodeId, RunId, SchemaId, SpecHash,
 };
 use mfm_spec::v1 as spec;
-use mfm_store::v1 as store;
 
 #[cfg(test)]
 use mfm_ids::CellId;
@@ -252,10 +251,6 @@ fn attempt_id(
     ))
 }
 
-fn retention_ref_for_artifact(artifact: &store::ArtifactEvidenceRef) -> events::RetentionRef {
-    artifact.retention_ref()
-}
-
 fn canonical_json(value: serde_json::Value) -> Result<PlainCanonicalJsonBytes> {
     let json = serde_json::to_string(&value)
         .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
@@ -265,6 +260,16 @@ fn canonical_json(value: serde_json::Value) -> Result<PlainCanonicalJsonBytes> {
 
 fn content_digest_json(value: serde_json::Value) -> Result<ContentDigest> {
     Ok(canonical_json(value)?.content_digest())
+}
+
+fn executable_identity_json(identity: &events::ExecutableIdentity) -> serde_json::Value {
+    serde_json::json!({
+        "binary_digest": identity.binary_digest.as_str(),
+        "cargo_package_digest": identity.cargo_package_digest.as_str(),
+        "factory_id": identity.factory_id.as_str(),
+        "nix_derivation_hash": identity.nix_derivation_hash.as_ref().map(events::NixDerivationHash::as_str),
+        "nix_output_hash": identity.nix_output_hash.as_ref().map(events::NixOutputHash::as_str),
+    })
 }
 
 fn config_ref_key(config_ref: &spec::ConfigRef) -> String {

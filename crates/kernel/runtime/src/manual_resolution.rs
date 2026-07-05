@@ -1,6 +1,6 @@
 use mfm_canonical::sha256_digest_bytes;
 use mfm_events::v1 as events;
-use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, RunId};
+use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, RunId, SchemaId};
 use mfm_manual_auth::{
     manual_authorization_proof_schema_id, ManualResolutionBlockReason, ManualResolutionEvidenceRef,
     ManualResolutionPrefixAuthority, ManualResolutionProofAuthority,
@@ -80,9 +80,13 @@ pub(crate) fn verify_manual_resolution_for_prefix(
     evidence_artifact: &ManualResolutionEvidenceArtifact,
     authorization_proof_bytes: Vec<u8>,
 ) -> Result<VerifiedManualResolutionForPrefix> {
-    let evidence = manual_resolution_evidence_ref(prefix.manual_policy(), &evidence_artifact.bytes);
-    let authorization =
-        manual_resolution_authorization_ref(&authorization_proof_bytes).map_err(|error| {
+    let evidence = manual_resolution_content_ref(
+        prefix.manual_policy().evidence_schema.clone(),
+        &evidence_artifact.bytes,
+    );
+    let authorization = manual_authorization_proof_schema_id()
+        .map(|schema_id| manual_resolution_content_ref(schema_id, &authorization_proof_bytes))
+        .map_err(|error| {
             RuntimeError::InvalidRunStream(format!(
                 "manual authorization proof schema failed: {error}"
             ))
@@ -165,34 +169,21 @@ pub(crate) fn prepare_manual_resolution_commit(
         ));
     }
 
-    let evidence_ref = store::ArtifactEvidenceRef {
-        artifact_id: claim.evidence.artifact_id.clone(),
-        digest: claim.evidence.content_hash.clone(),
-        byte_len: evidence_artifact.bytes.len() as u64,
-        media_type: evidence_artifact.media_type,
-        schema_id: Some(claim.evidence.schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::ManualResolutionEvidence,
-    };
+    let evidence_ref = manual_resolution_artifact_evidence_ref(
+        &claim.evidence,
+        evidence_artifact.bytes.len() as u64,
+        evidence_artifact.media_type,
+        events::ArtifactRole::ManualResolutionEvidence,
+    );
     verify_artifact_bytes(&evidence_artifact.bytes, &evidence_ref)?;
 
     let authorization = verified.authorization();
-    let authorization_hash = authorization.content_hash.clone();
-    let authorization_artifact_id = authorization.artifact_id.clone();
-    let authorization_schema_id = authorization.schema_id.clone();
-    let authorization_ref = store::ArtifactEvidenceRef {
-        artifact_id: authorization_artifact_id.clone(),
-        digest: authorization_hash.clone(),
-        byte_len: verified.proof_bytes().len() as u64,
-        media_type: spec::MediaType::new("application/json")?,
-        schema_id: Some(authorization_schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::ManualResolutionAuthorization,
-    };
+    let authorization_ref = manual_resolution_artifact_evidence_ref(
+        authorization,
+        verified.proof_bytes().len() as u64,
+        spec::MediaType::new("application/json")?,
+        events::ArtifactRole::ManualResolutionAuthorization,
+    );
     verify_artifact_bytes(verified.proof_bytes(), &authorization_ref)?;
 
     let mut payloads =
@@ -205,9 +196,9 @@ pub(crate) fn prepare_manual_resolution_commit(
             evidence_schema_id: claim.evidence.schema_id.clone(),
             evidence_hash: claim.evidence.content_hash.clone(),
             evidence_artifact_id: claim.evidence.artifact_id.clone(),
-            authorization_schema_id: authorization_schema_id.clone(),
-            authorization_hash: authorization_hash.clone(),
-            authorization_artifact_id: authorization_artifact_id.clone(),
+            authorization_schema_id: authorization.schema_id.clone(),
+            authorization_hash: authorization.content_hash.clone(),
+            authorization_artifact_id: authorization.artifact_id.clone(),
             note,
         },
     ));
@@ -218,7 +209,7 @@ pub(crate) fn prepare_manual_resolution_commit(
         store::CommitKey::new(format!(
             "manual-resolution:{}:{}",
             claim.outcome.as_str(),
-            authorization_hash.as_str()
+            authorization.content_hash.as_str()
         ))?,
         payloads,
         vec![evidence_ref.clone(), authorization_ref.clone()],
@@ -339,33 +330,33 @@ pub const fn manual_resolution_block_reason(
     }
 }
 
-fn manual_resolution_evidence_ref(
-    manual: &spec::ManualResolutionEvidenceSpec,
-    evidence_bytes: &[u8],
-) -> ManualResolutionEvidenceRef {
-    let content_hash = ContentDigest::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(evidence_bytes),
-    );
+fn manual_resolution_content_ref(schema_id: SchemaId, bytes: &[u8]) -> ManualResolutionEvidenceRef {
+    let content_hash =
+        ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes));
     ManualResolutionEvidenceRef {
-        schema_id: manual.evidence_schema.clone(),
+        schema_id,
         artifact_id: ArtifactId::from_digest(content_hash.algorithm(), *content_hash.digest()),
         content_hash,
     }
 }
 
-fn manual_resolution_authorization_ref(
-    proof_bytes: &[u8],
-) -> mfm_manual_auth::Result<ManualResolutionEvidenceRef> {
-    let content_hash = ContentDigest::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(proof_bytes),
-    );
-    Ok(ManualResolutionEvidenceRef {
-        schema_id: manual_authorization_proof_schema_id()?,
-        artifact_id: ArtifactId::from_digest(content_hash.algorithm(), *content_hash.digest()),
-        content_hash,
-    })
+fn manual_resolution_artifact_evidence_ref(
+    evidence: &ManualResolutionEvidenceRef,
+    byte_len: u64,
+    media_type: spec::MediaType,
+    artifact_role: events::ArtifactRole,
+) -> store::ArtifactEvidenceRef {
+    store::ArtifactEvidenceRef {
+        artifact_id: evidence.artifact_id.clone(),
+        digest: evidence.content_hash.clone(),
+        byte_len,
+        media_type,
+        schema_id: Some(evidence.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role,
+    }
 }
 
 pub(crate) fn certified_manual_resolution_spec(

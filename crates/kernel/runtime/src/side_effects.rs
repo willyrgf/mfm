@@ -6,7 +6,6 @@ use mfm_ids::{AttemptId, NodeId, RunId, SideEffectPairId};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
-use crate::artifacts::{StagedArtifactBindingKind, StagedSideEffectArtifactPhase};
 use crate::side_effect_lifecycle::SideEffectLifecycle;
 use crate::{
     require_adapter, require_attempt, require_capability, CertifiedRuntimeCapabilities,
@@ -14,7 +13,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HistoricalSideEffectPhase {
+enum HistoricalSideEffectPhase {
     IntentPersisted,
     Claimed,
     ResourceLaneClaimed,
@@ -75,8 +74,11 @@ pub(crate) fn validate_historical_side_effect_payload(
     )? {
         return Ok(());
     }
-    let (node_id, attempt_id, ledger_key, pair_id, phase) = side_effect_payload_ref(payload)
-        .ok_or_else(|| RuntimeError::InvalidRunStream("expected side-effect payload".to_owned()))?;
+    let (node_id, attempt_id, ledger_key, pair_id, event_kind) = side_effect_payload_ref(payload)
+        .ok_or_else(|| {
+        RuntimeError::InvalidRunStream("expected side-effect payload".to_owned())
+    })?;
+    let phase = HistoricalSideEffectPhase::from(event_kind);
     let node = runtime_spec.node(node_id).ok_or_else(|| {
         RuntimeError::InvalidRunStream(format!("side-effect event for uncertified node {node_id}"))
     })?;
@@ -88,8 +90,9 @@ pub(crate) fn validate_historical_side_effect_payload(
             ledger_key, node_id, attempt_id
         )));
     }
-    let contract = certified_side_effect_contract(runtime_spec, contract_node)
-        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+    let contract =
+        CertifiedSideEffectContract::for_node(runtime_spec.spec(), &contract_node.node_id)
+            .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
     let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
     validate_side_effect_ledger_purpose(
         &contract,
@@ -110,10 +113,7 @@ pub(crate) fn validate_historical_side_effect_payload(
                     node.node_id, payload.scope_id
                 )));
             }
-            let caps = CertifiedRuntimeCapabilities::new(
-                node.node_id.clone(),
-                node.capability_bindings.clone(),
-            );
+            let caps = CertifiedRuntimeCapabilities::for_node(node);
             require_capability(
                 &caps,
                 &payload.capability_kind,
@@ -172,7 +172,7 @@ pub(crate) fn side_effect_payload_ref(
     &AttemptId,
     &events::SideEffectLedgerKey,
     &SideEffectPairId,
-    HistoricalSideEffectPhase,
+    events::SideEffectEventKind,
 )> {
     let emitter = payload.side_effect_emitter_ref()?;
     let ledger = payload.side_effect_ledger_ref()?;
@@ -181,23 +181,8 @@ pub(crate) fn side_effect_payload_ref(
         emitter.attempt_id,
         ledger.ledger_key,
         ledger.pair_id,
-        HistoricalSideEffectPhase::from(ledger.kind),
+        ledger.kind,
     ))
-}
-
-fn side_effect_payload_ledger_purpose(
-    payload: &events::KernelEventPayload,
-) -> Option<&events::SideEffectLedgerPurpose> {
-    payload
-        .side_effect_ledger_ref()
-        .map(|side_effect| side_effect.ledger_purpose)
-}
-
-fn certified_side_effect_contract(
-    runtime_spec: &CertifiedRuntimeSpec,
-    node: &spec::NodeSpec,
-) -> mfm_certify::Result<CertifiedSideEffectContract> {
-    CertifiedSideEffectContract::for_node(runtime_spec.spec(), &node.node_id)
 }
 
 fn side_effect_contract_node_for_payload<'a>(
@@ -242,9 +227,12 @@ fn validate_side_effect_ledger_purpose(
     payload: &events::KernelEventPayload,
     terminal_policies: &store::SideEffectTerminalPolicies,
 ) -> Result<()> {
-    let purpose = side_effect_payload_ledger_purpose(payload).ok_or_else(|| {
-        RuntimeError::InvalidRunnerOutput("expected side-effect payload".to_owned())
-    })?;
+    let purpose = payload
+        .side_effect_ledger_ref()
+        .map(|side_effect| side_effect.ledger_purpose)
+        .ok_or_else(|| {
+            RuntimeError::InvalidRunnerOutput("expected side-effect payload".to_owned())
+        })?;
     contract
         .validate_ledger_purpose(purpose)
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
@@ -555,18 +543,6 @@ pub(crate) fn validate_terminal_cell_has_completed_attempt(
     }
 }
 
-pub(crate) fn side_effect_artifact_binding(
-    ledger_key: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
-    phase: StagedSideEffectArtifactPhase,
-) -> StagedArtifactBindingKind {
-    StagedArtifactBindingKind::SideEffectEvidence {
-        ledger_key,
-        invocation_epoch,
-        phase,
-    }
-}
-
 pub(crate) fn validate_runner_side_effect_payload(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
@@ -592,8 +568,9 @@ pub(crate) fn validate_runner_side_effect_payload(
             RuntimeError::InvalidRunnerOutput("expected side-effect payload".to_owned())
         })?;
     require_attempt(node, attempt_id, payload_node_id, payload_attempt_id)?;
-    let contract = certified_side_effect_contract(runtime_spec, contract_node)
-        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+    let contract =
+        CertifiedSideEffectContract::for_node(runtime_spec.spec(), &contract_node.node_id)
+            .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
     let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
     validate_side_effect_ledger_purpose(
         &contract,

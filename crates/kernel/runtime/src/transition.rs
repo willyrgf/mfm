@@ -60,25 +60,13 @@ impl TransitionLifecycle {
                     node,
                     attempt_id,
                     attempt_no,
-                } => {
-                    return Ok(TransitionDecision::ContinueAttempt(TransitionAttempt {
-                        node,
-                        attempt_id: Some(attempt_id),
-                        attempt_no,
-                    }));
                 }
-                OpenAttemptDisposition::Interrupt {
+                | OpenAttemptDisposition::Interrupt {
                     node,
                     attempt_id,
                     attempt_no,
-                } => {
-                    return Ok(TransitionDecision::ContinueAttempt(TransitionAttempt {
-                        node,
-                        attempt_id: Some(attempt_id),
-                        attempt_no,
-                    }));
                 }
-                OpenAttemptDisposition::DelegateSideEffect {
+                | OpenAttemptDisposition::DelegateSideEffect {
                     node,
                     attempt_id,
                     attempt_no,
@@ -135,16 +123,7 @@ fn blocked_node_ids(
     blocked_lanes: &BTreeSet<ResourceLaneBlockWitness>,
 ) -> BTreeSet<NodeId> {
     let mut blocked = BTreeSet::new();
-    for node_id in runtime_spec.topological_order() {
-        let node = runtime_spec.node(node_id).expect("topological node exists");
-        if blocked_lanes
-            .iter()
-            .any(|witness| witness.blocks_node(&view.projections, node))
-        {
-            blocked.insert(node_id.clone());
-        }
-    }
-    for (_, node) in runtime_spec.remediations() {
+    for node in runtime_spec.executable_nodes() {
         if blocked_lanes
             .iter()
             .any(|witness| witness.blocks_node(&view.projections, node))
@@ -159,21 +138,7 @@ fn classify_runnable<'a>(
     runtime_spec: &'a CertifiedRuntimeSpec,
     runnable: RunnableNode<'a>,
 ) -> Result<TransitionDecision<'a>> {
-    let attempt = transition_attempt(runnable);
-    if attempt.attempt_id.is_some() {
-        return Ok(TransitionDecision::ContinueAttempt(attempt));
-    }
-    if is_resolve_saga_terminal(attempt.node) {
-        return Ok(TransitionDecision::ResolveSagaTerminal(attempt));
-    }
-    if is_remediation_node(runtime_spec, attempt.node) {
-        return Ok(TransitionDecision::StartRemediation(attempt));
-    }
-    Ok(TransitionDecision::StartNode(attempt))
-}
-
-fn transition_attempt(runnable: RunnableNode<'_>) -> TransitionAttempt<'_> {
-    match runnable.attempt {
+    let attempt = match runnable.attempt {
         AttemptPlan::StartNew { attempt_no } => TransitionAttempt {
             node: runnable.node,
             attempt_id: None,
@@ -187,18 +152,21 @@ fn transition_attempt(runnable: RunnableNode<'_>) -> TransitionAttempt<'_> {
             attempt_id: Some(attempt_id),
             attempt_no,
         },
+    };
+    if attempt.attempt_id.is_some() {
+        return Ok(TransitionDecision::ContinueAttempt(attempt));
     }
-}
-
-fn is_resolve_saga_terminal(node: &spec::NodeSpec) -> bool {
-    matches!(
-        &node.framework,
+    if matches!(
+        &attempt.node.framework,
         Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
-    )
-}
-
-fn is_remediation_node(runtime_spec: &CertifiedRuntimeSpec, node: &spec::NodeSpec) -> bool {
-    runtime_spec
-        .remediations()
-        .any(|(_, remediation)| remediation.node_id == node.node_id)
+    ) {
+        return Ok(TransitionDecision::ResolveSagaTerminal(attempt));
+    }
+    if runtime_spec
+        .forward_node_for_remediation(&attempt.node.node_id)
+        .is_some()
+    {
+        return Ok(TransitionDecision::StartRemediation(attempt));
+    }
+    Ok(TransitionDecision::StartNode(attempt))
 }

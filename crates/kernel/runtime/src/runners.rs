@@ -151,7 +151,7 @@ impl RunnerFactRecorded {
         &self.payload
     }
 
-    pub(crate) fn into_payload(self) -> events::FactRecorded {
+    fn into_payload(self) -> events::FactRecorded {
         self.payload
     }
 }

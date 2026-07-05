@@ -28,6 +28,7 @@ use mfm_program::{
 };
 use mfm_program_derive::{MfmConfig, MfmFactType, MfmValue, PublicOutputs};
 use mfm_store::v1::{
+    self as store,
     test_support::{
         event_id_for_envelope_inputs_for_test as test_event_id_for_envelope_inputs,
         fact_query_receipt_trust_root_for_test as test_store_fact_query_receipt_trust_root,
@@ -2959,8 +2960,7 @@ async fn fact_query_evidence_prepares_private_artifact_reference_without_fact_re
         .cell(&node.output_cell)
         .expect("output cell");
     let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
-    let caps =
-        CertifiedRuntimeCapabilities::new(node.node_id.clone(), node.capability_bindings.clone());
+    let caps = CertifiedRuntimeCapabilities::for_node(node);
     let recorded_facts = RecordedFacts::default();
     let invocation = PreparedRunnerInvocation {
         runtime_spec: &fixture.runtime_spec,
@@ -3001,7 +3001,7 @@ async fn fact_query_evidence_prepares_private_artifact_reference_without_fact_re
     let mut staged_artifacts = vec![state_artifact];
     staged_artifacts.extend(query_output.staged_artifacts);
     let mut tampered_retention_refs = query_output.staged_retention_refs.clone();
-    tampered_retention_refs[0].refs = vec![retention_ref_for_artifact(&state_evidence)];
+    tampered_retention_refs[0].refs = vec![state_evidence.retention_ref()];
     let tampered_output = fact_query_terminal_output(
         &ctx,
         &state_evidence,
@@ -3027,7 +3027,6 @@ async fn fact_query_evidence_prepares_private_artifact_reference_without_fact_re
     let prepared =
         prepare_runner_output_for_invocation(&invocation, output).expect("prepare runner output");
     let query_reference = prepared
-        .commit
         .request()
         .payloads()
         .iter()
@@ -3045,24 +3044,18 @@ async fn fact_query_evidence_prepares_private_artifact_reference_without_fact_re
         mfm_facts::fact_query_evidence_schema_id().expect("query evidence schema")
     );
     assert!(query_reference.artifact_ref.semantic_type_id.is_none());
-    assert!(prepared
-        .commit
-        .request()
-        .payloads()
-        .iter()
-        .any(|payload| matches!(
-            payload,
-            events::KernelEventPayload::RetentionRefsAppended(payload)
-                if payload.reason == events::RetentionReason::RuntimeEvidence
-                    && payload.refs.iter().any(|reference| {
-                        reference.artifact_id == query_reference.artifact_ref.artifact_id
-                            && reference.role == events::ArtifactRole::FactQueryEvidence
-                            && reference.content_digest
-                                == query_reference.artifact_ref.content_digest
-                    })
-        )));
+    assert!(prepared.request().payloads().iter().any(|payload| matches!(
+        payload,
+        events::KernelEventPayload::RetentionRefsAppended(payload)
+            if payload.reason == events::RetentionReason::RuntimeEvidence
+                && payload.refs.iter().any(|reference| {
+                    reference.artifact_id == query_reference.artifact_ref.artifact_id
+                        && reference.role == events::ArtifactRole::FactQueryEvidence
+                        && reference.content_digest
+                            == query_reference.artifact_ref.content_digest
+                })
+    )));
     assert!(!prepared
-        .commit
         .request()
         .payloads()
         .iter()
@@ -3105,8 +3098,7 @@ async fn fact_query_evidence_retains_non_empty_returned_fact_authority() {
         .cell(&node.output_cell)
         .expect("output cell");
     let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
-    let caps =
-        CertifiedRuntimeCapabilities::new(node.node_id.clone(), node.capability_bindings.clone());
+    let caps = CertifiedRuntimeCapabilities::for_node(node);
     let recorded_facts = RecordedFacts::default();
     let invocation = PreparedRunnerInvocation {
         runtime_spec: &fixture.runtime_spec,
@@ -3176,7 +3168,6 @@ async fn fact_query_evidence_retains_non_empty_returned_fact_authority() {
     let prepared = prepare_runner_output_for_invocation(&invocation, output)
         .expect("prepare runner output with returned fact query refs");
     let query_reference = prepared
-        .commit
         .request()
         .payloads()
         .iter()
@@ -3190,7 +3181,6 @@ async fn fact_query_evidence_retains_non_empty_returned_fact_authority() {
         })
         .expect("fact query evidence artifact reference");
     let retained_refs = prepared
-        .commit
         .request()
         .payloads()
         .iter()
@@ -3221,7 +3211,6 @@ async fn fact_query_evidence_retains_non_empty_returned_fact_authority() {
     }));
     assert_eq!(retained_refs.len(), 3);
     assert!(!prepared
-        .commit
         .request()
         .payloads()
         .iter()
@@ -4328,10 +4317,7 @@ macro_rules! with_prepared_runner_ctx {
                 input_schema_id: invocation_node.input_bindings.input_schema_id.clone(),
                 root: MaterializedInputNode::Unit,
             },
-            caps: CertifiedRuntimeCapabilities::new(
-                invocation_node.node_id.clone(),
-                invocation_node.capability_bindings.clone(),
-            ),
+            caps: CertifiedRuntimeCapabilities::for_node(invocation_node),
             recorded_facts: RecordedFacts::default(),
             projections: &projections,
             run_stream: &run_stream,
@@ -5648,7 +5634,7 @@ async fn runner_cannot_stage_reserved_retention_reasons() {
                 Ok(ErasedRunnerOutput {
                     staged_artifacts: vec![staged_artifact],
                     staged_retention_refs: vec![StagedRetentionRefs {
-                        refs: vec![retention_ref_for_artifact(&artifact)],
+                        refs: vec![artifact.retention_ref()],
                         reason: self.reason,
                         authority:
                             crate::artifacts::StagedRetentionRefAuthority::CurrentCommitArtifacts,

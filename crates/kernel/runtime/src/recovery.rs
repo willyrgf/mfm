@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use mfm_capabilities::CapabilityRole;
-use mfm_ids::{AttemptId, NodeId, RunId};
+use mfm_ids::{AttemptId, RunId};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
@@ -13,9 +13,7 @@ use crate::error::async_store_error;
 use crate::framework_lifecycle::FrameworkAttemptLifecycle;
 use crate::frontier::node_inputs_ready;
 use crate::history::RuntimeRunView;
-use crate::side_effect_lifecycle::{
-    SideEffectLifecycle, SideEffectOpenAttemptDisposition, SideEffectOperationalBlockReason,
-};
+use crate::side_effect_lifecycle::{SideEffectLifecycle, SideEffectOpenAttemptDisposition};
 use crate::side_effects::validate_terminal_cell_has_completed_attempt;
 use crate::transition::TransitionAttempt;
 use crate::{CertifiedRuntimeSpec, Result, RuntimeError};
@@ -66,36 +64,6 @@ pub(crate) enum OpenAttemptDisposition<'a> {
         attempt_id: AttemptId,
         /// Original attempt number.
         attempt_no: u32,
-        /// Reason the attempt is operationally blocked.
-        reason: OperationalBlockReason,
-    },
-}
-
-/// Explicit operational block reasons produced by attempt recovery.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OperationalBlockReason {
-    /// A side-effect ledger is terminal while the attempt remains started.
-    SideEffectTerminalLedgerWithoutAttemptTerminal,
-}
-
-impl From<SideEffectOperationalBlockReason> for OperationalBlockReason {
-    fn from(reason: SideEffectOperationalBlockReason) -> Self {
-        match reason {
-            SideEffectOperationalBlockReason::TerminalLedgerWithoutAttemptTerminal => {
-                Self::SideEffectTerminalLedgerWithoutAttemptTerminal
-            }
-        }
-    }
-}
-
-enum OpenAttemptDispatch<'a> {
-    RunLifecycle,
-    Interrupt {
-        node: &'a spec::NodeSpec,
-        attempt_id: AttemptId,
-    },
-    OperationalBlock {
-        node_id: NodeId,
     },
 }
 
@@ -109,7 +77,7 @@ impl AttemptRecoveryLifecycle {
         view: &RuntimeRunView,
         blocked_lanes: &BTreeSet<ResourceLaneBlockWitness>,
     ) -> Result<Option<OpenAttemptDisposition<'a>>> {
-        for node in recoverable_nodes(runtime_spec) {
+        for node in runtime_spec.executable_nodes() {
             if blocked_lanes
                 .iter()
                 .any(|witness| witness.blocks_node(&view.projections, node))
@@ -126,7 +94,7 @@ impl AttemptRecoveryLifecycle {
     }
 
     /// Classifies a selected open attempt before its attempt lifecycle is resumed.
-    pub(crate) fn open_attempt_disposition_for_attempt<'a>(
+    fn open_attempt_disposition_for_attempt<'a>(
         runtime_spec: &'a CertifiedRuntimeSpec,
         view: &RuntimeRunView,
         node: &'a spec::NodeSpec,
@@ -157,21 +125,32 @@ impl AttemptRecoveryLifecycle {
         view: &RuntimeRunView,
         attempt: &TransitionAttempt<'_>,
     ) -> Result<Option<AttemptRunStatus>> {
-        match Self::open_attempt_dispatch_for_attempt(runtime_spec, view, attempt)? {
-            OpenAttemptDispatch::RunLifecycle => Ok(None),
-            OpenAttemptDispatch::Interrupt { node, attempt_id } => {
-                Self::interrupt_attempt(store, runtime_spec, run_id, view, node, &attempt_id)
-                    .await
-                    .map(Some)
+        let Some(attempt_id) = attempt.attempt_id.as_ref() else {
+            return Ok(None);
+        };
+        match Self::open_attempt_disposition_for_attempt(
+            runtime_spec,
+            view,
+            attempt.node,
+            attempt_id,
+            attempt.attempt_no,
+        )? {
+            OpenAttemptDisposition::Interrupt {
+                node, attempt_id, ..
+            } => Self::interrupt_attempt(store, runtime_spec, run_id, view, node, &attempt_id)
+                .await
+                .map(Some),
+            OpenAttemptDisposition::OperationalBlock { .. } => {
+                Ok(Some(AttemptRunStatus::OperationalBlock))
             }
-            OpenAttemptDispatch::OperationalBlock { node_id } => {
-                Ok(Some(AttemptRunStatus::OperationalBlock { node_id }))
-            }
+            OpenAttemptDisposition::Continue { .. }
+            | OpenAttemptDisposition::RetryTerminalization { .. }
+            | OpenAttemptDisposition::DelegateSideEffect { .. } => Ok(None),
         }
     }
 
     /// Appends the recovery-owned interruption evidence for a resumable async store.
-    pub(crate) async fn interrupt_attempt<S: store::RunEventStore + ?Sized>(
+    async fn interrupt_attempt<S: store::RunEventStore + ?Sized>(
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
@@ -202,7 +181,7 @@ impl AttemptRecoveryLifecycle {
         run_id: &RunId,
         projections: &store::ProjectionSnapshot,
     ) -> Result<()> {
-        for node in recoverable_nodes(runtime_spec) {
+        for node in runtime_spec.executable_nodes() {
             if let Some(terminal) = projections.cell_terminal_for_run(run_id, &node.output_cell) {
                 let attempt_id = validate_terminal_cell_has_completed_attempt(
                     runtime_spec,
@@ -304,20 +283,18 @@ impl AttemptRecoveryLifecycle {
                         attempt_no,
                     });
                 }
-                SideEffectOpenAttemptDisposition::DelegateRecovery { phase } => {
-                    let _ = phase;
+                SideEffectOpenAttemptDisposition::DelegateRecovery => {
                     return Ok(OpenAttemptDisposition::DelegateSideEffect {
                         node,
                         attempt_id,
                         attempt_no,
                     });
                 }
-                SideEffectOpenAttemptDisposition::OperationalBlock { reason } => {
+                SideEffectOpenAttemptDisposition::OperationalBlock => {
                     return Ok(OpenAttemptDisposition::OperationalBlock {
                         node,
                         attempt_id,
                         attempt_no,
-                        reason: reason.into(),
                     });
                 }
             }
@@ -336,38 +313,6 @@ impl AttemptRecoveryLifecycle {
             attempt_id,
             attempt_no,
         })
-    }
-
-    fn open_attempt_dispatch_for_attempt<'a>(
-        runtime_spec: &'a CertifiedRuntimeSpec,
-        view: &RuntimeRunView,
-        attempt: &TransitionAttempt<'a>,
-    ) -> Result<OpenAttemptDispatch<'a>> {
-        let Some(attempt_id) = attempt.attempt_id.as_ref() else {
-            return Ok(OpenAttemptDispatch::RunLifecycle);
-        };
-        match Self::open_attempt_disposition_for_attempt(
-            runtime_spec,
-            view,
-            attempt.node,
-            attempt_id,
-            attempt.attempt_no,
-        )? {
-            OpenAttemptDisposition::Interrupt {
-                node, attempt_id, ..
-            } => Ok(OpenAttemptDispatch::Interrupt { node, attempt_id }),
-            OpenAttemptDisposition::OperationalBlock { node, reason, .. } => {
-                let _ = reason;
-                Ok(OpenAttemptDispatch::OperationalBlock {
-                    node_id: node.node_id.clone(),
-                })
-            }
-            OpenAttemptDisposition::Continue { .. }
-            | OpenAttemptDisposition::RetryTerminalization { .. }
-            | OpenAttemptDisposition::DelegateSideEffect { .. } => {
-                Ok(OpenAttemptDispatch::RunLifecycle)
-            }
-        }
     }
 }
 
@@ -431,14 +376,4 @@ fn node_requires_same_attempt_recovery(node: &spec::NodeSpec) -> bool {
                 CapabilityRole::ManagedPlatformWrite | CapabilityRole::ExternalMutationAuthority
             )
         })
-}
-
-fn recoverable_nodes<'a>(
-    runtime_spec: &'a CertifiedRuntimeSpec,
-) -> impl Iterator<Item = &'a spec::NodeSpec> + 'a {
-    runtime_spec
-        .topological_order()
-        .iter()
-        .map(|node_id| runtime_spec.node(node_id).expect("topological node exists"))
-        .chain(runtime_spec.remediations().map(|(_, node)| node))
 }

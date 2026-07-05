@@ -20,6 +20,7 @@ use crate::framework::{
     public_output_rendered_digest, resolve_saga_terminal_receipt_json,
     retention_manifest_receipt_json, run_completion_evidence, saga_terminal_completion_outcome,
 };
+use crate::manual_resolution::certified_manual_resolution_spec;
 use crate::recovery::AttemptRecoveryLifecycle;
 use crate::side_effects::{
     node_uses_side_effect_terminal_validation, side_effect_payload_ref,
@@ -55,7 +56,7 @@ pub(crate) struct CommittedArtifactReference {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct RuntimeCommittedHistory {
+struct RuntimeCommittedHistory {
     commits: Vec<RuntimeCommittedBatch>,
 }
 
@@ -338,7 +339,7 @@ impl RuntimeRunView {
         let seed_cells = validate_seed_cells(runtime_spec, &run_admitted.seed_cells)?;
         let config_artifacts =
             config_artifacts_from_run_admitted(runtime_spec, &run_admitted.config_artifacts)?;
-        let artifact_refs = artifact_refs_from_stream(stream)?;
+        let artifact_refs = artifact_refs_from_stream(stream, &history)?;
         Ok(Self {
             stream: stream.to_vec(),
             projections,
@@ -355,18 +356,12 @@ impl RuntimeRunView {
         mut self,
         authority: &store::ProjectionSnapshot,
     ) -> Result<Self> {
-        self.projections = projection_with_status_authority(&self.projections, authority)?;
+        self.projections = self
+            .projections
+            .with_store_authority_from(authority)
+            .map_err(RuntimeError::from)?;
         Ok(self)
     }
-}
-
-fn projection_with_status_authority(
-    projections: &store::ProjectionSnapshot,
-    authority: &store::ProjectionSnapshot,
-) -> Result<store::ProjectionSnapshot> {
-    projections
-        .with_store_authority_from(authority)
-        .map_err(RuntimeError::from)
 }
 
 #[cfg(test)]
@@ -981,10 +976,7 @@ fn validate_historical_run_stream(
                         payload.node_id
                     )));
                 }
-                let caps = CertifiedRuntimeCapabilities::new(
-                    node.node_id.clone(),
-                    node.capability_bindings.clone(),
-                );
+                let caps = CertifiedRuntimeCapabilities::for_node(node);
                 let producer = payload.claim.producer();
                 require_capability(
                     &caps,
@@ -1140,10 +1132,10 @@ fn validate_historical_run_stream(
         }
     }
     validate_atomic_terminal_pairs(runtime_spec, stream)?;
-    validate_historical_run_admission_batch(runtime_spec, run_id, stream)?;
+    validate_historical_run_admission_batch(runtime_spec, run_id, stream, history)?;
     validate_historical_retention_ref_batches(runtime_spec, stream, history)?;
     validate_historical_retention_manifest_batches(runtime_spec, stream, history, artifact_bytes)?;
-    validate_historical_terminal_tail(runtime_spec, run_id, stream, artifact_bytes)?;
+    validate_historical_terminal_tail(runtime_spec, run_id, stream, history, artifact_bytes)?;
     validate_atomic_side_effect_failure_pairs(runtime_spec, stream)?;
     AttemptRecoveryLifecycle::validate_frontier(runtime_spec, run_id, projections)?;
     Ok(())
@@ -1162,11 +1154,7 @@ fn validate_historical_manual_resolution(
             "manual resolution event identity does not match certified run".to_owned(),
         ));
     }
-    let manual = certified_manual_resolution_spec(&runtime_spec.spec().saga).ok_or_else(|| {
-        RuntimeError::InvalidRunStream(
-            "manual resolution was recorded without certified manual policy".to_owned(),
-        )
-    })?;
+    let manual = certified_manual_resolution_spec(&runtime_spec.spec().saga)?;
     if payload.evidence_schema_id != manual.evidence_schema {
         return Err(RuntimeError::InvalidRunStream(
             "manual resolution evidence schema does not match certified policy".to_owned(),
@@ -1207,20 +1195,6 @@ fn validate_historical_manual_resolution(
         ));
     }
     Ok(())
-}
-
-fn certified_manual_resolution_spec(
-    policy: &spec::SagaPolicySpec,
-) -> Option<&spec::ManualResolutionEvidenceSpec> {
-    match policy {
-        spec::SagaPolicySpec::ManualResolution { manual } => Some(manual),
-        spec::SagaPolicySpec::CompensateCompleted {
-            on_remediation_unresolved: spec::RemediationUnresolvedSpec::ManualResolution { manual },
-        } => Some(manual),
-        spec::SagaPolicySpec::NoSideEffects
-        | spec::SagaPolicySpec::FailWithoutAcdcClaim
-        | spec::SagaPolicySpec::CompensateCompleted { .. } => None,
-    }
 }
 
 fn validate_attempt_start_boundary(
@@ -1405,10 +1379,11 @@ fn validate_historical_retention_ref_batches(
     Ok(())
 }
 
-pub(crate) fn validate_historical_run_admission_batch(
+fn validate_historical_run_admission_batch(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
+    history: &RuntimeCommittedHistory,
 ) -> Result<()> {
     let Some(first) = stream.first() else {
         return Err(RuntimeError::InvalidRunStream(
@@ -1420,16 +1395,16 @@ pub(crate) fn validate_historical_run_admission_batch(
             "RunAdmitted must be the first event in the run stream".to_owned(),
         ));
     }
-    let first_seq = first.seq();
-    let first_commit_key = first.commit_key().clone();
-    let mut end = 1;
-    while end < stream.len()
-        && stream[end].seq() == first_seq
-        && stream[end].commit_key() == &first_commit_key
-    {
-        end += 1;
-    }
-    if end != 1 {
+    let first_commit = history
+        .commits()
+        .first()
+        .map(|batch| batch.events(stream))
+        .ok_or_else(|| {
+            RuntimeError::InvalidRunStream(
+                "run stream is missing RunAdmitted root event".to_owned(),
+            )
+        })?;
+    if first_commit.len() != 1 {
         return Err(RuntimeError::InvalidRunStream(
             "RunAdmitted commit must contain exactly one root event".to_owned(),
         ));
@@ -1621,7 +1596,7 @@ fn validate_same_commit_retention_ref_evidence(
             continue;
         }
         let key = retention_ref_key(retention_ref);
-        if retention_ref_requires_artifact_reference(retention_ref.role)
+        if staged_artifact_binding_kind(retention_ref.role).is_some()
             && !artifact_refs.contains(&key)
         {
             return Err(RuntimeError::InvalidRunStream(format!(
@@ -1718,10 +1693,6 @@ fn public_output_retention_ref_keys(
         ));
     }
     Ok(allowed)
-}
-
-fn retention_ref_requires_artifact_reference(role: events::ArtifactRole) -> bool {
-    staged_artifact_binding_kind(role).is_some()
 }
 
 fn retention_ref_key(retention_ref: &events::RetentionRef) -> RetentionRefKey {
@@ -2075,25 +2046,15 @@ fn validate_historical_terminal_tail(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
+    history: &RuntimeCommittedHistory,
     artifact_bytes: &store::ArtifactByteAuthorityMap,
 ) -> Result<()> {
     let completion_node = certified_complete_run_node(runtime_spec)?;
     let resolve_node = certified_resolve_saga_terminal_node(runtime_spec)?;
     let mut last_retention_commit_end = None::<usize>;
     let mut terminal_commit = None::<(usize, usize, TerminalCommitKind)>;
-    let mut index = 0;
-    while index < stream.len() {
-        let first = &stream[index];
-        let seq = first.seq();
-        let commit_key = first.commit_key().clone();
-        let mut end = index + 1;
-        while end < stream.len()
-            && stream[end].seq() == seq
-            && stream[end].commit_key() == &commit_key
-        {
-            end += 1;
-        }
-        let commit = &stream[index..end];
+    for batch in history.commits() {
+        let commit = batch.events(stream);
         let has_retention_projection = commit.iter().any(|event| {
             matches!(
                 event.payload(),
@@ -2101,7 +2062,7 @@ fn validate_historical_terminal_tail(
             )
         });
         if has_retention_projection {
-            last_retention_commit_end = Some(end);
+            last_retention_commit_end = Some(batch.event_range.end);
         }
         let has_completion_node_payload = commit.iter().any(|event| {
             payload_targets_node_after_start(event.payload(), &completion_node.node_id)
@@ -2135,7 +2096,10 @@ fn validate_historical_terminal_tail(
             } else {
                 TerminalCommitKind::CompleteRun
             };
-            if terminal_commit.replace((index, end, kind)).is_some() {
+            if terminal_commit
+                .replace((batch.event_range.start, batch.event_range.end, kind))
+                .is_some()
+            {
                 return Err(RuntimeError::InvalidRunStream(
                     "run stream contains multiple terminal lifecycle commits".to_owned(),
                 ));
@@ -2151,7 +2115,6 @@ fn validate_historical_terminal_tail(
                 ));
             }
         }
-        index = end;
     }
 
     match (last_retention_commit_end, terminal_commit) {
@@ -2536,7 +2499,7 @@ fn validate_sealed_terminal_commit_batch(
     Ok(())
 }
 
-pub(crate) fn require_projected_attempt(
+fn require_projected_attempt(
     projections: &store::ProjectionSnapshot,
     node_id: &NodeId,
     attempt_id: &AttemptId,
@@ -2987,7 +2950,7 @@ fn validate_fact_descriptor_artifact_refs(
     runtime_spec: &CertifiedRuntimeSpec,
     artifacts: &[events::RunArtifactEvidenceRef],
 ) -> Result<()> {
-    let required = certified_fact_descriptor_hashes(runtime_spec);
+    let required = runtime_spec.fact_descriptor_hashes();
     let schema_id = mfm_facts::fact_descriptor_schema_id()
         .map_err(|error| RuntimeError::Identity(error.to_string()))?;
     let media_type = spec::MediaType::new("application/json")?;
@@ -3032,22 +2995,6 @@ fn validate_fact_descriptor_artifact_refs(
     Ok(())
 }
 
-fn certified_fact_descriptor_hashes(
-    runtime_spec: &CertifiedRuntimeSpec,
-) -> BTreeSet<ContentDigest> {
-    runtime_spec
-        .spec()
-        .nodes
-        .iter()
-        .chain(runtime_spec.spec().remediations.values())
-        .flat_map(|node| {
-            node.fact_descriptor_allowlist
-                .iter()
-                .map(|reference| reference.descriptor_hash.clone())
-        })
-        .collect()
-}
-
 fn config_artifacts_from_run_admitted(
     runtime_spec: &CertifiedRuntimeSpec,
     config_artifacts: &[events::RunArtifactEvidenceRef],
@@ -3077,21 +3024,11 @@ fn config_artifacts_from_run_admitted(
 
 fn artifact_refs_from_stream(
     stream: &[store::KernelEventEnvelope],
+    history: &RuntimeCommittedHistory,
 ) -> Result<BTreeMap<store::ArtifactAuthorityKey, CommittedArtifactReference>> {
     let mut artifacts = BTreeMap::new();
-    let mut index = 0;
-    while index < stream.len() {
-        let first = &stream[index];
-        let seq = first.seq();
-        let commit_key = first.commit_key().clone();
-        let mut end = index + 1;
-        while end < stream.len()
-            && stream[end].seq() == seq
-            && stream[end].commit_key() == &commit_key
-        {
-            end += 1;
-        }
-        let commit = &stream[index..end];
+    for batch in history.commits() {
+        let commit = batch.events(stream);
         for event in commit {
             match event.payload() {
                 events::KernelEventPayload::RunAdmitted(payload) => {
@@ -3167,7 +3104,6 @@ fn artifact_refs_from_stream(
                 _ => {}
             }
         }
-        index = end;
     }
     Ok(artifacts)
 }
@@ -3341,7 +3277,7 @@ fn store_artifact_from_event_ref(
     }
 }
 
-pub(crate) fn store_artifact_from_run_ref(
+fn store_artifact_from_run_ref(
     evidence: &events::RunArtifactEvidenceRef,
 ) -> store::ArtifactEvidenceRef {
     store::ArtifactEvidenceRef {

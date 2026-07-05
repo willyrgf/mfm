@@ -115,43 +115,9 @@ pub(crate) enum SideEffectOpenAttemptDisposition {
     /// Close the open attempt with standalone interruption before invocation preparation.
     InterruptBeforeInvocationPrepared,
     /// Re-enter the runner with the existing attempt id and store-projected ledger state.
-    DelegateRecovery {
-        /// Store-owned side-effect phase that recovery will resume from.
-        phase: SideEffectRecoveryPhase,
-    },
+    DelegateRecovery,
     /// Recovery cannot safely continue without operational intervention.
-    OperationalBlock {
-        /// Reason the side-effect lifecycle cannot advance.
-        reason: SideEffectOperationalBlockReason,
-    },
-}
-
-/// Side-effect phase classes that can be resumed by the side-effect lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SideEffectRecoveryPhase {
-    /// A side-effect claim exists and must continue under its original attempt authority.
-    Claimed,
-    /// Invocation preparation recorded the resource boundary.
-    Prepared,
-    /// Invocation start crossed the external uncertainty boundary.
-    Started,
-    /// Recovery proved the invocation was not submitted.
-    NotSubmitted,
-    /// Submission evidence was recovered.
-    SubmissionObserved,
-    /// Submission status remains unknown and must be recovered.
-    SubmissionUnknown,
-    /// Receipt evidence was recovered.
-    ReceiptObserved,
-    /// Confirmation evidence is present and attempt terminalization can be retried.
-    Confirmed,
-}
-
-/// Operational block reasons produced by side-effect recovery classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SideEffectOperationalBlockReason {
-    /// Terminal side-effect evidence exists but the attempt remains open.
-    TerminalLedgerWithoutAttemptTerminal,
+    OperationalBlock,
 }
 
 impl SideEffectLifecycle {
@@ -174,7 +140,22 @@ impl SideEffectLifecycle {
         node: &spec::NodeSpec,
         attempt_id: &AttemptId,
     ) -> Result<()> {
-        validate_side_effect_terminal_evidence(runtime_spec, run_id, projections, node, attempt_id)
+        let terminal_skipped = matches!(
+            projections.cell_terminal_for_run(run_id, &node.output_cell),
+            Some(store::CellTerminalProjection::Skipped {
+                node_id,
+                attempt_id: cell_attempt_id,
+                ..
+            }) if node_id == &node.node_id && cell_attempt_id == attempt_id
+        );
+        validate_side_effect_terminal_phase(
+            runtime_spec,
+            run_id,
+            projections,
+            node,
+            attempt_id,
+            terminal_skipped,
+        )
     }
 
     /// Validates legal terminal evidence for a same-batch side-effect runner output.
@@ -236,8 +217,10 @@ impl SideEffectLifecycle {
         let state = projection
             .ledger_state()
             .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
-        Ok(side_effect_phase_is_before_invocation_prepared(
+        Ok(matches!(
             state.phase(),
+            store::SideEffectLedgerPhase::IntentPersisted { .. }
+                | store::SideEffectLedgerPhase::Claimed { .. }
         ))
     }
 
@@ -267,69 +250,41 @@ impl SideEffectLifecycle {
                 Ok(SideEffectOpenAttemptDisposition::InterruptBeforeInvocationPrepared)
             }
             store::SideEffectLedgerPhase::Claimed { .. } if projection.resource_key.is_some() => {
-                Ok(SideEffectOpenAttemptDisposition::DelegateRecovery {
-                    phase: SideEffectRecoveryPhase::Claimed,
-                })
+                Ok(SideEffectOpenAttemptDisposition::DelegateRecovery)
             }
             store::SideEffectLedgerPhase::Claimed { .. } => {
                 Ok(SideEffectOpenAttemptDisposition::InterruptBeforeInvocationPrepared)
             }
             store::SideEffectLedgerPhase::Prepared { .. } => {
-                Ok(SideEffectOpenAttemptDisposition::DelegateRecovery {
-                    phase: SideEffectRecoveryPhase::Prepared,
-                })
+                Ok(SideEffectOpenAttemptDisposition::DelegateRecovery)
             }
             store::SideEffectLedgerPhase::Started { .. } => {
-                Ok(SideEffectOpenAttemptDisposition::DelegateRecovery {
-                    phase: SideEffectRecoveryPhase::Started,
-                })
+                Ok(SideEffectOpenAttemptDisposition::DelegateRecovery)
             }
             store::SideEffectLedgerPhase::SubmissionKnown {
                 status: store::SideEffectSubmissionState::NotSubmitted,
                 ..
-            } => Ok(SideEffectOpenAttemptDisposition::DelegateRecovery {
-                phase: SideEffectRecoveryPhase::NotSubmitted,
-            }),
+            } => Ok(SideEffectOpenAttemptDisposition::DelegateRecovery),
             store::SideEffectLedgerPhase::SubmissionKnown {
                 status: store::SideEffectSubmissionState::Observed { .. },
                 ..
-            } => Ok(SideEffectOpenAttemptDisposition::DelegateRecovery {
-                phase: SideEffectRecoveryPhase::SubmissionObserved,
-            }),
+            } => Ok(SideEffectOpenAttemptDisposition::DelegateRecovery),
             store::SideEffectLedgerPhase::SubmissionKnown {
                 status: store::SideEffectSubmissionState::Unknown,
                 ..
-            } => Ok(SideEffectOpenAttemptDisposition::DelegateRecovery {
-                phase: SideEffectRecoveryPhase::SubmissionUnknown,
-            }),
+            } => Ok(SideEffectOpenAttemptDisposition::DelegateRecovery),
             store::SideEffectLedgerPhase::ReceiptObserved { .. } => {
-                Ok(SideEffectOpenAttemptDisposition::DelegateRecovery {
-                    phase: SideEffectRecoveryPhase::ReceiptObserved,
-                })
+                Ok(SideEffectOpenAttemptDisposition::DelegateRecovery)
             }
             store::SideEffectLedgerPhase::Confirmed { .. } => {
-                Ok(SideEffectOpenAttemptDisposition::DelegateRecovery {
-                    phase: SideEffectRecoveryPhase::Confirmed,
-                })
+                Ok(SideEffectOpenAttemptDisposition::DelegateRecovery)
             }
             store::SideEffectLedgerPhase::Ambiguous { .. }
             | store::SideEffectLedgerPhase::Failed { .. } => {
-                Ok(SideEffectOpenAttemptDisposition::OperationalBlock {
-                    reason: SideEffectOperationalBlockReason::TerminalLedgerWithoutAttemptTerminal,
-                })
+                Ok(SideEffectOpenAttemptDisposition::OperationalBlock)
             }
         }
     }
-}
-
-fn side_effect_phase_is_before_invocation_prepared(
-    phase: store::SideEffectLedgerPhase<'_>,
-) -> bool {
-    matches!(
-        phase,
-        store::SideEffectLedgerPhase::IntentPersisted { .. }
-            | store::SideEffectLedgerPhase::Claimed { .. }
-    )
 }
 
 pub(crate) fn side_effect_projection_for_attempt<'a>(
@@ -342,20 +297,11 @@ pub(crate) fn side_effect_projection_for_attempt<'a>(
     let Some(pair_id) = certified_side_effect_pair_id(runtime_spec, node)? else {
         return Ok(None);
     };
-    let Some(projection) = side_effect_projection_for_pair(run_id, projections, pair_id) else {
+    let Some(projection) = projections.side_effect_for_pair(run_id, pair_id) else {
         return Ok(None);
     };
     validate_side_effect_actor_eligibility(node, attempt_id, pair_id, projection)?;
     Ok(Some(projection))
-}
-
-/// Returns the durable side-effect projection by run-scoped certified pair id.
-pub(crate) fn side_effect_projection_for_pair<'a>(
-    run_id: &RunId,
-    projections: &'a store::ProjectionSnapshot,
-    pair_id: &SideEffectPairId,
-) -> Option<&'a store::SideEffectProjection> {
-    projections.side_effect_for_pair(run_id, pair_id)
 }
 
 fn certified_side_effect_pair_id<'a>(
@@ -414,31 +360,6 @@ fn validate_side_effect_actor_eligibility(
     }
 }
 
-pub(crate) fn validate_side_effect_terminal_evidence(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    projections: &store::ProjectionSnapshot,
-    node: &spec::NodeSpec,
-    attempt_id: &AttemptId,
-) -> Result<()> {
-    let terminal_skipped = matches!(
-        projections.cell_terminal_for_run(run_id, &node.output_cell),
-        Some(store::CellTerminalProjection::Skipped {
-            node_id,
-            attempt_id: cell_attempt_id,
-            ..
-        }) if node_id == &node.node_id && cell_attempt_id == attempt_id
-    );
-    validate_side_effect_terminal_phase(
-        runtime_spec,
-        run_id,
-        projections,
-        node,
-        attempt_id,
-        terminal_skipped,
-    )
-}
-
 fn validate_side_effect_terminal_phase(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
@@ -459,7 +380,14 @@ fn validate_side_effect_terminal_phase(
         .ledger_state()
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
     if terminal_skipped {
-        if side_effect_phase_has_submission_result(state.phase()) {
+        if matches!(
+            state.phase(),
+            store::SideEffectLedgerPhase::SubmissionKnown { .. }
+                | store::SideEffectLedgerPhase::ReceiptObserved { .. }
+                | store::SideEffectLedgerPhase::Confirmed { .. }
+                | store::SideEffectLedgerPhase::Ambiguous { .. }
+                | store::SideEffectLedgerPhase::Failed { .. }
+        ) {
             return Ok(());
         }
         return Err(RuntimeError::InvalidRunStream(format!(
@@ -482,18 +410,7 @@ fn validate_side_effect_terminal_phase(
     }
 }
 
-fn side_effect_phase_has_submission_result(phase: store::SideEffectLedgerPhase<'_>) -> bool {
-    matches!(
-        phase,
-        store::SideEffectLedgerPhase::SubmissionKnown { .. }
-            | store::SideEffectLedgerPhase::ReceiptObserved { .. }
-            | store::SideEffectLedgerPhase::Confirmed { .. }
-            | store::SideEffectLedgerPhase::Ambiguous { .. }
-            | store::SideEffectLedgerPhase::Failed { .. }
-    )
-}
-
-pub(crate) fn validate_side_effect_resume_output(
+fn validate_side_effect_resume_output(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
     projections: &store::ProjectionSnapshot,

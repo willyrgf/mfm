@@ -528,7 +528,7 @@ async fn read_retained_artifact(
     artifacts
         .read_retained_artifact(requirement)
         .await
-        .map_err(artifact_read_runtime_error)
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
 fn decode_verified_json<T>(artifact: &store::VerifiedRunArtifactBytes) -> Result<T>
@@ -606,10 +606,6 @@ fn side_effect_artifact_source(
             "artifact role {role:?} is not a side-effect artifact"
         ))),
     }
-}
-
-fn artifact_read_runtime_error(error: store::StoreError) -> RuntimeError {
-    RuntimeError::InvalidRunnerOutput(error.to_string())
 }
 
 fn executable_identity_digest(value: serde_json::Value) -> Result<ContentDigest> {
@@ -1409,9 +1405,7 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
         T: MfmValue,
     {
         let payloads = RunnerPayloadBuilder::new(self.artifacts.ctx);
-        let artifact = self.artifacts.state_output(value)?;
-        self.stage_attempt_artifact(&artifact)?;
-        self.retain_runtime_evidence(&artifact);
+        let artifact = self.stage_state_output_artifact(value)?;
         self.payload(payloads.cell_produced(&artifact)?);
         Ok(artifact)
     }
@@ -1426,9 +1420,7 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
         T: MfmFactType + MfmValue,
     {
         let payloads = RunnerPayloadBuilder::new(self.artifacts.ctx);
-        let state_artifact = self.artifacts.state_output(&input.fact)?;
-        self.stage_attempt_artifact(&state_artifact)?;
-        self.retain_runtime_evidence(&state_artifact);
+        let state_artifact = self.stage_state_output_artifact(&input.fact)?;
         let staged = self.record_fact(input, producer)?;
         self.payload(payloads.cell_produced(&state_artifact)?);
         Ok(staged)
@@ -1501,17 +1493,15 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
         })
         .map_err(runtime_fact_error)?;
 
-        self.staged_artifacts
-            .push(self.artifacts.staged_attempt(&response)?);
-        self.payloads
-            .push(RunnerEventPayload::FactRecorded(RunnerFactRecorded::new(
-                events::FactRecorded {
-                    spec_hash: self.artifacts.ctx.spec_hash().clone(),
-                    node_id: self.artifacts.ctx.node().node_id.clone(),
-                    attempt_id: self.artifacts.ctx.attempt_id().clone(),
-                    claim,
-                },
-            )));
+        self.stage_attempt_artifact(&response)?;
+        self.payload(RunnerEventPayload::FactRecorded(RunnerFactRecorded::new(
+            events::FactRecorded {
+                spec_hash: self.artifacts.ctx.spec_hash().clone(),
+                node_id: self.artifacts.ctx.node().node_id.clone(),
+                attempt_id: self.artifacts.ctx.attempt_id().clone(),
+                claim,
+            },
+        )));
 
         Ok(StagedFactRecord {
             fact_key,
@@ -1552,6 +1542,16 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
             artifact_id: staged_evidence.artifact_id,
             evidence_hash,
         })
+    }
+
+    fn stage_state_output_artifact<T>(&mut self, value: &T) -> Result<RunnerJsonArtifact>
+    where
+        T: MfmValue,
+    {
+        let artifact = self.artifacts.state_output(value)?;
+        self.stage_attempt_artifact(&artifact)?;
+        self.retain_runtime_evidence(&artifact);
+        Ok(artifact)
     }
 
     /// Appends a runner-owned event payload.

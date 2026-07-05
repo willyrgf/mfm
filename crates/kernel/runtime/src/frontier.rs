@@ -111,11 +111,8 @@ fn next_runnable_node<'a>(
             continue;
         }
         let node = runtime_spec.node(node_id).expect("topological node exists");
-        let Some(attempt) = attempt_plan(runtime_spec, node, view)? else {
-            continue;
-        };
-        if node_inputs_ready(runtime_spec, node, view)? {
-            return Ok(Some(RunnableNode { node, attempt }));
+        if let Some(runnable) = planned_runnable_node_if_ready(runtime_spec, node, view)? {
+            return Ok(Some(runnable));
         }
     }
     Ok(None)
@@ -152,11 +149,8 @@ fn next_forward_completion_node<'a>(
             if !state.is_forward_completion_candidate() {
                 continue;
             }
-            let Some(attempt) = attempt_plan(runtime_spec, node, view)? else {
-                continue;
-            };
-            if node_inputs_ready(runtime_spec, node, view)? {
-                return Ok(Some(RunnableNode { node, attempt }));
+            if let Some(runnable) = planned_runnable_node_if_ready(runtime_spec, node, view)? {
+                return Ok(Some(runnable));
             }
         }
     }
@@ -235,29 +229,12 @@ fn next_remediation_node<'a>(
                         ))
                     })?;
                 if remediation_verify_completion_candidate(&state) {
-                    let Some(attempt) = attempt_plan(runtime_spec, verify_node, view)? else {
-                        return Ok(None);
-                    };
-                    if node_inputs_ready(runtime_spec, verify_node, view)? {
-                        return Ok(Some(RunnableNode {
-                            node: verify_node,
-                            attempt,
-                        }));
-                    }
+                    return planned_runnable_node_if_ready(runtime_spec, verify_node, view);
                 }
                 return Ok(None);
             }
         }
-        let Some(attempt) = attempt_plan(runtime_spec, remediation_node, view)? else {
-            return Ok(None);
-        };
-        if node_inputs_ready(runtime_spec, remediation_node, view)? {
-            return Ok(Some(RunnableNode {
-                node: remediation_node,
-                attempt,
-            }));
-        }
-        return Ok(None);
+        return planned_runnable_node_if_ready(runtime_spec, remediation_node, view);
     }
     Ok(None)
 }
@@ -477,6 +454,20 @@ fn attempt_plan(
     }
 }
 
+fn planned_runnable_node_if_ready<'a>(
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    node: &'a spec::NodeSpec,
+    view: &RuntimeRunView,
+) -> Result<Option<RunnableNode<'a>>> {
+    let Some(attempt) = attempt_plan(runtime_spec, node, view)? else {
+        return Ok(None);
+    };
+    if node_inputs_ready(runtime_spec, node, view)? {
+        return Ok(Some(RunnableNode { node, attempt }));
+    }
+    Ok(None)
+}
+
 fn non_side_effect_attempt_plan(
     runtime_spec: &CertifiedRuntimeSpec,
     node: &spec::NodeSpec,
@@ -534,16 +525,7 @@ fn non_side_effect_attempt_plan(
         }
     }
 
-    if let Some((attempt_id, attempt_no)) = started {
-        Ok(Some(AttemptPlan::Continue {
-            attempt_id,
-            attempt_no,
-        }))
-    } else {
-        Ok(Some(AttemptPlan::StartNew {
-            attempt_no: next_attempt_no(&view.projections, &node.node_id)?,
-        }))
-    }
+    attempt_plan_from_started_or_new(started, &view.projections, &node.node_id)
 }
 
 fn side_effect_attempt_plan(
@@ -623,6 +605,14 @@ fn side_effect_attempt_plan(
         }
     }
 
+    attempt_plan_from_started_or_new(started, &view.projections, &node.node_id)
+}
+
+fn attempt_plan_from_started_or_new(
+    started: Option<(AttemptId, u32)>,
+    projections: &store::ProjectionSnapshot,
+    node_id: &NodeId,
+) -> Result<Option<AttemptPlan>> {
     if let Some((attempt_id, attempt_no)) = started {
         Ok(Some(AttemptPlan::Continue {
             attempt_id,
@@ -630,7 +620,7 @@ fn side_effect_attempt_plan(
         }))
     } else {
         Ok(Some(AttemptPlan::StartNew {
-            attempt_no: next_attempt_no(&view.projections, &node.node_id)?,
+            attempt_no: next_attempt_no(projections, node_id)?,
         }))
     }
 }
