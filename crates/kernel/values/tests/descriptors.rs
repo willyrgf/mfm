@@ -111,6 +111,13 @@ fn descriptor_identity_has_golden_canonical_json_and_schema_id() {
     let descriptor = ExampleValue::schema_descriptor().expect("example descriptor");
 
     assert_eq!(
+        descriptor.identity.persisted_surface,
+        PersistedSurfacePolicy {
+            secrets: SecretPolicy::NoSecrets,
+            numbers: NumberPolicy::NoFloats,
+        }
+    );
+    assert_eq!(
         descriptor.identity_canonical_json().as_str(),
         "{\"canonicalization\":\"sha256-jcs-v1\",\"persisted_surface\":{\"numbers\":\"no_floats\",\"secrets\":\"no_secrets\"},\"schema_kind\":\"value\",\"schema_name\":\"mfm.test.example_value\",\"schema_version\":\"1\",\"semantic_type_id\":\"semantic:mfm.test:example-value:1:sha256-jcs-v1:3333333333333333333333333333333333333333333333333333333333333333\",\"shape\":{\"fields\":[{\"default\":\"required\",\"name\":\"amount\",\"shape\":{\"kind\":\"decimal_string\",\"scale\":{\"kind\":\"variable\"}}},{\"default\":\"required\",\"name\":\"label\",\"shape\":{\"kind\":\"string\"}}],\"kind\":\"struct\"},\"versioning\":\"manual_version\"}"
     );
@@ -271,19 +278,6 @@ fn duplicate_descriptor_names_reject() {
         EnumVariantDescriptor::new("dup", SchemaShape::Unit),
     ])
     .is_err());
-}
-
-#[test]
-fn persisted_surface_policy_is_strict_no_secret_no_float() {
-    let descriptor = ExampleValue::schema_descriptor().expect("example descriptor");
-
-    assert_eq!(
-        descriptor.identity.persisted_surface,
-        PersistedSurfacePolicy {
-            secrets: SecretPolicy::NoSecrets,
-            numbers: NumberPolicy::NoFloats,
-        }
-    );
 }
 
 #[test]

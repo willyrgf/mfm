@@ -497,54 +497,53 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_evm_domain() {
+    fn rejects_invalid_request_contracts_before_unlocking_keystore() {
+        enum Case {
+            UnsupportedDomain,
+            UnsupportedPurpose,
+            MissingExpectedIdentity,
+        }
+
         let keystore = test_keystore();
         let provider = provider(registry_entry(&keystore));
-        let request = signing_request_with(
-            keystore.address,
-            SigningDomainId::new("evm.other").expect("domain"),
-            legacy_transaction_purpose_id().expect("purpose"),
-            true,
-        );
 
-        assert_eq!(
-            provider.sign_request(&request),
-            Err(KeystoreSignerError::UnsupportedDomain)
-        );
-    }
+        for (case, expected) in [
+            (
+                Case::UnsupportedDomain,
+                KeystoreSignerError::UnsupportedDomain,
+            ),
+            (
+                Case::UnsupportedPurpose,
+                KeystoreSignerError::UnsupportedPurpose,
+            ),
+            (
+                Case::MissingExpectedIdentity,
+                KeystoreSignerError::MissingExpectedIdentity,
+            ),
+        ] {
+            let request = match case {
+                Case::UnsupportedDomain => signing_request_with(
+                    keystore.address,
+                    SigningDomainId::new("evm.other").expect("domain"),
+                    legacy_transaction_purpose_id().expect("purpose"),
+                    true,
+                ),
+                Case::UnsupportedPurpose => signing_request_with(
+                    keystore.address,
+                    evm_transaction_domain_id().expect("domain"),
+                    SigningPurposeId::new("evm.transaction.other").expect("purpose"),
+                    true,
+                ),
+                Case::MissingExpectedIdentity => signing_request_with(
+                    keystore.address,
+                    evm_transaction_domain_id().expect("domain"),
+                    legacy_transaction_purpose_id().expect("purpose"),
+                    false,
+                ),
+            };
 
-    #[test]
-    fn rejects_unsupported_evm_purpose() {
-        let keystore = test_keystore();
-        let provider = provider(registry_entry(&keystore));
-        let request = signing_request_with(
-            keystore.address,
-            evm_transaction_domain_id().expect("domain"),
-            SigningPurposeId::new("evm.transaction.other").expect("purpose"),
-            true,
-        );
-
-        assert_eq!(
-            provider.sign_request(&request),
-            Err(KeystoreSignerError::UnsupportedPurpose)
-        );
-    }
-
-    #[test]
-    fn rejects_missing_expected_identity() {
-        let keystore = test_keystore();
-        let provider = provider(registry_entry(&keystore));
-        let request = signing_request_with(
-            keystore.address,
-            evm_transaction_domain_id().expect("domain"),
-            legacy_transaction_purpose_id().expect("purpose"),
-            false,
-        );
-
-        assert_eq!(
-            provider.sign_request(&request),
-            Err(KeystoreSignerError::MissingExpectedIdentity)
-        );
+            assert_eq!(provider.sign_request(&request), Err(expected));
+        }
     }
 
     #[test]

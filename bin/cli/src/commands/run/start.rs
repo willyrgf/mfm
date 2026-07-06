@@ -147,61 +147,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_requires_store_trust_scope_before_entry_point_resolution() {
+    async fn start_requires_store_trust_scope_before_later_entry_point_work() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let config = tmp.path().join("portfolio.json");
-        std::fs::write(&config, "{}").expect("write config");
 
-        let mut args = start_args(config, RunStoresArgs { database_url: None });
-        args.op = "unknown_op".to_owned();
+        for (case, op, file_name, format, contents) in [
+            (
+                "unknown op",
+                "unknown_op",
+                "unknown.json",
+                ConfigFormatArg::Json,
+                "{}".to_owned(),
+            ),
+            (
+                "invalid op config",
+                "portfolio_snapshot",
+                "invalid-portfolio.json",
+                ConfigFormatArg::Json,
+                r#"{"portfolio":{"portfolio_id":1}}"#.to_owned(),
+            ),
+            (
+                "valid json",
+                "portfolio_snapshot",
+                "portfolio.json",
+                ConfigFormatArg::Json,
+                sample_portfolio_config_json(),
+            ),
+            (
+                "valid toml",
+                "portfolio_snapshot",
+                "portfolio.toml",
+                ConfigFormatArg::Toml,
+                sample_portfolio_config_toml(),
+            ),
+        ] {
+            let config = tmp.path().join(file_name);
+            std::fs::write(&config, contents).expect("write config");
+            let mut args = start_args(config, RunStoresArgs { database_url: None });
+            args.op = op.to_owned();
+            args.config_format = format;
 
-        let err = execute_internal(&args)
-            .await
-            .expect_err("start requires store trust scope");
+            let err = match execute_internal(&args).await {
+                Ok(_) => panic!("{case} should reach store trust-scope lookup"),
+                Err(err) => err,
+            };
 
-        assert_eq!(err.code, "MissingDatabaseUrl");
-    }
-
-    #[tokio::test]
-    async fn start_requires_store_trust_scope_before_op_config_decode() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let config = tmp.path().join("portfolio.json");
-        std::fs::write(&config, r#"{"portfolio":{"portfolio_id":1}}"#).expect("write config");
-
-        let err = execute_internal(&start_args(config, RunStoresArgs { database_url: None }))
-            .await
-            .expect_err("start requires store trust scope");
-
-        assert_eq!(err.code, "MissingDatabaseUrl");
-    }
-
-    #[tokio::test]
-    async fn start_accepts_entry_point_material_before_store_connection() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let config = tmp.path().join("portfolio.json");
-        std::fs::write(&config, sample_portfolio_config_json()).expect("write config");
-
-        let err = execute_internal(&start_args(config, RunStoresArgs { database_url: None }))
-            .await
-            .expect_err("valid entry-point launch proceeds to store construction");
-
-        assert_eq!(err.code, "MissingDatabaseUrl");
-    }
-
-    #[tokio::test]
-    async fn start_defaults_config_format_to_toml_before_store_connection() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let config = tmp.path().join("portfolio.toml");
-        std::fs::write(&config, sample_portfolio_config_toml()).expect("write config");
-
-        let mut args = start_args(config, RunStoresArgs { database_url: None });
-        args.config_format = ConfigFormatArg::Toml;
-
-        let err = execute_internal(&args)
-            .await
-            .expect_err("valid TOML entry-point launch proceeds to store construction");
-
-        assert_eq!(err.code, "MissingDatabaseUrl");
+            assert_eq!(err.code, "MissingDatabaseUrl", "{case}");
+        }
     }
 
     #[tokio::test]

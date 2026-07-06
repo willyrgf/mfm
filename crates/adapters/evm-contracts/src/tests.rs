@@ -1839,70 +1839,79 @@ fn event_block_selector_rejects_unsupported_tags() {
 }
 
 #[test]
-fn configure_action_transaction_inputs_accepts_empty_calls_without_artifact() {
-    let action = configure_action(json!([]));
+fn configure_action_transaction_inputs_handle_missing_artifact_by_call_set() {
+    enum Expected {
+        EmptyInputs,
+        MissingArtifact,
+    }
 
-    let inputs = configure_action_transaction_inputs(
-        &action,
-        None,
-        "0x000000000000000000000000000000000000beef",
-    )
-    .expect("empty configure calls should not require artifact");
+    for (label, calls, expected) in [
+        ("empty calls", json!([]), Expected::EmptyInputs),
+        (
+            "non-empty calls",
+            json!([
+                {
+                    "function": "configure",
+                }
+            ]),
+            Expected::MissingArtifact,
+        ),
+    ] {
+        let action = configure_action(calls);
+        let result = configure_action_transaction_inputs(
+            &action,
+            None,
+            "0x000000000000000000000000000000000000beef",
+        );
 
-    assert!(inputs.is_empty());
-}
-
-#[test]
-fn configure_action_transaction_inputs_rejects_calls_without_artifact() {
-    let action = configure_action(json!([
-        {
-            "function": "configure",
+        match expected {
+            Expected::EmptyInputs => {
+                let inputs = result.expect(label);
+                assert!(inputs.is_empty(), "{label}");
+            }
+            Expected::MissingArtifact => {
+                let error = match result {
+                    Ok(_) => panic!("{label} should require artifact"),
+                    Err(error) => error,
+                };
+                assert!(matches!(
+                    error,
+                    EvmContractAdapterError::MissingContractArtifact
+                ));
+            }
         }
-    ]));
-
-    let error = match configure_action_transaction_inputs(
-        &action,
-        None,
-        "0x000000000000000000000000000000000000beef",
-    ) {
-        Ok(_) => panic!("non-empty configure calls require artifact"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(
-        error,
-        EvmContractAdapterError::MissingContractArtifact
-    ));
+    }
 }
 
 #[tokio::test]
-async fn deploy_preparation_defaults_to_eip1559_contract_creation() {
-    let (_fixture, prepared) = prepared_deploy_fixture("eip1559").await;
+async fn deploy_preparation_uses_requested_transaction_style_for_contract_creation() {
+    for (style, expected_prepared, expected_signing) in [
+        (
+            "eip1559",
+            PreparedContractTransactionStyle::Eip1559,
+            SigningTransactionStyle::Eip1559,
+        ),
+        (
+            "legacy",
+            PreparedContractTransactionStyle::Legacy,
+            SigningTransactionStyle::Legacy,
+        ),
+    ] {
+        let (_fixture, prepared) = prepared_deploy_fixture(style).await;
 
-    assert_eq!(prepared.evidence().transactions.len(), 1);
-    assert_eq!(
-        prepared.evidence().transactions[0].style,
-        PreparedContractTransactionStyle::Eip1559
-    );
-    assert_eq!(prepared.evidence().transactions[0].to_address, None);
-    assert_eq!(
-        prepared.signing_requests()[0].style(),
-        SigningTransactionStyle::Eip1559
-    );
-}
-
-#[tokio::test]
-async fn deploy_preparation_supports_legacy_contract_creation() {
-    let (_fixture, prepared) = prepared_deploy_fixture("legacy").await;
-
-    assert_eq!(
-        prepared.evidence().transactions[0].style,
-        PreparedContractTransactionStyle::Legacy
-    );
-    assert_eq!(
-        prepared.signing_requests()[0].style(),
-        SigningTransactionStyle::Legacy
-    );
+        assert_eq!(prepared.evidence().transactions.len(), 1, "{style}");
+        assert_eq!(
+            prepared.evidence().transactions[0].style,
+            expected_prepared,
+            "{style}"
+        );
+        assert_eq!(
+            prepared.evidence().transactions[0].to_address,
+            None,
+            "{style}"
+        );
+        assert_eq!(prepared.signing_requests()[0].style(), expected_signing);
+    }
 }
 
 #[tokio::test]
@@ -2324,13 +2333,13 @@ async fn submit_rejects_resigned_hash_mismatch_before_broadcast() {
 }
 
 #[tokio::test]
-async fn recovery_observes_landed_anchor_without_resubmitting() {
-    assert_recovery_observed(RecoveryReceiptMode::Landed, 0).await;
-}
-
-#[tokio::test]
-async fn recovery_rebroadcasts_unlanded_anchor_after_resign_match() {
-    assert_recovery_observed(RecoveryReceiptMode::Pending, 1).await;
+async fn recovery_observes_or_rebroadcasts_anchor_by_receipt_state() {
+    for (receipt_mode, expected_submit_count) in [
+        (RecoveryReceiptMode::Landed, 0),
+        (RecoveryReceiptMode::Pending, 1),
+    ] {
+        assert_recovery_observed(receipt_mode, expected_submit_count).await;
+    }
 }
 
 #[tokio::test]
@@ -2368,11 +2377,6 @@ async fn fresh_submit_records_ambiguity_when_provider_returns_mismatched_hash() 
 }
 
 #[tokio::test]
-async fn recovery_keeps_advanced_nonce_unknown_without_occupancy_proof() {
-    assert_recovery_unknown(RecoveryReceiptMode::Pending, 8).await;
-}
-
-#[tokio::test]
 async fn recovery_proves_not_submitted_when_foreign_transaction_occupies_nonce() {
     let (_fixture, prepared) = prepared_deploy_fixture("eip1559").await;
     let occupying_hash = "0x2222222222222222222222222222222222222222222222222222222222222222"
@@ -2405,8 +2409,13 @@ async fn recovery_proves_not_submitted_when_foreign_transaction_occupies_nonce()
 }
 
 #[tokio::test]
-async fn recovery_records_unknown_on_transient_anchor_read_failure() {
-    assert_recovery_unknown(RecoveryReceiptMode::ProviderFailure, 7).await;
+async fn recovery_records_unknown_without_occupancy_proof_or_on_anchor_read_failure() {
+    for (receipt_mode, pending_nonce) in [
+        (RecoveryReceiptMode::Pending, 8),
+        (RecoveryReceiptMode::ProviderFailure, 7),
+    ] {
+        assert_recovery_unknown(receipt_mode, pending_nonce).await;
+    }
 }
 
 type PreparedInvocationMutation = Box<dyn FnOnce(&mut PreparedContractInvocation)>;
@@ -2654,39 +2663,38 @@ fn replay_intent_evidence(
 }
 
 #[test]
-fn replay_intent_rejects_prepared_transaction_count_mismatch() {
-    let original = prepared_invocation_fixture();
-    let intent = replay_intent_evidence(&original);
-    let mut prepared = original.clone();
-    let mut extra = prepared.transactions[0].clone();
-    extra.index = 1;
-    prepared.transactions.push(extra);
+fn replay_intent_rejects_prepared_transaction_mismatches() {
+    #[derive(Clone, Copy)]
+    enum Mismatch {
+        Count,
+        Destination,
+        Policy,
+    }
 
-    assert!(verify_replay_intent_matches_prepared(&intent, &prepared).is_err());
-}
+    for mismatch in [Mismatch::Count, Mismatch::Destination, Mismatch::Policy] {
+        let original = prepared_invocation_fixture();
+        let intent = replay_intent_evidence(&original);
+        let mut prepared = original;
+        match mismatch {
+            Mismatch::Count => {
+                let mut extra = prepared.transactions[0].clone();
+                extra.index = 1;
+                prepared.transactions.push(extra);
+            }
+            Mismatch::Destination => {
+                prepared.transactions[0].to_address =
+                    Some("0x000000000000000000000000000000000000beef".to_owned());
+            }
+            Mismatch::Policy => {
+                prepared.transactions[0].style = PreparedContractTransactionStyle::Legacy;
+                prepared.transactions[0].gas_price = Some("9".to_owned());
+                prepared.transactions[0].max_fee_per_gas = None;
+                prepared.transactions[0].max_priority_fee_per_gas = None;
+            }
+        }
 
-#[test]
-fn replay_intent_rejects_prepared_destination_mismatch() {
-    let original = prepared_invocation_fixture();
-    let intent = replay_intent_evidence(&original);
-    let mut prepared = original;
-    prepared.transactions[0].to_address =
-        Some("0x000000000000000000000000000000000000beef".to_owned());
-
-    assert!(verify_replay_intent_matches_prepared(&intent, &prepared).is_err());
-}
-
-#[test]
-fn replay_intent_rejects_prepared_policy_mismatch() {
-    let original = prepared_invocation_fixture();
-    let intent = replay_intent_evidence(&original);
-    let mut prepared = original;
-    prepared.transactions[0].style = PreparedContractTransactionStyle::Legacy;
-    prepared.transactions[0].gas_price = Some("9".to_owned());
-    prepared.transactions[0].max_fee_per_gas = None;
-    prepared.transactions[0].max_priority_fee_per_gas = None;
-
-    assert!(verify_replay_intent_matches_prepared(&intent, &prepared).is_err());
+        assert!(verify_replay_intent_matches_prepared(&intent, &prepared).is_err());
+    }
 }
 
 #[test]
@@ -2824,6 +2832,26 @@ fn receipt_polling_invocation(transaction_hash: &str) -> PreparedContractInvocat
     transaction.signing_digest = transaction_hash.to_owned();
     transaction.expected_transaction_hash = transaction_hash.to_owned();
     prepared
+}
+
+fn receipt_polling_submissions(
+    prepared: &PreparedContractInvocation,
+    transaction_hash: &str,
+) -> ContractTransactionSubmissions {
+    ContractTransactionSubmissions {
+        submissions_version: 1,
+        context_ref: prepared.context_ref.clone(),
+        evm_network_context_ref: prepared.evm_network_context_ref.clone(),
+        resource_stage: prepared.resource_stage,
+        transactions: vec![ContractTransactionSubmission {
+            submission_version: 1,
+            context_ref: prepared.context_ref.clone(),
+            evm_network_context_ref: prepared.evm_network_context_ref.clone(),
+            resource_stage: prepared.resource_stage,
+            transaction_hash: transaction_hash.to_owned(),
+            signer_public_key: None,
+        }],
+    }
 }
 
 fn finality_receipt() -> ContractTransactionReceipt {
@@ -3191,50 +3219,59 @@ fn replay_external_adoption_requires_code_evidence_when_policy_requires_code() {
 }
 
 #[test]
-fn replay_submission_rejects_context_mismatch() {
-    let prepared = prepared_invocation_fixture();
-    let mut submissions = prepared_anchor_submissions(&prepared).expect("submissions");
-    submissions.context_ref = mfm_values::ContextRefValue::from(ContextRef::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        digest_with(0x90),
-    ));
+fn replay_submission_and_receipt_reject_context_mismatch() {
+    enum Case {
+        Submission,
+        Receipt,
+    }
 
-    assert!(matches!(
-        verify_prepared_submissions(&prepared, &submissions),
-        Err(EvmContractAdapterError::InvalidPreparedInvocation)
-    ));
-}
+    for case in [Case::Submission, Case::Receipt] {
+        let prepared = prepared_invocation_fixture();
+        match case {
+            Case::Submission => {
+                let mut submissions = prepared_anchor_submissions(&prepared).expect("submissions");
+                submissions.context_ref = mfm_values::ContextRefValue::from(
+                    ContextRef::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(0x90)),
+                );
 
-#[test]
-fn replay_receipt_rejects_context_mismatch() {
-    let prepared = prepared_invocation_fixture();
-    let mut receipt = ContractDeployReceipt {
-        receipt_version: 1,
-        context_ref: prepared.context_ref.clone(),
-        evm_network_context_ref: prepared.evm_network_context_ref.clone(),
-        resource_stage: ContractLifecycleStage::Deployed,
-        contract_address: "0x000000000000000000000000000000000000beef".to_owned(),
-        receipt: ContractTransactionReceipt {
-            receipt_version: 1,
-            context_ref: prepared.context_ref.clone(),
-            evm_network_context_ref: prepared.evm_network_context_ref.clone(),
-            resource_stage: ContractLifecycleStage::Deployed,
-            transaction_hash: prepared.transactions[0].expected_transaction_hash.clone(),
-            block_number: 7,
-            status: true,
-            receipt_evidence: None,
-        },
-    };
-    receipt.context_ref = mfm_values::ContextRefValue::from(ContextRef::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        digest_with(0x91),
-    ));
-    let schema = ContractDeployReceipt::schema_id().expect("schema");
-    let bytes = serde_json::to_vec(&receipt).expect("receipt json");
+                assert!(matches!(
+                    verify_prepared_submissions(&prepared, &submissions),
+                    Err(EvmContractAdapterError::InvalidPreparedInvocation)
+                ));
+            }
+            Case::Receipt => {
+                let mut receipt = ContractDeployReceipt {
+                    receipt_version: 1,
+                    context_ref: prepared.context_ref.clone(),
+                    evm_network_context_ref: prepared.evm_network_context_ref.clone(),
+                    resource_stage: ContractLifecycleStage::Deployed,
+                    contract_address: "0x000000000000000000000000000000000000beef".to_owned(),
+                    receipt: ContractTransactionReceipt {
+                        receipt_version: 1,
+                        context_ref: prepared.context_ref.clone(),
+                        evm_network_context_ref: prepared.evm_network_context_ref.clone(),
+                        resource_stage: ContractLifecycleStage::Deployed,
+                        transaction_hash: prepared.transactions[0]
+                            .expected_transaction_hash
+                            .clone(),
+                        block_number: 7,
+                        status: true,
+                        receipt_evidence: None,
+                    },
+                };
+                receipt.context_ref = mfm_values::ContextRefValue::from(ContextRef::from_digest(
+                    DigestAlgorithm::Sha256JcsV1,
+                    digest_with(0x91),
+                ));
+                let schema = ContractDeployReceipt::schema_id().expect("schema");
+                let bytes = serde_json::to_vec(&receipt).expect("receipt json");
 
-    let error = verify_contract_receipt_artifact(&schema, &bytes, &prepared)
-        .expect_err("mismatched receipt context");
-    assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
+                let error = verify_contract_receipt_artifact(&schema, &bytes, &prepared)
+                    .expect_err("mismatched receipt context");
+                assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
+            }
+        }
+    }
 }
 
 #[test]
@@ -3254,42 +3291,48 @@ fn replay_verifier_accepts_prepared_context_matching_certified_node_context() {
 }
 
 #[test]
-fn replay_verifier_rejects_consistently_wrong_prepared_submission_context() {
-    let certified_prepared = prepared_invocation_fixture();
-    let wrong_prepared = wrong_context_prepared_invocation_fixture();
-    let verifier = EvmContractLifecycleReplayVerifier::new().expect("verifier");
-    let input = replay::SideEffectSubmissionReplayInput {
-        intent: replay_intent_evidence(&wrong_prepared),
-        certified_context: certified_side_effect_context_for_prepared(&certified_prepared),
-        prepared_invocation: Some(replay_prepared_evidence(&wrong_prepared)),
-        submission: replay_submission_evidence(&wrong_prepared),
-    };
+fn replay_verifier_rejects_consistently_wrong_prepared_context() {
+    enum Case {
+        Submission,
+        Receipt,
+    }
 
-    let error = verifier
-        .verify_submission(&input)
-        .expect_err("prepared and submission artifacts agree with the wrong context");
+    for case in [Case::Submission, Case::Receipt] {
+        let certified_prepared = prepared_invocation_fixture();
+        let wrong_prepared = wrong_context_prepared_invocation_fixture();
+        let verifier = EvmContractLifecycleReplayVerifier::new().expect("verifier");
+        let error = match case {
+            Case::Submission => {
+                let input = replay::SideEffectSubmissionReplayInput {
+                    intent: replay_intent_evidence(&wrong_prepared),
+                    certified_context: certified_side_effect_context_for_prepared(
+                        &certified_prepared,
+                    ),
+                    prepared_invocation: Some(replay_prepared_evidence(&wrong_prepared)),
+                    submission: replay_submission_evidence(&wrong_prepared),
+                };
+                verifier
+                    .verify_submission(&input)
+                    .expect_err("prepared and submission artifacts agree with the wrong context")
+            }
+            Case::Receipt => {
+                let input = replay::SideEffectReceiptReplayInput {
+                    intent: replay_intent_evidence(&wrong_prepared),
+                    certified_context: certified_side_effect_context_for_prepared(
+                        &certified_prepared,
+                    ),
+                    prepared_invocation: Some(replay_prepared_evidence(&wrong_prepared)),
+                    submission: Some(replay_submission_evidence(&wrong_prepared)),
+                    receipt: replay_receipt_evidence(&wrong_prepared),
+                };
+                verifier.verify_receipt(&input).expect_err(
+                    "prepared, submission, and receipt artifacts agree with the wrong context",
+                )
+            }
+        };
 
-    assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
-}
-
-#[test]
-fn replay_verifier_rejects_consistently_wrong_prepared_submission_receipt_context() {
-    let certified_prepared = prepared_invocation_fixture();
-    let wrong_prepared = wrong_context_prepared_invocation_fixture();
-    let verifier = EvmContractLifecycleReplayVerifier::new().expect("verifier");
-    let input = replay::SideEffectReceiptReplayInput {
-        intent: replay_intent_evidence(&wrong_prepared),
-        certified_context: certified_side_effect_context_for_prepared(&certified_prepared),
-        prepared_invocation: Some(replay_prepared_evidence(&wrong_prepared)),
-        submission: Some(replay_submission_evidence(&wrong_prepared)),
-        receipt: replay_receipt_evidence(&wrong_prepared),
-    };
-
-    let error = verifier
-        .verify_receipt(&input)
-        .expect_err("prepared, submission, and receipt artifacts agree with the wrong context");
-
-    assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
+        assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
+    }
 }
 
 #[tokio::test]
@@ -3298,20 +3341,7 @@ async fn receipt_polling_does_not_retry_permanent_capability_failures() {
     let runtime = runtime_from_provider(TestEvmProviders::receipt_failure(Arc::clone(&reads)));
     let transaction_hash = TEST_TRANSACTION_HASH;
     let prepared = receipt_polling_invocation(transaction_hash);
-    let submissions = ContractTransactionSubmissions {
-        submissions_version: 1,
-        context_ref: prepared.context_ref.clone(),
-        evm_network_context_ref: prepared.evm_network_context_ref.clone(),
-        resource_stage: prepared.resource_stage,
-        transactions: vec![ContractTransactionSubmission {
-            submission_version: 1,
-            context_ref: prepared.context_ref.clone(),
-            evm_network_context_ref: prepared.evm_network_context_ref.clone(),
-            resource_stage: prepared.resource_stage,
-            transaction_hash: transaction_hash.to_owned(),
-            signer_public_key: None,
-        }],
-    };
+    let submissions = receipt_polling_submissions(&prepared, transaction_hash);
 
     let error = read_receipts_with_poll(&runtime, &prepared, &submissions)
         .await
@@ -3326,21 +3356,10 @@ async fn receipt_polling_rejects_tampered_submission_before_provider_read() {
     let reads = Arc::new(Mutex::new(0_u32));
     let runtime = runtime_from_provider(TestEvmProviders::receipt_failure(Arc::clone(&reads)));
     let prepared = receipt_polling_invocation(TEST_TRANSACTION_HASH);
-    let submissions = ContractTransactionSubmissions {
-        submissions_version: 1,
-        context_ref: prepared.context_ref.clone(),
-        evm_network_context_ref: prepared.evm_network_context_ref.clone(),
-        resource_stage: prepared.resource_stage,
-        transactions: vec![ContractTransactionSubmission {
-            submission_version: 1,
-            context_ref: prepared.context_ref.clone(),
-            evm_network_context_ref: prepared.evm_network_context_ref.clone(),
-            resource_stage: prepared.resource_stage,
-            transaction_hash: "0x2222222222222222222222222222222222222222222222222222222222222222"
-                .to_owned(),
-            signer_public_key: None,
-        }],
-    };
+    let submissions = receipt_polling_submissions(
+        &prepared,
+        "0x2222222222222222222222222222222222222222222222222222222222222222",
+    );
 
     let error = read_receipts_with_poll(&runtime, &prepared, &submissions)
         .await

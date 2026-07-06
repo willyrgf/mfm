@@ -98,14 +98,16 @@ fn btc_jsonrpc_runtime_config_parses_from_toml_and_json() {
 }
 
 #[test]
-fn required_btc_family_must_exist() {
-    let err = RuntimeConfig::from_str_with_requirements(
-        "",
-        RuntimeConfigFormat::Toml,
-        RuntimeConfigRequirement::btc(),
-    )
-    .expect_err("missing btc");
-    assert_eq!(err.kind(), &RuntimeConfigErrorKind::MissingFamily);
+fn required_runtime_families_must_exist() {
+    for (name, requirement) in [
+        ("btc", RuntimeConfigRequirement::btc()),
+        ("evm", RuntimeConfigRequirement::evm()),
+    ] {
+        let err =
+            RuntimeConfig::from_str_with_requirements("", RuntimeConfigFormat::Toml, requirement)
+                .expect_err(name);
+        assert_eq!(err.kind(), &RuntimeConfigErrorKind::MissingFamily, "{name}");
+    }
 }
 
 #[test]
@@ -217,41 +219,47 @@ fn direct_env_file_and_file_env_sources_resolve() {
 }
 
 #[test]
-fn endpoint_source_must_be_exactly_one() {
-    let missing = r#"
-        [evm.sources.local]
+fn value_sources_enforce_endpoint_and_auth_cardinality() {
+    for (name, config, expected) in [
+        (
+            "missing endpoint source",
+            r#"
+            [evm.sources.local]
 
-        [evm.routes.dev]
-        source_ref = "local"
-    "#;
-    let err = RuntimeConfig::from_str(missing, RuntimeConfigFormat::Toml).expect_err("missing");
-    assert_eq!(err.kind(), &RuntimeConfigErrorKind::ExactlyOneValueSource);
+            [evm.routes.dev]
+            source_ref = "local"
+            "#,
+            RuntimeConfigErrorKind::ExactlyOneValueSource,
+        ),
+        (
+            "duplicate endpoint source",
+            r#"
+            [evm.sources.local]
+            rpc_url = "http://127.0.0.1:8545"
+            rpc_url_env = "MFM_RUNTIME_CONFIG_TEST_RPC_ENV"
 
-    let duplicate = r#"
-        [evm.sources.local]
-        rpc_url = "http://127.0.0.1:8545"
-        rpc_url_env = "MFM_RUNTIME_CONFIG_TEST_RPC_ENV"
+            [evm.routes.dev]
+            source_ref = "local"
+            "#,
+            RuntimeConfigErrorKind::ExactlyOneValueSource,
+        ),
+        (
+            "duplicate auth source",
+            r#"
+            [evm.sources.local]
+            rpc_url = "http://127.0.0.1:8545"
+            auth_header = "Bearer direct"
+            auth_header_env = "MFM_RUNTIME_CONFIG_TEST_AUTH_ENV"
 
-        [evm.routes.dev]
-        source_ref = "local"
-    "#;
-    let err = RuntimeConfig::from_str(duplicate, RuntimeConfigFormat::Toml).expect_err("duplicate");
-    assert_eq!(err.kind(), &RuntimeConfigErrorKind::ExactlyOneValueSource);
-}
-
-#[test]
-fn auth_source_must_be_at_most_one() {
-    let duplicate = r#"
-        [evm.sources.local]
-        rpc_url = "http://127.0.0.1:8545"
-        auth_header = "Bearer direct"
-        auth_header_env = "MFM_RUNTIME_CONFIG_TEST_AUTH_ENV"
-
-        [evm.routes.dev]
-        source_ref = "local"
-    "#;
-    let err = RuntimeConfig::from_str(duplicate, RuntimeConfigFormat::Toml).expect_err("duplicate");
-    assert_eq!(err.kind(), &RuntimeConfigErrorKind::AtMostOneValueSource);
+            [evm.routes.dev]
+            source_ref = "local"
+            "#,
+            RuntimeConfigErrorKind::AtMostOneValueSource,
+        ),
+    ] {
+        let err = RuntimeConfig::from_str(config, RuntimeConfigFormat::Toml).expect_err(name);
+        assert_eq!(err.kind(), &expected, "{name}");
+    }
 }
 
 #[test]
@@ -549,17 +557,6 @@ fn whole_required_family_rejects_unused_malformed_entries() {
 }
 
 #[test]
-fn required_evm_family_must_exist() {
-    let err = RuntimeConfig::from_str_with_requirements(
-        "",
-        RuntimeConfigFormat::Toml,
-        RuntimeConfigRequirement::evm(),
-    )
-    .expect_err("missing evm");
-    assert_eq!(err.kind(), &RuntimeConfigErrorKind::MissingFamily);
-}
-
-#[test]
 fn diagnostics_are_closed_and_redacted() {
     let _env = locked_env([(
         "MFM_RUNTIME_CONFIG_TEST_SECRET_PATH",
@@ -575,8 +572,7 @@ fn diagnostics_are_closed_and_redacted() {
     fs::write(&runtime_path, config).expect("runtime config");
 
     let err = RuntimeConfig::load_path(&runtime_path).expect_err("redacted error");
-    assert_redacted(&err.to_string());
-    assert_redacted(&format!("{err:?}"));
+    assert_error_redacted(&err);
 
     let userinfo = r#"
         [evm.sources.secret-source]
@@ -584,8 +580,7 @@ fn diagnostics_are_closed_and_redacted() {
         auth_header = "Bearer should-not-leak"
     "#;
     let err = RuntimeConfig::from_str(userinfo, RuntimeConfigFormat::Toml).expect_err("userinfo");
-    assert_redacted(&err.to_string());
-    assert_redacted(&format!("{err:?}"));
+    assert_error_redacted(&err);
 
     let signer_secret = r#"
         [keystores.default]
@@ -600,8 +595,7 @@ fn diagnostics_are_closed_and_redacted() {
     "#;
     let err =
         RuntimeConfig::from_str(signer_secret, RuntimeConfigFormat::Toml).expect_err("secret");
-    assert_redacted(&err.to_string());
-    assert_redacted(&format!("{err:?}"));
+    assert_error_redacted(&err);
 }
 
 fn assert_value(
@@ -629,6 +623,11 @@ fn assert_redacted(message: &str) {
             "diagnostic leaked {forbidden}: {message}"
         );
     }
+}
+
+fn assert_error_redacted(error: &(impl std::fmt::Debug + std::fmt::Display)) {
+    assert_redacted(&error.to_string());
+    assert_redacted(&format!("{error:?}"));
 }
 
 fn locked_env<const N: usize>(pairs: [(&'static str, &str); N]) -> EnvGuard {

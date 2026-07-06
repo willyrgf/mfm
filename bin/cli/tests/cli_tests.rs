@@ -64,7 +64,7 @@ fn test_facts_query_help_has_public_query_shape() {
 }
 
 #[test]
-fn facts_commands_use_evidence_only_services() {
+fn facts_commands_use_public_evidence_only_services() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let source =
         std::fs::read_to_string(manifest_dir.join("src/commands/facts.rs")).expect("facts source");
@@ -77,13 +77,6 @@ fn facts_commands_use_evidence_only_services() {
         !source.contains("connect_run_services("),
         "facts commands must not construct live run services"
     );
-}
-
-#[test]
-fn facts_commands_do_not_expose_non_public_fact_access_knobs() {
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let source =
-        std::fs::read_to_string(manifest_dir.join("src/commands/facts.rs")).expect("facts source");
 
     for forbidden in [
         "FactAudience::Control",
@@ -102,83 +95,66 @@ fn facts_commands_do_not_expose_non_public_fact_access_knobs() {
 }
 
 #[test]
-fn test_keystore_help() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.args(&["keystore", "--help"]);
+fn test_keystore_help_surfaces() {
+    for (args, expected) in [
+        (
+            vec!["keystore", "--help"],
+            vec!["Keystore management operations", "import", "delete", "list"],
+        ),
+        (
+            vec!["keystore", "import", "--help"],
+            vec![
+                "Import a private key or mnemonic",
+                "--import-type",
+                "--passphrase-file",
+                "--passphrase-prompt",
+                "privatekey",
+                "mnemonic",
+            ],
+        ),
+        (
+            vec!["keystore", "list", "--help"],
+            vec!["List keys in the keystore", "--show-addresses"],
+        ),
+        (
+            vec!["keystore", "delete", "--help"],
+            vec!["Delete a key from the keystore", "--by-label", "--yes"],
+        ),
+        (
+            vec!["keystore", "tx-sign", "--help"],
+            vec!["--out", "--overwrite"],
+        ),
+    ] {
+        let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+        cmd.args(args);
 
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("Keystore management operations"))
-        .stdout(predicate::str::contains("import"))
-        .stdout(predicate::str::contains("delete"))
-        .stdout(predicate::str::contains("list"));
+        let output = cmd.assert().success().get_output().stdout.clone();
+        let rendered = String::from_utf8(output).expect("help output is UTF-8");
+        for expected in expected {
+            assert!(
+                rendered.contains(expected),
+                "help output missing {expected:?}: {rendered}"
+            );
+        }
+    }
 }
 
 #[test]
-fn test_import_help() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.args(&["keystore", "import", "--help"]);
+fn test_list_missing_keystore_error_cases() {
+    for args in [
+        vec!["keystore", "list"],
+        vec!["--output-format", "json", "keystore", "list"],
+    ] {
+        let (_temp_dir, keystore_path) = create_test_keystore();
 
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("Import a private key or mnemonic"))
-        .stdout(predicate::str::contains("--import-type"))
-        .stdout(predicate::str::contains("--passphrase-file"))
-        .stdout(predicate::str::contains("--passphrase-prompt"))
-        .stdout(predicate::str::contains("privatekey"))
-        .stdout(predicate::str::contains("mnemonic"));
-}
+        let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+        cmd.args(args)
+            .args(&["--keystore", keystore_path.to_str().unwrap()]);
 
-#[test]
-fn test_list_help() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.args(&["keystore", "list", "--help"]);
-
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("List keys in the keystore"))
-        .stdout(predicate::str::contains("--show-addresses"))
-        .stdout(predicate::str::contains("--show-addresses"));
-}
-
-#[test]
-fn test_delete_help() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.args(&["keystore", "delete", "--help"]);
-
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("Delete a key from the keystore"))
-        .stdout(predicate::str::contains("--by-label"))
-        .stdout(predicate::str::contains("--yes"));
-}
-
-#[test]
-fn test_tx_sign_help() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.args(&["keystore", "tx-sign", "--help"]);
-
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("--out"))
-        .stdout(predicate::str::contains("--overwrite"));
-}
-
-#[test]
-fn test_list_empty_keystore() {
-    let (_temp_dir, keystore_path) = create_test_keystore();
-
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.args(&[
-        "keystore",
-        "list",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-    ]);
-
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("Keystore not found"));
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains("Keystore not found"));
+    }
 }
 
 #[test]
@@ -220,57 +196,19 @@ fn test_import_missing_type() {
 }
 
 #[test]
-fn test_delete_missing_arguments() {
-    let (_temp_dir, keystore_path) = create_test_keystore();
+fn test_delete_error_cases() {
+    for args in [Vec::new(), vec!["invalid-uuid"]] {
+        let (_temp_dir, keystore_path) = create_test_keystore();
 
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.args(&[
-        "keystore",
-        "delete",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-    ]);
+        let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+        cmd.args(&["keystore", "delete"])
+            .args(args)
+            .args(&["--keystore", keystore_path.to_str().unwrap()]);
 
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("Keystore not found"));
-}
-
-#[test]
-fn test_delete_invalid_uuid() {
-    let (_temp_dir, keystore_path) = create_test_keystore();
-
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.args(&[
-        "keystore",
-        "delete",
-        "invalid-uuid",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-    ]);
-
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("Keystore not found"));
-}
-
-#[test]
-fn test_list_json_format_option() {
-    let (_temp_dir, keystore_path) = create_test_keystore();
-
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.args(&[
-        "--output-format",
-        "json",
-        "keystore",
-        "list",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-    ]);
-
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("Keystore not found"));
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains("Keystore not found"));
+    }
 }
 
 #[test]
@@ -302,23 +240,14 @@ fn test_version_flag() {
         .stdout(predicate::str::contains("mfm"));
 }
 
-// Test invalid commands
 #[test]
-fn test_invalid_subcommand() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.arg("invalid");
+fn test_invalid_subcommands() {
+    for args in [vec!["invalid"], vec!["keystore", "invalid"]] {
+        let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+        cmd.args(args);
 
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("unrecognized subcommand"));
-}
-
-#[test]
-fn test_keystore_invalid_subcommand() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.args(&["keystore", "invalid"]);
-
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("unrecognized subcommand"));
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains("unrecognized subcommand"));
+    }
 }

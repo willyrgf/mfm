@@ -321,36 +321,41 @@ mod tests {
     }
 
     #[test]
-    fn response_rejects_unpinned_field_summaries() {
-        let fact_ref = internal_fact_ref(1);
-        let row = FactIndexReadRow::new(fact_ref.clone(), vec![summary_value(42)]);
-        let receipt = receipt_without_summaries(&plan(FactAudience::Control), fact_ref);
+    fn response_rejects_rows_that_do_not_match_receipt_shape() {
+        enum Case {
+            UnpinnedFieldSummaries,
+            RowRefMismatch,
+        }
 
-        let error =
-            FactIndexReadResponse::new(vec![row], receipt, trust_root()).expect_err("unpinned");
+        for (case, expected) in [
+            (
+                Case::UnpinnedFieldSummaries,
+                FactIndexReceiptFailure::UnpinnedFieldSummaries,
+            ),
+            (
+                Case::RowRefMismatch,
+                FactIndexReceiptFailure::RowRefMismatch,
+            ),
+        ] {
+            let (row, receipt) = match case {
+                Case::UnpinnedFieldSummaries => {
+                    let fact_ref = internal_fact_ref(1);
+                    (
+                        FactIndexReadRow::new(fact_ref.clone(), vec![summary_value(42)]),
+                        receipt_without_summaries(&plan(FactAudience::Control), fact_ref),
+                    )
+                }
+                Case::RowRefMismatch => (
+                    FactIndexReadRow::new(internal_fact_ref(2), Vec::new()),
+                    receipt_without_summaries(&plan(FactAudience::Control), internal_fact_ref(1)),
+                ),
+            };
 
-        assert_eq!(
-            error,
-            FactIndexReadError::Receipt {
-                reason: FactIndexReceiptFailure::UnpinnedFieldSummaries,
-            }
-        );
-    }
+            let error =
+                FactIndexReadResponse::new(vec![row], receipt, trust_root()).expect_err("shape");
 
-    #[test]
-    fn response_rejects_mismatched_row_ref() {
-        let receipt = receipt_without_summaries(&plan(FactAudience::Control), internal_fact_ref(1));
-        let row = FactIndexReadRow::new(internal_fact_ref(2), Vec::new());
-
-        let error =
-            FactIndexReadResponse::new(vec![row], receipt, trust_root()).expect_err("mismatch");
-
-        assert_eq!(
-            error,
-            FactIndexReadError::Receipt {
-                reason: FactIndexReceiptFailure::RowRefMismatch,
-            }
-        );
+            assert_eq!(error, FactIndexReadError::Receipt { reason: expected });
+        }
     }
 
     #[test]

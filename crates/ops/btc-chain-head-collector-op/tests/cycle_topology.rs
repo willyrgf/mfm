@@ -67,7 +67,7 @@ fn cycle_topology_is_deterministic_and_linear() {
 }
 
 #[test]
-fn descriptor_allow_lists_are_attached_only_to_fact_recording_nodes() {
+fn descriptor_allow_lists_are_attached_to_fact_recording_nodes_and_survive_certification() {
     let draft =
         btc_chain_head_collector_cycle_program_draft(BtcChainHeadCollectorConfig::default())
             .expect("draft");
@@ -105,13 +105,7 @@ fn descriptor_allow_lists_are_attached_only_to_fact_recording_nodes() {
         chain_head_ref.descriptor_hash,
         checkpoint_ref.descriptor_hash
     );
-}
 
-#[test]
-fn cycle_program_certifies_and_preserves_descriptor_allow_lists() {
-    let draft =
-        btc_chain_head_collector_cycle_program_draft(BtcChainHeadCollectorConfig::default())
-            .expect("draft");
     let certified = mfm_certify::certify_program_draft(&draft).expect("certified");
 
     certified.envelope().verify_hash().expect("hash verifies");

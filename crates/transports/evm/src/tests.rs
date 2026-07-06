@@ -13,7 +13,7 @@ const OCCUPYING_HASH_HEX: &str =
 #[tokio::test]
 async fn selects_source_by_policy_and_records_redacted_evidence() {
     let server = TestRpcServer::spawn("0x1").await;
-    let client = client_for(&server.url, "primary", "mainnet", 1);
+    let client = client_for(&server.url, "primary", "mainnet");
 
     let response = client
         .chain_identity(&chain_request("mainnet", 1))
@@ -32,7 +32,7 @@ async fn selects_source_by_policy_and_records_redacted_evidence() {
 #[tokio::test]
 async fn rejects_chain_id_mismatch_without_leaking_source_details() {
     let server = TestRpcServer::spawn("0x2").await;
-    let client = client_for(&server.url, "primary", "mainnet", 1);
+    let client = client_for(&server.url, "primary", "mainnet");
 
     let error = client
         .chain_identity(&chain_request("mainnet", 1))
@@ -55,7 +55,7 @@ async fn rejects_chain_id_mismatch_without_leaking_source_details() {
 #[tokio::test]
 async fn supports_core_evm_json_rpc_calls() {
     let server = TestRpcServer::spawn("0x1").await;
-    let client = client_for(&server.url, "primary", "mainnet", 1);
+    let client = client_for(&server.url, "primary", "mainnet");
     let guard = guard("mainnet", 1);
     let address = address!("0x1111111111111111111111111111111111111111");
     let hash = HASH_HEX.parse::<B256>().expect("hash");
@@ -206,7 +206,7 @@ fn block_selector_tag_supports_pending_nonce_reads() {
 #[tokio::test]
 async fn pending_receipt_is_typed_capability_error() {
     let server = TestRpcServer::spawn_pending_receipt("0x1").await;
-    let client = client_for(&server.url, "primary", "mainnet", 1);
+    let client = client_for(&server.url, "primary", "mainnet");
     let error = client
         .read_receipt(&EvmReceiptReadRequest {
             guard: guard("mainnet", 1),
@@ -221,7 +221,7 @@ async fn pending_receipt_is_typed_capability_error() {
 #[tokio::test]
 async fn code_read_preserves_empty_code_observation() {
     let server = TestRpcServer::spawn_empty_code("0x1").await;
-    let client = client_for(&server.url, "primary", "mainnet", 1);
+    let client = client_for(&server.url, "primary", "mainnet");
     let response = client
         .read_code(&EvmCodeReadRequest {
             guard: guard("mainnet", 1),
@@ -238,7 +238,7 @@ async fn code_read_preserves_empty_code_observation() {
 #[tokio::test]
 async fn code_read_rejects_chain_id_mismatch_without_code_authority() {
     let server = TestRpcServer::spawn("0x2").await;
-    let client = client_for(&server.url, "primary", "mainnet", 1);
+    let client = client_for(&server.url, "primary", "mainnet");
     let error = client
         .read_code(&EvmCodeReadRequest {
             guard: guard("mainnet", 1),
@@ -253,50 +253,45 @@ async fn code_read_rejects_chain_id_mismatch_without_code_authority() {
 }
 
 #[tokio::test]
-async fn nonce_occupancy_read_proves_non_anchor_transaction() {
-    let server = TestRpcServer::spawn_nonce_occupancy("0x1").await;
-    let client = client_for(&server.url, "primary", "mainnet", 1);
-    let response = client
-        .read_nonce_occupancy(&EvmNonceOccupancyReadRequest {
-            guard: guard("mainnet", 1),
-            account: address!("0x1111111111111111111111111111111111111111"),
-            nonce: 7,
-            excluded_transaction_hash: HASH_HEX.parse::<B256>().expect("anchor hash"),
-        })
-        .await
-        .expect("nonce occupancy");
+async fn nonce_occupancy_read_classifies_anchor_and_non_anchor_transactions() {
+    for (name, excluded_transaction_hash, expected) in [
+        (
+            "non-anchor transaction",
+            HASH_HEX,
+            EvmNonceOccupancy::Occupied {
+                transaction_hash: OCCUPYING_HASH_HEX.parse::<B256>().expect("occupying hash"),
+                block_number: Some(42),
+            },
+        ),
+        (
+            "recorded anchor",
+            OCCUPYING_HASH_HEX,
+            EvmNonceOccupancy::Unknown,
+        ),
+    ] {
+        let server = TestRpcServer::spawn_nonce_occupancy("0x1").await;
+        let client = client_for(&server.url, "primary", "mainnet");
+        let response = client
+            .read_nonce_occupancy(&EvmNonceOccupancyReadRequest {
+                guard: guard("mainnet", 1),
+                account: address!("0x1111111111111111111111111111111111111111"),
+                nonce: 7,
+                excluded_transaction_hash: excluded_transaction_hash
+                    .parse::<B256>()
+                    .expect("excluded hash"),
+            })
+            .await
+            .expect("nonce occupancy");
 
-    assert_eq!(response.evidence.observed_chain_id, 1);
-    assert_eq!(
-        response.outcome,
-        EvmNonceOccupancy::Occupied {
-            transaction_hash: OCCUPYING_HASH_HEX.parse::<B256>().expect("occupying hash"),
-            block_number: Some(42),
-        }
-    );
-}
-
-#[tokio::test]
-async fn nonce_occupancy_read_does_not_prove_recorded_anchor() {
-    let server = TestRpcServer::spawn_nonce_occupancy("0x1").await;
-    let client = client_for(&server.url, "primary", "mainnet", 1);
-    let response = client
-        .read_nonce_occupancy(&EvmNonceOccupancyReadRequest {
-            guard: guard("mainnet", 1),
-            account: address!("0x1111111111111111111111111111111111111111"),
-            nonce: 7,
-            excluded_transaction_hash: OCCUPYING_HASH_HEX.parse::<B256>().expect("anchor hash"),
-        })
-        .await
-        .expect("nonce occupancy");
-
-    assert_eq!(response.outcome, EvmNonceOccupancy::Unknown);
+        assert_eq!(response.evidence.observed_chain_id, 1, "{name}");
+        assert_eq!(response.outcome, expected, "{name}");
+    }
 }
 
 #[tokio::test]
 async fn supports_legacy_fee_source_without_eip1559_methods() {
     let server = TestRpcServer::spawn_legacy_fee("0x1").await;
-    let client = client_for(&server.url, "primary", "mainnet", 1);
+    let client = client_for(&server.url, "primary", "mainnet");
 
     let fee = client
         .read_fee(&EvmFeeReadRequest {
@@ -313,7 +308,7 @@ async fn supports_legacy_fee_source_without_eip1559_methods() {
 
 #[test]
 fn route_binding_validation_does_not_require_guard_or_live_io() {
-    let client = client_for("http://127.0.0.1:1", "primary", "mainnet", 1);
+    let client = client_for("http://127.0.0.1:1", "primary", "mainnet");
 
     client
         .validate_route_binding(&EvmNetworkId::new("mainnet").expect("network"))
@@ -328,7 +323,7 @@ fn route_binding_validation_does_not_require_guard_or_live_io() {
 #[tokio::test]
 async fn rejects_explicit_block_identity_mismatch() {
     let server = TestRpcServer::spawn_block_identity_mismatch("0x1").await;
-    let client = client_for(&server.url, "primary", "mainnet", 1);
+    let client = client_for(&server.url, "primary", "mainnet");
     let guard = guard("mainnet", 1);
 
     let number_error = client
@@ -359,7 +354,7 @@ async fn rejects_explicit_block_identity_mismatch() {
 #[tokio::test]
 async fn rejects_receipt_transaction_hash_mismatch() {
     let server = TestRpcServer::spawn_receipt_hash_mismatch("0x1").await;
-    let client = client_for(&server.url, "primary", "mainnet", 1);
+    let client = client_for(&server.url, "primary", "mainnet");
 
     let error = client
         .read_receipt(&EvmReceiptReadRequest {
@@ -378,7 +373,7 @@ async fn rejects_receipt_transaction_hash_mismatch() {
 #[tokio::test]
 async fn rejects_log_entries_that_contradict_filter() {
     let server = TestRpcServer::spawn_log_filter_mismatch("0x1").await;
-    let client = client_for(&server.url, "primary", "mainnet", 1);
+    let client = client_for(&server.url, "primary", "mainnet");
 
     let error = client
         .read_logs(&EvmLogsReadRequest {
@@ -460,12 +455,7 @@ async fn ordered_policy_falls_back_after_request_failure() {
     assert_eq!(response.chain_id, 1);
 }
 
-fn client_for(
-    url: &str,
-    source_id: &str,
-    policy_id: &str,
-    _expected_chain_id: u64,
-) -> EvmJsonRpcClient {
+fn client_for(url: &str, source_id: &str, policy_id: &str) -> EvmJsonRpcClient {
     let source = EvmRuntimeSource::new(
         EvmSourceRef::new(source_id).expect("source"),
         url,

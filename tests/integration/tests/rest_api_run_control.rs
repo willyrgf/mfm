@@ -255,6 +255,28 @@ async fn assert_absent_run_routes_not_found(app: &axum::Router, include_resume: 
     }
 }
 
+async fn assert_chain_mismatch_diagnostic(
+    store: &store::AsyncInMemoryRunStore,
+    failed: &events::StateAttemptFailed,
+) -> serde_json::Value {
+    let diagnostic = failed
+        .error
+        .diagnostic_ref
+        .as_ref()
+        .expect("chain mismatch records diagnostic artifact");
+    let diagnostic_artifact = store
+        .read_retained_artifact(&diagnostic_artifact_requirement(diagnostic))
+        .await
+        .expect("diagnostic artifact");
+    let diagnostic_json = serde_json::from_slice::<serde_json::Value>(diagnostic_artifact.bytes())
+        .expect("diagnostic json");
+    assert_eq!(
+        diagnostic_json["public_details"],
+        portfolio_chain_mismatch_public_details()
+    );
+    diagnostic_json
+}
+
 async fn start_portfolio_rpc_chain_flip_mock(first_chain_id: u64, later_chain_id: u64) -> String {
     let state = Arc::new(PortfolioRpcChainFlipState {
         first_chain_id,
@@ -325,14 +347,11 @@ async fn portfolio_rpc_chain_flip_handler(
 }
 
 #[tokio::test]
-async fn health_endpoint_reports_liveness() {
+async fn health_and_ready_endpoints_report_liveness_and_readiness() {
     get_success("/v1/health").await;
-}
 
-#[tokio::test]
-async fn ready_endpoint_reports_run_store_readiness() {
-    let v = get_success("/v1/ready").await;
-    assert_eq!(v["data"]["checks"]["run_store"], "ready");
+    let ready = get_success("/v1/ready").await;
+    assert_eq!(ready["data"]["checks"]["run_store"], "ready");
 }
 
 #[tokio::test]
@@ -468,11 +487,6 @@ async fn portfolio_chain_mismatch_fails_after_admission_with_redacted_diagnostic
     assert!(admitted_index < failed_index);
     assert_eq!(failed.error.category, events::ErrorCategory::Validation);
     assert_eq!(failed.error.safe_message, "runner output failed validation");
-    let diagnostic = failed
-        .error
-        .diagnostic_ref
-        .as_ref()
-        .expect("chain mismatch records diagnostic artifact");
     let details_digest = failed
         .error
         .public_details
@@ -480,16 +494,7 @@ async fn portfolio_chain_mismatch_fails_after_admission_with_redacted_diagnostic
         .expect("chain mismatch records public details digest")
         .content_digest
         .clone();
-    let diagnostic_artifact = store
-        .read_retained_artifact(&diagnostic_artifact_requirement(diagnostic))
-        .await
-        .expect("diagnostic artifact");
-    let diagnostic_json = serde_json::from_slice::<serde_json::Value>(diagnostic_artifact.bytes())
-        .expect("diagnostic json");
-    assert_eq!(
-        diagnostic_json["public_details"],
-        portfolio_chain_mismatch_public_details()
-    );
+    let diagnostic_json = assert_chain_mismatch_diagnostic(store, failed).await;
     assert_eq!(
         mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
             &serde_json::to_string(&diagnostic_json["public_details"]).expect("details json")
@@ -540,21 +545,7 @@ async fn portfolio_observe_batch_chain_mismatch_is_attempt_failure() {
     assert!(admitted_index < pinned_index);
     assert!(pinned_index < failed_index);
 
-    let diagnostic = failed
-        .error
-        .diagnostic_ref
-        .as_ref()
-        .expect("chain mismatch records diagnostic artifact");
-    let diagnostic_artifact = store
-        .read_retained_artifact(&diagnostic_artifact_requirement(diagnostic))
-        .await
-        .expect("diagnostic artifact");
-    let diagnostic_json = serde_json::from_slice::<serde_json::Value>(diagnostic_artifact.bytes())
-        .expect("diagnostic json");
-    assert_eq!(
-        diagnostic_json["public_details"],
-        portfolio_chain_mismatch_public_details()
-    );
+    assert_chain_mismatch_diagnostic(store, failed).await;
 
     std::fs::remove_file(runtime_config_path).expect("remove runtime config");
     let replay = app
@@ -631,33 +622,28 @@ async fn evm_contract_validation_ignores_unused_malformed_signers() {
 }
 
 #[tokio::test]
-async fn evm_contract_mutation_requires_signers_before_admission() {
+async fn evm_contract_mutation_signer_ingress_failures_happen_before_admission() {
     let rpc_url = test_support::start_portfolio_rpc_mock(1).await;
-    let runtime = runtime_config_app("ethereum-mainnet", &rpc_url);
 
-    assert_evm_start_fails_before_admission(
-        &runtime.state,
-        &runtime.app,
-        "evm_contract_deploy",
-        evm_deploy_config_json(),
-        "missing signer must fail before admission",
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn evm_contract_mutation_rejects_malformed_signers_before_admission() {
-    let rpc_url = test_support::start_portfolio_rpc_mock(1).await;
-    let runtime = malformed_signer_runtime_config_app("ethereum-mainnet", &rpc_url);
-
-    assert_evm_start_fails_before_admission(
-        &runtime.state,
-        &runtime.app,
-        "evm_contract_deploy",
-        evm_deploy_config_json(),
-        "malformed signer config must fail before admission",
-    )
-    .await;
+    for (runtime, message) in [
+        (
+            runtime_config_app("ethereum-mainnet", &rpc_url),
+            "missing signer must fail before admission",
+        ),
+        (
+            malformed_signer_runtime_config_app("ethereum-mainnet", &rpc_url),
+            "malformed signer config must fail before admission",
+        ),
+    ] {
+        assert_evm_start_fails_before_admission(
+            &runtime.state,
+            &runtime.app,
+            "evm_contract_deploy",
+            evm_deploy_config_json(),
+            message,
+        )
+        .await;
+    }
 }
 
 #[tokio::test]

@@ -1,22 +1,38 @@
 use mfm::presentation::output::{format_keys_table, KeyDisplay, ResponseStatus, SuccessResponse};
 
+fn key_display(
+    id: &str,
+    label: &str,
+    key_type: &str,
+    address: Option<&str>,
+    created: &str,
+) -> KeyDisplay {
+    KeyDisplay {
+        id: id.to_string(),
+        label: label.to_string(),
+        key_type: key_type.to_string(),
+        address: address.map(str::to_string),
+        created: created.to_string(),
+    }
+}
+
 #[test]
 fn test_key_display_table_formatting() {
     let keys = vec![
-        KeyDisplay {
-            id: "test-id-1".to_string(),
-            label: "test-key-1".to_string(),
-            key_type: "privatekey".to_string(),
-            address: None,
-            created: "2024-01-01 12:00:00".to_string(),
-        },
-        KeyDisplay {
-            id: "test-id-2".to_string(),
-            label: "test-key-2".to_string(),
-            key_type: "hd_derived".to_string(),
-            address: None,
-            created: "2024-01-01 13:00:00".to_string(),
-        },
+        key_display(
+            "test-id-1",
+            "test-key-1",
+            "privatekey",
+            None,
+            "2024-01-01 12:00:00",
+        ),
+        key_display(
+            "test-id-2",
+            "test-key-2",
+            "hd_derived",
+            None,
+            "2024-01-01 13:00:00",
+        ),
     ];
 
     let output = format_keys_table(&keys, false);
@@ -32,13 +48,13 @@ fn test_key_display_table_formatting() {
 
 #[test]
 fn test_key_display_json_formatting() {
-    let keys = vec![KeyDisplay {
-        id: "test-id-1".to_string(),
-        label: "test-key-1".to_string(),
-        key_type: "privatekey".to_string(),
-        address: Some("0x1234567890123456789012345678901234567890".to_string()),
-        created: "2024-01-01 12:00:00".to_string(),
-    }];
+    let keys = vec![key_display(
+        "test-id-1",
+        "test-key-1",
+        "privatekey",
+        Some("0x1234567890123456789012345678901234567890"),
+        "2024-01-01 12:00:00",
+    )];
 
     let response = SuccessResponse::new(keys.clone());
     let output = serde_json::to_string(&response).unwrap();
@@ -59,13 +75,13 @@ fn test_key_display_json_formatting() {
 
 #[test]
 fn test_key_display_json_without_addresses() {
-    let keys = vec![KeyDisplay {
-        id: "test-id-1".to_string(),
-        label: "test-key-1".to_string(),
-        key_type: "privatekey".to_string(),
-        address: Some("0x1234567890123456789012345678901234567890".to_string()),
-        created: "2024-01-01 12:00:00".to_string(),
-    }];
+    let keys = vec![key_display(
+        "test-id-1",
+        "test-key-1",
+        "privatekey",
+        Some("0x1234567890123456789012345678901234567890"),
+        "2024-01-01 12:00:00",
+    )];
 
     // In the new model, filtering addresses is done before serialization.
     let keys_without_address: Vec<KeyDisplay> = keys
@@ -92,53 +108,42 @@ fn test_key_display_json_without_addresses() {
 }
 
 #[test]
-fn test_key_display_table_with_addresses() {
-    let keys = vec![KeyDisplay {
-        id: "test-id-1".to_string(),
-        label: "test-key-1".to_string(),
-        key_type: "privatekey".to_string(),
-        address: Some("0x1234567890123456789012345678901234567890".to_string()),
-        created: "2024-01-01 12:00:00".to_string(),
-    }];
+fn test_key_display_table_address_visibility() {
+    const ADDRESS: &str = "0x1234567890123456789012345678901234567890";
+    let keys = vec![key_display(
+        "test-id-1",
+        "test-key-1",
+        "privatekey",
+        Some(ADDRESS),
+        "2024-01-01 12:00:00",
+    )];
 
-    let output = format_keys_table(&keys, true);
-
-    // Should contain address when show_addresses is true
-    assert!(output.contains("0x1234567890123456789012345678901234567890"));
+    for (show_addresses, should_contain) in [(true, true), (false, false)] {
+        let output = format_keys_table(&keys, show_addresses);
+        assert_eq!(
+            output.contains(ADDRESS),
+            should_contain,
+            "show_addresses={show_addresses}"
+        );
+    }
 }
 
 #[test]
-fn test_key_display_table_without_addresses() {
-    let keys = vec![KeyDisplay {
-        id: "test-id-1".to_string(),
-        label: "test-key-1".to_string(),
-        key_type: "privatekey".to_string(),
-        address: Some("0x1234567890123456789012345678901234567890".to_string()),
-        created: "2024-01-01 12:00:00".to_string(),
-    }];
-
-    let output = format_keys_table(&keys, false);
-
-    // Should not contain address when show_addresses is false
-    assert!(!output.contains("0x1234567890123456789012345678901234567890"));
-}
-
-#[test]
-fn test_empty_keys_formatting() {
-    let keys: Vec<KeyDisplay> = vec![];
-
-    // Test table output
+fn test_empty_keys_table_and_json_output() {
+    let keys: Vec<KeyDisplay> = Vec::new();
     let table_output = format_keys_table(&keys, false);
-    // Table should be empty or just headers
-    assert!(!table_output.contains("test-id"));
+    let lines: Vec<&str> = table_output.lines().collect();
 
-    // Test JSON output
+    assert_eq!(lines.len(), 3);
+    assert!(lines[0].starts_with('+') && lines[0].ends_with('+'));
+    assert!(lines[1].contains("| id"));
+    assert_eq!(lines[0], lines[2]);
+
     let response = SuccessResponse::new(keys);
     let json_output = serde_json::to_string(&response).unwrap();
-
-    // JSON should be success response with empty array
     let parsed: SuccessResponse<Vec<KeyDisplay>> =
         serde_json::from_str(&json_output).expect("Should be valid JSON");
+
     assert!(matches!(parsed.status, ResponseStatus::Success));
     assert!(parsed.data.is_empty());
 }
@@ -146,20 +151,14 @@ fn test_empty_keys_formatting() {
 #[test]
 fn test_ascii_table_shape_is_stable() {
     let keys = vec![
-        KeyDisplay {
-            id: "id-1".to_string(),
-            label: "short".to_string(),
-            key_type: "privatekey".to_string(),
-            address: None,
-            created: "2024-01-01 12:00:00".to_string(),
-        },
-        KeyDisplay {
-            id: "id-2".to_string(),
-            label: "much-longer-label".to_string(),
-            key_type: "hd_derived".to_string(),
-            address: None,
-            created: "2024-01-01 13:00:00".to_string(),
-        },
+        key_display("id-1", "short", "privatekey", None, "2024-01-01 12:00:00"),
+        key_display(
+            "id-2",
+            "much-longer-label",
+            "hd_derived",
+            None,
+            "2024-01-01 13:00:00",
+        ),
     ];
 
     let output = format_keys_table(&keys, false);
@@ -178,15 +177,4 @@ fn test_ascii_table_shape_is_stable() {
             assert_eq!(line.len(), lines[0].len());
         }
     }
-}
-
-#[test]
-fn test_ascii_table_for_empty_keys_has_header_only() {
-    let output = format_keys_table(&[], false);
-    let lines: Vec<&str> = output.lines().collect();
-
-    assert_eq!(lines.len(), 3);
-    assert!(lines[0].starts_with('+') && lines[0].ends_with('+'));
-    assert!(lines[1].contains("| id"));
-    assert_eq!(lines[0], lines[2]);
 }

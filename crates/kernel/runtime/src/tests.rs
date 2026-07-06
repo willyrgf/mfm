@@ -4044,38 +4044,33 @@ async fn launch_rejects_context_bound_output_runner_without_extractor() {
 }
 
 #[tokio::test]
-async fn context_bound_output_artifact_must_match_certified_context() {
-    let fixture = fixture_with_context_bound_states();
-    let wrong_stage = ContextStage::new("wrong_stage").expect("wrong stage");
-    let registry = registered_context_bound_fixture_runners(
-        &fixture,
-        ContextSourceRunner::with_stage(wrong_stage),
-    );
-    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
+async fn context_bound_output_rejects_mismatched_artifact_or_payload_context() {
+    enum Case {
+        ArtifactContext,
+        PayloadContext,
+    }
 
-    assert_first_node_invalid_after_drive!(
-        scheduler,
-        store,
-        fixture,
-        "terminalize wrong context-bound output artifact"
-    );
-}
+    for case in [Case::ArtifactContext, Case::PayloadContext] {
+        let fixture = fixture_with_context_bound_states();
+        let source_runner = match case {
+            Case::ArtifactContext => {
+                let wrong_stage = ContextStage::new("wrong_stage").expect("wrong stage");
+                ContextSourceRunner::with_stage(wrong_stage)
+            }
+            Case::PayloadContext => {
+                ContextSourceRunner::with_payload_context(spec::CellContextSpec::no_context())
+            }
+        };
+        let registry = registered_context_bound_fixture_runners(&fixture, source_runner);
+        let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
 
-#[tokio::test]
-async fn context_bound_output_payload_context_must_match_certified_cell() {
-    let fixture = fixture_with_context_bound_states();
-    let registry = registered_context_bound_fixture_runners(
-        &fixture,
-        ContextSourceRunner::with_payload_context(spec::CellContextSpec::no_context()),
-    );
-    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
-
-    assert_first_node_invalid_after_drive!(
-        scheduler,
-        store,
-        fixture,
-        "terminalize mismatched context-bound payload"
-    );
+        assert_first_node_invalid_after_drive!(
+            scheduler,
+            store,
+            fixture,
+            "terminalize mismatched context-bound output"
+        );
+    }
 }
 
 #[tokio::test]
@@ -4730,14 +4725,7 @@ fn certified_runtime_spec_rejects_hash_mismatch() {
 }
 
 #[test]
-fn certified_runtime_spec_accepts_certifier_authority() {
-    let (certified, _registry) = certifier_backed_runtime_authority();
-    let runtime = CertifiedRuntimeSpec::new(certified).expect("runtime authority");
-    assert!(!runtime.topological_order().is_empty());
-}
-
-#[test]
-fn certified_runtime_spec_accepts_verified_persisted_parts_authority() {
+fn certified_runtime_spec_accepts_certifier_and_verified_persisted_authority() {
     let (certified, registry) = certifier_backed_runtime_authority();
     let persisted_parts = certified
         .to_persisted_parts()
@@ -4748,8 +4736,13 @@ fn certified_runtime_spec_accepts_verified_persisted_parts_authority() {
         &registry,
     )
     .expect("verified persisted spec/certificate");
-    let runtime = CertifiedRuntimeSpec::new(verified).expect("runtime authority");
-    assert!(!runtime.topological_order().is_empty());
+    for (source, authority) in [
+        ("certifier authority", certified),
+        ("verified persisted parts authority", verified),
+    ] {
+        let runtime = CertifiedRuntimeSpec::new(authority).expect(source);
+        assert!(!runtime.topological_order().is_empty(), "{source}");
+    }
 }
 
 #[tokio::test]
@@ -4858,26 +4851,67 @@ async fn scheduler_rejects_uncertified_capability_use() {
 }
 
 #[tokio::test]
-async fn runner_cannot_stage_artifact_with_foreign_producer() {
-    struct ForeignProducerArtifactRunner {
-        foreign_node_id: NodeId,
+async fn runner_rejects_invalid_artifact_outputs() {
+    #[derive(Clone, Copy)]
+    enum InvalidArtifactOutputKind {
+        ForeignProducer,
+        MismatchedInlineBytes,
+        MissingStagedArtifact,
+    }
+
+    impl InvalidArtifactOutputKind {
+        fn label(self) -> &'static str {
+            match self {
+                Self::ForeignProducer => "foreign producer artifact",
+                Self::MismatchedInlineBytes => "mismatched inline artifact",
+                Self::MissingStagedArtifact => "missing staged artifact",
+            }
+        }
+    }
+
+    enum InvalidArtifactOutput {
+        ForeignProducer { foreign_node_id: NodeId },
+        MismatchedInlineBytes,
+        MissingStagedArtifact,
+    }
+
+    struct InvalidArtifactRunner {
+        case: InvalidArtifactOutput,
         output_artifact: ArtifactId,
         output_digest: ContentDigest,
     }
 
-    impl ErasedNodeRunner for ForeignProducerArtifactRunner {
+    impl ErasedNodeRunner for InvalidArtifactRunner {
         fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
             Box::pin(async move {
-                let mut artifact = state_output_artifact(
-                    ctx.node(),
-                    ctx.descriptor(),
-                    self.output_artifact.clone(),
-                    self.output_digest.clone(),
-                );
-                artifact.producer_node_id = Some(self.foreign_node_id.clone());
-                let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
+                let staged_artifacts = match &self.case {
+                    InvalidArtifactOutput::ForeignProducer { foreign_node_id } => {
+                        let mut artifact = state_output_artifact(
+                            ctx.node(),
+                            ctx.descriptor(),
+                            self.output_artifact.clone(),
+                            self.output_digest.clone(),
+                        );
+                        artifact.producer_node_id = Some(foreign_node_id.clone());
+                        vec![staged_attempt_artifact(&ctx, artifact)?]
+                    }
+                    InvalidArtifactOutput::MismatchedInlineBytes => {
+                        let artifact = state_output_artifact(
+                            ctx.node(),
+                            ctx.descriptor(),
+                            self.output_artifact.clone(),
+                            self.output_digest.clone(),
+                        );
+                        vec![StagedArtifact::inline_attempt_artifact(
+                            &ctx,
+                            b"mismatched".to_vec(),
+                            artifact,
+                        )?]
+                    }
+                    InvalidArtifactOutput::MissingStagedArtifact => Vec::new(),
+                };
                 Ok(ErasedRunnerOutput::from_parts(
-                    vec![staged_artifact],
+                    staged_artifacts,
                     Vec::new(),
                     terminal_payloads(
                         &ctx,
@@ -4889,78 +4923,45 @@ async fn runner_cannot_stage_artifact_with_foreign_producer() {
         }
     }
 
-    let fixture = fixture();
-    let foreign_node_id = node_by_output(&fixture, &fixture.cell_b).node_id.clone();
-    let registry = fixture_registry_with_first_runner(
-        &fixture,
-        "pure",
-        ForeignProducerArtifactRunner {
-            foreign_node_id,
-            output_artifact: artifact(0xa1),
-            output_digest: content(0xa2),
-        },
-    );
-    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
+    for kind in [
+        InvalidArtifactOutputKind::ForeignProducer,
+        InvalidArtifactOutputKind::MismatchedInlineBytes,
+        InvalidArtifactOutputKind::MissingStagedArtifact,
+    ] {
+        let fixture = fixture();
+        let case = match kind {
+            InvalidArtifactOutputKind::ForeignProducer => InvalidArtifactOutput::ForeignProducer {
+                foreign_node_id: node_by_output(&fixture, &fixture.cell_b).node_id.clone(),
+            },
+            InvalidArtifactOutputKind::MismatchedInlineBytes => {
+                InvalidArtifactOutput::MismatchedInlineBytes
+            }
+            InvalidArtifactOutputKind::MissingStagedArtifact => {
+                InvalidArtifactOutput::MissingStagedArtifact
+            }
+        };
+        let registry = fixture_registry_with_first_runner(
+            &fixture,
+            "pure",
+            InvalidArtifactRunner {
+                case,
+                output_artifact: artifact(0xa1),
+                output_digest: content(0xa2),
+            },
+        );
+        let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
 
-    assert_first_node_invalid_after_drive!(
-        scheduler,
-        store,
-        fixture,
-        "terminalize foreign producer artifact"
-    );
-}
-
-#[tokio::test]
-async fn runner_cannot_stage_inline_artifact_with_mismatched_bytes() {
-    struct BadInlineArtifactRunner {
-        output_artifact: ArtifactId,
-        output_digest: ContentDigest,
+        assert_eq!(
+            drive_fixture_once(&scheduler, &mut store, &fixture)
+                .await
+                .unwrap_or_else(|_| panic!("{}", kind.label())),
+            SchedulerStatus::Advanced,
+            "{}",
+            kind.label()
+        );
+        let node = node_by_output(&fixture, &fixture.cell_a);
+        assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
     }
-
-    impl ErasedNodeRunner for BadInlineArtifactRunner {
-        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-            Box::pin(async move {
-                let artifact = state_output_artifact(
-                    ctx.node(),
-                    ctx.descriptor(),
-                    self.output_artifact.clone(),
-                    self.output_digest.clone(),
-                );
-                let staged_artifact = StagedArtifact::inline_attempt_artifact(
-                    &ctx,
-                    b"mismatched".to_vec(),
-                    artifact,
-                )?;
-                Ok(ErasedRunnerOutput::from_parts(
-                    vec![staged_artifact],
-                    Vec::new(),
-                    terminal_payloads(
-                        &ctx,
-                        self.output_artifact.clone(),
-                        self.output_digest.clone(),
-                    ),
-                ))
-            })
-        }
-    }
-
-    let fixture = fixture();
-    let registry = fixture_registry_with_first_runner(
-        &fixture,
-        "pure",
-        BadInlineArtifactRunner {
-            output_artifact: artifact(0xa1),
-            output_digest: content(0xa2),
-        },
-    );
-    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
-
-    assert_first_node_invalid_after_drive!(
-        scheduler,
-        store,
-        fixture,
-        "terminalize mismatched inline artifact"
-    );
 }
 
 #[tokio::test]
@@ -5077,48 +5078,6 @@ async fn runner_cannot_stage_reserved_retention_reasons() {
             .cell_terminal(&fixture.cell_a)
             .is_none());
     }
-}
-
-#[tokio::test]
-async fn runner_output_requires_payload_bound_staged_artifact() {
-    struct MissingStagedArtifactRunner {
-        output_artifact: ArtifactId,
-        output_digest: ContentDigest,
-    }
-
-    impl ErasedNodeRunner for MissingStagedArtifactRunner {
-        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-            Box::pin(async move {
-                Ok(ErasedRunnerOutput::from_parts(
-                    Vec::new(),
-                    Vec::new(),
-                    terminal_payloads(
-                        &ctx,
-                        self.output_artifact.clone(),
-                        self.output_digest.clone(),
-                    ),
-                ))
-            })
-        }
-    }
-
-    let fixture = fixture();
-    let registry = fixture_registry_with_first_runner(
-        &fixture,
-        "pure",
-        MissingStagedArtifactRunner {
-            output_artifact: artifact(0xa1),
-            output_digest: content(0xa2),
-        },
-    );
-    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
-
-    assert_first_node_invalid_after_drive!(
-        scheduler,
-        store,
-        fixture,
-        "terminalize missing staged artifact"
-    );
 }
 
 #[tokio::test]
@@ -5622,134 +5581,146 @@ async fn run_admission_returns_bound_context_with_capability_and_framework_autho
 }
 
 #[test]
-fn run_start_rejects_missing_capability_implementation() {
-    let fixture = fixture();
-    let registry = fixture_registry_with_first_runner(
-        &fixture,
-        "pure",
-        RecordingRunner {
-            expected_caps: Vec::new(),
-            output_artifact: artifact(0xa1),
-            output_digest: content(0xa2),
-        },
-    );
-    let scheduler = test_scheduler(registry);
-    let store = TestTypedRunStore::new();
-    let error =
-        prepare_fixture_launch(&scheduler, &store, &fixture, vec![fixture.seed_ref.clone()])
-            .err()
-            .expect("missing capability implementation must reject launch");
-    assert!(
-        matches!(error, RuntimeError::RunnerBinding(message) if message.contains("missing capability implementation"))
-    );
-}
+fn run_start_rejects_invalid_capability_implementation_bindings() {
+    #[derive(Clone, Copy, Debug)]
+    enum Case {
+        MissingImplementation,
+        DescriptorMismatch,
+    }
 
-#[test]
-fn run_start_rejects_capability_implementation_descriptor_mismatch() {
-    let fixture = fixture();
-    let mut registry = ErasedRunnerRegistry::new();
-    let implementation_id =
-        CapabilityImplementationId::new("mfm.test.capability").expect("capability implementation");
-    registry
-        .register_capability(CapabilityImplementationBinding::new(
-            CapabilityDescriptor::new(
-                fixture.cap_kind.clone(),
-                fixture.cap_version.clone(),
-                CapabilityRole::ReadExternal,
-                "wrong-read-db",
-            )
-            .expect("wrong capability descriptor"),
-            implementation_id,
-        ))
-        .expect("capability implementation");
-    register_default_fixture_pure_runner(&mut registry, &fixture);
-    register_default_fixture_read_runner(&mut registry, &fixture);
-    let scheduler = test_scheduler(registry);
-    let store = TestTypedRunStore::new();
-    let error =
-        prepare_fixture_launch(&scheduler, &store, &fixture, vec![fixture.seed_ref.clone()])
-            .err()
-            .expect("mismatched capability implementation must reject launch");
-    assert!(
-        matches!(error, RuntimeError::RunnerBinding(message) if message.contains("differs from certified descriptor"))
-    );
-}
-
-#[tokio::test]
-async fn resume_rejects_missing_downstream_binding_before_attempt_start() {
-    let fixture = fixture();
-    let (_, mut store) = started_fixture_run(&fixture).await;
-    let stream_len_before = store.load_run_stream(&fixture.run_id).len();
-
-    let mut partial_registry = ErasedRunnerRegistry::new();
-    register_default_fixture_pure_runner(&mut partial_registry, &fixture);
-    let resume_scheduler = test_scheduler(partial_registry);
-    let error = drive_fixture_once(&resume_scheduler, &mut store, &fixture)
-        .await
-        .expect_err("missing descriptor b binding should reject bound context");
-
-    assert!(
-        matches!(error, RuntimeError::RunnerBinding(message) if message.contains("missing runner binding"))
-    );
-    store.assert_run_stream_len(&fixture.run_id, stream_len_before);
+    for (case, expected_message) in [
+        (
+            Case::MissingImplementation,
+            "missing capability implementation",
+        ),
+        (
+            Case::DescriptorMismatch,
+            "differs from certified descriptor",
+        ),
+    ] {
+        let fixture = fixture();
+        let registry = match case {
+            Case::MissingImplementation => fixture_registry_with_first_runner(
+                &fixture,
+                "pure",
+                RecordingRunner {
+                    expected_caps: Vec::new(),
+                    output_artifact: artifact(0xa1),
+                    output_digest: content(0xa2),
+                },
+            ),
+            Case::DescriptorMismatch => {
+                let mut registry = ErasedRunnerRegistry::new();
+                let implementation_id = CapabilityImplementationId::new("mfm.test.capability")
+                    .expect("capability implementation");
+                registry
+                    .register_capability(CapabilityImplementationBinding::new(
+                        CapabilityDescriptor::new(
+                            fixture.cap_kind.clone(),
+                            fixture.cap_version.clone(),
+                            CapabilityRole::ReadExternal,
+                            "wrong-read-db",
+                        )
+                        .expect("wrong capability descriptor"),
+                        implementation_id,
+                    ))
+                    .expect("capability implementation");
+                register_default_fixture_pure_runner(&mut registry, &fixture);
+                register_default_fixture_read_runner(&mut registry, &fixture);
+                registry
+            }
+        };
+        let scheduler = test_scheduler(registry);
+        let store = TestTypedRunStore::new();
+        let error =
+            prepare_fixture_launch(&scheduler, &store, &fixture, vec![fixture.seed_ref.clone()])
+                .err()
+                .expect("invalid capability implementation binding must reject launch");
+        assert!(
+            matches!(&error, RuntimeError::RunnerBinding(message) if message.contains(expected_message)),
+            "{case:?} returned unexpected error: {error:?}"
+        );
+    }
 }
 
 #[tokio::test]
-async fn resume_rejects_runner_executable_identity_mismatch_before_attempt_start() {
-    let fixture = fixture();
-    let (_, mut store) = started_fixture_run(&fixture).await;
-    let stream_len_before = store.load_run_stream(&fixture.run_id).len();
+async fn resume_rejects_binding_changes_before_attempt_start() {
+    #[derive(Clone, Copy, Debug)]
+    enum Case {
+        MissingDownstreamBinding,
+        RunnerExecutableMismatch,
+        AdapterExecutableMismatch,
+    }
 
-    let mut changed_registry = ErasedRunnerRegistry::new();
-    let mut changed_a = binding(
-        fixture.descriptor_a.clone(),
-        "pure",
-        RecordingRunner {
-            expected_caps: Vec::new(),
-            output_artifact: artifact(0xa1),
-            output_digest: content(0xa2),
-        },
-    );
-    changed_a.executable.binary_digest = content(0xee);
-    changed_registry.register(changed_a).expect("binding a");
-    register_default_fixture_read_runner(&mut changed_registry, &fixture);
-    let resume_scheduler = fixture_scheduler(changed_registry, &fixture);
-    let run_admitted = store.run_admitted(&fixture.run_id);
-    resume_scheduler
-        .validate_admitted_run_binding(&fixture.runtime_spec, &run_admitted)
-        .expect_err("changed executable identity should reject binding validation");
-    let error = drive_fixture_once(&resume_scheduler, &mut store, &fixture)
-        .await
-        .expect_err("changed executable identity should reject bound context");
+    for (case, expected_message, direct_validation_rejects) in [
+        (
+            Case::MissingDownstreamBinding,
+            "missing runner binding",
+            false,
+        ),
+        (
+            Case::RunnerExecutableMismatch,
+            "runner executable identities",
+            true,
+        ),
+        (
+            Case::AdapterExecutableMismatch,
+            "adapter executable identities",
+            true,
+        ),
+    ] {
+        let fixture = fixture();
+        let (_, mut store) = started_fixture_run(&fixture).await;
+        let stream_len_before = store.load_run_stream(&fixture.run_id).len();
 
-    assert!(matches!(error, RuntimeError::RunnerBinding(message)
-            if message.contains("runner executable identities")));
-    store.assert_run_stream_len(&fixture.run_id, stream_len_before);
-}
+        let resume_scheduler = match case {
+            Case::MissingDownstreamBinding => {
+                let mut partial_registry = ErasedRunnerRegistry::new();
+                register_default_fixture_pure_runner(&mut partial_registry, &fixture);
+                test_scheduler(partial_registry)
+            }
+            Case::RunnerExecutableMismatch => {
+                let mut changed_registry = ErasedRunnerRegistry::new();
+                let mut changed_a = binding(
+                    fixture.descriptor_a.clone(),
+                    "pure",
+                    RecordingRunner {
+                        expected_caps: Vec::new(),
+                        output_artifact: artifact(0xa1),
+                        output_digest: content(0xa2),
+                    },
+                );
+                changed_a.executable.binary_digest = content(0xee);
+                changed_registry.register(changed_a).expect("binding a");
+                register_default_fixture_read_runner(&mut changed_registry, &fixture);
+                fixture_scheduler(changed_registry, &fixture)
+            }
+            Case::AdapterExecutableMismatch => {
+                let mut changed_adapter = test_adapter_executable_identity();
+                changed_adapter.binary_digest = content(0xef);
+                test_scheduler(registered_fixture_runners_with_adapter_executable(
+                    &fixture,
+                    changed_adapter,
+                ))
+            }
+        };
 
-#[tokio::test]
-async fn resume_rejects_adapter_executable_identity_mismatch_before_attempt_start() {
-    let fixture = fixture();
-    let (_, mut store) = started_fixture_run(&fixture).await;
-    let stream_len_before = store.load_run_stream(&fixture.run_id).len();
+        if direct_validation_rejects {
+            let run_admitted = store.run_admitted(&fixture.run_id);
+            resume_scheduler
+                .validate_admitted_run_binding(&fixture.runtime_spec, &run_admitted)
+                .expect_err("binding validation should reject");
+        }
 
-    let mut changed_adapter = test_adapter_executable_identity();
-    changed_adapter.binary_digest = content(0xef);
-    let resume_scheduler = test_scheduler(registered_fixture_runners_with_adapter_executable(
-        &fixture,
-        changed_adapter,
-    ));
-    let run_admitted = store.run_admitted(&fixture.run_id);
-    resume_scheduler
-        .validate_admitted_run_binding(&fixture.runtime_spec, &run_admitted)
-        .expect_err("changed adapter executable identity should reject binding validation");
-    let error = drive_fixture_once(&resume_scheduler, &mut store, &fixture)
-        .await
-        .expect_err("changed adapter executable identity should reject bound context");
-
-    assert!(matches!(error, RuntimeError::RunnerBinding(message)
-            if message.contains("adapter executable identities")));
-    store.assert_run_stream_len(&fixture.run_id, stream_len_before);
+        let error = drive_fixture_once(&resume_scheduler, &mut store, &fixture)
+            .await
+            .expect_err("changed binding should reject bound context");
+        assert!(
+            matches!(&error, RuntimeError::RunnerBinding(message) if message.contains(expected_message)),
+            "{case:?} returned unexpected error: {error:?}"
+        );
+        store.assert_run_stream_len(&fixture.run_id, stream_len_before);
+    }
 }
 
 #[tokio::test]
@@ -5841,72 +5812,72 @@ async fn post_start_materialization_failure_terminalizes_attempt() {
 }
 
 #[tokio::test]
-async fn post_start_runtime_validation_failure_terminalizes_attempt() {
-    let fixture = fixture();
-    let registry = fixture_registry_with_first_runner(
-        &fixture,
-        "pure",
-        ErrorRunner {
-            error: RuntimeError::RuntimeValidation(
+async fn post_start_runner_errors_follow_terminal_policy_by_error_class() {
+    #[derive(Clone, Copy)]
+    enum Case {
+        RuntimeValidation,
+        InvalidRunStream,
+    }
+
+    for case in [Case::RuntimeValidation, Case::InvalidRunStream] {
+        let fixture = fixture();
+        let error = match case {
+            Case::RuntimeValidation => RuntimeError::RuntimeValidation(
                 "synthetic post-start validation failure".to_owned(),
             ),
-        },
-    );
-    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
+            Case::InvalidRunStream => {
+                RuntimeError::InvalidRunStream("synthetic corrupt stream authority".to_owned())
+            }
+        };
+        let registry = fixture_registry_with_first_runner(&fixture, "pure", ErrorRunner { error });
+        let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
 
-    assert_drive!(
-        scheduler,
-        store,
-        fixture,
-        Advanced,
-        "terminalize runtime validation failure"
-    );
+        match case {
+            Case::RuntimeValidation => {
+                assert_drive!(
+                    scheduler,
+                    store,
+                    fixture,
+                    Advanced,
+                    "terminalize runtime validation failure"
+                );
 
-    let node = node_by_output(&fixture, &fixture.cell_a);
-    assert_node_failed_with_code(&store, &node.node_id, "runtime_validation_failed");
-    assert_eq!(
-        runtime_lifecycle_summary(&store, &fixture.run_id),
-        "run=Started attempts[started=0 completed=0 failed=1 interrupted=0 total=1] cells=0 side_effects=0 lanes[run=0 total=0] public_outputs=0 retentions=1"
-    );
-}
+                let node = node_by_output(&fixture, &fixture.cell_a);
+                assert_node_failed_with_code(&store, &node.node_id, "runtime_validation_failed");
+                assert_eq!(
+                    runtime_lifecycle_summary(&store, &fixture.run_id),
+                    "run=Started attempts[started=0 completed=0 failed=1 interrupted=0 total=1] cells=0 side_effects=0 lanes[run=0 total=0] public_outputs=0 retentions=1"
+                );
+            }
+            Case::InvalidRunStream => {
+                assert!(matches!(
+                    drive_fixture_once(&scheduler, &mut store, &fixture)
+                        .await,
+                    Err(RuntimeError::InvalidRunStream(message))
+                        if message.contains("synthetic corrupt stream authority")
+                ));
 
-#[tokio::test]
-async fn post_start_invalid_run_stream_failure_does_not_terminalize_attempt() {
-    let fixture = fixture();
-    let registry = fixture_registry_with_first_runner(
-        &fixture,
-        "pure",
-        ErrorRunner {
-            error: RuntimeError::InvalidRunStream("synthetic corrupt stream authority".to_owned()),
-        },
-    );
-    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
-
-    assert!(matches!(
-        drive_fixture_once(&scheduler, &mut store, &fixture)
-            .await,
-        Err(RuntimeError::InvalidRunStream(message))
-            if message.contains("synthetic corrupt stream authority")
-    ));
-
-    let node = node_by_output(&fixture, &fixture.cell_a);
-    let projection_snapshot = store.projection_snapshot();
-    let attempts = projection_snapshot
-        .attempts()
-        .filter(|((node_id, _), _)| node_id == &node.node_id)
-        .map(|(_, attempt)| attempt)
-        .collect::<Vec<_>>();
-    assert_eq!(attempts.len(), 1);
-    assert!(matches!(
-        attempts[0].status,
-        store::AttemptStatus::Started { .. }
-    ));
-    assert_failure_code_count(&store, "runtime_validation_failed", 0);
-    assert_failure_code_count(&store, "runner_output_invalid", 0);
-    assert_eq!(
-        runtime_lifecycle_summary(&store, &fixture.run_id),
-        "run=Started attempts[started=1 completed=0 failed=0 interrupted=0 total=1] cells=0 side_effects=0 lanes[run=0 total=0] public_outputs=0 retentions=1"
-    );
+                let node = node_by_output(&fixture, &fixture.cell_a);
+                let projection_snapshot = store.projection_snapshot();
+                let attempts = projection_snapshot
+                    .attempts()
+                    .filter(|((node_id, _), _)| node_id == &node.node_id)
+                    .map(|(_, attempt)| attempt)
+                    .collect::<Vec<_>>();
+                assert_eq!(attempts.len(), 1);
+                assert!(matches!(
+                    attempts[0].status,
+                    store::AttemptStatus::Started { .. }
+                ));
+                assert_failure_code_count(&store, "runtime_validation_failed", 0);
+                assert_failure_code_count(&store, "runner_output_invalid", 0);
+                assert_eq!(
+                    runtime_lifecycle_summary(&store, &fixture.run_id),
+                    "run=Started attempts[started=1 completed=0 failed=0 interrupted=0 total=1] cells=0 side_effects=0 lanes[run=0 total=0] public_outputs=0 retentions=1"
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -7175,215 +7146,201 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
 }
 
 #[tokio::test]
-async fn runtime_rejects_exact_touched_set_receipt_without_evidence() {
-    let fixture = fixture_with_first_exact_touched_set_side_effect_state();
-    let (scheduler, mut store) = started_side_effect_fixture_run(&fixture).await;
+async fn runtime_rejects_invalid_touched_set_terminal_evidence_cases() {
+    enum Case {
+        ReceiptWithoutEvidence,
+        ConfirmationWithoutEvidence,
+        ConfirmationWithoutExactClaim,
+    }
 
-    assert_invalid_output_after(
-        &scheduler,
-        &mut store,
-        &fixture,
-        3,
-        TOUCHED_SET_EVIDENCE_ERR,
-    )
-    .await;
+    for case in [
+        Case::ReceiptWithoutEvidence,
+        Case::ConfirmationWithoutEvidence,
+        Case::ConfirmationWithoutExactClaim,
+    ] {
+        match case {
+            Case::ReceiptWithoutEvidence => {
+                let fixture = fixture_with_first_exact_touched_set_side_effect_state();
+                let (scheduler, mut store) = started_side_effect_fixture_run(&fixture).await;
+
+                assert_invalid_output_after(
+                    &scheduler,
+                    &mut store,
+                    &fixture,
+                    3,
+                    TOUCHED_SET_EVIDENCE_ERR,
+                )
+                .await;
+            }
+            Case::ConfirmationWithoutEvidence => {
+                let fixture = fixture_with_first_exact_touched_set_finalized_side_effect_state();
+                let scheduler =
+                    test_scheduler(registered_first_side_effect_and_verify_runners_with(
+                        &fixture,
+                        DriverSideEffectRunner::new(&fixture),
+                        TouchedSetSideEffectVerifyRunner::with_receipt(&fixture),
+                    ));
+                let mut store = started_fixture_store(&scheduler, &fixture).await;
+
+                assert_invalid_output_after(
+                    &scheduler,
+                    &mut store,
+                    &fixture,
+                    4,
+                    TOUCHED_SET_EVIDENCE_ERR,
+                )
+                .await;
+            }
+            Case::ConfirmationWithoutExactClaim => {
+                let fixture = fixture_with_first_finalized_side_effect_state();
+                let scheduler =
+                    test_scheduler(registered_first_side_effect_and_verify_runners_with(
+                        &fixture,
+                        DriverSideEffectRunner::new(&fixture),
+                        TouchedSetSideEffectVerifyRunner::with_confirmation(&fixture),
+                    ));
+                let mut store = started_fixture_store(&scheduler, &fixture).await;
+
+                assert_invalid_output_after(
+                    &scheduler,
+                    &mut store,
+                    &fixture,
+                    4,
+                    EXACT_TOUCHED_SET_CLAIM_ERR,
+                )
+                .await;
+            }
+        }
+    }
 }
 
 #[tokio::test]
-async fn runtime_rejects_exact_touched_set_confirmation_without_evidence() {
-    let fixture = fixture_with_first_exact_touched_set_finalized_side_effect_state();
-    let scheduler = test_scheduler(registered_first_side_effect_and_verify_runners_with(
-        &fixture,
-        DriverSideEffectRunner::new(&fixture),
-        TouchedSetSideEffectVerifyRunner::with_receipt(&fixture),
-    ));
-    let mut store = started_fixture_store(&scheduler, &fixture).await;
+async fn runtime_fails_active_forward_attempts_before_saga_terminal() {
+    #[derive(Clone, Copy)]
+    enum Case {
+        PreBoundary,
+        NotSubmitted,
+    }
 
-    assert_invalid_output_after(
-        &scheduler,
-        &mut store,
-        &fixture,
-        4,
-        TOUCHED_SET_EVIDENCE_ERR,
-    )
-    .await;
-}
+    for case in [Case::PreBoundary, Case::NotSubmitted] {
+        let fixture = fixture_with_independent_second_node_and_first_side_effect_state();
+        let forward_node = node_by_output(&fixture, &fixture.cell_a).clone();
+        let failing_node = node_by_output(&fixture, &fixture.cell_b).clone();
+        let scheduler = match case {
+            Case::PreBoundary => test_scheduler(registered_first_side_effect_runners_with(
+                &fixture,
+                FailActiveSideEffectAfterSagaRunner::before_invocation_started(&fixture),
+            )),
+            Case::NotSubmitted => test_scheduler(registered_first_side_effect_runners_with(
+                &fixture,
+                FailActiveSideEffectAfterSagaRunner::new(&fixture)
+                    .with_submission_decision(TestSubmissionDecision::NotSubmitted),
+            )),
+        };
+        let mut store = started_fixture_store(&scheduler, &fixture).await;
+        let forward_attempt = append_or_get_first_attempt(&mut store, &fixture, &forward_node);
 
-#[tokio::test]
-async fn runtime_rejects_touched_set_confirmation_without_exact_claim() {
-    let fixture = fixture_with_first_finalized_side_effect_state();
-    let scheduler = test_scheduler(registered_first_side_effect_and_verify_runners_with(
-        &fixture,
-        DriverSideEffectRunner::new(&fixture),
-        TouchedSetSideEffectVerifyRunner::with_confirmation(&fixture),
-    ));
-    let mut store = started_fixture_store(&scheduler, &fixture).await;
+        match case {
+            Case::PreBoundary => {
+                drive_until_side_effect_attempt_phase(
+                    &scheduler,
+                    &mut store,
+                    &fixture,
+                    &forward_node,
+                    &forward_attempt,
+                    |phase| matches!(phase, store::SideEffectPhase::InvocationPrepared { .. }),
+                    "prepare forward side effect",
+                )
+                .await;
+            }
+            Case::NotSubmitted => {
+                drive_until_side_effect_attempt_phase(
+                    &scheduler,
+                    &mut store,
+                    &fixture,
+                    &forward_node,
+                    &forward_attempt,
+                    |phase| matches!(phase, store::SideEffectPhase::NotSubmittedProven { .. }),
+                    "advance forward side effect before not-submitted proof",
+                )
+                .await;
+            }
+        }
 
-    assert_invalid_output_after(
-        &scheduler,
-        &mut store,
-        &fixture,
-        4,
-        EXACT_TOUCHED_SET_CLAIM_ERR,
-    )
-    .await;
-}
+        let failing_attempt = append_or_get_started_attempt(&mut store, &fixture, &failing_node, 1);
+        append_attempt_failure(&mut store, &fixture, &failing_node, &failing_attempt, false);
+        if matches!(case, Case::PreBoundary) {
+            assert_eq!(
+                derive_fixture_saga(&fixture, store.projection_snapshot()).run_mode,
+                store::RunMode::FailedWithoutAcdcClaim
+            );
+        }
 
-#[tokio::test]
-async fn runtime_fails_pre_boundary_forward_attempt_before_saga_terminal() {
-    let fixture = fixture_with_independent_second_node_and_first_side_effect_state();
-    let forward_node = node_by_output(&fixture, &fixture.cell_a).clone();
-    let failing_node = node_by_output(&fixture, &fixture.cell_b).clone();
-    let scheduler = test_scheduler(registered_first_side_effect_runners_with(
-        &fixture,
-        FailActiveSideEffectAfterSagaRunner::before_invocation_started(&fixture),
-    ));
-    let mut store = started_fixture_store(&scheduler, &fixture).await;
-    let forward_attempt = append_or_get_first_attempt(&mut store, &fixture, &forward_node);
-
-    drive_until_side_effect_attempt_phase(
-        &scheduler,
-        &mut store,
-        &fixture,
-        &forward_node,
-        &forward_attempt,
-        |phase| matches!(phase, store::SideEffectPhase::InvocationPrepared { .. }),
-        "prepare forward side effect",
-    )
-    .await;
-
-    let failing_attempt = append_or_get_started_attempt(&mut store, &fixture, &failing_node, 1);
-    append_attempt_failure(&mut store, &fixture, &failing_node, &failing_attempt, false);
-    assert_eq!(
-        derive_fixture_saga(&fixture, store.projection_snapshot()).run_mode,
-        store::RunMode::FailedWithoutAcdcClaim
-    );
-
-    assert_drive!(
-        scheduler,
-        store,
-        fixture,
-        Advanced,
-        "fail active pre-boundary forward attempt"
-    );
-    let projection_snapshot = store.projection_snapshot();
-    assert!(matches!(
-        side_effect_projection_for_attempt(
+        assert_drive!(
+            scheduler,
+            store,
+            fixture,
+            Advanced,
+            "fail active forward attempt before saga terminal"
+        );
+        let projection_snapshot = store.projection_snapshot();
+        let projection = side_effect_projection_for_attempt(
             &fixture.runtime_spec,
             &fixture.run_id,
             &projection_snapshot,
             &forward_node,
-            &forward_attempt
+            &forward_attempt,
         )
         .expect("side-effect lookup")
-        .expect("side-effect projection")
-        .phase,
-        store::SideEffectPhase::Failed {
-            failure_phase: events::side_effect::FailurePhase::BeforeInvocationStarted,
-            ..
+        .expect("side-effect projection");
+        match (case, &projection.phase) {
+            (
+                Case::PreBoundary,
+                store::SideEffectPhase::Failed {
+                    failure_phase: events::side_effect::FailurePhase::BeforeInvocationStarted,
+                    ..
+                },
+            )
+            | (
+                Case::NotSubmitted,
+                store::SideEffectPhase::Failed {
+                    failure_phase: events::side_effect::FailurePhase::AfterNotSubmittedProven,
+                    ..
+                },
+            ) => {}
+            (_, phase) => panic!("unexpected failed forward phase: {phase:?}"),
         }
-    ));
-    assert!(matches!(
-        store
-            .projection_snapshot()
-            .attempt(&forward_node.node_id, &forward_attempt)
-            .expect("forward attempt")
-            .status,
-        store::AttemptStatus::Failed { .. }
-    ));
-    assert!(store
-        .projection_snapshot()
-        .run_completion(&fixture.run_id)
-        .is_none());
-
-    assert_drive!(
-        scheduler,
-        store,
-        fixture,
-        Advanced,
-        "resolve saga terminal after active attempt closed"
-    );
-    assert!(matches!(
-        store
+        if matches!(case, Case::PreBoundary) {
+            assert!(matches!(
+                store
+                    .projection_snapshot()
+                    .attempt(&forward_node.node_id, &forward_attempt)
+                    .expect("forward attempt")
+                    .status,
+                store::AttemptStatus::Failed { .. }
+            ));
+        }
+        assert!(store
             .projection_snapshot()
             .run_completion(&fixture.run_id)
-            .expect("run completion")
-            .outcome,
-        events::RunCompletionOutcome::FailedWithoutAcdcClaim
-    ));
-}
+            .is_none());
 
-#[tokio::test]
-async fn runtime_fails_not_submitted_forward_attempt_before_saga_terminal() {
-    let fixture = fixture_with_independent_second_node_and_first_side_effect_state();
-    let forward_node = node_by_output(&fixture, &fixture.cell_a).clone();
-    let failing_node = node_by_output(&fixture, &fixture.cell_b).clone();
-    let scheduler = test_scheduler(registered_first_side_effect_runners_with(
-        &fixture,
-        FailActiveSideEffectAfterSagaRunner::new(&fixture)
-            .with_submission_decision(TestSubmissionDecision::NotSubmitted),
-    ));
-    let mut store = started_fixture_store(&scheduler, &fixture).await;
-    let forward_attempt = append_or_get_first_attempt(&mut store, &fixture, &forward_node);
-
-    drive_until_side_effect_attempt_phase(
-        &scheduler,
-        &mut store,
-        &fixture,
-        &forward_node,
-        &forward_attempt,
-        |phase| matches!(phase, store::SideEffectPhase::NotSubmittedProven { .. }),
-        "advance forward side effect before not-submitted proof",
-    )
-    .await;
-
-    let failing_attempt = append_or_get_started_attempt(&mut store, &fixture, &failing_node, 1);
-    append_attempt_failure(&mut store, &fixture, &failing_node, &failing_attempt, false);
-
-    assert_drive!(
-        scheduler,
-        store,
-        fixture,
-        Advanced,
-        "fail active not-submitted forward attempt"
-    );
-    let projection_snapshot = store.projection_snapshot();
-    assert!(matches!(
-        side_effect_projection_for_attempt(
-            &fixture.runtime_spec,
-            &fixture.run_id,
-            &projection_snapshot,
-            &forward_node,
-            &forward_attempt
-        )
-        .expect("side-effect lookup")
-        .expect("side-effect projection")
-        .phase,
-        store::SideEffectPhase::Failed {
-            failure_phase: events::side_effect::FailurePhase::AfterNotSubmittedProven,
-            ..
-        }
-    ));
-    assert!(store
-        .projection_snapshot()
-        .run_completion(&fixture.run_id)
-        .is_none());
-
-    assert_drive!(
-        scheduler,
-        store,
-        fixture,
-        Advanced,
-        "resolve saga terminal after not-submitted attempt closed"
-    );
-    assert!(matches!(
-        store
-            .projection_snapshot()
-            .run_completion(&fixture.run_id)
-            .expect("run completion")
-            .outcome,
-        events::RunCompletionOutcome::FailedWithoutAcdcClaim
-    ));
+        assert_drive!(
+            scheduler,
+            store,
+            fixture,
+            Advanced,
+            "resolve saga terminal after active attempt closed"
+        );
+        assert!(matches!(
+            store
+                .projection_snapshot()
+                .run_completion(&fixture.run_id)
+                .expect("run completion")
+                .outcome,
+            events::RunCompletionOutcome::FailedWithoutAcdcClaim
+        ));
+    }
 }
 
 #[tokio::test]
@@ -8424,139 +8381,133 @@ async fn side_effect_output_before_terminal_evidence_is_rejected() {
 }
 
 #[tokio::test]
-async fn receipt_policy_allows_verify_output_after_receipt() {
-    let fixture = fixture_with_first_exclusive_side_effect_state();
-    let (_, mut store) = started_side_effect_fixture_run(&fixture).await;
-    let submit_node = node_by_output(&fixture, &fixture.cell_a);
-    let submit_attempt_id = append_synthetic_exclusive_receipt_phase(
-        &mut store,
-        &fixture,
-        submit_node,
-        "wallet-submit-output-receipt",
-        "sidefx-submit-output-receipt",
-    );
-    let verify_node = side_effect_verify_node_for_submit(&fixture, submit_node);
-    let verify_attempt_id = attempt_id(
-        &fixture.run_id,
-        fixture.runtime_spec.spec_hash(),
-        &verify_node.node_id,
-        1,
-    )
-    .expect("verify attempt id");
+async fn verify_output_after_receipt_follows_terminal_policy() {
+    #[derive(Clone, Copy)]
+    enum Case {
+        Receipt,
+        Finalized,
+    }
 
-    let snapshot = store.projection_snapshot();
-    side_effect_lifecycle::validate_terminal_batch_evidence(
-        &fixture.runtime_spec,
-        &fixture.run_id,
-        &snapshot,
-        verify_node,
-        &verify_attempt_id,
-        false,
-    )
-    .expect("receipt policy permits submit output after receipt");
+    for case in [Case::Receipt, Case::Finalized] {
+        let fixture = match case {
+            Case::Receipt => fixture_with_first_exclusive_side_effect_state(),
+            Case::Finalized => runtime_side_effect_fixture(
+                RuntimeSideEffectFixtureShape::Chained,
+                RuntimeSideEffectClaim::Exclusive,
+                spec::SideEffectVerificationSpec::Finalized { depth: 1 },
+            ),
+        };
+        let (wallet_label, sidefx_label, terminal_artifact, terminal_digest) = match case {
+            Case::Receipt => (
+                "wallet-submit-output-receipt",
+                "sidefx-submit-output-receipt",
+                artifact(0xe1),
+                content(0xe2),
+            ),
+            Case::Finalized => (
+                "wallet-submit-output-finalized",
+                "sidefx-submit-output-finalized",
+                artifact(0xe3),
+                content(0xe4),
+            ),
+        };
+        let (_, mut store) = started_side_effect_fixture_run(&fixture).await;
+        let submit_node = node_by_output(&fixture, &fixture.cell_a);
+        let submit_attempt_id = append_synthetic_exclusive_receipt_phase(
+            &mut store,
+            &fixture,
+            submit_node,
+            wallet_label,
+            sidefx_label,
+        );
+        let verify_node = side_effect_verify_node_for_submit(&fixture, submit_node);
+        let verify_attempt_id = attempt_id(
+            &fixture.run_id,
+            fixture.runtime_spec.spec_hash(),
+            &verify_node.node_id,
+            1,
+        )
+        .expect("verify attempt id");
 
-    append_terminal(
-        &mut store,
-        &fixture,
-        verify_node,
-        &verify_attempt_id,
-        artifact(0xe1),
-        content(0xe2),
-    );
-    validate_runtime_stream_for_tests(
-        &fixture.runtime_spec,
-        &fixture.run_id,
-        &store.load_run_stream(&fixture.run_id),
-    )
-    .expect("historical validation permits receipt-terminal verify output");
-    assert!(store
-        .projection_snapshot()
-        .attempt(&submit_node.node_id, &submit_attempt_id)
-        .is_some());
-}
+        let snapshot = store.projection_snapshot();
+        let validation = side_effect_lifecycle::validate_terminal_batch_evidence(
+            &fixture.runtime_spec,
+            &fixture.run_id,
+            &snapshot,
+            verify_node,
+            &verify_attempt_id,
+            false,
+        );
+        match case {
+            Case::Receipt => validation.expect("receipt policy permits output after receipt"),
+            Case::Finalized => {
+                let error = validation.expect_err("finalized policy requires confirmation");
+                assert!(error
+                    .to_string()
+                    .contains("produced output before certified terminal evidence"));
+            }
+        }
 
-#[tokio::test]
-async fn finalized_policy_rejects_verify_output_after_receipt_before_confirmation() {
-    let fixture = runtime_side_effect_fixture(
-        RuntimeSideEffectFixtureShape::Chained,
-        RuntimeSideEffectClaim::Exclusive,
-        spec::SideEffectVerificationSpec::Finalized { depth: 1 },
-    );
-    let (_, mut store) = started_side_effect_fixture_run(&fixture).await;
-    let submit_node = node_by_output(&fixture, &fixture.cell_a);
-    append_synthetic_exclusive_receipt_phase(
-        &mut store,
-        &fixture,
-        submit_node,
-        "wallet-submit-output-finalized",
-        "sidefx-submit-output-finalized",
-    );
-    let verify_node = side_effect_verify_node_for_submit(&fixture, submit_node);
-    let verify_attempt_id = attempt_id(
-        &fixture.run_id,
-        fixture.runtime_spec.spec_hash(),
-        &verify_node.node_id,
-        1,
-    )
-    .expect("verify attempt id");
-
-    let snapshot = store.projection_snapshot();
-    let error = side_effect_lifecycle::validate_terminal_batch_evidence(
-        &fixture.runtime_spec,
-        &fixture.run_id,
-        &snapshot,
-        verify_node,
-        &verify_attempt_id,
-        false,
-    )
-    .expect_err("finalized policy requires confirmation");
-    assert!(error
-        .to_string()
-        .contains("produced output before certified terminal evidence"));
-
-    append_terminal(
-        &mut store,
-        &fixture,
-        verify_node,
-        &verify_attempt_id,
-        artifact(0xe3),
-        content(0xe4),
-    );
-    let error = validate_runtime_stream_for_tests(
-        &fixture.runtime_spec,
-        &fixture.run_id,
-        &store.load_run_stream(&fixture.run_id),
-    )
-    .expect_err("historical validation requires finalized confirmation");
-    assert!(error
-        .to_string()
-        .contains("produced output before certified terminal evidence"));
+        append_terminal(
+            &mut store,
+            &fixture,
+            verify_node,
+            &verify_attempt_id,
+            terminal_artifact,
+            terminal_digest,
+        );
+        let historical = validate_runtime_stream_for_tests(
+            &fixture.runtime_spec,
+            &fixture.run_id,
+            &store.load_run_stream(&fixture.run_id),
+        );
+        match case {
+            Case::Receipt => {
+                historical.expect("historical validation permits receipt-terminal verify output");
+                assert!(store
+                    .projection_snapshot()
+                    .attempt(&submit_node.node_id, &submit_attempt_id)
+                    .is_some());
+            }
+            Case::Finalized => {
+                let error = historical.expect_err("historical validation requires confirmation");
+                assert!(error
+                    .to_string()
+                    .contains("produced output before certified terminal evidence"));
+            }
+        }
+    }
 }
 
 #[test]
-fn side_effect_failure_derives_attempt_failure_payload() {
-    let fixture = fixture_with_first_side_effect_state();
-    let node = node_by_output(&fixture, &fixture.cell_a);
-    let attempt_id = attempt_id(
-        &fixture.run_id,
-        fixture.runtime_spec.spec_hash(),
-        &node.node_id,
-        1,
-    )
-    .expect("attempt id");
-    let ledger_purpose = side_effect_ledger_purpose();
-    let (pair_id, pair_role) = side_effect_pair_fields_for_purpose(
-        &fixture.runtime_spec,
-        &node.node_id,
-        &ledger_purpose,
-        events::SideEffectPairRole::Verify,
-    );
-    let payloads = runner_payloads_with_derived_lifecycle(
-        &fixture.runtime_spec,
-        node,
-        &attempt_id,
-        vec![RunnerEventPayload::SideEffectFailed(
-            events::side_effect::Failed {
+fn side_effect_terminal_payloads_derive_attempt_failure_payload() {
+    enum Case {
+        Failure,
+        Ambiguous,
+    }
+
+    for (case, expected_error_code) in [
+        (Case::Failure, "sidefx_failed"),
+        (Case::Ambiguous, "side_effect_ambiguous"),
+    ] {
+        let fixture = fixture_with_first_side_effect_state();
+        let node = node_by_output(&fixture, &fixture.cell_a);
+        let attempt_id = attempt_id(
+            &fixture.run_id,
+            fixture.runtime_spec.spec_hash(),
+            &node.node_id,
+            1,
+        )
+        .expect("attempt id");
+        let ledger_purpose = side_effect_ledger_purpose();
+        let (pair_id, pair_role) = side_effect_pair_fields_for_purpose(
+            &fixture.runtime_spec,
+            &node.node_id,
+            &ledger_purpose,
+            events::SideEffectPairRole::Verify,
+        );
+        let runner_payload = match case {
+            Case::Failure => RunnerEventPayload::SideEffectFailed(events::side_effect::Failed {
                 spec_hash: fixture.runtime_spec.spec_hash().clone(),
                 node_id: node.node_id.clone(),
                 attempt_id: attempt_id.clone(),
@@ -8568,74 +8519,42 @@ fn side_effect_failure_derives_attempt_failure_payload() {
                 failure_phase: events::side_effect::FailurePhase::BeforeInvocationStarted,
                 retryable: false,
                 error: side_effect_error(false),
-            },
-        )],
-    );
-    let payloads = payloads.expect("derive lifecycle");
-    assert!(
-        payloads.iter().any(|payload| {
-            matches!(
-                payload,
-                events::KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
-                    retryable: false,
-                    ..
+            }),
+            Case::Ambiguous => {
+                RunnerEventPayload::SideEffectAmbiguous(events::side_effect::Ambiguous {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    ledger_key: side_effect_ledger_key(1),
+                    ledger_purpose,
+                    pair_id,
+                    pair_role,
+                    invocation_epoch: 1,
+                    ambiguity_code: events::AmbiguityCode::new("unknown_submission")
+                        .expect("ambiguity code"),
+                    evidence_schema_id: node.config_ref.schema_id.clone(),
+                    evidence_hash: content(0xca),
+                    evidence_artifact_id: artifact(0xcb),
                 })
-            )
-        }),
-        "side-effect failure payloads should include middleware-derived StateAttemptFailed"
-    );
-}
-
-#[test]
-fn side_effect_ambiguity_derives_attempt_failure_payload() {
-    let fixture = fixture_with_first_side_effect_state();
-    let node = node_by_output(&fixture, &fixture.cell_a);
-    let attempt_id = attempt_id(
-        &fixture.run_id,
-        fixture.runtime_spec.spec_hash(),
-        &node.node_id,
-        1,
-    )
-    .expect("attempt id");
-    let ledger_purpose = side_effect_ledger_purpose();
-    let (pair_id, pair_role) = side_effect_pair_fields_for_purpose(
-        &fixture.runtime_spec,
-        &node.node_id,
-        &ledger_purpose,
-        events::SideEffectPairRole::Verify,
-    );
-    let payloads = runner_payloads_with_derived_lifecycle(
-        &fixture.runtime_spec,
-        node,
-        &attempt_id,
-        vec![RunnerEventPayload::SideEffectAmbiguous(
-            events::side_effect::Ambiguous {
-                spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                node_id: node.node_id.clone(),
-                attempt_id: attempt_id.clone(),
-                ledger_key: side_effect_ledger_key(1),
-                ledger_purpose,
-                pair_id,
-                pair_role,
-                invocation_epoch: 1,
-                ambiguity_code: events::AmbiguityCode::new("unknown_submission")
-                    .expect("ambiguity code"),
-                evidence_schema_id: node.config_ref.schema_id.clone(),
-                evidence_hash: content(0xca),
-                evidence_artifact_id: artifact(0xcb),
-            },
-        )],
-    );
-    let payloads = payloads.expect("derive lifecycle");
-    let failure = payloads
-        .iter()
-        .find_map(|payload| match payload {
-            events::KernelEventPayload::StateAttemptFailed(payload) => Some(payload),
-            _ => None,
-        })
-        .expect("derived attempt failure");
-    assert!(!failure.retryable);
-    assert_eq!(failure.error.code.as_str(), "side_effect_ambiguous");
+            }
+        };
+        let payloads = runner_payloads_with_derived_lifecycle(
+            &fixture.runtime_spec,
+            node,
+            &attempt_id,
+            vec![runner_payload],
+        )
+        .expect("derive lifecycle");
+        let failure = payloads
+            .iter()
+            .find_map(|payload| match payload {
+                events::KernelEventPayload::StateAttemptFailed(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("derived attempt failure");
+        assert!(!failure.retryable);
+        assert_eq!(failure.error.code.as_str(), expected_error_code);
+    }
 }
 
 #[derive(Clone)]

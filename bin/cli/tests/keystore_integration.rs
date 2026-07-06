@@ -5,16 +5,9 @@ fn create_test_keystore_with_data() -> (TempDir, std::path::PathBuf) {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let keystore_path = temp_dir.path().join("test_keystore");
 
-    // Create a keystore with fast config for testing
-    let fast_config = KeystoreConfig {
-        argon2_memory_kb: 64, // 64KB - minimal for testing
-        argon2_iterations: 1, // 1 iteration - minimal
-        argon2_parallelism: 1,
-        allow_secret_exports: false,
-    };
-
     let mut keystore =
-        Keystore::new_with_config(&keystore_path, fast_config).expect("Failed to create keystore");
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::insecure_integration_test())
+            .expect("Failed to create keystore");
     keystore
         .unlock("test_password_123")
         .expect("Failed to unlock keystore");
@@ -40,19 +33,6 @@ fn create_test_keystore_with_data() -> (TempDir, std::path::PathBuf) {
 }
 
 #[test]
-fn test_keystore_integration_list_keys() {
-    let (_temp_dir, keystore_path) = create_test_keystore_with_data();
-
-    // Verify keystore file was created
-    assert!(keystore_path.exists(), "Keystore file should exist");
-
-    // Test that we can read the keystore back
-    let _keystore = Keystore::new(&keystore_path).expect("Failed to load keystore");
-    // Note: We can't test unlock without interactive password input in integration tests
-    // This would require mocking the password input, which is complex in integration tests
-}
-
-#[test]
 fn test_keystore_file_creation() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let keystore_path = temp_dir.path().join("new_keystore");
@@ -63,15 +43,9 @@ fn test_keystore_file_creation() {
         "Keystore file should not exist initially"
     );
 
-    // Create keystore with fast config
-    let fast_config = KeystoreConfig {
-        argon2_memory_kb: 64,
-        argon2_iterations: 1,
-        argon2_parallelism: 1,
-        allow_secret_exports: false,
-    };
     let _keystore =
-        Keystore::new_with_config(&keystore_path, fast_config).expect("Failed to create keystore");
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::insecure_integration_test())
+            .expect("Failed to create keystore");
 
     // File should still not exist until we unlock (create) it
     assert!(
@@ -97,6 +71,7 @@ fn test_keystore_operations() {
     let labels: Vec<_> = keys.iter().filter_map(|k| k.alias.as_ref()).collect();
     assert!(labels.contains(&&"test-key".to_string()));
     assert!(labels.contains(&&"test-mnemonic".to_string()));
+    assert!(keys.iter().all(|key| key.address.0.len() == 20));
 
     // Test deletion
     let key_to_delete = keys
@@ -115,18 +90,13 @@ fn test_keystore_operations() {
 }
 
 #[test]
-fn test_invalid_private_key() {
+fn test_invalid_key_material() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let keystore_path = temp_dir.path().join("test_keystore");
 
-    let fast_config = KeystoreConfig {
-        argon2_memory_kb: 64,
-        argon2_iterations: 1,
-        argon2_parallelism: 1,
-        allow_secret_exports: false,
-    };
     let mut keystore =
-        Keystore::new_with_config(&keystore_path, fast_config).expect("Failed to create keystore");
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::insecure_integration_test())
+            .expect("Failed to create keystore");
     keystore
         .unlock("test_password_123")
         .expect("Failed to unlock keystore");
@@ -141,24 +111,6 @@ fn test_invalid_private_key() {
         "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
     );
     assert!(result.is_err(), "Should fail with non-hex private key");
-}
-
-#[test]
-fn test_invalid_mnemonic() {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let keystore_path = temp_dir.path().join("test_keystore");
-
-    let fast_config = KeystoreConfig {
-        argon2_memory_kb: 64,
-        argon2_iterations: 1,
-        argon2_parallelism: 1,
-        allow_secret_exports: false,
-    };
-    let mut keystore =
-        Keystore::new_with_config(&keystore_path, fast_config).expect("Failed to create keystore");
-    keystore
-        .unlock("test_password_123")
-        .expect("Failed to unlock keystore");
 
     // Test invalid mnemonic
     let result = keystore.import_mnemonic(
@@ -171,24 +123,6 @@ fn test_invalid_mnemonic() {
 }
 
 #[test]
-fn test_keystore_addresses() {
-    let (_temp_dir, keystore_path) = create_test_keystore_with_data();
-
-    let mut keystore = Keystore::new(&keystore_path).expect("Failed to load keystore");
-    keystore
-        .unlock("test_password_123")
-        .expect("Failed to unlock keystore");
-
-    let keys = keystore.list_keys().expect("Failed to list keys");
-
-    // Verify all keys have addresses
-    for key in &keys {
-        // Address should be a valid Ethereum address (20 bytes)
-        assert_eq!(key.address.0.len(), 20, "Address should be 20 bytes");
-    }
-}
-
-#[test]
 fn test_keystore_persistence() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let keystore_path = temp_dir.path().join("test_keystore");
@@ -198,14 +132,9 @@ fn test_keystore_persistence() {
 
     // Create keystore and add key
     {
-        let fast_config = KeystoreConfig {
-            argon2_memory_kb: 64,
-            argon2_iterations: 1,
-            argon2_parallelism: 1,
-            allow_secret_exports: false,
-        };
-        let mut keystore = Keystore::new_with_config(&keystore_path, fast_config)
-            .expect("Failed to create keystore");
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::insecure_integration_test())
+                .expect("Failed to create keystore");
         keystore
             .unlock("test_password_123")
             .expect("Failed to unlock keystore");

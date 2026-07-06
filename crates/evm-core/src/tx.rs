@@ -305,77 +305,84 @@ mod tests {
     }
 
     #[test]
-    fn signed_legacy_create_encoding_is_stable() {
-        let tx = LegacyTxToSign {
-            to: None,
-            value_wei: 0,
-            chain_id: 1,
-            nonce: 0,
-            gas_price_wei: 1,
-            gas_limit: 21_000,
-            data: vec![0x60, 0x00],
-        };
+    fn signed_transaction_encodings_are_stable() {
+        enum Case {
+            LegacyCreate,
+            LegacyCall,
+            Eip1559Call,
+            Eip1559Create,
+        }
 
-        assert_eq!(
-            bytes_to_hex_prefixed(&encode_signed_legacy_tx(&tx, signature(false))),
-            "0xcd80018252088080826000250102"
-        );
-    }
+        for (case, expected) in [
+            (Case::LegacyCreate, "0xcd80018252088080826000250102"),
+            (
+                Case::LegacyCall,
+                "0xdf01028252089411111111111111111111111111111111111111118080260102",
+            ),
+            (
+                Case::Eip1559Call,
+                "0x02e2018001028252089400000000000000000000000000000000000000008080c0800102",
+            ),
+            (
+                Case::Eip1559Create,
+                "0x02d0018001028252088080826000c0800102",
+            ),
+        ] {
+            let encoded = match case {
+                Case::LegacyCreate => bytes_to_hex_prefixed(&encode_signed_legacy_tx(
+                    &LegacyTxToSign {
+                        to: None,
+                        value_wei: 0,
+                        chain_id: 1,
+                        nonce: 0,
+                        gas_price_wei: 1,
+                        gas_limit: 21_000,
+                        data: vec![0x60, 0x00],
+                    },
+                    signature(false),
+                )),
+                Case::LegacyCall => bytes_to_hex_prefixed(&encode_signed_legacy_tx(
+                    &LegacyTxToSign {
+                        to: Some(Address::from([0x11; 20])),
+                        value_wei: 0,
+                        chain_id: 1,
+                        nonce: 1,
+                        gas_price_wei: 2,
+                        gas_limit: 21_000,
+                        data: Vec::new(),
+                    },
+                    signature(true),
+                )),
+                Case::Eip1559Call => bytes_to_hex_prefixed(&encode_signed_eip1559_tx(
+                    &Eip1559TxToSign {
+                        to: Some(Address::from([0u8; 20])),
+                        value_wei: 0,
+                        chain_id: 1,
+                        nonce: 0,
+                        max_fee_per_gas: 2,
+                        max_priority_fee_per_gas: 1,
+                        gas_limit: 21_000,
+                        data: Vec::new(),
+                    },
+                    signature(false),
+                )),
+                Case::Eip1559Create => bytes_to_hex_prefixed(&encode_signed_eip1559_tx(
+                    &Eip1559TxToSign {
+                        to: None,
+                        value_wei: 0,
+                        chain_id: 1,
+                        nonce: 0,
+                        max_fee_per_gas: 2,
+                        max_priority_fee_per_gas: 1,
+                        gas_limit: 21_000,
+                        data: vec![0x60, 0x00],
+                    },
+                    signature(false),
+                )),
+            };
 
-    #[test]
-    fn signed_legacy_call_encoding_is_stable() {
-        let tx = LegacyTxToSign {
-            to: Some(Address::from([0x11; 20])),
-            value_wei: 0,
-            chain_id: 1,
-            nonce: 1,
-            gas_price_wei: 2,
-            gas_limit: 21_000,
-            data: Vec::new(),
-        };
-
-        assert_eq!(
-            bytes_to_hex_prefixed(&encode_signed_legacy_tx(&tx, signature(true))),
-            "0xdf01028252089411111111111111111111111111111111111111118080260102"
-        );
-    }
-
-    #[test]
-    fn signed_eip1559_encoding_uses_canonical_zero_y_parity() {
-        let tx = Eip1559TxToSign {
-            to: Some(Address::from([0u8; 20])),
-            value_wei: 0,
-            chain_id: 1,
-            nonce: 0,
-            max_fee_per_gas: 2,
-            max_priority_fee_per_gas: 1,
-            gas_limit: 21_000,
-            data: Vec::new(),
-        };
-
-        assert_eq!(
-            bytes_to_hex_prefixed(&encode_signed_eip1559_tx(&tx, signature(false))),
-            "0x02e2018001028252089400000000000000000000000000000000000000008080c0800102"
-        );
-    }
-
-    #[test]
-    fn signed_eip1559_create_encoding_allows_absent_recipient() {
-        let tx = Eip1559TxToSign {
-            to: None,
-            value_wei: 0,
-            chain_id: 1,
-            nonce: 0,
-            max_fee_per_gas: 2,
-            max_priority_fee_per_gas: 1,
-            gas_limit: 21_000,
-            data: vec![0x60, 0x00],
-        };
-
-        assert_eq!(
-            bytes_to_hex_prefixed(&encode_signed_eip1559_tx(&tx, signature(false))),
-            "0x02d0018001028252088080826000c0800102"
-        );
+            assert_eq!(encoded, expected);
+        }
     }
 
     #[test]

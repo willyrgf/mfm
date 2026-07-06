@@ -291,12 +291,11 @@ impl mfm_runtime::ErasedNodeRunner for AppFactRecordingRunner {
 }
 
 fn app_fact_runner_capability_binding() -> mfm_runtime::RunnerCapabilityBinding {
-    mfm_runtime::RunnerCapabilityBinding {
-        capability_kind: AppFactReadCap::kind().expect("capability kind"),
-        capability_version: AppFactReadCap::version().expect("capability version"),
-        adapter_kind: app_fact_adapter_kind(),
-        adapter_version: app_fact_adapter_version(),
-    }
+    mfm_runtime::RunnerCapabilityBinding::for_capability::<AppFactReadCap>(
+        app_fact_adapter_kind(),
+        app_fact_adapter_version(),
+    )
+    .expect("runner capability binding")
 }
 
 fn app_launch_fact_query_request() -> PublicFactQueryRequest {
@@ -1086,77 +1085,75 @@ async fn run_read_services_public_fact_reads_are_store_scoped_across_runs() {
 }
 
 #[tokio::test]
-async fn run_read_services_do_not_disclose_control_facts() {
-    let (_run_id, store, registry) =
-        launch_app_fact_run_with_visibility(mfm_program::facts::FactVisibility::indexed_default(
-            mfm_program::facts::FactAudience::Control,
-        ))
-        .await;
-    let services =
-        make_run_read_services_with_certification_registry(store.clone(), store.clone(), registry);
+async fn run_read_services_do_not_disclose_non_public_facts() {
+    for (case, visibility, has_index_entry) in [
+        (
+            "control",
+            mfm_program::facts::FactVisibility::indexed_default(
+                mfm_program::facts::FactAudience::Control,
+            ),
+            true,
+        ),
+        (
+            "run-private",
+            mfm_program::facts::FactVisibility::RunPrivate,
+            false,
+        ),
+    ] {
+        let (_run_id, store, registry) = launch_app_fact_run_with_visibility(visibility).await;
+        let services = make_run_read_services_with_certification_registry(
+            store.clone(),
+            store.clone(),
+            registry,
+        );
 
-    assert!(services
-        .fact_kinds()
-        .await
-        .expect("control fact kinds")
-        .is_empty());
-    let error = services
-        .describe_fact_kind("mfm.app.test.launch")
-        .await
-        .expect_err("control descriptors are not public");
-    assert_eq!(error.class, ErrorClass::NotFound);
-    assert_eq!(error.code, "FactNotFound");
-    let error = services
-        .explain_fact_kind("mfm.app.test.launch")
-        .await
-        .expect_err("control descriptors are not explainable");
-    assert_eq!(error.class, ErrorClass::NotFound);
-    assert_eq!(error.code, "FactNotFound");
+        assert!(
+            services
+                .fact_kinds()
+                .await
+                .expect("non-public fact kinds")
+                .is_empty(),
+            "{case} facts should not be listed"
+        );
+        let error = services
+            .describe_fact_kind("mfm.app.test.launch")
+            .await
+            .expect_err("non-public descriptors are not public");
+        assert_eq!(error.class, ErrorClass::NotFound, "{case}");
+        assert_eq!(error.code, "FactNotFound", "{case}");
+        let error = services
+            .explain_fact_kind("mfm.app.test.launch")
+            .await
+            .expect_err("non-public descriptors are not explainable");
+        assert_eq!(error.class, ErrorClass::NotFound, "{case}");
+        assert_eq!(error.code, "FactNotFound", "{case}");
 
-    let projection = store.projection_snapshot().expect("projection snapshot");
-    let (_claim_id, entry) = projection
-        .fact_index_entries()
-        .next()
-        .expect("control fact index entry");
-    let control_ref =
-        public_ref_id(&internal_fact_ref_for_entry(entry).expect("control internal ref"))
-            .expect("control public ref-shaped id");
-    let error = services
-        .resolve_public_fact_ref(&control_ref)
-        .await
-        .expect_err("control refs resolve as not found");
-    assert_eq!(error.class, ErrorClass::NotFound);
-    assert_eq!(error.code, "FactNotFound");
-}
-
-#[tokio::test]
-async fn run_read_services_do_not_disclose_run_private_facts() {
-    let (_run_id, store, registry) =
-        launch_app_fact_run_with_visibility(mfm_program::facts::FactVisibility::RunPrivate).await;
-    let services =
-        make_run_read_services_with_certification_registry(store.clone(), store.clone(), registry);
-
-    assert!(services
-        .fact_kinds()
-        .await
-        .expect("run-private fact kinds")
-        .is_empty());
-    let error = services
-        .describe_fact_kind("mfm.app.test.launch")
-        .await
-        .expect_err("run-private descriptors are not public");
-    assert_eq!(error.class, ErrorClass::NotFound);
-    assert_eq!(error.code, "FactNotFound");
-    let error = services
-        .explain_fact_kind("mfm.app.test.launch")
-        .await
-        .expect_err("run-private descriptors are not explainable");
-    assert_eq!(error.class, ErrorClass::NotFound);
-    assert_eq!(error.code, "FactNotFound");
-
-    let projection = store.projection_snapshot().expect("projection snapshot");
-    assert!(projection.fact_records().next().is_some());
-    assert!(projection.fact_index_entries().next().is_none());
+        let projection = store.projection_snapshot().expect("projection snapshot");
+        if has_index_entry {
+            let (_claim_id, entry) = projection
+                .fact_index_entries()
+                .next()
+                .expect("control fact index entry");
+            let public_ref =
+                public_ref_id(&internal_fact_ref_for_entry(entry).expect("control internal ref"))
+                    .expect("control public ref-shaped id");
+            let error = services
+                .resolve_public_fact_ref(&public_ref)
+                .await
+                .expect_err("non-public refs resolve as not found");
+            assert_eq!(error.class, ErrorClass::NotFound, "{case}");
+            assert_eq!(error.code, "FactNotFound", "{case}");
+        } else {
+            assert!(
+                projection.fact_records().next().is_some(),
+                "{case} fact should still be retained internally"
+            );
+            assert!(
+                projection.fact_index_entries().next().is_none(),
+                "{case} fact should not be publicly indexed"
+            );
+        }
+    }
 }
 
 #[derive(Clone)]

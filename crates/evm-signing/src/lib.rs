@@ -370,43 +370,69 @@ mod tests {
         .expect("identity")
     }
 
+    fn legacy_request_for_signed_payload(
+        signing_hash: B256,
+        expected_from: Address,
+    ) -> EvmSigningRequest {
+        EvmSigningRequest {
+            transaction: EvmSigningTransaction::Legacy(legacy_tx()),
+            signing_request: SigningRequest::from_digest(
+                signer_ref(),
+                evm_signing_algorithm_id().expect("algorithm"),
+                evm_transaction_domain_id().expect("domain"),
+                legacy_transaction_purpose_id().expect("purpose"),
+                digest_from_hash(signing_hash),
+            )
+            .require_public_identity(
+                ExpectedSignerIdentity::account_id(format!("{expected_from:?}")).expect("expected"),
+            ),
+            signing_hash,
+            expected_from,
+        }
+    }
+
     #[test]
     fn default_transaction_style_is_eip1559() {
         assert_eq!(EvmTransactionStyle::default(), EvmTransactionStyle::Eip1559);
     }
 
     #[test]
-    fn legacy_tx_hash_is_stable() {
-        let request = EvmSigningRequest::legacy(signer_ref(), legacy_tx(), expected_sender())
+    fn transaction_signing_hashes_are_stable() {
+        enum Case {
+            Legacy,
+            Eip1559,
+        }
+
+        for (case, expected_hash, expected_purpose) in [
+            (
+                Case::Legacy,
+                "0x7b5763c12ba4587de9d52aac395936808bf4d52eb0d6cc0a8803011825d8aa55",
+                EVM_LEGACY_TRANSACTION_PURPOSE_ID,
+            ),
+            (
+                Case::Eip1559,
+                "0x57806671c35732b1b46a1f8c8a7d63844b94639d997b46c482ea0062d86a8185",
+                EVM_EIP1559_TRANSACTION_PURPOSE_ID,
+            ),
+        ] {
+            let request = match case {
+                Case::Legacy => {
+                    EvmSigningRequest::legacy(signer_ref(), legacy_tx(), expected_sender())
+                }
+                Case::Eip1559 => {
+                    EvmSigningRequest::eip1559(signer_ref(), eip1559_tx(), expected_sender())
+                }
+            }
             .expect("request");
 
-        assert_eq!(
-            format!("{:?}", request.signing_hash()),
-            "0x7b5763c12ba4587de9d52aac395936808bf4d52eb0d6cc0a8803011825d8aa55"
-        );
-        assert_eq!(
-            request.signing_request().purpose().as_str(),
-            EVM_LEGACY_TRANSACTION_PURPOSE_ID
-        );
-        assert_eq!(request.expected_from(), expected_sender());
-        assert!(request.signing_request().expected_identity().is_some());
-    }
-
-    #[test]
-    fn eip1559_tx_hash_is_stable() {
-        let request = EvmSigningRequest::eip1559(signer_ref(), eip1559_tx(), expected_sender())
-            .expect("request");
-
-        assert_eq!(
-            format!("{:?}", request.signing_hash()),
-            "0x57806671c35732b1b46a1f8c8a7d63844b94639d997b46c482ea0062d86a8185"
-        );
-        assert_eq!(
-            request.signing_request().purpose().as_str(),
-            EVM_EIP1559_TRANSACTION_PURPOSE_ID
-        );
-        assert_eq!(request.expected_from(), expected_sender());
-        assert!(request.signing_request().expected_identity().is_some());
+            assert_eq!(format!("{:?}", request.signing_hash()), expected_hash);
+            assert_eq!(
+                request.signing_request().purpose().as_str(),
+                expected_purpose
+            );
+            assert_eq!(request.expected_from(), expected_sender());
+            assert!(request.signing_request().expected_identity().is_some());
+        }
     }
 
     #[test]
@@ -429,21 +455,7 @@ mod tests {
         let signing_hash = "0x5eb4f5a33c621f32a8622d5f943b6b102994dfe4e5aebbefe69bb1b2aa0fc93e"
             .parse::<B256>()
             .expect("hash");
-        let request = EvmSigningRequest {
-            transaction: EvmSigningTransaction::Legacy(legacy_tx()),
-            signing_request: SigningRequest::from_digest(
-                signer_ref(),
-                evm_signing_algorithm_id().expect("algorithm"),
-                evm_transaction_domain_id().expect("domain"),
-                legacy_transaction_purpose_id().expect("purpose"),
-                digest_from_hash(signing_hash),
-            )
-            .require_public_identity(
-                ExpectedSignerIdentity::account_id(format!("{expected:?}")).expect("expected"),
-            ),
-            signing_hash,
-            expected_from: expected,
-        };
+        let request = legacy_request_for_signed_payload(signing_hash, expected);
         let result = SigningResult::for_request(
             request.signing_request(),
             provider_identity(expected),
@@ -466,21 +478,7 @@ mod tests {
         let signing_hash = "0x5eb4f5a33c621f32a8622d5f943b6b102994dfe4e5aebbefe69bb1b2aa0fc93e"
             .parse::<B256>()
             .expect("hash");
-        let request = EvmSigningRequest {
-            transaction: EvmSigningTransaction::Legacy(legacy_tx()),
-            signing_request: SigningRequest::from_digest(
-                signer_ref(),
-                evm_signing_algorithm_id().expect("algorithm"),
-                evm_transaction_domain_id().expect("domain"),
-                legacy_transaction_purpose_id().expect("purpose"),
-                digest_from_hash(signing_hash),
-            )
-            .require_public_identity(
-                ExpectedSignerIdentity::account_id(format!("{expected:?}")).expect("expected"),
-            ),
-            signing_hash,
-            expected_from: expected,
-        };
+        let request = legacy_request_for_signed_payload(signing_hash, expected);
         let result = SigningResult::for_request(
             request.signing_request(),
             provider_identity(expected),

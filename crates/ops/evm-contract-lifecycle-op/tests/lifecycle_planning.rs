@@ -295,109 +295,112 @@ fn full_lifecycle_program_lowers_to_context_bound_states() {
 }
 
 #[test]
-fn context_deploy_program_declares_context_without_seeds() {
-    let draft = deploy_contract_program_draft(context_deploy_entry_config()).expect("draft");
+fn context_entry_programs_lower_without_seed_material() {
+    struct Case {
+        label: &'static str,
+        draft: mfm_program::TypedProgramDraft,
+        keys: &'static [&'static str],
+        descriptor_names: &'static [&'static str],
+        context_bound_inputs: &'static [(&'static str, &'static str)],
+    }
 
-    assert_eq!(draft.contexts().len(), 1);
-    assert!(draft.seeds().is_empty());
-    assert_eq!(draft.state_nodes().len(), 1);
-    assert_eq!(draft.state_nodes()[0].key.as_str(), "deploy");
-    assert_eq!(
-        draft.state_nodes()[0].state_descriptor_name,
-        "mfm.evm.contract.context_deploy"
-    );
-    assert_node_requires_draft_context(&draft, "deploy");
-    assert_node_output_bound_to_draft_context(&draft, "deploy");
-    certify_program_draft(&draft).expect("certified");
-}
+    let cases = [
+        Case {
+            label: "deploy",
+            draft: deploy_contract_program_draft(context_deploy_entry_config())
+                .expect("deploy draft"),
+            keys: &["deploy"],
+            descriptor_names: &["mfm.evm.contract.context_deploy"],
+            context_bound_inputs: &[],
+        },
+        Case {
+            label: "configure",
+            draft: configure_contract_program_draft(context_configure_entry_config())
+                .expect("configure draft"),
+            keys: &["import_deployed", "configure"],
+            descriptor_names: &[
+                "mfm.evm.contract.import_deployed",
+                "mfm.evm.contract.context_configure",
+            ],
+            context_bound_inputs: &[("configure", "deployed")],
+        },
+        Case {
+            label: "validate",
+            draft: validate_contract_program_draft(context_validate_entry_config())
+                .expect("validate draft"),
+            keys: &["import_configured", "validate"],
+            descriptor_names: &[
+                "mfm.evm.contract.import_configured",
+                "mfm.evm.contract.context_validate",
+            ],
+            context_bound_inputs: &[("validate", "configured")],
+        },
+    ];
 
-#[test]
-fn context_configure_program_imports_deployed_without_seed_material() {
-    let draft = configure_contract_program_draft(context_configure_entry_config()).expect("draft");
-
-    assert_eq!(draft.contexts().len(), 1);
-    assert!(draft.seeds().is_empty());
-    assert_eq!(draft.state_nodes().len(), 2);
-    assert_eq!(draft.state_nodes()[0].key.as_str(), "import_deployed");
-    assert_eq!(draft.state_nodes()[1].key.as_str(), "configure");
-    assert_eq!(
-        draft
-            .state_nodes()
-            .iter()
-            .map(|node| node.state_descriptor_name.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "mfm.evm.contract.import_deployed",
-            "mfm.evm.contract.context_configure"
-        ]
-    );
-    assert_node_requires_draft_context(&draft, "import_deployed");
-    assert_node_requires_draft_context(&draft, "configure");
-    assert_node_output_bound_to_draft_context(&draft, "import_deployed");
-    assert_node_output_bound_to_draft_context(&draft, "configure");
-    assert_struct_input_bound_to_draft_context(&draft, "configure", "deployed");
-    certify_program_draft(&draft).expect("certified");
-}
-
-#[test]
-fn context_validate_program_imports_configured_without_seed_material() {
-    let draft = validate_contract_program_draft(context_validate_entry_config()).expect("draft");
-
-    assert_eq!(draft.contexts().len(), 1);
-    assert!(draft.seeds().is_empty());
-    assert_eq!(draft.state_nodes().len(), 2);
-    assert_eq!(draft.state_nodes()[0].key.as_str(), "import_configured");
-    assert_eq!(draft.state_nodes()[1].key.as_str(), "validate");
-    assert_eq!(
-        draft
-            .state_nodes()
-            .iter()
-            .map(|node| node.state_descriptor_name.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "mfm.evm.contract.import_configured",
-            "mfm.evm.contract.context_validate"
-        ]
-    );
-    assert_node_requires_draft_context(&draft, "import_configured");
-    assert_node_requires_draft_context(&draft, "validate");
-    assert_node_output_bound_to_draft_context(&draft, "import_configured");
-    assert_node_output_bound_to_draft_context(&draft, "validate");
-    assert_struct_input_bound_to_draft_context(&draft, "validate", "configured");
-    certify_program_draft(&draft).expect("certified");
+    for case in cases {
+        assert_eq!(case.draft.contexts().len(), 1, "{}", case.label);
+        assert!(case.draft.seeds().is_empty(), "{}", case.label);
+        assert_eq!(
+            case.draft
+                .state_nodes()
+                .iter()
+                .map(|node| node.key.as_str())
+                .collect::<Vec<_>>(),
+            case.keys,
+            "{}",
+            case.label
+        );
+        assert_eq!(
+            case.draft
+                .state_nodes()
+                .iter()
+                .map(|node| node.state_descriptor_name.as_str())
+                .collect::<Vec<_>>(),
+            case.descriptor_names,
+            "{}",
+            case.label
+        );
+        for key in case.keys {
+            assert_node_requires_draft_context(&case.draft, key);
+            assert_node_output_bound_to_draft_context(&case.draft, key);
+        }
+        for (key, field) in case.context_bound_inputs {
+            assert_struct_input_bound_to_draft_context(&case.draft, key, field);
+        }
+        certify_program_draft(&case.draft).expect("certified");
+    }
 }
 
 #[test]
 fn entry_plan_helpers_do_not_emit_seed_material() {
-    let deploy = plan_contract_deploy_entry_point(context_deploy_entry_config()).expect("deploy");
-    let configure =
-        plan_contract_configure_entry_point(context_configure_entry_config()).expect("configure");
-    let validate =
-        plan_contract_validate_entry_point(context_validate_entry_config()).expect("validate");
-    let lifecycle =
-        plan_contract_lifecycle_entry_point(context_lifecycle_entry_config()).expect("lifecycle");
-
-    assert_eq!(deploy.draft.state_nodes().len(), 1);
-    assert!(deploy.draft.seeds().is_empty());
-    assert!(deploy.seed_material.is_empty());
-    assert_eq!(configure.draft.state_nodes().len(), 2);
-    assert!(configure.draft.seeds().is_empty());
-    assert!(configure.seed_material.is_empty());
-    assert_eq!(validate.draft.state_nodes().len(), 2);
-    assert!(validate.draft.seeds().is_empty());
-    assert!(validate.seed_material.is_empty());
-    assert_eq!(lifecycle.draft.state_nodes().len(), 3);
-    assert!(lifecycle.draft.seeds().is_empty());
-    assert!(lifecycle.seed_material.is_empty());
-
-    for plan in [&deploy, &configure, &validate, &lifecycle] {
-        assert!(!plan.config_material.is_empty());
-        assert!(plan
-            .draft
-            .seeds()
-            .iter()
-            .all(|seed| seed.key.as_str() != "deployed_contract"
-                && seed.key.as_str() != "configured_contract"));
+    for (label, plan, expected_nodes) in [
+        (
+            "deploy",
+            plan_contract_deploy_entry_point(context_deploy_entry_config()).expect("deploy"),
+            1,
+        ),
+        (
+            "configure",
+            plan_contract_configure_entry_point(context_configure_entry_config())
+                .expect("configure"),
+            2,
+        ),
+        (
+            "validate",
+            plan_contract_validate_entry_point(context_validate_entry_config()).expect("validate"),
+            2,
+        ),
+        (
+            "lifecycle",
+            plan_contract_lifecycle_entry_point(context_lifecycle_entry_config())
+                .expect("lifecycle"),
+            3,
+        ),
+    ] {
+        assert_eq!(plan.draft.state_nodes().len(), expected_nodes, "{label}");
+        assert!(plan.draft.seeds().is_empty(), "{label}");
+        assert!(plan.seed_material.is_empty(), "{label}");
+        assert!(!plan.config_material.is_empty(), "{label}");
     }
 }
 

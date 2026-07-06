@@ -151,26 +151,25 @@ mod tests {
     }
 
     #[test]
-    fn private_key_rejects_invalid_hex_without_echoing_input() {
-        let err =
-            EthereumPrivateKey::from_hex_secret("not-a-valid-private-key-secret").expect_err("bad");
-        assert_eq!(err, EthereumKeyError::InvalidHex);
-        assert!(!err.to_string().contains("not-a-valid-private-key-secret"));
-    }
+    fn private_key_rejects_invalid_inputs_without_echoing_secrets() {
+        for (case, raw, expected) in [
+            (
+                "invalid hex",
+                "not-a-valid-private-key-secret",
+                EthereumKeyError::InvalidHex,
+            ),
+            ("short key", "0x1234", EthereumKeyError::InvalidLength),
+            (
+                "invalid curve key",
+                "0x0000000000000000000000000000000000000000000000000000000000000000",
+                EthereumKeyError::InvalidPrivateKey,
+            ),
+        ] {
+            let err = EthereumPrivateKey::from_hex_secret(raw).expect_err(case);
 
-    #[test]
-    fn private_key_rejects_short_key() {
-        let err = EthereumPrivateKey::from_hex_secret("0x1234").expect_err("short");
-        assert_eq!(err, EthereumKeyError::InvalidLength);
-    }
-
-    #[test]
-    fn private_key_rejects_invalid_curve_key() {
-        let err = EthereumPrivateKey::from_hex_secret(
-            "0x0000000000000000000000000000000000000000000000000000000000000000",
-        )
-        .expect_err("zero key");
-        assert_eq!(err, EthereumKeyError::InvalidPrivateKey);
+            assert_eq!(err, expected, "{case}");
+            assert!(!err.to_string().contains(raw), "{case}");
+        }
     }
 
     #[test]

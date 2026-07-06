@@ -557,16 +557,12 @@ async fn app_resume_completed_run_is_evidence_only_without_live_runners() {
 }
 
 #[tokio::test]
-async fn app_resume_missing_runtime_config_fails_before_claim_or_attempt() {
+async fn app_resume_runtime_config_ingress_failures_before_claim_or_attempt() {
     assert_resume_runtime_config_ingress_failure(None).await;
-}
 
-#[tokio::test]
-async fn app_resume_malformed_runtime_config_fails_before_claim_or_attempt() {
     let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
     let runtime_config_path = runtime_config_dir.path().join("runtime.toml");
     std::fs::write(&runtime_config_path, "[evm.sources.bad\n").expect("write malformed config");
-
     assert_resume_runtime_config_ingress_failure(Some(&runtime_config_path)).await;
 }
 

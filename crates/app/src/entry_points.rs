@@ -444,75 +444,43 @@ mod tests {
     }
 
     #[test]
-    fn evm_contract_entry_point_registry_resolves_all_versions() {
+    fn evm_contract_entry_points_resolve_and_plan_without_seeds() {
         let registry = production_entry_point_op_registry().expect("registry");
 
-        for name in [
-            "evm_contract_deploy",
-            "evm_contract_configure",
-            "evm_contract_validate",
-            "evm_contract_lifecycle",
+        for (name, config, expects_import_node) in [
+            ("evm_contract_deploy", deploy_config_json(), false),
+            (
+                "evm_contract_configure",
+                configure_entry_config_json(),
+                true,
+            ),
+            ("evm_contract_validate", validate_entry_config_json(), true),
+            ("evm_contract_lifecycle", lifecycle_config_json(), false),
         ] {
             let op = registry
                 .resolve_latest(&PublicOpName::new(name).expect("name"))
                 .expect("EVM contract op");
             assert_eq!(op.version(), OpVersion::new(2).unwrap());
-        }
-    }
-
-    #[test]
-    fn evm_contract_entry_point_plans_deploy_and_lifecycle_without_seeds() {
-        let registry = production_entry_point_op_registry().expect("registry");
-
-        for (name, config) in [
-            ("evm_contract_deploy", deploy_config_json().to_string()),
-            (
-                "evm_contract_lifecycle",
-                lifecycle_config_json().to_string(),
-            ),
-        ] {
-            let op = registry
-                .resolve_latest(&PublicOpName::new(name).expect("name"))
-                .expect("EVM contract op");
-            let authored =
-                AuthoredConfig::new(AuthoredConfigFormat::Json, config).expect("authored");
+            let authored = AuthoredConfig::new(AuthoredConfigFormat::Json, config.to_string())
+                .expect("authored");
             let plan = op.plan(authored).expect("EVM contract plan");
 
-            assert!(!plan.draft.state_nodes().is_empty());
             assert!(!plan.config_material.is_empty());
-            assert!(plan.seed_material.is_empty());
-        }
-    }
-
-    #[test]
-    fn evm_contract_entry_point_plans_configure_and_validate_with_imports_without_seeds() {
-        let registry = production_entry_point_op_registry().expect("registry");
-
-        for (name, config) in [
-            (
-                "evm_contract_configure",
-                configure_entry_config_json().to_string(),
-            ),
-            (
-                "evm_contract_validate",
-                validate_entry_config_json().to_string(),
-            ),
-        ] {
-            let op = registry
-                .resolve_latest(&PublicOpName::new(name).expect("name"))
-                .expect("EVM contract op");
-            let authored =
-                AuthoredConfig::new(AuthoredConfigFormat::Json, config).expect("authored");
-            let plan = op.plan(authored).expect("EVM contract plan");
-
             assert!(plan.seed_material.is_empty());
             assert!(plan.draft.seeds().is_empty());
-            assert!(!plan.config_material.is_empty());
-            assert!(plan
-                .draft
-                .state_nodes()
-                .iter()
-                .any(|node| node.state_descriptor_name.contains("import_")));
+            if expects_import_node {
+                assert!(
+                    plan.draft
+                        .state_nodes()
+                        .iter()
+                        .any(|node| node.state_descriptor_name.contains("import_")),
+                    "{name} should include an import state"
+                );
+            }
+            assert!(
+                !plan.draft.state_nodes().is_empty(),
+                "{name} should plan state nodes"
+            );
         }
     }
 

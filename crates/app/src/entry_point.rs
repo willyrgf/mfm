@@ -588,7 +588,12 @@ mod tests {
     }
 
     #[test]
-    fn entry_point_registry_resolves_latest_version() {
+    fn entry_point_registry_resolves_latest_and_explicit_versions() {
+        enum Case {
+            Latest,
+            Explicit,
+        }
+
         let name = PublicOpName::new("portfolio_snapshot").expect("public name");
         let mut registry = EntryPointOpRegistry::new();
         registry
@@ -598,27 +603,16 @@ mod tests {
             .register(FakeOp::new("portfolio_snapshot", 2))
             .unwrap();
 
-        let op = registry.resolve_latest(&name).expect("latest op");
+        for (case, expected_version) in [(Case::Latest, 2), (Case::Explicit, 1)] {
+            let op = match case {
+                Case::Latest => registry.resolve_latest(&name).expect("latest op"),
+                Case::Explicit => registry
+                    .resolve(&name, Some(OpVersion::new(1).unwrap()))
+                    .expect("versioned op"),
+            };
 
-        assert_eq!(op.version().get(), 2);
-    }
-
-    #[test]
-    fn entry_point_registry_resolves_explicit_version() {
-        let name = PublicOpName::new("portfolio_snapshot").expect("public name");
-        let mut registry = EntryPointOpRegistry::new();
-        registry
-            .register(FakeOp::new("portfolio_snapshot", 1))
-            .unwrap();
-        registry
-            .register(FakeOp::new("portfolio_snapshot", 2))
-            .unwrap();
-
-        let op = registry
-            .resolve(&name, Some(OpVersion::new(1).unwrap()))
-            .expect("versioned op");
-
-        assert_eq!(op.version().get(), 1);
+            assert_eq!(op.version().get(), expected_version);
+        }
     }
 
     #[test]

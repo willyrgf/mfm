@@ -24,6 +24,29 @@ use crate::{
 /// Boxed future returned by side-effect driver callbacks.
 pub type SideEffectDriverFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
+/// Future returned by callbacks that submit or recover a prepared side-effect invocation.
+pub type SideEffectSubmissionDecisionFuture<
+    'a,
+    Submission,
+    UnknownEvidence,
+    NotSubmittedProof,
+    AmbiguityEvidence,
+> = SideEffectDriverFuture<
+    'a,
+    SideEffectSubmissionDecision<Submission, UnknownEvidence, NotSubmittedProof, AmbiguityEvidence>,
+>;
+
+/// Future returned by callbacks that recover a previously unknown submission.
+pub type SideEffectUnknownSubmissionDecisionFuture<
+    'a,
+    Submission,
+    NotSubmittedProof,
+    AmbiguityEvidence,
+> = SideEffectDriverFuture<
+    'a,
+    SideEffectUnknownSubmissionDecision<Submission, NotSubmittedProof, AmbiguityEvidence>,
+>;
+
 /// Builds pre-invocation side-effect resource-lane claim evidence for the first epoch.
 pub fn preclaim_side_effect_resource_lane<Intent, Idempotency>(
     ctx: &PreInvocationRunCtx<'_>,
@@ -520,14 +543,12 @@ pub trait SideEffectDriverCallbacks {
         ctx: &'a ErasedRunCtx<'ctx>,
         action: SideEffectProtocolAction,
         prepared: Option<Self::PreparedInvocation>,
-    ) -> SideEffectDriverFuture<
+    ) -> SideEffectSubmissionDecisionFuture<
         'a,
-        SideEffectSubmissionDecision<
-            Self::Submission,
-            Self::SubmissionUnknownEvidence,
-            Self::NotSubmittedProof,
-            Self::AmbiguityEvidence,
-        >,
+        Self::Submission,
+        Self::SubmissionUnknownEvidence,
+        Self::NotSubmittedProof,
+        Self::AmbiguityEvidence,
     >;
 }
 
@@ -765,13 +786,11 @@ pub trait SideEffectVerifyCallbacks {
         submit_node: &'a spec::NodeSpec,
         submit_inputs: &'a MaterializedInputs,
         prepared_invocation: Option<&'a store::SideEffectArtifactProjection>,
-    ) -> SideEffectDriverFuture<
+    ) -> SideEffectUnknownSubmissionDecisionFuture<
         'a,
-        SideEffectUnknownSubmissionDecision<
-            Self::Submission,
-            Self::NotSubmittedProof,
-            Self::AmbiguityEvidence,
-        >,
+        Self::Submission,
+        Self::NotSubmittedProof,
+        Self::AmbiguityEvidence,
     >;
 
     /// Reads receipt evidence for an observed submission.
