@@ -14,6 +14,11 @@ pub use mfm_effects::{
 };
 use mfm_ids::NameToken;
 pub use mfm_ids::{CapabilityKind, CapabilityVersion};
+pub use provider_diagnostic::{
+    ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
+};
+
+mod provider_diagnostic;
 
 #[cfg(test)]
 mod tests;
