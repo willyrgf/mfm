@@ -15,6 +15,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 mfm-canonical = { path = "../../kernel/canonical" }
+mfm-btc-capabilities = { path = "../../btc-capabilities" }
 mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-events = { path = "../../kernel/events" }
 mfm-evm-capabilities = { path = "../../evm-capabilities" }

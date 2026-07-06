@@ -2,8 +2,8 @@
 //! Reusable Bitcoin capability contracts.
 //!
 //! This crate defines state/adapter-facing Bitcoin read authority contracts. It owns semantic
-//! source identities, chain-head requests, response evidence, provider traits, and redacted
-//! errors. Concrete protocol clients and runtime routing live outside this crate.
+//! source identities, chain-head and balance requests, response evidence, provider traits, and
+//! redacted errors. Concrete protocol clients and runtime routing live outside this crate.
 //!
 //! ```rust
 //! use mfm_btc_capabilities::{
@@ -72,6 +72,41 @@ pub trait BtcChainHeadReadProvider: Send + Sync {
         &'a self,
         request: &'a BtcChainHeadRequest,
     ) -> BtcCapabilityFuture<'a, BtcChainHeadResponse>;
+}
+
+/// Bitcoin address balance read authority.
+pub struct BtcBalanceReadCapability;
+
+impl CapabilitySpec for BtcBalanceReadCapability {
+    type Role = ReadExternalRole;
+
+    fn kind() -> mfm_capabilities::Result<CapabilityKind> {
+        CapabilityKind::new(
+            "mfm.bitcoin",
+            "balance.read",
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(b"mfm.bitcoin.capability:balance.read"),
+        )
+        .map_err(|error| CapabilityError::Identity(error.to_string()))
+    }
+
+    fn version() -> mfm_capabilities::Result<CapabilityVersion> {
+        CapabilityVersion::new("mfm.bitcoin.balance.read.v1")
+            .map_err(|error| CapabilityError::Identity(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.bitcoin.balance.read"
+    }
+}
+
+/// Provider interface for Bitcoin address balance reads.
+pub trait BtcBalanceReadProvider: Send + Sync {
+    /// Reads a Bitcoin address balance from the selected source.
+    fn read_balance<'a>(
+        &'a self,
+        request: &'a BtcBalanceReadRequest,
+    ) -> BtcCapabilityFuture<'a, BtcBalanceReadResponse>;
 }
 
 /// Bitcoin-like chain family observed by this capability.
@@ -286,6 +321,17 @@ pub struct BtcChainHeadRequest {
     pub selection: BtcHeadSelection,
 }
 
+/// Request for a Bitcoin address balance read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtcBalanceReadRequest {
+    /// Semantic chain guard.
+    pub guard: BtcChainGuard,
+    /// Public Bitcoin address to observe.
+    pub address: BtcAddress,
+    /// Requested UTXO-set head selection.
+    pub selection: BtcHeadSelection,
+}
+
 /// Redacted Bitcoin source evidence attached to provider responses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedactedBtcSourceEvidence {
@@ -407,6 +453,62 @@ impl From<BtcBlockHash> for String {
     }
 }
 
+/// Canonical public Bitcoin address string.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BtcAddress(String);
+
+impl BtcAddress {
+    /// Creates a checked public Bitcoin address.
+    pub fn new(value: impl AsRef<str>) -> Result<Self> {
+        let value = value.as_ref();
+        if !is_supported_bitcoin_address_envelope(value) {
+            return Err(BtcCapabilityError::InvalidRequest {
+                reason: BtcInvalidRequest::InvalidAddress,
+            });
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    /// Returns the canonical address string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for BtcAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("BtcAddress").field(&self.0).finish()
+    }
+}
+
+impl fmt::Display for BtcAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for BtcAddress {
+    type Err = BtcCapabilityError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for BtcAddress {
+    type Error = BtcCapabilityError;
+
+    fn try_from(value: String) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl From<BtcAddress> for String {
+    fn from(value: BtcAddress) -> Self {
+        value.0
+    }
+}
+
 /// Response for a Bitcoin chain-head read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtcChainHeadResponse {
@@ -427,6 +529,38 @@ impl BtcChainHeadResponse {
     }
 }
 
+/// Response for a Bitcoin address balance read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtcBalanceReadResponse {
+    /// Redacted source evidence.
+    pub evidence: RedactedBtcSourceEvidence,
+    /// Public Bitcoin address that was observed.
+    pub address: BtcAddress,
+    /// Total confirmed UTXO amount in satoshis.
+    pub balance_sats: u64,
+    /// UTXO set height used by the provider.
+    pub block_height: u64,
+    /// UTXO set block hash used by the provider.
+    pub block_hash: BtcBlockHash,
+}
+
+impl BtcBalanceReadResponse {
+    /// Verifies that this response matches the request guard, address, and head selection.
+    pub fn verify_request(&self, request: &BtcBalanceReadRequest) -> Result<()> {
+        self.evidence.verify_request(&BtcChainHeadRequest {
+            guard: request.guard.clone(),
+            selection: request.selection,
+        })?;
+        if self.address == request.address {
+            Ok(())
+        } else {
+            Err(BtcCapabilityError::SourceMismatch {
+                evidence: self.evidence.clone(),
+            })
+        }
+    }
+}
+
 /// Closed invalid-request reasons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BtcInvalidRequest {
@@ -436,6 +570,8 @@ pub enum BtcInvalidRequest {
     ZeroConfirmations,
     /// Block hash was not 32 bytes of hex.
     InvalidBlockHash,
+    /// Address was not in a supported public Bitcoin address envelope.
+    InvalidAddress,
 }
 
 /// Closed provider failure reasons.
@@ -481,6 +617,22 @@ fn invalid_identifier(_source: mfm_ids::CheckedStringError) -> BtcCapabilityErro
     BtcCapabilityError::InvalidRequest {
         reason: BtcInvalidRequest::InvalidIdentifier,
     }
+}
+
+fn is_supported_bitcoin_address_envelope(value: &str) -> bool {
+    if value.trim() != value || value.len() < 14 || value.len() > 90 || !value.is_ascii() {
+        return false;
+    }
+    if !value.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return false;
+    }
+    if value.starts_with("bc1") || value.starts_with("tb1") || value.starts_with("bcrt1") {
+        return value == value.to_ascii_lowercase();
+    }
+    matches!(
+        value.as_bytes().first().copied(),
+        Some(b'1' | b'3' | b'2' | b'm' | b'n')
+    )
 }
 
 #[cfg(test)]

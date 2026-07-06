@@ -7,8 +7,11 @@ fn capability_name_describes_read_authority() {
         BtcChainHeadReadCapability::name(),
         "mfm.bitcoin.chain_head.read"
     );
+    assert_eq!(BtcBalanceReadCapability::name(), "mfm.bitcoin.balance.read");
     assert!(!BtcChainHeadReadCapability::name().contains("collector"));
     assert!(!BtcChainHeadReadCapability::name().contains("workflow"));
+    assert!(!BtcBalanceReadCapability::name().contains("collector"));
+    assert!(!BtcBalanceReadCapability::name().contains("workflow"));
 }
 
 #[test]
@@ -19,9 +22,17 @@ fn capability_kind_and_version_are_stable() {
     let version = BtcChainHeadReadCapability::version()
         .expect("version")
         .to_string();
+    let balance_kind = BtcBalanceReadCapability::kind()
+        .expect("balance kind")
+        .to_string();
+    let balance_version = BtcBalanceReadCapability::version()
+        .expect("balance version")
+        .to_string();
 
     assert!(kind.starts_with("capability:mfm.bitcoin:chain_head.read:"));
     assert_eq!(version, "mfm.bitcoin.chain_head.read.v1");
+    assert!(balance_kind.starts_with("capability:mfm.bitcoin:balance.read:"));
+    assert_eq!(balance_version, "mfm.bitcoin.balance.read.v1");
 }
 
 #[test]
@@ -65,4 +76,39 @@ fn source_identity_rejects_route_like_material() {
             reason: BtcInvalidRequest::InvalidIdentifier,
         }
     );
+}
+
+#[test]
+fn balance_response_evidence_verifies_request() {
+    let request = BtcBalanceReadRequest {
+        guard: BtcChainGuard::new(
+            BtcChain::Bitcoin,
+            BtcNetworkId::new("bitcoin-mainnet").expect("network"),
+            BtcSourceIdentity::new("bitcoin-mainnet").expect("source"),
+        ),
+        address: BtcAddress::new("bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw").expect("address"),
+        selection: BtcHeadSelection::best(),
+    };
+    let evidence = RedactedBtcSourceEvidence::from_request(
+        &BtcChainHeadRequest {
+            guard: request.guard.clone(),
+            selection: request.selection,
+        },
+        Some("main".to_string()),
+        BtcSourceStatus::Synced,
+    );
+    let response = BtcBalanceReadResponse {
+        evidence,
+        address: request.address.clone(),
+        balance_sats: 42,
+        block_height: 850_000,
+        block_hash: BtcBlockHash::new(
+            "00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc",
+        )
+        .expect("block hash"),
+    };
+
+    response
+        .verify_request(&request)
+        .expect("matching balance evidence");
 }

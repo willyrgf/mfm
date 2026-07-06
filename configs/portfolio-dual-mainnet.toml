@@ -1,0 +1,82 @@
+[portfolio]
+portfolio_id = "portfolio_dual_mainnet"
+quote_codes = ["USD"]
+metadata = {}
+
+[[portfolio.networks]]
+network_id = "ethereum-mainnet"
+family = "evm"
+chain_id = 1
+control_scope = "ethereum-mainnet"
+metadata = {}
+
+[[portfolio.networks]]
+network_id = "bitcoin-mainnet"
+family = "bitcoin"
+control_scope = "bitcoin-mainnet"
+metadata = {}
+
+[[portfolio.wallets]]
+wallet_id = "wallet_eth_mainnet"
+network_id = "ethereum-mainnet"
+symbol_ids = ["eth.native.ethereum-mainnet"]
+metadata = {}
+
+[portfolio.wallets.subject]
+kind = "evm_address"
+address = "0xabdbbd00fad79b257e7313b398a1ea10d9eef8d6"
+
+[portfolio.wallets.implementation]
+kind = "address_only"
+
+[[portfolio.wallets]]
+wallet_id = "wallet_btc_mainnet"
+network_id = "bitcoin-mainnet"
+symbol_ids = ["btc.native.bitcoin-mainnet"]
+metadata = {}
+
+[portfolio.wallets.subject]
+kind = "bitcoin_address"
+address = "bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw"
+
+[portfolio.wallets.implementation]
+kind = "address_only"
+
+[[portfolio.symbol_configs]]
+symbol_id = "eth.native.ethereum-mainnet"
+display_symbol = "ETH"
+kind = "native_balance"
+role = "native"
+network_id = "ethereum-mainnet"
+decimals = 18
+metadata = {}
+
+[portfolio.symbol_configs.balance_reader]
+kind = "native_balance"
+
+[portfolio.symbol_configs.valuation]
+# Fixed prices are deterministic placeholders. Replace these before relying on USD totals.
+quotes = [
+  { quote = "USD", priced_symbol_id = "eth.native.ethereum-mainnet", reader = { kind = "fixed_unit_price", unit_price_dec = "0.00" } },
+]
+
+[[portfolio.symbol_configs]]
+symbol_id = "btc.native.bitcoin-mainnet"
+display_symbol = "BTC"
+kind = "native_balance"
+role = "native"
+network_id = "bitcoin-mainnet"
+decimals = 8
+metadata = {}
+
+[portfolio.symbol_configs.balance_reader]
+kind = "native_balance"
+
+[portfolio.symbol_configs.valuation]
+# Fixed prices are deterministic placeholders. Replace these before relying on USD totals.
+quotes = [
+  { quote = "USD", priced_symbol_id = "btc.native.bitcoin-mainnet", reader = { kind = "fixed_unit_price", unit_price_dec = "0.00" } },
+]
+
+[valuation_source_registry]
+sources = []

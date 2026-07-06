@@ -98,6 +98,37 @@ fn btc_jsonrpc_runtime_config_parses_from_toml_and_json() {
 }
 
 #[test]
+fn dual_mainnet_runtime_example_resolves_from_env() {
+    let _env = locked_env([
+        ("MFM_ETHEREUM_MAINNET_RPC_URL", "http://127.0.0.1:8545"),
+        ("MFM_BITCOIN_RPC_URL", "http://127.0.0.1:8332"),
+        ("MFM_BITCOIN_RPC_USER", "rpc-user"),
+        ("MFM_BITCOIN_RPC_PASSWORD", "rpc-pass"),
+    ]);
+    let raw = include_str!("../../../configs/runtime-dual-mainnet.example.toml");
+
+    let runtime = RuntimeConfig::from_str(raw, RuntimeConfigFormat::Toml).expect("runtime config");
+
+    assert_eq!(runtime.evm().expect("evm").routes().len(), 1);
+    let btc = runtime.btc().expect("btc").json_rpc();
+    assert_value(
+        btc.rpc_url(),
+        "http://127.0.0.1:8332",
+        RuntimeValueSourceKind::Env,
+    );
+    assert_value(
+        btc.rpc_user().expect("user"),
+        "rpc-user",
+        RuntimeValueSourceKind::Env,
+    );
+    assert_value(
+        btc.rpc_password().expect("password"),
+        "rpc-pass",
+        RuntimeValueSourceKind::Env,
+    );
+}
+
+#[test]
 fn required_btc_family_must_exist() {
     let err = RuntimeConfig::from_str_with_requirements(
         "",

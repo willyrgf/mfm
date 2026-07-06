@@ -2154,6 +2154,7 @@ name = "mfm-adapters-portfolio"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "mfm-btc-capabilities",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-events",

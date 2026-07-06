@@ -169,9 +169,7 @@ fn fixed_price_observation_projects_report_totals() {
         &ObserveBatchConfig::new(wallet.clone(), symbol.clone(), network.clone())
             .expect("observe config"),
         &input,
-        U256::from(1_000_000_000_000_000_000u128),
-        18,
-        10,
+        RawBalanceObservation::new(U256::from(1_000_000_000_000_000_000u128), 18, None),
     );
     assert_eq!(
         batch.observations[0].values[0].value_dec,

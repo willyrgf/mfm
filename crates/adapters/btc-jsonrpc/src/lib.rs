@@ -12,12 +12,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use mfm_btc_capabilities::{
-    BtcBlockHash, BtcCapabilityError, BtcCapabilityFuture, BtcChainHeadReadProvider,
-    BtcChainHeadRequest, BtcChainHeadResponse, BtcFinality, BtcSourceStatus,
-    RedactedBtcSourceEvidence,
+    BtcBalanceReadProvider, BtcBalanceReadRequest, BtcBalanceReadResponse, BtcBlockHash,
+    BtcCapabilityError, BtcCapabilityFuture, BtcChainHeadReadProvider, BtcChainHeadRequest,
+    BtcChainHeadResponse, BtcFinality, BtcSourceStatus, RedactedBtcSourceEvidence,
 };
 use mfm_collectors_btc_jsonrpc_http::{
-    BlockHeaderInfo, BlockchainInfo, BtcJsonRpcClient, BtcRpcError,
+    BlockHeaderInfo, BlockchainInfo, BtcJsonRpcClient, BtcRpcError, ScanTxOutSetResult,
 };
 use mfm_events::v1 as events;
 use mfm_fact_capabilities::{
@@ -67,6 +67,12 @@ pub trait BtcJsonRpcChainHeadTransport: Send + Sync {
         &'a self,
         block_hash: &'a str,
     ) -> BtcTransportFuture<'a, BlockHeaderInfo>;
+
+    /// Scans the UTXO set for a single address.
+    fn scan_tx_out_set<'a>(
+        &'a self,
+        address: &'a str,
+    ) -> BtcTransportFuture<'a, ScanTxOutSetResult>;
 }
 
 impl BtcJsonRpcChainHeadTransport for BtcJsonRpcClient {
@@ -83,6 +89,13 @@ impl BtcJsonRpcChainHeadTransport for BtcJsonRpcClient {
         block_hash: &'a str,
     ) -> BtcTransportFuture<'a, BlockHeaderInfo> {
         Box::pin(async move { BtcJsonRpcClient::get_block_header(self, block_hash).await })
+    }
+
+    fn scan_tx_out_set<'a>(
+        &'a self,
+        address: &'a str,
+    ) -> BtcTransportFuture<'a, ScanTxOutSetResult> {
+        Box::pin(async move { BtcJsonRpcClient::scan_tx_out_set(self, address).await })
     }
 }
 
@@ -126,6 +139,50 @@ impl BtcJsonRpcChainHeadProvider {
         response.verify_request(request)?;
         Ok(response)
     }
+
+    async fn read_balance_inner(
+        &self,
+        request: &BtcBalanceReadRequest,
+    ) -> mfm_btc_capabilities::Result<BtcBalanceReadResponse> {
+        if request.selection != mfm_btc_capabilities::BtcHeadSelection::best() {
+            return Err(BtcCapabilityError::redacted_provider_failure(
+                "bitcoin balance reads support only best-available UTXO scans",
+            ));
+        }
+        let info = self
+            .transport
+            .get_blockchain_info()
+            .await
+            .map_err(redacted_provider_error)?;
+        let status = source_status(&info);
+        let result = self
+            .transport
+            .scan_tx_out_set(request.address.as_str())
+            .await
+            .map_err(redacted_provider_error)?;
+        if !result.success {
+            return Err(BtcCapabilityError::redacted_provider_failure(
+                "bitcoin UTXO scan did not complete successfully",
+            ));
+        }
+        let evidence = RedactedBtcSourceEvidence::from_request(
+            &BtcChainHeadRequest {
+                guard: request.guard.clone(),
+                selection: request.selection,
+            },
+            Some(info.chain),
+            status,
+        );
+        let response = BtcBalanceReadResponse {
+            evidence,
+            address: request.address.clone(),
+            balance_sats: result.total_amount_sats,
+            block_height: result.height,
+            block_hash: provider_block_hash(&result.bestblock)?,
+        };
+        response.verify_request(request)?;
+        Ok(response)
+    }
 }
 
 impl BtcChainHeadReadProvider for BtcJsonRpcChainHeadProvider {
@@ -134,6 +191,15 @@ impl BtcChainHeadReadProvider for BtcJsonRpcChainHeadProvider {
         request: &'a BtcChainHeadRequest,
     ) -> BtcCapabilityFuture<'a, BtcChainHeadResponse> {
         Box::pin(async move { self.read_chain_head_inner(request).await })
+    }
+}
+
+impl BtcBalanceReadProvider for BtcJsonRpcChainHeadProvider {
+    fn read_balance<'a>(
+        &'a self,
+        request: &'a BtcBalanceReadRequest,
+    ) -> BtcCapabilityFuture<'a, BtcBalanceReadResponse> {
+        Box::pin(async move { self.read_balance_inner(request).await })
     }
 }
 

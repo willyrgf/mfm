@@ -132,6 +132,28 @@ impl CapabilitySpec for PortfolioReadCapability {
 pub type PortfolioReadFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, PortfolioReadError>> + Send + 'a>>;
 
+/// Raw balance read result returned by portfolio read backends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawBalanceObservation {
+    /// Raw balance integer in the symbol's native base unit.
+    pub raw: U256,
+    /// Decimal precision for rendering the raw amount.
+    pub decimals: u8,
+    /// Concrete observation anchor, when the backend read returns its own source anchor.
+    pub anchor: Option<ExecutionAnchor>,
+}
+
+impl RawBalanceObservation {
+    /// Creates a raw balance observation.
+    pub fn new(raw: U256, decimals: u8, anchor: Option<ExecutionAnchor>) -> Self {
+        Self {
+            raw,
+            decimals,
+            anchor,
+        }
+    }
+}
+
 /// Redaction-safe external read error reported by portfolio read backends.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{code}: {message}")]
@@ -172,21 +194,27 @@ impl PortfolioReadError {
 
 /// Runtime backend used by read portfolio states to observe external chain data.
 pub trait PortfolioReadBackend: Send + Sync {
-    /// Reads the current EVM block number for a network.
-    fn evm_block_number<'a>(&'a self, network: &'a NetworkConfig) -> PortfolioReadFuture<'a, u64>;
+    /// Reads the current execution anchor for a network.
+    fn execution_anchor<'a>(
+        &'a self,
+        network: &'a NetworkConfig,
+    ) -> PortfolioReadFuture<'a, ExecutionAnchor>;
 
-    /// Reads a raw wallet/symbol balance and its decimals at a pinned block.
+    /// Reads a raw wallet/symbol balance and its decimals at a pinned execution anchor.
     fn observe_raw_balance<'a>(
         &'a self,
         config: &'a ObserveBatchConfig,
-        block_number: u64,
-    ) -> PortfolioReadFuture<'a, (U256, u8)>;
+        anchor: &'a ExecutionAnchor,
+    ) -> PortfolioReadFuture<'a, RawBalanceObservation>;
 }
 
 struct UnavailablePortfolioReadBackend;
 
 impl PortfolioReadBackend for UnavailablePortfolioReadBackend {
-    fn evm_block_number<'a>(&'a self, network: &'a NetworkConfig) -> PortfolioReadFuture<'a, u64> {
+    fn execution_anchor<'a>(
+        &'a self,
+        network: &'a NetworkConfig,
+    ) -> PortfolioReadFuture<'a, ExecutionAnchor> {
         Box::pin(async move {
             Err(PortfolioReadError::new(
                 "external_read_required",
@@ -201,8 +229,8 @@ impl PortfolioReadBackend for UnavailablePortfolioReadBackend {
     fn observe_raw_balance<'a>(
         &'a self,
         _config: &'a ObserveBatchConfig,
-        _block_number: u64,
-    ) -> PortfolioReadFuture<'a, (U256, u8)> {
+        _anchor: &'a ExecutionAnchor,
+    ) -> PortfolioReadFuture<'a, RawBalanceObservation> {
         Box::pin(async {
             Err(PortfolioReadError::new(
                 "external_read_required",
@@ -1268,18 +1296,8 @@ pub fn resolve_subjects_from_config(config: &ResolveSubjectsConfig) -> ResolvedS
     ResolvedSubjects { subjects }
 }
 
-/// Builds a pinned view for `network` using the supplied EVM block number.
-pub fn pinned_view_for_network(network: &NetworkConfig, evm_block_number: u64) -> PinnedView {
-    let anchor = match network {
-        NetworkConfig::Evm { chain_id, .. } => ExecutionAnchor::Evm {
-            chain_id: chain_id.get(),
-            block_number: evm_block_number,
-        },
-        NetworkConfig::Bitcoin { .. } => ExecutionAnchor::Bitcoin {
-            height: 0,
-            block_hash: String::new(),
-        },
-    };
+/// Builds a pinned view for `network` using the supplied execution anchor.
+pub fn pinned_view_for_network(network: &NetworkConfig, anchor: ExecutionAnchor) -> PinnedView {
     PinnedView {
         network_id: network.network_id().to_string(),
         anchor,
@@ -1296,11 +1314,8 @@ where
 {
     let mut views = Vec::new();
     for network in config.networks() {
-        let block_number = match network.family() {
-            NetworkFamilyConfig::Evm => backend.evm_block_number(network).await?,
-            NetworkFamilyConfig::Bitcoin => 0,
-        };
-        views.push(pinned_view_for_network(network, block_number));
+        let anchor = backend.execution_anchor(network).await?;
+        views.push(pinned_view_for_network(network, anchor));
     }
     views.sort_by(|left, right| left.network_id.cmp(&right.network_id));
     Ok(PinnedViews { views })
@@ -1384,9 +1399,7 @@ fn resolved_valuation_for_quote(
 pub fn observation_batch_from_raw_balance(
     config: &ObserveBatchConfig,
     input: &ObserveBatchInput,
-    raw: U256,
-    decimals: u8,
-    block_number: u64,
+    balance: RawBalanceObservation,
 ) -> ObservationBatch {
     let mut errors = input.valuations.errors.clone();
     let batch_id = observation_batch_id(&config.wallet.wallet_id, &config.symbol.symbol_id);
@@ -1416,21 +1429,9 @@ pub fn observation_batch_from_raw_balance(
         .iter()
         .find(|view| view.network_id == config.network.network_id().as_str())
     else {
-        errors.push(snapshot_error(
-            "missing_pinned_view",
-            "missing pinned view for observation batch",
-            Some(&config.wallet.wallet_id),
-            Some(&config.symbol.symbol_id),
-            Some(config.network.network_id()),
-            None,
-        ));
-        return ObservationBatch {
-            batch_id,
-            observations: Vec::new(),
-            errors,
-        };
+        return missing_pinned_view_observation_batch(config, errors);
     };
-    let amount_dec = format_u256_units(&raw, decimals);
+    let amount_dec = format_u256_units(&balance.raw, balance.decimals);
     let values = observation_values(config, input, &amount_dec, &mut errors);
     if values.is_empty() {
         errors.push(snapshot_error(
@@ -1448,10 +1449,14 @@ pub fn observation_batch_from_raw_balance(
         };
     }
 
-    let anchor = match &view.anchor {
-        ExecutionAnchor::Evm { chain_id, .. } => ObservationAnchor::Evm {
-            chain_id: *chain_id,
+    let anchor_source = balance.anchor.as_ref().unwrap_or(&view.anchor);
+    let anchor = match anchor_source {
+        ExecutionAnchor::Evm {
+            chain_id,
             block_number,
+        } => ObservationAnchor::Evm {
+            chain_id: *chain_id,
+            block_number: *block_number,
         },
         ExecutionAnchor::Bitcoin { height, block_hash } => ObservationAnchor::Bitcoin {
             height: *height,
@@ -1467,8 +1472,8 @@ pub fn observation_batch_from_raw_balance(
         network_id: config.network.network_id().to_string(),
         protocol: config.symbol.protocol.as_ref().map(ToString::to_string),
         quantity: ObservationQuantity {
-            raw_dec: raw.to_string(),
-            decimals,
+            raw_dec: balance.raw.to_string(),
+            decimals: balance.decimals,
             amount_dec,
         },
         values,
@@ -1516,18 +1521,29 @@ pub async fn observe_batch_with_backend<B>(
 where
     B: PortfolioReadBackend + ?Sized,
 {
-    let block_number = evm_block_number_for(&input.views, config.network.network_id());
-    match backend.observe_raw_balance(config, block_number).await {
-        Ok((raw, decimals)) => Ok(observation_batch_from_raw_balance(
+    let Some(anchor) = pinned_anchor_for(&input.views, config.network.network_id()) else {
+        return Ok(missing_pinned_view_observation_batch(
             config,
-            input,
-            raw,
-            decimals,
-            block_number,
-        )),
+            input.valuations.errors.clone(),
+        ));
+    };
+    match backend.observe_raw_balance(config, anchor).await {
+        Ok(balance) => Ok(observation_batch_from_raw_balance(config, input, balance)),
         Err(error) if error.fatal_attempt_failure => Err(error),
         Err(error) => Ok(observation_batch_error(config, error.code, error.message)),
     }
+}
+
+/// Returns the pinned execution anchor for `network_id`.
+pub fn pinned_anchor_for<'a>(
+    views: &'a PinnedViews,
+    network_id: &str,
+) -> Option<&'a ExecutionAnchor> {
+    views
+        .views
+        .iter()
+        .find(|view| view.network_id == network_id)
+        .map(|view| &view.anchor)
 }
 
 /// Returns the pinned EVM block number for `network_id`, or zero when no EVM view exists.
@@ -1542,6 +1558,25 @@ pub fn evm_block_number_for(views: &PinnedViews, network_id: &str) -> u64 {
             _ => None,
         })
         .unwrap_or_default()
+}
+
+fn missing_pinned_view_observation_batch(
+    config: &ObserveBatchConfig,
+    mut errors: Vec<PortfolioSnapshotError>,
+) -> ObservationBatch {
+    errors.push(snapshot_error(
+        "missing_pinned_view",
+        "missing pinned view for observation batch",
+        Some(&config.wallet.wallet_id),
+        Some(&config.symbol.symbol_id),
+        Some(config.network.network_id()),
+        None,
+    ));
+    ObservationBatch {
+        batch_id: observation_batch_id(&config.wallet.wallet_id, &config.symbol.symbol_id),
+        observations: Vec::new(),
+        errors,
+    }
 }
 
 fn state_error_from_portfolio_read(error: PortfolioReadError) -> StateError {

@@ -563,18 +563,15 @@ pub async fn connect_production_run_services(
 ) -> Result<ProductionRunServices, AppError> {
     let runtime_config = RuntimeConfigLoader::from_path_or_env(runtime_config_path);
     let btc_config = runtime_config.load_optional_btc()?;
-    let store = if btc_config.is_some() {
-        connect_production_fact_query_run_store(database_url).await?
-    } else {
-        connect_production_run_store(database_url).await?
-    };
-    let fact_index = if btc_config.is_some() {
-        Some(btc_collector::production_fact_index_read_provider(
-            store.clone(),
-        )?)
-    } else {
-        None
-    };
+    let store = connect_production_run_store_with_optional_fact_query_signer(database_url).await?;
+    let fact_index =
+        if btc_config.is_some() && store.store_authority().fact_receipt_trust_root().is_some() {
+            Some(btc_collector::production_fact_index_read_provider(
+                store.clone(),
+            )?)
+        } else {
+            None
+        };
     let runners = production_runner_registry_inner(
         Arc::new(store.clone()),
         fact_index,
@@ -660,14 +657,26 @@ fn production_runner_registry_inner(
 ) -> Result<ErasedRunnerRegistry, AppError> {
     let mut registry = ErasedRunnerRegistry::new();
     let portfolio_artifacts: Arc<dyn store::RetainedArtifactReadProvider> = artifacts.clone();
-    let portfolio_runtime = Arc::new(RuntimeConfigPortfolioEvm::new(runtime_config.clone()));
+    let portfolio_runtime = Arc::new(RuntimeConfigPortfolioRuntime::new(
+        runtime_config.clone(),
+        btc_config.clone(),
+    ));
     let portfolio_evm: Arc<dyn mfm_adapters_portfolio::PortfolioEvmProvider> =
         portfolio_runtime.clone();
+    let portfolio_btc: Option<Arc<dyn mfm_adapters_portfolio::PortfolioBtcProvider>> = btc_config
+        .clone()
+        .map(|config| {
+            btc_collector::btc_json_rpc_read_provider(config).map(|provider| {
+                Arc::new(provider) as Arc<dyn mfm_adapters_portfolio::PortfolioBtcProvider>
+            })
+        })
+        .transpose()?;
     let portfolio_runtime: Arc<dyn mfm_adapters_portfolio::PortfolioRuntimeValidator> =
         portfolio_runtime;
     let portfolio_capabilities = mfm_adapters_portfolio::PortfolioRunnerCapabilities::new(
         portfolio_artifacts,
         portfolio_evm,
+        portfolio_btc,
         portfolio_runtime,
     );
     mfm_adapters_portfolio::register_portfolio_runners(&mut registry, portfolio_capabilities)?;
@@ -689,32 +698,55 @@ fn production_runner_registry_inner(
 }
 
 #[derive(Clone)]
-struct RuntimeConfigPortfolioEvm {
+struct RuntimeConfigPortfolioRuntime {
     runtime_config: RuntimeConfigLoader,
+    btc_config: Option<mfm_runtime_config::BtcRuntimeConfig>,
 }
 
-impl RuntimeConfigPortfolioEvm {
-    fn new(runtime_config: RuntimeConfigLoader) -> Self {
-        Self { runtime_config }
+impl RuntimeConfigPortfolioRuntime {
+    fn new(
+        runtime_config: RuntimeConfigLoader,
+        btc_config: Option<mfm_runtime_config::BtcRuntimeConfig>,
+    ) -> Self {
+        Self {
+            runtime_config,
+            btc_config,
+        }
     }
 
-    fn client(&self) -> mfm_runtime::Result<mfm_transports_evm::EvmJsonRpcClient> {
+    fn evm_client(&self) -> mfm_runtime::Result<mfm_transports_evm::EvmJsonRpcClient> {
         self.runtime_config.load_evm().and_then(evm_json_rpc_client)
     }
+
+    fn btc_provider(
+        &self,
+    ) -> mfm_runtime::Result<mfm_adapters_btc_jsonrpc::BtcJsonRpcChainHeadProvider> {
+        let btc = self.btc_config.clone().ok_or_else(|| {
+            mfm_runtime::RuntimeError::RunnerBinding("missing Bitcoin runtime config".to_owned())
+        })?;
+        btc_collector::btc_json_rpc_read_provider(btc)
+    }
 }
 
-impl mfm_adapters_portfolio::PortfolioRuntimeValidator for RuntimeConfigPortfolioEvm {
+impl mfm_adapters_portfolio::PortfolioRuntimeValidator for RuntimeConfigPortfolioRuntime {
     fn validate_evm_guard(
         &self,
         guard: &mfm_evm_capabilities::EvmChainGuard,
     ) -> mfm_runtime::Result<()> {
-        self.client()?
+        self.evm_client()?
             .validate_guard(guard)
             .map_err(runtime_evm_transport_error)
     }
+
+    fn validate_btc_guard(
+        &self,
+        _guard: &mfm_btc_capabilities::BtcChainGuard,
+    ) -> mfm_runtime::Result<()> {
+        self.btc_provider().map(|_| ())
+    }
 }
 
-impl mfm_evm_capabilities::EvmBlockReadProvider for RuntimeConfigPortfolioEvm {
+impl mfm_evm_capabilities::EvmBlockReadProvider for RuntimeConfigPortfolioRuntime {
     fn read_block<'a>(
         &'a self,
         request: &'a mfm_evm_capabilities::EvmBlockReadRequest,
@@ -722,14 +754,14 @@ impl mfm_evm_capabilities::EvmBlockReadProvider for RuntimeConfigPortfolioEvm {
     {
         Box::pin(async move {
             let client = self
-                .client()
+                .evm_client()
                 .map_err(portfolio_runtime_config_capability_error)?;
             mfm_evm_capabilities::EvmBlockReadProvider::read_block(&client, request).await
         })
     }
 }
 
-impl mfm_evm_capabilities::EvmBalanceReadProvider for RuntimeConfigPortfolioEvm {
+impl mfm_evm_capabilities::EvmBalanceReadProvider for RuntimeConfigPortfolioRuntime {
     fn read_balance<'a>(
         &'a self,
         request: &'a mfm_evm_capabilities::EvmBalanceReadRequest,
@@ -737,14 +769,14 @@ impl mfm_evm_capabilities::EvmBalanceReadProvider for RuntimeConfigPortfolioEvm 
     {
         Box::pin(async move {
             let client = self
-                .client()
+                .evm_client()
                 .map_err(portfolio_runtime_config_capability_error)?;
             mfm_evm_capabilities::EvmBalanceReadProvider::read_balance(&client, request).await
         })
     }
 }
 
-impl mfm_evm_capabilities::EvmCallReadProvider for RuntimeConfigPortfolioEvm {
+impl mfm_evm_capabilities::EvmCallReadProvider for RuntimeConfigPortfolioRuntime {
     fn read_call<'a>(
         &'a self,
         request: &'a mfm_evm_capabilities::EvmCallReadRequest,
@@ -752,7 +784,7 @@ impl mfm_evm_capabilities::EvmCallReadProvider for RuntimeConfigPortfolioEvm {
     {
         Box::pin(async move {
             let client = self
-                .client()
+                .evm_client()
                 .map_err(portfolio_runtime_config_capability_error)?;
             mfm_evm_capabilities::EvmCallReadProvider::read_call(&client, request).await
         })

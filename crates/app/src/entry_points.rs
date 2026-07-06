@@ -264,6 +264,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn btc_portfolio_launch_requires_runtime_config_before_admission() {
+        let fixture = EntryPointRunFixture::in_memory().await;
+        let prepared = fixture.prepare_bitcoin_portfolio(None);
+        let run_id = prepared.request.run_id.clone();
+        let services = fixture.services();
+
+        let error = services
+            .launch_run(prepared.request)
+            .await
+            .expect_err("missing BTC runtime config rejects Bitcoin portfolio before admission");
+
+        assert_eq!(error.code, "LaunchRunnerUnavailable");
+        assert!(fixture
+            .store
+            .load_run_stream(&run_id)
+            .await
+            .expect("run stream")
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn app_launch_concurrent_duplicates_admit_once_and_dedupe_rest() {
         const LAUNCHERS: usize = 8;
 
@@ -562,6 +583,13 @@ mod tests {
         ) -> crate::PreparedEntryPointRunLaunch {
             self.prepare_portfolio_launch(sample_portfolio_config_json(), distinct_run_key)
         }
+
+        fn prepare_bitcoin_portfolio(
+            &self,
+            distinct_run_key: Option<crate::DistinctRunKey>,
+        ) -> crate::PreparedEntryPointRunLaunch {
+            self.prepare_portfolio_launch(sample_bitcoin_portfolio_config_json(), distinct_run_key)
+        }
     }
 
     struct EntryPointRunFixture {
@@ -589,6 +617,13 @@ mod tests {
             distinct_run_key: Option<crate::DistinctRunKey>,
         ) -> crate::PreparedEntryPointRunLaunch {
             self.prep.prepare_sample_portfolio(distinct_run_key)
+        }
+
+        fn prepare_bitcoin_portfolio(
+            &self,
+            distinct_run_key: Option<crate::DistinctRunKey>,
+        ) -> crate::PreparedEntryPointRunLaunch {
+            self.prep.prepare_bitcoin_portfolio(distinct_run_key)
         }
 
         fn services(
@@ -725,6 +760,65 @@ source_ref = "ethereum-mainnet"
                             ]
                         },
                         "decimals": 18,
+                        "underlying_symbol_id": null,
+                        "metadata": {}
+                    }
+                ],
+                "metadata": {}
+            },
+            "valuation_source_registry": { "sources": [] }
+        })
+        .to_string()
+    }
+
+    fn sample_bitcoin_portfolio_config_json() -> String {
+        serde_json::json!({
+            "portfolio": {
+                "portfolio_id": "portfolio_btc",
+                "quote_codes": ["USD"],
+                "networks": [
+                    {
+                        "network_id": "bitcoin-mainnet",
+                        "family": "bitcoin",
+                        "control_scope": "bitcoin-mainnet",
+                        "metadata": {}
+                    }
+                ],
+                "wallets": [
+                    {
+                        "wallet_id": "wallet_btc_mainnet",
+                        "subject": {
+                            "kind": "bitcoin_address",
+                            "address": "bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw"
+                        },
+                        "implementation": { "kind": "address_only" },
+                        "network_id": "bitcoin-mainnet",
+                        "symbol_ids": ["btc.native.bitcoin-mainnet"],
+                        "metadata": {}
+                    }
+                ],
+                "symbol_configs": [
+                    {
+                        "symbol_id": "btc.native.bitcoin-mainnet",
+                        "display_symbol": "BTC",
+                        "kind": "native_balance",
+                        "role": "native",
+                        "network_id": "bitcoin-mainnet",
+                        "protocol": null,
+                        "balance_reader": { "kind": "native_balance" },
+                        "valuation": {
+                            "quotes": [
+                                {
+                                    "quote": "USD",
+                                    "priced_symbol_id": "btc.native.bitcoin-mainnet",
+                                    "reader": {
+                                        "kind": "fixed_unit_price",
+                                        "unit_price_dec": "0.00"
+                                    }
+                                }
+                            ]
+                        },
+                        "decimals": 8,
                         "underlying_symbol_id": null,
                         "metadata": {}
                     }

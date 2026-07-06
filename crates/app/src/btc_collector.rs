@@ -14,18 +14,23 @@ pub(crate) fn register_btc_collector_runners_if_configured(
     fact_index: Option<Arc<dyn FactIndexReadProvider>>,
     btc: Option<mfm_runtime_config::BtcRuntimeConfig>,
 ) -> Result<(), AppError> {
-    let Some(btc) = btc else {
+    let (Some(btc), Some(fact_index)) = (btc, fact_index) else {
         return Ok(());
     };
-    let fact_index = fact_index.ok_or_else(launch_runner_unavailable)?;
-    let client = btc_json_rpc_client(btc)?;
-    let btc = Arc::new(mfm_adapters_btc_jsonrpc::BtcJsonRpcChainHeadProvider::new(
-        Arc::new(client),
-    ));
+    let btc = Arc::new(btc_json_rpc_read_provider(btc)?);
     let capabilities =
         mfm_adapters_btc_jsonrpc::BtcJsonRpcRunnerCapabilities::new(artifacts, btc, fact_index);
     mfm_adapters_btc_jsonrpc::register_btc_jsonrpc_runners(registry, capabilities)?;
     Ok(())
+}
+
+pub(crate) fn btc_json_rpc_read_provider(
+    btc: mfm_runtime_config::BtcRuntimeConfig,
+) -> mfm_runtime::Result<mfm_adapters_btc_jsonrpc::BtcJsonRpcChainHeadProvider> {
+    let client = btc_json_rpc_client(btc)?;
+    Ok(mfm_adapters_btc_jsonrpc::BtcJsonRpcChainHeadProvider::new(
+        Arc::new(client),
+    ))
 }
 
 pub(crate) fn production_fact_index_read_provider(

@@ -2,7 +2,8 @@ use super::*;
 use ed25519_dalek::SigningKey;
 use mfm_artifact_capabilities::ArtifactEvidenceRef;
 use mfm_btc_capabilities::{
-    BtcChain, BtcChainGuard, BtcHeadSelection, BtcNetworkId, BtcSourceIdentity,
+    BtcAddress, BtcBalanceReadRequest, BtcChain, BtcChainGuard, BtcHeadSelection, BtcNetworkId,
+    BtcSourceIdentity,
 };
 use mfm_canonical::sha256_digest_bytes;
 use mfm_facts::{
@@ -230,6 +231,25 @@ impl BtcJsonRpcChainHeadTransport for MockTransport {
             })
         })
     }
+
+    fn scan_tx_out_set<'a>(
+        &'a self,
+        address: &'a str,
+    ) -> BtcTransportFuture<'a, ScanTxOutSetResult> {
+        Box::pin(async move {
+            self.calls
+                .lock()
+                .expect("calls")
+                .push(format!("scan:{address}"));
+            Ok(ScanTxOutSetResult {
+                success: true,
+                height: 850_000,
+                bestblock: BEST_HASH.to_owned(),
+                total_amount_sats: 123_456_789,
+                unspents: Vec::new(),
+            })
+        })
+    }
 }
 
 fn make_request(selection: BtcHeadSelection) -> BtcChainHeadRequest {
@@ -240,6 +260,18 @@ fn make_request(selection: BtcHeadSelection) -> BtcChainHeadRequest {
             BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
         ),
         selection,
+    }
+}
+
+fn make_balance_request(address: &str) -> BtcBalanceReadRequest {
+    BtcBalanceReadRequest {
+        guard: BtcChainGuard::new(
+            BtcChain::Bitcoin,
+            BtcNetworkId::new("bitcoin-mainnet").expect("network"),
+            BtcSourceIdentity::new("bitcoin-mainnet").expect("source"),
+        ),
+        address: BtcAddress::new(address).expect("address"),
+        selection: BtcHeadSelection::best(),
     }
 }
 
@@ -613,6 +645,24 @@ async fn provider_maps_confirmed_head_request_to_selected_height() {
             "hash:849994".to_owned(),
             format!("header:{CONFIRMED_HASH}")
         ]
+    );
+}
+
+#[tokio::test]
+async fn provider_maps_balance_request_to_utxo_scan() {
+    let address = "bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw";
+    let transport = Arc::new(MockTransport::default());
+    let provider = BtcJsonRpcChainHeadProvider::new(transport.clone());
+    let request = make_balance_request(address);
+    let response = provider.read_balance(&request).await.expect("balance read");
+
+    response.verify_request(&request).expect("evidence");
+    assert_eq!(response.balance_sats, 123_456_789);
+    assert_eq!(response.block_height, 850_000);
+    assert_eq!(response.block_hash.as_str(), BEST_HASH);
+    assert_eq!(
+        transport.calls(),
+        vec!["info".to_owned(), format!("scan:{address}")]
     );
 }
 
