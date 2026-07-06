@@ -5,7 +5,7 @@ use mfm_portfolio_config::{
 
 #[test]
 fn dual_mainnet_portfolio_config_parses_and_canonicalizes() {
-    let raw = include_str!("../../../configs/portfolio-dual-mainnet.toml");
+    let raw = include_str!("../../../examples/configs/portfolio-dual-mainnet.toml");
     let authored =
         parse_portfolio_snapshot_authored_config_with_hint(raw, Some("portfolio.toml".as_ref()))
             .expect("authored portfolio config");
