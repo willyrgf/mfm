@@ -4230,7 +4230,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         })
     }
 
-    /// Plans a registered typed state by resolving `S` through this builder's registry.
+    /// Plans a registry-resolved typed state by resolving `S` through this builder's registry.
     pub fn state<S, I>(
         &mut self,
         key: StateKey,
@@ -4248,7 +4248,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         self.state_with_domain_key_refs::<S, I>(key, descriptor, context, config, input, Vec::new())
     }
 
-    /// Plans a registered typed state and attaches stable domain-key evidence to its output
+    /// Plans a registry-resolved typed state and attaches stable domain-key evidence to its output
     /// value lineage.
     pub fn state_with_domain_keys<S, I, K>(
         &mut self,
@@ -4721,7 +4721,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         }
     }
 
-    /// Expands a registered typed operation by resolving `O` through this builder's registry.
+    /// Expands a registry-resolved typed operation by resolving `O` through this builder's registry.
     pub fn call<O, I>(
         &mut self,
         key: OperationKey,
@@ -4920,7 +4920,7 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
         self.scope_mut().declare_context(value)
     }
 
-    /// Plans a registered typed state by resolving `S` through this expansion's registry.
+    /// Plans a registry-resolved typed state by resolving `S` through this expansion's registry.
     pub fn state<S, I>(
         &mut self,
         key: StateKey,
@@ -4937,7 +4937,7 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
         self.scope_mut().state::<S, I>(key, context, config, input)
     }
 
-    /// Plans a registered typed state and attaches stable domain-key evidence to its output.
+    /// Plans a registry-resolved typed state and attaches stable domain-key evidence to its output.
     pub fn state_with_domain_keys<S, I, K>(
         &mut self,
         key: StateKey,
@@ -5010,7 +5010,7 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
             )
     }
 
-    /// Expands a registered typed operation by resolving `O` through this expansion's registry.
+    /// Expands a registry-resolved typed operation by resolving `O` through this expansion's registry.
     pub fn call<O, I>(
         &mut self,
         key: OperationKey,

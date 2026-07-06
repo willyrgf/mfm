@@ -2051,8 +2051,7 @@ mod tests {
     #[test]
     fn query_state_declares_fact_index_read_capability() {
         let descriptor =
-            mfm_program::registered_state_descriptor::<QueryCollectorCheckpointState>()
-                .expect("descriptor");
+            mfm_program::state_descriptor::<QueryCollectorCheckpointState>().expect("descriptor");
 
         assert_eq!(descriptor.effect().class, ReadExternal::class());
         assert_eq!(descriptor.capabilities().len(), 1);

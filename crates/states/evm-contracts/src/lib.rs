@@ -1235,7 +1235,7 @@ where
     S::Effect: mfm_program::EffectRunner<S>,
     S::Caps: CapabilitySetFor<S::Effect>,
 {
-    mfm_program::registered_state_descriptor::<S>()
+    mfm_program::state_descriptor::<S>()
         .map(|descriptor| descriptor.descriptor_id().clone())
         .map_err(|error| mfm_program::PlanError::Registry(error.to_string()))
 }

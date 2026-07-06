@@ -1659,9 +1659,11 @@ impl PureState for RuntimeContextConsumerState {
 }
 
 fn runtime_context_source_descriptor_id() -> mfm_program::Result<DescriptorId> {
-    let mut states = StateRegistryBuilder::new();
-    let registered = states.register::<RuntimeContextSourceState>()?;
-    Ok(registered.descriptor().descriptor_id().clone())
+    Ok(
+        mfm_program::state_descriptor::<RuntimeContextSourceState>()?
+            .descriptor_id()
+            .clone(),
+    )
 }
 
 #[derive(PublicOutputs)]
@@ -1974,12 +1976,12 @@ fn certifier_backed_runtime_authority() -> (
     mfm_certify::CertificationRegistry,
 ) {
     let mut states = StateRegistryBuilder::new();
-    let registered = states
+    states
         .register::<CertifierState>()
         .expect("state registration");
     let mut registry = mfm_certify::CertificationRegistry::new();
     registry
-        .register_state(&registered)
+        .register_state::<CertifierState>()
         .expect("certification registry");
     let draft = build_root_with_registries(
         ScopeKey::new("root").expect("root key"),
@@ -4524,7 +4526,7 @@ fn runner_registration_builder_preserves_explicit_binding_authority() {
         .state_descriptor_for_node(typed_node)
         .expect("typed state descriptor");
     let expected_descriptor =
-        mfm_program::registered_state_descriptor::<RuntimeReadState>().expect("typed descriptor");
+        mfm_program::state_descriptor::<RuntimeReadState>().expect("typed descriptor");
     let typed_factory = events::RunnerFactoryId::new("read_external").expect("typed factory");
     let typed_executable = events::ExecutableIdentity {
         factory_id: typed_factory.clone(),

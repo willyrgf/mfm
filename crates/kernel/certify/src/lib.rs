@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_capabilities::{CapabilitySet, CapabilitySetDescriptor, NoCaps};
+use mfm_capabilities::{CapabilitySet, CapabilitySetDescriptor, CapabilitySetFor, NoCaps};
 use mfm_effects::{ApplySideEffect, EffectClass, EffectSpec, ManagedPlatformWrite, Pure};
 use mfm_events::v1 as events;
 use mfm_ids::{
@@ -200,21 +200,8 @@ macro_rules! define_program_descriptor_registry {
         $cert_vis fn $certification(
             registry: &mut $crate::CertificationRegistry,
         ) -> $crate::Result<()> {
-            let mut states = mfm_program::StateRegistryBuilder::new();
-            $(
-                let registered = states
-                    .register::<$state>()
-                    .map_err($crate::CertifyError::from)?;
-                registry.register_state(&registered)?;
-            )*
-
-            let mut operations = mfm_program::OperationRegistryBuilder::new();
-            $(
-                let registered = operations
-                    .register::<$operation>()
-                    .map_err($crate::CertifyError::from)?;
-                registry.register_operation(&registered)?;
-            )*
+            $(registry.register_state::<$state>()?;)*
+            $(registry.register_operation::<$operation>()?;)*
 
             $($after(registry)?;)?
             Ok(())
@@ -1447,15 +1434,15 @@ impl CertificationRegistry {
         }))
     }
 
-    /// Adds a framework-validated registered state descriptor to this registry.
-    pub fn register_state<S>(&mut self, registered: &program::RegisteredState<S>) -> Result<()>
+    /// Adds a framework-validated state descriptor to this registry.
+    pub fn register_state<S>(&mut self) -> Result<()>
     where
         S: program::StateSpec,
+        S::Effect: program::EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
     {
-        self.insert_state(state_descriptor_identity_from_registered(
-            registered.descriptor(),
-            registered.runner(),
-        )?)?;
+        let descriptor = program::state_descriptor::<S>()?;
+        self.insert_state(state_descriptor_identity_from_descriptor(&descriptor)?)?;
         self.insert_config_validator(config_validator_for::<S::Config>()?)?;
         if let Some(validator) = context_validator_for::<S::Context>()? {
             self.insert_context_validator(validator)?;
@@ -1463,17 +1450,13 @@ impl CertificationRegistry {
         Ok(())
     }
 
-    /// Adds a framework-validated registered operation descriptor to this registry.
-    pub fn register_operation<O>(
-        &mut self,
-        registered: &program::RegisteredOperation<O>,
-    ) -> Result<()>
+    /// Adds a framework-validated operation descriptor to this registry.
+    pub fn register_operation<O>(&mut self) -> Result<()>
     where
         O: program::Operation,
     {
-        self.insert_operation(operation_descriptor_identity_from_registered(
-            registered.descriptor(),
-        ))?;
+        let descriptor = program::operation_descriptor::<O>()?;
+        self.insert_operation(operation_descriptor_identity_from_descriptor(&descriptor))?;
         self.insert_config_validator(config_validator_for::<O::Config>()?)
     }
 
@@ -5834,9 +5817,8 @@ fn state_descriptor_identity_from_program(
     })
 }
 
-fn state_descriptor_identity_from_registered(
+fn state_descriptor_identity_from_descriptor(
     descriptor: &program::StateDescriptorIdentity,
-    runner: program::RunnerKind,
 ) -> Result<spec::StateDescriptorIdentity> {
     let effect = descriptor.effect();
     Ok(spec::StateDescriptorIdentity {
@@ -5857,7 +5839,7 @@ fn state_descriptor_identity_from_registered(
         effect_version: effect.version.clone(),
         capabilities: descriptor.capabilities().clone(),
         emitted_fact_descriptors: descriptor.emitted_fact_descriptors().to_vec(),
-        runner: runner_kind_name(runner).to_owned(),
+        runner: runner_kind_name(descriptor.runner()).to_owned(),
         side_effect_contract_digest: descriptor.side_effect_contract_digest().cloned(),
     })
 }
@@ -5877,7 +5859,7 @@ fn operation_descriptor_identity_from_program(
     }
 }
 
-fn operation_descriptor_identity_from_registered(
+fn operation_descriptor_identity_from_descriptor(
     descriptor: &program::OperationDescriptorIdentity,
 ) -> spec::OperationDescriptorIdentity {
     spec::OperationDescriptorIdentity {

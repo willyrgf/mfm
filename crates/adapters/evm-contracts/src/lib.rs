@@ -5264,14 +5264,13 @@ fn side_effect_verify_submit_node_id(node: &spec::NodeSpec) -> std::result::Resu
 fn context_mutation_phase_for_submit_node(
     node: &spec::NodeSpec,
 ) -> mfm_runtime::Result<ContractMutationPhase> {
-    let deploy = mfm_program::registered_state_descriptor::<ContextBoundDeployContractState>()
+    let deploy = mfm_program::state_descriptor::<ContextBoundDeployContractState>()
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
     if &node.descriptor_id == deploy.descriptor_id() {
         return Ok(ContractMutationPhase::Deploy);
     }
-    let configure =
-        mfm_program::registered_state_descriptor::<ContextBoundConfigureContractState>()
-            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    let configure = mfm_program::state_descriptor::<ContextBoundConfigureContractState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
     if &node.descriptor_id == configure.descriptor_id() {
         return Ok(ContractMutationPhase::Configure);
     }

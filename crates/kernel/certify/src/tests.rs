@@ -334,9 +334,9 @@ impl PureState for ContextConsumerState {
 }
 
 fn context_source_descriptor_id() -> program::Result<DescriptorId> {
-    let mut states = StateRegistryBuilder::new();
-    let registered = states.register::<ContextSourceState>()?;
-    Ok(registered.descriptor().descriptor_id().clone())
+    Ok(program::state_descriptor::<ContextSourceState>()?
+        .descriptor_id()
+        .clone())
 }
 
 struct FactEmittingState {
@@ -748,13 +748,9 @@ fn config_ref_for_bytes<C: mfm_values::MfmConfig>(
 
 #[test]
 fn registered_config_validator_rejects_schema_shape_mismatch() {
-    let mut states = StateRegistryBuilder::new();
-    let registered = states
-        .register::<MultiplyState>()
-        .expect("state registration");
     let mut registry = CertificationRegistry::new();
     registry
-        .register_state(&registered)
+        .register_state::<MultiplyState>()
         .expect("certification state registration");
     let invalid = PlainCanonicalJsonBytes::from_json_str(r#"{"multiplier":"bad"}"#)
         .expect("canonical invalid config");
@@ -770,13 +766,9 @@ fn registered_config_validator_rejects_schema_shape_mismatch() {
 
 #[test]
 fn registered_config_validator_rejects_noncanonical_bytes() {
-    let mut states = StateRegistryBuilder::new();
-    let registered = states
-        .register::<MultiplyState>()
-        .expect("state registration");
     let mut registry = CertificationRegistry::new();
     registry
-        .register_state(&registered)
+        .register_state::<MultiplyState>()
         .expect("certification state registration");
     let canonical =
         PlainCanonicalJsonBytes::from_json_str(r#"{"multiplier":2}"#).expect("canonical config");
