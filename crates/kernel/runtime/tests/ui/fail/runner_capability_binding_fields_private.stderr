@@ -1,0 +1,43 @@
+error[E0616]: field `capability_kind` of struct `RunnerCapabilityBinding` is private
+ --> tests/ui/fail/runner_capability_binding_fields_private.rs:2:21
+  |
+2 |     let _ = binding.capability_kind;
+  |                     ^^^^^^^^^^^^^^^ private field
+  |
+help: a method `capability_kind` also exists, call it with parentheses
+  |
+2 |     let _ = binding.capability_kind();
+  |                                    ++
+
+error[E0616]: field `capability_version` of struct `RunnerCapabilityBinding` is private
+ --> tests/ui/fail/runner_capability_binding_fields_private.rs:3:21
+  |
+3 |     let _ = binding.capability_version;
+  |                     ^^^^^^^^^^^^^^^^^^ private field
+  |
+help: a method `capability_version` also exists, call it with parentheses
+  |
+3 |     let _ = binding.capability_version();
+  |                                       ++
+
+error[E0616]: field `adapter_kind` of struct `RunnerCapabilityBinding` is private
+ --> tests/ui/fail/runner_capability_binding_fields_private.rs:4:21
+  |
+4 |     let _ = binding.adapter_kind;
+  |                     ^^^^^^^^^^^^ private field
+  |
+help: a method `adapter_kind` also exists, call it with parentheses
+  |
+4 |     let _ = binding.adapter_kind();
+  |                                 ++
+
+error[E0616]: field `adapter_version` of struct `RunnerCapabilityBinding` is private
+ --> tests/ui/fail/runner_capability_binding_fields_private.rs:5:21
+  |
+5 |     let _ = binding.adapter_version;
+  |                     ^^^^^^^^^^^^^^^ private field
+  |
+help: a method `adapter_version` also exists, call it with parentheses
+  |
+5 |     let _ = binding.adapter_version();
+  |                                    ++

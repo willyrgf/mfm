@@ -12,7 +12,7 @@ impl<T> RuntimeArtifactStore for T where T: store::RetainedArtifactReadProvider 
 
 /// Runtime-owned artifact binding kind for one staged attempt artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StagedArtifactBindingKind {
+pub(crate) enum StagedArtifactBindingKind {
     /// Artifact is the terminal output for a state cell.
     StateOutput,
     /// Artifact is an external read fact response.
@@ -38,7 +38,7 @@ pub enum StagedArtifactBindingKind {
 
 /// Runtime-owned side-effect phase for one staged side-effect artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum StagedSideEffectArtifactPhase {
+pub(crate) enum StagedSideEffectArtifactPhase {
     /// Initial side-effect intent persisted before claims and invocation.
     Intent,
     /// Prepared invocation payload.
@@ -59,7 +59,7 @@ pub enum StagedSideEffectArtifactPhase {
 
 /// Sealed finalized artifact handle bound to one run, node, attempt, and evidence role.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StagedArtifactHandle {
+pub(crate) struct StagedArtifactHandle {
     run_id: RunId,
     node_id: NodeId,
     attempt_id: AttemptId,
@@ -121,27 +121,27 @@ impl StagedArtifactHandle {
     }
 
     /// Returns the run id this handle is sealed to.
-    pub fn run_id(&self) -> &RunId {
+    pub(crate) fn run_id(&self) -> &RunId {
         &self.run_id
     }
 
     /// Returns the node id this handle is sealed to.
-    pub fn node_id(&self) -> &NodeId {
+    pub(crate) fn node_id(&self) -> &NodeId {
         &self.node_id
     }
 
     /// Returns the attempt id this handle is sealed to.
-    pub fn attempt_id(&self) -> &AttemptId {
+    pub(crate) fn attempt_id(&self) -> &AttemptId {
         &self.attempt_id
     }
 
     /// Returns the artifact binding metadata.
-    pub fn binding(&self) -> &StagedArtifactBindingKind {
+    pub(crate) fn binding(&self) -> &StagedArtifactBindingKind {
         &self.binding
     }
 
     /// Returns the finalized artifact evidence.
-    pub fn evidence(&self) -> &store::ArtifactEvidenceRef {
+    pub(crate) fn evidence(&self) -> &store::ArtifactEvidenceRef {
         &self.evidence
     }
 }
@@ -224,7 +224,7 @@ impl StagedArtifact {
     }
 
     /// Creates an inline staged side-effect artifact bound to one ledger phase.
-    pub fn inline_side_effect_artifact(
+    pub(crate) fn inline_side_effect_artifact(
         ctx: &ErasedRunCtx<'_>,
         bytes: Vec<u8>,
         evidence: store::ArtifactEvidenceRef,
@@ -251,7 +251,7 @@ impl StagedArtifact {
     }
 
     /// Creates an inline staged side-effect artifact from pre-invocation lane preflight.
-    pub fn inline_pre_invocation_side_effect_artifact(
+    pub(crate) fn inline_pre_invocation_side_effect_artifact(
         ctx: &PreInvocationRunCtx<'_>,
         bytes: Vec<u8>,
         evidence: store::ArtifactEvidenceRef,
@@ -316,7 +316,7 @@ impl StagedArtifact {
     }
 
     /// Returns the sealed handle.
-    pub fn handle(&self) -> &StagedArtifactHandle {
+    pub(crate) fn handle(&self) -> &StagedArtifactHandle {
         &self.handle
     }
 

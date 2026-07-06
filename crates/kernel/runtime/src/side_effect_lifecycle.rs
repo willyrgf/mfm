@@ -3,7 +3,6 @@ use mfm_ids::{AttemptId, RunId, SideEffectPairId};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
-use crate::history::VerifiedRunContext;
 use crate::invocation::{ErasedRunCtx, PreInvocationRunCtx};
 use crate::{CertifiedRuntimeSpec, Result, RuntimeError};
 
@@ -12,14 +11,13 @@ use crate::{CertifiedRuntimeSpec, Result, RuntimeError};
 /// This view is minted only from runtime-owned verified context. It wraps the canonical
 /// side-effect projection lookup and validates the projected ledger typestate before exposing it
 /// to side-effect protocol helpers.
-pub struct SideEffectAttemptView<'a> {
+pub(crate) struct SideEffectAttemptView<'a> {
     projection: Option<&'a store::SideEffectProjection>,
     ledger_state: Option<store::SideEffectLedgerState<'a>>,
 }
 
 impl<'a> SideEffectAttemptView<'a> {
     /// Builds a side-effect attempt view from a prepared runner context.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn from_erased_context(ctx: &'a ErasedRunCtx<'_>) -> Result<Self> {
         Self::from_verified_parts(
             ctx.runtime_spec(),
@@ -31,7 +29,6 @@ impl<'a> SideEffectAttemptView<'a> {
     }
 
     /// Builds a side-effect attempt view from a pre-invocation resource-lane context.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn from_pre_invocation_context(ctx: &'a PreInvocationRunCtx<'_>) -> Result<Self> {
         Self::from_verified_parts(
             ctx.runtime_spec(),
@@ -42,24 +39,6 @@ impl<'a> SideEffectAttemptView<'a> {
         )
     }
 
-    /// Builds a side-effect attempt view from a scheduler-owned verified run context.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn from_verified_context(
-        runtime_spec: &CertifiedRuntimeSpec,
-        ctx: &'a VerifiedRunContext,
-        node: &spec::NodeSpec,
-        attempt_id: &AttemptId,
-    ) -> Result<Self> {
-        Self::from_verified_parts(
-            runtime_spec,
-            ctx.run_id(),
-            &ctx.view().projections,
-            node,
-            attempt_id,
-        )
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
     fn from_verified_parts(
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
@@ -67,7 +46,7 @@ impl<'a> SideEffectAttemptView<'a> {
         node: &spec::NodeSpec,
         attempt_id: &AttemptId,
     ) -> Result<Self> {
-        let projection = SideEffectLifecycle::projection_for_attempt(
+        let projection = side_effect_projection_for_attempt(
             runtime_spec,
             run_id,
             projections,
@@ -88,25 +67,17 @@ impl<'a> SideEffectAttemptView<'a> {
     }
 
     /// Returns the backing side-effect projection, when this attempt has persisted ledger evidence.
-    pub fn projection(&self) -> Option<&'a store::SideEffectProjection> {
+    pub(crate) fn projection(&self) -> Option<&'a store::SideEffectProjection> {
         self.projection
     }
 
-    /// Returns the validated ledger state, when this attempt has persisted ledger evidence.
-    pub fn ledger_state(&self) -> Option<&store::SideEffectLedgerState<'a>> {
-        self.ledger_state.as_ref()
-    }
-
     /// Returns the validated ledger phase, when this attempt has persisted ledger evidence.
-    pub fn phase(&self) -> Option<store::SideEffectLedgerPhase<'a>> {
+    pub(crate) fn phase(&self) -> Option<store::SideEffectLedgerPhase<'a>> {
         self.ledger_state
             .as_ref()
             .map(store::SideEffectLedgerState::phase)
     }
 }
-
-/// Runtime lifecycle guard for side-effect attempt uncertainty and recovery evidence.
-pub(crate) struct SideEffectLifecycle;
 
 /// Recovery disposition for an open side-effect attempt.
 pub(crate) enum SideEffectOpenAttemptDisposition {
@@ -120,169 +91,91 @@ pub(crate) enum SideEffectOpenAttemptDisposition {
     OperationalBlock,
 }
 
-impl SideEffectLifecycle {
-    /// Returns the single durable side-effect projection for a certified node attempt.
-    pub(crate) fn projection_for_attempt<'a>(
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        projections: &'a store::ProjectionSnapshot,
-        node: &spec::NodeSpec,
-        attempt_id: &AttemptId,
-    ) -> Result<Option<&'a store::SideEffectProjection>> {
-        side_effect_projection_for_attempt(runtime_spec, run_id, projections, node, attempt_id)
-    }
+/// Validates that a side-effect attempt has certified terminal evidence before producing output.
+pub(crate) fn validate_terminal_evidence(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    projections: &store::ProjectionSnapshot,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+) -> Result<()> {
+    let terminal_skipped = matches!(
+        projections.cell_terminal_for_run(run_id, &node.output_cell),
+        Some(store::CellTerminalProjection::Skipped {
+            node_id,
+            attempt_id: cell_attempt_id,
+            ..
+        }) if node_id == &node.node_id && cell_attempt_id == attempt_id
+    );
+    validate_terminal_batch_evidence(
+        runtime_spec,
+        run_id,
+        projections,
+        node,
+        attempt_id,
+        terminal_skipped,
+    )
+}
 
-    /// Validates that a side-effect attempt has certified terminal evidence before producing output.
-    pub(crate) fn validate_terminal_evidence(
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        projections: &store::ProjectionSnapshot,
-        node: &spec::NodeSpec,
-        attempt_id: &AttemptId,
-    ) -> Result<()> {
-        let terminal_skipped = matches!(
-            projections.cell_terminal_for_run(run_id, &node.output_cell),
-            Some(store::CellTerminalProjection::Skipped {
-                node_id,
-                attempt_id: cell_attempt_id,
-                ..
-            }) if node_id == &node.node_id && cell_attempt_id == attempt_id
-        );
-        validate_side_effect_terminal_phase(
-            runtime_spec,
-            run_id,
-            projections,
-            node,
-            attempt_id,
-            terminal_skipped,
-        )
-    }
+/// Returns whether standalone interruption can close this attempt without ledger recovery.
+pub(crate) fn standalone_interruption_allowed(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    projections: &store::ProjectionSnapshot,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+) -> Result<bool> {
+    let Some(projection) =
+        side_effect_projection_for_attempt(runtime_spec, run_id, projections, node, attempt_id)?
+    else {
+        return Ok(true);
+    };
+    let state = projection
+        .ledger_state()
+        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+    Ok(matches!(
+        state.phase(),
+        store::SideEffectLedgerPhase::IntentPersisted { .. }
+            | store::SideEffectLedgerPhase::Claimed { .. }
+    ))
+}
 
-    /// Validates legal terminal evidence for a same-batch side-effect runner output.
-    pub(crate) fn validate_terminal_batch_evidence(
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        projections: &store::ProjectionSnapshot,
-        node: &spec::NodeSpec,
-        attempt_id: &AttemptId,
-        terminal_skipped: bool,
-    ) -> Result<()> {
-        validate_side_effect_terminal_phase(
-            runtime_spec,
-            run_id,
-            projections,
-            node,
-            attempt_id,
-            terminal_skipped,
-        )
-    }
-
-    /// Validates legal runner evidence when resuming an open side-effect ledger.
-    pub(crate) fn validate_resume_output(
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        projections: &store::ProjectionSnapshot,
-        node: &spec::NodeSpec,
-        attempt_id: &AttemptId,
-        payloads: &[events::KernelEventPayload],
-    ) -> Result<()> {
-        validate_side_effect_resume_output(
-            runtime_spec,
-            run_id,
-            projections,
-            node,
-            attempt_id,
-            payloads,
-        )
-    }
-
-    /// Returns whether standalone interruption can close this attempt without ledger recovery.
-    pub(crate) fn standalone_interruption_allowed(
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        projections: &store::ProjectionSnapshot,
-        node: &spec::NodeSpec,
-        attempt_id: &AttemptId,
-    ) -> Result<bool> {
-        let Some(projection) = side_effect_projection_for_attempt(
-            runtime_spec,
-            run_id,
-            projections,
-            node,
-            attempt_id,
-        )?
-        else {
-            return Ok(true);
-        };
-        let state = projection
-            .ledger_state()
-            .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
-        Ok(matches!(
-            state.phase(),
-            store::SideEffectLedgerPhase::IntentPersisted { .. }
-                | store::SideEffectLedgerPhase::Claimed { .. }
-        ))
-    }
-
-    /// Classifies an open side-effect attempt from store-owned ledger typestate.
-    pub(crate) fn open_attempt_disposition(
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        projections: &store::ProjectionSnapshot,
-        node: &spec::NodeSpec,
-        attempt_id: &AttemptId,
-    ) -> Result<SideEffectOpenAttemptDisposition> {
-        let Some(projection) = side_effect_projection_for_attempt(
-            runtime_spec,
-            run_id,
-            projections,
-            node,
-            attempt_id,
-        )?
-        else {
-            return Ok(SideEffectOpenAttemptDisposition::ContinueBeforeLedger);
-        };
-        let state = projection
-            .ledger_state()
-            .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
-        match state.phase() {
-            store::SideEffectLedgerPhase::IntentPersisted { .. } => {
-                Ok(SideEffectOpenAttemptDisposition::InterruptBeforeInvocationPrepared)
-            }
-            store::SideEffectLedgerPhase::Claimed { .. } if projection.resource_key.is_some() => {
-                Ok(SideEffectOpenAttemptDisposition::DelegateRecovery)
-            }
-            store::SideEffectLedgerPhase::Claimed { .. } => {
-                Ok(SideEffectOpenAttemptDisposition::InterruptBeforeInvocationPrepared)
-            }
-            store::SideEffectLedgerPhase::Prepared { .. } => {
-                Ok(SideEffectOpenAttemptDisposition::DelegateRecovery)
-            }
-            store::SideEffectLedgerPhase::Started { .. } => {
-                Ok(SideEffectOpenAttemptDisposition::DelegateRecovery)
-            }
-            store::SideEffectLedgerPhase::SubmissionKnown {
-                status: store::SideEffectSubmissionState::NotSubmitted,
-                ..
-            } => Ok(SideEffectOpenAttemptDisposition::DelegateRecovery),
-            store::SideEffectLedgerPhase::SubmissionKnown {
-                status: store::SideEffectSubmissionState::Observed { .. },
-                ..
-            } => Ok(SideEffectOpenAttemptDisposition::DelegateRecovery),
-            store::SideEffectLedgerPhase::SubmissionKnown {
-                status: store::SideEffectSubmissionState::Unknown,
-                ..
-            } => Ok(SideEffectOpenAttemptDisposition::DelegateRecovery),
-            store::SideEffectLedgerPhase::ReceiptObserved { .. } => {
-                Ok(SideEffectOpenAttemptDisposition::DelegateRecovery)
-            }
-            store::SideEffectLedgerPhase::Confirmed { .. } => {
-                Ok(SideEffectOpenAttemptDisposition::DelegateRecovery)
-            }
-            store::SideEffectLedgerPhase::Ambiguous { .. }
-            | store::SideEffectLedgerPhase::Failed { .. } => {
-                Ok(SideEffectOpenAttemptDisposition::OperationalBlock)
-            }
+/// Classifies an open side-effect attempt from store-owned ledger typestate.
+pub(crate) fn open_attempt_disposition(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    projections: &store::ProjectionSnapshot,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+) -> Result<SideEffectOpenAttemptDisposition> {
+    let Some(projection) =
+        side_effect_projection_for_attempt(runtime_spec, run_id, projections, node, attempt_id)?
+    else {
+        return Ok(SideEffectOpenAttemptDisposition::ContinueBeforeLedger);
+    };
+    let state = projection
+        .ledger_state()
+        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+    match state.phase() {
+        store::SideEffectLedgerPhase::IntentPersisted { .. } => {
+            Ok(SideEffectOpenAttemptDisposition::InterruptBeforeInvocationPrepared)
+        }
+        store::SideEffectLedgerPhase::Claimed { .. } if projection.resource_key.is_some() => {
+            Ok(SideEffectOpenAttemptDisposition::DelegateRecovery)
+        }
+        store::SideEffectLedgerPhase::Claimed { .. } => {
+            Ok(SideEffectOpenAttemptDisposition::InterruptBeforeInvocationPrepared)
+        }
+        store::SideEffectLedgerPhase::Prepared { .. }
+        | store::SideEffectLedgerPhase::Started { .. }
+        | store::SideEffectLedgerPhase::SubmissionKnown { .. }
+        | store::SideEffectLedgerPhase::ReceiptObserved { .. }
+        | store::SideEffectLedgerPhase::Confirmed { .. } => {
+            Ok(SideEffectOpenAttemptDisposition::DelegateRecovery)
+        }
+        store::SideEffectLedgerPhase::Ambiguous { .. }
+        | store::SideEffectLedgerPhase::Failed { .. } => {
+            Ok(SideEffectOpenAttemptDisposition::OperationalBlock)
         }
     }
 }
@@ -360,7 +253,8 @@ fn validate_side_effect_actor_eligibility(
     }
 }
 
-fn validate_side_effect_terminal_phase(
+/// Validates legal terminal evidence for a same-batch side-effect runner output.
+pub(crate) fn validate_terminal_batch_evidence(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
     projections: &store::ProjectionSnapshot,
@@ -410,7 +304,8 @@ fn validate_side_effect_terminal_phase(
     }
 }
 
-fn validate_side_effect_resume_output(
+/// Validates legal runner evidence when resuming an open side-effect ledger.
+pub(crate) fn validate_resume_output(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
     projections: &store::ProjectionSnapshot,

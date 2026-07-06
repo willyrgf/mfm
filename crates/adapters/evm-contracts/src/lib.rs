@@ -73,15 +73,14 @@ use mfm_replay::v1 as replay;
 use mfm_runtime::{
     load_launch_config_for_node, load_materialized_struct_field_value, load_runner_config,
     load_runner_config_for_node, load_side_effect_artifact, load_side_effect_value,
-    load_side_effect_value_for_node, CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx,
-    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedInputs,
-    PreInvocationRunCtx, PreInvocationRunnerFuture, RunnerCapabilityBinding,
-    RunnerExecutableIdentityTemplate, RunnerIngressContext, RunnerRegistrationBuilder,
-    SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
-    SideEffectLanePreclaimBuilder, SideEffectObservedEvidence, SideEffectPreparedInvocationPlan,
+    load_side_effect_value_for_node, preclaim_side_effect_resource_lane,
+    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
+    ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedInputs, PreInvocationRunCtx,
+    PreInvocationRunnerFuture, RunnerCapabilityBinding, RunnerExecutableIdentityTemplate,
+    RunnerIngressContext, RunnerRegistrationBuilder, SideEffectDriver, SideEffectDriverCallbacks,
+    SideEffectDriverFuture, SideEffectIntentPlan, SideEffectObservedEvidence,
     SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
-    SideEffectSubmissionDecisionFuture, SideEffectUnknownSubmissionDecision,
-    SideEffectUnknownSubmissionDecisionFuture, SideEffectVerifyCallbacks, SideEffectVerifyDriver,
+    SideEffectUnknownSubmissionDecision, SideEffectVerifyCallbacks, SideEffectVerifyDriver,
     TypedContextOutputExtractor,
 };
 use mfm_signing::{PublicKeyBytes, SignerRef, SigningProvider};
@@ -2871,10 +2870,7 @@ pub fn replay_verifier_id() -> Result<events::ReplayVerifierId> {
 }
 
 fn contract_side_effect_replay_evidence() -> mfm_runtime::Result<SideEffectReplayEvidence> {
-    Ok(SideEffectReplayEvidence {
-        replay_verifier_id: replay_verifier_id()?,
-        resource_touched_set: None,
-    })
+    Ok(SideEffectReplayEvidence::new(replay_verifier_id()?, None))
 }
 
 /// Verifies contract lifecycle replay evidence when present in a broker stream.
@@ -5171,7 +5167,17 @@ where
                 self.factory.artifacts(),
             )
             .await?;
-            claim_mutation_resource_lane(ctx, &plan)
+            let scope = plan.nonce_resource_scope()?;
+            let resource_key =
+                mutation_resource_key(ctx.node(), &scope, plan.expected_signer_address())?;
+            preclaim_side_effect_resource_lane(
+                ctx,
+                plan.intent(),
+                plan.idempotency(),
+                idempotency_key_ref(plan.idempotency())?,
+                evm_transaction_submit_binding()?,
+                resource_key,
+            )
         })
     }
 
@@ -5314,24 +5320,6 @@ fn validate_context_mutation_runtime_for_node(
             Some(&signer_ref),
         )
         .map(|_| ())
-}
-
-fn claim_mutation_resource_lane<P>(
-    ctx: &PreInvocationRunCtx<'_>,
-    plan: &P,
-) -> mfm_runtime::Result<ErasedRunnerOutput>
-where
-    P: ContractMutationPlanOps,
-{
-    let scope = plan.nonce_resource_scope()?;
-    let resource_key = mutation_resource_key(ctx.node(), &scope, plan.expected_signer_address())?;
-    SideEffectLanePreclaimBuilder::new(ctx).claim_resource_lane(
-        plan.intent(),
-        plan.idempotency(),
-        idempotency_key_ref(plan.idempotency())?,
-        evm_transaction_submit_binding()?,
-        resource_key,
-    )
 }
 
 struct ContextDeployMutationPlan {
@@ -5661,12 +5649,12 @@ where
         _ctx: &'a ErasedRunCtx<'ctx>,
     ) -> SideEffectDriverFuture<'a, SideEffectIntentPlan<Self::Intent, Self::Idempotency>> {
         Box::pin(async move {
-            Ok(SideEffectIntentPlan {
-                intent: self.plan.intent().clone(),
-                idempotency: self.plan.idempotency().clone(),
-                idempotency_key: idempotency_key_ref(self.plan.idempotency())?,
-                capability_binding: evm_transaction_submit_binding()?,
-            })
+            Ok(SideEffectIntentPlan::new(
+                self.plan.intent().clone(),
+                self.plan.idempotency().clone(),
+                idempotency_key_ref(self.plan.idempotency())?,
+                evm_transaction_submit_binding()?,
+            ))
         })
     }
 
@@ -5674,14 +5662,11 @@ where
         &'a self,
         _ctx: &'a ErasedRunCtx<'ctx>,
         _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
-    ) -> SideEffectDriverFuture<'a, SideEffectPreparedInvocationPlan<Self::PreparedInvocation>>
-    {
+    ) -> SideEffectDriverFuture<'a, Option<Self::PreparedInvocation>> {
         Box::pin(async move {
             let runtime = self.factory.runtime_for(self.plan.network_id())?;
             let prepared = self.plan.prepare_invocation(&runtime).await?;
-            Ok(SideEffectPreparedInvocationPlan::with_prepared_invocation(
-                prepared.evidence().clone(),
-            ))
+            Ok(Some(prepared.evidence().clone()))
         })
     }
 
@@ -5706,12 +5691,14 @@ where
         _ctx: &'a ErasedRunCtx<'ctx>,
         action: SideEffectProtocolAction,
         prepared: Option<Self::PreparedInvocation>,
-    ) -> SideEffectSubmissionDecisionFuture<
+    ) -> SideEffectDriverFuture<
         'a,
-        Self::Submission,
-        Self::SubmissionUnknownEvidence,
-        Self::NotSubmittedProof,
-        Self::AmbiguityEvidence,
+        SideEffectSubmissionDecision<
+            Self::Submission,
+            Self::SubmissionUnknownEvidence,
+            Self::NotSubmittedProof,
+            Self::AmbiguityEvidence,
+        >,
     > {
         Box::pin(async move {
             let stored_prepared =
@@ -5812,11 +5799,13 @@ where
         submit_node: &'a spec::NodeSpec,
         submit_inputs: &'a MaterializedInputs,
         prepared_invocation: Option<&'a store::SideEffectArtifactProjection>,
-    ) -> SideEffectUnknownSubmissionDecisionFuture<
+    ) -> SideEffectDriverFuture<
         'a,
-        Self::Submission,
-        Self::NotSubmittedProof,
-        Self::AmbiguityEvidence,
+        SideEffectUnknownSubmissionDecision<
+            Self::Submission,
+            Self::NotSubmittedProof,
+            Self::AmbiguityEvidence,
+        >,
     > {
         Box::pin(async move {
             let prepared_projection = prepared_invocation
@@ -5859,10 +5848,10 @@ where
             .await?;
             let receipts =
                 read_receipts_with_poll(&runtime, prepared.evidence(), &submissions).await?;
-            Ok(SideEffectObservedEvidence {
-                evidence: plan.receipt_from_observed(prepared.evidence(), receipts)?,
-                replay: contract_side_effect_replay_evidence()?,
-            })
+            Ok(SideEffectObservedEvidence::new(
+                plan.receipt_from_observed(prepared.evidence(), receipts)?,
+                contract_side_effect_replay_evidence()?,
+            ))
         })
     }
 
@@ -5895,10 +5884,10 @@ where
                 required_depth,
             )
             .await?;
-            Ok(SideEffectObservedEvidence {
-                evidence: P::confirmation_from_receipt(receipt, confirmations),
-                replay: contract_side_effect_replay_evidence()?,
-            })
+            Ok(SideEffectObservedEvidence::new(
+                P::confirmation_from_receipt(receipt, confirmations),
+                contract_side_effect_replay_evidence()?,
+            ))
         })
     }
 

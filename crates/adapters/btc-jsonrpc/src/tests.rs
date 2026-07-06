@@ -773,15 +773,15 @@ fn capability_binding_uses_btc_jsonrpc_adapter_identity() {
     let binding = btc_fact_record_capability_binding().expect("binding");
 
     assert_eq!(
-        binding.capability_kind.canonical_name(),
+        binding.capability_kind().canonical_name(),
         Some("mfm.bitcoin/fact.record")
     );
     assert_eq!(
-        binding.adapter_kind,
-        btc_jsonrpc_adapter_kind().expect("adapter kind")
+        binding.adapter_kind(),
+        &btc_jsonrpc_adapter_kind().expect("adapter kind")
     );
     assert_eq!(
-        binding.adapter_version,
-        btc_jsonrpc_adapter_version().expect("adapter version")
+        binding.adapter_version(),
+        &btc_jsonrpc_adapter_version().expect("adapter version")
     );
 }

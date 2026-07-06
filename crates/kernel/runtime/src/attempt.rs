@@ -10,7 +10,7 @@ use crate::commit::{
 use crate::error::async_store_error;
 use crate::history::RuntimeRunView;
 use crate::invocation::{ErasedRunCtx, InvocationBuilder, InvocationBuilderInput};
-use crate::side_effect_lifecycle::SideEffectLifecycle;
+use crate::side_effect_lifecycle::side_effect_projection_for_attempt;
 use crate::transition::TransitionAttempt;
 use crate::{
     attempt_id, canonical_json, CertifiedRuntimeSpec, Result, RuntimeDiagnosticDetails,
@@ -441,7 +441,7 @@ fn can_terminalize_observed_failure(
         return Ok(false);
     }
     if node.side_effect.is_some() {
-        let Some(side_effect) = SideEffectLifecycle::projection_for_attempt(
+        let Some(side_effect) = side_effect_projection_for_attempt(
             runtime_spec,
             run_id,
             &view.projections,
@@ -671,13 +671,8 @@ fn node_needs_pre_invocation_lane_claim(
     ) {
         return Ok(false);
     }
-    let Some(projection) = SideEffectLifecycle::projection_for_attempt(
-        runtime_spec,
-        run_id,
-        projections,
-        node,
-        attempt_id,
-    )?
+    let Some(projection) =
+        side_effect_projection_for_attempt(runtime_spec, run_id, projections, node, attempt_id)?
     else {
         return Ok(true);
     };

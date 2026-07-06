@@ -1,0 +1,5 @@
+error[E0433]: cannot find `SideEffectLanePreclaimBuilder` in `mfm_runtime`
+ --> tests/ui/fail/side_effect_preclaim_builder_removed.rs:2:26
+  |
+2 |     let _ = mfm_runtime::SideEffectLanePreclaimBuilder::new;
+  |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ could not find `SideEffectLanePreclaimBuilder` in `mfm_runtime`

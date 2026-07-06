@@ -1,0 +1,30 @@
+error[E0425]: cannot find type `RunnerSideEffectBinding` in crate `mfm_runtime`
+ --> tests/ui/fail/side_effect_payload_builder_helpers_private.rs:3:47
+  |
+3 |     let _ = core::mem::size_of::<mfm_runtime::RunnerSideEffectBinding>();
+  |                                               ^^^^^^^^^^^^^^^^^^^^^^^ not found in `mfm_runtime`
+  |
+note: found an item that was configured out
+ --> src/lib.rs
+  |
+  | #[cfg(test)]
+  |       ---- the item is gated here
+  | use runner_kit::{RunnerClaimBinding, RunnerPreparedInvocationBinding, RunnerSideEffectBinding};
+  |                                                                       ^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0624]: method `side_effect_failed` is private
+ --> tests/ui/fail/side_effect_payload_builder_helpers_private.rs:2:48
+  |
+2 |       let _ = mfm_runtime::RunnerPayloadBuilder::side_effect_failed;
+  |                                                  ^^^^^^^^^^^^^^^^^^ private method
+  |
+ ::: src/runner_kit.rs
+  |
+  | /     pub(crate) fn side_effect_failed(
+  | |         &self,
+  | |         side_effect: RunnerSideEffectBinding,
+  | |         pair_role: events::SideEffectPairRole,
+... |
+  | |         error: events::MfmErrorInfo,
+  | |     ) -> RunnerEventPayload {
+  | |___________________________- private method defined here

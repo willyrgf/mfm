@@ -263,21 +263,63 @@ impl From<RunnerEventPayload> for events::KernelEventPayload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ErasedRunnerOutput {
     /// Staged artifacts or sealed finalized handles referenced by payloads.
-    pub staged_artifacts: Vec<StagedArtifact>,
+    staged_artifacts: Vec<StagedArtifact>,
     /// Retention refs staged by the runner for scheduler-owned event binding.
-    pub staged_retention_refs: Vec<StagedRetentionRefs>,
+    staged_retention_refs: Vec<StagedRetentionRefs>,
     /// Runner-owned typed payloads to validate before runtime lifecycle derivation.
-    pub payloads: Vec<RunnerEventPayload>,
+    payloads: Vec<RunnerEventPayload>,
 }
 
 impl ErasedRunnerOutput {
-    /// Creates an output batch from payloads with no additional artifact evidence.
-    pub fn new(payloads: Vec<RunnerEventPayload>) -> Self {
+    pub(crate) fn from_parts(
+        staged_artifacts: Vec<StagedArtifact>,
+        staged_retention_refs: Vec<StagedRetentionRefs>,
+        payloads: Vec<RunnerEventPayload>,
+    ) -> Self {
         Self {
-            staged_artifacts: Vec::new(),
-            staged_retention_refs: Vec::new(),
+            staged_artifacts,
+            staged_retention_refs,
             payloads,
         }
+    }
+
+    /// Creates an output batch from payloads with no additional artifact evidence.
+    pub fn new(payloads: Vec<RunnerEventPayload>) -> Self {
+        Self::from_parts(Vec::new(), Vec::new(), payloads)
+    }
+
+    /// Returns staged artifacts or sealed finalized handles referenced by payloads.
+    pub fn staged_artifacts(&self) -> &[StagedArtifact] {
+        &self.staged_artifacts
+    }
+
+    /// Returns retention refs staged by the runner for scheduler-owned event binding.
+    pub fn staged_retention_refs(&self) -> &[StagedRetentionRefs] {
+        &self.staged_retention_refs
+    }
+
+    /// Returns runner-owned typed payloads to validate before runtime lifecycle derivation.
+    pub fn payloads(&self) -> &[RunnerEventPayload] {
+        &self.payloads
+    }
+
+    #[cfg(test)]
+    pub(crate) fn payloads_mut(&mut self) -> &mut [RunnerEventPayload] {
+        &mut self.payloads
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Vec<StagedArtifact>,
+        Vec<StagedRetentionRefs>,
+        Vec<RunnerEventPayload>,
+    ) {
+        (
+            self.staged_artifacts,
+            self.staged_retention_refs,
+            self.payloads,
+        )
     }
 }
 

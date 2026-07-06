@@ -25,7 +25,10 @@ use crate::history::{
     validate_seed_cells, validate_spec_artifact, RuntimeRunView,
 };
 use crate::runners::{ContextOutputExtractor, ErasedRunnerOutput, RunnerEventPayload};
-use crate::side_effect_lifecycle::SideEffectLifecycle;
+use crate::side_effect_lifecycle::{
+    side_effect_projection_for_attempt, standalone_interruption_allowed, validate_resume_output,
+    validate_terminal_batch_evidence,
+};
 use crate::side_effects::validate_runner_side_effect_payload;
 use crate::{
     content_digest_json, require_adapter, require_attempt, require_capability,
@@ -394,11 +397,7 @@ impl CommitPlanner {
     pub(crate) fn prepare_runner_output(
         input: RunnerOutputCommitInput<'_>,
     ) -> Result<PreparedRunnerOutput> {
-        let ErasedRunnerOutput {
-            staged_artifacts,
-            staged_retention_refs,
-            payloads: runner_payloads,
-        } = input.output;
+        let (staged_artifacts, staged_retention_refs, runner_payloads) = input.output.into_parts();
         let runner_payloads = runner_payloads_with_derived_lifecycle(
             input.runtime_spec,
             input.node,
@@ -566,7 +565,7 @@ impl CommitPlanner {
             None => {}
         }
         let terminal_side_effect_payloads = if input.node.side_effect.is_some() {
-            SideEffectLifecycle::projection_for_attempt(
+            side_effect_projection_for_attempt(
                 input.runtime_spec,
                 input.run_id,
                 &input.view.projections,
@@ -706,7 +705,7 @@ impl CommitPlanner {
             )));
         }
         if input.node.side_effect.is_some()
-            && !SideEffectLifecycle::standalone_interruption_allowed(
+            && !standalone_interruption_allowed(
                 input.runtime_spec,
                 input.run_id,
                 &input.view.projections,
@@ -2117,7 +2116,7 @@ fn runner_output_preconditions(
     }
 
     if let Some(required) = terminal_side_effect_required_state {
-        let projection = SideEffectLifecycle::projection_for_attempt(
+        let projection = side_effect_projection_for_attempt(
             runtime_spec,
             run_id,
             projections,
@@ -2600,7 +2599,7 @@ fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Result<()> {
     }
 
     if node.side_effect.is_some() {
-        SideEffectLifecycle::validate_resume_output(
+        validate_resume_output(
             runtime_spec,
             run_id,
             projections,
@@ -2653,7 +2652,7 @@ fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Result<()> {
         let terminal_skipped = payloads
             .iter()
             .any(|payload| matches!(payload, events::KernelEventPayload::CellSkipped(_)));
-        SideEffectLifecycle::validate_terminal_batch_evidence(
+        validate_terminal_batch_evidence(
             runtime_spec,
             run_id,
             projections,

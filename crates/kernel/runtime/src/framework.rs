@@ -220,12 +220,12 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
     let (receipt_artifact, receipt_cell_produced) =
         stage_framework_state_output(&ctx, receipt_bytes)?;
     let receipt_retention_ref = receipt_artifact.evidence().retention_ref();
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![receipt_artifact],
-        staged_retention_refs: vec![StagedRetentionRefs::framework_public_output(vec![
+    Ok(ErasedRunnerOutput::from_parts(
+        vec![receipt_artifact],
+        vec![StagedRetentionRefs::framework_public_output(vec![
             receipt_retention_ref,
         ])],
-        payloads: vec![
+        vec![
             receipt_cell_produced,
             RunnerEventPayload::PublicOutputProduced(events::PublicOutputProduced {
                 spec_hash: ctx.spec_hash().clone(),
@@ -240,7 +240,7 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
                 renderer_descriptor_id: render.renderer_descriptor.descriptor_id.clone(),
             }),
         ],
-    })
+    ))
 }
 
 fn project_retention_manifest(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
@@ -265,13 +265,13 @@ fn project_retention_manifest(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutpu
     let (receipt_artifact, receipt_cell_produced) =
         stage_framework_state_output(&ctx, receipt_bytes)?;
     let receipt_retention_ref = receipt_artifact.evidence().retention_ref();
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![manifest_artifact, receipt_artifact],
-        staged_retention_refs: vec![StagedRetentionRefs::runtime_evidence(vec![
+    Ok(ErasedRunnerOutput::from_parts(
+        vec![manifest_artifact, receipt_artifact],
+        vec![StagedRetentionRefs::runtime_evidence(vec![
             receipt_retention_ref,
         ])],
-        payloads: vec![receipt_cell_produced],
-    })
+        vec![receipt_cell_produced],
+    ))
 }
 
 fn complete_run_framework(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
@@ -287,11 +287,11 @@ fn complete_run_framework(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
         complete_run_receipt_json(&completion, retention_manifest, ctx.run_stream())?;
     let (receipt_artifact, receipt_cell_produced) =
         stage_framework_state_output(&ctx, receipt_bytes)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![receipt_artifact],
-        staged_retention_refs: Vec::new(),
-        payloads: vec![receipt_cell_produced],
-    })
+    Ok(ErasedRunnerOutput::from_parts(
+        vec![receipt_artifact],
+        Vec::new(),
+        vec![receipt_cell_produced],
+    ))
 }
 
 fn resolve_saga_terminal_framework(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
@@ -307,11 +307,11 @@ fn resolve_saga_terminal_framework(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunner
         resolve_saga_terminal_receipt_json(ctx.runtime_spec(), &outcome, ctx.run_stream())?;
     let (receipt_artifact, receipt_cell_produced) =
         stage_framework_state_output(&ctx, receipt_bytes)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![receipt_artifact],
-        staged_retention_refs: Vec::new(),
-        payloads: vec![receipt_cell_produced],
-    })
+    Ok(ErasedRunnerOutput::from_parts(
+        vec![receipt_artifact],
+        Vec::new(),
+        vec![receipt_cell_produced],
+    ))
 }
 
 fn stage_framework_state_output(

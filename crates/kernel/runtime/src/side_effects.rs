@@ -6,7 +6,7 @@ use mfm_ids::{AttemptId, NodeId, RunId, SideEffectPairId};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
-use crate::side_effect_lifecycle::SideEffectLifecycle;
+use crate::side_effect_lifecycle::side_effect_projection_for_attempt;
 use crate::{
     require_adapter, require_attempt, require_capability, CertifiedRuntimeCapabilities,
     CertifiedRuntimeSpec, Result, RuntimeError,
@@ -28,24 +28,24 @@ enum HistoricalSideEffectPhase {
     Failed,
 }
 
-impl From<events::SideEffectEventKind> for HistoricalSideEffectPhase {
-    fn from(kind: events::SideEffectEventKind) -> Self {
+impl HistoricalSideEffectPhase {
+    fn from_event_kind(kind: events::SideEffectEventKind) -> Option<Self> {
         match kind {
-            events::SideEffectEventKind::IntentPersisted => Self::IntentPersisted,
+            events::SideEffectEventKind::IntentPersisted => Some(Self::IntentPersisted),
             events::SideEffectEventKind::Claimed | events::SideEffectEventKind::ClaimTakenOver => {
-                Self::Claimed
+                Some(Self::Claimed)
             }
-            events::SideEffectEventKind::ResourceLaneClaimed => Self::ResourceLaneClaimed,
-            events::SideEffectEventKind::InvocationPrepared => Self::InvocationPrepared,
-            events::SideEffectEventKind::InvocationStarted => Self::InvocationStarted,
-            events::SideEffectEventKind::NotSubmittedProven => Self::NotSubmittedProven,
-            events::SideEffectEventKind::SubmissionObserved => Self::SubmissionObserved,
-            events::SideEffectEventKind::SubmissionUnknown => Self::SubmissionUnknown,
-            events::SideEffectEventKind::ReceiptObserved => Self::ReceiptObserved,
-            events::SideEffectEventKind::ConfirmationObserved => Self::ConfirmationObserved,
-            events::SideEffectEventKind::Ambiguous => Self::Ambiguous,
-            events::SideEffectEventKind::Failed => Self::Failed,
-            events::SideEffectEventKind::ResourceLaneReleased => Self::ResourceLaneClaimed,
+            events::SideEffectEventKind::ResourceLaneClaimed => Some(Self::ResourceLaneClaimed),
+            events::SideEffectEventKind::InvocationPrepared => Some(Self::InvocationPrepared),
+            events::SideEffectEventKind::InvocationStarted => Some(Self::InvocationStarted),
+            events::SideEffectEventKind::NotSubmittedProven => Some(Self::NotSubmittedProven),
+            events::SideEffectEventKind::SubmissionObserved => Some(Self::SubmissionObserved),
+            events::SideEffectEventKind::SubmissionUnknown => Some(Self::SubmissionUnknown),
+            events::SideEffectEventKind::ReceiptObserved => Some(Self::ReceiptObserved),
+            events::SideEffectEventKind::ConfirmationObserved => Some(Self::ConfirmationObserved),
+            events::SideEffectEventKind::Ambiguous => Some(Self::Ambiguous),
+            events::SideEffectEventKind::Failed => Some(Self::Failed),
+            events::SideEffectEventKind::ResourceLaneReleased => None,
         }
     }
 }
@@ -78,7 +78,9 @@ pub(crate) fn validate_historical_side_effect_payload(
         .ok_or_else(|| {
         RuntimeError::InvalidRunStream("expected side-effect payload".to_owned())
     })?;
-    let phase = HistoricalSideEffectPhase::from(event_kind);
+    let Some(phase) = HistoricalSideEffectPhase::from_event_kind(event_kind) else {
+        return Ok(());
+    };
     let node = runtime_spec.node(node_id).ok_or_else(|| {
         RuntimeError::InvalidRunStream(format!("side-effect event for uncertified node {node_id}"))
     })?;
@@ -154,9 +156,6 @@ pub(crate) fn validate_historical_side_effect_payload(
                     )
                     .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
                 ledger.resource_key = Some(payload.resource_key.clone());
-            }
-            if matches!(payload, events::KernelEventPayload::ResourceLaneReleased(_)) {
-                return Ok(());
             }
             ledger.phase = phase;
         }
@@ -418,32 +417,26 @@ pub(crate) fn validate_atomic_side_effect_failure_pairs(
     let mut attempt_failures = BTreeMap::new();
     for event in stream {
         if let Some(side_effect) = event.payload().side_effect_ref() {
-            match side_effect.kind {
+            let retryable = match side_effect.kind {
                 events::SideEffectEventKind::Failed => {
                     let events::KernelEventPayload::SideEffectFailed(payload) = event.payload()
                     else {
                         unreachable!("side-effect kind came from payload variant");
                     };
-                    side_effect_failures.insert(
-                        (
-                            event.seq(),
-                            side_effect.node_id.clone(),
-                            side_effect.attempt_id.clone(),
-                        ),
-                        payload.retryable,
-                    );
+                    Some(payload.retryable)
                 }
-                events::SideEffectEventKind::Ambiguous => {
-                    side_effect_failures.insert(
-                        (
-                            event.seq(),
-                            side_effect.node_id.clone(),
-                            side_effect.attempt_id.clone(),
-                        ),
-                        false,
-                    );
-                }
-                _ => {}
+                events::SideEffectEventKind::Ambiguous => Some(false),
+                _ => None,
+            };
+            if let Some(retryable) = retryable {
+                side_effect_failures.insert(
+                    (
+                        event.seq(),
+                        side_effect.node_id.clone(),
+                        side_effect.attempt_id.clone(),
+                    ),
+                    retryable,
+                );
             }
         }
         if let events::KernelEventPayload::StateAttemptFailed(payload) = event.payload() {
@@ -609,7 +602,7 @@ pub(crate) fn validate_runner_side_effect_payload(
                     node.node_id
                 )));
             }
-            if let Some(projection) = SideEffectLifecycle::projection_for_attempt(
+            if let Some(projection) = side_effect_projection_for_attempt(
                 runtime_spec,
                 run_id,
                 projections,

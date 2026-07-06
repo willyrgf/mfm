@@ -7,7 +7,9 @@ use mfm_store::v1 as store;
 
 use crate::framework::public_output_is_produced;
 use crate::history::RuntimeRunView;
-use crate::side_effect_lifecycle::SideEffectLifecycle;
+use crate::side_effect_lifecycle::{
+    open_attempt_disposition, side_effect_projection_for_attempt, validate_terminal_evidence,
+};
 use crate::side_effects::validate_terminal_cell_has_completed_attempt;
 use crate::{CertifiedRuntimeSpec, Result, RuntimeError};
 
@@ -347,7 +349,7 @@ fn continuing_side_effect_node_if<'a>(
         if !matches!(attempt.status, store::AttemptStatus::Started { .. }) {
             continue;
         }
-        let Some(projection) = SideEffectLifecycle::projection_for_attempt(
+        let Some(projection) = side_effect_projection_for_attempt(
             runtime_spec,
             &view.run_admitted.run_id,
             &view.projections,
@@ -543,7 +545,7 @@ fn side_effect_attempt_plan(
             node,
             cell_terminal,
         )?;
-        SideEffectLifecycle::validate_terminal_evidence(
+        validate_terminal_evidence(
             runtime_spec,
             &view.run_admitted.run_id,
             &view.projections,
@@ -570,7 +572,7 @@ fn side_effect_attempt_plan(
                         attempt_id, node.node_id
                     )));
                 }
-                SideEffectLifecycle::open_attempt_disposition(
+                open_attempt_disposition(
                     runtime_spec,
                     &view.run_admitted.run_id,
                     &view.projections,

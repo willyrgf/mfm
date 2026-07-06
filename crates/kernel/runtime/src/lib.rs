@@ -39,10 +39,7 @@ mod spec_authority;
 mod transition;
 
 pub use admission::RunAdmissionAuthority;
-pub use artifacts::{
-    RuntimeArtifactStore, StagedArtifact, StagedArtifactBindingKind, StagedArtifactHandle,
-    StagedRetentionRefs, StagedSideEffectArtifactPhase,
-};
+pub use artifacts::{RuntimeArtifactStore, StagedArtifact, StagedRetentionRefs};
 pub use binding::{
     BoundCapabilityAuthority, BoundFrameworkHandlerAuthority, BoundFrameworkHandlerKind,
     BoundRuntimeContext, BoundRuntimeContextLoader,
@@ -67,7 +64,7 @@ pub use runner_kit::{
     load_side_effect_value, load_side_effect_value_for_node, materialized_input_node_json,
     FactRecordInput, RunnerArtifactBuilder, RunnerCapabilityBinding,
     RunnerExecutableIdentityTemplate, RunnerFactoryBinding, RunnerJsonArtifact,
-    RunnerOutputBuilder, RunnerPayloadBuilder, RunnerRegistrationBuilder, StagedFactRecord,
+    RunnerOutputBuilder, RunnerPayloadBuilder, RunnerRegistrationBuilder,
     TypedContextOutputExtractor,
 };
 pub use runners::{
@@ -78,17 +75,17 @@ pub use runners::{
 };
 pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
 pub use side_effect_driver::{
-    SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
-    SideEffectLanePreclaimBuilder, SideEffectObservedEvidence, SideEffectPreparedInvocationPlan,
+    preclaim_side_effect_resource_lane, SideEffectDriver, SideEffectDriverCallbacks,
+    SideEffectDriverFuture, SideEffectIntentPlan, SideEffectObservedEvidence,
     SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
-    SideEffectSubmissionDecisionFuture, SideEffectUnknownSubmissionDecision,
-    SideEffectUnknownSubmissionDecisionFuture, SideEffectVerifyCallbacks, SideEffectVerifyDriver,
+    SideEffectUnknownSubmissionDecision, SideEffectVerifyCallbacks, SideEffectVerifyDriver,
 };
-pub use side_effect_lifecycle::SideEffectAttemptView;
 pub use spec_authority::CertifiedRuntimeSpec;
 
 #[cfg(test)]
-use artifacts::{staged_artifact_binding_kind, staged_side_effect_artifact_phase};
+use artifacts::{
+    staged_artifact_binding_kind, staged_side_effect_artifact_phase, StagedArtifactBindingKind,
+};
 
 #[cfg(test)]
 use commit::{retention_manifest_payloads, runner_payloads_with_derived_lifecycle};
@@ -100,17 +97,13 @@ use framework::{
 #[cfg(test)]
 use history::RuntimeRunView;
 #[cfg(test)]
-use runner_kit::{
-    RunnerClaimBinding, RunnerClaimTakeoverBinding, RunnerPreparedInvocationBinding,
-    RunnerSideEffectBinding,
-};
+use runner_kit::{RunnerClaimBinding, RunnerPreparedInvocationBinding, RunnerSideEffectBinding};
 #[cfg(test)]
 use side_effect_driver::{
-    RuntimeSideEffectClaimAuthority, SideEffectEvidenceBuilder,
-    SideEffectPreparedInvocationEvidence,
+    RuntimeSideEffectClaimAuthority, SideEffectEvidenceBuilder, SideEffectPrepareEvidence,
 };
 #[cfg(test)]
-use side_effect_lifecycle::side_effect_projection_for_attempt;
+use side_effect_lifecycle::{side_effect_projection_for_attempt, SideEffectAttemptView};
 
 /// Result type for typed runtime operations.
 pub type Result<T> = std::result::Result<T, RuntimeError>;

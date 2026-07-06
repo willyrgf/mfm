@@ -1,0 +1,5 @@
+error[E0425]: cannot find type `StagedFactRecord` in crate `mfm_runtime`
+ --> tests/ui/fail/staged_fact_record_removed.rs:2:47
+  |
+2 |     let _ = core::mem::size_of::<mfm_runtime::StagedFactRecord>();
+  |                                               ^^^^^^^^^^^^^^^^ not found in `mfm_runtime`

@@ -13,7 +13,9 @@ use crate::error::async_store_error;
 use crate::framework_lifecycle::FrameworkAttemptLifecycle;
 use crate::frontier::node_inputs_ready;
 use crate::history::RuntimeRunView;
-use crate::side_effect_lifecycle::{SideEffectLifecycle, SideEffectOpenAttemptDisposition};
+use crate::side_effect_lifecycle::{
+    open_attempt_disposition, validate_terminal_evidence, SideEffectOpenAttemptDisposition,
+};
 use crate::side_effects::validate_terminal_cell_has_completed_attempt;
 use crate::transition::TransitionAttempt;
 use crate::{CertifiedRuntimeSpec, Result, RuntimeError};
@@ -190,7 +192,7 @@ impl AttemptRecoveryLifecycle {
                     terminal,
                 )?;
                 if node.side_effect.is_some() {
-                    SideEffectLifecycle::validate_terminal_evidence(
+                    validate_terminal_evidence(
                         runtime_spec,
                         run_id,
                         projections,
@@ -262,7 +264,7 @@ impl AttemptRecoveryLifecycle {
             });
         }
         if node.side_effect.is_some() {
-            match SideEffectLifecycle::open_attempt_disposition(
+            match open_attempt_disposition(
                 runtime_spec,
                 &view.run_admitted.run_id,
                 &view.projections,
