@@ -559,7 +559,7 @@ fn source_run_program_draft(
             let context = root.scope().declare_context(context)?;
             let deployed = root
                 .scope()
-                .side_effect_in_context::<ContextBoundDeployContractState, _, EvmContractContext>(
+                .side_effect::<ContextBoundDeployContractState, _>(
                     mfm_program::StateKey::new("deploy")?,
                     &context,
                     deploy,
@@ -570,11 +570,7 @@ fn source_run_program_draft(
                 .into_handle();
             let configured = root
                 .scope()
-                .side_effect_in_context::<
-                    ContextBoundConfigureContractState,
-                    _,
-                    EvmContractContext,
-                >(
+                .side_effect::<ContextBoundConfigureContractState, _>(
                     mfm_program::StateKey::new("configure")?,
                     &context,
                     configure,

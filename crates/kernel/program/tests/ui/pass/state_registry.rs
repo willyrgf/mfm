@@ -15,6 +15,7 @@ fn main() {
                 root.seed(mfm_program::SeedKey::new("input")?, types::seed()?)?;
             let result = root.scope().state::<TryPureState, _>(
                 mfm_program::StateKey::new("state")?,
+                mfm_program::NoContext,
                 TryConfig { multiplier: 2 },
                 input,
             )?;

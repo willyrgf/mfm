@@ -1,7 +1,7 @@
 error[E0277]: the trait bound `RemediationHandle<'_, '_, TryValue>: IntoStateInput<'_, '_, TryValue>` is not satisfied
-  --> tests/ui/fail/remediation_handle_as_forward_input.rs:44:61
+  --> tests/ui/fail/remediation_handle_as_forward_input.rs:46:61
    |
-44 |             let result = root.scope().state::<TryPureState, _>(
+46 |             let result = root.scope().state::<TryPureState, _>(
    |                                       -----                 ^ the trait `IntoStateInput<'_, '_, TryValue>` is not implemented for `RemediationHandle<'_, '_, TryValue>`
    |                                       |
    |                                       required by a bound introduced by this call

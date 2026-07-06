@@ -525,6 +525,7 @@ impl Operation for MultiplyOperation {
     ) -> program::Result<Self::Output<'p, 's>> {
         let result = builder.state::<MultiplyState, _>(
             StateKey::new("multiply-state")?,
+            NoContext,
             TestConfig {
                 multiplier: config.as_ref().multiplier,
             },
@@ -594,22 +595,18 @@ fn context_bound_draft(declare_second_context: bool) -> program::TypedProgramDra
                     network: "secondary".to_owned(),
                 })?;
             }
-            let produced = root
-                .scope()
-                .state_in_context::<ContextSourceState, _, ContractContext>(
-                    StateKey::new("context-source")?,
-                    &primary,
-                    TestConfig { multiplier: 3 },
-                    seed,
-                )?;
-            let consumed = root
-                .scope()
-                .state_in_context::<ContextConsumerState, _, ContractContext>(
-                    StateKey::new("context-consumer")?,
-                    &primary,
-                    TestConfig { multiplier: 5 },
-                    produced,
-                )?;
+            let produced = root.scope().state::<ContextSourceState, _>(
+                StateKey::new("context-source")?,
+                &primary,
+                TestConfig { multiplier: 3 },
+                seed,
+            )?;
+            let consumed = root.scope().state::<ContextConsumerState, _>(
+                StateKey::new("context-consumer")?,
+                &primary,
+                TestConfig { multiplier: 5 },
+                produced,
+            )?;
             root.bind_public_outputs(
                 PublicOutputKey::new("terminal")?,
                 &TestPublicOutputs { result: consumed },
@@ -635,6 +632,7 @@ fn fact_emitting_draft() -> program::TypedProgramDraft {
             )?;
             let result = root.scope().state::<FactEmittingState, _>(
                 StateKey::new("fact-emitter")?,
+                NoContext,
                 TestConfig { multiplier: 3 },
                 seed,
             )?;
@@ -670,6 +668,7 @@ fn side_effect_draft_with_verification(
             )?;
             let result = root.scope().side_effect::<MutatingState, _>(
                 StateKey::new("mutating-state")?,
+                NoContext,
                 TestConfig { multiplier: 3 },
                 seed,
                 ResourceClaim::manual_only(),
@@ -706,6 +705,8 @@ fn compensating_draft() -> program::TypedProgramDraft {
             let (forward, _remediation) = root
                 .scope()
                 .side_effect_with_compensation::<MutatingState, MutatingState, _, _, _>(
+                    NoContext,
+                    NoContext,
                     program::SideEffectNodeParams {
                         key: StateKey::new("mutating-state")?,
                         config: TestConfig { multiplier: 3 },
@@ -987,16 +988,15 @@ fn certification_rejects_no_context_state_consuming_context_bound_resource() {
             let context = root.scope().declare_context(ContractContext {
                 network: "primary".to_owned(),
             })?;
-            let produced = root
-                .scope()
-                .state_in_context::<ContextSourceState, _, ContractContext>(
-                    StateKey::new("context-source")?,
-                    &context,
-                    TestConfig { multiplier: 3 },
-                    seed,
-                )?;
+            let produced = root.scope().state::<ContextSourceState, _>(
+                StateKey::new("context-source")?,
+                &context,
+                TestConfig { multiplier: 3 },
+                seed,
+            )?;
             let consumed = root.scope().state::<MultiplyState, _>(
                 StateKey::new("plain-consumer")?,
+                NoContext,
                 TestConfig { multiplier: 5 },
                 produced,
             )?;

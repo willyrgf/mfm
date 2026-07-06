@@ -11,7 +11,7 @@ registered states, nested operations, and child scopes through that context, but
 cannot construct it or call `Operation::expand` directly with a raw `ScopeBuilder`.
 
 State transition contexts are explicit typed values. Domain crates opt in with `MfmContext`, set
-`StateSpec::Context`, declare values through `ScopeBuilder::declare_context`, and plan
-context-required states with `ScopeBuilder::state_in_context`. Declared contexts lower into the
-certified context table and context-bound cell metadata; ordinary state authoring remains
-`NoContext` by default.
+`StateSpec::Context`, declare values through `ScopeBuilder::declare_context`, and pass either
+`NoContext` or `&DeclaredContext<C>` to every state-planning API. Declared contexts lower into the
+certified context table and context-bound cell metadata; ordinary state authoring must pass
+`NoContext` explicitly.

@@ -222,6 +222,7 @@ fn app_fact_launch_plan_with_state_key(state_key: &str) -> TypedProgramLaunchPla
             )?;
             let result = root.scope().state::<AppFactState, _>(
                 StateKey::new(state_key)?,
+                NoContext,
                 AppFactStateConfig { multiplier: 2 },
                 input,
             )?;
