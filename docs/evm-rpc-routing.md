@@ -67,6 +67,11 @@ the semantic network id, expected chain id, observed chain id, selected source r
 The selected source and policy ids are audit provenance only. Replay and public output must not
 resolve them against current runtime config.
 
+Transport failures, HTTP status failures, JSON-RPC error objects, malformed responses, and source
+mismatches are classified as redacted provider diagnostics. Diagnostics may carry the stable EVM
+operation id and numeric status/error code, but never endpoint URLs, authorization headers, provider
+messages, response bodies, or runtime config paths.
+
 ## Signing
 
 Contract lifecycle configs carry only signer intent: non-secret `signer_ref` and expected signer

@@ -41,11 +41,11 @@ async fn rejects_chain_id_mismatch_without_leaking_source_details() {
     let error = client
         .chain_identity(&chain_request("mainnet", 1))
         .await
-        .expect_err("chain mismatch");
+        .expect_err("source mismatch");
 
     let rendered = format!("{error:?} {error}");
     let EvmCapabilityError::SourceMismatch { diagnostic } = error else {
-        panic!("expected chain mismatch error");
+        panic!("expected source mismatch error");
     };
     assert_eq!(diagnostic.stable_error_code(), "evm_source_mismatch");
     assert_eq!(
@@ -302,7 +302,7 @@ async fn code_read_rejects_chain_id_mismatch_without_code_authority() {
             block: EvmBlockSelector::Latest,
         })
         .await
-        .expect_err("chain mismatch");
+        .expect_err("source mismatch");
 
     assert!(matches!(error, EvmCapabilityError::SourceMismatch { .. }));
     assert_eq!(server.methods(), ["eth_chainId"]);

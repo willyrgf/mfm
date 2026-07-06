@@ -75,6 +75,66 @@ fn bitcoin_capability_backend_rejects_balance_anchor_drift() {
     assert!(error.message.contains(BTC_NEXT_HASH));
 }
 
+#[test]
+fn bitcoin_provider_diagnostic_maps_to_snapshot_error_code_and_details() {
+    let diagnostic = mfm_btc_capabilities::btc_diagnostic(
+        mfm_capabilities::ProviderDiagnosticCode::RpcHttpStatus,
+    )
+    .with_operation(diagnostic_id("scantxoutset"))
+    .with_field(
+        diagnostic_id("http_status"),
+        mfm_capabilities::ProviderDiagnosticValue::U64(403),
+    );
+
+    let error = portfolio_btc_capability_error(BtcCapabilityError::provider_failure(diagnostic));
+
+    assert_eq!(error.code, "bitcoin_rpc_http_status");
+    assert_eq!(
+        error.message,
+        "portfolio Bitcoin read capability failed: rpc_http_status operation=scantxoutset http_status=403"
+    );
+    assert_eq!(
+        error.redacted_details,
+        Some(serde_json::json!({
+            "diagnostic_kind": "provider_failure",
+            "provider_family": "bitcoin",
+            "code": "rpc_http_status",
+            "operation": "scantxoutset",
+            "fields": {
+                "http_status": 403,
+            },
+        }))
+    );
+    assert!(!error.fatal_attempt_failure);
+}
+
+#[test]
+fn source_mismatch_diagnostics_are_attempt_failures_for_each_provider_family() {
+    let btc_error = portfolio_btc_capability_error(BtcCapabilityError::SourceMismatch {
+        diagnostic: mfm_btc_capabilities::btc_diagnostic(
+            mfm_capabilities::ProviderDiagnosticCode::SourceMismatch,
+        ),
+    });
+    let evm_error = portfolio_evm_capability_error(EvmCapabilityError::SourceMismatch {
+        diagnostic: mfm_evm_capabilities::evm_diagnostic(
+            mfm_capabilities::ProviderDiagnosticCode::SourceMismatch,
+        ),
+    });
+
+    assert_eq!(btc_error.code, "bitcoin_source_mismatch");
+    assert_eq!(evm_error.code, "evm_source_mismatch");
+    assert_eq!(
+        btc_error.redacted_details.as_ref().expect("btc details")["diagnostic_kind"],
+        "provider_source_mismatch"
+    );
+    assert_eq!(
+        evm_error.redacted_details.as_ref().expect("evm details")["diagnostic_kind"],
+        "provider_source_mismatch"
+    );
+    assert!(btc_error.fatal_attempt_failure);
+    assert!(evm_error.fatal_attempt_failure);
+}
+
 fn bitcoin_observe_config() -> (NetworkConfig, ObserveBatchConfig) {
     let network = NetworkConfig::new(
         "bitcoin-mainnet".to_owned(),
@@ -119,6 +179,10 @@ fn bitcoin_observe_config() -> (NetworkConfig, ObserveBatchConfig) {
     };
     let config = ObserveBatchConfig::new(wallet, symbol, network.clone()).expect("observe config");
     (network, config)
+}
+
+fn diagnostic_id(value: &str) -> mfm_ids::LocalPublicId {
+    mfm_ids::LocalPublicId::new(value).expect("test diagnostic id")
 }
 
 fn poll_ready<F>(future: F) -> F::Output

@@ -478,12 +478,12 @@ async fn portfolio_chain_mismatch_fails_after_admission_with_redacted_diagnostic
         .error
         .diagnostic_ref
         .as_ref()
-        .expect("chain mismatch records diagnostic artifact");
+        .expect("source mismatch records diagnostic artifact");
     let details_digest = failed
         .error
         .public_details
         .as_ref()
-        .expect("chain mismatch records public details digest")
+        .expect("source mismatch records public details digest")
         .content_digest
         .clone();
     let diagnostic_artifact = store
@@ -550,7 +550,7 @@ async fn portfolio_observe_batch_chain_mismatch_is_attempt_failure() {
         .error
         .diagnostic_ref
         .as_ref()
-        .expect("chain mismatch records diagnostic artifact");
+        .expect("source mismatch records diagnostic artifact");
     let diagnostic_artifact = store
         .read_retained_artifact(&diagnostic_artifact_requirement(diagnostic))
         .await

@@ -9,10 +9,11 @@ use std::{fmt, sync::Arc};
 
 use alloy_primitives::{Address, U256};
 use mfm_btc_capabilities::{
-    BtcAddress, BtcBalanceReadProvider, BtcBalanceReadRequest, BtcChain, BtcChainGuard,
-    BtcChainHeadReadProvider, BtcChainHeadRequest, BtcHeadSelection, BtcNetworkId,
+    BtcAddress, BtcBalanceReadProvider, BtcBalanceReadRequest, BtcCapabilityError, BtcChain,
+    BtcChainGuard, BtcChainHeadReadProvider, BtcChainHeadRequest, BtcHeadSelection, BtcNetworkId,
     BtcSourceIdentity,
 };
+use mfm_capabilities::{ProviderDiagnosticCode, RedactedProviderDiagnostic};
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
     EvmBalanceReadProvider, EvmBalanceReadRequest, EvmBlockReadProvider, EvmBlockReadRequest,
@@ -936,32 +937,50 @@ fn wallet_btc_address(config: &ObserveBatchConfig) -> Result<BtcAddress, Portfol
 }
 
 fn portfolio_evm_capability_error(error: EvmCapabilityError) -> PortfolioReadError {
-    let details = match &error {
-        EvmCapabilityError::SourceMismatch { diagnostic } => {
-            Some(diagnostic.to_public_details_json())
+    match error {
+        EvmCapabilityError::InvalidRequest { .. } => PortfolioReadError::new(
+            "evm_invalid_request",
+            "portfolio EVM read capability request was invalid",
+        ),
+        EvmCapabilityError::Provider { diagnostic }
+        | EvmCapabilityError::SourceMismatch { diagnostic } => {
+            portfolio_provider_diagnostic_error("EVM", diagnostic)
         }
-        _ => None,
-    };
-    let error = PortfolioReadError::new(
-        "evm_capability_failed",
-        format!("portfolio EVM read capability failed: {error}"),
-    );
-    if let Some(details) = details {
-        error
-            .with_redacted_details(details)
-            .with_fatal_attempt_failure()
-    } else {
-        error
+        EvmCapabilityError::ReceiptPending => PortfolioReadError::new(
+            "evm_receipt_pending",
+            "portfolio EVM read transaction receipt was pending",
+        ),
     }
 }
 
-fn portfolio_btc_capability_error(
-    error: mfm_btc_capabilities::BtcCapabilityError,
+fn portfolio_btc_capability_error(error: BtcCapabilityError) -> PortfolioReadError {
+    match error {
+        BtcCapabilityError::InvalidRequest { .. } => PortfolioReadError::new(
+            "bitcoin_invalid_request",
+            "portfolio Bitcoin read capability request was invalid",
+        ),
+        BtcCapabilityError::Provider { diagnostic }
+        | BtcCapabilityError::SourceMismatch { diagnostic } => {
+            portfolio_provider_diagnostic_error("Bitcoin", diagnostic)
+        }
+    }
+}
+
+fn portfolio_provider_diagnostic_error(
+    provider_label: &str,
+    diagnostic: RedactedProviderDiagnostic,
 ) -> PortfolioReadError {
-    PortfolioReadError::new(
-        "bitcoin_capability_failed",
-        format!("portfolio Bitcoin read capability failed: {error}"),
+    let is_source_mismatch = diagnostic.code() == ProviderDiagnosticCode::SourceMismatch;
+    let error = PortfolioReadError::new(
+        diagnostic.stable_error_code(),
+        format!("portfolio {provider_label} read capability failed: {diagnostic}"),
     )
+    .with_redacted_details(diagnostic.to_public_details_json());
+    if is_source_mismatch {
+        error.with_fatal_attempt_failure()
+    } else {
+        error
+    }
 }
 
 fn missing_btc_provider() -> PortfolioReadError {

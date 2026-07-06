@@ -675,6 +675,11 @@ The CLI's process-level configuration is intentionally narrow.
 - Typed EVM contract requests use semantic `network_id` plus `expected_chain_id`; transports
   resolve `network_id` through the runtime config route registry and verify the observed chain id
   for every guarded live request.
+- Live BTC/EVM provider failures are reported with redacted diagnostic codes such as
+  `bitcoin_rpc_http_status`, `bitcoin_rpc_json_error`, `evm_rpc_http_status`, or
+  `evm_source_mismatch`. Diagnostics may include closed operation ids and numeric status/error
+  codes, but never RPC URLs, authorization headers, provider messages, request/response bodies, or
+  runtime config paths.
 - Typed EVM contract requests use non-secret `signer_ref`; app assembly resolves it against the
   runtime config signer registry when mutation workflows require signing.
 - Portfolio configs may also use `control_scope` when source-selection partitioning is part of the
