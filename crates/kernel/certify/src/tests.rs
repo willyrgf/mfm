@@ -215,6 +215,32 @@ impl PureState for MultiplyState {
     }
 }
 
+struct ConflictingMultiplyState {
+    config: TestConfig,
+}
+
+impl_test_state_spec!(
+    ConflictingMultiplyState,
+    effect = Pure,
+    caps = NoCaps,
+    kind = "multiply",
+    version = "mfm.certify.test.multiply.v1",
+    name = "mfm.certify.test.conflicting_multiply",
+    digest = 0x11,
+);
+
+impl PureState for ConflictingMultiplyState {
+    fn run(
+        &self,
+        input: Self::Input,
+        _context: &program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        Ok(TestValue {
+            amount: input.amount * self.config.multiplier,
+        })
+    }
+}
+
 struct ContextSourceState {
     config: TestConfig,
 }
@@ -535,6 +561,51 @@ impl Operation for MultiplyOperation {
     }
 }
 
+struct ConflictingMultiplyOperation;
+
+impl Operation for ConflictingMultiplyOperation {
+    type Config = OperationConfig;
+    type Input<'p, 's> = mfm_program::Handle<'p, 's, TestValue>;
+    type Output<'p, 's> = TestOperationOutputs<'p, 's>;
+
+    fn kind() -> program::Result<OperationKind> {
+        OperationKind::new(
+            "mfm.certify.test",
+            "operation-multiply",
+            DigestAlgorithm::Sha256JcsV1,
+            digest_byte(0x12),
+        )
+        .map_err(|error| program::PlanError::Key(error.to_string()))
+    }
+
+    fn version() -> program::Result<OperationVersion> {
+        OperationVersion::new("mfm.certify.test.operation_multiply.v1")
+            .map_err(|error| program::PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.certify.test.conflicting_operation_multiply"
+    }
+
+    fn expand<'p, 's>(
+        &self,
+        config: program::ValidatedConfig<Self::Config>,
+        input: Self::Input<'p, 's>,
+        builder: &mut mfm_program::OperationExpansion<'p, 's>,
+        _dispatch: mfm_program::OperationExpansionDispatch<Self>,
+    ) -> program::Result<Self::Output<'p, 's>> {
+        let result = builder.state::<MultiplyState, _>(
+            StateKey::new("multiply-state")?,
+            NoContext,
+            TestConfig {
+                multiplier: config.as_ref().multiplier,
+            },
+            input,
+        )?;
+        Ok(TestOperationOutputs { result })
+    }
+}
+
 fn reference_draft() -> program::TypedProgramDraft {
     let mut states = StateRegistryBuilder::new();
     states
@@ -744,6 +815,34 @@ fn config_ref_for_bytes<C: mfm_values::MfmConfig>(
         byte_len: bytes.as_bytes().len() as u64,
         media_type: spec::MediaType::new("application/json").expect("media type"),
     }
+}
+
+#[test]
+fn certification_registry_rejects_duplicate_state_kind_version() {
+    let mut registry = CertificationRegistry::new();
+    registry
+        .register_state::<MultiplyState>()
+        .expect("first state descriptor registers");
+
+    let error = registry
+        .register_state::<ConflictingMultiplyState>()
+        .expect_err("conflicting state kind/version rejects");
+
+    assert_invalid_semantic_contains(error, "state kind/version");
+}
+
+#[test]
+fn certification_registry_rejects_duplicate_operation_kind_version() {
+    let mut registry = CertificationRegistry::new();
+    registry
+        .register_operation::<MultiplyOperation>()
+        .expect("first operation descriptor registers");
+
+    let error = registry
+        .register_operation::<ConflictingMultiplyOperation>()
+        .expect_err("conflicting operation kind/version rejects");
+
+    assert_invalid_semantic_contains(error, "operation kind/version");
 }
 
 #[test]

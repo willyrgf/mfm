@@ -1370,6 +1370,9 @@ struct TrustedConfigRef {
 }
 
 /// Registry authority used when certifying an already-lowered typed spec.
+///
+/// Descriptor ids and descriptor kind/version pairs must both be unique. This matches typed
+/// authoring registry admission, but applies to every certification descriptor insertion path.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CertificationRegistry {
     states: BTreeMap<String, spec::StateDescriptorIdentity>,
@@ -1701,9 +1704,24 @@ impl CertificationRegistry {
                     format!("conflicting registered state descriptor {key}"),
                 ));
             }
-        } else {
-            self.states.insert(key, descriptor);
+            return Ok(());
         }
+        if let Some(existing) = self.states.values().find(|existing| {
+            existing.state_kind == descriptor.state_kind
+                && existing.state_version == descriptor.state_version
+        }) {
+            return Err(problem(
+                ProblemClass::InvalidSemanticTransition,
+                format!(
+                    "conflicting registered state kind/version {}@{}: descriptor {} conflicts with {}",
+                    descriptor.state_kind.as_str(),
+                    descriptor.state_version.as_str(),
+                    descriptor.descriptor_id.as_str(),
+                    existing.descriptor_id.as_str()
+                ),
+            ));
+        }
+        self.states.insert(key, descriptor);
         Ok(())
     }
 
@@ -1716,9 +1734,24 @@ impl CertificationRegistry {
                     format!("conflicting registered operation descriptor {key}"),
                 ));
             }
-        } else {
-            self.operations.insert(key, descriptor);
+            return Ok(());
         }
+        if let Some(existing) = self.operations.values().find(|existing| {
+            existing.operation_kind == descriptor.operation_kind
+                && existing.operation_version == descriptor.operation_version
+        }) {
+            return Err(problem(
+                ProblemClass::InvalidSemanticTransition,
+                format!(
+                    "conflicting registered operation kind/version {}@{}: descriptor {} conflicts with {}",
+                    descriptor.operation_kind.as_str(),
+                    descriptor.operation_version.as_str(),
+                    descriptor.descriptor_id.as_str(),
+                    existing.descriptor_id.as_str()
+                ),
+            ));
+        }
+        self.operations.insert(key, descriptor);
         Ok(())
     }
 
