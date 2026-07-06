@@ -99,10 +99,6 @@ use history::RuntimeRunView;
 #[cfg(test)]
 use runner_kit::{RunnerClaimBinding, RunnerPreparedInvocationBinding, RunnerSideEffectBinding};
 #[cfg(test)]
-use side_effect_driver::{
-    RuntimeSideEffectClaimAuthority, SideEffectEvidenceBuilder, SideEffectPrepareEvidence,
-};
-#[cfg(test)]
 use side_effect_lifecycle::{side_effect_projection_for_attempt, SideEffectAttemptView};
 
 /// Result type for typed runtime operations.

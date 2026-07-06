@@ -1,5 +1,0 @@
-error[E0425]: cannot find type `SideEffectPreparedInvocationPlan` in crate `mfm_runtime`
- --> tests/ui/fail/side_effect_prepared_invocation_plan_removed.rs:2:47
-  |
-2 |     let _ = core::mem::size_of::<mfm_runtime::SideEffectPreparedInvocationPlan<()>>();
-  |                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `mfm_runtime`
