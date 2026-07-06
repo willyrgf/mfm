@@ -30,6 +30,12 @@ const TEST_TRANSACTION_HASH: &str =
     "0x1111111111111111111111111111111111111111111111111111111111111111";
 const MISMATCH_HASH: &str = TEST_TRANSACTION_HASH;
 
+fn test_evm_provider_failure() -> EvmCapabilityError {
+    EvmCapabilityError::provider_failure(mfm_evm_capabilities::evm_diagnostic(
+        mfm_capabilities::ProviderDiagnosticCode::TransportFailed,
+    ))
+}
+
 fn evidence_for_guard(guard: &EvmChainGuard) -> RedactedEvmSourceEvidence {
     RedactedEvmSourceEvidence {
         network_id: guard.network_id().clone(),
@@ -1575,20 +1581,16 @@ impl EvmReceiptReadProvider for TestEvmProviders {
                             status: true,
                         }),
                         RecoveryReceiptMode::Pending => Err(EvmCapabilityError::ReceiptPending),
-                        RecoveryReceiptMode::ProviderFailure => {
-                            Err(EvmCapabilityError::redacted_provider_failure("test rpc"))
-                        }
+                        RecoveryReceiptMode::ProviderFailure => Err(test_evm_provider_failure()),
                     }
                 })
             }
             TestEvmProviderMode::ReceiptFailure => {
                 let reads = Arc::clone(&self.receipt_failure_reads);
                 Box::pin(async move {
-                    let mut reads = reads
-                        .lock()
-                        .map_err(|_| EvmCapabilityError::redacted_provider_failure("test evm"))?;
+                    let mut reads = reads.lock().map_err(|_| test_evm_provider_failure())?;
                     *reads += 1;
-                    Err(EvmCapabilityError::redacted_provider_failure("test evm"))
+                    Err(test_evm_provider_failure())
                 })
             }
             _ => unexpected_evm_call("read_receipt"),
@@ -3367,7 +3369,7 @@ async fn finality_rejects_mismatched_guard_evidence() {
         error,
         mfm_runtime::RuntimeError::InvalidRunnerOutputDiagnostic { .. }
     ));
-    assert!(error.to_string().contains("EVM source chain id"));
+    assert!(error.to_string().contains("EVM source evidence"));
 }
 
 #[test]

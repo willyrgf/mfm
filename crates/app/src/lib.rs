@@ -925,7 +925,11 @@ fn runtime_evm_transport_error(
 fn portfolio_runtime_config_capability_error(
     _error: mfm_runtime::RuntimeError,
 ) -> mfm_evm_capabilities::EvmCapabilityError {
-    mfm_evm_capabilities::EvmCapabilityError::redacted_provider_failure("runtime config")
+    mfm_evm_capabilities::EvmCapabilityError::provider_failure(
+        mfm_evm_capabilities::evm_diagnostic(
+            mfm_capabilities::ProviderDiagnosticCode::ProviderConfigurationInvalid,
+        ),
+    )
 }
 
 /// Builds an adapter-facing artifact read provider from a retained artifact reader.

@@ -1907,8 +1907,11 @@ async fn verified_chain_identity(
         .await?;
     chain.evidence.verify_guard(&guard)?;
     if chain.chain_id != expected_chain_id {
-        return Err(EvmCapabilityError::ChainMismatch {
-            evidence: chain.evidence.with_observed_chain_id(chain.chain_id),
+        return Err(EvmCapabilityError::SourceMismatch {
+            diagnostic: chain
+                .evidence
+                .with_observed_chain_id(chain.chain_id)
+                .source_mismatch_diagnostic(),
         }
         .into());
     }
@@ -6608,18 +6611,18 @@ impl From<mfm_program::StateError> for EvmContractAdapterError {
 impl From<EvmContractAdapterError> for mfm_runtime::RuntimeError {
     fn from(error: EvmContractAdapterError) -> Self {
         match error {
-            EvmContractAdapterError::EvmCapability(EvmCapabilityError::ChainMismatch {
-                evidence,
+            EvmContractAdapterError::EvmCapability(EvmCapabilityError::SourceMismatch {
+                diagnostic,
             }) => {
                 let message =
-                    EvmContractAdapterError::EvmCapability(EvmCapabilityError::ChainMismatch {
-                        evidence: evidence.clone(),
+                    EvmContractAdapterError::EvmCapability(EvmCapabilityError::SourceMismatch {
+                        diagnostic: diagnostic.clone(),
                     })
                     .to_string();
                 Self::InvalidRunnerOutputDiagnostic {
                     message,
                     details: mfm_runtime::RuntimeDiagnosticDetails::from_json(
-                        evidence.chain_mismatch_diagnostic_details(),
+                        diagnostic.to_public_details_json(),
                     ),
                 }
             }

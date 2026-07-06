@@ -937,8 +937,8 @@ fn wallet_btc_address(config: &ObserveBatchConfig) -> Result<BtcAddress, Portfol
 
 fn portfolio_evm_capability_error(error: EvmCapabilityError) -> PortfolioReadError {
     let details = match &error {
-        EvmCapabilityError::ChainMismatch { evidence } => {
-            Some(evidence.chain_mismatch_diagnostic_details())
+        EvmCapabilityError::SourceMismatch { diagnostic } => {
+            Some(diagnostic.to_public_details_json())
         }
         _ => None,
     };

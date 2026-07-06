@@ -15,9 +15,12 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 
+mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-evm-capabilities = { path = "../../evm-capabilities" }
 mfm-evm-core = { path = "../../evm-core" }
+mfm-ids = { path = "../../kernel/ids" }
 
 [dev-dependencies]
 tokio = { workspace = true }

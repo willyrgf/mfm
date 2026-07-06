@@ -27,7 +27,8 @@ use std::str::FromStr;
 use alloy_primitives::{Address, B256, U256};
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{
-    CapabilityError, CapabilitySpec, ExternalMutationAuthorityRole, ReadExternalRole,
+    CapabilityError, CapabilitySpec, ExternalMutationAuthorityRole, ProviderDiagnosticCode,
+    ProviderDiagnosticValue, ReadExternalRole, RedactedProviderDiagnostic,
 };
 use mfm_ids::{CapabilityKind, CapabilityVersion, DigestAlgorithm, LocalPublicId};
 
@@ -449,15 +450,29 @@ impl RedactedEvmSourceEvidence {
         }
     }
 
-    /// Returns closed redacted chain-mismatch diagnostic details.
-    pub fn chain_mismatch_diagnostic_details(&self) -> serde_json::Value {
-        serde_json::json!({
-            "network_id": self.network_id.to_string(),
-            "expected_chain_id": self.expected_chain_id,
-            "observed_chain_id": self.observed_chain_id,
-            "source_ref": self.source_ref.to_string(),
-            "policy_id": self.policy_id.to_string(),
-        })
+    /// Returns closed redacted source-mismatch diagnostic details.
+    pub fn source_mismatch_diagnostic(&self) -> RedactedProviderDiagnostic {
+        evm_diagnostic(ProviderDiagnosticCode::SourceMismatch)
+            .with_field(
+                evm_public_id("network_id"),
+                ProviderDiagnosticValue::Id(evm_public_id(self.network_id.as_str())),
+            )
+            .with_field(
+                evm_public_id("expected_chain_id"),
+                ProviderDiagnosticValue::U64(self.expected_chain_id),
+            )
+            .with_field(
+                evm_public_id("observed_chain_id"),
+                ProviderDiagnosticValue::U64(self.observed_chain_id),
+            )
+            .with_field(
+                evm_public_id("source_ref"),
+                ProviderDiagnosticValue::Id(evm_public_id(self.source_ref.as_str())),
+            )
+            .with_field(
+                evm_public_id("policy_id"),
+                ProviderDiagnosticValue::Id(evm_public_id(self.policy_id.as_str())),
+            )
     }
 
     /// Verifies that provider evidence matches the semantic request guard.
@@ -468,8 +483,8 @@ impl RedactedEvmSourceEvidence {
         {
             Ok(())
         } else {
-            Err(EvmCapabilityError::ChainMismatch {
-                evidence: self.clone(),
+            Err(EvmCapabilityError::SourceMismatch {
+                diagnostic: self.source_mismatch_diagnostic(),
             })
         }
     }
@@ -825,13 +840,6 @@ pub enum EvmInvalidRequest {
     EmptySignedPayload,
 }
 
-/// Closed provider failure reasons.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EvmProviderFailure {
-    /// Provider failed without exposing concrete source details.
-    Failed,
-}
-
 /// Redaction-safe EVM capability error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EvmCapabilityError {
@@ -842,16 +850,16 @@ pub enum EvmCapabilityError {
         reason: EvmInvalidRequest,
     },
     /// Provider failed without exposing concrete source details.
-    #[error("EVM capability provider failed")]
+    #[error("EVM capability provider failed: {diagnostic}")]
     Provider {
-        /// Closed provider failure reason.
-        reason: EvmProviderFailure,
+        /// Closed redacted provider diagnostic.
+        diagnostic: RedactedProviderDiagnostic,
     },
     /// Provider evidence did not match the semantic request guard.
-    #[error("EVM source chain id did not match request guard")]
-    ChainMismatch {
-        /// Closed redacted mismatch evidence.
-        evidence: RedactedEvmSourceEvidence,
+    #[error("EVM source evidence did not match request guard: {diagnostic}")]
+    SourceMismatch {
+        /// Closed redacted source-mismatch diagnostic.
+        diagnostic: RedactedProviderDiagnostic,
     },
     /// A transaction receipt is not available yet.
     #[error("EVM transaction receipt is pending")]
@@ -859,12 +867,27 @@ pub enum EvmCapabilityError {
 }
 
 impl EvmCapabilityError {
-    /// Builds a redacted provider failure, discarding source details.
-    pub fn redacted_provider_failure(_source: impl fmt::Display) -> Self {
-        Self::Provider {
-            reason: EvmProviderFailure::Failed,
+    /// Builds a provider failure from a closed redacted diagnostic.
+    pub fn provider_failure(diagnostic: RedactedProviderDiagnostic) -> Self {
+        Self::Provider { diagnostic }
+    }
+
+    /// Returns the closed redacted provider diagnostic carried by this error.
+    pub const fn redacted_diagnostic(&self) -> Option<&RedactedProviderDiagnostic> {
+        match self {
+            Self::Provider { diagnostic } | Self::SourceMismatch { diagnostic } => Some(diagnostic),
+            Self::InvalidRequest { .. } | Self::ReceiptPending => None,
         }
     }
+}
+
+/// Builds a closed redacted EVM provider diagnostic.
+pub fn evm_diagnostic(code: ProviderDiagnosticCode) -> RedactedProviderDiagnostic {
+    RedactedProviderDiagnostic::new(evm_public_id("evm"), code)
+}
+
+fn evm_public_id(value: &str) -> LocalPublicId {
+    LocalPublicId::new(value).expect("EVM diagnostic id must be checked public text")
 }
 
 fn invalid_identifier(_source: mfm_ids::CheckedStringError) -> EvmCapabilityError {
@@ -928,8 +951,11 @@ mod tests {
             .expect_err("mismatch");
         let rendered = format!("{error:?} {error}");
 
-        assert!(matches!(error, EvmCapabilityError::ChainMismatch { .. }));
-        assert!(rendered.contains("observed_chain_id: 2"));
+        let EvmCapabilityError::SourceMismatch { diagnostic } = error else {
+            panic!("expected source mismatch");
+        };
+        assert_eq!(diagnostic.stable_error_code(), "evm_source_mismatch");
+        assert!(diagnostic.summary().contains("observed_chain_id=2"));
         assert!(!rendered.contains("http://"));
         assert!(!rendered.contains("Bearer"));
     }

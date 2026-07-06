@@ -33,24 +33,30 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use alloy_primitives::{keccak256, B256};
+use mfm_capabilities::{
+    ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
+};
 use mfm_evm_capabilities::{
-    EvmBalanceReadProvider, EvmBalanceReadRequest, EvmBalanceReadResponse, EvmBlockReadProvider,
-    EvmBlockReadRequest, EvmBlockReadResponse, EvmBlockSelector, EvmCallReadProvider,
-    EvmCallReadRequest, EvmCallReadResponse, EvmCapabilityError, EvmCapabilityFuture,
-    EvmChainGuard, EvmChainIdentityProvider, EvmChainIdentityRequest, EvmChainIdentityResponse,
-    EvmCodeReadProvider, EvmCodeReadRequest, EvmCodeReadResponse, EvmFeeReadProvider,
-    EvmFeeReadRequest, EvmFeeReadResponse, EvmGasEstimateProvider, EvmGasEstimateRequest,
-    EvmGasEstimateResponse, EvmLogEntry, EvmLogsReadProvider, EvmLogsReadRequest,
-    EvmLogsReadResponse, EvmNetworkId, EvmNonceOccupancy, EvmNonceOccupancyReadProvider,
-    EvmNonceOccupancyReadRequest, EvmNonceOccupancyReadResponse, EvmNonceReadProvider,
-    EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider, EvmReceiptReadRequest,
-    EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef, EvmTransactionSubmitProvider,
-    EvmTransactionSubmitRequest, EvmTransactionSubmitResponse, RedactedEvmSourceEvidence,
+    evm_diagnostic, EvmBalanceReadProvider, EvmBalanceReadRequest, EvmBalanceReadResponse,
+    EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockReadResponse, EvmBlockSelector,
+    EvmCallReadProvider, EvmCallReadRequest, EvmCallReadResponse, EvmCapabilityError,
+    EvmCapabilityFuture, EvmChainGuard, EvmChainIdentityProvider, EvmChainIdentityRequest,
+    EvmChainIdentityResponse, EvmCodeReadProvider, EvmCodeReadRequest, EvmCodeReadResponse,
+    EvmFeeReadProvider, EvmFeeReadRequest, EvmFeeReadResponse, EvmGasEstimateProvider,
+    EvmGasEstimateRequest, EvmGasEstimateResponse, EvmLogEntry, EvmLogsReadProvider,
+    EvmLogsReadRequest, EvmLogsReadResponse, EvmNetworkId, EvmNonceOccupancy,
+    EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest, EvmNonceOccupancyReadResponse,
+    EvmNonceReadProvider, EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider,
+    EvmReceiptReadRequest, EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef,
+    EvmTransactionSubmitProvider, EvmTransactionSubmitRequest, EvmTransactionSubmitResponse,
+    RedactedEvmSourceEvidence,
 };
 use mfm_evm_core::encoding::parse_u256_hex;
 use mfm_evm_core::hex::{bytes_to_hex_prefixed, hex_to_bytes};
 use mfm_evm_core::tx::{parse_u128_quantity, parse_u64_quantity};
+use mfm_ids::LocalPublicId;
 use serde_json::{json, Value};
+use tracing::debug;
 
 /// Result type for EVM transport setup.
 pub type TransportResult<T> = std::result::Result<T, EvmTransportError>;
@@ -533,7 +539,7 @@ impl EvmJsonRpcClient {
                     .ok_or(EvmTransportError::InvalidResponse)
                     .and_then(parse_u128)?,
             ),
-            Err(EvmTransportError::RequestFailed) => None,
+            Err(error) if error.can_try_next_source() => None,
             Err(error) => return Err(error),
         };
         let latest_block = match self
@@ -545,7 +551,7 @@ impl EvmJsonRpcClient {
             .await
         {
             Ok(value) => Some(value),
-            Err(EvmTransportError::RequestFailed) => None,
+            Err(error) if error.can_try_next_source() => None,
             Err(error) => return Err(error),
         };
         let base_fee_per_gas = latest_block
@@ -741,18 +747,19 @@ impl EvmJsonRpcClient {
                     });
                 }
                 Ok(chain_id) => {
-                    return Err(EvmTransportError::ChainIdMismatch {
-                        evidence: RedactedEvmSourceEvidence {
-                            network_id: guard.network_id().clone(),
-                            expected_chain_id: guard.expected_chain_id(),
-                            observed_chain_id: chain_id,
-                            source_ref: source.id.clone(),
-                            policy_id: route.policy_id().clone(),
-                        },
+                    let evidence = RedactedEvmSourceEvidence {
+                        network_id: guard.network_id().clone(),
+                        expected_chain_id: guard.expected_chain_id(),
+                        observed_chain_id: chain_id,
+                        source_ref: source.id.clone(),
+                        policy_id: route.policy_id().clone(),
+                    };
+                    return Err(EvmTransportError::SourceMismatch {
+                        diagnostic: evidence.source_mismatch_diagnostic(),
                     });
                 }
-                Err(EvmTransportError::RequestFailed) => {
-                    last_failure = EvmTransportError::RequestFailed;
+                Err(error) if error.can_try_next_source() => {
+                    last_failure = error;
                 }
                 Err(error) => return Err(error),
             }
@@ -774,6 +781,7 @@ impl EvmJsonRpcClient {
         method: &'static str,
         params: Value,
     ) -> TransportResult<Value> {
+        let operation = operation_id(method);
         let mut request = self.client.post(&source.rpc_url).json(&json!({
             "jsonrpc": "2.0",
             "id": 1u64,
@@ -783,24 +791,106 @@ impl EvmJsonRpcClient {
         if let Some(authorization) = &source.authorization {
             request = request.header(reqwest::header::AUTHORIZATION, authorization);
         }
+        debug!(operation = %operation, "evm rpc request");
         let response = request
             .send()
             .await
-            .map_err(|_| EvmTransportError::RequestFailed)?;
+            .map_err(|_| EvmTransportError::TransportFailed {
+                operation: operation.clone(),
+            })?;
+        let status = response.status().as_u16();
         if !response.status().is_success() {
-            return Err(EvmTransportError::RequestFailed);
+            return Err(EvmTransportError::RpcHttpStatus { operation, status });
         }
         let body = response
             .json::<Value>()
             .await
             .map_err(|_| EvmTransportError::InvalidResponse)?;
-        if body.get("error").is_some() {
-            return Err(EvmTransportError::RequestFailed);
+        if let Some(error) = body.get("error") {
+            let code = error
+                .get("code")
+                .and_then(Value::as_i64)
+                .ok_or(EvmTransportError::InvalidResponse)?;
+            return Err(EvmTransportError::RpcJsonError { operation, code });
         }
         body.get("result")
             .cloned()
-            .ok_or(EvmTransportError::InvalidResponse)
+            .ok_or(EvmTransportError::ResponseMissingResult { operation })
     }
+}
+
+impl EvmTransportError {
+    fn can_try_next_source(&self) -> bool {
+        matches!(
+            self,
+            Self::TransportFailed { .. } | Self::RpcHttpStatus { .. } | Self::RpcJsonError { .. }
+        )
+    }
+
+    fn into_provider_diagnostic(self) -> RedactedProviderDiagnostic {
+        match self {
+            Self::InvalidRegistry => {
+                evm_diagnostic(ProviderDiagnosticCode::ProviderConfigurationInvalid)
+            }
+            Self::PolicyUnavailable | Self::RouteUnavailable => {
+                evm_diagnostic(ProviderDiagnosticCode::RouteUnavailable)
+            }
+            Self::SourceUnavailable => evm_diagnostic(ProviderDiagnosticCode::SourceUnavailable),
+            Self::SourceNotAllowed => evm_diagnostic(ProviderDiagnosticCode::SourceNotAllowed),
+            Self::SourceMismatch { diagnostic } => diagnostic,
+            Self::TransportFailed { operation } => {
+                evm_diagnostic(ProviderDiagnosticCode::TransportFailed).with_operation(operation)
+            }
+            Self::RpcHttpStatus { operation, status } => {
+                evm_diagnostic(ProviderDiagnosticCode::RpcHttpStatus)
+                    .with_operation(operation)
+                    .with_field(
+                        diagnostic_id("http_status"),
+                        ProviderDiagnosticValue::U64(u64::from(status)),
+                    )
+            }
+            Self::RpcJsonError { operation, code } => {
+                evm_diagnostic(ProviderDiagnosticCode::RpcJsonError)
+                    .with_operation(operation)
+                    .with_field(
+                        diagnostic_id("rpc_code"),
+                        ProviderDiagnosticValue::I64(code),
+                    )
+            }
+            Self::InvalidResponse => evm_diagnostic(ProviderDiagnosticCode::ResponseInvalid),
+            Self::ResponseMissingResult { operation } => {
+                evm_diagnostic(ProviderDiagnosticCode::ResponseMissingResult)
+                    .with_operation(operation)
+            }
+            Self::ReceiptPending => evm_diagnostic(ProviderDiagnosticCode::OperationIncomplete)
+                .with_operation(diagnostic_id("eth_get_transaction_receipt")),
+        }
+    }
+}
+
+fn operation_id(method: &'static str) -> LocalPublicId {
+    match method {
+        "eth_chainId" => diagnostic_id("eth_chain_id"),
+        "web3_clientVersion" => diagnostic_id("web3_client_version"),
+        "eth_getBlockByHash" => diagnostic_id("eth_get_block_by_hash"),
+        "eth_getBlockByNumber" => diagnostic_id("eth_get_block_by_number"),
+        "eth_call" => diagnostic_id("eth_call"),
+        "eth_getCode" => diagnostic_id("eth_get_code"),
+        "eth_getBalance" => diagnostic_id("eth_get_balance"),
+        "eth_getTransactionCount" => diagnostic_id("eth_get_transaction_count"),
+        "eth_gasPrice" => diagnostic_id("eth_gas_price"),
+        "eth_maxPriorityFeePerGas" => diagnostic_id("eth_max_priority_fee_per_gas"),
+        "eth_estimateGas" => diagnostic_id("eth_estimate_gas"),
+        "eth_getLogs" => diagnostic_id("eth_get_logs"),
+        "eth_sendRawTransaction" => diagnostic_id("eth_send_raw_transaction"),
+        "eth_getTransactionReceipt" => diagnostic_id("eth_get_transaction_receipt"),
+        "eth_getTransactionByHash" => diagnostic_id("eth_get_transaction_by_hash"),
+        _ => diagnostic_id("evm_rpc"),
+    }
+}
+
+fn diagnostic_id(value: &str) -> LocalPublicId {
+    LocalPublicId::new(value).expect("EVM diagnostic label must be checked public text")
 }
 
 impl fmt::Debug for EvmJsonRpcClient {
@@ -920,10 +1010,10 @@ impl_provider!(
 fn capability_error_from_transport(error: EvmTransportError) -> EvmCapabilityError {
     match error {
         EvmTransportError::ReceiptPending => EvmCapabilityError::ReceiptPending,
-        EvmTransportError::ChainIdMismatch { evidence } => {
-            EvmCapabilityError::ChainMismatch { evidence }
+        EvmTransportError::SourceMismatch { diagnostic } => {
+            EvmCapabilityError::SourceMismatch { diagnostic }
         }
-        other => EvmCapabilityError::redacted_provider_failure(other),
+        other => EvmCapabilityError::provider_failure(other.into_provider_diagnostic()),
     }
 }
 
@@ -1071,18 +1161,43 @@ pub enum EvmTransportError {
     /// Requested source is not allowed by the policy.
     #[error("EVM source was not allowed by policy")]
     SourceNotAllowed,
-    /// Source chain id did not match the expected chain.
-    #[error("EVM source chain id did not match expected chain")]
-    ChainIdMismatch {
-        /// Closed redacted mismatch evidence.
-        evidence: RedactedEvmSourceEvidence,
+    /// Source evidence did not match the expected chain.
+    #[error("EVM source evidence did not match expected chain")]
+    SourceMismatch {
+        /// Closed redacted source-mismatch diagnostic.
+        diagnostic: RedactedProviderDiagnostic,
     },
-    /// JSON-RPC request failed.
+    /// JSON-RPC transport request failed before a protocol response was available.
     #[error("EVM JSON-RPC request failed")]
-    RequestFailed,
+    TransportFailed {
+        /// Redaction-safe operation id.
+        operation: LocalPublicId,
+    },
+    /// JSON-RPC endpoint returned a non-success HTTP status.
+    #[error("EVM JSON-RPC HTTP status {status}")]
+    RpcHttpStatus {
+        /// Redaction-safe operation id.
+        operation: LocalPublicId,
+        /// HTTP status code.
+        status: u16,
+    },
+    /// JSON-RPC endpoint returned an error object.
+    #[error("EVM JSON-RPC error {code}")]
+    RpcJsonError {
+        /// Redaction-safe operation id.
+        operation: LocalPublicId,
+        /// JSON-RPC error code.
+        code: i64,
+    },
     /// JSON-RPC response failed contract validation.
     #[error("EVM JSON-RPC response was invalid")]
     InvalidResponse,
+    /// JSON-RPC response did not contain a result.
+    #[error("EVM JSON-RPC response missing result")]
+    ResponseMissingResult {
+        /// Redaction-safe operation id.
+        operation: LocalPublicId,
+    },
     /// Transaction receipt is not yet available.
     #[error("EVM transaction receipt is pending")]
     ReceiptPending,

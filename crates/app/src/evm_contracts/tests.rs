@@ -51,6 +51,12 @@ const TEST_SIGNER_HEX: &str = "4c0883a69102937d6231471b5dbb6204fe512961708279c2f
 type ContractRunStore = store::AsyncInMemoryRunStore;
 type ContractRunServices = RunServices<ContractRunStore, ContractArtifactOverlay>;
 
+fn test_evm_provider_failure() -> EvmCapabilityError {
+    EvmCapabilityError::provider_failure(mfm_evm_capabilities::evm_diagnostic(
+        mfm_capabilities::ProviderDiagnosticCode::TransportFailed,
+    ))
+}
+
 fn evm_forbidden_runtime_terms() -> Vec<String> {
     vec![
         ["raw", "_transaction"].concat(),
@@ -984,10 +990,7 @@ impl TestEvmProvider {
         if !self.fail_repeated_prepare_reads {
             return Ok(());
         }
-        let mut reads = self
-            .reads
-            .lock()
-            .map_err(|_| EvmCapabilityError::redacted_provider_failure("test evm"))?;
+        let mut reads = self.reads.lock().map_err(|_| test_evm_provider_failure())?;
         let count = match kind {
             TestPrepareReadKind::Nonce => &mut reads.nonce,
             TestPrepareReadKind::Fee => &mut reads.fee,
@@ -995,7 +998,7 @@ impl TestEvmProvider {
         };
         *count += 1;
         if *count > 1 {
-            Err(EvmCapabilityError::redacted_provider_failure("test evm"))
+            Err(test_evm_provider_failure())
         } else {
             Ok(())
         }
@@ -1127,18 +1130,13 @@ impl EvmReceiptReadProvider for TestEvmProvider {
         let reads = Arc::clone(&self.reads);
         if !self.mutation {
             return Box::pin(async move {
-                let mut reads = reads
-                    .lock()
-                    .map_err(|_| EvmCapabilityError::redacted_provider_failure("test evm"))?;
+                let mut reads = reads.lock().map_err(|_| test_evm_provider_failure())?;
                 reads.receipt += 1;
-                Err(EvmCapabilityError::redacted_provider_failure("test evm"))
+                Err(test_evm_provider_failure())
             });
         }
         Box::pin(async move {
-            let mut reads = self
-                .reads
-                .lock()
-                .map_err(|_| EvmCapabilityError::redacted_provider_failure("test evm"))?;
+            let mut reads = self.reads.lock().map_err(|_| test_evm_provider_failure())?;
             reads.receipt += 1;
             Ok(EvmReceiptReadResponse {
                 evidence: self.evidence(&request.guard),
@@ -1218,7 +1216,7 @@ impl EvmLogsReadProvider for TestEvmProvider {
 }
 
 fn failed_evm<'a, T>() -> EvmCapabilityFuture<'a, T> {
-    Box::pin(async { Err(EvmCapabilityError::redacted_provider_failure("test evm")) })
+    Box::pin(async { Err(test_evm_provider_failure()) })
 }
 
 async fn wait_for_live_execution_claim<S>(

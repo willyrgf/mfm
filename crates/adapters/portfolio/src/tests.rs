@@ -206,12 +206,18 @@ impl BtcBalanceReadProvider for MockPortfolioBtc {
 
 struct UnavailablePortfolioEvm;
 
+fn unavailable_evm_error() -> EvmCapabilityError {
+    EvmCapabilityError::provider_failure(mfm_evm_capabilities::evm_diagnostic(
+        mfm_capabilities::ProviderDiagnosticCode::SourceUnavailable,
+    ))
+}
+
 impl EvmBlockReadProvider for UnavailablePortfolioEvm {
     fn read_block<'a>(
         &'a self,
         _request: &'a EvmBlockReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmBlockReadResponse> {
-        Box::pin(async { Err(EvmCapabilityError::redacted_provider_failure("unused")) })
+        Box::pin(async { Err(unavailable_evm_error()) })
     }
 }
 
@@ -220,7 +226,7 @@ impl EvmBalanceReadProvider for UnavailablePortfolioEvm {
         &'a self,
         _request: &'a EvmBalanceReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmBalanceReadResponse> {
-        Box::pin(async { Err(EvmCapabilityError::redacted_provider_failure("unused")) })
+        Box::pin(async { Err(unavailable_evm_error()) })
     }
 }
 
@@ -229,7 +235,7 @@ impl EvmCallReadProvider for UnavailablePortfolioEvm {
         &'a self,
         _request: &'a EvmCallReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmCallReadResponse> {
-        Box::pin(async { Err(EvmCapabilityError::redacted_provider_failure("unused")) })
+        Box::pin(async { Err(unavailable_evm_error()) })
     }
 }
 

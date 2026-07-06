@@ -10,6 +10,10 @@ const HASH_HEX: &str = "0x111111111111111111111111111111111111111111111111111111
 const OCCUPYING_HASH_HEX: &str =
     "0x2222222222222222222222222222222222222222222222222222222222222222";
 
+fn evm_response_invalid_error() -> EvmCapabilityError {
+    EvmCapabilityError::provider_failure(evm_diagnostic(ProviderDiagnosticCode::ResponseInvalid))
+}
+
 #[tokio::test]
 async fn selects_source_by_policy_and_records_redacted_evidence() {
     let server = TestRpcServer::spawn("0x1").await;
@@ -40,16 +44,68 @@ async fn rejects_chain_id_mismatch_without_leaking_source_details() {
         .expect_err("chain mismatch");
 
     let rendered = format!("{error:?} {error}");
-    let EvmCapabilityError::ChainMismatch { evidence } = error else {
+    let EvmCapabilityError::SourceMismatch { diagnostic } = error else {
         panic!("expected chain mismatch error");
     };
-    assert_eq!(evidence.network_id.as_str(), "mainnet");
-    assert_eq!(evidence.expected_chain_id, 1);
-    assert_eq!(evidence.observed_chain_id, 2);
-    assert_eq!(evidence.source_ref.as_str(), "primary");
-    assert_eq!(evidence.policy_id.as_str(), "mainnet");
+    assert_eq!(diagnostic.stable_error_code(), "evm_source_mismatch");
+    assert_eq!(
+        diagnostic.to_public_details_json()["fields"],
+        serde_json::json!({
+            "expected_chain_id": 1,
+            "network_id": "mainnet",
+            "observed_chain_id": 2,
+            "policy_id": "mainnet",
+            "source_ref": "primary",
+        })
+    );
     assert!(!rendered.contains(&server.url));
     assert!(!rendered.contains("Bearer"));
+}
+
+#[tokio::test]
+async fn classifies_http_status_failure_without_body() {
+    let server = TestRpcServer::spawn_failure().await;
+    let client = client_for(&server.url, "primary", "mainnet", 1);
+
+    let error = client
+        .chain_identity(&chain_request("mainnet", 1))
+        .await
+        .expect_err("provider failure");
+    let rendered = format!("{error:?} {error}");
+    let EvmCapabilityError::Provider { diagnostic } = error else {
+        panic!("expected provider diagnostic");
+    };
+
+    assert_eq!(diagnostic.stable_error_code(), "evm_rpc_http_status");
+    assert_eq!(
+        diagnostic.summary(),
+        "rpc_http_status operation=eth_chain_id http_status=500"
+    );
+    assert!(!rendered.contains(&server.url));
+    assert!(!rendered.contains("top-secret"));
+}
+
+#[tokio::test]
+async fn classifies_json_rpc_failure_without_message() {
+    let server = TestRpcServer::spawn_json_rpc_failure().await;
+    let client = client_for(&server.url, "primary", "mainnet", 1);
+
+    let error = client
+        .chain_identity(&chain_request("mainnet", 1))
+        .await
+        .expect_err("provider failure");
+    let rendered = format!("{error:?} {error}");
+    let EvmCapabilityError::Provider { diagnostic } = error else {
+        panic!("expected provider diagnostic");
+    };
+
+    assert_eq!(diagnostic.stable_error_code(), "evm_rpc_json_error");
+    assert_eq!(
+        diagnostic.summary(),
+        "rpc_json_error operation=eth_chain_id rpc_code=-32601"
+    );
+    assert!(!rendered.contains("secret provider message"));
+    assert!(!rendered.contains("top-secret"));
 }
 
 #[tokio::test]
@@ -248,7 +304,7 @@ async fn code_read_rejects_chain_id_mismatch_without_code_authority() {
         .await
         .expect_err("chain mismatch");
 
-    assert!(matches!(error, EvmCapabilityError::ChainMismatch { .. }));
+    assert!(matches!(error, EvmCapabilityError::SourceMismatch { .. }));
     assert_eq!(server.methods(), ["eth_chainId"]);
 }
 
@@ -338,10 +394,7 @@ async fn rejects_explicit_block_identity_mismatch() {
         })
         .await
         .expect_err("number mismatch");
-    assert_eq!(
-        number_error,
-        EvmCapabilityError::redacted_provider_failure(EvmTransportError::InvalidResponse)
-    );
+    assert_eq!(number_error, evm_response_invalid_error());
 
     let hash_error = client
         .read_block(&EvmBlockReadRequest {
@@ -350,10 +403,7 @@ async fn rejects_explicit_block_identity_mismatch() {
         })
         .await
         .expect_err("hash mismatch");
-    assert_eq!(
-        hash_error,
-        EvmCapabilityError::redacted_provider_failure(EvmTransportError::InvalidResponse)
-    );
+    assert_eq!(hash_error, evm_response_invalid_error());
 }
 
 #[tokio::test]
@@ -369,10 +419,7 @@ async fn rejects_receipt_transaction_hash_mismatch() {
         .await
         .expect_err("receipt hash mismatch");
 
-    assert_eq!(
-        error,
-        EvmCapabilityError::redacted_provider_failure(EvmTransportError::InvalidResponse)
-    );
+    assert_eq!(error, evm_response_invalid_error());
 }
 
 #[tokio::test]
@@ -391,10 +438,7 @@ async fn rejects_log_entries_that_contradict_filter() {
         .await
         .expect_err("log filter mismatch");
 
-    assert_eq!(
-        error,
-        EvmCapabilityError::redacted_provider_failure(EvmTransportError::InvalidResponse)
-    );
+    assert_eq!(error, evm_response_invalid_error());
 }
 
 #[tokio::test]
@@ -540,6 +584,10 @@ impl TestRpcServer {
 
     async fn spawn_failure() -> Self {
         Self::spawn_with_mode(TestRpcMode::Failure).await
+    }
+
+    async fn spawn_json_rpc_failure() -> Self {
+        Self::spawn_with_mode(TestRpcMode::JsonRpcFailure).await
     }
 
     async fn spawn_with_mode(mode: TestRpcMode) -> Self {
@@ -709,6 +757,22 @@ impl TestRpcServer {
                             "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n"
                                 .to_owned()
                         }
+                        TestRpcMode::JsonRpcFailure => {
+                            let body = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "error": {
+                                    "code": -32601,
+                                    "message": "secret provider message",
+                                },
+                            })
+                            .to_string();
+                            format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                                body.len(),
+                                body
+                            )
+                        }
                     };
                     stream.write_all(response.as_bytes()).await.expect("write");
                 });
@@ -736,6 +800,7 @@ enum TestRpcMode {
     ReceiptHashMismatch { chain_id: &'static str },
     LogFilterMismatch { chain_id: &'static str },
     Failure,
+    JsonRpcFailure,
 }
 
 fn request_complete(bytes: &[u8]) -> bool {

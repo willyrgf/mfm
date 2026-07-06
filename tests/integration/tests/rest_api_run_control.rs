@@ -179,11 +179,17 @@ fn first_failed_attempt(
 
 fn portfolio_chain_mismatch_public_details() -> serde_json::Value {
     serde_json::json!({
-        "network_id": PORTFOLIO_NETWORK_ID,
-        "expected_chain_id": 31337,
-        "observed_chain_id": 31338,
-        "source_ref": PORTFOLIO_NETWORK_ID,
-        "policy_id": PORTFOLIO_NETWORK_ID,
+        "diagnostic_kind": "provider_source_mismatch",
+        "provider_family": "evm",
+        "code": "source_mismatch",
+        "operation": null,
+        "fields": {
+            "network_id": PORTFOLIO_NETWORK_ID,
+            "expected_chain_id": 31337,
+            "observed_chain_id": 31338,
+            "source_ref": PORTFOLIO_NETWORK_ID,
+            "policy_id": PORTFOLIO_NETWORK_ID,
+        },
     })
 }
 
