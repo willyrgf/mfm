@@ -1,9 +1,0 @@
-error[E0451]: fields `_operation` and `_private` of struct `OperationRegistrationEvidence` are private
-  --> tests/ui/fail/forged_operation_registration_evidence.rs:10:9
-   |
- 9 |     let _forged = mfm_program::OperationRegistrationEvidence::<TryOperation> {
-   |                   ---------------------------------------------------------- in this type
-10 |         _operation: PhantomData,
-   |         ^^^^^^^^^^ private field
-11 |         _private: (),
-   |         ^^^^^^^^ private field

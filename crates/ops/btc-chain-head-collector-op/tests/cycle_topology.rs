@@ -4,7 +4,7 @@ use mfm_op_btc_chain_head_collector::{
     CollectorCheckpointFact, ObserveBtcChainHeadState, QueryCollectorCheckpointState,
     RecordBtcChainHeadFactState, RecordCollectorCheckpointState,
 };
-use mfm_program::{InputBindingNodeRef, MfmFactType as _, OperationRegistry as _, StateSpec as _};
+use mfm_program::{InputBindingNodeRef, MfmFactType as _, StateSpec as _};
 
 #[test]
 fn cycle_topology_is_deterministic_and_linear() {
@@ -129,10 +129,9 @@ fn descriptor_allow_lists_are_attached_to_fact_recording_nodes_and_survive_certi
 #[test]
 fn operation_descriptor_registers() {
     let registry = btc_chain_head_collector_operation_registry().expect("operation registry");
-    let registered = registry
-        .registered_operation::<BtcChainHeadCollectorCycleOperation>()
+    let descriptor = registry
+        .operation_descriptor::<BtcChainHeadCollectorCycleOperation>()
         .expect("operation descriptor");
-    let descriptor = registered.descriptor();
 
     assert_eq!(
         descriptor.name(),

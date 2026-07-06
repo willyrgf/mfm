@@ -183,8 +183,8 @@ A state type is executable only after framework registration validates:
 - side-effect contract when applicable
 - runner kind and executable identity
 
-Planning requires registered state or operation evidence. Runtime requires the certified descriptor
-identity and the registered runner identity to match the stored spec.
+Planning requires state and operation membership in the builder registry. Runtime requires the
+certified descriptor identity and the registered runner identity to match the stored spec.
 
 ## Effects And Capabilities
 

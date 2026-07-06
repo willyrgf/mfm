@@ -26,6 +26,8 @@ fn main() -> mfm_program::Result<()> {
                     _,
                     _,
                 >(
+                    mfm_program::NoContext,
+                    mfm_program::NoContext,
                     mfm_program::SideEffectNodeParams {
                         key: mfm_program::StateKey::new("forward")?,
                         config: TryConfig { multiplier: 2 },
@@ -43,6 +45,7 @@ fn main() -> mfm_program::Result<()> {
                 )?;
             let result = root.scope().state::<TryPureState, _>(
                 mfm_program::StateKey::new("uses-remediation")?,
+                mfm_program::NoContext,
                 TryConfig { multiplier: 4 },
                 remediation,
             )?;

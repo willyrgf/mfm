@@ -24,7 +24,6 @@ use mfm_evm_contract_config::{
 };
 use mfm_evm_contract_model::{
     ConfiguredContractInstance, ContextBoundValidationReport, DeployedContractInstance,
-    EvmContractContext,
 };
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_program::{
@@ -187,7 +186,7 @@ impl Operation for ContextDeployContractOperation {
         let config = config.into_inner();
         let context = builder.declare_context(config.context().clone())?;
         let deployed = builder
-            .side_effect_in_context::<ContextBoundDeployContractState, _, EvmContractContext>(
+            .side_effect::<ContextBoundDeployContractState, _>(
                 StateKey::new("deploy")?,
                 &context,
                 config.deploy().clone(),
@@ -232,15 +231,14 @@ impl Operation for ContextConfigureContractOperation {
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
         let config = config.into_inner();
         let context = builder.declare_context(config.context().clone())?;
-        let deployed = builder
-            .state_in_context::<ImportDeployedContractState, _, EvmContractContext>(
-                StateKey::new("import_deployed")?,
-                &context,
-                config.import_deployed().clone(),
-                (),
-            )?;
+        let deployed = builder.state::<ImportDeployedContractState, _>(
+            StateKey::new("import_deployed")?,
+            &context,
+            config.import_deployed().clone(),
+            (),
+        )?;
         let configured = builder
-            .side_effect_in_context::<ContextBoundConfigureContractState, _, EvmContractContext>(
+            .side_effect::<ContextBoundConfigureContractState, _>(
                 StateKey::new("configure")?,
                 &context,
                 config.configure().clone(),
@@ -285,20 +283,18 @@ impl Operation for ContextValidateContractOperation {
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
         let config = config.into_inner();
         let context = builder.declare_context(config.context().clone())?;
-        let configured = builder
-            .state_in_context::<ImportConfiguredContractState, _, EvmContractContext>(
-                StateKey::new("import_configured")?,
-                &context,
-                config.import_configured().clone(),
-                (),
-            )?;
-        let validation_report = builder
-            .state_in_context::<ContextBoundValidateContractState, _, EvmContractContext>(
-                StateKey::new("validate")?,
-                &context,
-                config.validate().clone(),
-                ContextValidateContractInputHandles { configured },
-            )?;
+        let configured = builder.state::<ImportConfiguredContractState, _>(
+            StateKey::new("import_configured")?,
+            &context,
+            config.import_configured().clone(),
+            (),
+        )?;
+        let validation_report = builder.state::<ContextBoundValidateContractState, _>(
+            StateKey::new("validate")?,
+            &context,
+            config.validate().clone(),
+            ContextValidateContractInputHandles { configured },
+        )?;
         Ok(ContextContractValidateOperationOutputs { validation_report })
     }
 }
@@ -336,7 +332,7 @@ impl Operation for ContextContractLifecycleOperation {
         let config = config.into_inner();
         let context = builder.declare_context(config.context().clone())?;
         let deployed = builder
-            .side_effect_in_context::<ContextBoundDeployContractState, _, EvmContractContext>(
+            .side_effect::<ContextBoundDeployContractState, _>(
                 StateKey::new("deploy")?,
                 &context,
                 config.deploy().clone(),
@@ -346,7 +342,7 @@ impl Operation for ContextContractLifecycleOperation {
             )?
             .into_handle();
         let configured = builder
-            .side_effect_in_context::<ContextBoundConfigureContractState, _, EvmContractContext>(
+            .side_effect::<ContextBoundConfigureContractState, _>(
                 StateKey::new("configure")?,
                 &context,
                 config.configure().clone(),
@@ -357,15 +353,14 @@ impl Operation for ContextContractLifecycleOperation {
                 SideEffectVerificationSpec::Receipt,
             )?
             .into_handle();
-        let validation_report = builder
-            .state_in_context::<ContextBoundValidateContractState, _, EvmContractContext>(
-                StateKey::new("validate")?,
-                &context,
-                config.validate().clone(),
-                ContextValidateContractInputHandles {
-                    configured: configured.clone(),
-                },
-            )?;
+        let validation_report = builder.state::<ContextBoundValidateContractState, _>(
+            StateKey::new("validate")?,
+            &context,
+            config.validate().clone(),
+            ContextValidateContractInputHandles {
+                configured: configured.clone(),
+            },
+        )?;
         Ok(ContextContractLifecycleOperationOutputs {
             deployed,
             configured,

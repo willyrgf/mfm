@@ -1660,9 +1660,11 @@ impl PureState for RuntimeContextConsumerState {
 }
 
 fn runtime_context_source_descriptor_id() -> mfm_program::Result<DescriptorId> {
-    let mut states = StateRegistryBuilder::new();
-    let registered = states.register::<RuntimeContextSourceState>()?;
-    Ok(registered.descriptor().descriptor_id().clone())
+    Ok(
+        mfm_program::state_descriptor::<RuntimeContextSourceState>()?
+            .descriptor_id()
+            .clone(),
+    )
 }
 
 #[derive(PublicOutputs)]
@@ -1975,12 +1977,12 @@ fn certifier_backed_runtime_authority() -> (
     mfm_certify::CertificationRegistry,
 ) {
     let mut states = StateRegistryBuilder::new();
-    let registered = states
+    states
         .register::<CertifierState>()
         .expect("state registration");
     let mut registry = mfm_certify::CertificationRegistry::new();
     registry
-        .register_state(&registered)
+        .register_state::<CertifierState>()
         .expect("certification registry");
     let draft = build_root_with_registries(
         ScopeKey::new("root").expect("root key"),
@@ -1993,6 +1995,7 @@ fn certifier_backed_runtime_authority() -> (
             )?;
             let result = root.scope().state::<CertifierState, _>(
                 StateKey::new("multiply-state")?,
+                NoContext,
                 CertifierConfig { multiplier: 3 },
                 seed,
             )?;
@@ -3917,7 +3920,7 @@ fn runner_registration_builder_preserves_explicit_binding_authority() {
         .state_descriptor_for_node(typed_node)
         .expect("typed state descriptor");
     let expected_descriptor =
-        mfm_program::registered_state_descriptor::<RuntimeReadState>().expect("typed descriptor");
+        mfm_program::state_descriptor::<RuntimeReadState>().expect("typed descriptor");
     let typed_factory = events::RunnerFactoryId::new("read_external").expect("typed factory");
     let typed_executable = events::ExecutableIdentity {
         factory_id: typed_factory.clone(),
@@ -12636,6 +12639,7 @@ fn runtime_side_effect_fixture(
                 RuntimeSideEffectFixtureShape::Chained => {
                     let forward = root.scope().side_effect::<RuntimeSubmitAState, _>(
                         StateKey::new("a")?,
+                        NoContext,
                         CertifierConfig { multiplier: 3 },
                         input,
                         claim.into_resource_claim(),
@@ -12643,6 +12647,7 @@ fn runtime_side_effect_fixture(
                     )?;
                     let result = root.scope().state::<RuntimeReadState, _>(
                         StateKey::new("b")?,
+                        NoContext,
                         CertifierConfig { multiplier: 5 },
                         forward.into_handle(),
                     )?;
@@ -12654,6 +12659,7 @@ fn runtime_side_effect_fixture(
                 RuntimeSideEffectFixtureShape::IndependentSecond => {
                     let forward = root.scope().side_effect::<RuntimeSubmitAState, _>(
                         StateKey::new("a")?,
+                        NoContext,
                         CertifierConfig { multiplier: 3 },
                         input.clone(),
                         claim.into_resource_claim(),
@@ -12662,6 +12668,7 @@ fn runtime_side_effect_fixture(
                     let side_effect = forward.into_handle();
                     let result = root.scope().state::<RuntimeSeedReadState, _>(
                         StateKey::new("b")?,
+                        NoContext,
                         CertifierConfig { multiplier: 5 },
                         input,
                     )?;
@@ -12683,6 +12690,8 @@ fn runtime_side_effect_fixture(
                             _,
                             _,
                         >(
+                            NoContext,
+                            NoContext,
                             SideEffectNodeParams {
                                 key: StateKey::new("a")?,
                                 config: CertifierConfig { multiplier: 3 },
@@ -12707,6 +12716,8 @@ fn runtime_side_effect_fixture(
                             _,
                             _,
                         >(
+                            NoContext,
+                            NoContext,
                             SideEffectNodeParams {
                                 key: StateKey::new("b")?,
                                 config: CertifierConfig { multiplier: 7 },
@@ -12724,6 +12735,7 @@ fn runtime_side_effect_fixture(
                         )?;
                     let result = root.scope().state::<RuntimeTailState, _>(
                         StateKey::new("c")?,
+                        NoContext,
                         CertifierConfig { multiplier: 1 },
                         forward_b.into_handle(),
                     )?;
@@ -12761,22 +12773,18 @@ fn fixture_with_context_bound_states() -> Fixture {
             let context = root.scope().declare_context(RuntimeContractContext {
                 network: "primary".to_owned(),
             })?;
-            let produced = root
-                .scope()
-                .state_in_context::<RuntimeContextSourceState, _, RuntimeContractContext>(
-                    StateKey::new("context-source")?,
-                    &context,
-                    CertifierConfig { multiplier: 3 },
-                    input,
-                )?;
-            let result = root
-                .scope()
-                .state_in_context::<RuntimeContextConsumerState, _, RuntimeContractContext>(
-                    StateKey::new("context-consumer")?,
-                    &context,
-                    CertifierConfig { multiplier: 5 },
-                    produced,
-                )?;
+            let produced = root.scope().state::<RuntimeContextSourceState, _>(
+                StateKey::new("context-source")?,
+                &context,
+                CertifierConfig { multiplier: 3 },
+                input,
+            )?;
+            let result = root.scope().state::<RuntimeContextConsumerState, _>(
+                StateKey::new("context-consumer")?,
+                &context,
+                CertifierConfig { multiplier: 5 },
+                produced,
+            )?;
             root.bind_public_outputs(
                 PublicOutputKey::new("terminal")?,
                 &CertifierPublicOutputs { result },

@@ -222,6 +222,7 @@ fn app_fact_launch_plan_with_state_key(state_key: &str) -> TypedProgramLaunchPla
             )?;
             let result = root.scope().state::<AppFactState, _>(
                 StateKey::new(state_key)?,
+                NoContext,
                 AppFactStateConfig { multiplier: 2 },
                 input,
             )?;
@@ -241,12 +242,8 @@ fn app_fact_launch_plan_with_state_key(state_key: &str) -> TypedProgramLaunchPla
 
 fn app_fact_certification_registry(include_fact_descriptor: bool) -> CertificationRegistry {
     let mut registry = CertificationRegistry::new();
-    let mut states = StateRegistryBuilder::new();
-    let registered = states
-        .register::<AppFactState>()
-        .expect("state registration");
     registry
-        .register_state(&registered)
+        .register_state::<AppFactState>()
         .expect("certification state registration");
     if include_fact_descriptor {
         registry

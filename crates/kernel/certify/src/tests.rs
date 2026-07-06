@@ -215,6 +215,32 @@ impl PureState for MultiplyState {
     }
 }
 
+struct ConflictingMultiplyState {
+    config: TestConfig,
+}
+
+impl_test_state_spec!(
+    ConflictingMultiplyState,
+    effect = Pure,
+    caps = NoCaps,
+    kind = "multiply",
+    version = "mfm.certify.test.multiply.v1",
+    name = "mfm.certify.test.conflicting_multiply",
+    digest = 0x11,
+);
+
+impl PureState for ConflictingMultiplyState {
+    fn run(
+        &self,
+        input: Self::Input,
+        _context: &program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        Ok(TestValue {
+            amount: input.amount * self.config.multiplier,
+        })
+    }
+}
+
 struct ContextSourceState {
     config: TestConfig,
 }
@@ -334,9 +360,9 @@ impl PureState for ContextConsumerState {
 }
 
 fn context_source_descriptor_id() -> program::Result<DescriptorId> {
-    let mut states = StateRegistryBuilder::new();
-    let registered = states.register::<ContextSourceState>()?;
-    Ok(registered.descriptor().descriptor_id().clone())
+    Ok(program::state_descriptor::<ContextSourceState>()?
+        .descriptor_id()
+        .clone())
 }
 
 struct FactEmittingState {
@@ -525,6 +551,52 @@ impl Operation for MultiplyOperation {
     ) -> program::Result<Self::Output<'p, 's>> {
         let result = builder.state::<MultiplyState, _>(
             StateKey::new("multiply-state")?,
+            NoContext,
+            TestConfig {
+                multiplier: config.as_ref().multiplier,
+            },
+            input,
+        )?;
+        Ok(TestOperationOutputs { result })
+    }
+}
+
+struct ConflictingMultiplyOperation;
+
+impl Operation for ConflictingMultiplyOperation {
+    type Config = OperationConfig;
+    type Input<'p, 's> = mfm_program::Handle<'p, 's, TestValue>;
+    type Output<'p, 's> = TestOperationOutputs<'p, 's>;
+
+    fn kind() -> program::Result<OperationKind> {
+        OperationKind::new(
+            "mfm.certify.test",
+            "operation-multiply",
+            DigestAlgorithm::Sha256JcsV1,
+            digest_byte(0x12),
+        )
+        .map_err(|error| program::PlanError::Key(error.to_string()))
+    }
+
+    fn version() -> program::Result<OperationVersion> {
+        OperationVersion::new("mfm.certify.test.operation_multiply.v1")
+            .map_err(|error| program::PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.certify.test.conflicting_operation_multiply"
+    }
+
+    fn expand<'p, 's>(
+        &self,
+        config: program::ValidatedConfig<Self::Config>,
+        input: Self::Input<'p, 's>,
+        builder: &mut mfm_program::OperationExpansion<'p, 's>,
+        _dispatch: mfm_program::OperationExpansionDispatch<Self>,
+    ) -> program::Result<Self::Output<'p, 's>> {
+        let result = builder.state::<MultiplyState, _>(
+            StateKey::new("multiply-state")?,
+            NoContext,
             TestConfig {
                 multiplier: config.as_ref().multiplier,
             },
@@ -594,22 +666,18 @@ fn context_bound_draft(declare_second_context: bool) -> program::TypedProgramDra
                     network: "secondary".to_owned(),
                 })?;
             }
-            let produced = root
-                .scope()
-                .state_in_context::<ContextSourceState, _, ContractContext>(
-                    StateKey::new("context-source")?,
-                    &primary,
-                    TestConfig { multiplier: 3 },
-                    seed,
-                )?;
-            let consumed = root
-                .scope()
-                .state_in_context::<ContextConsumerState, _, ContractContext>(
-                    StateKey::new("context-consumer")?,
-                    &primary,
-                    TestConfig { multiplier: 5 },
-                    produced,
-                )?;
+            let produced = root.scope().state::<ContextSourceState, _>(
+                StateKey::new("context-source")?,
+                &primary,
+                TestConfig { multiplier: 3 },
+                seed,
+            )?;
+            let consumed = root.scope().state::<ContextConsumerState, _>(
+                StateKey::new("context-consumer")?,
+                &primary,
+                TestConfig { multiplier: 5 },
+                produced,
+            )?;
             root.bind_public_outputs(
                 PublicOutputKey::new("terminal")?,
                 &TestPublicOutputs { result: consumed },
@@ -635,6 +703,7 @@ fn fact_emitting_draft() -> program::TypedProgramDraft {
             )?;
             let result = root.scope().state::<FactEmittingState, _>(
                 StateKey::new("fact-emitter")?,
+                NoContext,
                 TestConfig { multiplier: 3 },
                 seed,
             )?;
@@ -670,6 +739,7 @@ fn side_effect_draft_with_verification(
             )?;
             let result = root.scope().side_effect::<MutatingState, _>(
                 StateKey::new("mutating-state")?,
+                NoContext,
                 TestConfig { multiplier: 3 },
                 seed,
                 ResourceClaim::manual_only(),
@@ -706,6 +776,8 @@ fn compensating_draft() -> program::TypedProgramDraft {
             let (forward, _remediation) = root
                 .scope()
                 .side_effect_with_compensation::<MutatingState, MutatingState, _, _, _>(
+                    NoContext,
+                    NoContext,
                     program::SideEffectNodeParams {
                         key: StateKey::new("mutating-state")?,
                         config: TestConfig { multiplier: 3 },
@@ -746,15 +818,39 @@ fn config_ref_for_bytes<C: mfm_values::MfmConfig>(
 }
 
 fn registered_multiply_certification_registry() -> CertificationRegistry {
-    let mut states = StateRegistryBuilder::new();
-    let registered = states
-        .register::<MultiplyState>()
-        .expect("state registration");
     let mut registry = CertificationRegistry::new();
     registry
-        .register_state(&registered)
+        .register_state::<MultiplyState>()
         .expect("certification state registration");
     registry
+}
+
+#[test]
+fn certification_registry_rejects_duplicate_state_kind_version() {
+    let mut registry = CertificationRegistry::new();
+    registry
+        .register_state::<MultiplyState>()
+        .expect("first state descriptor registers");
+
+    let error = registry
+        .register_state::<ConflictingMultiplyState>()
+        .expect_err("conflicting state kind/version rejects");
+
+    assert_invalid_semantic_contains(error, "state kind/version");
+}
+
+#[test]
+fn certification_registry_rejects_duplicate_operation_kind_version() {
+    let mut registry = CertificationRegistry::new();
+    registry
+        .register_operation::<MultiplyOperation>()
+        .expect("first operation descriptor registers");
+
+    let error = registry
+        .register_operation::<ConflictingMultiplyOperation>()
+        .expect_err("conflicting operation kind/version rejects");
+
+    assert_invalid_semantic_contains(error, "operation kind/version");
 }
 
 #[test]
@@ -999,16 +1095,15 @@ fn certification_rejects_no_context_state_consuming_context_bound_resource() {
             let context = root.scope().declare_context(ContractContext {
                 network: "primary".to_owned(),
             })?;
-            let produced = root
-                .scope()
-                .state_in_context::<ContextSourceState, _, ContractContext>(
-                    StateKey::new("context-source")?,
-                    &context,
-                    TestConfig { multiplier: 3 },
-                    seed,
-                )?;
+            let produced = root.scope().state::<ContextSourceState, _>(
+                StateKey::new("context-source")?,
+                &context,
+                TestConfig { multiplier: 3 },
+                seed,
+            )?;
             let consumed = root.scope().state::<MultiplyState, _>(
                 StateKey::new("plain-consumer")?,
+                NoContext,
                 TestConfig { multiplier: 5 },
                 produced,
             )?;

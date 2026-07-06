@@ -614,6 +614,7 @@ impl Operation for MultiplyOperation {
     ) -> Result<Self::Output<'program, 'scope>> {
         let result = builder.state::<MultiplyState, _>(
             StateKey::new("multiply-operation/state")?,
+            NoContext,
             config.into_inner(),
             input,
         )?;
@@ -657,7 +658,7 @@ impl Operation for ContextualMutationOperation {
             network: "local".to_owned(),
         })?;
         let result = builder
-            .side_effect_in_context::<ContextualMutationState, _, ChainContext>(
+            .side_effect::<ContextualMutationState, _>(
                 StateKey::new("contextual-mutation-operation/state")?,
                 &context,
                 config.into_inner(),
@@ -700,6 +701,7 @@ impl Operation for FailingOperation {
     ) -> Result<Self::Output<'program, 'scope>> {
         let _planned = builder.state::<MultiplyState, _>(
             StateKey::new("rollback/state")?,
+            NoContext,
             config.into_inner(),
             input,
         )?;
@@ -710,18 +712,16 @@ impl Operation for FailingOperation {
     }
 }
 
-fn register_multiply_state(registry: &mut StateRegistryBuilder) -> RegisteredState<MultiplyState> {
+fn register_multiply_state(registry: &mut StateRegistryBuilder) {
     registry
         .register::<MultiplyState>()
-        .expect("state registers")
+        .expect("state registers");
 }
 
-fn register_contextual_multiply_state(
-    registry: &mut StateRegistryBuilder,
-) -> RegisteredState<ContextualMultiplyState> {
+fn register_contextual_multiply_state(registry: &mut StateRegistryBuilder) {
     registry
         .register::<ContextualMultiplyState>()
-        .expect("contextual state registers")
+        .expect("contextual state registers");
 }
 
 fn multiply_state_registry() -> StateRegistrySnapshot {
@@ -730,12 +730,10 @@ fn multiply_state_registry() -> StateRegistrySnapshot {
     registry.into_snapshot()
 }
 
-fn register_multiply_operation(
-    registry: &mut OperationRegistryBuilder,
-) -> RegisteredOperation<MultiplyOperation> {
+fn register_multiply_operation(registry: &mut OperationRegistryBuilder) {
     registry
         .register::<MultiplyOperation>()
-        .expect("operation registers")
+        .expect("operation registers");
 }
 
 fn multiply_registries() -> (StateRegistrySnapshot, OperationRegistrySnapshot) {
@@ -991,8 +989,12 @@ fn typed_program_launch_plan_rejects_invalid_seed_material() {
 #[test]
 fn registered_state_registry_plans_state_node() {
     let mut registry = StateRegistryBuilder::new();
-    let registered = register_multiply_state(&mut registry);
-    assert_eq!(registered.runner(), RunnerKind::Pure);
+    register_multiply_state(&mut registry);
+    let descriptor = registry
+        .snapshot()
+        .state_descriptor::<MultiplyState>()
+        .expect("registered state descriptor resolves");
+    assert_eq!(descriptor.runner(), RunnerKind::Pure);
 
     let draft = build_root_with_registry(
         ScopeKey::new("portfolio/root").expect("scope key"),
@@ -1002,6 +1004,7 @@ fn registered_state_registry_plans_state_node() {
             let input = root.seed(SeedKey::new("launch-input")?, seed)?;
             let result = root.scope().state::<MultiplyState, _>(
                 StateKey::new("multiply")?,
+                NoContext,
                 LaunchConfig { multiplier: 3 },
                 input,
             )?;
@@ -1018,10 +1021,7 @@ fn registered_state_registry_plans_state_node() {
     let node = &draft.state_nodes()[0];
     assert_eq!(node.key.as_str(), "multiply");
     assert_eq!(node.scope_id, *draft.root_scope_id());
-    assert_eq!(
-        &node.state_descriptor_id,
-        registered.descriptor().descriptor_id()
-    );
+    assert_eq!(&node.state_descriptor_id, descriptor.descriptor_id());
     assert_eq!(node.runner, RunnerKind::Pure);
     assert_eq!(
         node.config.schema_id,
@@ -1043,31 +1043,6 @@ fn registered_state_registry_plans_state_node() {
         draft.public_output_spec().outputs()[0].cell().cell_id(),
         &node.output_cell_id
     );
-}
-
-#[test]
-fn explicit_registered_state_token_plans_without_builder_registry() {
-    let mut registry = StateRegistryBuilder::new();
-    let registered = register_multiply_state(&mut registry);
-
-    let draft = build_root(ScopeKey::new("root").expect("scope key"), |root| {
-        let seed = launch_seed(2, "explicit");
-        let input = root.seed(SeedKey::new("input")?, seed)?;
-        let result = root.scope().state_registered::<MultiplyState, _>(
-            StateKey::new("multiply")?,
-            registered,
-            LaunchConfig { multiplier: 5 },
-            input,
-        )?;
-        root.bind_public_outputs(
-            PublicOutputKey::new("terminal")?,
-            &LaunchPublicOutputs { result },
-        )
-    })
-    .expect("root builds");
-
-    assert_eq!(draft.state_nodes().len(), 1);
-    assert_eq!(draft.state_nodes()[0].key.as_str(), "multiply");
 }
 
 #[test]
@@ -1121,10 +1096,13 @@ fn declared_context_refs_are_stable_and_duplicates_reject() {
 }
 
 #[test]
-fn state_in_context_emits_context_node_output_and_input_metadata() {
+fn state_with_declared_context_emits_context_node_output_and_input_metadata() {
     let mut registry = StateRegistryBuilder::new();
-    let registered = register_contextual_multiply_state(&mut registry);
-    let descriptor = registered.descriptor().clone();
+    register_contextual_multiply_state(&mut registry);
+    let descriptor = registry
+        .snapshot()
+        .state_descriptor::<ContextualMultiplyState>()
+        .expect("registered state descriptor resolves");
     register_multiply_state(&mut registry);
 
     let draft = build_root_with_registry(
@@ -1136,16 +1114,15 @@ fn state_in_context_emits_context_node_output_and_input_metadata() {
                 chain_id: 31337,
                 network: "local".to_owned(),
             })?;
-            let context_bound = root
-                .scope()
-                .state_in_context::<ContextualMultiplyState, _, ChainContext>(
-                    StateKey::new("contextual")?,
-                    &context,
-                    LaunchConfig { multiplier: 5 },
-                    input,
-                )?;
+            let context_bound = root.scope().state::<ContextualMultiplyState, _>(
+                StateKey::new("contextual")?,
+                &context,
+                LaunchConfig { multiplier: 5 },
+                input,
+            )?;
             let result = root.scope().state::<MultiplyState, _>(
                 StateKey::new("consume-contextual")?,
+                NoContext,
                 LaunchConfig { multiplier: 2 },
                 context_bound,
             )?;
@@ -1287,34 +1264,6 @@ fn operation_expansion_can_declare_context_and_plan_context_side_effect() {
 }
 
 #[test]
-fn context_required_state_rejects_plain_state_authoring() {
-    let mut registry = StateRegistryBuilder::new();
-    register_contextual_multiply_state(&mut registry);
-
-    let error = build_root_with_registry(
-        ScopeKey::new("root").expect("scope key"),
-        registry.snapshot(),
-        |root| {
-            let input = root.seed(SeedKey::new("input")?, launch_seed(2, "missing-context"))?;
-            let result = root.scope().state::<ContextualMultiplyState, _>(
-                StateKey::new("contextual")?,
-                LaunchConfig { multiplier: 5 },
-                input,
-            )?;
-            root.bind_public_outputs(
-                PublicOutputKey::new("terminal")?,
-                &LaunchPublicOutputs { result },
-            )
-        },
-    )
-    .expect_err("missing context rejects");
-
-    assert!(
-        matches!(error, PlanError::ContextContract(message) if message.contains("requires a certified context"))
-    );
-}
-
-#[test]
 fn linked_compensation_authoring_keeps_remediation_out_of_forward_nodes() {
     let draft = build_root_with_registry(
         ScopeKey::new("root").expect("scope key"),
@@ -1335,6 +1284,8 @@ fn linked_compensation_authoring_keeps_remediation_out_of_forward_nodes() {
                     _,
                     _,
                 >(
+                    NoContext,
+                    NoContext,
                     SideEffectNodeParams {
                         key: StateKey::new("forward")?,
                         config: LaunchConfig { multiplier: 5 },
@@ -1440,6 +1391,8 @@ fn linked_compensation_rejects_same_forward_and_remediation_key() {
                     _,
                     _,
                 >(
+                    NoContext,
+                    NoContext,
                     SideEffectNodeParams {
                         key: StateKey::new("forward")?,
                         config: LaunchConfig { multiplier: 5 },
@@ -1474,6 +1427,7 @@ fn compensating_policy_requires_every_forward_side_effect_linked() {
             let input = root.seed(SeedKey::new("input")?, seed)?;
             let result = root.scope().side_effect::<ForwardMutationState, _>(
                 StateKey::new("forward")?,
+                NoContext,
                 LaunchConfig { multiplier: 5 },
                 input,
                 manual_resource_claim(),
@@ -1510,6 +1464,7 @@ fn out_of_scope_remediation_binding_fails_finalize() {
             let input = root.seed(SeedKey::new("input")?, seed)?;
             let sibling = root.scope().state::<MultiplyState, _>(
                 StateKey::new("sibling")?,
+                NoContext,
                 LaunchConfig { multiplier: 3 },
                 input.clone(),
             )?;
@@ -1522,6 +1477,8 @@ fn out_of_scope_remediation_binding_fails_finalize() {
                     _,
                     _,
                 >(
+                    NoContext,
+                    NoContext,
                     SideEffectNodeParams {
                         key: StateKey::new("forward")?,
                         config: LaunchConfig { multiplier: 5 },
@@ -1560,6 +1517,7 @@ fn state_output_domain_keys_are_lineage_evidence() {
                 let input = root.seed(SeedKey::new("input")?, seed)?;
                 let result = root.scope().state_with_domain_keys::<MultiplyState, _, _>(
                     StateKey::new("multiply")?,
+                    NoContext,
                     LaunchConfig { multiplier: 5 },
                     input,
                     vec![domain_key],
@@ -1597,7 +1555,11 @@ fn state_output_domain_keys_are_lineage_evidence() {
 fn registered_operation_registry_records_lineage_frame() {
     let state_registry = multiply_state_registry();
     let mut operation_registry = OperationRegistryBuilder::new();
-    let registered_operation = register_multiply_operation(&mut operation_registry);
+    register_multiply_operation(&mut operation_registry);
+    let operation_descriptor = operation_registry
+        .snapshot()
+        .operation_descriptor::<MultiplyOperation>()
+        .expect("registered operation descriptor resolves");
 
     let draft = build_root_with_registries(
         ScopeKey::new("portfolio/root").expect("scope key"),
@@ -1629,7 +1591,7 @@ fn registered_operation_registry_records_lineage_frame() {
     assert_eq!(frame.scope_id, *draft.root_scope_id());
     assert_eq!(
         &frame.operation_descriptor_id,
-        registered_operation.descriptor().descriptor_id()
+        operation_descriptor.descriptor_id()
     );
     assert_eq!(
         frame.output_schema_id,
@@ -1921,42 +1883,6 @@ fn same_scope_same_type_lineage_mismatch_rejects_for_certification() {
 }
 
 #[test]
-fn explicit_registered_operation_token_calls_without_builder_registry() {
-    let state_registry = multiply_state_registry();
-    let mut operation_registry = OperationRegistryBuilder::new();
-    let registered_operation = register_multiply_operation(&mut operation_registry);
-
-    let draft = build_root_with_registry(
-        ScopeKey::new("root").expect("scope key"),
-        state_registry,
-        |root| {
-            let seed = launch_seed(5, "explicit-operation");
-            let input = root.seed(SeedKey::new("input")?, seed)?;
-            let result = root.scope().call_registered::<MultiplyOperation, _>(
-                OperationKey::new("multiply-operation")?,
-                registered_operation,
-                MultiplyOperation,
-                LaunchConfig { multiplier: 2 },
-                input,
-            )?;
-            root.bind_public_outputs(
-                PublicOutputKey::new("terminal")?,
-                &LaunchPublicOutputs {
-                    result: result.result,
-                },
-            )
-        },
-    )
-    .expect("root builds");
-
-    assert_eq!(draft.operation_lineage().len(), 1);
-    assert_eq!(
-        draft.operation_lineage()[0].key.as_str(),
-        "multiply-operation"
-    );
-}
-
-#[test]
 fn failed_operation_expansion_rolls_back_scope_mutations_and_lineage() {
     let state_registry = multiply_state_registry();
     let mut operation_registry = OperationRegistryBuilder::new();
@@ -1985,6 +1911,7 @@ fn failed_operation_expansion_rolls_back_scope_mutations_and_lineage() {
 
             let _direct = root.scope().state::<MultiplyState, _>(
                 StateKey::new("rollback/state")?,
+                NoContext,
                 LaunchConfig { multiplier: 3 },
                 input.clone(),
             )?;
@@ -2069,6 +1996,7 @@ fn unregistered_operation_and_state_are_rejected_at_registry_boundary() {
                 let input = root.seed(SeedKey::new("input")?, seed)?;
                 let _ = root.scope().state::<MultiplyState, _>(
                     StateKey::new("multiply")?,
+                    NoContext,
                     LaunchConfig { multiplier: 2 },
                     input,
                 )?;
@@ -2096,11 +2024,13 @@ fn duplicate_state_key_is_rejected_without_partial_node() {
             let second = root.seed(SeedKey::new("second")?, launch_seed(2, "second"))?;
             let _ = root.scope().state::<MultiplyState, _>(
                 StateKey::new("multiply")?,
+                NoContext,
                 LaunchConfig { multiplier: 2 },
                 first,
             )?;
             let _ = root.scope().state::<MultiplyState, _>(
                 StateKey::new("multiply")?,
+                NoContext,
                 LaunchConfig { multiplier: 3 },
                 second,
             )?;

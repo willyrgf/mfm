@@ -1554,7 +1554,7 @@ impl<'a> RunnerRegistrationBuilder<'a> {
         S::Effect: EffectRunner<S>,
         S::Caps: CapabilitySetFor<S::Effect>,
     {
-        let descriptor = mfm_program::registered_state_descriptor::<S>()
+        let descriptor = mfm_program::state_descriptor::<S>()
             .map_err(|error| RuntimeError::RunnerBinding(error.to_string()))?;
         self.register_descriptor(
             descriptor.descriptor_id().clone(),

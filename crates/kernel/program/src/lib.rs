@@ -625,6 +625,34 @@ impl<'program, 'scope, C: MfmContext> DeclaredContext<'program, 'scope, C> {
     }
 }
 
+/// Explicit transition-context authority accepted by state planning APIs.
+///
+/// This trait is sealed by the framework. Authoring code can pass [`NoContext`] for states whose
+/// [`StateSpec::Context`] is [`NoContext`], or `&DeclaredContext<C>` for states bound to a declared
+/// typed context `C`.
+pub trait StateTransitionContext<'program, 'scope, C: StateContext>:
+    private::StateTransitionContextSealed<'program, 'scope, C>
+{
+    /// Returns the certified context table entry to attach to the planned node, if any.
+    fn certified_context_spec(&self) -> Option<&CertifiedContextSpec>;
+}
+
+impl<'program, 'scope> StateTransitionContext<'program, 'scope, NoContext> for NoContext {
+    fn certified_context_spec(&self) -> Option<&CertifiedContextSpec> {
+        None
+    }
+}
+
+impl<'program, 'scope, C> StateTransitionContext<'program, 'scope, C>
+    for &DeclaredContext<'program, 'scope, C>
+where
+    C: MfmContext,
+{
+    fn certified_context_spec(&self) -> Option<&CertifiedContextSpec> {
+        Some(self.spec())
+    }
+}
+
 /// Descriptive contract for a versioned executable state.
 pub trait StateSpec: Send + Sync + 'static {
     /// Deterministic planning config type.
@@ -710,7 +738,7 @@ pub trait Operation: Send + Sync + 'static {
 /// The token is public so downstream crates can implement [`Operation`], but its fields and
 /// constructor are private. Each token is bound to one operation type, so an operation body cannot
 /// forward its own dispatch authority into another operation's `expand` method. Framework code
-/// mints this token only inside [`ScopeBuilder::call_registered`].
+/// mints this token only inside [`ScopeBuilder::call`].
 #[doc(hidden)]
 pub struct OperationExpansionDispatch<O: Operation> {
     _operation: PhantomData<fn() -> O>,
@@ -1419,128 +1447,24 @@ impl From<RegistryError> for PlanError {
     }
 }
 
-/// Private registration evidence carried by a registered state token.
-#[derive(Debug, PartialEq, Eq)]
-pub struct StateRegistrationEvidence<S: StateSpec> {
-    _state: PhantomData<fn(S) -> S>,
-    _private: (),
-}
-
-impl<S: StateSpec> Clone for StateRegistrationEvidence<S> {
-    fn clone(&self) -> Self {
-        Self {
-            _state: PhantomData,
-            _private: (),
-        }
-    }
-}
-
-/// Framework-owned authority token for a registered state.
-#[derive(Debug, PartialEq, Eq)]
-pub struct RegisteredState<S: StateSpec> {
-    descriptor: StateDescriptorIdentity,
-    runner: RunnerKind,
-    evidence: StateRegistrationEvidence<S>,
-    _state: PhantomData<fn(S) -> S>,
-}
-
-impl<S: StateSpec> Clone for RegisteredState<S> {
-    fn clone(&self) -> Self {
-        Self {
-            descriptor: self.descriptor.clone(),
-            runner: self.runner,
-            evidence: self.evidence.clone(),
-            _state: PhantomData,
-        }
-    }
-}
-
-impl<S: StateSpec> RegisteredState<S> {
-    fn new(descriptor: StateDescriptorIdentity, runner: RunnerKind) -> Self {
-        Self {
-            descriptor,
-            runner,
-            evidence: StateRegistrationEvidence {
-                _state: PhantomData,
-                _private: (),
-            },
-            _state: PhantomData,
-        }
-    }
-
-    /// Returns the validated state descriptor identity.
-    pub fn descriptor(&self) -> &StateDescriptorIdentity {
-        &self.descriptor
-    }
-
-    /// Returns the registered runner kind.
-    pub fn runner(&self) -> RunnerKind {
-        self.runner
-    }
-}
-
 /// Returns the validated descriptor identity for a typed state.
-pub fn registered_state_descriptor<S>(
-) -> std::result::Result<StateDescriptorIdentity, RegistryError>
+pub fn state_descriptor<S>() -> std::result::Result<StateDescriptorIdentity, RegistryError>
 where
     S: StateSpec,
     S::Effect: EffectRunner<S>,
     S::Caps: CapabilitySetFor<S::Effect>,
 {
-    let mut states = StateRegistryBuilder::new();
-    Ok(states.register::<S>()?.descriptor().clone())
+    StateDescriptorIdentity::for_state::<S>()
+        .map_err(|error| RegistryError::Descriptor(error.to_string()))
 }
 
-/// Private registration evidence carried by a registered operation token.
-#[derive(Debug, PartialEq, Eq)]
-pub struct OperationRegistrationEvidence<O: Operation> {
-    _operation: PhantomData<fn(O) -> O>,
-    _private: (),
-}
-
-impl<O: Operation> Clone for OperationRegistrationEvidence<O> {
-    fn clone(&self) -> Self {
-        Self {
-            _operation: PhantomData,
-            _private: (),
-        }
-    }
-}
-
-/// Framework-owned authority token for a registered operation.
-#[derive(Debug, PartialEq, Eq)]
-pub struct RegisteredOperation<O: Operation> {
-    descriptor: OperationDescriptorIdentity,
-    evidence: OperationRegistrationEvidence<O>,
-    _operation: PhantomData<fn(O) -> O>,
-}
-
-impl<O: Operation> Clone for RegisteredOperation<O> {
-    fn clone(&self) -> Self {
-        Self {
-            descriptor: self.descriptor.clone(),
-            evidence: self.evidence.clone(),
-            _operation: PhantomData,
-        }
-    }
-}
-
-impl<O: Operation> RegisteredOperation<O> {
-    fn new(descriptor: OperationDescriptorIdentity) -> Self {
-        Self {
-            descriptor,
-            evidence: OperationRegistrationEvidence {
-                _operation: PhantomData,
-                _private: (),
-            },
-            _operation: PhantomData,
-        }
-    }
-
-    /// Returns the validated operation descriptor identity.
-    pub fn descriptor(&self) -> &OperationDescriptorIdentity {
-        &self.descriptor
-    }
+/// Returns the validated descriptor identity for a typed operation.
+pub fn operation_descriptor<O>() -> std::result::Result<OperationDescriptorIdentity, RegistryError>
+where
+    O: Operation,
+{
+    OperationDescriptorIdentity::for_operation::<O>()
+        .map_err(|error| RegistryError::Descriptor(error.to_string()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1600,6 +1524,32 @@ impl StateRegistrySnapshot {
     pub fn len(&self) -> usize {
         self.records.len()
     }
+
+    /// Resolves the validated descriptor identity for a state registered in this snapshot.
+    pub fn state_descriptor<S>(&self) -> std::result::Result<StateDescriptorIdentity, RegistryError>
+    where
+        S: StateSpec,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
+    {
+        let descriptor = state_descriptor::<S>()?;
+        let key = StateRegistrationKey::from_descriptor(&descriptor);
+        let Some(record) = self.records.get(&key) else {
+            return Err(RegistryError::UnregisteredState {
+                kind: key.kind,
+                version: key.version,
+            });
+        };
+        if record.descriptor_id != *descriptor.descriptor_id()
+            || record.runner != descriptor.runner()
+        {
+            return Err(RegistryError::DescriptorMismatch {
+                kind: key.kind,
+                version: key.version,
+            });
+        }
+        Ok(descriptor)
+    }
 }
 
 /// Mutable framework state registry builder.
@@ -1615,14 +1565,13 @@ impl StateRegistryBuilder {
     }
 
     /// Registers a state after validating descriptor, effect, capability, and runner evidence.
-    pub fn register<S>(&mut self) -> std::result::Result<RegisteredState<S>, RegistryError>
+    pub fn register<S>(&mut self) -> std::result::Result<(), RegistryError>
     where
         S: StateSpec,
         S::Effect: EffectRunner<S>,
         S::Caps: CapabilitySetFor<S::Effect>,
     {
-        let descriptor = StateDescriptorIdentity::for_state::<S>()
-            .map_err(|error| RegistryError::Descriptor(error.to_string()))?;
+        let descriptor = state_descriptor::<S>()?;
         let runner = <S::Effect as EffectRunner<S>>::runner_kind();
         if descriptor.runner() != runner {
             return Err(RegistryError::Descriptor(format!(
@@ -1646,7 +1595,7 @@ impl StateRegistryBuilder {
         } else {
             self.snapshot.records.insert(key, record);
         }
-        Ok(RegisteredState::new(descriptor, runner))
+        Ok(())
     }
 
     /// Returns an immutable registry snapshot.
@@ -1657,44 +1606,6 @@ impl StateRegistryBuilder {
     /// Converts this builder into an immutable registry snapshot.
     pub fn into_snapshot(self) -> StateRegistrySnapshot {
         self.snapshot
-    }
-}
-
-/// Framework-owned registry lookup contract.
-pub trait StateRegistry {
-    /// Resolves a registered state token for `S`.
-    fn registered_state<S>(&self) -> std::result::Result<RegisteredState<S>, RegistryError>
-    where
-        S: StateSpec,
-        S::Effect: EffectRunner<S>,
-        S::Caps: CapabilitySetFor<S::Effect>;
-}
-
-impl StateRegistry for StateRegistrySnapshot {
-    fn registered_state<S>(&self) -> std::result::Result<RegisteredState<S>, RegistryError>
-    where
-        S: StateSpec,
-        S::Effect: EffectRunner<S>,
-        S::Caps: CapabilitySetFor<S::Effect>,
-    {
-        let descriptor = StateDescriptorIdentity::for_state::<S>()
-            .map_err(|error| RegistryError::Descriptor(error.to_string()))?;
-        let key = StateRegistrationKey::from_descriptor(&descriptor);
-        let Some(record) = self.records.get(&key) else {
-            return Err(RegistryError::UnregisteredState {
-                kind: key.kind,
-                version: key.version,
-            });
-        };
-        if record.descriptor_id != *descriptor.descriptor_id()
-            || record.runner != descriptor.runner()
-        {
-            return Err(RegistryError::DescriptorMismatch {
-                kind: key.kind,
-                version: key.version,
-            });
-        }
-        Ok(RegisteredState::new(descriptor, record.runner))
     }
 }
 
@@ -1714,6 +1625,30 @@ impl OperationRegistrySnapshot {
     pub fn len(&self) -> usize {
         self.records.len()
     }
+
+    /// Resolves the validated descriptor identity for an operation registered in this snapshot.
+    pub fn operation_descriptor<O>(
+        &self,
+    ) -> std::result::Result<OperationDescriptorIdentity, RegistryError>
+    where
+        O: Operation,
+    {
+        let descriptor = operation_descriptor::<O>()?;
+        let key = OperationRegistrationKey::from_descriptor(&descriptor);
+        let Some(record) = self.records.get(&key) else {
+            return Err(RegistryError::UnregisteredOperation {
+                kind: key.kind,
+                version: key.version,
+            });
+        };
+        if record.descriptor_id != *descriptor.descriptor_id() {
+            return Err(RegistryError::OperationDescriptorMismatch {
+                kind: key.kind,
+                version: key.version,
+            });
+        }
+        Ok(descriptor)
+    }
 }
 
 /// Mutable framework operation registry builder.
@@ -1729,12 +1664,11 @@ impl OperationRegistryBuilder {
     }
 
     /// Registers an operation after validating descriptor evidence.
-    pub fn register<O>(&mut self) -> std::result::Result<RegisteredOperation<O>, RegistryError>
+    pub fn register<O>(&mut self) -> std::result::Result<(), RegistryError>
     where
         O: Operation,
     {
-        let descriptor = OperationDescriptorIdentity::for_operation::<O>()
-            .map_err(|error| RegistryError::Descriptor(error.to_string()))?;
+        let descriptor = operation_descriptor::<O>()?;
         let key = OperationRegistrationKey::from_descriptor(&descriptor);
         let record = OperationRegistrationRecord {
             descriptor_id: descriptor.descriptor_id().clone(),
@@ -1749,7 +1683,7 @@ impl OperationRegistryBuilder {
         } else {
             self.snapshot.records.insert(key, record);
         }
-        Ok(RegisteredOperation::new(descriptor))
+        Ok(())
     }
 
     /// Returns an immutable registry snapshot.
@@ -1760,38 +1694,6 @@ impl OperationRegistryBuilder {
     /// Converts this builder into an immutable registry snapshot.
     pub fn into_snapshot(self) -> OperationRegistrySnapshot {
         self.snapshot
-    }
-}
-
-/// Framework-owned operation registry lookup contract.
-pub trait OperationRegistry {
-    /// Resolves a registered operation token for `O`.
-    fn registered_operation<O>(&self) -> std::result::Result<RegisteredOperation<O>, RegistryError>
-    where
-        O: Operation;
-}
-
-impl OperationRegistry for OperationRegistrySnapshot {
-    fn registered_operation<O>(&self) -> std::result::Result<RegisteredOperation<O>, RegistryError>
-    where
-        O: Operation,
-    {
-        let descriptor = OperationDescriptorIdentity::for_operation::<O>()
-            .map_err(|error| RegistryError::Descriptor(error.to_string()))?;
-        let key = OperationRegistrationKey::from_descriptor(&descriptor);
-        let Some(record) = self.records.get(&key) else {
-            return Err(RegistryError::UnregisteredOperation {
-                kind: key.kind,
-                version: key.version,
-            });
-        };
-        if record.descriptor_id != *descriptor.descriptor_id() {
-            return Err(RegistryError::OperationDescriptorMismatch {
-                kind: key.kind,
-                version: key.version,
-            });
-        }
-        Ok(RegisteredOperation::new(descriptor))
     }
 }
 
@@ -4328,10 +4230,11 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         })
     }
 
-    /// Plans a registered typed state by resolving `S` through this builder's registry.
+    /// Plans a registry-resolved typed state by resolving `S` through this builder's registry.
     pub fn state<S, I>(
         &mut self,
         key: StateKey,
+        context: impl StateTransitionContext<'program, 'scope, S::Context>,
         config: S::Config,
         input: I,
     ) -> Result<Handle<'program, 'scope, S::Output>>
@@ -4341,15 +4244,16 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         S::Caps: CapabilitySetFor<S::Effect>,
         I: IntoStateInput<'program, 'scope, S::Input>,
     {
-        let registered = self.state_registry.registered_state::<S>()?;
-        self.state_registered_with_domain_key_refs(key, registered, config, input, Vec::new())
+        let descriptor = self.state_registry.state_descriptor::<S>()?;
+        self.state_with_domain_key_refs::<S, I>(key, descriptor, context, config, input, Vec::new())
     }
 
-    /// Plans a registered typed state and attaches stable domain-key evidence to its output
+    /// Plans a registry-resolved typed state and attaches stable domain-key evidence to its output
     /// value lineage.
     pub fn state_with_domain_keys<S, I, K>(
         &mut self,
         key: StateKey,
+        context: impl StateTransitionContext<'program, 'scope, S::Context>,
         config: S::Config,
         input: I,
         domain_keys: Vec<K>,
@@ -4361,174 +4265,45 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         I: IntoStateInput<'program, 'scope, S::Input>,
         K: StableDomainKey,
     {
-        let registered = self.state_registry.registered_state::<S>()?;
-        self.state_registered_with_domain_key_refs(
+        let descriptor = self.state_registry.state_descriptor::<S>()?;
+        self.state_with_domain_key_refs::<S, I>(
             key,
-            registered,
+            descriptor,
+            context,
             config,
             input,
             stable_domain_key_refs(domain_keys)?,
         )
     }
 
-    /// Plans a typed state from an explicit framework-owned registration token.
-    pub fn state_registered<S, I>(
+    /// Plans a registered side-effect state with an explicit transition context and resource claim.
+    pub fn side_effect<S, I>(
         &mut self,
         key: StateKey,
-        registered: RegisteredState<S>,
-        config: S::Config,
-        input: I,
-    ) -> Result<Handle<'program, 'scope, S::Output>>
-    where
-        S: StateSpec,
-        S::Effect: EffectRunner<S>,
-        S::Caps: CapabilitySetFor<S::Effect>,
-        I: IntoStateInput<'program, 'scope, S::Input>,
-    {
-        self.state_registered_with_domain_key_refs(key, registered, config, input, Vec::new())
-    }
-
-    /// Plans a typed state from an explicit registration token and attaches stable domain-key
-    /// evidence to its output value lineage.
-    pub fn state_registered_with_domain_keys<S, I, K>(
-        &mut self,
-        key: StateKey,
-        registered: RegisteredState<S>,
-        config: S::Config,
-        input: I,
-        domain_keys: Vec<K>,
-    ) -> Result<Handle<'program, 'scope, S::Output>>
-    where
-        S: StateSpec,
-        S::Effect: EffectRunner<S>,
-        S::Caps: CapabilitySetFor<S::Effect>,
-        I: IntoStateInput<'program, 'scope, S::Input>,
-        K: StableDomainKey,
-    {
-        self.state_registered_with_domain_key_refs(
-            key,
-            registered,
-            config,
-            input,
-            stable_domain_key_refs(domain_keys)?,
-        )
-    }
-
-    /// Plans a registered typed state under an explicitly declared certified context.
-    pub fn state_in_context<S, I, C>(
-        &mut self,
-        key: StateKey,
-        context: &DeclaredContext<'program, 'scope, C>,
-        config: S::Config,
-        input: I,
-    ) -> Result<Handle<'program, 'scope, S::Output>>
-    where
-        S: StateSpec<Context = C>,
-        C: MfmContext,
-        S::Effect: EffectRunner<S>,
-        S::Caps: CapabilitySetFor<S::Effect>,
-        I: IntoStateInput<'program, 'scope, S::Input>,
-    {
-        let registered = self.state_registry.registered_state::<S>()?;
-        self.state_registered_in_context(key, registered, context, config, input)
-    }
-
-    /// Plans a typed state from an explicit registration token under a declared context.
-    pub fn state_registered_in_context<S, I, C>(
-        &mut self,
-        key: StateKey,
-        registered: RegisteredState<S>,
-        context: &DeclaredContext<'program, 'scope, C>,
-        config: S::Config,
-        input: I,
-    ) -> Result<Handle<'program, 'scope, S::Output>>
-    where
-        S: StateSpec<Context = C>,
-        C: MfmContext,
-        S::Effect: EffectRunner<S>,
-        S::Caps: CapabilitySetFor<S::Effect>,
-        I: IntoStateInput<'program, 'scope, S::Input>,
-    {
-        let key_string = key.as_str().to_owned();
-        if self.state_keys.contains(&key_string) {
-            return Err(PlanError::DuplicateStateKey(key.as_str().to_owned()));
-        }
-        let (node, handle) = self.plan_state_node(
-            key,
-            registered,
-            config,
-            input,
-            StateNodePlanningOptions {
-                context: Some(context.spec().clone()),
-                ..StateNodePlanningOptions::default()
-            },
-        )?;
-        self.state_keys.insert(key_string);
-        self.state_nodes.push(node);
-        Ok(handle)
-    }
-
-    /// Plans a registered side-effect state under an explicitly declared certified context.
-    pub fn side_effect_in_context<S, I, C>(
-        &mut self,
-        key: StateKey,
-        context: &DeclaredContext<'program, 'scope, C>,
+        context: impl StateTransitionContext<'program, 'scope, S::Context>,
         config: S::Config,
         input: I,
         resource_claim: ResourceClaim,
         verification: SideEffectVerificationSpec,
     ) -> Result<ForwardSideEffectHandle<'program, 'scope, S::Output>>
     where
-        S: SideEffectState<Context = C>,
-        C: MfmContext,
+        S: SideEffectState,
         S::Caps: CapabilitySetFor<ApplySideEffect>,
         I: IntoStateInput<'program, 'scope, S::Input>,
     {
-        let registered = self.state_registry.registered_state::<S>()?;
-        self.side_effect_registered_in_context(
-            registered,
-            context,
-            SideEffectNodeParams {
-                key,
-                config,
-                input,
-                resource_claim,
-                verification,
-            },
-        )
-    }
-
-    /// Plans a side-effect state from an explicit registration token under a declared context.
-    pub fn side_effect_registered_in_context<S, I, C>(
-        &mut self,
-        registered: RegisteredState<S>,
-        context: &DeclaredContext<'program, 'scope, C>,
-        params: SideEffectNodeParams<S, I>,
-    ) -> Result<ForwardSideEffectHandle<'program, 'scope, S::Output>>
-    where
-        S: SideEffectState<Context = C>,
-        C: MfmContext,
-        S::Caps: CapabilitySetFor<ApplySideEffect>,
-        I: IntoStateInput<'program, 'scope, S::Input>,
-    {
-        let SideEffectNodeParams {
-            key,
-            config,
-            input,
-            resource_claim,
-            verification,
-        } = params;
+        let descriptor = self.state_registry.state_descriptor::<S>()?;
+        let context = context.certified_context_spec().cloned();
         let key_string = key.as_str().to_owned();
         if self.state_keys.contains(&key_string) {
             return Err(PlanError::DuplicateStateKey(key.as_str().to_owned()));
         }
-        let (node, handle) = self.plan_state_node(
+        let (node, handle) = self.plan_state_node::<S, I>(
             key,
-            registered,
+            descriptor,
             config,
             input,
             StateNodePlanningOptions {
-                context: Some(context.spec().clone()),
+                context,
                 side_effect_contract: Some((resource_claim, verification)),
                 ..StateNodePlanningOptions::default()
             },
@@ -4546,6 +4321,8 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
     /// that are transitive ancestors of that forward node.
     pub fn side_effect_with_compensation<F, R, I, J, B>(
         &mut self,
+        forward_context: impl StateTransitionContext<'program, 'scope, F::Context>,
+        remediation_context: impl StateTransitionContext<'program, 'scope, R::Context>,
         forward_params: SideEffectNodeParams<F, I>,
         remediation_params: RemediationNodeParams<R>,
         build_remediation_input: B,
@@ -4559,6 +4336,8 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         J: IntoStateInput<'program, 'scope, R::Input>,
         B: FnOnce(ForwardSideEffectHandle<'program, 'scope, F::Output>) -> Result<J>,
     {
+        let forward_context = forward_context.certified_context_spec().cloned();
+        let remediation_context = remediation_context.certified_context_spec().cloned();
         let SideEffectNodeParams {
             key: forward_key,
             config: forward_config,
@@ -4588,13 +4367,14 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             ));
         }
 
-        let forward_registered = self.state_registry.registered_state::<F>()?;
-        let (forward_node, forward_handle) = self.plan_state_node(
+        let forward_descriptor = self.state_registry.state_descriptor::<F>()?;
+        let (forward_node, forward_handle) = self.plan_state_node::<F, I>(
             forward_key,
-            forward_registered,
+            forward_descriptor,
             forward_config,
             forward_input,
             StateNodePlanningOptions {
+                context: forward_context,
                 side_effect_contract: Some((forward_resource_claim, forward_verification)),
                 ..StateNodePlanningOptions::default()
             },
@@ -4608,19 +4388,20 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             }
         };
 
-        let remediation_registered = match self.state_registry.registered_state::<R>() {
-            Ok(registered) => registered,
+        let remediation_descriptor = match self.state_registry.state_descriptor::<R>() {
+            Ok(descriptor) => descriptor,
             Err(error) => {
                 self.restore(checkpoint);
                 return Err(error.into());
             }
         };
-        let (remediation_node, remediation_handle) = match self.plan_state_node(
+        let (remediation_node, remediation_handle) = match self.plan_state_node::<R, J>(
             remediation_key,
-            remediation_registered,
+            remediation_descriptor,
             remediation_config,
             remediation_input,
             StateNodePlanningOptions {
+                context: remediation_context,
                 side_effect_contract: Some((remediation_resource_claim, remediation_verification)),
                 ..StateNodePlanningOptions::default()
             },
@@ -4656,10 +4437,11 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         ))
     }
 
-    fn state_registered_with_domain_key_refs<S, I>(
+    fn state_with_domain_key_refs<S, I>(
         &mut self,
         key: StateKey,
-        registered: RegisteredState<S>,
+        descriptor: StateDescriptorIdentity,
+        context: impl StateTransitionContext<'program, 'scope, S::Context>,
         config: S::Config,
         input: I,
         output_domain_keys: Vec<StableDomainKeyRef>,
@@ -4674,12 +4456,14 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         if self.state_keys.contains(&key_string) {
             return Err(PlanError::DuplicateStateKey(key.as_str().to_owned()));
         }
-        let (node, handle) = self.plan_state_node(
+        let context = context.certified_context_spec().cloned();
+        let (node, handle) = self.plan_state_node::<S, I>(
             key,
-            registered,
+            descriptor,
             config,
             input,
             StateNodePlanningOptions {
+                context,
                 output_domain_keys,
                 ..StateNodePlanningOptions::default()
             },
@@ -4689,44 +4473,10 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         Ok(handle)
     }
 
-    /// Plans a registered side-effect state with an explicit resource claim.
-    pub fn side_effect<S, I>(
-        &mut self,
-        key: StateKey,
-        config: S::Config,
-        input: I,
-        resource_claim: ResourceClaim,
-        verification: SideEffectVerificationSpec,
-    ) -> Result<ForwardSideEffectHandle<'program, 'scope, S::Output>>
-    where
-        S: SideEffectState,
-        S::Caps: CapabilitySetFor<ApplySideEffect>,
-        I: IntoStateInput<'program, 'scope, S::Input>,
-    {
-        let key_string = key.as_str().to_owned();
-        if self.state_keys.contains(&key_string) {
-            return Err(PlanError::DuplicateStateKey(key.as_str().to_owned()));
-        }
-        let registered = self.state_registry.registered_state::<S>()?;
-        let (node, handle) = self.plan_state_node(
-            key,
-            registered,
-            config,
-            input,
-            StateNodePlanningOptions {
-                side_effect_contract: Some((resource_claim, verification)),
-                ..StateNodePlanningOptions::default()
-            },
-        )?;
-        self.state_keys.insert(key_string);
-        self.state_nodes.push(node.clone());
-        Ok(ForwardSideEffectHandle::new(node.node_id, handle))
-    }
-
     fn plan_state_node<S, I>(
         &self,
         key: StateKey,
-        registered: RegisteredState<S>,
+        descriptor: StateDescriptorIdentity,
         config: S::Config,
         input: I,
         options: StateNodePlanningOptions,
@@ -4750,7 +4500,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             side_effect_contract,
         } = options;
 
-        let descriptor = registered.descriptor();
+        let descriptor = &descriptor;
         validate_state_context_binding(descriptor, context.as_ref())?;
         let side_effect_contract_digest = descriptor.side_effect_contract_digest().cloned();
         let side_effect_contract =
@@ -4884,7 +4634,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
                 input_context_contract: descriptor.input_context().clone(),
                 output_context_contract: descriptor.output_context().clone(),
                 context: node_context,
-                runner: registered.runner(),
+                runner: descriptor.runner(),
                 effect_kind: descriptor.effect().kind.clone(),
                 capability_bindings: descriptor.capabilities().clone(),
                 adapter_bindings,
@@ -4971,7 +4721,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         }
     }
 
-    /// Expands a registered typed operation by resolving `O` through this builder's registry.
+    /// Expands a registry-resolved typed operation by resolving `O` through this builder's registry.
     pub fn call<O, I>(
         &mut self,
         key: OperationKey,
@@ -4983,15 +4733,14 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         O: Operation,
         I: IntoOperationInput<'program, 'scope, O::Input<'program, 'scope>>,
     {
-        let registered = self.operation_registry.registered_operation::<O>()?;
-        self.call_registered(key, registered, operation, config, input)
+        let descriptor = self.operation_registry.operation_descriptor::<O>()?;
+        self.call_with_descriptor(key, descriptor, operation, config, input)
     }
 
-    /// Expands a typed operation from an explicit framework-owned registration token.
-    pub fn call_registered<O, I>(
+    fn call_with_descriptor<O, I>(
         &mut self,
         key: OperationKey,
-        registered: RegisteredOperation<O>,
+        descriptor: OperationDescriptorIdentity,
         operation: O,
         config: O::Config,
         input: I,
@@ -5011,7 +4760,6 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         let input_binding = operation_input.input_binding()?;
         let output_schema_id =
             <O::Output<'program, 'scope> as OperationOutput<'program, 'scope>>::output_schema_id()?;
-        let descriptor = registered.descriptor().clone();
         let parent_operation_lineage = self.current_operation_lineage()?;
         let operation_instance_id = operation_instance_id(OperationInstanceIdParts {
             scope_id: &self.scope_id,
@@ -5116,8 +4864,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
     }
 }
 
-/// Operation-local planning context minted only by [`ScopeBuilder::call`] and
-/// [`ScopeBuilder::call_registered`].
+/// Operation-local planning context minted only by [`ScopeBuilder::call`].
 ///
 /// The fields are private so downstream crates cannot construct this context or call
 /// [`Operation::expand`] directly. Authoring code inside an operation can compose registered
@@ -5141,10 +4888,10 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
     }
 
     fn scope_mut(&mut self) -> &mut ScopeBuilder<'program, 'scope> {
-        // SAFETY: OperationExpansion is created only by ScopeBuilder::call_registered from its
-        // exclusive `&mut self`. The raw pointer is never exposed, all mutation goes through
-        // `&mut OperationExpansion`, and call_registered does not touch the ScopeBuilder again
-        // until operation expansion returns.
+        // SAFETY: OperationExpansion is created only by ScopeBuilder::call from its exclusive
+        // `&mut self`. The raw pointer is never exposed, all mutation goes through
+        // `&mut OperationExpansion`, and call does not touch the ScopeBuilder again until
+        // operation expansion returns.
         unsafe { self.scope.as_mut() }
     }
 
@@ -5173,10 +4920,11 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
         self.scope_mut().declare_context(value)
     }
 
-    /// Plans a registered typed state by resolving `S` through this expansion's registry.
+    /// Plans a registry-resolved typed state by resolving `S` through this expansion's registry.
     pub fn state<S, I>(
         &mut self,
         key: StateKey,
+        context: impl StateTransitionContext<'program, 'scope, S::Context>,
         config: S::Config,
         input: I,
     ) -> Result<Handle<'program, 'scope, S::Output>>
@@ -5186,13 +4934,14 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
         S::Caps: CapabilitySetFor<S::Effect>,
         I: IntoStateInput<'program, 'scope, S::Input>,
     {
-        self.scope_mut().state::<S, I>(key, config, input)
+        self.scope_mut().state::<S, I>(key, context, config, input)
     }
 
-    /// Plans a registered typed state and attaches stable domain-key evidence to its output.
+    /// Plans a registry-resolved typed state and attaches stable domain-key evidence to its output.
     pub fn state_with_domain_keys<S, I, K>(
         &mut self,
         key: StateKey,
+        context: impl StateTransitionContext<'program, 'scope, S::Context>,
         config: S::Config,
         input: I,
         domain_keys: Vec<K>,
@@ -5205,96 +4954,14 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
         K: StableDomainKey,
     {
         self.scope_mut()
-            .state_with_domain_keys::<S, I, K>(key, config, input, domain_keys)
+            .state_with_domain_keys::<S, I, K>(key, context, config, input, domain_keys)
     }
 
-    /// Plans a typed state from an explicit framework-owned registration token.
-    pub fn state_registered<S, I>(
-        &mut self,
-        key: StateKey,
-        registered: RegisteredState<S>,
-        config: S::Config,
-        input: I,
-    ) -> Result<Handle<'program, 'scope, S::Output>>
-    where
-        S: StateSpec,
-        S::Effect: EffectRunner<S>,
-        S::Caps: CapabilitySetFor<S::Effect>,
-        I: IntoStateInput<'program, 'scope, S::Input>,
-    {
-        self.scope_mut()
-            .state_registered::<S, I>(key, registered, config, input)
-    }
-
-    /// Plans a typed state from an explicit token and attaches stable domain-key evidence.
-    pub fn state_registered_with_domain_keys<S, I, K>(
-        &mut self,
-        key: StateKey,
-        registered: RegisteredState<S>,
-        config: S::Config,
-        input: I,
-        domain_keys: Vec<K>,
-    ) -> Result<Handle<'program, 'scope, S::Output>>
-    where
-        S: StateSpec,
-        S::Effect: EffectRunner<S>,
-        S::Caps: CapabilitySetFor<S::Effect>,
-        I: IntoStateInput<'program, 'scope, S::Input>,
-        K: StableDomainKey,
-    {
-        self.scope_mut()
-            .state_registered_with_domain_keys::<S, I, K>(
-                key,
-                registered,
-                config,
-                input,
-                domain_keys,
-            )
-    }
-
-    /// Plans a registered typed state under an explicitly declared certified context.
-    pub fn state_in_context<S, I, C>(
-        &mut self,
-        key: StateKey,
-        context: &DeclaredContext<'program, 'scope, C>,
-        config: S::Config,
-        input: I,
-    ) -> Result<Handle<'program, 'scope, S::Output>>
-    where
-        S: StateSpec<Context = C>,
-        C: MfmContext,
-        S::Effect: EffectRunner<S>,
-        S::Caps: CapabilitySetFor<S::Effect>,
-        I: IntoStateInput<'program, 'scope, S::Input>,
-    {
-        self.scope_mut()
-            .state_in_context::<S, I, C>(key, context, config, input)
-    }
-
-    /// Plans a typed state from an explicit registration token under a declared context.
-    pub fn state_registered_in_context<S, I, C>(
-        &mut self,
-        key: StateKey,
-        registered: RegisteredState<S>,
-        context: &DeclaredContext<'program, 'scope, C>,
-        config: S::Config,
-        input: I,
-    ) -> Result<Handle<'program, 'scope, S::Output>>
-    where
-        S: StateSpec<Context = C>,
-        C: MfmContext,
-        S::Effect: EffectRunner<S>,
-        S::Caps: CapabilitySetFor<S::Effect>,
-        I: IntoStateInput<'program, 'scope, S::Input>,
-    {
-        self.scope_mut()
-            .state_registered_in_context::<S, I, C>(key, registered, context, config, input)
-    }
-
-    /// Plans a registered side-effect state with an explicit resource claim.
+    /// Plans a registered side-effect state with an explicit transition context and resource claim.
     pub fn side_effect<S, I>(
         &mut self,
         key: StateKey,
+        context: impl StateTransitionContext<'program, 'scope, S::Context>,
         config: S::Config,
         input: I,
         resource_claim: ResourceClaim,
@@ -5305,27 +4972,7 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
         S::Caps: CapabilitySetFor<ApplySideEffect>,
         I: IntoStateInput<'program, 'scope, S::Input>,
     {
-        self.scope_mut()
-            .side_effect::<S, I>(key, config, input, resource_claim, verification)
-    }
-
-    /// Plans a registered side-effect state under an explicitly declared certified context.
-    pub fn side_effect_in_context<S, I, C>(
-        &mut self,
-        key: StateKey,
-        context: &DeclaredContext<'program, 'scope, C>,
-        config: S::Config,
-        input: I,
-        resource_claim: ResourceClaim,
-        verification: SideEffectVerificationSpec,
-    ) -> Result<ForwardSideEffectHandle<'program, 'scope, S::Output>>
-    where
-        S: SideEffectState<Context = C>,
-        C: MfmContext,
-        S::Caps: CapabilitySetFor<ApplySideEffect>,
-        I: IntoStateInput<'program, 'scope, S::Input>,
-    {
-        self.scope_mut().side_effect_in_context::<S, I, C>(
+        self.scope_mut().side_effect::<S, I>(
             key,
             context,
             config,
@@ -5335,26 +4982,11 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
         )
     }
 
-    /// Plans a side-effect state from an explicit registration token under a declared context.
-    pub fn side_effect_registered_in_context<S, I, C>(
-        &mut self,
-        registered: RegisteredState<S>,
-        context: &DeclaredContext<'program, 'scope, C>,
-        params: SideEffectNodeParams<S, I>,
-    ) -> Result<ForwardSideEffectHandle<'program, 'scope, S::Output>>
-    where
-        S: SideEffectState<Context = C>,
-        C: MfmContext,
-        S::Caps: CapabilitySetFor<ApplySideEffect>,
-        I: IntoStateInput<'program, 'scope, S::Input>,
-    {
-        self.scope_mut()
-            .side_effect_registered_in_context::<S, I, C>(registered, context, params)
-    }
-
     /// Plans a linked forward/remediation side-effect pair.
     pub fn side_effect_with_compensation<F, R, I, J, B>(
         &mut self,
+        forward_context: impl StateTransitionContext<'program, 'scope, F::Context>,
+        remediation_context: impl StateTransitionContext<'program, 'scope, R::Context>,
         forward_params: SideEffectNodeParams<F, I>,
         remediation_params: RemediationNodeParams<R>,
         build_remediation_input: B,
@@ -5370,13 +5002,15 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
     {
         self.scope_mut()
             .side_effect_with_compensation::<F, R, I, J, B>(
+                forward_context,
+                remediation_context,
                 forward_params,
                 remediation_params,
                 build_remediation_input,
             )
     }
 
-    /// Expands a registered typed operation by resolving `O` through this expansion's registry.
+    /// Expands a registry-resolved typed operation by resolving `O` through this expansion's registry.
     pub fn call<O, I>(
         &mut self,
         key: OperationKey,
@@ -5389,23 +5023,6 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
         I: IntoOperationInput<'program, 'scope, O::Input<'program, 'scope>>,
     {
         self.scope_mut().call::<O, I>(key, operation, config, input)
-    }
-
-    /// Expands a typed operation from an explicit framework-owned registration token.
-    pub fn call_registered<O, I>(
-        &mut self,
-        key: OperationKey,
-        registered: RegisteredOperation<O>,
-        operation: O,
-        config: O::Config,
-        input: I,
-    ) -> Result<O::Output<'program, 'scope>>
-    where
-        O: Operation,
-        I: IntoOperationInput<'program, 'scope, O::Input<'program, 'scope>>,
-    {
-        self.scope_mut()
-            .call_registered::<O, I>(key, registered, operation, config, input)
     }
 }
 
@@ -6848,13 +6465,15 @@ fn digest_only_id<I>(
 
 mod private {
     use super::{
-        ApplySideEffect, ForwardSideEffectHandle, Handle, ManagedPlatformWrite, MfmValue,
-        NonEmptyHandles, Pure, ReadExternal, SideEffectState, StateSpec,
+        ApplySideEffect, DeclaredContext, ForwardSideEffectHandle, Handle, ManagedPlatformWrite,
+        MfmContext, MfmValue, NoContext, NonEmptyHandles, Pure, ReadExternal, SideEffectState,
+        StateContext, StateSpec,
     };
 
     pub trait EffectRunnerSealed<S: StateSpec> {}
     pub trait OperationInputSealed {}
     pub trait BridgeableSealed {}
+    pub trait StateTransitionContextSealed<'program, 'scope, C: StateContext> {}
 
     impl<S> EffectRunnerSealed<S> for Pure where S: super::PureState {}
 
@@ -6863,6 +6482,15 @@ mod private {
     impl<S> EffectRunnerSealed<S> for ManagedPlatformWrite where S: super::ManagedWriteState {}
 
     impl<S> EffectRunnerSealed<S> for ApplySideEffect where S: SideEffectState {}
+
+    impl<'program, 'scope> StateTransitionContextSealed<'program, 'scope, NoContext> for NoContext {}
+
+    impl<'program, 'scope, C> StateTransitionContextSealed<'program, 'scope, C>
+        for &DeclaredContext<'program, 'scope, C>
+    where
+        C: MfmContext,
+    {
+    }
 
     impl OperationInputSealed for () {}
 

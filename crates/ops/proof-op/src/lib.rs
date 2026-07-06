@@ -26,8 +26,8 @@ pub use mfm_collectors_proof::{
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion, SchemaId};
 use mfm_program::{
     build_root_with_registries, ManualAuthorizationDraft, ManualAuthorizationVerifierId,
-    ManualResolutionPolicyDraft, ManualSigningSchemeSpec, NonEmptyUniqueOperators, Operation,
-    OperationExpansion, OperationKey, OperatorAuthorityId, OperatorAuthorityMemberSpec,
+    ManualResolutionPolicyDraft, ManualSigningSchemeSpec, NoContext, NonEmptyUniqueOperators,
+    Operation, OperationExpansion, OperationKey, OperatorAuthorityId, OperatorAuthorityMemberSpec,
     OperatorAuthoritySnapshotDraft, OperatorId, OperatorPublicIdentity, PublicOutputKey,
     ResourceClaim, RootBuilder, ScopeKey, SideEffectSagaPolicy, SideEffectVerificationSpec,
     StateKey, ThresholdQuorum,
@@ -79,10 +79,15 @@ impl Operation for ProofWorkflowOperation {
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
         let config = config.into_inner();
-        let fact =
-            builder.state::<ProofReadFactState, _>(StateKey::new("read_fact")?, config.read, ())?;
+        let fact = builder.state::<ProofReadFactState, _>(
+            StateKey::new("read_fact")?,
+            NoContext,
+            config.read,
+            (),
+        )?;
         let side_effect = builder.side_effect::<ProofApplySideEffectState, _>(
             StateKey::new("apply_side_effect")?,
+            NoContext,
             config.apply,
             fact.clone(),
             ResourceClaim::manual_only(),
@@ -90,6 +95,7 @@ impl Operation for ProofWorkflowOperation {
         )?;
         let output = builder.state::<ProofAssembleOutputState, _>(
             StateKey::new("assemble_output")?,
+            NoContext,
             ProofAssembleConfig {},
             ProofAssembleInputHandles {
                 fact,

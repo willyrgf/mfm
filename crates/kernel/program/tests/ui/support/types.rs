@@ -259,6 +259,7 @@ impl mfm_program::Operation for TryOperation {
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
         let result = builder.state::<TryPureState, _>(
             mfm_program::StateKey::new("try-operation/state")?,
+            mfm_program::NoContext,
             config.into_inner(),
             input,
         )?;

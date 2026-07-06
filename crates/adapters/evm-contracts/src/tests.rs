@@ -401,22 +401,14 @@ fn artifact_ref_for_raw_bytes(bytes: &[u8]) -> LifecycleArtifactEvidenceRef {
 
 fn source_run_certification_registry() -> mfm_certify::CertificationRegistry {
     let mut registry = mfm_certify::CertificationRegistry::new();
-    let mut states = mfm_program::StateRegistryBuilder::new();
-    let deploy = states
-        .register::<ContextBoundDeployContractState>()
-        .expect("deploy state descriptor");
-    registry.register_state(&deploy).expect("deploy certifier");
-    let configure = states
-        .register::<ContextBoundConfigureContractState>()
-        .expect("configure state descriptor");
     registry
-        .register_state(&configure)
+        .register_state::<ContextBoundDeployContractState>()
+        .expect("deploy certifier");
+    registry
+        .register_state::<ContextBoundConfigureContractState>()
         .expect("configure certifier");
-    let validate = states
-        .register::<ContextBoundValidateContractState>()
-        .expect("validate state descriptor");
     registry
-        .register_state(&validate)
+        .register_state::<ContextBoundValidateContractState>()
         .expect("validate certifier");
     registry
 }
@@ -559,7 +551,7 @@ fn source_run_program_draft(
             let context = root.scope().declare_context(context)?;
             let deployed = root
                 .scope()
-                .side_effect_in_context::<ContextBoundDeployContractState, _, EvmContractContext>(
+                .side_effect::<ContextBoundDeployContractState, _>(
                     mfm_program::StateKey::new("deploy")?,
                     &context,
                     deploy,
@@ -570,11 +562,7 @@ fn source_run_program_draft(
                 .into_handle();
             let configured = root
                 .scope()
-                .side_effect_in_context::<
-                    ContextBoundConfigureContractState,
-                    _,
-                    EvmContractContext,
-                >(
+                .side_effect::<ContextBoundConfigureContractState, _>(
                     mfm_program::StateKey::new("configure")?,
                     &context,
                     configure,

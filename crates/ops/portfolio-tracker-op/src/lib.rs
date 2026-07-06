@@ -32,8 +32,9 @@ use mfm_portfolio_model::portfolio::{NetworkConfig, PortfolioConfig};
 use mfm_portfolio_model::symbol::SymbolConfig;
 use mfm_portfolio_model::wallet::WalletConfig;
 use mfm_program::{
-    build_root_with_registries, DomainKeyedNonEmptyHandles, Operation, OperationExpansion,
-    OperationKey, PublicOutputKey, RootBuilder, ScopeKey, StateKey, TypedProgramLaunchPlan,
+    build_root_with_registries, DomainKeyedNonEmptyHandles, NoContext, Operation,
+    OperationExpansion, OperationKey, PublicOutputKey, RootBuilder, ScopeKey, StateKey,
+    TypedProgramLaunchPlan,
 };
 pub use mfm_state_portfolio::{
     balance_reader_kind, observation_batch_id, portfolio_adapter_kind, portfolio_adapter_version,
@@ -113,6 +114,7 @@ impl Operation for PortfolioTrackerWorkflowOperation {
 
         let prepared = builder.state_with_domain_keys::<PrepareSourcesState, _, _>(
             StateKey::new("prepare_sources")?,
+            NoContext,
             PrepareSourcesConfig::new(portfolio.networks.clone())
                 .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
             (),
@@ -120,6 +122,7 @@ impl Operation for PortfolioTrackerWorkflowOperation {
         )?;
         let subjects = builder.state_with_domain_keys::<ResolveSubjectsState, _, _>(
             StateKey::new("resolve_subjects")?,
+            NoContext,
             ResolveSubjectsConfig::new(portfolio.wallets.clone())
                 .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
             prepared.clone(),
@@ -127,6 +130,7 @@ impl Operation for PortfolioTrackerWorkflowOperation {
         )?;
         let views = builder.state_with_domain_keys::<PinViewsState, _, _>(
             StateKey::new("pin_views")?,
+            NoContext,
             PinViewsConfig::new(portfolio.networks.clone())
                 .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
             prepared,
@@ -134,6 +138,7 @@ impl Operation for PortfolioTrackerWorkflowOperation {
         )?;
         let valuations = builder.state_with_domain_keys::<ResolveValuationsState, _, _>(
             StateKey::new("resolve_valuations")?,
+            NoContext,
             ResolveValuationsConfig::new(
                 portfolio.symbol_configs.clone(),
                 valuation_source_registry,
@@ -163,6 +168,7 @@ impl Operation for PortfolioTrackerWorkflowOperation {
                 .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
             let handle = builder.state_with_domain_keys::<ObserveBatchState, _, _>(
                 StateKey::new(format!("observe/{batch_key}"))?,
+                NoContext,
                 ObserveBatchConfig::new(wallet.clone(), symbol.clone(), network.clone())
                     .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
                 ObserveBatchInputHandles {
@@ -177,6 +183,7 @@ impl Operation for PortfolioTrackerWorkflowOperation {
 
         let observations = builder.state::<MergeObservationsState, _>(
             StateKey::new("merge_observations")?,
+            NoContext,
             MergeObservationsConfig::new(),
             DomainKeyedNonEmptyHandles::<ObservationBatchDomainKey, ObservationBatch>::new(
                 observation_handles,
@@ -184,6 +191,7 @@ impl Operation for PortfolioTrackerWorkflowOperation {
         )?;
         let snapshot = builder.state::<AssembleSnapshotState, _>(
             StateKey::new("assemble_snapshot")?,
+            NoContext,
             AssembleSnapshotConfig::new(2, portfolio.clone())
                 .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
             AssembleSnapshotInputHandles {
@@ -194,6 +202,7 @@ impl Operation for PortfolioTrackerWorkflowOperation {
         )?;
         let report = builder.state_with_domain_keys::<ProjectReportState, _, _>(
             StateKey::new("project_report")?,
+            NoContext,
             ProjectReportConfig::new(2)
                 .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
             ProjectReportInputHandles {

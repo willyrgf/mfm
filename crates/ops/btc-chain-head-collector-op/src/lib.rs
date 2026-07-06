@@ -22,8 +22,8 @@ use std::num::NonZeroU64;
 
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_program::{
-    build_root_with_registries, CanonicalSeed, Handle, Operation, OperationExpansion, OperationKey,
-    PublicOutputKey, RootBuilder, ScopeKey, SeedKey, StateKey,
+    build_root_with_registries, CanonicalSeed, Handle, NoContext, Operation, OperationExpansion,
+    OperationKey, PublicOutputKey, RootBuilder, ScopeKey, SeedKey, StateKey,
 };
 use mfm_program_derive::{MfmConfig, OperationOutput, PublicOutputs};
 pub use mfm_states_btc::{
@@ -194,11 +194,13 @@ impl Operation for BtcChainHeadCollectorCycleOperation {
         let config = config.into_inner();
         let loaded_checkpoint = builder.state::<QueryCollectorCheckpointState, _>(
             StateKey::new("query_collector_checkpoint")?,
+            NoContext,
             config.checkpoint_query_config(),
             QueryCollectorCheckpointInputHandles {},
         )?;
         let observation = builder.state::<ObserveBtcChainHeadState, _>(
             StateKey::new("observe_btc_chain_head")?,
+            NoContext,
             config.observe_chain_head_config(),
             ObserveBtcChainHeadInputHandles {
                 loaded_checkpoint: loaded_checkpoint.clone(),
@@ -207,11 +209,13 @@ impl Operation for BtcChainHeadCollectorCycleOperation {
         )?;
         let chain_head_fact = builder.state::<RecordBtcChainHeadFactState, _>(
             StateKey::new("record_btc_chain_head_fact")?,
+            NoContext,
             RecordBtcChainHeadFactConfig {},
             RecordBtcChainHeadFactInputHandles { observation },
         )?;
         let collector_checkpoint = builder.state::<RecordCollectorCheckpointState, _>(
             StateKey::new("record_collector_checkpoint")?,
+            NoContext,
             config.record_checkpoint_config(),
             RecordCollectorCheckpointInputHandles {
                 chain_head_fact: chain_head_fact.clone(),
