@@ -164,6 +164,28 @@ mod tests {
     }
 
     #[test]
+    fn app_prepare_dual_mainnet_portfolio_run_launch_certifies() {
+        let fixture =
+            EntryPointPrepFixture::with_trust_scope_hex("53535353535353535353535353535353");
+        let authored_config = AuthoredConfig::new(
+            AuthoredConfigFormat::Toml,
+            include_str!("../../../examples/configs/portfolio-dual-mainnet.toml"),
+        )
+        .expect("authored config");
+
+        crate::prepare_entry_point_run_launch(crate::EntryPointRunLaunchInput {
+            entry_point_registry: &fixture.entry_point_registry,
+            public_op_name: portfolio_public_op_name(),
+            op_version: None,
+            authored_config,
+            certification_registry: &fixture.certification_registry,
+            trust_scope_id: fixture.trust_scope_id,
+            distinct_run_key: None,
+        })
+        .expect("dual-mainnet portfolio launch should certify");
+    }
+
+    #[test]
     fn app_prepare_entry_point_run_launch_derives_stable_and_distinct_run_ids() {
         let fixture =
             EntryPointPrepFixture::with_trust_scope_hex("51515151515151515151515151515151");

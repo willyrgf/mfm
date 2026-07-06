@@ -754,19 +754,11 @@ impl<O: Operation> OperationExpansionDispatch<O> {
     }
 }
 
-/// Typed dynamic fanout key with canonical bytes for stable ordering.
+/// Typed dynamic fanout key for stable domain-key references.
 pub trait StableDomainKey: MfmValue {
     /// Returns the domain-key schema descriptor.
     fn domain_key_descriptor() -> mfm_values::Result<SchemaDescriptor> {
         Self::schema_descriptor()
-    }
-
-    /// Returns canonical domain-key bytes used for ordering and duplicate detection.
-    fn canonical_domain_bytes(&self) -> Result<PlainCanonicalJsonBytes> {
-        let json =
-            serde_json::to_string(self).map_err(|error| PlanError::Serialize(error.to_string()))?;
-        PlainCanonicalJsonBytes::from_json_str(&json)
-            .map_err(|error| PlanError::Canonical(error.to_string()))
     }
 }
 
@@ -1949,7 +1941,7 @@ impl StableDomainKeyRef {
         let schema_id = K::domain_key_descriptor()
             .and_then(|descriptor| descriptor.schema_id())
             .map_err(|error| PlanError::Value(error.to_string()))?;
-        let content_digest = key.canonical_domain_bytes()?.content_digest();
+        let content_digest = canonical_domain_key_bytes(key)?.content_digest();
         Ok(Self {
             schema_id,
             content_digest,
@@ -1963,6 +1955,13 @@ impl StableDomainKeyRef {
             self.content_digest.as_str()
         )
     }
+}
+
+fn canonical_domain_key_bytes<K: StableDomainKey>(key: &K) -> Result<PlainCanonicalJsonBytes> {
+    let json =
+        serde_json::to_string(key).map_err(|error| PlanError::Serialize(error.to_string()))?;
+    PlainCanonicalJsonBytes::from_json_str(&json)
+        .map_err(|error| PlanError::Canonical(error.to_string()))
 }
 
 fn stable_domain_key_refs<K: StableDomainKey>(keys: Vec<K>) -> Result<Vec<StableDomainKeyRef>> {
@@ -3354,7 +3353,6 @@ pub struct DomainKeyedNonEmptyHandles<'program, 'scope, K: StableDomainKey, T: M
 #[derive(Debug, PartialEq, Eq)]
 struct DomainKeyedHandle<'program, 'scope, K: StableDomainKey, T: MfmValue> {
     key_ref: StableDomainKeyRef,
-    canonical_domain_bytes: PlainCanonicalJsonBytes,
     handle: Handle<'program, 'scope, T>,
     _key: PhantomData<fn(K) -> K>,
 }
@@ -3364,7 +3362,7 @@ where
     K: StableDomainKey,
     T: MfmValue,
 {
-    /// Creates domain-keyed handles, rejecting duplicate canonical keys and sorting by canonical bytes.
+    /// Creates domain-keyed handles, rejecting duplicate stable references and sorting by them.
     pub fn new(entries: Vec<(K, Handle<'program, 'scope, T>)>) -> Result<Self> {
         Ok(Self {
             entries: Self::sorted_entries(entries)?,
@@ -3377,38 +3375,18 @@ where
         let mut keyed = entries
             .into_iter()
             .map(|(key, handle)| {
-                let schema_id = K::domain_key_descriptor()
-                    .and_then(|descriptor| descriptor.schema_id())
-                    .map_err(|error| PlanError::Value(error.to_string()))?;
-                let canonical_domain_bytes = key.canonical_domain_bytes()?;
-                let key_ref = StableDomainKeyRef {
-                    schema_id,
-                    content_digest: canonical_domain_bytes.content_digest(),
-                };
+                let key_ref = StableDomainKeyRef::from_key(&key)?;
                 Ok(DomainKeyedHandle {
                     key_ref,
-                    canonical_domain_bytes,
                     handle,
                     _key: PhantomData,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        keyed.sort_by(|left, right| {
-            left.key_ref
-                .schema_id
-                .cmp(&right.key_ref.schema_id)
-                .then_with(|| {
-                    left.canonical_domain_bytes
-                        .cmp(&right.canonical_domain_bytes)
-                })
-        });
+        keyed.sort_by(|left, right| left.key_ref.cmp(&right.key_ref));
         let mut seen = BTreeSet::new();
         for entry in &keyed {
-            let key = (
-                entry.key_ref.schema_id.clone(),
-                entry.canonical_domain_bytes.clone(),
-            );
-            if !seen.insert(key) {
+            if !seen.insert(entry.key_ref.clone()) {
                 return Err(PlanError::DuplicateDomainKey(
                     entry.key_ref.stable_sort_key(),
                 ));
@@ -3433,7 +3411,7 @@ where
     K: StableDomainKey,
     T: MfmValue,
 {
-    /// Creates non-empty domain-keyed handles, rejecting empty input and duplicate canonical keys.
+    /// Creates non-empty domain-keyed handles, rejecting empty input and duplicate stable references.
     pub fn new(entries: Vec<(K, Handle<'program, 'scope, T>)>) -> Result<Self> {
         if entries.is_empty() {
             return Err(PlanError::EmptyNonEmptyInput);

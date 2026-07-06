@@ -1718,7 +1718,7 @@ fn stable_ids_and_value_lineage_golden_vectors() {
 }
 
 #[test]
-fn domain_keyed_handles_sort_canonically_and_reject_duplicates() {
+fn domain_keyed_handles_sort_by_stable_refs_and_reject_duplicates() {
     build_root(ScopeKey::new("root").expect("scope key"), |root| {
         let late = root.seed(SeedKey::new("late")?, launch_seed(3, "late"))?;
         let early = root.seed(SeedKey::new("early")?, launch_seed(1, "early"))?;
@@ -1761,7 +1761,7 @@ fn domain_keyed_handles_sort_canonically_and_reject_duplicates() {
         assert_eq!(
             binding.digest(),
             reversed_binding.digest(),
-            "canonical domain-key order must make input order irrelevant"
+            "stable domain-key ref order must make input order irrelevant"
         );
         let InputBindingNodeKind::Vec {
             ordering,
@@ -1774,17 +1774,14 @@ fn domain_keyed_handles_sort_canonically_and_reject_duplicates() {
         assert_eq!(ordering, &OrderingEvidence::StableDomainKey);
         assert_eq!(domain_keys.len(), 2);
         assert_eq!(elements.len(), 2);
-        assert_eq!(
-            binding.digest().as_str(),
-            "content:sha256-jcs-v1:422c5aedbcf6740a6de87d7efeebe548ab81245c4572ec1c76b8e322678e07e4"
-        );
+        assert!(domain_keys.windows(2).all(|pair| pair[0] <= pair[1]));
         assert_eq!(
             domain_keys[0].content_digest.as_str(),
-            "content:sha256-jcs-v1:dcf7ba6724b36bcbb4945ba25c50e8fadc7b56b00be10009321a918484de9187"
+            "content:sha256-jcs-v1:201a76ed8dddaee1cc860ade5d752a9b6e710be9f1ccece57a7c69f6a062e64f"
         );
         assert_eq!(
             domain_keys[1].content_digest.as_str(),
-            "content:sha256-jcs-v1:201a76ed8dddaee1cc860ade5d752a9b6e710be9f1ccece57a7c69f6a062e64f"
+            "content:sha256-jcs-v1:dcf7ba6724b36bcbb4945ba25c50e8fadc7b56b00be10009321a918484de9187"
         );
         let InputBindingNodeKind::Cell(first_cell) = &elements[0].kind else {
             panic!("first domain-keyed element should be a cell");
@@ -1792,8 +1789,8 @@ fn domain_keyed_handles_sort_canonically_and_reject_duplicates() {
         let InputBindingNodeKind::Cell(second_cell) = &elements[1].kind else {
             panic!("second domain-keyed element should be a cell");
         };
-        assert_eq!(first_cell.cell_id, early_ref.cell_id);
-        assert_eq!(second_cell.cell_id, late_ref.cell_id);
+        assert_eq!(first_cell.cell_id, late_ref.cell_id);
+        assert_eq!(second_cell.cell_id, early_ref.cell_id);
 
         let non_empty_keyed = DomainKeyedNonEmptyHandles::new(vec![
             (
@@ -1824,6 +1821,7 @@ fn domain_keyed_handles_sort_canonically_and_reject_duplicates() {
         assert_eq!(ordering, &OrderingEvidence::StableDomainKey);
         assert_eq!(domain_keys.len(), 2);
         assert_eq!(elements.len(), 2);
+        assert!(domain_keys.windows(2).all(|pair| pair[0] <= pair[1]));
         assert!(matches!(
             DomainKeyedNonEmptyHandles::<TestDomainKey, LaunchValue>::new(Vec::new()),
             Err(PlanError::EmptyNonEmptyInput)

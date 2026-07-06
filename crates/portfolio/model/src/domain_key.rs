@@ -96,17 +96,7 @@ impl mfm_program::StableDomainKey for ReportDomainKey {}
 #[cfg(test)]
 mod tests {
     use super::SubjectDomainKey;
-    use mfm_program::StableDomainKey;
     use serde_json::json;
-
-    #[test]
-    fn stable_domain_key_bytes_are_canonical_json() {
-        let key = SubjectDomainKey::new("wallet_main").expect("valid key");
-        let bytes = key
-            .canonical_domain_bytes()
-            .expect("canonical domain bytes");
-        assert_eq!(bytes.as_bytes(), br#"{"subject_key":"wallet_main"}"#);
-    }
 
     #[test]
     fn stable_domain_keys_validate_deserialized_values() {
