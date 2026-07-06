@@ -18,7 +18,7 @@ mfm-artifact-capabilities = { path = "../../artifact-capabilities" }
 mfm-btc-capabilities = { path = "../../btc-capabilities" }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-capabilities = { path = "../../kernel/capabilities" }
-mfm-collectors-btc-jsonrpc-http = { path = "../../collectors/btc-jsonrpc-http" }
+mfm-transports-btc-jsonrpc-http = { path = "../../transports/btc-jsonrpc-http" }
 mfm-events = { path = "../../kernel/events" }
 mfm-fact-capabilities = { path = "../../fact-capabilities" }
 mfm-facts = { path = "../../kernel/facts" }

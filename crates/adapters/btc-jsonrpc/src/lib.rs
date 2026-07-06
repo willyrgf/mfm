@@ -16,9 +16,6 @@ use mfm_btc_capabilities::{
     BtcCapabilityError, BtcCapabilityFuture, BtcChainHeadReadProvider, BtcChainHeadRequest,
     BtcChainHeadResponse, BtcFinality, BtcSourceStatus, RedactedBtcSourceEvidence,
 };
-use mfm_collectors_btc_jsonrpc_http::{
-    BlockHeaderInfo, BlockchainInfo, BtcJsonRpcClient, BtcRpcError, ScanTxOutSetResult,
-};
 use mfm_events::v1 as events;
 use mfm_fact_capabilities::{
     FactIndexReadEvidence, FactIndexReadProvider, FactIndexReadResponse,
@@ -40,6 +37,9 @@ use mfm_states_btc::{
     QueryCollectorCheckpointState, RecordBtcChainHeadFactState, RecordCollectorCheckpointState,
 };
 use mfm_store::v1 as store;
+use mfm_transports_btc_jsonrpc_http::{
+    BlockHeaderInfo, BlockchainInfo, BtcJsonRpcClient, BtcRpcError, ScanTxOutSetResult,
+};
 use mfm_values::MfmValue;
 
 const READ_FACTORY: &str = "read_external";

@@ -7,7 +7,7 @@ members = [
 	"bin/rest-api",
 	"tests/integration",
 	"crates/app",
-	"crates/collectors/btc-jsonrpc-http",
+	"crates/transports/btc-jsonrpc-http",
 	"crates/collectors/proof",
 	"crates/core",
 	"crates/kernel/canonical",

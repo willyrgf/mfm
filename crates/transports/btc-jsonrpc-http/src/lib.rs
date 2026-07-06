@@ -13,7 +13,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use mfm_collectors_btc_jsonrpc_http::BtcJsonRpcConfig;
+//! use mfm_transports_btc_jsonrpc_http::BtcJsonRpcConfig;
 //!
 //! let config = BtcJsonRpcConfig {
 //!     rpc_url: "http://127.0.0.1:8332".to_string(),

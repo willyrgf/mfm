@@ -1,5 +1,5 @@
 [package]
-name = "mfm-collectors-btc-jsonrpc-http"
+name = "mfm-transports-btc-jsonrpc-http"
 version = "0.1.0"
 edition = "2021"
 description = "Bitcoin Core JSON-RPC over HTTP client for managed Bitcoin IO"

@@ -30,7 +30,7 @@ const APPROVED_CATEGORY_DEPENDENCY_OVERRIDES: &[(&str, &str)] = &[
 
 const PATH_CATEGORY_EXCEPTIONS: &[(&str, CrateCategory)] = &[
     (
-        "crates/collectors/btc-jsonrpc-http/Cargo.toml",
+        "crates/transports/btc-jsonrpc-http/Cargo.toml",
         CrateCategory::Transport,
     ),
     ("crates/collectors/proof/Cargo.toml", CrateCategory::State),
