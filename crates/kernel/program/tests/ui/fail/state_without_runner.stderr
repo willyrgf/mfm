@@ -18,7 +18,7 @@ help: the trait `PureState` is implemented for `TryPureState`
 note: required by a bound in `StateRegistryBuilder::register`
   --> src/lib.rs
    |
-   |     pub fn register<S>(&mut self) -> std::result::Result<RegisteredState<S>, RegistryError>
+   |     pub fn register<S>(&mut self) -> std::result::Result<(), RegistryError>
    |            -------- required by a bound in this associated function
 ...
    |         S::Effect: EffectRunner<S>,
