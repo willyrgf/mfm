@@ -4634,93 +4634,68 @@ fn state_attempt_interrupted_rejects_duplicate_terminal_event() {
 }
 
 #[test]
-fn state_attempt_interrupted_allows_side_effect_intent_before_invocation_prepared() {
-    let run_id = run_id(62);
-    let artifact_id = artifact_id(81);
-    let artifact_digest = content_digest(82);
-    let mut store = admitted_store(&run_id, "run-start");
-    append_side_effect_attempt_started(&mut store, &run_id, "sidefx-attempt-start")
-        .expect("append sidefx attempt start");
-    append_certified_side_effect_commit(
-        &mut store,
-        &run_id,
-        "sidefx-intent",
-        vec![side_effect_intent(
+fn state_attempt_interrupted_allows_side_effect_before_invocation_prepared() {
+    for (case_label, run_id, artifact_id, artifact_digest, include_claim) in [
+        (
+            "intent",
+            run_id(62),
+            artifact_id(81),
+            content_digest(82),
+            false,
+        ),
+        (
+            "claim",
+            run_id(63),
+            artifact_id(83),
+            content_digest(84),
+            true,
+        ),
+    ] {
+        let mut store = admitted_store(&run_id, "run-start");
+        append_side_effect_attempt_started(&mut store, &run_id, "sidefx-attempt-start")
+            .expect("append sidefx attempt start");
+        let mut payloads = vec![side_effect_intent(
             artifact_id.clone(),
             artifact_digest.clone(),
-        )],
-        vec![intent_artifact_ref(artifact_id, artifact_digest)],
-    )
-    .expect("append sidefx intent");
+        )];
+        if include_claim {
+            payloads.push(side_effect_claim());
+        }
+        append_certified_side_effect_commit(
+            &mut store,
+            &run_id,
+            &format!("sidefx-{case_label}"),
+            payloads,
+            vec![intent_artifact_ref(artifact_id, artifact_digest)],
+        )
+        .expect("append sidefx pre-prepare phase");
 
-    append_default_commit(
-        &mut store,
-        &run_id,
-        "sidefx-attempt-interrupt",
-        vec![state_attempt_interrupted_for(node_id(70), attempt_id(72))],
-        Vec::new(),
-    )
-    .expect("interruption before sidefx prepare admits");
+        append_default_commit(
+            &mut store,
+            &run_id,
+            "sidefx-attempt-interrupt",
+            vec![state_attempt_interrupted_for(node_id(70), attempt_id(72))],
+            Vec::new(),
+        )
+        .expect("interruption before sidefx prepare admits");
 
-    let projection = store.projection_snapshot();
-    let attempt = projection
-        .attempt(&node_id(70), &attempt_id(72))
-        .expect("attempt projection");
-    assert!(matches!(attempt.status, AttemptStatus::Interrupted));
-    assert!(matches!(
-        projection
+        let projection = store.projection_snapshot();
+        let attempt = projection
+            .attempt(&node_id(70), &attempt_id(72))
+            .expect("attempt projection");
+        assert!(matches!(attempt.status, AttemptStatus::Interrupted));
+        let phase = projection
             .side_effect_for_pair(&run_id, &side_effect_pair_id())
             .expect("side-effect projection")
             .ledger_state()
             .expect("ledger state")
-            .phase(),
-        SideEffectLedgerPhase::IntentPersisted { .. }
-    ));
-}
-
-#[test]
-fn state_attempt_interrupted_allows_side_effect_claim_before_invocation_prepared() {
-    let run_id = run_id(63);
-    let artifact_id = artifact_id(83);
-    let artifact_digest = content_digest(84);
-    let mut store = admitted_store(&run_id, "run-start");
-    append_side_effect_attempt_started(&mut store, &run_id, "sidefx-attempt-start")
-        .expect("append sidefx attempt start");
-    append_certified_side_effect_commit(
-        &mut store,
-        &run_id,
-        "sidefx-claim",
-        vec![
-            side_effect_intent(artifact_id.clone(), artifact_digest.clone()),
-            side_effect_claim(),
-        ],
-        vec![intent_artifact_ref(artifact_id, artifact_digest)],
-    )
-    .expect("append sidefx claim");
-
-    append_default_commit(
-        &mut store,
-        &run_id,
-        "sidefx-attempt-interrupt",
-        vec![state_attempt_interrupted_for(node_id(70), attempt_id(72))],
-        Vec::new(),
-    )
-    .expect("interruption before sidefx prepare admits");
-
-    let projection = store.projection_snapshot();
-    let attempt = projection
-        .attempt(&node_id(70), &attempt_id(72))
-        .expect("attempt projection");
-    assert!(matches!(attempt.status, AttemptStatus::Interrupted));
-    assert!(matches!(
-        projection
-            .side_effect_for_pair(&run_id, &side_effect_pair_id())
-            .expect("side-effect projection")
-            .ledger_state()
-            .expect("ledger state")
-            .phase(),
-        SideEffectLedgerPhase::Claimed { .. }
-    ));
+            .phase();
+        match (include_claim, phase) {
+            (false, SideEffectLedgerPhase::IntentPersisted { .. })
+            | (true, SideEffectLedgerPhase::Claimed { .. }) => {}
+            (_, other) => panic!("{case_label}: unexpected side-effect phase: {other:?}"),
+        }
+    }
 }
 
 #[test]

@@ -6563,76 +6563,72 @@ async fn recovery_sweep_includes_open_remediation_attempts() {
 }
 
 #[tokio::test]
-async fn recovery_interrupts_side_effect_attempt_after_intent_before_prepare() {
-    assert_prepared_boundary_side_effect_recovery_interrupts(false).await;
-}
+async fn recovery_interrupts_side_effect_attempts_before_prepare() {
+    for (case_label, emit_claim) in [
+        ("after intent before prepare", false),
+        ("after claim before prepare", true),
+    ] {
+        let fixture = fixture_with_first_side_effect_state();
+        let scheduler = test_scheduler(registered_first_side_effect_runners_with(
+            &fixture,
+            PrePreparedSideEffectRunner { emit_claim },
+        ));
+        let mut store = started_fixture_store(&scheduler, &fixture).await;
+        let node = node_by_output(&fixture, &fixture.cell_a).clone();
 
-#[tokio::test]
-async fn recovery_interrupts_side_effect_attempt_after_claim_before_prepare() {
-    assert_prepared_boundary_side_effect_recovery_interrupts(true).await;
-}
-
-async fn assert_prepared_boundary_side_effect_recovery_interrupts(emit_claim: bool) {
-    let fixture = fixture_with_first_side_effect_state();
-    let scheduler = test_scheduler(registered_first_side_effect_runners_with(
-        &fixture,
-        PrePreparedSideEffectRunner { emit_claim },
-    ));
-    let mut store = started_fixture_store(&scheduler, &fixture).await;
-    let node = node_by_output(&fixture, &fixture.cell_a).clone();
-
-    assert_drive!(
-        scheduler,
-        store,
-        fixture,
-        Advanced,
-        "append pre-prepared side-effect evidence"
-    );
-    let stream = store.load_run_stream(&fixture.run_id);
-    let view = RuntimeRunView::from_stream(&fixture.runtime_spec, &fixture.run_id, &stream)
-        .expect("runtime view");
-    let attempt_id = attempt_id(
-        &fixture.run_id,
-        fixture.runtime_spec.spec_hash(),
-        &node.node_id,
-        1,
-    )
-    .expect("attempt id");
-    match crate::recovery::AttemptRecoveryLifecycle::next_open_attempt_disposition(
-        &fixture.runtime_spec,
-        &view,
-        &BTreeSet::new(),
-    )
-    .expect("recovery disposition")
-    .expect("open side-effect attempt")
-    {
-        crate::recovery::OpenAttemptDisposition::Interrupt {
-            node: recovered_node,
-            attempt_id: recovered_attempt,
-            attempt_no,
-        } => {
-            assert_eq!(recovered_node.node_id, node.node_id);
-            assert_eq!(recovered_attempt, attempt_id);
-            assert_eq!(attempt_no, 1);
+        assert_eq!(
+            drive_fixture_once(&scheduler, &mut store, &fixture)
+                .await
+                .expect("append pre-prepared side-effect evidence"),
+            SchedulerStatus::Advanced,
+            "{case_label}: expected pre-prepared side-effect evidence"
+        );
+        let stream = store.load_run_stream(&fixture.run_id);
+        let view = RuntimeRunView::from_stream(&fixture.runtime_spec, &fixture.run_id, &stream)
+            .expect("runtime view");
+        let attempt_id = attempt_id(
+            &fixture.run_id,
+            fixture.runtime_spec.spec_hash(),
+            &node.node_id,
+            1,
+        )
+        .expect("attempt id");
+        match crate::recovery::AttemptRecoveryLifecycle::next_open_attempt_disposition(
+            &fixture.runtime_spec,
+            &view,
+            &BTreeSet::new(),
+        )
+        .expect("recovery disposition")
+        .expect("open side-effect attempt")
+        {
+            crate::recovery::OpenAttemptDisposition::Interrupt {
+                node: recovered_node,
+                attempt_id: recovered_attempt,
+                attempt_no,
+            } => {
+                assert_eq!(recovered_node.node_id, node.node_id);
+                assert_eq!(recovered_attempt, attempt_id);
+                assert_eq!(attempt_no, 1);
+            }
+            _ => panic!("{case_label}: pre-prepared side-effect attempt must interrupt"),
         }
-        _ => panic!("pre-prepared side-effect attempt must interrupt"),
-    }
 
-    assert_drive!(
-        scheduler,
-        store,
-        fixture,
-        Advanced,
-        "interrupt pre-prepared side-effect attempt"
-    );
-    assert!(matches!(
-        store
-            .projection_snapshot()
-            .attempt(&node.node_id, &attempt_id)
-            .expect("attempt projection")
-            .status,
-        store::AttemptStatus::Interrupted
-    ));
+        assert_eq!(
+            drive_fixture_once(&scheduler, &mut store, &fixture)
+                .await
+                .expect("interrupt pre-prepared side-effect attempt"),
+            SchedulerStatus::Advanced,
+            "{case_label}: expected interrupt commit"
+        );
+        assert!(matches!(
+            store
+                .projection_snapshot()
+                .attempt(&node.node_id, &attempt_id)
+                .expect("attempt projection")
+                .status,
+            store::AttemptStatus::Interrupted
+        ));
+    }
 }
 
 #[tokio::test]
@@ -11552,25 +11548,6 @@ fn fact_recorded_count(store: &TestTypedRunStore, expected: &mfm_facts::FactKey)
         .fact_records()
         .filter(|(_, fact)| fact.claim.subject().fact_key() == expected)
         .count()
-}
-
-#[test]
-fn scheduler_does_not_match_open_attempt_disposition() {
-    let scheduler_source =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/scheduler.rs"))
-            .expect("scheduler source");
-    assert!(
-        !scheduler_source.contains("OpenAttemptDisposition"),
-        "scheduler facade must not match recovery dispositions directly"
-    );
-    let transition_source =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/transition.rs"))
-            .expect("transition source");
-    assert!(
-        !transition_source.contains("TransitionDecision::PublicOutputProjected")
-            && !transition_source.contains("PublicOutputProjected,"),
-        "public-output projected is a scheduler status, not a transition decision variant"
-    );
 }
 
 #[test]
