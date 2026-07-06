@@ -105,7 +105,7 @@ fn dual_mainnet_runtime_example_resolves_from_env() {
         ("MFM_BITCOIN_RPC_USER", "rpc-user"),
         ("MFM_BITCOIN_RPC_PASSWORD", "rpc-pass"),
     ]);
-    let raw = include_str!("../../../examples/configs/runtime-dual-mainnet.example.toml");
+    let raw = include_str!("../../../examples/configs/runtime-dual-mainnet.toml");
 
     let runtime = RuntimeConfig::from_str(raw, RuntimeConfigFormat::Toml).expect("runtime config");
 
