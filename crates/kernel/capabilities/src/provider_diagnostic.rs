@@ -100,6 +100,12 @@ impl RedactedProviderDiagnostic {
     }
 }
 
+impl fmt::Display for RedactedProviderDiagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.summary())
+    }
+}
+
 /// Closed provider diagnostic code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ProviderDiagnosticCode {

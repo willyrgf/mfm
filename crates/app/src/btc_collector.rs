@@ -26,11 +26,9 @@ pub(crate) fn register_btc_collector_runners_if_configured(
 
 pub(crate) fn btc_json_rpc_read_provider(
     btc: mfm_runtime_config::BtcRuntimeConfig,
-) -> mfm_runtime::Result<mfm_adapters_btc_jsonrpc::BtcJsonRpcChainHeadProvider> {
+) -> mfm_runtime::Result<mfm_transports_btc_jsonrpc_http::BtcJsonRpcChainHeadProvider> {
     let client = btc_json_rpc_client(btc)?;
-    Ok(mfm_adapters_btc_jsonrpc::BtcJsonRpcChainHeadProvider::new(
-        Arc::new(client),
-    ))
+    Ok(mfm_transports_btc_jsonrpc_http::BtcJsonRpcChainHeadProvider::new(Arc::new(client)))
 }
 
 pub(crate) fn production_fact_index_read_provider(

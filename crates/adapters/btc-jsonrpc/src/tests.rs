@@ -2,8 +2,9 @@ use super::*;
 use ed25519_dalek::SigningKey;
 use mfm_artifact_capabilities::ArtifactEvidenceRef;
 use mfm_btc_capabilities::{
-    BtcAddress, BtcBalanceReadRequest, BtcChain, BtcChainGuard, BtcHeadSelection, BtcNetworkId,
-    BtcSourceIdentity,
+    BtcAddress, BtcBalanceReadProvider, BtcBalanceReadRequest, BtcBlockHash, BtcChain,
+    BtcChainGuard, BtcFinality, BtcHeadSelection, BtcNetworkId, BtcSourceIdentity, BtcSourceStatus,
+    RedactedBtcSourceEvidence,
 };
 use mfm_canonical::sha256_digest_bytes;
 use mfm_facts::{
@@ -24,6 +25,10 @@ use mfm_states_btc::{
 use mfm_store::v1::{
     self as store,
     test_support::{signed_fact_query_receipt_for_test, SignedFactQueryReceiptFixtureInputForTest},
+};
+use mfm_transports_btc_jsonrpc_http::{
+    BlockHeaderInfo, BlockchainInfo, BtcJsonRpcChainHeadProvider, BtcJsonRpcChainHeadTransport,
+    BtcRpcError, BtcTransportFuture, ScanTxOutSetResult,
 };
 use std::sync::Mutex;
 
@@ -46,13 +51,20 @@ where
 #[derive(Default)]
 struct MockTransport {
     calls: Mutex<Vec<String>>,
-    fail_info: bool,
+    info_failure: Option<MockInfoFailure>,
 }
 
 impl MockTransport {
     fn calls(&self) -> Vec<String> {
         self.calls.lock().expect("calls").clone()
     }
+}
+
+#[derive(Clone, Copy)]
+enum MockInfoFailure {
+    Http,
+    HttpStatus,
+    JsonRpc,
 }
 
 struct MockFactIndex {
@@ -182,14 +194,25 @@ impl BtcJsonRpcChainHeadTransport for MockTransport {
     fn get_blockchain_info<'a>(&'a self) -> BtcTransportFuture<'a, BlockchainInfo> {
         Box::pin(async move {
             self.calls.lock().expect("calls").push("info".to_owned());
-            if self.fail_info {
-                return Err(BtcRpcError::Http(
-                    concat!(
-                        "http://user:password@localhost:8332 ",
-                        "Authorization: Bearer secret"
-                    )
-                    .to_owned(),
-                ));
+            if let Some(failure) = self.info_failure {
+                return Err(match failure {
+                    MockInfoFailure::Http => BtcRpcError::Http(
+                        concat!(
+                            "http://user:password@localhost:8332 ",
+                            "Authorization: Bearer secret"
+                        )
+                        .to_owned(),
+                    ),
+                    MockInfoFailure::HttpStatus => BtcRpcError::HttpStatus {
+                        status: 403,
+                        body_len: Some(64),
+                        content_type: Some("text/plain".to_owned()),
+                    },
+                    MockInfoFailure::JsonRpc => BtcRpcError::JsonRpcError {
+                        code: -32601,
+                        message: "secret provider message".to_owned(),
+                    },
+                });
             }
             Ok(BlockchainInfo {
                 blocks: 850_000,
@@ -670,7 +693,7 @@ async fn provider_maps_balance_request_to_utxo_scan() {
 async fn provider_errors_discard_transport_secret_details() {
     let transport = Arc::new(MockTransport {
         calls: Mutex::new(Vec::new()),
-        fail_info: true,
+        info_failure: Some(MockInfoFailure::Http),
     });
     let provider = BtcJsonRpcChainHeadProvider::new(transport);
     let error = provider
@@ -679,11 +702,64 @@ async fn provider_errors_discard_transport_secret_details() {
         .expect_err("provider failure");
     let rendered = format!("{error:?} {error}");
 
-    assert!(matches!(error, BtcCapabilityError::Provider { .. }));
+    let BtcCapabilityError::Provider { diagnostic } = error else {
+        panic!("expected provider diagnostic");
+    };
+    assert_eq!(diagnostic.stable_error_code(), "bitcoin_transport_failed");
+    assert_eq!(
+        diagnostic.summary(),
+        "transport_failed operation=getblockchaininfo"
+    );
     assert!(!rendered.contains("localhost"));
     assert!(!rendered.contains("password"));
     assert!(!rendered.contains("secret"));
     assert!(!rendered.contains("Authorization"));
+}
+
+#[tokio::test]
+async fn provider_classifies_http_status_failure_without_body() {
+    let transport = Arc::new(MockTransport {
+        calls: Mutex::new(Vec::new()),
+        info_failure: Some(MockInfoFailure::HttpStatus),
+    });
+    let provider = BtcJsonRpcChainHeadProvider::new(transport);
+    let error = provider
+        .read_chain_head(&make_request(BtcHeadSelection::best()))
+        .await
+        .expect_err("provider failure");
+    let BtcCapabilityError::Provider { diagnostic } = error else {
+        panic!("expected provider diagnostic");
+    };
+
+    assert_eq!(diagnostic.stable_error_code(), "bitcoin_rpc_http_status");
+    assert_eq!(
+        diagnostic.summary(),
+        "rpc_http_status operation=getblockchaininfo http_status=403"
+    );
+}
+
+#[tokio::test]
+async fn provider_classifies_json_rpc_failure_without_message() {
+    let transport = Arc::new(MockTransport {
+        calls: Mutex::new(Vec::new()),
+        info_failure: Some(MockInfoFailure::JsonRpc),
+    });
+    let provider = BtcJsonRpcChainHeadProvider::new(transport);
+    let error = provider
+        .read_chain_head(&make_request(BtcHeadSelection::best()))
+        .await
+        .expect_err("provider failure");
+    let rendered = format!("{error:?} {error}");
+    let BtcCapabilityError::Provider { diagnostic } = error else {
+        panic!("expected provider diagnostic");
+    };
+
+    assert_eq!(diagnostic.stable_error_code(), "bitcoin_rpc_json_error");
+    assert_eq!(
+        diagnostic.summary(),
+        "rpc_json_error operation=getblockchaininfo rpc_code=-32601"
+    );
+    assert!(!rendered.contains("secret provider message"));
 }
 
 #[test]

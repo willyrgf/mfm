@@ -6,15 +6,11 @@
 //! this crate owns request mapping, runner registration, fact recording, and replay helpers over
 //! recorded evidence.
 
-use std::future::Future;
 use std::marker::PhantomData;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use mfm_btc_capabilities::{
-    BtcBalanceReadProvider, BtcBalanceReadRequest, BtcBalanceReadResponse, BtcBlockHash,
-    BtcCapabilityError, BtcCapabilityFuture, BtcChainHeadReadProvider, BtcChainHeadRequest,
-    BtcChainHeadResponse, BtcFinality, BtcSourceStatus, RedactedBtcSourceEvidence,
+    BtcCapabilityError, BtcChainHeadReadProvider, BtcChainHeadRequest, BtcChainHeadResponse,
 };
 use mfm_events::v1 as events;
 use mfm_fact_capabilities::{
@@ -37,9 +33,6 @@ use mfm_states_btc::{
     QueryCollectorCheckpointState, RecordBtcChainHeadFactState, RecordCollectorCheckpointState,
 };
 use mfm_store::v1 as store;
-use mfm_transports_btc_jsonrpc_http::{
-    BlockHeaderInfo, BlockchainInfo, BtcJsonRpcClient, BtcRpcError, ScanTxOutSetResult,
-};
 use mfm_values::MfmValue;
 
 const READ_FACTORY: &str = "read_external";
@@ -49,159 +42,6 @@ const CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.bitcoin.jsonrpc.runtime.v1";
 
 /// Result type for Bitcoin JSON-RPC adapter operations.
 pub type Result<T> = std::result::Result<T, BtcJsonRpcAdapterError>;
-
-/// Boxed future returned by adapter transport abstractions.
-pub type BtcTransportFuture<'a, T> =
-    Pin<Box<dyn Future<Output = std::result::Result<T, BtcRpcError>> + Send + 'a>>;
-
-/// Minimal Bitcoin JSON-RPC transport surface needed by this adapter.
-pub trait BtcJsonRpcChainHeadTransport: Send + Sync {
-    /// Reads current blockchain summary information.
-    fn get_blockchain_info<'a>(&'a self) -> BtcTransportFuture<'a, BlockchainInfo>;
-
-    /// Reads the block hash for a selected height.
-    fn get_block_hash<'a>(&'a self, height: u64) -> BtcTransportFuture<'a, String>;
-
-    /// Reads verbose block-header metadata for a block hash.
-    fn get_block_header<'a>(
-        &'a self,
-        block_hash: &'a str,
-    ) -> BtcTransportFuture<'a, BlockHeaderInfo>;
-
-    /// Scans the UTXO set for a single address.
-    fn scan_tx_out_set<'a>(
-        &'a self,
-        address: &'a str,
-    ) -> BtcTransportFuture<'a, ScanTxOutSetResult>;
-}
-
-impl BtcJsonRpcChainHeadTransport for BtcJsonRpcClient {
-    fn get_blockchain_info<'a>(&'a self) -> BtcTransportFuture<'a, BlockchainInfo> {
-        Box::pin(async move { BtcJsonRpcClient::get_blockchain_info(self).await })
-    }
-
-    fn get_block_hash<'a>(&'a self, height: u64) -> BtcTransportFuture<'a, String> {
-        Box::pin(async move { BtcJsonRpcClient::get_block_hash(self, height).await })
-    }
-
-    fn get_block_header<'a>(
-        &'a self,
-        block_hash: &'a str,
-    ) -> BtcTransportFuture<'a, BlockHeaderInfo> {
-        Box::pin(async move { BtcJsonRpcClient::get_block_header(self, block_hash).await })
-    }
-
-    fn scan_tx_out_set<'a>(
-        &'a self,
-        address: &'a str,
-    ) -> BtcTransportFuture<'a, ScanTxOutSetResult> {
-        Box::pin(async move { BtcJsonRpcClient::scan_tx_out_set(self, address).await })
-    }
-}
-
-/// Bitcoin chain-head provider backed by a redacting JSON-RPC transport.
-#[derive(Clone)]
-pub struct BtcJsonRpcChainHeadProvider {
-    transport: Arc<dyn BtcJsonRpcChainHeadTransport>,
-}
-
-impl BtcJsonRpcChainHeadProvider {
-    /// Creates a provider over a concrete JSON-RPC transport.
-    pub fn new(transport: Arc<dyn BtcJsonRpcChainHeadTransport>) -> Self {
-        Self { transport }
-    }
-
-    async fn read_chain_head_inner(
-        &self,
-        request: &BtcChainHeadRequest,
-    ) -> mfm_btc_capabilities::Result<BtcChainHeadResponse> {
-        let info = self
-            .transport
-            .get_blockchain_info()
-            .await
-            .map_err(redacted_provider_error)?;
-        let status = source_status(&info);
-        let (height, hash) = selected_head(&*self.transport, &info, request).await?;
-        let header = self
-            .transport
-            .get_block_header(hash.as_str())
-            .await
-            .map_err(redacted_provider_error)?;
-        verify_header(&header, height, hash.as_str())?;
-        let provider_time_unix_ms = header.time.checked_mul(1000);
-        let evidence = RedactedBtcSourceEvidence::from_request(request, Some(info.chain), status);
-        let response = BtcChainHeadResponse {
-            evidence,
-            block_height: height,
-            block_hash: hash,
-            provider_time_unix_ms,
-        };
-        response.verify_request(request)?;
-        Ok(response)
-    }
-
-    async fn read_balance_inner(
-        &self,
-        request: &BtcBalanceReadRequest,
-    ) -> mfm_btc_capabilities::Result<BtcBalanceReadResponse> {
-        if request.selection != mfm_btc_capabilities::BtcHeadSelection::best() {
-            return Err(BtcCapabilityError::redacted_provider_failure(
-                "bitcoin balance reads support only best-available UTXO scans",
-            ));
-        }
-        let info = self
-            .transport
-            .get_blockchain_info()
-            .await
-            .map_err(redacted_provider_error)?;
-        let status = source_status(&info);
-        let result = self
-            .transport
-            .scan_tx_out_set(request.address.as_str())
-            .await
-            .map_err(redacted_provider_error)?;
-        if !result.success {
-            return Err(BtcCapabilityError::redacted_provider_failure(
-                "bitcoin UTXO scan did not complete successfully",
-            ));
-        }
-        let evidence = RedactedBtcSourceEvidence::from_request(
-            &BtcChainHeadRequest {
-                guard: request.guard.clone(),
-                selection: request.selection,
-            },
-            Some(info.chain),
-            status,
-        );
-        let response = BtcBalanceReadResponse {
-            evidence,
-            address: request.address.clone(),
-            balance_sats: result.total_amount_sats,
-            block_height: result.height,
-            block_hash: provider_block_hash(&result.bestblock)?,
-        };
-        response.verify_request(request)?;
-        Ok(response)
-    }
-}
-
-impl BtcChainHeadReadProvider for BtcJsonRpcChainHeadProvider {
-    fn read_chain_head<'a>(
-        &'a self,
-        request: &'a BtcChainHeadRequest,
-    ) -> BtcCapabilityFuture<'a, BtcChainHeadResponse> {
-        Box::pin(async move { self.read_chain_head_inner(request).await })
-    }
-}
-
-impl BtcBalanceReadProvider for BtcJsonRpcChainHeadProvider {
-    fn read_balance<'a>(
-        &'a self,
-        request: &'a BtcBalanceReadRequest,
-    ) -> BtcCapabilityFuture<'a, BtcBalanceReadResponse> {
-        Box::pin(async move { self.read_balance_inner(request).await })
-    }
-}
 
 /// Runtime capabilities used by Bitcoin JSON-RPC adapter runners.
 #[derive(Clone)]
@@ -549,67 +389,6 @@ fn fact_query_trust_root(
 ) -> mfm_runtime::Result<mfm_store::v1::FactQueryReceiptTrustRoot> {
     mfm_store::v1::FactQueryReceiptTrustRoot::from_material(material)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))
-}
-
-async fn selected_head(
-    transport: &dyn BtcJsonRpcChainHeadTransport,
-    info: &BlockchainInfo,
-    request: &BtcChainHeadRequest,
-) -> mfm_btc_capabilities::Result<(u64, BtcBlockHash)> {
-    match request.selection.finality() {
-        BtcFinality::BestAvailable => {
-            let hash = provider_block_hash(&info.bestblockhash)?;
-            Ok((info.blocks, hash))
-        }
-        BtcFinality::Confirmations(confirmations) => {
-            let confirmations = confirmations.get();
-            if info.blocks < confirmations {
-                return Err(BtcCapabilityError::redacted_provider_failure(
-                    "bitcoin source tip is below requested confirmation depth",
-                ));
-            }
-            let height = info.blocks - confirmations;
-            let hash = transport
-                .get_block_hash(height)
-                .await
-                .map_err(redacted_provider_error)?;
-            Ok((height, provider_block_hash(&hash)?))
-        }
-    }
-}
-
-fn source_status(info: &BlockchainInfo) -> BtcSourceStatus {
-    match info.initialblockdownload {
-        Some(true) => BtcSourceStatus::InitialBlockDownload,
-        Some(false) => BtcSourceStatus::Synced,
-        None => BtcSourceStatus::Unknown,
-    }
-}
-
-fn verify_header(
-    header: &BlockHeaderInfo,
-    height: u64,
-    hash: &str,
-) -> mfm_btc_capabilities::Result<()> {
-    if header.height == height && header.hash.eq_ignore_ascii_case(hash) {
-        Ok(())
-    } else {
-        Err(BtcCapabilityError::redacted_provider_failure(
-            "bitcoin block header did not match selected head",
-        ))
-    }
-}
-
-fn provider_block_hash(hash: &str) -> mfm_btc_capabilities::Result<BtcBlockHash> {
-    BtcBlockHash::new(hash).map_err(|_| {
-        BtcCapabilityError::redacted_provider_failure(
-            "bitcoin provider returned invalid block hash",
-        )
-    })
-}
-
-fn redacted_provider_error(error: BtcRpcError) -> BtcCapabilityError {
-    BtcCapabilityError::redacted_provider_failure(error)
 }
 
 fn btc_fact_record_capability_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {

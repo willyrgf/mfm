@@ -720,7 +720,7 @@ impl RuntimeConfigPortfolioRuntime {
 
     fn btc_provider(
         &self,
-    ) -> mfm_runtime::Result<mfm_adapters_btc_jsonrpc::BtcJsonRpcChainHeadProvider> {
+    ) -> mfm_runtime::Result<mfm_transports_btc_jsonrpc_http::BtcJsonRpcChainHeadProvider> {
         let btc = self.btc_config.clone().ok_or_else(|| {
             mfm_runtime::RuntimeError::RunnerBinding("missing Bitcoin runtime config".to_owned())
         })?;

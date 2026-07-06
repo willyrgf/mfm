@@ -16,4 +16,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tracing = { workspace = true }
 thiserror = { workspace = true }
 
+mfm-btc-capabilities = { path = "../../btc-capabilities" }
+mfm-capabilities = { path = "../../kernel/capabilities" }
+mfm-ids = { path = "../../kernel/ids" }
+
 [dev-dependencies]

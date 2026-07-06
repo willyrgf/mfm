@@ -23,9 +23,22 @@
 //! ```
 
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
+use mfm_btc_capabilities::{
+    btc_diagnostic, BtcBalanceReadProvider, BtcBalanceReadRequest, BtcBalanceReadResponse,
+    BtcBlockHash, BtcCapabilityError, BtcCapabilityFuture, BtcChainHeadReadProvider,
+    BtcChainHeadRequest, BtcChainHeadResponse, BtcFinality, BtcHeadSelection, BtcSourceStatus,
+    RedactedBtcSourceEvidence,
+};
+use mfm_capabilities::{
+    ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
+};
+use mfm_ids::LocalPublicId;
 use reqwest::header::CONTENT_TYPE;
 use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
@@ -65,6 +78,175 @@ pub struct BtcJsonRpcClient {
     config: BtcJsonRpcConfig,
     http: reqwest::Client,
     next_id: AtomicU64,
+}
+
+/// Boxed future returned by Bitcoin JSON-RPC transport abstractions.
+pub type BtcTransportFuture<'a, T> =
+    Pin<Box<dyn Future<Output = std::result::Result<T, BtcRpcError>> + Send + 'a>>;
+
+/// Minimal Bitcoin JSON-RPC transport surface needed by the capability provider.
+pub trait BtcJsonRpcChainHeadTransport: Send + Sync {
+    /// Reads current blockchain summary information.
+    fn get_blockchain_info<'a>(&'a self) -> BtcTransportFuture<'a, BlockchainInfo>;
+
+    /// Reads the block hash for a selected height.
+    fn get_block_hash<'a>(&'a self, height: u64) -> BtcTransportFuture<'a, String>;
+
+    /// Reads verbose block-header metadata for a block hash.
+    fn get_block_header<'a>(
+        &'a self,
+        block_hash: &'a str,
+    ) -> BtcTransportFuture<'a, BlockHeaderInfo>;
+
+    /// Scans the UTXO set for a single address.
+    fn scan_tx_out_set<'a>(
+        &'a self,
+        address: &'a str,
+    ) -> BtcTransportFuture<'a, ScanTxOutSetResult>;
+}
+
+impl BtcJsonRpcChainHeadTransport for BtcJsonRpcClient {
+    fn get_blockchain_info<'a>(&'a self) -> BtcTransportFuture<'a, BlockchainInfo> {
+        Box::pin(async move { BtcJsonRpcClient::get_blockchain_info(self).await })
+    }
+
+    fn get_block_hash<'a>(&'a self, height: u64) -> BtcTransportFuture<'a, String> {
+        Box::pin(async move { BtcJsonRpcClient::get_block_hash(self, height).await })
+    }
+
+    fn get_block_header<'a>(
+        &'a self,
+        block_hash: &'a str,
+    ) -> BtcTransportFuture<'a, BlockHeaderInfo> {
+        Box::pin(async move { BtcJsonRpcClient::get_block_header(self, block_hash).await })
+    }
+
+    fn scan_tx_out_set<'a>(
+        &'a self,
+        address: &'a str,
+    ) -> BtcTransportFuture<'a, ScanTxOutSetResult> {
+        Box::pin(async move { BtcJsonRpcClient::scan_tx_out_set(self, address).await })
+    }
+}
+
+/// Bitcoin chain-head provider backed by a redacting JSON-RPC transport.
+#[derive(Clone)]
+pub struct BtcJsonRpcChainHeadProvider {
+    transport: Arc<dyn BtcJsonRpcChainHeadTransport>,
+}
+
+impl BtcJsonRpcChainHeadProvider {
+    /// Creates a provider over a concrete JSON-RPC transport.
+    pub fn new(transport: Arc<dyn BtcJsonRpcChainHeadTransport>) -> Self {
+        Self { transport }
+    }
+
+    async fn read_chain_head_inner(
+        &self,
+        request: &BtcChainHeadRequest,
+    ) -> mfm_btc_capabilities::Result<BtcChainHeadResponse> {
+        let info = self
+            .transport
+            .get_blockchain_info()
+            .await
+            .map_err(|error| btc_rpc_provider_error("getblockchaininfo", error))?;
+        let status = source_status(&info);
+        let (height, hash) = selected_head(&*self.transport, &info, request).await?;
+        let header = self
+            .transport
+            .get_block_header(hash.as_str())
+            .await
+            .map_err(|error| btc_rpc_provider_error("getblockheader", error))?;
+        verify_header(&header, height, hash.as_str())?;
+        let provider_time_unix_ms = header.time.checked_mul(1000);
+        let evidence = RedactedBtcSourceEvidence::from_request(request, Some(info.chain), status);
+        let response = BtcChainHeadResponse {
+            evidence,
+            block_height: height,
+            block_hash: hash,
+            provider_time_unix_ms,
+        };
+        response.verify_request(request)?;
+        Ok(response)
+    }
+
+    async fn read_balance_inner(
+        &self,
+        request: &BtcBalanceReadRequest,
+    ) -> mfm_btc_capabilities::Result<BtcBalanceReadResponse> {
+        if request.selection != BtcHeadSelection::best() {
+            return Err(btc_provider_failure(
+                btc_operation_diagnostic(
+                    ProviderDiagnosticCode::UnsupportedOperation,
+                    "read_balance",
+                )
+                .with_field(
+                    diagnostic_id("head_kind"),
+                    ProviderDiagnosticValue::Id(diagnostic_id(
+                        request.selection.head_kind().as_str(),
+                    )),
+                )
+                .with_field(
+                    diagnostic_id("finality"),
+                    ProviderDiagnosticValue::Id(diagnostic_id(
+                        request.selection.finality().as_str(),
+                    )),
+                ),
+            ));
+        }
+        let info = self
+            .transport
+            .get_blockchain_info()
+            .await
+            .map_err(|error| btc_rpc_provider_error("getblockchaininfo", error))?;
+        let status = source_status(&info);
+        let result = self
+            .transport
+            .scan_tx_out_set(request.address.as_str())
+            .await
+            .map_err(|error| btc_rpc_provider_error("scantxoutset", error))?;
+        if !result.success {
+            return Err(btc_provider_failure(btc_operation_diagnostic(
+                ProviderDiagnosticCode::OperationIncomplete,
+                "scantxoutset",
+            )));
+        }
+        let evidence = RedactedBtcSourceEvidence::from_request(
+            &BtcChainHeadRequest {
+                guard: request.guard.clone(),
+                selection: request.selection,
+            },
+            Some(info.chain),
+            status,
+        );
+        let response = BtcBalanceReadResponse {
+            evidence,
+            address: request.address.clone(),
+            balance_sats: result.total_amount_sats,
+            block_height: result.height,
+            block_hash: provider_block_hash("scantxoutset", &result.bestblock)?,
+        };
+        response.verify_request(request)?;
+        Ok(response)
+    }
+}
+
+impl BtcChainHeadReadProvider for BtcJsonRpcChainHeadProvider {
+    fn read_chain_head<'a>(
+        &'a self,
+        request: &'a BtcChainHeadRequest,
+    ) -> BtcCapabilityFuture<'a, BtcChainHeadResponse> {
+        Box::pin(async move { self.read_chain_head_inner(request).await })
+    }
+}
+
+impl BtcBalanceReadProvider for BtcJsonRpcChainHeadProvider {
+    fn read_balance<'a>(
+        &'a self,
+        request: &'a BtcBalanceReadRequest,
+    ) -> BtcCapabilityFuture<'a, BtcBalanceReadResponse> {
+        Box::pin(async move { self.read_balance_inner(request).await })
+    }
 }
 
 /// Error returned by the Bitcoin JSON-RPC client.
@@ -609,6 +791,127 @@ impl BtcJsonRpcClient {
         let result = self.scan_tx_out_set(address).await?;
         Ok(result.total_amount_sats)
     }
+}
+
+async fn selected_head(
+    transport: &dyn BtcJsonRpcChainHeadTransport,
+    info: &BlockchainInfo,
+    request: &BtcChainHeadRequest,
+) -> mfm_btc_capabilities::Result<(u64, BtcBlockHash)> {
+    match request.selection.finality() {
+        BtcFinality::BestAvailable => {
+            let hash = provider_block_hash("getblockchaininfo", &info.bestblockhash)?;
+            Ok((info.blocks, hash))
+        }
+        BtcFinality::Confirmations(confirmations) => {
+            let confirmations = confirmations.get();
+            if info.blocks < confirmations {
+                return Err(btc_provider_failure(
+                    btc_operation_diagnostic(
+                        ProviderDiagnosticCode::OperationIncomplete,
+                        "getblockhash",
+                    )
+                    .with_field(
+                        diagnostic_id("source_height"),
+                        ProviderDiagnosticValue::U64(info.blocks),
+                    )
+                    .with_field(
+                        diagnostic_id("confirmations"),
+                        ProviderDiagnosticValue::U64(confirmations),
+                    ),
+                ));
+            }
+            let height = info.blocks - confirmations;
+            let hash = transport
+                .get_block_hash(height)
+                .await
+                .map_err(|error| btc_rpc_provider_error("getblockhash", error))?;
+            Ok((height, provider_block_hash("getblockhash", &hash)?))
+        }
+    }
+}
+
+fn source_status(info: &BlockchainInfo) -> BtcSourceStatus {
+    match info.initialblockdownload {
+        Some(true) => BtcSourceStatus::InitialBlockDownload,
+        Some(false) => BtcSourceStatus::Synced,
+        None => BtcSourceStatus::Unknown,
+    }
+}
+
+fn verify_header(
+    header: &BlockHeaderInfo,
+    height: u64,
+    hash: &str,
+) -> mfm_btc_capabilities::Result<()> {
+    if header.height == height && header.hash.eq_ignore_ascii_case(hash) {
+        Ok(())
+    } else {
+        Err(btc_provider_failure(btc_operation_diagnostic(
+            ProviderDiagnosticCode::ResponseInvalid,
+            "getblockheader",
+        )))
+    }
+}
+
+fn provider_block_hash(
+    operation: &'static str,
+    hash: &str,
+) -> mfm_btc_capabilities::Result<BtcBlockHash> {
+    BtcBlockHash::new(hash).map_err(|_| {
+        btc_provider_failure(btc_operation_diagnostic(
+            ProviderDiagnosticCode::ResponseInvalid,
+            operation,
+        ))
+    })
+}
+
+fn btc_rpc_provider_error(operation: &'static str, error: BtcRpcError) -> BtcCapabilityError {
+    let diagnostic = match error {
+        BtcRpcError::Http(_) | BtcRpcError::BodyRead(_) => {
+            btc_operation_diagnostic(ProviderDiagnosticCode::TransportFailed, operation)
+        }
+        BtcRpcError::HttpStatus { status, .. } => {
+            btc_operation_diagnostic(ProviderDiagnosticCode::RpcHttpStatus, operation).with_field(
+                diagnostic_id("http_status"),
+                ProviderDiagnosticValue::U64(u64::from(status)),
+            )
+        }
+        BtcRpcError::InvalidJson(_) => {
+            btc_operation_diagnostic(ProviderDiagnosticCode::ResponseInvalid, operation)
+        }
+        BtcRpcError::JsonRpcError { code, .. } => {
+            btc_operation_diagnostic(ProviderDiagnosticCode::RpcJsonError, operation).with_field(
+                diagnostic_id("rpc_code"),
+                ProviderDiagnosticValue::I64(code),
+            )
+        }
+        BtcRpcError::MissingResult => {
+            btc_operation_diagnostic(ProviderDiagnosticCode::ResponseMissingResult, operation)
+        }
+    };
+    btc_provider_failure(diagnostic)
+}
+
+fn btc_operation_diagnostic(
+    code: ProviderDiagnosticCode,
+    operation: &'static str,
+) -> RedactedProviderDiagnostic {
+    btc_diagnostic(code).with_operation(diagnostic_id(operation))
+}
+
+fn btc_provider_failure(diagnostic: RedactedProviderDiagnostic) -> BtcCapabilityError {
+    debug!(
+        provider_family = %diagnostic.provider_family(),
+        diagnostic_code = diagnostic.code().as_str(),
+        diagnostic = %diagnostic,
+        "btc provider failure"
+    );
+    BtcCapabilityError::provider_failure(diagnostic)
+}
+
+fn diagnostic_id(value: &str) -> LocalPublicId {
+    LocalPublicId::new(value).expect("BTC diagnostic label must be checked public text")
 }
 
 #[cfg(test)]

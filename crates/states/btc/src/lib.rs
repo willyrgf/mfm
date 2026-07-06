@@ -2019,9 +2019,10 @@ mod tests {
 
     #[test]
     fn state_error_from_capability_provider_failure_is_redacted() {
-        let error = BtcStateError::from(BtcCapabilityError::redacted_provider_failure(
-            "http://user:password@localhost:8332",
-        ));
+        let diagnostic = mfm_btc_capabilities::btc_diagnostic(
+            mfm_capabilities::ProviderDiagnosticCode::TransportFailed,
+        );
+        let error = BtcStateError::from(BtcCapabilityError::provider_failure(diagnostic));
         let text = error.to_string();
 
         assert_eq!(error, BtcStateError::ProviderFailed);

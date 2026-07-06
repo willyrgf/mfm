@@ -2100,7 +2100,6 @@ dependencies = [
  "mfm-btc-capabilities",
  "mfm-canonical",
  "mfm-capabilities",
- "mfm-collectors-btc-jsonrpc-http",
  "mfm-events",
  "mfm-fact-capabilities",
  "mfm-facts",
@@ -2110,6 +2109,7 @@ dependencies = [
  "mfm-spec",
  "mfm-states-btc",
  "mfm-store",
+ "mfm-transports-btc-jsonrpc-http",
  "mfm-values",
  "serde",
  "serde_json",
@@ -2187,7 +2187,6 @@ dependencies = [
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-certify",
- "mfm-collectors-btc-jsonrpc-http",
  "mfm-effects",
  "mfm-events",
  "mfm-evm-capabilities",
@@ -2213,6 +2212,7 @@ dependencies = [
  "mfm-spec",
  "mfm-store",
  "mfm-stream-store-postgres",
+ "mfm-transports-btc-jsonrpc-http",
  "mfm-transports-evm",
  "mfm-transports-proof",
  "mfm-values",
@@ -2306,17 +2306,6 @@ dependencies = [
  "serde_json",
  "thiserror",
  "trybuild",
-]
-
-[[package]]
-name = "mfm-collectors-btc-jsonrpc-http"
-version = "0.1.0"
-dependencies = [
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tracing",
 ]
 
 [[package]]
@@ -2881,6 +2870,20 @@ dependencies = [
  "thiserror",
  "tokio",
  "zeroize",
+]
+
+[[package]]
+name = "mfm-transports-btc-jsonrpc-http"
+version = "0.1.0"
+dependencies = [
+ "mfm-btc-capabilities",
+ "mfm-capabilities",
+ "mfm-ids",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]

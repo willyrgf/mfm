@@ -30,7 +30,10 @@ use std::pin::Pin;
 use std::str::FromStr;
 
 use mfm_canonical::sha256_digest_bytes;
-use mfm_capabilities::{CapabilityError, CapabilitySpec, ReadExternalRole};
+use mfm_capabilities::{
+    CapabilityError, CapabilitySpec, ProviderDiagnosticCode, ProviderDiagnosticValue,
+    ReadExternalRole, RedactedProviderDiagnostic,
+};
 use mfm_ids::{CapabilityKind, CapabilityVersion, DigestAlgorithm, LocalPublicId};
 
 /// Result type for Bitcoin capability contracts.
@@ -249,6 +252,16 @@ pub enum BtcHeadKind {
     Confirmed,
 }
 
+impl BtcHeadKind {
+    /// Returns the stable diagnostic tag.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Best => "best",
+            Self::Confirmed => "confirmed",
+        }
+    }
+}
+
 /// Finality policy attached to a chain-head read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BtcFinality {
@@ -273,6 +286,14 @@ impl BtcFinality {
         match self {
             Self::BestAvailable => None,
             Self::Confirmations(confirmations) => Some(confirmations.get()),
+        }
+    }
+
+    /// Returns the stable diagnostic tag.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BestAvailable => "best_available",
+            Self::Confirmations(_) => "confirmations",
         }
     }
 }
@@ -380,9 +401,45 @@ impl RedactedBtcSourceEvidence {
             Ok(())
         } else {
             Err(BtcCapabilityError::SourceMismatch {
-                evidence: self.clone(),
+                diagnostic: self.source_mismatch_diagnostic(),
             })
         }
+    }
+
+    /// Returns closed redacted source-mismatch diagnostic details.
+    pub fn source_mismatch_diagnostic(&self) -> RedactedProviderDiagnostic {
+        let mut diagnostic = btc_diagnostic(ProviderDiagnosticCode::SourceMismatch)
+            .with_field(
+                btc_public_id("chain"),
+                ProviderDiagnosticValue::Id(btc_public_id(self.chain.as_str())),
+            )
+            .with_field(
+                btc_public_id("network_id"),
+                ProviderDiagnosticValue::Id(btc_public_id(self.network_id.as_str())),
+            )
+            .with_field(
+                btc_public_id("source_identity"),
+                ProviderDiagnosticValue::Id(btc_public_id(self.source_identity.as_str())),
+            )
+            .with_field(
+                btc_public_id("head_kind"),
+                ProviderDiagnosticValue::Id(btc_public_id(self.head_kind.as_str())),
+            )
+            .with_field(
+                btc_public_id("finality"),
+                ProviderDiagnosticValue::Id(btc_public_id(self.finality.as_str())),
+            )
+            .with_field(
+                btc_public_id("source_status"),
+                ProviderDiagnosticValue::Id(btc_public_id(self.source_status.as_str())),
+            );
+        if let Some(confirmations) = self.finality.confirmation_depth() {
+            diagnostic = diagnostic.with_field(
+                btc_public_id("confirmations"),
+                ProviderDiagnosticValue::U64(confirmations),
+            );
+        }
+        diagnostic
     }
 }
 
@@ -395,6 +452,17 @@ pub enum BtcSourceStatus {
     InitialBlockDownload,
     /// Source status could not be classified by the provider.
     Unknown,
+}
+
+impl BtcSourceStatus {
+    /// Returns the stable diagnostic tag.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Synced => "synced",
+            Self::InitialBlockDownload => "initial_block_download",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// Canonical Bitcoin block hash string.
@@ -555,7 +623,7 @@ impl BtcBalanceReadResponse {
             Ok(())
         } else {
             Err(BtcCapabilityError::SourceMismatch {
-                evidence: self.evidence.clone(),
+                diagnostic: self.evidence.source_mismatch_diagnostic(),
             })
         }
     }
@@ -574,13 +642,6 @@ pub enum BtcInvalidRequest {
     InvalidAddress,
 }
 
-/// Closed provider failure reasons.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BtcProviderFailure {
-    /// Provider failed without exposing concrete source details.
-    Failed,
-}
-
 /// Redaction-safe Bitcoin capability error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BtcCapabilityError {
@@ -591,26 +652,41 @@ pub enum BtcCapabilityError {
         reason: BtcInvalidRequest,
     },
     /// Provider failed without exposing concrete source details.
-    #[error("Bitcoin capability provider failed")]
+    #[error("Bitcoin capability provider failed: {diagnostic}")]
     Provider {
-        /// Closed provider failure reason.
-        reason: BtcProviderFailure,
+        /// Closed redacted provider diagnostic.
+        diagnostic: RedactedProviderDiagnostic,
     },
     /// Provider evidence did not match the semantic request.
-    #[error("Bitcoin source evidence did not match request")]
+    #[error("Bitcoin source evidence did not match request: {diagnostic}")]
     SourceMismatch {
-        /// Closed redacted mismatch evidence.
-        evidence: RedactedBtcSourceEvidence,
+        /// Closed redacted source-mismatch diagnostic.
+        diagnostic: RedactedProviderDiagnostic,
     },
 }
 
 impl BtcCapabilityError {
-    /// Builds a redacted provider failure, discarding concrete source details.
-    pub fn redacted_provider_failure(_source: impl fmt::Display) -> Self {
-        Self::Provider {
-            reason: BtcProviderFailure::Failed,
+    /// Builds a provider failure from a closed redacted diagnostic.
+    pub fn provider_failure(diagnostic: RedactedProviderDiagnostic) -> Self {
+        Self::Provider { diagnostic }
+    }
+
+    /// Returns the closed redacted provider diagnostic carried by this error.
+    pub const fn redacted_diagnostic(&self) -> Option<&RedactedProviderDiagnostic> {
+        match self {
+            Self::Provider { diagnostic } | Self::SourceMismatch { diagnostic } => Some(diagnostic),
+            Self::InvalidRequest { .. } => None,
         }
     }
+}
+
+/// Builds a closed redacted Bitcoin provider diagnostic.
+pub fn btc_diagnostic(code: ProviderDiagnosticCode) -> RedactedProviderDiagnostic {
+    RedactedProviderDiagnostic::new(btc_public_id("bitcoin"), code)
+}
+
+fn btc_public_id(value: &str) -> LocalPublicId {
+    LocalPublicId::new(value).expect("Bitcoin diagnostic id must be checked public text")
 }
 
 fn invalid_identifier(_source: mfm_ids::CheckedStringError) -> BtcCapabilityError {
@@ -725,22 +801,17 @@ mod tests {
     }
 
     #[test]
-    fn provider_failure_discards_raw_diagnostics() {
-        let error = BtcCapabilityError::redacted_provider_failure(concat!(
-            "http://node.invalid:8332/?token=secret ",
-            "Author",
-            "ization: ",
-            "Bear",
-            "er secret"
-        ));
+    fn provider_failure_carries_only_closed_diagnostics() {
+        let diagnostic = btc_diagnostic(ProviderDiagnosticCode::RpcHttpStatus)
+            .with_operation(btc_public_id("scantxoutset"))
+            .with_field(
+                btc_public_id("http_status"),
+                ProviderDiagnosticValue::U64(403),
+            );
+        let error = BtcCapabilityError::provider_failure(diagnostic.clone());
         let rendered = format!("{error:?} {error}");
 
-        assert_eq!(
-            error,
-            BtcCapabilityError::Provider {
-                reason: BtcProviderFailure::Failed,
-            }
-        );
+        assert_eq!(error, BtcCapabilityError::Provider { diagnostic });
         assert!(!rendered.contains("node.invalid"));
         assert!(!rendered.contains(concat!("Author", "ization")));
         assert!(!rendered.contains("secret"));
