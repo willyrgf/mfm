@@ -11,7 +11,7 @@ use mfm_events::v1 as events;
 use mfm_ids::{
     AdapterKind, ArtifactId, AttemptId, CapabilityKind, CellId, ContentDigest, DescriptorId,
     DigestAlgorithm, DigestBytes, EventId, NodeId, RunId, SchemaId, ScopeId, SemanticTypeId,
-    SpecHash, StateKind, TrustScopeId,
+    SpecHash, StateKind, StoreScopeId,
 };
 use mfm_spec::v1 as spec;
 
@@ -804,23 +804,23 @@ pub fn run_artifact_ref_from_store_artifact_for_test(
     }
 }
 
-/// Builds run identity material for a deterministic test trust scope suffix.
+/// Builds run identity material for a deterministic test store scope suffix.
 pub fn run_identity_material_for_test(
     certified_spec_hash: SpecHash,
-    trust_scope_hex: &str,
+    store_scope_hex: &str,
 ) -> events::RunIdentityMaterialV1 {
     events::RunIdentityMaterialV1 {
         certified_spec_hash,
-        trust_scope_id: TrustScopeId::new(format!("{}{}", TrustScopeId::PREFIX, trust_scope_hex))
-            .expect("test trust scope"),
-        invocation_key_digest: invocation_key_digest_for_test(trust_scope_hex),
+        store_scope_id: StoreScopeId::new(format!("{}{}", StoreScopeId::PREFIX, store_scope_hex))
+            .expect("test store scope"),
+        invocation_key_digest: invocation_key_digest_for_test(store_scope_hex),
     }
 }
 
-fn invocation_key_digest_for_test(trust_scope_hex: &str) -> ContentDigest {
+fn invocation_key_digest_for_test(store_scope_hex: &str) -> ContentDigest {
     ContentDigest::from_digest(
         DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(format!("mfm.store.test.invocation:{trust_scope_hex}").as_bytes()),
+        sha256_digest_bytes(format!("mfm.store.test.invocation:{store_scope_hex}").as_bytes()),
     )
 }
 

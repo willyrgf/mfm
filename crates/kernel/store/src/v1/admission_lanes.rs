@@ -227,7 +227,7 @@ pub type ExecutionClaimAdmissionLane = AdmissionLane<NowaitSkip>;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExecutionClaimScope {
     certified_spec_hash: SpecHash,
-    trust_scope_id: TrustScopeId,
+    store_scope_id: StoreScopeId,
 }
 
 impl ExecutionClaimScope {
@@ -235,7 +235,7 @@ impl ExecutionClaimScope {
     pub fn from_run_identity_material(identity: &events::RunIdentityMaterialV1) -> Self {
         Self {
             certified_spec_hash: identity.certified_spec_hash.clone(),
-            trust_scope_id: identity.trust_scope_id.clone(),
+            store_scope_id: identity.store_scope_id.clone(),
         }
     }
 
@@ -244,9 +244,9 @@ impl ExecutionClaimScope {
         &self.certified_spec_hash
     }
 
-    /// Returns the trust scope coordinated by this scope.
-    pub fn trust_scope_id(&self) -> &TrustScopeId {
-        &self.trust_scope_id
+    /// Returns the store scope coordinated by this scope.
+    pub fn store_scope_id(&self) -> &StoreScopeId {
+        &self.store_scope_id
     }
 }
 
@@ -260,7 +260,7 @@ impl ExecutionClaimAdmissionLane {
                 AdmissionLaneMode::NowaitSkip,
                 serde_json::json!({
                     "certified_spec_hash": scope.certified_spec_hash.as_str(),
-                    "trust_scope_id": scope.trust_scope_id.as_str(),
+                    "store_scope_id": scope.store_scope_id.as_str(),
                 }),
             )?,
         ))

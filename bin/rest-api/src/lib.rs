@@ -192,7 +192,7 @@ struct RouterState<S> {
 
 trait RunCommandStore:
     RunEventStore
-    + store::TrustScopeStore
+    + store::StoreScopeStore
     + store::ExecutionClaimStore
     + store::RetainedArtifactReadProvider
     + Clone
@@ -204,7 +204,7 @@ trait RunCommandStore:
 
 impl<S> RunCommandStore for S where
     S: RunEventStore
-        + store::TrustScopeStore
+        + store::StoreScopeStore
         + store::ExecutionClaimStore
         + store::RetainedArtifactReadProvider
         + Clone
@@ -280,7 +280,7 @@ pub async fn make_default_app_state() -> Result<DefaultAppState, ApiError> {
 pub fn make_app<S>(state: AppState<S>) -> Router
 where
     S: RunEventStore
-        + store::TrustScopeStore
+        + store::StoreScopeStore
         + store::ExecutionClaimStore
         + RunObservationStore<Error = <S as RunEventStore>::Error>
         + store::RetainedArtifactReadProvider
@@ -366,7 +366,7 @@ async fn ready<S>(State(state): State<RouterState<S>>) -> Result<Json<serde_json
 where
     S: RunCommandStore,
 {
-    state.app.store.load_trust_scope_id().await.map_err(|_| {
+    state.app.store.load_store_scope_id().await.map_err(|_| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "NotReady",
@@ -660,7 +660,7 @@ where
 {
     let Json(req) = body?;
     let services = state.live_services()?;
-    let trust_scope_id = services.load_trust_scope_id().await?;
+    let store_scope_id = services.load_store_scope_id().await?;
     let entry_point_registry = mfm_app::production_entry_point_op_registry()?;
     let public_op_name = PublicOpName::new(&req.op)?;
     let op_version = req.op_version.map(mfm_app::OpVersion::new).transpose()?;
@@ -675,7 +675,7 @@ where
         op_version,
         authored_config,
         certification_registry: services.certification_registry(),
-        trust_scope_id,
+        store_scope_id,
         invocation_key,
     })?;
     let report = services.launch_prepared_entry_point_run(prepared).await?;

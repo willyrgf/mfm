@@ -27,7 +27,7 @@ use mfm_evm_contract_model::{
 };
 use mfm_ids::{
     ArtifactId, ContentDigest, DigestAlgorithm, EventId, RunId, SchemaId, SeedId, SemanticTypeId,
-    SpecHash, TrustScopeId,
+    SpecHash, StoreScopeId,
 };
 use mfm_replay::v1::{
     ReplayBroker, ReplayError, ReplayReadAuthority, RetainedSourceFactReplayEvent,
@@ -330,7 +330,7 @@ pub fn make_run_services_with_certification_registry<S, A>(
     certification_registry: CertificationRegistry,
 ) -> RunServices<S, A>
 where
-    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
+    S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     make_run_services_with_certification_registry_and_fact_query_trust_root(
@@ -351,7 +351,7 @@ pub fn make_run_services_with_certification_registry_and_fact_query_trust_root<S
     fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
 ) -> RunServices<S, A>
 where
-    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
+    S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     let runtime_artifacts = Arc::new(artifacts.clone());
@@ -371,7 +371,7 @@ pub fn make_run_read_services_with_certification_registry<S, A>(
     certification_registry: CertificationRegistry,
 ) -> RunReadServices<S, A>
 where
-    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
+    S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     make_run_read_services_with_certification_registry_and_fact_query_trust_root(
@@ -390,7 +390,7 @@ pub fn make_run_read_services_with_certification_registry_and_fact_query_trust_r
     fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
 ) -> RunReadServices<S, A>
 where
-    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
+    S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     RunReadServices::new_with_certification_registry_and_fact_query_trust_root(
@@ -1138,8 +1138,8 @@ pub struct EntryPointRunLaunchInput<'a> {
     pub authored_config: AuthoredConfig,
     /// Trusted certification registry used to certify the planned typed spec.
     pub certification_registry: &'a CertificationRegistry,
-    /// Store-owned deployment trust scope.
-    pub trust_scope_id: TrustScopeId,
+    /// Store-owned deployment scope.
+    pub store_scope_id: StoreScopeId,
     /// Optional caller material identifying one intended invocation.
     pub invocation_key: Option<InvocationKey>,
 }
@@ -1732,7 +1732,7 @@ pub struct RunReadServices<S, A> {
 
 impl<S, A> RunReadServices<S, A>
 where
-    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
+    S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     /// Creates evidence-only app services with an explicit trusted certification registry.
@@ -1779,9 +1779,9 @@ where
         &self.certification_registry
     }
 
-    /// Loads the store-owned deployment trust scope used to verify run identities.
-    pub async fn load_trust_scope_id(&self) -> Result<TrustScopeId, AppError> {
-        self.trusted_run_reader().load_trust_scope_id().await
+    /// Loads the store-owned deployment scope used to verify run identities.
+    pub async fn load_store_scope_id(&self) -> Result<StoreScopeId, AppError> {
+        self.trusted_run_reader().load_store_scope_id().await
     }
 
     /// Returns typed run status by rebuilding projection from the authoritative run stream.
@@ -1876,7 +1876,7 @@ where
 
 impl<S, A> RunReadServices<S, A>
 where
-    S: store::RunEventStore + store::TrustScopeStore + PublicFactQueryExecutor + Send + Sync,
+    S: store::RunEventStore + store::StoreScopeStore + PublicFactQueryExecutor + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     /// Builds a production public fact query service from retained descriptor and store-scoped projection authority.
@@ -1907,7 +1907,7 @@ pub struct RunServices<S, A> {
 
 impl<S, A> RunServices<S, A>
 where
-    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
+    S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     /// Creates typed async app services with an explicit trusted certification registry.
@@ -1959,9 +1959,9 @@ where
         &self.certification_registry
     }
 
-    /// Loads the store-owned deployment trust scope used to derive run identities.
-    pub async fn load_trust_scope_id(&self) -> Result<TrustScopeId, AppError> {
-        self.trusted_run_reader().load_trust_scope_id().await
+    /// Loads the store-owned deployment scope used to derive run identities.
+    pub async fn load_store_scope_id(&self) -> Result<StoreScopeId, AppError> {
+        self.trusted_run_reader().load_store_scope_id().await
     }
 
     /// Returns typed run status by rebuilding projection from the authoritative run stream.
@@ -2034,12 +2034,12 @@ where
         self.trusted_run_reader().load_status_context(run_id).await
     }
 
-    async fn validate_identity_material_trust_scope(
+    async fn validate_identity_material_store_scope(
         &self,
         identity_material: &events::RunIdentityMaterialV1,
     ) -> Result<(), AppError> {
         self.trusted_run_reader()
-            .validate_identity_material_trust_scope(identity_material)
+            .validate_identity_material_store_scope(identity_material)
             .await
     }
 
@@ -2050,7 +2050,7 @@ where
 
 impl<S, A> RunServices<S, A>
 where
-    S: store::RunEventStore + store::TrustScopeStore + store::ExecutionClaimStore + Send + Sync,
+    S: store::RunEventStore + store::StoreScopeStore + store::ExecutionClaimStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     /// Resumes a certified typed run from its stored spec artifact.
@@ -2086,7 +2086,7 @@ where
 
     /// Starts a certified typed run against a durable async typed store.
     pub async fn launch_run(&self, req: RunLaunchRequest) -> Result<RunLaunchOutcome, AppError> {
-        self.validate_identity_material_trust_scope(&req.identity_material)
+        self.validate_identity_material_store_scope(&req.identity_material)
             .await?;
         if req.identity_material.certified_spec_hash != *req.certified_spec.spec_hash() {
             return Err(run_identity_material_mismatch());
@@ -2598,22 +2598,22 @@ impl<'a, S, A: ?Sized> TrustedRunReader<'a, S, A> {
 
 impl<S, A> TrustedRunReader<'_, S, A>
 where
-    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
+    S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + ?Sized,
 {
-    async fn load_trust_scope_id(&self) -> Result<TrustScopeId, AppError> {
+    async fn load_store_scope_id(&self) -> Result<StoreScopeId, AppError> {
         self.store
-            .load_trust_scope_id()
+            .load_store_scope_id()
             .await
             .map_err(async_app_store_error)
     }
 
-    async fn validate_identity_material_trust_scope(
+    async fn validate_identity_material_store_scope(
         &self,
         identity_material: &events::RunIdentityMaterialV1,
     ) -> Result<(), AppError> {
-        let trust_scope_id = self.load_trust_scope_id().await?;
-        if trust_scope_id != identity_material.trust_scope_id {
+        let store_scope_id = self.load_store_scope_id().await?;
+        if store_scope_id != identity_material.store_scope_id {
             return Err(run_identity_material_mismatch());
         }
         Ok(())
@@ -2623,7 +2623,7 @@ where
         let context =
             load_async_verified_run_read_context(self.store, self.artifacts, self.registry, run_id)
                 .await?;
-        self.validate_identity_material_trust_scope(
+        self.validate_identity_material_store_scope(
             &context.view().run_admitted().identity_material,
         )
         .await?;
@@ -2641,7 +2641,7 @@ where
             run_id,
         )
         .await?;
-        self.validate_identity_material_trust_scope(
+        self.validate_identity_material_store_scope(
             &context.read.view().run_admitted().identity_material,
         )
         .await?;
@@ -3991,7 +3991,7 @@ pub fn prepare_entry_point_run_launch(
         CertifiedRunLaunchInput {
             certified_spec,
             registry: &scoped_registry,
-            trust_scope_id: input.trust_scope_id,
+            store_scope_id: input.store_scope_id,
             invocation_key_digest,
             entry_point_evidence: runtime_entry_point_evidence,
         },
@@ -4011,7 +4011,7 @@ pub fn prepare_typed_program_run_launch_for_test(
     draft: mfm_program::TypedProgramDraft,
     seed_material: BTreeMap<SeedId, PlainCanonicalJsonBytes>,
     certification_registry: &CertificationRegistry,
-    trust_scope_id: TrustScopeId,
+    store_scope_id: StoreScopeId,
     invocation_key: Option<InvocationKey>,
 ) -> Result<RunLaunchRequest, AppError> {
     let plan =
@@ -4056,7 +4056,7 @@ pub fn prepare_typed_program_run_launch_for_test(
         CertifiedRunLaunchInput {
             certified_spec,
             registry: &scoped_registry,
-            trust_scope_id,
+            store_scope_id,
             invocation_key_digest,
             entry_point_evidence: events::EntryPointLaunchEvidence {
                 resolved_op_id: events::EntryPointOpId::new("mfm.test.typed_program_internal_test")
@@ -4094,8 +4094,8 @@ pub(crate) struct CertifiedRunLaunchInput<'a> {
     pub(crate) certified_spec: CertifiedTypedSpec,
     /// Trusted registry used to validate launch config artifacts.
     pub(crate) registry: &'a CertificationRegistry,
-    /// Store-owned deployment trust scope.
-    pub(crate) trust_scope_id: TrustScopeId,
+    /// Store-owned deployment scope.
+    pub(crate) store_scope_id: StoreScopeId,
     /// Required invocation key digest.
     pub(crate) invocation_key_digest: ContentDigest,
     /// Public entry-point operation evidence selected by app assembly.
@@ -4118,7 +4118,7 @@ fn prepare_certified_run_launch(
     let seed_cells = seed_launch_cells_for_spec(&runtime_spec, seed_inputs)?;
     let identity_material = events::RunIdentityMaterialV1 {
         certified_spec_hash: runtime_spec.spec_hash().clone(),
-        trust_scope_id: input.trust_scope_id,
+        store_scope_id: input.store_scope_id,
         invocation_key_digest: input.invocation_key_digest,
     };
     let run_id = identity_material.derive_run_id().map_err(|_| {

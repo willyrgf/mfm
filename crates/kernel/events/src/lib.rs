@@ -11,7 +11,7 @@ use mfm_ids::{
     ContentDigest, DescriptorId, DigestAlgorithm, EventId, IdentityError, LoweringVersion, NodeId,
     PrintableAscii1024 as CheckedPrintableAscii1024, PrintableAscii512 as CheckedPrintableAscii512,
     RunId, SchemaId, ScopeId, SeedId, SemanticTypeId, SideEffectPairId, SpecHash, SpecVersion,
-    StateKind, StateVersion, TrustScopeId, VisibleAscii256 as CheckedVisibleAscii256,
+    StateKind, StateVersion, StoreScopeId, VisibleAscii256 as CheckedVisibleAscii256,
 };
 use mfm_spec::v1::{
     CanonicalizerIdentity, CellContextSpec, CellProducer, DescriptorIdentity, MediaType,
@@ -988,8 +988,8 @@ pub mod v1 {
     pub struct RunIdentityMaterialV1 {
         /// Certified typed spec hash.
         pub certified_spec_hash: SpecHash,
-        /// Store-owned deployment trust scope.
-        pub trust_scope_id: TrustScopeId,
+        /// Store-owned deployment scope.
+        pub store_scope_id: StoreScopeId,
         /// Digest of caller-supplied or app-minted invocation material.
         pub invocation_key_digest: ContentDigest,
     }
@@ -1004,7 +1004,7 @@ pub mod v1 {
                 "certified_spec_hash": self.certified_spec_hash.as_str(),
                 "invocation_key_digest": self.invocation_key_digest.as_str(),
                 "domain": Self::DOMAIN,
-                "trust_scope_id": self.trust_scope_id.as_str(),
+                "store_scope_id": self.store_scope_id.as_str(),
             }))
         }
 
@@ -3279,7 +3279,7 @@ pub mod v1 {
             "AdapterKind" | "ArtifactId" | "AttemptId" | "CapabilityKind" | "CellId"
             | "ContentDigest" | "ContextRef" | "DescriptorId" | "EffectKind" | "EventId"
             | "NodeId" | "OperationKind" | "RunId" | "SchemaId" | "ScopeId" | "SeedId"
-            | "SemanticTypeId" | "SideEffectPairId" | "SpecHash" | "StateKind" | "TrustScopeId" => {
+            | "SemanticTypeId" | "SideEffectPairId" | "SpecHash" | "StateKind" | "StoreScopeId" => {
                 mfm_identity_type(type_name)
             }
             "AdapterVersion" | "CapabilityVersion" | "LoweringVersion" | "OperationVersion"
@@ -3480,8 +3480,8 @@ pub mod v1 {
                         EventFieldCardinality::Required,
                     ),
                     schema_field(
-                        "trust_scope_id",
-                        "TrustScopeId",
+                        "store_scope_id",
+                        "StoreScopeId",
                         EventFieldCardinality::Required,
                     ),
                     schema_field(

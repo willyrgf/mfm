@@ -18,7 +18,7 @@ use mfm_op_btc_chain_head_collector::{
 use mfm_program::CanonicalSeed;
 use mfm_store::v1::{
     AsyncInMemoryRunStore, ProjectionSnapshot, RetainedArtifactReadProvider, RunEventStore,
-    TrustScopeStore,
+    StoreScopeStore,
 };
 use tokio::sync::oneshot;
 
@@ -324,12 +324,12 @@ async fn collector_launch_request(
 ) -> mfm_app::RunLaunchRequest {
     let draft = btc_chain_head_collector_cycle_program_draft(config).expect("collector draft");
     let seed_material = collector_seed_material(&draft);
-    let trust_scope_id = store.load_trust_scope_id().await.expect("trust scope id");
+    let store_scope_id = store.load_store_scope_id().await.expect("store scope id");
     mfm_app::prepare_typed_program_run_launch_for_test(
         draft,
         seed_material,
         &mfm_app::production_certification_registry().expect("certification registry"),
-        trust_scope_id,
+        store_scope_id,
         Some(mfm_app::InvocationKey::new(invocation_key).expect("invocation key")),
     )
     .expect("prepared collector launch")

@@ -64,7 +64,7 @@ mod tests {
     use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
     use mfm_store::v1::{
         self as store, AdmissionToken, ExecutionClaimStatus, ExecutionClaimStore,
-        NowaitSkipAdmissionResult, RunEventStore, TrustScopeStore,
+        NowaitSkipAdmissionResult, RunEventStore, StoreScopeStore,
     };
     use std::sync::Arc;
 
@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn app_prepare_entry_point_run_launch_records_evidence_and_certifies() {
         let fixture =
-            EntryPointPrepFixture::with_trust_scope_hex("50505050505050505050505050505050");
+            EntryPointPrepFixture::with_store_scope_hex("50505050505050505050505050505050");
         let registry_digest = fixture
             .entry_point_registry
             .registry_digest()
@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn app_prepare_dual_mainnet_portfolio_run_launch_certifies() {
         let fixture =
-            EntryPointPrepFixture::with_trust_scope_hex("53535353535353535353535353535353");
+            EntryPointPrepFixture::with_store_scope_hex("53535353535353535353535353535353");
         let authored_config = AuthoredConfig::new(
             AuthoredConfigFormat::Toml,
             include_str!("../../../examples/configs/portfolio-dual-mainnet.toml"),
@@ -179,7 +179,7 @@ mod tests {
             op_version: None,
             authored_config,
             certification_registry: &fixture.certification_registry,
-            trust_scope_id: fixture.trust_scope_id,
+            store_scope_id: fixture.store_scope_id,
             invocation_key: None,
         })
         .expect("dual-mainnet portfolio launch should certify");
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn app_prepare_entry_point_run_launch_derives_fresh_and_invocation_stable_run_ids() {
         let fixture =
-            EntryPointPrepFixture::with_trust_scope_hex("51515151515151515151515151515151");
+            EntryPointPrepFixture::with_store_scope_hex("51515151515151515151515151515151");
 
         let first = fixture.prepare_sample_portfolio(None);
         let second = fixture.prepare_sample_portfolio(None);
@@ -583,22 +583,22 @@ mod tests {
     struct EntryPointPrepFixture {
         entry_point_registry: EntryPointOpRegistry,
         certification_registry: mfm_certify::CertificationRegistry,
-        trust_scope_id: mfm_ids::TrustScopeId,
+        store_scope_id: mfm_ids::StoreScopeId,
     }
 
     impl EntryPointPrepFixture {
-        fn with_trust_scope_hex(hex: &str) -> Self {
-            Self::with_trust_scope_id(
-                mfm_ids::TrustScopeId::new(format!("mfm.trust_scope.v1:{hex}"))
-                    .expect("trust scope"),
+        fn with_store_scope_hex(hex: &str) -> Self {
+            Self::with_store_scope_id(
+                mfm_ids::StoreScopeId::new(format!("mfm.store_scope.v1:{hex}"))
+                    .expect("store scope"),
             )
         }
 
-        fn with_trust_scope_id(trust_scope_id: mfm_ids::TrustScopeId) -> Self {
+        fn with_store_scope_id(store_scope_id: mfm_ids::StoreScopeId) -> Self {
             Self {
                 entry_point_registry: production_entry_point_op_registry().expect("registry"),
                 certification_registry: crate::production_certification_registry().expect("cert"),
-                trust_scope_id,
+                store_scope_id,
             }
         }
 
@@ -614,7 +614,7 @@ mod tests {
                 authored_config: AuthoredConfig::new(AuthoredConfigFormat::Json, config)
                     .expect("authored config"),
                 certification_registry: &self.certification_registry,
-                trust_scope_id: self.trust_scope_id.clone(),
+                store_scope_id: self.store_scope_id.clone(),
                 invocation_key,
             })
             .expect("prepared entry-point launch")
@@ -645,10 +645,10 @@ mod tests {
     impl EntryPointRunFixture {
         async fn in_memory() -> Self {
             let store = mfm_store::v1::AsyncInMemoryRunStore::default();
-            let trust_scope_id = store.load_trust_scope_id().await.expect("trust scope");
+            let store_scope_id = store.load_store_scope_id().await.expect("store scope");
             let (runtime_config_dir, runtime_config_path) = test_runtime_config();
             Self {
-                prep: EntryPointPrepFixture::with_trust_scope_id(trust_scope_id),
+                prep: EntryPointPrepFixture::with_store_scope_id(store_scope_id),
                 store,
                 _runtime_config_dir: runtime_config_dir,
                 runtime_config_path,

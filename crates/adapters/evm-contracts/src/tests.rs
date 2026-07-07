@@ -15,7 +15,7 @@ use mfm_evm_signing::{
 };
 use mfm_ids::{
     ArtifactId, AttemptId, CellId, ContextRef, DescriptorId, DigestAlgorithm, DigestBytes, EventId,
-    NodeId, RunId, SchemaId, ScopeId, SideEffectPairId, SpecHash, TrustScopeId,
+    NodeId, RunId, SchemaId, ScopeId, SideEffectPairId, SpecHash, StoreScopeId,
 };
 use mfm_program::StateContext;
 use mfm_replay::v1::SideEffectReplayVerifier;
@@ -637,8 +637,8 @@ fn certified_lifecycle_source_cell(
 fn source_run_identity_material(spec_hash: &SpecHash) -> events::RunIdentityMaterialV1 {
     events::RunIdentityMaterialV1 {
         certified_spec_hash: spec_hash.clone(),
-        trust_scope_id: TrustScopeId::new("mfm.trust_scope.v1:30303030303030303030303030303030")
-            .expect("trust scope"),
+        store_scope_id: StoreScopeId::new("mfm.store_scope.v1:30303030303030303030303030303030")
+            .expect("store scope"),
         invocation_key_digest: content_digest(0x30),
     }
 }

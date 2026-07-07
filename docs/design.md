@@ -353,7 +353,7 @@ crates/storages/stream-store-postgres
 Postgres is the only production persistence backend. It stores append-only `commits`, canonical
 `run_events`, artifact blobs/evidence, resource-lane claim/release/transition rows,
 commit cursor authority, store metadata, and mutable operational admission-lane coordination rows.
-`store_metadata.trust_scope_id` is store-owned, non-secret identity material for the deployment's
+`store_metadata.store_scope_id` is store-owned, non-secret identity material for the deployment's
 trust boundary; callers cannot supply or update it. Observation list/watch rows are derived from
 strict authority at read time. Artifact bytes live in Postgres; production app, CLI, and REST paths
 do not stage, read, or migrate workflow artifacts through filesystem artifact roots. The schema and
@@ -376,7 +376,7 @@ first specify Postgres roles, ownership, credentials, and restore/clone runbooks
 v1 has two operational lane uses:
 
 - execution lanes: `nowait_skip` leases keyed by base work identity
-  (`certified_spec_hash` + `trust_scope_id`) with the concrete holder `run_id` stored separately;
+  (`certified_spec_hash` + `store_scope_id`) with the concrete holder `run_id` stored separately;
 - resource-admission waiters: FIFO waiters for one certified exclusive side-effect resource claim.
 
 Execution-lane acquire, renew, release, and reap require the holder `run_id` and token to match the
@@ -396,10 +396,10 @@ stream, and store validation.
 
 The model has three identities:
 
-- run identity: `certified_spec_hash` + store-owned `trust_scope_id` +
+- run identity: `certified_spec_hash` + store-owned `store_scope_id` +
   `invocation_key_digest`; this derives `run_id` and is recorded in `RunAdmitted`;
-- execution lane: `certified_spec_hash` + `trust_scope_id`; this allows at most one live driver for
-  the same base work in one trust scope;
+- execution lane: `certified_spec_hash` + `store_scope_id`; this allows at most one live driver for
+  the same base work in one store scope;
 - resource lane: the certified side-effect resource key resolved by state preflight; this protects
   external mutation.
 
@@ -524,7 +524,7 @@ artifact evidence that was not admitted in the same commit. Artifact blobs are a
 append transaction; failed appends leave no authoritative run-store evidence.
 
 Normal launch identity is content-addressed from `RunIdentityMaterialV1` using canonical JSON:
-`certified_spec_hash`, store-owned `trust_scope_id`, and required `invocation_key_digest`. Public
+`certified_spec_hash`, store-owned `store_scope_id`, and required `invocation_key_digest`. Public
 entry-point starts accept an optional raw `invocation_key`; when omitted, the app mints a fresh opaque
 key before deriving identity. The raw key is not persisted. The run id must equal the digest of the
 recorded identity material, and `RunAdmitted` records the material so attach, resume, replay, status,
@@ -532,7 +532,7 @@ and public-output authority can fail closed on identity mismatch. Raw caller-sup
 a normal launch surface.
 
 Run admission and first execution-claim acquire are one store operation. The app validates the
-store-owned trust scope, the certified spec hash, and the derived `run_id`; the store validates that
+store-owned scope, the certified spec hash, and the derived `run_id`; the store validates that
 the prepared execution claim matches the `RunAdmitted` identity material before admission. If the
 execution lane is already held, the store returns `ExecutionClaimBusy`, appends no contender run
 event, and public start reports `already_active` with the holder `run_id`.

@@ -124,14 +124,14 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
     let entry_point_registry = mfm_app::production_entry_point_op_registry()?;
     let certification_registry = mfm_app::production_certification_registry()?;
     let services = connect_run_services(&args.stores, args.runtime_config.as_deref()).await?;
-    let trust_scope_id = services.load_trust_scope_id().await?;
+    let store_scope_id = services.load_store_scope_id().await?;
     let prepared = mfm_app::prepare_entry_point_run_launch(EntryPointRunLaunchInput {
         entry_point_registry: &entry_point_registry,
         public_op_name,
         op_version,
         authored_config,
         certification_registry: &certification_registry,
-        trust_scope_id,
+        store_scope_id,
         invocation_key,
     })?;
     let report = services.launch_prepared_entry_point_run(prepared).await?;
@@ -164,7 +164,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_requires_store_trust_scope_before_entry_point_resolution() {
+    async fn start_requires_store_store_scope_before_entry_point_resolution() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let config = tmp.path().join("portfolio.json");
         std::fs::write(&config, "{}").expect("write config");
@@ -174,20 +174,20 @@ mod tests {
 
         let err = execute_internal(&args)
             .await
-            .expect_err("start requires store trust scope");
+            .expect_err("start requires store scope");
 
         assert_eq!(err.code, "MissingDatabaseUrl");
     }
 
     #[tokio::test]
-    async fn start_requires_store_trust_scope_before_op_config_decode() {
+    async fn start_requires_store_store_scope_before_op_config_decode() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let config = tmp.path().join("portfolio.json");
         std::fs::write(&config, r#"{"portfolio":{"portfolio_id":1}}"#).expect("write config");
 
         let err = execute_internal(&start_args(config, RunStoresArgs { database_url: None }))
             .await
-            .expect_err("start requires store trust scope");
+            .expect_err("start requires store scope");
 
         assert_eq!(err.code, "MissingDatabaseUrl");
     }
@@ -276,9 +276,9 @@ mod tests {
             AuthoredConfigFormat::Json,
             serde_json::to_vec(&config).expect("config json"),
         )?;
-        let trust_scope_id =
-            mfm_ids::TrustScopeId::new("mfm.trust_scope.v1:43434343434343434343434343434343")
-                .expect("trust scope");
+        let store_scope_id =
+            mfm_ids::StoreScopeId::new("mfm.store_scope.v1:43434343434343434343434343434343")
+                .expect("store scope");
 
         mfm_app::prepare_entry_point_run_launch(EntryPointRunLaunchInput {
             entry_point_registry: &entry_point_registry,
@@ -286,7 +286,7 @@ mod tests {
             op_version: Some(mfm_app::OpVersion::new(2)?),
             authored_config,
             certification_registry: &certification_registry,
-            trust_scope_id,
+            store_scope_id,
             invocation_key: None,
         })
         .map_err(CommandError::from)

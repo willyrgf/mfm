@@ -1044,10 +1044,10 @@ fn fact_run_admitted() -> events::RunAdmitted {
         run_id: run_id(0xc1),
         identity_material: events::RunIdentityMaterialV1 {
             certified_spec_hash: spec_hash.clone(),
-            trust_scope_id: mfm_ids::TrustScopeId::new(
-                "mfm.trust_scope.v1:000000000000000000000000000000c1",
+            store_scope_id: mfm_ids::StoreScopeId::new(
+                "mfm.store_scope.v1:000000000000000000000000000000c1",
             )
-            .expect("trust scope"),
+            .expect("store scope"),
             invocation_key_digest: content_digest(0xc2),
         },
         entry_point: events::EntryPointLaunchEvidence {
@@ -1842,10 +1842,10 @@ fn fact_run_admitted_for_stream_with_descriptors(
     let spec_hash = certified_spec.spec_hash.clone();
     let identity_material = events::RunIdentityMaterialV1 {
         certified_spec_hash: spec_hash.clone(),
-        trust_scope_id: mfm_ids::TrustScopeId::new(
-            "mfm.trust_scope.v1:000000000000000000000000000000c1",
+        store_scope_id: mfm_ids::StoreScopeId::new(
+            "mfm.store_scope.v1:000000000000000000000000000000c1",
         )
-        .expect("trust scope"),
+        .expect("store scope"),
         invocation_key_digest: content_digest(0xc2),
     };
     let run_id = identity_material.derive_run_id().expect("run id");

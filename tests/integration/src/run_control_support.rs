@@ -158,20 +158,20 @@ fn toml_string(value: &str) -> String {
     serde_json::to_string(value).expect("toml-compatible string")
 }
 
-/// Prepares a portfolio snapshot entry-point launch against the supplied store trust scope.
+/// Prepares a portfolio snapshot entry-point launch against the supplied store scope.
 pub async fn prepare_portfolio_launch_for_store<S>(
     store: &S,
     config: &serde_json::Value,
     invocation_key: Option<&str>,
 ) -> mfm_app::PreparedEntryPointRunLaunch
 where
-    S: store::TrustScopeStore,
+    S: store::StoreScopeStore,
 {
     prepare_entry_point_launch_for_store(store, "portfolio_snapshot", None, config, invocation_key)
         .await
 }
 
-/// Prepares an entry-point launch against the supplied store trust scope.
+/// Prepares an entry-point launch against the supplied store scope.
 pub async fn prepare_entry_point_launch_for_store<S>(
     store: &S,
     op_name: &str,
@@ -180,14 +180,14 @@ pub async fn prepare_entry_point_launch_for_store<S>(
     invocation_key: Option<&str>,
 ) -> mfm_app::PreparedEntryPointRunLaunch
 where
-    S: store::TrustScopeStore,
+    S: store::StoreScopeStore,
 {
     let entry_point_registry = mfm_app::production_entry_point_op_registry().expect("entrypoints");
     let certification_registry = mfm_app::production_certification_registry().expect("cert");
-    let trust_scope_id = store
-        .load_trust_scope_id()
+    let store_scope_id = store
+        .load_store_scope_id()
         .await
-        .unwrap_or_else(|error| panic!("trust scope: {error}"));
+        .unwrap_or_else(|error| panic!("store scope: {error}"));
     let authored_config = mfm_authored_config::AuthoredConfig::new(
         mfm_authored_config::AuthoredConfigFormat::Json,
         serde_json::to_vec(config).expect("entry-point config json"),
@@ -199,7 +199,7 @@ where
         op_version,
         authored_config,
         certification_registry: &certification_registry,
-        trust_scope_id,
+        store_scope_id,
         invocation_key: invocation_key
             .map(mfm_app::InvocationKey::new)
             .transpose()
@@ -215,7 +215,7 @@ pub async fn admit_portfolio_run_without_driving<S>(
 ) -> (RunId, mfm_certify::CertifiedTypedSpec)
 where
     S: store::RunEventStore
-        + store::TrustScopeStore
+        + store::StoreScopeStore
         + store::RetainedArtifactReadProvider
         + Clone
         + Send

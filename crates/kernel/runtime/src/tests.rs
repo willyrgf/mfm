@@ -14,7 +14,7 @@ use mfm_capabilities::{
 use mfm_ids::{
     ArtifactId, ContextRef, ContextResourceKind, ContextStage, DigestBytes, EffectKind,
     EffectVersion, EventId, SchemaId, ScopeId, SeedId, SemanticTypeId, SideEffectPairId, StateKind,
-    StateVersion, TrustScopeId,
+    StateVersion, StoreScopeId,
 };
 use mfm_manual_auth::{
     ManualAuthorizationSignatureBytes, ManualResolutionAuthorizationProof,
@@ -66,14 +66,14 @@ fn fixture_value_schema_id() -> SchemaId {
     SchemaId::new("mfm.test.value", "1", DigestAlgorithm::Sha256JcsV1, DA).expect("schema")
 }
 
-fn fixture_trust_scope_id() -> TrustScopeId {
-    TrustScopeId::new("mfm.trust_scope.v1:10101010101010101010101010101010")
-        .expect("test trust scope")
+fn fixture_store_scope_id() -> StoreScopeId {
+    StoreScopeId::new("mfm.store_scope.v1:10101010101010101010101010101010")
+        .expect("test store scope")
 }
 
-fn alternate_fixture_trust_scope_id() -> TrustScopeId {
-    TrustScopeId::new("mfm.trust_scope.v1:20202020202020202020202020202020")
-        .expect("alternate test trust scope")
+fn alternate_fixture_store_scope_id() -> StoreScopeId {
+    StoreScopeId::new("mfm.store_scope.v1:20202020202020202020202020202020")
+        .expect("alternate test store scope")
 }
 
 fn synthetic_side_effect_pair_id(byte: u8) -> SideEffectPairId {
@@ -601,19 +601,19 @@ fn run_identity_material_with_invocation(
 ) -> events::RunIdentityMaterialV1 {
     run_identity_material_with_scope_and_invocation(
         runtime_spec,
-        fixture_trust_scope_id(),
+        fixture_store_scope_id(),
         invocation_key_digest,
     )
 }
 
 fn run_identity_material_with_scope_and_invocation(
     runtime_spec: &CertifiedRuntimeSpec,
-    trust_scope_id: TrustScopeId,
+    store_scope_id: StoreScopeId,
     invocation_key_digest: ContentDigest,
 ) -> events::RunIdentityMaterialV1 {
     events::RunIdentityMaterialV1 {
         certified_spec_hash: runtime_spec.spec_hash().clone(),
-        trust_scope_id,
+        store_scope_id,
         invocation_key_digest,
     }
 }
@@ -621,7 +621,7 @@ fn run_identity_material_with_scope_and_invocation(
 fn fixture_run_identity_material(fixture: &Fixture) -> events::RunIdentityMaterialV1 {
     run_identity_material_with_scope_and_invocation(
         &fixture.runtime_spec,
-        fixture.trust_scope_id.clone(),
+        fixture.store_scope_id.clone(),
         fixture.invocation_key_digest.clone(),
     )
 }
@@ -635,20 +635,20 @@ fn refresh_fixture_run_id_with_invocation(
     fixture: &mut Fixture,
     invocation_key_digest: ContentDigest,
 ) {
-    let trust_scope_id = fixture.trust_scope_id.clone();
-    refresh_fixture_run_id_with_identity(fixture, trust_scope_id, invocation_key_digest);
+    let store_scope_id = fixture.store_scope_id.clone();
+    refresh_fixture_run_id_with_identity(fixture, store_scope_id, invocation_key_digest);
 }
 
 fn refresh_fixture_run_id_with_identity(
     fixture: &mut Fixture,
-    trust_scope_id: TrustScopeId,
+    store_scope_id: StoreScopeId,
     invocation_key_digest: ContentDigest,
 ) {
-    fixture.trust_scope_id = trust_scope_id.clone();
+    fixture.store_scope_id = store_scope_id.clone();
     fixture.invocation_key_digest = invocation_key_digest.clone();
     fixture.run_id = run_identity_material_with_scope_and_invocation(
         &fixture.runtime_spec,
-        trust_scope_id,
+        store_scope_id,
         invocation_key_digest,
     )
     .derive_run_id()
@@ -2075,7 +2075,7 @@ const CONFIG_MULTIPLIER_7_BYTES: &[u8] = br#"{"multiplier":7}"#;
 struct Fixture {
     runtime_spec: CertifiedRuntimeSpec,
     run_id: RunId,
-    trust_scope_id: TrustScopeId,
+    store_scope_id: StoreScopeId,
     invocation_key_digest: ContentDigest,
     seed_ref: events::SeedCellRef,
     descriptor_a: DescriptorId,
@@ -3794,7 +3794,7 @@ async fn side_effect_driver_preserves_concrete_exclusive_resource_key_across_run
     let mut peer = fixture.clone();
     refresh_fixture_run_id_with_identity(
         &mut peer,
-        alternate_fixture_trust_scope_id(),
+        alternate_fixture_store_scope_id(),
         content(0xf6),
     );
     let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
@@ -13262,7 +13262,7 @@ fn fixture() -> Fixture {
     Fixture {
         runtime_spec,
         run_id,
-        trust_scope_id: fixture_trust_scope_id(),
+        store_scope_id: fixture_store_scope_id(),
         invocation_key_digest: content(0x10),
         seed_ref,
         descriptor_a,
@@ -13651,7 +13651,7 @@ fn fixture_from_context_runtime_spec(
     Fixture {
         runtime_spec,
         run_id,
-        trust_scope_id: fixture_trust_scope_id(),
+        store_scope_id: fixture_store_scope_id(),
         invocation_key_digest: content(0x10),
         seed_ref,
         descriptor_a: node_a.descriptor_id.clone(),
@@ -13727,7 +13727,7 @@ fn fixture_from_runtime_spec(
     Fixture {
         runtime_spec,
         run_id,
-        trust_scope_id: fixture_trust_scope_id(),
+        store_scope_id: fixture_store_scope_id(),
         invocation_key_digest: content(0x10),
         seed_ref,
         descriptor_a: node_a.descriptor_id.clone(),

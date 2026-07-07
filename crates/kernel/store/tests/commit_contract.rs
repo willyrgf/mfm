@@ -51,7 +51,7 @@ use mfm_store::v1::{
     RunCompletionProjection, RunEventStore, RunMode, RunState, SagaEngagementProjection,
     SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectLedgerPhase,
     SideEffectPairLedgerRef, SideEffectPhase, SideEffectTerminal, StateAttemptStarted, StoreError,
-    StreamSeq, TrustScopeId, TrustScopeStore, EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS,
+    StoreScopeId, StoreScopeStore, StreamSeq, EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS,
     EXECUTION_CLAIM_LEASE_TTL_SECS,
 };
 
@@ -477,7 +477,7 @@ fn run_identity_material_for_saga_policy(
     let certified_spec_hash = authority_spec
         .spec_hash()
         .expect("saga authority spec hash");
-    run_identity_material_for_test(certified_spec_hash, &trust_scope_hex(byte))
+    run_identity_material_for_test(certified_spec_hash, &store_scope_hex(byte))
 }
 
 fn execution_claim_scope(byte: u8) -> ExecutionClaimScope {
@@ -508,7 +508,7 @@ fn run_identity_material_for_spec_run_id(
 ) -> events::RunIdentityMaterialV1 {
     (0..=u8::MAX)
         .map(|byte| {
-            run_identity_material_for_test(certified_spec_hash.clone(), &trust_scope_hex(byte))
+            run_identity_material_for_test(certified_spec_hash.clone(), &store_scope_hex(byte))
         })
         .find(|material| {
             material
@@ -527,12 +527,12 @@ fn fact_run_id_for_node(byte: u8, fact_node_id: NodeId) -> RunId {
     let certified_spec_hash = fact_authority_spec_with_node(fact_node_id)
         .spec_hash()
         .expect("fact authority spec hash");
-    run_identity_material_for_test(certified_spec_hash, &trust_scope_hex(byte))
+    run_identity_material_for_test(certified_spec_hash, &store_scope_hex(byte))
         .derive_run_id()
         .expect("fact test run id")
 }
 
-fn trust_scope_hex(byte: u8) -> String {
+fn store_scope_hex(byte: u8) -> String {
     format!("{byte:02x}").repeat(16)
 }
 
@@ -1093,26 +1093,26 @@ fn execution_claim_contract_defaults_are_explicit() {
 }
 
 #[test]
-fn trust_scope_id_contract_is_store_owned_shape() {
-    let trust_scope = TrustScopeId::new("mfm.trust_scope.v1:0123456789abcdef0123456789abcdef")
-        .expect("trust scope id");
+fn store_scope_id_contract_is_store_owned_shape() {
+    let store_scope = StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")
+        .expect("store scope id");
     assert_eq!(
-        trust_scope.as_str(),
-        "mfm.trust_scope.v1:0123456789abcdef0123456789abcdef"
+        store_scope.as_str(),
+        "mfm.store_scope.v1:0123456789abcdef0123456789abcdef"
     );
-    assert!(TrustScopeId::new("mfm.trust_scope.v2:0123456789abcdef0123456789abcdef").is_err());
-    assert!(TrustScopeId::new("mfm.trust_scope.v1:0123456789ABCDEF0123456789abcdef").is_err());
-    assert!(TrustScopeId::new("mfm.trust_scope.v1:0123456789abcdef").is_err());
+    assert!(StoreScopeId::new("mfm.store_scope.v2:0123456789abcdef0123456789abcdef").is_err());
+    assert!(StoreScopeId::new("mfm.store_scope.v1:0123456789ABCDEF0123456789abcdef").is_err());
+    assert!(StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef").is_err());
 }
 
 #[test]
-fn in_memory_store_exposes_store_owned_trust_scope() {
+fn in_memory_store_exposes_store_owned_store_scope() {
     let store = AsyncInMemoryRunStore::default();
-    let trust_scope =
-        poll_ready_store_future(store.load_trust_scope_id()).expect("load in-memory trust scope");
+    let store_scope =
+        poll_ready_store_future(store.load_store_scope_id()).expect("load in-memory store scope");
     assert_eq!(
-        trust_scope.as_str(),
-        "mfm.trust_scope.v1:00000000000000000000000000000000"
+        store_scope.as_str(),
+        "mfm.store_scope.v1:00000000000000000000000000000000"
     );
 }
 

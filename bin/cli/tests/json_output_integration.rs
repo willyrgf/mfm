@@ -380,7 +380,7 @@ fn test_run_start_run_id_flag_is_not_a_start_option() {
 }
 
 #[test]
-fn test_run_start_requires_store_trust_scope_before_config_decode() {
+fn test_run_start_requires_store_store_scope_before_config_decode() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("portfolio.toml");
     std::fs::write(&config_path, sample_portfolio_config_toml()).expect("config fixture");

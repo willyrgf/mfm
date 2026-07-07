@@ -113,7 +113,7 @@ async fn prepare_evm_entry_point_request<S, A>(
     config: serde_json::Value,
 ) -> RunLaunchRequest
 where
-    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
+    S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     let entry_point_registry =
@@ -129,7 +129,7 @@ where
         op_version: None,
         authored_config,
         certification_registry: services.certification_registry(),
-        trust_scope_id: services.load_trust_scope_id().await.expect("trust scope"),
+        store_scope_id: services.load_store_scope_id().await.expect("store scope"),
         invocation_key: None,
     })
     .expect("entry-point launch request")
@@ -357,13 +357,13 @@ impl store::RunEventStore for MissingValidationReportArtifactStore {
     }
 }
 
-impl store::TrustScopeStore for MissingValidationReportArtifactStore {
+impl store::StoreScopeStore for MissingValidationReportArtifactStore {
     type Error = store::StoreError;
 
-    fn load_trust_scope_id<'a>(
+    fn load_store_scope_id<'a>(
         &'a self,
-    ) -> store::AsyncStoreFuture<'a, store::TrustScopeId, Self::Error> {
-        self.store.load_trust_scope_id()
+    ) -> store::AsyncStoreFuture<'a, store::StoreScopeId, Self::Error> {
+        self.store.load_store_scope_id()
     }
 }
 

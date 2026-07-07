@@ -262,14 +262,14 @@ fn touched_set(byte: u8) -> ResourceTouchedSetEvidence {
     }
 }
 
-fn trust_scope_id() -> TrustScopeId {
-    TrustScopeId::new("mfm.trust_scope.v1:20202020202020202020202020202020").expect("trust scope")
+fn store_scope_id() -> StoreScopeId {
+    StoreScopeId::new("mfm.store_scope.v1:20202020202020202020202020202020").expect("store scope")
 }
 
 fn run_identity_material(spec_hash: SpecHash) -> RunIdentityMaterialV1 {
     RunIdentityMaterialV1 {
         certified_spec_hash: spec_hash,
-        trust_scope_id: trust_scope_id(),
+        store_scope_id: store_scope_id(),
         invocation_key_digest: content_digest(1),
     }
 }
@@ -765,7 +765,7 @@ fn event_schema_descriptor_requirement_sources_golden() {
 
     assert_eq!(
         rows,
-        r#"mfm.events.v1.run_admitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:a502ff3d0bfa2c156a6118735ef4a6ae08998d4ab1cb904395242aed9649b5f5 [RunSpec,RunCertificate,RunConfig,SeedCell,FactDescriptor]
+        r#"mfm.events.v1.run_admitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:b9433b57c327c3f98c916950ad1db355359341550145f9d5d6d15261c0b30f3e [RunSpec,RunCertificate,RunConfig,SeedCell,FactDescriptor]
 mfm.events.v1.state_attempt_started schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b []
 mfm.events.v1.fact_recorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:f66fc733963d3564fe94bcd8c5d80c489405ddc63c34002a9c6af381cf8f1734 [FactResponse]
 mfm.events.v1.artifact_referenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:3467e9d93a82b31967749282034ed4e9d4fb1816de477cc01eb7ba1f4146a531 [ArtifactReferenced]
@@ -844,7 +844,7 @@ fn v1_event_schema_golden() {
     assert_eq!(all_event_schema_descriptors().len(), 31);
     assert_eq!(
         rows,
-        r#"mfm_events::v1::RunAdmitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:a502ff3d0bfa2c156a6118735ef4a6ae08998d4ab1cb904395242aed9649b5f5
+        r#"mfm_events::v1::RunAdmitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:b9433b57c327c3f98c916950ad1db355359341550145f9d5d6d15261c0b30f3e
 mfm_events::v1::StateAttemptStarted schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b
 mfm_events::v1::FactRecorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:f66fc733963d3564fe94bcd8c5d80c489405ddc63c34002a9c6af381cf8f1734
 mfm_events::v1::ArtifactReferenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:3467e9d93a82b31967749282034ed4e9d4fb1816de477cc01eb7ba1f4146a531

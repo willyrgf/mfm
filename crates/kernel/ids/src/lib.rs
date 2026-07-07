@@ -1071,47 +1071,47 @@ pub type ArtifactId = Identity<ArtifactIdKind>;
 /// Generic digest of canonical bytes or artifact bytes.
 pub type ContentDigest = Identity<ContentDigestKind>;
 
-/// Store-owned deployment trust-scope identifier.
+/// Store-owned deployment scope identifier.
 ///
 /// This non-secret value identifies a deployment trust domain for run identity derivation.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TrustScopeId(String);
+pub struct StoreScopeId(String);
 
-impl TrustScopeId {
-    /// Stable v1 trust-scope prefix.
-    pub const PREFIX: &'static str = "mfm.trust_scope.v1:";
+impl StoreScopeId {
+    /// Stable v1 store scope prefix.
+    pub const PREFIX: &'static str = "mfm.store_scope.v1:";
 
-    /// Creates a trust-scope id from the stable persisted string shape.
+    /// Creates a store scope id from the stable persisted string shape.
     pub fn new(value: impl Into<String>) -> Result<Self> {
         let value = value.into();
         let suffix = value
             .strip_prefix(Self::PREFIX)
-            .ok_or_else(|| IdentityError::new("trust scope id prefix mismatch"))?;
+            .ok_or_else(|| IdentityError::new("store scope id prefix mismatch"))?;
         if suffix.len() != 32
             || !suffix
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
         {
             return Err(IdentityError::new(
-                "trust scope id must use 32 lowercase hex characters",
+                "store scope id must use 32 lowercase hex characters",
             ));
         }
         Ok(Self(value))
     }
 
-    /// Returns the persisted trust-scope id string.
+    /// Returns the persisted store scope id string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
-impl fmt::Display for TrustScopeId {
+impl fmt::Display for StoreScopeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-impl FromStr for TrustScopeId {
+impl FromStr for StoreScopeId {
     type Err = IdentityError;
 
     fn from_str(value: &str) -> Result<Self> {

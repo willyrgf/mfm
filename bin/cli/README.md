@@ -403,7 +403,7 @@ branch's expected baseline. Filesystem artifact roots outside the typed run
 store are not read or migrated by typed run commands.
 
 Run ids use the typed identity format `run:<algorithm>:<digest>`. Normal `run start` derives the
-typed run id from certified run identity material: certified spec hash, store trust scope, and a
+typed run id from certified run identity material: certified spec hash, store scope, and a
 required invocation key digest. The raw CLI `--invocation-key` is optional; when omitted, the app
 mints a fresh opaque key before deriving the digest.
 

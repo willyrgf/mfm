@@ -46,17 +46,17 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
         .expect("register manual proof entry point");
     let authored_config =
         AuthoredConfig::new(AuthoredConfigFormat::Json, b"{}".to_vec()).expect("authored config");
-    let trust_scope_id = services
-        .load_trust_scope_id()
+    let store_scope_id = services
+        .load_store_scope_id()
         .await
-        .expect("trust scope id");
+        .expect("store scope id");
     let launch = mfm_app::prepare_entry_point_run_launch(EntryPointRunLaunchInput {
         entry_point_registry: &entry_points,
         public_op_name: PublicOpName::new("manual_resolution_proof").expect("public op name"),
         op_version: Some(OpVersion::new(1).expect("op version")),
         authored_config,
         certification_registry: &registry,
-        trust_scope_id,
+        store_scope_id,
         invocation_key: None,
     })
     .expect("launch request");

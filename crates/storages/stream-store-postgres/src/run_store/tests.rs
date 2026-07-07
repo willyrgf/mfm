@@ -38,8 +38,8 @@ use mfm_store::v1::{
     CommitOutcome, CommitPreconditions, ExecutionClaimStatus, ExecutionClaimStore,
     ExistingArtifactAdmission, ManualResolution, NowaitSkipAdmissionResult, PreparedCommit,
     PreparedCommitPlan, RequiredRunState, ResourceLaneKey, Retention, RunState,
-    SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectPhase, StoreError, StreamSeq,
-    TrustScopeId, TrustScopeStore,
+    SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectPhase, StoreError,
+    StoreScopeId, StoreScopeStore, StreamSeq,
 };
 use sqlx::postgres::PgConnectOptions;
 use sqlx::AssertSqlSafe;
@@ -371,29 +371,29 @@ async fn store_authority_rejects_invalid_store_metadata() {
 }
 
 #[tokio::test]
-async fn store_authority_rejects_invalid_trust_scope_binding() {
+async fn store_authority_rejects_invalid_store_scope_binding() {
     let (store, schema) = test_store().await;
 
     sqlx::query("ALTER TABLE store_metadata DISABLE TRIGGER store_metadata_no_update")
         .execute(&store.pool)
         .await
         .expect("disable metadata mutation guard");
-    sqlx::query("ALTER TABLE store_metadata ALTER COLUMN trust_scope_id DROP NOT NULL")
+    sqlx::query("ALTER TABLE store_metadata ALTER COLUMN store_scope_id DROP NOT NULL")
         .execute(&store.pool)
         .await
-        .expect("allow null trust scope fixture");
-    sqlx::query("UPDATE store_metadata SET trust_scope_id = NULL")
+        .expect("allow null store scope fixture");
+    sqlx::query("UPDATE store_metadata SET store_scope_id = NULL")
         .execute(&store.pool)
         .await
-        .expect("remove trust scope");
+        .expect("remove store scope");
     sqlx::query("ALTER TABLE store_metadata ENABLE TRIGGER store_metadata_no_update")
         .execute(&store.pool)
         .await
         .expect("reenable metadata mutation guard");
     let error = crate::schema::validate_pool(&store.pool)
         .await
-        .expect_err("invalid trust scope fails authority validation");
-    assert_authority_error(error, PostgresStoreAuthorityError::TrustScope);
+        .expect_err("invalid store scope fails authority validation");
+    assert_authority_error(error, PostgresStoreAuthorityError::StoreScope);
 
     drop_schema(&store, &schema).await;
 }
@@ -431,32 +431,32 @@ async fn schema_validation_rejects_missing_mutation_guard_trigger() {
 }
 
 #[tokio::test]
-async fn store_trust_scope_survives_reconnects_and_rejects_mutation() {
+async fn store_store_scope_survives_reconnects_and_rejects_mutation() {
     let (store, schema) = test_store().await;
 
-    let trust_scope = store.load_trust_scope_id().await.expect("load trust scope");
-    assert!(trust_scope.as_str().starts_with(TrustScopeId::PREFIX));
-    assert_eq!(store.store_authority().trust_scope_id(), &trust_scope);
+    let store_scope = store.load_store_scope_id().await.expect("load store scope");
+    assert!(store_scope.as_str().starts_with(StoreScopeId::PREFIX));
+    assert_eq!(store.store_authority().store_scope_id(), &store_scope);
 
     let restarted = PostgresRunStore {
         pool: store.pool.clone(),
         authority: store.store_authority().clone(),
         fact_receipt_signer: store.fact_receipt_signer.clone(),
     };
-    let restarted_trust_scope = restarted
-        .load_trust_scope_id()
+    let restarted_store_scope = restarted
+        .load_store_scope_id()
         .await
-        .expect("load restarted trust scope");
-    assert_eq!(trust_scope, restarted_trust_scope);
+        .expect("load restarted store scope");
+    assert_eq!(store_scope, restarted_store_scope);
 
     sqlx::query(
         "UPDATE store_metadata \
-         SET trust_scope_id = 'mfm.trust_scope.v1:ffffffffffffffffffffffffffffffff' \
+         SET store_scope_id = 'mfm.store_scope.v1:ffffffffffffffffffffffffffffffff' \
          WHERE singleton",
     )
     .execute(&store.pool)
     .await
-    .expect_err("trust scope mutation is rejected");
+    .expect_err("store scope mutation is rejected");
     crate::schema::validate_pool(&store.pool)
         .await
         .expect("metadata remains valid");
@@ -612,7 +612,7 @@ fn admission_token(value: &str) -> AdmissionToken {
 }
 
 fn execution_claim_scope(byte: u8) -> mfm_store::v1::ExecutionClaimScope {
-    let identity = run_identity_material_for_test(spec_hash(byte), &trust_scope_hex(byte));
+    let identity = run_identity_material_for_test(spec_hash(byte), &store_scope_hex(byte));
     mfm_store::v1::ExecutionClaimScope::from_run_identity_material(&identity)
 }
 
@@ -1474,14 +1474,14 @@ fn run_identity_material_for_saga_policy(
     let certified_spec_hash = authority_spec
         .spec_hash()
         .expect("saga authority spec hash");
-    run_identity_material_for_test(certified_spec_hash, &trust_scope_hex(byte))
+    run_identity_material_for_test(certified_spec_hash, &store_scope_hex(byte))
 }
 
 fn run_identity_material_for_fact_spec(byte: u8) -> events::RunIdentityMaterialV1 {
     let certified_spec_hash = fact_authority_spec()
         .spec_hash()
         .expect("fact authority spec hash");
-    run_identity_material_for_test(certified_spec_hash, &trust_scope_hex(byte))
+    run_identity_material_for_test(certified_spec_hash, &store_scope_hex(byte))
 }
 
 fn run_identity_material_for_run_id(
@@ -1511,7 +1511,7 @@ fn run_identity_material_for_fact_run_id(run_id: &RunId) -> events::RunIdentityM
         .expect("test run id must be derived from fact identity material")
 }
 
-fn trust_scope_hex(byte: u8) -> String {
+fn store_scope_hex(byte: u8) -> String {
     format!("{byte:02x}").repeat(16)
 }
 

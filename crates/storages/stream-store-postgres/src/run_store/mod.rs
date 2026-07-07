@@ -20,8 +20,8 @@ use mfm_store::v1::{
     ProjectionSnapshot, ProjectionSnapshotParts, ResourceLaneAuthoritySet, ResourceLaneKey,
     ResourceLaneProjection, RetainedArtifactReadFuture, RetainedArtifactReadProvider,
     RunEventStore, RunObservation, RunObservationPage, RunObservationQuery, RunObservationStore,
-    RunState, StagedCommitOutcome, StoreError, StoreErrorInspection, StreamSeq, TrustScopeId,
-    TrustScopeStore, VerifiedRunArtifactBytes,
+    RunState, StagedCommitOutcome, StoreError, StoreErrorInspection, StoreScopeId, StoreScopeStore,
+    StreamSeq, VerifiedRunArtifactBytes,
 };
 use serde_json::Value;
 use sqlx::{
@@ -100,9 +100,9 @@ pub enum PostgresStoreAuthorityError {
     /// The singleton store metadata row or contract version was invalid.
     #[error("metadata validation failed")]
     Metadata,
-    /// The store-owned deployment trust-scope binding was missing or invalid.
-    #[error("trust-scope validation failed")]
-    TrustScope,
+    /// The store-owned deployment scope binding was missing or invalid.
+    #[error("store scope validation failed")]
+    StoreScope,
     /// The store-owned fact-query receipt trust root was invalid.
     #[error("fact receipt trust-root validation failed")]
     FactReceiptTrustRoot,
@@ -111,24 +111,24 @@ pub enum PostgresStoreAuthorityError {
 /// Validated Postgres run-store authority loaded during store construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostgresStoreAuthority {
-    trust_scope_id: TrustScopeId,
+    store_scope_id: StoreScopeId,
     fact_receipt_trust_root: Option<mfm_store::v1::FactQueryReceiptTrustRoot>,
 }
 
 impl PostgresStoreAuthority {
     pub(crate) fn new(
-        trust_scope_id: TrustScopeId,
+        store_scope_id: StoreScopeId,
         fact_receipt_trust_root: Option<mfm_store::v1::FactQueryReceiptTrustRoot>,
     ) -> Self {
         Self {
-            trust_scope_id,
+            store_scope_id,
             fact_receipt_trust_root,
         }
     }
 
-    /// Returns the store-owned deployment trust-scope id validated at construction.
-    pub fn trust_scope_id(&self) -> &TrustScopeId {
-        &self.trust_scope_id
+    /// Returns the store-owned deployment scope id validated at construction.
+    pub fn store_scope_id(&self) -> &StoreScopeId {
+        &self.store_scope_id
     }
 
     /// Returns the configured fact-query receipt trust root, when the store has one.
@@ -383,11 +383,11 @@ impl ExecutionClaimStore for PostgresRunStore {
     }
 }
 
-impl TrustScopeStore for PostgresRunStore {
+impl StoreScopeStore for PostgresRunStore {
     type Error = PostgresStoreError;
 
-    fn load_trust_scope_id<'a>(&'a self) -> AsyncStoreFuture<'a, TrustScopeId, Self::Error> {
-        Box::pin(async move { load_trust_scope_id_client(&self.pool).await })
+    fn load_store_scope_id<'a>(&'a self) -> AsyncStoreFuture<'a, StoreScopeId, Self::Error> {
+        Box::pin(async move { load_store_scope_id_client(&self.pool).await })
     }
 }
 

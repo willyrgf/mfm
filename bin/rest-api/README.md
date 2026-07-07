@@ -230,7 +230,7 @@ Request notes:
 - `config` is required. With `config_format: "toml"`, it must be a string. With
   `config_format: "json"`, it may be a JSON object/array/value accepted by the selected op.
 - Normal start derives the typed run id from certified run identity material: certified spec hash,
-  store trust scope, and a required invocation key digest.
+  store scope, and a required invocation key digest.
 - `invocation_key` is optional at the API boundary. Supplying it makes retries target the same run.
   When omitted, the app mints a fresh opaque invocation key before deriving `run_id`. The raw key is
   not persisted; only a domain-separated digest enters run identity material.

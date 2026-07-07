@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use mfm_facts::{StoreIdentity, StoreKeyId, StoreReceiptAuthenticationScheme};
-use mfm_store::v1::{FactQueryReceiptTrustRoot, TrustScopeId};
+use mfm_store::v1::{FactQueryReceiptTrustRoot, StoreScopeId};
 use sqlx::{PgPool, Row};
 
 use crate::run_store::{
@@ -384,7 +384,7 @@ async fn validate_store_metadata(
     let row = sqlx::query(
         "SELECT COUNT(*)::bigint AS row_count, \
           MIN(store_epoch) AS store_epoch, \
-          MIN(trust_scope_id) AS trust_scope_id, \
+          MIN(store_scope_id) AS store_scope_id, \
           MIN(schema_contract_version) AS schema_contract_version \
          FROM store_metadata WHERE singleton",
     )
@@ -400,8 +400,8 @@ async fn validate_store_metadata(
     let schema_contract_version: Option<String> = row
         .try_get("schema_contract_version")
         .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Metadata))?;
-    let trust_scope_id: Option<String> = row
-        .try_get("trust_scope_id")
+    let store_scope_id: Option<String> = row
+        .try_get("store_scope_id")
         .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Metadata))?;
     if row_count != 1
         || schema_contract_version.as_deref() != Some("mfm.postgres.run_store.v1")
@@ -409,14 +409,14 @@ async fn validate_store_metadata(
     {
         return Err(store_authority_error(PostgresStoreAuthorityError::Metadata));
     }
-    let trust_scope_id = trust_scope_id
-        .ok_or_else(|| store_authority_error(PostgresStoreAuthorityError::TrustScope))
+    let store_scope_id = store_scope_id
+        .ok_or_else(|| store_authority_error(PostgresStoreAuthorityError::StoreScope))
         .and_then(|value| {
-            TrustScopeId::new(value)
-                .map_err(|_| store_authority_error(PostgresStoreAuthorityError::TrustScope))
+            StoreScopeId::new(value)
+                .map_err(|_| store_authority_error(PostgresStoreAuthorityError::StoreScope))
         })?;
     Ok(PostgresStoreAuthority::new(
-        trust_scope_id,
+        store_scope_id,
         fact_receipt_trust_root,
     ))
 }
@@ -543,7 +543,7 @@ const REQUIRED_CONSTRAINTS: &[&str] = &[
     "commits_sort_key_v1_length",
     "commits_sort_key_v1_prefix",
     "commits_sort_key_not_sentinel",
-    "store_metadata_trust_scope_id_v1",
+    "store_metadata_store_scope_id_v1",
     "fact_receipt_trust_root_store_identity_v1",
     "fact_receipt_trust_root_scheme_v1",
     "fact_receipt_trust_root_key_id_v1",

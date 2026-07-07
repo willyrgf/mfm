@@ -202,21 +202,21 @@ fn checked_constructors_produce_canonical_strings() {
 }
 
 #[test]
-fn trust_scope_id_accepts_only_stable_lowercase_hex_shape() {
-    let trust_scope = TrustScopeId::new("mfm.trust_scope.v1:0123456789abcdef0123456789abcdef")
-        .expect("trust scope");
+fn store_scope_id_accepts_only_stable_lowercase_hex_shape() {
+    let store_scope = StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")
+        .expect("store scope");
 
     assert_eq!(
-        trust_scope.as_str(),
-        "mfm.trust_scope.v1:0123456789abcdef0123456789abcdef"
+        store_scope.as_str(),
+        "mfm.store_scope.v1:0123456789abcdef0123456789abcdef"
     );
     assert_eq!(
-        trust_scope.to_string(),
-        "mfm.trust_scope.v1:0123456789abcdef0123456789abcdef"
+        store_scope.to_string(),
+        "mfm.store_scope.v1:0123456789abcdef0123456789abcdef"
     );
-    assert!(TrustScopeId::new("mfm.trust_scope.v2:0123456789abcdef0123456789abcdef").is_err());
-    assert!(TrustScopeId::new("mfm.trust_scope.v1:0123456789ABCDEF0123456789abcdef").is_err());
-    assert!(TrustScopeId::new("mfm.trust_scope.v1:0123456789abcdef").is_err());
+    assert!(StoreScopeId::new("mfm.store_scope.v2:0123456789abcdef0123456789abcdef").is_err());
+    assert!(StoreScopeId::new("mfm.store_scope.v1:0123456789ABCDEF0123456789abcdef").is_err());
+    assert!(StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef").is_err());
 }
 
 #[test]

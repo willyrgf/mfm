@@ -304,7 +304,7 @@ pub enum CodecError {
 /// Backend helper APIs for durable store implementations.
 pub mod backend;
 
-pub use mfm_ids::TrustScopeId;
+pub use mfm_ids::StoreScopeId;
 
 mod admission_lanes;
 pub use admission_lanes::{
@@ -5652,13 +5652,13 @@ pub struct RunObservationPage {
     pub runs: Vec<RunObservation>,
 }
 
-/// Read-only store-owned deployment trust scope.
-pub trait TrustScopeStore {
+/// Read-only store-owned deployment scope.
+pub trait StoreScopeStore {
     /// Store-specific error type.
     type Error: StoreErrorInspection + fmt::Display + Send + Sync + 'static;
 
-    /// Loads the store-owned deployment trust-scope id.
-    fn load_trust_scope_id<'a>(&'a self) -> AsyncStoreFuture<'a, TrustScopeId, Self::Error>;
+    /// Loads the store-owned deployment scope id.
+    fn load_store_scope_id<'a>(&'a self) -> AsyncStoreFuture<'a, StoreScopeId, Self::Error>;
 }
 
 /// Internal storage boundary for observation list/watch pages.
@@ -6085,7 +6085,7 @@ impl CommitStagingVerifier<'_> {
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone)]
 struct RunMemoryCore {
-    trust_scope_id: TrustScopeId,
+    store_scope_id: StoreScopeId,
     streams: BTreeMap<RunId, Vec<CommittedBatch>>,
     commit_keys: BTreeMap<(RunId, CommitKey), CommitKeyRecord>,
     artifacts: ArtifactAuthorityMap,
@@ -6101,10 +6101,10 @@ struct RunMemoryCore {
 impl Default for RunMemoryCore {
     fn default() -> Self {
         Self {
-            trust_scope_id: TrustScopeId::new(
-                "mfm.trust_scope.v1:00000000000000000000000000000000",
+            store_scope_id: StoreScopeId::new(
+                "mfm.store_scope.v1:00000000000000000000000000000000",
             )
-            .expect("test trust scope"),
+            .expect("test store scope"),
             streams: BTreeMap::new(),
             commit_keys: BTreeMap::new(),
             artifacts: BTreeMap::new(),
@@ -7008,11 +7008,11 @@ impl RunEventStore for AsyncInMemoryRunStore {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-impl TrustScopeStore for AsyncInMemoryRunStore {
+impl StoreScopeStore for AsyncInMemoryRunStore {
     type Error = StoreError;
 
-    fn load_trust_scope_id<'a>(&'a self) -> AsyncStoreFuture<'a, TrustScopeId, Self::Error> {
-        let result = self.lock_inner().map(|store| store.trust_scope_id.clone());
+    fn load_store_scope_id<'a>(&'a self) -> AsyncStoreFuture<'a, StoreScopeId, Self::Error> {
+        let result = self.lock_inner().map(|store| store.store_scope_id.clone());
         Box::pin(std::future::ready(result))
     }
 }
@@ -10778,7 +10778,7 @@ fn parse_entry_point_launch_evidence(
 fn parse_run_identity_material(json: &serde_json::Value) -> Result<events::RunIdentityMaterialV1> {
     Ok(events::RunIdentityMaterialV1 {
         certified_spec_hash: parse_identity(required_str(json, "certified_spec_hash")?)?,
-        trust_scope_id: TrustScopeId::new(required_str(json, "trust_scope_id")?)?,
+        store_scope_id: StoreScopeId::new(required_str(json, "store_scope_id")?)?,
         invocation_key_digest: parse_identity(required_str(json, "invocation_key_digest")?)?,
     })
 }
@@ -11194,7 +11194,7 @@ fn run_identity_material_json(material: &events::RunIdentityMaterialV1) -> serde
     serde_json::json!({
         "certified_spec_hash": material.certified_spec_hash.as_str(),
         "invocation_key_digest": material.invocation_key_digest.as_str(),
-        "trust_scope_id": material.trust_scope_id.as_str(),
+        "store_scope_id": material.store_scope_id.as_str(),
     })
 }
 

@@ -413,10 +413,10 @@ fn prepare_btc_collector_internal_test_launch() -> Result<RunLaunchRequest, AppE
         CertifiedRunLaunchInput {
             certified_spec,
             registry: &scoped,
-            trust_scope_id: TrustScopeId::new(
-                "mfm.trust_scope.v1:00000000000000000000000000000000",
+            store_scope_id: StoreScopeId::new(
+                "mfm.store_scope.v1:00000000000000000000000000000000",
             )
-            .expect("trust scope"),
+            .expect("store scope"),
             invocation_key_digest: default_invocation_key_digest(),
             entry_point_evidence: events::EntryPointLaunchEvidence {
                 resolved_op_id: events::EntryPointOpId::new(
@@ -482,10 +482,10 @@ fn prepare_app_fact_launch_with_invocation_key_and_state_key(
         CertifiedRunLaunchInput {
             certified_spec,
             registry: &scoped,
-            trust_scope_id: TrustScopeId::new(
-                "mfm.trust_scope.v1:00000000000000000000000000000000",
+            store_scope_id: StoreScopeId::new(
+                "mfm.store_scope.v1:00000000000000000000000000000000",
             )
-            .expect("trust scope"),
+            .expect("store scope"),
             invocation_key_digest: invocation_key_digest
                 .unwrap_or_else(default_invocation_key_digest),
             entry_point_evidence: events::EntryPointLaunchEvidence {
@@ -759,11 +759,11 @@ impl store::RunEventStore for OverriddenCommittedStreamStore {
     }
 }
 
-impl store::TrustScopeStore for OverriddenCommittedStreamStore {
+impl store::StoreScopeStore for OverriddenCommittedStreamStore {
     type Error = store::StoreError;
 
-    fn load_trust_scope_id<'a>(&'a self) -> store::AsyncStoreFuture<'a, TrustScopeId, Self::Error> {
-        self.inner.load_trust_scope_id()
+    fn load_store_scope_id<'a>(&'a self) -> store::AsyncStoreFuture<'a, StoreScopeId, Self::Error> {
+        self.inner.load_store_scope_id()
     }
 }
 

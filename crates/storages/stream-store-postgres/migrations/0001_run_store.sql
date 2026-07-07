@@ -20,18 +20,18 @@ $$;
 CREATE TABLE store_metadata (
   singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
   store_epoch TEXT NOT NULL,
-  trust_scope_id TEXT NOT NULL,
+  store_scope_id TEXT NOT NULL,
   schema_contract_version TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
-  CONSTRAINT store_metadata_trust_scope_id_v1 CHECK (
-    trust_scope_id ~ '^mfm\.trust_scope\.v1:[0-9a-f]{32}$'
+  CONSTRAINT store_metadata_store_scope_id_v1 CHECK (
+    store_scope_id ~ '^mfm\.store_scope\.v1:[0-9a-f]{32}$'
   )
 );
 
-INSERT INTO store_metadata (store_epoch, trust_scope_id, schema_contract_version)
+INSERT INTO store_metadata (store_epoch, store_scope_id, schema_contract_version)
 VALUES (
   'mfm.store.epoch.v1:' || encode(public.gen_random_bytes(16), 'hex'),
-  'mfm.trust_scope.v1:' || encode(public.gen_random_bytes(16), 'hex'),
+  'mfm.store_scope.v1:' || encode(public.gen_random_bytes(16), 'hex'),
   'mfm.postgres.run_store.v1'
 );
 
