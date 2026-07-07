@@ -162,19 +162,13 @@ fn toml_string(value: &str) -> String {
 pub async fn prepare_portfolio_launch_for_store<S>(
     store: &S,
     config: &serde_json::Value,
-    distinct_run_key: Option<&str>,
+    invocation_key: Option<&str>,
 ) -> mfm_app::PreparedEntryPointRunLaunch
 where
     S: store::TrustScopeStore,
 {
-    prepare_entry_point_launch_for_store(
-        store,
-        "portfolio_snapshot",
-        None,
-        config,
-        distinct_run_key,
-    )
-    .await
+    prepare_entry_point_launch_for_store(store, "portfolio_snapshot", None, config, invocation_key)
+        .await
 }
 
 /// Prepares an entry-point launch against the supplied store trust scope.
@@ -183,7 +177,7 @@ pub async fn prepare_entry_point_launch_for_store<S>(
     op_name: &str,
     op_version: Option<mfm_app::OpVersion>,
     config: &serde_json::Value,
-    distinct_run_key: Option<&str>,
+    invocation_key: Option<&str>,
 ) -> mfm_app::PreparedEntryPointRunLaunch
 where
     S: store::TrustScopeStore,
@@ -206,10 +200,10 @@ where
         authored_config,
         certification_registry: &certification_registry,
         trust_scope_id,
-        distinct_run_key: distinct_run_key
-            .map(mfm_app::DistinctRunKey::new)
+        invocation_key: invocation_key
+            .map(mfm_app::InvocationKey::new)
             .transpose()
-            .expect("distinct run key"),
+            .expect("invocation key"),
     })
     .expect("prepared entry-point launch")
 }

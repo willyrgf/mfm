@@ -136,6 +136,21 @@ impl SerialTypedScheduler {
             .map_err(async_store_error)
     }
 
+    /// Appends run admission while atomically acquiring the execution claim.
+    pub async fn start_run_with_execution_claim<S: store::RunEventStore + ?Sized>(
+        &self,
+        store: &S,
+        launch: PreparedRunLaunch,
+        claim: store::PreparedExecutionClaim,
+    ) -> Result<store::CommitOutcome> {
+        let bundle = prepared_commit_bundle(launch.commit.into(), launch.artifacts_to_stage)?
+            .with_execution_claim(claim)?;
+        store
+            .append_prepared_commit_bundle(bundle)
+            .await
+            .map_err(async_store_error)
+    }
+
     /// Appends admission and reloads verified admission authority for the run.
     pub async fn start_run_admitted<S: store::RunEventStore + ?Sized>(
         &self,
@@ -219,6 +234,7 @@ impl SerialTypedScheduler {
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
+        execution_scope: &store::ExecutionClaimScope,
         execution_claim_token: store::AdmissionToken,
     ) -> Result<SchedulerStatus>
     where
@@ -226,7 +242,8 @@ impl SerialTypedScheduler {
     {
         let mut blocked_lanes = BTreeSet::new();
         loop {
-            require_live_execution_claim(store, run_id, &execution_claim_token).await?;
+            require_live_execution_claim(store, execution_scope, run_id, &execution_claim_token)
+                .await?;
             match self
                 .drive_once_with_blocked_lanes(store, runtime_spec, run_id, &blocked_lanes)
                 .await?
@@ -257,6 +274,7 @@ impl SerialTypedScheduler {
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
+        execution_scope: &store::ExecutionClaimScope,
         execution_claim_token: store::AdmissionToken,
     ) -> Result<SchedulerStatus>
     where
@@ -265,7 +283,8 @@ impl SerialTypedScheduler {
         let mut advanced = false;
         let mut blocked_lanes = BTreeSet::new();
         loop {
-            require_live_execution_claim(store, run_id, &execution_claim_token).await?;
+            require_live_execution_claim(store, execution_scope, run_id, &execution_claim_token)
+                .await?;
             match self
                 .drive_once_with_blocked_lanes(store, runtime_spec, run_id, &blocked_lanes)
                 .await?
@@ -376,6 +395,7 @@ impl SerialTypedScheduler {
 
 async fn require_live_execution_claim<S>(
     store: &S,
+    execution_scope: &store::ExecutionClaimScope,
     run_id: &RunId,
     token: &store::AdmissionToken,
 ) -> Result<()>
@@ -383,17 +403,33 @@ where
     S: store::ExecutionClaimStore + ?Sized,
 {
     match store
-        .execution_claim_status(run_id)
+        .execution_claim_status(execution_scope)
         .await
         .map_err(async_store_error)?
     {
-        store::ExecutionClaimStatus::Live(lease) if &lease.token == token => Ok(()),
+        store::ExecutionClaimStatus::Live(lease)
+            if &lease.token == token && &lease.holder_run_id == run_id =>
+        {
+            Ok(())
+        }
+        store::ExecutionClaimStatus::Live(lease) if &lease.token == token => Err(
+            RuntimeError::ExecutionClaim("execution claim is held for a different run".to_owned()),
+        ),
         store::ExecutionClaimStatus::Live(_) => Err(RuntimeError::ExecutionClaim(
             "execution claim is held by a different token".to_owned(),
         )),
-        store::ExecutionClaimStatus::Expired(lease) if &lease.token == token => Err(
-            RuntimeError::ExecutionClaim("execution claim is expired".to_owned()),
-        ),
+        store::ExecutionClaimStatus::Expired(lease)
+            if &lease.token == token && &lease.holder_run_id == run_id =>
+        {
+            Err(RuntimeError::ExecutionClaim(
+                "execution claim is expired".to_owned(),
+            ))
+        }
+        store::ExecutionClaimStatus::Expired(lease) if &lease.token == token => {
+            Err(RuntimeError::ExecutionClaim(
+                "execution claim is expired for a different run".to_owned(),
+            ))
+        }
         store::ExecutionClaimStatus::Expired(_) => Err(RuntimeError::ExecutionClaim(
             "execution claim is expired under a different token".to_owned(),
         )),

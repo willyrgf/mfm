@@ -404,46 +404,46 @@ async fn start_validates_entry_point_request_shapes() {
 }
 
 #[tokio::test]
-async fn start_distinct_run_key_derives_separate_run_without_persisting_raw_key() {
+async fn start_invocation_key_derives_separate_run_without_persisting_raw_key() {
     let rpc_url = test_support::start_portfolio_rpc_mock(31337).await;
     let runtime = runtime_config_app(PORTFOLIO_NETWORK_ID, &rpc_url);
     let app = runtime.app.clone();
     let store = &runtime.state.store;
-    let raw_key = "distinct-alpha";
+    let raw_key = "invocation-alpha";
     let first_run_id =
         test_support::prepare_portfolio_launch_for_store(store, &portfolio_snapshot_config(), None)
             .await
             .request
             .run_id;
 
-    let distinct = app
+    let response = app
         .oneshot(json_post(
             "/v1/runs/start",
             serde_json::json!({
                 "op": "portfolio_snapshot",
                 "config_format": "json",
                 "config": portfolio_snapshot_config(),
-                "distinct_run_key": raw_key,
+                "invocation_key": raw_key,
             }),
         ))
         .await
-        .expect("distinct start response");
-    assert_eq!(distinct.status(), StatusCode::OK);
-    let distinct_body = response_json(distinct).await;
-    assert_eq!(distinct_body["data"]["outcome"], "admitted");
-    assert!(!distinct_body.to_string().contains(raw_key));
-    let distinct_run_id = RunId::parse(
-        distinct_body["data"]["run"]["run_id"]
+        .expect("invocation start response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let response_body = response_json(response).await;
+    assert_eq!(response_body["data"]["outcome"], "admitted");
+    assert!(!response_body.to_string().contains(raw_key));
+    let invocation_run_id = RunId::parse(
+        response_body["data"]["run"]["run_id"]
             .as_str()
-            .expect("distinct run id"),
+            .expect("invocation id"),
     )
-    .expect("typed distinct run id");
-    assert_ne!(first_run_id, distinct_run_id);
+    .expect("typed invocation id");
+    assert_ne!(first_run_id, invocation_run_id);
 
     let stream = store
-        .load_run_stream(&distinct_run_id)
+        .load_run_stream(&invocation_run_id)
         .await
-        .expect("distinct stream");
+        .expect("invocation stream");
     let admitted = stream
         .iter()
         .find_map(|event| match event.payload() {
@@ -451,7 +451,11 @@ async fn start_distinct_run_key_derives_separate_run_without_persisting_raw_key(
             _ => None,
         })
         .expect("RunAdmitted");
-    assert!(admitted.identity_material.distinct_run_key_digest.is_some());
+    assert!(admitted
+        .identity_material
+        .invocation_key_digest
+        .as_str()
+        .starts_with("content:sha256-jcs-v1:"));
     assert!(!format!("{admitted:?}").contains(raw_key));
 }
 

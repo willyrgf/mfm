@@ -303,22 +303,23 @@ fn collector_services(
 async fn launch_cycle(
     services: &mfm_app::RunServices<AsyncInMemoryRunStore, AsyncInMemoryRunStore>,
     store: &AsyncInMemoryRunStore,
-    distinct_key: &str,
+    invocation_key: &str,
     config: BtcChainHeadCollectorConfig,
 ) -> mfm_app::RunResponse {
-    let request = collector_launch_request(store, distinct_key, config).await;
+    let request = collector_launch_request(store, invocation_key, config).await;
     let response = services
         .launch_run(request)
         .await
-        .unwrap_or_else(|error| panic!("{distinct_key} collector launch: {error:?}"))
+        .unwrap_or_else(|error| panic!("{invocation_key} collector launch: {error:?}"))
         .into_response_parts()
-        .1;
-    assert_completed_collector_launch(store, distinct_key, response).await
+        .1
+        .expect("collector launch returns run");
+    assert_completed_collector_launch(store, invocation_key, response).await
 }
 
 async fn collector_launch_request(
     store: &AsyncInMemoryRunStore,
-    distinct_key: &str,
+    invocation_key: &str,
     config: BtcChainHeadCollectorConfig,
 ) -> mfm_app::RunLaunchRequest {
     let draft = btc_chain_head_collector_cycle_program_draft(config).expect("collector draft");
@@ -329,14 +330,14 @@ async fn collector_launch_request(
         seed_material,
         &mfm_app::production_certification_registry().expect("certification registry"),
         trust_scope_id,
-        Some(mfm_app::DistinctRunKey::new(distinct_key).expect("distinct key")),
+        Some(mfm_app::InvocationKey::new(invocation_key).expect("invocation key")),
     )
     .expect("prepared collector launch")
 }
 
 async fn assert_completed_collector_launch(
     store: &AsyncInMemoryRunStore,
-    distinct_key: &str,
+    invocation_key: &str,
     response: mfm_app::RunResponse,
 ) -> mfm_app::RunResponse {
     if response.run_mode != mfm_app::RunModeStatus::Completed {
@@ -353,7 +354,7 @@ async fn assert_completed_collector_launch(
             })
             .collect::<Vec<_>>();
         panic!(
-            "{distinct_key} collector run mode {:?}; failures={failures:?}",
+            "{invocation_key} collector run mode {:?}; failures={failures:?}",
             response.run_mode
         );
     }

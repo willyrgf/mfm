@@ -63,8 +63,8 @@ mod tests {
     use crate::{OpVersion, PublicOpName};
     use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
     use mfm_store::v1::{
-        AdmissionToken, ExecutionClaimStatus, ExecutionClaimStore, NowaitSkipAdmissionResult,
-        RunEventStore, TrustScopeStore,
+        self as store, AdmissionToken, ExecutionClaimStatus, ExecutionClaimStore,
+        NowaitSkipAdmissionResult, RunEventStore, TrustScopeStore,
     };
     use std::sync::Arc;
 
@@ -180,47 +180,49 @@ mod tests {
             authored_config,
             certification_registry: &fixture.certification_registry,
             trust_scope_id: fixture.trust_scope_id,
-            distinct_run_key: None,
+            invocation_key: None,
         })
         .expect("dual-mainnet portfolio launch should certify");
     }
 
     #[test]
-    fn app_prepare_entry_point_run_launch_derives_stable_and_distinct_run_ids() {
+    fn app_prepare_entry_point_run_launch_derives_fresh_and_invocation_stable_run_ids() {
         let fixture =
             EntryPointPrepFixture::with_trust_scope_hex("51515151515151515151515151515151");
 
         let first = fixture.prepare_sample_portfolio(None);
         let second = fixture.prepare_sample_portfolio(None);
-        let distinct = fixture.prepare_sample_portfolio(Some(
-            crate::DistinctRunKey::new("alpha").expect("distinct key"),
-        ));
+        let explicit = crate::InvocationKey::new("alpha").expect("invocation key");
+        let explicit_first = fixture.prepare_sample_portfolio(Some(explicit.clone()));
+        let explicit_second = fixture.prepare_sample_portfolio(Some(explicit));
         let mut changed_config: serde_json::Value =
             serde_json::from_str(&sample_portfolio_config_json()).expect("portfolio json");
         changed_config["portfolio"]["portfolio_id"] = serde_json::json!("portfolio_other");
         let changed = fixture.prepare_portfolio_launch(changed_config.to_string(), None);
 
-        assert_eq!(first.request.run_id, second.request.run_id);
+        assert_ne!(first.request.run_id, second.request.run_id);
         assert_eq!(
             first.request.certified_spec.spec_hash(),
             second.request.certified_spec.spec_hash()
         );
         assert_eq!(
             first.request.certified_spec.spec_hash(),
-            distinct.request.certified_spec.spec_hash()
+            explicit_first.request.certified_spec.spec_hash()
         );
-        assert_ne!(first.request.run_id, distinct.request.run_id);
         assert_eq!(
-            distinct
+            explicit_first.request.run_id,
+            explicit_second.request.run_id
+        );
+        assert_ne!(first.request.run_id, explicit_first.request.run_id);
+        assert_eq!(
+            explicit_first
                 .request
                 .identity_material
-                .distinct_run_key_digest
-                .as_ref()
-                .expect("distinct key digest")
+                .invocation_key_digest
                 .as_str(),
-            "content:sha256-jcs-v1:4b27bd2f750880d8bd52200ddc0af0ad78fe23dfa519cad83595ec905a103c1d"
+            "content:sha256-jcs-v1:e8b2dba1a1730580547875fc9f27a3edf6a5c62660bdc3a6ac06518b487ecd43"
         );
-        assert!(!format!("{:?}", distinct.request).contains("alpha"));
+        assert!(!format!("{:?}", explicit_first.request).contains("alpha"));
         assert_ne!(
             first.request.certified_spec.spec_hash(),
             changed.request.certified_spec.spec_hash()
@@ -231,8 +233,10 @@ mod tests {
     #[tokio::test]
     async fn app_launch_duplicate_same_spec_attaches_without_second_admission() {
         let fixture = EntryPointRunFixture::in_memory().await;
-        let first = fixture.prepare_sample_portfolio(None);
-        let second = fixture.prepare_sample_portfolio(None);
+        let invocation_key =
+            crate::InvocationKey::new("mfm.test.app.duplicate-attach").expect("key");
+        let first = fixture.prepare_sample_portfolio(Some(invocation_key.clone()));
+        let second = fixture.prepare_sample_portfolio(Some(invocation_key));
         let run_id = first.request.run_id.clone();
         let services = fixture.services();
 
@@ -253,7 +257,13 @@ mod tests {
             second_outcome.status(),
             crate::RunLaunchOutcomeStatus::Attached
         );
-        assert_eq!(second_outcome.run().scheduler_status, "observed");
+        assert_eq!(
+            second_outcome
+                .run()
+                .expect("attached launch returns run")
+                .scheduler_status,
+            "observed"
+        );
         assert_eq!(fixture.run_admitted_count(&run_id).await, 1);
     }
 
@@ -344,7 +354,7 @@ mod tests {
                 .iter()
                 .filter(|status| {
                     **status == crate::RunLaunchOutcomeStatus::Attached
-                        || **status == crate::RunLaunchOutcomeStatus::AlreadyDriving
+                        || **status == crate::RunLaunchOutcomeStatus::AlreadyActive
                 })
                 .count(),
             LAUNCHERS - 1
@@ -353,11 +363,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn app_launch_duplicate_reports_already_driving_for_live_claim() {
+    async fn app_launch_duplicate_reports_already_active_for_live_claim() {
         let fixture = EntryPointRunFixture::in_memory().await;
-        let first = fixture.prepare_sample_portfolio(None);
-        let second = fixture.prepare_sample_portfolio(None);
+        let invocation_key =
+            crate::InvocationKey::new("mfm.test.app.duplicate-live-claim").expect("key");
+        let first = fixture.prepare_sample_portfolio(Some(invocation_key.clone()));
+        let second = fixture.prepare_sample_portfolio(Some(invocation_key));
         let run_id = first.request.run_id.clone();
+        let execution_scope = store::ExecutionClaimScope::from_run_identity_material(
+            &first.request.identity_material,
+        );
         let services = fixture.services();
         services
             .launch_run(first.request)
@@ -367,7 +382,7 @@ mod tests {
         assert!(matches!(
             fixture
                 .store
-                .acquire_execution_claim(&run_id, token)
+                .acquire_execution_claim(&execution_scope, &run_id, token)
                 .await
                 .expect("claim execution"),
             NowaitSkipAdmissionResult::Admitted(_)
@@ -380,7 +395,7 @@ mod tests {
 
         assert_eq!(
             outcome.status(),
-            crate::RunLaunchOutcomeStatus::AlreadyDriving
+            crate::RunLaunchOutcomeStatus::AlreadyActive
         );
         assert_eq!(fixture.run_admitted_count(&run_id).await, 1);
     }
@@ -389,6 +404,9 @@ mod tests {
     async fn app_resume_reports_busy_for_live_execution_claim_without_driving() {
         let fixture = EntryPointRunFixture::in_memory().await;
         let prepared = fixture.prepare_sample_portfolio(None);
+        let execution_scope = store::ExecutionClaimScope::from_run_identity_material(
+            &prepared.request.identity_material,
+        );
         let services = fixture.services();
         let run_id = admit_entry_point_run(&services, prepared).await;
         let head_seq = fixture
@@ -405,7 +423,7 @@ mod tests {
         assert!(matches!(
             fixture
                 .store
-                .acquire_execution_claim(&run_id, token)
+                .acquire_execution_claim(&execution_scope, &run_id, token)
                 .await
                 .expect("claim execution"),
             NowaitSkipAdmissionResult::Admitted(_)
@@ -425,6 +443,9 @@ mod tests {
     async fn app_resume_rejects_unavailable_runner_binding_without_claiming() {
         let fixture = EntryPointRunFixture::in_memory().await;
         let prepared = fixture.prepare_sample_portfolio(None);
+        let execution_scope = store::ExecutionClaimScope::from_run_identity_material(
+            &prepared.request.identity_material,
+        );
         let services = fixture.services();
         let run_id = admit_entry_point_run(&services, prepared).await;
         let incompatible_services = crate::make_run_services_with_certification_registry(
@@ -443,7 +464,7 @@ mod tests {
         assert!(matches!(
             fixture
                 .store
-                .execution_claim_status(&run_id)
+                .execution_claim_status(&execution_scope)
                 .await
                 .expect("execution claim status"),
             ExecutionClaimStatus::Unclaimed
@@ -584,7 +605,7 @@ mod tests {
         fn prepare_portfolio_launch(
             &self,
             config: String,
-            distinct_run_key: Option<crate::DistinctRunKey>,
+            invocation_key: Option<crate::InvocationKey>,
         ) -> crate::PreparedEntryPointRunLaunch {
             crate::prepare_entry_point_run_launch(crate::EntryPointRunLaunchInput {
                 entry_point_registry: &self.entry_point_registry,
@@ -594,23 +615,23 @@ mod tests {
                     .expect("authored config"),
                 certification_registry: &self.certification_registry,
                 trust_scope_id: self.trust_scope_id.clone(),
-                distinct_run_key,
+                invocation_key,
             })
             .expect("prepared entry-point launch")
         }
 
         fn prepare_sample_portfolio(
             &self,
-            distinct_run_key: Option<crate::DistinctRunKey>,
+            invocation_key: Option<crate::InvocationKey>,
         ) -> crate::PreparedEntryPointRunLaunch {
-            self.prepare_portfolio_launch(sample_portfolio_config_json(), distinct_run_key)
+            self.prepare_portfolio_launch(sample_portfolio_config_json(), invocation_key)
         }
 
         fn prepare_bitcoin_portfolio(
             &self,
-            distinct_run_key: Option<crate::DistinctRunKey>,
+            invocation_key: Option<crate::InvocationKey>,
         ) -> crate::PreparedEntryPointRunLaunch {
-            self.prepare_portfolio_launch(sample_bitcoin_portfolio_config_json(), distinct_run_key)
+            self.prepare_portfolio_launch(sample_bitcoin_portfolio_config_json(), invocation_key)
         }
     }
 
@@ -636,16 +657,16 @@ mod tests {
 
         fn prepare_sample_portfolio(
             &self,
-            distinct_run_key: Option<crate::DistinctRunKey>,
+            invocation_key: Option<crate::InvocationKey>,
         ) -> crate::PreparedEntryPointRunLaunch {
-            self.prep.prepare_sample_portfolio(distinct_run_key)
+            self.prep.prepare_sample_portfolio(invocation_key)
         }
 
         fn prepare_bitcoin_portfolio(
             &self,
-            distinct_run_key: Option<crate::DistinctRunKey>,
+            invocation_key: Option<crate::InvocationKey>,
         ) -> crate::PreparedEntryPointRunLaunch {
-            self.prep.prepare_bitcoin_portfolio(distinct_run_key)
+            self.prep.prepare_bitcoin_portfolio(invocation_key)
         }
 
         fn services(

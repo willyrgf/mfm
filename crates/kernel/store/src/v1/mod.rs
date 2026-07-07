@@ -312,9 +312,9 @@ pub use admission_lanes::{
     resource_wait_fifo_admission_token, AdmissionAdvisoryLockKey, AdmissionLane,
     AdmissionLaneClass, AdmissionLaneId, AdmissionLaneKey, AdmissionLaneMode, AdmissionLease,
     AdmissionModeSpec, AdmissionToken, AdmissionWaiter, AdmissionWaiterId,
-    ExecutionClaimAdmissionLane, ExecutionClaimStatus, ExpiredExecutionClaim, NowaitSkip,
-    NowaitSkipAdmissionBusy, NowaitSkipAdmissionResult, ResourceAdmissionLane, WaitFifo,
-    WaitFifoAdmissionBlock, EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS,
+    ExecutionClaimAdmissionLane, ExecutionClaimScope, ExecutionClaimStatus, ExpiredExecutionClaim,
+    NowaitSkip, NowaitSkipAdmissionBusy, NowaitSkipAdmissionResult, ResourceAdmissionLane,
+    WaitFifo, WaitFifoAdmissionBlock, EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS,
     EXECUTION_CLAIM_LEASE_TTL_SECS,
 };
 
@@ -2048,6 +2048,7 @@ pub struct PreparedCommitBundle {
     plan: PreparedCommitPlan,
     artifact_bytes: Vec<PreparedArtifactBytes>,
     existing_artifacts: Vec<ExistingArtifactAdmission>,
+    execution_claim: Option<PreparedExecutionClaim>,
 }
 
 impl PreparedCommitBundle {
@@ -2062,7 +2063,48 @@ impl PreparedCommitBundle {
             plan,
             artifact_bytes,
             existing_artifacts,
+            execution_claim: None,
         })
+    }
+
+    /// Attaches an execution claim that must be acquired atomically with run admission.
+    pub fn with_execution_claim(mut self, claim: PreparedExecutionClaim) -> Result<Self> {
+        let PreparedCommitPlan::RunAdmission(commit) = &self.plan else {
+            return Err(invalid_prepared_commit_purpose(
+                "prepared_commit_bundle",
+                "execution claims may only be attached to run admission commits",
+            ));
+        };
+        let run_admitted = commit
+            .request()
+            .payloads()
+            .iter()
+            .find_map(|payload| match payload {
+                KernelEventPayload::RunAdmitted(payload) => Some(payload),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                invalid_prepared_commit_purpose(
+                    "prepared_commit_bundle",
+                    "execution claim run admission commit lacks RunAdmitted payload",
+                )
+            })?;
+        if claim.holder_run_id != run_admitted.run_id {
+            return Err(invalid_prepared_commit_purpose(
+                "prepared_commit_bundle",
+                "execution claim holder run id does not match RunAdmitted",
+            ));
+        }
+        let expected_scope =
+            ExecutionClaimScope::from_run_identity_material(&run_admitted.identity_material);
+        if claim.scope != expected_scope {
+            return Err(invalid_prepared_commit_purpose(
+                "prepared_commit_bundle",
+                "execution claim scope does not match RunAdmitted identity material",
+            ));
+        }
+        self.execution_claim = Some(claim);
+        Ok(self)
     }
 
     /// Builds a zero-artifact bundle for commit plans that admit no artifact evidence.
@@ -2093,6 +2135,33 @@ impl PreparedCommitBundle {
     /// Returns exact existing artifact admissions carried by the bundle.
     pub fn existing_artifacts(&self) -> &[ExistingArtifactAdmission] {
         &self.existing_artifacts
+    }
+
+    /// Returns the execution claim that must be acquired with this bundle, if any.
+    pub fn execution_claim(&self) -> Option<&PreparedExecutionClaim> {
+        self.execution_claim.as_ref()
+    }
+}
+
+/// Execution-claim material attached to one run admission bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedExecutionClaim {
+    /// Base work scope for the execution lane.
+    pub scope: ExecutionClaimScope,
+    /// Concrete run admitted as holder.
+    pub holder_run_id: RunId,
+    /// Holder token.
+    pub token: AdmissionToken,
+}
+
+impl PreparedExecutionClaim {
+    /// Builds execution-claim material for a run admission bundle.
+    pub fn new(scope: ExecutionClaimScope, holder_run_id: RunId, token: AdmissionToken) -> Self {
+        Self {
+            scope,
+            holder_run_id,
+            token,
+        }
     }
 }
 
@@ -2315,6 +2384,8 @@ pub enum CommitOutcome {
     Appended(CommittedBatch),
     /// The commit key had already appended the same canonical batch.
     Idempotent(CommittedBatch),
+    /// Run admission was skipped because the execution lane already has an active holder.
+    ExecutionClaimBusy(Box<NowaitSkipAdmissionBusy>),
     /// A FIFO admission was blocked before domain authority was persisted.
     AdmissionBlocked(Box<WaitFifoAdmissionBlock>),
 }
@@ -5664,33 +5735,36 @@ pub trait ExecutionClaimStore {
     /// Store-specific error type.
     type Error: StoreErrorInspection + fmt::Display + Send + Sync + 'static;
 
-    /// Attempts to acquire the execution claim for `run_id` with a caller-supplied holder token.
+    /// Attempts to acquire the execution claim for `scope` with a caller-supplied holder token.
     ///
     /// Stores must not auto-reap expired holders during acquisition. If any holder token is present,
     /// including an expired one, the result is [`NowaitSkipAdmissionResult::Busy`].
     fn acquire_execution_claim<'a>(
         &'a self,
-        run_id: &'a RunId,
+        scope: &'a ExecutionClaimScope,
+        holder_run_id: &'a RunId,
         token: AdmissionToken,
     ) -> AsyncStoreFuture<'a, NowaitSkipAdmissionResult, Self::Error>;
 
     /// Returns the current holder status for the execution claim without mutating it.
     fn execution_claim_status<'a>(
         &'a self,
-        run_id: &'a RunId,
+        scope: &'a ExecutionClaimScope,
     ) -> AsyncStoreFuture<'a, ExecutionClaimStatus, Self::Error>;
 
-    /// Renews the execution claim only when `token` matches the current holder token.
+    /// Renews the execution claim only when `holder_run_id` and `token` match the current holder.
     fn renew_execution_claim<'a>(
         &'a self,
-        run_id: &'a RunId,
+        scope: &'a ExecutionClaimScope,
+        holder_run_id: &'a RunId,
         token: &'a AdmissionToken,
     ) -> AsyncStoreFuture<'a, Option<AdmissionLease>, Self::Error>;
 
-    /// Releases the execution claim only when `token` matches the current holder token.
+    /// Releases the execution claim only when `holder_run_id` and `token` match the current holder.
     fn release_execution_claim<'a>(
         &'a self,
-        run_id: &'a RunId,
+        scope: &'a ExecutionClaimScope,
+        holder_run_id: &'a RunId,
         token: &'a AdmissionToken,
     ) -> AsyncStoreFuture<'a, bool, Self::Error>;
 
@@ -5699,10 +5773,11 @@ pub trait ExecutionClaimStore {
         &'a self,
     ) -> AsyncStoreFuture<'a, Vec<ExpiredExecutionClaim>, Self::Error>;
 
-    /// Clears an expired execution claim only when `token` still matches the current holder token.
+    /// Clears an expired execution claim only when `holder_run_id` and `token` still match the current holder.
     fn reap_expired_execution_claim<'a>(
         &'a self,
-        run_id: &'a RunId,
+        scope: &'a ExecutionClaimScope,
+        holder_run_id: &'a RunId,
         token: &'a AdmissionToken,
     ) -> AsyncStoreFuture<'a, bool, Self::Error>;
 }
@@ -6019,7 +6094,7 @@ struct RunMemoryCore {
     unique_logical_payloads: BTreeMap<(RunId, LogicalEventKey), ContentDigest>,
     projections: ProjectionSnapshot,
     resource_lane_authority: ResourceLaneAuthoritySet,
-    execution_claims: BTreeMap<RunId, MemoryExecutionClaim>,
+    execution_claims: BTreeMap<AdmissionLaneKey, MemoryExecutionClaim>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -6047,6 +6122,7 @@ impl Default for RunMemoryCore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MemoryExecutionClaim {
     lane: ExecutionClaimAdmissionLane,
+    holder_run_id: RunId,
     token: AdmissionToken,
     lease_expires_at_unix_ms: i64,
 }
@@ -6064,25 +6140,29 @@ impl RunMemoryCore {
 
     fn acquire_execution_claim(
         &mut self,
-        run_id: &RunId,
+        scope: &ExecutionClaimScope,
+        holder_run_id: &RunId,
         token: AdmissionToken,
     ) -> Result<NowaitSkipAdmissionResult> {
-        let lane = ExecutionClaimAdmissionLane::from_run_id(run_id)?;
-        if let Some(holder) = self.execution_claims.get(run_id) {
+        let lane = ExecutionClaimAdmissionLane::from_scope(scope)?;
+        let lane_key = lane.erased_key();
+        if let Some(holder) = self.execution_claims.get(&lane_key) {
             return Ok(NowaitSkipAdmissionResult::Busy(NowaitSkipAdmissionBusy {
                 lane,
                 holder: Some(execution_claim_lease(holder)),
             }));
         }
         let lease = AdmissionLease {
-            lane: lane.erased_key(),
+            lane: lane_key.clone(),
+            holder_run_id: holder_run_id.clone(),
             token,
             lease_expires_at_unix_ms: execution_claim_expiry_unix_ms()?,
         };
         self.execution_claims.insert(
-            run_id.clone(),
+            lane_key,
             MemoryExecutionClaim {
                 lane,
+                holder_run_id: holder_run_id.clone(),
                 token: lease.token.clone(),
                 lease_expires_at_unix_ms: lease.lease_expires_at_unix_ms,
             },
@@ -6090,8 +6170,9 @@ impl RunMemoryCore {
         Ok(NowaitSkipAdmissionResult::Admitted(lease))
     }
 
-    fn execution_claim_status(&self, run_id: &RunId) -> Result<ExecutionClaimStatus> {
-        let Some(holder) = self.execution_claims.get(run_id) else {
+    fn execution_claim_status(&self, scope: &ExecutionClaimScope) -> Result<ExecutionClaimStatus> {
+        let lane = ExecutionClaimAdmissionLane::from_scope(scope)?;
+        let Some(holder) = self.execution_claims.get(&lane.erased_key()) else {
             return Ok(ExecutionClaimStatus::Unclaimed);
         };
         let lease = execution_claim_lease(holder);
@@ -6104,27 +6185,36 @@ impl RunMemoryCore {
 
     fn renew_execution_claim(
         &mut self,
-        run_id: &RunId,
+        scope: &ExecutionClaimScope,
+        holder_run_id: &RunId,
         token: &AdmissionToken,
     ) -> Result<Option<AdmissionLease>> {
-        let Some(holder) = self.execution_claims.get_mut(run_id) else {
+        let lane = ExecutionClaimAdmissionLane::from_scope(scope)?;
+        let Some(holder) = self.execution_claims.get_mut(&lane.erased_key()) else {
             return Ok(None);
         };
-        if &holder.token != token {
+        if &holder.holder_run_id != holder_run_id || &holder.token != token {
             return Ok(None);
         }
         holder.lease_expires_at_unix_ms = execution_claim_expiry_unix_ms()?;
         Ok(Some(execution_claim_lease(holder)))
     }
 
-    fn release_execution_claim(&mut self, run_id: &RunId, token: &AdmissionToken) -> Result<bool> {
+    fn release_execution_claim(
+        &mut self,
+        scope: &ExecutionClaimScope,
+        holder_run_id: &RunId,
+        token: &AdmissionToken,
+    ) -> Result<bool> {
+        let lane = ExecutionClaimAdmissionLane::from_scope(scope)?;
+        let lane_key = lane.erased_key();
         let matches = self
             .execution_claims
-            .get(run_id)
-            .map(|holder| &holder.token == token)
+            .get(&lane_key)
+            .map(|holder| &holder.holder_run_id == holder_run_id && &holder.token == token)
             .unwrap_or(false);
         if matches {
-            self.execution_claims.remove(run_id);
+            self.execution_claims.remove(&lane_key);
         }
         Ok(matches)
     }
@@ -6135,8 +6225,8 @@ impl RunMemoryCore {
             .execution_claims
             .iter()
             .filter(|(_, holder)| holder.lease_expires_at_unix_ms <= now)
-            .map(|(run_id, holder)| ExpiredExecutionClaim {
-                run_id: run_id.clone(),
+            .map(|(_, holder)| ExpiredExecutionClaim {
+                run_id: holder.holder_run_id.clone(),
                 lane: holder.lane.clone(),
                 lease: execution_claim_lease(holder),
             })
@@ -6145,17 +6235,24 @@ impl RunMemoryCore {
 
     fn reap_expired_execution_claim(
         &mut self,
-        run_id: &RunId,
+        scope: &ExecutionClaimScope,
+        holder_run_id: &RunId,
         token: &AdmissionToken,
     ) -> Result<bool> {
+        let lane = ExecutionClaimAdmissionLane::from_scope(scope)?;
+        let lane_key = lane.erased_key();
         let now = unix_time_ms()?;
         let matches = self
             .execution_claims
-            .get(run_id)
-            .map(|holder| &holder.token == token && holder.lease_expires_at_unix_ms <= now)
+            .get(&lane_key)
+            .map(|holder| {
+                &holder.holder_run_id == holder_run_id
+                    && &holder.token == token
+                    && holder.lease_expires_at_unix_ms <= now
+            })
             .unwrap_or(false);
         if matches {
-            self.execution_claims.remove(run_id);
+            self.execution_claims.remove(&lane_key);
         }
         Ok(matches)
     }
@@ -6165,6 +6262,7 @@ impl RunMemoryCore {
 fn execution_claim_lease(holder: &MemoryExecutionClaim) -> AdmissionLease {
     AdmissionLease {
         lane: holder.lane.erased_key(),
+        holder_run_id: holder.holder_run_id.clone(),
         token: holder.token.clone(),
         lease_expires_at_unix_ms: holder.lease_expires_at_unix_ms,
     }
@@ -6708,6 +6806,18 @@ impl RunMemoryCore {
                 return Ok(CommitOutcome::AdmissionBlocked(block));
             }
         };
+        if let Some(claim) = bundle.execution_claim() {
+            match self.acquire_execution_claim(
+                &claim.scope,
+                &claim.holder_run_id,
+                claim.token.clone(),
+            )? {
+                NowaitSkipAdmissionResult::Admitted(_) => {}
+                NowaitSkipAdmissionResult::Busy(busy) => {
+                    return Ok(CommitOutcome::ExecutionClaimBusy(Box::new(busy)));
+                }
+            }
+        }
         let (
             batch,
             staged_logical_keys,
@@ -6803,7 +6913,11 @@ impl AsyncInMemoryRunStore {
     /// Marks an execution claim expired for tests that need stale-claim recovery without sleeping.
     pub fn expire_execution_claim_for_test(&self, run_id: &RunId) -> Result<bool> {
         let mut store = self.lock_inner()?;
-        let Some(holder) = store.execution_claims.get_mut(run_id) else {
+        let Some(holder) = store
+            .execution_claims
+            .values_mut()
+            .find(|holder| &holder.holder_run_id == run_id)
+        else {
             return Ok(false);
         };
         holder.lease_expires_at_unix_ms = unix_time_ms()?.saturating_sub(1);
@@ -6909,44 +7023,47 @@ impl ExecutionClaimStore for AsyncInMemoryRunStore {
 
     fn acquire_execution_claim<'a>(
         &'a self,
-        run_id: &'a RunId,
+        scope: &'a ExecutionClaimScope,
+        holder_run_id: &'a RunId,
         token: AdmissionToken,
     ) -> AsyncStoreFuture<'a, NowaitSkipAdmissionResult, Self::Error> {
         let result = self
             .lock_inner()
-            .and_then(|mut store| store.acquire_execution_claim(run_id, token));
+            .and_then(|mut store| store.acquire_execution_claim(scope, holder_run_id, token));
         Box::pin(std::future::ready(result))
     }
 
     fn execution_claim_status<'a>(
         &'a self,
-        run_id: &'a RunId,
+        scope: &'a ExecutionClaimScope,
     ) -> AsyncStoreFuture<'a, ExecutionClaimStatus, Self::Error> {
         let result = self
             .lock_inner()
-            .and_then(|store| store.execution_claim_status(run_id));
+            .and_then(|store| store.execution_claim_status(scope));
         Box::pin(std::future::ready(result))
     }
 
     fn renew_execution_claim<'a>(
         &'a self,
-        run_id: &'a RunId,
+        scope: &'a ExecutionClaimScope,
+        holder_run_id: &'a RunId,
         token: &'a AdmissionToken,
     ) -> AsyncStoreFuture<'a, Option<AdmissionLease>, Self::Error> {
         let result = self
             .lock_inner()
-            .and_then(|mut store| store.renew_execution_claim(run_id, token));
+            .and_then(|mut store| store.renew_execution_claim(scope, holder_run_id, token));
         Box::pin(std::future::ready(result))
     }
 
     fn release_execution_claim<'a>(
         &'a self,
-        run_id: &'a RunId,
+        scope: &'a ExecutionClaimScope,
+        holder_run_id: &'a RunId,
         token: &'a AdmissionToken,
     ) -> AsyncStoreFuture<'a, bool, Self::Error> {
         let result = self
             .lock_inner()
-            .and_then(|mut store| store.release_execution_claim(run_id, token));
+            .and_then(|mut store| store.release_execution_claim(scope, holder_run_id, token));
         Box::pin(std::future::ready(result))
     }
 
@@ -6961,12 +7078,13 @@ impl ExecutionClaimStore for AsyncInMemoryRunStore {
 
     fn reap_expired_execution_claim<'a>(
         &'a self,
-        run_id: &'a RunId,
+        scope: &'a ExecutionClaimScope,
+        holder_run_id: &'a RunId,
         token: &'a AdmissionToken,
     ) -> AsyncStoreFuture<'a, bool, Self::Error> {
         let result = self
             .lock_inner()
-            .and_then(|mut store| store.reap_expired_execution_claim(run_id, token));
+            .and_then(|mut store| store.reap_expired_execution_claim(scope, holder_run_id, token));
         Box::pin(std::future::ready(result))
     }
 }
@@ -10661,9 +10779,7 @@ fn parse_run_identity_material(json: &serde_json::Value) -> Result<events::RunId
     Ok(events::RunIdentityMaterialV1 {
         certified_spec_hash: parse_identity(required_str(json, "certified_spec_hash")?)?,
         trust_scope_id: TrustScopeId::new(required_str(json, "trust_scope_id")?)?,
-        distinct_run_key_digest: optional_str(json, "distinct_run_key_digest")?
-            .map(parse_identity)
-            .transpose()?,
+        invocation_key_digest: parse_identity(required_str(json, "invocation_key_digest")?)?,
     })
 }
 
@@ -11077,7 +11193,7 @@ fn entry_point_launch_evidence_json(
 fn run_identity_material_json(material: &events::RunIdentityMaterialV1) -> serde_json::Value {
     serde_json::json!({
         "certified_spec_hash": material.certified_spec_hash.as_str(),
-        "distinct_run_key_digest": material.distinct_run_key_digest.as_ref().map(ContentDigest::as_str),
+        "invocation_key_digest": material.invocation_key_digest.as_str(),
         "trust_scope_id": material.trust_scope_id.as_str(),
     })
 }

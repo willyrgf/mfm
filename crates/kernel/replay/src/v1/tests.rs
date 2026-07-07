@@ -1048,7 +1048,7 @@ fn fact_run_admitted() -> events::RunAdmitted {
                 "mfm.trust_scope.v1:000000000000000000000000000000c1",
             )
             .expect("trust scope"),
-            distinct_run_key_digest: None,
+            invocation_key_digest: content_digest(0xc2),
         },
         entry_point: events::EntryPointLaunchEvidence {
             resolved_op_id: events::EntryPointOpId::new("mfm.replay.test.fact")
@@ -1846,7 +1846,7 @@ fn fact_run_admitted_for_stream_with_descriptors(
             "mfm.trust_scope.v1:000000000000000000000000000000c1",
         )
         .expect("trust scope"),
-        distinct_run_key_digest: None,
+        invocation_key_digest: content_digest(0xc2),
     };
     let run_id = identity_material.derive_run_id().expect("run id");
     events::RunAdmitted {

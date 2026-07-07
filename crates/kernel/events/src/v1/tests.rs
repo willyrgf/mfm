@@ -270,33 +270,33 @@ fn run_identity_material(spec_hash: SpecHash) -> RunIdentityMaterialV1 {
     RunIdentityMaterialV1 {
         certified_spec_hash: spec_hash,
         trust_scope_id: trust_scope_id(),
-        distinct_run_key_digest: None,
+        invocation_key_digest: content_digest(1),
     }
 }
 
 #[test]
-fn distinct_run_key_material_v1_digest_is_canonical_and_redacted() {
-    let material = DistinctRunKeyMaterialV1::new("alpha").expect("distinct key");
+fn invocation_key_material_v1_digest_is_canonical_and_redacted() {
+    let material = InvocationKeyMaterialV1::new("alpha").expect("invocation key");
 
     assert_eq!(
         material.canonical_json().expect("canonical").as_str(),
-        r#"{"domain":"mfm.distinct_run_key.v1","raw_key":"alpha"}"#
+        r#"{"domain":"mfm.invocation_key.v1","raw_key":"alpha"}"#
     );
     assert_eq!(
         material.digest().expect("digest").as_str(),
-        "content:sha256-jcs-v1:4b27bd2f750880d8bd52200ddc0af0ad78fe23dfa519cad83595ec905a103c1d"
+        "content:sha256-jcs-v1:e8b2dba1a1730580547875fc9f27a3edf6a5c62660bdc3a6ac06518b487ecd43"
     );
     assert!(!format!("{material:?}").contains("alpha"));
 }
 
 #[test]
-fn distinct_run_key_material_v1_rejects_empty_and_oversized_keys_without_echo() {
-    let empty = DistinctRunKeyMaterialV1::new("").expect_err("empty key rejects");
-    assert_eq!(empty.to_string(), "invalid distinct run key: empty");
+fn invocation_key_material_v1_rejects_empty_and_oversized_keys_without_echo() {
+    let empty = InvocationKeyMaterialV1::new("").expect_err("empty key rejects");
+    assert_eq!(empty.to_string(), "invalid invocation key: empty");
 
-    let too_large = "x".repeat(DistinctRunKeyMaterialV1::MAX_RAW_KEY_BYTES + 1);
-    let err = DistinctRunKeyMaterialV1::new(&too_large).expect_err("oversized key rejects");
-    assert_eq!(err.to_string(), "invalid distinct run key: too_large");
+    let too_large = "x".repeat(InvocationKeyMaterialV1::MAX_RAW_KEY_BYTES + 1);
+    let err = InvocationKeyMaterialV1::new(&too_large).expect_err("oversized key rejects");
+    assert_eq!(err.to_string(), "invalid invocation key: too_large");
     assert!(!err.to_string().contains(&too_large));
 }
 
@@ -765,7 +765,7 @@ fn event_schema_descriptor_requirement_sources_golden() {
 
     assert_eq!(
         rows,
-        r#"mfm.events.v1.run_admitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:b15d0ab8c8f78c932819a2a455b356a74f17dbc94ba19e7f7730858a265fd7cf [RunSpec,RunCertificate,RunConfig,SeedCell,FactDescriptor]
+        r#"mfm.events.v1.run_admitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:a502ff3d0bfa2c156a6118735ef4a6ae08998d4ab1cb904395242aed9649b5f5 [RunSpec,RunCertificate,RunConfig,SeedCell,FactDescriptor]
 mfm.events.v1.state_attempt_started schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b []
 mfm.events.v1.fact_recorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:f66fc733963d3564fe94bcd8c5d80c489405ddc63c34002a9c6af381cf8f1734 [FactResponse]
 mfm.events.v1.artifact_referenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:3467e9d93a82b31967749282034ed4e9d4fb1816de477cc01eb7ba1f4146a531 [ArtifactReferenced]
@@ -844,7 +844,7 @@ fn v1_event_schema_golden() {
     assert_eq!(all_event_schema_descriptors().len(), 31);
     assert_eq!(
         rows,
-        r#"mfm_events::v1::RunAdmitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:b15d0ab8c8f78c932819a2a455b356a74f17dbc94ba19e7f7730858a265fd7cf
+        r#"mfm_events::v1::RunAdmitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:a502ff3d0bfa2c156a6118735ef4a6ae08998d4ab1cb904395242aed9649b5f5
 mfm_events::v1::StateAttemptStarted schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b
 mfm_events::v1::FactRecorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:f66fc733963d3564fe94bcd8c5d80c489405ddc63c34002a9c6af381cf8f1734
 mfm_events::v1::ArtifactReferenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:3467e9d93a82b31967749282034ed4e9d4fb1816de477cc01eb7ba1f4146a531

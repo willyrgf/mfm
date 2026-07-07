@@ -403,8 +403,9 @@ branch's expected baseline. Filesystem artifact roots outside the typed run
 store are not read or migrated by typed run commands.
 
 Run ids use the typed identity format `run:<algorithm>:<digest>`. Normal `run start` derives the
-typed run id from certified run identity material: certified spec hash, store trust scope, and an
-optional distinct-run key digest.
+typed run id from certified run identity material: certified spec hash, store trust scope, and a
+required invocation key digest. The raw CLI `--invocation-key` is optional; when omitted, the app
+mints a fresh opaque key before deriving the digest.
 
 The CLI starts only through registered entry-point ops that app assembly plans and certifies into
 typed execution specs, and it resumes/replays only from stored typed run streams.
@@ -428,8 +429,9 @@ mfm_cli run start --op <NAME> --config <PATH> [OPTIONS]
 - `--config <PATH>`: Authored op config file.
 - `--op-version <VERSION>`: Optional public op version. If omitted, the latest registered version is selected.
 - `--config-format <toml|json>`: Authored config format. Defaults to `toml`.
-- `--distinct-run-key <KEY>`: Forces a distinct run for otherwise identical certified work. The raw
-  key is not persisted; only a domain-separated digest enters run identity material.
+- `--invocation-key <KEY>`: Uses caller-provided invocation identity for retry-stable starts. When
+  omitted, the app mints a fresh opaque invocation key. The raw key is not persisted; only a
+  domain-separated digest enters run identity material.
 - `--framework-version <VALUE>`: Framework version evidence recorded in `RunAdmitted`.
 - `--source-revision <VALUE>`: Source revision evidence recorded in `RunAdmitted` (or `MFM_SOURCE_REVISION`).
 - `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
@@ -464,8 +466,9 @@ contains the framework public-output renderer plus the portfolio and EVM contrac
 used by registered entry-point ops.
 
 JSON and text output include `launch_outcome`. Fresh admissions report `admitted`. A duplicate start
-for the same certified run identity reports `attached` without driving; if another process holds a
-live execution claim it reports `already_driving`.
+for the same certified run identity reports `attached` without driving. If another process holds the
+execution lane for the same op/config base identity, start reports `already_active` with
+`active_run_id` and no `run` body.
 
 Stable launch errors include:
 

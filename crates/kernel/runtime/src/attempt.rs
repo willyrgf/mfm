@@ -241,6 +241,9 @@ impl<'a> AttemptLifecycle<'a> {
                             holder
                         )));
                     }
+                    Ok(store::CommitOutcome::ExecutionClaimBusy(_)) => {
+                        return Err(unexpected_execution_claim_busy("attempt start"));
+                    }
                     Err(error) if async_error_is_stale_expected_next_seq(&error) => {
                         return Ok(AttemptRunStatus::StaleView);
                     }
@@ -313,6 +316,11 @@ impl<'a> AttemptLifecycle<'a> {
                             ),
                             advanced,
                         });
+                    }
+                    Ok(store::CommitOutcome::ExecutionClaimBusy(_)) => {
+                        return Err(unexpected_execution_claim_busy(
+                            "resource-lane pre-invocation commit",
+                        ));
                     }
                     Err(error) if async_error_is_stale_expected_next_seq(&error) => {
                         return Ok(AttemptRunStatus::StaleView);
@@ -452,6 +460,9 @@ impl<'a> AttemptLifecycle<'a> {
                     block.resource_lane_key.namespace, block.resource_lane_key.key
                 )))
             }
+            Ok(store::CommitOutcome::ExecutionClaimBusy(_)) => {
+                Err(unexpected_execution_claim_busy("terminal attempt commit"))
+            }
             Err(error) if async_error_is_stale_expected_next_seq(&error) => {
                 Ok(AttemptRunStatus::StaleView)
             }
@@ -498,12 +509,29 @@ pub(crate) async fn terminalize_observed_failure<S: store::RunEventStore + ?Size
     })?;
     let bundle = prepared_commit_bundle(failure.commit, failure.artifact_admissions)?;
     match store.append_prepared_commit_bundle(bundle).await {
-        Ok(_) => Ok(AttemptRunStatus::Advanced),
+        Ok(store::CommitOutcome::Appended(_) | store::CommitOutcome::Idempotent(_)) => {
+            Ok(AttemptRunStatus::Advanced)
+        }
+        Ok(store::CommitOutcome::AdmissionBlocked(block)) => {
+            Err(RuntimeError::InvalidRunStream(format!(
+                "attempt failure commit was blocked by lane {}:{}",
+                block.resource_lane_key.namespace, block.resource_lane_key.key
+            )))
+        }
+        Ok(store::CommitOutcome::ExecutionClaimBusy(_)) => {
+            Err(unexpected_execution_claim_busy("attempt failure commit"))
+        }
         Err(error) if async_error_is_stale_expected_next_seq(&error) => {
             Ok(AttemptRunStatus::StaleView)
         }
         Err(error) => Err(async_store_error(error)),
     }
+}
+
+fn unexpected_execution_claim_busy(context: &str) -> RuntimeError {
+    RuntimeError::InvalidRunStream(format!(
+        "{context} requested a run execution claim outside run admission"
+    ))
 }
 
 async fn load_runtime_run_view<S: store::RunEventStore + ?Sized>(

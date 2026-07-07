@@ -57,17 +57,20 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
         authored_config,
         certification_registry: &registry,
         trust_scope_id,
-        distinct_run_key: None,
+        invocation_key: None,
     })
     .expect("launch request");
 
     let run_id = launch.request.run_id.clone();
     let certified = launch.request.certified_spec.clone();
-    let (_, blocked) = services
+    let execution_scope =
+        store::ExecutionClaimScope::from_run_identity_material(&launch.request.identity_material);
+    let (_, blocked, _) = services
         .launch_run(launch.request)
         .await
         .expect("launch")
         .into_response_parts();
+    let blocked = blocked.expect("manual-blocked launch returns run");
     assert_eq!(blocked.run_mode, RunModeStatus::ManualBlocked);
     let blocked_replay = services
         .verify_replay_for_run(&run_id)
@@ -80,7 +83,7 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
     );
     assert!(matches!(
         store
-            .execution_claim_status(&run_id)
+            .execution_claim_status(&execution_scope)
             .await
             .expect("execution claim status"),
         ExecutionClaimStatus::Live(_)
@@ -132,7 +135,7 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
     assert_eq!(resolved.run_mode, RunModeStatus::ManuallyResolved);
     assert!(matches!(
         store
-            .execution_claim_status(&run_id)
+            .execution_claim_status(&execution_scope)
             .await
             .expect("execution claim status"),
         ExecutionClaimStatus::Unclaimed

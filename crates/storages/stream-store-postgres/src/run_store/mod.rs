@@ -14,14 +14,14 @@ use mfm_store::v1::{
     AdmissionLease, AdmissionToken, AdmissionWaiter, ArtifactAuthorityMap,
     ArtifactByteAuthorityMap, ArtifactEvidenceRef, AsyncStoreFuture, CodecError, CommitBase,
     CommitFingerprint, CommitKey, CommitOrdinal, CommitOutcome, CommittedBatch, CommittedRunStream,
-    EventArtifactRequirement, ExecutionClaimStatus, ExecutionClaimStore, ExpiredExecutionClaim,
-    KernelEventEnvelope, LogicalEventKey, NowaitSkipAdmissionResult, ObservedRunStatus,
-    PersistedKernelEventRecord, PreparedArtifactBytes, PreparedCommitBundle, ProjectionSnapshot,
-    ProjectionSnapshotParts, ResourceLaneAuthoritySet, ResourceLaneKey, ResourceLaneProjection,
-    RetainedArtifactReadFuture, RetainedArtifactReadProvider, RunEventStore, RunObservation,
-    RunObservationPage, RunObservationQuery, RunObservationStore, RunState, StagedCommitOutcome,
-    StoreError, StoreErrorInspection, StreamSeq, TrustScopeId, TrustScopeStore,
-    VerifiedRunArtifactBytes,
+    EventArtifactRequirement, ExecutionClaimScope, ExecutionClaimStatus, ExecutionClaimStore,
+    ExpiredExecutionClaim, KernelEventEnvelope, LogicalEventKey, NowaitSkipAdmissionResult,
+    ObservedRunStatus, PersistedKernelEventRecord, PreparedArtifactBytes, PreparedCommitBundle,
+    ProjectionSnapshot, ProjectionSnapshotParts, ResourceLaneAuthoritySet, ResourceLaneKey,
+    ResourceLaneProjection, RetainedArtifactReadFuture, RetainedArtifactReadProvider,
+    RunEventStore, RunObservation, RunObservationPage, RunObservationQuery, RunObservationStore,
+    RunState, StagedCommitOutcome, StoreError, StoreErrorInspection, StreamSeq, TrustScopeId,
+    TrustScopeStore, VerifiedRunArtifactBytes,
 };
 use serde_json::Value;
 use sqlx::{
@@ -327,33 +327,42 @@ impl ExecutionClaimStore for PostgresRunStore {
 
     fn acquire_execution_claim<'a>(
         &'a self,
-        run_id: &'a RunId,
+        scope: &'a ExecutionClaimScope,
+        holder_run_id: &'a RunId,
         token: AdmissionToken,
     ) -> AsyncStoreFuture<'a, NowaitSkipAdmissionResult, Self::Error> {
-        Box::pin(async move { acquire_execution_claim_client(&self.pool, run_id, token).await })
+        Box::pin(async move {
+            acquire_execution_claim_client(&self.pool, scope, holder_run_id, token).await
+        })
     }
 
     fn execution_claim_status<'a>(
         &'a self,
-        run_id: &'a RunId,
+        scope: &'a ExecutionClaimScope,
     ) -> AsyncStoreFuture<'a, ExecutionClaimStatus, Self::Error> {
-        Box::pin(async move { execution_claim_status_client(&self.pool, run_id).await })
+        Box::pin(async move { execution_claim_status_client(&self.pool, scope).await })
     }
 
     fn renew_execution_claim<'a>(
         &'a self,
-        run_id: &'a RunId,
+        scope: &'a ExecutionClaimScope,
+        holder_run_id: &'a RunId,
         token: &'a AdmissionToken,
     ) -> AsyncStoreFuture<'a, Option<AdmissionLease>, Self::Error> {
-        Box::pin(async move { renew_execution_claim_client(&self.pool, run_id, token).await })
+        Box::pin(async move {
+            renew_execution_claim_client(&self.pool, scope, holder_run_id, token).await
+        })
     }
 
     fn release_execution_claim<'a>(
         &'a self,
-        run_id: &'a RunId,
+        scope: &'a ExecutionClaimScope,
+        holder_run_id: &'a RunId,
         token: &'a AdmissionToken,
     ) -> AsyncStoreFuture<'a, bool, Self::Error> {
-        Box::pin(async move { release_execution_claim_client(&self.pool, run_id, token).await })
+        Box::pin(async move {
+            release_execution_claim_client(&self.pool, scope, holder_run_id, token).await
+        })
     }
 
     fn expired_execution_claims<'a>(
@@ -364,12 +373,13 @@ impl ExecutionClaimStore for PostgresRunStore {
 
     fn reap_expired_execution_claim<'a>(
         &'a self,
-        run_id: &'a RunId,
+        scope: &'a ExecutionClaimScope,
+        holder_run_id: &'a RunId,
         token: &'a AdmissionToken,
     ) -> AsyncStoreFuture<'a, bool, Self::Error> {
-        Box::pin(
-            async move { reap_expired_execution_claim_client(&self.pool, run_id, token).await },
-        )
+        Box::pin(async move {
+            reap_expired_execution_claim_client(&self.pool, scope, holder_run_id, token).await
+        })
     }
 }
 

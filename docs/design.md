@@ -384,10 +384,11 @@ refresh one mutable operational waiter row. Waiter leases bound dead process imp
 or admitted waiters no longer block later waiters. Retries for an expired deterministic admission
 token reuse the same waiter id but receive a fresh lane-local ticket, so stale priority is not
 restored. Execution claims use the same admission-lane table as `nowait_skip` holder leases keyed by
-derived run id; acquire does not auto-reap expired holders, and renew/release/reap only mutate when
-the caller's token still matches the current holder. The store validates prepared claim semantics
-before enqueueing a waiter, preventing malformed claims from occupying the FIFO head. Release
-notifications, if present, are wake hints only and do not grant ownership.
+base work identity (`certified_spec_hash` + `trust_scope_id`) and store the holder `run_id`
+separately; acquire does not auto-reap expired holders, and renew/release/reap only mutate when both
+the holder run id and token still match the current holder. The store validates prepared claim
+semantics before enqueueing a waiter, preventing malformed claims from occupying the FIFO head.
+Release notifications, if present, are wake hints only and do not grant ownership.
 
 ## Process-Fungible Execution
 
@@ -399,10 +400,11 @@ resume the same run at different times without changing the run's meaning.
 
 Workers are disposable and interchangeable only within the run's certified executable and capability
 bindings. A worker may drive a run when it matches the stored executable identities, has the required
-runtime capability bindings, and holds the current execution claim token. A same-identity launcher
-with compatible bindings attaches and reports when another holder is active; a launcher with
-incompatible executable bindings reports without driving. These checks are determinism guards, not
-run identity material.
+runtime capability bindings, and holds the current execution claim token for the run's base work
+identity. A same-run launcher with compatible bindings attaches when no holder is active. A launcher
+for another invocation of the same base work reports `already_active` with the holder run id while the
+execution lane is held. A launcher with incompatible executable bindings reports without driving.
+These checks are determinism guards, not run identity material.
 
 Leases, admission waiters, execution claims, notifications, and observation cursors are operational
 liveness mechanisms. They can reduce duplicate effort, preserve single-lane FIFO retry order, wake
@@ -526,20 +528,25 @@ artifact evidence that was not admitted in the same commit. Artifact blobs are a
 append transaction; failed appends leave no authoritative run-store evidence.
 
 Normal launch identity is content-addressed from `RunIdentityMaterialV1` using canonical JSON:
-`certified_spec_hash`, store-owned `trust_scope_id`, and an optional
-`distinct_run_key_digest`. The run id must equal the digest of that material, and `RunAdmitted`
-records the material so attach, resume, replay, status, and public-output authority can fail closed
-on identity mismatch. Raw caller-supplied run ids are not a normal launch surface.
+`certified_spec_hash`, store-owned `trust_scope_id`, and required `invocation_key_digest`. Public
+entry-point starts accept an optional raw `invocation_key`; when omitted, the app mints a fresh opaque
+key before deriving identity. The raw key is not persisted. The run id must equal the digest of the
+recorded identity material, and `RunAdmitted` records the material so attach, resume, replay, status,
+and public-output authority can fail closed on identity mismatch. Raw caller-supplied run ids are not
+a normal launch surface.
 
-Execution claims are operational liveness, not run authority. v1 uses a claim lane keyed by the
-derived run id with a 60 second TTL and a 20 second heartbeat interval. The invoker that starts or
-resumes the run drives it while renewing the claim; duplicate compatible launchers attach/report,
-and incompatible executable bindings report without driving. Automatic dead-driver takeover,
-background worker-pool dispatch, feed-driven dispatch, `due_at` re-wake, and long-wait tenure
-release are deferred. Manual `run resume <run_id>` is the v1 recovery trigger. While short
-receipt-level waits are active, the invoker loop keeps heartbeating instead of releasing tenure.
-Runtime drive entry points require a live execution-claim token and an `ExecutionClaimStore`; callers
-without the current token cannot drive through the public scheduler API.
+Execution claims are operational liveness, not run authority. v1 uses a claim lane keyed by
+`ExecutionClaimScope` (`certified_spec_hash` + `trust_scope_id`) with a holder `run_id`, a 60 second
+TTL, and a 20 second heartbeat interval. Public start admission and initial execution-claim acquire
+are one store admission operation: if the execution lane is held, no `RunAdmitted` event is committed
+for the contender and the caller receives `already_active` with the active holder run id. The invoker
+that starts or resumes the run drives it while renewing the claim; duplicate compatible same-run
+launchers attach/report, and incompatible executable bindings report without driving. Automatic
+dead-driver takeover, background worker-pool dispatch, feed-driven dispatch, `due_at` re-wake, and
+long-wait tenure release are deferred. Manual `run resume <run_id>` is the v1 recovery trigger.
+While short receipt-level waits are active, the invoker loop keeps heartbeating instead of releasing
+tenure. Runtime drive entry points require a live execution-claim token and an `ExecutionClaimStore`;
+callers without the current token cannot drive through the public scheduler API.
 
 Framework lifecycle work is represented by certified graph nodes, not ad hoc runtime side effects.
 Run admission is the sole pre-attempt root authority and is not represented by a certified graph

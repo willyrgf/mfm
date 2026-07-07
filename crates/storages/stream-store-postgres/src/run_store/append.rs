@@ -118,6 +118,11 @@ impl PostgresRunStore {
                 return Ok(CommitOutcome::AdmissionBlocked(block));
             }
         };
+        if let Some(claim) = bundle.execution_claim() {
+            if let Some(busy) = execution_claim_admission_pre_gate_tx(&mut tx, claim).await? {
+                return Ok(CommitOutcome::ExecutionClaimBusy(Box::new(busy)));
+            }
+        }
         if let Some(admission) = &claim_admission {
             if let Some(block) = resource_lane_fifo_pre_gate_tx(&mut tx, admission).await? {
                 tx.commit()

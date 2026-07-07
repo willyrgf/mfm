@@ -68,6 +68,11 @@ impl AdmissionLaneId {
         self.0.to_vec()
     }
 
+    /// Rebuilds a lane id from trusted store bytes.
+    pub fn from_array(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     fn from_material(
         class: AdmissionLaneClass,
         mode: AdmissionLaneMode,
@@ -218,19 +223,52 @@ impl ResourceAdmissionLane {
 /// Execution-claim admission key. Execution claims always use nowait admission.
 pub type ExecutionClaimAdmissionLane = AdmissionLane<NowaitSkip>;
 
+/// Base work identity coordinated by an execution claim.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExecutionClaimScope {
+    certified_spec_hash: SpecHash,
+    trust_scope_id: TrustScopeId,
+}
+
+impl ExecutionClaimScope {
+    /// Builds an execution scope from run identity material.
+    pub fn from_run_identity_material(identity: &events::RunIdentityMaterialV1) -> Self {
+        Self {
+            certified_spec_hash: identity.certified_spec_hash.clone(),
+            trust_scope_id: identity.trust_scope_id.clone(),
+        }
+    }
+
+    /// Returns the certified spec hash coordinated by this scope.
+    pub fn certified_spec_hash(&self) -> &SpecHash {
+        &self.certified_spec_hash
+    }
+
+    /// Returns the trust scope coordinated by this scope.
+    pub fn trust_scope_id(&self) -> &TrustScopeId {
+        &self.trust_scope_id
+    }
+}
+
 impl ExecutionClaimAdmissionLane {
-    /// Builds the nowait admission lane for a derived run id.
-    pub fn from_run_id(run_id: &RunId) -> Result<Self> {
+    /// Builds the nowait admission lane for a base execution scope.
+    pub fn from_scope(scope: &ExecutionClaimScope) -> Result<Self> {
         Ok(Self::new(
             AdmissionLaneClass::ExecutionClaim,
             AdmissionLaneId::from_material(
                 AdmissionLaneClass::ExecutionClaim,
                 AdmissionLaneMode::NowaitSkip,
                 serde_json::json!({
-                    "run_id": run_id.as_str(),
+                    "certified_spec_hash": scope.certified_spec_hash.as_str(),
+                    "trust_scope_id": scope.trust_scope_id.as_str(),
                 }),
             )?,
         ))
+    }
+
+    /// Rebuilds an execution-claim lane from trusted store bytes.
+    pub fn from_stored_id(id: AdmissionLaneId) -> Self {
+        Self::new(AdmissionLaneClass::ExecutionClaim, id)
     }
 }
 
@@ -258,6 +296,8 @@ impl AdmissionToken {
 pub struct AdmissionLease {
     /// Lane held by the lease.
     pub lane: AdmissionLaneKey,
+    /// Concrete run currently holding the lease.
+    pub holder_run_id: RunId,
     /// Holder token.
     pub token: AdmissionToken,
     /// Lease expiry as milliseconds since the Unix epoch.

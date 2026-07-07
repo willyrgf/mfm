@@ -29,7 +29,7 @@ use axum::Json;
 use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
-    AppError, DistinctRunKey, EntryPointRunLaunchInput, ErrorClass, ManualResolutionDecision,
+    AppError, EntryPointRunLaunchInput, ErrorClass, InvocationKey, ManualResolutionDecision,
     ManualResolutionRecordRequest, ProductionRunStore, PublicFactQueryRequest, PublicFactRefId,
     PublicOpName, PublicOutputResponse, PublicSafeMessage, RunLaunchOutcomeStatus, RunReadServices,
     RunResponse, RunServices, RunStreamResponse,
@@ -402,13 +402,17 @@ struct RunStartBody {
     config_format: Option<RestConfigFormat>,
     config: serde_json::Value,
     #[serde(default)]
-    distinct_run_key: Option<String>,
+    invocation_key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct RunStartResponse {
     outcome: RunLaunchOutcomeStatus,
-    run: RunResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run: Option<RunResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     public_output: Option<PublicOutputResponse>,
 }
 
@@ -660,7 +664,7 @@ where
     let entry_point_registry = mfm_app::production_entry_point_op_registry()?;
     let public_op_name = PublicOpName::new(&req.op)?;
     let op_version = req.op_version.map(mfm_app::OpVersion::new).transpose()?;
-    let distinct_run_key = req.distinct_run_key.map(DistinctRunKey::new).transpose()?;
+    let invocation_key = req.invocation_key.map(InvocationKey::new).transpose()?;
     let authored_config = AuthoredConfig::from_json_transport_value(
         req.config_format.map(AuthoredConfigFormat::from),
         &req.config,
@@ -672,13 +676,14 @@ where
         authored_config,
         certification_registry: services.certification_registry(),
         trust_scope_id,
-        distinct_run_key,
+        invocation_key,
     })?;
     let report = services.launch_prepared_entry_point_run(prepared).await?;
 
     json_ok(RunStartResponse {
         outcome: report.outcome,
         run: report.run,
+        active_run_id: report.active_run_id,
         public_output: report.public_output,
     })
 }

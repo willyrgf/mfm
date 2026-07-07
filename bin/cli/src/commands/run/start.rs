@@ -6,7 +6,7 @@ use crate::presentation::output::handle_command_result;
 use crate::support::run_store::{connect_run_services, RunStoresArgs};
 use clap::{Args, ValueEnum};
 use mfm_app::{
-    DistinctRunKey, EntryPointRunLaunchInput, PublicOpName, PublicOutputResponse,
+    EntryPointRunLaunchInput, InvocationKey, PublicOpName, PublicOutputResponse,
     RunLaunchOutcomeStatus, RunResponse,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
@@ -31,9 +31,9 @@ pub(crate) struct StartArgs {
     #[arg(long, value_enum, default_value_t = ConfigFormatArg::Toml)]
     pub config_format: ConfigFormatArg,
 
-    /// Caller-supplied key that forces a distinct run of otherwise identical certified work.
+    /// Caller-supplied key that forces a invocation of otherwise identical certified work.
     #[arg(long, value_name = "KEY")]
-    pub distinct_run_key: Option<String>,
+    pub invocation_key: Option<String>,
 
     /// Runtime configuration file for live capabilities (default: $MFM_RUNTIME_CONFIG_FILE).
     #[arg(long, value_name = "PATH")]
@@ -74,15 +74,31 @@ impl std::fmt::Display for ConfigFormatArg {
 #[derive(Debug, Clone, Serialize)]
 struct StartOutput {
     outcome: RunLaunchOutcomeStatus,
-    run: RunResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run: Option<RunResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     public_output: Option<PublicOutputResponse>,
 }
 
 impl std::fmt::Display for StartOutput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.public_output {
-            Some(public_output) => write!(f, "launch_outcome={} {public_output}", self.outcome),
-            None => write!(f, "launch_outcome={} {}", self.outcome, self.run),
+        if let Some(public_output) = &self.public_output {
+            return write!(f, "launch_outcome={} {public_output}", self.outcome);
+        }
+        if let Some(run) = &self.run {
+            return write!(f, "launch_outcome={} {run}", self.outcome);
+        }
+        match &self.active_run_id {
+            Some(active_run_id) => {
+                write!(
+                    f,
+                    "launch_outcome={} active_run_id={active_run_id}",
+                    self.outcome
+                )
+            }
+            None => write!(f, "launch_outcome={}", self.outcome),
         }
     }
 }
@@ -96,10 +112,10 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &StartArgs) -> ! {
 async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
     let public_op_name = PublicOpName::new(&args.op)?;
     let op_version = args.op_version.map(mfm_app::OpVersion::new).transpose()?;
-    let distinct_run_key = args
-        .distinct_run_key
+    let invocation_key = args
+        .invocation_key
         .as_deref()
-        .map(DistinctRunKey::new)
+        .map(InvocationKey::new)
         .transpose()?;
     let config_bytes = tokio::fs::read(&args.config)
         .await
@@ -116,12 +132,13 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
         authored_config,
         certification_registry: &certification_registry,
         trust_scope_id,
-        distinct_run_key,
+        invocation_key,
     })?;
     let report = services.launch_prepared_entry_point_run(prepared).await?;
     Ok(CommandOutput::new(StartOutput {
         outcome: report.outcome,
         run: report.run,
+        active_run_id: report.active_run_id,
         public_output: report.public_output,
     }))
 }
@@ -131,19 +148,19 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn start_rejects_empty_distinct_run_key_before_store_connection() {
+    async fn start_rejects_empty_invocation_key_before_store_connection() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let config = tmp.path().join("portfolio.json");
         std::fs::write(&config, "{}").expect("write config");
 
         let mut args = start_args(config, RunStoresArgs { database_url: None });
-        args.distinct_run_key = Some(String::new());
+        args.invocation_key = Some(String::new());
 
         let err = execute_internal(&args)
             .await
-            .expect_err("empty distinct run key rejects before store construction");
+            .expect_err("empty invocation key rejects before store construction");
 
-        assert_eq!(err.code, "DistinctRunKeyInvalid");
+        assert_eq!(err.code, "InvocationKeyInvalid");
     }
 
     #[tokio::test]
@@ -270,7 +287,7 @@ mod tests {
             authored_config,
             certification_registry: &certification_registry,
             trust_scope_id,
-            distinct_run_key: None,
+            invocation_key: None,
         })
         .map_err(CommandError::from)
     }
@@ -281,7 +298,7 @@ mod tests {
             config,
             op_version: None,
             config_format: ConfigFormatArg::Json,
-            distinct_run_key: None,
+            invocation_key: None,
             runtime_config: None,
             stores,
         }

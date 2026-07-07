@@ -360,7 +360,7 @@ fn app_fact_runner_registry(
 }
 
 fn prepare_app_fact_launch(include_fact_descriptor: bool) -> Result<RunLaunchRequest, AppError> {
-    prepare_app_fact_launch_with_distinct_key(include_fact_descriptor, None)
+    prepare_app_fact_launch_with_invocation_key(include_fact_descriptor, None)
 }
 
 fn prepare_btc_collector_internal_test_launch() -> Result<RunLaunchRequest, AppError> {
@@ -417,7 +417,7 @@ fn prepare_btc_collector_internal_test_launch() -> Result<RunLaunchRequest, AppE
                 "mfm.trust_scope.v1:00000000000000000000000000000000",
             )
             .expect("trust scope"),
-            distinct_run_key_digest: None,
+            invocation_key_digest: default_invocation_key_digest(),
             entry_point_evidence: events::EntryPointLaunchEvidence {
                 resolved_op_id: events::EntryPointOpId::new(
                     "mfm.bitcoin.btc_chain_head_collector_internal_test",
@@ -433,20 +433,20 @@ fn prepare_btc_collector_internal_test_launch() -> Result<RunLaunchRequest, AppE
     )
 }
 
-fn prepare_app_fact_launch_with_distinct_key(
+fn prepare_app_fact_launch_with_invocation_key(
     include_fact_descriptor: bool,
-    distinct_run_key_digest: Option<ContentDigest>,
+    invocation_key_digest: Option<ContentDigest>,
 ) -> Result<RunLaunchRequest, AppError> {
-    prepare_app_fact_launch_with_distinct_key_and_state_key(
+    prepare_app_fact_launch_with_invocation_key_and_state_key(
         include_fact_descriptor,
-        distinct_run_key_digest,
+        invocation_key_digest,
         "fact-state",
     )
 }
 
-fn prepare_app_fact_launch_with_distinct_key_and_state_key(
+fn prepare_app_fact_launch_with_invocation_key_and_state_key(
     include_fact_descriptor: bool,
-    distinct_run_key_digest: Option<ContentDigest>,
+    invocation_key_digest: Option<ContentDigest>,
     state_key: &str,
 ) -> Result<RunLaunchRequest, AppError> {
     let plan = app_fact_launch_plan_with_state_key(state_key);
@@ -486,7 +486,8 @@ fn prepare_app_fact_launch_with_distinct_key_and_state_key(
                 "mfm.trust_scope.v1:00000000000000000000000000000000",
             )
             .expect("trust scope"),
-            distinct_run_key_digest,
+            invocation_key_digest: invocation_key_digest
+                .unwrap_or_else(default_invocation_key_digest),
             entry_point_evidence: events::EntryPointLaunchEvidence {
                 resolved_op_id: events::EntryPointOpId::new("mfm.app.test.fact-launch")
                     .expect("entry point"),
@@ -496,6 +497,10 @@ fn prepare_app_fact_launch_with_distinct_key_and_state_key(
         config_inputs,
         seed_inputs,
     )
+}
+
+fn default_invocation_key_digest() -> ContentDigest {
+    content_digest_for_bytes(b"mfm.app.test.default-invocation")
 }
 
 async fn launch_app_fact_run() -> (RunId, store::AsyncInMemoryRunStore, CertificationRegistry) {
@@ -515,12 +520,12 @@ async fn launch_app_fact_run_with_visibility(
 async fn launch_app_fact_run_in_store_with_visibility(
     store: store::AsyncInMemoryRunStore,
     visibility: mfm_program::facts::FactVisibility,
-    distinct_run_key_digest: Option<ContentDigest>,
+    invocation_key_digest: Option<ContentDigest>,
 ) -> (RunId, store::AsyncInMemoryRunStore, CertificationRegistry) {
     launch_app_fact_run_in_store_with_visibility_and_state_key(
         store,
         visibility,
-        distinct_run_key_digest,
+        invocation_key_digest,
         "fact-state",
         true,
     )
@@ -530,13 +535,13 @@ async fn launch_app_fact_run_in_store_with_visibility(
 async fn launch_app_fact_run_in_store_with_visibility_and_state_key(
     store: store::AsyncInMemoryRunStore,
     visibility: mfm_program::facts::FactVisibility,
-    distinct_run_key_digest: Option<ContentDigest>,
+    invocation_key_digest: Option<ContentDigest>,
     state_key: &str,
     require_completion: bool,
 ) -> (RunId, store::AsyncInMemoryRunStore, CertificationRegistry) {
-    let request = prepare_app_fact_launch_with_distinct_key_and_state_key(
+    let request = prepare_app_fact_launch_with_invocation_key_and_state_key(
         true,
-        distinct_run_key_digest,
+        invocation_key_digest,
         state_key,
     )
     .expect("prepared app fact launch");
@@ -545,6 +550,8 @@ async fn launch_app_fact_run_in_store_with_visibility_and_state_key(
     let runners = app_fact_runner_registry(&runtime_spec, visibility);
     let registry = app_fact_certification_registry(true);
     let run_id = request.run_id.clone();
+    let execution_scope =
+        store::ExecutionClaimScope::from_run_identity_material(&request.identity_material);
     let scheduler = SerialTypedScheduler::new(runners, Arc::new(store.clone()));
     let launch = scheduler
         .prepare_run_launch(
@@ -561,7 +568,7 @@ async fn launch_app_fact_run_in_store_with_visibility_and_state_key(
     let token = store::AdmissionToken::new("mfm.app.test.fact-runner-claim")
         .expect("execution claim token");
     match store
-        .acquire_execution_claim(&run_id, token.clone())
+        .acquire_execution_claim(&execution_scope, &run_id, token.clone())
         .await
         .expect("acquire execution claim")
     {
@@ -586,7 +593,13 @@ async fn launch_app_fact_run_in_store_with_visibility_and_state_key(
             break;
         }
         match scheduler
-            .drive_once(&store, &runtime_spec, &run_id, token.clone())
+            .drive_once(
+                &store,
+                &runtime_spec,
+                &run_id,
+                &execution_scope,
+                token.clone(),
+            )
             .await
         {
             Ok(_) => {}

@@ -71,6 +71,11 @@ fn fixture_trust_scope_id() -> TrustScopeId {
         .expect("test trust scope")
 }
 
+fn alternate_fixture_trust_scope_id() -> TrustScopeId {
+    TrustScopeId::new("mfm.trust_scope.v1:20202020202020202020202020202020")
+        .expect("alternate test trust scope")
+}
+
 fn synthetic_side_effect_pair_id(byte: u8) -> SideEffectPairId {
     SideEffectPairId::from_digest(
         DigestAlgorithm::Sha256JcsV1,
@@ -409,33 +414,39 @@ macro_rules! delegate_execution_claim_store_to_inner {
 
             fn acquire_execution_claim<'a>(
                 &'a self,
-                run_id: &'a RunId,
+                scope: &'a store::ExecutionClaimScope,
+                holder_run_id: &'a RunId,
                 token: store::AdmissionToken,
             ) -> store::AsyncStoreFuture<'a, store::NowaitSkipAdmissionResult, Self::Error> {
-                self.inner.acquire_execution_claim(run_id, token)
+                self.inner
+                    .acquire_execution_claim(scope, holder_run_id, token)
             }
 
             fn execution_claim_status<'a>(
                 &'a self,
-                run_id: &'a RunId,
+                scope: &'a store::ExecutionClaimScope,
             ) -> store::AsyncStoreFuture<'a, store::ExecutionClaimStatus, Self::Error> {
-                self.inner.execution_claim_status(run_id)
+                self.inner.execution_claim_status(scope)
             }
 
             fn renew_execution_claim<'a>(
                 &'a self,
-                run_id: &'a RunId,
+                scope: &'a store::ExecutionClaimScope,
+                holder_run_id: &'a RunId,
                 token: &'a store::AdmissionToken,
             ) -> store::AsyncStoreFuture<'a, Option<store::AdmissionLease>, Self::Error> {
-                self.inner.renew_execution_claim(run_id, token)
+                self.inner
+                    .renew_execution_claim(scope, holder_run_id, token)
             }
 
             fn release_execution_claim<'a>(
                 &'a self,
-                run_id: &'a RunId,
+                scope: &'a store::ExecutionClaimScope,
+                holder_run_id: &'a RunId,
                 token: &'a store::AdmissionToken,
             ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
-                self.inner.release_execution_claim(run_id, token)
+                self.inner
+                    .release_execution_claim(scope, holder_run_id, token)
             }
 
             fn expired_execution_claims<'a>(
@@ -446,10 +457,12 @@ macro_rules! delegate_execution_claim_store_to_inner {
 
             fn reap_expired_execution_claim<'a>(
                 &'a self,
-                run_id: &'a RunId,
+                scope: &'a store::ExecutionClaimScope,
+                holder_run_id: &'a RunId,
                 token: &'a store::AdmissionToken,
             ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
-                self.inner.reap_expired_execution_claim(run_id, token)
+                self.inner
+                    .reap_expired_execution_claim(scope, holder_run_id, token)
             }
         }
     };
@@ -462,45 +475,51 @@ macro_rules! delegate_execution_claim_store_to_refcell_inner {
 
             fn acquire_execution_claim<'a>(
                 &'a self,
-                run_id: &'a RunId,
+                scope: &'a store::ExecutionClaimScope,
+                holder_run_id: &'a RunId,
                 token: store::AdmissionToken,
             ) -> store::AsyncStoreFuture<'a, store::NowaitSkipAdmissionResult, Self::Error> {
-                let result = block_on_ready(
-                    self.inner
-                        .borrow_mut()
-                        .acquire_execution_claim(run_id, token),
-                );
+                let result = block_on_ready(self.inner.borrow_mut().acquire_execution_claim(
+                    scope,
+                    holder_run_id,
+                    token,
+                ));
                 Box::pin(std::future::ready(result))
             }
 
             fn execution_claim_status<'a>(
                 &'a self,
-                run_id: &'a RunId,
+                scope: &'a store::ExecutionClaimScope,
             ) -> store::AsyncStoreFuture<'a, store::ExecutionClaimStatus, Self::Error> {
-                let result = block_on_ready(self.inner.borrow().execution_claim_status(run_id));
+                let result = block_on_ready(self.inner.borrow().execution_claim_status(scope));
                 Box::pin(std::future::ready(result))
             }
 
             fn renew_execution_claim<'a>(
                 &'a self,
-                run_id: &'a RunId,
+                scope: &'a store::ExecutionClaimScope,
+                holder_run_id: &'a RunId,
                 token: &'a store::AdmissionToken,
             ) -> store::AsyncStoreFuture<'a, Option<store::AdmissionLease>, Self::Error> {
-                let result =
-                    block_on_ready(self.inner.borrow_mut().renew_execution_claim(run_id, token));
+                let result = block_on_ready(self.inner.borrow_mut().renew_execution_claim(
+                    scope,
+                    holder_run_id,
+                    token,
+                ));
                 Box::pin(std::future::ready(result))
             }
 
             fn release_execution_claim<'a>(
                 &'a self,
-                run_id: &'a RunId,
+                scope: &'a store::ExecutionClaimScope,
+                holder_run_id: &'a RunId,
                 token: &'a store::AdmissionToken,
             ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
-                let result = block_on_ready(
-                    self.inner
-                        .borrow_mut()
-                        .release_execution_claim(run_id, token),
-                );
+                let result = block_on_ready(self.inner.borrow_mut().release_execution_claim(
+                    scope,
+                    holder_run_id,
+                    token,
+                ));
                 Box::pin(std::future::ready(result))
             }
 
@@ -513,14 +532,15 @@ macro_rules! delegate_execution_claim_store_to_refcell_inner {
 
             fn reap_expired_execution_claim<'a>(
                 &'a self,
-                run_id: &'a RunId,
+                scope: &'a store::ExecutionClaimScope,
+                holder_run_id: &'a RunId,
                 token: &'a store::AdmissionToken,
             ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
-                let result = block_on_ready(
-                    self.inner
-                        .borrow_mut()
-                        .reap_expired_execution_claim(run_id, token),
-                );
+                let result = block_on_ready(self.inner.borrow_mut().reap_expired_execution_claim(
+                    scope,
+                    holder_run_id,
+                    token,
+                ));
                 Box::pin(std::future::ready(result))
             }
         }
@@ -572,41 +592,67 @@ fn side_effect_pair_fields_for_ctx(
 }
 
 fn run_identity_material(runtime_spec: &CertifiedRuntimeSpec) -> events::RunIdentityMaterialV1 {
-    run_identity_material_with_distinct(runtime_spec, None)
+    run_identity_material_with_invocation(runtime_spec, content(0x10))
 }
 
-fn run_identity_material_with_distinct(
+fn run_identity_material_with_invocation(
     runtime_spec: &CertifiedRuntimeSpec,
-    distinct_run_key_digest: Option<ContentDigest>,
+    invocation_key_digest: ContentDigest,
+) -> events::RunIdentityMaterialV1 {
+    run_identity_material_with_scope_and_invocation(
+        runtime_spec,
+        fixture_trust_scope_id(),
+        invocation_key_digest,
+    )
+}
+
+fn run_identity_material_with_scope_and_invocation(
+    runtime_spec: &CertifiedRuntimeSpec,
+    trust_scope_id: TrustScopeId,
+    invocation_key_digest: ContentDigest,
 ) -> events::RunIdentityMaterialV1 {
     events::RunIdentityMaterialV1 {
         certified_spec_hash: runtime_spec.spec_hash().clone(),
-        trust_scope_id: fixture_trust_scope_id(),
-        distinct_run_key_digest,
+        trust_scope_id,
+        invocation_key_digest,
     }
 }
 
 fn fixture_run_identity_material(fixture: &Fixture) -> events::RunIdentityMaterialV1 {
-    run_identity_material_with_distinct(
+    run_identity_material_with_scope_and_invocation(
         &fixture.runtime_spec,
-        fixture.distinct_run_key_digest.clone(),
+        fixture.trust_scope_id.clone(),
+        fixture.invocation_key_digest.clone(),
     )
 }
 
 fn refresh_fixture_run_id(fixture: &mut Fixture) {
-    let distinct_run_key_digest = fixture.distinct_run_key_digest.clone();
-    refresh_fixture_run_id_with_distinct(fixture, distinct_run_key_digest);
+    let invocation_key_digest = fixture.invocation_key_digest.clone();
+    refresh_fixture_run_id_with_invocation(fixture, invocation_key_digest);
 }
 
-fn refresh_fixture_run_id_with_distinct(
+fn refresh_fixture_run_id_with_invocation(
     fixture: &mut Fixture,
-    distinct_run_key_digest: Option<ContentDigest>,
+    invocation_key_digest: ContentDigest,
 ) {
-    fixture.distinct_run_key_digest = distinct_run_key_digest.clone();
-    fixture.run_id =
-        run_identity_material_with_distinct(&fixture.runtime_spec, distinct_run_key_digest)
-            .derive_run_id()
-            .expect("fixture run id");
+    let trust_scope_id = fixture.trust_scope_id.clone();
+    refresh_fixture_run_id_with_identity(fixture, trust_scope_id, invocation_key_digest);
+}
+
+fn refresh_fixture_run_id_with_identity(
+    fixture: &mut Fixture,
+    trust_scope_id: TrustScopeId,
+    invocation_key_digest: ContentDigest,
+) {
+    fixture.trust_scope_id = trust_scope_id.clone();
+    fixture.invocation_key_digest = invocation_key_digest.clone();
+    fixture.run_id = run_identity_material_with_scope_and_invocation(
+        &fixture.runtime_spec,
+        trust_scope_id,
+        invocation_key_digest,
+    )
+    .derive_run_id()
+    .expect("fixture run id");
 }
 
 macro_rules! store_typed_commit_request {
@@ -2029,7 +2075,8 @@ const CONFIG_MULTIPLIER_7_BYTES: &[u8] = br#"{"multiplier":7}"#;
 struct Fixture {
     runtime_spec: CertifiedRuntimeSpec,
     run_id: RunId,
-    distinct_run_key_digest: Option<ContentDigest>,
+    trust_scope_id: TrustScopeId,
+    invocation_key_digest: ContentDigest,
     seed_ref: events::SeedCellRef,
     descriptor_a: DescriptorId,
     descriptor_b: DescriptorId,
@@ -3745,7 +3792,11 @@ async fn side_effect_driver_prepares_and_starts_one_step() {
 async fn side_effect_driver_preserves_concrete_exclusive_resource_key_across_runs() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
     let mut peer = fixture.clone();
-    refresh_fixture_run_id_with_distinct(&mut peer, Some(content(0xf6)));
+    refresh_fixture_run_id_with_identity(
+        &mut peer,
+        alternate_fixture_trust_scope_id(),
+        content(0xf6),
+    );
     let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
     let mut store = TestTypedRunStore::new();
 
@@ -10332,9 +10383,10 @@ async fn drive_once_with_claim<S>(
 where
     S: store::RunEventStore + store::ExecutionClaimStore + ?Sized,
 {
-    let token = execution_claim_token(store, run_id).await?;
+    let execution_scope = execution_claim_scope(store, run_id).await?;
+    let token = execution_claim_token(store, &execution_scope, run_id).await?;
     scheduler
-        .drive_once(store, runtime_spec, run_id, token)
+        .drive_once(store, runtime_spec, run_id, &execution_scope, token)
         .await
 }
 
@@ -10347,26 +10399,57 @@ async fn drive_until_blocked_with_claim<S>(
 where
     S: store::RunEventStore + store::ExecutionClaimStore + ?Sized,
 {
-    let token = execution_claim_token(store, run_id).await?;
+    let execution_scope = execution_claim_scope(store, run_id).await?;
+    let token = execution_claim_token(store, &execution_scope, run_id).await?;
     scheduler
-        .drive_until_blocked(store, runtime_spec, run_id, token)
+        .drive_until_blocked(store, runtime_spec, run_id, &execution_scope, token)
         .await
 }
 
-async fn execution_claim_token<S>(store: &S, run_id: &RunId) -> Result<store::AdmissionToken>
+async fn execution_claim_scope<S>(store: &S, run_id: &RunId) -> Result<store::ExecutionClaimScope>
+where
+    S: store::RunEventStore + ?Sized,
+{
+    let committed = store
+        .load_committed_run_stream(run_id)
+        .await
+        .map_err(crate::error::async_store_error)?;
+    committed
+        .events()
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::RunAdmitted(payload) => Some(
+                store::ExecutionClaimScope::from_run_identity_material(&payload.identity_material),
+            ),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            RuntimeError::InvalidRunStream(format!("run {run_id} has no RunAdmitted event"))
+        })
+}
+
+async fn execution_claim_token<S>(
+    store: &S,
+    execution_scope: &store::ExecutionClaimScope,
+    run_id: &RunId,
+) -> Result<store::AdmissionToken>
 where
     S: store::ExecutionClaimStore + ?Sized,
 {
     loop {
         match store
-            .execution_claim_status(run_id)
+            .execution_claim_status(execution_scope)
             .await
             .map_err(crate::error::async_store_error)?
         {
             store::ExecutionClaimStatus::Live(lease) => return Ok(lease.token),
             store::ExecutionClaimStatus::Expired(lease) => {
                 store
-                    .reap_expired_execution_claim(run_id, &lease.token)
+                    .reap_expired_execution_claim(
+                        execution_scope,
+                        &lease.holder_run_id,
+                        &lease.token,
+                    )
                     .await
                     .map_err(crate::error::async_store_error)?;
             }
@@ -10375,7 +10458,7 @@ where
                     "mfm.test.runtime.execution_claim:{run_id}"
                 ))?;
                 match store
-                    .acquire_execution_claim(run_id, token)
+                    .acquire_execution_claim(execution_scope, run_id, token)
                     .await
                     .map_err(crate::error::async_store_error)?
                 {
@@ -13179,7 +13262,8 @@ fn fixture() -> Fixture {
     Fixture {
         runtime_spec,
         run_id,
-        distinct_run_key_digest: None,
+        trust_scope_id: fixture_trust_scope_id(),
+        invocation_key_digest: content(0x10),
         seed_ref,
         descriptor_a,
         descriptor_b,
@@ -13567,7 +13651,8 @@ fn fixture_from_context_runtime_spec(
     Fixture {
         runtime_spec,
         run_id,
-        distinct_run_key_digest: None,
+        trust_scope_id: fixture_trust_scope_id(),
+        invocation_key_digest: content(0x10),
         seed_ref,
         descriptor_a: node_a.descriptor_id.clone(),
         descriptor_b: node_b.descriptor_id.clone(),
@@ -13642,7 +13727,8 @@ fn fixture_from_runtime_spec(
     Fixture {
         runtime_spec,
         run_id,
-        distinct_run_key_digest: None,
+        trust_scope_id: fixture_trust_scope_id(),
+        invocation_key_digest: content(0x10),
         seed_ref,
         descriptor_a: node_a.descriptor_id.clone(),
         descriptor_b: node_b.descriptor_id.clone(),

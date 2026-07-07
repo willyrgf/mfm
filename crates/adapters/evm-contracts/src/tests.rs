@@ -639,7 +639,7 @@ fn source_run_identity_material(spec_hash: &SpecHash) -> events::RunIdentityMate
         certified_spec_hash: spec_hash.clone(),
         trust_scope_id: TrustScopeId::new("mfm.trust_scope.v1:30303030303030303030303030303030")
             .expect("trust scope"),
-        distinct_run_key_digest: Some(content_digest(0x30)),
+        invocation_key_digest: content_digest(0x30),
     }
 }
 

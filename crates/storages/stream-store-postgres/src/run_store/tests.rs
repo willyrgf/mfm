@@ -484,21 +484,22 @@ async fn execution_claim_acquire_busy_and_release_are_token_matched() {
 async fn execution_claim_expiry_requires_explicit_reap() {
     let (store, schema) = test_store().await;
     let run = run_id(7);
+    let scope = execution_claim_scope(7);
     let holder = admission_token("mfm.test.execution_claim.expired_holder");
     let other = admission_token("mfm.test.execution_claim.expired_other");
 
-    let lease = acquire_execution_claim_lease(&store, &run, holder.clone()).await;
+    let lease = acquire_execution_claim_lease(&store, &scope, &run, holder.clone()).await;
     expire_execution_claim_row(&store, &run).await;
     assert!(matches!(
         store
-            .execution_claim_status(&run)
+            .execution_claim_status(&scope)
             .await
             .expect("expired execution claim status"),
         ExecutionClaimStatus::Expired(status) if status.token == lease.token
     ));
 
     let busy = store
-        .acquire_execution_claim(&run, other.clone())
+        .acquire_execution_claim(&scope, &run, other.clone())
         .await
         .expect("expired holder still blocks acquire");
     let NowaitSkipAdmissionResult::Busy(busy) = busy else {
@@ -515,24 +516,24 @@ async fn execution_claim_expiry_requires_explicit_reap() {
     assert_eq!(expired[0].lease.token, holder);
 
     assert!(!store
-        .reap_expired_execution_claim(&run, &other)
+        .reap_expired_execution_claim(&scope, &run, &other)
         .await
         .expect("wrong-token reap"));
     assert!(matches!(
         store
-            .acquire_execution_claim(&run, other.clone())
+            .acquire_execution_claim(&scope, &run, other.clone())
             .await
             .expect("busy after wrong-token reap"),
         NowaitSkipAdmissionResult::Busy(_)
     ));
 
     assert!(store
-        .reap_expired_execution_claim(&run, &holder)
+        .reap_expired_execution_claim(&scope, &run, &holder)
         .await
         .expect("matching-token reap"));
     assert!(matches!(
         store
-            .acquire_execution_claim(&run, other)
+            .acquire_execution_claim(&scope, &run, other)
             .await
             .expect("acquire after explicit reap"),
         NowaitSkipAdmissionResult::Admitted(_)
@@ -545,26 +546,27 @@ async fn execution_claim_expiry_requires_explicit_reap() {
 async fn execution_claim_stale_token_cannot_reap_newer_holder() {
     let (store, schema) = test_store().await;
     let run = run_id(8);
+    let scope = execution_claim_scope(8);
     let first = admission_token("mfm.test.execution_claim.first");
     let second = admission_token("mfm.test.execution_claim.second");
     let third = admission_token("mfm.test.execution_claim.third");
 
-    acquire_execution_claim_lease(&store, &run, first.clone()).await;
+    acquire_execution_claim_lease(&store, &scope, &run, first.clone()).await;
     expire_execution_claim_row(&store, &run).await;
     assert!(store
-        .reap_expired_execution_claim(&run, &first)
+        .reap_expired_execution_claim(&scope, &run, &first)
         .await
         .expect("first reap"));
 
-    let second_lease = acquire_execution_claim_lease(&store, &run, second.clone()).await;
+    let second_lease = acquire_execution_claim_lease(&store, &scope, &run, second.clone()).await;
     expire_execution_claim_row(&store, &run).await;
 
     assert!(!store
-        .reap_expired_execution_claim(&run, &first)
+        .reap_expired_execution_claim(&scope, &run, &first)
         .await
         .expect("stale-token reap"));
     let busy = store
-        .acquire_execution_claim(&run, third)
+        .acquire_execution_claim(&scope, &run, third)
         .await
         .expect("newer holder still blocks after stale reap");
     let NowaitSkipAdmissionResult::Busy(busy) = busy else {
@@ -573,7 +575,7 @@ async fn execution_claim_stale_token_cannot_reap_newer_holder() {
     assert_eq!(busy.holder.expect("newer holder").token, second_lease.token);
 
     assert!(store
-        .reap_expired_execution_claim(&run, &second)
+        .reap_expired_execution_claim(&scope, &run, &second)
         .await
         .expect("newer holder reap"));
 
@@ -582,11 +584,12 @@ async fn execution_claim_stale_token_cannot_reap_newer_holder() {
 
 async fn acquire_execution_claim_lease(
     store: &PostgresRunStore,
+    scope: &mfm_store::v1::ExecutionClaimScope,
     run_id: &RunId,
     token: AdmissionToken,
 ) -> AdmissionLease {
     let admitted = store
-        .acquire_execution_claim(run_id, token)
+        .acquire_execution_claim(scope, run_id, token)
         .await
         .expect("acquire execution claim");
     let NowaitSkipAdmissionResult::Admitted(lease) = admitted else {
@@ -606,6 +609,11 @@ fn prepared_artifact_bytes_from_bytes(bytes: Vec<u8>, role: ArtifactRole) -> Pre
 
 fn admission_token(value: &str) -> AdmissionToken {
     AdmissionToken::new(value).expect("admission token")
+}
+
+fn execution_claim_scope(byte: u8) -> mfm_store::v1::ExecutionClaimScope {
+    let identity = run_identity_material_for_test(spec_hash(byte), &trust_scope_hex(byte));
+    mfm_store::v1::ExecutionClaimScope::from_run_identity_material(&identity)
 }
 
 async fn expire_execution_claim_row(store: &PostgresRunStore, run_id: &RunId) {

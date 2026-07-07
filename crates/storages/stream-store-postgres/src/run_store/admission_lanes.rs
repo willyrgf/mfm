@@ -178,17 +178,20 @@ pub(super) async fn mark_wait_fifo_waiter_admitted_tx(
 
 pub(super) async fn acquire_execution_claim_client(
     pool: &PgPool,
-    run_id: &RunId,
+    scope: &mfm_store::v1::ExecutionClaimScope,
+    holder_run_id: &RunId,
     token: AdmissionToken,
 ) -> Result<mfm_store::v1::NowaitSkipAdmissionResult> {
-    let lane = mfm_store::v1::ExecutionClaimAdmissionLane::from_run_id(run_id)?;
+    let lane = mfm_store::v1::ExecutionClaimAdmissionLane::from_scope(scope)?;
     let mut tx = pool
         .begin()
         .await
         .map_err(|error| database_error("failed to begin execution claim transaction", error))?;
     lock_admission_lane_tx(&mut tx, &lane.erased_key()).await?;
 
-    if let Some(lease) = admit_execution_claim_holder_tx(&mut tx, run_id, &lane, &token).await? {
+    if let Some(lease) =
+        admit_execution_claim_holder_tx(&mut tx, holder_run_id, &lane, &token).await?
+    {
         tx.commit()
             .await
             .map_err(|error| database_error("failed to commit execution claim acquire", error))?;
@@ -205,12 +208,12 @@ pub(super) async fn acquire_execution_claim_client(
 
 pub(super) async fn execution_claim_status_client(
     pool: &PgPool,
-    run_id: &RunId,
+    scope: &mfm_store::v1::ExecutionClaimScope,
 ) -> Result<mfm_store::v1::ExecutionClaimStatus> {
-    let lane = mfm_store::v1::ExecutionClaimAdmissionLane::from_run_id(run_id)?;
+    let lane = mfm_store::v1::ExecutionClaimAdmissionLane::from_scope(scope)?;
     let lane_id = lane.id().to_vec();
     let row = sqlx::query(
-        "SELECT holder_token, \
+        "SELECT lane_id, execution_run_id, holder_token, \
             (EXTRACT(EPOCH FROM lease_expires_at) * 1000)::BIGINT AS lease_expires_at_unix_ms, \
             (lease_expires_at <= statement_timestamp()) AS lease_expired \
          FROM admission_lane WHERE class = $1 AND lane_id = $2",
@@ -227,16 +230,17 @@ pub(super) async fn execution_claim_status_client(
 
 pub(super) async fn renew_execution_claim_client(
     pool: &PgPool,
-    run_id: &RunId,
+    scope: &mfm_store::v1::ExecutionClaimScope,
+    holder_run_id: &RunId,
     token: &AdmissionToken,
 ) -> Result<Option<AdmissionLease>> {
-    let lane = mfm_store::v1::ExecutionClaimAdmissionLane::from_run_id(run_id)?;
+    let lane = mfm_store::v1::ExecutionClaimAdmissionLane::from_scope(scope)?;
     let mut tx = pool
         .begin()
         .await
         .map_err(|error| database_error("failed to begin execution claim transaction", error))?;
     lock_admission_lane_tx(&mut tx, &lane.erased_key()).await?;
-    let lease = update_execution_claim_lease_tx(&mut tx, &lane, token).await?;
+    let lease = update_execution_claim_lease_tx(&mut tx, &lane, holder_run_id, token).await?;
     tx.commit()
         .await
         .map_err(|error| database_error("failed to commit execution claim renew", error))?;
@@ -245,16 +249,17 @@ pub(super) async fn renew_execution_claim_client(
 
 pub(super) async fn release_execution_claim_client(
     pool: &PgPool,
-    run_id: &RunId,
+    scope: &mfm_store::v1::ExecutionClaimScope,
+    holder_run_id: &RunId,
     token: &AdmissionToken,
 ) -> Result<bool> {
-    let lane = mfm_store::v1::ExecutionClaimAdmissionLane::from_run_id(run_id)?;
+    let lane = mfm_store::v1::ExecutionClaimAdmissionLane::from_scope(scope)?;
     let mut tx = pool
         .begin()
         .await
         .map_err(|error| database_error("failed to begin execution claim transaction", error))?;
     lock_admission_lane_tx(&mut tx, &lane.erased_key()).await?;
-    let released = release_execution_claim_holder_tx(&mut tx, &lane, token).await?;
+    let released = release_execution_claim_holder_tx(&mut tx, &lane, holder_run_id, token).await?;
     tx.commit()
         .await
         .map_err(|error| database_error("failed to commit execution claim release", error))?;
@@ -265,7 +270,7 @@ pub(super) async fn expired_execution_claims_client(
     pool: &PgPool,
 ) -> Result<Vec<mfm_store::v1::ExpiredExecutionClaim>> {
     let rows = sqlx::query(
-        "SELECT execution_run_id, holder_token, \
+        "SELECT lane_id, execution_run_id, holder_token, \
             (EXTRACT(EPOCH FROM lease_expires_at) * 1000)::BIGINT AS lease_expires_at_unix_ms \
          FROM admission_lane \
          WHERE class = 'execution_claim' AND holder_token IS NOT NULL \
@@ -282,25 +287,45 @@ pub(super) async fn expired_execution_claims_client(
 
 pub(super) async fn reap_expired_execution_claim_client(
     pool: &PgPool,
-    run_id: &RunId,
+    scope: &mfm_store::v1::ExecutionClaimScope,
+    holder_run_id: &RunId,
     token: &AdmissionToken,
 ) -> Result<bool> {
-    let lane = mfm_store::v1::ExecutionClaimAdmissionLane::from_run_id(run_id)?;
+    let lane = mfm_store::v1::ExecutionClaimAdmissionLane::from_scope(scope)?;
     let mut tx = pool
         .begin()
         .await
         .map_err(|error| database_error("failed to begin execution claim transaction", error))?;
     lock_admission_lane_tx(&mut tx, &lane.erased_key()).await?;
-    let reaped = reap_execution_claim_holder_tx(&mut tx, &lane, token).await?;
+    let reaped = reap_execution_claim_holder_tx(&mut tx, &lane, holder_run_id, token).await?;
     tx.commit()
         .await
         .map_err(|error| database_error("failed to commit execution claim reap", error))?;
     Ok(reaped)
 }
 
+pub(super) async fn execution_claim_admission_pre_gate_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    claim: &mfm_store::v1::PreparedExecutionClaim,
+) -> Result<Option<mfm_store::v1::NowaitSkipAdmissionBusy>> {
+    let lane = mfm_store::v1::ExecutionClaimAdmissionLane::from_scope(&claim.scope)?;
+    lock_admission_lane_tx(tx, &lane.erased_key()).await?;
+    if admit_execution_claim_holder_tx(tx, &claim.holder_run_id, &lane, &claim.token)
+        .await?
+        .is_some()
+    {
+        return Ok(None);
+    }
+    let holder = read_execution_claim_holder_tx(tx, &lane).await?;
+    Ok(Some(mfm_store::v1::NowaitSkipAdmissionBusy {
+        lane,
+        holder,
+    }))
+}
+
 async fn admit_execution_claim_holder_tx(
     tx: &mut Transaction<'_, Postgres>,
-    run_id: &RunId,
+    holder_run_id: &RunId,
     lane: &mfm_store::v1::ExecutionClaimAdmissionLane,
     token: &AdmissionToken,
 ) -> Result<Option<AdmissionLease>> {
@@ -315,14 +340,15 @@ async fn admit_execution_claim_holder_tx(
              execution_run_id = EXCLUDED.execution_run_id, \
              updated_at = statement_timestamp() \
          WHERE admission_lane.holder_token IS NULL \
-         RETURNING holder_token, (EXTRACT(EPOCH FROM lease_expires_at) * 1000)::BIGINT AS lease_expires_at_unix_ms",
+         RETURNING execution_run_id, holder_token, \
+            (EXTRACT(EPOCH FROM lease_expires_at) * 1000)::BIGINT AS lease_expires_at_unix_ms",
     )
     .bind(lane.class().as_str())
     .bind(&lane_id)
     .bind(lane.mode().as_str())
     .bind(token.as_str())
     .bind(EXECUTION_CLAIM_LEASE_SECS)
-    .bind(run_id.as_str())
+    .bind(holder_run_id.as_str())
     .fetch_optional(&mut **tx)
     .await
     .map_err(|error| database_error("failed to admit execution claim", error))?;
@@ -336,7 +362,7 @@ async fn read_execution_claim_holder_tx(
 ) -> Result<Option<AdmissionLease>> {
     let lane_id = lane.id().to_vec();
     let row = sqlx::query(
-        "SELECT holder_token, \
+        "SELECT execution_run_id, holder_token, \
             (EXTRACT(EPOCH FROM lease_expires_at) * 1000)::BIGINT AS lease_expires_at_unix_ms \
          FROM admission_lane WHERE class = $1 AND lane_id = $2",
     )
@@ -353,19 +379,22 @@ async fn read_execution_claim_holder_tx(
 async fn update_execution_claim_lease_tx(
     tx: &mut Transaction<'_, Postgres>,
     lane: &mfm_store::v1::ExecutionClaimAdmissionLane,
+    holder_run_id: &RunId,
     token: &AdmissionToken,
 ) -> Result<Option<AdmissionLease>> {
     let lane_id = lane.id().to_vec();
     let row = sqlx::query(
         "UPDATE admission_lane \
-         SET lease_expires_at = statement_timestamp() + make_interval(secs => $4), \
+         SET lease_expires_at = statement_timestamp() + make_interval(secs => $5), \
              updated_at = statement_timestamp() \
-         WHERE class = $1 AND lane_id = $2 AND holder_token = $3 \
-         RETURNING holder_token, (EXTRACT(EPOCH FROM lease_expires_at) * 1000)::BIGINT AS lease_expires_at_unix_ms",
+         WHERE class = $1 AND lane_id = $2 AND holder_token = $3 AND execution_run_id = $4 \
+         RETURNING execution_run_id, holder_token, \
+            (EXTRACT(EPOCH FROM lease_expires_at) * 1000)::BIGINT AS lease_expires_at_unix_ms",
     )
     .bind(lane.class().as_str())
     .bind(&lane_id)
     .bind(token.as_str())
+    .bind(holder_run_id.as_str())
     .bind(EXECUTION_CLAIM_LEASE_SECS)
     .fetch_optional(&mut **tx)
     .await
@@ -377,17 +406,19 @@ async fn update_execution_claim_lease_tx(
 async fn release_execution_claim_holder_tx(
     tx: &mut Transaction<'_, Postgres>,
     lane: &mfm_store::v1::ExecutionClaimAdmissionLane,
+    holder_run_id: &RunId,
     token: &AdmissionToken,
 ) -> Result<bool> {
     let lane_id = lane.id().to_vec();
     let result = sqlx::query(
         "UPDATE admission_lane \
          SET holder_token = NULL, lease_expires_at = NULL, updated_at = statement_timestamp() \
-         WHERE class = $1 AND lane_id = $2 AND holder_token = $3",
+         WHERE class = $1 AND lane_id = $2 AND holder_token = $3 AND execution_run_id = $4",
     )
     .bind(lane.class().as_str())
     .bind(&lane_id)
     .bind(token.as_str())
+    .bind(holder_run_id.as_str())
     .execute(&mut **tx)
     .await
     .map_err(|error| database_error("failed to release execution claim", error))?;
@@ -397,18 +428,20 @@ async fn release_execution_claim_holder_tx(
 async fn reap_execution_claim_holder_tx(
     tx: &mut Transaction<'_, Postgres>,
     lane: &mfm_store::v1::ExecutionClaimAdmissionLane,
+    holder_run_id: &RunId,
     token: &AdmissionToken,
 ) -> Result<bool> {
     let lane_id = lane.id().to_vec();
     let result = sqlx::query(
         "UPDATE admission_lane \
          SET holder_token = NULL, lease_expires_at = NULL, updated_at = statement_timestamp() \
-         WHERE class = $1 AND lane_id = $2 AND holder_token = $3 \
+         WHERE class = $1 AND lane_id = $2 AND holder_token = $3 AND execution_run_id = $4 \
            AND lease_expires_at <= statement_timestamp()",
     )
     .bind(lane.class().as_str())
     .bind(&lane_id)
     .bind(token.as_str())
+    .bind(holder_run_id.as_str())
     .execute(&mut **tx)
     .await
     .map_err(|error| database_error("failed to reap execution claim", error))?;
@@ -419,11 +452,16 @@ fn execution_claim_lease_from_row(
     lane: &mfm_store::v1::ExecutionClaimAdmissionLane,
     row: PgRow,
 ) -> Result<AdmissionLease> {
+    let holder_run_id =
+        parse_identity::<RunId>(&row.try_get::<String, _>("execution_run_id").map_err(
+            |error| database_error("failed to decode execution claim holder run", error),
+        )?)?;
     let token = row
         .try_get::<String, _>("holder_token")
         .map_err(|error| database_error("failed to decode execution claim token", error))?;
     Ok(AdmissionLease {
         lane: lane.erased_key(),
+        holder_run_id,
         token: AdmissionToken::new(token)?,
         lease_expires_at_unix_ms: row
             .try_get("lease_expires_at_unix_ms")
@@ -441,8 +479,13 @@ fn optional_execution_claim_lease_from_row(
     else {
         return Ok(None);
     };
+    let holder_run_id =
+        parse_identity::<RunId>(&row.try_get::<String, _>("execution_run_id").map_err(
+            |error| database_error("failed to decode execution claim holder run", error),
+        )?)?;
     Ok(Some(AdmissionLease {
         lane: lane.erased_key(),
+        holder_run_id,
         token: AdmissionToken::new(token)?,
         lease_expires_at_unix_ms: row
             .try_get("lease_expires_at_unix_ms")
@@ -460,8 +503,13 @@ fn execution_claim_status_from_row(
     else {
         return Ok(mfm_store::v1::ExecutionClaimStatus::Unclaimed);
     };
+    let holder_run_id =
+        parse_identity::<RunId>(&row.try_get::<String, _>("execution_run_id").map_err(
+            |error| database_error("failed to decode execution claim holder run", error),
+        )?)?;
     let lease = AdmissionLease {
         lane: lane.erased_key(),
+        holder_run_id,
         token: AdmissionToken::new(token)?,
         lease_expires_at_unix_ms: row
             .try_get("lease_expires_at_unix_ms")
@@ -483,12 +531,21 @@ fn expired_execution_claim_from_row(row: PgRow) -> Result<mfm_store::v1::Expired
         parse_identity::<RunId>(&row.try_get::<String, _>("execution_run_id").map_err(
             |error| database_error("failed to decode expired execution claim run", error),
         )?)?;
-    let lane = mfm_store::v1::ExecutionClaimAdmissionLane::from_run_id(&run_id)?;
+    let lane_id_bytes: Vec<u8> = row
+        .try_get("lane_id")
+        .map_err(|error| database_error("failed to decode expired execution claim lane", error))?;
+    let lane_id_bytes: [u8; 32] = lane_id_bytes.try_into().map_err(|_| {
+        PostgresStoreError::Corruption("execution claim lane id length invalid".to_owned())
+    })?;
+    let lane = mfm_store::v1::ExecutionClaimAdmissionLane::from_stored_id(
+        mfm_store::v1::AdmissionLaneId::from_array(lane_id_bytes),
+    );
     let token = row
         .try_get::<String, _>("holder_token")
         .map_err(|error| database_error("failed to decode expired execution claim token", error))?;
     let lease = AdmissionLease {
         lane: lane.erased_key(),
+        holder_run_id: run_id.clone(),
         token: AdmissionToken::new(token)?,
         lease_expires_at_unix_ms: row.try_get("lease_expires_at_unix_ms").map_err(|error| {
             database_error("failed to decode expired execution claim lease", error)

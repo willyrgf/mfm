@@ -130,7 +130,7 @@ where
         authored_config,
         certification_registry: services.certification_registry(),
         trust_scope_id: services.load_trust_scope_id().await.expect("trust scope"),
-        distinct_run_key: None,
+        invocation_key: None,
     })
     .expect("entry-point launch request")
     .request
@@ -154,7 +154,8 @@ async fn launch_completed(
     let run_id = request.run_id.clone();
     let public_schema_id = public_schema_id(&request);
     let outcome = services.launch_run(request).await.expect(label);
-    let (_, launched) = outcome.into_response_parts();
+    let (_, launched, _) = outcome.into_response_parts();
+    let launched = launched.expect("completed launch returns run");
     assert_eq!(launched.run_mode, RunModeStatus::Completed);
     (run_id, public_schema_id)
 }
@@ -169,9 +170,10 @@ async fn assert_replay_completed(
 }
 
 async fn assert_execution_claim_unclaimed(store: &ContractRunStore, run_id: &mfm_ids::RunId) {
+    let scope = execution_scope_for_run(store, run_id).await;
     assert!(matches!(
         store
-            .execution_claim_status(run_id)
+            .execution_claim_status(&scope)
             .await
             .expect("execution claim status"),
         ExecutionClaimStatus::Unclaimed
@@ -512,11 +514,12 @@ async fn app_resume_completed_run_is_evidence_only_without_live_runners() {
     .await;
     let run_id = request.run_id.clone();
 
-    let (_, launched) = launch_services
+    let (_, launched, _) = launch_services
         .launch_run(request)
         .await
         .expect("launch validate lifecycle")
         .into_response_parts();
+    let launched = launched.expect("completed launch returns run");
     assert_eq!(launched.run_mode, RunModeStatus::Completed);
     assert_execution_claim_unclaimed(&store, &run_id).await;
     let completed_stream = store
@@ -589,6 +592,8 @@ async fn app_runner_reports_execution_claim_lost_after_renewal_failure() {
     )
     .await;
     let run_id = request.run_id.clone();
+    let execution_scope =
+        store::ExecutionClaimScope::from_run_identity_material(&request.identity_material);
     let services_for_launch = services.clone();
     let launch = tokio::spawn(async move {
         services_for_launch
@@ -597,11 +602,12 @@ async fn app_runner_reports_execution_claim_lost_after_renewal_failure() {
             .expect("launch response")
             .into_response_parts()
             .1
+            .expect("launch returns run")
     });
-    let lease = wait_for_live_execution_claim(&store, &run_id).await;
+    let lease = wait_for_live_execution_claim(&store, &execution_scope).await;
     assert!(
         store
-            .release_execution_claim(&run_id, &lease.token)
+            .release_execution_claim(&execution_scope, &run_id, &lease.token)
             .await
             .expect("release execution claim"),
         "test must remove the active claim before renewal"
@@ -1221,7 +1227,7 @@ fn failed_evm<'a, T>() -> EvmCapabilityFuture<'a, T> {
 
 async fn wait_for_live_execution_claim<S>(
     store: &S,
-    run_id: &mfm_ids::RunId,
+    execution_scope: &store::ExecutionClaimScope,
 ) -> store::AdmissionLease
 where
     S: ExecutionClaimStore,
@@ -1229,7 +1235,7 @@ where
 {
     for _ in 0..100 {
         match store
-            .execution_claim_status(run_id)
+            .execution_claim_status(execution_scope)
             .await
             .expect("execution claim status")
         {
@@ -1240,6 +1246,22 @@ where
         }
     }
     panic!("execution claim was not acquired");
+}
+
+async fn execution_scope_for_run(
+    store: &ContractRunStore,
+    run_id: &mfm_ids::RunId,
+) -> store::ExecutionClaimScope {
+    let stream = store.load_run_stream(run_id).await.expect("run stream");
+    stream
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::RunAdmitted(payload) => Some(
+                store::ExecutionClaimScope::from_run_identity_material(&payload.identity_material),
+            ),
+            _ => None,
+        })
+        .expect("RunAdmitted")
 }
 
 struct TestSignerRuntime {

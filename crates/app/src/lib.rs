@@ -1072,42 +1072,44 @@ impl fmt::Display for ManualResolutionDecision {
     }
 }
 
-/// Raw caller material used only to force a distinct run for otherwise identical certified work.
+/// Raw caller material identifying one intended invocation of certified work.
 ///
 /// The raw key is intentionally not exposed after construction. Only its digest may be recorded in
 /// run identity material.
 #[derive(Clone, PartialEq, Eq)]
-pub struct DistinctRunKey(String);
+pub struct InvocationKey(String);
 
-impl DistinctRunKey {
-    /// Creates a checked distinct-run key from the exact caller-supplied UTF-8 string.
+impl InvocationKey {
+    /// Creates a checked invocation key from the exact caller-supplied UTF-8 string.
     pub fn new(value: impl Into<String>) -> Result<Self, AppError> {
         let value = value.into();
-        events::DistinctRunKeyMaterialV1::new(&value).map_err(distinct_run_key_error)?;
+        events::InvocationKeyMaterialV1::new(&value).map_err(invocation_key_error)?;
         Ok(Self(value))
     }
 
     /// Returns the domain-separated digest used by `RunIdentityMaterialV1`.
     pub fn digest(&self) -> Result<ContentDigest, AppError> {
-        events::DistinctRunKeyMaterialV1::new(&self.0)
+        events::InvocationKeyMaterialV1::new(&self.0)
             .and_then(|material| material.digest())
-            .map_err(distinct_run_key_error)
+            .map_err(invocation_key_error)
+    }
+
+    fn mint() -> Result<Self, AppError> {
+        Self::new(format!("mfm.invocation_key.v1:{}", uuid::Uuid::new_v4()))
     }
 }
 
-impl fmt::Debug for DistinctRunKey {
+impl fmt::Debug for InvocationKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("DistinctRunKey")
-            .field(&"<redacted>")
-            .finish()
+        f.debug_tuple("InvocationKey").field(&"<redacted>").finish()
     }
 }
 
-fn distinct_run_key_error(_error: mfm_events::EventError) -> AppError {
+fn invocation_key_error(_error: mfm_events::EventError) -> AppError {
     AppError::new(
         ErrorClass::BadRequest,
-        "DistinctRunKeyInvalid",
-        "Distinct run key must be non-empty and at most 1024 bytes",
+        "InvocationKeyInvalid",
+        "Invocation key must be non-empty and at most 1024 bytes",
     )
 }
 
@@ -1138,8 +1140,8 @@ pub struct EntryPointRunLaunchInput<'a> {
     pub certification_registry: &'a CertificationRegistry,
     /// Store-owned deployment trust scope.
     pub trust_scope_id: TrustScopeId,
-    /// Optional caller material used only to force a distinct run id.
-    pub distinct_run_key: Option<DistinctRunKey>,
+    /// Optional caller material identifying one intended invocation.
+    pub invocation_key: Option<InvocationKey>,
 }
 
 /// App-level evidence for a prepared entry-point op launch.
@@ -1484,8 +1486,8 @@ pub enum RunLaunchOutcomeStatus {
     Admitted,
     /// The launch request attached to an already admitted compatible run.
     Attached,
-    /// The launch request found an already admitted run with an active compatible driver.
-    AlreadyDriving,
+    /// The launch request found active equivalent work and did not admit a new run.
+    AlreadyActive,
 }
 
 impl RunLaunchOutcomeStatus {
@@ -1494,7 +1496,7 @@ impl RunLaunchOutcomeStatus {
         match self {
             Self::Admitted => "admitted",
             Self::Attached => "attached",
-            Self::AlreadyDriving => "already_driving",
+            Self::AlreadyActive => "already_active",
         }
     }
 }
@@ -1518,10 +1520,10 @@ pub enum RunLaunchOutcome {
         /// Current run status for the existing run.
         run: RunResponse,
     },
-    /// This launch found an active compatible driver.
-    AlreadyDriving {
-        /// Current run status for the existing run.
-        run: RunResponse,
+    /// This launch found active equivalent work before run admission.
+    AlreadyActive {
+        /// Active run id holding the equivalent execution lane.
+        active_run_id: RunId,
     },
 }
 
@@ -1531,23 +1533,30 @@ impl RunLaunchOutcome {
         match self {
             Self::Admitted { .. } => RunLaunchOutcomeStatus::Admitted,
             Self::Attached { .. } => RunLaunchOutcomeStatus::Attached,
-            Self::AlreadyDriving { .. } => RunLaunchOutcomeStatus::AlreadyDriving,
+            Self::AlreadyActive { .. } => RunLaunchOutcomeStatus::AlreadyActive,
         }
     }
 
     /// Returns the run response carried by this outcome.
-    pub fn run(&self) -> &RunResponse {
+    pub fn run(&self) -> Option<&RunResponse> {
         match self {
-            Self::Admitted { run } | Self::Attached { run } | Self::AlreadyDriving { run } => run,
+            Self::Admitted { run } | Self::Attached { run } => Some(run),
+            Self::AlreadyActive { .. } => None,
         }
     }
 
-    /// Splits this outcome into the public kind and run response.
-    pub fn into_response_parts(self) -> (RunLaunchOutcomeStatus, RunResponse) {
+    /// Splits this outcome into the public kind, run response, and active run id.
+    pub fn into_response_parts(
+        self,
+    ) -> (RunLaunchOutcomeStatus, Option<RunResponse>, Option<RunId>) {
         match self {
-            Self::Admitted { run } => (RunLaunchOutcomeStatus::Admitted, run),
-            Self::Attached { run } => (RunLaunchOutcomeStatus::Attached, run),
-            Self::AlreadyDriving { run } => (RunLaunchOutcomeStatus::AlreadyDriving, run),
+            Self::Admitted { run } => (RunLaunchOutcomeStatus::Admitted, Some(run), None),
+            Self::Attached { run } => (RunLaunchOutcomeStatus::Attached, Some(run), None),
+            Self::AlreadyActive { active_run_id } => (
+                RunLaunchOutcomeStatus::AlreadyActive,
+                None,
+                Some(active_run_id),
+            ),
         }
     }
 }
@@ -1591,8 +1600,10 @@ impl fmt::Display for PublicOutputResponse {
 pub struct RunStartReport {
     /// Public launch outcome kind.
     pub outcome: RunLaunchOutcomeStatus,
-    /// Current run status.
-    pub run: RunResponse,
+    /// Current run status when a run was admitted or attached.
+    pub run: Option<RunResponse>,
+    /// Active equivalent run id when admission was skipped.
+    pub active_run_id: Option<String>,
     /// Rendered public output when the run completed during launch.
     pub public_output: Option<PublicOutputResponse>,
 }
@@ -2091,6 +2102,8 @@ where
             return Err(run_identity_material_mismatch());
         }
         let identity_material = req.identity_material;
+        let execution_scope =
+            store::ExecutionClaimScope::from_run_identity_material(&identity_material);
         let runtime_spec = CertifiedRuntimeSpec::new(req.certified_spec)?;
         let stream = self
             .store
@@ -2118,20 +2131,64 @@ where
             req.evidence,
             expected_next_seq,
         )?;
-        if let Err(error) = self.scheduler.start_run(&self.store, launch).await {
-            let stream = self
-                .store
-                .load_run_stream(&run_id)
-                .await
-                .map_err(async_app_store_error)?;
-            if !stream.is_empty() {
+        let execution_claim_token = new_execution_claim_token()?;
+        let execution_claim = store::PreparedExecutionClaim::new(
+            execution_scope.clone(),
+            run_id.clone(),
+            execution_claim_token.clone(),
+        );
+        match self
+            .scheduler
+            .start_run_with_execution_claim(&self.store, launch, execution_claim)
+            .await
+        {
+            Ok(store::CommitOutcome::Appended(_)) => {}
+            Ok(store::CommitOutcome::Idempotent(_)) => {
                 return self
                     .attach_to_existing_run(&run_id, &identity_material)
                     .await;
             }
-            return Err(error.into());
+            Ok(store::CommitOutcome::ExecutionClaimBusy(busy)) => {
+                let Some(holder) = busy.holder else {
+                    return Err(AppError::backend(
+                        ErrorClass::Internal,
+                        "ExecutionClaimBusyWithoutHolder",
+                        "execution claim busy response did not include a holder",
+                    ));
+                };
+                return Ok(RunLaunchOutcome::AlreadyActive {
+                    active_run_id: holder.holder_run_id,
+                });
+            }
+            Ok(store::CommitOutcome::AdmissionBlocked(_)) => {
+                return Err(AppError::backend(
+                    ErrorClass::Internal,
+                    "RunAdmissionBlockedUnexpectedly",
+                    "run admission was blocked by a resource lane",
+                ));
+            }
+            Err(error) => {
+                let stream = self
+                    .store
+                    .load_run_stream(&run_id)
+                    .await
+                    .map_err(async_app_store_error)?;
+                if !stream.is_empty() {
+                    return self
+                        .attach_to_existing_run(&run_id, &identity_material)
+                        .await;
+                }
+                return Err(error.into());
+            }
         }
-        let status = self.drive_until_blocked(&runtime_spec, &run_id).await?;
+        let status = self
+            .drive_until_blocked_with_existing_claim(
+                &runtime_spec,
+                &run_id,
+                &execution_scope,
+                &execution_claim_token,
+            )
+            .await?;
         let run = self
             .run_response_from_verified_status(&run_id, status)
             .await?;
@@ -2153,8 +2210,11 @@ where
             .public_schema_id
             .clone();
         let launch = self.launch_run(prepared.request).await?;
-        let (outcome, run) = launch.into_response_parts();
-        let public_output = if run.run_mode == RunModeStatus::Completed {
+        let (outcome, run, active_run_id) = launch.into_response_parts();
+        let public_output = if matches!(
+            run.as_ref().map(|run| run.run_mode),
+            Some(RunModeStatus::Completed)
+        ) {
             Some(
                 self.public_output(&run_id, &public_output_schema_id)
                     .await?,
@@ -2165,6 +2225,7 @@ where
         Ok(RunStartReport {
             outcome,
             run,
+            active_run_id: active_run_id.map(|run_id| run_id.to_string()),
             public_output,
         })
     }
@@ -2189,11 +2250,15 @@ where
         )?;
         match self
             .store
-            .execution_claim_status(run_id)
+            .execution_claim_status(&store::ExecutionClaimScope::from_run_identity_material(
+                identity_material,
+            ))
             .await
             .map_err(async_app_store_error)?
         {
-            store::ExecutionClaimStatus::Live(_) => Ok(RunLaunchOutcome::AlreadyDriving { run }),
+            store::ExecutionClaimStatus::Live(lease) => Ok(RunLaunchOutcome::AlreadyActive {
+                active_run_id: lease.holder_run_id,
+            }),
             store::ExecutionClaimStatus::Unclaimed | store::ExecutionClaimStatus::Expired(_) => {
                 Ok(RunLaunchOutcome::Attached { run })
             }
@@ -2206,12 +2271,16 @@ where
         run_id: &RunId,
     ) -> Result<DriveStatus, AppError> {
         let context = self.load_verified_status_read_context(run_id).await?;
+        let execution_scope = store::ExecutionClaimScope::from_run_identity_material(
+            &context.read.view().run_admitted().identity_material,
+        );
         if run_projection_has_terminal_completion(
             run_id,
             context.runtime_spec(),
             context.projection(),
         )? {
-            self.reap_expired_execution_claim_if_present(run_id).await?;
+            self.reap_expired_execution_claim_if_present(&execution_scope, run_id)
+                .await?;
             return Ok(DriveStatus::Observed);
         }
         self.scheduler
@@ -2223,19 +2292,59 @@ where
         .await?;
         self.scheduler
             .validate_admitted_run_ingress(runtime_spec, &launch_evidence)?;
-        let mut lease = match self.acquire_execution_claim_for_drive(run_id).await? {
+        let mut lease = match self
+            .acquire_execution_claim_for_drive(&execution_scope, run_id)
+            .await?
+        {
             ExecutionClaimAcquire::Acquired(lease) => lease,
             ExecutionClaimAcquire::Busy => return Ok(DriveStatus::ExecutionClaimBusy),
         };
+        self.drive_until_blocked_with_lease(runtime_spec, run_id, &execution_scope, &mut lease)
+            .await
+    }
+
+    async fn drive_until_blocked_with_existing_claim(
+        &self,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        execution_scope: &store::ExecutionClaimScope,
+        token: &store::AdmissionToken,
+    ) -> Result<DriveStatus, AppError> {
+        let mut lease = match self
+            .store
+            .execution_claim_status(execution_scope)
+            .await
+            .map_err(async_app_store_error)?
+        {
+            store::ExecutionClaimStatus::Live(lease)
+                if &lease.holder_run_id == run_id && &lease.token == token =>
+            {
+                lease
+            }
+            store::ExecutionClaimStatus::Live(_) => return Ok(DriveStatus::ExecutionClaimBusy),
+            store::ExecutionClaimStatus::Expired(_) => return Ok(DriveStatus::ExecutionClaimLost),
+            store::ExecutionClaimStatus::Unclaimed => return Ok(DriveStatus::ExecutionClaimLost),
+        };
+        self.drive_until_blocked_with_lease(runtime_spec, run_id, execution_scope, &mut lease)
+            .await
+    }
+
+    async fn drive_until_blocked_with_lease(
+        &self,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        execution_scope: &store::ExecutionClaimScope,
+        lease: &mut store::AdmissionLease,
+    ) -> Result<DriveStatus, AppError> {
         loop {
             if !self
-                .renew_execution_claim_or_lost(run_id, &mut lease)
+                .renew_execution_claim_or_lost(execution_scope, run_id, lease)
                 .await?
             {
                 return Ok(DriveStatus::ExecutionClaimLost);
             }
             let step = self
-                .drive_once_with_execution_claim(runtime_spec, run_id, &mut lease)
+                .drive_once_with_execution_claim(runtime_spec, run_id, execution_scope, lease)
                 .await?;
             if step.claim_lost {
                 return Ok(DriveStatus::ExecutionClaimLost);
@@ -2247,7 +2356,7 @@ where
                 context.projection(),
             )? || step.status == SchedulerStatus::PublicOutputProjected
             {
-                self.release_execution_claim_if_holder(run_id, &lease)
+                self.release_execution_claim_if_holder(execution_scope, run_id, lease)
                     .await?;
                 return Ok(step.status.into());
             }
@@ -2261,19 +2370,24 @@ where
 
     async fn acquire_execution_claim_for_drive(
         &self,
+        execution_scope: &store::ExecutionClaimScope,
         run_id: &RunId,
     ) -> Result<ExecutionClaimAcquire, AppError> {
         loop {
             match self
                 .store
-                .execution_claim_status(run_id)
+                .execution_claim_status(execution_scope)
                 .await
                 .map_err(async_app_store_error)?
             {
                 store::ExecutionClaimStatus::Live(_) => return Ok(ExecutionClaimAcquire::Busy),
                 store::ExecutionClaimStatus::Expired(lease) => {
                     self.store
-                        .reap_expired_execution_claim(run_id, &lease.token)
+                        .reap_expired_execution_claim(
+                            execution_scope,
+                            &lease.holder_run_id,
+                            &lease.token,
+                        )
                         .await
                         .map_err(async_app_store_error)?;
                 }
@@ -2281,7 +2395,7 @@ where
                     let token = new_execution_claim_token()?;
                     match self
                         .store
-                        .acquire_execution_claim(run_id, token)
+                        .acquire_execution_claim(execution_scope, run_id, token)
                         .await
                         .map_err(async_app_store_error)?
                     {
@@ -2297,16 +2411,17 @@ where
 
     async fn reap_expired_execution_claim_if_present(
         &self,
-        run_id: &RunId,
+        execution_scope: &store::ExecutionClaimScope,
+        _run_id: &RunId,
     ) -> Result<(), AppError> {
         if let store::ExecutionClaimStatus::Expired(lease) = self
             .store
-            .execution_claim_status(run_id)
+            .execution_claim_status(execution_scope)
             .await
             .map_err(async_app_store_error)?
         {
             self.store
-                .reap_expired_execution_claim(run_id, &lease.token)
+                .reap_expired_execution_claim(execution_scope, &lease.holder_run_id, &lease.token)
                 .await
                 .map_err(async_app_store_error)?;
         }
@@ -2317,10 +2432,17 @@ where
         &self,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
+        execution_scope: &store::ExecutionClaimScope,
         lease: &mut store::AdmissionLease,
     ) -> Result<ClaimedDriveStep, AppError> {
         let scheduler = self.scheduler.clone();
-        let step = scheduler.drive_once(&self.store, runtime_spec, run_id, lease.token.clone());
+        let step = scheduler.drive_once(
+            &self.store,
+            runtime_spec,
+            run_id,
+            execution_scope,
+            lease.token.clone(),
+        );
         tokio::pin!(step);
         loop {
             tokio::select! {
@@ -2338,7 +2460,7 @@ where
                     };
                 }
                 _ = tokio::time::sleep(self.execution_claim_heartbeat_interval) => {
-                    if !self.renew_execution_claim_or_lost(run_id, lease).await? {
+                    if !self.renew_execution_claim_or_lost(execution_scope, run_id, lease).await? {
                         let status = match (&mut step).await {
                             Ok(status) => status,
                             Err(mfm_runtime::RuntimeError::ExecutionClaim(_)) => {
@@ -2355,12 +2477,13 @@ where
 
     async fn renew_execution_claim_or_lost(
         &self,
+        execution_scope: &store::ExecutionClaimScope,
         run_id: &RunId,
         lease: &mut store::AdmissionLease,
     ) -> Result<bool, AppError> {
         match self
             .store
-            .renew_execution_claim(run_id, &lease.token)
+            .renew_execution_claim(execution_scope, run_id, &lease.token)
             .await
             .map_err(async_app_store_error)?
         {
@@ -2374,11 +2497,12 @@ where
 
     async fn release_execution_claim_if_holder(
         &self,
+        execution_scope: &store::ExecutionClaimScope,
         run_id: &RunId,
         lease: &store::AdmissionLease,
     ) -> Result<(), AppError> {
         self.store
-            .release_execution_claim(run_id, &lease.token)
+            .release_execution_claim(execution_scope, run_id, &lease.token)
             .await
             .map_err(async_app_store_error)?;
         Ok(())
@@ -3851,11 +3975,7 @@ pub fn prepare_entry_point_run_launch(
         resolved_op_id,
         entry_point_registry_digest: registry_digest,
     };
-    let distinct_run_key_digest = input
-        .distinct_run_key
-        .as_ref()
-        .map(DistinctRunKey::digest)
-        .transpose()?;
+    let invocation_key_digest = invocation_key_digest_or_mint(input.invocation_key.as_ref())?;
     let runtime_entry_point_evidence = events::EntryPointLaunchEvidence {
         resolved_op_id: events::EntryPointOpId::new(evidence.resolved_op_id.to_string()).map_err(
             |_| {
@@ -3872,7 +3992,7 @@ pub fn prepare_entry_point_run_launch(
             certified_spec,
             registry: &scoped_registry,
             trust_scope_id: input.trust_scope_id,
-            distinct_run_key_digest,
+            invocation_key_digest,
             entry_point_evidence: runtime_entry_point_evidence,
         },
         config_inputs,
@@ -3892,7 +4012,7 @@ pub fn prepare_typed_program_run_launch_for_test(
     seed_material: BTreeMap<SeedId, PlainCanonicalJsonBytes>,
     certification_registry: &CertificationRegistry,
     trust_scope_id: TrustScopeId,
-    distinct_run_key: Option<DistinctRunKey>,
+    invocation_key: Option<InvocationKey>,
 ) -> Result<RunLaunchRequest, AppError> {
     let plan =
         mfm_program::TypedProgramLaunchPlan::from_draft_and_seed_material(draft, seed_material)
@@ -3931,16 +4051,13 @@ pub fn prepare_typed_program_run_launch_for_test(
     config_inputs.extend(framework_config_launch_artifacts_for_spec(
         &certified_spec.envelope().spec,
     )?);
-    let distinct_run_key_digest = distinct_run_key
-        .as_ref()
-        .map(DistinctRunKey::digest)
-        .transpose()?;
+    let invocation_key_digest = invocation_key_digest_or_mint(invocation_key.as_ref())?;
     prepare_certified_run_launch(
         CertifiedRunLaunchInput {
             certified_spec,
             registry: &scoped_registry,
             trust_scope_id,
-            distinct_run_key_digest,
+            invocation_key_digest,
             entry_point_evidence: events::EntryPointLaunchEvidence {
                 resolved_op_id: events::EntryPointOpId::new("mfm.test.typed_program_internal_test")
                     .map_err(|_| {
@@ -3979,8 +4096,8 @@ pub(crate) struct CertifiedRunLaunchInput<'a> {
     pub(crate) registry: &'a CertificationRegistry,
     /// Store-owned deployment trust scope.
     pub(crate) trust_scope_id: TrustScopeId,
-    /// Optional distinct-run key digest.
-    pub(crate) distinct_run_key_digest: Option<ContentDigest>,
+    /// Required invocation key digest.
+    pub(crate) invocation_key_digest: ContentDigest,
     /// Public entry-point operation evidence selected by app assembly.
     pub(crate) entry_point_evidence: events::EntryPointLaunchEvidence,
 }
@@ -4002,7 +4119,7 @@ fn prepare_certified_run_launch(
     let identity_material = events::RunIdentityMaterialV1 {
         certified_spec_hash: runtime_spec.spec_hash().clone(),
         trust_scope_id: input.trust_scope_id,
-        distinct_run_key_digest: input.distinct_run_key_digest,
+        invocation_key_digest: input.invocation_key_digest,
     };
     let run_id = identity_material.derive_run_id().map_err(|_| {
         AppError::backend(
@@ -4024,6 +4141,13 @@ fn prepare_certified_run_launch(
             seed_cells,
         },
     })
+}
+
+fn invocation_key_digest_or_mint(key: Option<&InvocationKey>) -> Result<ContentDigest, AppError> {
+    match key {
+        Some(key) => key.digest(),
+        None => InvocationKey::mint()?.digest(),
+    }
 }
 
 fn run_identity_material_mismatch() -> AppError {

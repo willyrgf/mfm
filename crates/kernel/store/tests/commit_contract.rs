@@ -43,15 +43,16 @@ use mfm_store::v1::{
     ArtifactEvidenceRef, AsyncInMemoryRunStore, AttemptStatus, AttemptTerminal,
     CellTerminalProjection, CertifiedRunStoreAuthority, CommitArtifactEvidenceSet, CommitKey,
     CommitOutcome, CommitPreconditions, CommitRequest, CommittedRunStream,
-    EventArtifactReferenceSource, ExecutionClaimAdmissionLane, ExistingArtifactAdmission,
-    ForwardLedgerClassification, KernelEventEnvelope, ManualBlockReason, ManualResolution,
-    ManualResolutionProjection, PreparedArtifactBytes, PreparedCommit, PreparedCommitBundle,
-    PreparedCommitPlan, ProjectionSnapshot, PublicOutputProjection, RequiredRunState,
-    ResourceAdmissionLane, ResourceLaneKey, RunAdmission, RunCompletionProjection, RunEventStore,
-    RunMode, RunState, SagaEngagementProjection, SagaEngagementReason, SagaTerminal,
-    SagaTerminalProof, SideEffectLedgerPhase, SideEffectPairLedgerRef, SideEffectPhase,
-    SideEffectTerminal, StateAttemptStarted, StoreError, StreamSeq, TrustScopeId, TrustScopeStore,
-    EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS, EXECUTION_CLAIM_LEASE_TTL_SECS,
+    EventArtifactReferenceSource, ExecutionClaimAdmissionLane, ExecutionClaimScope,
+    ExistingArtifactAdmission, ForwardLedgerClassification, KernelEventEnvelope, ManualBlockReason,
+    ManualResolution, ManualResolutionProjection, PreparedArtifactBytes, PreparedCommit,
+    PreparedCommitBundle, PreparedCommitPlan, ProjectionSnapshot, PublicOutputProjection,
+    RequiredRunState, ResourceAdmissionLane, ResourceLaneKey, RunAdmission,
+    RunCompletionProjection, RunEventStore, RunMode, RunState, SagaEngagementProjection,
+    SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectLedgerPhase,
+    SideEffectPairLedgerRef, SideEffectPhase, SideEffectTerminal, StateAttemptStarted, StoreError,
+    StreamSeq, TrustScopeId, TrustScopeStore, EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS,
+    EXECUTION_CLAIM_LEASE_TTL_SECS,
 };
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -477,6 +478,13 @@ fn run_identity_material_for_saga_policy(
         .spec_hash()
         .expect("saga authority spec hash");
     run_identity_material_for_test(certified_spec_hash, &trust_scope_hex(byte))
+}
+
+fn execution_claim_scope(byte: u8) -> ExecutionClaimScope {
+    ExecutionClaimScope::from_run_identity_material(&run_identity_material_for_saga_policy(
+        byte,
+        &SagaPolicySpec::NoSideEffects,
+    ))
 }
 
 fn run_identity_material_for_run_id(
@@ -1010,8 +1018,8 @@ fn admission_lane_constructors_bind_class_to_mode() {
     assert_eq!(resource_lane.class(), AdmissionLaneClass::ResourceLane);
     assert_eq!(resource_lane.mode(), AdmissionLaneMode::WaitFifo);
 
-    let execution_lane =
-        ExecutionClaimAdmissionLane::from_run_id(&run_id(240)).expect("execution admission lane");
+    let execution_lane = ExecutionClaimAdmissionLane::from_scope(&execution_claim_scope(240))
+        .expect("execution admission lane");
     assert_eq!(execution_lane.class(), AdmissionLaneClass::ExecutionClaim);
     assert_eq!(execution_lane.mode(), AdmissionLaneMode::NowaitSkip);
     assert_ne!(
@@ -1068,7 +1076,7 @@ fn admission_lane_helpers_are_stable_and_domain_separated() {
     let resource_retry_lock =
         admission_advisory_lock_key(&lane.erased_key()).expect("resource advisory lock retry");
     let execution_lock = admission_advisory_lock_key(
-        &ExecutionClaimAdmissionLane::from_run_id(&run_id)
+        &ExecutionClaimAdmissionLane::from_scope(&execution_claim_scope(241))
             .expect("execution lane")
             .erased_key(),
     )
@@ -7841,6 +7849,9 @@ fn fact_recorded_same_subject_claims_are_claim_id_distinct() {
         let batch = match outcome {
             CommitOutcome::Appended(batch) | CommitOutcome::Idempotent(batch) => batch,
             CommitOutcome::AdmissionBlocked(_) => panic!("fact append must not admission-block"),
+            CommitOutcome::ExecutionClaimBusy(_) => {
+                panic!("fact append must not hit execution claim admission")
+            }
         };
         assert_eq!(batch.events().len(), 1);
         &batch.events()[0]

@@ -218,7 +218,7 @@ Request shape:
   "config": {
     "...": "entry-point config"
   },
-  "distinct_run_key": "optional-key"
+  "invocation_key": "optional-key"
 }
 ```
 
@@ -230,16 +230,17 @@ Request notes:
 - `config` is required. With `config_format: "toml"`, it must be a string. With
   `config_format: "json"`, it may be a JSON object/array/value accepted by the selected op.
 - Normal start derives the typed run id from certified run identity material: certified spec hash,
-  store trust scope, and an optional distinct-run key digest.
-- `distinct_run_key` is optional. Supplying it forces a distinct run for otherwise identical
-  certified work. The raw key is not persisted; only a domain-separated digest enters run identity
-  material.
+  store trust scope, and a required invocation key digest.
+- `invocation_key` is optional at the API boundary. Supplying it makes retries target the same run.
+  When omitted, the app mints a fresh opaque invocation key before deriving `run_id`. The raw key is
+  not persisted; only a domain-separated digest enters run identity material.
 - `run_id` is not a normal start field.
 
-The response is `{"outcome": "...", "run": ..., "public_output": ...}` inside the standard success
-envelope. Fresh admissions report `admitted`. Duplicate starts for the same certified run identity
-report `attached` without driving; if another process holds a live execution claim they report
-`already_driving`.
+The response is `{"outcome": "...", "run": ..., "active_run_id": "...", "public_output": ...}`
+inside the standard success envelope. Fresh admissions report `admitted`. Duplicate starts for the
+same certified run identity report `attached` without driving. If another process holds the
+execution lane for the same op/config base identity, start reports `already_active` with
+`active_run_id` and omits `run`.
 `public_output` is present when the run completes while driving and the op exposes a public output
 schema id.
 

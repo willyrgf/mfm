@@ -518,19 +518,30 @@ where
     S: ExecutionClaimStore + Sync + 'a,
 {
     Box::pin(async move {
+        let identity = run_identity_material_for_test(
+            SpecHash::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                fixed_digest_bytes_for_test(0x51),
+            ),
+            "51515151515151515151515151515151",
+        );
+        let scope = ExecutionClaimScope::from_run_identity_material(&identity);
         let admitted = store
-            .acquire_execution_claim(run_id, holder.clone())
+            .acquire_execution_claim(&scope, run_id, holder.clone())
             .await?;
         let NowaitSkipAdmissionResult::Admitted(first_lease) = admitted else {
             panic!("first execution claim should be admitted");
         };
         assert_eq!(first_lease.token, holder);
         assert!(matches!(
-            store.execution_claim_status(run_id).await?,
-            ExecutionClaimStatus::Live(status) if status.token == first_lease.token
+            store.execution_claim_status(&scope).await?,
+            ExecutionClaimStatus::Live(status)
+                if status.token == first_lease.token && status.holder_run_id == *run_id
         ));
 
-        let busy = store.acquire_execution_claim(run_id, other.clone()).await?;
+        let busy = store
+            .acquire_execution_claim(&scope, run_id, other.clone())
+            .await?;
         let NowaitSkipAdmissionResult::Busy(busy) = busy else {
             panic!("second execution claim should be busy");
         };
@@ -539,11 +550,18 @@ where
             first_lease.token
         );
 
-        assert!(store.renew_execution_claim(run_id, &other).await?.is_none());
-        assert!(!store.release_execution_claim(run_id, &other).await?);
+        assert!(store
+            .renew_execution_claim(&scope, run_id, &other)
+            .await?
+            .is_none());
+        assert!(
+            !store
+                .release_execution_claim(&scope, run_id, &other)
+                .await?
+        );
 
         let renewed = store
-            .renew_execution_claim(run_id, &first_lease.token)
+            .renew_execution_claim(&scope, run_id, &first_lease.token)
             .await?
             .expect("matching token returns lease");
         assert_eq!(renewed.token, first_lease.token);
@@ -551,15 +569,15 @@ where
 
         assert!(
             store
-                .release_execution_claim(run_id, &renewed.token)
+                .release_execution_claim(&scope, run_id, &renewed.token)
                 .await?
         );
         assert!(matches!(
-            store.execution_claim_status(run_id).await?,
+            store.execution_claim_status(&scope).await?,
             ExecutionClaimStatus::Unclaimed
         ));
         assert!(matches!(
-            store.acquire_execution_claim(run_id, other).await?,
+            store.acquire_execution_claim(&scope, run_id, other).await?,
             NowaitSkipAdmissionResult::Admitted(_)
         ));
         Ok(())
@@ -795,8 +813,15 @@ pub fn run_identity_material_for_test(
         certified_spec_hash,
         trust_scope_id: TrustScopeId::new(format!("{}{}", TrustScopeId::PREFIX, trust_scope_hex))
             .expect("test trust scope"),
-        distinct_run_key_digest: None,
+        invocation_key_digest: invocation_key_digest_for_test(trust_scope_hex),
     }
+}
+
+fn invocation_key_digest_for_test(trust_scope_hex: &str) -> ContentDigest {
+    ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(format!("mfm.store.test.invocation:{trust_scope_hex}").as_bytes()),
+    )
 }
 
 /// Builds side-effect terminal policies for projected side-effect ledgers in one run.

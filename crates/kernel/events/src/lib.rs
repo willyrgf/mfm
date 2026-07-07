@@ -40,9 +40,9 @@ pub enum EventError {
         /// Stable rejection reason.
         reason: &'static str,
     },
-    /// A distinct-run key failed validation.
-    #[error("invalid distinct run key: {reason}")]
-    InvalidDistinctRunKey {
+    /// An invocation key failed validation.
+    #[error("invalid invocation key: {reason}")]
+    InvalidInvocationKey {
         /// Stable rejection reason.
         reason: &'static str,
     },
@@ -931,34 +931,34 @@ pub mod v1 {
         pub kind: SideEffectEventKind,
     }
 
-    /// Transient hash-defining material for a caller-requested distinct run.
+    /// Transient hash-defining material for a caller-requested invocation.
     ///
     /// The raw key is never persisted. Only the digest returned by [`Self::digest`] may enter
     /// [`RunIdentityMaterialV1`].
-    pub struct DistinctRunKeyMaterialV1<'a> {
+    pub struct InvocationKeyMaterialV1<'a> {
         raw_key: &'a str,
     }
 
-    impl<'a> DistinctRunKeyMaterialV1<'a> {
+    impl<'a> InvocationKeyMaterialV1<'a> {
         /// Stable canonical domain.
-        pub const DOMAIN: &'static str = "mfm.distinct_run_key.v1";
+        pub const DOMAIN: &'static str = "mfm.invocation_key.v1";
         /// Maximum accepted raw key size in bytes.
         pub const MAX_RAW_KEY_BYTES: usize = 1024;
 
-        /// Creates transient distinct-run material from the exact caller-supplied UTF-8 key.
+        /// Creates transient invocation material from the exact caller-supplied UTF-8 key.
         pub fn new(raw_key: &'a str) -> Result<Self> {
             if raw_key.is_empty() {
-                return Err(EventError::InvalidDistinctRunKey { reason: "empty" });
+                return Err(EventError::InvalidInvocationKey { reason: "empty" });
             }
             if raw_key.len() > Self::MAX_RAW_KEY_BYTES {
-                return Err(EventError::InvalidDistinctRunKey {
+                return Err(EventError::InvalidInvocationKey {
                     reason: "too_large",
                 });
             }
             Ok(Self { raw_key })
         }
 
-        /// Returns canonical JSON bytes for the distinct-run key digest material.
+        /// Returns canonical JSON bytes for the invocation key digest material.
         pub fn canonical_json(&self) -> Result<PlainCanonicalJsonBytes> {
             canonical_json(serde_json::json!({
                 "domain": Self::DOMAIN,
@@ -975,9 +975,9 @@ pub mod v1 {
         }
     }
 
-    impl std::fmt::Debug for DistinctRunKeyMaterialV1<'_> {
+    impl std::fmt::Debug for InvocationKeyMaterialV1<'_> {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("DistinctRunKeyMaterialV1")
+            f.debug_struct("InvocationKeyMaterialV1")
                 .field("raw_key", &"<redacted>")
                 .finish()
         }
@@ -990,8 +990,8 @@ pub mod v1 {
         pub certified_spec_hash: SpecHash,
         /// Store-owned deployment trust scope.
         pub trust_scope_id: TrustScopeId,
-        /// Optional digest of caller-supplied distinct-run material.
-        pub distinct_run_key_digest: Option<ContentDigest>,
+        /// Digest of caller-supplied or app-minted invocation material.
+        pub invocation_key_digest: ContentDigest,
     }
 
     impl RunIdentityMaterialV1 {
@@ -1002,7 +1002,7 @@ pub mod v1 {
         pub fn canonical_json(&self) -> Result<PlainCanonicalJsonBytes> {
             canonical_json(serde_json::json!({
                 "certified_spec_hash": self.certified_spec_hash.as_str(),
-                "distinct_run_key_digest": self.distinct_run_key_digest.as_ref().map(ContentDigest::as_str),
+                "invocation_key_digest": self.invocation_key_digest.as_str(),
                 "domain": Self::DOMAIN,
                 "trust_scope_id": self.trust_scope_id.as_str(),
             }))
@@ -3485,9 +3485,9 @@ pub mod v1 {
                         EventFieldCardinality::Required,
                     ),
                     schema_field(
-                        "distinct_run_key_digest",
+                        "invocation_key_digest",
                         "ContentDigest",
-                        EventFieldCardinality::Optional,
+                        EventFieldCardinality::Required,
                     ),
                 ],
             ),
