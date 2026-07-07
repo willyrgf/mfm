@@ -360,13 +360,11 @@ do not stage, read, or migrate workflow artifacts through filesystem artifact ro
 migrations are owned by `crates/storages/stream-store-postgres`; runtime callers validate schema
 contract shape and must not run startup auto-DDL. Because MFM is pre-production, replacing a
 persisted contract shape is a destructive schema change that updates the baseline directly.
-Logical-key admission folds
-authoritative `run_events`; there is no logical-key admission index. Admission-lane rows are
-operational coordination only. In v1 they serve single-lane FIFO resource claims and nowait execution
-claims; they can preserve retry order or active-driver liveness, but cannot grant ownership and are
-never semantic authority for resume, replay, public-output rendering, side-effect legality, or
-completion. Observation rows and list/watch cursors are likewise never semantic authority for those
-decisions.
+Existing-run detection folds authoritative `run_events`; there is no separate run-admission index.
+Admission-lane rows are operational coordination only. They may select who tries next or who is the
+current active driver, but they never grant replay, resume, public-output, side-effect, resource
+ownership, or terminal-state authority. Observation rows and list/watch cursors have the same limit:
+they are read models, not authority.
 
 Production deployments must give the Postgres run store a dedicated MFM database tenancy. List/watch
 cursors order `commits` rows by `(append_xid, commit_sort_key)` behind a snapshot `xmin`
@@ -375,58 +373,56 @@ unrelated long-lived transactions can therefore delay observation frontier advan
 and artifact cleanup have no public v1 maintenance entry points; any future maintenance role must
 first specify Postgres roles, ownership, credentials, and restore/clone runbooks.
 
-For single-lane exclusive resource-lane claim commits, Postgres enforces FIFO under the lane advisory
-transaction lock before materializing `ResourceLaneClaimed`: a claim can commit only when the one
-requested lane has no active authoritative holder and no earlier live waiter. A
-`AdmissionBlocked` result persists no run event, commit, resource-lane claim,
-resource-lane release, lane-transition, or other MFM domain authority row, but it may insert or
-refresh one mutable operational waiter row. Waiter leases bound dead process impact; expired,
-or admitted waiters no longer block later waiters. Retries for an expired deterministic admission
-token reuse the same waiter id but receive a fresh lane-local ticket, so stale priority is not
-restored. Execution claims use the same admission-lane table as `nowait_skip` holder leases keyed by
-base work identity (`certified_spec_hash` + `trust_scope_id`) and store the holder `run_id`
-separately; acquire does not auto-reap expired holders, and renew/release/reap only mutate when both
-the holder run id and token still match the current holder. The store validates prepared claim
-semantics before enqueueing a waiter, preventing malformed claims from occupying the FIFO head.
-Release notifications, if present, are wake hints only and do not grant ownership.
+v1 has two operational lane uses:
+
+- execution lanes: `nowait_skip` leases keyed by base work identity
+  (`certified_spec_hash` + `trust_scope_id`) with the concrete holder `run_id` stored separately;
+- resource-admission waiters: FIFO waiters for one certified exclusive side-effect resource claim.
+
+Execution-lane acquire, renew, release, and reap require the holder `run_id` and token to match the
+current row. Acquire does not auto-reap expired holders. Resource-admission checks run under the
+store transaction and may use Postgres advisory transaction locks as an implementation detail. A
+resource claim commits only when the certified lane has no active authoritative holder and no earlier
+live waiter. `AdmissionBlocked` persists no run event, commit, resource-lane claim/release,
+lane-transition, or other domain authority row; it may insert or refresh one mutable waiter row.
+Expired or admitted waiters no longer block later attempts, and retries after expiry receive a fresh
+lane-local ticket. Release notifications are wake hints only.
 
 ## Process-Fungible Execution
 
-MFM is a Postgres-coordinated durable execution fabric. The semantic unit is the certified run, not
-the process that happens to drive it. Correctness lives in the certified spec, the append-only run
-stream, and the store transaction boundary. Process topology is an operational deployment choice:
-one service may drive many runs, many invokers may each drive one run, and compatible workers may
-resume the same run at different times without changing the run's meaning.
+MFM runs are durable certified work, not process-owned work. A process can start, drive, stop, crash,
+or resume, but the run's meaning comes only from the certified spec, `RunAdmitted`, the append-only
+stream, and store validation.
 
-Workers are disposable and interchangeable only within the run's certified executable and capability
-bindings. A worker may drive a run when it matches the stored executable identities, has the required
-runtime capability bindings, and holds the current execution claim token for the run's base work
-identity. A same-run launcher with compatible bindings attaches when no holder is active. A launcher
-for another invocation of the same base work reports `already_active` with the holder run id while the
-execution lane is held. A launcher with incompatible executable bindings reports without driving.
-These checks are determinism guards, not run identity material.
+The model has three identities:
 
-Leases, admission waiters, execution claims, notifications, and observation cursors are operational
-liveness mechanisms. They can reduce duplicate effort, preserve single-lane FIFO retry order, wake
-blocked invokers, or coordinate the current active driver. They do not grant semantic authority to
-append events, replay, resume, render public output, own resource lanes, cross side-effect
-boundaries, or decide terminal run state. A false reap or duplicate execution-claim holder can waste
-work, but the per-run append transaction, prepared commit authority, stream preconditions, resource
-lane authority events, side-effect fencing, and certified verification rules remain the safety
-boundary.
+- run identity: `certified_spec_hash` + store-owned `trust_scope_id` +
+  `invocation_key_digest`; this derives `run_id` and is recorded in `RunAdmitted`;
+- execution lane: `certified_spec_hash` + `trust_scope_id`; this allows at most one live driver for
+  the same base work in one trust scope;
+- resource lane: the certified side-effect resource key resolved by state preflight; this protects
+  external mutation.
 
-External mutation is the one boundary that cannot be made atomic with the store transaction. MFM
-therefore corners external effects into the certified side-effect ledger: resource-lane exclusivity,
-typed idempotency, prepared invocation evidence, receipt/finality verification, recovery evidence,
-and saga engagement are the authority. Lease expiry is never permission to redo an external
-mutation; it is permission to re-examine the durable ledger and either continue from recorded
-evidence, record defended terminal evidence, or block for manual/resolution work under certified
-policy.
+A worker may drive a run only after all execution validations pass:
+
+- the stored stream validates against the certified runtime spec and recorded run identity;
+- the worker's executable and capability bindings match the stored admission evidence;
+- the worker holds the live execution-claim token for the run's execution lane and holder `run_id`.
+
+Public start uses the same rules. If the requested `run_id` already exists, compatible callers attach
+or observe `already_active`. If a different invocation of the same base work is already driving, the
+execution lane returns `already_active` with the holder `run_id` and no contender `RunAdmitted` event
+is appended.
+
+Execution lanes reduce duplicate live work; resource lanes protect side effects. Neither replaces the
+other. Execution-claim expiry is not permission to repeat an external mutation. It is permission to
+reload the stream and either continue from recorded side-effect evidence, record defended terminal
+evidence, or block for certified manual/resolution policy.
 
 v1 is invoker-driven and manual-resumable. Automatic dead-driver takeover, background worker-pool
 dispatch, feed-driven dispatch, `due_at` re-wake, long-wait tenure release, pipelined nonces, and
-multi-lane admission remain deferred unless this document and `docs/saga.md` are updated with a new
-certified contract.
+multi-lane admission remain deferred unless this document and `docs/saga.md` define a new certified
+contract.
 
 ## Runtime
 
@@ -535,18 +531,18 @@ recorded identity material, and `RunAdmitted` records the material so attach, re
 and public-output authority can fail closed on identity mismatch. Raw caller-supplied run ids are not
 a normal launch surface.
 
-Execution claims are operational liveness, not run authority. v1 uses a claim lane keyed by
-`ExecutionClaimScope` (`certified_spec_hash` + `trust_scope_id`) with a holder `run_id`, a 60 second
-TTL, and a 20 second heartbeat interval. Public start admission and initial execution-claim acquire
-are one store admission operation: if the execution lane is held, no `RunAdmitted` event is committed
-for the contender and the caller receives `already_active` with the active holder run id. The invoker
-that starts or resumes the run drives it while renewing the claim; duplicate compatible same-run
-launchers attach/report, and incompatible executable bindings report without driving. Automatic
-dead-driver takeover, background worker-pool dispatch, feed-driven dispatch, `due_at` re-wake, and
-long-wait tenure release are deferred. Manual `run resume <run_id>` is the v1 recovery trigger.
-While short receipt-level waits are active, the invoker loop keeps heartbeating instead of releasing
-tenure. Runtime drive entry points require a live execution-claim token and an `ExecutionClaimStore`;
-callers without the current token cannot drive through the public scheduler API.
+Run admission and first execution-claim acquire are one store operation. The app validates the
+store-owned trust scope, the certified spec hash, and the derived `run_id`; the store validates that
+the prepared execution claim matches the `RunAdmitted` identity material before admission. If the
+execution lane is already held, the store returns `ExecutionClaimBusy`, appends no contender run
+event, and public start reports `already_active` with the holder `run_id`.
+
+Resume reads the recorded identity from `RunAdmitted`, rebuilds the execution lane from that identity,
+validates stored launch evidence and executable/capability bindings, then acquires or renews the
+claim. Runtime drive entry points require the current token for the execution lane and holder
+`run_id`; callers without it cannot drive through the public scheduler API. The v1 claim lease has a
+60 second TTL and a 20 second heartbeat interval. While short receipt-level waits are active, the
+invoker loop keeps heartbeating instead of releasing tenure.
 
 Framework lifecycle work is represented by certified graph nodes, not ad hoc runtime side effects.
 Run admission is the sole pre-attempt root authority and is not represented by a certified graph
@@ -627,8 +623,8 @@ and may be retried after bounded backoff or a lane-release wakeup; ordinary cont
 terminal evidence. Runtime resolves concrete exclusive lane keys in pure preflight, then asks the
 store to materialize `ResourceLaneClaimed` from `ResourceLaneClaimIntent`. The store assigns the
 lane-local fencing token and transition sequence and records the lane mirror/transition rows in the
-same append transaction. `ResourceLaneClaimed` is therefore held-lane authority and recovery must
-either reuse that committed held lane for the same invocation or release it through certified
+same append transaction. `ResourceLaneClaimed`, not the waiter row, is held-lane authority. Recovery
+must either reuse that committed held lane for the same invocation or release it through certified
 cleanup authority before interruption. `SideEffectInvocationPrepared` and every later phase are
 owned by `SideEffectLifecycle`; recovery either resumes from the concrete ledger phase, records
 evidence-backed terminal side-effect outcome, or reports an operational block.

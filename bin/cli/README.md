@@ -467,7 +467,7 @@ used by registered entry-point ops.
 
 JSON and text output include `launch_outcome`. Fresh admissions report `admitted`. A duplicate start
 for the same certified run identity reports `attached` without driving. If another process holds the
-execution lane for the same op/config base identity, start reports `already_active` with
+execution lane for the same base work identity, start reports `already_active` with
 `active_run_id` and no `run` body.
 
 Stable launch errors include:

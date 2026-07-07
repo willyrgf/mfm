@@ -239,7 +239,7 @@ Request notes:
 The response is `{"outcome": "...", "run": ..., "active_run_id": "...", "public_output": ...}`
 inside the standard success envelope. Fresh admissions report `admitted`. Duplicate starts for the
 same certified run identity report `attached` without driving. If another process holds the
-execution lane for the same op/config base identity, start reports `already_active` with
+execution lane for the same base work identity, start reports `already_active` with
 `active_run_id` and omits `run`.
 `public_output` is present when the run completes while driving and the op exposes a public output
 schema id.

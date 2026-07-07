@@ -34,10 +34,10 @@ The certified typed execution spec is the runtime contract. Runner plans, route 
 names, source scans, CI summary keys, rendered JSON, and projection rows are not semantic authority.
 
 Process fungibility is part of this boundary. Certified runs are store-owned durable work, not
-process-owned work. App and binary code may construct process-local stores, transports, signer
-providers, and driver loops, but those process-local choices cannot define run identity, side-effect
-authority, replay authority, public-output authority, or terminal status. Execution claims,
-admission waiters, observations, and notifications are liveness and coordination mechanisms only.
+process-owned work. Run identity comes from `RunAdmitted`; execution lanes only choose the current
+live driver for a base work identity; resource lanes protect certified side effects. Process-local
+stores, transports, signer providers, and driver loops cannot define run identity, side-effect
+authority, replay authority, public-output authority, or terminal status.
 
 For the proposed consolidation of public run-start ingress around registered entry-point
 operations, see `docs/RFC_ENTRYPOINT_OP.md`.
@@ -556,9 +556,8 @@ Before merging a change, verify:
 - certified saga and side-effect verification policy are hash-defining spec data, not policy
   resolved by a registry at admission, and compensation/manual outcomes are derived from certified
   policy plus stream evidence
-- process topology remains operational: process-local resources and execution claims do not become
-  run identity, side-effect authority, replay authority, public-output authority, or terminal-status
-  authority
+- process topology remains operational: run identity, execution lanes, and resource lanes keep
+  separate responsibilities, and process-local resources do not become durable authority
 - manual resolution uses certified schema roles, certified verifier identity, certified operator
   authority snapshot, canonical proof bytes, signature verification, and quorum
 - replay paths cannot construct live capabilities

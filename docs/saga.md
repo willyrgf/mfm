@@ -160,24 +160,23 @@ Every side-effect contract declares a resource claim:
 - `ExactTouchedSet`: adapter records exact touched-key evidence after execution.
 - `ManualOnly`: MFM makes no framework-derived cross-run concurrency claim.
 
-Only `Exclusive` takes a lane. `ExactTouchedSet` and `ManualOnly` do not acquire lane authority.
-Core saga v1 supports one concrete exclusive lane per side-effect ledger. For `Exclusive`, runtime
-appends `StateAttemptStarted`, resolves that lane key through pure capability preflight, and submits
-one `ResourceLaneClaimIntent` commit before invocation construction. The store admits that intent
-only when the requested lane is free and no earlier live waiter blocks it; it materializes the
-committed `ResourceLaneClaimed` event, assigns the lane-local fencing token and transition sequence,
-and records the matching `resource_lane_claim_events` and `resource_lane_transitions` rows. A held
-lane blocks other ledgers for the same `(namespace, key_schema_id, key, exclusive)` lane across
-runs.
+Only `Exclusive` takes a resource lane. `ExactTouchedSet` and `ManualOnly` do not acquire lane
+authority. Core saga v1 supports one concrete exclusive lane per side-effect ledger. For
+`Exclusive`, runtime appends `StateAttemptStarted`, resolves that lane key through pure capability
+preflight, and submits one `ResourceLaneClaimIntent` commit before invocation construction. The store
+admits that intent only when the requested lane has no active authoritative holder and no earlier
+live waiter. Admission materializes the committed `ResourceLaneClaimed` event, assigns the lane-local
+fencing token and transition sequence, and records the matching `resource_lane_claim_events` and
+`resource_lane_transitions` rows. A held lane blocks other ledgers for the same
+`(namespace, key_schema_id, key, exclusive)` lane across runs.
 
-Ordinary contention returns `AdmissionBlocked`. That outcome parks the open attempt before live IO;
-it is not a run event, not lane-transition authority, not persisted semantic authority, and never
-authorizes attempt, saga, or run terminal failure. For single-lane exclusive claims, Postgres may
-insert or refresh a mutable operational waiter row so retry admission is FIFO among live non-expired
-waiters. That waiter row is not lane ownership authority, cannot grant execution, and is skipped once
-admitted or expired. Parked attempts retry with bounded backoff and may wake on lane-release
-notifications, but notifications are only wakeups; the durable ownership signal is the append-only
-lane authority, and the FIFO signal is rechecked by store admission before any claim materializes.
+Ordinary contention returns `AdmissionBlocked`. That outcome parks the open attempt before live IO
+and persists no run event, lane transition, or semantic authority. For single-lane exclusive claims,
+Postgres may insert or refresh a mutable waiter row so retries are FIFO among live non-expired
+waiters. The waiter row can delay admission, but it cannot grant resource ownership or terminalize
+the run. Parked attempts retry with bounded backoff and may wake on lane-release notifications.
+Notifications are wakeups only; the store rechecks FIFO and active-lane authority before any claim
+materializes.
 
 The no-deadlock invariant is structural: a v1 attempt can hold at most one exclusive lane, and it
 never holds one lane while issuing a second blocking claim. Multi-lane admission, all-or-nothing
@@ -230,6 +229,6 @@ The following remain outside the current certified saga contract:
 - multi-lane admission, lane fairness, deadlock detection, or global scheduling policy.
 
 Generic lane fairness and queueing remain outside the current certified saga contract. The only v1
-fairness guarantee is the Postgres operational FIFO rule for live non-expired waiters on a single
-exclusive lane claim; callers must not assume starvation freedom for multi-lane claims or for waiters
-whose leases are not refreshed.
+fairness guarantee is the Postgres operational FIFO rule for live non-expired waiters on one
+exclusive resource lane; callers must not assume starvation freedom for multi-lane claims or for
+waiters whose leases are not refreshed.
