@@ -16,9 +16,8 @@
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::future::{self, Future};
+use std::future;
 use std::num::NonZeroU64;
-use std::pin::Pin;
 
 use alloy_primitives::U256;
 use mfm_canonical::sha256_digest_bytes;
@@ -128,18 +127,14 @@ impl CapabilitySpec for PortfolioReadCapability {
     }
 }
 
-/// Future returned by portfolio read backends.
-pub type PortfolioReadFuture<'a, T> =
-    Pin<Box<dyn Future<Output = Result<T, PortfolioReadError>> + Send + 'a>>;
-
-/// Raw balance read result returned by portfolio read backends.
+/// Raw balance read result returned by adapter-executed portfolio reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawBalanceObservation {
     /// Raw balance integer in the symbol's native base unit.
     pub raw: U256,
     /// Decimal precision for rendering the raw amount.
     pub decimals: u8,
-    /// Concrete observation anchor, when the backend read returns its own source anchor.
+    /// Concrete observation anchor, when the executed read returns its own source anchor.
     pub anchor: Option<ExecutionAnchor>,
 }
 
@@ -154,7 +149,76 @@ impl RawBalanceObservation {
     }
 }
 
-/// Redaction-safe external read error reported by portfolio read backends.
+/// Classified network read intent derived from portfolio state config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortfolioNetworkReadIntent {
+    /// Read an Ethereum-compatible network.
+    Evm {
+        /// Stable portfolio network id.
+        network_id: String,
+        /// Expected EVM chain id.
+        chain_id: u64,
+    },
+    /// Read a Bitcoin-family network.
+    Bitcoin {
+        /// Stable portfolio network id.
+        network_id: String,
+        /// Semantic source identity expected for the read.
+        source_identity: String,
+    },
+}
+
+/// Classified raw balance read intent derived from portfolio state config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortfolioBalanceReadIntent {
+    /// Read an EVM native account balance.
+    EvmNativeBalance {
+        /// Stable portfolio network id.
+        network_id: String,
+        /// Expected EVM chain id.
+        chain_id: u64,
+        /// Canonical account address.
+        account: String,
+        /// Pinned EVM block number.
+        block_number: u64,
+        /// Decimal precision used for rendering the raw amount.
+        decimals: u8,
+        /// Pinned execution anchor that must be preserved in the observation.
+        anchor: ExecutionAnchor,
+    },
+    /// Read an ERC-20 balance.
+    Erc20Balance {
+        /// Stable portfolio network id.
+        network_id: String,
+        /// Expected EVM chain id.
+        chain_id: u64,
+        /// Canonical account address.
+        account: String,
+        /// Canonical token contract address.
+        token_address: String,
+        /// Pinned EVM block number.
+        block_number: u64,
+        /// Optional configured token decimals. When absent, the adapter must read token decimals.
+        decimals: Option<u8>,
+        /// Pinned execution anchor that must be preserved in the observation.
+        anchor: ExecutionAnchor,
+    },
+    /// Read a Bitcoin native address balance.
+    BitcoinNativeBalance {
+        /// Stable portfolio network id.
+        network_id: String,
+        /// Semantic source identity expected for the read.
+        source_identity: String,
+        /// Canonical Bitcoin address.
+        address: String,
+        /// Pinned execution anchor that the returned balance must match.
+        anchor: ExecutionAnchor,
+        /// Decimal precision used for rendering the raw amount.
+        decimals: u8,
+    },
+}
+
+/// Redaction-safe external read error reported by portfolio read execution.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{code}: {message}")]
 pub struct PortfolioReadError {
@@ -189,54 +253,6 @@ impl PortfolioReadError {
     pub fn with_fatal_attempt_failure(mut self) -> Self {
         self.fatal_attempt_failure = true;
         self
-    }
-}
-
-/// Runtime backend used by read portfolio states to observe external chain data.
-pub trait PortfolioReadBackend: Send + Sync {
-    /// Reads the current execution anchor for a network.
-    fn execution_anchor<'a>(
-        &'a self,
-        network: &'a NetworkConfig,
-    ) -> PortfolioReadFuture<'a, ExecutionAnchor>;
-
-    /// Reads a raw wallet/symbol balance and its decimals at a pinned execution anchor.
-    fn observe_raw_balance<'a>(
-        &'a self,
-        config: &'a ObserveBatchConfig,
-        anchor: &'a ExecutionAnchor,
-    ) -> PortfolioReadFuture<'a, RawBalanceObservation>;
-}
-
-struct UnavailablePortfolioReadBackend;
-
-impl PortfolioReadBackend for UnavailablePortfolioReadBackend {
-    fn execution_anchor<'a>(
-        &'a self,
-        network: &'a NetworkConfig,
-    ) -> PortfolioReadFuture<'a, ExecutionAnchor> {
-        Box::pin(async move {
-            Err(PortfolioReadError::new(
-                "external_read_required",
-                format!(
-                    "typed portfolio read backend unavailable for network `{}`",
-                    network.network_id()
-                ),
-            ))
-        })
-    }
-
-    fn observe_raw_balance<'a>(
-        &'a self,
-        _config: &'a ObserveBatchConfig,
-        _anchor: &'a ExecutionAnchor,
-    ) -> PortfolioReadFuture<'a, RawBalanceObservation> {
-        Box::pin(async {
-            Err(PortfolioReadError::new(
-                "external_read_required",
-                "typed portfolio observation requires an external read backend",
-            ))
-        })
     }
 }
 
@@ -994,9 +1010,7 @@ impl PureState for ResolveSubjectsState {
 }
 
 /// State that pins concrete execution views for configured networks.
-pub struct PinViewsState {
-    config: PinViewsConfig,
-}
+pub struct PinViewsState;
 
 impl StateSpec for PinViewsState {
     type Config = PinViewsConfig;
@@ -1023,14 +1037,13 @@ impl StateSpec for PinViewsState {
     }
 
     fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
-        Ok(Self {
-            config: config.into_inner(),
-        })
+        let _config = config.into_inner();
+        Ok(Self)
     }
 }
 
 impl ReadState for PinViewsState {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = StateResult<Self::Output>> + Send + 'a>>;
+    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
 
     fn run<'a>(
         &'a self,
@@ -1038,11 +1051,7 @@ impl ReadState for PinViewsState {
         _caps: &'a Self::Caps,
         _context: &'a mfm_program::CertifiedContext<Self::Context>,
     ) -> Self::RunFuture<'a> {
-        Box::pin(async move {
-            pin_views_with_backend(&self.config, &UnavailablePortfolioReadBackend)
-                .await
-                .map_err(state_error_from_portfolio_read)
-        })
+        future::ready(Err(adapter_bound_read_state_error(Self::name())))
     }
 }
 
@@ -1089,9 +1098,7 @@ impl PureState for ResolveValuationsState {
 }
 
 /// State that observes one wallet/symbol batch.
-pub struct ObserveBatchState {
-    config: ObserveBatchConfig,
-}
+pub struct ObserveBatchState;
 
 impl StateSpec for ObserveBatchState {
     type Config = ObserveBatchConfig;
@@ -1118,14 +1125,13 @@ impl StateSpec for ObserveBatchState {
     }
 
     fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
-        Ok(Self {
-            config: config.into_inner(),
-        })
+        let _config = config.into_inner();
+        Ok(Self)
     }
 }
 
 impl ReadState for ObserveBatchState {
-    type RunFuture<'a> = Pin<Box<dyn Future<Output = StateResult<Self::Output>> + Send + 'a>>;
+    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
 
     fn run<'a>(
         &'a self,
@@ -1133,11 +1139,8 @@ impl ReadState for ObserveBatchState {
         _caps: &'a Self::Caps,
         _context: &'a mfm_program::CertifiedContext<Self::Context>,
     ) -> Self::RunFuture<'a> {
-        Box::pin(async move {
-            observe_batch_with_backend(&self.config, &input, &UnavailablePortfolioReadBackend)
-                .await
-                .map_err(state_error_from_portfolio_read)
-        })
+        let _input = input;
+        future::ready(Err(adapter_bound_read_state_error(Self::name())))
     }
 }
 
@@ -1304,21 +1307,102 @@ pub fn pinned_view_for_network(network: &NetworkConfig, anchor: ExecutionAnchor)
     }
 }
 
-/// Pins execution views through the supplied portfolio read backend.
-pub async fn pin_views_with_backend<B>(
-    config: &PinViewsConfig,
-    backend: &B,
-) -> Result<PinnedViews, PortfolioReadError>
-where
-    B: PortfolioReadBackend + ?Sized,
-{
-    let mut views = Vec::new();
-    for network in config.networks() {
-        let anchor = backend.execution_anchor(network).await?;
-        views.push(pinned_view_for_network(network, anchor));
-    }
+/// Builds a canonical pinned-view collection.
+pub fn pinned_views_from_views(mut views: Vec<PinnedView>) -> PinnedViews {
     views.sort_by(|left, right| left.network_id.cmp(&right.network_id));
-    Ok(PinnedViews { views })
+    PinnedViews { views }
+}
+
+/// Classifies the network read intent for a configured portfolio network.
+pub fn network_read_intent_for_network(network: &NetworkConfig) -> PortfolioNetworkReadIntent {
+    match network {
+        NetworkConfig::Evm {
+            network_id,
+            chain_id,
+            ..
+        } => PortfolioNetworkReadIntent::Evm {
+            network_id: network_id.to_string(),
+            chain_id: chain_id.get(),
+        },
+        NetworkConfig::Bitcoin { network_id, .. } => PortfolioNetworkReadIntent::Bitcoin {
+            network_id: network_id.to_string(),
+            source_identity: network_id.to_string(),
+        },
+    }
+}
+
+/// Classifies the network reads needed to pin all configured execution views.
+pub fn pin_view_read_intents(config: &PinViewsConfig) -> Vec<PortfolioNetworkReadIntent> {
+    config
+        .networks()
+        .iter()
+        .map(network_read_intent_for_network)
+        .collect()
+}
+
+/// Classifies the network read required by a supported observation batch.
+pub fn observe_batch_network_read_intent(
+    config: &ObserveBatchConfig,
+) -> Option<PortfolioNetworkReadIntent> {
+    match (&config.network, &config.symbol.balance_reader) {
+        (NetworkConfig::Evm { .. }, BalanceReaderConfig::NativeBalance {})
+        | (NetworkConfig::Evm { .. }, BalanceReaderConfig::Erc20Balance { .. })
+        | (NetworkConfig::Bitcoin { .. }, BalanceReaderConfig::NativeBalance {}) => {
+            Some(network_read_intent_for_network(&config.network))
+        }
+        (NetworkConfig::Bitcoin { .. }, BalanceReaderConfig::Erc20Balance { .. })
+        | (_, BalanceReaderConfig::ProtocolPosition { .. }) => None,
+    }
+}
+
+/// Classifies the raw balance read required by one observation batch at a pinned anchor.
+pub fn observe_batch_read_intent(
+    config: &ObserveBatchConfig,
+    anchor: &ExecutionAnchor,
+) -> Result<PortfolioBalanceReadIntent, PortfolioReadError> {
+    match &config.symbol.balance_reader {
+        BalanceReaderConfig::NativeBalance {} => match &config.network {
+            NetworkConfig::Evm {
+                network_id,
+                chain_id,
+                ..
+            } => Ok(PortfolioBalanceReadIntent::EvmNativeBalance {
+                network_id: network_id.to_string(),
+                chain_id: chain_id.get(),
+                account: wallet_evm_address(config)?,
+                block_number: evm_block_number_from_anchor(chain_id.get(), anchor)?,
+                decimals: config.symbol.decimals.unwrap_or(18),
+                anchor: anchor.clone(),
+            }),
+            NetworkConfig::Bitcoin { network_id, .. } => {
+                ensure_bitcoin_anchor(anchor)?;
+                Ok(PortfolioBalanceReadIntent::BitcoinNativeBalance {
+                    network_id: network_id.to_string(),
+                    source_identity: network_id.to_string(),
+                    address: wallet_btc_address(config)?,
+                    anchor: anchor.clone(),
+                    decimals: config.symbol.decimals.unwrap_or(8),
+                })
+            }
+        },
+        BalanceReaderConfig::Erc20Balance { token_address } => match &config.network {
+            NetworkConfig::Evm {
+                network_id,
+                chain_id,
+                ..
+            } => Ok(PortfolioBalanceReadIntent::Erc20Balance {
+                network_id: network_id.to_string(),
+                chain_id: chain_id.get(),
+                account: wallet_evm_address(config)?,
+                token_address: token_address.to_string(),
+                block_number: evm_block_number_from_anchor(chain_id.get(), anchor)?,
+                decimals: config.symbol.decimals,
+                anchor: anchor.clone(),
+            }),
+            NetworkConfig::Bitcoin { .. } => Err(unsupported_balance_reader_error()),
+        },
+        BalanceReaderConfig::ProtocolPosition { .. } => Err(unsupported_balance_reader_error()),
+    }
 }
 
 /// Resolves configured valuation routes.
@@ -1429,7 +1513,7 @@ pub fn observation_batch_from_raw_balance(
         .iter()
         .find(|view| view.network_id == config.network.network_id().as_str())
     else {
-        return missing_pinned_view_observation_batch(config, errors);
+        return observation_batch_missing_pinned_view(config, errors);
     };
     let amount_dec = format_u256_units(&balance.raw, balance.decimals);
     let values = observation_values(config, input, &amount_dec, &mut errors);
@@ -1512,28 +1596,6 @@ pub fn observation_batch_error(
     }
 }
 
-/// Observes one wallet/symbol batch through the supplied portfolio read backend.
-pub async fn observe_batch_with_backend<B>(
-    config: &ObserveBatchConfig,
-    input: &ObserveBatchInput,
-    backend: &B,
-) -> Result<ObservationBatch, PortfolioReadError>
-where
-    B: PortfolioReadBackend + ?Sized,
-{
-    let Some(anchor) = pinned_anchor_for(&input.views, config.network.network_id()) else {
-        return Ok(missing_pinned_view_observation_batch(
-            config,
-            input.valuations.errors.clone(),
-        ));
-    };
-    match backend.observe_raw_balance(config, anchor).await {
-        Ok(balance) => Ok(observation_batch_from_raw_balance(config, input, balance)),
-        Err(error) if error.fatal_attempt_failure => Err(error),
-        Err(error) => Ok(observation_batch_error(config, error.code, error.message)),
-    }
-}
-
 /// Returns the pinned execution anchor for `network_id`.
 pub fn pinned_anchor_for<'a>(
     views: &'a PinnedViews,
@@ -1560,7 +1622,8 @@ pub fn evm_block_number_for(views: &PinnedViews, network_id: &str) -> u64 {
         .unwrap_or_default()
 }
 
-fn missing_pinned_view_observation_batch(
+/// Builds an observation batch containing a missing pinned-view domain error.
+pub fn observation_batch_missing_pinned_view(
     config: &ObserveBatchConfig,
     mut errors: Vec<PortfolioSnapshotError>,
 ) -> ObservationBatch {
@@ -1579,8 +1642,67 @@ fn missing_pinned_view_observation_batch(
     }
 }
 
-fn state_error_from_portfolio_read(error: PortfolioReadError) -> StateError {
-    StateError::Message(error.to_string())
+fn evm_block_number_from_anchor(
+    expected_chain_id: u64,
+    anchor: &ExecutionAnchor,
+) -> Result<u64, PortfolioReadError> {
+    match anchor {
+        ExecutionAnchor::Evm {
+            chain_id,
+            block_number,
+        } if *chain_id == expected_chain_id => Ok(*block_number),
+        ExecutionAnchor::Evm { .. } => Err(PortfolioReadError::new(
+            "network_anchor_mismatch",
+            "portfolio EVM read anchor did not match the configured network",
+        )),
+        ExecutionAnchor::Bitcoin { .. } => Err(PortfolioReadError::new(
+            "network_anchor_mismatch",
+            "portfolio EVM read received a non-EVM execution anchor",
+        )),
+    }
+}
+
+fn ensure_bitcoin_anchor(anchor: &ExecutionAnchor) -> Result<(), PortfolioReadError> {
+    match anchor {
+        ExecutionAnchor::Bitcoin { .. } => Ok(()),
+        ExecutionAnchor::Evm { .. } => Err(PortfolioReadError::new(
+            "network_anchor_mismatch",
+            "portfolio Bitcoin read received a non-Bitcoin execution anchor",
+        )),
+    }
+}
+
+fn wallet_evm_address(config: &ObserveBatchConfig) -> Result<String, PortfolioReadError> {
+    let Some(address) = config.wallet.subject.evm_address() else {
+        return Err(PortfolioReadError::new(
+            "invalid_wallet_subject",
+            "wallet subject was not an EVM address for portfolio EVM read",
+        ));
+    };
+    Ok(address.to_string())
+}
+
+fn wallet_btc_address(config: &ObserveBatchConfig) -> Result<String, PortfolioReadError> {
+    if config.wallet.subject.kind() != WalletSubjectKind::BitcoinAddress {
+        return Err(PortfolioReadError::new(
+            "invalid_wallet_subject",
+            "wallet subject was not a Bitcoin address for portfolio Bitcoin read",
+        ));
+    }
+    Ok(config.wallet.subject.address_str().to_owned())
+}
+
+fn unsupported_balance_reader_error() -> PortfolioReadError {
+    PortfolioReadError::new(
+        "unsupported_balance_reader",
+        "portfolio balance reader is not enabled in the typed portfolio runner",
+    )
+}
+
+fn adapter_bound_read_state_error(state_name: &str) -> StateError {
+    StateError::Message(format!(
+        "{state_name} requires adapter-bound external read execution"
+    ))
 }
 
 /// Merges non-empty observation batches.

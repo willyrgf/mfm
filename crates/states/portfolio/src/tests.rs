@@ -1,4 +1,8 @@
 use super::*;
+use mfm_portfolio_model::aave::{
+    AaveMarketConfig, AaveProtocolPositionConfig, AaveReserveConfig, AaveReservePositionConfig,
+    AAVE_V3_PROTOCOL_ID, AAVE_V3_READER_RESERVE_POSITION,
+};
 use mfm_portfolio_model::metadata::PublicMetadata;
 use mfm_portfolio_model::symbol::{SymbolKind, SymbolValuationConfig};
 use mfm_portfolio_model::wallet::WalletSubject;
@@ -82,6 +86,133 @@ fn observe_batch_mfm_config_validation_rejects_network_mismatch() {
             .contains("did not match observation network"),
         "{error}"
     );
+}
+
+#[test]
+fn observation_read_intent_classifies_erc20_balance() {
+    let network = test_evm_network("ethereum-mainnet", 1);
+    let wallet = test_evm_wallet(
+        "wallet_main",
+        network.network_id().as_str(),
+        vec!["usdc.ethereum-mainnet"],
+    );
+    let symbol = SymbolConfig {
+        symbol_id: "usdc.ethereum-mainnet".parse().expect("symbol id"),
+        display_symbol: Some("USDC".to_owned()),
+        kind: SymbolKind::Erc20Balance,
+        role: SymbolRole::Asset,
+        network_id: network.network_id().as_str().parse().expect("network id"),
+        protocol: None,
+        balance_reader: BalanceReaderConfig::Erc20Balance {
+            token_address: "0x0000000000000000000000000000000000000001"
+                .parse()
+                .expect("token address"),
+        },
+        valuation: fixed_usd_valuation("usdc.ethereum-mainnet"),
+        decimals: None,
+        underlying_symbol_id: None,
+        metadata: PublicMetadata::default(),
+    };
+    let config = ObserveBatchConfig::new(wallet, symbol, network).expect("observe config");
+
+    assert_eq!(
+        observe_batch_network_read_intent(&config),
+        Some(PortfolioNetworkReadIntent::Evm {
+            network_id: "ethereum-mainnet".to_owned(),
+            chain_id: 1,
+        })
+    );
+    assert_eq!(
+        observe_batch_read_intent(
+            &config,
+            &ExecutionAnchor::Evm {
+                chain_id: 1,
+                block_number: 123,
+            },
+        )
+        .expect("read intent"),
+        PortfolioBalanceReadIntent::Erc20Balance {
+            network_id: "ethereum-mainnet".to_owned(),
+            chain_id: 1,
+            account: "0x000000000000000000000000000000000000dead".to_owned(),
+            token_address: "0x0000000000000000000000000000000000000001".to_owned(),
+            block_number: 123,
+            decimals: None,
+            anchor: ExecutionAnchor::Evm {
+                chain_id: 1,
+                block_number: 123,
+            },
+        }
+    );
+}
+
+#[test]
+fn observation_read_intent_classifies_bitcoin_native_balance() {
+    let network = test_bitcoin_network();
+    let wallet = test_bitcoin_wallet(
+        "wallet_btc_mainnet",
+        network.network_id().as_str(),
+        vec!["btc.native.bitcoin-mainnet"],
+    );
+    let symbol = SymbolConfig {
+        symbol_id: "btc.native.bitcoin-mainnet".parse().expect("symbol id"),
+        display_symbol: Some("BTC".to_owned()),
+        kind: SymbolKind::NativeBalance,
+        role: SymbolRole::Native,
+        network_id: network.network_id().as_str().parse().expect("network id"),
+        protocol: None,
+        balance_reader: BalanceReaderConfig::NativeBalance {},
+        valuation: fixed_usd_valuation("btc.native.bitcoin-mainnet"),
+        decimals: None,
+        underlying_symbol_id: None,
+        metadata: PublicMetadata::default(),
+    };
+    let config = ObserveBatchConfig::new(wallet, symbol, network).expect("observe config");
+    let anchor = ExecutionAnchor::Bitcoin {
+        height: 850_000,
+        block_hash: "00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc".to_owned(),
+    };
+
+    assert_eq!(
+        observe_batch_network_read_intent(&config),
+        Some(PortfolioNetworkReadIntent::Bitcoin {
+            network_id: "bitcoin-mainnet".to_owned(),
+            source_identity: "bitcoin-mainnet".to_owned(),
+        })
+    );
+    assert_eq!(
+        observe_batch_read_intent(&config, &anchor).expect("read intent"),
+        PortfolioBalanceReadIntent::BitcoinNativeBalance {
+            network_id: "bitcoin-mainnet".to_owned(),
+            source_identity: "bitcoin-mainnet".to_owned(),
+            address: "bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw".to_owned(),
+            anchor,
+            decimals: 8,
+        }
+    );
+}
+
+#[test]
+fn protocol_position_classifies_as_unsupported_without_network_requirement() {
+    let network = test_evm_network("ethereum-mainnet", 1);
+    let wallet = test_evm_wallet(
+        "wallet_main",
+        network.network_id().as_str(),
+        vec!["aave.weth.ethereum-mainnet"],
+    );
+    let symbol = aave_reserve_symbol(network.network_id().as_str());
+    let config = ObserveBatchConfig::new(wallet, symbol, network).expect("observe config");
+
+    assert_eq!(observe_batch_network_read_intent(&config), None);
+    let error = observe_batch_read_intent(
+        &config,
+        &ExecutionAnchor::Evm {
+            chain_id: 1,
+            block_number: 123,
+        },
+    )
+    .expect_err("protocol positions are unsupported by the typed read adapter");
+    assert_eq!(error.code, "unsupported_balance_reader");
 }
 
 #[test]
@@ -208,4 +339,124 @@ fn fixed_price_observation_projects_report_totals() {
         report.totals_by_quote[0].net_value_dec,
         "2.500000000000000000"
     );
+}
+
+fn test_evm_network(network_id: &str, chain_id: u64) -> NetworkConfig {
+    NetworkConfig::new(
+        network_id.to_owned(),
+        NetworkFamilyConfig::Evm,
+        Some(chain_id),
+        "shared".to_owned(),
+        BTreeMap::new(),
+    )
+    .expect("valid EVM network")
+}
+
+fn test_bitcoin_network() -> NetworkConfig {
+    NetworkConfig::new(
+        "bitcoin-mainnet".to_owned(),
+        NetworkFamilyConfig::Bitcoin,
+        None,
+        "bitcoin-mainnet".to_owned(),
+        BTreeMap::new(),
+    )
+    .expect("valid Bitcoin network")
+}
+
+fn test_evm_wallet(wallet_id: &str, network_id: &str, symbol_ids: Vec<&str>) -> WalletConfig {
+    test_wallet(
+        wallet_id,
+        "0x000000000000000000000000000000000000dead",
+        WalletSubjectKind::EvmAddress,
+        network_id,
+        symbol_ids,
+    )
+}
+
+fn test_bitcoin_wallet(wallet_id: &str, network_id: &str, symbol_ids: Vec<&str>) -> WalletConfig {
+    test_wallet(
+        wallet_id,
+        "bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw",
+        WalletSubjectKind::BitcoinAddress,
+        network_id,
+        symbol_ids,
+    )
+}
+
+fn test_wallet(
+    wallet_id: &str,
+    address: &str,
+    subject_kind: WalletSubjectKind,
+    network_id: &str,
+    symbol_ids: Vec<&str>,
+) -> WalletConfig {
+    WalletConfig {
+        wallet_id: wallet_id.parse().expect("wallet id"),
+        subject: WalletSubject::new(address, subject_kind).expect("wallet subject"),
+        network_id: network_id.parse().expect("network id"),
+        implementation: WalletImplementationConfig::AddressOnly {},
+        symbol_ids: symbol_ids
+            .into_iter()
+            .map(|symbol_id| symbol_id.parse().expect("symbol id"))
+            .collect(),
+        metadata: PublicMetadata::default(),
+    }
+}
+
+fn fixed_usd_valuation(symbol_id: &str) -> SymbolValuationConfig {
+    SymbolValuationConfig {
+        quotes: vec![QuoteValuationConfig {
+            quote: QuoteCode::Usd,
+            priced_symbol_id: symbol_id.parse().expect("priced symbol id"),
+            reader: ValuationReaderConfig::FixedUnitPrice {
+                unit_price_dec: "1.0".parse().expect("unit price"),
+            },
+        }],
+    }
+}
+
+fn aave_reserve_symbol(network_id: &str) -> SymbolConfig {
+    let market = AaveMarketConfig {
+        market_id: "aave_v3_ethereum".parse().expect("market id"),
+        network_id: network_id.parse().expect("network id"),
+        chain_id: 1,
+        pool_address: "0x0000000000000000000000000000000000000002"
+            .parse()
+            .expect("pool address"),
+        reserves: vec![AaveReserveConfig {
+            reserve_id: "weth".parse().expect("reserve id"),
+            reserve_index: 0,
+            underlying_token_address: "0x0000000000000000000000000000000000000003"
+                .parse()
+                .expect("underlying token"),
+            a_token_address: "0x0000000000000000000000000000000000000004"
+                .parse()
+                .expect("a token"),
+            variable_debt_token_address: None,
+            stable_debt_token_address: None,
+            metadata: PublicMetadata::default(),
+        }],
+        metadata: PublicMetadata::default(),
+    };
+    SymbolConfig {
+        symbol_id: "aave.weth.ethereum-mainnet".parse().expect("symbol id"),
+        display_symbol: Some("aWETH".to_owned()),
+        kind: SymbolKind::ProtocolPosition,
+        role: SymbolRole::Collateral,
+        network_id: network_id.parse().expect("network id"),
+        protocol: Some(AAVE_V3_PROTOCOL_ID.parse().expect("protocol id")),
+        balance_reader: BalanceReaderConfig::ProtocolPosition {
+            protocol: AAVE_V3_PROTOCOL_ID.parse().expect("reader protocol"),
+            reader: AAVE_V3_READER_RESERVE_POSITION.parse().expect("reader id"),
+            config: AaveProtocolPositionConfig::ReservePosition(AaveReservePositionConfig {
+                market,
+                reserve_id: "weth".parse().expect("reserve id"),
+                use_as_collateral_required: Some(true),
+            }),
+        },
+        valuation: fixed_usd_valuation("eth.native.ethereum-mainnet"),
+        decimals: Some(18),
+        underlying_symbol_id: Some("eth.native.ethereum-mainnet".parse().expect("underlying")),
+        metadata: PublicMetadata::default(),
+    }
 }

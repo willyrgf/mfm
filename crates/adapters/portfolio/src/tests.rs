@@ -10,10 +10,10 @@ use mfm_evm_capabilities::{
     EvmBalanceReadResponse, EvmBlockReadResponse, EvmCallReadResponse, EvmCapabilityFuture,
 };
 use mfm_portfolio_model::metadata::PublicMetadata;
-use mfm_portfolio_model::portfolio::NetworkFamilyConfig;
+use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig};
 use mfm_portfolio_model::symbol::{
-    QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole, SymbolValuationConfig,
-    ValuationReaderConfig,
+    BalanceReaderConfig, QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole,
+    SymbolValuationConfig, ValuationReaderConfig,
 };
 use mfm_portfolio_model::wallet::{
     WalletConfig, WalletImplementationConfig, WalletSubject, WalletSubjectKind,
@@ -36,8 +36,11 @@ fn bitcoin_capability_backend_observes_native_balance_with_anchor() {
     let btc = Arc::new(MockPortfolioBtc::matching());
     let backend = CapabilityPortfolioBackend::new(Arc::new(UnavailablePortfolioEvm), Some(btc));
 
-    let anchor = poll_ready(backend.read_execution_anchor(&network)).expect("chain head");
-    let balance = poll_ready(backend.read_raw_balance(&config, &anchor)).expect("balance");
+    let anchor =
+        poll_ready(backend.read_execution_anchor(&network_read_intent_for_network(&network)))
+            .expect("chain head");
+    let intent = observe_batch_read_intent(&config, &anchor).expect("balance intent");
+    let balance = poll_ready(backend.read_raw_balance(&intent)).expect("balance");
 
     assert_eq!(
         anchor,
@@ -63,9 +66,11 @@ fn bitcoin_capability_backend_rejects_balance_anchor_drift() {
     let btc = Arc::new(MockPortfolioBtc::mismatched_balance_anchor());
     let backend = CapabilityPortfolioBackend::new(Arc::new(UnavailablePortfolioEvm), Some(btc));
 
-    let anchor = poll_ready(backend.read_execution_anchor(&network)).expect("chain head");
-    let error =
-        poll_ready(backend.read_raw_balance(&config, &anchor)).expect_err("anchor mismatch");
+    let anchor =
+        poll_ready(backend.read_execution_anchor(&network_read_intent_for_network(&network)))
+            .expect("chain head");
+    let intent = observe_batch_read_intent(&config, &anchor).expect("balance intent");
+    let error = poll_ready(backend.read_raw_balance(&intent)).expect_err("anchor mismatch");
 
     assert_eq!(error.code, "observation_anchor_mismatch");
     assert!(error.message.contains("pinned execution anchor"));
