@@ -138,121 +138,83 @@ fn workspace_category_dependency_rules_hold_with_exact_allowlist() {
 #[test]
 fn category_dependency_rules_reject_forbidden_edges() {
     let root = repo_root();
-    let mut metadata = workspace_metadata(&root);
-    let packages = metadata
-        .get_mut("packages")
-        .and_then(Value::as_array_mut)
-        .expect("metadata packages");
-    let state = packages
-        .iter_mut()
-        .find(|package| package.get("name").and_then(Value::as_str) == Some("mfm-state-portfolio"))
-        .expect("mfm-state-portfolio package");
-    state
-        .get_mut("dependencies")
-        .and_then(Value::as_array_mut)
-        .expect("mfm-state-portfolio dependencies")
-        .push(json!({
-            "name": "mfm-adapters-portfolio",
-            "source": null,
-            "req": "*",
-            "kind": null,
-            "rename": null,
-            "optional": false,
-            "uses_default_features": true,
-            "features": [],
-            "target": null,
-            "registry": null,
-            "path": root.join("crates/adapters/portfolio").to_string_lossy(),
-        }));
+    let base_metadata = workspace_metadata(&root);
+    for (
+        name,
+        source,
+        dependency,
+        dependency_path,
+        expected_source_category,
+        expected_dependency_category,
+    ) in [
+        (
+            "state to adapter",
+            "mfm-state-portfolio",
+            "mfm-adapters-portfolio",
+            "crates/adapters/portfolio",
+            "state",
+            "adapter",
+        ),
+        (
+            "state to live transport",
+            "mfm-state-portfolio",
+            "mfm-transports-evm",
+            "crates/transports/evm",
+            "state",
+            "transport",
+        ),
+        (
+            "transport to runtime config",
+            "mfm-transports-evm",
+            "mfm-runtime-config",
+            "crates/runtime-config",
+            "transport",
+            "runtime-config",
+        ),
+        (
+            "state to runtime config",
+            "mfm-state-portfolio",
+            "mfm-runtime-config",
+            "crates/runtime-config",
+            "state",
+            "runtime-config",
+        ),
+        (
+            "operation to runtime config",
+            "mfm-op-portfolio-tracker",
+            "mfm-runtime-config",
+            "crates/runtime-config",
+            "operation",
+            "runtime-config",
+        ),
+        (
+            "transport to operation",
+            "mfm-transports-proof",
+            "mfm-op-proof",
+            "crates/ops/proof-op",
+            "transport",
+            "operation",
+        ),
+    ] {
+        let mut metadata = base_metadata.clone();
+        push_path_dependency(
+            &mut metadata,
+            source,
+            dependency,
+            &root.join(dependency_path),
+        );
 
-    let error =
-        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
-    assert!(
-        error.contains("source_category=state")
-            && error.contains("dependency_category=adapter")
-            && error.contains("mfm-adapters-portfolio"),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
-fn category_dependency_rules_reject_forbidden_state_to_live_transport_edges() {
-    let root = repo_root();
-    let mut metadata = workspace_metadata(&root);
-    push_path_dependency(
-        &mut metadata,
-        "mfm-state-portfolio",
-        "mfm-transports-evm",
-        &root.join("crates/transports/evm"),
-    );
-
-    let error =
-        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
-    assert!(
-        error.contains("source_category=state")
-            && error.contains("dependency_category=transport")
-            && error.contains("mfm-transports-evm"),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
-fn category_dependency_rules_reject_transport_runtime_config_edges() {
-    let root = repo_root();
-    let mut metadata = workspace_metadata(&root);
-    push_path_dependency(
-        &mut metadata,
-        "mfm-transports-evm",
-        "mfm-runtime-config",
-        &root.join("crates/runtime-config"),
-    );
-
-    let error =
-        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
-    assert!(
-        error.contains("source_category=transport")
-            && error.contains("dependency_category=runtime-config")
-            && error.contains("mfm-runtime-config"),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
-fn category_dependency_rules_reject_ops_and_states_runtime_config_edges() {
-    let root = repo_root();
-    let mut metadata = workspace_metadata(&root);
-    push_path_dependency(
-        &mut metadata,
-        "mfm-state-portfolio",
-        "mfm-runtime-config",
-        &root.join("crates/runtime-config"),
-    );
-
-    let error =
-        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
-    assert!(
-        error.contains("source_category=state")
-            && error.contains("dependency_category=runtime-config")
-            && error.contains("mfm-runtime-config"),
-        "unexpected error: {error}"
-    );
-
-    let mut metadata = workspace_metadata(&root);
-    push_path_dependency(
-        &mut metadata,
-        "mfm-op-portfolio-tracker",
-        "mfm-runtime-config",
-        &root.join("crates/runtime-config"),
-    );
-
-    let error =
-        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
-    assert!(
-        error.contains("source_category=operation")
-            && error.contains("dependency_category=runtime-config")
-            && error.contains("mfm-runtime-config"),
-        "unexpected error: {error}"
-    );
+        let error =
+            validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
+        assert!(
+            error.contains(&format!("source_category={expected_source_category}"))
+                && error.contains(&format!(
+                    "dependency_category={expected_dependency_category}"
+                ))
+                && error.contains(dependency),
+            "{name}: unexpected error: {error}"
+        );
+    }
 }
 
 #[test]
@@ -297,31 +259,12 @@ fn state_category_allows_adapter_contracts_and_rejects_adapters() {
 fn category_dependency_rules_reject_forbidden_binary_edges() {
     let root = repo_root();
     let mut metadata = workspace_metadata(&root);
-    let packages = metadata
-        .get_mut("packages")
-        .and_then(Value::as_array_mut)
-        .expect("metadata packages");
-    let binary = packages
-        .iter_mut()
-        .find(|package| package.get("name").and_then(Value::as_str) == Some("mfm"))
-        .expect("mfm package");
-    binary
-        .get_mut("dependencies")
-        .and_then(Value::as_array_mut)
-        .expect("mfm dependencies")
-        .push(json!({
-            "name": "mfm-adapters-portfolio",
-            "source": null,
-            "req": "*",
-            "kind": null,
-            "rename": null,
-            "optional": false,
-            "uses_default_features": true,
-            "features": [],
-            "target": null,
-            "registry": null,
-            "path": root.join("crates/adapters/portfolio").to_string_lossy(),
-        }));
+    push_path_dependency(
+        &mut metadata,
+        "mfm",
+        "mfm-adapters-portfolio",
+        &root.join("crates/adapters/portfolio"),
+    );
 
     let error =
         validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
@@ -336,75 +279,36 @@ fn category_dependency_rules_reject_forbidden_binary_edges() {
 #[test]
 fn category_dependency_rules_reject_unapproved_binary_platform_edges() {
     let root = repo_root();
-    let mut metadata = workspace_metadata(&root);
+    let base_metadata = workspace_metadata(&root);
+    for (name, package, manifest, category, dependency_path) in [
+        (
+            "storage platform",
+            "mfm-storage-fixture",
+            "crates/storages/fixture/Cargo.toml",
+            "storage",
+            "crates/storages/fixture",
+        ),
+        (
+            "signer-provider platform",
+            "mfm-signer-provider-fixture",
+            "crates/signers/fixture/Cargo.toml",
+            "signer-provider",
+            "crates/signers/fixture",
+        ),
+    ] {
+        let mut metadata = base_metadata.clone();
+        push_synthetic_workspace_package(&mut metadata, &root, package, manifest, category);
+        push_path_dependency(&mut metadata, "mfm", package, &root.join(dependency_path));
 
-    push_synthetic_workspace_package(
-        &mut metadata,
-        &root,
-        "mfm-storage-fixture",
-        "crates/storages/fixture/Cargo.toml",
-        "storage",
-    );
-    push_path_dependency(
-        &mut metadata,
-        "mfm",
-        "mfm-storage-fixture",
-        &root.join("crates/storages/fixture"),
-    );
-
-    let error =
-        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
-    assert!(
-        error.contains("source_category=binary")
-            && error.contains("dependency_category=storage")
-            && error.contains("mfm-storage-fixture"),
-        "unexpected error: {error}"
-    );
-
-    let mut metadata = workspace_metadata(&root);
-    push_synthetic_workspace_package(
-        &mut metadata,
-        &root,
-        "mfm-signer-provider-fixture",
-        "crates/signers/fixture/Cargo.toml",
-        "signer-provider",
-    );
-    push_path_dependency(
-        &mut metadata,
-        "mfm",
-        "mfm-signer-provider-fixture",
-        &root.join("crates/signers/fixture"),
-    );
-
-    let error =
-        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
-    assert!(
-        error.contains("source_category=binary")
-            && error.contains("dependency_category=signer-provider")
-            && error.contains("mfm-signer-provider-fixture"),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
-fn category_dependency_rules_reject_forbidden_transport_to_operation_edges() {
-    let root = repo_root();
-    let mut metadata = workspace_metadata(&root);
-    push_path_dependency(
-        &mut metadata,
-        "mfm-transports-proof",
-        "mfm-op-proof",
-        &root.join("crates/ops/proof-op"),
-    );
-
-    let error =
-        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
-    assert!(
-        error.contains("source_category=transport")
-            && error.contains("dependency_category=operation")
-            && error.contains("mfm-op-proof"),
-        "unexpected error: {error}"
-    );
+        let error =
+            validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
+        assert!(
+            error.contains("source_category=binary")
+                && error.contains(&format!("dependency_category={category}"))
+                && error.contains(package),
+            "{name}: unexpected error: {error}"
+        );
+    }
 }
 
 #[test]
@@ -419,30 +323,12 @@ fn kernel_workspace_crates_stay_inside_kernel_dependency_boundary() {
 fn kernel_dependency_boundary_rejects_non_kernel_path_dependency_fixture() {
     let root = repo_root();
     let mut metadata = workspace_metadata(&root);
-    let packages = metadata
-        .get_mut("packages")
-        .and_then(Value::as_array_mut)
-        .expect("metadata packages");
-    let ids = packages
-        .iter_mut()
-        .find(|package| package.get("name").and_then(Value::as_str) == Some("mfm-ids"))
-        .expect("mfm-ids package");
-    ids.get_mut("dependencies")
-        .and_then(Value::as_array_mut)
-        .expect("mfm-ids dependencies")
-        .push(json!({
-            "name": "mfm-app",
-            "source": null,
-            "req": "*",
-            "kind": null,
-            "rename": null,
-            "optional": false,
-            "uses_default_features": true,
-            "features": [],
-            "target": null,
-            "registry": null,
-            "path": root.join("crates/app").to_string_lossy(),
-        }));
+    push_path_dependency(
+        &mut metadata,
+        "mfm-ids",
+        "mfm-app",
+        &root.join("crates/app"),
+    );
 
     let error =
         validate_kernel_dependency_boundary(&metadata, &root).expect_err("fixture must fail");

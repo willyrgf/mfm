@@ -432,39 +432,36 @@ mod tests {
     use bech32::{hrp, segwit};
 
     #[test]
-    fn validate_bitcoin_address_rejects_bad_base58_checksum() {
-        assert!(validate_bitcoin_address("1BoatSLRHtKNngkdXEeobR76b53LETtpyT").is_ok());
-        assert!(
-            validate_bitcoin_address("1BoatSLRHtKNngkdXEeobR76b53LETtpyY").is_err(),
-            "checksum mismatch should be rejected"
-        );
+    fn validate_bitcoin_address_accepts_supported_formats() {
+        let segwit_v0 = segwit::encode_v0(hrp::BC, &[0x11; 20]).expect("valid v0 bech32 address");
+        let taproot = segwit::encode_v1(hrp::BC, &[0x22; 32]).expect("valid v1 bech32m address");
+
+        for (case, address, expected_prefix) in [
+            (
+                "base58",
+                "1BoatSLRHtKNngkdXEeobR76b53LETtpyT".to_owned(),
+                "1",
+            ),
+            ("segwit v0", segwit_v0, "bc1q"),
+            ("taproot", taproot, "bc1p"),
+        ] {
+            assert!(validate_bitcoin_address(&address).is_ok(), "{case}");
+            assert!(address.starts_with(expected_prefix), "{case}");
+        }
     }
 
     #[test]
-    fn validate_bitcoin_address_accepts_segwit_v0_bech32() {
-        let witness_program = [0x11; 20];
-        let address = segwit::encode_v0(hrp::BC, &witness_program).expect("valid v0 address");
+    fn validate_bitcoin_address_rejects_checksum_mismatches() {
+        let mut bad_bech32 =
+            segwit::encode_v0(hrp::BC, &[0x33; 20]).expect("valid v0 bech32 address");
+        let last = bad_bech32.pop().expect("non-empty address");
+        bad_bech32.push(if last == 'q' { 'p' } else { 'q' });
 
-        assert!(validate_bitcoin_address(&address).is_ok());
-        assert!(address.starts_with("bc1q"));
-    }
-
-    #[test]
-    fn validate_bitcoin_address_accepts_taproot_bech32m() {
-        let witness_program = [0x22; 32];
-        let address = segwit::encode_v1(hrp::BC, &witness_program).expect("valid v1 address");
-
-        assert!(validate_bitcoin_address(&address).is_ok());
-        assert!(address.starts_with("bc1p"));
-    }
-
-    #[test]
-    fn validate_bitcoin_address_rejects_bad_bech32_checksum() {
-        let witness_program = [0x33; 20];
-        let mut address = segwit::encode_v0(hrp::BC, &witness_program).expect("valid v0 address");
-        let last = address.pop().expect("non-empty address");
-        address.push(if last == 'q' { 'p' } else { 'q' });
-
-        assert!(validate_bitcoin_address(&address).is_err());
+        for (case, address) in [
+            ("base58", "1BoatSLRHtKNngkdXEeobR76b53LETtpyY".to_owned()),
+            ("bech32", bad_bech32),
+        ] {
+            assert!(validate_bitcoin_address(&address).is_err(), "{case}");
+        }
     }
 }

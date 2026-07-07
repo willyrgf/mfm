@@ -10,7 +10,7 @@ use crate::attempt::{
     ObservedFailureContext, ObservedFailureRetryabilityPolicy,
 };
 use crate::binding::BoundRuntimeContext;
-use crate::commit::{prepared_commit_bundle, CommitPlanner, RunnerOutputCommitInput};
+use crate::commit::{CommitPlanner, RunnerOutputCommitInput};
 use crate::error::async_store_error;
 use crate::history::RuntimeRunView;
 use crate::invocation::{ErasedRunCtx, InvocationBuilder, InvocationBuilderInput};
@@ -120,8 +120,7 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
                 return terminalize_observed_failure(store, failure_context, error).await;
             }
         };
-        let bundle =
-            prepared_commit_bundle(terminal_output.commit, terminal_output.artifact_admissions)?;
+        let bundle = terminal_output.into_prepared_commit_bundle()?;
         match store.append_prepared_commit_bundle(bundle).await {
             Ok(_) => Ok(AttemptRunStatus::Advanced),
             Err(error) if async_error_is_stale_expected_next_seq(&error) => {
@@ -190,7 +189,10 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
             .runner
             .run_erased(ErasedRunCtx::from_prepared(&invocation))
             .await?;
-        let proof = if is_resolve_saga_terminal(node) {
+        let proof = if matches!(
+            &node.framework,
+            Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
+        ) {
             Some(
                 self.saga_terminal_proof_for_view(runtime_spec, run_id, latest_view)
                     .await?,
@@ -353,11 +355,4 @@ struct FrameworkTerminalOutputInput<'a> {
     attempt_id: &'a AttemptId,
     attempt_no: u32,
     latest_view: &'a RuntimeRunView,
-}
-
-fn is_resolve_saga_terminal(node: &spec::NodeSpec) -> bool {
-    matches!(
-        &node.framework,
-        Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
-    )
 }

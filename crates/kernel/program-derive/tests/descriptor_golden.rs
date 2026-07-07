@@ -302,7 +302,7 @@ fn generated_config_descriptor_resolves_wire_names_and_value_refs() {
 }
 
 #[test]
-fn generated_config_validation_delegates_to_configured_function() {
+fn generated_config_validation_uses_configured_function_for_config_and_value_derives() {
     let valid = CheckedRequest {
         account_id: "acct".to_owned(),
     };
@@ -313,13 +313,15 @@ fn generated_config_validation_delegates_to_configured_function() {
     };
     let error = invalid.validate().expect_err("empty account id must fail");
     assert_eq!(error.message(), "account_id must be non-empty");
-}
 
-#[test]
-fn generated_config_validation_composes_with_value_derive() {
     let descriptor = <DualValidatedConfig as mfm_values::MfmValue>::schema_descriptor()
         .expect("value descriptor");
     assert_eq!(descriptor.identity.schema_kind, SchemaKind::Value);
+
+    let valid = DualValidatedConfig {
+        account_id: "acct".to_owned(),
+    };
+    assert!(valid.validate().is_ok());
 
     let invalid = DualValidatedConfig {
         account_id: String::new(),

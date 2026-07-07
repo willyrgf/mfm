@@ -43,15 +43,16 @@ fn parity_keystore_cli_tx_sign_writes_eip1559_payload() {
     let sign_output = run_tx_sign(
         &keystore_path,
         &password_file,
-        &key_id,
-        recipient,
-        1_000_000_000_000_000,
-        31_337,
-        0,
-        2_000_000_000,
-        1_000_000_000,
-        21_000,
-        &signed_tx_path,
+        TxSignArgs {
+            id: Some(&key_id),
+            to: recipient,
+            value_wei: "1000000000000000",
+            chain_id: "31337",
+            nonce: "0",
+            max_fee_per_gas: "2000000000",
+            max_priority_fee_per_gas: "1000000000",
+            ..TxSignArgs::new(&signed_tx_path)
+        },
     );
     assert!(
         sign_output.status.success(),
@@ -119,19 +120,13 @@ fn parity_keystore_tx_sign_fails_with_wrong_password() {
         stderr_string(&import_output)
     );
 
-    let output = run_tx_sign_with_selector(
+    let output = run_tx_sign(
         &keystore_path,
         &wrong_password_file,
-        Some("wrong-credential-label"),
-        None,
-        "0x1111111111111111111111111111111111111111",
-        "1",
-        "1",
-        "1",
-        "1",
-        "1",
-        "21000",
-        &out_path,
+        TxSignArgs {
+            by_label: Some("wrong-credential-label"),
+            ..TxSignArgs::new(&out_path)
+        },
     );
 
     assert!(
@@ -165,20 +160,7 @@ fn parity_keystore_tx_sign_fails_with_missing_selector() {
         stderr_string(&import_output)
     );
 
-    let output = run_tx_sign_with_selector(
-        &keystore_path,
-        &password_file,
-        None,
-        None,
-        "0x1111111111111111111111111111111111111111",
-        "1",
-        "1",
-        "1",
-        "1",
-        "1",
-        "21000",
-        &out_path,
-    );
+    let output = run_tx_sign(&keystore_path, &password_file, TxSignArgs::new(&out_path));
     assert!(!output.status.success());
     let err = parse_error_json(&output.stderr);
     assert_eq!(err["code"].as_str(), Some("missing_argument"));
@@ -215,19 +197,13 @@ fn parity_keystore_tx_sign_fails_with_ambiguous_label() {
         stderr_string(&second_import)
     );
 
-    let output = run_tx_sign_with_selector(
+    let output = run_tx_sign(
         &keystore_path,
         &password_file,
-        Some("duplicate-label"),
-        None,
-        "0x1111111111111111111111111111111111111111",
-        "1",
-        "1",
-        "1",
-        "1",
-        "1",
-        "21000",
-        &out_path,
+        TxSignArgs {
+            by_label: Some("duplicate-label"),
+            ..TxSignArgs::new(&out_path)
+        },
     );
     assert!(!output.status.success());
     let err = parse_error_json(&output.stderr);
@@ -263,51 +239,37 @@ fn run_import_private_key(
         .expect("execute import")
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_tx_sign(
-    keystore_path: &Path,
-    password_file: &Path,
-    key_id: &str,
-    to: &str,
-    value_wei: u128,
-    chain_id: u64,
-    nonce: u64,
-    max_fee_per_gas: u128,
-    max_priority_fee_per_gas: u128,
-    gas_limit: u64,
-    out: &Path,
-) -> Output {
-    run_tx_sign_with_selector(
-        keystore_path,
-        password_file,
-        None,
-        Some(key_id),
-        to,
-        &value_wei.to_string(),
-        &chain_id.to_string(),
-        &nonce.to_string(),
-        &max_fee_per_gas.to_string(),
-        &max_priority_fee_per_gas.to_string(),
-        &gas_limit.to_string(),
-        out,
-    )
+struct TxSignArgs<'a> {
+    by_label: Option<&'a str>,
+    id: Option<&'a str>,
+    to: &'a str,
+    value_wei: &'a str,
+    chain_id: &'a str,
+    nonce: &'a str,
+    max_fee_per_gas: &'a str,
+    max_priority_fee_per_gas: &'a str,
+    gas_limit: &'a str,
+    out: &'a Path,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_tx_sign_with_selector(
-    keystore_path: &Path,
-    password_file: &Path,
-    by_label: Option<&str>,
-    id: Option<&str>,
-    to: &str,
-    value_wei: &str,
-    chain_id: &str,
-    nonce: &str,
-    max_fee_per_gas: &str,
-    max_priority_fee_per_gas: &str,
-    gas_limit: &str,
-    out: &Path,
-) -> Output {
+impl<'a> TxSignArgs<'a> {
+    fn new(out: &'a Path) -> Self {
+        Self {
+            by_label: None,
+            id: None,
+            to: "0x1111111111111111111111111111111111111111",
+            value_wei: "1",
+            chain_id: "1",
+            nonce: "1",
+            max_fee_per_gas: "1",
+            max_priority_fee_per_gas: "1",
+            gas_limit: "21000",
+            out,
+        }
+    }
+}
+
+fn run_tx_sign(keystore_path: &Path, password_file: &Path, args: TxSignArgs<'_>) -> Output {
     let artifact_root = test_artifact_root(keystore_path);
     let runtime_config = write_runtime_config(keystore_path, password_file);
     let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
@@ -320,26 +282,26 @@ fn run_tx_sign_with_selector(
             "keystore",
             "tx-sign",
             "--to",
-            to,
+            args.to,
             "--value-wei",
-            value_wei,
+            args.value_wei,
             "--chain-id",
-            chain_id,
+            args.chain_id,
             "--nonce",
-            nonce,
+            args.nonce,
             "--max-fee-per-gas",
-            max_fee_per_gas,
+            args.max_fee_per_gas,
             "--max-priority-fee-per-gas",
-            max_priority_fee_per_gas,
+            args.max_priority_fee_per_gas,
             "--gas-limit",
-            gas_limit,
+            args.gas_limit,
             "--out",
-            out.to_str().expect("path"),
+            args.out.to_str().expect("path"),
         ]);
-    if let Some(label) = by_label {
+    if let Some(label) = args.by_label {
         cmd.args(["--by-label", label]);
     }
-    if let Some(id) = id {
+    if let Some(id) = args.id {
         cmd.args(["--id", id]);
     }
     cmd.output().expect("execute tx-sign")

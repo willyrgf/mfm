@@ -7,23 +7,17 @@ fn encode_one(typ: &str, value: serde_json::Value) -> Result<Vec<u8>, UtilError>
 }
 
 #[test]
-fn encode_dynamic_string() {
-    let types = vec!["string".to_string()];
-    let args = vec![serde_json::json!("hello")];
+fn encode_dynamic_values() {
+    let string = encode_one("string", serde_json::json!("hello")).expect("string");
+    assert_eq!(string.len(), 96);
+    assert_eq!(string[31], 32u8);
+    assert_eq!(string[63], 5u8);
 
-    let out = encode_params(&types, &args).expect("encode");
-    assert_eq!(out.len(), 96);
-    assert_eq!(out[31], 32u8);
-    assert_eq!(out[63], 5u8);
-}
-
-#[test]
-fn encode_dynamic_bytes() {
-    let out = encode_one("bytes", serde_json::json!("0xdeadbeef")).expect("encode");
-    assert_eq!(out.len(), 96);
-    assert_eq!(out[31], 32u8);
-    assert_eq!(out[63], 4u8);
-    assert_eq!(&out[64..68], &[0xde, 0xad, 0xbe, 0xef]);
+    let bytes = encode_one("bytes", serde_json::json!("0xdeadbeef")).expect("bytes");
+    assert_eq!(bytes.len(), 96);
+    assert_eq!(bytes[31], 32u8);
+    assert_eq!(bytes[63], 4u8);
+    assert_eq!(&bytes[64..68], &[0xde, 0xad, 0xbe, 0xef]);
 }
 
 #[test]

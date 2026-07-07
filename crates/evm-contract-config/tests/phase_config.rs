@@ -100,6 +100,15 @@ fn validate_json() -> serde_json::Value {
     serde_json::json!({})
 }
 
+fn deploy_entry_json(context: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "context": context,
+        "deploy": {
+            "signer": signer_json(),
+        },
+    })
+}
+
 fn import_from_mfm_run_json(required_stage: &str) -> serde_json::Value {
     serde_json::json!({
         "source_run_id": run_id_str(0x30),
@@ -202,7 +211,7 @@ fn receipt_policy_rejects_unbounded_waits() {
 }
 
 #[test]
-fn legacy_transaction_style_remains_accepted() {
+fn transaction_policy_accepts_legacy_and_rejects_mixed_fee_fields() {
     let deploy: DeployAction = serde_json::from_value(serde_json::json!({
         "signer": signer_json(),
         "transaction": {
@@ -214,10 +223,7 @@ fn legacy_transaction_style_remains_accepted() {
 
     assert_eq!(deploy.transaction().style(), EvmTransactionStyle::Legacy);
     assert_eq!(deploy.transaction().gas_price(), Some("1000000000"));
-}
 
-#[test]
-fn eip1559_transaction_policy_rejects_legacy_fee_field() {
     assert!(serde_json::from_value::<DeployAction>(serde_json::json!({
         "signer": signer_json(),
         "transaction": {
@@ -280,13 +286,9 @@ fn context_actions_reject_embedded_network_fields() {
 
 #[test]
 fn context_entry_configs_parse_new_shapes() {
-    let deploy: EvmContractDeployEntryConfig = serde_json::from_value(serde_json::json!({
-        "context": context_json(serde_json::json!(1)),
-        "deploy": {
-            "signer": signer_json(),
-        },
-    }))
-    .expect("deploy entry");
+    let deploy: EvmContractDeployEntryConfig =
+        serde_json::from_value(deploy_entry_json(context_json(serde_json::json!(1))))
+            .expect("deploy entry");
     assert_eq!(deploy.context().network.expected_chain_id(), 1);
     assert_eq!(deploy.deploy().signer().signer_ref_str(), "deployer");
 
@@ -335,12 +337,9 @@ fn context_entry_configs_parse_new_shapes() {
 #[test]
 fn context_entry_configs_reject_malformed_or_loose_contexts() {
     assert!(
-        serde_json::from_value::<EvmContractDeployEntryConfig>(serde_json::json!({
-            "context": context_json(serde_json::json!(1.5)),
-            "deploy": {
-                "signer": signer_json(),
-            },
-        }))
+        serde_json::from_value::<EvmContractDeployEntryConfig>(deploy_entry_json(context_json(
+            serde_json::json!(1.5)
+        )))
         .is_err()
     );
 
@@ -351,13 +350,8 @@ fn context_entry_configs_reject_malformed_or_loose_contexts() {
         .expect("network object")
         .remove("expected_chain_id");
     assert!(
-        serde_json::from_value::<EvmContractDeployEntryConfig>(serde_json::json!({
-            "context": missing_chain,
-            "deploy": {
-                "signer": signer_json(),
-            },
-        }))
-        .is_err()
+        serde_json::from_value::<EvmContractDeployEntryConfig>(deploy_entry_json(missing_chain))
+            .is_err()
     );
 
     let mut unknown_profile_field = context_json(serde_json::json!(1));
@@ -367,12 +361,9 @@ fn context_entry_configs_reject_malformed_or_loose_contexts() {
         .expect("contract profile object")
         .insert("unexpected".to_owned(), serde_json::json!(true));
     assert!(
-        serde_json::from_value::<EvmContractDeployEntryConfig>(serde_json::json!({
-            "context": unknown_profile_field,
-            "deploy": {
-                "signer": signer_json(),
-            },
-        }))
+        serde_json::from_value::<EvmContractDeployEntryConfig>(deploy_entry_json(
+            unknown_profile_field
+        ))
         .is_err()
     );
 }

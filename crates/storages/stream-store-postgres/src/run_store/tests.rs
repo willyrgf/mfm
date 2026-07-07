@@ -234,6 +234,23 @@ fn assert_fact_query_receipt(
     assert_eq!(result.receipt().result_cardinality(), expected_cardinality);
 }
 
+async fn mutate_store_metadata_unchecked(pool: &PgPool, statements: &[&'static str]) {
+    sqlx::query("ALTER TABLE store_metadata DISABLE TRIGGER store_metadata_no_update")
+        .execute(pool)
+        .await
+        .expect("disable metadata mutation guard");
+    for statement in statements.iter().copied() {
+        sqlx::query(statement)
+            .execute(pool)
+            .await
+            .expect("mutate store metadata fixture");
+    }
+    sqlx::query("ALTER TABLE store_metadata ENABLE TRIGGER store_metadata_no_update")
+        .execute(pool)
+        .await
+        .expect("reenable metadata mutation guard");
+}
+
 #[tokio::test]
 async fn schema_validation_proves_append_xid_trigger_contracts() {
     let (store, schema) = test_store().await;
@@ -267,171 +284,135 @@ async fn schema_validation_proves_append_xid_trigger_contracts() {
 }
 
 #[tokio::test]
-async fn store_authority_rejects_missing_migration_record() {
-    let (store, schema) = test_store().await;
+async fn store_authority_rejects_schema_drift_cases() {
+    #[derive(Clone, Copy, Debug)]
+    enum Case {
+        MissingMigrationRecord,
+        MigrationChecksumMismatch,
+        StaleSchemaObject,
+        MissingFactProjectionTable,
+        RetiredFactProjectionObject,
+        InvalidStoreMetadata,
+        InvalidStoreScopeBinding,
+        DisabledAppendXidTrigger,
+        MissingMutationGuardTrigger,
+    }
 
-    sqlx::query("DELETE FROM _sqlx_migrations")
-        .execute(&store.pool)
-        .await
-        .expect("delete migration ledger");
-    let error = crate::schema::validate_pool(&store.pool)
-        .await
-        .expect_err("missing migration ledger fails authority validation");
-    assert_authority_error(error, PostgresStoreAuthorityError::Migrations);
+    for (case, expected) in [
+        (
+            Case::MissingMigrationRecord,
+            PostgresStoreAuthorityError::Migrations,
+        ),
+        (
+            Case::MigrationChecksumMismatch,
+            PostgresStoreAuthorityError::Migrations,
+        ),
+        (
+            Case::StaleSchemaObject,
+            PostgresStoreAuthorityError::Catalog,
+        ),
+        (
+            Case::MissingFactProjectionTable,
+            PostgresStoreAuthorityError::Catalog,
+        ),
+        (
+            Case::RetiredFactProjectionObject,
+            PostgresStoreAuthorityError::Catalog,
+        ),
+        (
+            Case::InvalidStoreMetadata,
+            PostgresStoreAuthorityError::Metadata,
+        ),
+        (
+            Case::InvalidStoreScopeBinding,
+            PostgresStoreAuthorityError::StoreScope,
+        ),
+        (
+            Case::DisabledAppendXidTrigger,
+            PostgresStoreAuthorityError::Catalog,
+        ),
+        (
+            Case::MissingMutationGuardTrigger,
+            PostgresStoreAuthorityError::Catalog,
+        ),
+    ] {
+        let (store, schema) = test_store().await;
 
-    drop_schema(&store, &schema).await;
+        match case {
+            Case::MissingMigrationRecord => {
+                sqlx::query("DELETE FROM _sqlx_migrations")
+                    .execute(&store.pool)
+                    .await
+                    .expect("delete migration ledger");
+            }
+            Case::MigrationChecksumMismatch => {
+                sqlx::query(
+                    "UPDATE _sqlx_migrations SET checksum = decode(repeat('00', 32), 'hex')",
+                )
+                .execute(&store.pool)
+                .await
+                .expect("mutate migration checksum");
+            }
+            Case::StaleSchemaObject => {
+                sqlx::query("CREATE TABLE typed_run_heads (id TEXT PRIMARY KEY)")
+                    .execute(&store.pool)
+                    .await
+                    .expect("create stale retired table");
+            }
+            Case::MissingFactProjectionTable => {
+                sqlx::query("DROP TABLE fact_index_terms")
+                    .execute(&store.pool)
+                    .await
+                    .expect("drop fact term table");
+            }
+            Case::RetiredFactProjectionObject => {
+                sqlx::query("CREATE TABLE typed_fact_projection (id TEXT PRIMARY KEY)")
+                    .execute(&store.pool)
+                    .await
+                    .expect("create retired fact projection table");
+            }
+            Case::InvalidStoreMetadata => {
+                mutate_store_metadata_unchecked(
+                    &store.pool,
+                    &["UPDATE store_metadata SET schema_contract_version = 'mfm.postgres.run_store.v0'"],
+                )
+                .await;
+            }
+            Case::InvalidStoreScopeBinding => {
+                mutate_store_metadata_unchecked(
+                    &store.pool,
+                    &[
+                        "ALTER TABLE store_metadata ALTER COLUMN store_scope_id DROP NOT NULL",
+                        "UPDATE store_metadata SET store_scope_id = NULL",
+                    ],
+                )
+                .await;
+            }
+            Case::DisabledAppendXidTrigger => {
+                sqlx::query("ALTER TABLE commits DISABLE TRIGGER commits_set_append_xid")
+                    .execute(&store.pool)
+                    .await
+                    .expect("disable append xid trigger");
+            }
+            Case::MissingMutationGuardTrigger => {
+                sqlx::query("DROP TRIGGER run_events_no_update ON run_events")
+                    .execute(&store.pool)
+                    .await
+                    .expect("drop run events mutation guard");
+            }
+        }
+
+        let error = crate::schema::validate_pool(&store.pool)
+            .await
+            .expect_err("schema drift should fail authority validation");
+        assert_authority_error(error, expected);
+
+        drop_schema(&store, &schema).await;
+    }
 }
 
 #[tokio::test]
-async fn store_authority_rejects_migration_checksum_mismatch() {
-    let (store, schema) = test_store().await;
-
-    sqlx::query("UPDATE _sqlx_migrations SET checksum = decode(repeat('00', 32), 'hex')")
-        .execute(&store.pool)
-        .await
-        .expect("mutate migration checksum");
-    let error = crate::schema::validate_pool(&store.pool)
-        .await
-        .expect_err("checksum mismatch fails authority validation");
-    assert_authority_error(error, PostgresStoreAuthorityError::Migrations);
-
-    drop_schema(&store, &schema).await;
-}
-
-#[tokio::test]
-async fn store_authority_rejects_stale_schema_object() {
-    let (store, schema) = test_store().await;
-
-    sqlx::query("CREATE TABLE typed_run_heads (id TEXT PRIMARY KEY)")
-        .execute(&store.pool)
-        .await
-        .expect("create stale retired table");
-    let error = crate::schema::validate_pool(&store.pool)
-        .await
-        .expect_err("stale schema object fails authority validation");
-    assert_authority_error(error, PostgresStoreAuthorityError::Catalog);
-
-    drop_schema(&store, &schema).await;
-}
-
-#[tokio::test]
-async fn store_authority_rejects_missing_fact_projection_table() {
-    let (store, schema) = test_store().await;
-
-    sqlx::query("DROP TABLE fact_index_terms")
-        .execute(&store.pool)
-        .await
-        .expect("drop fact term table");
-    let error = crate::schema::validate_pool(&store.pool)
-        .await
-        .expect_err("missing fact projection table fails authority validation");
-    assert_authority_error(error, PostgresStoreAuthorityError::Catalog);
-
-    drop_schema(&store, &schema).await;
-}
-
-#[tokio::test]
-async fn store_authority_rejects_retired_fact_projection_object() {
-    let (store, schema) = test_store().await;
-
-    sqlx::query("CREATE TABLE typed_fact_projection (id TEXT PRIMARY KEY)")
-        .execute(&store.pool)
-        .await
-        .expect("create retired fact projection table");
-    let error = crate::schema::validate_pool(&store.pool)
-        .await
-        .expect_err("retired fact projection table fails authority validation");
-    assert_authority_error(error, PostgresStoreAuthorityError::Catalog);
-
-    drop_schema(&store, &schema).await;
-}
-
-#[tokio::test]
-async fn store_authority_rejects_invalid_store_metadata() {
-    let (store, schema) = test_store().await;
-
-    sqlx::query("ALTER TABLE store_metadata DISABLE TRIGGER store_metadata_no_update")
-        .execute(&store.pool)
-        .await
-        .expect("disable metadata mutation guard");
-    sqlx::query("UPDATE store_metadata SET schema_contract_version = 'mfm.postgres.run_store.v0'")
-        .execute(&store.pool)
-        .await
-        .expect("mutate schema contract version");
-    sqlx::query("ALTER TABLE store_metadata ENABLE TRIGGER store_metadata_no_update")
-        .execute(&store.pool)
-        .await
-        .expect("reenable metadata mutation guard");
-    let error = crate::schema::validate_pool(&store.pool)
-        .await
-        .expect_err("invalid metadata fails authority validation");
-    assert_authority_error(error, PostgresStoreAuthorityError::Metadata);
-
-    drop_schema(&store, &schema).await;
-}
-
-#[tokio::test]
-async fn store_authority_rejects_invalid_store_scope_binding() {
-    let (store, schema) = test_store().await;
-
-    sqlx::query("ALTER TABLE store_metadata DISABLE TRIGGER store_metadata_no_update")
-        .execute(&store.pool)
-        .await
-        .expect("disable metadata mutation guard");
-    sqlx::query("ALTER TABLE store_metadata ALTER COLUMN store_scope_id DROP NOT NULL")
-        .execute(&store.pool)
-        .await
-        .expect("allow null store scope fixture");
-    sqlx::query("UPDATE store_metadata SET store_scope_id = NULL")
-        .execute(&store.pool)
-        .await
-        .expect("remove store scope");
-    sqlx::query("ALTER TABLE store_metadata ENABLE TRIGGER store_metadata_no_update")
-        .execute(&store.pool)
-        .await
-        .expect("reenable metadata mutation guard");
-    let error = crate::schema::validate_pool(&store.pool)
-        .await
-        .expect_err("invalid store scope fails authority validation");
-    assert_authority_error(error, PostgresStoreAuthorityError::StoreScope);
-
-    drop_schema(&store, &schema).await;
-}
-
-#[tokio::test]
-async fn schema_validation_rejects_disabled_append_xid_trigger() {
-    let (store, schema) = test_store().await;
-
-    sqlx::query("ALTER TABLE commits DISABLE TRIGGER commits_set_append_xid")
-        .execute(&store.pool)
-        .await
-        .expect("disable append xid trigger");
-    let error = crate::schema::validate_pool(&store.pool)
-        .await
-        .expect_err("disabled append xid trigger fails schema validation");
-    assert_authority_error(error, PostgresStoreAuthorityError::Catalog);
-
-    drop_schema(&store, &schema).await;
-}
-
-#[tokio::test]
-async fn schema_validation_rejects_missing_mutation_guard_trigger() {
-    let (store, schema) = test_store().await;
-
-    sqlx::query("DROP TRIGGER run_events_no_update ON run_events")
-        .execute(&store.pool)
-        .await
-        .expect("drop run events mutation guard");
-    let error = crate::schema::validate_pool(&store.pool)
-        .await
-        .expect_err("missing mutation guard fails schema validation");
-    assert_authority_error(error, PostgresStoreAuthorityError::Catalog);
-
-    drop_schema(&store, &schema).await;
-}
-
-#[tokio::test]
-async fn store_store_scope_survives_reconnects_and_rejects_mutation() {
+async fn store_scope_survives_reconnects_and_rejects_mutation() {
     let (store, schema) = test_store().await;
 
     let store_scope = store.load_store_scope_id().await.expect("load store scope");
@@ -2576,6 +2557,16 @@ fn assert_cursor_expired(error: PostgresStoreError) {
     ));
 }
 
+async fn disable_observation_cursor_mutation_guard(pool: &PgPool) {
+    sqlx::query(
+        "ALTER TABLE run_observation_cursors DISABLE TRIGGER \
+         run_observation_cursors_no_update",
+    )
+    .execute(pool)
+    .await
+    .expect("disable cursor mutation guard");
+}
+
 async fn observation_row_cursor_for_commit(
     store: &PostgresRunStore,
     run: &RunId,
@@ -2944,13 +2935,7 @@ async fn observation_cursor_lifecycle_rejects_malformed_unknown_and_missing_toke
     assert_invalid_cursor(unknown, "unknown cursor");
 
     let cursor = observation_row_cursor_for_commit(&store, &run, 1).await;
-    sqlx::query(
-        "ALTER TABLE run_observation_cursors DISABLE TRIGGER \
-         run_observation_cursors_no_update",
-    )
-    .execute(&store.pool)
-    .await
-    .expect("disable cursor mutation guard");
+    disable_observation_cursor_mutation_guard(&store.pool).await;
     sqlx::query("DELETE FROM run_observation_cursors WHERE token_hash = $1")
         .bind(observation_cursor_token_hash(&cursor))
         .execute(&store.pool)
@@ -2977,13 +2962,7 @@ async fn observation_cursor_lifecycle_is_epoch_bound_without_ttl() {
     let cursor = observation_row_cursor_for_commit(&store, &run, 1).await;
     let token_hash = observation_cursor_token_hash(&cursor);
 
-    sqlx::query(
-        "ALTER TABLE run_observation_cursors DISABLE TRIGGER \
-         run_observation_cursors_no_update",
-    )
-    .execute(&store.pool)
-    .await
-    .expect("disable cursor mutation guard");
+    disable_observation_cursor_mutation_guard(&store.pool).await;
     sqlx::query(
         "UPDATE run_observation_cursors SET issued_at = '2000-01-01T00:00:00Z'::timestamptz \
          WHERE token_hash = $1",
@@ -3026,13 +3005,7 @@ async fn observation_cursor_lifecycle_rejects_stale_format() {
     let cursor = observation_row_cursor_for_commit(&store, &run, 1).await;
     let token_hash = observation_cursor_token_hash(&cursor);
 
-    sqlx::query(
-        "ALTER TABLE run_observation_cursors DISABLE TRIGGER \
-         run_observation_cursors_no_update",
-    )
-    .execute(&store.pool)
-    .await
-    .expect("disable cursor mutation guard");
+    disable_observation_cursor_mutation_guard(&store.pool).await;
     sqlx::query(
         "ALTER TABLE run_observation_cursors DROP CONSTRAINT run_observation_cursors_version_v1",
     )

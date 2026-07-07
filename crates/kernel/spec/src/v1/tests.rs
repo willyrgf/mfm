@@ -992,7 +992,7 @@ fn resource_claims_are_mandatory_and_hash_defining() {
 }
 
 #[test]
-fn persisted_spec_json_round_trips_through_checked_parser() {
+fn persisted_spec_json_round_trips_and_rejects_unknown_fields() {
     let spec = test_spec();
     let canonical = spec.canonical_json().expect("canonical spec");
     let parsed =
@@ -1007,6 +1007,17 @@ fn persisted_spec_json_round_trips_through_checked_parser() {
         parsed.spec_hash().expect("parsed hash"),
         spec.spec_hash().expect("spec hash")
     );
+
+    let mut unknown_field: serde_json::Value =
+        serde_json::from_str(canonical.as_str()).expect("spec JSON");
+    unknown_field
+        .as_object_mut()
+        .expect("spec object")
+        .insert("unknown_field".to_owned(), serde_json::json!(true));
+    let input = serde_json::to_string(&unknown_field).expect("JSON");
+    let err = TypedExecutionSpec::from_json_str(&input).expect_err("unknown field rejects");
+
+    assert!(matches!(err, SpecError::Json(message) if message.contains("unknown")));
 }
 
 #[test]
@@ -1068,21 +1079,4 @@ fn lifecycle_framework_node_json_round_trips_through_checked_parser() {
 
         assert_eq!(parsed, spec);
     }
-}
-
-#[test]
-fn persisted_spec_json_rejects_unknown_fields() {
-    let spec = test_spec();
-    let mut value: serde_json::Value =
-        serde_json::from_str(spec.canonical_json().expect("canonical spec").as_str())
-            .expect("spec JSON");
-    value
-        .as_object_mut()
-        .expect("spec object")
-        .insert("unknown_field".to_owned(), serde_json::json!(true));
-    let input = serde_json::to_string(&value).expect("JSON");
-
-    let err = TypedExecutionSpec::from_json_str(&input).expect_err("unknown field rejects");
-
-    assert!(matches!(err, SpecError::Json(message) if message.contains("unknown")));
 }

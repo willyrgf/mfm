@@ -1058,71 +1058,79 @@ mod tests {
     }
 
     #[test]
-    fn scan_tx_out_set_result_deserializes() {
-        let json = r#"{
-            "success": true,
-            "txouts": 120000000,
-            "height": 840000,
-            "bestblock": "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5",
-            "unspents": [
-                {
-                    "txid": "abc123",
-                    "vout": 0,
-                    "scriptPubKey": "76a914...",
-                    "desc": "addr(1BoatSLRHtKNngkdXEeobR76b53LETtpyT)#...",
-                    "amount": 0.00000001,
-                    "height": 839999
-                }
-            ],
-            "total_amount": 0.05000000
-        }"#;
-        let result: ScanTxOutSetResult = serde_json::from_str(json).expect("deserialize");
-        assert!(result.success);
-        assert_eq!(result.unspents.len(), 1);
-        assert_eq!(result.unspents[0].txid, "abc123");
-        assert_eq!(result.unspents[0].amount_sats, 1);
-        assert_eq!(result.total_amount_sats, 5_000_000);
-    }
+    fn scan_tx_out_set_results_deserialize_populated_and_empty_responses() {
+        for (case, json, expected_unspents, expected_total_sats) in [
+            (
+                "populated",
+                r#"{
+                    "success": true,
+                    "txouts": 120000000,
+                    "height": 840000,
+                    "bestblock": "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5",
+                    "unspents": [
+                        {
+                            "txid": "abc123",
+                            "vout": 0,
+                            "scriptPubKey": "76a914...",
+                            "desc": "addr(1BoatSLRHtKNngkdXEeobR76b53LETtpyT)#...",
+                            "amount": 0.00000001,
+                            "height": 839999
+                        }
+                    ],
+                    "total_amount": 0.05000000
+                }"#,
+                1,
+                5_000_000,
+            ),
+            (
+                "empty",
+                r#"{
+                    "success": true,
+                    "txouts": 120000000,
+                    "height": 840000,
+                    "bestblock": "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5",
+                    "unspents": [],
+                    "total_amount": 0
+                }"#,
+                0,
+                0,
+            ),
+        ] {
+            let result: ScanTxOutSetResult = serde_json::from_str(json).expect(case);
 
-    #[test]
-    fn empty_scan_result_deserializes() {
-        let json = r#"{
-            "success": true,
-            "txouts": 120000000,
-            "height": 840000,
-            "bestblock": "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5",
-            "unspents": [],
-            "total_amount": 0
-        }"#;
-        let result: ScanTxOutSetResult = serde_json::from_str(json).expect("deserialize");
-        assert!(result.success);
-        assert!(result.unspents.is_empty());
-        assert_eq!(result.total_amount_sats, 0);
+            assert!(result.success, "{case}");
+            assert_eq!(result.unspents.len(), expected_unspents, "{case}");
+            assert_eq!(result.total_amount_sats, expected_total_sats, "{case}");
+            if case == "populated" {
+                assert_eq!(result.unspents[0].txid, "abc123");
+                assert_eq!(result.unspents[0].amount_sats, 1);
+            }
+        }
     }
 
     #[test]
     fn btc_amount_json_to_sats_parses_exact_satoshis() {
-        assert_eq!(btc_amount_json_to_sats("0.00000001").unwrap(), 1);
-        assert_eq!(btc_amount_json_to_sats("0.05000000").unwrap(), 5_000_000);
-        assert_eq!(
-            btc_amount_json_to_sats("\"1.23000000\"").unwrap(),
-            123_000_000
-        );
+        for (amount, expected_sats) in [
+            ("0.00000001", 1),
+            ("0.05000000", 5_000_000),
+            ("\"1.23000000\"", 123_000_000),
+        ] {
+            assert_eq!(
+                btc_amount_json_to_sats(amount).unwrap(),
+                expected_sats,
+                "{amount}"
+            );
+        }
     }
 
     #[test]
     fn btc_amount_json_to_sats_rejects_invalid_amounts() {
-        assert_eq!(
-            btc_amount_json_to_sats("0.000000001").unwrap_err(),
-            BtcAmountParseError::TooPrecise
-        );
-        assert_eq!(
-            btc_amount_json_to_sats("-0.00000001").unwrap_err(),
-            BtcAmountParseError::Negative
-        );
-        assert_eq!(
-            btc_amount_json_to_sats("18446744073709551615").unwrap_err(),
-            BtcAmountParseError::Overflow
-        );
+        for (amount, expected_error) in [
+            ("0.000000001", BtcAmountParseError::TooPrecise),
+            ("-0.00000001", BtcAmountParseError::Negative),
+            ("18446744073709551615", BtcAmountParseError::Overflow),
+        ] {
+            assert_eq!(btc_amount_json_to_sats(amount).unwrap_err(), expected_error);
+        }
     }
 }

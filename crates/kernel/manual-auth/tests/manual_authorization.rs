@@ -62,30 +62,38 @@ fn registry_mints_verified_manual_resolution_after_verifier_accepts() {
 
 #[test]
 fn registry_rejects_policy_and_quorum_mismatches_before_verifier() {
-    let policy = policy();
-    let mut missing_quorum_proof = proof();
-    missing_quorum_proof.signatures.clear();
-    let registry = ManualAuthorizationVerifierRegistry::new();
+    enum Case {
+        MissingQuorum,
+        VerifierMismatch,
+    }
 
-    let error = registry
-        .verify(&policy, claim(), missing_quorum_proof)
-        .expect_err("quorum rejects");
+    for case in [Case::MissingQuorum, Case::VerifierMismatch] {
+        let policy = policy();
+        let mut proof = proof();
+        match case {
+            Case::MissingQuorum => proof.signatures.clear(),
+            Case::VerifierMismatch => {
+                proof.verifier_id =
+                    spec::ManualAuthorizationVerifierId::new("mfm.manual_auth.test.other")
+                        .expect("verifier id");
+            }
+        }
+        let registry = ManualAuthorizationVerifierRegistry::new();
 
-    assert!(matches!(
-        error,
-        ManualAuthorizationError::QuorumUnsatisfied { .. }
-    ));
-
-    let mut proof = proof();
-    proof.verifier_id = spec::ManualAuthorizationVerifierId::new("mfm.manual_auth.test.other")
-        .expect("verifier id");
-    let error = registry
-        .verify(&policy, claim(), proof)
-        .expect_err("verifier mismatch rejects");
-    assert_eq!(
-        error,
-        ManualAuthorizationError::PolicyMismatch("verifier_id")
-    );
+        let error = registry
+            .verify(&policy, claim(), proof)
+            .expect_err("pre-verifier mismatch should reject");
+        match case {
+            Case::MissingQuorum => assert!(matches!(
+                error,
+                ManualAuthorizationError::QuorumUnsatisfied { .. }
+            )),
+            Case::VerifierMismatch => assert_eq!(
+                error,
+                ManualAuthorizationError::PolicyMismatch("verifier_id")
+            ),
+        }
+    }
 }
 
 #[test]

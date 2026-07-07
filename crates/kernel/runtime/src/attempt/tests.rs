@@ -8,37 +8,13 @@ use mfm_spec::v1::ResourceNamespace;
 
 #[test]
 fn resource_lane_block_detection_uses_typed_commit_outcome() {
-    let lane_key = store::ResourceLaneKey {
-        namespace: ResourceNamespace::new("mfm.test.account_nonce").expect("namespace"),
-        key_schema_id: SchemaId::new(
-            "mfm.test.resource_key",
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            DigestBytes::from_array([0x7b; 32]),
-        )
-        .expect("schema id"),
-        key: events::ResourceKey::new("wallet-1").expect("resource key"),
-    };
-    let holder = store::SideEffectPairLedgerRef::new(
-        RunId::from_digest(
-            DigestAlgorithm::Sha256JcsV1,
-            DigestBytes::from_array([0x7a; 32]),
-        ),
-        mfm_ids::SideEffectPairId::from_digest(
-            DigestAlgorithm::Sha256JcsV1,
-            DigestBytes::from_array([0x7c; 32]),
-        ),
-    );
-    let node_id = NodeId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([7; 32]),
-    );
+    let node_id = node_id(7);
 
     let witness = resource_lane_block_witness_from_outcome(
         &node_id,
         store::WaitFifoAdmissionBlock {
-            resource_lane_key: lane_key,
-            holder: Some(holder),
+            resource_lane_key: resource_lane_key("wallet-1"),
+            holder: None,
             waiter: None,
         },
     );

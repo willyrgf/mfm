@@ -283,48 +283,53 @@ fn test_mnemonic_passphrase_support() {
 
 #[cfg(feature = "dangerous-secret-export")]
 #[test]
-fn test_export_private_key_for_private_key_entries() {
-    let (_temp_dir, mut keystore) = test_keystore_with_exports();
-    keystore.unlock("test_password").unwrap();
+fn test_export_private_key_covers_raw_and_hd_derived_entries() {
+    enum Case {
+        RawPrivateKey,
+        HdDerivedMnemonic,
+    }
 
-    let test_key = "0000000000000000000000000000000000000000000000000000000000000001";
-    let id = keystore
-        .import_private_key(Some("export_pk".to_string()), test_key)
-        .unwrap();
+    for case in [Case::RawPrivateKey, Case::HdDerivedMnemonic] {
+        let (_temp_dir, mut keystore) = test_keystore_with_exports();
+        keystore.unlock("test_password").unwrap();
 
-    let exported = keystore.export_private_key(id).unwrap();
-    assert_eq!(exported.as_str(), format!("0x{test_key}"));
-}
+        match case {
+            Case::RawPrivateKey => {
+                let test_key = "0000000000000000000000000000000000000000000000000000000000000001";
+                let id = keystore
+                    .import_private_key(Some("export_pk".to_string()), test_key)
+                    .unwrap();
 
-#[cfg(feature = "dangerous-secret-export")]
-#[test]
-fn test_export_private_key_for_hd_derived_entries() {
-    let (_temp_dir, mut keystore) = test_keystore_with_exports();
-    keystore.unlock("test_password").unwrap();
+                let exported = keystore.export_private_key(id).unwrap();
+                assert_eq!(exported.as_str(), format!("0x{test_key}"));
+            }
+            Case::HdDerivedMnemonic => {
+                let test_mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+                let derivation_path = "m/44'/60'/0'/0/0";
 
-    let test_mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-    let derivation_path = "m/44'/60'/0'/0/0";
+                let mnemonic_id = keystore
+                    .import_mnemonic(
+                        Some("mnemonic_key".to_string()),
+                        test_mnemonic,
+                        derivation_path,
+                        None,
+                    )
+                    .unwrap();
 
-    let mnemonic_id = keystore
-        .import_mnemonic(
-            Some("mnemonic_key".to_string()),
-            test_mnemonic,
-            derivation_path,
-            None,
-        )
-        .unwrap();
+                let exported_pk = keystore.export_private_key(mnemonic_id).unwrap();
+                let derived_id = keystore
+                    .import_private_key(Some("derived".to_string()), exported_pk.as_str())
+                    .unwrap();
 
-    let exported_pk = keystore.export_private_key(mnemonic_id).unwrap();
-    let derived_id = keystore
-        .import_private_key(Some("derived".to_string()), exported_pk.as_str())
-        .unwrap();
-
-    let key_from_mnemonic = keystore.get_private_key(mnemonic_id).unwrap();
-    let key_from_exported = keystore.get_private_key(derived_id).unwrap();
-    assert_eq!(
-        key_from_mnemonic.ethereum_address().unwrap(),
-        key_from_exported.ethereum_address().unwrap()
-    );
+                let key_from_mnemonic = keystore.get_private_key(mnemonic_id).unwrap();
+                let key_from_exported = keystore.get_private_key(derived_id).unwrap();
+                assert_eq!(
+                    key_from_mnemonic.ethereum_address().unwrap(),
+                    key_from_exported.ethereum_address().unwrap()
+                );
+            }
+        }
+    }
 }
 
 #[cfg(feature = "dangerous-secret-export")]
@@ -1364,46 +1369,49 @@ fn test_keystore_version_handling() {
 }
 
 #[test]
-fn test_strict_loading_rejects_unknown_top_level_field() {
-    let temp_dir = tempdir().unwrap();
-    let keystore_path = temp_dir.path().join("unknown_top_level.keystore");
-
-    {
-        let mut keystore =
-            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
-        keystore.unlock("strong_password_123").unwrap();
+fn test_strict_loading_rejects_unknown_header_fields() {
+    enum Case {
+        TopLevel,
+        Kdf,
     }
 
-    let mut json = read_keystore_json(&keystore_path);
-    json["unexpected"] = serde_json::json!(true);
-    write_keystore_json(&keystore_path, &json);
+    for (case, file_name, expected_message) in [
+        (
+            Case::TopLevel,
+            "unknown_top_level.keystore",
+            "Unknown keystore file field",
+        ),
+        (
+            Case::Kdf,
+            "unknown_kdf.keystore",
+            "Malformed keystore header",
+        ),
+    ] {
+        let temp_dir = tempdir().unwrap();
+        let keystore_path = temp_dir.path().join(file_name);
 
-    let err = Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap_err();
-    match err {
-        KeystoreError::InvalidInput(msg) => assert!(msg.contains("Unknown keystore file field")),
-        other => panic!("expected unknown top-level field rejection, got: {other:?}"),
-    }
-}
+        {
+            let mut keystore =
+                Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+            keystore.unlock("strong_password_123").unwrap();
+        }
 
-#[test]
-fn test_strict_loading_rejects_unknown_kdf_field() {
-    let temp_dir = tempdir().unwrap();
-    let keystore_path = temp_dir.path().join("unknown_kdf.keystore");
+        let mut json = read_keystore_json(&keystore_path);
+        match case {
+            Case::TopLevel => json["unexpected"] = serde_json::json!(true),
+            Case::Kdf => json["kdf_params"]["unexpected"] = serde_json::json!(true),
+        }
+        write_keystore_json(&keystore_path, &json);
 
-    {
-        let mut keystore =
-            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
-        keystore.unlock("strong_password_123").unwrap();
-    }
-
-    let mut json = read_keystore_json(&keystore_path);
-    json["kdf_params"]["unexpected"] = serde_json::json!(true);
-    write_keystore_json(&keystore_path, &json);
-
-    let err = Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap_err();
-    match err {
-        KeystoreError::InvalidInput(msg) => assert!(msg.contains("Malformed keystore header")),
-        other => panic!("expected unknown KDF field rejection, got: {other:?}"),
+        let err =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap_err();
+        match err {
+            KeystoreError::InvalidInput(msg) => assert!(
+                msg.contains(expected_message),
+                "{file_name}: expected {expected_message:?}, got {msg:?}"
+            ),
+            other => panic!("{file_name}: expected unknown field rejection, got: {other:?}"),
+        }
     }
 }
 
@@ -1551,54 +1559,48 @@ fn test_import_after_retained_mac_body_tamper_fails_without_rewrite() {
 }
 
 #[test]
-fn test_get_after_external_tamper_fails_without_rewrite() {
-    let temp_dir = tempdir().unwrap();
-    let keystore_path = temp_dir.path().join("get_after_tamper.keystore");
-    let (mut keystore, key_id) = unlocked_keystore_with_one_key(&keystore_path, "read-target");
+fn test_operations_after_external_tamper_fail_without_rewrite() {
+    #[derive(Clone, Copy)]
+    enum Case {
+        Get,
+        Delete,
+        ChangePassword,
+    }
 
-    mutate_keystore_json_retaining_mac(&keystore_path, |value| {
-        value["audit_log"][0]["success"] = serde_json::json!(false);
-    });
-    let tampered_bytes = std::fs::read(&keystore_path).unwrap();
+    for case in [Case::Get, Case::Delete, Case::ChangePassword] {
+        let temp_dir = tempdir().unwrap();
+        let (file_name, alias) = match case {
+            Case::Get => ("get_after_tamper.keystore", "read-target"),
+            Case::Delete => ("delete_after_tamper.keystore", "delete-target"),
+            Case::ChangePassword => ("change_password_after_tamper.keystore", "rekey-target"),
+        };
+        let keystore_path = temp_dir.path().join(file_name);
+        let (mut keystore, key_id) = unlocked_keystore_with_one_key(&keystore_path, alias);
 
-    assert_concurrent_write_rejected(keystore.get_private_key(key_id));
-    assert_eq!(std::fs::read(&keystore_path).unwrap(), tampered_bytes);
-}
+        mutate_keystore_json_retaining_mac(&keystore_path, |value| match case {
+            Case::Get => value["audit_log"][0]["success"] = serde_json::json!(false),
+            Case::Delete => {
+                value["entries"][0]["alias"] = serde_json::json!("tampered-delete-target")
+            }
+            Case::ChangePassword => {
+                let salt = value["kdf_params"]["salt"].as_array_mut().unwrap();
+                let first = salt[0].as_u64().unwrap();
+                salt[0] = serde_json::json!((first + 1) % 256);
+            }
+        });
+        let tampered_bytes = std::fs::read(&keystore_path).unwrap();
 
-#[test]
-fn test_delete_after_external_tamper_fails_without_rewrite() {
-    let temp_dir = tempdir().unwrap();
-    let keystore_path = temp_dir.path().join("delete_after_tamper.keystore");
-    let (mut keystore, key_id) = unlocked_keystore_with_one_key(&keystore_path, "delete-target");
-
-    mutate_keystore_json_retaining_mac(&keystore_path, |value| {
-        value["entries"][0]["alias"] = serde_json::json!("tampered-delete-target");
-    });
-    let tampered_bytes = std::fs::read(&keystore_path).unwrap();
-
-    assert_concurrent_write_rejected(keystore.delete_key(key_id));
-    assert_eq!(std::fs::read(&keystore_path).unwrap(), tampered_bytes);
-}
-
-#[test]
-fn test_change_password_after_external_tamper_fails_without_rewrite() {
-    let temp_dir = tempdir().unwrap();
-    let keystore_path = temp_dir
-        .path()
-        .join("change_password_after_tamper.keystore");
-    let (mut keystore, _) = unlocked_keystore_with_one_key(&keystore_path, "rekey-target");
-
-    mutate_keystore_json_retaining_mac(&keystore_path, |value| {
-        let salt = value["kdf_params"]["salt"].as_array_mut().unwrap();
-        let first = salt[0].as_u64().unwrap();
-        salt[0] = serde_json::json!((first + 1) % 256);
-    });
-    let tampered_bytes = std::fs::read(&keystore_path).unwrap();
-
-    assert_concurrent_write_rejected(
-        keystore.change_password("strong_password_123", "new_password_123"),
-    );
-    assert_eq!(std::fs::read(&keystore_path).unwrap(), tampered_bytes);
+        match case {
+            Case::Get => {
+                assert_concurrent_write_rejected(keystore.get_private_key(key_id).map(|_| ()))
+            }
+            Case::Delete => assert_concurrent_write_rejected(keystore.delete_key(key_id)),
+            Case::ChangePassword => assert_concurrent_write_rejected(
+                keystore.change_password("strong_password_123", "new_password_123"),
+            ),
+        }
+        assert_eq!(std::fs::read(&keystore_path).unwrap(), tampered_bytes);
+    }
 }
 
 #[test]
@@ -1868,20 +1870,63 @@ fn test_early_file_validation_dos_protection() {
 }
 
 #[test]
-fn test_weak_password_rejected_on_create_and_change() {
-    let temp_dir = tempdir().unwrap();
-    let keystore_path = temp_dir.path().join("weak_password.keystore");
+fn test_password_policy_accepts_boundary_and_rejects_weak_values() {
+    #[derive(Clone, Copy)]
+    enum Case {
+        ShortCreate,
+        RepeatedChange,
+        StrongBoundaryCreate,
+        CommonCreate,
+        WhitespaceCreate,
+    }
 
-    let mut keystore =
-        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
-    let create_err = keystore.unlock("short").unwrap_err();
-    assert!(matches!(create_err, KeystoreError::InvalidInput(_)));
+    fn assert_policy_rejects(result: Result<(), KeystoreError>, expected_message: Option<&str>) {
+        match result {
+            Err(KeystoreError::InvalidInput(msg)) => {
+                if let Some(expected_message) = expected_message {
+                    assert!(
+                        msg.contains(expected_message),
+                        "expected password rejection to mention {expected_message:?}, got: {msg}"
+                    );
+                }
+            }
+            other => panic!("expected InvalidInput for weak password, got: {other:?}"),
+        }
+    }
 
-    keystore.unlock("strong_password_123").unwrap();
-    let change_err = keystore
-        .change_password("strong_password_123", "aaaaaaaaaaaa")
-        .unwrap_err();
-    assert!(matches!(change_err, KeystoreError::InvalidInput(_)));
+    for (label, case) in [
+        ("short-create", Case::ShortCreate),
+        ("repeated-change", Case::RepeatedChange),
+        ("strong-boundary-create", Case::StrongBoundaryCreate),
+        ("common-create", Case::CommonCreate),
+        ("whitespace-create", Case::WhitespaceCreate),
+    ] {
+        let temp_dir = tempdir().unwrap();
+        let keystore_path = temp_dir.path().join(format!("{label}.keystore"));
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+
+        match case {
+            Case::ShortCreate => assert_policy_rejects(keystore.unlock("short"), None),
+            Case::RepeatedChange => {
+                keystore.unlock("strong_password_123").unwrap();
+                assert_policy_rejects(
+                    keystore.change_password("strong_password_123", "aaaaaaaaaaaa"),
+                    None,
+                );
+            }
+            Case::StrongBoundaryCreate => {
+                keystore.unlock("A1b2C3d4E5f6").unwrap();
+                assert_eq!(keystore.list_keys().unwrap().len(), 0);
+            }
+            Case::CommonCreate => {
+                assert_policy_rejects(keystore.unlock("QWERTY123456"), Some("too weak"));
+            }
+            Case::WhitespaceCreate => {
+                assert_policy_rejects(keystore.unlock("            "), Some("too weak"));
+            }
+        }
+    }
 }
 
 #[test]
@@ -2044,45 +2089,6 @@ fn test_auto_lock_timeout_expires_session() {
         keystore.get_private_key(key_id),
         Err(KeystoreError::Locked)
     ));
-}
-
-#[test]
-fn test_password_policy_accepts_12_char_strong_password() {
-    let temp_dir = tempdir().unwrap();
-    let keystore_path = temp_dir.path().join("pw_boundary.keystore");
-
-    let mut keystore =
-        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
-    keystore.unlock("A1b2C3d4E5f6").unwrap();
-    assert_eq!(keystore.list_keys().unwrap().len(), 0);
-}
-
-#[test]
-fn test_password_policy_rejects_common_values_case_insensitive() {
-    let temp_dir = tempdir().unwrap();
-    let keystore_path = temp_dir.path().join("pw_common.keystore");
-
-    let mut keystore =
-        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
-    let err = keystore.unlock("QWERTY123456").unwrap_err();
-    match err {
-        KeystoreError::InvalidInput(msg) => assert!(msg.contains("too weak")),
-        other => panic!("expected InvalidInput for weak password, got: {other:?}"),
-    }
-}
-
-#[test]
-fn test_password_policy_rejects_whitespace_only_password() {
-    let temp_dir = tempdir().unwrap();
-    let keystore_path = temp_dir.path().join("pw_spaces.keystore");
-
-    let mut keystore =
-        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
-    let err = keystore.unlock("            ").unwrap_err();
-    match err {
-        KeystoreError::InvalidInput(msg) => assert!(msg.contains("too weak")),
-        other => panic!("expected InvalidInput for weak password, got: {other:?}"),
-    }
 }
 
 #[test]

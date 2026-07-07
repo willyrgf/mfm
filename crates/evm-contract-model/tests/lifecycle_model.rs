@@ -106,9 +106,28 @@ fn expected_matches_normalizes_hex_wrappers() {
 }
 
 #[test]
-fn json_wrappers_reject_non_canonical_float_values() {
+fn typed_json_boundaries_reject_non_canonical_float_values() {
     assert!(AbiArgumentValue::from_json_value(&serde_json::json!(1.5)).is_err());
     assert!(ExpectedValue::from_json_value(&serde_json::json!(1.5)).is_err());
+
+    let context = serde_json::json!({
+        "lifecycle_key": "example-lifecycle",
+        "network": {
+            "network_id": "ethereum-mainnet",
+            "expected_chain_id": 1.5,
+            "chain_fingerprint": null,
+            "finality_or_observation_policy": null
+        },
+        "contract_profile": {
+            "profile_id": "example-profile",
+            "artifact_digest": null,
+            "interface_digest": null,
+            "creation_bytecode_digest": null,
+            "deployed_code_hash": null,
+            "selector_event_policy_digest": null
+        }
+    });
+    assert!(serde_json::from_value::<EvmContractContext>(context).is_err());
 }
 
 #[test]
@@ -202,29 +221,6 @@ fn contract_context_refs_are_stable_content_addresses() {
 
     assert_eq!(derived_context_ref(&first), derived_context_ref(&second));
     assert_ne!(derived_context_ref(&first), derived_context_ref(&different));
-}
-
-#[test]
-fn contract_context_rejects_float_chain_ids() {
-    let context = serde_json::json!({
-        "lifecycle_key": "example-lifecycle",
-        "network": {
-            "network_id": "ethereum-mainnet",
-            "expected_chain_id": 1.5,
-            "chain_fingerprint": null,
-            "finality_or_observation_policy": null
-        },
-        "contract_profile": {
-            "profile_id": "example-profile",
-            "artifact_digest": null,
-            "interface_digest": null,
-            "creation_bytecode_digest": null,
-            "deployed_code_hash": null,
-            "selector_event_policy_digest": null
-        }
-    });
-
-    assert!(serde_json::from_value::<EvmContractContext>(context).is_err());
 }
 
 #[test]

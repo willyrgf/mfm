@@ -224,10 +224,7 @@ impl<'a> InvocationBuilder<'a> {
     fn materialize(&self) -> Result<InvocationMaterial> {
         let config_artifact = committed_config_artifact(self.node, self.view)?;
         let inputs = materialize_inputs(self.runtime_spec, self.node, self.view)?;
-        let caps = CertifiedRuntimeCapabilities::new(
-            self.node.node_id.clone(),
-            self.node.capability_bindings.clone(),
-        );
+        let caps = CertifiedRuntimeCapabilities::for_node(self.node);
         let recorded_facts = recorded_facts_for_attempt(
             &self.view.projections,
             &self.node.node_id,
@@ -570,10 +567,10 @@ pub struct CertifiedRuntimeCapabilities {
 }
 
 impl CertifiedRuntimeCapabilities {
-    pub(crate) fn new(node_id: NodeId, descriptor: CapabilitySetDescriptor) -> Self {
+    pub(crate) fn for_node(node: &spec::NodeSpec) -> Self {
         Self {
-            node_id,
-            descriptor,
+            node_id: node.node_id.clone(),
+            descriptor: node.capability_bindings.clone(),
         }
     }
 

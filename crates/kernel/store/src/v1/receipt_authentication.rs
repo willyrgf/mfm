@@ -307,17 +307,21 @@ mod tests {
         })
     }
 
+    fn default_signed_receipt(plan_hash: &ContentDigest, key: &SigningKey) -> FactQueryReceipt {
+        signed_receipt(
+            plan_hash,
+            key,
+            StoreIdentity::new("store.default").expect("store"),
+            StoreKeyId::new("key.default").expect("key"),
+        )
+    }
+
     #[test]
     fn verifies_ed25519_receipt_authentication() {
         let key = signing_key();
         let plan = plan();
         let plan_hash = mfm_facts::fact_query_plan_hash(&plan).expect("plan hash");
-        let receipt = signed_receipt(
-            &plan_hash,
-            &key,
-            StoreIdentity::new("store.default").expect("store"),
-            StoreKeyId::new("key.default").expect("key"),
-        );
+        let receipt = default_signed_receipt(&plan_hash, &key);
         verify_fact_query_receipt_authentication(&plan_hash, &receipt, &trust_root(&key))
             .expect("verified receipt");
 
@@ -334,12 +338,7 @@ mod tests {
         let key = signing_key();
         let plan = plan();
         let plan_hash = mfm_facts::fact_query_plan_hash(&plan).expect("plan hash");
-        let receipt = signed_receipt(
-            &plan_hash,
-            &key,
-            StoreIdentity::new("store.default").expect("store"),
-            StoreKeyId::new("key.default").expect("key"),
-        );
+        let receipt = default_signed_receipt(&plan_hash, &key);
         let evidence = FactQueryEvidence::new(
             plan.clone(),
             receipt.clone(),
@@ -360,12 +359,7 @@ mod tests {
     fn rejects_tampered_receipt_authentication() {
         let key = signing_key();
         let plan_hash = mfm_facts::fact_query_plan_hash(&plan()).expect("plan hash");
-        let receipt = signed_receipt(
-            &plan_hash,
-            &key,
-            StoreIdentity::new("store.default").expect("store"),
-            StoreKeyId::new("key.default").expect("key"),
-        );
+        let receipt = default_signed_receipt(&plan_hash, &key);
 
         let tampered_hash = receipt_with_invalid_signature(&plan_hash, &receipt);
         assert!(verify_fact_query_receipt_authentication(

@@ -3,9 +3,11 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use mfm_certify::{
     CertifiedDescriptorSet, CertifiedSpecCertificate, CertifiedSpecGraph, CertifiedTypedSpec,
 };
-use mfm_ids::{CellId, ContextRef, DescriptorId, NodeId, SideEffectPairId, SpecHash};
 #[cfg(test)]
-use mfm_ids::{ContentDigest, DigestAlgorithm};
+use mfm_ids::DigestAlgorithm;
+use mfm_ids::{
+    CellId, ContentDigest, ContextRef, DescriptorId, NodeId, SideEffectPairId, SpecHash,
+};
 use mfm_spec::v1 as spec;
 
 use crate::{Result, RuntimeError};
@@ -28,7 +30,6 @@ impl CertifiedRuntimeSpec {
     pub fn new(certified: CertifiedTypedSpec) -> Result<Self> {
         let parts = certified.into_parts();
         let state_descriptors = certified_state_descriptors(parts.graph.descriptors());
-        let _framework_lifecycle = parts.framework_lifecycle;
         Self::from_certified_graph(
             parts.envelope,
             parts.certificate,
@@ -183,6 +184,28 @@ impl CertifiedRuntimeSpec {
         &self.topological_order
     }
 
+    /// Iterates forward nodes in topological order followed by remediation nodes.
+    pub(crate) fn executable_nodes(&self) -> impl Iterator<Item = &spec::NodeSpec> + '_ {
+        self.topological_order
+            .iter()
+            .map(|node_id| self.node(node_id).expect("topological node exists"))
+            .chain(self.remediations.values())
+    }
+
+    /// Returns certified fact descriptor hashes required by any executable node.
+    pub(crate) fn fact_descriptor_hashes(&self) -> BTreeSet<ContentDigest> {
+        self.spec()
+            .nodes
+            .iter()
+            .chain(self.spec().remediations.values())
+            .flat_map(|node| {
+                node.fact_descriptor_allowlist
+                    .iter()
+                    .map(|reference| reference.descriptor_hash.clone())
+            })
+            .collect()
+    }
+
     /// Returns a certified node by id.
     pub fn node(&self, node_id: &NodeId) -> Option<&spec::NodeSpec> {
         self.nodes.get(node_id).or_else(|| {
@@ -221,11 +244,6 @@ impl CertifiedRuntimeSpec {
             .side_effect_verify_pair_for_submit_node(submit_node_id)
             .ok()
             .map(|pair| pair.pair_id)
-    }
-
-    /// Iterates certified remediation nodes keyed by their forward side-effect node id.
-    pub(crate) fn remediations(&self) -> impl Iterator<Item = (&NodeId, &spec::NodeSpec)> {
-        self.remediations.iter()
     }
 
     /// Returns a certified cell by id.

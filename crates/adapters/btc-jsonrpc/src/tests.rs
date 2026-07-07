@@ -133,25 +133,7 @@ struct MockArtifacts {
 
 impl MockArtifacts {
     fn with_checkpoint_response(response: &CollectorCheckpointResponse) -> (Self, InternalFactRef) {
-        let bytes = serde_json::to_vec(response).expect("response json");
-        let digest =
-            ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(&bytes));
-        let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
-        let producer_node_id = producer_node_id(1);
-        let evidence = checkpoint_response_evidence(
-            bytes.len() as u64,
-            artifact_id.clone(),
-            digest.clone(),
-            producer_node_id.clone(),
-        );
-        let artifact_evidence_hash = artifact_evidence_hash(&evidence);
-        let fact_ref = internal_fact_ref(
-            1,
-            artifact_id,
-            digest,
-            producer_node_id,
-            artifact_evidence_hash,
-        );
+        let (bytes, evidence, fact_ref) = checkpoint_artifact_and_ref(response, 1);
         (
             Self {
                 calls: Mutex::new(Vec::new()),
@@ -164,6 +146,31 @@ impl MockArtifacts {
     fn calls(&self) -> Vec<ArtifactId> {
         self.calls.lock().expect("calls").clone()
     }
+}
+
+fn checkpoint_artifact_and_ref(
+    response: &CollectorCheckpointResponse,
+    seed: u8,
+) -> (Vec<u8>, ArtifactEvidenceRef, InternalFactRef) {
+    let bytes = serde_json::to_vec(response).expect("response json");
+    let digest =
+        ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(&bytes));
+    let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
+    let producer_node_id = producer_node_id(seed);
+    let evidence = checkpoint_response_evidence(
+        bytes.len() as u64,
+        artifact_id.clone(),
+        digest.clone(),
+        producer_node_id.clone(),
+    );
+    let fact_ref = internal_fact_ref(
+        seed,
+        artifact_id,
+        digest,
+        producer_node_id,
+        artifact_evidence_hash(&evidence),
+    );
+    (bytes, evidence, fact_ref)
 }
 
 impl store::RetainedArtifactReadProvider for MockArtifacts {
@@ -454,25 +461,7 @@ fn checkpoint_replay_helper_uses_recorded_evidence_without_provider() {
         None,
         BtcFinality::BestAvailable,
     );
-    let bytes = serde_json::to_vec(&response).expect("response json");
-    let response_digest =
-        ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(&bytes));
-    let artifact_id =
-        ArtifactId::from_digest(response_digest.algorithm(), *response_digest.digest());
-    let producer_node_id = producer_node_id(2);
-    let evidence = checkpoint_response_evidence(
-        bytes.len() as u64,
-        artifact_id.clone(),
-        response_digest.clone(),
-        producer_node_id.clone(),
-    );
-    let fact_ref = internal_fact_ref(
-        2,
-        artifact_id,
-        response_digest,
-        producer_node_id,
-        artifact_evidence_hash(&evidence),
-    );
+    let (_, _, fact_ref) = checkpoint_artifact_and_ref(&response, 2);
     let plan = config.request().expect("request").plan().clone();
     let selection = FactSelectionEvidence::new(digest(0x71), vec![0], None).expect("selection");
     let evidence = mfm_facts::FactQueryEvidence::new(
@@ -631,44 +620,43 @@ fn digest_bytes(seed: u8) -> DigestBytes {
 }
 
 #[tokio::test]
-async fn provider_maps_best_head_request_to_blockchain_info_and_header() {
-    let transport = Arc::new(MockTransport::default());
-    let provider = BtcJsonRpcChainHeadProvider::new(transport.clone());
-    let response = provider
-        .read_chain_head(&make_request(BtcHeadSelection::best()))
-        .await
-        .expect("best head");
-
-    assert_eq!(response.block_height, 850_000);
-    assert_eq!(response.block_hash.as_str(), BEST_HASH);
-    assert_eq!(response.provider_time_unix_ms, Some(1_720_000_000_000));
-    assert_eq!(
-        transport.calls(),
-        vec!["info".to_owned(), format!("header:{BEST_HASH}")]
-    );
-}
-
-#[tokio::test]
-async fn provider_maps_confirmed_head_request_to_selected_height() {
-    let transport = Arc::new(MockTransport::default());
-    let provider = BtcJsonRpcChainHeadProvider::new(transport.clone());
-    let response = provider
-        .read_chain_head(&make_request(
+async fn provider_maps_head_requests_to_blockchain_info_and_headers() {
+    for (name, selection, expected_height, expected_hash, expected_calls) in [
+        (
+            "best head",
+            BtcHeadSelection::best(),
+            850_000,
+            BEST_HASH,
+            vec!["info".to_owned(), format!("header:{BEST_HASH}")],
+        ),
+        (
+            "confirmed head",
             BtcHeadSelection::confirmed(6).expect("confirmed"),
-        ))
-        .await
-        .expect("confirmed head");
+            849_994,
+            CONFIRMED_HASH,
+            vec![
+                "info".to_owned(),
+                "hash:849994".to_owned(),
+                format!("header:{CONFIRMED_HASH}"),
+            ],
+        ),
+    ] {
+        let transport = Arc::new(MockTransport::default());
+        let provider = BtcJsonRpcChainHeadProvider::new(transport.clone());
+        let response = provider
+            .read_chain_head(&make_request(selection))
+            .await
+            .expect(name);
 
-    assert_eq!(response.block_height, 849_994);
-    assert_eq!(response.block_hash.as_str(), CONFIRMED_HASH);
-    assert_eq!(
-        transport.calls(),
-        vec![
-            "info".to_owned(),
-            "hash:849994".to_owned(),
-            format!("header:{CONFIRMED_HASH}")
-        ]
-    );
+        assert_eq!(response.block_height, expected_height, "{name}");
+        assert_eq!(response.block_hash.as_str(), expected_hash, "{name}");
+        assert_eq!(
+            response.provider_time_unix_ms,
+            Some(1_720_000_000_000),
+            "{name}"
+        );
+        assert_eq!(transport.calls(), expected_calls, "{name}");
+    }
 }
 
 #[tokio::test]
@@ -806,7 +794,7 @@ fn replay_helper_rejects_mismatched_recorded_evidence() {
 }
 
 #[test]
-fn replay_helper_rejects_checkpoint_source_incompatibility() {
+fn replay_helper_rejects_incompatible_loaded_checkpoints() {
     let request = make_request(BtcHeadSelection::best());
     let response = BtcChainHeadResponse {
         evidence: RedactedBtcSourceEvidence::from_request(
@@ -818,36 +806,29 @@ fn replay_helper_rejects_checkpoint_source_incompatibility() {
         block_hash: BtcBlockHash::new(BEST_HASH).expect("hash"),
         provider_time_unix_ms: Some(1_720_000_000_000),
     };
-    let input = observe_input(
-        Some(checkpoint_fact_for_source(849_999, "other-bitcoin-core")),
-        Some(1_720_000_001_000),
-    );
 
-    let error =
-        replay_chain_head_fact_from_evidence(&request, &response, &input).expect_err("checkpoint");
-
-    assert_eq!(error, BtcJsonRpcAdapterError::ReplayEvidenceMismatch);
-}
-
-#[test]
-fn replay_helper_rejects_observation_behind_loaded_checkpoint() {
-    let request = make_request(BtcHeadSelection::best());
-    let response = BtcChainHeadResponse {
-        evidence: RedactedBtcSourceEvidence::from_request(
-            &request,
-            Some("main".to_owned()),
-            BtcSourceStatus::Synced,
+    for (name, input) in [
+        (
+            "checkpoint source incompatibility",
+            observe_input(
+                Some(checkpoint_fact_for_source(849_999, "other-bitcoin-core")),
+                Some(1_720_000_001_000),
+            ),
         ),
-        block_height: 850_000,
-        block_hash: BtcBlockHash::new(BEST_HASH).expect("hash"),
-        provider_time_unix_ms: Some(1_720_000_000_000),
-    };
-    let input = observe_input(Some(checkpoint_fact(850_001)), Some(1_720_000_001_000));
+        (
+            "observation behind loaded checkpoint",
+            observe_input(Some(checkpoint_fact(850_001)), Some(1_720_000_001_000)),
+        ),
+    ] {
+        let error =
+            replay_chain_head_fact_from_evidence(&request, &response, &input).expect_err(name);
 
-    let error =
-        replay_chain_head_fact_from_evidence(&request, &response, &input).expect_err("checkpoint");
-
-    assert_eq!(error, BtcJsonRpcAdapterError::ReplayEvidenceMismatch);
+        assert_eq!(
+            error,
+            BtcJsonRpcAdapterError::ReplayEvidenceMismatch,
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -899,15 +880,15 @@ fn capability_binding_uses_btc_jsonrpc_adapter_identity() {
     let binding = btc_fact_record_capability_binding().expect("binding");
 
     assert_eq!(
-        binding.capability_kind.canonical_name(),
+        binding.capability_kind().canonical_name(),
         Some("mfm.bitcoin/fact.record")
     );
     assert_eq!(
-        binding.adapter_kind,
-        btc_jsonrpc_adapter_kind().expect("adapter kind")
+        binding.adapter_kind(),
+        &btc_jsonrpc_adapter_kind().expect("adapter kind")
     );
     assert_eq!(
-        binding.adapter_version,
-        btc_jsonrpc_adapter_version().expect("adapter version")
+        binding.adapter_version(),
+        &btc_jsonrpc_adapter_version().expect("adapter version")
     );
 }

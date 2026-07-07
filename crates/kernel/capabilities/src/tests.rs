@@ -122,24 +122,19 @@ fn valid_effect_capability_sets_compile_and_describe() {
 }
 
 #[test]
-fn no_caps_validates_for_pure_only() {
+fn descriptor_role_validation_matches_v1_effect_rules() {
     let no_caps = NoCaps::descriptor().expect("no caps descriptor");
     assert!(no_caps.is_empty());
     no_caps
         .validate_for_effect::<Pure>()
         .expect("pure accepts no caps");
-
-    let side_effect_error = no_caps
-        .validate_for_effect::<ApplySideEffect>()
-        .expect_err("side effect needs one mutation authority");
     assert!(matches!(
-        side_effect_error,
+        no_caps
+            .validate_for_effect::<ApplySideEffect>()
+            .expect_err("side effect needs one mutation authority"),
         CapabilityError::InvalidCapabilitySet { .. }
     ));
-}
 
-#[test]
-fn descriptor_role_validation_matches_v1_effect_rules() {
     let read_with_mutation =
         CapabilitySetDescriptor::new(vec![MutationSubmitter::descriptor().expect("mutation cap")])
             .expect("descriptor builds");

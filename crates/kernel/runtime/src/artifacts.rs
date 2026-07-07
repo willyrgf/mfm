@@ -12,7 +12,7 @@ impl<T> RuntimeArtifactStore for T where T: store::RetainedArtifactReadProvider 
 
 /// Runtime-owned artifact binding kind for one staged attempt artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StagedArtifactBindingKind {
+pub(crate) enum StagedArtifactBindingKind {
     /// Artifact is the terminal output for a state cell.
     StateOutput,
     /// Artifact is an external read fact response.
@@ -38,7 +38,7 @@ pub enum StagedArtifactBindingKind {
 
 /// Runtime-owned side-effect phase for one staged side-effect artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum StagedSideEffectArtifactPhase {
+pub(crate) enum StagedSideEffectArtifactPhase {
     /// Initial side-effect intent persisted before claims and invocation.
     Intent,
     /// Prepared invocation payload.
@@ -57,26 +57,9 @@ pub enum StagedSideEffectArtifactPhase {
     AmbiguityEvidence,
 }
 
-impl StagedSideEffectArtifactPhase {
-    fn staging_class(self) -> events::ArtifactStagingClass {
-        match self {
-            Self::Intent => events::ArtifactStagingClass::SideEffectIntent,
-            Self::PreparedInvocation => events::ArtifactStagingClass::SideEffectPreparedInvocation,
-            Self::NotSubmittedProof => events::ArtifactStagingClass::SideEffectNotSubmittedProof,
-            Self::Submission => events::ArtifactStagingClass::SideEffectSubmission,
-            Self::SubmissionUnknownEvidence => {
-                events::ArtifactStagingClass::SideEffectSubmissionUnknown
-            }
-            Self::Receipt => events::ArtifactStagingClass::SideEffectReceipt,
-            Self::Confirmation => events::ArtifactStagingClass::SideEffectConfirmation,
-            Self::AmbiguityEvidence => events::ArtifactStagingClass::SideEffectAmbiguity,
-        }
-    }
-}
-
 /// Sealed finalized artifact handle bound to one run, node, attempt, and evidence role.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StagedArtifactHandle {
+pub(crate) struct StagedArtifactHandle {
     run_id: RunId,
     node_id: NodeId,
     attempt_id: AttemptId,
@@ -90,21 +73,13 @@ impl StagedArtifactHandle {
         evidence: store::ArtifactEvidenceRef,
         binding: StagedArtifactBindingKind,
     ) -> Result<Self> {
-        if staged_artifact_binding_role(&binding) != evidence.artifact_role {
-            return Err(RuntimeError::InvalidRunnerOutput(format!(
-                "node {} staged artifact role {} with mismatched binding",
-                ctx.node().node_id,
-                artifact_role_name(evidence.artifact_role)
-            )));
-        }
-        validate_staged_artifact_producer(ctx, &evidence)?;
-        Ok(Self {
-            run_id: ctx.run_id().clone(),
-            node_id: ctx.node().node_id.clone(),
-            attempt_id: ctx.attempt_id().clone(),
-            binding,
+        Self::for_context(
+            ctx.run_id(),
+            &ctx.node().node_id,
+            ctx.attempt_id(),
             evidence,
-        })
+            binding,
+        )
     }
 
     fn for_pre_invocation(
@@ -112,54 +87,63 @@ impl StagedArtifactHandle {
         evidence: store::ArtifactEvidenceRef,
         binding: StagedArtifactBindingKind,
     ) -> Result<Self> {
+        Self::for_context(
+            ctx.run_id(),
+            &ctx.node().node_id,
+            ctx.attempt_id(),
+            evidence,
+            binding,
+        )
+    }
+
+    fn for_context(
+        run_id: &RunId,
+        node_id: &NodeId,
+        attempt_id: &AttemptId,
+        evidence: store::ArtifactEvidenceRef,
+        binding: StagedArtifactBindingKind,
+    ) -> Result<Self> {
         if staged_artifact_binding_role(&binding) != evidence.artifact_role {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
                 "node {} staged artifact role {} with mismatched binding",
-                ctx.node().node_id,
+                node_id,
                 artifact_role_name(evidence.artifact_role)
             )));
         }
-        validate_staged_artifact_producer_for_node(&ctx.node().node_id, &evidence)?;
+        validate_staged_artifact_producer_for_node(node_id, &evidence)?;
         Ok(Self {
-            run_id: ctx.run_id().clone(),
-            node_id: ctx.node().node_id.clone(),
-            attempt_id: ctx.attempt_id().clone(),
+            run_id: run_id.clone(),
+            node_id: node_id.clone(),
+            attempt_id: attempt_id.clone(),
             binding,
             evidence,
         })
     }
 
     /// Returns the run id this handle is sealed to.
-    pub fn run_id(&self) -> &RunId {
+    pub(crate) fn run_id(&self) -> &RunId {
         &self.run_id
     }
 
     /// Returns the node id this handle is sealed to.
-    pub fn node_id(&self) -> &NodeId {
+    pub(crate) fn node_id(&self) -> &NodeId {
         &self.node_id
     }
 
     /// Returns the attempt id this handle is sealed to.
-    pub fn attempt_id(&self) -> &AttemptId {
+    pub(crate) fn attempt_id(&self) -> &AttemptId {
         &self.attempt_id
     }
 
     /// Returns the artifact binding metadata.
-    pub fn binding(&self) -> &StagedArtifactBindingKind {
+    pub(crate) fn binding(&self) -> &StagedArtifactBindingKind {
         &self.binding
     }
 
     /// Returns the finalized artifact evidence.
-    pub fn evidence(&self) -> &store::ArtifactEvidenceRef {
+    pub(crate) fn evidence(&self) -> &store::ArtifactEvidenceRef {
         &self.evidence
     }
-}
-
-fn validate_staged_artifact_producer(
-    ctx: &ErasedRunCtx<'_>,
-    evidence: &store::ArtifactEvidenceRef,
-) -> Result<()> {
-    validate_staged_artifact_producer_for_node(&ctx.node().node_id, evidence)
 }
 
 fn validate_staged_artifact_producer_for_node(
@@ -240,7 +224,7 @@ impl StagedArtifact {
     }
 
     /// Creates an inline staged side-effect artifact bound to one ledger phase.
-    pub fn inline_side_effect_artifact(
+    pub(crate) fn inline_side_effect_artifact(
         ctx: &ErasedRunCtx<'_>,
         bytes: Vec<u8>,
         evidence: store::ArtifactEvidenceRef,
@@ -267,7 +251,7 @@ impl StagedArtifact {
     }
 
     /// Creates an inline staged side-effect artifact from pre-invocation lane preflight.
-    pub fn inline_pre_invocation_side_effect_artifact(
+    pub(crate) fn inline_pre_invocation_side_effect_artifact(
         ctx: &PreInvocationRunCtx<'_>,
         bytes: Vec<u8>,
         evidence: store::ArtifactEvidenceRef,
@@ -332,7 +316,7 @@ impl StagedArtifact {
     }
 
     /// Returns the sealed handle.
-    pub fn handle(&self) -> &StagedArtifactHandle {
+    pub(crate) fn handle(&self) -> &StagedArtifactHandle {
         &self.handle
     }
 
@@ -419,42 +403,35 @@ pub(crate) fn staged_side_effect_artifact_phase(
     }
 }
 
-fn artifact_role_for_staging_class(staging: events::ArtifactStagingClass) -> events::ArtifactRole {
-    events::ArtifactRole::ALL
-        .iter()
-        .copied()
-        .find(|role| role.contract().staging == staging)
-        .expect("artifact role contract for runtime staging class")
-}
-
-fn staged_artifact_binding_staging_class(
-    binding: &StagedArtifactBindingKind,
-) -> events::ArtifactStagingClass {
-    match binding {
-        StagedArtifactBindingKind::StateOutput => events::ArtifactStagingClass::AttemptStateOutput,
-        StagedArtifactBindingKind::FactResponse => {
-            events::ArtifactStagingClass::AttemptFactResponse
-        }
-        StagedArtifactBindingKind::FactQueryEvidence => {
-            events::ArtifactStagingClass::AttemptFactQueryEvidence
-        }
-        StagedArtifactBindingKind::SideEffectEvidence { phase, .. } => phase.staging_class(),
-        StagedArtifactBindingKind::PublicOutput => {
-            events::ArtifactStagingClass::AttemptPublicOutput
-        }
-        StagedArtifactBindingKind::RedactedDiagnostic => {
-            events::ArtifactStagingClass::AttemptRedactedDiagnostic
-        }
-        StagedArtifactBindingKind::RetentionManifest => {
-            events::ArtifactStagingClass::MiddlewareRetentionManifest
-        }
-    }
-}
-
 pub(crate) fn staged_artifact_binding_role(
     binding: &StagedArtifactBindingKind,
 ) -> events::ArtifactRole {
-    artifact_role_for_staging_class(staged_artifact_binding_staging_class(binding))
+    match binding {
+        StagedArtifactBindingKind::StateOutput => events::ArtifactRole::StateOutput,
+        StagedArtifactBindingKind::FactResponse => events::ArtifactRole::FactResponse,
+        StagedArtifactBindingKind::FactQueryEvidence => events::ArtifactRole::FactQueryEvidence,
+        StagedArtifactBindingKind::SideEffectEvidence { phase, .. } => match phase {
+            StagedSideEffectArtifactPhase::Intent => events::ArtifactRole::SideEffectIntent,
+            StagedSideEffectArtifactPhase::PreparedInvocation => {
+                events::ArtifactRole::PreparedInvocation
+            }
+            StagedSideEffectArtifactPhase::NotSubmittedProof => {
+                events::ArtifactRole::NotSubmittedProof
+            }
+            StagedSideEffectArtifactPhase::Submission => events::ArtifactRole::Submission,
+            StagedSideEffectArtifactPhase::SubmissionUnknownEvidence => {
+                events::ArtifactRole::SubmissionUnknownEvidence
+            }
+            StagedSideEffectArtifactPhase::Receipt => events::ArtifactRole::Receipt,
+            StagedSideEffectArtifactPhase::Confirmation => events::ArtifactRole::Confirmation,
+            StagedSideEffectArtifactPhase::AmbiguityEvidence => {
+                events::ArtifactRole::AmbiguityEvidence
+            }
+        },
+        StagedArtifactBindingKind::PublicOutput => events::ArtifactRole::PublicOutput,
+        StagedArtifactBindingKind::RedactedDiagnostic => events::ArtifactRole::RedactedDiagnostic,
+        StagedArtifactBindingKind::RetentionManifest => events::ArtifactRole::RetentionManifest,
+    }
 }
 
 pub(crate) fn verify_artifact_bytes(
@@ -536,7 +513,7 @@ impl StagedRetentionRefs {
     }
 }
 
-pub(crate) fn validate_fact_query_returned_ref_authority(
+fn validate_fact_query_returned_ref_authority(
     projections: &store::ProjectionSnapshot,
     fact_ref: &mfm_facts::InternalFactRef,
 ) -> Result<()> {

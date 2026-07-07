@@ -52,7 +52,7 @@ fn signing_request_debug_does_not_render_digest_bytes() {
 }
 
 #[test]
-fn signing_result_verifies_expected_public_identity() {
+fn signing_result_enforces_expected_public_identity() {
     let public_key = PublicKeyBytes::new(vec![1, 2, 3]).expect("public key");
     let request =
         request().require_public_identity(ExpectedSignerIdentity::public_key(public_key.clone()));
@@ -60,19 +60,14 @@ fn signing_result_verifies_expected_public_identity() {
         PublicSigningIdentity::new(algorithm(), Some(public_key), None).expect("identity");
     let signature = SignatureBytes::new(vec![4, 5, 6]).expect("signature");
 
-    let result = SigningResult::for_request(&request, identity, signature).expect("signing result");
+    let result =
+        SigningResult::for_request(&request, identity, signature.clone()).expect("signing result");
 
     assert_eq!(result.signer_ref(), request.signer_ref());
-}
 
-#[test]
-fn signing_result_rejects_public_identity_mismatch() {
-    let expected = PublicKeyBytes::new(vec![1, 2, 3]).expect("expected public key");
     let actual = PublicKeyBytes::new(vec![9, 9, 9]).expect("actual public key");
-    let request = request().require_public_identity(ExpectedSignerIdentity::public_key(expected));
     let identity =
         PublicSigningIdentity::new(algorithm(), Some(actual), None).expect("actual identity");
-    let signature = SignatureBytes::new(vec![4, 5, 6]).expect("signature");
 
     let err =
         SigningResult::for_request(&request, identity, signature).expect_err("identity mismatch");

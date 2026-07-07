@@ -1483,52 +1483,46 @@ mod tests {
     }
 
     #[test]
-    fn physical_fact_projection_validation_rejects_index_without_record() {
-        let mut projections = valid_physical_fact_projections();
-        let claim_id = projections
-            .fact_index_entries
-            .keys()
-            .next()
-            .expect("index claim id")
-            .clone();
-        projections.fact_records.remove(&claim_id);
+    fn physical_fact_projection_validation_rejects_missing_projection_links() {
+        #[derive(Clone, Copy)]
+        enum MissingLink {
+            RecordForIndex,
+            DescriptorForAdmission,
+            RunAdmissionForRecord,
+        }
 
-        let error = validate_physical_fact_projections(&projections)
-            .expect_err("index without record should reject");
-        assert!(
-            error.to_string().contains("has no FactRecorded payload"),
-            "{error}"
-        );
-    }
+        for (case, expected) in [
+            (MissingLink::RecordForIndex, "has no FactRecorded payload"),
+            (
+                MissingLink::DescriptorForAdmission,
+                "references missing descriptor row",
+            ),
+            (
+                MissingLink::RunAdmissionForRecord,
+                "references descriptor not admitted by run",
+            ),
+        ] {
+            let mut projections = valid_physical_fact_projections();
+            match case {
+                MissingLink::RecordForIndex => {
+                    let claim_id = projections
+                        .fact_index_entries
+                        .keys()
+                        .next()
+                        .expect("index claim id")
+                        .clone();
+                    projections.fact_records.remove(&claim_id);
+                }
+                MissingLink::DescriptorForAdmission => projections.fact_descriptors.clear(),
+                MissingLink::RunAdmissionForRecord => {
+                    projections.fact_descriptor_admissions.clear()
+                }
+            }
 
-    #[test]
-    fn physical_fact_projection_validation_rejects_admission_without_descriptor() {
-        let mut projections = valid_physical_fact_projections();
-        projections.fact_descriptors.clear();
-
-        let error = validate_physical_fact_projections(&projections)
-            .expect_err("admission without descriptor should reject");
-        assert!(
-            error
-                .to_string()
-                .contains("references missing descriptor row"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn physical_fact_projection_validation_rejects_record_without_run_admission() {
-        let mut projections = valid_physical_fact_projections();
-        projections.fact_descriptor_admissions.clear();
-
-        let error = validate_physical_fact_projections(&projections)
-            .expect_err("record without run descriptor admission should reject");
-        assert!(
-            error
-                .to_string()
-                .contains("references descriptor not admitted by run"),
-            "{error}"
-        );
+            let error =
+                validate_physical_fact_projections(&projections).expect_err("missing link rejects");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 
     fn valid_physical_fact_projections() -> PhysicalFactProjections {

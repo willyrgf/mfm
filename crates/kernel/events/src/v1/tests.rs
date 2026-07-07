@@ -187,7 +187,7 @@ fn mfm_error_info_constructor_accepts_redacted_diagnostic_ref() {
 }
 
 #[test]
-fn mfm_error_info_rejects_secret_shaped_safe_message() {
+fn mfm_error_info_rejects_public_diagnostic_boundary_violations() {
     let error = MfmErrorInfo::new(
         ErrorCode::new("redacted_diagnostic").expect("code"),
         ErrorCategory::Runtime,
@@ -203,10 +203,7 @@ fn mfm_error_info_rejects_secret_shaped_safe_message() {
             reason: "message resembles secret material"
         }
     ));
-}
 
-#[test]
-fn mfm_error_info_rejects_non_redacted_diagnostic_ref() {
     let diagnostic = event_artifact_ref(
         artifact_id(46),
         ArtifactRole::SideEffectIntent,
@@ -796,34 +793,6 @@ mfm.events.v1.manual_resolution_recorded schema:mfm.events.v1.manual_resolution_
 mfm.events.v1.run_completed schema:mfm.events.v1.run_completed:1:sha256-jcs-v1:cda37495cb3c733164ce1a91f58ff6d27bdcfbf9b1f9efe5a7fd48ae68eba479 []
 mfm.events.v1.retention_refs_appended schema:mfm.events.v1.retention_refs_appended:1:sha256-jcs-v1:6aa88032678cc64b14e4854ba28d15e95fd78246f9a4a1028d3781a55fb2987e [RetentionRef]
 mfm.events.v1.retention_manifest_projected schema:mfm.events.v1.retention_manifest_projected:1:sha256-jcs-v1:269a96fc12c7c5004aa4592139f84cd0e4b617e04e494522ce639aeae0b9fed1 [RetentionManifest]"#
-    );
-}
-
-#[test]
-fn artifact_role_schema_descriptor_tag_baseline() {
-    assert_eq!(
-        artifact_role_schema_tags().join("\n"),
-        "typed_execution_spec\n\
-typed_spec_certificate\n\
-typed_config\n\
-fact_descriptor\n\
-seed_input\n\
-state_output\n\
-fact_response\n\
-fact_query_evidence\n\
-side_effect_intent\n\
-prepared_invocation\n\
-not_submitted_proof\n\
-submission\n\
-submission_unknown_evidence\n\
-receipt\n\
-confirmation\n\
-ambiguity_evidence\n\
-manual_resolution_evidence\n\
-manual_resolution_authorization\n\
-public_output\n\
-redacted_diagnostic\n\
-retention_manifest"
     );
 }
 

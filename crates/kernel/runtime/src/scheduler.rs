@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use mfm_events::v1 as events;
-use mfm_ids::{NodeId, RunId};
+use mfm_ids::RunId;
 use mfm_store::v1 as store;
 
 use crate::admission::{RunAdmissionAuthority, RunAdmissionLifecycle};
@@ -53,11 +53,8 @@ enum DriveStepStatus {
     Blocked,
     PublicOutputProjected,
     BlockedOnResourceLane {
-        witness: ResourceLaneBlockWitness,
+        witness: Box<ResourceLaneBlockWitness>,
         advanced: bool,
-    },
-    OperationalBlock {
-        node_id: NodeId,
     },
 }
 
@@ -129,7 +126,7 @@ impl SerialTypedScheduler {
         store: &S,
         launch: PreparedRunLaunch,
     ) -> Result<store::CommitOutcome> {
-        let bundle = prepared_commit_bundle(launch.commit.into(), launch.artifacts_to_stage)?;
+        let bundle = launch.into_prepared_commit_bundle()?;
         store
             .append_prepared_commit_bundle(bundle)
             .await
@@ -143,7 +140,8 @@ impl SerialTypedScheduler {
         launch: PreparedRunLaunch,
         claim: store::PreparedExecutionClaim,
     ) -> Result<store::CommitOutcome> {
-        let bundle = prepared_commit_bundle(launch.commit.into(), launch.artifacts_to_stage)?
+        let bundle = launch
+            .into_prepared_commit_bundle()?
             .with_execution_claim(claim)?;
         store
             .append_prepared_commit_bundle(bundle)
@@ -158,8 +156,8 @@ impl SerialTypedScheduler {
         runtime_spec: &CertifiedRuntimeSpec,
         launch: PreparedRunLaunch,
     ) -> Result<RunAdmissionAuthority> {
-        let run_id = launch.commit.request().run_id().clone();
-        let bundle = prepared_commit_bundle(launch.commit.into(), launch.artifacts_to_stage)?;
+        let run_id = launch.run_id().clone();
+        let bundle = launch.into_prepared_commit_bundle()?;
         store
             .append_prepared_commit_bundle(bundle)
             .await
@@ -251,10 +249,6 @@ impl SerialTypedScheduler {
                 DriveStepStatus::Advanced => return Ok(SchedulerStatus::Advanced),
                 DriveStepStatus::StaleView => continue,
                 DriveStepStatus::Blocked => return Ok(SchedulerStatus::Blocked),
-                DriveStepStatus::OperationalBlock { node_id } => {
-                    let _ = node_id;
-                    return Ok(SchedulerStatus::Blocked);
-                }
                 DriveStepStatus::PublicOutputProjected => {
                     return Ok(SchedulerStatus::PublicOutputProjected);
                 }
@@ -262,7 +256,7 @@ impl SerialTypedScheduler {
                     if advanced {
                         return Ok(SchedulerStatus::Advanced);
                     }
-                    blocked_lanes.insert(witness);
+                    blocked_lanes.insert(*witness);
                 }
             }
         }
@@ -296,18 +290,10 @@ impl SerialTypedScheduler {
                     advanced: step_advanced,
                 } => {
                     advanced |= step_advanced;
-                    blocked_lanes.insert(witness);
+                    blocked_lanes.insert(*witness);
                 }
                 DriveStepStatus::Blocked if advanced => return Ok(SchedulerStatus::Advanced),
                 DriveStepStatus::Blocked => return Ok(SchedulerStatus::Blocked),
-                DriveStepStatus::OperationalBlock { node_id } if advanced => {
-                    let _ = node_id;
-                    return Ok(SchedulerStatus::Advanced);
-                }
-                DriveStepStatus::OperationalBlock { node_id } => {
-                    let _ = node_id;
-                    return Ok(SchedulerStatus::Blocked);
-                }
                 DriveStepStatus::PublicOutputProjected => {
                     return Ok(SchedulerStatus::PublicOutputProjected);
                 }
@@ -342,9 +328,7 @@ impl SerialTypedScheduler {
                     AttemptRunStatus::BlockedOnResourceLane { witness, advanced } => {
                         Ok(DriveStepStatus::BlockedOnResourceLane { witness, advanced })
                     }
-                    AttemptRunStatus::OperationalBlock { node_id } => {
-                        Ok(DriveStepStatus::OperationalBlock { node_id })
-                    }
+                    AttemptRunStatus::OperationalBlock => Ok(DriveStepStatus::Blocked),
                 }
             }
             TransitionDecision::AwaitManualResolution => Ok(DriveStepStatus::Blocked),

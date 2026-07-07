@@ -670,6 +670,21 @@ mod tests {
         .expect("portfolio")
     }
 
+    fn assert_protocol_position_config_rejected(market: Value) {
+        assert!(serde_json::from_value::<BalanceReaderConfig>(json!({
+            "kind": "protocol_position",
+            "protocol": AAVE_V3_PROTOCOL_ID,
+            "reader": AAVE_V3_READER_RESERVE_POSITION,
+            "config": {
+                "reserve_position": {
+                    "market": market,
+                    "reserve_id": "usdc"
+                }
+            }
+        }))
+        .is_err());
+    }
+
     #[test]
     fn validates_aave_symbols_against_underlying_symbol_identity() {
         let market = aave_market();
@@ -754,34 +769,10 @@ mod tests {
     fn rejects_secret_markers_in_market_and_reserve_metadata() {
         let mut market_metadata = serde_json::to_value(aave_market()).expect("market json");
         market_metadata["metadata"] = json!({"secret_key": "redacted"});
-
-        assert!(serde_json::from_value::<BalanceReaderConfig>(json!({
-            "kind": "protocol_position",
-            "protocol": AAVE_V3_PROTOCOL_ID,
-            "reader": AAVE_V3_READER_RESERVE_POSITION,
-            "config": {
-                "reserve_position": {
-                    "market": market_metadata,
-                    "reserve_id": "usdc"
-                }
-            }
-        }))
-        .is_err());
+        assert_protocol_position_config_rejected(market_metadata);
 
         let mut reserve_metadata = serde_json::to_value(aave_market()).expect("market json");
         reserve_metadata["reserves"][0]["metadata"] = json!({"label": "bearer redacted"});
-
-        assert!(serde_json::from_value::<BalanceReaderConfig>(json!({
-            "kind": "protocol_position",
-            "protocol": AAVE_V3_PROTOCOL_ID,
-            "reader": AAVE_V3_READER_RESERVE_POSITION,
-            "config": {
-                "reserve_position": {
-                    "market": reserve_metadata,
-                    "reserve_id": "usdc"
-                }
-            }
-        }))
-        .is_err());
+        assert_protocol_position_config_rejected(reserve_metadata);
     }
 }

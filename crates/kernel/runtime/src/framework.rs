@@ -14,7 +14,7 @@ use crate::runners::{
     RunnerEventPayload,
 };
 use crate::{
-    canonical_json, content_digest_json, retention_ref_for_artifact, CertifiedRuntimeSpec, Result,
+    canonical_json, content_digest_json, executable_identity_json, CertifiedRuntimeSpec, Result,
     RuntimeError,
 };
 
@@ -38,32 +38,9 @@ pub(crate) fn framework_public_output_binding(
     ErasedRunnerBinding::new(
         node.descriptor_id.clone(),
         factory_id.clone(),
-        framework_public_output_executable(factory_id)?,
+        framework_executable(factory_id, "framework_public_output")?,
         Arc::new(FrameworkPublicOutputRunner),
     )
-}
-
-fn framework_public_output_executable(
-    factory_id: events::RunnerFactoryId,
-) -> Result<events::ExecutableIdentity> {
-    let package_digest = content_digest_json(serde_json::json!({
-        "crate": "mfm-runtime",
-        "runner": "framework_public_output",
-        "version": env!("CARGO_PKG_VERSION"),
-    }))?;
-    let binary_digest = content_digest_json(serde_json::json!({
-        "crate": "mfm-runtime",
-        "factory_id": factory_id.as_str(),
-        "runner": "framework_public_output",
-        "version": env!("CARGO_PKG_VERSION"),
-    }))?;
-    Ok(events::ExecutableIdentity {
-        factory_id,
-        cargo_package_digest: package_digest,
-        binary_digest,
-        nix_derivation_hash: None,
-        nix_output_hash: None,
-    })
 }
 
 struct FrameworkPublicOutputRunner;
@@ -94,32 +71,9 @@ pub(crate) fn framework_retention_manifest_binding(
     ErasedRunnerBinding::new(
         node.descriptor_id.clone(),
         factory_id.clone(),
-        framework_retention_manifest_executable(factory_id)?,
+        framework_executable(factory_id, "framework_retention_manifest")?,
         Arc::new(FrameworkRetentionManifestRunner),
     )
-}
-
-fn framework_retention_manifest_executable(
-    factory_id: events::RunnerFactoryId,
-) -> Result<events::ExecutableIdentity> {
-    let package_digest = content_digest_json(serde_json::json!({
-        "crate": "mfm-runtime",
-        "runner": "framework_retention_manifest",
-        "version": env!("CARGO_PKG_VERSION"),
-    }))?;
-    let binary_digest = content_digest_json(serde_json::json!({
-        "crate": "mfm-runtime",
-        "factory_id": factory_id.as_str(),
-        "runner": "framework_retention_manifest",
-        "version": env!("CARGO_PKG_VERSION"),
-    }))?;
-    Ok(events::ExecutableIdentity {
-        factory_id,
-        cargo_package_digest: package_digest,
-        binary_digest,
-        nix_derivation_hash: None,
-        nix_output_hash: None,
-    })
 }
 
 struct FrameworkRetentionManifestRunner;
@@ -150,32 +104,9 @@ pub(crate) fn framework_complete_run_binding(
     ErasedRunnerBinding::new(
         node.descriptor_id.clone(),
         factory_id.clone(),
-        framework_complete_run_executable(factory_id)?,
+        framework_executable(factory_id, "framework_complete_run")?,
         Arc::new(FrameworkCompleteRunRunner),
     )
-}
-
-fn framework_complete_run_executable(
-    factory_id: events::RunnerFactoryId,
-) -> Result<events::ExecutableIdentity> {
-    let package_digest = content_digest_json(serde_json::json!({
-        "crate": "mfm-runtime",
-        "runner": "framework_complete_run",
-        "version": env!("CARGO_PKG_VERSION"),
-    }))?;
-    let binary_digest = content_digest_json(serde_json::json!({
-        "crate": "mfm-runtime",
-        "factory_id": factory_id.as_str(),
-        "runner": "framework_complete_run",
-        "version": env!("CARGO_PKG_VERSION"),
-    }))?;
-    Ok(events::ExecutableIdentity {
-        factory_id,
-        cargo_package_digest: package_digest,
-        binary_digest,
-        nix_derivation_hash: None,
-        nix_output_hash: None,
-    })
 }
 
 pub(crate) fn framework_resolve_saga_terminal_binding(
@@ -198,23 +129,24 @@ pub(crate) fn framework_resolve_saga_terminal_binding(
     ErasedRunnerBinding::new(
         node.descriptor_id.clone(),
         factory_id.clone(),
-        framework_resolve_saga_terminal_executable(factory_id)?,
+        framework_executable(factory_id, "framework_resolve_saga_terminal")?,
         Arc::new(FrameworkResolveSagaTerminalRunner),
     )
 }
 
-fn framework_resolve_saga_terminal_executable(
+fn framework_executable(
     factory_id: events::RunnerFactoryId,
+    runner: &'static str,
 ) -> Result<events::ExecutableIdentity> {
     let package_digest = content_digest_json(serde_json::json!({
         "crate": "mfm-runtime",
-        "runner": "framework_resolve_saga_terminal",
+        "runner": runner,
         "version": env!("CARGO_PKG_VERSION"),
     }))?;
     let binary_digest = content_digest_json(serde_json::json!({
         "crate": "mfm-runtime",
         "factory_id": factory_id.as_str(),
-        "runner": "framework_resolve_saga_terminal",
+        "runner": runner,
         "version": env!("CARGO_PKG_VERSION"),
     }))?;
     Ok(events::ExecutableIdentity {
@@ -285,44 +217,16 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
         &rendered_digest,
         rendered_artifact_id.as_ref(),
     )?;
-    let receipt_digest = receipt_bytes.content_digest();
-    let receipt_artifact_id =
-        ArtifactId::from_digest(receipt_digest.algorithm(), *receipt_digest.digest());
-    let receipt_artifact = store::ArtifactEvidenceRef {
-        artifact_id: receipt_artifact_id.clone(),
-        digest: receipt_digest.clone(),
-        byte_len: receipt_bytes.as_bytes().len() as u64,
-        media_type: spec::MediaType::new("application/json")?,
-        schema_id: Some(ctx.output_cell().schema_id.clone()),
-        semantic_type_id: Some(ctx.output_cell().semantic_type_id.clone()),
-        producer_node_id: Some(ctx.node().node_id.clone()),
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::StateOutput,
-    };
-    let receipt_artifact =
-        StagedArtifact::inline_attempt_artifact(&ctx, receipt_bytes.to_vec(), receipt_artifact)?;
-    let receipt_retention_ref = retention_ref_for_artifact(receipt_artifact.evidence());
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![receipt_artifact],
-        staged_retention_refs: vec![StagedRetentionRefs::framework_public_output(vec![
+    let (receipt_artifact, receipt_cell_produced) =
+        stage_framework_state_output(&ctx, receipt_bytes)?;
+    let receipt_retention_ref = receipt_artifact.evidence().retention_ref();
+    Ok(ErasedRunnerOutput::from_parts(
+        vec![receipt_artifact],
+        vec![StagedRetentionRefs::framework_public_output(vec![
             receipt_retention_ref,
         ])],
-        payloads: vec![
-            RunnerEventPayload::CellProduced(events::CellProduced {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                cell_id: ctx.node().output_cell.clone(),
-                scope_id: ctx.output_cell().scope_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
-                schema_id: ctx.output_cell().schema_id.clone(),
-                value_lineage: ctx.output_cell().value_lineage.clone(),
-                context: ctx.output_cell().context.clone(),
-                artifact_id: receipt_artifact_id,
-                content_digest: receipt_digest,
-                producer_state_kind: Some(ctx.node().state_kind.clone()),
-                producer_state_version: Some(ctx.node().state_version.clone()),
-            }),
+        vec![
+            receipt_cell_produced,
             RunnerEventPayload::PublicOutputProduced(events::PublicOutputProduced {
                 spec_hash: ctx.spec_hash().clone(),
                 node_id: ctx.node().node_id.clone(),
@@ -336,7 +240,7 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
                 renderer_descriptor_id: render.renderer_descriptor.descriptor_id.clone(),
             }),
         ],
-    })
+    ))
 }
 
 fn project_retention_manifest(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
@@ -358,44 +262,16 @@ fn project_retention_manifest(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutpu
         manifest.evidence.clone(),
     )?;
     let receipt_bytes = retention_manifest_receipt_json(&manifest, ctx.run_stream())?;
-    let receipt_digest = receipt_bytes.content_digest();
-    let receipt_artifact_id =
-        ArtifactId::from_digest(receipt_digest.algorithm(), *receipt_digest.digest());
-    let receipt_artifact = store::ArtifactEvidenceRef {
-        artifact_id: receipt_artifact_id.clone(),
-        digest: receipt_digest.clone(),
-        byte_len: receipt_bytes.as_bytes().len() as u64,
-        media_type: spec::MediaType::new("application/json")?,
-        schema_id: Some(ctx.output_cell().schema_id.clone()),
-        semantic_type_id: Some(ctx.output_cell().semantic_type_id.clone()),
-        producer_node_id: Some(ctx.node().node_id.clone()),
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::StateOutput,
-    };
-    let receipt_artifact =
-        StagedArtifact::inline_attempt_artifact(&ctx, receipt_bytes.to_vec(), receipt_artifact)?;
-    let receipt_retention_ref = retention_ref_for_artifact(receipt_artifact.evidence());
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![manifest_artifact, receipt_artifact],
-        staged_retention_refs: vec![StagedRetentionRefs::runtime_evidence(vec![
+    let (receipt_artifact, receipt_cell_produced) =
+        stage_framework_state_output(&ctx, receipt_bytes)?;
+    let receipt_retention_ref = receipt_artifact.evidence().retention_ref();
+    Ok(ErasedRunnerOutput::from_parts(
+        vec![manifest_artifact, receipt_artifact],
+        vec![StagedRetentionRefs::runtime_evidence(vec![
             receipt_retention_ref,
         ])],
-        payloads: vec![RunnerEventPayload::CellProduced(events::CellProduced {
-            spec_hash: ctx.spec_hash().clone(),
-            node_id: ctx.node().node_id.clone(),
-            cell_id: ctx.node().output_cell.clone(),
-            scope_id: ctx.output_cell().scope_id.clone(),
-            attempt_id: ctx.attempt_id().clone(),
-            semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
-            schema_id: ctx.output_cell().schema_id.clone(),
-            value_lineage: ctx.output_cell().value_lineage.clone(),
-            context: ctx.output_cell().context.clone(),
-            artifact_id: receipt_artifact_id,
-            content_digest: receipt_digest,
-            producer_state_kind: Some(ctx.node().state_kind.clone()),
-            producer_state_version: Some(ctx.node().state_version.clone()),
-        })],
-    })
+        vec![receipt_cell_produced],
+    ))
 }
 
 fn complete_run_framework(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
@@ -409,41 +285,13 @@ fn complete_run_framework(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
     let retention_manifest = projected_retention_manifest(ctx.run_id(), ctx.projections())?;
     let receipt_bytes =
         complete_run_receipt_json(&completion, retention_manifest, ctx.run_stream())?;
-    let receipt_digest = receipt_bytes.content_digest();
-    let receipt_artifact_id =
-        ArtifactId::from_digest(receipt_digest.algorithm(), *receipt_digest.digest());
-    let receipt_artifact = store::ArtifactEvidenceRef {
-        artifact_id: receipt_artifact_id.clone(),
-        digest: receipt_digest.clone(),
-        byte_len: receipt_bytes.as_bytes().len() as u64,
-        media_type: spec::MediaType::new("application/json")?,
-        schema_id: Some(ctx.output_cell().schema_id.clone()),
-        semantic_type_id: Some(ctx.output_cell().semantic_type_id.clone()),
-        producer_node_id: Some(ctx.node().node_id.clone()),
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::StateOutput,
-    };
-    let receipt_artifact =
-        StagedArtifact::inline_attempt_artifact(&ctx, receipt_bytes.to_vec(), receipt_artifact)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![receipt_artifact],
-        staged_retention_refs: Vec::new(),
-        payloads: vec![RunnerEventPayload::CellProduced(events::CellProduced {
-            spec_hash: ctx.spec_hash().clone(),
-            node_id: ctx.node().node_id.clone(),
-            cell_id: ctx.node().output_cell.clone(),
-            scope_id: ctx.output_cell().scope_id.clone(),
-            attempt_id: ctx.attempt_id().clone(),
-            semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
-            schema_id: ctx.output_cell().schema_id.clone(),
-            value_lineage: ctx.output_cell().value_lineage.clone(),
-            context: ctx.output_cell().context.clone(),
-            artifact_id: receipt_artifact_id,
-            content_digest: receipt_digest,
-            producer_state_kind: Some(ctx.node().state_kind.clone()),
-            producer_state_version: Some(ctx.node().state_version.clone()),
-        })],
-    })
+    let (receipt_artifact, receipt_cell_produced) =
+        stage_framework_state_output(&ctx, receipt_bytes)?;
+    Ok(ErasedRunnerOutput::from_parts(
+        vec![receipt_artifact],
+        Vec::new(),
+        vec![receipt_cell_produced],
+    ))
 }
 
 fn resolve_saga_terminal_framework(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
@@ -457,6 +305,19 @@ fn resolve_saga_terminal_framework(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunner
         saga_terminal_completion_outcome(ctx.runtime_spec(), ctx.run_id(), ctx.projections())?;
     let receipt_bytes =
         resolve_saga_terminal_receipt_json(ctx.runtime_spec(), &outcome, ctx.run_stream())?;
+    let (receipt_artifact, receipt_cell_produced) =
+        stage_framework_state_output(&ctx, receipt_bytes)?;
+    Ok(ErasedRunnerOutput::from_parts(
+        vec![receipt_artifact],
+        Vec::new(),
+        vec![receipt_cell_produced],
+    ))
+}
+
+fn stage_framework_state_output(
+    ctx: &ErasedRunCtx<'_>,
+    receipt_bytes: PlainCanonicalJsonBytes,
+) -> Result<(StagedArtifact, RunnerEventPayload)> {
     let receipt_digest = receipt_bytes.content_digest();
     let receipt_artifact_id =
         ArtifactId::from_digest(receipt_digest.algorithm(), *receipt_digest.digest());
@@ -472,11 +333,10 @@ fn resolve_saga_terminal_framework(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunner
         artifact_role: events::ArtifactRole::StateOutput,
     };
     let receipt_artifact =
-        StagedArtifact::inline_attempt_artifact(&ctx, receipt_bytes.to_vec(), receipt_artifact)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![receipt_artifact],
-        staged_retention_refs: Vec::new(),
-        payloads: vec![RunnerEventPayload::CellProduced(events::CellProduced {
+        StagedArtifact::inline_attempt_artifact(ctx, receipt_bytes.to_vec(), receipt_artifact)?;
+    Ok((
+        receipt_artifact,
+        RunnerEventPayload::CellProduced(events::CellProduced {
             spec_hash: ctx.spec_hash().clone(),
             node_id: ctx.node().node_id.clone(),
             cell_id: ctx.node().output_cell.clone(),
@@ -490,8 +350,8 @@ fn resolve_saga_terminal_framework(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunner
             content_digest: receipt_digest,
             producer_state_kind: Some(ctx.node().state_kind.clone()),
             producer_state_version: Some(ctx.node().state_version.clone()),
-        })],
-    })
+        }),
+    ))
 }
 
 pub(crate) fn public_output_rendered_digest(
@@ -735,7 +595,7 @@ fn retention_manifest_json(
         .collect::<Vec<_>>();
     let retained_by_role = retained_refs_by_role(retained_refs);
     canonical_json(serde_json::json!({
-        "adapter_executables": run_admitted.adapter_executables.iter().map(executable_json).collect::<Vec<_>>(),
+        "adapter_executables": run_admitted.adapter_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
         "canonicalizer_identity": run_admitted.canonicalizer_identity.as_str(),
         "certificate_artifact": {
             "artifact_id": run_admitted.certificate_artifact.artifact_id.as_str(),
@@ -755,7 +615,7 @@ fn retention_manifest_json(
         "confirmation_artifacts": retained_by_role.confirmation_artifacts,
         "retained_refs": retained_refs.iter().map(|retention_ref| retention_ref_json(retention_ref)).collect::<Vec<_>>(),
         "run_id": run_id.as_str(),
-        "runner_executables": run_admitted.runner_executables.iter().map(executable_json).collect::<Vec<_>>(),
+        "runner_executables": run_admitted.runner_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
         "spec_artifact": {
             "artifact_id": run_admitted.spec_artifact.artifact_id.as_str(),
             "byte_len": spec_canonical.as_bytes().len(),
@@ -857,16 +717,6 @@ fn descriptor_digest_json(identity: &spec::DescriptorIdentity) -> serde_json::Va
     serde_json::json!({
         "descriptor_id": descriptor_id.as_str(),
         "digest": ContentDigest::from_digest(descriptor_id.algorithm(), *descriptor_id.digest()).as_str(),
-    })
-}
-
-fn executable_json(identity: &events::ExecutableIdentity) -> serde_json::Value {
-    serde_json::json!({
-        "binary_digest": identity.binary_digest.as_str(),
-        "cargo_package_digest": identity.cargo_package_digest.as_str(),
-        "factory_id": identity.factory_id.as_str(),
-        "nix_derivation_hash": identity.nix_derivation_hash.as_ref().map(events::NixDerivationHash::as_str),
-        "nix_output_hash": identity.nix_output_hash.as_ref().map(events::NixOutputHash::as_str),
     })
 }
 
@@ -998,68 +848,55 @@ pub(crate) fn build_retention_manifest_artifact(
 pub(crate) fn certified_retention_manifest_node(
     runtime_spec: &CertifiedRuntimeSpec,
 ) -> Result<&spec::NodeSpec> {
-    let mut retention_node = None;
-    for node_id in runtime_spec.topological_order() {
-        let node = runtime_spec.node(node_id).expect("topological node exists");
-        if matches!(
-            &node.framework,
-            Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_))
-        ) && retention_node.replace(node).is_some()
-        {
-            return Err(RuntimeError::InvalidRunStream(
-                "multiple certified retention manifest framework nodes".to_owned(),
-            ));
-        }
-    }
-    retention_node.ok_or_else(|| {
-        RuntimeError::InvalidRunStream(
-            "retention manifest projection lacks a certified framework retention node".to_owned(),
-        )
-    })
+    certified_framework_node(
+        runtime_spec,
+        |framework| {
+            matches!(
+                framework,
+                spec::FrameworkNodeSpec::ProjectRetentionManifest(_)
+            )
+        },
+        "multiple certified retention manifest framework nodes",
+        "retention manifest projection lacks a certified framework retention node",
+    )
 }
 
 pub(crate) fn certified_complete_run_node(
     runtime_spec: &CertifiedRuntimeSpec,
 ) -> Result<&spec::NodeSpec> {
-    let mut completion_node = None;
-    for node_id in runtime_spec.topological_order() {
-        let node = runtime_spec.node(node_id).expect("topological node exists");
-        if matches!(
-            &node.framework,
-            Some(spec::FrameworkNodeSpec::CompleteRun(_))
-        ) && completion_node.replace(node).is_some()
-        {
-            return Err(RuntimeError::InvalidRunStream(
-                "multiple certified completion framework nodes".to_owned(),
-            ));
-        }
-    }
-    completion_node.ok_or_else(|| {
-        RuntimeError::InvalidRunStream(
-            "RunCompleted lacks a certified CompleteRun framework node".to_owned(),
-        )
-    })
+    certified_framework_node(
+        runtime_spec,
+        |framework| matches!(framework, spec::FrameworkNodeSpec::CompleteRun(_)),
+        "multiple certified completion framework nodes",
+        "RunCompleted lacks a certified CompleteRun framework node",
+    )
 }
 
 pub(crate) fn certified_resolve_saga_terminal_node(
     runtime_spec: &CertifiedRuntimeSpec,
 ) -> Result<&spec::NodeSpec> {
-    let mut resolve_node = None;
+    certified_framework_node(
+        runtime_spec,
+        |framework| matches!(framework, spec::FrameworkNodeSpec::ResolveSagaTerminal(_)),
+        "multiple certified resolve-saga-terminal framework nodes",
+        "RunCompleted lacks a certified ResolveSagaTerminal framework node",
+    )
+}
+
+fn certified_framework_node<'a>(
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    matches_framework: impl Fn(&spec::FrameworkNodeSpec) -> bool,
+    duplicate_message: &'static str,
+    missing_message: &'static str,
+) -> Result<&'a spec::NodeSpec> {
+    let mut framework_node = None;
     for node_id in runtime_spec.topological_order() {
         let node = runtime_spec.node(node_id).expect("topological node exists");
-        if matches!(
-            &node.framework,
-            Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
-        ) && resolve_node.replace(node).is_some()
+        if node.framework.as_ref().is_some_and(&matches_framework)
+            && framework_node.replace(node).is_some()
         {
-            return Err(RuntimeError::InvalidRunStream(
-                "multiple certified resolve-saga-terminal framework nodes".to_owned(),
-            ));
+            return Err(RuntimeError::InvalidRunStream(duplicate_message.to_owned()));
         }
     }
-    resolve_node.ok_or_else(|| {
-        RuntimeError::InvalidRunStream(
-            "RunCompleted lacks a certified ResolveSagaTerminal framework node".to_owned(),
-        )
-    })
+    framework_node.ok_or_else(|| RuntimeError::InvalidRunStream(missing_message.to_owned()))
 }

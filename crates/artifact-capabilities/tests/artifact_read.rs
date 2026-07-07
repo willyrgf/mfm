@@ -65,57 +65,75 @@ fn evidence(bytes: &[u8]) -> ArtifactEvidenceRef {
     }
 }
 
-fn request(evidence: &ArtifactEvidenceRef) -> ArtifactReadRequest {
-    ArtifactReadRequest::from_replay_authorized_evidence(evidence.clone())
-}
-
 #[test]
 fn verifies_artifact_bytes() {
     let bytes = br#"{"ok":true}"#.to_vec();
     let evidence = evidence(&bytes);
+    let request = ArtifactReadRequest::from_replay_authorized_evidence(evidence.clone());
 
-    let verified = VerifiedArtifactBytes::new(bytes.clone(), evidence.clone(), &request(&evidence))
-        .expect("verified");
+    let verified =
+        VerifiedArtifactBytes::new(bytes.clone(), evidence.clone(), &request).expect("verified");
 
     assert_eq!(verified.bytes(), bytes.as_slice());
     assert_eq!(verified.evidence(), &evidence);
 }
 
 #[test]
-fn rejects_digest_mismatch() {
-    let bytes = br#"{"ok":true}"#.to_vec();
-    let mut evidence = evidence(&bytes);
-    evidence.digest = digest(br#"{"ok":false}"#);
+fn rejects_artifact_evidence_mismatches() {
+    enum Mismatch {
+        Digest,
+        Role,
+        Schema,
+        Semantic,
+        Producer,
+        ByteLen,
+    }
 
-    let err = VerifiedArtifactBytes::new(bytes, evidence.clone(), &request(&evidence))
-        .expect_err("digest mismatch");
-
-    assert!(matches!(
-        err,
-        ArtifactReadError::EvidenceMismatch {
-            field: "content_digest",
-            ..
+    for (name, mismatch, expected_field) in [
+        ("digest", Mismatch::Digest, "content_digest"),
+        ("role", Mismatch::Role, "artifact_role"),
+        ("schema", Mismatch::Schema, "schema_id"),
+        ("semantic", Mismatch::Semantic, "semantic_type_id"),
+        ("producer", Mismatch::Producer, "producer_node_id"),
+        ("byte length", Mismatch::ByteLen, "byte_len"),
+    ] {
+        let bytes = br#"{"ok":true}"#.to_vec();
+        let mut evidence = evidence(&bytes);
+        let mut expected = evidence.clone();
+        match mismatch {
+            Mismatch::Digest => {
+                evidence.digest = digest(br#"{"ok":false}"#);
+                expected = evidence.clone();
+            }
+            Mismatch::Role => {
+                expected.artifact_role = ArtifactRole::TypedConfig;
+            }
+            Mismatch::Schema => {
+                expected.schema_id = Some(schema_id("mfm.test.other_schema"));
+            }
+            Mismatch::Semantic => {
+                expected.semantic_type_id = Some(semantic_id("other_value"));
+            }
+            Mismatch::Producer => {
+                expected.producer_node_id = Some(node_id("other-producer"));
+            }
+            Mismatch::ByteLen => {
+                evidence.byte_len += 1;
+                expected = evidence.clone();
+            }
         }
-    ));
-}
+        let request = ArtifactReadRequest::from_replay_authorized_evidence(expected);
 
-#[test]
-fn rejects_role_mismatch() {
-    let bytes = br#"{"ok":true}"#.to_vec();
-    let evidence = evidence(&bytes);
-    let mut expected = evidence.clone();
-    expected.artifact_role = ArtifactRole::TypedConfig;
-    let request = ArtifactReadRequest::from_replay_authorized_evidence(expected);
+        let err = VerifiedArtifactBytes::new(bytes, evidence, &request).expect_err(name);
 
-    let err = VerifiedArtifactBytes::new(bytes, evidence, &request).expect_err("role mismatch");
-
-    assert!(matches!(
-        err,
-        ArtifactReadError::EvidenceMismatch {
-            field: "artifact_role",
-            ..
-        }
-    ));
+        assert!(
+            matches!(
+                err,
+                ArtifactReadError::EvidenceMismatch { field, .. } if field == expected_field
+            ),
+            "{name}: {err:?}"
+        );
+    }
 }
 
 #[test]
@@ -196,75 +214,6 @@ fn side_effect_projection_request_accepts_unprojected_schema_and_semantic_identi
 
     VerifiedArtifactBytes::new(bytes, evidence, &request)
         .expect("verified prepared side-effect artifact");
-}
-
-#[test]
-fn rejects_schema_and_semantic_mismatch() {
-    let bytes = br#"{"ok":true}"#.to_vec();
-    let evidence = evidence(&bytes);
-    let mut expected = evidence.clone();
-    expected.schema_id = Some(schema_id("mfm.test.other_schema"));
-    let request = ArtifactReadRequest::from_replay_authorized_evidence(expected);
-
-    let err = VerifiedArtifactBytes::new(bytes.clone(), evidence.clone(), &request)
-        .expect_err("schema mismatch");
-    assert!(matches!(
-        err,
-        ArtifactReadError::EvidenceMismatch {
-            field: "schema_id",
-            ..
-        }
-    ));
-
-    let mut expected = evidence.clone();
-    expected.semantic_type_id = Some(semantic_id("other_value"));
-    let request = ArtifactReadRequest::from_replay_authorized_evidence(expected);
-
-    let err = VerifiedArtifactBytes::new(bytes, evidence, &request).expect_err("semantic mismatch");
-    assert!(matches!(
-        err,
-        ArtifactReadError::EvidenceMismatch {
-            field: "semantic_type_id",
-            ..
-        }
-    ));
-}
-
-#[test]
-fn rejects_producer_mismatch() {
-    let bytes = br#"{"ok":true}"#.to_vec();
-    let evidence = evidence(&bytes);
-    let mut expected = evidence.clone();
-    expected.producer_node_id = Some(node_id("other-producer"));
-    let request = ArtifactReadRequest::from_replay_authorized_evidence(expected);
-
-    let err = VerifiedArtifactBytes::new(bytes, evidence, &request).expect_err("producer mismatch");
-
-    assert!(matches!(
-        err,
-        ArtifactReadError::EvidenceMismatch {
-            field: "producer_node_id",
-            ..
-        }
-    ));
-}
-
-#[test]
-fn rejects_byte_length_mismatch() {
-    let bytes = br#"{"ok":true}"#.to_vec();
-    let mut evidence = evidence(&bytes);
-    evidence.byte_len += 1;
-
-    let err = VerifiedArtifactBytes::new(bytes, evidence.clone(), &request(&evidence))
-        .expect_err("byte length mismatch");
-
-    assert!(matches!(
-        err,
-        ArtifactReadError::EvidenceMismatch {
-            field: "byte_len",
-            ..
-        }
-    ));
 }
 
 #[test]

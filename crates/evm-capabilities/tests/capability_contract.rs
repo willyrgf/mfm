@@ -29,10 +29,7 @@ fn capability_names_are_authority_names_not_workflow_names() {
         assert!(!name.contains("configure"));
         assert!(!name.contains("validate"));
     }
-}
 
-#[test]
-fn fee_market_and_gas_estimate_capabilities_are_separate() {
     assert_ne!(
         EvmFeeReadCapability::name(),
         EvmGasEstimateCapability::name()

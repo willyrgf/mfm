@@ -8,7 +8,10 @@ use crate::runners::{
     CapabilityImplementationBinding, ErasedRunnerBinding, ErasedRunnerRegistry,
     RunnerIngressContext,
 };
-use crate::{canonical_json, CertifiedRuntimeSpec, Result, RunLaunchEvidence, RuntimeError};
+use crate::{
+    canonical_json, executable_identity_json, CertifiedRuntimeSpec, Result, RunLaunchEvidence,
+    RuntimeError,
+};
 
 /// Runtime binding authority for one certified execution spec.
 ///
@@ -91,11 +94,7 @@ impl BoundRuntimeContext {
     ) -> Result<Self> {
         let mut accumulator = BindingAccumulator::default();
 
-        for node_id in runtime_spec.topological_order() {
-            let node = runtime_spec.node(node_id).expect("topological node exists");
-            bind_node(runtime_spec, runners, node, &mut accumulator)?;
-        }
-        for (_, node) in runtime_spec.remediations() {
+        for node in runtime_spec.executable_nodes() {
             bind_node(runtime_spec, runners, node, &mut accumulator)?;
         }
 
@@ -118,19 +117,6 @@ impl BoundRuntimeContext {
         &self.adapter_executables
     }
 
-    pub(crate) fn validate_run_admitted_executables(
-        &self,
-        run_admitted: &events::RunAdmitted,
-    ) -> Result<()> {
-        if run_admitted.runner_executables != self.runner_executables {
-            return Err(RuntimeError::RunnerBinding(
-                "RunAdmitted runner executable identities do not match bound runtime context"
-                    .to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
     pub(crate) fn admitted_binding_digest(&self) -> Result<ContentDigest> {
         let canonical = canonical_json(serde_json::json!({
             "adapter_executables": self.adapter_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
@@ -146,7 +132,12 @@ impl BoundRuntimeContext {
         &self,
         run_admitted: &events::RunAdmitted,
     ) -> Result<()> {
-        self.validate_run_admitted_executables(run_admitted)?;
+        if run_admitted.runner_executables != self.runner_executables {
+            return Err(RuntimeError::RunnerBinding(
+                "RunAdmitted runner executable identities do not match bound runtime context"
+                    .to_owned(),
+            ));
+        }
         if run_admitted.adapter_executables != self.adapter_executables {
             return Err(RuntimeError::RunnerBinding(
                 "RunAdmitted adapter executable identities do not match bound runtime context"
@@ -197,11 +188,7 @@ impl BoundRuntimeContext {
         &self,
         runtime_spec: &CertifiedRuntimeSpec,
     ) -> Result<()> {
-        for node_id in runtime_spec.topological_order() {
-            let node = runtime_spec.node(node_id).expect("topological node exists");
-            self.require_node_authority(node)?;
-        }
-        for (_, node) in runtime_spec.remediations() {
+        for node in runtime_spec.executable_nodes() {
             self.require_node_authority(node)?;
         }
         Ok(())
@@ -212,14 +199,8 @@ impl BoundRuntimeContext {
         runtime_spec: &CertifiedRuntimeSpec,
         launch: &RunLaunchEvidence,
     ) -> Result<()> {
-        for node_id in runtime_spec.topological_order() {
-            let node = runtime_spec.node(node_id).expect("topological node exists");
-            if node_requires_runner_ingress(node) {
-                self.validate_node_ingress(runtime_spec, node, launch)?;
-            }
-        }
-        for (_, node) in runtime_spec.remediations() {
-            if node_requires_runner_ingress(node) {
+        for node in runtime_spec.executable_nodes() {
+            if node.framework.is_none() {
                 self.validate_node_ingress(runtime_spec, node, launch)?;
             }
         }
@@ -287,20 +268,6 @@ impl BoundRuntimeContext {
             .runner
             .validate_ingress(RunnerIngressContext::new(runtime_spec, node, launch))
     }
-}
-
-fn executable_identity_json(identity: &events::ExecutableIdentity) -> serde_json::Value {
-    serde_json::json!({
-        "binary_digest": identity.binary_digest.as_str(),
-        "cargo_package_digest": identity.cargo_package_digest.as_str(),
-        "factory_id": identity.factory_id.as_str(),
-        "nix_derivation_hash": identity.nix_derivation_hash.as_ref().map(|value| value.as_str()),
-        "nix_output_hash": identity.nix_output_hash.as_ref().map(|value| value.as_str()),
-    })
-}
-
-fn node_requires_runner_ingress(node: &spec::NodeSpec) -> bool {
-    node.framework.is_none()
 }
 
 #[derive(Default)]

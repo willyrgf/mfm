@@ -34,6 +34,20 @@ fn verify_error_response(output: &str) -> ErrorResponse {
     parsed
 }
 
+fn json_cli_error_without_database(args: &[&str]) -> (Option<i32>, ErrorResponse) {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .env_remove("DATABASE_URL")
+        .args(args)
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    (output.status.code(), verify_error_response(&stderr))
+}
+
 #[test]
 fn run_stream_command_filters_range_after_authoritative_run_stream_validation() {
     let source = include_str!("../src/commands/run/stream.rs");
@@ -54,153 +68,98 @@ fn run_stream_command_filters_range_after_authoritative_run_stream_validation() 
 }
 
 #[test]
-fn test_keystore_list_json_output_empty() {
-    let temp_dir = setup_temp_keystore();
-    let keystore_path = temp_dir.path().join("test.keystore");
+fn test_keystore_list_json_output_sources() {
+    enum JsonSource {
+        Flag,
+        Env,
+    }
 
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let output = cmd
-        .args([
+    for source in [JsonSource::Flag, JsonSource::Env] {
+        let temp_dir = setup_temp_keystore();
+        let keystore_path = temp_dir.path().join("test.keystore");
+        let keystore = keystore_path.to_str().unwrap();
+
+        let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+        let output = match source {
+            JsonSource::Flag => cmd
+                .args([
+                    "--output-format",
+                    "json",
+                    "keystore",
+                    "list",
+                    "--keystore",
+                    keystore,
+                ])
+                .output(),
+            JsonSource::Env => cmd
+                .env(OUTPUT_FORMAT_ENV, "json")
+                .args(["keystore", "list", "--keystore", keystore])
+                .output(),
+        }
+        .expect("Failed to execute command");
+
+        if !output.status.success() {
+            // If keystore doesn't exist or requires password, that's expected for empty case.
+            continue;
+        }
+
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        if !stdout.trim().is_empty() {
+            let parsed = verify_success_response(&stdout);
+            assert!(parsed["data"].is_array());
+        }
+    }
+}
+
+#[test]
+fn test_keystore_import_json_errors_for_invalid_input() {
+    for (import_type, stdin, error_code) in [
+        ("privatekey", "invalid_key", "invalid_key_material"),
+        ("mnemonic", "short mnemonic", "invalid_recovery_phrase"),
+    ] {
+        let temp_dir = setup_temp_keystore();
+        let keystore_path = temp_dir.path().join("test.keystore");
+
+        let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+        cmd.args([
             "--output-format",
             "json",
             "keystore",
-            "list",
+            "import",
+            "--import-type",
+            import_type,
             "--keystore",
             keystore_path.to_str().unwrap(),
+            "--stdin",
         ])
-        .output()
-        .expect("Failed to execute command");
-
-    if !output.status.success() {
-        // If keystore doesn't exist or requires password, that's expected for empty case
-        return;
-    }
-
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    if !stdout.trim().is_empty() {
-        let parsed = verify_success_response(&stdout);
-        assert!(parsed["data"].is_array());
+        .write_stdin(stdin)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(error_code))
+        .stderr(predicate::str::contains("status"))
+        .stderr(predicate::str::contains("error"));
     }
 }
 
 #[test]
-fn test_keystore_list_json_output_with_env_var() {
-    let temp_dir = setup_temp_keystore();
-    let keystore_path = temp_dir.path().join("test.keystore");
+fn test_keystore_delete_json_error_cases() {
+    for args in [Vec::new(), vec!["invalid-uuid"]] {
+        let temp_dir = setup_temp_keystore();
+        let keystore_path = temp_dir.path().join("test.keystore");
 
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let output = cmd
-        .env(OUTPUT_FORMAT_ENV, "json")
-        .args([
+        let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+        cmd.args([
+            "--output-format",
+            "json",
             "keystore",
-            "list",
+            "delete",
             "--keystore",
             keystore_path.to_str().unwrap(),
         ])
-        .output()
-        .expect("Failed to execute command");
-
-    if !output.status.success() {
-        // If keystore doesn't exist or requires password, that's expected
-        return;
+        .args(args)
+        .assert()
+        .failure();
     }
-
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    if !stdout.trim().is_empty() {
-        let parsed = verify_success_response(&stdout);
-        assert!(parsed["data"].is_array());
-    }
-}
-
-#[test]
-fn test_keystore_import_json_error_invalid_key() {
-    let temp_dir = setup_temp_keystore();
-    let keystore_path = temp_dir.path().join("test.keystore");
-
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.args([
-        "--output-format",
-        "json",
-        "keystore",
-        "import",
-        "--import-type",
-        "privatekey",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-        "--stdin",
-    ])
-    .write_stdin("invalid_key")
-    .assert()
-    .failure()
-    .stderr(predicate::str::contains("invalid_key_material"))
-    .stderr(predicate::str::contains("status"))
-    .stderr(predicate::str::contains("error"));
-}
-
-#[test]
-fn test_keystore_import_json_error_short_mnemonic() {
-    let temp_dir = setup_temp_keystore();
-    let keystore_path = temp_dir.path().join("test.keystore");
-
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.args([
-        "--output-format",
-        "json",
-        "keystore",
-        "import",
-        "--import-type",
-        "mnemonic",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-        "--stdin",
-    ])
-    .write_stdin("short mnemonic")
-    .assert()
-    .failure()
-    .stderr(predicate::str::contains("invalid_recovery_phrase"))
-    .stderr(predicate::str::contains("status"))
-    .stderr(predicate::str::contains("error"));
-}
-
-#[test]
-fn test_keystore_delete_json_error_missing_args() {
-    // This test verifies argument validation happens at clap level
-    let temp_dir = setup_temp_keystore();
-    let keystore_path = temp_dir.path().join("test.keystore");
-
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.args([
-        "--output-format",
-        "json",
-        "keystore",
-        "delete",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-    ])
-    .assert()
-    .failure();
-    // Note: This error happens at keystore loading level, not our custom validation
-}
-
-#[test]
-fn test_keystore_delete_json_error_invalid_uuid() {
-    // This test verifies error handling at keystore level
-    let temp_dir = setup_temp_keystore();
-    let keystore_path = temp_dir.path().join("test.keystore");
-
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.args([
-        "--output-format",
-        "json",
-        "keystore",
-        "delete",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-        "invalid-uuid",
-    ])
-    .assert()
-    .failure();
-    // Note: This error happens at keystore loading level, not our UUID validation
 }
 
 #[test]
@@ -216,77 +175,77 @@ fn test_help_output_shows_json_format_option() {
 }
 
 #[test]
-fn test_cli_parse_error_json_output_for_unknown_command_flag_equals() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let output = cmd
-        .args(["--output-format=json", "unknown-command"])
-        .output()
-        .expect("Failed to execute command");
+fn test_cli_parse_error_json_output_cases() {
+    struct Case {
+        name: &'static str,
+        env_json: bool,
+        args: &'static [&'static str],
+        message_fragment: &'static str,
+        assert_no_ansi: bool,
+    }
 
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    let parsed = verify_error_response(&stderr);
-    assert_eq!(parsed.error.code, "CliParseError");
-    assert!(parsed.error.message.contains("unknown-command"));
-    assert!(!parsed.error.message.contains('\u{1b}'));
-}
+    for case in [
+        Case {
+            name: "unknown command via equals flag",
+            env_json: false,
+            args: &["--output-format=json", "unknown-command"],
+            message_fragment: "unknown-command",
+            assert_no_ansi: true,
+        },
+        Case {
+            name: "unknown command via env",
+            env_json: true,
+            args: &["unknown-command"],
+            message_fragment: "unknown-command",
+            assert_no_ansi: false,
+        },
+        Case {
+            name: "missing required argument",
+            env_json: false,
+            args: &["--output-format", "json", "keystore", "import", "--stdin"],
+            message_fragment: "--import-type",
+            assert_no_ansi: false,
+        },
+        Case {
+            name: "invalid value",
+            env_json: false,
+            args: &[
+                "--output-format",
+                "json",
+                "keystore",
+                "import",
+                "--import-type",
+                "not-a-type",
+                "--stdin",
+            ],
+            message_fragment: "not-a-type",
+            assert_no_ansi: false,
+        },
+    ] {
+        let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+        if case.env_json {
+            cmd.env(OUTPUT_FORMAT_ENV, "json");
+        }
+        let output = cmd
+            .args(case.args)
+            .output()
+            .expect("Failed to execute command");
 
-#[test]
-fn test_cli_parse_error_json_output_for_unknown_command_env() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let output = cmd
-        .env(OUTPUT_FORMAT_ENV, "json")
-        .arg("unknown-command")
-        .output()
-        .expect("Failed to execute command");
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    let parsed = verify_error_response(&stderr);
-    assert_eq!(parsed.error.code, "CliParseError");
-    assert!(parsed.error.message.contains("unknown-command"));
-}
-
-#[test]
-fn test_cli_parse_error_json_output_for_missing_required_argument() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let output = cmd
-        .args(["--output-format", "json", "keystore", "import", "--stdin"])
-        .output()
-        .expect("Failed to execute command");
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    let parsed = verify_error_response(&stderr);
-    assert_eq!(parsed.error.code, "CliParseError");
-    assert!(parsed.error.message.contains("--import-type"));
-}
-
-#[test]
-fn test_cli_parse_error_json_output_for_invalid_value() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let output = cmd
-        .args([
-            "--output-format",
-            "json",
-            "keystore",
-            "import",
-            "--import-type",
-            "not-a-type",
-            "--stdin",
-        ])
-        .output()
-        .expect("Failed to execute command");
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    let parsed = verify_error_response(&stderr);
-    assert_eq!(parsed.error.code, "CliParseError");
-    assert!(parsed.error.message.contains("not-a-type"));
+        assert_eq!(output.status.code(), Some(2), "{}", case.name);
+        assert!(output.stdout.is_empty(), "{}", case.name);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let parsed = verify_error_response(&stderr);
+        assert_eq!(parsed.error.code, "CliParseError", "{}", case.name);
+        assert!(
+            parsed.error.message.contains(case.message_fragment),
+            "{}: {:?}",
+            case.name,
+            parsed.error.message
+        );
+        if case.assert_no_ansi {
+            assert!(!parsed.error.message.contains('\u{1b}'), "{}", case.name);
+        }
+    }
 }
 
 #[test]
@@ -380,194 +339,155 @@ fn test_run_start_run_id_flag_is_not_a_start_option() {
 }
 
 #[test]
-fn test_run_start_requires_store_store_scope_before_config_decode() {
+fn test_json_commands_reach_store_connection_after_local_validation() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("portfolio.toml");
     std::fs::write(&config_path, sample_portfolio_config_toml()).expect("config fixture");
+    let config_path = config_path.to_str().unwrap();
 
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let output = cmd
-        .env_remove("DATABASE_URL")
-        .args([
-            "--output-format",
-            "json",
-            "run",
-            "start",
-            "--op",
-            "portfolio_snapshot",
-            "--config",
-            config_path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("Failed to execute command");
+    struct Case<'a> {
+        name: &'static str,
+        args: Vec<&'a str>,
+    }
 
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    let parsed = verify_error_response(&stderr);
-    assert_eq!(parsed.error.code, "MissingDatabaseUrl");
+    for case in [
+        Case {
+            name: "run start decodes valid launch input before store connection",
+            args: vec![
+                "--output-format",
+                "json",
+                "run",
+                "start",
+                "--op",
+                "portfolio_snapshot",
+                "--config",
+                config_path,
+            ],
+        },
+        Case {
+            name: "facts kinds reaches evidence-only store connection",
+            args: vec!["--output-format", "json", "facts", "kinds"],
+        },
+        Case {
+            name: "facts query parses public flags before store connection",
+            args: vec![
+                "--output-format",
+                "json",
+                "facts",
+                "query",
+                "--kind",
+                "wallet.balance",
+                "--shape",
+                "mfm.wallet.balance.v1",
+                "--order",
+                "result.amount_sat.desc",
+                "--subject",
+                "asset_ref=btc",
+                "--result",
+                "amount_sat.gt=1000",
+                "--where",
+                "metadata.observed_at.lte=timestamp:2026-07-02T00:00:00Z",
+                "--field",
+                "subject.asset_ref",
+                "--field",
+                "result.amount_sat",
+                "--limit",
+                "20",
+            ],
+        },
+        Case {
+            name: "run replay validates run id before store connection",
+            args: vec![
+                "--output-format",
+                "json",
+                "run",
+                "replay",
+                "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ],
+        },
+    ] {
+        let (_status, parsed) = json_cli_error_without_database(&case.args);
+        assert_eq!(parsed.error.code, "MissingDatabaseUrl", "{}", case.name);
+    }
 }
 
 #[test]
-fn test_facts_kinds_json_reaches_evidence_only_store_connection() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let output = cmd
-        .env_remove("DATABASE_URL")
-        .args(["--output-format", "json", "facts", "kinds"])
-        .output()
-        .expect("Failed to execute command");
+fn test_json_commands_report_local_validation_errors_before_store_connection() {
+    struct Case {
+        name: &'static str,
+        args: &'static [&'static str],
+        expected_status: Option<i32>,
+        expected_code: &'static str,
+        message_fragment: Option<&'static str>,
+    }
 
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    let parsed = verify_error_response(&stderr);
-    assert_eq!(parsed.error.code, "MissingDatabaseUrl");
-}
-
-#[test]
-fn test_facts_query_json_parses_public_flags_before_store_connection() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let output = cmd
-        .env_remove("DATABASE_URL")
-        .args([
-            "--output-format",
-            "json",
-            "facts",
-            "query",
-            "--kind",
-            "wallet.balance",
-            "--shape",
-            "mfm.wallet.balance.v1",
-            "--order",
-            "result.amount_sat.desc",
-            "--subject",
-            "asset_ref=btc",
-            "--result",
-            "amount_sat.gt=1000",
-            "--where",
-            "metadata.observed_at.lte=timestamp:2026-07-02T00:00:00Z",
-            "--field",
-            "subject.asset_ref",
-            "--field",
-            "result.amount_sat",
-            "--limit",
-            "20",
-        ])
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    let parsed = verify_error_response(&stderr);
-    assert_eq!(parsed.error.code, "MissingDatabaseUrl");
-}
-
-#[test]
-fn test_facts_show_rejects_invalid_public_ref_before_store_connection() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let output = cmd
-        .env_remove("DATABASE_URL")
-        .args([
-            "--output-format",
-            "json",
-            "facts",
-            "show",
-            "not-a-public-ref",
-        ])
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    let parsed = verify_error_response(&stderr);
-    assert_eq!(parsed.error.code, "PublicFactRefInvalid");
-}
-
-#[test]
-fn test_facts_query_requires_return_fields() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let output = cmd
-        .env_remove("DATABASE_URL")
-        .args([
-            "--output-format",
-            "json",
-            "facts",
-            "query",
-            "--kind",
-            "wallet.balance",
-            "--order",
-            "result.amount_sat.desc",
-        ])
-        .output()
-        .expect("Failed to execute command");
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    let parsed = verify_error_response(&stderr);
-    assert_eq!(parsed.error.code, "CliParseError");
-    assert!(parsed.error.message.contains("--field"));
-}
-
-#[test]
-fn test_run_replay_requires_run_store_after_valid_run_id() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let output = cmd
-        .env_remove("DATABASE_URL")
-        .args([
-            "--output-format",
-            "json",
-            "run",
-            "replay",
-            "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        ])
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    let parsed = verify_error_response(&stderr);
-    assert_eq!(parsed.error.code, "MissingDatabaseUrl");
-}
-
-#[test]
-fn test_run_status_json_error_invalid_run_id() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let output = cmd
-        .env_remove("DATABASE_URL")
-        .args(["--output-format", "json", "run", "status", "not-a-run-id"])
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    let parsed = verify_error_response(&stderr);
-    assert_eq!(parsed.error.code, "InvalidRunId");
-}
-
-#[test]
-fn test_run_public_output_json_rejects_invalid_schema_id() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let output = cmd
-        .env_remove("DATABASE_URL")
-        .args([
-            "--output-format",
-            "json",
-            "run",
-            "public-output",
-            "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "--schema-id",
-            "schema_123",
-        ])
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    let err = verify_error_response(&stderr);
-    assert_eq!(err.error.code, "InvalidSchemaId");
+    for case in [
+        Case {
+            name: "facts show rejects invalid public ref",
+            args: &[
+                "--output-format",
+                "json",
+                "facts",
+                "show",
+                "not-a-public-ref",
+            ],
+            expected_status: None,
+            expected_code: "PublicFactRefInvalid",
+            message_fragment: None,
+        },
+        Case {
+            name: "facts query requires return fields",
+            args: &[
+                "--output-format",
+                "json",
+                "facts",
+                "query",
+                "--kind",
+                "wallet.balance",
+                "--order",
+                "result.amount_sat.desc",
+            ],
+            expected_status: Some(2),
+            expected_code: "CliParseError",
+            message_fragment: Some("--field"),
+        },
+        Case {
+            name: "run status rejects invalid run id",
+            args: &["--output-format", "json", "run", "status", "not-a-run-id"],
+            expected_status: None,
+            expected_code: "InvalidRunId",
+            message_fragment: None,
+        },
+        Case {
+            name: "run public output rejects invalid schema id",
+            args: &[
+                "--output-format",
+                "json",
+                "run",
+                "public-output",
+                "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "--schema-id",
+                "schema_123",
+            ],
+            expected_status: None,
+            expected_code: "InvalidSchemaId",
+            message_fragment: None,
+        },
+    ] {
+        let (status, parsed) = json_cli_error_without_database(case.args);
+        if let Some(expected) = case.expected_status {
+            assert_eq!(status, Some(expected), "{}", case.name);
+        }
+        assert_eq!(parsed.error.code, case.expected_code, "{}", case.name);
+        if let Some(fragment) = case.message_fragment {
+            assert!(
+                parsed.error.message.contains(fragment),
+                "{}: {:?}",
+                case.name,
+                parsed.error.message
+            );
+        }
+    }
 }
 
 #[test]

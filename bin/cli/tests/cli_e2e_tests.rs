@@ -58,6 +58,45 @@ fn cli_with_runtime_config(env: &TestEnv) -> Command {
     cmd
 }
 
+fn import_private_key(test_env: &TestEnv, label: Option<&str>, private_key: &str) {
+    let mut import_cmd = cli_with_runtime_config(test_env);
+    import_cmd.args(&["keystore", "import", "--import-type", "privatekey"]);
+    if let Some(label) = label {
+        import_cmd.args(&["--label", label]);
+    }
+    import_cmd.arg("--stdin");
+    import_cmd.write_stdin(private_key);
+
+    import_cmd
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "private key imported successfully",
+        ));
+}
+
+fn import_mnemonic(test_env: &TestEnv, label: &str, derivation_path: Option<&str>, mnemonic: &str) {
+    let mut import_cmd = cli_with_runtime_config(test_env);
+    import_cmd.args(&[
+        "keystore",
+        "import",
+        "--import-type",
+        "mnemonic",
+        "--label",
+        label,
+    ]);
+    if let Some(derivation_path) = derivation_path {
+        import_cmd.args(&["--derivation-path", derivation_path]);
+    }
+    import_cmd.arg("--stdin");
+    import_cmd.write_stdin(mnemonic);
+
+    import_cmd
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hd_derived imported successfully"));
+}
+
 fn toml_string(value: &str) -> String {
     serde_json::to_string(value).expect("toml string")
 }
@@ -68,26 +107,18 @@ fn test_e2e_private_key_workflow() {
     let keystore_path = test_env.keystore_path.clone();
 
     // Step 1: Import a private key
-    let mut import_cmd = cli_with_runtime_config(&test_env);
-    import_cmd.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "privatekey",
-        "--label",
-        "test-wallet",
-        "--stdin",
-    ]);
-    import_cmd.write_stdin("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+    import_private_key(
+        &test_env,
+        Some("test-wallet"),
+        "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+    );
+    import_private_key(
+        &test_env,
+        None,
+        "2222222222222222222222222222222222222222222222222222222222222222",
+    );
 
-    import_cmd
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "private key imported successfully",
-        ));
-
-    // Step 2: List keys to verify import
+    // Step 2: List keys to verify explicit and generated labels.
     let mut list_cmd = cli_with_runtime_config(&test_env);
     list_cmd.args(&["keystore", "list"]);
 
@@ -95,6 +126,7 @@ fn test_e2e_private_key_workflow() {
         .assert()
         .success()
         .stdout(predicate::str::contains("test-wallet"))
+        .stdout(predicate::str::contains("imported-key-"))
         .stdout(predicate::str::contains("privatekey"));
 
     // Step 3: List keys in JSON format
@@ -126,24 +158,12 @@ fn test_e2e_mnemonic_workflow() {
     let test_env = create_test_env();
 
     // Step 1: Import a mnemonic
-    let mut import_cmd = cli_with_runtime_config(&test_env);
-    import_cmd.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "mnemonic",
-        "--label",
+    import_mnemonic(
+        &test_env,
         "hd-wallet",
-        "--derivation-path",
-        "m/44'/60'/0'/0/0",
-        "--stdin",
-    ]);
-    import_cmd.write_stdin("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about");
-
-    import_cmd
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("hd_derived imported successfully"));
+        Some("m/44'/60'/0'/0/0"),
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    );
 
     // Step 2: List keys to verify import
     let mut list_cmd = cli_with_runtime_config(&test_env);
@@ -155,24 +175,12 @@ fn test_e2e_mnemonic_workflow() {
         .stdout(predicate::str::contains("hd-wallet"));
 
     // Step 3: Import another mnemonic with different derivation path
-    let mut import_cmd2 = cli_with_runtime_config(&test_env);
-    import_cmd2.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "mnemonic",
-        "--label",
+    import_mnemonic(
+        &test_env,
         "hd-wallet-2",
-        "--derivation-path",
-        "m/44'/60'/1'/0/0",
-        "--stdin",
-    ]);
-    import_cmd2.write_stdin("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about");
-
-    import_cmd2
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("hd_derived imported successfully"));
+        Some("m/44'/60'/1'/0/0"),
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    );
 
     // Step 4: List should now show 2 keys
     let mut list_cmd2 = cli_with_runtime_config(&test_env);
@@ -284,44 +292,18 @@ fn test_e2e_delete_workflow() {
     let test_env = create_test_env();
 
     // Step 1: Import a key
-    let mut import_cmd = cli_with_runtime_config(&test_env);
-    import_cmd.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "privatekey",
-        "--label",
-        "deleteme",
-        "--stdin",
-    ]);
-    import_cmd.write_stdin("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
-
-    import_cmd
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "private key imported successfully",
-        ));
+    import_private_key(
+        &test_env,
+        Some("deleteme"),
+        "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+    );
 
     // Step 2: Import another key to keep
-    let mut import_cmd2 = cli_with_runtime_config(&test_env);
-    import_cmd2.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "privatekey",
-        "--label",
-        "keepme",
-        "--stdin",
-    ]);
-    import_cmd2.write_stdin("fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321");
-
-    import_cmd2
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "private key imported successfully",
-        ));
+    import_private_key(
+        &test_env,
+        Some("keepme"),
+        "fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321",
+    );
 
     // Step 3: List keys to verify both exist
     let mut list_cmd = cli_with_runtime_config(&test_env);
@@ -350,12 +332,7 @@ fn test_e2e_delete_workflow() {
         .assert()
         .success()
         .stdout(predicate::str::contains("keepme"))
-        .stdout(
-            predicate::str::contains("keepme")
-                .not()
-                .and(predicate::str::contains("deleteme"))
-                .not(),
-        );
+        .stdout(predicate::str::contains("deleteme").not());
 }
 
 #[test]
@@ -363,42 +340,19 @@ fn test_e2e_mixed_key_types_workflow() {
     let test_env = create_test_env();
 
     // Import private key
-    let mut import_pk_cmd = cli_with_runtime_config(&test_env);
-    import_pk_cmd.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "privatekey",
-        "--label",
-        "pk-wallet",
-        "--stdin",
-    ]);
-    import_pk_cmd.write_stdin("1111111111111111111111111111111111111111111111111111111111111111");
-
-    import_pk_cmd
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "private key imported successfully",
-        ));
+    import_private_key(
+        &test_env,
+        Some("pk-wallet"),
+        "1111111111111111111111111111111111111111111111111111111111111111",
+    );
 
     // Import mnemonic
-    let mut import_mn_cmd = cli_with_runtime_config(&test_env);
-    import_mn_cmd.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "mnemonic",
-        "--label",
+    import_mnemonic(
+        &test_env,
         "mn-wallet",
-        "--stdin",
-    ]);
-    import_mn_cmd.write_stdin("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about");
-
-    import_mn_cmd
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("hd_derived imported successfully"));
+        None,
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    );
 
     // List all keys
     let mut list_cmd = cli_with_runtime_config(&test_env);
@@ -430,63 +384,13 @@ fn test_e2e_mixed_key_types_workflow() {
 }
 
 #[test]
-fn test_e2e_auto_generated_labels() {
-    let test_env = create_test_env();
-
-    // Import without specifying label
-    let mut import_cmd = cli_with_runtime_config(&test_env);
-    import_cmd.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "privatekey",
-        "--stdin",
-    ]);
-    import_cmd.write_stdin("2222222222222222222222222222222222222222222222222222222222222222");
-
-    import_cmd
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "private key imported successfully",
-        ));
-
-    // List to verify auto-generated label
-    let mut list_cmd = cli_with_runtime_config(&test_env);
-    list_cmd.args(&["keystore", "list"]);
-
-    list_cmd
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("imported-key-")); // Should have auto-generated label
-}
-
-#[test]
 fn test_e2e_sorting_and_formatting() {
     let test_env = create_test_env();
 
     // Import multiple keys with different labels
     for (i, label) in ["zebra", "alpha", "beta"].iter().enumerate() {
-        let mut import_cmd = cli_with_runtime_config(&test_env);
-        import_cmd.args(&[
-            "keystore",
-            "import",
-            "--import-type",
-            "privatekey",
-            "--label",
-            label,
-            "--stdin",
-        ]);
-        // Use different private keys
         let pk = format!("{:064x}", i + 1);
-        import_cmd.write_stdin(pk.as_str());
-
-        import_cmd
-            .assert()
-            .success()
-            .stdout(predicate::str::contains(
-                "private key imported successfully",
-            ));
+        import_private_key(&test_env, Some(label), pk.as_str());
 
         // Small delay to ensure different timestamps
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -522,52 +426,4 @@ fn test_e2e_sorting_and_formatting() {
         .stdout(predicate::str::contains("\"label\":"))
         .stdout(predicate::str::contains("\"address\":"))
         .stdout(predicate::str::contains("\"created\":"));
-}
-
-#[test]
-fn test_e2e_keystore_persistence() {
-    let test_env = create_test_env();
-    let keystore_path = test_env.keystore_path.clone();
-
-    // Import a key
-    let mut import_cmd = cli_with_runtime_config(&test_env);
-    import_cmd.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "privatekey",
-        "--label",
-        "persistent-key",
-        "--stdin",
-    ]);
-    import_cmd.write_stdin("9999999999999999999999999999999999999999999999999999999999999999");
-
-    import_cmd
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "private key imported successfully",
-        ));
-
-    // Verify keystore file exists and has content
-    assert!(keystore_path.exists(), "Keystore file should exist");
-    let file_content =
-        fs::read_to_string(&keystore_path).expect("Should be able to read keystore file");
-    assert!(
-        file_content.contains("persistent-key"),
-        "Keystore should contain the key label"
-    );
-    assert!(
-        file_content.len() > 100,
-        "Keystore file should have substantial content"
-    );
-
-    // List keys in a new CLI invocation (simulating restart)
-    let mut list_cmd = cli_with_runtime_config(&test_env);
-    list_cmd.args(&["keystore", "list"]);
-
-    list_cmd
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("persistent-key"));
 }

@@ -7,6 +7,7 @@ fn runtime_authority_requires_certified_inputs_at_compile_time() {
     tests.compile_fail("tests/ui/fail/lifecycle_payload_not_runner_payload.rs");
     tests.compile_fail("tests/ui/fail/kernel_payload_batch_not_runner_output.rs");
     tests.compile_fail("tests/ui/fail/artifact_reference_not_runner_payload.rs");
+    tests.compile_fail("tests/ui/fail/runtime_surface_private.rs");
     tests.compile_fail("tests/ui/fail/verified_run_history_view_constructor_private.rs");
     tests.compile_fail("tests/ui/fail/verified_run_history_view_fields_private.rs");
 }

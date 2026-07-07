@@ -104,11 +104,11 @@ impl RunnerJsonArtifact {
 /// Runner-owned input for recording one typed fact claim.
 pub struct FactRecordInput<T: MfmFactType> {
     /// Typed fact value containing the subject and response material.
-    pub fact: T,
+    fact: T,
     /// Visibility selected for the recorded claim.
-    pub visibility: mfm_facts::FactVisibility,
+    visibility: mfm_facts::FactVisibility,
     /// Optional source observation timestamp.
-    pub observed_at: Option<String>,
+    observed_at: Option<String>,
 }
 
 impl<T: MfmFactType> FactRecordInput<T> {
@@ -125,50 +125,6 @@ impl<T: MfmFactType> FactRecordInput<T> {
     pub fn observed_at(mut self, observed_at: impl Into<String>) -> Self {
         self.observed_at = Some(observed_at.into());
         self
-    }
-}
-
-/// Handle returned after a typed fact has been staged into runner output.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StagedFactRecord {
-    fact_key: mfm_facts::FactKey,
-    response_artifact_id: ArtifactId,
-    response_hash: ContentDigest,
-}
-
-impl StagedFactRecord {
-    /// Returns the descriptor-derived fact key for the staged claim.
-    pub const fn fact_key(&self) -> &mfm_facts::FactKey {
-        &self.fact_key
-    }
-
-    /// Returns the staged response artifact id.
-    pub const fn response_artifact_id(&self) -> &ArtifactId {
-        &self.response_artifact_id
-    }
-
-    /// Returns the staged response content hash.
-    pub const fn response_hash(&self) -> &ContentDigest {
-        &self.response_hash
-    }
-}
-
-/// Handle returned after fact query replay evidence has been staged into runner output.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StagedFactQueryEvidence {
-    artifact_id: ArtifactId,
-    evidence_hash: ContentDigest,
-}
-
-impl StagedFactQueryEvidence {
-    /// Returns the staged query evidence artifact id.
-    pub const fn artifact_id(&self) -> &ArtifactId {
-        &self.artifact_id
-    }
-
-    /// Returns the canonical query evidence artifact-evidence hash.
-    pub const fn evidence_hash(&self) -> &ContentDigest {
-        &self.evidence_hash
     }
 }
 
@@ -528,7 +484,7 @@ async fn read_retained_artifact(
     artifacts
         .read_retained_artifact(requirement)
         .await
-        .map_err(artifact_read_runtime_error)
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
 fn decode_verified_json<T>(artifact: &store::VerifiedRunArtifactBytes) -> Result<T>
@@ -608,10 +564,6 @@ fn side_effect_artifact_source(
     }
 }
 
-fn artifact_read_runtime_error(error: store::StoreError) -> RuntimeError {
-    RuntimeError::InvalidRunnerOutput(error.to_string())
-}
-
 fn executable_identity_digest(value: serde_json::Value) -> Result<ContentDigest> {
     let json = serde_json::to_string(&value)
         .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
@@ -679,7 +631,7 @@ impl<'a, 'ctx> RunnerArtifactBuilder<'a, 'ctx> {
     }
 
     /// Builds a side-effect intent artifact.
-    pub fn side_effect_intent<T>(&self, value: &T) -> Result<RunnerJsonArtifact>
+    pub(crate) fn side_effect_intent<T>(&self, value: &T) -> Result<RunnerJsonArtifact>
     where
         T: MfmValue,
     {
@@ -687,7 +639,7 @@ impl<'a, 'ctx> RunnerArtifactBuilder<'a, 'ctx> {
     }
 
     /// Builds a schema-less prepared invocation artifact.
-    pub fn prepared_invocation<T>(&self, value: &T) -> Result<RunnerJsonArtifact>
+    pub(crate) fn prepared_invocation<T>(&self, value: &T) -> Result<RunnerJsonArtifact>
     where
         T: Serialize,
     {
@@ -695,7 +647,7 @@ impl<'a, 'ctx> RunnerArtifactBuilder<'a, 'ctx> {
     }
 
     /// Builds a not-submitted proof artifact.
-    pub fn not_submitted_proof<T>(&self, value: &T) -> Result<RunnerJsonArtifact>
+    pub(crate) fn not_submitted_proof<T>(&self, value: &T) -> Result<RunnerJsonArtifact>
     where
         T: MfmValue,
     {
@@ -703,7 +655,7 @@ impl<'a, 'ctx> RunnerArtifactBuilder<'a, 'ctx> {
     }
 
     /// Builds a submission artifact.
-    pub fn submission<T>(&self, value: &T) -> Result<RunnerJsonArtifact>
+    pub(crate) fn submission<T>(&self, value: &T) -> Result<RunnerJsonArtifact>
     where
         T: MfmValue,
     {
@@ -711,7 +663,7 @@ impl<'a, 'ctx> RunnerArtifactBuilder<'a, 'ctx> {
     }
 
     /// Builds a submission-unknown evidence artifact.
-    pub fn submission_unknown<T>(&self, value: &T) -> Result<RunnerJsonArtifact>
+    pub(crate) fn submission_unknown<T>(&self, value: &T) -> Result<RunnerJsonArtifact>
     where
         T: MfmValue,
     {
@@ -719,7 +671,7 @@ impl<'a, 'ctx> RunnerArtifactBuilder<'a, 'ctx> {
     }
 
     /// Builds a receipt artifact.
-    pub fn receipt<T>(&self, value: &T) -> Result<RunnerJsonArtifact>
+    pub(crate) fn receipt<T>(&self, value: &T) -> Result<RunnerJsonArtifact>
     where
         T: MfmValue,
     {
@@ -727,7 +679,7 @@ impl<'a, 'ctx> RunnerArtifactBuilder<'a, 'ctx> {
     }
 
     /// Builds a confirmation artifact.
-    pub fn confirmation<T>(&self, value: &T) -> Result<RunnerJsonArtifact>
+    pub(crate) fn confirmation<T>(&self, value: &T) -> Result<RunnerJsonArtifact>
     where
         T: MfmValue,
     {
@@ -735,7 +687,7 @@ impl<'a, 'ctx> RunnerArtifactBuilder<'a, 'ctx> {
     }
 
     /// Builds an ambiguity evidence artifact.
-    pub fn ambiguity_evidence<T>(&self, value: &T) -> Result<RunnerJsonArtifact>
+    pub(crate) fn ambiguity_evidence<T>(&self, value: &T) -> Result<RunnerJsonArtifact>
     where
         T: MfmValue,
     {
@@ -752,7 +704,7 @@ impl<'a, 'ctx> RunnerArtifactBuilder<'a, 'ctx> {
     }
 
     /// Stages an inline side-effect artifact for one ledger epoch.
-    pub fn staged_side_effect(
+    pub(crate) fn staged_side_effect(
         &self,
         artifact: &RunnerJsonArtifact,
         ledger_key: events::SideEffectLedgerKey,
@@ -840,13 +792,13 @@ impl<'a, 'ctx> RunnerArtifactBuilder<'a, 'ctx> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerCapabilityBinding {
     /// Capability kind used by the runner.
-    pub capability_kind: CapabilityKind,
+    pub(crate) capability_kind: CapabilityKind,
     /// Capability version used by the runner.
-    pub capability_version: CapabilityVersion,
+    pub(crate) capability_version: CapabilityVersion,
     /// Adapter kind used by the runner.
-    pub adapter_kind: AdapterKind,
+    pub(crate) adapter_kind: AdapterKind,
     /// Adapter version used by the runner.
-    pub adapter_version: AdapterVersion,
+    pub(crate) adapter_version: AdapterVersion,
 }
 
 impl RunnerCapabilityBinding {
@@ -867,11 +819,31 @@ impl RunnerCapabilityBinding {
             adapter_version,
         })
     }
+
+    /// Returns the capability kind used by the runner.
+    pub const fn capability_kind(&self) -> &CapabilityKind {
+        &self.capability_kind
+    }
+
+    /// Returns the capability version used by the runner.
+    pub const fn capability_version(&self) -> &CapabilityVersion {
+        &self.capability_version
+    }
+
+    /// Returns the adapter kind used by the runner.
+    pub const fn adapter_kind(&self) -> &AdapterKind {
+        &self.adapter_kind
+    }
+
+    /// Returns the adapter version used by the runner.
+    pub const fn adapter_version(&self) -> &AdapterVersion {
+        &self.adapter_version
+    }
 }
 
 /// Shared side-effect ledger coordinates for runner payload builders.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunnerSideEffectBinding {
+pub(crate) struct RunnerSideEffectBinding {
     /// Side-effect ledger key.
     pub ledger_key: events::SideEffectLedgerKey,
     /// Side-effect ledger purpose.
@@ -884,7 +856,7 @@ pub struct RunnerSideEffectBinding {
 
 /// Claim metadata for a side-effect invocation owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunnerClaimBinding {
+pub(crate) struct RunnerClaimBinding {
     /// Claim owner.
     pub claim_owner: events::RunnerInvocationId,
     /// Claim generation.
@@ -893,24 +865,9 @@ pub struct RunnerClaimBinding {
     pub claim_fencing_token: side_effect::ClaimFencingToken,
 }
 
-/// Claim takeover metadata for a side-effect invocation owner.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunnerClaimTakeoverBinding {
-    /// Previous claim owner.
-    pub previous_claim_owner: events::RunnerInvocationId,
-    /// New claim owner.
-    pub new_claim_owner: events::RunnerInvocationId,
-    /// Previous claim generation.
-    pub previous_claim_generation: u32,
-    /// New claim generation.
-    pub claim_generation: u32,
-    /// Claim fencing token.
-    pub claim_fencing_token: side_effect::ClaimFencingToken,
-}
-
 /// Prepared invocation metadata for a side-effect runner payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunnerPreparedInvocationBinding {
+pub(crate) struct RunnerPreparedInvocationBinding {
     /// Claim generation.
     pub claim_generation: u32,
     /// Claim fencing token.
@@ -990,7 +947,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
     }
 
     /// Builds a `SideEffectIntentPersisted` runner payload.
-    pub fn side_effect_intent_persisted<Idempotency>(
+    pub(crate) fn side_effect_intent_persisted<Idempotency>(
         &self,
         side_effect: RunnerSideEffectBinding,
         intent: &RunnerJsonArtifact,
@@ -1026,7 +983,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
     }
 
     /// Builds a `SideEffectClaimed` runner payload.
-    pub fn side_effect_claimed(
+    pub(crate) fn side_effect_claimed(
         &self,
         side_effect: RunnerSideEffectBinding,
         claim: RunnerClaimBinding,
@@ -1043,51 +1000,8 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
         ))
     }
 
-    /// Builds a `SideEffectClaimTakenOver` runner payload.
-    pub fn side_effect_claim_taken_over(
-        &self,
-        side_effect: RunnerSideEffectBinding,
-        takeover: RunnerClaimTakeoverBinding,
-    ) -> RunnerEventPayload {
-        RunnerEventPayload::SideEffectClaimTakenOver(runner_side_effect_payload!(
-            self,
-            side_effect,
-            events::SideEffectPairRole::Submit,
-            ClaimTakenOver {
-                previous_claim_owner: takeover.previous_claim_owner,
-                new_claim_owner: takeover.new_claim_owner,
-                previous_claim_generation: takeover.previous_claim_generation,
-                claim_generation: takeover.claim_generation,
-                claim_fencing_token: takeover.claim_fencing_token,
-            }
-        ))
-    }
-
-    /// Builds a `ResourceLaneClaimIntent` runner payload for pre-invocation lane authority.
-    pub fn resource_lane_claim_intent(
-        &self,
-        side_effect: RunnerSideEffectBinding,
-        resource_key: events::ResourceKeyEvidence,
-        requirement_digest: ContentDigest,
-        resolved_by_capability_impl: events::RunnerFactoryId,
-    ) -> RunnerEventPayload {
-        RunnerEventPayload::ResourceLaneClaimIntent(events::ResourceLaneClaimIntent {
-            spec_hash: self.ctx.spec_hash().clone(),
-            node_id: self.ctx.node().node_id.clone(),
-            attempt_id: self.ctx.attempt_id().clone(),
-            ledger_key: side_effect.ledger_key.clone(),
-            ledger_purpose: side_effect.ledger_purpose.clone(),
-            pair_id: side_effect.pair_id.clone(),
-            pair_role: events::SideEffectPairRole::Submit,
-            invocation_epoch: side_effect.invocation_epoch,
-            resource_key,
-            requirement_digest,
-            resolved_by_capability_impl,
-        })
-    }
-
     /// Builds a `ResourceLaneReleaseIntent` runner payload for terminal lane release.
-    pub fn resource_lane_release_intent(
+    pub(crate) fn resource_lane_release_intent(
         &self,
         side_effect: RunnerSideEffectBinding,
         claim_id: events::ResourceLaneClaimId,
@@ -1107,7 +1021,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
     }
 
     /// Builds a `SideEffectInvocationPrepared` runner payload.
-    pub fn side_effect_invocation_prepared(
+    pub(crate) fn side_effect_invocation_prepared(
         &self,
         side_effect: RunnerSideEffectBinding,
         prepared: Option<&RunnerJsonArtifact>,
@@ -1134,7 +1048,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
     }
 
     /// Builds a `SideEffectInvocationStarted` runner payload.
-    pub fn side_effect_invocation_started(
+    pub(crate) fn side_effect_invocation_started(
         &self,
         side_effect: RunnerSideEffectBinding,
         claim: RunnerClaimBinding,
@@ -1151,21 +1065,8 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
         ))
     }
 
-    /// Builds a `SideEffectNotSubmittedProven` runner payload.
-    pub fn side_effect_not_submitted_proven(
-        &self,
-        side_effect: RunnerSideEffectBinding,
-        proof: &RunnerJsonArtifact,
-    ) -> Result<RunnerEventPayload> {
-        self.side_effect_not_submitted_proven_with_role(
-            side_effect,
-            events::SideEffectPairRole::Submit,
-            proof,
-        )
-    }
-
     /// Builds a `SideEffectNotSubmittedProven` runner payload with an explicit pair role.
-    pub fn side_effect_not_submitted_proven_with_role(
+    pub(crate) fn side_effect_not_submitted_proven_with_role(
         &self,
         side_effect: RunnerSideEffectBinding,
         pair_role: events::SideEffectPairRole,
@@ -1186,21 +1087,8 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
         ))
     }
 
-    /// Builds a `SideEffectSubmissionObserved` runner payload.
-    pub fn side_effect_submission_observed(
-        &self,
-        side_effect: RunnerSideEffectBinding,
-        submission: &RunnerJsonArtifact,
-    ) -> Result<RunnerEventPayload> {
-        self.side_effect_submission_observed_with_role(
-            side_effect,
-            events::SideEffectPairRole::Submit,
-            submission,
-        )
-    }
-
     /// Builds a `SideEffectSubmissionObserved` runner payload with an explicit pair role.
-    pub fn side_effect_submission_observed_with_role(
+    pub(crate) fn side_effect_submission_observed_with_role(
         &self,
         side_effect: RunnerSideEffectBinding,
         pair_role: events::SideEffectPairRole,
@@ -1222,7 +1110,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
     }
 
     /// Builds a `SideEffectSubmissionUnknown` runner payload.
-    pub fn side_effect_submission_unknown(
+    pub(crate) fn side_effect_submission_unknown(
         &self,
         side_effect: RunnerSideEffectBinding,
         evidence: &RunnerJsonArtifact,
@@ -1243,7 +1131,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
     }
 
     /// Builds a `SideEffectReceiptObserved` runner payload.
-    pub fn side_effect_receipt_observed(
+    pub(crate) fn side_effect_receipt_observed(
         &self,
         side_effect: RunnerSideEffectBinding,
         receipt: &RunnerJsonArtifact,
@@ -1268,7 +1156,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
     }
 
     /// Builds a `SideEffectConfirmationObserved` runner payload.
-    pub fn side_effect_confirmation_observed(
+    pub(crate) fn side_effect_confirmation_observed(
         &self,
         side_effect: RunnerSideEffectBinding,
         confirmation: &RunnerJsonArtifact,
@@ -1293,7 +1181,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
     }
 
     /// Builds a `SideEffectAmbiguous` runner payload.
-    pub fn side_effect_ambiguous(
+    pub(crate) fn side_effect_ambiguous(
         &self,
         side_effect: RunnerSideEffectBinding,
         pair_role: events::SideEffectPairRole,
@@ -1317,7 +1205,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
     }
 
     /// Builds a `SideEffectFailed` runner payload.
-    pub fn side_effect_failed(
+    pub(crate) fn side_effect_failed(
         &self,
         side_effect: RunnerSideEffectBinding,
         pair_role: events::SideEffectPairRole,
@@ -1365,7 +1253,7 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
     }
 
     /// Stages a side-effect artifact.
-    pub fn stage_side_effect_artifact(
+    pub(crate) fn stage_side_effect_artifact(
         &mut self,
         artifact: &RunnerJsonArtifact,
         ledger_key: events::SideEffectLedgerKey,
@@ -1380,7 +1268,7 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
     }
 
     /// Stages a side-effect artifact and retains it as runtime evidence.
-    pub fn stage_side_effect_runtime_evidence(
+    pub(crate) fn stage_side_effect_runtime_evidence(
         &mut self,
         artifact: &RunnerJsonArtifact,
         side_effect: &RunnerSideEffectBinding,
@@ -1409,9 +1297,7 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
         T: MfmValue,
     {
         let payloads = RunnerPayloadBuilder::new(self.artifacts.ctx);
-        let artifact = self.artifacts.state_output(value)?;
-        self.stage_attempt_artifact(&artifact)?;
-        self.retain_runtime_evidence(&artifact);
+        let artifact = self.stage_state_output_artifact(value)?;
         self.payload(payloads.cell_produced(&artifact)?);
         Ok(artifact)
     }
@@ -1421,17 +1307,15 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
         &mut self,
         input: FactRecordInput<T>,
         producer: RunnerCapabilityBinding,
-    ) -> Result<StagedFactRecord>
+    ) -> Result<()>
     where
         T: MfmFactType + MfmValue,
     {
         let payloads = RunnerPayloadBuilder::new(self.artifacts.ctx);
-        let state_artifact = self.artifacts.state_output(&input.fact)?;
-        self.stage_attempt_artifact(&state_artifact)?;
-        self.retain_runtime_evidence(&state_artifact);
-        let staged = self.record_fact(input, producer)?;
+        let state_artifact = self.stage_state_output_artifact(&input.fact)?;
+        self.record_fact(input, producer)?;
         self.payload(payloads.cell_produced(&state_artifact)?);
-        Ok(staged)
+        Ok(())
     }
 
     /// Stages a state-output artifact and private fact-query replay evidence.
@@ -1440,7 +1324,7 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
         value: &T,
         evidence: mfm_facts::FactQueryEvidence,
         trust_root: &store::FactQueryReceiptTrustRoot,
-    ) -> Result<StagedFactQueryEvidence>
+    ) -> Result<()>
     where
         T: MfmValue,
     {
@@ -1453,7 +1337,7 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
         &mut self,
         input: FactRecordInput<T>,
         producer: RunnerCapabilityBinding,
-    ) -> Result<StagedFactRecord>
+    ) -> Result<()>
     where
         T: MfmFactType,
     {
@@ -1467,8 +1351,6 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
             .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
         let subject = mfm_facts::typed_fact_subject_evidence(&descriptor, &subject_json)
             .map_err(runtime_fact_error)?;
-        let fact_key = subject.fact_key().clone();
-
         let response = self.artifacts.fact_response(input.fact.response())?;
         let response_schema_id = artifact_schema_id(&response)?;
         if descriptor.response_schema_id() != &response_schema_id {
@@ -1501,23 +1383,17 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
         })
         .map_err(runtime_fact_error)?;
 
-        self.staged_artifacts
-            .push(self.artifacts.staged_attempt(&response)?);
-        self.payloads
-            .push(RunnerEventPayload::FactRecorded(RunnerFactRecorded::new(
-                events::FactRecorded {
-                    spec_hash: self.artifacts.ctx.spec_hash().clone(),
-                    node_id: self.artifacts.ctx.node().node_id.clone(),
-                    attempt_id: self.artifacts.ctx.attempt_id().clone(),
-                    claim,
-                },
-            )));
+        self.stage_attempt_artifact(&response)?;
+        self.payload(RunnerEventPayload::FactRecorded(RunnerFactRecorded::new(
+            events::FactRecorded {
+                spec_hash: self.artifacts.ctx.spec_hash().clone(),
+                node_id: self.artifacts.ctx.node().node_id.clone(),
+                attempt_id: self.artifacts.ctx.attempt_id().clone(),
+                claim,
+            },
+        )));
 
-        Ok(StagedFactRecord {
-            fact_key,
-            response_artifact_id: response_evidence.artifact_id,
-            response_hash: response_evidence.digest,
-        })
+        Ok(())
     }
 
     /// Stages private replay evidence for a live fact query.
@@ -1529,12 +1405,11 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
         &mut self,
         evidence: mfm_facts::FactQueryEvidence,
         trust_root: &store::FactQueryReceiptTrustRoot,
-    ) -> Result<StagedFactQueryEvidence> {
+    ) -> Result<()> {
         store::validate_fact_query_evidence_recording(&evidence, trust_root)
             .map_err(RuntimeError::from)?;
         let artifact = self.artifacts.fact_query_evidence(&evidence)?;
         let staged = self.artifacts.staged_attempt(&artifact)?;
-        let staged_evidence = staged.evidence().clone();
         let retention_refs = fact_query_evidence_retention_refs(
             &artifact,
             &evidence,
@@ -1547,11 +1422,17 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
                 retention_refs,
                 returned_refs,
             ));
-        let evidence_hash = staged_evidence.evidence_hash()?;
-        Ok(StagedFactQueryEvidence {
-            artifact_id: staged_evidence.artifact_id,
-            evidence_hash,
-        })
+        Ok(())
+    }
+
+    fn stage_state_output_artifact<T>(&mut self, value: &T) -> Result<RunnerJsonArtifact>
+    where
+        T: MfmValue,
+    {
+        let artifact = self.artifacts.state_output(value)?;
+        self.stage_attempt_artifact(&artifact)?;
+        self.retain_runtime_evidence(&artifact);
+        Ok(artifact)
     }
 
     /// Appends a runner-owned event payload.
@@ -1562,11 +1443,11 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
 
     /// Finishes the builder into an erased runner output batch.
     pub fn finish(self) -> ErasedRunnerOutput {
-        ErasedRunnerOutput {
-            staged_artifacts: self.staged_artifacts,
-            staged_retention_refs: self.staged_retention_refs,
-            payloads: self.payloads,
-        }
+        ErasedRunnerOutput::from_parts(
+            self.staged_artifacts,
+            self.staged_retention_refs,
+            self.payloads,
+        )
     }
 }
 

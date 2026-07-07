@@ -25,12 +25,15 @@ use crate::history::{
     validate_seed_cells, validate_spec_artifact, RuntimeRunView,
 };
 use crate::runners::{ContextOutputExtractor, ErasedRunnerOutput, RunnerEventPayload};
-use crate::side_effect_lifecycle::SideEffectLifecycle;
-use crate::side_effects::{side_effect_artifact_binding, validate_runner_side_effect_payload};
+use crate::side_effect_lifecycle::{
+    side_effect_projection_for_attempt, standalone_interruption_allowed, validate_resume_output,
+    validate_terminal_batch_evidence,
+};
+use crate::side_effects::validate_runner_side_effect_payload;
 use crate::{
     content_digest_json, require_adapter, require_attempt, require_capability,
-    retention_ref_for_artifact, validate_public_output, validate_public_output_render_node,
-    CertifiedRuntimeCapabilities, CertifiedRuntimeSpec, RecordedFacts, Result, RuntimeError,
+    validate_public_output, validate_public_output_render_node, CertifiedRuntimeCapabilities,
+    CertifiedRuntimeSpec, RecordedFacts, Result, RuntimeError,
 };
 
 /// Launch evidence needed to prepare a typed run admission commit.
@@ -70,8 +73,18 @@ pub struct RunLaunchSeedCell {
 
 /// Prepared run admission authority accepted by runtime-owned start middleware.
 pub struct PreparedRunLaunch {
-    pub(crate) commit: store::PreparedCommit<store::RunAdmission>,
-    pub(crate) artifacts_to_stage: Vec<PreparedStagedArtifact>,
+    commit: store::PreparedCommit<store::RunAdmission>,
+    artifacts_to_stage: Vec<PreparedStagedArtifact>,
+}
+
+impl PreparedRunLaunch {
+    pub(crate) fn run_id(&self) -> &RunId {
+        self.commit.request().run_id()
+    }
+
+    pub(crate) fn into_prepared_commit_bundle(self) -> Result<store::PreparedCommitBundle> {
+        prepared_commit_bundle(self.commit.into(), self.artifacts_to_stage)
+    }
 }
 
 pub(crate) struct RunnerOutputCommitInput<'a> {
@@ -126,8 +139,18 @@ pub(crate) struct SealedTerminalCommitValidation<'a> {
 }
 
 pub(crate) struct PreparedRunnerOutput {
-    pub(crate) commit: store::PreparedCommitPlan,
-    pub(crate) artifact_admissions: Vec<PreparedArtifactAdmission>,
+    commit: store::PreparedCommitPlan,
+    artifact_admissions: Vec<PreparedArtifactAdmission>,
+}
+
+impl PreparedRunnerOutput {
+    pub(crate) fn request(&self) -> &store::CommitRequest {
+        self.commit.request()
+    }
+
+    pub(crate) fn into_prepared_commit_bundle(self) -> Result<store::PreparedCommitBundle> {
+        prepared_commit_bundle_with_admissions(self.commit, self.artifact_admissions)
+    }
 }
 
 pub(crate) struct PreparedStagedArtifact {
@@ -135,7 +158,7 @@ pub(crate) struct PreparedStagedArtifact {
     pub(crate) evidence: store::ArtifactEvidenceRef,
 }
 
-pub(crate) enum PreparedArtifactAdmission {
+enum PreparedArtifactAdmission {
     Bytes(Box<PreparedStagedArtifact>),
     Existing(store::ExistingArtifactAdmission),
 }
@@ -146,17 +169,27 @@ impl From<PreparedStagedArtifact> for PreparedArtifactAdmission {
     }
 }
 
-pub(crate) fn prepared_commit_bundle<A>(
+pub(crate) fn prepared_commit_bundle(
     commit: store::PreparedCommitPlan,
-    artifacts: Vec<A>,
-) -> Result<store::PreparedCommitBundle>
-where
-    A: Into<PreparedArtifactAdmission>,
-{
+    artifacts: Vec<PreparedStagedArtifact>,
+) -> Result<store::PreparedCommitBundle> {
+    prepared_commit_bundle_with_admissions(
+        commit,
+        artifacts
+            .into_iter()
+            .map(PreparedArtifactAdmission::from)
+            .collect(),
+    )
+}
+
+fn prepared_commit_bundle_with_admissions(
+    commit: store::PreparedCommitPlan,
+    artifacts: Vec<PreparedArtifactAdmission>,
+) -> Result<store::PreparedCommitBundle> {
     let mut artifact_bytes = Vec::new();
     let mut existing_artifacts = Vec::new();
     for artifact in artifacts {
-        match artifact.into() {
+        match artifact {
             PreparedArtifactAdmission::Bytes(artifact) => {
                 let artifact = *artifact;
                 artifact_bytes.push(
@@ -346,17 +379,7 @@ impl CommitPlanner {
                 state_kind: node.state_kind.clone(),
                 state_version: node.state_version.clone(),
             });
-        let mut preconditions = store::CommitPreconditions {
-            required_run_state: store::RequiredRunState::NotCompleted,
-            required_cell_states: vec![store::CellStatePrecondition {
-                cell_id: node.output_cell.clone(),
-                required: store::RequiredCellState::Absent,
-            }],
-            ..store::CommitPreconditions::default()
-        };
-        preconditions
-            .required_cell_states
-            .extend(node_cell_preconditions(runtime_spec, node)?);
+        let preconditions = attempt_commit_preconditions(runtime_spec, node, None)?;
         let request = store::CommitRequest::from_payloads(
             run_id.clone(),
             view.next_seq,
@@ -374,11 +397,7 @@ impl CommitPlanner {
     pub(crate) fn prepare_runner_output(
         input: RunnerOutputCommitInput<'_>,
     ) -> Result<PreparedRunnerOutput> {
-        let ErasedRunnerOutput {
-            staged_artifacts,
-            staged_retention_refs,
-            payloads: runner_payloads,
-        } = input.output;
+        let (staged_artifacts, staged_retention_refs, runner_payloads) = input.output.into_parts();
         let runner_payloads = runner_payloads_with_derived_lifecycle(
             input.runtime_spec,
             input.node,
@@ -546,7 +565,7 @@ impl CommitPlanner {
             None => {}
         }
         let terminal_side_effect_payloads = if input.node.side_effect.is_some() {
-            SideEffectLifecycle::projection_for_attempt(
+            side_effect_projection_for_attempt(
                 input.runtime_spec,
                 input.run_id,
                 &input.view.projections,
@@ -623,7 +642,7 @@ impl CommitPlanner {
                     events::RetentionRefsAppended {
                         run_id: input.run_id.clone(),
                         spec_hash: input.runtime_spec.spec_hash().clone(),
-                        refs: vec![retention_ref_for_artifact(&artifact.evidence)],
+                        refs: vec![artifact.evidence.retention_ref()],
                         reason: events::RetentionReason::RuntimeEvidence,
                     },
                 ));
@@ -636,21 +655,8 @@ impl CommitPlanner {
             } else {
                 (Vec::new(), Vec::new(), Vec::new())
             };
-        let mut preconditions = store::CommitPreconditions {
-            required_run_state: store::RequiredRunState::NotCompleted,
-            required_cell_states: vec![store::CellStatePrecondition {
-                cell_id: input.node.output_cell.clone(),
-                required: store::RequiredCellState::Absent,
-            }],
-            required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
-                "attempt:{}:{}",
-                input.node.node_id, input.attempt_id
-            ))?],
-            ..store::CommitPreconditions::default()
-        };
-        preconditions
-            .required_cell_states
-            .extend(node_cell_preconditions(input.runtime_spec, input.node)?);
+        let mut preconditions =
+            attempt_commit_preconditions(input.runtime_spec, input.node, Some(input.attempt_id))?;
         if payloads.iter().any(is_side_effect_terminal_payload) {
             preconditions.certified_run_authority =
                 Some(certified_run_authority(input.runtime_spec, input.run_id)?);
@@ -699,7 +705,7 @@ impl CommitPlanner {
             )));
         }
         if input.node.side_effect.is_some()
-            && !SideEffectLifecycle::standalone_interruption_allowed(
+            && !standalone_interruption_allowed(
                 input.runtime_spec,
                 input.run_id,
                 &input.view.projections,
@@ -719,21 +725,8 @@ impl CommitPlanner {
                 node_id: input.node.node_id.clone(),
                 attempt_id: input.attempt_id.clone(),
             });
-        let mut preconditions = store::CommitPreconditions {
-            required_run_state: store::RequiredRunState::NotCompleted,
-            required_cell_states: vec![store::CellStatePrecondition {
-                cell_id: input.node.output_cell.clone(),
-                required: store::RequiredCellState::Absent,
-            }],
-            required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
-                "attempt:{}:{}",
-                input.node.node_id, input.attempt_id
-            ))?],
-            ..store::CommitPreconditions::default()
-        };
-        preconditions
-            .required_cell_states
-            .extend(node_cell_preconditions(input.runtime_spec, input.node)?);
+        let preconditions =
+            attempt_commit_preconditions(input.runtime_spec, input.node, Some(input.attempt_id))?;
         let request = store::CommitRequest::from_payloads(
             input.run_id.clone(),
             input.view.next_seq,
@@ -796,9 +789,16 @@ fn prepare_runner_output_commit_plan(
     saga_terminal_proof: Option<store::SagaTerminalProof>,
 ) -> Result<store::PreparedCommitPlan> {
     let payloads = request.payloads();
-    if payloads.iter().any(is_saga_terminal_payload)
-        && request.preconditions().certified_run_authority.is_some()
-    {
+    let has_run_completed = payloads
+        .iter()
+        .any(|payload| matches!(payload, events::KernelEventPayload::RunCompleted(_)));
+    let has_retention_manifest_projection = payloads.iter().any(|payload| {
+        matches!(
+            payload,
+            events::KernelEventPayload::RetentionManifestProjected(_)
+        )
+    });
+    if has_run_completed && request.preconditions().certified_run_authority.is_some() {
         let proof = saga_terminal_proof.ok_or_else(|| {
             RuntimeError::InvalidRunnerOutput(
                 "saga terminal resolution requires SagaTerminalProof".to_owned(),
@@ -808,15 +808,12 @@ fn prepare_runner_output_commit_plan(
             store::PreparedCommit::<store::SagaTerminal>::new(request, artifacts, &proof)?.into(),
         );
     }
-    if payloads.iter().any(is_run_completed_payload) {
+    if has_run_completed {
         return Ok(
             store::PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)?.into(),
         );
     }
-    if payloads
-        .iter()
-        .any(is_retention_manifest_projection_payload)
-    {
+    if has_retention_manifest_projection {
         return Ok(store::PreparedCommit::<store::Retention>::new(request, artifacts)?.into());
     }
     if payloads.iter().any(is_side_effect_terminal_payload) {
@@ -829,23 +826,23 @@ fn prepare_runner_output_commit_plan(
             store::PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)?.into(),
         );
     }
-    if payloads.iter().any(is_side_effect_payload) {
+    if payloads
+        .iter()
+        .any(|payload| payload.side_effect_ledger_ref().is_some())
+    {
         return Ok(
             store::PreparedCommit::<store::SideEffectProgress>::new(request, artifacts)?.into(),
         );
     }
-    if payloads.iter().any(is_retention_payload) {
+    if payloads.iter().any(|payload| {
+        matches!(
+            payload,
+            events::KernelEventPayload::RetentionRefsAppended(_)
+        )
+    }) {
         return Ok(store::PreparedCommit::<store::Retention>::new(request, artifacts)?.into());
     }
     Ok(store::PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)?.into())
-}
-
-fn is_saga_terminal_payload(payload: &events::KernelEventPayload) -> bool {
-    matches!(payload, events::KernelEventPayload::RunCompleted(_))
-}
-
-fn is_run_completed_payload(payload: &events::KernelEventPayload) -> bool {
-    matches!(payload, events::KernelEventPayload::RunCompleted(_))
 }
 
 fn is_attempt_terminal_payload(payload: &events::KernelEventPayload) -> bool {
@@ -861,21 +858,6 @@ fn is_attempt_terminal_payload(payload: &events::KernelEventPayload) -> bool {
             | events::KernelEventPayload::PublicOutputProduced(_)
             | events::KernelEventPayload::PublicOutputRenderFailed(_)
             | events::KernelEventPayload::RunCompleted(_)
-    )
-}
-
-fn is_retention_payload(payload: &events::KernelEventPayload) -> bool {
-    matches!(
-        payload,
-        events::KernelEventPayload::RetentionRefsAppended(_)
-            | events::KernelEventPayload::RetentionManifestProjected(_)
-    )
-}
-
-fn is_retention_manifest_projection_payload(payload: &events::KernelEventPayload) -> bool {
-    matches!(
-        payload,
-        events::KernelEventPayload::RetentionManifestProjected(_)
     )
 }
 
@@ -901,10 +883,6 @@ fn is_side_effect_terminal_disposition_payload(payload: &events::KernelEventPayl
             events::KernelEventPayload::ResourceLaneReleased(_)
                 | events::KernelEventPayload::ResourceLaneReleaseIntent(_)
         )
-}
-
-fn is_side_effect_payload(payload: &events::KernelEventPayload) -> bool {
-    payload.side_effect_ledger_ref().is_some()
 }
 
 fn required_artifacts_for_payloads(
@@ -1023,7 +1001,7 @@ fn validate_fact_descriptor_launch_artifacts(
     runtime_spec: &CertifiedRuntimeSpec,
     artifacts: Vec<RunLaunchArtifact>,
 ) -> Result<Vec<RunLaunchArtifact>> {
-    let required = certified_fact_descriptor_hashes(runtime_spec);
+    let required = runtime_spec.fact_descriptor_hashes();
     let schema_id = mfm_facts::fact_descriptor_schema_id()
         .map_err(|error| RuntimeError::Identity(error.to_string()))?;
     let media_type = spec::MediaType::new("application/json")?;
@@ -1080,22 +1058,6 @@ fn validate_fact_descriptor_launch_artifacts(
     }
 
     Ok(by_hash.into_values().collect())
-}
-
-fn certified_fact_descriptor_hashes(
-    runtime_spec: &CertifiedRuntimeSpec,
-) -> BTreeSet<ContentDigest> {
-    runtime_spec
-        .spec()
-        .nodes
-        .iter()
-        .chain(runtime_spec.spec().remediations.values())
-        .flat_map(|node| {
-            node.fact_descriptor_allowlist
-                .iter()
-                .map(|reference| reference.descriptor_hash.clone())
-        })
-        .collect()
 }
 
 fn validate_launch_seed_artifacts<'a>(
@@ -1429,7 +1391,7 @@ pub(crate) fn retention_manifest_payloads(
     run_id: &RunId,
     manifest: RetentionManifestArtifact,
 ) -> Vec<events::KernelEventPayload> {
-    let manifest_ref = retention_ref_for_artifact(&manifest.evidence);
+    let manifest_ref = manifest.evidence.retention_ref();
     vec![
         events::KernelEventPayload::RetentionManifestProjected(
             events::RetentionManifestProjected {
@@ -1700,11 +1662,11 @@ fn staged_side_effect_artifact_binding(
             node.node_id
         ))
     })?;
-    Ok(Some(side_effect_artifact_binding(
-        side_effect.ledger_key.clone(),
+    Ok(Some(StagedArtifactBindingKind::SideEffectEvidence {
+        ledger_key: side_effect.ledger_key.clone(),
         invocation_epoch,
         phase,
-    )))
+    }))
 }
 
 fn staged_side_effect_artifact_phase_for_source(
@@ -2154,7 +2116,7 @@ fn runner_output_preconditions(
     }
 
     if let Some(required) = terminal_side_effect_required_state {
-        let projection = SideEffectLifecycle::projection_for_attempt(
+        let projection = side_effect_projection_for_attempt(
             runtime_spec,
             run_id,
             projections,
@@ -2268,6 +2230,33 @@ fn side_effect_verify_spec(node: &spec::NodeSpec) -> Option<&spec::SideEffectVer
         Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) => Some(verify),
         _ => None,
     }
+}
+
+fn attempt_commit_preconditions(
+    runtime_spec: &CertifiedRuntimeSpec,
+    node: &spec::NodeSpec,
+    existing_attempt: Option<&AttemptId>,
+) -> Result<store::CommitPreconditions> {
+    let mut preconditions = store::CommitPreconditions {
+        required_run_state: store::RequiredRunState::NotCompleted,
+        required_cell_states: vec![store::CellStatePrecondition {
+            cell_id: node.output_cell.clone(),
+            required: store::RequiredCellState::Absent,
+        }],
+        ..store::CommitPreconditions::default()
+    };
+    preconditions
+        .required_cell_states
+        .extend(node_cell_preconditions(runtime_spec, node)?);
+    if let Some(attempt_id) = existing_attempt {
+        preconditions
+            .required_present_logical_keys
+            .push(store::LogicalEventKey::new(format!(
+                "attempt:{}:{}",
+                node.node_id, attempt_id
+            ))?);
+    }
+    Ok(preconditions)
 }
 
 fn node_cell_preconditions(
@@ -2610,7 +2599,7 @@ fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Result<()> {
     }
 
     if node.side_effect.is_some() {
-        SideEffectLifecycle::validate_resume_output(
+        validate_resume_output(
             runtime_spec,
             run_id,
             projections,
@@ -2663,7 +2652,7 @@ fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Result<()> {
         let terminal_skipped = payloads
             .iter()
             .any(|payload| matches!(payload, events::KernelEventPayload::CellSkipped(_)));
-        SideEffectLifecycle::validate_terminal_batch_evidence(
+        validate_terminal_batch_evidence(
             runtime_spec,
             run_id,
             projections,

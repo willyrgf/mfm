@@ -5,19 +5,16 @@ use mfm_store::v1 as store;
 
 use crate::binding::BoundRuntimeContext;
 use crate::commit::{
-    prepared_commit_bundle, AttemptFailureCommitInput, CommitPlanner, PreparedRunnerOutput,
-    PreparedStagedArtifact, RunnerOutputCommitInput,
+    AttemptFailureCommitInput, CommitPlanner, PreparedStagedArtifact, RunnerOutputCommitInput,
 };
 use crate::error::async_store_error;
 use crate::history::RuntimeRunView;
-use crate::invocation::{
-    ErasedRunCtx, InvocationBuilder, InvocationBuilderInput, PreparedRunnerInvocation,
-};
-use crate::side_effect_lifecycle::SideEffectLifecycle;
+use crate::invocation::{ErasedRunCtx, InvocationBuilder, InvocationBuilderInput};
+use crate::side_effect_lifecycle::side_effect_projection_for_attempt;
 use crate::transition::TransitionAttempt;
 use crate::{
-    attempt_id, canonical_json, CertifiedRuntimeSpec, ErasedRunnerOutput, Result,
-    RuntimeDiagnosticDetails, RuntimeError,
+    attempt_id, canonical_json, CertifiedRuntimeSpec, Result, RuntimeDiagnosticDetails,
+    RuntimeError,
 };
 
 /// Result of running one ordinary attempt lifecycle.
@@ -29,15 +26,12 @@ pub(crate) enum AttemptRunStatus {
     /// Attempt was blocked by an exclusive resource lane.
     BlockedOnResourceLane {
         /// Scoped witness proving which resource lane blocked the node.
-        witness: ResourceLaneBlockWitness,
+        witness: Box<ResourceLaneBlockWitness>,
         /// Whether the attempt-start commit advanced before the lane block.
         advanced: bool,
     },
     /// Recovery cannot safely continue without operational intervention.
-    OperationalBlock {
-        /// Node whose open attempt is operationally blocked.
-        node_id: NodeId,
-    },
+    OperationalBlock,
 }
 
 /// Scoped resource-lane block carried between scheduler decisions.
@@ -78,40 +72,7 @@ impl ResourceLaneBlockWitness {
 /// non-framework-special attempts. New attempts append `StateAttemptStarted` before sealed runner
 /// invocation construction, so observed materialization and runner-output validation failures can
 /// terminalize through runtime-owned failure-safe evidence.
-pub(crate) struct AttemptLifecycle<'a> {
-    _marker: std::marker::PhantomData<&'a ()>,
-}
-
-struct Attempt<P> {
-    phase: P,
-}
-
-struct Selected<'a> {
-    node: &'a spec::NodeSpec,
-    selected_attempt_id: Option<AttemptId>,
-    attempt_no: u32,
-}
-
-struct Started<'a> {
-    node: &'a spec::NodeSpec,
-    attempt_id: &'a AttemptId,
-    attempt_no: u32,
-    view: &'a RuntimeRunView,
-}
-
-struct Invoked<'a> {
-    node: &'a spec::NodeSpec,
-    attempt_id: &'a AttemptId,
-    view: &'a RuntimeRunView,
-    invocation: PreparedRunnerInvocation<'a>,
-    output: ErasedRunnerOutput,
-}
-
-struct TerminalPlanned {
-    terminal_output: PreparedRunnerOutput,
-}
-
-struct TerminalCommitted;
+pub(crate) struct AttemptLifecycle;
 
 /// Trusted context for terminalizing an observed post-start attempt failure.
 #[derive(Clone, Copy)]
@@ -164,12 +125,10 @@ enum ObservedFailureClass {
     RuntimeValidation,
 }
 
-impl<'a> AttemptLifecycle<'a> {
+impl AttemptLifecycle {
     /// Creates a lifecycle bound to runtime-owned append planning.
     pub(crate) fn new() -> Self {
-        Self {
-            _marker: std::marker::PhantomData,
-        }
+        Self
     }
 
     /// Runs one ordinary attempt against an async typed store.
@@ -187,38 +146,25 @@ impl<'a> AttemptLifecycle<'a> {
             attempt_id: selected_attempt_id,
             attempt_no,
         } = attempt;
-        let selected_attempt = Attempt {
-            phase: Selected {
-                node,
-                selected_attempt_id,
-                attempt_no,
-            },
-        };
-        let descriptor = runtime_spec.state_descriptor_for_node(selected_attempt.phase.node)?;
-        let output_cell = runtime_spec
-            .cell(&selected_attempt.phase.node.output_cell)
-            .ok_or_else(|| {
-                RuntimeError::InvalidSpec(format!(
-                    "node {} output cell {} is missing",
-                    selected_attempt.phase.node.node_id, selected_attempt.phase.node.output_cell
-                ))
-            })?;
-        let binding = bound_context.runner_binding_for(selected_attempt.phase.node)?;
+        let descriptor = runtime_spec.state_descriptor_for_node(node)?;
+        let output_cell = runtime_spec.cell(&node.output_cell).ok_or_else(|| {
+            RuntimeError::InvalidSpec(format!(
+                "node {} output cell {} is missing",
+                node.node_id, node.output_cell
+            ))
+        })?;
+        let binding = bound_context.runner_binding_for(node)?;
         let mut advanced = false;
-        let (attempt_id, attempt_no) = match selected_attempt.phase.selected_attempt_id {
+        let (attempt_id, attempt_no) = match selected_attempt_id {
             None => {
-                let attempt_id = attempt_id(
-                    run_id,
-                    runtime_spec.spec_hash(),
-                    &selected_attempt.phase.node.node_id,
-                    selected_attempt.phase.attempt_no,
-                )?;
+                let attempt_id =
+                    attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
                 let start_commit = CommitPlanner::prepare_attempt_start(
                     runtime_spec,
                     run_id,
-                    selected_attempt.phase.node,
+                    node,
                     &attempt_id,
-                    selected_attempt.phase.attempt_no,
+                    attempt_no,
                     view,
                 )?;
                 let bundle = store::PreparedCommitBundle::without_artifacts(start_commit.into())?;
@@ -235,7 +181,7 @@ impl<'a> AttemptLifecycle<'a> {
                             .unwrap_or_else(|| " with no active holder".to_owned());
                         return Err(RuntimeError::InvalidRunStream(format!(
                             "attempt start for node {} was blocked by resource lane {}:{}{}",
-                            selected_attempt.phase.node.node_id,
+                            node.node_id,
                             block.resource_lane_key.namespace,
                             block.resource_lane_key.key,
                             holder
@@ -250,9 +196,9 @@ impl<'a> AttemptLifecycle<'a> {
                     Err(error) => return Err(async_store_error(error)),
                 }
                 advanced = true;
-                (attempt_id, selected_attempt.phase.attempt_no)
+                (attempt_id, attempt_no)
             }
-            Some(attempt_id) => (attempt_id, selected_attempt.phase.attempt_no),
+            Some(attempt_id) => (attempt_id, attempt_no),
         };
 
         let mut latest_view = load_runtime_run_view(runtime_spec, store, run_id).await?;
@@ -260,14 +206,14 @@ impl<'a> AttemptLifecycle<'a> {
             runtime_spec,
             run_id,
             &latest_view.projections,
-            selected_attempt.phase.node,
+            node,
             &attempt_id,
         )? {
             {
                 let pre_invocation = InvocationBuilder::new(InvocationBuilderInput {
                     runtime_spec,
                     run_id,
-                    node: selected_attempt.phase.node,
+                    node,
                     descriptor,
                     output_cell,
                     attempt_id: &attempt_id,
@@ -278,7 +224,7 @@ impl<'a> AttemptLifecycle<'a> {
                 .map_err(|error| {
                     RuntimeError::InvalidRunStream(format!(
                         "failed to build resource-lane preflight context for node {}: {error}",
-                        selected_attempt.phase.node.node_id
+                        node.node_id
                     ))
                 })?;
                 let output = binding
@@ -288,7 +234,7 @@ impl<'a> AttemptLifecycle<'a> {
                 let preclaim = CommitPlanner::prepare_runner_output(RunnerOutputCommitInput {
                     runtime_spec,
                     run_id,
-                    node: selected_attempt.phase.node,
+                    node,
                     attempt_id: &attempt_id,
                     caps: pre_invocation.caps(),
                     recorded_facts: pre_invocation.recorded_facts(),
@@ -297,23 +243,23 @@ impl<'a> AttemptLifecycle<'a> {
                     saga_terminal_proof: None,
                     output,
                 })?;
-                if !request_has_resource_lane_claim(preclaim.commit.request()) {
+                if !request_has_resource_lane_claim(preclaim.request()) {
                     return Err(RuntimeError::InvalidRunnerOutput(format!(
                         "exclusive side-effect node {} did not emit pre-invocation resource-lane claim",
-                        selected_attempt.phase.node.node_id
+                        node.node_id
                     )));
                 }
-                let bundle = prepared_commit_bundle(preclaim.commit, preclaim.artifact_admissions)?;
+                let bundle = preclaim.into_prepared_commit_bundle()?;
                 match store.append_prepared_commit_bundle(bundle).await {
                     Ok(store::CommitOutcome::Appended(_) | store::CommitOutcome::Idempotent(_)) => {
                         advanced = true;
                     }
                     Ok(store::CommitOutcome::AdmissionBlocked(block)) => {
                         return Ok(AttemptRunStatus::BlockedOnResourceLane {
-                            witness: resource_lane_block_witness_from_outcome(
-                                &selected_attempt.phase.node.node_id,
+                            witness: Box::new(resource_lane_block_witness_from_outcome(
+                                &node.node_id,
                                 *block,
-                            ),
+                            )),
                             advanced,
                         });
                     }
@@ -330,34 +276,23 @@ impl<'a> AttemptLifecycle<'a> {
             }
             latest_view = load_runtime_run_view(runtime_spec, store, run_id).await?;
         }
-        let started_attempt = Attempt {
-            phase: Started {
-                node: selected_attempt.phase.node,
-                attempt_id: &attempt_id,
-                attempt_no,
-                view: &latest_view,
-            },
-        };
         let failure_context = ObservedFailureContext {
             runtime_spec,
             run_id,
-            node: started_attempt.phase.node,
-            attempt_id: started_attempt.phase.attempt_id,
-            view: started_attempt.phase.view,
-            retryability: ObservedFailureRetryabilityPolicy::for_attempt(
-                runtime_spec,
-                started_attempt.phase.node,
-            ),
+            node,
+            attempt_id: &attempt_id,
+            view: &latest_view,
+            retryability: ObservedFailureRetryabilityPolicy::for_attempt(runtime_spec, node),
         };
         let invocation = match InvocationBuilder::new(InvocationBuilderInput {
             runtime_spec,
             run_id,
-            node: started_attempt.phase.node,
+            node,
             descriptor,
             output_cell,
-            attempt_id: started_attempt.phase.attempt_id,
-            attempt_no: started_attempt.phase.attempt_no,
-            view: started_attempt.phase.view,
+            attempt_id: &attempt_id,
+            attempt_no,
+            view: &latest_view,
         })
         .build()
         {
@@ -373,38 +308,20 @@ impl<'a> AttemptLifecycle<'a> {
         {
             Ok(output) => output,
             Err(RuntimeError::Blocked(_)) => {
-                return Ok(AttemptRunStatus::OperationalBlock {
-                    node_id: started_attempt.phase.node.node_id.clone(),
-                });
+                return Ok(AttemptRunStatus::OperationalBlock);
             }
             Err(error) => {
                 return terminalize_observed_failure(store, failure_context, error).await;
             }
         };
-        let invoked_attempt = Attempt {
-            phase: Invoked {
-                node: started_attempt.phase.node,
-                attempt_id: started_attempt.phase.attempt_id,
-                view: started_attempt.phase.view,
-                invocation,
-                output,
-            },
-        };
-        let Invoked {
-            node,
-            attempt_id,
-            view,
-            invocation,
-            output,
-        } = invoked_attempt.phase;
         let terminal_output = match CommitPlanner::prepare_runner_output(RunnerOutputCommitInput {
             runtime_spec,
             run_id,
             node,
-            attempt_id,
+            attempt_id: &attempt_id,
             caps: invocation.caps(),
             recorded_facts: invocation.recorded_facts(),
-            view,
+            view: &latest_view,
             context_output_extractor: binding.runner.context_output_extractor(),
             saga_terminal_proof: None,
             output,
@@ -414,43 +331,30 @@ impl<'a> AttemptLifecycle<'a> {
                 return terminalize_observed_failure(store, failure_context, error).await;
             }
         };
-        let terminal_planned_attempt = Attempt {
-            phase: TerminalPlanned { terminal_output },
-        };
         let lane_projection = store
             .status_projection_snapshot(run_id)
             .await
             .map_err(async_store_error)?;
-        if let Some(witness) = resource_lane_block_for_request(
-            &lane_projection,
-            terminal_planned_attempt
-                .phase
-                .terminal_output
-                .commit
-                .request(),
-        ) {
-            return Ok(AttemptRunStatus::BlockedOnResourceLane { witness, advanced });
+        if let Some(witness) =
+            resource_lane_block_for_request(&lane_projection, terminal_output.request())
+        {
+            return Ok(AttemptRunStatus::BlockedOnResourceLane {
+                witness: Box::new(witness),
+                advanced,
+            });
         }
-        let has_resource_lane_claim = request_has_resource_lane_claim(
-            terminal_planned_attempt
-                .phase
-                .terminal_output
-                .commit
-                .request(),
-        );
-        let terminal_output = terminal_planned_attempt.phase.terminal_output;
-        let bundle =
-            prepared_commit_bundle(terminal_output.commit, terminal_output.artifact_admissions)?;
+        let has_resource_lane_claim = request_has_resource_lane_claim(terminal_output.request());
+        let bundle = terminal_output.into_prepared_commit_bundle()?;
         match store.append_prepared_commit_bundle(bundle).await {
             Ok(store::CommitOutcome::Appended(_) | store::CommitOutcome::Idempotent(_)) => {
-                let _terminal_committed_attempt = Attempt {
-                    phase: TerminalCommitted,
-                };
                 Ok(AttemptRunStatus::Advanced)
             }
             Ok(store::CommitOutcome::AdmissionBlocked(block)) if has_resource_lane_claim => {
                 Ok(AttemptRunStatus::BlockedOnResourceLane {
-                    witness: resource_lane_block_witness_from_outcome(&node.node_id, *block),
+                    witness: Box::new(resource_lane_block_witness_from_outcome(
+                        &node.node_id,
+                        *block,
+                    )),
                     advanced,
                 })
             }
@@ -507,7 +411,7 @@ pub(crate) async fn terminalize_observed_failure<S: store::RunEventStore + ?Size
         error: failure_info.error,
         diagnostic_artifact: Some(diagnostic_artifact),
     })?;
-    let bundle = prepared_commit_bundle(failure.commit, failure.artifact_admissions)?;
+    let bundle = failure.into_prepared_commit_bundle()?;
     match store.append_prepared_commit_bundle(bundle).await {
         Ok(store::CommitOutcome::Appended(_) | store::CommitOutcome::Idempotent(_)) => {
             Ok(AttemptRunStatus::Advanced)
@@ -565,7 +469,7 @@ fn can_terminalize_observed_failure(
         return Ok(false);
     }
     if node.side_effect.is_some() {
-        let Some(side_effect) = SideEffectLifecycle::projection_for_attempt(
+        let Some(side_effect) = side_effect_projection_for_attempt(
             runtime_spec,
             run_id,
             &view.projections,
@@ -780,15 +684,6 @@ fn node_resource_claims_lane_namespace(
     }
 }
 
-fn node_requires_pre_invocation_lane_claim(node: &spec::NodeSpec) -> bool {
-    matches!(
-        node.side_effect
-            .as_ref()
-            .map(|side_effect| &side_effect.resource_claim),
-        Some(spec::ResourceClaimSpec::Exclusive { .. })
-    )
-}
-
 fn node_needs_pre_invocation_lane_claim(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
@@ -796,16 +691,16 @@ fn node_needs_pre_invocation_lane_claim(
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
 ) -> Result<bool> {
-    if !node_requires_pre_invocation_lane_claim(node) {
+    if !matches!(
+        node.side_effect
+            .as_ref()
+            .map(|side_effect| &side_effect.resource_claim),
+        Some(spec::ResourceClaimSpec::Exclusive { .. })
+    ) {
         return Ok(false);
     }
-    let Some(projection) = SideEffectLifecycle::projection_for_attempt(
-        runtime_spec,
-        run_id,
-        projections,
-        node,
-        attempt_id,
-    )?
+    let Some(projection) =
+        side_effect_projection_for_attempt(runtime_spec, run_id, projections, node, attempt_id)?
     else {
         return Ok(true);
     };
@@ -839,7 +734,7 @@ fn projected_started_attempt_active_lane_key(
     None
 }
 
-pub(crate) fn store_error_is_stale_expected_next_seq(error: &store::StoreError) -> bool {
+fn store_error_is_stale_expected_next_seq(error: &store::StoreError) -> bool {
     matches!(error, store::StoreError::StaleExpectedNextSeq { .. })
 }
 

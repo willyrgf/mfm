@@ -12,7 +12,6 @@ use mfm_ids::{
     DescriptorId, DigestAlgorithm, NodeId, RunId, SchemaId, SpecHash,
 };
 use mfm_spec::v1 as spec;
-use mfm_store::v1 as store;
 
 #[cfg(test)]
 use mfm_ids::CellId;
@@ -40,10 +39,7 @@ mod spec_authority;
 mod transition;
 
 pub use admission::RunAdmissionAuthority;
-pub use artifacts::{
-    RuntimeArtifactStore, StagedArtifact, StagedArtifactBindingKind, StagedArtifactHandle,
-    StagedRetentionRefs, StagedSideEffectArtifactPhase,
-};
+pub use artifacts::{RuntimeArtifactStore, StagedArtifact, StagedRetentionRefs};
 pub use binding::{
     BoundCapabilityAuthority, BoundFrameworkHandlerAuthority, BoundFrameworkHandlerKind,
     BoundRuntimeContext, BoundRuntimeContextLoader,
@@ -68,7 +64,7 @@ pub use runner_kit::{
     load_side_effect_value, load_side_effect_value_for_node, materialized_input_node_json,
     FactRecordInput, RunnerArtifactBuilder, RunnerCapabilityBinding,
     RunnerExecutableIdentityTemplate, RunnerFactoryBinding, RunnerJsonArtifact,
-    RunnerOutputBuilder, RunnerPayloadBuilder, RunnerRegistrationBuilder, StagedFactRecord,
+    RunnerOutputBuilder, RunnerPayloadBuilder, RunnerRegistrationBuilder,
     TypedContextOutputExtractor,
 };
 pub use runners::{
@@ -79,17 +75,17 @@ pub use runners::{
 };
 pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
 pub use side_effect_driver::{
-    SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
-    SideEffectLanePreclaimBuilder, SideEffectObservedEvidence, SideEffectPreparedInvocationPlan,
+    preclaim_side_effect_resource_lane, SideEffectDriver, SideEffectDriverCallbacks,
+    SideEffectDriverFuture, SideEffectIntentPlan, SideEffectObservedEvidence,
     SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
-    SideEffectSubmissionDecisionFuture, SideEffectUnknownSubmissionDecision,
-    SideEffectUnknownSubmissionDecisionFuture, SideEffectVerifyCallbacks, SideEffectVerifyDriver,
+    SideEffectUnknownSubmissionDecision, SideEffectVerifyCallbacks, SideEffectVerifyDriver,
 };
-pub use side_effect_lifecycle::SideEffectAttemptView;
 pub use spec_authority::CertifiedRuntimeSpec;
 
 #[cfg(test)]
-use artifacts::{staged_artifact_binding_kind, staged_side_effect_artifact_phase};
+use artifacts::{
+    staged_artifact_binding_kind, staged_side_effect_artifact_phase, StagedArtifactBindingKind,
+};
 
 #[cfg(test)]
 use commit::{retention_manifest_payloads, runner_payloads_with_derived_lifecycle};
@@ -101,17 +97,9 @@ use framework::{
 #[cfg(test)]
 use history::RuntimeRunView;
 #[cfg(test)]
-use runner_kit::{
-    RunnerClaimBinding, RunnerClaimTakeoverBinding, RunnerPreparedInvocationBinding,
-    RunnerSideEffectBinding,
-};
+use runner_kit::{RunnerClaimBinding, RunnerPreparedInvocationBinding, RunnerSideEffectBinding};
 #[cfg(test)]
-use side_effect_driver::{
-    RuntimeSideEffectClaimAuthority, SideEffectEvidenceBuilder,
-    SideEffectPreparedInvocationEvidence,
-};
-#[cfg(test)]
-use side_effect_lifecycle::side_effect_projection_for_attempt;
+use side_effect_lifecycle::{side_effect_projection_for_attempt, SideEffectAttemptView};
 
 /// Result type for typed runtime operations.
 pub type Result<T> = std::result::Result<T, RuntimeError>;
@@ -252,10 +240,6 @@ fn attempt_id(
     ))
 }
 
-fn retention_ref_for_artifact(artifact: &store::ArtifactEvidenceRef) -> events::RetentionRef {
-    artifact.retention_ref()
-}
-
 fn canonical_json(value: serde_json::Value) -> Result<PlainCanonicalJsonBytes> {
     let json = serde_json::to_string(&value)
         .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
@@ -265,6 +249,16 @@ fn canonical_json(value: serde_json::Value) -> Result<PlainCanonicalJsonBytes> {
 
 fn content_digest_json(value: serde_json::Value) -> Result<ContentDigest> {
     Ok(canonical_json(value)?.content_digest())
+}
+
+fn executable_identity_json(identity: &events::ExecutableIdentity) -> serde_json::Value {
+    serde_json::json!({
+        "binary_digest": identity.binary_digest.as_str(),
+        "cargo_package_digest": identity.cargo_package_digest.as_str(),
+        "factory_id": identity.factory_id.as_str(),
+        "nix_derivation_hash": identity.nix_derivation_hash.as_ref().map(events::NixDerivationHash::as_str),
+        "nix_output_hash": identity.nix_output_hash.as_ref().map(events::NixOutputHash::as_str),
+    })
 }
 
 fn config_ref_key(config_ref: &spec::ConfigRef) -> String {

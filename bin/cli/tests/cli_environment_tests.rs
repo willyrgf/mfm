@@ -10,13 +10,13 @@ const PASSWORD: &str = "env_password_123";
 const PRIVATE_KEY: &str = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
 
 #[test]
-fn runtime_config_file_env_selects_default_keystore_profile() {
-    let fixture = KeystoreFixture::new("runtime-env-test");
+fn runtime_config_selection_uses_env_and_cli_override() {
+    let env_fixture = KeystoreFixture::new("runtime-env-test");
 
     let mut list_cmd = Command::cargo_bin("mfm_cli").unwrap();
     list_cmd.env(
         "MFM_RUNTIME_CONFIG_FILE",
-        fixture.runtime_config.to_str().unwrap(),
+        env_fixture.runtime_config.to_str().unwrap(),
     );
     list_cmd.args(["keystore", "list"]);
 
@@ -24,10 +24,7 @@ fn runtime_config_file_env_selects_default_keystore_profile() {
         .assert()
         .success()
         .stdout(predicate::str::contains("runtime-env-test"));
-}
 
-#[test]
-fn runtime_config_cli_arg_overrides_runtime_config_env() {
     let good = KeystoreFixture::new("runtime-arg-test");
     let bad_dir = TempDir::new().expect("bad temp dir");
     let bad_runtime_config = bad_dir.path().join("bad-runtime.toml");

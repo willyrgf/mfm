@@ -2,7 +2,7 @@ use mfm_btc_capabilities::*;
 use mfm_capabilities::CapabilitySpec;
 
 #[test]
-fn capability_name_describes_read_authority() {
+fn capability_identity_describes_read_authority() {
     assert_eq!(
         BtcChainHeadReadCapability::name(),
         "mfm.bitcoin.chain_head.read"
@@ -12,10 +12,7 @@ fn capability_name_describes_read_authority() {
     assert!(!BtcChainHeadReadCapability::name().contains("workflow"));
     assert!(!BtcBalanceReadCapability::name().contains("collector"));
     assert!(!BtcBalanceReadCapability::name().contains("workflow"));
-}
 
-#[test]
-fn capability_kind_and_version_are_stable() {
     let kind = BtcChainHeadReadCapability::kind()
         .expect("kind")
         .to_string();
@@ -63,10 +60,7 @@ fn source_identity_is_semantic_not_route_material() {
     let identity = BtcSourceIdentity::new("public-bitcoin-core").expect("source identity");
 
     assert_eq!(identity.as_str(), "public-bitcoin-core");
-}
 
-#[test]
-fn source_identity_rejects_route_like_material() {
     let error = BtcSourceIdentity::new("http://node.invalid:8332")
         .expect_err("source identity should reject route material");
 

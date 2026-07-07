@@ -13,101 +13,98 @@ use serde::Serialize;
 use crate::runner_kit::{
     RunnerClaimBinding, RunnerPreparedInvocationBinding, RunnerSideEffectBinding,
 };
+use crate::side_effect_lifecycle::SideEffectAttemptView;
 use crate::{
     canonical_json, CertifiedRuntimeSpec, ErasedRunCtx, ErasedRunnerOutput, MaterializedInputs,
     PreInvocationRunCtx, Result, RunnerArtifactBuilder, RunnerCapabilityBinding,
     RunnerEventPayload, RunnerJsonArtifact, RunnerOutputBuilder, RunnerPayloadBuilder,
-    RuntimeError, SideEffectAttemptView, StagedArtifact, StagedRetentionRefs,
+    RuntimeError, StagedArtifact, StagedRetentionRefs,
 };
 
 /// Boxed future returned by side-effect driver callbacks.
 pub type SideEffectDriverFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
-/// Builder for pre-invocation side-effect resource-lane claim evidence.
-pub struct SideEffectLanePreclaimBuilder<'a> {
-    ctx: &'a PreInvocationRunCtx<'a>,
-}
+/// Future returned by callbacks that submit or recover a prepared side-effect invocation.
+pub type SideEffectSubmissionDecisionFuture<
+    'a,
+    Submission,
+    UnknownEvidence,
+    NotSubmittedProof,
+    AmbiguityEvidence,
+> = SideEffectDriverFuture<
+    'a,
+    SideEffectSubmissionDecision<Submission, UnknownEvidence, NotSubmittedProof, AmbiguityEvidence>,
+>;
 
-impl<'a> SideEffectLanePreclaimBuilder<'a> {
-    /// Creates a builder for one pre-invocation context.
-    pub fn new(ctx: &'a PreInvocationRunCtx<'a>) -> Self {
-        Self { ctx }
-    }
+/// Future returned by callbacks that recover a previously unknown submission.
+pub type SideEffectUnknownSubmissionDecisionFuture<
+    'a,
+    Submission,
+    NotSubmittedProof,
+    AmbiguityEvidence,
+> = SideEffectDriverFuture<
+    'a,
+    SideEffectUnknownSubmissionDecision<Submission, NotSubmittedProof, AmbiguityEvidence>,
+>;
 
-    /// Builds pre-invocation intent/claim evidence for the first epoch.
-    pub fn claim_resource_lane<Intent, Idempotency>(
-        &self,
-        intent: &Intent,
-        idempotency: &Idempotency,
-        idempotency_key: events::IdempotencyKeyRef,
-        capability_binding: RunnerCapabilityBinding,
-        resource_key: events::ResourceKeyEvidence,
-    ) -> Result<ErasedRunnerOutput>
-    where
-        Intent: MfmValue,
-        Idempotency: MfmValue,
-    {
-        match pre_invocation_lane_claim_plan(self.ctx, Some(resource_key.clone()))? {
-            PreInvocationLaneClaimPlan::Initial { side_effect, claim } => {
-                let intent_artifact = pre_invocation_value_artifact(
-                    self.ctx,
-                    intent,
-                    events::ArtifactRole::SideEffectIntent,
-                )?;
-                let staged_artifact = StagedArtifact::inline_pre_invocation_side_effect_artifact(
-                    self.ctx,
-                    intent_artifact.bytes.clone(),
-                    intent_artifact.evidence.clone(),
-                    side_effect.ledger_key.clone(),
-                    side_effect.invocation_epoch,
-                )?;
-                Ok(ErasedRunnerOutput {
-                    staged_artifacts: vec![staged_artifact],
-                    staged_retention_refs: vec![StagedRetentionRefs::runtime_evidence(vec![
-                        intent_artifact.retention_ref(),
-                    ])],
-                    payloads: vec![
-                        pre_invocation_side_effect_intent_persisted(
-                            self.ctx,
-                            side_effect.clone(),
-                            &intent_artifact,
-                            idempotency,
-                            idempotency_key,
-                            capability_binding,
-                        )?,
-                        pre_invocation_side_effect_claimed(
-                            self.ctx,
-                            side_effect.clone(),
-                            claim.claim_binding(),
-                        ),
-                        pre_invocation_resource_lane_claim_intent(
-                            self.ctx,
-                            side_effect,
-                            resource_key,
-                        )?,
-                    ],
-                })
-            }
-        }
-    }
-}
-
-enum PreInvocationLaneClaimPlan {
-    Initial {
-        side_effect: RunnerSideEffectBinding,
-        claim: RuntimeSideEffectClaimAuthority,
-    },
+/// Builds pre-invocation side-effect resource-lane claim evidence for the first epoch.
+pub fn preclaim_side_effect_resource_lane<Intent, Idempotency>(
+    ctx: &PreInvocationRunCtx<'_>,
+    intent: &Intent,
+    idempotency: &Idempotency,
+    idempotency_key: events::IdempotencyKeyRef,
+    capability_binding: RunnerCapabilityBinding,
+    resource_key: events::ResourceKeyEvidence,
+) -> Result<ErasedRunnerOutput>
+where
+    Intent: MfmValue,
+    Idempotency: MfmValue,
+{
+    let (side_effect, claim) = pre_invocation_lane_claim(ctx, Some(resource_key.clone()))?;
+    let intent_artifact =
+        pre_invocation_value_artifact(ctx, intent, events::ArtifactRole::SideEffectIntent)?;
+    let staged_artifact = StagedArtifact::inline_pre_invocation_side_effect_artifact(
+        ctx,
+        intent_artifact.bytes.clone(),
+        intent_artifact.evidence.clone(),
+        side_effect.ledger_key.clone(),
+        side_effect.invocation_epoch,
+    )?;
+    Ok(ErasedRunnerOutput::from_parts(
+        vec![staged_artifact],
+        vec![StagedRetentionRefs::runtime_evidence(vec![intent_artifact
+            .evidence
+            .retention_ref()])],
+        vec![
+            pre_invocation_side_effect_intent_persisted(
+                ctx,
+                side_effect.clone(),
+                &intent_artifact,
+                idempotency,
+                idempotency_key,
+                capability_binding,
+            )?,
+            RunnerEventPayload::SideEffectClaimed(side_effect::Claimed {
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
+                ledger_key: side_effect.ledger_key.clone(),
+                ledger_purpose: side_effect.ledger_purpose.clone(),
+                pair_id: side_effect.pair_id.clone(),
+                pair_role: events::SideEffectPairRole::Submit,
+                claim_owner: claim.claim_owner.clone(),
+                invocation_epoch: side_effect.invocation_epoch,
+                claim_generation: claim.claim_generation,
+                claim_fencing_token: claim.claim_fencing_token.clone(),
+            }),
+            pre_invocation_resource_lane_claim_intent(ctx, side_effect, resource_key)?,
+        ],
+    ))
 }
 
 struct PreInvocationJsonArtifact {
     bytes: Vec<u8>,
     evidence: store::ArtifactEvidenceRef,
-}
-
-impl PreInvocationJsonArtifact {
-    fn retention_ref(&self) -> events::RetentionRef {
-        self.evidence.retention_ref()
-    }
 }
 
 fn pre_invocation_value_artifact<T>(
@@ -139,17 +136,6 @@ where
     })
 }
 
-fn pre_invocation_artifact_schema_id(
-    artifact: &PreInvocationJsonArtifact,
-) -> Result<mfm_ids::SchemaId> {
-    artifact.evidence.schema_id.clone().ok_or_else(|| {
-        RuntimeError::InvalidRunnerOutput(format!(
-            "artifact {} missing required schema id",
-            artifact.evidence.artifact_id
-        ))
-    })
-}
-
 fn pre_invocation_side_effect_intent_persisted<Idempotency>(
     ctx: &PreInvocationRunCtx<'_>,
     side_effect: RunnerSideEffectBinding,
@@ -178,7 +164,12 @@ where
             pair_id: side_effect.pair_id.clone(),
             pair_role: events::SideEffectPairRole::Submit,
             invocation_epoch: side_effect.invocation_epoch,
-            intent_schema_id: pre_invocation_artifact_schema_id(intent)?,
+            intent_schema_id: intent.evidence.schema_id.clone().ok_or_else(|| {
+                RuntimeError::InvalidRunnerOutput(format!(
+                    "artifact {} missing required schema id",
+                    intent.evidence.artifact_id
+                ))
+            })?,
             intent_hash: intent.evidence.digest.clone(),
             intent_artifact_id: intent.evidence.artifact_id.clone(),
             idempotency_input_schema_id: Idempotency::schema_id()
@@ -191,26 +182,6 @@ where
             adapter_version: binding.adapter_version,
         },
     ))
-}
-
-fn pre_invocation_side_effect_claimed(
-    ctx: &PreInvocationRunCtx<'_>,
-    side_effect: RunnerSideEffectBinding,
-    claim: RunnerClaimBinding,
-) -> RunnerEventPayload {
-    RunnerEventPayload::SideEffectClaimed(side_effect::Claimed {
-        spec_hash: ctx.spec_hash().clone(),
-        node_id: ctx.node().node_id.clone(),
-        attempt_id: ctx.attempt_id().clone(),
-        ledger_key: side_effect.ledger_key.clone(),
-        ledger_purpose: side_effect.ledger_purpose.clone(),
-        pair_id: side_effect.pair_id.clone(),
-        pair_role: events::SideEffectPairRole::Submit,
-        claim_owner: claim.claim_owner,
-        invocation_epoch: side_effect.invocation_epoch,
-        claim_generation: claim.claim_generation,
-        claim_fencing_token: claim.claim_fencing_token,
-    })
 }
 
 fn pre_invocation_resource_lane_claim_intent(
@@ -312,7 +283,7 @@ pub enum SideEffectProtocolAction {
 
 impl SideEffectProtocolAction {
     /// Selects the protocol action for a verified side-effect attempt view.
-    pub fn from_attempt_view(view: &SideEffectAttemptView<'_>) -> Result<Self> {
+    pub(crate) fn from_attempt_view(view: &SideEffectAttemptView<'_>) -> Result<Self> {
         let Some(phase) = view.phase() else {
             return Ok(Self::PrepareAndStart);
         };
@@ -330,22 +301,11 @@ impl SideEffectProtocolAction {
                     invocation_epoch: claim.invocation_epoch,
                 })
             }
-            store::SideEffectLedgerPhase::SubmissionKnown {
-                claim,
-                status: store::SideEffectSubmissionState::NotSubmitted,
-            } => Ok(Self::CompleteSubmissionBoundary {
-                invocation_epoch: claim.invocation_epoch,
-            }),
-            store::SideEffectLedgerPhase::SubmissionKnown {
-                claim,
-                status: store::SideEffectSubmissionState::Observed { .. },
+            store::SideEffectLedgerPhase::SubmissionKnown { claim, .. } => {
+                Ok(Self::CompleteSubmissionBoundary {
+                    invocation_epoch: claim.invocation_epoch,
+                })
             }
-            | store::SideEffectLedgerPhase::SubmissionKnown {
-                claim,
-                status: store::SideEffectSubmissionState::Unknown,
-            } => Ok(Self::CompleteSubmissionBoundary {
-                invocation_epoch: claim.invocation_epoch,
-            }),
             store::SideEffectLedgerPhase::IntentPersisted { .. }
             | store::SideEffectLedgerPhase::ReceiptObserved { .. }
             | store::SideEffectLedgerPhase::Confirmed { .. }
@@ -420,77 +380,67 @@ impl RuntimeSideEffectClaimAuthority {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SideEffectReplayEvidence {
     /// Replay verifier that can validate the observed evidence.
-    pub replay_verifier_id: events::ReplayVerifierId,
+    replay_verifier_id: events::ReplayVerifierId,
     /// Optional exact touched resource set evidence.
-    pub resource_touched_set: Option<events::ResourceTouchedSetEvidence>,
+    resource_touched_set: Option<events::ResourceTouchedSetEvidence>,
+}
+
+impl SideEffectReplayEvidence {
+    /// Creates replay verifier evidence for observed side-effect material.
+    pub fn new(
+        replay_verifier_id: events::ReplayVerifierId,
+        resource_touched_set: Option<events::ResourceTouchedSetEvidence>,
+    ) -> Self {
+        Self {
+            replay_verifier_id,
+            resource_touched_set,
+        }
+    }
 }
 
 /// Input for preparing and starting a side-effect invocation.
-pub struct SideEffectPrepareEvidence<'a, Intent, Idempotency> {
+pub(crate) struct SideEffectPrepareEvidence<'a, Intent, Idempotency> {
     /// Side-effect ledger coordinates.
     pub(crate) side_effect: RunnerSideEffectBinding,
     /// Claim authority for the invocation epoch.
     pub(crate) claim: RuntimeSideEffectClaimAuthority,
     /// Typed side-effect intent evidence.
-    pub intent: &'a Intent,
+    pub(crate) intent: &'a Intent,
     /// Typed idempotency input evidence.
-    pub idempotency: &'a Idempotency,
+    pub(crate) idempotency: &'a Idempotency,
     /// Stable idempotency key derived by the adapter.
-    pub idempotency_key: events::IdempotencyKeyRef,
+    pub(crate) idempotency_key: events::IdempotencyKeyRef,
     /// Capability implementation that will perform the mutation.
-    pub capability_binding: RunnerCapabilityBinding,
-}
-
-/// Input for preparing and starting a side-effect invocation with prepared invocation evidence.
-pub struct SideEffectPreparedInvocationEvidence<'a, Intent, Idempotency, Prepared> {
-    /// Side-effect ledger coordinates.
-    pub(crate) side_effect: RunnerSideEffectBinding,
-    /// Claim authority for the invocation epoch.
-    pub(crate) claim: RuntimeSideEffectClaimAuthority,
-    /// Typed side-effect intent evidence.
-    pub intent: &'a Intent,
-    /// Typed idempotency input evidence.
-    pub idempotency: &'a Idempotency,
-    /// Stable idempotency key derived by the adapter.
-    pub idempotency_key: events::IdempotencyKeyRef,
-    /// Capability implementation that will perform the mutation.
-    pub capability_binding: RunnerCapabilityBinding,
-    /// Prepared invocation evidence. Live or secret-bearing data must not be included.
-    pub prepared_invocation: &'a Prepared,
-}
-
-/// Adapter-owned preparation result recorded before crossing the uncertainty boundary.
-pub struct SideEffectPreparedInvocationPlan<Prepared> {
-    /// Public prepared invocation evidence. Live or secret-bearing data must not be included.
-    pub prepared_invocation: Option<Prepared>,
-}
-
-impl<Prepared> SideEffectPreparedInvocationPlan<Prepared> {
-    /// Creates a preparation result with no prepared artifact.
-    pub fn none() -> Self {
-        Self {
-            prepared_invocation: None,
-        }
-    }
-
-    /// Creates a preparation result with public prepared invocation evidence.
-    pub fn with_prepared_invocation(prepared_invocation: Prepared) -> Self {
-        Self {
-            prepared_invocation: Some(prepared_invocation),
-        }
-    }
+    pub(crate) capability_binding: RunnerCapabilityBinding,
 }
 
 /// Owned side-effect intent and idempotency plan returned by adapter callbacks.
 pub struct SideEffectIntentPlan<Intent, Idempotency> {
     /// Typed intent evidence.
-    pub intent: Intent,
+    pub(crate) intent: Intent,
     /// Typed idempotency input evidence.
-    pub idempotency: Idempotency,
+    pub(crate) idempotency: Idempotency,
     /// Stable idempotency key derived by the adapter.
-    pub idempotency_key: events::IdempotencyKeyRef,
+    pub(crate) idempotency_key: events::IdempotencyKeyRef,
     /// Capability implementation that will perform the mutation.
-    pub capability_binding: RunnerCapabilityBinding,
+    pub(crate) capability_binding: RunnerCapabilityBinding,
+}
+
+impl<Intent, Idempotency> SideEffectIntentPlan<Intent, Idempotency> {
+    /// Creates an adapter-owned side-effect intent and idempotency plan.
+    pub fn new(
+        intent: Intent,
+        idempotency: Idempotency,
+        idempotency_key: events::IdempotencyKeyRef,
+        capability_binding: RunnerCapabilityBinding,
+    ) -> Self {
+        Self {
+            intent,
+            idempotency,
+            idempotency_key,
+            capability_binding,
+        }
+    }
 }
 
 /// Submission recovery result returned by side-effect driver callbacks.
@@ -515,18 +465,6 @@ pub enum SideEffectSubmissionDecision<
     },
 }
 
-/// Boxed future returned by submission recovery callbacks.
-pub type SideEffectSubmissionDecisionFuture<
-    'a,
-    Submission,
-    UnknownEvidence,
-    NotSubmittedProof,
-    AmbiguityEvidence,
-> = SideEffectDriverFuture<
-    'a,
-    SideEffectSubmissionDecision<Submission, UnknownEvidence, NotSubmittedProof, AmbiguityEvidence>,
->;
-
 /// Verify-side recovery result for a previously unknown submission.
 pub enum SideEffectUnknownSubmissionDecision<Submission, NotSubmittedProof, AmbiguityEvidence> {
     /// Submission was observed and can be persisted by the verify role.
@@ -544,30 +482,25 @@ pub enum SideEffectUnknownSubmissionDecision<Submission, NotSubmittedProof, Ambi
     },
 }
 
-/// Boxed future returned by verify-side unknown-submission recovery callbacks.
-pub type SideEffectUnknownSubmissionDecisionFuture<
-    'a,
-    Submission,
-    NotSubmittedProof,
-    AmbiguityEvidence,
-> = SideEffectDriverFuture<
-    'a,
-    SideEffectUnknownSubmissionDecision<Submission, NotSubmittedProof, AmbiguityEvidence>,
->;
-
 /// Observed side-effect evidence plus replay verifier metadata.
 pub struct SideEffectObservedEvidence<T> {
     /// Typed observed evidence.
-    pub evidence: T,
+    evidence: T,
     /// Replay verifier metadata for this observation.
-    pub replay: SideEffectReplayEvidence,
+    replay: SideEffectReplayEvidence,
+}
+
+impl<T> SideEffectObservedEvidence<T> {
+    /// Creates observed side-effect evidence with replay verifier metadata.
+    pub fn new(evidence: T, replay: SideEffectReplayEvidence) -> Self {
+        Self { evidence, replay }
+    }
 }
 
 /// Adapter callbacks used by the generic side-effect driver.
 ///
 /// Implementations own artifact reads, live providers, signing, and domain reconstruction. The
-/// runtime driver uses callback results to build runner outputs through [`SideEffectEvidenceBuilder`]
-/// without taking ownership of adapter IO.
+/// runtime driver turns callback results into runner outputs without taking ownership of adapter IO.
 pub trait SideEffectDriverCallbacks {
     /// Typed side-effect intent evidence.
     type Intent: MfmValue + Send + Sync + 'static;
@@ -590,12 +523,12 @@ pub trait SideEffectDriverCallbacks {
         ctx: &'a ErasedRunCtx<'ctx>,
     ) -> SideEffectDriverFuture<'a, SideEffectIntentPlan<Self::Intent, Self::Idempotency>>;
 
-    /// Prepares public invocation evidence before the external uncertainty boundary.
+    /// Optionally prepares public invocation evidence before the external uncertainty boundary.
     fn prepare_invocation<'a, 'ctx>(
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
         plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
-    ) -> SideEffectDriverFuture<'a, SideEffectPreparedInvocationPlan<Self::PreparedInvocation>>;
+    ) -> SideEffectDriverFuture<'a, Option<Self::PreparedInvocation>>;
 
     /// Reconstructs live invocation state from adapter-owned artifact reads.
     fn reconstruct_prepared_invocation<'a, 'ctx>(
@@ -652,8 +585,15 @@ impl SideEffectDriver {
                     .await
             }
             SideEffectProtocolAction::CompleteSubmissionBoundary { invocation_epoch } => {
-                let side_effect = side_effect_binding(&view, invocation_epoch)?;
-                build_submit_boundary_skipped_output(&ctx, side_effect)
+                side_effect_binding(&view, invocation_epoch)?;
+                let payloads = RunnerPayloadBuilder::new(&ctx);
+                let skip_reason = events::SkipReason {
+                    code: events::ErrorCode::new("side_effect_submission_boundary")?,
+                    safe_message: "side-effect submit boundary recorded; verification is delegated to the paired verify node".to_owned(),
+                };
+                Ok(ErasedRunnerOutput::new(vec![
+                    payloads.cell_skipped(skip_reason)
+                ]))
             }
         }
     }
@@ -665,7 +605,13 @@ impl SideEffectDriver {
     where
         C: SideEffectDriverCallbacks + ?Sized,
     {
-        if node_has_exclusive_resource_claim(ctx.node()) {
+        if matches!(
+            ctx.node()
+                .side_effect
+                .as_ref()
+                .map(|side_effect| &side_effect.resource_claim),
+            Some(spec::ResourceClaimSpec::Exclusive { .. })
+        ) {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
                 "exclusive side-effect node {} must commit ResourceLaneClaimed before invocation preparation",
                 ctx.node().node_id
@@ -673,28 +619,28 @@ impl SideEffectDriver {
         }
         let plan = callbacks.intent_and_idempotency(ctx).await?;
         let side_effect = runtime_side_effect_binding(ctx)?;
-        let claim = runtime_claim_authority(ctx, &side_effect, 1, None)?;
+        let claim = claim_authority_for(
+            ctx.run_id(),
+            &ctx.node().node_id,
+            ctx.attempt_id(),
+            &side_effect,
+            1,
+            None,
+        )?;
         let prepared = callbacks.prepare_invocation(ctx, &plan).await?;
         let builder = SideEffectEvidenceBuilder::new(ctx);
-        if let Some(prepared) = prepared.prepared_invocation {
-            builder.prepare_invocation_and_start(SideEffectPreparedInvocationEvidence {
-                side_effect,
-                claim,
-                intent: &plan.intent,
-                idempotency: &plan.idempotency,
-                idempotency_key: plan.idempotency_key,
-                capability_binding: plan.capability_binding,
-                prepared_invocation: &prepared,
-            })
+        let evidence = SideEffectPrepareEvidence {
+            side_effect,
+            claim,
+            intent: &plan.intent,
+            idempotency: &plan.idempotency,
+            idempotency_key: plan.idempotency_key,
+            capability_binding: plan.capability_binding,
+        };
+        if let Some(prepared) = prepared {
+            builder.prepare_invocation_and_start(evidence, &prepared)
         } else {
-            builder.prepare_and_start(SideEffectPrepareEvidence {
-                side_effect,
-                claim,
-                intent: &plan.intent,
-                idempotency: &plan.idempotency,
-                idempotency_key: plan.idempotency_key,
-                capability_binding: plan.capability_binding,
-            })
+            builder.prepare_and_start(evidence)
         }
     }
 
@@ -719,9 +665,22 @@ impl SideEffectDriver {
             )));
         }
         let prepared = callbacks.prepare_invocation(ctx, &plan).await?;
-        let claim = claimed_authority(view)?;
+        let projection = view
+            .projection()
+            .ok_or_else(|| missing_driver_projection("claimed side-effect projection"))?;
+        let claim = match view.phase() {
+            Some(store::SideEffectLedgerPhase::Claimed { claim }) => {
+                RuntimeSideEffectClaimAuthority {
+                    claim_owner: claim.claim_owner.clone(),
+                    claim_generation: claim.claim_generation,
+                    claim_fencing_token: claim.claim_fencing_token.clone(),
+                    resource_key: projection.resource_key.clone(),
+                }
+            }
+            _ => return Err(missing_driver_projection("claimed authority")),
+        };
         let builder = SideEffectEvidenceBuilder::new(ctx);
-        if let Some(prepared) = prepared.prepared_invocation {
+        if let Some(prepared) = prepared {
             builder.prepare_claimed_invocation_and_start(side_effect, claim, Some(&prepared))
         } else {
             builder.prepare_claimed_invocation_and_start::<serde_json::Value>(
@@ -742,7 +701,10 @@ impl SideEffectDriver {
     where
         C: SideEffectDriverCallbacks + ?Sized,
     {
-        let prepared = match prepared_invocation(view) {
+        let prepared = match view
+            .projection()
+            .and_then(|projection| projection.prepared_invocation.as_ref())
+        {
             Some(prepared) => Some(
                 callbacks
                     .reconstruct_prepared_invocation(ctx, prepared)
@@ -757,20 +719,37 @@ impl SideEffectDriver {
         let builder = SideEffectEvidenceBuilder::new(ctx);
         let start_claim = match action {
             SideEffectProtocolAction::StartPreparedAndSubmitOrRecoverSubmission { .. } => {
-                Some(prepared_claim_binding(view)?)
+                match view.phase() {
+                    Some(store::SideEffectLedgerPhase::Prepared { claim, .. }) => {
+                        Some(RunnerClaimBinding {
+                            claim_owner: claim.claim_owner.clone(),
+                            claim_generation: claim.claim_generation,
+                            claim_fencing_token: claim.claim_fencing_token.clone(),
+                        })
+                    }
+                    _ => return Err(missing_driver_projection("prepared claim")),
+                }
             }
             _ => None,
         };
         match decision {
-            SideEffectSubmissionDecision::Observed(submission) => {
-                builder.submission_observed(side_effect, start_claim, &submission)
-            }
+            SideEffectSubmissionDecision::Observed(submission) => builder
+                .submission_observed_with_role(
+                    side_effect,
+                    events::SideEffectPairRole::Submit,
+                    start_claim,
+                    &submission,
+                ),
             SideEffectSubmissionDecision::Unknown(evidence) => {
                 builder.submission_unknown(side_effect, start_claim, &evidence)
             }
-            SideEffectSubmissionDecision::NotSubmitted(proof) => {
-                builder.not_submitted_proven(side_effect, start_claim, &proof)
-            }
+            SideEffectSubmissionDecision::NotSubmitted(proof) => builder
+                .not_submitted_proven_with_role(
+                    side_effect,
+                    events::SideEffectPairRole::Submit,
+                    start_claim,
+                    &proof,
+                ),
             SideEffectSubmissionDecision::Ambiguous {
                 ambiguity_code,
                 evidence,
@@ -926,13 +905,29 @@ impl SideEffectVerifyDriver {
             store::SideEffectLedgerPhase::SubmissionKnown {
                 status: store::SideEffectSubmissionState::NotSubmitted,
                 ..
-            } => build_side_effect_failed_with_release(
-                &ctx,
-                side_effect,
-                side_effect::FailurePhase::AfterNotSubmittedProven,
-                false,
-                "side-effect invocation was proven not submitted",
-            ),
+            } => {
+                let payloads = RunnerPayloadBuilder::new(&ctx);
+                let mut output = RunnerOutputBuilder::new(&ctx);
+                if let Some(release) = SideEffectEvidenceBuilder::new(&ctx)
+                    .resource_lane_released_payload(side_effect.clone(), "side_effect.failed")?
+                {
+                    output.payload(release);
+                }
+                let error = events::MfmErrorInfo::new(
+                    events::ErrorCode::new("side_effect_verification_failed")?,
+                    events::ErrorCategory::SideEffect,
+                    false,
+                    "side-effect invocation was proven not submitted",
+                )?;
+                output.payload(payloads.side_effect_failed(
+                    side_effect,
+                    events::SideEffectPairRole::Verify,
+                    side_effect::FailurePhase::AfterNotSubmittedProven,
+                    false,
+                    error,
+                ));
+                Ok(output.finish())
+            }
             store::SideEffectLedgerPhase::SubmissionKnown {
                 status: store::SideEffectSubmissionState::Unknown,
                 ..
@@ -986,7 +981,7 @@ impl SideEffectVerifyDriver {
                         let output = callbacks
                             .map_receipt_to_output(&ctx, submit_node, &submit_inputs, receipt)
                             .await?;
-                        build_side_effect_state_output(&ctx, &output)
+                        ErasedRunnerOutput::state_output(&ctx, &output)
                     }
                     spec::SideEffectVerificationSpec::Finalized { .. } => {
                         let confirmation = callbacks
@@ -1009,13 +1004,13 @@ impl SideEffectVerifyDriver {
                     let output = callbacks
                         .map_receipt_to_output(&ctx, submit_node, &submit_inputs, receipt)
                         .await?;
-                    build_side_effect_state_output(&ctx, &output)
+                    ErasedRunnerOutput::state_output(&ctx, &output)
                 }
                 spec::SideEffectVerificationSpec::Finalized { .. } => {
                     let output = callbacks
                         .map_confirmation_to_output(&ctx, submit_node, &submit_inputs, confirmation)
                         .await?;
-                    build_side_effect_state_output(&ctx, &output)
+                    ErasedRunnerOutput::state_output(&ctx, &output)
                 }
             },
             store::SideEffectLedgerPhase::IntentPersisted { .. }
@@ -1046,19 +1041,26 @@ fn side_effect_binding(
 }
 
 fn runtime_side_effect_binding(ctx: &ErasedRunCtx<'_>) -> Result<RunnerSideEffectBinding> {
-    let ledger_purpose = runtime_ledger_purpose(ctx)?;
-    side_effect_binding_for(
-        ctx.run_id(),
-        ctx.runtime_spec(),
-        &ctx.node().node_id,
-        ledger_purpose,
-    )
-}
-
-fn pre_invocation_side_effect_binding(
-    ctx: &PreInvocationRunCtx<'_>,
-) -> Result<RunnerSideEffectBinding> {
-    let ledger_purpose = pre_invocation_ledger_purpose(ctx)?;
+    let linked_forward_pair = match SideEffectAttemptView::from_erased_context(ctx)?.projection() {
+        Some(projection) => match &projection.ledger_purpose {
+            events::SideEffectLedgerPurpose::Remediation { forward_pair_id } => {
+                Some(forward_pair_id.clone())
+            }
+            _ => terminal_forward_pair_for_remediation(
+                ctx.runtime_spec(),
+                ctx.projections(),
+                ctx.node(),
+            )?,
+        },
+        None => terminal_forward_pair_for_remediation(
+            ctx.runtime_spec(),
+            ctx.projections(),
+            ctx.node(),
+        )?,
+    };
+    let ledger_purpose = linked_forward_pair
+        .map(|forward_pair_id| events::SideEffectLedgerPurpose::Remediation { forward_pair_id })
+        .unwrap_or(events::SideEffectLedgerPurpose::Forward);
     side_effect_binding_for(
         ctx.run_id(),
         ctx.runtime_spec(),
@@ -1073,7 +1075,14 @@ fn side_effect_binding_for(
     node_id: &NodeId,
     ledger_purpose: events::SideEffectLedgerPurpose,
 ) -> Result<RunnerSideEffectBinding> {
-    let pair_id = forward_side_effect_pair_id(runtime_spec, node_id, &ledger_purpose)?;
+    let pair_id = runtime_spec
+        .side_effect_pair_for_submit_node(node_id)
+        .cloned()
+        .ok_or_else(|| {
+            RuntimeError::InvalidSpec(format!(
+                "side-effect node {node_id} is missing certified verify pair"
+            ))
+        })?;
     let ledger_key = side_effect_ledger_key(run_id, &pair_id, &ledger_purpose)?;
     Ok(RunnerSideEffectBinding {
         ledger_key,
@@ -1083,64 +1092,49 @@ fn side_effect_binding_for(
     })
 }
 
-fn pre_invocation_lane_claim_plan(
+fn pre_invocation_lane_claim(
     ctx: &PreInvocationRunCtx<'_>,
     resource_key: Option<events::ResourceKeyEvidence>,
-) -> Result<PreInvocationLaneClaimPlan> {
+) -> Result<(RunnerSideEffectBinding, RuntimeSideEffectClaimAuthority)> {
     let view = SideEffectAttemptView::from_pre_invocation_context(ctx)?;
     match view.phase() {
         None => {
-            let side_effect = pre_invocation_side_effect_binding(ctx)?;
-            let claim = pre_invocation_claim_authority(ctx, &side_effect, 1, resource_key)?;
-            Ok(PreInvocationLaneClaimPlan::Initial { side_effect, claim })
+            let ledger_purpose = terminal_forward_pair_for_remediation(
+                ctx.runtime_spec(),
+                ctx.projections(),
+                ctx.node(),
+            )?
+            .map(|forward_pair_id| events::SideEffectLedgerPurpose::Remediation { forward_pair_id })
+            .unwrap_or(events::SideEffectLedgerPurpose::Forward);
+            let side_effect = side_effect_binding_for(
+                ctx.run_id(),
+                ctx.runtime_spec(),
+                &ctx.node().node_id,
+                ledger_purpose,
+            )?;
+            let claim = claim_authority_for(
+                ctx.run_id(),
+                &ctx.node().node_id,
+                ctx.attempt_id(),
+                &side_effect,
+                1,
+                resource_key,
+            )?;
+            Ok((side_effect, claim))
         }
         Some(store::SideEffectLedgerPhase::SubmissionKnown {
-            claim,
             status: store::SideEffectSubmissionState::NotSubmitted,
-        }) => {
-            let _ = claim;
-            Err(RuntimeError::InvalidRunnerOutput(format!(
-                "side-effect node {} cannot retry after not-submitted proof",
-                ctx.node().node_id
-            )))
-        }
+            ..
+        }) => Err(RuntimeError::InvalidRunnerOutput(format!(
+            "side-effect node {} cannot retry after not-submitted proof",
+            ctx.node().node_id
+        ))),
         Some(phase) => Err(RuntimeError::InvalidRunnerOutput(format!(
             "exclusive side-effect node {} cannot preclaim a resource lane from {} phase",
             ctx.node().node_id,
             side_effect_ledger_phase_name(phase)
         ))),
     }
-}
-
-fn runtime_ledger_purpose(ctx: &ErasedRunCtx<'_>) -> Result<events::SideEffectLedgerPurpose> {
-    Ok(linked_forward_pair_for_remediation(ctx)?
-        .map(|forward_pair_id| events::SideEffectLedgerPurpose::Remediation { forward_pair_id })
-        .unwrap_or(events::SideEffectLedgerPurpose::Forward))
-}
-
-fn pre_invocation_ledger_purpose(
-    ctx: &PreInvocationRunCtx<'_>,
-) -> Result<events::SideEffectLedgerPurpose> {
-    Ok(pre_invocation_linked_forward_pair_for_remediation(ctx)?
-        .map(|forward_pair_id| events::SideEffectLedgerPurpose::Remediation { forward_pair_id })
-        .unwrap_or(events::SideEffectLedgerPurpose::Forward))
-}
-
-fn linked_forward_pair_for_remediation(ctx: &ErasedRunCtx<'_>) -> Result<Option<SideEffectPairId>> {
-    if let Some(projection) = SideEffectAttemptView::from_erased_context(ctx)?.projection() {
-        if let events::SideEffectLedgerPurpose::Remediation { forward_pair_id } =
-            &projection.ledger_purpose
-        {
-            return Ok(Some(forward_pair_id.clone()));
-        }
-    }
-    terminal_forward_pair_for_remediation(ctx.runtime_spec(), ctx.projections(), ctx.node())
-}
-
-fn pre_invocation_linked_forward_pair_for_remediation(
-    ctx: &PreInvocationRunCtx<'_>,
-) -> Result<Option<SideEffectPairId>> {
-    terminal_forward_pair_for_remediation(ctx.runtime_spec(), ctx.projections(), ctx.node())
 }
 
 fn terminal_forward_pair_for_remediation(
@@ -1168,24 +1162,6 @@ fn terminal_forward_pair_for_remediation(
     Ok(None)
 }
 
-fn forward_side_effect_pair_id(
-    runtime_spec: &CertifiedRuntimeSpec,
-    node_id: &NodeId,
-    ledger_purpose: &events::SideEffectLedgerPurpose,
-) -> Result<SideEffectPairId> {
-    match ledger_purpose {
-        events::SideEffectLedgerPurpose::Forward
-        | events::SideEffectLedgerPurpose::Remediation { .. } => runtime_spec
-            .side_effect_pair_for_submit_node(node_id)
-            .cloned()
-            .ok_or_else(|| {
-                RuntimeError::InvalidSpec(format!(
-                    "side-effect node {node_id} is missing certified verify pair"
-                ))
-            }),
-    }
-}
-
 fn side_effect_ledger_key(
     run_id: &mfm_ids::RunId,
     pair_id: &mfm_ids::SideEffectPairId,
@@ -1202,38 +1178,6 @@ fn side_effect_ledger_key(
     ))?)
 }
 
-fn runtime_claim_authority(
-    ctx: &ErasedRunCtx<'_>,
-    side_effect: &RunnerSideEffectBinding,
-    claim_generation: u32,
-    resource_key: Option<events::ResourceKeyEvidence>,
-) -> Result<RuntimeSideEffectClaimAuthority> {
-    claim_authority_for(
-        ctx.run_id(),
-        &ctx.node().node_id,
-        ctx.attempt_id(),
-        side_effect,
-        claim_generation,
-        resource_key,
-    )
-}
-
-fn pre_invocation_claim_authority(
-    ctx: &PreInvocationRunCtx<'_>,
-    side_effect: &RunnerSideEffectBinding,
-    claim_generation: u32,
-    resource_key: Option<events::ResourceKeyEvidence>,
-) -> Result<RuntimeSideEffectClaimAuthority> {
-    claim_authority_for(
-        ctx.run_id(),
-        &ctx.node().node_id,
-        ctx.attempt_id(),
-        side_effect,
-        claim_generation,
-        resource_key,
-    )
-}
-
 fn claim_authority_for(
     run_id: &RunId,
     node_id: &NodeId,
@@ -1242,54 +1186,34 @@ fn claim_authority_for(
     claim_generation: u32,
     resource_key: Option<events::ResourceKeyEvidence>,
 ) -> Result<RuntimeSideEffectClaimAuthority> {
-    let claim_owner = claim_owner_for(run_id, node_id, attempt_id, side_effect, claim_generation)?;
-    let claim_fencing_token =
-        claim_fencing_token_for(node_id, attempt_id, side_effect, claim_generation)?;
-    Ok(RuntimeSideEffectClaimAuthority {
-        claim_owner,
-        claim_generation,
-        claim_fencing_token,
-        resource_key,
-    })
-}
-
-fn claim_owner_for(
-    run_id: &RunId,
-    node_id: &NodeId,
-    attempt_id: &AttemptId,
-    side_effect: &RunnerSideEffectBinding,
-    claim_generation: u32,
-) -> Result<events::RunnerInvocationId> {
-    let digest = crate::content_digest_json(serde_json::json!({
+    let claim_owner_digest = crate::content_digest_json(serde_json::json!({
         "attempt_id": attempt_id.as_str(),
         "claim_generation": claim_generation,
         "ledger_key": side_effect.ledger_key.as_str(),
         "node_id": node_id.as_str(),
         "run_id": run_id.as_str(),
     }))?;
-    Ok(events::RunnerInvocationId::new(format!(
+    let claim_owner = events::RunnerInvocationId::new(format!(
         "mfm.runtime.owner.{}",
-        short_stable_id_fragment(digest.as_str(), 32)
-    ))?)
-}
-
-fn claim_fencing_token_for(
-    node_id: &NodeId,
-    attempt_id: &AttemptId,
-    side_effect: &RunnerSideEffectBinding,
-    claim_generation: u32,
-) -> Result<side_effect::ClaimFencingToken> {
-    let digest = crate::content_digest_json(serde_json::json!({
+        short_stable_id_fragment(claim_owner_digest.as_str(), 32)
+    ))?;
+    let claim_fencing_token_digest = crate::content_digest_json(serde_json::json!({
         "attempt_id": attempt_id.as_str(),
         "claim_generation": claim_generation,
         "ledger_key": side_effect.ledger_key.as_str(),
         "node_id": node_id.as_str(),
         "purpose": "side-effect-claim-fencing",
     }))?;
-    Ok(side_effect::ClaimFencingToken::new(format!(
+    let claim_fencing_token = side_effect::ClaimFencingToken::new(format!(
         "mfm.runtime.token.{}",
-        short_stable_id_fragment(digest.as_str(), 32)
-    ))?)
+        short_stable_id_fragment(claim_fencing_token_digest.as_str(), 32)
+    ))?;
+    Ok(RuntimeSideEffectClaimAuthority {
+        claim_owner,
+        claim_generation,
+        claim_fencing_token,
+        resource_key,
+    })
 }
 
 fn pre_invocation_resource_lane_requirement_digest(
@@ -1318,15 +1242,6 @@ fn pre_invocation_resource_lane_requirement_digest(
     }))
 }
 
-fn node_has_exclusive_resource_claim(node: &spec::NodeSpec) -> bool {
-    matches!(
-        node.side_effect
-            .as_ref()
-            .map(|side_effect| &side_effect.resource_claim),
-        Some(spec::ResourceClaimSpec::Exclusive { .. })
-    )
-}
-
 fn ledger_purpose_key(ledger_purpose: &events::SideEffectLedgerPurpose) -> serde_json::Value {
     match ledger_purpose {
         events::SideEffectLedgerPurpose::Forward => serde_json::json!({
@@ -1350,99 +1265,10 @@ where
     canonical_json(value)
 }
 
-fn prepared_invocation<'view>(
-    view: &SideEffectAttemptView<'view>,
-) -> Option<&'view store::SideEffectArtifactProjection> {
-    view.projection()
-        .and_then(|projection| projection.prepared_invocation.as_ref())
-}
-
-fn prepared_claim_binding(view: &SideEffectAttemptView<'_>) -> Result<RunnerClaimBinding> {
-    match view.phase() {
-        Some(store::SideEffectLedgerPhase::Prepared { claim, .. }) => Ok(RunnerClaimBinding {
-            claim_owner: claim.claim_owner.clone(),
-            claim_generation: claim.claim_generation,
-            claim_fencing_token: claim.claim_fencing_token.clone(),
-        }),
-        _ => Err(missing_driver_projection("prepared claim")),
-    }
-}
-
-fn claimed_authority(view: &SideEffectAttemptView<'_>) -> Result<RuntimeSideEffectClaimAuthority> {
-    let projection = view
-        .projection()
-        .ok_or_else(|| missing_driver_projection("claimed side-effect projection"))?;
-    match view.phase() {
-        Some(store::SideEffectLedgerPhase::Claimed { claim }) => {
-            Ok(RuntimeSideEffectClaimAuthority {
-                claim_owner: claim.claim_owner.clone(),
-                claim_generation: claim.claim_generation,
-                claim_fencing_token: claim.claim_fencing_token.clone(),
-                resource_key: projection.resource_key.clone(),
-            })
-        }
-        _ => Err(missing_driver_projection("claimed authority")),
-    }
-}
-
 fn missing_driver_projection(label: &str) -> RuntimeError {
     RuntimeError::InvalidRunnerOutput(format!(
         "side-effect driver missing verified {label} projection"
     ))
-}
-
-fn build_submit_boundary_skipped_output(
-    ctx: &ErasedRunCtx<'_>,
-    _side_effect: RunnerSideEffectBinding,
-) -> Result<ErasedRunnerOutput> {
-    let payloads = RunnerPayloadBuilder::new(ctx);
-    let skip_reason = events::SkipReason {
-        code: events::ErrorCode::new("side_effect_submission_boundary")?,
-        safe_message: "side-effect submit boundary recorded; verification is delegated to the paired verify node".to_owned(),
-    };
-    Ok(ErasedRunnerOutput::new(vec![
-        payloads.cell_skipped(skip_reason)
-    ]))
-}
-
-fn build_side_effect_state_output<Output>(
-    ctx: &ErasedRunCtx<'_>,
-    output: &Output,
-) -> Result<ErasedRunnerOutput>
-where
-    Output: MfmValue,
-{
-    ErasedRunnerOutput::state_output(ctx, output)
-}
-
-fn build_side_effect_failed_with_release(
-    ctx: &ErasedRunCtx<'_>,
-    side_effect: RunnerSideEffectBinding,
-    failure_phase: side_effect::FailurePhase,
-    retryable: bool,
-    safe_message: &'static str,
-) -> Result<ErasedRunnerOutput> {
-    let payloads = RunnerPayloadBuilder::new(ctx);
-    let mut runner_output = RunnerOutputBuilder::new(ctx);
-    if let Some(release) = SideEffectEvidenceBuilder::new(ctx)
-        .resource_lane_released_payload(side_effect.clone(), "side_effect.failed")?
-    {
-        runner_output.payload(release);
-    }
-    let error = events::MfmErrorInfo::new(
-        events::ErrorCode::new("side_effect_verification_failed")?,
-        events::ErrorCategory::SideEffect,
-        retryable,
-        safe_message,
-    )?;
-    runner_output.payload(payloads.side_effect_failed(
-        side_effect,
-        events::SideEffectPairRole::Verify,
-        failure_phase,
-        retryable,
-        error,
-    ));
-    Ok(runner_output.finish())
 }
 
 /// Builder for side-effect runner evidence outputs.
@@ -1450,18 +1276,18 @@ fn build_side_effect_failed_with_release(
 /// This builder stages artifacts and emits runner payloads only. It does not derive commit
 /// preconditions, append commits, perform live IO, read prior artifacts, or create attempt
 /// failures.
-pub struct SideEffectEvidenceBuilder<'a, 'ctx> {
+pub(crate) struct SideEffectEvidenceBuilder<'a, 'ctx> {
     ctx: &'a ErasedRunCtx<'ctx>,
 }
 
 impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     /// Creates a side-effect evidence builder for one runner invocation context.
-    pub fn new(ctx: &'a ErasedRunCtx<'ctx>) -> Self {
+    pub(crate) fn new(ctx: &'a ErasedRunCtx<'ctx>) -> Self {
         Self { ctx }
     }
 
     /// Builds prepared invocation and started evidence for an already claimed lane.
-    pub fn prepare_claimed_invocation_and_start<Prepared>(
+    pub(crate) fn prepare_claimed_invocation_and_start<Prepared>(
         &self,
         side_effect: RunnerSideEffectBinding,
         claim: RuntimeSideEffectClaimAuthority,
@@ -1505,7 +1331,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     }
 
     /// Builds intent, claim, prepared-without-artifact, and started evidence.
-    pub fn prepare_and_start<Intent, Idempotency>(
+    pub(crate) fn prepare_and_start<Intent, Idempotency>(
         &self,
         evidence: SideEffectPrepareEvidence<'_, Intent, Idempotency>,
     ) -> Result<ErasedRunnerOutput>
@@ -1517,9 +1343,10 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     }
 
     /// Builds intent, claim, prepared-with-artifact, and started evidence.
-    pub fn prepare_invocation_and_start<Intent, Idempotency, Prepared>(
+    pub(crate) fn prepare_invocation_and_start<Intent, Idempotency, Prepared>(
         &self,
-        evidence: SideEffectPreparedInvocationEvidence<'_, Intent, Idempotency, Prepared>,
+        evidence: SideEffectPrepareEvidence<'_, Intent, Idempotency>,
+        prepared_invocation: &Prepared,
     ) -> Result<ErasedRunnerOutput>
     where
         Intent: MfmValue,
@@ -1527,37 +1354,12 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
         Prepared: Serialize,
     {
         let artifacts = RunnerArtifactBuilder::new(self.ctx);
-        let prepared_artifact = artifacts.prepared_invocation(evidence.prepared_invocation)?;
-        let evidence = SideEffectPrepareEvidence {
-            side_effect: evidence.side_effect,
-            claim: evidence.claim,
-            intent: evidence.intent,
-            idempotency: evidence.idempotency,
-            idempotency_key: evidence.idempotency_key,
-            capability_binding: evidence.capability_binding,
-        };
+        let prepared_artifact = artifacts.prepared_invocation(prepared_invocation)?;
         self.prepare_and_start_with_artifact(evidence, Some(prepared_artifact))
     }
 
     /// Builds not-submitted proof evidence.
-    pub fn not_submitted_proven<Proof>(
-        &self,
-        side_effect: RunnerSideEffectBinding,
-        start_claim: Option<RunnerClaimBinding>,
-        proof: &Proof,
-    ) -> Result<ErasedRunnerOutput>
-    where
-        Proof: MfmValue,
-    {
-        self.not_submitted_proven_with_role(
-            side_effect,
-            events::SideEffectPairRole::Submit,
-            start_claim,
-            proof,
-        )
-    }
-
-    fn not_submitted_proven_with_role<Proof>(
+    pub(crate) fn not_submitted_proven_with_role<Proof>(
         &self,
         side_effect: RunnerSideEffectBinding,
         pair_role: events::SideEffectPairRole,
@@ -1585,24 +1387,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     }
 
     /// Builds submission observed evidence.
-    pub fn submission_observed<Submission>(
-        &self,
-        side_effect: RunnerSideEffectBinding,
-        start_claim: Option<RunnerClaimBinding>,
-        submission: &Submission,
-    ) -> Result<ErasedRunnerOutput>
-    where
-        Submission: MfmValue,
-    {
-        self.submission_observed_with_role(
-            side_effect,
-            events::SideEffectPairRole::Submit,
-            start_claim,
-            submission,
-        )
-    }
-
-    fn submission_observed_with_role<Submission>(
+    pub(crate) fn submission_observed_with_role<Submission>(
         &self,
         side_effect: RunnerSideEffectBinding,
         pair_role: events::SideEffectPairRole,
@@ -1626,7 +1411,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     }
 
     /// Builds submission unknown evidence.
-    pub fn submission_unknown<Evidence>(
+    pub(crate) fn submission_unknown<Evidence>(
         &self,
         side_effect: RunnerSideEffectBinding,
         start_claim: Option<RunnerClaimBinding>,
@@ -1649,7 +1434,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     }
 
     /// Builds receipt observed evidence.
-    pub fn receipt_observed<Receipt>(
+    pub(crate) fn receipt_observed<Receipt>(
         &self,
         side_effect: RunnerSideEffectBinding,
         receipt: &Receipt,
@@ -1660,18 +1445,24 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     {
         let artifacts = RunnerArtifactBuilder::new(self.ctx);
         let artifact = artifacts.receipt(receipt)?;
-        self.single_artifact_output(side_effect, &artifact, |payloads, side_effect, artifact| {
-            payloads.side_effect_receipt_observed(
-                side_effect,
-                artifact,
-                replay.replay_verifier_id,
-                replay.resource_touched_set,
-            )
-        })
+        self.single_artifact_output_with_optional_start(
+            side_effect,
+            None,
+            &artifact,
+            None,
+            |payloads, side_effect, artifact| {
+                payloads.side_effect_receipt_observed(
+                    side_effect,
+                    artifact,
+                    replay.replay_verifier_id,
+                    replay.resource_touched_set,
+                )
+            },
+        )
     }
 
     /// Builds terminal receipt-observed evidence and releases any active resource lane.
-    pub fn receipt_observed_terminal<Receipt>(
+    pub(crate) fn receipt_observed_terminal<Receipt>(
         &self,
         side_effect: RunnerSideEffectBinding,
         receipt: &Receipt,
@@ -1699,7 +1490,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     }
 
     /// Builds confirmation observed evidence.
-    pub fn confirmation_observed<Confirmation>(
+    pub(crate) fn confirmation_observed<Confirmation>(
         &self,
         side_effect: RunnerSideEffectBinding,
         confirmation: &Confirmation,
@@ -1727,7 +1518,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     }
 
     /// Builds ambiguity evidence.
-    pub fn ambiguous<Evidence>(
+    pub(crate) fn ambiguous<Evidence>(
         &self,
         side_effect: RunnerSideEffectBinding,
         pair_role: events::SideEffectPairRole,
@@ -1786,22 +1577,6 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
         )?);
         output.payload(payloads.side_effect_invocation_started(side_effect, claim.claim_binding()));
         Ok(output.finish())
-    }
-
-    fn single_artifact_output<F>(
-        &self,
-        side_effect: RunnerSideEffectBinding,
-        artifact: &RunnerJsonArtifact,
-        payload: F,
-    ) -> Result<ErasedRunnerOutput>
-    where
-        F: FnOnce(
-            &RunnerPayloadBuilder<'_, '_>,
-            RunnerSideEffectBinding,
-            &RunnerJsonArtifact,
-        ) -> Result<crate::RunnerEventPayload>,
-    {
-        self.single_artifact_output_with_optional_start(side_effect, None, artifact, None, payload)
     }
 
     fn terminal_single_artifact_output<F>(

@@ -64,7 +64,7 @@ fn run_id(byte: u8) -> RunId {
     )
 }
 
-fn subject_field(id: &str, _path: &str) -> FactFieldDescriptor {
+fn subject_field(id: &str) -> FactFieldDescriptor {
     FactFieldDescriptor::new(
         FactFieldId::new(id).expect("field id"),
         FactFieldValueType::String,
@@ -78,7 +78,7 @@ fn subject_field(id: &str, _path: &str) -> FactFieldDescriptor {
     .expect("subject field")
 }
 
-fn sortable_result_field(id: &str, _path: &str) -> FactFieldDescriptor {
+fn sortable_result_field(id: &str) -> FactFieldDescriptor {
     FactFieldDescriptor::new(
         FactFieldId::new(id).expect("field id"),
         FactFieldValueType::UnsignedInteger,
@@ -175,6 +175,26 @@ fn descriptor_without_orderings(fields: Vec<FactFieldDescriptor>) -> Result<Fact
     )
 }
 
+fn default_query_input(
+    predicates: Vec<FactQueryPredicate>,
+    return_fields: &[&str],
+    limit: Option<u64>,
+) -> FactQueryInput {
+    FactQueryInput::new(
+        StoreScopeRef::new("default").expect("store scope"),
+        FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
+        ScopeDecisionEvidence::new(digest(2)),
+        predicates,
+        return_fields
+            .iter()
+            .map(|field| FactFieldId::new(*field).expect("field"))
+            .collect(),
+        FactOrderingName::new("result.height.desc").expect("ordering"),
+        limit,
+    )
+    .expect("query input")
+}
+
 #[test]
 fn scalar_json_conversion_preserves_context_specific_behavior() {
     let field_id = FactFieldId::new("result.height").expect("field");
@@ -237,8 +257,8 @@ fn scalar_json_conversion_preserves_context_specific_behavior() {
         );
 
     let descriptor = descriptor(vec![
-        subject_field("subject.chain", "subject.chain"),
-        sortable_result_field("result.height", "result.height"),
+        subject_field("subject.chain"),
+        sortable_result_field("result.height"),
     ])
     .expect("descriptor");
     let subject = typed_fact_subject_value(&descriptor, &serde_json::json!({ "chain": "bitcoin" }))
@@ -314,8 +334,8 @@ fn fact_query_ordering_term_comparison_keeps_null_policy_independent_of_directio
 #[test]
 fn descriptor_accepts_valid_subject_result_and_ordering() {
     let descriptor = descriptor(vec![
-        subject_field("subject.chain", "subject.chain"),
-        sortable_result_field("result.height", "result.height"),
+        subject_field("subject.chain"),
+        sortable_result_field("result.height"),
     ])
     .expect("valid descriptor");
 
@@ -324,30 +344,7 @@ fn descriptor_accepts_valid_subject_result_and_ordering() {
 }
 
 #[test]
-fn descriptor_rejects_duplicate_field_ids() {
-    let error = descriptor(vec![
-        subject_field("subject.chain", "subject.chain"),
-        subject_field("subject.chain", "subject.network"),
-        sortable_result_field("result.height", "result.height"),
-    ])
-    .expect_err("duplicate field id");
-
-    assert!(error.to_string().contains("duplicate field id"));
-}
-
-#[test]
-fn descriptor_rejects_zero_subject_fields() {
-    let error = descriptor(vec![sortable_result_field(
-        "result.height",
-        "result.height",
-    )])
-    .expect_err("zero subject fields");
-
-    assert!(error.to_string().contains("at least one subject field"));
-}
-
-#[test]
-fn descriptor_rejects_optional_subject_fields() {
+fn descriptor_rejects_invalid_field_sets() {
     let optional_subject = FactFieldDescriptor::new(
         FactFieldId::new("subject.chain").expect("field id"),
         FactFieldValueType::String,
@@ -359,15 +356,28 @@ fn descriptor_rejects_optional_subject_fields() {
     )
     .expect("field constructor allows subject required check at descriptor level");
 
-    let error = descriptor(vec![
-        optional_subject,
-        sortable_result_field("result.height", "result.height"),
-    ])
-    .expect_err("optional subject");
+    for (fields, expected) in [
+        (
+            vec![
+                subject_field("subject.chain"),
+                subject_field("subject.chain"),
+                sortable_result_field("result.height"),
+            ],
+            "duplicate field id",
+        ),
+        (
+            vec![sortable_result_field("result.height")],
+            "at least one subject field",
+        ),
+        (
+            vec![optional_subject, sortable_result_field("result.height")],
+            "subject fields must be required",
+        ),
+    ] {
+        let error = descriptor(fields).expect_err(expected);
 
-    assert!(error
-        .to_string()
-        .contains("subject fields must be required"));
+        assert!(error.to_string().contains(expected));
+    }
 }
 
 #[test]
@@ -405,35 +415,43 @@ fn field_constructor_rejects_incompatible_operator() {
 }
 
 #[test]
-fn descriptor_rejects_ordering_for_missing_field() {
-    let fields = vec![subject_field("subject.chain", "subject.chain")];
-    let error = descriptor(fields).expect_err("missing ordering field");
+fn descriptor_rejects_invalid_ordering_terms() {
+    enum Case {
+        MissingField,
+        NonSortableField,
+    }
 
-    assert!(error.to_string().contains("unknown field"));
-}
+    for (case, expected) in [
+        (Case::MissingField, "unknown field"),
+        (Case::NonSortableField, "non-sortable"),
+    ] {
+        let error = match case {
+            Case::MissingField => {
+                let fields = vec![subject_field("subject.chain")];
+                descriptor(fields).expect_err("missing ordering field")
+            }
+            Case::NonSortableField => FactDescriptor::new(
+                FactKind::new("chain.head").expect("kind"),
+                schema_id("mfm.test.fact.descriptor"),
+                schema_id("mfm.test.subject"),
+                schema_id("mfm.test.response"),
+                vec![subject_field("subject.chain")],
+                vec![FactOrderingPolicy::new(
+                    FactOrderingName::new("subject.chain.asc").expect("ordering"),
+                    vec![FactOrderingTerm::new(
+                        FactFieldId::new("subject.chain").expect("field"),
+                        SortDirection::Ascending,
+                        NullOrdering::Last,
+                        false,
+                    )],
+                )
+                .expect("ordering")],
+            )
+            .expect_err("non-sortable ordering field"),
+        };
 
-#[test]
-fn descriptor_rejects_ordering_for_non_sortable_field() {
-    let error = FactDescriptor::new(
-        FactKind::new("chain.head").expect("kind"),
-        schema_id("mfm.test.fact.descriptor"),
-        schema_id("mfm.test.subject"),
-        schema_id("mfm.test.response"),
-        vec![subject_field("subject.chain", "subject.chain")],
-        vec![FactOrderingPolicy::new(
-            FactOrderingName::new("subject.chain.asc").expect("ordering"),
-            vec![FactOrderingTerm::new(
-                FactFieldId::new("subject.chain").expect("field"),
-                SortDirection::Ascending,
-                NullOrdering::Last,
-                false,
-            )],
-        )
-        .expect("ordering")],
-    )
-    .expect_err("non-sortable ordering field");
-
-    assert!(error.to_string().contains("non-sortable"));
+        assert!(error.to_string().contains(expected));
+    }
 }
 
 #[test]
@@ -459,13 +477,13 @@ fn visibility_indexed_default_records_audience_and_scope() {
 #[test]
 fn descriptor_hash_is_stable_for_reordered_fields() {
     let first = descriptor(vec![
-        subject_field("subject.chain", "subject.chain"),
-        sortable_result_field("result.height", "result.height"),
+        subject_field("subject.chain"),
+        sortable_result_field("result.height"),
     ])
     .expect("descriptor");
     let second = descriptor(vec![
-        sortable_result_field("result.height", "result.height"),
-        subject_field("subject.chain", "subject.chain"),
+        sortable_result_field("result.height"),
+        subject_field("subject.chain"),
     ])
     .expect("descriptor");
 
@@ -482,8 +500,8 @@ fn descriptor_hash_is_stable_for_reordered_fields() {
 #[test]
 fn canonical_descriptor_bytes_parse_back_to_descriptor_only_when_canonical() {
     let descriptor = descriptor(vec![
-        subject_field("subject.chain", "subject.chain"),
-        sortable_result_field("result.height", "result.height"),
+        subject_field("subject.chain"),
+        sortable_result_field("result.height"),
     ])
     .expect("descriptor");
     let canonical = canonical_fact_descriptor_bytes(&descriptor).expect("canonical");
@@ -536,13 +554,13 @@ fn subject_evidence_carries_canonical_subject_material() {
 #[test]
 fn subject_namespace_excludes_result_fields() {
     let first = descriptor_without_orderings(vec![
-        subject_field("subject.chain", "subject.chain"),
-        sortable_result_field("result.height", "result.height"),
+        subject_field("subject.chain"),
+        sortable_result_field("result.height"),
     ])
     .expect("descriptor");
     let second = descriptor_without_orderings(vec![
-        subject_field("subject.chain", "subject.chain"),
-        sortable_result_field("result.block_number", "result.block_number"),
+        subject_field("subject.chain"),
+        sortable_result_field("result.block_number"),
     ])
     .expect("descriptor");
 
@@ -555,8 +573,8 @@ fn subject_namespace_excludes_result_fields() {
 #[test]
 fn fact_key_changes_when_subject_value_changes() {
     let descriptor = descriptor_without_orderings(vec![
-        subject_field("subject.chain", "subject.chain"),
-        sortable_result_field("result.height", "result.height"),
+        subject_field("subject.chain"),
+        sortable_result_field("result.height"),
     ])
     .expect("descriptor");
     let namespace_hash = fact_subject_namespace_hash(&descriptor).expect("namespace hash");
@@ -608,8 +626,8 @@ fn fact_claim_id_uses_run_stream_coordinates() {
 #[test]
 fn extraction_derives_subject_material_and_terms() {
     let descriptor = descriptor_without_orderings(vec![
-        subject_field("subject.chain", "subject.chain"),
-        sortable_result_field("result.height", "result.height"),
+        subject_field("subject.chain"),
+        sortable_result_field("result.height"),
         metadata_recorded_at_field(),
     ])
     .expect("descriptor");
@@ -633,7 +651,7 @@ fn extraction_derives_subject_material_and_terms() {
 #[test]
 fn extraction_optional_missing_field_yields_no_term() {
     let descriptor = descriptor_without_orderings(vec![
-        subject_field("subject.chain", "subject.chain"),
+        subject_field("subject.chain"),
         optional_result_field(
             "result.optional_height",
             "result.optional_height",
@@ -655,65 +673,62 @@ fn extraction_optional_missing_field_yields_no_term() {
 }
 
 #[test]
-fn extraction_required_missing_subject_fails() {
-    let descriptor = descriptor_without_orderings(vec![
-        subject_field("subject.chain", "subject.chain"),
-        sortable_result_field("result.height", "result.height"),
-    ])
-    .expect("descriptor");
-    let subject = CanonicalValue::object([("network", CanonicalValue::String("mainnet".into()))])
-        .expect("subject");
+fn extraction_rejects_invalid_material_shapes() {
+    enum Case {
+        MissingSubject,
+        ScalarTypeMismatch,
+        ArraySubject,
+    }
 
-    let error = extract_subject_material(&descriptor, &subject).expect_err("missing subject field");
+    for (case, expected) in [
+        (Case::MissingSubject, "required subject field missing"),
+        (Case::ScalarTypeMismatch, "scalar type does not match"),
+        (Case::ArraySubject, "arrays"),
+    ] {
+        let descriptor = descriptor_without_orderings(vec![
+            subject_field("subject.chain"),
+            sortable_result_field("result.height"),
+        ])
+        .expect("descriptor");
+        let error = match case {
+            Case::MissingSubject => {
+                let subject =
+                    CanonicalValue::object([("network", CanonicalValue::String("mainnet".into()))])
+                        .expect("subject");
+                extract_subject_material(&descriptor, &subject).expect_err("missing subject field")
+            }
+            Case::ScalarTypeMismatch => {
+                let subject =
+                    CanonicalValue::object([("chain", CanonicalValue::String("bitcoin".into()))])
+                        .expect("subject");
+                let response =
+                    CanonicalValue::object([("height", CanonicalValue::String("850000".into()))])
+                        .expect("response");
+                let metadata =
+                    FactExtractionMetadata::new("2026-07-01T00:00:00Z", None::<String>, 42)
+                        .expect("metadata");
+                extract_terms(&descriptor, &subject, &response, &metadata)
+                    .expect_err("type mismatch")
+            }
+            Case::ArraySubject => {
+                let subject = CanonicalValue::object([(
+                    "chain",
+                    CanonicalValue::Array(vec![CanonicalValue::String("bitcoin".into())]),
+                )])
+                .expect("subject");
+                extract_subject_material(&descriptor, &subject).expect_err("array subject value")
+            }
+        };
 
-    assert!(error.to_string().contains("required subject field missing"));
-}
-
-#[test]
-fn extraction_rejects_scalar_type_mismatch() {
-    let descriptor = descriptor_without_orderings(vec![
-        subject_field("subject.chain", "subject.chain"),
-        sortable_result_field("result.height", "result.height"),
-    ])
-    .expect("descriptor");
-    let subject = CanonicalValue::object([("chain", CanonicalValue::String("bitcoin".into()))])
-        .expect("subject");
-    let response = CanonicalValue::object([("height", CanonicalValue::String("850000".into()))])
-        .expect("response");
-    let metadata =
-        FactExtractionMetadata::new("2026-07-01T00:00:00Z", None::<String>, 42).expect("metadata");
-
-    let error =
-        extract_terms(&descriptor, &subject, &response, &metadata).expect_err("type mismatch");
-
-    assert!(error.to_string().contains("scalar type does not match"));
-}
-
-#[test]
-fn extraction_rejects_arrays() {
-    let descriptor = descriptor_without_orderings(vec![
-        subject_field("subject.chain", "subject.chain"),
-        sortable_result_field("result.height", "result.height"),
-    ])
-    .expect("descriptor");
-    let subject = CanonicalValue::object([(
-        "chain",
-        CanonicalValue::Array(vec![CanonicalValue::String("bitcoin".into())]),
-    )])
-    .expect("subject");
-
-    let error = extract_subject_material(&descriptor, &subject).expect_err("array subject value");
-
-    assert!(error.to_string().contains("arrays"));
+        assert!(error.to_string().contains(expected));
+    }
 }
 
 #[test]
 fn extraction_validates_decimal_scale() {
-    let descriptor = descriptor_without_orderings(vec![
-        subject_field("subject.chain", "subject.chain"),
-        decimal_result_field(),
-    ])
-    .expect("descriptor");
+    let descriptor =
+        descriptor_without_orderings(vec![subject_field("subject.chain"), decimal_result_field()])
+            .expect("descriptor");
     let subject = CanonicalValue::object([("chain", CanonicalValue::String("bitcoin".into()))])
         .expect("subject");
     let metadata =
@@ -738,7 +753,7 @@ fn extraction_validates_decimal_scale() {
 #[test]
 fn canonical_fact_response_parse_preserves_optional_null_fields() {
     let descriptor = descriptor_without_orderings(vec![
-        subject_field("subject.chain", "subject.chain"),
+        subject_field("subject.chain"),
         optional_result_field(
             "result.observed_at_unix_ms",
             "result.observed_at_unix_ms",
@@ -763,8 +778,8 @@ fn canonical_fact_response_parse_preserves_optional_null_fields() {
 #[test]
 fn query_plan_computes_canonical_query_hash_and_rejects_zero_limit() {
     let descriptor = descriptor(vec![
-        subject_field("subject.chain", "subject.chain"),
-        sortable_result_field("result.height", "result.height"),
+        subject_field("subject.chain"),
+        sortable_result_field("result.height"),
     ])
     .expect("descriptor");
     let ordering = descriptor
@@ -811,8 +826,8 @@ fn query_plan_computes_canonical_query_hash_and_rejects_zero_limit() {
 #[test]
 fn query_compiler_builds_descriptor_scoped_canonical_plan() {
     let descriptor = descriptor(vec![
-        subject_field("subject.chain", "subject.chain"),
-        sortable_result_field("result.height", "result.height"),
+        subject_field("subject.chain"),
+        sortable_result_field("result.height"),
         optional_result_field(
             "result.confirmations",
             "result.confirmations",
@@ -821,10 +836,7 @@ fn query_compiler_builds_descriptor_scoped_canonical_plan() {
     ])
     .expect("descriptor");
     let descriptor_hash = fact_descriptor_hash(&descriptor).expect("descriptor hash");
-    let input = FactQueryInput::new(
-        StoreScopeRef::new("default").expect("store scope"),
-        FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
-        ScopeDecisionEvidence::new(digest(2)),
+    let input = default_query_input(
         vec![
             FactQueryPredicate::new(
                 FactFieldId::new("subject.chain").expect("field"),
@@ -837,14 +849,9 @@ fn query_compiler_builds_descriptor_scoped_canonical_plan() {
                 FactCanonicalScalar::UnsignedInteger(800_000),
             ),
         ],
-        vec![
-            FactFieldId::new("subject.chain").expect("field"),
-            FactFieldId::new("result.height").expect("field"),
-        ],
-        FactOrderingName::new("result.height.desc").expect("ordering"),
+        &["subject.chain", "result.height"],
         Some(25),
-    )
-    .expect("input");
+    );
 
     let plan = compile_fact_query_plan(&descriptor, input).expect("plan");
 
@@ -884,10 +891,18 @@ fn query_compiler_builds_descriptor_scoped_canonical_plan() {
 }
 
 #[test]
-fn query_compiler_enforces_exposure_policy() {
+fn query_compiler_rejects_invalid_policy_and_predicate_shapes() {
+    #[derive(Clone, Copy)]
+    enum Case {
+        HiddenPredicate,
+        QueryOnlyReturn,
+        UndeclaredOperator,
+        WrongPredicateType,
+    }
+
     let descriptor = descriptor(vec![
-        subject_field("subject.chain", "subject.chain"),
-        sortable_result_field("result.height", "result.height"),
+        subject_field("subject.chain"),
+        sortable_result_field("result.height"),
         optional_result_field(
             "result.confirmations",
             "result.confirmations",
@@ -897,86 +912,48 @@ fn query_compiler_enforces_exposure_policy() {
     ])
     .expect("descriptor");
 
-    let hidden_predicate = FactQueryInput::new(
-        StoreScopeRef::new("default").expect("store scope"),
-        FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
-        ScopeDecisionEvidence::new(digest(2)),
-        vec![FactQueryPredicate::new(
-            FactFieldId::new("metadata.recorded_at").expect("field"),
-            FactQueryOperator::GreaterThanOrEqual,
-            FactCanonicalScalar::timestamp("2026-01-02T00:00:00Z").expect("timestamp"),
-        )],
-        vec![FactFieldId::new("subject.chain").expect("field")],
-        FactOrderingName::new("result.height.desc").expect("ordering"),
-        Some(10),
-    )
-    .expect("input");
-    assert!(compile_fact_query_plan(&descriptor, hidden_predicate)
-        .expect_err("hidden predicate")
-        .to_string()
-        .contains("hidden field"));
+    for (case, expected) in [
+        (Case::HiddenPredicate, "hidden field"),
+        (Case::QueryOnlyReturn, "not returnable"),
+        (Case::UndeclaredOperator, "not declared"),
+        (Case::WrongPredicateType, "field expects"),
+    ] {
+        let input = match case {
+            Case::HiddenPredicate => default_query_input(
+                vec![FactQueryPredicate::new(
+                    FactFieldId::new("metadata.recorded_at").expect("field"),
+                    FactQueryOperator::GreaterThanOrEqual,
+                    FactCanonicalScalar::timestamp("2026-01-02T00:00:00Z").expect("timestamp"),
+                )],
+                &["subject.chain"],
+                Some(10),
+            ),
+            Case::QueryOnlyReturn => {
+                default_query_input(Vec::new(), &["result.confirmations"], Some(10))
+            }
+            Case::UndeclaredOperator => default_query_input(
+                vec![FactQueryPredicate::new(
+                    FactFieldId::new("result.height").expect("field"),
+                    FactQueryOperator::GreaterThanOrEqual,
+                    FactCanonicalScalar::UnsignedInteger(800_000),
+                )],
+                &["result.height"],
+                Some(10),
+            ),
+            Case::WrongPredicateType => default_query_input(
+                vec![FactQueryPredicate::new(
+                    FactFieldId::new("result.height").expect("field"),
+                    FactQueryOperator::GreaterThan,
+                    FactCanonicalScalar::string("800000"),
+                )],
+                &["result.height"],
+                Some(10),
+            ),
+        };
+        let error = compile_fact_query_plan(&descriptor, input).expect_err(expected);
 
-    let query_only_return = FactQueryInput::new(
-        StoreScopeRef::new("default").expect("store scope"),
-        FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
-        ScopeDecisionEvidence::new(digest(2)),
-        Vec::new(),
-        vec![FactFieldId::new("result.confirmations").expect("field")],
-        FactOrderingName::new("result.height.desc").expect("ordering"),
-        Some(10),
-    )
-    .expect("input");
-    assert!(compile_fact_query_plan(&descriptor, query_only_return)
-        .expect_err("query-only return")
-        .to_string()
-        .contains("not returnable"));
-}
-
-#[test]
-fn query_compiler_rejects_invalid_predicates() {
-    let descriptor = descriptor(vec![
-        subject_field("subject.chain", "subject.chain"),
-        sortable_result_field("result.height", "result.height"),
-    ])
-    .expect("descriptor");
-
-    let undeclared_operator = FactQueryInput::new(
-        StoreScopeRef::new("default").expect("store scope"),
-        FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
-        ScopeDecisionEvidence::new(digest(2)),
-        vec![FactQueryPredicate::new(
-            FactFieldId::new("result.height").expect("field"),
-            FactQueryOperator::GreaterThanOrEqual,
-            FactCanonicalScalar::UnsignedInteger(800_000),
-        )],
-        vec![FactFieldId::new("result.height").expect("field")],
-        FactOrderingName::new("result.height.desc").expect("ordering"),
-        Some(10),
-    )
-    .expect("input");
-    assert!(compile_fact_query_plan(&descriptor, undeclared_operator)
-        .expect_err("undeclared operator")
-        .to_string()
-        .contains("not declared"));
-
-    let wrong_type = FactQueryInput::new(
-        StoreScopeRef::new("default").expect("store scope"),
-        FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
-        ScopeDecisionEvidence::new(digest(2)),
-        vec![FactQueryPredicate::new(
-            FactFieldId::new("result.height").expect("field"),
-            FactQueryOperator::GreaterThan,
-            FactCanonicalScalar::string("800000"),
-        )],
-        vec![FactFieldId::new("result.height").expect("field")],
-        FactOrderingName::new("result.height.desc").expect("ordering"),
-        Some(10),
-    )
-    .expect("input");
-    assert!(compile_fact_query_plan(&descriptor, wrong_type)
-        .expect_err("wrong predicate type")
-        .to_string()
-        .contains("field expects"));
+        assert!(error.to_string().contains(expected));
+    }
 }
 
 #[test]
@@ -1045,8 +1022,8 @@ fn internal_ref_parts(visibility: FactVisibility) -> InternalFactRefParts {
 
 fn query_evidence_fixture() -> (CanonicalFactQueryPlan, FactQueryReceipt, FactQueryEvidence) {
     let descriptor = descriptor(vec![
-        subject_field("subject.chain", "subject.chain"),
-        sortable_result_field("result.height", "result.height"),
+        subject_field("subject.chain"),
+        sortable_result_field("result.height"),
     ])
     .expect("descriptor");
     let ordering = descriptor.orderings().first().expect("ordering").clone();
@@ -1190,31 +1167,41 @@ fn fact_query_receipt_material_from_rows_derives_receipt_shape() {
 }
 
 #[test]
-fn fact_query_result_rejects_row_ref_mismatch() {
-    let (_, receipt, _) = query_evidence_fixture();
-    let mut parts = internal_ref_parts(FactVisibility::indexed_default(FactAudience::Platform));
-    parts.fact_claim_id = FactClaimId::new(run_id(10), 1, 1).expect("claim id");
-    let wrong_ref = InternalFactRef::new(parts).expect("wrong ref");
-    let fields = receipt
-        .returned_field_summaries()
-        .expect("summaries")
-        .summaries()[0]
-        .fields()
-        .to_vec();
-    let error = FactQueryResult::new(vec![FactQueryResultRow::new(wrong_ref, fields)], receipt)
-        .expect_err("row ref mismatch");
+fn fact_query_result_rejects_misaligned_or_unpinned_rows() {
+    enum Case {
+        RowRefMismatch,
+        UnpinnedFieldSummaries,
+    }
 
-    assert!(error.to_string().contains("row ref"));
-}
+    for (case, expected) in [
+        (Case::RowRefMismatch, "row ref"),
+        (Case::UnpinnedFieldSummaries, "not pinned"),
+    ] {
+        let (_, mut receipt, _) = query_evidence_fixture();
+        let row = match case {
+            Case::RowRefMismatch => {
+                let mut parts =
+                    internal_ref_parts(FactVisibility::indexed_default(FactAudience::Platform));
+                parts.fact_claim_id = FactClaimId::new(run_id(10), 1, 1).expect("claim id");
+                let wrong_ref = InternalFactRef::new(parts).expect("wrong ref");
+                let fields = receipt
+                    .returned_field_summaries()
+                    .expect("summaries")
+                    .summaries()[0]
+                    .fields()
+                    .to_vec();
+                FactQueryResultRow::new(wrong_ref, fields)
+            }
+            Case::UnpinnedFieldSummaries => {
+                let row = query_result_row_from_receipt(&receipt);
+                receipt.returned_field_summaries = None;
+                row
+            }
+        };
+        let error = FactQueryResult::new(vec![row], receipt).expect_err(expected);
 
-#[test]
-fn fact_query_result_rejects_unpinned_field_summaries() {
-    let (_, mut receipt, _) = query_evidence_fixture();
-    let row = query_result_row_from_receipt(&receipt);
-    receipt.returned_field_summaries = None;
-
-    let error = FactQueryResult::new(vec![row], receipt).expect_err("unpinned fields");
-    assert!(error.to_string().contains("not pinned"));
+        assert!(error.to_string().contains(expected));
+    }
 }
 
 #[test]
@@ -1231,9 +1218,9 @@ fn internal_fact_ref_requires_indexed_visibility() {
 #[test]
 fn canonical_fact_descriptor_bytes_round_trip_metadata_extractions() {
     let descriptor = descriptor(vec![
-        subject_field("subject.chain", "subject.chain"),
+        subject_field("subject.chain"),
         metadata_recorded_at_field(),
-        sortable_result_field("result.height", "result.height"),
+        sortable_result_field("result.height"),
     ])
     .expect("descriptor");
     let bytes = canonical_fact_descriptor_bytes(&descriptor).expect("descriptor bytes");
@@ -1252,8 +1239,8 @@ fn canonical_fact_descriptor_bytes_round_trip_metadata_extractions() {
 #[test]
 fn canonical_goldens_match_expected_values() {
     let descriptor = descriptor(vec![
-        subject_field("subject.chain", "subject.chain"),
-        sortable_result_field("result.height", "result.height"),
+        subject_field("subject.chain"),
+        sortable_result_field("result.height"),
     ])
     .expect("descriptor");
     let material = FactSubjectMaterialV1::new(vec![FactFieldValue::new(

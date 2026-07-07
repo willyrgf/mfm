@@ -56,9 +56,7 @@ async fn bitcoin_chain_head_collector_two_cycles_record_checkpoint_and_public_fa
     assert_eq!(fact_index.returned_row_counts(), vec![0]);
 
     let first_projection = store.projection_snapshot().expect("first projection");
-    assert_fact_projection_counts(&first_projection, 1, 1);
-    assert_chain_head_height(&first_projection, 850_000);
-    assert_checkpoint_height(&first_projection, 850_000);
+    assert_collector_projection(&first_projection, 1, 1, &[850_000], &[850_000]);
 
     let second = launch_cycle(
         &services,
@@ -82,9 +80,7 @@ async fn bitcoin_chain_head_collector_two_cycles_record_checkpoint_and_public_fa
     )));
 
     let projection = store.projection_snapshot().expect("projection");
-    assert_fact_projection_counts(&projection, 2, 2);
-    assert_chain_head_height(&projection, 850_001);
-    assert_checkpoint_height(&projection, 850_001);
+    assert_collector_projection(&projection, 2, 2, &[850_001], &[850_001]);
 
     let btc_calls_before_replay = btc.calls();
     let fact_index_reads_before_replay = fact_index.returned_row_counts();
@@ -233,9 +229,7 @@ async fn bitcoin_chain_head_collector_recovers_interrupted_observation_without_p
     );
 
     let interrupted_projection = store.projection_snapshot().expect("interrupted projection");
-    assert_fact_projection_counts(&interrupted_projection, 1, 1);
-    assert_chain_head_height(&interrupted_projection, 850_000);
-    assert_checkpoint_height(&interrupted_projection, 850_000);
+    assert_collector_projection(&interrupted_projection, 1, 1, &[850_000], &[850_000]);
 
     launch_task.abort();
     let _ = launch_task.await;
@@ -271,11 +265,7 @@ async fn bitcoin_chain_head_collector_recovers_interrupted_observation_without_p
         .expect("resumed stream");
     assert_eq!(fact_query_evidences(&store, &resumed_stream).await.len(), 1);
     let projection = store.projection_snapshot().expect("resumed projection");
-    assert_fact_projection_counts(&projection, 2, 2);
-    assert_chain_head_height(&projection, 850_000);
-    assert_chain_head_height(&projection, 850_001);
-    assert_checkpoint_height(&projection, 850_000);
-    assert_checkpoint_height(&projection, 850_001);
+    assert_collector_projection(&projection, 2, 2, &[850_000, 850_001], &[850_000, 850_001]);
 }
 
 fn collector_services(
@@ -382,6 +372,22 @@ fn collector_seed_material(
             (seed.seed_id.clone(), bytes)
         })
         .collect()
+}
+
+fn assert_collector_projection(
+    projection: &ProjectionSnapshot,
+    expected_platform: usize,
+    expected_control: usize,
+    expected_chain_head_heights: &[u64],
+    expected_checkpoint_heights: &[u64],
+) {
+    assert_fact_projection_counts(projection, expected_platform, expected_control);
+    for expected in expected_chain_head_heights {
+        assert_chain_head_height(projection, *expected);
+    }
+    for expected in expected_checkpoint_heights {
+        assert_checkpoint_height(projection, *expected);
+    }
 }
 
 fn assert_fact_projection_counts(

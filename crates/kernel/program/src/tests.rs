@@ -934,52 +934,56 @@ fn typed_program_launch_plan_matches_seed_material_by_seed_id() {
 }
 
 #[test]
-fn typed_program_launch_plan_rejects_missing_seed_material() {
-    let draft = single_seed_public_output_draft(launch_seed(1, "first"));
+fn typed_program_launch_plan_rejects_invalid_seed_material() {
+    #[derive(Clone, Copy)]
+    enum InvalidSeedMaterialCase {
+        Missing,
+        Unknown,
+        Mismatched,
+    }
 
-    let error = TypedProgramLaunchPlan::from_draft_and_seed_material(
-        draft,
-        std::collections::BTreeMap::new(),
-    )
-    .expect_err("missing seed material rejects");
+    for (name, case) in [
+        ("missing seed material", InvalidSeedMaterialCase::Missing),
+        ("unknown seed material", InvalidSeedMaterialCase::Unknown),
+        (
+            "mismatched seed material",
+            InvalidSeedMaterialCase::Mismatched,
+        ),
+    ] {
+        let seed = launch_seed(1, "first");
+        let seed_bytes = seed.canonical_json().clone();
+        let draft = single_seed_public_output_draft(seed);
+        let expected_id = draft.seeds()[0].seed_id.clone();
+        let seeds = match case {
+            InvalidSeedMaterialCase::Missing => std::collections::BTreeMap::new(),
+            InvalidSeedMaterialCase::Unknown => std::collections::BTreeMap::from([
+                (expected_id, seed_bytes.clone()),
+                (seed_id(0xab), seed_bytes),
+            ]),
+            InvalidSeedMaterialCase::Mismatched => std::collections::BTreeMap::from([(
+                expected_id,
+                launch_seed(2, "wrong").canonical_json().clone(),
+            )]),
+        };
 
-    assert!(
-        matches!(error, PlanError::Key(message) if message.contains("missing entry-point seed material"))
-    );
-}
+        let error =
+            TypedProgramLaunchPlan::from_draft_and_seed_material(draft, seeds).expect_err(name);
 
-#[test]
-fn typed_program_launch_plan_rejects_unknown_seed_material() {
-    let seed = launch_seed(1, "first");
-    let seed_bytes = seed.canonical_json().clone();
-    let draft = single_seed_public_output_draft(seed);
-    let expected_id = draft.seeds()[0].seed_id.clone();
-    let seeds = std::collections::BTreeMap::from([
-        (expected_id, seed_bytes.clone()),
-        (seed_id(0xab), seed_bytes),
-    ]);
-
-    let error = TypedProgramLaunchPlan::from_draft_and_seed_material(draft, seeds)
-        .expect_err("unknown seed material rejects");
-
-    assert!(
-        matches!(error, PlanError::Key(message) if message.contains("unknown entry-point seed material"))
-    );
-}
-
-#[test]
-fn typed_program_launch_plan_rejects_mismatched_seed_material() {
-    let mismatched_bytes = launch_seed(2, "wrong").canonical_json().clone();
-    let draft = single_seed_public_output_draft(launch_seed(1, "first"));
-    let seeds =
-        std::collections::BTreeMap::from([(draft.seeds()[0].seed_id.clone(), mismatched_bytes)]);
-
-    let error = TypedProgramLaunchPlan::from_draft_and_seed_material(draft, seeds)
-        .expect_err("mismatched seed material rejects");
-
-    assert!(
-        matches!(error, PlanError::Canonical(message) if message.contains("did not match draft seed"))
-    );
+        match case {
+            InvalidSeedMaterialCase::Missing => assert!(
+                matches!(&error, PlanError::Key(message) if message.contains("missing entry-point seed material")),
+                "{name}: {error:?}"
+            ),
+            InvalidSeedMaterialCase::Unknown => assert!(
+                matches!(&error, PlanError::Key(message) if message.contains("unknown entry-point seed material")),
+                "{name}: {error:?}"
+            ),
+            InvalidSeedMaterialCase::Mismatched => assert!(
+                matches!(&error, PlanError::Canonical(message) if message.contains("did not match draft seed")),
+                "{name}: {error:?}"
+            ),
+        }
+    }
 }
 
 #[test]
@@ -1960,48 +1964,52 @@ fn failed_operation_expansion_rolls_back_scope_mutations_and_lineage() {
 }
 
 #[test]
-fn unregistered_operation_cannot_be_called() {
-    let result = build_root_with_registry(
-        ScopeKey::new("root").expect("scope key"),
-        multiply_state_registry(),
-        |root| {
-            let seed = launch_seed(1, "unregistered-operation");
-            let input = root.seed(SeedKey::new("input")?, seed)?;
-            let _ = root.scope().call::<MultiplyOperation, _>(
-                OperationKey::new("multiply-operation")?,
-                MultiplyOperation,
-                LaunchConfig { multiplier: 2 },
-                input,
-            )?;
-            unreachable!("unregistered operation planning must fail before public output binding")
-        },
-    );
+fn unregistered_operation_and_state_are_rejected_at_registry_boundary() {
+    enum Case {
+        Operation,
+        State,
+    }
 
-    let Err(PlanError::Registry(message)) = result else {
-        panic!("expected unregistered operation registry error, got {result:?}");
-    };
-    assert!(message.contains("operation"));
-    assert!(message.contains("is not registered"));
-}
+    for case in [Case::Operation, Case::State] {
+        let result = match case {
+            Case::Operation => build_root_with_registry(
+                ScopeKey::new("root").expect("scope key"),
+                multiply_state_registry(),
+                |root| {
+                    let seed = launch_seed(1, "unregistered-operation");
+                    let input = root.seed(SeedKey::new("input")?, seed)?;
+                    let _ = root.scope().call::<MultiplyOperation, _>(
+                        OperationKey::new("multiply-operation")?,
+                        MultiplyOperation,
+                        LaunchConfig { multiplier: 2 },
+                        input,
+                    )?;
+                    unreachable!(
+                        "unregistered operation planning must fail before public output binding"
+                    )
+                },
+            ),
+            Case::State => build_root(ScopeKey::new("root").expect("scope key"), |root| {
+                let seed = launch_seed(1, "unregistered");
+                let input = root.seed(SeedKey::new("input")?, seed)?;
+                let _ = root.scope().state::<MultiplyState, _>(
+                    StateKey::new("multiply")?,
+                    NoContext,
+                    LaunchConfig { multiplier: 2 },
+                    input,
+                )?;
+                unreachable!("unregistered state planning must fail before public output binding")
+            }),
+        };
 
-#[test]
-fn unregistered_state_cannot_be_planned() {
-    let result = build_root(ScopeKey::new("root").expect("scope key"), |root| {
-        let seed = launch_seed(1, "unregistered");
-        let input = root.seed(SeedKey::new("input")?, seed)?;
-        let _ = root.scope().state::<MultiplyState, _>(
-            StateKey::new("multiply")?,
-            NoContext,
-            LaunchConfig { multiplier: 2 },
-            input,
-        )?;
-        unreachable!("unregistered state planning must fail before public output binding")
-    });
-
-    let Err(PlanError::Registry(message)) = result else {
-        panic!("expected unregistered state registry error, got {result:?}");
-    };
-    assert!(message.contains("is not registered"));
+        let Err(PlanError::Registry(message)) = result else {
+            panic!("expected unregistered registry error, got {result:?}");
+        };
+        if matches!(case, Case::Operation) {
+            assert!(message.contains("operation"));
+        }
+        assert!(message.contains("is not registered"));
+    }
 }
 
 #[test]
@@ -2478,12 +2486,12 @@ fn duplicate_seed_keys_reject() {
 }
 
 #[test]
-fn canonical_seed_can_be_built_from_canonical_json() {
-    let bytes = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+fn canonical_seed_from_canonical_json_accepts_matching_shape_and_rejects_mismatch() {
+    let valid = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
         "{\"amount\":7,\"label\":\"canonical\"}",
     )
     .expect("canonical json");
-    let seed = CanonicalSeed::<LaunchValue>::from_canonical_json(bytes).expect("seed");
+    let seed = CanonicalSeed::<LaunchValue>::from_canonical_json(valid).expect("seed");
 
     assert_eq!(seed.byte_len(), 32);
     assert_eq!(
@@ -2494,14 +2502,11 @@ fn canonical_seed_can_be_built_from_canonical_json() {
         seed.canonical_json().as_str(),
         "{\"amount\":7,\"label\":\"canonical\"}"
     );
-}
 
-#[test]
-fn canonical_seed_rejects_json_that_does_not_decode_as_value_type() {
-    let bytes = mfm_canonical::PlainCanonicalJsonBytes::from_json_str("{\"amount\":7}")
+    let invalid = mfm_canonical::PlainCanonicalJsonBytes::from_json_str("{\"amount\":7}")
         .expect("canonical json");
     let error =
-        CanonicalSeed::<LaunchValue>::from_canonical_json(bytes).expect_err("missing label");
+        CanonicalSeed::<LaunchValue>::from_canonical_json(invalid).expect_err("missing label");
 
     assert!(matches!(error, PlanError::Canonical(message) if message.contains("missing field")));
 }

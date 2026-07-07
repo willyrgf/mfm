@@ -772,56 +772,69 @@ fn context_validate_request_and_report_use_certified_context() {
 }
 
 #[test]
-fn context_validate_report_rejects_wrong_configured_input_digest() {
+fn context_validate_report_rejects_invalid_response_shapes() {
+    enum InvalidResponseShape {
+        ConfiguredInputDigestMismatch,
+        ForgedReadPassedFlag,
+        ForgedEventPassedFlag,
+    }
+
     let state =
         ContextBoundValidateContractState::new(validated_config(validate_action())).expect("state");
     let context = certified_contract_context();
     let input = ContextValidateContractInput {
         configured: configured_instance(&context),
     };
-    let mut response = validation_read_response(&context, &input);
-    response.configured_input_digest = contract_profile_digest_ref(0x99);
 
-    let error = state
-        .report_from_response(&input, response, &context)
-        .expect_err("configured input digest mismatch rejected");
+    for (name, shape, expected_fragment) in [
+        (
+            "configured input digest mismatch",
+            InvalidResponseShape::ConfiguredInputDigestMismatch,
+            Some("validation read response"),
+        ),
+        (
+            "forged read passed flag",
+            InvalidResponseShape::ForgedReadPassedFlag,
+            None,
+        ),
+        (
+            "forged event passed flag",
+            InvalidResponseShape::ForgedEventPassedFlag,
+            None,
+        ),
+    ] {
+        let mut response = validation_read_response(&context, &input);
 
-    assert!(error.to_string().contains("validation read response"));
-}
+        match shape {
+            InvalidResponseShape::ConfiguredInputDigestMismatch => {
+                response.configured_input_digest = contract_profile_digest_ref(0x99);
+            }
+            InvalidResponseShape::ForgedReadPassedFlag => {
+                response.read_results = vec![ValidationReadResult {
+                    function: "isConfigured".to_owned(),
+                    args: Vec::new(),
+                    expected: expected_value(serde_json::json!(true)),
+                    actual: expected_value(serde_json::json!(false)),
+                    passed: true,
+                }];
+            }
+            InvalidResponseShape::ForgedEventPassedFlag => {
+                response.event_results = vec![ValidationEventResult {
+                    event: "Configured".to_owned(),
+                    min_count: 2,
+                    observed_count: 1,
+                    passed: true,
+                }];
+            }
+        }
 
-#[test]
-fn context_validate_report_rejects_forged_passed_flags() {
-    let state =
-        ContextBoundValidateContractState::new(validated_config(validate_action())).expect("state");
-    let context = certified_contract_context();
-    let input = ContextValidateContractInput {
-        configured: configured_instance(&context),
-    };
-    let expected_true = expected_value(serde_json::json!(true));
-    let actual_false = expected_value(serde_json::json!(false));
-
-    let mut forged_read = validation_read_response(&context, &input);
-    forged_read.read_results = vec![ValidationReadResult {
-        function: "isConfigured".to_owned(),
-        args: Vec::new(),
-        expected: expected_true,
-        actual: actual_false,
-        passed: true,
-    }];
-    assert!(state
-        .report_from_response(&input, forged_read, &context)
-        .is_err());
-
-    let mut forged_event = validation_read_response(&context, &input);
-    forged_event.event_results = vec![ValidationEventResult {
-        event: "Configured".to_owned(),
-        min_count: 2,
-        observed_count: 1,
-        passed: true,
-    }];
-    assert!(state
-        .report_from_response(&input, forged_event, &context)
-        .is_err());
+        let error = state
+            .report_from_response(&input, response, &context)
+            .expect_err(name);
+        if let Some(expected_fragment) = expected_fragment {
+            assert!(error.to_string().contains(expected_fragment), "{name}");
+        }
+    }
 }
 
 #[test]
@@ -1002,59 +1015,71 @@ fn external_adoption_rejects_forged_assertion_passed_flags() {
 }
 
 #[test]
-fn external_adoption_rejects_mismatched_read_assertion_content() {
+fn external_adoption_rejects_mismatched_assertion_content() {
+    enum AssertionMismatch {
+        Read,
+        Event,
+    }
+
     let context = certified_contract_context();
-    let expected_true = expected_value(serde_json::json!(true));
-    let policy = external_adoption_policy(
-        vec![read_assertion("isConfigured", expected_true.clone())],
-        Vec::new(),
-    );
-    let import = import_configured_with_policy(&policy);
-    let mut evidence =
-        external_adoption_evidence(&context, &policy, ContractLifecycleStage::Configured);
-    evidence.read_assertion_evidence = vec![external_read_assertion_evidence(
-        &context,
-        "isAdmin",
-        expected_true.clone(),
-        expected_true,
-        true,
-    )];
-    let snapshot = snapshot_from_external_evidence(&evidence);
 
-    let error = ImportConfiguredContractState::admit_verified_external_adoption(
-        &import,
-        &context,
-        evidence,
-        Some(snapshot),
-        None,
-    )
-    .expect_err("mismatched read assertion rejected");
+    for (name, mismatch) in [
+        ("read assertion", AssertionMismatch::Read),
+        ("event assertion", AssertionMismatch::Event),
+    ] {
+        let (import, evidence, snapshot) = match mismatch {
+            AssertionMismatch::Read => {
+                let expected_true = expected_value(serde_json::json!(true));
+                let policy = external_adoption_policy(
+                    vec![read_assertion("isConfigured", expected_true.clone())],
+                    Vec::new(),
+                );
+                let import = import_configured_with_policy(&policy);
+                let mut evidence = external_adoption_evidence(
+                    &context,
+                    &policy,
+                    ContractLifecycleStage::Configured,
+                );
+                evidence.read_assertion_evidence = vec![external_read_assertion_evidence(
+                    &context,
+                    "isAdmin",
+                    expected_true.clone(),
+                    expected_true,
+                    true,
+                )];
+                let snapshot = snapshot_from_external_evidence(&evidence);
+                (import, evidence, snapshot)
+            }
+            AssertionMismatch::Event => {
+                let policy = external_adoption_policy(
+                    Vec::new(),
+                    vec![event_assertion("Configured", 1, None)],
+                );
+                let import = import_configured_with_policy(&policy);
+                let mut evidence = external_adoption_evidence(
+                    &context,
+                    &policy,
+                    ContractLifecycleStage::Configured,
+                );
+                evidence.event_assertion_evidence = vec![external_event_assertion_evidence(
+                    &context, "Upgraded", 1, 1, true,
+                )];
+                let snapshot = snapshot_from_external_evidence(&evidence);
+                (import, evidence, snapshot)
+            }
+        };
 
-    assert!(error.to_string().contains("external adoption"));
-}
+        let error = ImportConfiguredContractState::admit_verified_external_adoption(
+            &import,
+            &context,
+            evidence,
+            Some(snapshot),
+            None,
+        )
+        .expect_err(name);
 
-#[test]
-fn external_adoption_rejects_mismatched_event_assertion_content() {
-    let context = certified_contract_context();
-    let policy = external_adoption_policy(Vec::new(), vec![event_assertion("Configured", 1, None)]);
-    let import = import_configured_with_policy(&policy);
-    let mut evidence =
-        external_adoption_evidence(&context, &policy, ContractLifecycleStage::Configured);
-    evidence.event_assertion_evidence = vec![external_event_assertion_evidence(
-        &context, "Upgraded", 1, 1, true,
-    )];
-    let snapshot = snapshot_from_external_evidence(&evidence);
-
-    let error = ImportConfiguredContractState::admit_verified_external_adoption(
-        &import,
-        &context,
-        evidence,
-        Some(snapshot),
-        None,
-    )
-    .expect_err("mismatched event assertion rejected");
-
-    assert!(error.to_string().contains("external adoption"));
+        assert!(error.to_string().contains("external adoption"), "{name}");
+    }
 }
 
 #[test]

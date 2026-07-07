@@ -1767,15 +1767,35 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_query_config_rejects_runtime_routes() {
-        let config = QueryCollectorCheckpointConfig {
+    fn source_identity_configs_reject_runtime_routes_without_leaking_them() {
+        let observe_config = ObserveBtcChainHeadConfig {
+            semantic_source_identity: "http://user:password@localhost:8332".to_owned(),
+            ..observe_config()
+        };
+        let query_config = QueryCollectorCheckpointConfig {
             semantic_source_identity: "http://user:password@localhost:8332".to_owned(),
             ..checkpoint_query_config()
         };
 
-        let error = validate_query_collector_checkpoint_config(&config).expect_err("route");
-        assert!(!error.contains("localhost:8332"));
-        assert!(!error.contains("password"));
+        for (case, error) in [
+            (
+                "observe config",
+                validate_observe_chain_head_config(&observe_config).expect_err("route"),
+            ),
+            (
+                "checkpoint query config",
+                validate_query_collector_checkpoint_config(&query_config).expect_err("route"),
+            ),
+        ] {
+            assert!(
+                !error.contains("localhost:8332"),
+                "{case} leaked route host: {error}"
+            );
+            assert!(
+                !error.contains("password"),
+                "{case} leaked route password: {error}"
+            );
+        }
     }
 
     #[test]
@@ -1823,41 +1843,38 @@ mod tests {
     }
 
     #[test]
-    fn observe_validates_checkpoint_source_compatibility() {
-        let (_request, response) = capability_response();
-        let state =
-            ObserveBtcChainHeadState::new(ValidatedConfig::new(observe_config()).expect("config"))
-                .expect("state");
-        let incompatible = checkpoint_fact_for_source(
-            849_999,
-            "different-semantic-source",
-            "bitcoin-mainnet",
-            BtcFinality::BestAvailable,
-        );
-
-        let error = state
-            .materialize_response(&observe_input(Some(incompatible)), &response)
-            .expect_err("incompatible checkpoint");
-
-        assert!(error
-            .to_string()
-            .contains("incompatible with requested Bitcoin source"));
-    }
-
-    #[test]
-    fn observe_rejects_head_behind_loaded_checkpoint() {
+    fn observe_rejects_invalid_loaded_checkpoints() {
         let (_request, response) = capability_response();
         let state =
             ObserveBtcChainHeadState::new(ValidatedConfig::new(observe_config()).expect("config"))
                 .expect("state");
 
-        let error = state
-            .materialize_response(&observe_input(Some(checkpoint_fact(850_001))), &response)
-            .expect_err("head behind checkpoint");
+        for (case, checkpoint, expected_message) in [
+            (
+                "incompatible checkpoint source",
+                checkpoint_fact_for_source(
+                    849_999,
+                    "different-semantic-source",
+                    "bitcoin-mainnet",
+                    BtcFinality::BestAvailable,
+                ),
+                "incompatible with requested Bitcoin source",
+            ),
+            (
+                "head behind checkpoint",
+                checkpoint_fact(850_001),
+                "observed chain head must not be behind loaded checkpoint",
+            ),
+        ] {
+            let error = state
+                .materialize_response(&observe_input(Some(checkpoint)), &response)
+                .expect_err(case);
 
-        assert!(error
-            .to_string()
-            .contains("observed chain head must not be behind loaded checkpoint"));
+            assert!(
+                error.to_string().contains(expected_message),
+                "{case} produced unexpected error: {error}"
+            );
+        }
     }
 
     #[test]
@@ -2001,20 +2018,6 @@ mod tests {
         assert!(!text.contains("http://"));
         assert!(!text.contains("password"));
         assert!(text.contains("\"scope\":\"default\""));
-    }
-
-    #[test]
-    fn source_identity_rejects_runtime_route_strings() {
-        let config = ObserveBtcChainHeadConfig {
-            semantic_source_identity: "http://user:password@localhost:8332".to_owned(),
-            ..observe_config()
-        };
-
-        let error = validate_observe_chain_head_config(&config).expect_err("route must fail");
-        assert!(
-            !error.contains("localhost:8332"),
-            "unredacted error: {error}"
-        );
     }
 
     #[test]

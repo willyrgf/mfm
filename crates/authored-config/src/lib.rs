@@ -454,68 +454,55 @@ mod tests {
     }
 
     #[test]
-    fn detect_prefers_json_for_object_shapes() {
-        assert_eq!(
-            detect_authored_config_format("  {\"k\":1}"),
-            AuthoredConfigFormat::Json
-        );
-        assert_eq!(
-            detect_authored_config_format(" \n [1,2,3]"),
-            AuthoredConfigFormat::Json
-        );
+    fn detect_authored_config_format_classifies_prefixes() {
+        for (raw, expected) in [
+            ("  {\"k\":1}", AuthoredConfigFormat::Json),
+            (" \n [1,2,3]", AuthoredConfigFormat::Json),
+            ("title = \"demo\"", AuthoredConfigFormat::Toml),
+            ("", AuthoredConfigFormat::Toml),
+        ] {
+            assert_eq!(detect_authored_config_format(raw), expected, "{raw:?}");
+        }
     }
 
     #[test]
-    fn detect_defaults_to_toml_for_non_json_prefixes() {
-        assert_eq!(
-            detect_authored_config_format("title = \"demo\""),
-            AuthoredConfigFormat::Toml
-        );
-        assert_eq!(
-            detect_authored_config_format(""),
-            AuthoredConfigFormat::Toml
-        );
-    }
-
-    #[test]
-    fn parse_with_hint_uses_fallback_only_without_extension() {
-        let parsed = parse_authored_config_with_hint(
+    fn parse_with_hint_uses_fallback_only_without_explicit_extension() {
+        let without_extension = parse_authored_config_with_hint(
             "answer = 41",
             None,
             |_| Err("json"),
             |_| Ok::<_, &'static str>(41_u64),
         )
         .expect("fallback parse");
-        assert_eq!(parsed, 41);
-    }
+        assert_eq!(without_extension, 41);
 
-    #[test]
-    fn parse_with_hint_respects_explicit_extension() {
-        let path = Path::new("config.json");
-        let err = parse_authored_config_with_hint(
+        let json_hint = parse_authored_config_with_hint(
             "answer = 41",
-            Some(path),
+            Some(Path::new("config.json")),
             |_| Err("json"),
             |_| Ok::<_, &'static str>(41_u64),
         )
         .expect_err("json hint should disable fallback");
-        assert_eq!(err, "json");
+        assert_eq!(json_hint, "json");
     }
 
     #[test]
-    fn rest_string_config_defaults_to_toml() {
-        let value = serde_json::json!("name = \"demo\"\ncount = 2\n");
-        let authored = AuthoredConfig::from_json_transport_value(None, &value).expect("authored");
+    fn rest_config_values_default_to_transport_appropriate_formats() {
+        for (value, expected) in [
+            (
+                serde_json::json!("name = \"demo\"\ncount = 2\n"),
+                AuthoredConfigFormat::Toml,
+            ),
+            (
+                serde_json::json!({"name":"demo","count":2}),
+                AuthoredConfigFormat::Json,
+            ),
+        ] {
+            let authored =
+                AuthoredConfig::from_json_transport_value(None, &value).expect("authored");
 
-        assert_eq!(authored.format(), AuthoredConfigFormat::Toml);
-    }
-
-    #[test]
-    fn rest_object_config_defaults_to_json() {
-        let value = serde_json::json!({"name":"demo","count":2});
-        let authored = AuthoredConfig::from_json_transport_value(None, &value).expect("authored");
-
-        assert_eq!(authored.format(), AuthoredConfigFormat::Json);
+            assert_eq!(authored.format(), expected);
+        }
     }
 
     #[test]
@@ -541,45 +528,43 @@ mod tests {
     }
 
     #[test]
-    fn normalize_rejects_duplicate_json_keys() {
-        let authored = AuthoredConfig::new(
-            AuthoredConfigFormat::Json,
-            r#"{"name":"a","name":"b","count":1}"#,
-        )
-        .expect("authored");
+    fn normalize_rejects_invalid_submissions_with_stable_error_codes() {
+        enum Case {
+            DuplicateJsonKeys,
+            UnknownFields,
+            Float,
+        }
 
-        let err = authored
-            .normalize::<SimpleConfig>()
-            .expect_err("duplicate key should reject");
+        for (case, expected_code) in [
+            (Case::DuplicateJsonKeys, "AuthoredConfigInvalidJson"),
+            (Case::UnknownFields, "AuthoredConfigUnknownField"),
+            (Case::Float, "AuthoredConfigFloatUnsupported"),
+        ] {
+            let err = match case {
+                Case::DuplicateJsonKeys => AuthoredConfig::new(
+                    AuthoredConfigFormat::Json,
+                    r#"{"name":"a","name":"b","count":1}"#,
+                )
+                .expect("authored")
+                .normalize::<SimpleConfig>()
+                .expect_err("duplicate key should reject"),
+                Case::UnknownFields => AuthoredConfig::new(
+                    AuthoredConfigFormat::Json,
+                    r#"{"name":"demo","count":1,"extra":true}"#,
+                )
+                .expect("authored")
+                .normalize::<SimpleConfig>()
+                .expect_err("unknown field should reject"),
+                Case::Float => {
+                    AuthoredConfig::new(AuthoredConfigFormat::Json, r#"{"amount":1.25}"#)
+                        .expect("authored")
+                        .normalize::<serde_json::Value>()
+                        .expect_err("float should reject")
+                }
+            };
 
-        assert_eq!(err.code(), "AuthoredConfigInvalidJson");
-    }
-
-    #[test]
-    fn normalize_rejects_unknown_fields() {
-        let authored = AuthoredConfig::new(
-            AuthoredConfigFormat::Json,
-            r#"{"name":"demo","count":1,"extra":true}"#,
-        )
-        .expect("authored");
-
-        let err = authored
-            .normalize::<SimpleConfig>()
-            .expect_err("unknown field should reject");
-
-        assert_eq!(err.code(), "AuthoredConfigUnknownField");
-    }
-
-    #[test]
-    fn normalize_rejects_floats() {
-        let authored = AuthoredConfig::new(AuthoredConfigFormat::Json, r#"{"amount":1.25}"#)
-            .expect("authored");
-
-        let err = authored
-            .normalize::<serde_json::Value>()
-            .expect_err("float should reject");
-
-        assert_eq!(err.code(), "AuthoredConfigFloatUnsupported");
+            assert_eq!(err.code(), expected_code);
+        }
     }
 
     #[test]

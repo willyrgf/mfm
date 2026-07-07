@@ -35,7 +35,7 @@ fn decode_canonical_portfolio_config() {
 }
 
 #[test]
-fn validated_network_configs_reject_duplicate_network_ids() {
+fn validated_config_wrappers_roundtrip_and_reject_duplicate_ids() {
     let network = NetworkConfig::new(
         "ethereum-mainnet".to_owned(),
         NetworkFamilyConfig::Evm,
@@ -54,10 +54,7 @@ fn validated_network_configs_reject_duplicate_network_ids() {
         Err(PortfolioConfigError::DuplicateNetworkId { network_id })
             if network_id == "ethereum-mainnet"
     ));
-}
 
-#[test]
-fn validated_wallet_and_symbol_configs_reject_duplicate_ids() {
     let cfg = decode_portfolio_config(&canonical_config_json()).expect("config should decode");
     let wallet = cfg.wallets[0].clone();
     let symbol = cfg.symbol_configs[0].clone();
@@ -182,67 +179,67 @@ fn validated_portfolio_bundle_indexes_normalized_authority() {
 fn invalid_ref_detection_catches_cross_links() {
     let mut wallet_network = canonical_config_json();
     wallet_network["wallets"][0]["network_id"] = json!("unknown-network");
-    assert_eq!(
-        decode_portfolio_config(&wallet_network).unwrap_err(),
+    assert_decode_error(
+        &wallet_network,
         PortfolioConfigError::UnknownWalletNetwork {
             wallet_id: "wallet_treasury_eth".to_string(),
             network_id: "unknown-network".to_string(),
-        }
+        },
     );
 
     let mut wallet_symbol = canonical_config_json();
     wallet_symbol["wallets"][0]["symbol_ids"][0] = json!("unknown-symbol");
-    assert_eq!(
-        decode_portfolio_config(&wallet_symbol).unwrap_err(),
+    assert_decode_error(
+        &wallet_symbol,
         PortfolioConfigError::UnknownWalletSymbol {
             wallet_id: "wallet_treasury_eth".to_string(),
             symbol_id: "unknown-symbol".to_string(),
-        }
+        },
     );
 
     let mut symbol_network = canonical_config_json();
     symbol_network["symbol_configs"][0]["network_id"] = json!("unknown-network");
-    assert_eq!(
-        decode_portfolio_config(&symbol_network).unwrap_err(),
+    assert_decode_error(
+        &symbol_network,
         PortfolioConfigError::UnknownSymbolNetwork {
             symbol_id: "eth.native.ethereum-mainnet".to_string(),
             network_id: "unknown-network".to_string(),
-        }
+        },
     );
 
     let mut priced_symbol = canonical_config_json();
     priced_symbol["symbol_configs"][1]["valuation"]["quotes"][0]["priced_symbol_id"] =
         json!("unknown-symbol");
-    assert_eq!(
-        decode_portfolio_config(&priced_symbol).unwrap_err(),
+    assert_decode_error(
+        &priced_symbol,
         PortfolioConfigError::UnknownPricedSymbol {
             symbol_id: "usdc.wallet.ethereum-mainnet".to_string(),
             quote: QuoteCode::Usd,
             priced_symbol_id: "unknown-symbol".to_string(),
-        }
+        },
     );
 
     let mut underlying_symbol = canonical_config_json();
     underlying_symbol["symbol_configs"][1]["underlying_symbol_id"] = json!("unknown-symbol");
-    assert_eq!(
-        decode_portfolio_config(&underlying_symbol).unwrap_err(),
+    assert_decode_error(
+        &underlying_symbol,
         PortfolioConfigError::UnknownUnderlyingSymbol {
             symbol_id: "usdc.wallet.ethereum-mainnet".to_string(),
             underlying_symbol_id: "unknown-symbol".to_string(),
-        }
+        },
     );
 
     let mut source_network = canonical_config_json();
     source_network["symbol_configs"][0]["valuation"]["quotes"][0]["reader"]["source"]
         ["network_id"] = json!("unknown-network");
-    assert_eq!(
-        decode_portfolio_config(&source_network).unwrap_err(),
+    assert_decode_error(
+        &source_network,
         PortfolioConfigError::UnknownPriceSourceNetwork {
             symbol_id: "eth.native.ethereum-mainnet".to_string(),
             quote: QuoteCode::Usd,
             network_id: "unknown-network".to_string(),
             reader_kind: "direct_price",
-        }
+        },
     );
 }
 
@@ -293,6 +290,10 @@ fn assert_decode_rejects_public_metadata(value: &Value, expected_key: &str) {
     );
 }
 
+fn assert_decode_error(value: &Value, expected: PortfolioConfigError) {
+    assert_eq!(decode_portfolio_config(value).unwrap_err(), expected);
+}
+
 #[test]
 fn validation_rejects_non_normalized_addresses() {
     let mut wallet_address = canonical_config_json();
@@ -314,11 +315,11 @@ fn validation_rejects_non_normalized_addresses() {
 fn validation_rejects_quote_route_mismatches() {
     let mut duplicate_quote_codes = canonical_config_json();
     duplicate_quote_codes["quote_codes"] = json!(["USD", "USD"]);
-    assert_eq!(
-        decode_portfolio_config(&duplicate_quote_codes).unwrap_err(),
+    assert_decode_error(
+        &duplicate_quote_codes,
         PortfolioConfigError::DuplicateQuoteCode {
             quote: QuoteCode::Usd,
-        }
+        },
     );
 
     let mut missing_quote = canonical_config_json();
@@ -337,29 +338,29 @@ fn validation_rejects_quote_route_mismatches() {
             }
         }
     ]);
-    assert_eq!(
-        decode_portfolio_config(&missing_quote).unwrap_err(),
+    assert_decode_error(
+        &missing_quote,
         PortfolioConfigError::MissingValuationQuote {
             symbol_id: "eth.native.ethereum-mainnet".to_string(),
             quote: QuoteCode::Btc,
-        }
+        },
     );
 
     let mut unexpected_quote = canonical_config_json();
     unexpected_quote["quote_codes"] = json!(["USD"]);
-    assert_eq!(
-        decode_portfolio_config(&unexpected_quote).unwrap_err(),
+    assert_decode_error(
+        &unexpected_quote,
         PortfolioConfigError::UnexpectedValuationQuote {
             symbol_id: "eth.native.ethereum-mainnet".to_string(),
             quote: QuoteCode::Btc,
-        }
+        },
     );
 
     let mut derived_mismatch = canonical_config_json();
     derived_mismatch["symbol_configs"][1]["valuation"]["quotes"][1]["reader"]["denominator"]
         ["quote"] = json!("BTC");
-    assert_eq!(
-        decode_portfolio_config(&derived_mismatch).unwrap_err(),
+    assert_decode_error(
+        &derived_mismatch,
         PortfolioConfigError::InvalidSymbolConfig {
             symbol_id: "usdc.wallet.ethereum-mainnet".to_string(),
             source: Box::new(SymbolConfigError::DerivedPriceQuoteMismatch {
@@ -367,7 +368,7 @@ fn validation_rejects_quote_route_mismatches() {
                 numerator_quote: QuoteCode::Usd,
                 denominator_quote: QuoteCode::Btc,
             }),
-        }
+        },
     );
 }
 
