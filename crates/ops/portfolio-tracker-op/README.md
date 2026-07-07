@@ -9,7 +9,6 @@ This op is a thin typed planner for the canonical multi-network portfolio snapsh
 typed state contracts through handles, domain-keyed fanout/fanin, non-empty observation batches,
 and typed public outputs:
 
-- `PrepareSources`
 - `ResolveSubjects`
 - `PinViews`
 - `ResolveValuations`

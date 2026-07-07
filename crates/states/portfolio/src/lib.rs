@@ -31,10 +31,10 @@ use mfm_ids::{
 use mfm_portfolio_config::PortfolioSnapshotCanonicalConfig;
 use mfm_portfolio_model::aave::AAVE_V3_PROTOCOL_ID;
 use mfm_portfolio_model::portfolio::{
-    ExecutionAnchor, NetworkConfig, NetworkFamilyConfig, NetworkPin, PortfolioConfig,
-    PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot, PortfolioSnapshotError,
-    ValidatedNetworkConfigs, ValidatedPortfolioBundle, ValidatedPortfolioConfig,
-    ValidatedSymbolConfigs, ValidatedWalletConfigs, WalletReport, WalletSnapshot,
+    ExecutionAnchor, NetworkConfig, NetworkPin, PortfolioConfig, PortfolioQuoteTotal,
+    PortfolioReport, PortfolioSnapshot, PortfolioSnapshotError, ValidatedNetworkConfigs,
+    ValidatedPortfolioBundle, ValidatedPortfolioConfig, ValidatedSymbolConfigs,
+    ValidatedWalletConfigs, WalletReport, WalletSnapshot,
 };
 use mfm_portfolio_model::symbol::{
     validate_symbol_config, validate_valuation_source_registry, BalanceReaderConfig, Observation,
@@ -321,31 +321,6 @@ impl From<PortfolioSnapshotCanonicalConfig> for PortfolioWorkflowConfig {
     }
 }
 
-/// Config for source preparation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
-#[mfm(
-    schema = "mfm.portfolio.config.prepare_sources",
-    validate = "validate_prepare_sources_config"
-)]
-pub struct PrepareSourcesConfig {
-    /// Networks whose source pools are prepared.
-    networks: Vec<NetworkConfig>,
-}
-
-impl PrepareSourcesConfig {
-    /// Creates validated source-preparation config.
-    pub fn new(networks: Vec<NetworkConfig>) -> Result<Self, ConfigError> {
-        let config = Self { networks };
-        validate_prepare_sources_config(&config).map_err(ConfigError::new)?;
-        Ok(config)
-    }
-
-    /// Returns the networks whose source pools are prepared.
-    pub fn networks(&self) -> &[NetworkConfig] {
-        &self.networks
-    }
-}
-
 /// Config for subject resolution.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
 #[mfm(
@@ -602,12 +577,6 @@ fn validate_portfolio_workflow_config(config: &PortfolioWorkflowConfig) -> Resul
     .map_err(|error| error.to_string())
 }
 
-fn validate_prepare_sources_config(config: &PrepareSourcesConfig) -> Result<(), String> {
-    ValidatedNetworkConfigs::new(config.networks.clone())
-        .map(|_| ())
-        .map_err(|error| error.to_string())
-}
-
 fn validate_resolve_subjects_config(config: &ResolveSubjectsConfig) -> Result<(), String> {
     ValidatedWalletConfigs::new(config.wallets.clone())
         .map(|_| ())
@@ -632,34 +601,6 @@ fn validate_assemble_snapshot_config(config: &AssembleSnapshotConfig) -> Result<
     ValidatedPortfolioConfig::new(config.portfolio.clone())
         .map(|_| ())
         .map_err(|error| error.to_string())
-}
-
-/// Prepared external source summary for one network.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "prepared-source",
-    schema = "mfm.portfolio.prepared_source"
-)]
-pub struct PreparedSource {
-    /// Stable network identifier.
-    pub network_id: String,
-    /// Stable control scope used for reads.
-    pub control_scope: String,
-    /// Network family.
-    pub family: NetworkFamilyConfig,
-}
-
-/// Prepared source collection.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "prepared-sources",
-    schema = "mfm.portfolio.prepared_sources"
-)]
-pub struct PreparedSources {
-    /// Prepared networks in canonical order.
-    pub sources: Vec<PreparedSource>,
 }
 
 /// Resolved wallet subject.
@@ -818,30 +759,6 @@ pub struct ProjectReportInput {
     pub snapshot: PortfolioSnapshot,
 }
 
-/// Fact request recorded by source-preparation states.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "source-preparation-request",
-    schema = "mfm.portfolio.fact.source_preparation_request"
-)]
-pub struct SourcePreparationRequest {
-    /// Networks requested by the state.
-    pub network_ids: Vec<String>,
-}
-
-/// Fact response recorded by source-preparation states.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "source-preparation-response",
-    schema = "mfm.portfolio.fact.source_preparation_response"
-)]
-pub struct SourcePreparationResponse {
-    /// Prepared source payload.
-    pub prepared: PreparedSources,
-}
-
 /// Fact request recorded by view-pinning states.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[mfm(
@@ -918,55 +835,6 @@ pub struct PortfolioOperationOutputs<'program, 'scope> {
     pub report: mfm_program::Handle<'program, 'scope, PortfolioReport>,
 }
 
-/// State that prepares external source metadata for configured networks.
-pub struct PrepareSourcesState {
-    config: PrepareSourcesConfig,
-}
-
-impl StateSpec for PrepareSourcesState {
-    type Config = PrepareSourcesConfig;
-    type Context = NoContext;
-    type Input = ();
-    type Output = PreparedSources;
-    type Effect = ReadExternal;
-    type Caps = (PortfolioReadCapability,);
-
-    fn kind() -> mfm_program::Result<StateKind> {
-        state_kind("prepare_sources")
-    }
-
-    fn version() -> mfm_program::Result<StateVersion> {
-        state_version("prepare_sources")
-    }
-
-    fn name() -> &'static str {
-        "mfm.portfolio.prepare_sources"
-    }
-
-    fn adapter_bindings() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
-        adapter_binding()
-    }
-
-    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
-        Ok(Self {
-            config: config.into_inner(),
-        })
-    }
-}
-
-impl ReadState for PrepareSourcesState {
-    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
-
-    fn run<'a>(
-        &'a self,
-        _input: Self::Input,
-        _caps: &'a Self::Caps,
-        _context: &'a mfm_program::CertifiedContext<Self::Context>,
-    ) -> Self::RunFuture<'a> {
-        future::ready(Ok(prepare_sources_from_config(&self.config)))
-    }
-}
-
 /// State that resolves configured wallet subjects.
 pub struct ResolveSubjectsState {
     config: ResolveSubjectsConfig,
@@ -975,7 +843,7 @@ pub struct ResolveSubjectsState {
 impl StateSpec for ResolveSubjectsState {
     type Config = ResolveSubjectsConfig;
     type Context = NoContext;
-    type Input = PreparedSources;
+    type Input = ();
     type Output = ResolvedSubjects;
     type Effect = Pure;
     type Caps = NoCaps;
@@ -1015,7 +883,7 @@ pub struct PinViewsState;
 impl StateSpec for PinViewsState {
     type Config = PinViewsConfig;
     type Context = NoContext;
-    type Input = PreparedSources;
+    type Input = ();
     type Output = PinnedViews;
     type Effect = ReadExternal;
     type Caps = (PortfolioReadCapability,);
@@ -1265,21 +1133,6 @@ impl PureState for ProjectReportState {
     ) -> StateResult<Self::Output> {
         project_report_from_snapshot(input.snapshot, self.config.report_version())
     }
-}
-
-/// Builds prepared source output from typed network config.
-pub fn prepare_sources_from_config(config: &PrepareSourcesConfig) -> PreparedSources {
-    let mut sources = config
-        .networks
-        .iter()
-        .map(|network| PreparedSource {
-            network_id: network.network_id().to_string(),
-            control_scope: network.control_scope().to_string(),
-            family: network.family(),
-        })
-        .collect::<Vec<_>>();
-    sources.sort_by(|left, right| left.network_id.cmp(&right.network_id));
-    PreparedSources { sources }
 }
 
 /// Resolves configured wallets into typed subjects.

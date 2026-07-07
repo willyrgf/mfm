@@ -9,7 +9,6 @@ pure/read state logic, and deterministic read-intent classification used by
 
 State contracts:
 
-- `PrepareSourcesState`
 - `ResolveSubjectsState`
 - `PinViewsState`
 - `ResolveValuationsState`

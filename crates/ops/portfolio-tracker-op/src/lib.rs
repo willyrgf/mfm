@@ -25,8 +25,7 @@ use mfm_portfolio_config::{
     PortfolioSnapshotConfigError,
 };
 use mfm_portfolio_model::domain_key::{
-    ObservationBatchDomainKey, ReportDomainKey, SourceDomainKey, SubjectDomainKey,
-    ValuationDomainKey, ViewDomainKey,
+    ObservationBatchDomainKey, ReportDomainKey, SubjectDomainKey, ValuationDomainKey, ViewDomainKey,
 };
 use mfm_portfolio_model::portfolio::{NetworkConfig, PortfolioConfig};
 use mfm_portfolio_model::symbol::SymbolConfig;
@@ -42,9 +41,9 @@ pub use mfm_state_portfolio::{
     AssembleSnapshotState, MergeObservationsConfig, MergeObservationsState, ObservationBatch,
     ObserveBatchConfig, ObserveBatchInput, ObserveBatchInputHandles, ObserveBatchState,
     PinViewsConfig, PinViewsState, PortfolioOperationOutputs, PortfolioPublicOutputs,
-    PortfolioWorkflowConfig, PrepareSourcesConfig, PrepareSourcesState, ProjectReportConfig,
-    ProjectReportInput, ProjectReportInputHandles, ProjectReportState, ResolveSubjectsConfig,
-    ResolveSubjectsState, ResolveValuationsConfig, ResolveValuationsState,
+    PortfolioWorkflowConfig, ProjectReportConfig, ProjectReportInput, ProjectReportInputHandles,
+    ProjectReportState, ResolveSubjectsConfig, ResolveSubjectsState, ResolveValuationsConfig,
+    ResolveValuationsState,
 };
 
 const PORTFOLIO_OPERATION_KIND_NAME: &str = "tracker_workflow";
@@ -101,8 +100,6 @@ impl Operation for PortfolioTrackerWorkflowOperation {
         let valuation_source_registry = config.valuation_source_registry().clone().normalized();
         let networks_by_id = networks_by_id(&portfolio.networks)?;
 
-        let source_key = SourceDomainKey::new("portfolio_sources")
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
         let subject_key = SubjectDomainKey::new("portfolio_subjects")
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
         let view_key = ViewDomainKey::new("portfolio_views")
@@ -112,20 +109,12 @@ impl Operation for PortfolioTrackerWorkflowOperation {
         let report_key = ReportDomainKey::new("portfolio_report")
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
 
-        let prepared = builder.state_with_domain_keys::<PrepareSourcesState, _, _>(
-            StateKey::new("prepare_sources")?,
-            NoContext,
-            PrepareSourcesConfig::new(portfolio.networks.clone())
-                .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
-            (),
-            vec![source_key],
-        )?;
         let subjects = builder.state_with_domain_keys::<ResolveSubjectsState, _, _>(
             StateKey::new("resolve_subjects")?,
             NoContext,
             ResolveSubjectsConfig::new(portfolio.wallets.clone())
                 .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
-            prepared.clone(),
+            (),
             vec![subject_key],
         )?;
         let views = builder.state_with_domain_keys::<PinViewsState, _, _>(
@@ -133,7 +122,7 @@ impl Operation for PortfolioTrackerWorkflowOperation {
             NoContext,
             PinViewsConfig::new(portfolio.networks.clone())
                 .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
-            prepared,
+            (),
             vec![view_key],
         )?;
         let valuations = builder.state_with_domain_keys::<ResolveValuationsState, _, _>(
@@ -220,7 +209,6 @@ mfm_certify::define_program_descriptor_registry! {
     operation_registry: pub portfolio_operation_registry,
     certification: pub register_portfolio_certification_descriptors,
     states: [
-        PrepareSourcesState,
         ResolveSubjectsState,
         PinViewsState,
         ResolveValuationsState,
@@ -357,15 +345,15 @@ mod tests {
     #[test]
     fn portfolio_program_lowers_to_typed_state_contracts() {
         let draft = portfolio_program_draft(sample_workflow_config()).expect("draft");
-        assert_eq!(draft.state_nodes().len(), 8);
+        assert_eq!(draft.state_nodes().len(), 7);
         assert_eq!(
             draft
                 .state_nodes()
                 .iter()
                 .filter(|node| !node.output_domain_keys.is_empty())
                 .count(),
-            6,
-            "source, subject, view, valuation, observation batch, and report outputs need domain-key lineage"
+            5,
+            "subject, view, valuation, observation batch, and report outputs need domain-key lineage"
         );
         let state_keys = draft
             .state_nodes()
@@ -375,7 +363,6 @@ mod tests {
         assert_eq!(
             state_keys,
             [
-                "prepare_sources",
                 "resolve_subjects",
                 "pin_views",
                 "resolve_valuations",
@@ -396,7 +383,6 @@ mod tests {
                 .map(|node| node.stable_key.as_str())
                 .collect::<Vec<_>>(),
             [
-                "prepare_sources",
                 "resolve_subjects",
                 "pin_views",
                 "resolve_valuations",
@@ -427,7 +413,7 @@ mod tests {
                 .iter()
                 .filter(|lineage| !lineage.domain_keys.is_empty())
                 .count(),
-            6,
+            5,
             "certified portfolio spec must retain value-lineage domain keys"
         );
         certified.envelope().verify_hash().expect("hash verifies");

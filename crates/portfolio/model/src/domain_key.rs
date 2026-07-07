@@ -44,13 +44,6 @@ macro_rules! stable_domain_key_type {
 }
 
 stable_domain_key_type!(
-    SourceDomainKey,
-    source_key,
-    "source-domain-key",
-    "mfm.portfolio.domain_key.source",
-    "Stable domain key for a portfolio source preparation instance."
-);
-stable_domain_key_type!(
     SubjectDomainKey,
     subject_key,
     "subject-domain-key",
@@ -86,7 +79,6 @@ stable_domain_key_type!(
     "Stable domain key for a portfolio report instance."
 );
 
-impl mfm_program::StableDomainKey for SourceDomainKey {}
 impl mfm_program::StableDomainKey for SubjectDomainKey {}
 impl mfm_program::StableDomainKey for ViewDomainKey {}
 impl mfm_program::StableDomainKey for ValuationDomainKey {}

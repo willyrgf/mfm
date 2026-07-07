@@ -36,11 +36,10 @@ use mfm_state_portfolio::{
     observation_batch_missing_pinned_view, observe_batch_network_read_intent,
     observe_batch_read_intent, pin_view_read_intents, pinned_anchor_for, pinned_view_for_network,
     pinned_views_from_views, portfolio_adapter_kind, portfolio_adapter_version,
-    prepare_sources_from_config, resolve_subjects_from_config, resolve_valuations_from_config,
-    AssembleSnapshotConfig, AssembleSnapshotInput, AssembleSnapshotState, MergeObservationsConfig,
-    MergeObservationsState, ObservationBatch, ObserveBatchConfig, ObserveBatchInput,
-    ObserveBatchState, PinViewsConfig, PinViewsState, PortfolioBalanceReadIntent,
-    PortfolioNetworkReadIntent, PortfolioReadError, PrepareSourcesConfig, PrepareSourcesState,
+    resolve_subjects_from_config, resolve_valuations_from_config, AssembleSnapshotConfig,
+    AssembleSnapshotInput, AssembleSnapshotState, MergeObservationsConfig, MergeObservationsState,
+    ObservationBatch, ObserveBatchConfig, ObserveBatchInput, ObserveBatchState, PinViewsConfig,
+    PinViewsState, PortfolioBalanceReadIntent, PortfolioNetworkReadIntent, PortfolioReadError,
     ProjectReportConfig, ProjectReportInput, ProjectReportState, RawBalanceObservation,
     ResolveSubjectsConfig, ResolveSubjectsState, ResolveValuationsConfig, ResolveValuationsState,
 };
@@ -187,12 +186,6 @@ pub fn register_portfolio_runners(
         portfolio_adapter_version()?,
         &adapter_factory,
     )?;
-    registrations.register_state_descriptor_with_factory::<PrepareSourcesState>(
-        &read_factory,
-        Arc::new(PrepareSourcesRunner {
-            artifacts: artifacts.clone(),
-        }),
-    )?;
     registrations.register_state_descriptor_with_factory::<ResolveSubjectsState>(
         &pure_factory,
         Arc::new(ResolveSubjectsRunner {
@@ -242,22 +235,6 @@ pub fn register_portfolio_runners(
     Ok(())
 }
 
-struct PrepareSourcesRunner {
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-}
-
-impl ErasedNodeRunner for PrepareSourcesRunner {
-    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        Box::pin(async move {
-            let config =
-                load_runner_config::<PrepareSourcesConfig>(&ctx, self.artifacts.as_ref()).await?;
-            let config = config.as_ref();
-            let prepared = prepare_sources_from_config(config);
-            state_output(ctx, &prepared)
-        })
-    }
-}
-
 struct ResolveSubjectsRunner {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 }
@@ -268,11 +245,6 @@ impl ErasedNodeRunner for ResolveSubjectsRunner {
             let config =
                 load_runner_config::<ResolveSubjectsConfig>(&ctx, self.artifacts.as_ref()).await?;
             let config = config.as_ref();
-            let _prepared = load_materialized_input_value::<mfm_state_portfolio::PreparedSources>(
-                ctx.inputs(),
-                self.artifacts.as_ref(),
-            )
-            .await?;
             let output = resolve_subjects_from_config(config);
             state_output(ctx, &output)
         })
@@ -300,11 +272,6 @@ impl ErasedNodeRunner for PinViewsRunner {
             let config =
                 load_runner_config::<PinViewsConfig>(&ctx, self.artifacts.as_ref()).await?;
             let config = config.as_ref();
-            let _prepared = load_materialized_input_value::<mfm_state_portfolio::PreparedSources>(
-                ctx.inputs(),
-                self.artifacts.as_ref(),
-            )
-            .await?;
             let backend = CapabilityPortfolioBackend::new(Arc::clone(&self.evm), self.btc.clone());
             let mut views = Vec::new();
             for network in config.networks() {

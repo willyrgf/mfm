@@ -4,6 +4,7 @@ use mfm_portfolio_model::aave::{
     AAVE_V3_PROTOCOL_ID, AAVE_V3_READER_RESERVE_POSITION,
 };
 use mfm_portfolio_model::metadata::PublicMetadata;
+use mfm_portfolio_model::portfolio::NetworkFamilyConfig;
 use mfm_portfolio_model::symbol::{SymbolKind, SymbolValuationConfig};
 use mfm_portfolio_model::wallet::WalletSubject;
 use mfm_values::MfmConfig as _;
