@@ -166,6 +166,73 @@ transport architecture leaking upward.
 - Do not persist runtime source refs, URLs, credentials, provider bodies, or middleware state as
   semantic authority.
 
+## Breaking Cleanup And Deletion Policy
+
+This RFC is intentionally breaking. MFM is pre-production, and correctness, fewer concepts, fewer
+code paths, fewer public types, and fewer future edit sites take priority over compatibility.
+
+Implementation must delete the old paths rather than preserve them behind compatibility layers.
+
+Do not add or keep:
+
+- deprecated constructors
+- compatibility aliases
+- feature flags for old request shapes
+- fallback branches that accept both source-bound and operation-only requests
+- hidden shim helpers that rebuild old request source fields
+- `#[allow(dead_code)]` just to keep removed APIs around
+- tests whose only purpose is proving the old path still works
+- docs that describe the old source-bound request model as supported
+
+If removed code is needed later, recover it from git history. Do not keep old code in the live
+tree just because it may be useful.
+
+Expected deletions and LOC cleanup include:
+
+- EVM capability request source fields and accessors:
+  - remove per-request `network_id()` / `expected_chain_id()` accessors where they exist only for
+    transport source binding
+  - remove constructors that take `(network_id, expected_chain_id, ...)`
+  - replace private `EvmRequestSource` with capability-owned `EvmNetworkBinding`
+- BTC capability request source fields and accessors:
+  - remove per-request `network_id()` / `source_identity()` / `bitcoin_network()` accessors where
+    they exist only for transport source binding
+  - remove constructors that take `(network_id, source_identity, bitcoin_network, ...)`
+  - replace private `BtcRequestSource` with capability-owned `BtcSourceBinding`
+- Adapter-local generic source request helpers:
+  - remove EVM contract adapter request-authority helpers such as `EvmRequestAuthority`
+  - remove portfolio BTC request helpers whose only job is attaching source binding to every
+    request
+  - remove adapter-side code that revalidates source evidence after successful provider calls
+- Raw router/client provider implementations:
+  - remove capability trait impls from `EvmJsonRpcClient`
+  - split `BtcJsonRpcChainHeadProvider` into router/client plus bound provider, deleting the old
+    combined provider path
+  - remove public route/source validation methods whose signature preserves old source-only or
+    request-owned authority shapes
+- App and adapter wiring:
+  - remove wiring that passes one unbound live provider as a capability backend
+  - remove `PortfolioRuntimeValidator`-style splits if the only remaining role is no-IO route
+    validation separate from bound-provider construction
+  - remove app wrappers that reload runtime config per provider call instead of binding providers
+    from certified source intent
+- Replay helpers:
+  - remove public guard-style or request-style replay helper APIs that make callers validate source
+    evidence manually
+  - keep direct replay verifiers only when they are the smaller path and validate against certified
+    binding without live runtime config
+- Tests and fixtures:
+  - delete tests that assert request source fields, old constructors, old helper APIs, or raw
+    router capability impls
+  - replace them with tests for operation-only requests, bound-provider call paths, sealed pipeline
+    enforcement, and fail-closed source mismatch behavior
+- Docs:
+  - remove runbook guidance that says adapters construct source-bound requests for every call
+  - replace old terms such as request source authority with provider binding plus operation request
+
+The implementation is incomplete if both the old request-owned source-binding path and the new
+bound-provider path remain callable.
+
 ## Proposed Standard
 
 Every live transport crate should expose two public layers:
@@ -693,17 +760,20 @@ erasing protocol semantics.
 5. Make capability-provider operation IO helpers require private `Verified*Call` values.
 6. Move capability trait impls from raw routers/clients to bound providers.
 7. Make operation requests source-free.
-8. Update adapter runtime factories to return bound providers.
-9. Remove adapter-local generic source request helpers.
-10. Update recorded/replay providers or direct replay verifiers to bind from certified semantic
+8. Delete old source-bearing constructors, source accessors, and request-source helper types.
+9. Update adapter runtime factories to return bound providers.
+10. Remove adapter-local generic source request helpers.
+11. Remove raw router/client capability impls and old unbound-provider app wiring.
+12. Update recorded/replay providers or direct replay verifiers to bind from certified semantic
     binding and validate recorded evidence internally.
-11. Update docs:
+13. Delete old-path tests and replace them with bound-provider and operation-only request tests.
+14. Update docs:
     - `docs/architecture.md`
     - `docs/design.md`
     - `docs/evm-rpc-routing.md`
     - `docs/btc-rpc-routing.md`
     - `docs/persisted-public-surfaces.md`
-12. Add tests proving:
+15. Add tests proving:
     - raw routers do not implement capability provider traits
     - mandatory checks cannot be skipped by adapters or app assembly
     - capability-provider operation IO helpers cannot be called without private verified tokens
@@ -711,11 +781,14 @@ erasing protocol semantics.
     - call-finish checks reject mismatched response identity
     - live initialization checks do not replace per-call source checks
     - adapters no longer construct source-bearing operation requests
+    - old source-bearing constructors and raw router capability impls are gone
 
 ## Acceptance Criteria
 
 - No live raw transport router implements capability provider traits.
 - No operation request contains source binding fields.
+- No public operation request constructor accepts source binding fields.
+- No request accessor exposes source binding fields just to support live transport source binding.
 - No adapter-local generic transport request binding helper exists.
 - Mandatory transport checks are owned by the bound provider and cannot be selected or skipped by
   adapters.
@@ -732,6 +805,14 @@ erasing protocol semantics.
 - Replay providers or direct replay verifiers validate recorded evidence internally and do not
   consult runtime config.
 - Exact scans for public guard-style APIs remain empty.
+- Exact scans for old compatibility/shim surfaces remain empty:
+  - deprecated old constructors
+  - `EvmRequestAuthority`
+  - old request-source helpers
+  - raw router/client capability impls
+  - `inner`, `unchecked`, `skip_validation`, or provider decorator APIs
+- The implementation removes old code instead of keeping compatibility paths; the old and new
+  source-binding designs must not coexist as callable production paths.
 
 ## Open Questions
 
