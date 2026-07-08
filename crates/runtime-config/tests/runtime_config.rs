@@ -105,6 +105,20 @@ fn btc_jsonrpc_runtime_config_parses_from_toml_and_json() {
 }
 
 #[test]
+fn old_btc_singleton_json_rpc_shape_is_rejected() {
+    let old_shape = r#"
+        [btc.json_rpc]
+        rpc_url = "http://127.0.0.1:8332"
+    "#;
+
+    let err = RuntimeConfig::from_str(old_shape, RuntimeConfigFormat::Toml)
+        .expect_err("old singleton btc json rpc config must be rejected");
+
+    assert_eq!(err.kind(), &RuntimeConfigErrorKind::UnknownField);
+    assert_eq!(err.location().to_string(), "btc");
+}
+
+#[test]
 fn dual_mainnet_runtime_example_resolves_from_env() {
     let _env = locked_env([
         ("MFM_ETHEREUM_MAINNET_RPC_URL", "http://127.0.0.1:8545"),
