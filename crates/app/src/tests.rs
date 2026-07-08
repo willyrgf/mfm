@@ -1461,6 +1461,65 @@ async fn btc_collector_launch_requires_runtime_config_before_admission() {
 }
 
 #[tokio::test]
+async fn launch_run_reaps_expired_execution_claim_and_retries_admission() {
+    let store = store::AsyncInMemoryRunStore::default();
+    let request = prepare_app_fact_launch(true).expect("prepared launch");
+    let runtime_spec =
+        CertifiedRuntimeSpec::new(request.certified_spec.clone()).expect("runtime spec");
+    let runners = app_fact_runner_registry(
+        &runtime_spec,
+        mfm_program::facts::FactVisibility::indexed_default(
+            mfm_program::facts::FactAudience::Platform,
+        ),
+    );
+    let services = make_run_services_with_certification_registry(
+        runners,
+        store.clone(),
+        store.clone(),
+        app_fact_certification_registry(true),
+    );
+    let execution_scope =
+        store::ExecutionClaimScope::from_run_identity_material(&request.identity_material);
+    let stale_token =
+        store::AdmissionToken::new("mfm.app.test.expired-launch-claim").expect("token");
+    match store
+        .acquire_execution_claim(&execution_scope, &request.run_id, stale_token)
+        .await
+        .expect("pre-acquire execution claim")
+    {
+        store::NowaitSkipAdmissionResult::Admitted(_) => {}
+        store::NowaitSkipAdmissionResult::Busy(_) => panic!("test execution claim already busy"),
+    }
+    assert!(
+        store
+            .expire_execution_claim_for_test(&request.run_id)
+            .expect("expire execution claim"),
+        "pre-acquired claim should exist"
+    );
+    let run_id = request.run_id.clone();
+
+    let launch = services
+        .launch_run(request)
+        .await
+        .expect("launch retries after expired claim");
+
+    assert!(matches!(launch, RunLaunchOutcome::Admitted { .. }));
+    assert!(store
+        .load_run_stream(&run_id)
+        .await
+        .expect("run stream")
+        .iter()
+        .any(|event| matches!(event.payload(), events::KernelEventPayload::RunAdmitted(_))));
+    assert!(matches!(
+        store
+            .execution_claim_status(&execution_scope)
+            .await
+            .expect("execution claim status"),
+        store::ExecutionClaimStatus::Unclaimed
+    ));
+}
+
+#[tokio::test]
 async fn postgres_store_authority_error_is_redacted_for_public_app_surface() {
     let database_url = "postgres://mfm_user:super-secret@127.0.0.1:notaport/mfm";
     let error = match connect_production_run_store(Some(database_url)).await {

@@ -2113,94 +2113,111 @@ where
         let execution_scope =
             store::ExecutionClaimScope::from_run_identity_material(&identity_material);
         let runtime_spec = CertifiedRuntimeSpec::new(req.certified_spec)?;
-        let stream = self
-            .store
-            .load_run_stream(&run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        if !stream.is_empty() {
-            return self
-                .attach_to_existing_run(&run_id, &identity_material)
-                .await;
-        }
-        let expected_next_seq = self
-            .store
-            .expected_next_seq(&run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        if expected_next_seq != store::StreamSeq::FIRST {
-            return self
-                .attach_to_existing_run(&run_id, &identity_material)
-                .await;
-        }
-        let launch = self.scheduler.prepare_run_launch(
-            &runtime_spec,
-            identity_material.clone(),
-            req.evidence,
-            expected_next_seq,
-        )?;
-        let execution_claim_token = new_execution_claim_token()?;
-        let execution_claim = store::PreparedExecutionClaim::new(
-            execution_scope.clone(),
-            run_id.clone(),
-            execution_claim_token.clone(),
-        );
-        match self
-            .scheduler
-            .start_run_with_execution_claim(&self.store, launch, execution_claim)
-            .await
-        {
-            Ok(store::CommitOutcome::Appended(_)) => {}
-            Ok(store::CommitOutcome::Idempotent(_)) => {
+
+        loop {
+            let stream = self
+                .store
+                .load_run_stream(&run_id)
+                .await
+                .map_err(async_app_store_error)?;
+            if !stream.is_empty() {
                 return self
                     .attach_to_existing_run(&run_id, &identity_material)
                     .await;
             }
-            Ok(store::CommitOutcome::ExecutionClaimBusy(busy)) => {
-                let Some(holder) = busy.holder else {
-                    return Err(AppError::backend(
-                        ErrorClass::Internal,
-                        "ExecutionClaimBusyWithoutHolder",
-                        "execution claim busy response did not include a holder",
-                    ));
-                };
-                return Ok(RunLaunchOutcome::AlreadyActive {
-                    active_run_id: holder.holder_run_id,
-                });
+            let expected_next_seq = self
+                .store
+                .expected_next_seq(&run_id)
+                .await
+                .map_err(async_app_store_error)?;
+            if expected_next_seq != store::StreamSeq::FIRST {
+                return self
+                    .attach_to_existing_run(&run_id, &identity_material)
+                    .await;
             }
-            Ok(store::CommitOutcome::AdmissionBlocked(_)) => {
-                return Err(AppError::backend(
-                    ErrorClass::Internal,
-                    "RunAdmissionBlockedUnexpectedly",
-                    "run admission was blocked by a resource lane",
-                ));
-            }
-            Err(error) => {
-                let stream = self
-                    .store
-                    .load_run_stream(&run_id)
-                    .await
-                    .map_err(async_app_store_error)?;
-                if !stream.is_empty() {
+            let launch = self.scheduler.prepare_run_launch(
+                &runtime_spec,
+                identity_material.clone(),
+                req.evidence.clone(),
+                expected_next_seq,
+            )?;
+            let execution_claim_token = new_execution_claim_token()?;
+            let execution_claim = store::PreparedExecutionClaim::new(
+                execution_scope.clone(),
+                run_id.clone(),
+                execution_claim_token.clone(),
+            );
+            match self
+                .scheduler
+                .start_run_with_execution_claim(&self.store, launch, execution_claim)
+                .await
+            {
+                Ok(store::CommitOutcome::Appended(_)) => {
+                    let status = self
+                        .drive_until_blocked_with_existing_claim(
+                            &runtime_spec,
+                            &run_id,
+                            &execution_scope,
+                            &execution_claim_token,
+                        )
+                        .await?;
+                    let run = self
+                        .run_response_from_verified_status(&run_id, status)
+                        .await?;
+                    return Ok(RunLaunchOutcome::Admitted { run });
+                }
+                Ok(store::CommitOutcome::Idempotent(_)) => {
                     return self
                         .attach_to_existing_run(&run_id, &identity_material)
                         .await;
                 }
-                return Err(error.into());
+                Ok(store::CommitOutcome::ExecutionClaimBusy(_)) => {
+                    match self
+                        .store
+                        .execution_claim_status(&execution_scope)
+                        .await
+                        .map_err(async_app_store_error)?
+                    {
+                        store::ExecutionClaimStatus::Live(lease) => {
+                            return Ok(RunLaunchOutcome::AlreadyActive {
+                                active_run_id: lease.holder_run_id,
+                            });
+                        }
+                        store::ExecutionClaimStatus::Expired(lease) => {
+                            self.store
+                                .reap_expired_execution_claim(
+                                    &execution_scope,
+                                    &lease.holder_run_id,
+                                    &lease.token,
+                                )
+                                .await
+                                .map_err(async_app_store_error)?;
+                        }
+                        store::ExecutionClaimStatus::Unclaimed => {}
+                    }
+                }
+                Ok(store::CommitOutcome::AdmissionBlocked(_)) => {
+                    return Err(AppError::backend(
+                        ErrorClass::Internal,
+                        "RunAdmissionBlockedUnexpectedly",
+                        "run admission was blocked by a resource lane",
+                    ));
+                }
+                Err(error) => {
+                    let stream = self
+                        .store
+                        .load_run_stream(&run_id)
+                        .await
+                        .map_err(async_app_store_error)?;
+                    if !stream.is_empty() {
+                        return self
+                            .attach_to_existing_run(&run_id, &identity_material)
+                            .await;
+                    }
+                    return Err(error.into());
+                }
             }
         }
-        let status = self
-            .drive_until_blocked_with_existing_claim(
-                &runtime_spec,
-                &run_id,
-                &execution_scope,
-                &execution_claim_token,
-            )
-            .await?;
-        let run = self
-            .run_response_from_verified_status(&run_id, status)
-            .await?;
-        Ok(RunLaunchOutcome::Admitted { run })
     }
 
     /// Starts a prepared entry-point run and renders public output if the launch completes.
