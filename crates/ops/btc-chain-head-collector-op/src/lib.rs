@@ -61,6 +61,8 @@ pub struct BtcChainHeadCollectorConfig {
     pub partition: String,
     /// Semantic Bitcoin network id.
     pub network: String,
+    /// Expected Bitcoin Core network tag (`main`, `test`, `signet`, or `regtest`).
+    pub bitcoin_network: String,
     /// Non-secret store scope for the internal checkpoint fact query.
     pub store_scope: String,
     /// Head kind requested by the observation state.
@@ -79,6 +81,7 @@ impl Default for BtcChainHeadCollectorConfig {
             semantic_source_identity: checkpoint_query.semantic_source_identity,
             partition: checkpoint_query.partition,
             network: checkpoint_query.network,
+            bitcoin_network: checkpoint_query.bitcoin_network,
             store_scope: checkpoint_query.store_scope,
             head_kind: "best".to_owned(),
             confirmation_depth: None,
@@ -95,6 +98,7 @@ impl BtcChainHeadCollectorConfig {
             semantic_source_identity: self.semantic_source_identity.clone(),
             partition: self.partition.clone(),
             network: self.network.clone(),
+            bitcoin_network: self.bitcoin_network.clone(),
             store_scope: self.store_scope.clone(),
         }
     }
@@ -103,6 +107,7 @@ impl BtcChainHeadCollectorConfig {
     pub fn observe_chain_head_config(&self) -> ObserveBtcChainHeadConfig {
         ObserveBtcChainHeadConfig {
             network: self.network.clone(),
+            bitcoin_network: self.bitcoin_network.clone(),
             semantic_source_identity: self.semantic_source_identity.clone(),
             head_kind: self.head_kind.clone(),
             confirmation_depth: self.confirmation_depth,

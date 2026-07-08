@@ -40,6 +40,7 @@ fn validated_config_wrappers_roundtrip_and_reject_duplicate_ids() {
         "ethereum-mainnet".to_owned(),
         NetworkFamilyConfig::Evm,
         Some(1),
+        None,
         "shared".to_owned(),
         BTreeMap::new(),
     )

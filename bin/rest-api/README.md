@@ -101,9 +101,9 @@ Query parameters for `GET /v1/facts/:kind` and `GET /v1/facts/:kind/latest`:
   group.
 - `order`: required descriptor ordering policy name.
 - `field`: required and repeatable returnable field id.
-- `subject`: repeatable subject predicate, such as `chain=bitcoin` or `subject.chain.eq=bitcoin`.
+- `subject`: repeatable subject predicate, such as `network=bitcoin-mainnet` or `subject.network.eq=bitcoin-mainnet`.
 - `result`: repeatable result predicate, such as `amount_sat.gt=1000`.
-- `where`: repeatable fully qualified predicate, such as `subject.chain.eq=bitcoin`.
+- `where`: repeatable fully qualified predicate, such as `subject.bitcoin_network.eq=main`.
 - `limit`: optional non-zero limit for `GET /v1/facts/:kind`; ignored by `/latest`, which always
   uses one result.
 

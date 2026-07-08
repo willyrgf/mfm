@@ -58,7 +58,7 @@ fn toml_and_json_parsing_have_matching_descriptors() {
 #[test]
 fn btc_jsonrpc_runtime_config_parses_from_toml_and_json() {
     let toml = r#"
-        [btc.json_rpc]
+        [btc.routes.public-bitcoin-core]
         rpc_url = "http://127.0.0.1:8332"
         rpc_user = "rpc-user"
         rpc_password = "rpc-pass"
@@ -66,10 +66,12 @@ fn btc_jsonrpc_runtime_config_parses_from_toml_and_json() {
     let json = r#"
         {
           "btc": {
-            "json_rpc": {
-              "rpc_url": "http://127.0.0.1:8332",
-              "rpc_user": "rpc-user",
-              "rpc_password": "rpc-pass"
+            "routes": {
+              "public-bitcoin-core": {
+                "rpc_url": "http://127.0.0.1:8332",
+                "rpc_user": "rpc-user",
+                "rpc_password": "rpc-pass"
+              }
             }
           }
         }
@@ -79,7 +81,12 @@ fn btc_jsonrpc_runtime_config_parses_from_toml_and_json() {
     let from_json = RuntimeConfig::from_str(json, RuntimeConfigFormat::Json).expect("json");
 
     assert_eq!(from_toml, from_json);
-    let btc = from_toml.btc().expect("btc").json_rpc();
+    let btc = from_toml
+        .btc()
+        .expect("btc")
+        .routes()
+        .get(&"public-bitcoin-core".parse().expect("btc source"))
+        .expect("btc route");
     assert_value(
         btc.rpc_url(),
         "http://127.0.0.1:8332",
@@ -110,7 +117,12 @@ fn dual_mainnet_runtime_example_resolves_from_env() {
     let runtime = RuntimeConfig::from_str(raw, RuntimeConfigFormat::Toml).expect("runtime config");
 
     assert_eq!(runtime.evm().expect("evm").routes().len(), 1);
-    let btc = runtime.btc().expect("btc").json_rpc();
+    let btc = runtime
+        .btc()
+        .expect("btc")
+        .routes()
+        .get(&"bitcoin-mainnet".parse().expect("btc source"))
+        .expect("btc route");
     assert_value(
         btc.rpc_url(),
         "http://127.0.0.1:8332",
@@ -144,7 +156,7 @@ fn required_runtime_families_must_exist() {
 #[test]
 fn btc_basic_auth_requires_user_and_password_together() {
     let config = r#"
-        [btc.json_rpc]
+        [btc.routes.public-bitcoin-core]
         rpc_url = "http://127.0.0.1:8332"
         rpc_user = "rpc-user"
     "#;

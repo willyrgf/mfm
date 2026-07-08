@@ -128,8 +128,8 @@ async fn bitcoin_chain_head_collector_two_cycles_record_checkpoint_and_public_fa
                 "chain.head",
                 mfm_app::PublicFactQuerySelector {
                     return_fields: vec![
-                        "subject.chain".to_owned(),
                         "subject.network".to_owned(),
+                        "subject.bitcoin_network".to_owned(),
                         "subject.head_kind".to_owned(),
                         "result.block_height".to_owned(),
                         "result.block_hash".to_owned(),
@@ -467,9 +467,12 @@ impl BtcChainHeadReadProvider for MockBtcProvider {
             Ok(BtcChainHeadResponse {
                 evidence: RedactedBtcSourceEvidence::from_request(
                     request,
-                    Some("main".to_owned()),
+                    "main",
                     BtcSourceStatus::Synced,
-                ),
+                )
+                .expect("evidence"),
+                head_kind: request.selection.head_kind(),
+                finality: request.selection.finality(),
                 block_height: head.height,
                 block_hash: BtcBlockHash::new(head.hash).expect("block hash"),
                 provider_time_unix_ms: head.provider_time_unix_ms,

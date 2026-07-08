@@ -2717,6 +2717,7 @@ dependencies = [
 name = "mfm-runtime-config"
 version = "0.1.0"
 dependencies = [
+ "mfm-btc-capabilities",
  "mfm-evm-capabilities",
  "mfm-ids",
  "mfm-signing",

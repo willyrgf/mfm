@@ -2,8 +2,8 @@ use super::*;
 use ed25519_dalek::SigningKey;
 use mfm_artifact_capabilities::ArtifactEvidenceRef;
 use mfm_btc_capabilities::{
-    BtcAddress, BtcBalanceReadProvider, BtcBalanceReadRequest, BtcBlockHash, BtcChain,
-    BtcChainGuard, BtcFinality, BtcHeadSelection, BtcNetworkId, BtcSourceIdentity, BtcSourceStatus,
+    BtcAddress, BtcBalanceReadProvider, BtcBalanceReadRequest, BtcBlockHash, BtcChainGuard,
+    BtcFinality, BtcHeadSelection, BtcNetworkId, BtcSourceIdentity, BtcSourceStatus,
     RedactedBtcSourceEvidence,
 };
 use mfm_canonical::sha256_digest_bytes;
@@ -30,7 +30,10 @@ use mfm_transports_btc_jsonrpc_http::{
     BlockHeaderInfo, BlockchainInfo, BtcJsonRpcChainHeadProvider, BtcJsonRpcChainHeadTransport,
     BtcRpcError, BtcTransportFuture, ScanTxOutSetResult,
 };
-use std::sync::Mutex;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 const BEST_HASH: &str = "00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc";
 const CONFIRMED_HASH: &str = "00000000000000000002b2a7f3e0d5c4b6a897887766554433221100ffeeddcc";
@@ -285,10 +288,11 @@ impl BtcJsonRpcChainHeadTransport for MockTransport {
 fn make_request(selection: BtcHeadSelection) -> BtcChainHeadRequest {
     BtcChainHeadRequest {
         guard: BtcChainGuard::new(
-            BtcChain::Bitcoin,
             BtcNetworkId::new("bitcoin-mainnet").expect("network"),
             BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
-        ),
+            "main",
+        )
+        .expect("guard"),
         selection,
     }
 }
@@ -296,13 +300,41 @@ fn make_request(selection: BtcHeadSelection) -> BtcChainHeadRequest {
 fn make_balance_request(address: &str) -> BtcBalanceReadRequest {
     BtcBalanceReadRequest {
         guard: BtcChainGuard::new(
-            BtcChain::Bitcoin,
             BtcNetworkId::new("bitcoin-mainnet").expect("network"),
-            BtcSourceIdentity::new("bitcoin-mainnet").expect("source"),
-        ),
+            BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
+            "main",
+        )
+        .expect("guard"),
         address: BtcAddress::new(address).expect("address"),
-        selection: BtcHeadSelection::best(),
+        block_height: 850_000,
+        block_hash: BtcBlockHash::new(BEST_HASH).expect("hash"),
     }
+}
+
+fn chain_head_response(
+    request: &BtcChainHeadRequest,
+    block_height: u64,
+    block_hash: &str,
+    provider_time_unix_ms: Option<u64>,
+) -> BtcChainHeadResponse {
+    BtcChainHeadResponse {
+        evidence: RedactedBtcSourceEvidence::from_request(request, "main", BtcSourceStatus::Synced)
+            .expect("evidence"),
+        head_kind: request.selection.head_kind(),
+        finality: request.selection.finality(),
+        block_height,
+        block_hash: BtcBlockHash::new(block_hash).expect("hash"),
+        provider_time_unix_ms,
+    }
+}
+
+fn routed_provider(transport: Arc<MockTransport>) -> BtcJsonRpcChainHeadProvider {
+    let mut routes = BTreeMap::new();
+    routes.insert(
+        BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
+        transport as Arc<dyn BtcJsonRpcChainHeadTransport>,
+    );
+    BtcJsonRpcChainHeadProvider::new(routes)
 }
 
 fn observe_input(
@@ -331,9 +363,10 @@ fn checkpoint_fact_for_source(
         "btc-chain-head",
         &source_identity,
         "chain-head",
-        BtcChain::Bitcoin,
+        "main",
         &network,
-    );
+    )
+    .expect("checkpoint subject");
     let response =
         CollectorCheckpointResponse::new(height, BEST_HASH, None, None, BtcFinality::BestAvailable);
     CollectorCheckpointFact::new(subject, response)
@@ -352,6 +385,7 @@ fn checkpoint_query_config() -> QueryCollectorCheckpointConfig {
         semantic_source_identity: "public-bitcoin-core".to_owned(),
         partition: "chain-head".to_owned(),
         network: "bitcoin-mainnet".to_owned(),
+        bitcoin_network: "main".to_owned(),
         store_scope: "mfm.store.default".to_owned(),
     }
 }
@@ -642,7 +676,7 @@ async fn provider_maps_head_requests_to_blockchain_info_and_headers() {
         ),
     ] {
         let transport = Arc::new(MockTransport::default());
-        let provider = BtcJsonRpcChainHeadProvider::new(transport.clone());
+        let provider = routed_provider(transport.clone());
         let response = provider
             .read_chain_head(&make_request(selection))
             .await
@@ -660,21 +694,24 @@ async fn provider_maps_head_requests_to_blockchain_info_and_headers() {
 }
 
 #[tokio::test]
-async fn provider_maps_balance_request_to_utxo_scan() {
+async fn provider_rejects_exact_balance_requests_without_utxo_scan() {
     let address = "bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw";
     let transport = Arc::new(MockTransport::default());
-    let provider = BtcJsonRpcChainHeadProvider::new(transport.clone());
+    let provider = routed_provider(transport.clone());
     let request = make_balance_request(address);
-    let response = provider.read_balance(&request).await.expect("balance read");
+    let error = provider
+        .read_balance(&request)
+        .await
+        .expect_err("exact anchored balance unsupported");
 
-    response.verify_request(&request).expect("evidence");
-    assert_eq!(response.balance_sats, 123_456_789);
-    assert_eq!(response.block_height, 850_000);
-    assert_eq!(response.block_hash.as_str(), BEST_HASH);
+    let BtcCapabilityError::Provider { diagnostic } = error else {
+        panic!("expected provider diagnostic");
+    };
     assert_eq!(
-        transport.calls(),
-        vec!["info".to_owned(), format!("scan:{address}")]
+        diagnostic.stable_error_code(),
+        "bitcoin_unsupported_operation"
     );
+    assert_eq!(transport.calls(), vec!["info".to_owned()]);
 }
 
 #[tokio::test]
@@ -683,7 +720,7 @@ async fn provider_errors_discard_transport_secret_details() {
         calls: Mutex::new(Vec::new()),
         info_failure: Some(MockInfoFailure::Http),
     });
-    let provider = BtcJsonRpcChainHeadProvider::new(transport);
+    let provider = routed_provider(transport);
     let error = provider
         .read_chain_head(&make_request(BtcHeadSelection::best()))
         .await
@@ -710,7 +747,7 @@ async fn provider_classifies_http_status_failure_without_body() {
         calls: Mutex::new(Vec::new()),
         info_failure: Some(MockInfoFailure::HttpStatus),
     });
-    let provider = BtcJsonRpcChainHeadProvider::new(transport);
+    let provider = routed_provider(transport);
     let error = provider
         .read_chain_head(&make_request(BtcHeadSelection::best()))
         .await
@@ -732,7 +769,7 @@ async fn provider_classifies_json_rpc_failure_without_message() {
         calls: Mutex::new(Vec::new()),
         info_failure: Some(MockInfoFailure::JsonRpc),
     });
-    let provider = BtcJsonRpcChainHeadProvider::new(transport);
+    let provider = routed_provider(transport);
     let error = provider
         .read_chain_head(&make_request(BtcHeadSelection::best()))
         .await
@@ -753,16 +790,7 @@ async fn provider_classifies_json_rpc_failure_without_message() {
 #[test]
 fn replay_helper_verifies_recorded_evidence_without_transport() {
     let request = make_request(BtcHeadSelection::best());
-    let response = BtcChainHeadResponse {
-        evidence: RedactedBtcSourceEvidence::from_request(
-            &request,
-            Some("main".to_owned()),
-            BtcSourceStatus::Synced,
-        ),
-        block_height: 850_000,
-        block_hash: BtcBlockHash::new(BEST_HASH).expect("hash"),
-        provider_time_unix_ms: Some(1_720_000_000_000),
-    };
+    let response = chain_head_response(&request, 850_000, BEST_HASH, Some(1_720_000_000_000));
 
     verify_recorded_chain_head_evidence(&request, &response).expect("evidence");
     let fact = replay_chain_head_fact_from_evidence(
@@ -778,16 +806,7 @@ fn replay_helper_verifies_recorded_evidence_without_transport() {
 fn replay_helper_rejects_mismatched_recorded_evidence() {
     let request = make_request(BtcHeadSelection::best());
     let mismatched_request = make_request(BtcHeadSelection::confirmed(6).expect("confirmed"));
-    let response = BtcChainHeadResponse {
-        evidence: RedactedBtcSourceEvidence::from_request(
-            &mismatched_request,
-            Some("main".to_owned()),
-            BtcSourceStatus::Synced,
-        ),
-        block_height: 849_994,
-        block_hash: BtcBlockHash::new(CONFIRMED_HASH).expect("hash"),
-        provider_time_unix_ms: None,
-    };
+    let response = chain_head_response(&mismatched_request, 849_994, CONFIRMED_HASH, None);
 
     let error = verify_recorded_chain_head_evidence(&request, &response).expect_err("mismatch");
     assert_eq!(error, BtcJsonRpcAdapterError::ReplayEvidenceMismatch);
@@ -796,16 +815,7 @@ fn replay_helper_rejects_mismatched_recorded_evidence() {
 #[test]
 fn replay_helper_rejects_incompatible_loaded_checkpoints() {
     let request = make_request(BtcHeadSelection::best());
-    let response = BtcChainHeadResponse {
-        evidence: RedactedBtcSourceEvidence::from_request(
-            &request,
-            Some("main".to_owned()),
-            BtcSourceStatus::Synced,
-        ),
-        block_height: 850_000,
-        block_hash: BtcBlockHash::new(BEST_HASH).expect("hash"),
-        provider_time_unix_ms: Some(1_720_000_000_000),
-    };
+    let response = chain_head_response(&request, 850_000, BEST_HASH, Some(1_720_000_000_000));
 
     for (name, input) in [
         (
@@ -834,16 +844,7 @@ fn replay_helper_rejects_incompatible_loaded_checkpoints() {
 #[test]
 fn checkpoint_record_fixture_uses_recorded_chain_head_fact() {
     let request = make_request(BtcHeadSelection::best());
-    let response = BtcChainHeadResponse {
-        evidence: RedactedBtcSourceEvidence::from_request(
-            &request,
-            Some("main".to_owned()),
-            BtcSourceStatus::Synced,
-        ),
-        block_height: 850_000,
-        block_hash: BtcBlockHash::new(BEST_HASH).expect("hash"),
-        provider_time_unix_ms: Some(1_720_000_000_000),
-    };
+    let response = chain_head_response(&request, 850_000, BEST_HASH, Some(1_720_000_000_000));
     let chain_head_fact = replay_chain_head_fact_from_evidence(
         &request,
         &response,

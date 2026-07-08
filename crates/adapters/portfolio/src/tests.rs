@@ -61,7 +61,7 @@ fn bitcoin_capability_backend_observes_native_balance_with_anchor() {
 }
 
 #[test]
-fn bitcoin_capability_backend_rejects_balance_anchor_drift() {
+fn bitcoin_capability_backend_rejects_balance_response_that_violates_exact_anchor() {
     let (network, config) = bitcoin_observe_config();
     let btc = Arc::new(MockPortfolioBtc::mismatched_balance_anchor());
     let backend = CapabilityPortfolioBackend::new(Arc::new(UnavailablePortfolioEvm), Some(btc));
@@ -70,14 +70,27 @@ fn bitcoin_capability_backend_rejects_balance_anchor_drift() {
         poll_ready(backend.read_execution_anchor(&network_read_intent_for_network(&network)))
             .expect("chain head");
     let intent = observe_batch_read_intent(&config, &anchor).expect("balance intent");
-    let error = poll_ready(backend.read_raw_balance(&intent)).expect_err("anchor mismatch");
+    let error =
+        poll_ready(backend.read_raw_balance(&intent)).expect_err("capability source mismatch");
 
-    assert_eq!(error.code, "observation_anchor_mismatch");
-    assert!(error.message.contains("pinned execution anchor"));
-    assert!(error.message.contains("height=850000"));
-    assert!(error.message.contains("height=850001"));
-    assert!(error.message.contains(BTC_HASH));
-    assert!(error.message.contains(BTC_NEXT_HASH));
+    assert_eq!(error.code, "bitcoin_source_mismatch");
+    assert!(error.fatal_attempt_failure);
+    assert_eq!(
+        error.redacted_details,
+        Some(serde_json::json!({
+            "diagnostic_kind": "provider_source_mismatch",
+            "provider_family": "bitcoin",
+            "code": "source_mismatch",
+            "operation": null,
+            "fields": {
+                "network_id": "bitcoin-mainnet",
+                "source_identity": "bitcoin-mainnet",
+                "bitcoin_network": "main",
+                "observed_bitcoin_network": "main",
+                "source_status": "synced",
+            },
+        }))
+    );
 }
 
 #[test]
@@ -145,6 +158,7 @@ fn bitcoin_observe_config() -> (NetworkConfig, ObserveBatchConfig) {
         "bitcoin-mainnet".to_owned(),
         NetworkFamilyConfig::Bitcoin,
         None,
+        Some("main".to_owned()),
         "bitcoin-mainnet".to_owned(),
         BTreeMap::new(),
     )
@@ -236,9 +250,12 @@ impl BtcChainHeadReadProvider for MockPortfolioBtc {
             Ok(BtcChainHeadResponse {
                 evidence: RedactedBtcSourceEvidence::from_request(
                     request,
-                    Some("main".to_owned()),
+                    "main",
                     BtcSourceStatus::Synced,
-                ),
+                )
+                .expect("evidence"),
+                head_kind: request.selection.head_kind(),
+                finality: request.selection.finality(),
                 block_height: 850_000,
                 block_hash: BtcBlockHash::new(BTC_HASH).expect("hash"),
                 provider_time_unix_ms: None,
@@ -256,14 +273,12 @@ impl BtcBalanceReadProvider for MockPortfolioBtc {
         let balance_hash = self.balance_hash;
         Box::pin(async move {
             Ok(BtcBalanceReadResponse {
-                evidence: RedactedBtcSourceEvidence::from_request(
-                    &BtcChainHeadRequest {
-                        guard: request.guard.clone(),
-                        selection: request.selection,
-                    },
-                    Some("main".to_owned()),
+                evidence: RedactedBtcSourceEvidence::from_guard(
+                    &request.guard,
+                    "main",
                     BtcSourceStatus::Synced,
-                ),
+                )
+                .expect("evidence"),
                 address: request.address.clone(),
                 balance_sats: 123_456_789,
                 block_height: balance_height,

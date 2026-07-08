@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use mfm_fact_capabilities::{
@@ -27,8 +28,16 @@ pub(crate) fn register_btc_collector_runners_if_configured(
 pub(crate) fn btc_json_rpc_read_provider(
     btc: mfm_runtime_config::BtcRuntimeConfig,
 ) -> mfm_runtime::Result<mfm_transports_btc_jsonrpc_http::BtcJsonRpcChainHeadProvider> {
-    let client = btc_json_rpc_client(btc)?;
-    Ok(mfm_transports_btc_jsonrpc_http::BtcJsonRpcChainHeadProvider::new(Arc::new(client)))
+    let mut routes = BTreeMap::new();
+    for (source_identity, route) in btc.routes() {
+        let client = btc_json_rpc_client(route)?;
+        routes.insert(
+            source_identity.clone(),
+            Arc::new(client)
+                as Arc<dyn mfm_transports_btc_jsonrpc_http::BtcJsonRpcChainHeadTransport>,
+        );
+    }
+    Ok(mfm_transports_btc_jsonrpc_http::BtcJsonRpcChainHeadProvider::new(routes))
 }
 
 pub(crate) fn production_fact_index_read_provider(
@@ -54,9 +63,8 @@ fn launch_runner_unavailable() -> AppError {
 }
 
 fn btc_json_rpc_client(
-    btc: mfm_runtime_config::BtcRuntimeConfig,
+    json_rpc: &mfm_runtime_config::BtcJsonRpcRuntimeConfig,
 ) -> mfm_runtime::Result<mfm_transports_btc_jsonrpc_http::BtcJsonRpcClient> {
-    let json_rpc = btc.json_rpc();
     let config = mfm_transports_btc_jsonrpc_http::BtcJsonRpcConfig {
         rpc_url: json_rpc.rpc_url().expose_secret().to_owned(),
         rpc_user: json_rpc

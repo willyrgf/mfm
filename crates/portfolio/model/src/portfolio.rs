@@ -141,6 +141,8 @@ pub enum NetworkConfig {
     Bitcoin {
         /// Stable machine identifier for the network.
         network_id: NetworkId,
+        /// Expected Bitcoin Core network tag (`main`, `test`, `signet`, or `regtest`).
+        bitcoin_network: String,
         /// Stable control-plane scope used for managed rpc.control reads on this network.
         control_scope: ControlScopeId,
         /// Canonical metadata surface.
@@ -155,6 +157,7 @@ impl NetworkConfig {
         network_id: String,
         family: NetworkFamilyConfig,
         chain_id: Option<u64>,
+        bitcoin_network: Option<String>,
         control_scope: String,
         metadata: BTreeMap<String, String>,
     ) -> Result<Self, PortfolioConfigError> {
@@ -170,6 +173,11 @@ impl NetworkConfig {
         })?;
         match family {
             NetworkFamilyConfig::Evm => {
+                if bitcoin_network.is_some() {
+                    return Err(PortfolioConfigError::UnexpectedEvmBitcoinNetwork {
+                        network_id: network_id.to_string(),
+                    });
+                }
                 let Some(chain_id) = chain_id else {
                     return Err(PortfolioConfigError::MissingEvmChainId {
                         network_id: network_id.to_string(),
@@ -194,8 +202,19 @@ impl NetworkConfig {
                         network_id: network_id.to_string(),
                     });
                 }
+                let Some(bitcoin_network) = bitcoin_network else {
+                    return Err(PortfolioConfigError::MissingBitcoinNetwork {
+                        network_id: network_id.to_string(),
+                    });
+                };
+                validate_bitcoin_network(&bitcoin_network).map_err(|_| {
+                    PortfolioConfigError::InvalidBitcoinNetwork {
+                        network_id: network_id.to_string(),
+                    }
+                })?;
                 Self::Bitcoin {
                     network_id,
+                    bitcoin_network,
                     control_scope,
                     metadata,
                 }
@@ -237,6 +256,16 @@ impl NetworkConfig {
         match self {
             Self::Evm { chain_id, .. } => Some(chain_id.get()),
             Self::Bitcoin { .. } => None,
+        }
+    }
+
+    /// Returns the Bitcoin Core network tag when this is a Bitcoin network.
+    pub fn bitcoin_network(&self) -> Option<&str> {
+        match self {
+            Self::Evm { .. } => None,
+            Self::Bitcoin {
+                bitcoin_network, ..
+            } => Some(bitcoin_network),
         }
     }
 
@@ -795,6 +824,24 @@ pub enum PortfolioConfigError {
         /// Network id associated with the failure.
         network_id: String,
     },
+    /// EVM networks must not declare a Bitcoin network tag.
+    #[error("network `{network_id}` with family `evm` must not declare bitcoin_network")]
+    UnexpectedEvmBitcoinNetwork {
+        /// Network id associated with the failure.
+        network_id: String,
+    },
+    /// Bitcoin networks require an explicit Bitcoin Core network tag.
+    #[error("network `{network_id}` with family `bitcoin` must declare bitcoin_network")]
+    MissingBitcoinNetwork {
+        /// Network id associated with the failure.
+        network_id: String,
+    },
+    /// Bitcoin networks require a supported Bitcoin Core network tag.
+    #[error("network `{network_id}` with family `bitcoin` has invalid bitcoin_network")]
+    InvalidBitcoinNetwork {
+        /// Network id associated with the failure.
+        network_id: String,
+    },
     /// Two networks shared the same network id.
     #[error("network_id `{network_id}` must be unique")]
     DuplicateNetworkId {
@@ -986,6 +1033,13 @@ pub fn decode_portfolio_config(value: &Value) -> Result<PortfolioConfig, Portfol
     let cfg: PortfolioConfig = serde_json::from_value(value.clone())
         .map_err(|err| PortfolioConfigError::Decode(err.to_string()))?;
     cfg.validated()
+}
+
+fn validate_bitcoin_network(value: &str) -> Result<(), ()> {
+    match value {
+        "main" | "test" | "signet" | "regtest" => Ok(()),
+        _ => Err(()),
+    }
 }
 
 fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), PortfolioConfigError> {

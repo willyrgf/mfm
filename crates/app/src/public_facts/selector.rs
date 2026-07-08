@@ -295,20 +295,20 @@ mod tests {
     #[test]
     fn predicate_strings_decode_to_typed_query_primitives() {
         let predicates = parse_public_fact_predicates(
-            ["chain=bitcoin"],
+            ["network=bitcoin-mainnet"],
             ["amount_sat.gt=1000"],
             ["metadata.observed_at.lte=timestamp:2026-07-02T00:00:00Z"],
         )
         .expect("predicates");
 
-        assert_eq!(predicates[0].field_id().as_str(), "subject.chain");
+        assert_eq!(predicates[0].field_id().as_str(), "subject.network");
         assert_eq!(
             predicates[0].operator(),
             mfm_facts::FactQueryOperator::Equal
         );
         assert_eq!(
             predicates[0].value(),
-            &mfm_facts::FactCanonicalScalar::String("bitcoin".to_owned())
+            &mfm_facts::FactCanonicalScalar::String("bitcoin-mainnet".to_owned())
         );
         assert_eq!(predicates[1].field_id().as_str(), "result.amount_sat");
         assert_eq!(

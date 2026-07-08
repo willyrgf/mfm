@@ -50,6 +50,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use mfm_btc_capabilities::BtcSourceIdentity;
 use mfm_evm_capabilities::{EvmNetworkId, EvmSourcePolicyId, EvmSourceRef};
 use mfm_ids::{LocalPublicId, RuntimeEnvName};
 use mfm_signing::SignerRef;
@@ -903,29 +904,49 @@ impl EvmRoute {
 /// Runtime Bitcoin JSON-RPC descriptor.
 #[derive(Clone, PartialEq, Eq)]
 pub struct BtcRuntimeConfig {
-    json_rpc: BtcJsonRpcRuntimeConfig,
+    routes: BTreeMap<BtcSourceIdentity, BtcJsonRpcRuntimeConfig>,
 }
 
 impl BtcRuntimeConfig {
-    /// Returns the configured Bitcoin JSON-RPC endpoint descriptor.
-    pub const fn json_rpc(&self) -> &BtcJsonRpcRuntimeConfig {
-        &self.json_rpc
+    /// Returns Bitcoin JSON-RPC routes keyed by semantic source identity.
+    pub const fn routes(&self) -> &BTreeMap<BtcSourceIdentity, BtcJsonRpcRuntimeConfig> {
+        &self.routes
     }
 
     fn from_raw(raw: RawBtcConfig) -> Result<Self> {
         reject_extra_fields(&raw.extra, RuntimeConfigLocation::Btc)?;
-        let json_rpc = BtcJsonRpcRuntimeConfig::from_raw(
-            raw.json_rpc,
-            RuntimeConfigLocation::Btc.with_field("json_rpc"),
-        )?;
-        Ok(Self { json_rpc })
+        if raw.routes.is_empty() {
+            return Err(RuntimeConfigError::new(
+                RuntimeConfigLocation::Btc.with_field("routes"),
+                RuntimeConfigErrorKind::MissingRequiredField,
+            ));
+        }
+        let mut routes = BTreeMap::new();
+        for (raw_source_identity, raw_route) in raw.routes {
+            let source_identity = BtcSourceIdentity::new(&raw_source_identity).map_err(|_| {
+                RuntimeConfigError::new(
+                    RuntimeConfigLocation::BtcRoute {
+                        source_identity: None,
+                    },
+                    RuntimeConfigErrorKind::InvalidIdentifier {
+                        kind: RuntimeConfigIdentifierKind::BtcSourceIdentity,
+                    },
+                )
+            })?;
+            let location = RuntimeConfigLocation::BtcRoute {
+                source_identity: Some(source_identity.to_string()),
+            };
+            let route = BtcJsonRpcRuntimeConfig::from_raw(raw_route, location)?;
+            routes.insert(source_identity, route);
+        }
+        Ok(Self { routes })
     }
 }
 
 impl fmt::Debug for BtcRuntimeConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BtcRuntimeConfig")
-            .field("json_rpc", &self.json_rpc)
+            .field("routes", &self.routes)
             .finish()
     }
 }
@@ -1111,6 +1132,11 @@ pub enum RuntimeConfigLocation {
     Evm,
     /// Bitcoin capability family.
     Btc,
+    /// Bitcoin semantic source route entry.
+    BtcRoute {
+        /// Checked semantic source identity when available.
+        source_identity: Option<String>,
+    },
     /// EVM source entry.
     EvmSource {
         /// Checked source ref when available.
@@ -1160,6 +1186,10 @@ impl fmt::Display for RuntimeConfigLocation {
             Self::Root => f.write_str("root"),
             Self::Evm => f.write_str("evm"),
             Self::Btc => f.write_str("btc"),
+            Self::BtcRoute { source_identity } => match source_identity {
+                Some(source_identity) => write!(f, "btc.routes[{source_identity}]"),
+                None => f.write_str("btc.routes[<invalid>]"),
+            },
             Self::EvmSource { source_ref } => match source_ref {
                 Some(source_ref) => write!(f, "evm.sources[{source_ref}]"),
                 None => f.write_str("evm.sources[<invalid>]"),
@@ -1306,6 +1336,8 @@ impl fmt::Display for RuntimeConfigErrorKind {
 pub enum RuntimeConfigIdentifierKind {
     /// EVM source reference.
     SourceRef,
+    /// Bitcoin semantic source identity.
+    BtcSourceIdentity,
     /// EVM source policy id.
     PolicyId,
     /// EVM semantic network id.
@@ -1322,6 +1354,7 @@ impl fmt::Display for RuntimeConfigIdentifierKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SourceRef => f.write_str("source_ref"),
+            Self::BtcSourceIdentity => f.write_str("btc_source_identity"),
             Self::PolicyId => f.write_str("policy_id"),
             Self::NetworkId => f.write_str("network_id"),
             Self::SignerRef => f.write_str("signer_ref"),
@@ -1400,7 +1433,7 @@ struct RawEvmRoute {
 #[derive(Debug, Default, Deserialize)]
 struct RawBtcConfig {
     #[serde(default)]
-    json_rpc: RawBtcJsonRpcConfig,
+    routes: BTreeMap<String, RawBtcJsonRpcConfig>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }

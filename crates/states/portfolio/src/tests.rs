@@ -14,6 +14,7 @@ fn test_network(network_id: &str, chain_id: u64) -> NetworkConfig {
         network_id.to_owned(),
         NetworkFamilyConfig::Evm,
         Some(chain_id),
+        None,
         "shared".to_owned(),
         BTreeMap::new(),
     )
@@ -202,6 +203,7 @@ fn observation_read_intent_classifies_bitcoin_native_balance() {
         Some(PortfolioNetworkReadIntent::Bitcoin {
             network_id: "bitcoin-mainnet".to_owned(),
             source_identity: "bitcoin-mainnet".to_owned(),
+            bitcoin_network: "main".to_owned(),
         })
     );
     assert_eq!(
@@ -209,6 +211,7 @@ fn observation_read_intent_classifies_bitcoin_native_balance() {
         PortfolioBalanceReadIntent::BitcoinNativeBalance {
             network_id: "bitcoin-mainnet".to_owned(),
             source_identity: "bitcoin-mainnet".to_owned(),
+            bitcoin_network: "main".to_owned(),
             address: "bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw".to_owned(),
             anchor,
             decimals: 8,
@@ -325,6 +328,7 @@ fn test_evm_network(network_id: &str, chain_id: u64) -> NetworkConfig {
         network_id.to_owned(),
         NetworkFamilyConfig::Evm,
         Some(chain_id),
+        None,
         "shared".to_owned(),
         BTreeMap::new(),
     )
@@ -336,6 +340,7 @@ fn test_bitcoin_network() -> NetworkConfig {
         "bitcoin-mainnet".to_owned(),
         NetworkFamilyConfig::Bitcoin,
         None,
+        Some("main".to_owned()),
         "bitcoin-mainnet".to_owned(),
         BTreeMap::new(),
     )

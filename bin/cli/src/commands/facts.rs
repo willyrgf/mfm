@@ -156,7 +156,7 @@ pub(crate) struct FactQuerySelectorArgs {
     #[arg(long)]
     pub(crate) order: String,
 
-    /// Subject predicate, for example `chain=bitcoin` or `subject.chain.eq=bitcoin`.
+    /// Subject predicate, for example `network=bitcoin-mainnet` or `subject.network.eq=bitcoin-mainnet`.
     #[arg(long = "subject")]
     pub(crate) subjects: Vec<String>,
 
@@ -164,7 +164,7 @@ pub(crate) struct FactQuerySelectorArgs {
     #[arg(long = "result")]
     pub(crate) results: Vec<String>,
 
-    /// Full field predicate, for example `subject.chain.eq=bitcoin`.
+    /// Full field predicate, for example `subject.bitcoin_network.eq=main`.
     #[arg(long = "where")]
     pub(crate) where_predicates: Vec<String>,
 

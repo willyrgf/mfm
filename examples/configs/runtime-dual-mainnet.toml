@@ -4,7 +4,7 @@ rpc_url_env = "MFM_ETHEREUM_MAINNET_RPC_URL"
 [evm.routes.ethereum-mainnet]
 source_ref = "ethereum-mainnet"
 
-[btc.json_rpc]
+[btc.routes.bitcoin-mainnet]
 rpc_url_env = "MFM_BITCOIN_RPC_URL"
 rpc_user_env = "MFM_BITCOIN_RPC_USER"
 rpc_password_env = "MFM_BITCOIN_RPC_PASSWORD"

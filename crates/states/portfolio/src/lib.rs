@@ -165,6 +165,8 @@ pub enum PortfolioNetworkReadIntent {
         network_id: String,
         /// Semantic source identity expected for the read.
         source_identity: String,
+        /// Expected Bitcoin Core network tag.
+        bitcoin_network: String,
     },
 }
 
@@ -209,6 +211,8 @@ pub enum PortfolioBalanceReadIntent {
         network_id: String,
         /// Semantic source identity expected for the read.
         source_identity: String,
+        /// Expected Bitcoin Core network tag.
+        bitcoin_network: String,
         /// Canonical Bitcoin address.
         address: String,
         /// Pinned execution anchor that the returned balance must match.
@@ -1177,9 +1181,15 @@ pub fn network_read_intent_for_network(network: &NetworkConfig) -> PortfolioNetw
             network_id: network_id.to_string(),
             chain_id: chain_id.get(),
         },
-        NetworkConfig::Bitcoin { network_id, .. } => PortfolioNetworkReadIntent::Bitcoin {
+        NetworkConfig::Bitcoin {
+            network_id,
+            control_scope,
+            bitcoin_network,
+            ..
+        } => PortfolioNetworkReadIntent::Bitcoin {
             network_id: network_id.to_string(),
-            source_identity: network_id.to_string(),
+            source_identity: control_scope.to_string(),
+            bitcoin_network: bitcoin_network.clone(),
         },
     }
 }
@@ -1227,11 +1237,17 @@ pub fn observe_batch_read_intent(
                 decimals: config.symbol.decimals.unwrap_or(18),
                 anchor: anchor.clone(),
             }),
-            NetworkConfig::Bitcoin { network_id, .. } => {
+            NetworkConfig::Bitcoin {
+                network_id,
+                control_scope,
+                bitcoin_network,
+                ..
+            } => {
                 ensure_bitcoin_anchor(anchor)?;
                 Ok(PortfolioBalanceReadIntent::BitcoinNativeBalance {
                     network_id: network_id.to_string(),
-                    source_identity: network_id.to_string(),
+                    source_identity: control_scope.to_string(),
+                    bitcoin_network: bitcoin_network.clone(),
                     address: wallet_btc_address(config)?,
                     anchor: anchor.clone(),
                     decimals: config.symbol.decimals.unwrap_or(8),

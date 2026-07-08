@@ -13,6 +13,7 @@ metadata = {}
 [[portfolio.networks]]
 network_id = "bitcoin-mainnet"
 family = "bitcoin"
+bitcoin_network = "main"
 control_scope = "bitcoin-mainnet"
 metadata = {}
 

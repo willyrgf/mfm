@@ -74,32 +74,29 @@ fn source_identity_is_semantic_not_route_material() {
 
 #[test]
 fn balance_response_evidence_verifies_request() {
+    let block_hash =
+        BtcBlockHash::new("00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc")
+            .expect("block hash");
     let request = BtcBalanceReadRequest {
         guard: BtcChainGuard::new(
-            BtcChain::Bitcoin,
             BtcNetworkId::new("bitcoin-mainnet").expect("network"),
             BtcSourceIdentity::new("bitcoin-mainnet").expect("source"),
-        ),
+            "main",
+        )
+        .expect("guard"),
         address: BtcAddress::new("bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw").expect("address"),
-        selection: BtcHeadSelection::best(),
+        block_height: 850_000,
+        block_hash: block_hash.clone(),
     };
-    let evidence = RedactedBtcSourceEvidence::from_request(
-        &BtcChainHeadRequest {
-            guard: request.guard.clone(),
-            selection: request.selection,
-        },
-        Some("main".to_string()),
-        BtcSourceStatus::Synced,
-    );
+    let evidence =
+        RedactedBtcSourceEvidence::from_guard(&request.guard, "main", BtcSourceStatus::Synced)
+            .expect("evidence");
     let response = BtcBalanceReadResponse {
         evidence,
         address: request.address.clone(),
         balance_sats: 42,
-        block_height: 850_000,
-        block_hash: BtcBlockHash::new(
-            "00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc",
-        )
-        .expect("block hash"),
+        block_height: request.block_height,
+        block_hash,
     };
 
     response

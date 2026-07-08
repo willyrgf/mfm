@@ -493,6 +493,7 @@ mod tests {
                 "ethereum-mainnet".to_owned(),
                 NetworkFamilyConfig::Evm,
                 Some(1),
+                None,
                 "shared".to_owned(),
                 BTreeMap::new(),
             )

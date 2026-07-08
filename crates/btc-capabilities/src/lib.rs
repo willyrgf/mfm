@@ -7,17 +7,18 @@
 //!
 //! ```rust
 //! use mfm_btc_capabilities::{
-//!     BtcChain, BtcChainGuard, BtcChainHeadReadCapability, BtcHeadSelection, BtcNetworkId,
+//!     BtcChainGuard, BtcChainHeadReadCapability, BtcHeadSelection, BtcNetworkId,
 //!     BtcSourceIdentity,
 //! };
 //! use mfm_capabilities::CapabilitySpec;
 //!
 //! let guard = BtcChainGuard::new(
-//!     BtcChain::Bitcoin,
 //!     BtcNetworkId::new("bitcoin-mainnet")?,
 //!     BtcSourceIdentity::new("public-bitcoin-core")?,
-//! );
+//!     "main",
+//! )?;
 //! assert_eq!(guard.network_id().as_str(), "bitcoin-mainnet");
+//! assert_eq!(guard.bitcoin_network(), "main");
 //! assert_eq!(BtcChainHeadReadCapability::name(), "mfm.bitcoin.chain_head.read");
 //! assert_eq!(BtcHeadSelection::best().head_kind(), mfm_btc_capabilities::BtcHeadKind::Best);
 //! # Ok::<(), mfm_btc_capabilities::BtcCapabilityError>(())
@@ -112,28 +113,6 @@ pub trait BtcBalanceReadProvider: Send + Sync {
     ) -> BtcCapabilityFuture<'a, BtcBalanceReadResponse>;
 }
 
-/// Bitcoin-like chain family observed by this capability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum BtcChain {
-    /// Bitcoin.
-    Bitcoin,
-}
-
-impl BtcChain {
-    /// Returns the stable chain tag used in fact subjects and evidence.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Bitcoin => "bitcoin",
-        }
-    }
-}
-
-impl fmt::Display for BtcChain {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 macro_rules! checked_btc_public_id {
     (
         $(#[$meta:meta])*
@@ -208,28 +187,25 @@ checked_btc_public_id!(
 /// Semantic Bitcoin chain guard derived from workflow config.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtcChainGuard {
-    chain: BtcChain,
     network_id: BtcNetworkId,
     source_identity: BtcSourceIdentity,
+    bitcoin_network: String,
 }
 
 impl BtcChainGuard {
     /// Creates a semantic chain guard.
     pub fn new(
-        chain: BtcChain,
         network_id: BtcNetworkId,
         source_identity: BtcSourceIdentity,
-    ) -> Self {
-        Self {
-            chain,
+        bitcoin_network: impl Into<String>,
+    ) -> Result<Self> {
+        let bitcoin_network = bitcoin_network.into();
+        validate_bitcoin_network(&bitcoin_network)?;
+        Ok(Self {
             network_id,
             source_identity,
-        }
-    }
-
-    /// Returns the chain family.
-    pub const fn chain(&self) -> BtcChain {
-        self.chain
+            bitcoin_network,
+        })
     }
 
     /// Returns the semantic network id.
@@ -240,6 +216,11 @@ impl BtcChainGuard {
     /// Returns the semantic source identity.
     pub const fn source_identity(&self) -> &BtcSourceIdentity {
         &self.source_identity
+    }
+
+    /// Returns the expected Bitcoin Core network tag (`main`, `test`, `signet`, or `regtest`).
+    pub fn bitcoin_network(&self) -> &str {
+        &self.bitcoin_network
     }
 }
 
@@ -349,54 +330,62 @@ pub struct BtcBalanceReadRequest {
     pub guard: BtcChainGuard,
     /// Public Bitcoin address to observe.
     pub address: BtcAddress,
-    /// Requested UTXO-set head selection.
-    pub selection: BtcHeadSelection,
+    /// Exact UTXO-set block height requested from the provider.
+    pub block_height: u64,
+    /// Exact UTXO-set block hash requested from the provider.
+    pub block_hash: BtcBlockHash,
 }
 
 /// Redacted Bitcoin source evidence attached to provider responses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedactedBtcSourceEvidence {
-    /// Chain family from the request guard.
-    pub chain: BtcChain,
     /// Semantic network id from the request guard.
     pub network_id: BtcNetworkId,
     /// Semantic source identity observed by the provider.
     pub source_identity: BtcSourceIdentity,
-    /// Observed source network tag, when the provider can report one.
-    pub observed_network: Option<String>,
-    /// Head kind represented by this evidence.
-    pub head_kind: BtcHeadKind,
-    /// Finality policy represented by this evidence.
-    pub finality: BtcFinality,
+    /// Expected Bitcoin Core network tag from the request guard.
+    pub bitcoin_network: String,
+    /// Observed Bitcoin Core network tag from the provider.
+    pub observed_bitcoin_network: String,
     /// Source synchronization status represented by this evidence.
     pub source_status: BtcSourceStatus,
 }
 
 impl RedactedBtcSourceEvidence {
-    /// Builds evidence from a request and observed source status.
-    pub fn from_request(
-        request: &BtcChainHeadRequest,
-        observed_network: Option<String>,
+    /// Builds evidence from a guard and observed source status.
+    pub fn from_guard(
+        guard: &BtcChainGuard,
+        observed_bitcoin_network: impl Into<String>,
         source_status: BtcSourceStatus,
-    ) -> Self {
-        Self {
-            chain: request.guard.chain(),
-            network_id: request.guard.network_id().clone(),
-            source_identity: request.guard.source_identity().clone(),
-            observed_network,
-            head_kind: request.selection.head_kind(),
-            finality: request.selection.finality(),
+    ) -> Result<Self> {
+        let observed_bitcoin_network = observed_bitcoin_network.into();
+        validate_bitcoin_network(&observed_bitcoin_network)?;
+        let evidence = Self {
+            network_id: guard.network_id().clone(),
+            source_identity: guard.source_identity().clone(),
+            bitcoin_network: guard.bitcoin_network().to_owned(),
+            observed_bitcoin_network,
             source_status,
-        }
+        };
+        evidence.verify_guard(guard)?;
+        Ok(evidence)
     }
 
-    /// Verifies that provider evidence matches the semantic request guard and head selection.
-    pub fn verify_request(&self, request: &BtcChainHeadRequest) -> Result<()> {
-        if self.chain == request.guard.chain()
-            && &self.network_id == request.guard.network_id()
-            && &self.source_identity == request.guard.source_identity()
-            && self.head_kind == request.selection.head_kind()
-            && self.finality == request.selection.finality()
+    /// Builds evidence from a chain-head request and observed source status.
+    pub fn from_request(
+        request: &BtcChainHeadRequest,
+        observed_bitcoin_network: impl Into<String>,
+        source_status: BtcSourceStatus,
+    ) -> Result<Self> {
+        Self::from_guard(&request.guard, observed_bitcoin_network, source_status)
+    }
+
+    /// Verifies that provider evidence matches the semantic request guard.
+    pub fn verify_guard(&self, guard: &BtcChainGuard) -> Result<()> {
+        if &self.network_id == guard.network_id()
+            && &self.source_identity == guard.source_identity()
+            && self.bitcoin_network == guard.bitcoin_network()
+            && self.observed_bitcoin_network == guard.bitcoin_network()
         {
             Ok(())
         } else {
@@ -408,11 +397,7 @@ impl RedactedBtcSourceEvidence {
 
     /// Returns closed redacted source-mismatch diagnostic details.
     pub fn source_mismatch_diagnostic(&self) -> RedactedProviderDiagnostic {
-        let mut diagnostic = btc_diagnostic(ProviderDiagnosticCode::SourceMismatch)
-            .with_field(
-                btc_public_id("chain"),
-                ProviderDiagnosticValue::Id(btc_public_id(self.chain.as_str())),
-            )
+        btc_diagnostic(ProviderDiagnosticCode::SourceMismatch)
             .with_field(
                 btc_public_id("network_id"),
                 ProviderDiagnosticValue::Id(btc_public_id(self.network_id.as_str())),
@@ -422,24 +407,17 @@ impl RedactedBtcSourceEvidence {
                 ProviderDiagnosticValue::Id(btc_public_id(self.source_identity.as_str())),
             )
             .with_field(
-                btc_public_id("head_kind"),
-                ProviderDiagnosticValue::Id(btc_public_id(self.head_kind.as_str())),
+                btc_public_id("bitcoin_network"),
+                ProviderDiagnosticValue::Id(btc_public_id(&self.bitcoin_network)),
             )
             .with_field(
-                btc_public_id("finality"),
-                ProviderDiagnosticValue::Id(btc_public_id(self.finality.as_str())),
+                btc_public_id("observed_bitcoin_network"),
+                ProviderDiagnosticValue::Id(btc_public_id(&self.observed_bitcoin_network)),
             )
             .with_field(
                 btc_public_id("source_status"),
                 ProviderDiagnosticValue::Id(btc_public_id(self.source_status.as_str())),
-            );
-        if let Some(confirmations) = self.finality.confirmation_depth() {
-            diagnostic = diagnostic.with_field(
-                btc_public_id("confirmations"),
-                ProviderDiagnosticValue::U64(confirmations),
-            );
-        }
-        diagnostic
+            )
     }
 }
 
@@ -582,6 +560,10 @@ impl From<BtcAddress> for String {
 pub struct BtcChainHeadResponse {
     /// Redacted source evidence.
     pub evidence: RedactedBtcSourceEvidence,
+    /// Head kind represented by this response.
+    pub head_kind: BtcHeadKind,
+    /// Finality policy represented by this response.
+    pub finality: BtcFinality,
     /// Observed block height.
     pub block_height: u64,
     /// Observed block hash.
@@ -593,7 +575,16 @@ pub struct BtcChainHeadResponse {
 impl BtcChainHeadResponse {
     /// Verifies that this response matches the request guard and head selection.
     pub fn verify_request(&self, request: &BtcChainHeadRequest) -> Result<()> {
-        self.evidence.verify_request(request)
+        self.evidence.verify_guard(&request.guard)?;
+        if self.head_kind == request.selection.head_kind()
+            && self.finality == request.selection.finality()
+        {
+            Ok(())
+        } else {
+            Err(BtcCapabilityError::SourceMismatch {
+                diagnostic: self.evidence.source_mismatch_diagnostic(),
+            })
+        }
     }
 }
 
@@ -613,13 +604,13 @@ pub struct BtcBalanceReadResponse {
 }
 
 impl BtcBalanceReadResponse {
-    /// Verifies that this response matches the request guard, address, and head selection.
+    /// Verifies that this response matches the request guard, address, and exact anchor.
     pub fn verify_request(&self, request: &BtcBalanceReadRequest) -> Result<()> {
-        self.evidence.verify_request(&BtcChainHeadRequest {
-            guard: request.guard.clone(),
-            selection: request.selection,
-        })?;
-        if self.address == request.address {
+        self.evidence.verify_guard(&request.guard)?;
+        if self.address == request.address
+            && self.block_height == request.block_height
+            && self.block_hash == request.block_hash
+        {
             Ok(())
         } else {
             Err(BtcCapabilityError::SourceMismatch {
@@ -640,6 +631,8 @@ pub enum BtcInvalidRequest {
     InvalidBlockHash,
     /// Address was not in a supported public Bitcoin address envelope.
     InvalidAddress,
+    /// Bitcoin Core network tag was not one of the supported tags.
+    InvalidBitcoinNetwork,
 }
 
 /// Redaction-safe Bitcoin capability error.
@@ -695,6 +688,15 @@ fn invalid_identifier(_source: mfm_ids::CheckedStringError) -> BtcCapabilityErro
     }
 }
 
+fn validate_bitcoin_network(value: &str) -> Result<()> {
+    match value {
+        "main" | "test" | "signet" | "regtest" => Ok(()),
+        _ => Err(BtcCapabilityError::InvalidRequest {
+            reason: BtcInvalidRequest::InvalidBitcoinNetwork,
+        }),
+    }
+}
+
 fn is_supported_bitcoin_address_envelope(value: &str) -> bool {
     if value.trim() != value || value.len() < 14 || value.len() > 90 || !value.is_ascii() {
         return false;
@@ -717,10 +719,11 @@ mod tests {
 
     fn guard() -> BtcChainGuard {
         BtcChainGuard::new(
-            BtcChain::Bitcoin,
             BtcNetworkId::new("bitcoin-mainnet").expect("network"),
             BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
+            "main",
         )
+        .expect("guard")
     }
 
     fn request(selection: BtcHeadSelection) -> BtcChainHeadRequest {
@@ -769,14 +772,12 @@ mod tests {
     #[test]
     fn response_evidence_verifies_request() {
         let request = request(BtcHeadSelection::best());
-        let evidence = RedactedBtcSourceEvidence::from_request(
-            &request,
-            Some("main".to_string()),
-            BtcSourceStatus::Synced,
-        );
+        let evidence =
+            RedactedBtcSourceEvidence::from_request(&request, "main", BtcSourceStatus::Synced)
+                .expect("evidence");
 
         evidence
-            .verify_request(&request)
+            .verify_guard(&request.guard)
             .expect("matching evidence");
     }
 
@@ -785,11 +786,12 @@ mod tests {
         let request = request(BtcHeadSelection::best());
         let mismatched = RedactedBtcSourceEvidence {
             source_identity: BtcSourceIdentity::new("different-semantic-source").expect("source"),
-            ..RedactedBtcSourceEvidence::from_request(&request, None, BtcSourceStatus::Unknown)
+            ..RedactedBtcSourceEvidence::from_request(&request, "main", BtcSourceStatus::Unknown)
+                .expect("evidence")
         };
 
         let error = mismatched
-            .verify_request(&request)
+            .verify_guard(&request.guard)
             .expect_err("mismatch should fail");
         let rendered = format!("{error:?} {error}");
 
@@ -798,6 +800,18 @@ mod tests {
         assert!(!rendered.contains("http://"));
         assert!(!rendered.contains(concat!("Bear", "er")));
         assert!(!rendered.contains("secret"));
+    }
+
+    #[test]
+    fn response_evidence_rejects_observed_bitcoin_network_mismatch() {
+        let error = RedactedBtcSourceEvidence::from_request(
+            &request(BtcHeadSelection::best()),
+            "test",
+            BtcSourceStatus::Synced,
+        )
+        .expect_err("observed network mismatch");
+
+        assert!(matches!(error, BtcCapabilityError::SourceMismatch { .. }));
     }
 
     #[test]

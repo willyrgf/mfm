@@ -791,6 +791,7 @@ source_ref = "ethereum-mainnet"
                     {
                         "network_id": "bitcoin-mainnet",
                         "family": "bitcoin",
+                        "bitcoin_network": "main",
                         "control_scope": "bitcoin-mainnet",
                         "metadata": {}
                     }

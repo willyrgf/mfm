@@ -740,9 +740,11 @@ impl mfm_adapters_portfolio::PortfolioRuntimeValidator for RuntimeConfigPortfoli
 
     fn validate_btc_guard(
         &self,
-        _guard: &mfm_btc_capabilities::BtcChainGuard,
+        guard: &mfm_btc_capabilities::BtcChainGuard,
     ) -> mfm_runtime::Result<()> {
-        self.btc_provider().map(|_| ())
+        self.btc_provider()?
+            .validate_guard(guard)
+            .map_err(runtime_btc_capability_error)
     }
 }
 
@@ -918,6 +920,12 @@ fn runtime_config_error(
 
 fn runtime_evm_transport_error(
     error: mfm_transports_evm::EvmTransportError,
+) -> mfm_runtime::RuntimeError {
+    mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
+}
+
+fn runtime_btc_capability_error(
+    error: mfm_btc_capabilities::BtcCapabilityError,
 ) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
 }

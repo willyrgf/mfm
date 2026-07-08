@@ -18,6 +18,7 @@ url = { workspace = true }
 uuid = { version = "1.8.0" }
 
 mfm-evm-capabilities = { path = "../evm-capabilities" }
+mfm-btc-capabilities = { path = "../btc-capabilities" }
 mfm-ids = { path = "../kernel/ids" }
 mfm-signing = { path = "../signing" }
 

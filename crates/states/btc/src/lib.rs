@@ -9,9 +9,9 @@ use std::future;
 use std::num::NonZeroU64;
 
 use mfm_btc_capabilities::{
-    BtcCapabilityError, BtcChain, BtcChainGuard, BtcChainHeadReadCapability, BtcChainHeadRequest,
+    BtcCapabilityError, BtcChainGuard, BtcChainHeadReadCapability, BtcChainHeadRequest,
     BtcChainHeadResponse as CapabilityChainHeadResponse, BtcFinality, BtcHeadKind,
-    BtcHeadSelection, BtcNetworkId, BtcSourceIdentity, BtcSourceStatus, RedactedBtcSourceEvidence,
+    BtcHeadSelection, BtcNetworkId, BtcSourceIdentity, BtcSourceStatus,
 };
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{CapabilitySpec, ManagedPlatformWriteRole};
@@ -166,31 +166,32 @@ impl From<BtcStateError> for StateError {
     schema = "mfm.bitcoin.fact.chain_head.subject"
 )]
 pub struct BtcChainHeadSubject {
-    chain: String,
     network: String,
+    bitcoin_network: String,
     semantic_source_identity: String,
     head_kind: String,
 }
 
 impl BtcChainHeadSubject {
-    /// Creates chain-head subject material from redacted source evidence.
-    pub fn from_evidence(evidence: &RedactedBtcSourceEvidence) -> Self {
+    /// Creates chain-head subject material from a verified capability response.
+    pub fn from_capability_response(response: &CapabilityChainHeadResponse) -> Self {
+        let evidence = &response.evidence;
         Self {
-            chain: evidence.chain.as_str().to_owned(),
             network: evidence.network_id.as_str().to_owned(),
+            bitcoin_network: evidence.bitcoin_network.clone(),
             semantic_source_identity: evidence.source_identity.as_str().to_owned(),
-            head_kind: head_kind_tag(evidence.head_kind).to_owned(),
+            head_kind: head_kind_tag(response.head_kind).to_owned(),
         }
-    }
-
-    /// Returns the chain tag.
-    pub fn chain(&self) -> &str {
-        &self.chain
     }
 
     /// Returns the semantic network id.
     pub fn network(&self) -> &str {
         &self.network
+    }
+
+    /// Returns the Bitcoin Core network tag.
+    pub fn bitcoin_network(&self) -> &str {
+        &self.bitcoin_network
     }
 
     /// Returns the non-secret semantic source identity.
@@ -216,7 +217,7 @@ pub struct BtcChainHeadResponse {
     block_height: u64,
     block_hash: String,
     observed_source_status: String,
-    observed_network: Option<String>,
+    observed_bitcoin_network: String,
     finality_policy: String,
     confirmation_depth: Option<u64>,
     provider_time_unix_ms: Option<u64>,
@@ -233,9 +234,9 @@ impl BtcChainHeadResponse {
             block_height: response.block_height,
             block_hash: response.block_hash.as_str().to_owned(),
             observed_source_status: source_status_tag(response.evidence.source_status).to_owned(),
-            observed_network: response.evidence.observed_network.clone(),
-            finality_policy: finality_policy_tag(response.evidence.finality).to_owned(),
-            confirmation_depth: response.evidence.finality.confirmation_depth(),
+            observed_bitcoin_network: response.evidence.observed_bitcoin_network.clone(),
+            finality_policy: finality_policy_tag(response.finality).to_owned(),
+            confirmation_depth: response.finality.confirmation_depth(),
             provider_time_unix_ms: response.provider_time_unix_ms,
             observed_at_unix_ms,
         }
@@ -278,16 +279,16 @@ impl BtcChainHeadResponse {
 )]
 #[mfm_fact(kind = "chain.head")]
 #[mfm_fact(field(
-    id = "subject.chain",
+    id = "subject.network",
     source = "subject",
-    path = "chain",
+    path = "network",
     value_type = "string",
     exposure = "returnable"
 ))]
 #[mfm_fact(field(
-    id = "subject.network",
+    id = "subject.bitcoin_network",
     source = "subject",
-    path = "network",
+    path = "bitcoin_network",
     value_type = "string",
     exposure = "returnable"
 ))]
@@ -397,8 +398,8 @@ pub struct CollectorCheckpointSubject {
     semantic_source_identity: String,
     scope: String,
     partition: String,
-    chain: String,
     network: String,
+    bitcoin_network: String,
 }
 
 impl CollectorCheckpointSubject {
@@ -407,17 +408,20 @@ impl CollectorCheckpointSubject {
         collector_kind: impl Into<String>,
         source_identity: &BtcSourceIdentity,
         partition: impl Into<String>,
-        chain: BtcChain,
+        bitcoin_network: impl Into<String>,
         network: &BtcNetworkId,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, BtcStateError> {
+        let bitcoin_network = bitcoin_network.into();
+        validate_bitcoin_network(&bitcoin_network)
+            .map_err(|reason| BtcStateError::InvalidInput { reason })?;
+        Ok(Self {
             collector_kind: collector_kind.into(),
             semantic_source_identity: source_identity.as_str().to_owned(),
             scope: DEFAULT_SCOPE.to_owned(),
             partition: partition.into(),
-            chain: chain.as_str().to_owned(),
             network: network.as_str().to_owned(),
-        }
+            bitcoin_network,
+        })
     }
 
     /// Returns the collector kind.
@@ -440,14 +444,14 @@ impl CollectorCheckpointSubject {
         &self.partition
     }
 
-    /// Returns the chain tag.
-    pub fn chain(&self) -> &str {
-        &self.chain
-    }
-
     /// Returns the semantic network id.
     pub fn network(&self) -> &str {
         &self.network
+    }
+
+    /// Returns the Bitcoin Core network tag.
+    pub fn bitcoin_network(&self) -> &str {
+        &self.bitcoin_network
     }
 }
 
@@ -552,9 +556,9 @@ impl CollectorCheckpointResponse {
     exposure = "query_only"
 ))]
 #[mfm_fact(field(
-    id = "subject.chain",
+    id = "subject.bitcoin_network",
     source = "subject",
-    path = "chain",
+    path = "bitcoin_network",
     value_type = "string",
     exposure = "query_only"
 ))]
@@ -652,6 +656,8 @@ impl CollectorCheckpointFact {
 pub struct ObserveBtcChainHeadConfig {
     /// Semantic network id.
     pub network: String,
+    /// Expected Bitcoin Core network tag (`main`, `test`, `signet`, or `regtest`).
+    pub bitcoin_network: String,
     /// Non-secret semantic source identity.
     pub semantic_source_identity: String,
     /// Head kind requested by the state.
@@ -667,6 +673,7 @@ pub fn validate_observe_chain_head_config(
     config: &ObserveBtcChainHeadConfig,
 ) -> Result<(), String> {
     BtcNetworkId::new(&config.network).map_err(|error| error.to_string())?;
+    validate_bitcoin_network(&config.bitcoin_network)?;
     BtcSourceIdentity::new(&config.semantic_source_identity).map_err(|error| error.to_string())?;
     match config.head_kind.as_str() {
         "best" if config.confirmation_depth.is_none() => Ok(()),
@@ -684,7 +691,7 @@ impl ObserveBtcChainHeadConfig {
             .map_err(|reason| BtcStateError::InvalidInput { reason })?;
         let network = BtcNetworkId::new(&self.network)?;
         let source_identity = BtcSourceIdentity::new(&self.semantic_source_identity)?;
-        let guard = BtcChainGuard::new(BtcChain::Bitcoin, network, source_identity);
+        let guard = BtcChainGuard::new(network, source_identity, &self.bitcoin_network)?;
         let selection = match self.head_kind.as_str() {
             "best" => BtcHeadSelection::best(),
             "confirmed" => BtcHeadSelection::confirmed(
@@ -788,7 +795,7 @@ pub fn normalize_chain_head_response(
     response.verify_request(request)?;
     validate_loaded_checkpoint_for_request(request, &input.loaded_checkpoint)?;
     let observation = BtcChainHeadObservation::new(
-        BtcChainHeadSubject::from_evidence(&response.evidence),
+        BtcChainHeadSubject::from_capability_response(response),
         BtcChainHeadResponse::from_capability_response(response, input.context.observed_at_unix_ms),
         1,
     );
@@ -944,6 +951,8 @@ pub struct QueryCollectorCheckpointConfig {
     pub partition: String,
     /// Semantic Bitcoin network id.
     pub network: String,
+    /// Expected Bitcoin Core network tag (`main`, `test`, `signet`, or `regtest`).
+    pub bitcoin_network: String,
     /// Non-secret store scope for this internal fact-index query.
     pub store_scope: String,
 }
@@ -957,6 +966,7 @@ pub fn validate_query_collector_checkpoint_config(
         &config.semantic_source_identity,
         &config.partition,
         &config.network,
+        &config.bitcoin_network,
     )?;
     StoreScopeRef::new(&config.store_scope).map_err(|error| error.to_string())?;
     Ok(())
@@ -969,13 +979,13 @@ impl QueryCollectorCheckpointConfig {
             .map_err(|reason| BtcStateError::InvalidInput { reason })?;
         let source_identity = BtcSourceIdentity::new(&self.semantic_source_identity)?;
         let network = BtcNetworkId::new(&self.network)?;
-        Ok(CollectorCheckpointSubject::new(
+        CollectorCheckpointSubject::new(
             self.collector_kind.clone(),
             &source_identity,
             self.partition.clone(),
-            BtcChain::Bitcoin,
+            self.bitcoin_network.clone(),
             &network,
-        ))
+        )
     }
 
     /// Builds the Control fact-index read request for the latest checkpoint.
@@ -1041,6 +1051,7 @@ impl Default for QueryCollectorCheckpointConfig {
             semantic_source_identity: "public-bitcoin-core".to_owned(),
             partition: "chain-head".to_owned(),
             network: "bitcoin-mainnet".to_owned(),
+            bitcoin_network: "main".to_owned(),
             store_scope: DEFAULT_STORE_SCOPE.to_owned(),
         }
     }
@@ -1230,8 +1241,8 @@ impl RecordCollectorCheckpointConfig {
             semantic_source_identity: chain_head_fact.subject().semantic_source_identity.clone(),
             scope: DEFAULT_SCOPE.to_owned(),
             partition: self.partition.clone(),
-            chain: chain_head_fact.subject().chain.clone(),
             network: chain_head_fact.subject().network.clone(),
+            bitcoin_network: chain_head_fact.subject().bitcoin_network.clone(),
         })
     }
 }
@@ -1339,8 +1350,8 @@ fn validate_loaded_checkpoint_for_request(
     };
     let subject = checkpoint.subject();
     let response = checkpoint.response();
-    if subject.chain() != request.guard.chain().as_str()
-        || subject.network() != request.guard.network_id().as_str()
+    if subject.network() != request.guard.network_id().as_str()
+        || subject.bitcoin_network() != request.guard.bitcoin_network()
         || subject.semantic_source_identity() != request.guard.source_identity().as_str()
         || subject.scope() != DEFAULT_SCOPE
         || response.finality_policy() != finality_policy_tag(request.selection.finality())
@@ -1379,8 +1390,8 @@ fn validate_loaded_checkpoint_for_recorded_fact(
     if previous_subject.collector_kind() != config.collector_kind
         || previous_subject.partition() != config.partition
         || previous_subject.scope() != DEFAULT_SCOPE
-        || previous_subject.chain() != chain_head_fact.subject().chain()
         || previous_subject.network() != chain_head_fact.subject().network()
+        || previous_subject.bitcoin_network() != chain_head_fact.subject().bitcoin_network()
         || previous_subject.semantic_source_identity()
             != chain_head_fact.subject().semantic_source_identity()
         || previous.response().finality_policy() != chain_head_fact.response().finality_policy
@@ -1419,16 +1430,16 @@ fn collector_checkpoint_query_input(
         ScopeDecisionEvidence::new(control_scope_decision_hash()),
         vec![
             query_predicate(
-                "subject.chain",
-                FactCanonicalScalar::string(BtcChain::Bitcoin.as_str()),
-            )?,
-            query_predicate(
                 "subject.collector_kind",
                 FactCanonicalScalar::string(&config.collector_kind),
             )?,
             query_predicate(
                 "subject.network",
                 FactCanonicalScalar::string(&config.network),
+            )?,
+            query_predicate(
+                "subject.bitcoin_network",
+                FactCanonicalScalar::string(&config.bitcoin_network),
             )?,
             query_predicate(
                 "subject.partition",
@@ -1478,12 +1489,21 @@ fn validate_collector_checkpoint_common(
     semantic_source_identity: &str,
     partition: &str,
     network: &str,
+    bitcoin_network: &str,
 ) -> Result<(), String> {
     validate_non_secret_label("collector_kind", collector_kind)?;
     validate_non_secret_label("partition", partition)?;
     BtcSourceIdentity::new(semantic_source_identity).map_err(|error| error.to_string())?;
     BtcNetworkId::new(network).map_err(|error| error.to_string())?;
+    validate_bitcoin_network(bitcoin_network)?;
     Ok(())
+}
+
+fn validate_bitcoin_network(value: &str) -> Result<(), String> {
+    match value {
+        "main" | "test" | "signet" | "regtest" => Ok(()),
+        _ => Err("bitcoin_network must be `main`, `test`, `signet`, or `regtest`".to_owned()),
+    }
 }
 
 fn validate_non_secret_label(name: &str, value: &str) -> Result<(), String> {
@@ -1548,7 +1568,7 @@ fn finality_policy_tag(finality: BtcFinality) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mfm_btc_capabilities::BtcBlockHash;
+    use mfm_btc_capabilities::{BtcBlockHash, RedactedBtcSourceEvidence};
     use mfm_capabilities::CapabilitySpec;
     use mfm_effects::EffectSpec;
     use mfm_facts::{
@@ -1580,6 +1600,7 @@ mod tests {
     fn observe_config() -> ObserveBtcChainHeadConfig {
         ObserveBtcChainHeadConfig {
             network: "bitcoin-mainnet".to_owned(),
+            bitcoin_network: "main".to_owned(),
             semantic_source_identity: "public-bitcoin-core".to_owned(),
             head_kind: "best".to_owned(),
             confirmation_depth: None,
@@ -1589,13 +1610,13 @@ mod tests {
 
     fn capability_response() -> (BtcChainHeadRequest, CapabilityChainHeadResponse) {
         let request = observe_config().request().expect("request");
-        let evidence = RedactedBtcSourceEvidence::from_request(
-            &request,
-            Some("main".to_owned()),
-            BtcSourceStatus::Synced,
-        );
+        let evidence =
+            RedactedBtcSourceEvidence::from_request(&request, "main", BtcSourceStatus::Synced)
+                .expect("evidence");
         let response = CapabilityChainHeadResponse {
             evidence,
+            head_kind: request.selection.head_kind(),
+            finality: request.selection.finality(),
             block_height: 850_000,
             block_hash: BtcBlockHash::new(
                 "00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc",
@@ -1621,6 +1642,7 @@ mod tests {
             semantic_source_identity: "public-bitcoin-core".to_owned(),
             partition: "chain-head".to_owned(),
             network: "bitcoin-mainnet".to_owned(),
+            bitcoin_network: "main".to_owned(),
             store_scope: "mfm.store.default".to_owned(),
         }
     }
@@ -1668,8 +1690,8 @@ mod tests {
             "subject.semantic_source_identity",
             "subject.scope",
             "subject.partition",
-            "subject.chain",
             "subject.network",
+            "subject.bitcoin_network",
         ] {
             assert!(
                 descriptor
@@ -1997,9 +2019,10 @@ mod tests {
             "btc-chain-head",
             &BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
             "chain-head",
-            BtcChain::Bitcoin,
+            "main",
             &BtcNetworkId::new("bitcoin-mainnet").expect("network"),
-        );
+        )
+        .expect("checkpoint subject");
         let response = CollectorCheckpointResponse::new(
             850_000,
             "00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc",
@@ -2120,9 +2143,10 @@ mod tests {
             "btc-chain-head",
             &BtcSourceIdentity::new(source_identity).expect("source"),
             "chain-head",
-            BtcChain::Bitcoin,
+            "main",
             &BtcNetworkId::new(network).expect("network"),
-        );
+        )
+        .expect("checkpoint subject");
         let response = CollectorCheckpointResponse::new(
             height,
             "00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc",

@@ -9,7 +9,7 @@ use std::{fmt, sync::Arc};
 
 use alloy_primitives::{Address, U256};
 use mfm_btc_capabilities::{
-    BtcAddress, BtcBalanceReadProvider, BtcBalanceReadRequest, BtcCapabilityError, BtcChain,
+    BtcAddress, BtcBalanceReadProvider, BtcBalanceReadRequest, BtcBlockHash, BtcCapabilityError,
     BtcChainGuard, BtcChainHeadReadProvider, BtcChainHeadRequest, BtcHeadSelection, BtcNetworkId,
     BtcSourceIdentity,
 };
@@ -477,8 +477,9 @@ fn validate_network_read_intents(
             PortfolioNetworkReadIntent::Bitcoin {
                 network_id,
                 source_identity,
+                bitcoin_network,
             } => runtime.validate_btc_guard(
-                &portfolio_btc_guard(&network_id, &source_identity)
+                &portfolio_btc_guard(&network_id, &source_identity, &bitcoin_network)
                     .map_err(portfolio_runtime_binding_error)?,
             )?,
         }
@@ -523,6 +524,7 @@ fn portfolio_evm_guard(
 fn portfolio_btc_guard(
     network_id: &str,
     source_identity: &str,
+    bitcoin_network: &str,
 ) -> Result<BtcChainGuard, PortfolioReadError> {
     let network_id = BtcNetworkId::new(network_id).map_err(|_| {
         PortfolioReadError::new(
@@ -536,11 +538,12 @@ fn portfolio_btc_guard(
             "portfolio source identity could not be used as Bitcoin source identity",
         )
     })?;
-    Ok(BtcChainGuard::new(
-        BtcChain::Bitcoin,
-        network_id,
-        source_identity,
-    ))
+    BtcChainGuard::new(network_id, source_identity, bitcoin_network).map_err(|_| {
+        PortfolioReadError::new(
+            "bitcoin_network_invalid",
+            "portfolio Bitcoin network tag could not be used as a Bitcoin guard",
+        )
+    })
 }
 
 #[derive(Clone)]
@@ -566,8 +569,9 @@ impl CapabilityPortfolioBackend {
             PortfolioNetworkReadIntent::Bitcoin {
                 network_id,
                 source_identity,
+                bitcoin_network,
             } => {
-                self.read_bitcoin_execution_anchor(network_id, source_identity)
+                self.read_bitcoin_execution_anchor(network_id, source_identity, bitcoin_network)
                     .await
             }
         }
@@ -601,8 +605,9 @@ impl CapabilityPortfolioBackend {
         &self,
         network_id: &str,
         source_identity: &str,
+        bitcoin_network: &str,
     ) -> Result<ExecutionAnchor, PortfolioReadError> {
-        let guard = portfolio_btc_guard(network_id, source_identity)?;
+        let guard = portfolio_btc_guard(network_id, source_identity, bitcoin_network)?;
         let request = BtcChainHeadRequest {
             guard,
             selection: BtcHeadSelection::best(),
@@ -677,12 +682,20 @@ impl CapabilityPortfolioBackend {
             PortfolioBalanceReadIntent::BitcoinNativeBalance {
                 network_id,
                 source_identity,
+                bitcoin_network,
                 address,
                 anchor,
                 decimals,
             } => {
-                self.read_bitcoin_balance(network_id, source_identity, address, anchor, *decimals)
-                    .await
+                self.read_bitcoin_balance(
+                    network_id,
+                    source_identity,
+                    bitcoin_network,
+                    address,
+                    anchor,
+                    *decimals,
+                )
+                .await
             }
         }
     }
@@ -722,16 +735,19 @@ impl CapabilityPortfolioBackend {
         &self,
         network_id: &str,
         source_identity: &str,
+        bitcoin_network: &str,
         address: &str,
         anchor: &ExecutionAnchor,
         decimals: u8,
     ) -> Result<RawBalanceObservation, PortfolioReadError> {
-        let guard = portfolio_btc_guard(network_id, source_identity)?;
+        let guard = portfolio_btc_guard(network_id, source_identity, bitcoin_network)?;
         let address = parse_btc_address(address)?;
+        let (block_height, block_hash) = btc_anchor_parts(anchor)?;
         let request = BtcBalanceReadRequest {
             guard,
             address,
-            selection: BtcHeadSelection::best(),
+            block_height,
+            block_hash,
         };
         let btc = self.btc.as_ref().ok_or_else(missing_btc_provider)?;
         let response = btc
@@ -741,17 +757,10 @@ impl CapabilityPortfolioBackend {
         response
             .verify_request(&request)
             .map_err(portfolio_btc_capability_error)?;
-        let observed_anchor = ExecutionAnchor::Bitcoin {
-            height: response.block_height,
-            block_hash: response.block_hash.to_string(),
-        };
-        if &observed_anchor != anchor {
-            return Err(observation_anchor_mismatch(anchor, &observed_anchor));
-        }
         Ok(RawBalanceObservation::new(
             U256::from(response.balance_sats),
             decimals,
-            Some(observed_anchor),
+            Some(anchor.clone()),
         ))
     }
 
@@ -800,29 +809,21 @@ impl CapabilityPortfolioBackend {
     }
 }
 
-fn observation_anchor_mismatch(
-    expected: &ExecutionAnchor,
-    observed: &ExecutionAnchor,
-) -> PortfolioReadError {
-    PortfolioReadError::new(
-        "observation_anchor_mismatch",
-        format!(
-            "portfolio balance read did not match the pinned execution anchor: expected {}, observed {}",
-            execution_anchor_label(expected),
-            execution_anchor_label(observed),
-        ),
-    )
-}
-
-fn execution_anchor_label(anchor: &ExecutionAnchor) -> String {
+fn btc_anchor_parts(anchor: &ExecutionAnchor) -> Result<(u64, BtcBlockHash), PortfolioReadError> {
     match anchor {
-        ExecutionAnchor::Evm {
-            chain_id,
-            block_number,
-        } => format!("evm(chain_id={chain_id}, block_number={block_number})"),
         ExecutionAnchor::Bitcoin { height, block_hash } => {
-            format!("bitcoin(height={height}, block_hash={block_hash})")
+            let block_hash = BtcBlockHash::new(block_hash).map_err(|_| {
+                PortfolioReadError::new(
+                    "bitcoin_anchor_invalid",
+                    "portfolio Bitcoin execution anchor block hash was invalid",
+                )
+            })?;
+            Ok((*height, block_hash))
         }
+        ExecutionAnchor::Evm { .. } => Err(PortfolioReadError::new(
+            "bitcoin_anchor_invalid",
+            "portfolio Bitcoin read required a Bitcoin execution anchor",
+        )),
     }
 }
 
@@ -888,13 +889,16 @@ fn portfolio_provider_diagnostic_error(
     provider_label: &str,
     diagnostic: RedactedProviderDiagnostic,
 ) -> PortfolioReadError {
-    let is_source_mismatch = diagnostic.code() == ProviderDiagnosticCode::SourceMismatch;
+    let fatal_attempt_failure = matches!(
+        diagnostic.code(),
+        ProviderDiagnosticCode::SourceMismatch | ProviderDiagnosticCode::UnsupportedOperation
+    );
     let error = PortfolioReadError::new(
         diagnostic.stable_error_code(),
         format!("portfolio {provider_label} read capability failed: {diagnostic}"),
     )
     .with_redacted_details(diagnostic.to_public_details_json());
-    if is_source_mismatch {
+    if fatal_attempt_failure {
         error.with_fatal_attempt_failure()
     } else {
         error
