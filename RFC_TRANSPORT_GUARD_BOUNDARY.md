@@ -1,65 +1,57 @@
-# RFC: Transport Guard Boundary
+# RFC: Capability Source Authority Boundary
 
 Status: Draft
 
 ## Summary
 
-Transport guards should be owned by transport-facing capability requests and enforced only by
-transport/provider implementations when live external IO is about to happen.
+MFM should have one external-source boundary concept: the capability request/response provider
+contract.
 
-The current codebase has drifted from that boundary. Guard construction and guard verification appear
-in states, adapters, app/replay validation, and tests. That makes `EvmChainGuard` and `BtcChainGuard`
-look like general domain authority types instead of live transport boundary contracts. It also creates
-duplicated checks: a transport/provider verifies the guard, then adapter code often verifies the
-returned evidence against the same guard again.
+The current `EvmChainGuard` and `BtcChainGuard` model has become a second public authority concept.
+It appears in states, adapters, app/replay validation, transport route checks, and tests. That spreads
+source-authority responsibility across the codebase and forces repeated evidence validation after
+successful provider calls.
 
-This RFC proposes a broad cleanup:
+This RFC replaces that split with a smaller rule:
 
-- Keep semantic workflow authority as plain config/context fields.
-- Construct `*ChainGuard` only at adapter-to-transport call sites.
-- Enforce `*ChainGuard` only inside live transport/provider implementations.
-- Remove guard construction and transport request construction from state crates.
-- Remove adapter-side live response guard re-verification.
-- Keep replay evidence validation, but make it explicit and replay-only instead of using generic live
-  guard verification helpers throughout the codebase.
+- Existing config/context/intent values carry workflow semantic authority.
+- Adapters build external capability requests from that semantic authority.
+- Capability provider backends enforce request source authority before returning success.
+- Live backends enforce by resolving runtime routes and probing the external source.
+- Replay/recorded backends enforce by checking recorded evidence against the same request.
+- States, adapters, app replay, public-output code, and binaries do not re-verify provider source
+  evidence after a successful provider response.
+
+The public boundary is the capability request. Source authority should be private request data or a
+private helper inside the capability/request implementation, not a public `*ChainGuard` type passed
+around as domain authority.
 
 ## Problem
 
-### Guard Semantics Are Currently Spread Across Layers
+### Guards Became General Authority
 
-The design intent is that external provider identity is checked at the live transport boundary. In
-practice, guard-related code appears in several layers:
+`EvmChainGuard` and `BtcChainGuard` were meant to protect provider calls. In practice, guard
+construction and guard verification now appear in several layers:
 
-- Capability crates define `EvmChainGuard`, `BtcChainGuard`, guarded requests, evidence, and
-  `verify_guard` helpers.
-- Transport crates resolve runtime routes and probe live provider identity.
-- Adapter crates build guarded requests and also re-verify returned evidence.
-- `mfm-states-btc` constructs `BtcChainGuard` and `BtcChainHeadRequest`.
-- App/replay code constructs or validates EVM guards for diagnostic evidence.
+- capability crates expose public guard types, guarded request structs, evidence, and generic
+  `verify_guard` / `verify_request` helpers
+- transport crates enforce source identity
+- adapters build guarded requests and often re-verify successful responses
+- `mfm-states-btc` constructs `BtcChainGuard` and `BtcChainHeadRequest`
+- app/replay code reconstructs EVM guards to validate diagnostic evidence
+- docs describe replay as checking recorded evidence against request guards
 
-This makes the boundary unclear. A reader cannot easily tell which code is semantic planning, which
-code is request mapping, which code is live provider enforcement, and which code is replay evidence
-validation.
+That makes the guard look like semantic workflow authority. It is not. The semantic authority is
+already present in certified config, context, and state intent fields such as:
 
-### The Name "Guard" Is Doing Too Much
+- EVM `network_id` and `expected_chain_id`
+- Bitcoin `network_id`, `semantic_source_identity`, and `bitcoin_network`
 
-There are two concepts that have become conflated:
+The guard abstraction adds another public type without owning a distinct responsibility.
 
-1. Workflow semantic authority.
-   Examples: `network_id`, `expected_chain_id`, `source_identity`, `bitcoin_network`.
+### Provider Success Does Not Mean Enough Today
 
-2. Transport guard.
-   A checked request object passed to a live provider so the provider can reject a route/source
-   mismatch before returning data or submitting side effects.
-
-The first concept belongs in operation config, certified context, state config, facts, and replay
-authority.
-
-The second concept belongs at the transport boundary only.
-
-### Adapter-Side Guard Verification Duplicates Provider Responsibility
-
-Live adapters often do this after a successful provider call:
+Some live adapters currently do this after provider success:
 
 ```rust
 response.evidence.verify_guard(&guard)?;
@@ -71,131 +63,235 @@ or:
 response.verify_request(&request)?;
 ```
 
-When the provider contract already says that a guarded request is enforced before a successful
-response is returned, these checks duplicate the provider's job. They also train downstream code to
-treat provider evidence as untrusted even after crossing a trusted provider trait boundary.
+If callers must repeat this after every successful provider call, the provider trait contract is too
+weak. Every adapter then becomes a partial transport verifier, which duplicates code and leaves future
+contributors unsure where source authority is enforced.
 
-Adapters should still validate domain-specific response facts that are not transport guard
-enforcement. For example:
+The provider contract should be stronger:
 
-- transaction hash returned by `eth_sendRawTransaction`
-- receipt transaction hash and receipt status
-- block hash/height matching an exact request
-- address and anchor consistency for exact balance reads
+> A successful capability provider response has already enforced request source authority and carries
+> matching source evidence by construction.
 
-Those checks are not the same as "does this evidence match the transport guard?"
+This applies to live and replay/recorded provider backends.
 
-### BTC State Currently Crosses The Boundary
+### BTC State Crosses The Boundary
 
-`mfm-states-btc` currently constructs a `BtcChainGuard` and a `BtcChainHeadRequest` from
-`ObserveBtcChainHeadConfig`.
+`mfm-states-btc` currently imports `BtcChainGuard` and `BtcChainHeadRequest`, constructs the request
+from `ObserveBtcChainHeadConfig`, and normalizes by verifying the response against that request.
 
-That is the wrong layer. State logic may validate pure semantic configuration and normalize already
-obtained observations. It should not construct transport-boundary request objects.
+That is the wrong layer. A state may validate semantic config, checkpoint compatibility, and
+deterministic observation ordering. It should not construct external provider request objects or
+validate provider source evidence.
 
-The adapter runner should map state config plus input into a transport capability request immediately
-before calling the provider.
+The BTC adapter should build the request immediately before calling a provider. The provider, live or
+recorded, should enforce the request.
 
-### Replay Needs Evidence Validation, But Not Live Guard Enforcement
+### BTC Replay Helpers Are The Same Smell
 
-Replay has no live transport. It must verify stored evidence against certified workflow authority.
-That validation is real and must remain.
+`mfm-adapters-btc-jsonrpc` currently exposes replay helper functions such as:
 
-However, replay validation should not look like live guard enforcement. A replay verifier should work
-from certified semantic authority and recorded evidence, not from current runtime config and not from a
-transport guard abstraction that appears to be a live request concern.
+```rust
+verify_recorded_chain_head_evidence(...)
+replay_chain_head_fact_from_evidence(...)
+```
+
+Those helpers keep source-evidence validation as a caller activity. The better shape is a recorded
+provider backend that implements the same `BtcChainHeadReadProvider` trait as the live provider.
+
+Then the call path is unified:
+
+```text
+state config/input
+  -> adapter builds capability request
+  -> provider.read(request)
+  -> state normalizes successful response
+```
+
+Live and replay differ only in which provider backend app/replay assembly wires in.
 
 ## Goals
 
-- Make live transport/provider implementations the only live guard enforcement point.
-- Keep state crates free of transport guard and transport request construction.
-- Make adapter live flows trust successful provider responses with respect to guard enforcement.
-- Preserve explicit replay evidence validation.
-- Reduce repeated guard/evidence verification calls in adapters.
-- Keep route/source runtime config out of states, ops, and replay.
-- Preserve redaction rules for provider diagnostics and evidence.
+- Make the capability provider contract the only source-authority enforcement boundary.
+- Remove public guard types as general domain/replay authority.
+- Keep semantic authority in existing config/context/intent fields.
+- Keep states free of external provider request construction and provider evidence validation.
+- Make live adapters trust successful provider responses for source enforcement.
+- Represent replay source checks as recorded provider backend behavior, not caller-side helper calls.
+- Keep runtime route/source config out of states, ops, replay evidence, public outputs, and persisted
+  semantic surfaces.
+- Preserve redaction rules for source evidence and diagnostics.
 
 ## Non-Goals
 
-- Do not remove semantic fields from configs, contexts, facts, or evidence.
-- Do not remove source evidence from provider responses.
-- Do not weaken source mismatch handling in transports.
-- Do not add a cross-chain erased guard enum.
-- Do not move runtime route resolution into adapters, states, ops, app, or replay.
-- Do not silently trust recorded replay evidence without checking it against certified authority.
+- Do not remove semantic fields from configs, contexts, facts, or recorded evidence.
+- Do not remove redacted source evidence from provider responses.
+- Do not weaken source mismatch handling in live transports.
+- Do not silently trust recorded replay evidence.
+- Do not add a cross-chain erased guard enum or provider enum.
+- Do not move runtime route resolution into states, ops, app replay, public-output rendering, or
+  binaries.
+- Do not add public `EvmNetworkAuthority` / `BtcChainHeadAuthority` types just to replace public
+  guards.
+- Do not preserve backwards-compatible guard/request constructors, adapter verification paths, replay
+  helper APIs, or fallback compatibility shims.
 
-## Proposed Model
+## Compatibility And Deletion Policy
 
-### Definitions
+This is a breaking cleanup. MFM is pre-production, and correctness, fewer concepts, and fewer code
+paths take priority over compatibility.
 
-**Semantic authority**
+Old guard-based APIs and duplicate validation paths should be deleted, not hidden behind deprecation
+wrappers, fallback branches, compatibility constructors, feature flags, or temporary shims. If removed
+code is needed later, it can be recovered from git history.
 
-Workflow-owned non-secret fields that describe the intended external source.
+Implementation PRs should prefer removing public surface and tests over preserving old behavior. A
+change is incomplete if the old path still exists and can be called by states, adapters, app replay,
+or tests.
 
-EVM examples:
+Expected removals include:
 
-- `network_id`
-- `expected_chain_id`
+- public `guard` fields on EVM/BTC capability request structs
+- public `EvmChainGuard` / `BtcChainGuard` use from states, ops, adapters, app replay, and tests that
+  are not provider-backend tests
+- `ObserveBtcChainHeadConfig::request`
+- `ObserveBtcChainHeadState::request`
+- BTC state normalization APIs that accept `BtcChainHeadRequest`
+- state-side `response.verify_request(...)`
+- adapter-side `response.evidence.verify_guard(...)`
+- adapter-side `response.verify_request(...)`
+- public BTC replay helper functions that make callers validate recorded source evidence directly
+- app replay code that reconstructs EVM guards to validate source diagnostics
+- no-IO APIs named `validate_guard`
+- tests whose only purpose is proving adapters/states catch mismatched provider source evidence after
+  provider success
 
-Bitcoin examples:
+The replacement should be smaller:
 
-- `network_id`
-- `source_identity`
-- `bitcoin_network`
+- private request source authority plus request constructors/accessors
+- live provider source enforcement
+- recorded provider source enforcement
+- state semantic validation and normalization only
+- adapter request construction and workflow-level checks only
 
-Semantic authority may appear in certified config, context, state config, facts, public diagnostics,
-and replay verifiers.
+## Core Decision
 
-**Transport guard**
+### One Public Boundary: Capability Requests
 
-A checked request guard passed to a live transport/provider implementation.
+External source reads and writes should expose capability request types, not public guard objects.
 
-EVM:
+Current shape:
 
-- `EvmChainGuard`
+```rust
+pub struct BtcChainHeadRequest {
+    pub guard: BtcChainGuard,
+    pub selection: BtcHeadSelection,
+}
+```
 
-Bitcoin:
+Preferred shape:
 
-- `BtcChainGuard`
+```rust
+pub struct BtcChainHeadRequest {
+    source: BtcRequestSource,
+    selection: BtcHeadSelection,
+}
 
-Transport guards should be created only as part of constructing a transport-facing capability request.
-They should not be used as generic domain authority structs.
+impl BtcChainHeadRequest {
+    pub fn new(
+        network_id: BtcNetworkId,
+        source_identity: BtcSourceIdentity,
+        bitcoin_network: impl Into<String>,
+        selection: BtcHeadSelection,
+    ) -> Result<Self> {
+        // validate source authority and selection shape
+    }
 
-**Source evidence**
+    pub fn network_id(&self) -> &BtcNetworkId;
+    pub fn source_identity(&self) -> &BtcSourceIdentity;
+    pub fn bitcoin_network(&self) -> &str;
+    pub const fn selection(&self) -> BtcHeadSelection;
+}
+```
 
-Redacted provider evidence returned by a transport/provider after live guard enforcement.
+`BtcRequestSource` can be private. EVM should follow the same pattern:
 
-EVM examples:
+```rust
+pub struct EvmBlockReadRequest {
+    source: EvmRequestSource,
+    block: EvmBlockSelector,
+}
+```
 
-- semantic `network_id`
-- expected EVM chain id
-- observed EVM chain id
-- selected `source_ref`
-- selected `policy_id`
+The exact private helper names do not matter. The important rule is that callers cannot treat
+`*ChainGuard` as a reusable public authority object.
 
-Bitcoin examples:
+### One Provider Contract
 
-- semantic `network_id`
-- semantic `source_identity`
-- expected Bitcoin network tag
-- observed Bitcoin network tag
-- source status
+Capability provider traits should document this invariant:
 
-Source refs and policy ids are audit provenance only. They are not replay authority and must not be
-resolved against current runtime config during replay.
+> A successful response has already enforced all request-local provider authority, including source
+> identity, chain/network identity, and request-local selectors or anchors. Returned redacted source
+> evidence matches the request by construction.
 
-### Layer Responsibilities
+Provider-owned request-local checks include:
 
-#### Ops
+- source route/source identity
+- observed EVM chain id or Bitcoin network tag
+- requested block/hash/height identity when the request asks for an exact anchor
+- requested transaction hash for receipt reads
+- requested address/anchor for exact balance reads
+- requested chain-head selection and finality fields
+
+Adapters and states may still validate workflow-level invariants that are not provider source
+authority. Examples:
+
+- prepared transaction evidence matches certified lifecycle context
+- a signed payload hash matches the prepared expected transaction hash before submit
+- receipt `status` satisfies lifecycle success policy
+- retained artifacts match certified context and schema authority
+- normalized observation is not behind a loaded checkpoint
+
+Those checks are not provider source-evidence validation.
+
+### Live And Replay Use The Same Provider Trait
+
+There should be no separate caller-side replay validation path for source evidence.
+
+For a provider trait such as:
+
+```rust
+pub trait BtcChainHeadReadProvider: Send + Sync {
+    fn read_chain_head<'a>(
+        &'a self,
+        request: &'a BtcChainHeadRequest,
+    ) -> BtcCapabilityFuture<'a, BtcChainHeadResponse>;
+}
+```
+
+both backends implement the same trait:
+
+- `BtcJsonRpcChainHeadProvider`: live backend, resolves runtime route and probes RPC
+- `RecordedBtcChainHeadProvider`: replay backend, loads recorded response/evidence and validates it
+  against the request
+
+The adapter runner should not know whether it is executing live or replay. App/replay assembly chooses
+which backend is available for that execution mode.
+
+The same model applies to EVM provider traits.
+
+## Layer Responsibilities
+
+### Ops
 
 Ops assemble deterministic state graphs from semantic config.
 
-Ops may contain semantic fields like `network_id`, `expected_chain_id`, `source_identity`, and
-`bitcoin_network`.
+Ops may contain semantic fields like `network_id`, `expected_chain_id`, `semantic_source_identity`,
+and `bitcoin_network`.
 
-Ops must not construct `EvmChainGuard`, `BtcChainGuard`, or transport request objects.
+Ops must not construct external capability requests, route bindings, source guards, live transports,
+or recorded provider evidence.
 
-#### States
+### States
 
 States own reusable domain semantics and deterministic normalization.
 
@@ -203,372 +299,413 @@ States may:
 
 - validate semantic config fields
 - validate state inputs against prior state/fact material
-- normalize provider responses into state outputs
-- build fact-index requests when fact-index read is itself the state capability
+- expose semantic accessors or state-specific intent values
+- normalize successful provider responses into state outputs
+- build fact-index requests when the fact index itself is the state capability
 
 States must not:
 
-- construct transport guards
-- construct live EVM/BTC transport requests
+- construct external EVM/BTC provider requests
+- construct `EvmChainGuard`, `BtcChainGuard`, or replacement public guard objects
 - perform route/source binding checks
-- verify live provider source evidence against transport guards
+- verify provider source evidence
+- know whether a provider response came from live IO or recorded replay evidence
 
-For BTC, this means `ObserveBtcChainHeadState` should no longer expose `request() ->
-BtcChainHeadRequest`. It should expose semantic accessors or a pure semantic authority value that the
-adapter can use to build a transport request.
+For BTC, `ObserveBtcChainHeadState` should not expose `request() -> BtcChainHeadRequest`.
+It should expose only semantic config/selection behavior needed by the adapter and use successful
+provider responses as provider-validated input.
 
-#### Adapters
+### Adapters
 
 Adapters bind state intent to explicit capabilities.
 
 Adapters may:
 
-- load certified state config and input
-- build transport capability requests from semantic authority immediately before provider calls
-- call live providers
-- map provider errors to runtime errors
-- validate domain response invariants that are not guard enforcement
-- record redacted provider evidence
+- load certified state config and inputs
+- build capability requests from semantic config/context immediately before provider calls
+- call live or recorded provider backends through the same trait
+- map provider errors to runtime/replay errors
+- validate workflow-level invariants that are not provider source authority
+- record redacted provider evidence returned by successful providers
 
-Adapters should not:
+Adapters must not:
 
-- re-run `response.evidence.verify_guard(&guard)` after a successful live provider call
-- use guard verification as a substitute for provider contract enforcement
-- resolve runtime routes directly unless the adapter itself is the transport implementation
+- re-run source evidence validation after successful provider calls
+- use generic `verify_guard` / `verify_request` helpers as a substitute for provider contracts
+- expose free replay helpers that make callers validate recorded source evidence directly
+- resolve runtime routes unless the adapter is itself implementing a provider backend
 
-#### Transports / Providers
+### Live Providers / Transports
 
-Transports/providers own live guard enforcement.
+Live providers own live source enforcement.
 
-For every guarded live provider method:
+For each live provider method:
 
-1. Resolve the route/source from runtime config using the guard fields.
-2. Probe source identity before using the source for the requested operation.
-3. Compare observed identity with the guard.
-4. Return `SourceMismatch` with a closed redacted diagnostic if the source does not match.
-5. Construct source evidence only after the source has been verified.
-6. Return successful responses whose source evidence matches the guard by construction.
+1. Read source authority from the request.
+2. Resolve runtime route/source using only the request fields needed for binding.
+3. Probe source identity before operation-specific behavior.
+4. Compare observed identity with the request authority.
+5. Return `SourceMismatch` with closed redacted diagnostics on mismatch.
+6. Construct source evidence only after successful verification.
+7. Execute operation-specific behavior.
+8. Return responses that match request-local provider authority by construction.
 
-EVM already largely follows this model with an internal `verified_source(&guard)` helper.
+EVM already largely follows this model through internal `verified_source(&request.source)` behavior.
 
-Bitcoin should follow the same shape with an internal helper such as `verified_transport(&guard)` or
-`verified_source(&guard)` that performs route lookup, `getblockchaininfo`, network tag checking, and
-evidence construction before operation-specific RPC behavior.
+Bitcoin should mirror that shape with an internal helper such as `verified_source(&request)` or
+`verified_transport(&request)` that performs route lookup, `getblockchaininfo`, Bitcoin network tag
+checking, and evidence construction before operation-specific RPC behavior.
 
-#### App Assembly
+### Recorded Providers / Replay Backends
 
-App assembly may validate that runtime config can bind semantic routes before run admission.
+Recorded providers own replay source enforcement.
 
-That validation should not be named `validate_guard` if it does not perform live guard enforcement.
-Prefer names like:
+For each replay provider method:
+
+1. Read source authority from the request.
+2. Load the recorded response/evidence supplied by replay assembly.
+3. Validate recorded source evidence against the request.
+4. Validate request-local selectors or anchors against the recorded response.
+5. Return a normal capability response on success.
+6. Return a replay/provider mismatch error on failure.
+
+Recorded providers must not:
+
+- open live transports
+- consult runtime config
+- resolve `source_ref` or `policy_id` against current deployment config
+- expose source validation as a caller-side helper
+
+`source_ref` and `policy_id` remain audit provenance only.
+
+### App Assembly
+
+App assembly wires provider backends.
+
+Live start/resume uses live provider backends. Replay uses recorded provider backends. Evidence-only
+read paths do not construct live transports, signer providers, keystores, or live runtime config.
+
+App code may validate persisted diagnostic artifact shape, digest, schema, and redaction policy. It
+must not reconstruct EVM/BTC guards to validate source authority. That belongs to the provider backend
+that produced or replays the capability response.
+
+No-IO route binding preflight is allowed during live admission, but it is not source enforcement and
+must not be named `validate_guard`.
+
+Prefer names such as:
 
 - `validate_route_binding`
 - `validate_runtime_binding`
 - `validate_evm_route_binding`
 - `validate_btc_source_binding`
 
-Admission-time route binding checks should use only the fields they actually need. For example:
+Route binding checks should use only fields needed for route lookup. For example:
 
 - EVM route binding needs `network_id`.
 - BTC route binding needs `source_identity`.
 
-Expected chain id and observed network tag checks belong to live provider calls, not no-IO route
-binding validation.
+Expected chain id and observed network tag checks belong to provider calls, not no-IO preflight.
 
-#### Replay
+## BTC Implementation Smell Fix
 
-Replay must not use live transports or runtime config.
+BTC is the clearest first implementation target.
 
-Replay should verify recorded evidence against certified semantic authority using replay-specific
-functions, for example:
+### Current Wrong Shape
 
-```rust
-verify_recorded_evm_source_evidence(authority, evidence)
-verify_recorded_btc_source_evidence(authority, evidence)
-verify_recorded_btc_chain_head_response(authority, selection, response)
-```
-
-Replay verifiers should not be named as generic live guard methods. They should make it obvious that
-they operate on recorded evidence and certified authority.
-
-## Proposed API Direction
-
-### Keep Guarded Capability Requests
-
-`EvmChainGuard` and `BtcChainGuard` can remain in transport-facing capability request structs because
-the request is the live provider boundary contract.
-
-Examples:
-
-```rust
-pub struct EvmBlockReadRequest {
-    pub guard: EvmChainGuard,
-    pub block: EvmBlockSelector,
-}
-
-pub struct BtcChainHeadRequest {
-    pub guard: BtcChainGuard,
-    pub selection: BtcHeadSelection,
-}
-```
-
-The important rule is not "delete guards from capability requests." The rule is "do not let transport
-guards become general workflow/state/replay authority types."
-
-### Add Or Reuse Semantic Authority Types
-
-To avoid passing loose strings everywhere while also avoiding transport guard leakage, introduce or
-reuse pure semantic authority structs at the adapter/state boundary.
-
-Possible BTC example:
-
-```rust
-pub struct BtcChainHeadAuthority {
-    pub network: String,
-    pub semantic_source_identity: String,
-    pub bitcoin_network: String,
-    pub selection: BtcHeadSelection,
-}
-```
-
-This type would not be a transport guard. It would be a pure state/domain description. The adapter
-would convert it into `BtcChainGuard` only when building `BtcChainHeadRequest`.
-
-Possible EVM example:
-
-```rust
-pub struct EvmNetworkAuthority {
-    pub network_id: String,
-    pub expected_chain_id: u64,
-}
-```
-
-If existing model/context structs already serve this role, avoid adding a new type.
-
-### Move BTC Request Construction Out Of State
-
-Current wrong shape:
+`mfm-states-btc` currently owns external provider request construction:
 
 ```rust
 impl ObserveBtcChainHeadConfig {
     pub fn request(&self) -> Result<BtcChainHeadRequest, BtcStateError> {
-        ...
         let guard = BtcChainGuard::new(...)?;
         Ok(BtcChainHeadRequest { guard, selection })
     }
 }
 ```
 
-Preferred shape:
+The state then normalizes by verifying the provider response against that request:
+
+```rust
+response.verify_request(request)?;
+```
+
+This gives state code provider-boundary responsibility.
+
+### Preferred State Shape
+
+`mfm-states-btc` should expose semantic behavior only:
 
 ```rust
 impl ObserveBtcChainHeadConfig {
-    pub fn semantic_authority(&self) -> Result<BtcChainHeadAuthority, BtcStateError> {
-        ...
+    pub fn selection(&self) -> Result<BtcHeadSelection, BtcStateError> {
+        // validate head_kind / confirmation_depth and return selection
     }
 }
 ```
 
-Then in `mfm-adapters-btc-jsonrpc`:
+State checkpoint validation should compare against semantic config and selection:
 
 ```rust
-fn btc_chain_head_request(
-    authority: &BtcChainHeadAuthority,
+fn validate_loaded_checkpoint_for_config(
+    config: &ObserveBtcChainHeadConfig,
+    selection: BtcHeadSelection,
+    loaded_checkpoint: &LoadedCollectorCheckpoint,
+) -> Result<(), BtcStateError>
+```
+
+State normalization should not accept `BtcChainHeadRequest`:
+
+```rust
+pub fn normalize_chain_head_response(
+    config: &ObserveBtcChainHeadConfig,
+    response: &CapabilityChainHeadResponse,
+    input: &ObserveBtcChainHeadInput,
+) -> Result<BtcChainHeadObservation, BtcStateError>
+```
+
+The state may check that normalized fact subjects and checkpoints are compatible with semantic config,
+but it should not validate response source evidence. Successful provider responses are already
+provider-valid.
+
+### Preferred Adapter Shape
+
+`mfm-adapters-btc-jsonrpc` should build the capability request:
+
+```rust
+fn chain_head_request(
+    config: &ObserveBtcChainHeadConfig,
 ) -> Result<BtcChainHeadRequest, BtcJsonRpcAdapterError> {
-    let guard = BtcChainGuard::new(
-        BtcNetworkId::new(&authority.network)?,
-        BtcSourceIdentity::new(&authority.semantic_source_identity)?,
-        &authority.bitcoin_network,
-    )?;
-    Ok(BtcChainHeadRequest {
-        guard,
-        selection: authority.selection,
-    })
+    let selection = config.selection()?;
+    BtcChainHeadRequest::new(
+        BtcNetworkId::new(&config.network)?,
+        BtcSourceIdentity::new(&config.semantic_source_identity)?,
+        &config.bitcoin_network,
+        selection,
+    )
 }
 ```
 
-The exact type and function names can be improved during implementation.
-
-### Remove Live Adapter Guard Re-Verification
-
-Current live adapter pattern:
+The runner path becomes:
 
 ```rust
-let response = provider.read_block(&request).await?;
-response.evidence.verify_guard(&guard)?;
+let request = chain_head_request(&config)?;
+let response = provider.read_chain_head(&request).await?;
+let fact = state.materialize_response(&input, &response)?;
 ```
 
-Preferred live adapter pattern:
+There is no adapter-side `response.verify_request(&request)`.
+
+### Preferred BTC Recorded Provider Shape
+
+Replace free replay helpers with a provider backend:
 
 ```rust
-let response = provider.read_block(&request).await?;
-```
+pub struct RecordedBtcChainHeadProvider {
+    // recorded response/evidence supplied by replay assembly
+}
 
-The provider contract guarantees guard enforcement. If a provider implementation violates that
-contract, the provider implementation is broken and should be fixed or tested directly.
-
-Adapter code should still validate non-guard invariants:
-
-```rust
-if response.transaction_hash != expected_hash {
-    return Err(...);
+impl BtcChainHeadReadProvider for RecordedBtcChainHeadProvider {
+    fn read_chain_head<'a>(
+        &'a self,
+        request: &'a BtcChainHeadRequest,
+    ) -> BtcCapabilityFuture<'a, BtcChainHeadResponse> {
+        // validate recorded evidence against request and return response
+    }
 }
 ```
 
-### Replace Generic Verify Methods With Replay-Specific Validators
+This keeps replay source validation behind the same provider boundary as live source validation.
 
-Current generic helpers like:
+## API Direction
 
-```rust
-evidence.verify_guard(&guard)
-response.verify_request(&request)
-```
+### Capability Crates
 
-invite use in live adapter code.
+Capability crates should define:
 
-Preferred direction:
+- provider traits
+- request/response types
+- checked public identifier types
+- redacted source evidence types
+- redacted provider errors
 
-- Keep private/internal helpers in capability crates only if transports need them for construction.
-- Move public validation intended for replay into replay/adapter replay modules.
-- Use names that include `recorded`, `replay`, or `evidence`.
+Capability crates should not expose guard types as general authority. If internal request-source
+helpers remain, keep them private or crate-private.
 
-Examples:
+Public request fields should become private with constructors/accessors. This is intentionally
+breaking; correctness and smaller authority surfaces take priority.
 
-```rust
-verify_recorded_btc_chain_head_response(&authority, selection, response)
-verify_recorded_evm_source_evidence(&authority, evidence)
-```
+Generic public methods named like these should be removed or made private:
 
-These functions should accept semantic authority, not current runtime config and not a route binding.
+- `evidence.verify_guard(...)`
+- `response.verify_request(...)`
+
+If provider backends need common comparison logic, use private helpers inside the backend or
+request/evidence implementation. Do not expose a generic validation method that adapters and states
+can call after provider success.
+
+### Transport Crates
+
+Transport crates implement live providers.
+
+They may expose no-IO route-binding preflight APIs, but those APIs must not be named as guard
+validation and should not require full request source authority when route lookup needs only one
+field.
+
+### Adapter Crates
+
+Adapter crates build requests and own workflow replay wiring.
+
+When recorded evidence is workflow-specific, the recorded provider backend may live in the adapter
+crate. That is preferable to adding a new replay transport crate just to hold a small backend.
+
+The key constraint is that recorded evidence validation is hidden behind the provider trait, not
+exposed as a caller-side helper.
 
 ## Migration Plan
 
-### Phase 1: Clarify Naming And Documentation
+### Phase 1: Document The Provider Contract
 
-- Document this boundary in `docs/architecture.md`, `docs/design.md`, `docs/evm-rpc-routing.md`, and
-  `docs/btc-rpc-routing.md`.
-- Replace language like "states/adapters derive guards" with "adapters build guarded transport
-  requests immediately before provider calls."
-- Clarify that route binding validation is not live guard enforcement.
+- Update capability trait docs to state that successful responses have passed source-authority and
+  request-local validation.
+- Update `docs/design.md`, `docs/architecture.md`, EVM/BTC routing docs, and persisted-surface docs
+  to remove "request guard" replay language.
+- Replace "adapters derive guards" with "adapters build capability requests from certified semantic
+  fields."
 
 ### Phase 2: Fix BTC State Boundary
 
-- Remove `BtcChainGuard` construction from `mfm-states-btc`.
-- Remove `BtcChainHeadRequest` construction from `ObserveBtcChainHeadState`.
-- Replace state request helpers with pure semantic authority/selection helpers.
-- Move `BtcChainHeadRequest` construction into `mfm-adapters-btc-jsonrpc`.
-- Keep state normalization pure and based on response plus semantic state input/config.
+- Remove `BtcChainGuard` and `BtcChainHeadRequest` imports from `mfm-states-btc`.
+- Remove `ObserveBtcChainHeadConfig::request`.
+- Remove `ObserveBtcChainHeadState::request`.
+- Add a semantic `selection()` helper or equivalent.
+- Change checkpoint compatibility checks to use config plus selection.
+- Change normalization to accept config/response/input rather than request/response/input.
+- Update BTC state tests so they no longer construct provider requests.
 
-### Phase 3: Centralize BTC Transport Enforcement
+### Phase 3: Move BTC Request Construction Into Adapter
 
-- Add an internal BTC transport helper that mirrors EVM `verified_source`.
-- Ensure every BTC provider method calls this helper before operation-specific behavior.
-- Ensure successful BTC provider responses carry evidence that matches the guard by construction.
+- Add an adapter-local BTC request builder.
+- Build `BtcChainHeadRequest` immediately before calling `BtcChainHeadReadProvider`.
+- Remove adapter live response `verify_request` calls.
+- Keep workflow-level validation and checkpoint semantics in state.
+
+### Phase 4: Add BTC Recorded Provider Backend
+
+- Delete public BTC replay helper functions and add a recorded provider implementation.
+- Wire replay paths to call the same adapter/provider path using the recorded provider.
+- Ensure recorded provider validation rejects mismatched source evidence, selection, finality, height,
+  hash, or other request-local response fields.
+- Ensure recorded provider never consults runtime config or opens live transports.
+
+### Phase 5: Centralize BTC Live Enforcement
+
+- Add internal BTC live `verified_source` / `verified_transport` helper.
+- Ensure every BTC live provider method calls it before operation-specific behavior.
 - Keep unsupported-operation handling after source verification when the operation depends on source
   authority.
+- Add transport tests for missing route, source mismatch, successful evidence, redaction, and "no
+  operation-specific RPC after source mismatch."
 
-### Phase 4: Remove Live Adapter Re-Verification
+### Phase 6: Remove Live Adapter Re-Verification
 
-- Remove adapter-side calls to generic guard verification after successful provider calls.
-- Keep non-guard invariant checks.
-- Update tests that expected live adapters to catch mismatched provider evidence; those tests should
-  move to provider/transport contract tests or replay evidence tests.
+- Delete adapter-side `verify_guard` / `verify_request` after successful provider calls in EVM, BTC,
+  and portfolio adapters.
+- Keep workflow-level invariant checks.
+- Delete or rewrite tests expecting adapters to reject mismatched provider source evidence after
+  provider success. Provider source mismatch tests belong to provider-backend tests.
 
-### Phase 5: Separate Replay Evidence Validators
+### Phase 7: Delete Public Guard APIs
 
-- Rename or relocate public guard/evidence verification helpers so they are replay-specific.
-- Ensure replay validators accept certified semantic authority and recorded evidence.
-- Ensure replay never resolves `source_ref` or `policy_id` through current runtime config.
-- Keep tests proving replay rejects mismatched recorded evidence.
+- Replace public request `guard` fields with private request source authority.
+- Delete public `EvmChainGuard` / `BtcChainGuard` from state/adapter-facing APIs.
+- Delete or privatize generic source-evidence verification helpers so states, adapters, app replay,
+  and tests cannot call them.
+- Rename no-IO `validate_guard` APIs to route/runtime binding names.
 
-### Phase 6: Rename Route Binding Preflight APIs
+### Phase 8: Clean App Replay Diagnostics
 
-- Replace `validate_guard` APIs that perform no live IO with route-binding names.
-- Use semantic route fields rather than full transport guards where possible.
-- Keep live source identity checks inside provider methods.
+- Stop reconstructing EVM guards in app replay diagnostic validation.
+- Validate diagnostic artifact digest, schema, shape, and redaction only.
+- Leave source-authority validation to recorded provider backends.
+- Delete tests and helpers that assert app replay can validate source authority from reconstructed
+  guards.
 
 ## Testing Strategy
 
-### Transport Tests
+### Live Provider Tests
 
-Transport tests should prove:
+Live provider tests should prove:
 
 - route/source binding succeeds for configured sources
-- missing route/source returns a redacted provider diagnostic
+- missing route/source returns a redacted diagnostic
 - observed chain/network mismatch returns `SourceMismatch`
-- successful responses carry evidence matching the request guard by construction
-- diagnostics do not leak URLs, auth headers, provider messages, request bodies, response bodies, or
-  file paths
+- successful responses carry source evidence matching the request by construction
+- request-local selectors and anchors are enforced by providers
+- operation-specific RPC does not proceed after source mismatch
+- diagnostics do not leak URLs, auth headers, provider messages, request bodies, response bodies,
+  file paths, signer material, or signed raw transactions
+
+### Recorded Provider Tests
+
+Recorded provider tests should prove:
+
+- recorded evidence matching the request returns a normal response
+- mismatched source evidence fails closed
+- mismatched selection/finality/anchor fields fail closed
+- `source_ref` and `policy_id` are treated as recorded audit provenance only
+- runtime config is not consulted
+- live transports are not constructed
 
 ### Adapter Tests
 
 Adapter tests should prove:
 
-- adapters build the correct guarded transport request from certified semantic authority
+- adapters build the expected capability request from certified semantic fields
 - adapters map provider errors correctly
-- adapters record provider evidence without re-validating guard enforcement
-- adapters still reject non-guard domain mismatches such as transaction hash mismatch or exact anchor
-  mismatch
+- adapters do not re-validate provider source evidence after success
+- adapters still enforce workflow-level invariants
 
 ### State Tests
 
 State tests should prove:
 
 - state config validation accepts/rejects semantic fields correctly
-- state normalization does not require constructing transport guards
-- checkpoint compatibility is checked against semantic state authority and fact subjects, not
-  transport request guards
-
-### Replay Tests
-
-Replay tests should prove:
-
-- recorded source evidence is checked against certified semantic authority
-- mismatched observed chain/network evidence fails closed
-- source refs and policy ids are treated as recorded audit provenance only
-- replay does not open live transports or consult runtime config
+- state normalization does not require provider request construction
+- checkpoint compatibility is checked against semantic state authority and selection, not a request
+  guard
+- normalized facts remain secret-free and route-free
 
 ## Acceptance Criteria
 
-This boundary cleanup is complete when:
+This cleanup is complete when:
 
-- `rg 'BtcChainGuard|EvmChainGuard' crates/states crates/ops` returns no state/op guard construction
-  or live transport request construction.
-- Live adapter code no longer calls generic guard verification after successful provider calls.
-- Transport/provider implementations enforce guards before returning successful responses.
-- Replay evidence checks are explicit, replay-named, and based on certified semantic authority.
+- `rg 'BtcChainGuard|EvmChainGuard' crates/states crates/ops` returns no external-source guard usage.
+- BTC chain-head state no longer constructs `BtcChainHeadRequest`.
+- BTC replay source validation is implemented behind a `BtcChainHeadReadProvider` backend, not public
+  helper functions.
+- Live adapters no longer call `verify_guard` or `verify_request` after successful provider calls.
+- Recorded/replay adapters do not expose caller-side source-evidence validation helpers.
+- Live and recorded provider backends enforce source authority before returning successful responses.
+- Capability request source fields are private and exposed through constructors/accessors.
+- Old guard-based constructors, fields, helper methods, and tests are deleted rather than kept as
+  compatibility surfaces.
 - No-IO route binding APIs are not named `validate_guard`.
-- Docs consistently describe transport guards as boundary-only live request contracts.
-
-## Open Questions
-
-1. Should `EvmChainGuard` and `BtcChainGuard` remain public types in capability crates, or should their
-   constructors be narrowed once adapters are the only expected constructors?
-
-2. Should replay evidence validators live in adapter crates, capability crates, or a dedicated replay
-   module per provider family?
-
-3. Should pure semantic authority structs be introduced for EVM/BTC, or should existing config/context
-   structs be used directly to avoid another layer of types?
-
-4. Should provider trait docs explicitly state that successful responses have already passed guard
-   enforcement?
-
-5. Should tests include a shared contract suite for provider implementations so adapters do not need
-   defensive re-verification?
+- App replay diagnostic validation does not reconstruct transport guards.
+- Docs consistently describe source authority as provider-enforced request authority, not reusable
+  workflow guard authority.
 
 ## Recommended Initial PR
 
-Start with BTC because it has the clearest boundary violation.
+Start with BTC because it has the clearest boundary violation and the smallest path to a real
+simplification.
 
-1. Move `BtcChainGuard` and `BtcChainHeadRequest` construction out of `mfm-states-btc`.
-2. Add a pure semantic authority/selection helper in `mfm-states-btc`.
-3. Build `BtcChainHeadRequest` inside `mfm-adapters-btc-jsonrpc` immediately before calling the
-   provider.
-4. Add or clarify BTC provider tests that source mismatch is caught by the provider/transport.
-5. Remove live adapter-side `verify_request` calls only where provider enforcement already covers the
-   guard.
-6. Keep replay evidence checks and rename them as replay-specific follow-up work if that makes the
-   first PR too large.
+1. Move BTC chain-head request construction from `mfm-states-btc` to `mfm-adapters-btc-jsonrpc`.
+2. Remove BTC state request helpers and request-based response verification.
+3. Add semantic config/selection checkpoint validation in state.
+4. Add a BTC adapter-local request builder.
+5. Add a BTC recorded provider backend that implements `BtcChainHeadReadProvider`.
+6. Add BTC live `verified_source` helper and provider contract tests.
+7. Update BTC docs and tests.
 
-This keeps the first implementation small while moving the architecture in the right direction.
+After that PR, repeat the pattern for EVM/portfolio adapter re-verification and public guard API
+privatization.
