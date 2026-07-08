@@ -763,62 +763,6 @@ pub struct ProjectReportInput {
     pub snapshot: PortfolioSnapshot,
 }
 
-/// Fact request recorded by view-pinning states.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "view-pin-request",
-    schema = "mfm.portfolio.fact.view_pin_request"
-)]
-pub struct ViewPinRequest {
-    /// Networks requested by the state.
-    pub network_ids: Vec<String>,
-}
-
-/// Fact response recorded by view-pinning states.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "view-pin-response",
-    schema = "mfm.portfolio.fact.view_pin_response"
-)]
-pub struct ViewPinResponse {
-    /// Pinned view payload.
-    pub views: PinnedViews,
-}
-
-/// Fact request recorded by observation states.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "observation-request",
-    schema = "mfm.portfolio.fact.observation_request"
-)]
-pub struct ObservationRequest {
-    /// Stable wallet identifier.
-    pub wallet_id: String,
-    /// Stable symbol identifier.
-    pub symbol_id: String,
-    /// Stable network identifier.
-    pub network_id: String,
-    /// Canonical balance reader kind.
-    pub balance_reader_kind: String,
-    /// Pinned EVM block number, when the observation targets an EVM network.
-    pub block_number: Option<u64>,
-}
-
-/// Fact response recorded by observation states.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "observation-response",
-    schema = "mfm.portfolio.fact.observation_response"
-)]
-pub struct ObservationResponse {
-    /// Observation batch payload.
-    pub batch: ObservationBatch,
-}
-
 /// Public output contract for portfolio workflows.
 #[derive(PublicOutputs)]
 #[mfm(schema = "mfm.portfolio.public_outputs")]

@@ -297,6 +297,27 @@ Runtime process configuration maps non-secret refs to concrete local resources. 
 not become typed workflow config, event payload, artifact payload, public output, fixture, or replay
 input.
 
+### Multi-Network Workflow Symmetry
+
+Similar network-backed workflows should share workflow roles where the domain semantics actually
+match, but symmetry is not an architecture category and must not introduce generic cross-network
+types by itself.
+
+Enforce the hard boundaries instead:
+
+- operations keep topology network-neutral when the workflow semantics are network-neutral
+- domain models and states name family-specific semantic fields explicitly
+- states emit deterministic read or mutation intent, not live transport requests
+- adapters map state intent to family-specific capability requests and diagnostics
+- transports own reusable protocol behavior, route resolution, redaction, and live provider checks
+- tests cover each supported family at the model, state-intent, adapter, transport, and registry
+  binding surfaces that family actually uses
+
+Do not add a generic transport, guard, or adapter abstraction solely because two families occupy the
+same workflow slot. Add shared code only when it removes real duplication without erasing protocol
+semantics. When a family cannot provide the same semantic guarantee, fail closed or design a new
+explicit workflow mode rather than weakening the existing mode.
+
 ## Architecture Doctrine
 
 ### Rule 1: One Stable Abstraction Per Crate
