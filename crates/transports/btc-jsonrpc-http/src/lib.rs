@@ -33,8 +33,8 @@ use std::time::Duration;
 use mfm_btc_capabilities::{
     btc_diagnostic, BtcBalanceReadProvider, BtcBalanceReadRequest, BtcBalanceReadResponse,
     BtcBlockHash, BtcCapabilityError, BtcCapabilityFuture, BtcChainHeadReadProvider,
-    BtcChainHeadRequest, BtcChainHeadResponse, BtcFinality, BtcSourceIdentity, BtcSourceStatus,
-    RedactedBtcSourceEvidence,
+    BtcChainHeadRequest, BtcChainHeadResponse, BtcFinality, BtcSourceBinding, BtcSourceIdentity,
+    BtcSourceStatus, RedactedBtcSourceEvidence,
 };
 use mfm_capabilities::{
     ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
@@ -130,25 +130,40 @@ impl BtcJsonRpcChainHeadTransport for BtcJsonRpcClient {
     }
 }
 
-/// Bitcoin chain-head provider backed by a redacting JSON-RPC transport.
+/// Bitcoin JSON-RPC router over semantic source identities.
+///
+/// Owns runtime route/source descriptors and low-level protocol mechanics. It exposes no-IO binding
+/// validation and bind constructors only; it does not implement live capability provider traits.
 #[derive(Clone)]
-pub struct BtcJsonRpcChainHeadProvider {
+pub struct BtcJsonRpcRouter {
     routes: BTreeMap<BtcSourceIdentity, Arc<dyn BtcJsonRpcChainHeadTransport>>,
 }
 
-impl BtcJsonRpcChainHeadProvider {
-    /// Creates a provider over JSON-RPC transports keyed by semantic source identity.
+impl BtcJsonRpcRouter {
+    /// Creates a router over JSON-RPC transports keyed by semantic source identity.
     pub fn new(routes: BTreeMap<BtcSourceIdentity, Arc<dyn BtcJsonRpcChainHeadTransport>>) -> Self {
         Self { routes }
     }
 
-    /// Validates that a source identity can resolve to a configured route without network IO.
+    /// Validates that a source binding can resolve to a configured route without network IO.
     pub fn validate_source_binding(
         &self,
-        source_identity: &BtcSourceIdentity,
+        binding: &BtcSourceBinding,
     ) -> mfm_btc_capabilities::Result<()> {
-        self.transport_for_source_identity(source_identity)
+        self.transport_for_source_identity(binding.source_identity())
             .map(|_| ())
+    }
+
+    /// Binds a checked semantic source binding to a live capability provider.
+    pub fn bind_source(
+        &self,
+        binding: BtcSourceBinding,
+    ) -> mfm_btc_capabilities::Result<BtcJsonRpcSourceProvider> {
+        self.validate_source_binding(&binding)?;
+        Ok(BtcJsonRpcSourceProvider {
+            router: self.clone(),
+            binding,
+        })
     }
 
     fn transport_for_source_identity(
@@ -160,51 +175,57 @@ impl BtcJsonRpcChainHeadProvider {
             .cloned()
             .ok_or_else(|| btc_provider_failure(missing_route_diagnostic(source_identity)))
     }
+}
 
-    async fn verified_chain_head_source(
-        &self,
-        request: &BtcChainHeadRequest,
-    ) -> mfm_btc_capabilities::Result<VerifiedBtcSource> {
-        let transport = self.transport_for_source_identity(request.source_identity())?;
+/// Bitcoin capability provider bound to a checked semantic source binding.
+///
+/// Owns a private sealed pipeline that mints [`VerifiedBtcCall`] before raw operation IO.
+#[derive(Clone)]
+pub struct BtcJsonRpcSourceProvider {
+    router: BtcJsonRpcRouter,
+    binding: BtcSourceBinding,
+}
+
+/// Private verified-call token minted by the sealed call-prepare stage.
+///
+/// Raw operation helpers require this token so capability IO cannot skip provider binding checks.
+struct VerifiedBtcCall {
+    transport: Arc<dyn BtcJsonRpcChainHeadTransport>,
+    info: BlockchainInfo,
+    evidence: RedactedBtcSourceEvidence,
+}
+
+impl BtcJsonRpcSourceProvider {
+    /// Returns the private semantic binding owned by this provider.
+    pub const fn binding(&self) -> &BtcSourceBinding {
+        &self.binding
+    }
+
+    async fn prepare_call(&self) -> mfm_btc_capabilities::Result<VerifiedBtcCall> {
+        let transport = self
+            .router
+            .transport_for_source_identity(self.binding.source_identity())?;
         let info = transport
             .get_blockchain_info()
             .await
             .map_err(|error| btc_rpc_provider_error("getblockchaininfo", error))?;
         let status = source_status(&info);
         let evidence =
-            RedactedBtcSourceEvidence::from_request(request, info.chain.clone(), status)?;
-        Ok(VerifiedBtcSource {
+            RedactedBtcSourceEvidence::from_binding(&self.binding, info.chain.as_str(), status)?;
+        Ok(VerifiedBtcCall {
             transport,
             info,
             evidence,
         })
     }
 
-    async fn verified_balance_source(
+    async fn read_chain_head_checked(
         &self,
-        request: &BtcBalanceReadRequest,
-    ) -> mfm_btc_capabilities::Result<VerifiedBtcSource> {
-        let transport = self.transport_for_source_identity(request.source_identity())?;
-        let info = transport
-            .get_blockchain_info()
-            .await
-            .map_err(|error| btc_rpc_provider_error("getblockchaininfo", error))?;
-        let status = source_status(&info);
-        let evidence =
-            RedactedBtcSourceEvidence::from_balance_request(request, info.chain.clone(), status)?;
-        Ok(VerifiedBtcSource {
-            transport,
-            info,
-            evidence,
-        })
-    }
-
-    async fn read_chain_head_inner(
-        &self,
+        verified: &VerifiedBtcCall,
         request: &BtcChainHeadRequest,
     ) -> mfm_btc_capabilities::Result<BtcChainHeadResponse> {
-        let verified = self.verified_chain_head_source(request).await?;
-        let (height, hash) = selected_head(&*verified.transport, &verified.info, request).await?;
+        let (height, hash) =
+            selected_head(&*verified.transport, &verified.info, request).await?;
         let header = verified
             .transport
             .get_block_header(hash.as_str())
@@ -213,7 +234,7 @@ impl BtcJsonRpcChainHeadProvider {
         verify_header(&header, height, hash.as_str())?;
         let provider_time_unix_ms = header.time.checked_mul(1000);
         Ok(BtcChainHeadResponse {
-            evidence: verified.evidence,
+            evidence: verified.evidence.clone(),
             head_kind: request.selection().head_kind(),
             finality: request.selection().finality(),
             block_height: height,
@@ -222,11 +243,11 @@ impl BtcJsonRpcChainHeadProvider {
         })
     }
 
-    async fn read_balance_inner(
+    async fn read_balance_checked(
         &self,
+        _verified: &VerifiedBtcCall,
         request: &BtcBalanceReadRequest,
     ) -> mfm_btc_capabilities::Result<BtcBalanceReadResponse> {
-        let _verified = self.verified_balance_source(request).await?;
         Err(btc_provider_failure(
             btc_operation_diagnostic(ProviderDiagnosticCode::UnsupportedOperation, "read_balance")
                 .with_field(
@@ -235,15 +256,25 @@ impl BtcJsonRpcChainHeadProvider {
                 ),
         ))
     }
+
+    async fn read_chain_head_inner(
+        &self,
+        request: &BtcChainHeadRequest,
+    ) -> mfm_btc_capabilities::Result<BtcChainHeadResponse> {
+        let verified = self.prepare_call().await?;
+        self.read_chain_head_checked(&verified, request).await
+    }
+
+    async fn read_balance_inner(
+        &self,
+        request: &BtcBalanceReadRequest,
+    ) -> mfm_btc_capabilities::Result<BtcBalanceReadResponse> {
+        let verified = self.prepare_call().await?;
+        self.read_balance_checked(&verified, request).await
+    }
 }
 
-struct VerifiedBtcSource {
-    transport: Arc<dyn BtcJsonRpcChainHeadTransport>,
-    info: BlockchainInfo,
-    evidence: RedactedBtcSourceEvidence,
-}
-
-impl BtcChainHeadReadProvider for BtcJsonRpcChainHeadProvider {
+impl BtcChainHeadReadProvider for BtcJsonRpcSourceProvider {
     fn read_chain_head<'a>(
         &'a self,
         request: &'a BtcChainHeadRequest,
@@ -252,7 +283,7 @@ impl BtcChainHeadReadProvider for BtcJsonRpcChainHeadProvider {
     }
 }
 
-impl BtcBalanceReadProvider for BtcJsonRpcChainHeadProvider {
+impl BtcBalanceReadProvider for BtcJsonRpcSourceProvider {
     fn read_balance<'a>(
         &'a self,
         request: &'a BtcBalanceReadRequest,
@@ -938,7 +969,9 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicU64;
 
-    use mfm_btc_capabilities::{BtcAddress, BtcHeadSelection, BtcNetworkId};
+    use mfm_btc_capabilities::{
+        BitcoinNetworkTag, BtcAddress, BtcHeadSelection, BtcNetworkId,
+    };
 
     const BEST_BLOCK_HASH: &str =
         "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5";
@@ -1034,38 +1067,46 @@ mod tests {
         BtcSourceIdentity::new("public-bitcoin-core").expect("source")
     }
 
-    fn provider_with(
+    fn source_binding() -> BtcSourceBinding {
+        BtcSourceBinding::new(
+            BtcNetworkId::new("bitcoin-mainnet").expect("network"),
+            source_identity(),
+            BitcoinNetworkTag::Main,
+        )
+        .expect("binding")
+    }
+
+    fn router_with(
         source_identity: BtcSourceIdentity,
         transport: Arc<MockBtcTransport>,
-    ) -> BtcJsonRpcChainHeadProvider {
+    ) -> BtcJsonRpcRouter {
         let mut routes = BTreeMap::new();
         routes.insert(
             source_identity,
             transport as Arc<dyn BtcJsonRpcChainHeadTransport>,
         );
-        BtcJsonRpcChainHeadProvider::new(routes)
+        BtcJsonRpcRouter::new(routes)
+    }
+
+    fn provider_with(
+        source_identity: BtcSourceIdentity,
+        transport: Arc<MockBtcTransport>,
+    ) -> BtcJsonRpcSourceProvider {
+        router_with(source_identity, transport)
+            .bind_source(source_binding())
+            .expect("bind source")
     }
 
     fn chain_head_request(selection: BtcHeadSelection) -> BtcChainHeadRequest {
-        BtcChainHeadRequest::new(
-            BtcNetworkId::new("bitcoin-mainnet").expect("network"),
-            source_identity(),
-            "main",
-            selection,
-        )
-        .expect("request")
+        BtcChainHeadRequest::new(selection)
     }
 
     fn balance_request() -> BtcBalanceReadRequest {
         BtcBalanceReadRequest::new(
-            BtcNetworkId::new("bitcoin-mainnet").expect("network"),
-            source_identity(),
-            "main",
             BtcAddress::new("bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw").expect("address"),
             840_000,
             BtcBlockHash::new(BEST_BLOCK_HASH).expect("block hash"),
         )
-        .expect("request")
     }
 
     #[test]
@@ -1154,9 +1195,9 @@ mod tests {
 
     #[test]
     fn missing_source_binding_is_redacted() {
-        let provider = BtcJsonRpcChainHeadProvider::new(BTreeMap::new());
-        let error = provider
-            .validate_source_binding(&source_identity())
+        let router = BtcJsonRpcRouter::new(BTreeMap::new());
+        let error = router
+            .validate_source_binding(&source_binding())
             .expect_err("route should be missing");
         let rendered = format!("{error:?} {error}");
 
@@ -1190,9 +1231,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_response_evidence_matches_request_by_construction() {
+    async fn successful_response_evidence_matches_binding_by_construction() {
         let transport = Arc::new(MockBtcTransport::new("main"));
         let provider = provider_with(source_identity(), transport.clone());
+        let binding = source_binding();
         let request = chain_head_request(BtcHeadSelection::best());
 
         let response = provider
@@ -1200,15 +1242,18 @@ mod tests {
             .await
             .expect("successful response");
 
-        assert_eq!(response.evidence.network_id, request.network_id().clone());
+        assert_eq!(response.evidence.network_id, binding.network_id().clone());
         assert_eq!(
             response.evidence.source_identity,
-            request.source_identity().clone()
+            binding.source_identity().clone()
         );
-        assert_eq!(response.evidence.bitcoin_network, request.bitcoin_network());
+        assert_eq!(
+            response.evidence.bitcoin_network,
+            binding.bitcoin_network().as_str()
+        );
         assert_eq!(
             response.evidence.observed_bitcoin_network,
-            request.bitcoin_network()
+            binding.bitcoin_network().as_str()
         );
         assert_eq!(response.head_kind, request.selection().head_kind());
         assert_eq!(response.finality, request.selection().finality());
