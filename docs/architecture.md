@@ -308,8 +308,11 @@ Enforce the hard boundaries instead:
 - operations keep topology network-neutral when the workflow semantics are network-neutral
 - domain models and states name family-specific semantic fields explicitly
 - states emit deterministic read or mutation intent, not live transport requests
-- adapters map state intent to family-specific capability requests and diagnostics
+- adapters bind family-specific capability providers from certified semantic source binding and issue
+  operation-only capability requests
 - transports own reusable protocol behavior, route resolution, redaction, and live provider checks
+- raw routers/clients do not implement live capability provider traits; only bound providers do
+- bound providers own sealed call pipelines and private verified-call tokens for operation IO
 - tests cover each supported family at the model, state-intent, adapter, transport, and registry
   binding surfaces that family actually uses
 

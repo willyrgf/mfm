@@ -3,8 +3,9 @@ use std::future;
 use std::sync::{Arc, Mutex};
 
 use mfm_btc_capabilities::{
-    BtcBlockHash, BtcCapabilityFuture, BtcChainHeadReadProvider, BtcChainHeadRequest,
-    BtcChainHeadResponse, BtcSourceStatus, RedactedBtcSourceEvidence,
+    BitcoinNetworkTag, BtcBlockHash, BtcCapabilityFuture, BtcChainHeadReadProvider,
+    BtcChainHeadRequest, BtcChainHeadResponse, BtcNetworkId, BtcSourceBinding, BtcSourceIdentity,
+    BtcSourceStatus, RedactedBtcSourceEvidence,
 };
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1::{ArtifactRole, KernelEventPayload};
@@ -275,8 +276,12 @@ fn collector_services(
     fact_index: Arc<InMemoryControlFactIndexProvider>,
 ) -> mfm_app::RunServices<AsyncInMemoryRunStore, AsyncInMemoryRunStore> {
     let receipt_trust_root = fact_index.receipt_trust_root();
-    let capabilities =
-        mfm_adapters_btc_jsonrpc::BtcJsonRpcRunnerCapabilities::new(artifacts, btc, fact_index);
+    let btc_factory = Arc::new(FixedBtcFactory { provider: btc });
+    let capabilities = mfm_adapters_btc_jsonrpc::BtcJsonRpcRunnerCapabilities::new(
+        artifacts,
+        btc_factory,
+        fact_index,
+    );
     let mut runners = mfm_runtime::ErasedRunnerRegistry::new();
     mfm_adapters_btc_jsonrpc::register_btc_jsonrpc_runners(&mut runners, capabilities)
         .expect("btc runners");
@@ -426,6 +431,28 @@ fn assert_checkpoint_height(projection: &ProjectionSnapshot, expected: u64) {
     }));
 }
 
+fn test_btc_binding() -> BtcSourceBinding {
+    BtcSourceBinding::new(
+        BtcNetworkId::new("bitcoin-mainnet").expect("network"),
+        BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
+        BitcoinNetworkTag::Main,
+    )
+    .expect("binding")
+}
+
+struct FixedBtcFactory {
+    provider: Arc<dyn BtcChainHeadReadProvider>,
+}
+
+impl mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory for FixedBtcFactory {
+    fn bind_source(
+        &self,
+        _binding: BtcSourceBinding,
+    ) -> mfm_runtime::Result<Arc<dyn BtcChainHeadReadProvider>> {
+        Ok(Arc::clone(&self.provider))
+    }
+}
+
 #[derive(Debug, Clone)]
 struct MockHead {
     height: u64,
@@ -465,8 +492,8 @@ impl BtcChainHeadReadProvider for MockBtcProvider {
                 .pop_front()
                 .expect("mock head");
             Ok(BtcChainHeadResponse {
-                evidence: RedactedBtcSourceEvidence::from_request(
-                    request,
+                evidence: RedactedBtcSourceEvidence::from_binding(
+                    &test_btc_binding(),
                     "main",
                     BtcSourceStatus::Synced,
                 )

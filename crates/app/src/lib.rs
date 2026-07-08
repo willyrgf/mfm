@@ -661,23 +661,11 @@ fn production_runner_registry_inner(
         runtime_config.clone(),
         btc_config.clone(),
     ));
-    let portfolio_evm: Arc<dyn mfm_adapters_portfolio::PortfolioEvmProvider> =
-        portfolio_runtime.clone();
-    let portfolio_btc: Option<Arc<dyn mfm_adapters_portfolio::PortfolioBtcProvider>> = btc_config
-        .clone()
-        .map(|config| {
-            btc_collector::btc_json_rpc_read_provider(config).map(|provider| {
-                Arc::new(provider) as Arc<dyn mfm_adapters_portfolio::PortfolioBtcProvider>
-            })
-        })
-        .transpose()?;
-    let portfolio_runtime: Arc<dyn mfm_adapters_portfolio::PortfolioRuntimeValidator> =
+    let portfolio_transport: Arc<dyn mfm_adapters_portfolio::PortfolioTransportFactory> =
         portfolio_runtime;
     let portfolio_capabilities = mfm_adapters_portfolio::PortfolioRunnerCapabilities::new(
         portfolio_artifacts,
-        portfolio_evm,
-        portfolio_btc,
-        portfolio_runtime,
+        portfolio_transport,
     );
     mfm_adapters_portfolio::register_portfolio_runners(&mut registry, portfolio_capabilities)?;
     let source_run_registry = production_certification_registry()?;
@@ -718,78 +706,53 @@ impl RuntimeConfigPortfolioRuntime {
         self.runtime_config.load_evm().and_then(evm_json_rpc_client)
     }
 
-    fn btc_provider(
-        &self,
-    ) -> mfm_runtime::Result<mfm_transports_btc_jsonrpc_http::BtcJsonRpcChainHeadProvider> {
+    fn btc_router(&self) -> mfm_runtime::Result<mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter> {
         let btc = self.btc_config.clone().ok_or_else(|| {
             mfm_runtime::RuntimeError::RunnerBinding("missing Bitcoin runtime config".to_owned())
         })?;
-        btc_collector::btc_json_rpc_read_provider(btc)
+        btc_collector::btc_json_rpc_router(btc)
     }
 }
 
-impl mfm_adapters_portfolio::PortfolioRuntimeValidator for RuntimeConfigPortfolioRuntime {
-    fn validate_evm_route_binding(
+impl mfm_adapters_portfolio::PortfolioTransportFactory for RuntimeConfigPortfolioRuntime {
+    fn validate_evm_network_binding(
         &self,
-        network_id: &mfm_evm_capabilities::EvmNetworkId,
+        binding: &mfm_evm_capabilities::EvmNetworkBinding,
     ) -> mfm_runtime::Result<()> {
         self.evm_client()?
-            .validate_route_binding(network_id)
+            .validate_network_binding(binding)
             .map_err(runtime_evm_transport_error)
     }
 
     fn validate_btc_source_binding(
         &self,
-        source_identity: &mfm_btc_capabilities::BtcSourceIdentity,
+        binding: &mfm_btc_capabilities::BtcSourceBinding,
     ) -> mfm_runtime::Result<()> {
-        self.btc_provider()?
-            .validate_source_binding(source_identity)
+        self.btc_router()?
+            .validate_source_binding(binding)
             .map_err(runtime_btc_capability_error)
     }
-}
 
-impl mfm_evm_capabilities::EvmBlockReadProvider for RuntimeConfigPortfolioRuntime {
-    fn read_block<'a>(
-        &'a self,
-        request: &'a mfm_evm_capabilities::EvmBlockReadRequest,
-    ) -> mfm_evm_capabilities::EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmBlockReadResponse>
-    {
-        Box::pin(async move {
-            let client = self
-                .evm_client()
-                .map_err(portfolio_runtime_config_capability_error)?;
-            mfm_evm_capabilities::EvmBlockReadProvider::read_block(&client, request).await
-        })
+    fn bind_evm(
+        &self,
+        binding: mfm_evm_capabilities::EvmNetworkBinding,
+    ) -> mfm_runtime::Result<Arc<dyn mfm_adapters_portfolio::PortfolioEvmProvider>> {
+        let provider = self
+            .evm_client()?
+            .bind_network(binding)
+            .map_err(runtime_evm_transport_error)?;
+        Ok(Arc::new(provider) as Arc<dyn mfm_adapters_portfolio::PortfolioEvmProvider>)
     }
-}
 
-impl mfm_evm_capabilities::EvmBalanceReadProvider for RuntimeConfigPortfolioRuntime {
-    fn read_balance<'a>(
-        &'a self,
-        request: &'a mfm_evm_capabilities::EvmBalanceReadRequest,
-    ) -> mfm_evm_capabilities::EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmBalanceReadResponse>
-    {
-        Box::pin(async move {
-            let client = self
-                .evm_client()
-                .map_err(portfolio_runtime_config_capability_error)?;
-            mfm_evm_capabilities::EvmBalanceReadProvider::read_balance(&client, request).await
-        })
-    }
-}
-
-impl mfm_evm_capabilities::EvmCallReadProvider for RuntimeConfigPortfolioRuntime {
-    fn read_call<'a>(
-        &'a self,
-        request: &'a mfm_evm_capabilities::EvmCallReadRequest,
-    ) -> mfm_evm_capabilities::EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmCallReadResponse>
-    {
-        Box::pin(async move {
-            let client = self
-                .evm_client()
-                .map_err(portfolio_runtime_config_capability_error)?;
-            mfm_evm_capabilities::EvmCallReadProvider::read_call(&client, request).await
-        })
+    fn bind_btc(
+        &self,
+        binding: mfm_btc_capabilities::BtcSourceBinding,
+    ) -> mfm_runtime::Result<Arc<dyn mfm_adapters_portfolio::PortfolioBtcProvider>> {
+        let provider = self
+            .btc_router()?
+            .bind_source(binding)
+            .map_err(runtime_btc_capability_error)?;
+        Ok(Arc::new(provider) as Arc<dyn mfm_adapters_portfolio::PortfolioBtcProvider>)
     }
 }
 
@@ -928,16 +891,6 @@ fn runtime_btc_capability_error(
     error: mfm_btc_capabilities::BtcCapabilityError,
 ) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
-}
-
-fn portfolio_runtime_config_capability_error(
-    _error: mfm_runtime::RuntimeError,
-) -> mfm_evm_capabilities::EvmCapabilityError {
-    mfm_evm_capabilities::EvmCapabilityError::provider_failure(
-        mfm_evm_capabilities::evm_diagnostic(
-            mfm_capabilities::ProviderDiagnosticCode::ProviderConfigurationInvalid,
-        ),
-    )
 }
 
 /// Builds an adapter-facing artifact read provider from a retained artifact reader.

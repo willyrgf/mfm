@@ -32,20 +32,20 @@ The only supported Bitcoin runtime shape is `btc.routes.<source_identity>`. The 
 `btc.json_rpc` shape is intentionally rejected. Route keys are semantic `BtcSourceIdentity` values,
 not endpoint names, URLs, credential ids, or fallback policies.
 
-## Source-Bound Reads
+## Provider-Bound Source Binding
 
-Adapters construct BTC capability requests from workflow config for every live Bitcoin call. Each
-request carries:
+Adapters derive a checked semantic `BtcSourceBinding` (`network_id`, `source_identity`, and Bitcoin
+Core network tag) from certified workflow config/intent and bind the raw JSON-RPC router once per
+binding. The returned bound source provider implements BTC capability traits. Capability requests
+carry operation parameters only (head selection, address, block height/hash) and do not include
+source-binding fields.
 
-- semantic `network_id`
-- semantic `source_identity`
-- expected Bitcoin Core network tag: `main`, `test`, `signet`, or `regtest`
-
-The Bitcoin transport resolves `source_identity` through runtime config, probes
-`getblockchaininfo`, and returns redacted evidence containing both expected and observed Bitcoin
-network tags. If the observed tag differs from the request authority, the provider returns a
-source-mismatch diagnostic. `validate_source_binding` only checks that the route exists; it does not
-perform network IO.
+The raw router owns source route maps and no-IO binding validation. It does not implement live
+capability provider traits. Every bound-provider call goes through a provider-owned sealed pipeline
+that resolves `source_identity`, probes `getblockchaininfo`, and returns redacted evidence containing
+both expected and observed Bitcoin network tags. If the observed tag differs from the provider
+binding, the provider returns a source-mismatch diagnostic. `validate_source_binding` only checks
+that the route exists; it does not perform network IO.
 
 Provider diagnostics may carry stable operation ids and closed public fields such as network tags,
 heights, hashes, and numeric status codes. They must never carry RPC URLs, credentials, file paths,
@@ -53,9 +53,10 @@ provider messages, request bodies, or response bodies.
 
 ## Strict Portfolio Snapshots
 
-Portfolio Bitcoin balance reads are exact-anchor requests. The request carries the address,
-`block_height`, and `block_hash` obtained from the pinned execution anchor. The response must verify
-the same address, source evidence, height, and hash.
+Portfolio Bitcoin balance reads are exact-anchor operation requests. The request carries the
+address, `block_height`, and `block_hash` obtained from the pinned execution anchor. The provider is
+already bound to the certified Bitcoin source; the response must verify the same address, source
+evidence, height, and hash.
 
 Bitcoin Core `scantxoutset` cannot prove an arbitrary prior exact anchor, so the live Bitcoin Core
 provider rejects portfolio balance reads with `unsupported_operation` before scanning. This is a
@@ -72,14 +73,15 @@ network tag so checkpoints cannot cross expected Bitcoin networks.
 ## Replay
 
 Replay uses the stored certified spec, typed run stream, typed artifacts, and replay verifiers. It
-must not open live RPC connections or consult runtime config. Replay providers rebuild the certified
-request authority and verify recorded Bitcoin evidence against those request fields.
+must not open live RPC connections or consult runtime config. Recorded providers are bound to
+certified semantic source binding and verify recorded Bitcoin evidence against that binding plus the
+operation request only.
 
 ## Contributor Guidance
 
 - Keep runtime config parsing in `mfm-runtime-config`.
-- Keep live Bitcoin route resolution in `mfm-transports-btc-jsonrpc-http`.
-- Keep workflow-specific request construction in adapters.
+- Keep live Bitcoin route resolution and bound providers in `mfm-transports-btc-jsonrpc-http`.
+- Bind providers from certified semantic source intent in adapters/app; issue operation-only requests.
 - Keep binaries limited to parsing and passing runtime config paths.
 - Do not add fallback source routing, old singleton config compatibility, or current-only balance
   semantics without a deliberate new design.

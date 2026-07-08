@@ -73,22 +73,20 @@ fn source_identity_is_semantic_not_route_material() {
 }
 
 #[test]
-fn balance_request_exposes_semantic_accessors_and_builds_evidence() {
+fn balance_request_is_operation_only_and_evidence_uses_binding() {
     let block_hash =
         BtcBlockHash::new("00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc")
             .expect("block hash");
     let address = BtcAddress::new("bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw").expect("address");
-    let request = BtcBalanceReadRequest::new(
+    let binding = BtcSourceBinding::new(
         BtcNetworkId::new("bitcoin-mainnet").expect("network"),
         BtcSourceIdentity::new("bitcoin-mainnet").expect("source"),
-        "main",
-        address.clone(),
-        850_000,
-        block_hash.clone(),
+        BitcoinNetworkTag::Main,
     )
-    .expect("request");
+    .expect("binding");
+    let request = BtcBalanceReadRequest::new(address.clone(), 850_000, block_hash.clone());
     let evidence =
-        RedactedBtcSourceEvidence::from_balance_request(&request, "main", BtcSourceStatus::Synced)
+        RedactedBtcSourceEvidence::from_binding(&binding, "main", BtcSourceStatus::Synced)
             .expect("evidence");
     let response = BtcBalanceReadResponse {
         evidence,
@@ -98,21 +96,21 @@ fn balance_request_exposes_semantic_accessors_and_builds_evidence() {
         block_hash: block_hash.clone(),
     };
 
-    assert_eq!(request.network_id().as_str(), "bitcoin-mainnet");
-    assert_eq!(request.source_identity().as_str(), "bitcoin-mainnet");
-    assert_eq!(request.bitcoin_network(), "main");
     assert_eq!(request.address(), &address);
     assert_eq!(request.block_height(), 850_000);
     assert_eq!(request.block_hash(), &block_hash);
-    assert_eq!(response.evidence.network_id, request.network_id().clone());
+    assert_eq!(response.evidence.network_id, binding.network_id().clone());
     assert_eq!(
         response.evidence.source_identity,
-        request.source_identity().clone()
+        binding.source_identity().clone()
     );
-    assert_eq!(response.evidence.bitcoin_network, request.bitcoin_network());
+    assert_eq!(
+        response.evidence.bitcoin_network,
+        binding.bitcoin_network().as_str()
+    );
     assert_eq!(
         response.evidence.observed_bitcoin_network,
-        request.bitcoin_network()
+        binding.bitcoin_network().as_str()
     );
     assert_eq!(response.address, address);
     assert_eq!(response.block_height, request.block_height());

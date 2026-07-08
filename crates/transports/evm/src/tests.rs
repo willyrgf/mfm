@@ -1,6 +1,6 @@
 use super::*;
 use alloy_primitives::{address, B256, U256};
-use mfm_evm_capabilities::{EvmTransactionSubmitRequest, SignedEvmPayload};
+use mfm_evm_capabilities::{EvmNetworkBinding, EvmTransactionSubmitRequest, SignedEvmPayload};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -17,10 +17,10 @@ fn evm_response_invalid_error() -> EvmCapabilityError {
 #[tokio::test]
 async fn selects_source_by_policy_and_records_redacted_evidence() {
     let server = TestRpcServer::spawn("0x1").await;
-    let client = client_for(&server.url, "primary", "mainnet");
+    let client = bound_provider(&server.url, "primary", "mainnet", 1);
 
     let response = client
-        .chain_identity(&chain_request("mainnet", 1))
+        .chain_identity(&chain_request())
         .await
         .expect("chain identity");
 
@@ -36,10 +36,10 @@ async fn selects_source_by_policy_and_records_redacted_evidence() {
 #[tokio::test]
 async fn rejects_chain_id_mismatch_without_leaking_source_details() {
     let server = TestRpcServer::spawn("0x2").await;
-    let client = client_for(&server.url, "primary", "mainnet");
+    let client = bound_provider(&server.url, "primary", "mainnet", 1);
 
     let error = client
-        .chain_identity(&chain_request("mainnet", 1))
+        .chain_identity(&chain_request())
         .await
         .expect_err("source mismatch");
 
@@ -65,10 +65,10 @@ async fn rejects_chain_id_mismatch_without_leaking_source_details() {
 #[tokio::test]
 async fn classifies_http_status_failure_without_body() {
     let server = TestRpcServer::spawn_failure().await;
-    let client = client_for(&server.url, "primary", "mainnet");
+    let client = bound_provider(&server.url, "primary", "mainnet", 1);
 
     let error = client
-        .chain_identity(&chain_request("mainnet", 1))
+        .chain_identity(&chain_request())
         .await
         .expect_err("provider failure");
     let rendered = format!("{error:?} {error}");
@@ -88,10 +88,10 @@ async fn classifies_http_status_failure_without_body() {
 #[tokio::test]
 async fn classifies_json_rpc_failure_without_message() {
     let server = TestRpcServer::spawn_json_rpc_failure().await;
-    let client = client_for(&server.url, "primary", "mainnet");
+    let client = bound_provider(&server.url, "primary", "mainnet", 1);
 
     let error = client
-        .chain_identity(&chain_request("mainnet", 1))
+        .chain_identity(&chain_request())
         .await
         .expect_err("provider failure");
     let rendered = format!("{error:?} {error}");
@@ -111,33 +111,21 @@ async fn classifies_json_rpc_failure_without_message() {
 #[tokio::test]
 async fn supports_core_evm_json_rpc_calls() {
     let server = TestRpcServer::spawn("0x1").await;
-    let client = client_for(&server.url, "primary", "mainnet");
+    let client = bound_provider(&server.url, "primary", "mainnet", 1);
     let address = address!("0x1111111111111111111111111111111111111111");
     let hash = HASH_HEX.parse::<B256>().expect("hash");
 
     let block = client
-        .read_block(
-            &EvmBlockReadRequest::new(
-                EvmNetworkId::new("mainnet").expect("network"),
-                1,
-                EvmBlockSelector::Latest,
-            )
-            .expect("request"),
-        )
+        .read_block(&EvmBlockReadRequest::new(EvmBlockSelector::Latest))
         .await
         .expect("block");
     assert_eq!(block.block_number, 42);
 
     let balance = client
-        .read_balance(
-            &EvmBalanceReadRequest::new(
-                EvmNetworkId::new("mainnet").expect("network"),
-                1,
-                address,
-                EvmBlockSelector::Latest,
-            )
-            .expect("request"),
-        )
+        .read_balance(&EvmBalanceReadRequest::new(
+            address,
+            EvmBlockSelector::Latest,
+        ))
         .await
         .expect("balance");
     assert_eq!(
@@ -146,70 +134,41 @@ async fn supports_core_evm_json_rpc_calls() {
     );
 
     let call = client
-        .read_call(
-            &EvmCallReadRequest::new(
-                EvmNetworkId::new("mainnet").expect("network"),
-                1,
-                address,
-                vec![0xab, 0xcd],
-                EvmBlockSelector::Latest,
-            )
-            .expect("request"),
-        )
+        .read_call(&EvmCallReadRequest::new(
+            address,
+            vec![0xab, 0xcd],
+            EvmBlockSelector::Latest,
+        ))
         .await
         .expect("call");
     assert_eq!(call.return_data, vec![0x12, 0x34]);
 
     let code = client
-        .read_code(
-            &EvmCodeReadRequest::new(
-                EvmNetworkId::new("mainnet").expect("network"),
-                1,
-                address,
-                EvmBlockSelector::Latest,
-            )
-            .expect("request"),
-        )
+        .read_code(&EvmCodeReadRequest::new(address, EvmBlockSelector::Latest))
         .await
         .expect("code");
     assert_eq!(code.code, vec![0xde, 0xad, 0xbe, 0xef]);
     assert_eq!(code.code_hash, alloy_primitives::keccak256(&code.code));
 
     let logs = client
-        .read_logs(
-            &EvmLogsReadRequest::new(
-                EvmNetworkId::new("mainnet").expect("network"),
-                1,
-                EvmBlockSelector::Latest,
-                EvmBlockSelector::Latest,
-                Some(address),
-                vec![hash],
-            )
-            .expect("request"),
-        )
+        .read_logs(&EvmLogsReadRequest::new(
+            EvmBlockSelector::Latest,
+            EvmBlockSelector::Latest,
+            Some(address),
+            vec![hash],
+        ))
         .await
         .expect("logs");
     assert_eq!(logs.logs.len(), 1);
 
     let nonce = client
-        .read_nonce(
-            &EvmNonceReadRequest::new(
-                EvmNetworkId::new("mainnet").expect("network"),
-                1,
-                address,
-                EvmBlockSelector::Latest,
-            )
-            .expect("request"),
-        )
+        .read_nonce(&EvmNonceReadRequest::new(address, EvmBlockSelector::Latest))
         .await
         .expect("nonce");
     assert_eq!(nonce.nonce, 7);
 
     let fee = client
-        .read_fee(
-            &EvmFeeReadRequest::new(EvmNetworkId::new("mainnet").expect("network"), 1)
-                .expect("request"),
-        )
+        .read_fee(&EvmFeeReadRequest::new())
         .await
         .expect("fee");
     assert_eq!(fee.legacy_gas_price, Some(16));
@@ -218,39 +177,26 @@ async fn supports_core_evm_json_rpc_calls() {
     assert_eq!(fee.max_fee_per_gas, Some(66));
 
     let gas = client
-        .estimate_gas(
-            &EvmGasEstimateRequest::new(
-                EvmNetworkId::new("mainnet").expect("network"),
-                1,
-                Some(address),
-                Some(address),
-                0,
-                vec![0xab],
-            )
-            .expect("request"),
-        )
+        .estimate_gas(&EvmGasEstimateRequest::new(
+            Some(address),
+            Some(address),
+            0,
+            vec![0xab],
+        ))
         .await
         .expect("gas");
     assert_eq!(gas.gas_limit, 21_000);
 
     let submit = client
-        .submit_transaction(
-            &EvmTransactionSubmitRequest::new(
-                EvmNetworkId::new("mainnet").expect("network"),
-                1,
-                SignedEvmPayload::from_verified_bytes(vec![0x01], hash).expect("payload"),
-            )
-            .expect("request"),
-        )
+        .submit_transaction(&EvmTransactionSubmitRequest::new(
+            SignedEvmPayload::from_verified_bytes(vec![0x01], hash).expect("payload"),
+        ))
         .await
         .expect("submit");
     assert_eq!(submit.transaction_hash, hash);
 
     let receipt = client
-        .read_receipt(
-            &EvmReceiptReadRequest::new(EvmNetworkId::new("mainnet").expect("network"), 1, hash)
-                .expect("request"),
-        )
+        .read_receipt(&EvmReceiptReadRequest::new(hash))
         .await
         .expect("receipt");
     assert_eq!(receipt.block_number, 42);
@@ -293,16 +239,11 @@ fn block_selector_tag_supports_pending_nonce_reads() {
 #[tokio::test]
 async fn pending_receipt_is_typed_capability_error() {
     let server = TestRpcServer::spawn_pending_receipt("0x1").await;
-    let client = client_for(&server.url, "primary", "mainnet");
+    let client = bound_provider(&server.url, "primary", "mainnet", 1);
     let error = client
-        .read_receipt(
-            &EvmReceiptReadRequest::new(
-                EvmNetworkId::new("mainnet").expect("network"),
-                1,
-                HASH_HEX.parse::<B256>().expect("hash"),
-            )
-            .expect("request"),
-        )
+        .read_receipt(&EvmReceiptReadRequest::new(
+            HASH_HEX.parse::<B256>().expect("hash"),
+        ))
         .await
         .expect_err("pending receipt");
 
@@ -312,17 +253,12 @@ async fn pending_receipt_is_typed_capability_error() {
 #[tokio::test]
 async fn code_read_preserves_empty_code_observation() {
     let server = TestRpcServer::spawn_empty_code("0x1").await;
-    let client = client_for(&server.url, "primary", "mainnet");
+    let client = bound_provider(&server.url, "primary", "mainnet", 1);
     let response = client
-        .read_code(
-            &EvmCodeReadRequest::new(
-                EvmNetworkId::new("mainnet").expect("network"),
-                1,
-                address!("0x1111111111111111111111111111111111111111"),
-                EvmBlockSelector::Latest,
-            )
-            .expect("request"),
-        )
+        .read_code(&EvmCodeReadRequest::new(
+            address!("0x1111111111111111111111111111111111111111"),
+            EvmBlockSelector::Latest,
+        ))
         .await
         .expect("empty code response");
 
@@ -333,17 +269,12 @@ async fn code_read_preserves_empty_code_observation() {
 #[tokio::test]
 async fn code_read_rejects_chain_id_mismatch_without_code_authority() {
     let server = TestRpcServer::spawn("0x2").await;
-    let client = client_for(&server.url, "primary", "mainnet");
+    let client = bound_provider(&server.url, "primary", "mainnet", 1);
     let error = client
-        .read_code(
-            &EvmCodeReadRequest::new(
-                EvmNetworkId::new("mainnet").expect("network"),
-                1,
-                address!("0x1111111111111111111111111111111111111111"),
-                EvmBlockSelector::Latest,
-            )
-            .expect("request"),
-        )
+        .read_code(&EvmCodeReadRequest::new(
+            address!("0x1111111111111111111111111111111111111111"),
+            EvmBlockSelector::Latest,
+        ))
         .await
         .expect_err("source mismatch");
 
@@ -369,20 +300,15 @@ async fn nonce_occupancy_read_classifies_anchor_and_non_anchor_transactions() {
         ),
     ] {
         let server = TestRpcServer::spawn_nonce_occupancy("0x1").await;
-        let client = client_for(&server.url, "primary", "mainnet");
+        let client = bound_provider(&server.url, "primary", "mainnet", 1);
         let response = client
-            .read_nonce_occupancy(
-                &EvmNonceOccupancyReadRequest::new(
-                    EvmNetworkId::new("mainnet").expect("network"),
-                    1,
-                    address!("0x1111111111111111111111111111111111111111"),
-                    7,
-                    excluded_transaction_hash
-                        .parse::<B256>()
-                        .expect("excluded hash"),
-                )
-                .expect("request"),
-            )
+            .read_nonce_occupancy(&EvmNonceOccupancyReadRequest::new(
+                address!("0x1111111111111111111111111111111111111111"),
+                7,
+                excluded_transaction_hash
+                    .parse::<B256>()
+                    .expect("excluded hash"),
+            ))
             .await
             .expect("nonce occupancy");
 
@@ -394,13 +320,10 @@ async fn nonce_occupancy_read_classifies_anchor_and_non_anchor_transactions() {
 #[tokio::test]
 async fn supports_legacy_fee_source_without_eip1559_methods() {
     let server = TestRpcServer::spawn_legacy_fee("0x1").await;
-    let client = client_for(&server.url, "primary", "mainnet");
+    let client = bound_provider(&server.url, "primary", "mainnet", 1);
 
     let fee = client
-        .read_fee(
-            &EvmFeeReadRequest::new(EvmNetworkId::new("mainnet").expect("network"), 1)
-                .expect("request"),
-        )
+        .read_fee(&EvmFeeReadRequest::new())
         .await
         .expect("legacy fee response");
 
@@ -415,11 +338,17 @@ fn route_binding_validation_does_not_require_guard_or_live_io() {
     let client = client_for("http://127.0.0.1:1", "primary", "mainnet");
 
     client
-        .validate_route_binding(&EvmNetworkId::new("mainnet").expect("network"))
+        .validate_network_binding(
+            &EvmNetworkBinding::new(EvmNetworkId::new("mainnet").expect("network"), 1)
+                .expect("binding"),
+        )
         .expect("route binding");
 
     let missing = client
-        .validate_route_binding(&EvmNetworkId::new("sepolia").expect("network"))
+        .validate_network_binding(
+            &EvmNetworkBinding::new(EvmNetworkId::new("sepolia").expect("network"), 1)
+                .expect("binding"),
+        )
         .expect_err("missing route");
     assert_eq!(missing, EvmTransportError::RouteUnavailable);
 }
@@ -427,30 +356,18 @@ fn route_binding_validation_does_not_require_guard_or_live_io() {
 #[tokio::test]
 async fn rejects_explicit_block_identity_mismatch() {
     let server = TestRpcServer::spawn_block_identity_mismatch("0x1").await;
-    let client = client_for(&server.url, "primary", "mainnet");
+    let client = bound_provider(&server.url, "primary", "mainnet", 1);
 
     let number_error = client
-        .read_block(
-            &EvmBlockReadRequest::new(
-                EvmNetworkId::new("mainnet").expect("network"),
-                1,
-                EvmBlockSelector::Number(42),
-            )
-            .expect("request"),
-        )
+        .read_block(&EvmBlockReadRequest::new(EvmBlockSelector::Number(42)))
         .await
         .expect_err("number mismatch");
     assert_eq!(number_error, evm_response_invalid_error());
 
     let hash_error = client
-        .read_block(
-            &EvmBlockReadRequest::new(
-                EvmNetworkId::new("mainnet").expect("network"),
-                1,
-                EvmBlockSelector::Hash(HASH_HEX.parse::<B256>().expect("hash")),
-            )
-            .expect("request"),
-        )
+        .read_block(&EvmBlockReadRequest::new(EvmBlockSelector::Hash(
+            HASH_HEX.parse::<B256>().expect("hash"),
+        )))
         .await
         .expect_err("hash mismatch");
     assert_eq!(hash_error, evm_response_invalid_error());
@@ -459,17 +376,12 @@ async fn rejects_explicit_block_identity_mismatch() {
 #[tokio::test]
 async fn rejects_receipt_transaction_hash_mismatch() {
     let server = TestRpcServer::spawn_receipt_hash_mismatch("0x1").await;
-    let client = client_for(&server.url, "primary", "mainnet");
+    let client = bound_provider(&server.url, "primary", "mainnet", 1);
 
     let error = client
-        .read_receipt(
-            &EvmReceiptReadRequest::new(
-                EvmNetworkId::new("mainnet").expect("network"),
-                1,
-                HASH_HEX.parse::<B256>().expect("hash"),
-            )
-            .expect("request"),
-        )
+        .read_receipt(&EvmReceiptReadRequest::new(
+            HASH_HEX.parse::<B256>().expect("hash"),
+        ))
         .await
         .expect_err("receipt hash mismatch");
 
@@ -479,20 +391,15 @@ async fn rejects_receipt_transaction_hash_mismatch() {
 #[tokio::test]
 async fn rejects_log_entries_that_contradict_filter() {
     let server = TestRpcServer::spawn_log_filter_mismatch("0x1").await;
-    let client = client_for(&server.url, "primary", "mainnet");
+    let client = bound_provider(&server.url, "primary", "mainnet", 1);
 
     let error = client
-        .read_logs(
-            &EvmLogsReadRequest::new(
-                EvmNetworkId::new("mainnet").expect("network"),
-                1,
-                EvmBlockSelector::Number(42),
-                EvmBlockSelector::Number(42),
-                Some(address!("0x1111111111111111111111111111111111111111")),
-                vec![HASH_HEX.parse::<B256>().expect("hash")],
-            )
-            .expect("request"),
-        )
+        .read_logs(&EvmLogsReadRequest::new(
+            EvmBlockSelector::Number(42),
+            EvmBlockSelector::Number(42),
+            Some(address!("0x1111111111111111111111111111111111111111")),
+            vec![HASH_HEX.parse::<B256>().expect("hash")],
+        ))
         .await
         .expect_err("log filter mismatch");
 
@@ -553,8 +460,11 @@ async fn ordered_policy_falls_back_after_request_failure() {
         .expect("routes"),
     );
 
-    let response = client
-        .chain_identity(&chain_request("mainnet", 1))
+    let binding =
+        EvmNetworkBinding::new(EvmNetworkId::new("mainnet").expect("network"), 1).expect("binding");
+    let provider = client.bind_network(binding).expect("bind");
+    let response = provider
+        .chain_identity(&chain_request())
         .await
         .expect("fallback response");
 
@@ -583,12 +493,23 @@ fn client_for(url: &str, source_id: &str, policy_id: &str) -> EvmJsonRpcClient {
     EvmJsonRpcClient::new(registry, routes)
 }
 
-fn chain_request(network_id: &str, expected_chain_id: u64) -> EvmChainIdentityRequest {
-    EvmChainIdentityRequest::new(
-        EvmNetworkId::new(network_id).expect("network"),
-        expected_chain_id,
+fn bound_provider(
+    url: &str,
+    source: &str,
+    network: &str,
+    chain_id: u64,
+) -> EvmJsonRpcNetworkProvider {
+    let client = client_for(url, source, network);
+    let binding = EvmNetworkBinding::new(
+        mfm_evm_capabilities::EvmNetworkId::new(network).expect("network"),
+        chain_id,
     )
-    .expect("request")
+    .expect("binding");
+    client.bind_network(binding).expect("bind network")
+}
+
+fn chain_request() -> EvmChainIdentityRequest {
+    EvmChainIdentityRequest::new()
 }
 
 struct TestRpcServer {

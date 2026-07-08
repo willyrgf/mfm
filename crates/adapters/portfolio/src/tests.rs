@@ -3,8 +3,8 @@ use super::*;
 use std::{collections::BTreeMap, sync::Arc};
 
 use mfm_btc_capabilities::{
-    BtcBalanceReadResponse, BtcBlockHash, BtcChainHeadResponse, BtcSourceStatus,
-    RedactedBtcSourceEvidence,
+    BitcoinNetworkTag, BtcBalanceReadResponse, BtcBlockHash, BtcChainHeadResponse, BtcNetworkId,
+    BtcSourceBinding, BtcSourceIdentity, BtcSourceStatus, RedactedBtcSourceEvidence,
 };
 use mfm_evm_capabilities::{
     EvmBalanceReadResponse, EvmBlockReadResponse, EvmCallReadResponse, EvmCapabilityFuture,
@@ -33,8 +33,10 @@ fn executable_identity_summary_matches_golden() {
 #[test]
 fn bitcoin_capability_backend_observes_native_balance_with_anchor() {
     let (network, config) = bitcoin_observe_config();
-    let btc = Arc::new(MockPortfolioBtc::matching());
-    let backend = CapabilityPortfolioBackend::new(Arc::new(UnavailablePortfolioEvm), Some(btc));
+    let transport = Arc::new(MockPortfolioTransport::with_btc(
+        MockPortfolioBtc::matching(),
+    ));
+    let backend = CapabilityPortfolioBackend::new(transport);
 
     let anchor =
         poll_ready(backend.read_execution_anchor(&network_read_intent_for_network(&network)))
@@ -63,8 +65,10 @@ fn bitcoin_capability_backend_observes_native_balance_with_anchor() {
 #[test]
 fn bitcoin_capability_backend_maps_provider_source_mismatch() {
     let (network, config) = bitcoin_observe_config();
-    let btc = Arc::new(MockPortfolioBtc::rejecting_balance());
-    let backend = CapabilityPortfolioBackend::new(Arc::new(UnavailablePortfolioEvm), Some(btc));
+    let transport = Arc::new(MockPortfolioTransport::with_btc(
+        MockPortfolioBtc::rejecting_balance(),
+    ));
+    let backend = CapabilityPortfolioBackend::new(transport);
 
     let anchor =
         poll_ready(backend.read_execution_anchor(&network_read_intent_for_network(&network)))
@@ -218,6 +222,65 @@ where
 }
 
 const BTC_HASH: &str = "00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc";
+fn test_btc_binding() -> BtcSourceBinding {
+    BtcSourceBinding::new(
+        BtcNetworkId::new("bitcoin-mainnet").expect("network"),
+        BtcSourceIdentity::new("bitcoin-mainnet").expect("source"),
+        BitcoinNetworkTag::Main,
+    )
+    .expect("binding")
+}
+
+struct MockPortfolioTransport {
+    btc: Option<Arc<MockPortfolioBtc>>,
+}
+
+impl MockPortfolioTransport {
+    fn with_btc(btc: MockPortfolioBtc) -> Self {
+        Self {
+            btc: Some(Arc::new(btc)),
+        }
+    }
+}
+
+impl PortfolioTransportFactory for MockPortfolioTransport {
+    fn validate_evm_network_binding(
+        &self,
+        _binding: &EvmNetworkBinding,
+    ) -> mfm_runtime::Result<()> {
+        Ok(())
+    }
+
+    fn validate_btc_source_binding(&self, _binding: &BtcSourceBinding) -> mfm_runtime::Result<()> {
+        if self.btc.is_some() {
+            Ok(())
+        } else {
+            Err(mfm_runtime::RuntimeError::RunnerBinding(
+                "missing Bitcoin provider".to_owned(),
+            ))
+        }
+    }
+
+    fn bind_evm(
+        &self,
+        _binding: EvmNetworkBinding,
+    ) -> mfm_runtime::Result<Arc<dyn PortfolioEvmProvider>> {
+        Ok(Arc::new(UnavailablePortfolioEvm) as Arc<dyn PortfolioEvmProvider>)
+    }
+
+    fn bind_btc(
+        &self,
+        _binding: BtcSourceBinding,
+    ) -> mfm_runtime::Result<Arc<dyn PortfolioBtcProvider>> {
+        self.btc
+            .as_ref()
+            .map(|btc| Arc::clone(btc) as Arc<dyn PortfolioBtcProvider>)
+            .ok_or_else(|| {
+                mfm_runtime::RuntimeError::RunnerBinding("missing Bitcoin provider".to_owned())
+            })
+    }
+}
+
 struct MockPortfolioBtc {
     reject_balance: bool,
 }
@@ -243,8 +306,8 @@ impl BtcChainHeadReadProvider for MockPortfolioBtc {
     ) -> mfm_btc_capabilities::BtcCapabilityFuture<'a, BtcChainHeadResponse> {
         Box::pin(async move {
             Ok(BtcChainHeadResponse {
-                evidence: RedactedBtcSourceEvidence::from_request(
-                    request,
+                evidence: RedactedBtcSourceEvidence::from_binding(
+                    &test_btc_binding(),
                     "main",
                     BtcSourceStatus::Synced,
                 )
@@ -266,21 +329,22 @@ impl BtcBalanceReadProvider for MockPortfolioBtc {
     ) -> mfm_btc_capabilities::BtcCapabilityFuture<'a, BtcBalanceReadResponse> {
         let reject_balance = self.reject_balance;
         Box::pin(async move {
+            let binding = test_btc_binding();
             if reject_balance {
                 return Err(BtcCapabilityError::SourceMismatch {
                     diagnostic: RedactedBtcSourceEvidence {
-                        network_id: request.network_id().clone(),
-                        source_identity: request.source_identity().clone(),
-                        bitcoin_network: request.bitcoin_network().to_owned(),
-                        observed_bitcoin_network: request.bitcoin_network().to_owned(),
+                        network_id: binding.network_id().clone(),
+                        source_identity: binding.source_identity().clone(),
+                        bitcoin_network: binding.bitcoin_network().as_str().to_owned(),
+                        observed_bitcoin_network: binding.bitcoin_network().as_str().to_owned(),
                         source_status: BtcSourceStatus::Synced,
                     }
                     .source_mismatch_diagnostic(),
                 });
             }
             Ok(BtcBalanceReadResponse {
-                evidence: RedactedBtcSourceEvidence::from_balance_request(
-                    request,
+                evidence: RedactedBtcSourceEvidence::from_binding(
+                    &binding,
                     "main",
                     BtcSourceStatus::Synced,
                 )

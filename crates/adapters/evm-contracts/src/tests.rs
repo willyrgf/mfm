@@ -49,6 +49,16 @@ fn evidence_for_source(
     }
 }
 
+#[allow(dead_code)]
+fn test_network_id() -> EvmNetworkId {
+    EvmNetworkId::new("reth-dev").expect("network")
+}
+
+#[allow(dead_code)]
+fn test_chain_id() -> u64 {
+    31337
+}
+
 fn evidence_for_request(
     network_id: &EvmNetworkId,
     expected_chain_id: u64,
@@ -1200,6 +1210,8 @@ struct TestEvmProviders {
     mode: TestEvmProviderMode,
     submit_count: Arc<Mutex<u32>>,
     receipt_failure_reads: Arc<Mutex<u32>>,
+    network_id: EvmNetworkId,
+    expected_chain_id: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -1236,6 +1248,8 @@ impl TestEvmProviders {
             },
             submit_count,
             receipt_failure_reads: Arc::new(Mutex::new(0)),
+            network_id: EvmNetworkId::new("ethereum-mainnet").expect("network"),
+            expected_chain_id: 1,
         }
     }
 
@@ -1244,6 +1258,8 @@ impl TestEvmProviders {
             mode: TestEvmProviderMode::ReceiptFailure,
             submit_count: Arc::new(Mutex::new(0)),
             receipt_failure_reads: reads,
+            network_id: EvmNetworkId::new("ethereum-mainnet").expect("network"),
+            expected_chain_id: 1,
         }
     }
 
@@ -1256,15 +1272,27 @@ impl TestEvmProviders {
             mode: TestEvmProviderMode::SubmitHashMismatch { returned_hash },
             submit_count,
             receipt_failure_reads: Arc::new(Mutex::new(0)),
+            network_id: EvmNetworkId::new("ethereum-mainnet").expect("network"),
+            expected_chain_id: 1,
         }
     }
 
     fn new(mode: TestEvmProviderMode) -> Self {
+        Self::with_binding(mode, "ethereum-mainnet", 1)
+    }
+
+    fn with_binding(mode: TestEvmProviderMode, network_id: &str, expected_chain_id: u64) -> Self {
         Self {
             mode,
             submit_count: Arc::new(Mutex::new(0)),
             receipt_failure_reads: Arc::new(Mutex::new(0)),
+            network_id: EvmNetworkId::new(network_id).expect("network"),
+            expected_chain_id,
         }
+    }
+
+    fn evidence(&self) -> RedactedEvmSourceEvidence {
+        evidence_for_request(&self.network_id, self.expected_chain_id)
     }
 }
 
@@ -1421,18 +1449,15 @@ fn unexpected_signing_call<'a>() -> mfm_signing::SigningFuture<'a> {
 impl EvmChainIdentityProvider for TestEvmProviders {
     fn chain_identity<'a>(
         &'a self,
-        request: &'a EvmChainIdentityRequest,
+        _request: &'a EvmChainIdentityRequest,
     ) -> EvmCapabilityFuture<'a, EvmChainIdentityResponse> {
         match self.mode {
             TestEvmProviderMode::Preparation
             | TestEvmProviderMode::Recovery { .. }
             | TestEvmProviderMode::SubmitHashMismatch { .. } => Box::pin(async {
                 Ok(EvmChainIdentityResponse {
-                    evidence: evidence_for_request(
-                        request.network_id(),
-                        request.expected_chain_id(),
-                    ),
-                    chain_id: request.expected_chain_id(),
+                    evidence: self.evidence(),
+                    chain_id: self.expected_chain_id,
                     client_version: Some("test-client".to_owned()),
                 })
             }),
@@ -1444,12 +1469,11 @@ impl EvmChainIdentityProvider for TestEvmProviders {
 impl EvmBlockReadProvider for TestEvmProviders {
     fn read_block<'a>(
         &'a self,
-        request: &'a EvmBlockReadRequest,
+        _request: &'a EvmBlockReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmBlockReadResponse> {
         match self.mode {
             TestEvmProviderMode::Finality => {
-                let evidence =
-                    evidence_for_request(request.network_id(), request.expected_chain_id());
+                let evidence = self.evidence();
                 Box::pin(async move {
                     Ok(EvmBlockReadResponse {
                         evidence,
@@ -1471,10 +1495,7 @@ impl EvmNonceReadProvider for TestEvmProviders {
         match self.mode {
             TestEvmProviderMode::Preparation => Box::pin(async {
                 Ok(EvmNonceReadResponse {
-                    evidence: evidence_for_request(
-                        request.network_id(),
-                        request.expected_chain_id(),
-                    ),
+                    evidence: self.evidence(),
                     nonce: 7,
                 })
             }),
@@ -1482,10 +1503,7 @@ impl EvmNonceReadProvider for TestEvmProviders {
                 assert_eq!(request.block(), &EvmBlockSelector::Pending);
                 Box::pin(async move {
                     Ok(EvmNonceReadResponse {
-                        evidence: evidence_for_request(
-                            request.network_id(),
-                            request.expected_chain_id(),
-                        ),
+                        evidence: self.evidence(),
                         nonce: pending_nonce,
                     })
                 })
@@ -1498,15 +1516,12 @@ impl EvmNonceReadProvider for TestEvmProviders {
 impl EvmFeeReadProvider for TestEvmProviders {
     fn read_fee<'a>(
         &'a self,
-        request: &'a EvmFeeReadRequest,
+        _request: &'a EvmFeeReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmFeeReadResponse> {
         match self.mode {
             TestEvmProviderMode::Preparation => Box::pin(async {
                 Ok(EvmFeeReadResponse {
-                    evidence: evidence_for_request(
-                        request.network_id(),
-                        request.expected_chain_id(),
-                    ),
+                    evidence: self.evidence(),
                     base_fee_per_gas: Some(5),
                     priority_fee_per_gas: Some(3),
                     max_fee_per_gas: Some(11),
@@ -1521,15 +1536,12 @@ impl EvmFeeReadProvider for TestEvmProviders {
 impl EvmGasEstimateProvider for TestEvmProviders {
     fn estimate_gas<'a>(
         &'a self,
-        request: &'a EvmGasEstimateRequest,
+        _request: &'a EvmGasEstimateRequest,
     ) -> EvmCapabilityFuture<'a, EvmGasEstimateResponse> {
         match self.mode {
             TestEvmProviderMode::Preparation => Box::pin(async {
                 Ok(EvmGasEstimateResponse {
-                    evidence: evidence_for_request(
-                        request.network_id(),
-                        request.expected_chain_id(),
-                    ),
+                    evidence: self.evidence(),
                     gas_limit: 21_000,
                 })
             }),
@@ -1547,8 +1559,7 @@ impl EvmTransactionSubmitProvider for TestEvmProviders {
             TestEvmProviderMode::Recovery { .. } => {
                 let submit_count = Arc::clone(&self.submit_count);
                 let transaction_hash = request.signed_payload().transaction_hash();
-                let evidence =
-                    evidence_for_request(request.network_id(), request.expected_chain_id());
+                let evidence = self.evidence();
                 Box::pin(async move {
                     *submit_count.lock().expect("submit count") += 1;
                     Ok(mfm_evm_capabilities::EvmTransactionSubmitResponse {
@@ -1559,8 +1570,7 @@ impl EvmTransactionSubmitProvider for TestEvmProviders {
             }
             TestEvmProviderMode::SubmitHashMismatch { returned_hash } => {
                 let submit_count = Arc::clone(&self.submit_count);
-                let evidence =
-                    evidence_for_request(request.network_id(), request.expected_chain_id());
+                let evidence = self.evidence();
                 Box::pin(async move {
                     *submit_count.lock().expect("submit count") += 1;
                     Ok(mfm_evm_capabilities::EvmTransactionSubmitResponse {
@@ -1582,8 +1592,7 @@ impl EvmReceiptReadProvider for TestEvmProviders {
         match self.mode {
             TestEvmProviderMode::Recovery { receipt_mode, .. } => {
                 let transaction_hash = request.transaction_hash();
-                let evidence =
-                    evidence_for_request(request.network_id(), request.expected_chain_id());
+                let evidence = self.evidence();
                 Box::pin(async move {
                     match receipt_mode {
                         RecoveryReceiptMode::Landed => Ok(EvmReceiptReadResponse {
@@ -1618,8 +1627,7 @@ impl EvmNonceOccupancyReadProvider for TestEvmProviders {
         match self.mode {
             TestEvmProviderMode::Recovery { occupancy_mode, .. } => {
                 let nonce = request.nonce();
-                let evidence =
-                    evidence_for_request(request.network_id(), request.expected_chain_id());
+                let evidence = self.evidence();
                 Box::pin(async move {
                     match occupancy_mode {
                         RecoveryOccupancyMode::Unknown => {
@@ -1657,12 +1665,12 @@ impl EvmCallReadProvider for TestEvmProviders {
 impl EvmCodeReadProvider for TestEvmProviders {
     fn read_code<'a>(
         &'a self,
-        request: &'a EvmCodeReadRequest,
+        _request: &'a EvmCodeReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmCodeReadResponse> {
         Box::pin(async {
             let code = vec![0x60, 0x00];
             Ok(EvmCodeReadResponse {
-                evidence: evidence_for_request(request.network_id(), request.expected_chain_id()),
+                evidence: self.evidence(),
                 code_hash: keccak256(&code),
                 code,
             })
@@ -1919,7 +1927,8 @@ async fn deploy_preparation_uses_requested_transaction_style_for_contract_creati
 
 #[tokio::test]
 async fn context_deploy_preparation_routes_from_certified_context() {
-    let providers = TestEvmProviders::preparation();
+    let providers =
+        TestEvmProviders::with_binding(TestEvmProviderMode::Preparation, "reth-dev", 31337);
     let adapter = adapter(&providers);
     let context = certified_contract_context("reth-dev", 31337);
     let action = deploy_action(31337);
@@ -2213,7 +2222,8 @@ async fn external_adoption_records_replayable_code_evidence() {
 
 #[tokio::test]
 async fn context_prepared_reconstruction_rejects_mismatched_context_ref() {
-    let providers = TestEvmProviders::preparation();
+    let providers =
+        TestEvmProviders::with_binding(TestEvmProviderMode::Preparation, "reth-dev", 31337);
     let adapter = adapter(&providers);
     let context = certified_contract_context("reth-dev", 31337);
     let action = deploy_action(31337);

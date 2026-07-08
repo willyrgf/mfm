@@ -2,8 +2,9 @@ use super::*;
 use ed25519_dalek::SigningKey;
 use mfm_artifact_capabilities::ArtifactEvidenceRef;
 use mfm_btc_capabilities::{
-    BtcAddress, BtcBalanceReadProvider, BtcBalanceReadRequest, BtcBlockHash, BtcFinality,
-    BtcHeadSelection, BtcNetworkId, BtcSourceIdentity, BtcSourceStatus, RedactedBtcSourceEvidence,
+    BitcoinNetworkTag, BtcAddress, BtcBalanceReadProvider, BtcBalanceReadRequest, BtcBlockHash,
+    BtcFinality, BtcHeadSelection, BtcNetworkId, BtcSourceBinding, BtcSourceIdentity,
+    BtcSourceStatus, RedactedBtcSourceEvidence,
 };
 use mfm_canonical::sha256_digest_bytes;
 use mfm_facts::{
@@ -27,8 +28,8 @@ use mfm_store::v1::{
     test_support::{signed_fact_query_receipt_for_test, SignedFactQueryReceiptFixtureInputForTest},
 };
 use mfm_transports_btc_jsonrpc_http::{
-    BlockHeaderInfo, BlockchainInfo, BtcJsonRpcChainHeadProvider, BtcJsonRpcChainHeadTransport,
-    BtcRpcError, BtcTransportFuture, ScanTxOutSetResult,
+    BlockHeaderInfo, BlockchainInfo, BtcJsonRpcChainHeadTransport, BtcJsonRpcRouter,
+    BtcJsonRpcSourceProvider, BtcRpcError, BtcTransportFuture, ScanTxOutSetResult,
 };
 use std::{
     collections::BTreeMap,
@@ -285,26 +286,25 @@ impl BtcJsonRpcChainHeadTransport for MockTransport {
     }
 }
 
-fn make_request(selection: BtcHeadSelection) -> BtcChainHeadRequest {
-    BtcChainHeadRequest::new(
+fn make_binding() -> BtcSourceBinding {
+    BtcSourceBinding::new(
         BtcNetworkId::new("bitcoin-mainnet").expect("network"),
         BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
-        "main",
-        selection,
+        BitcoinNetworkTag::Main,
     )
-    .expect("request")
+    .expect("binding")
+}
+
+fn make_request(selection: BtcHeadSelection) -> BtcChainHeadRequest {
+    BtcChainHeadRequest::new(selection)
 }
 
 fn make_balance_request(address: &str) -> BtcBalanceReadRequest {
     BtcBalanceReadRequest::new(
-        BtcNetworkId::new("bitcoin-mainnet").expect("network"),
-        BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
-        "main",
         BtcAddress::new(address).expect("address"),
         850_000,
         BtcBlockHash::new(BEST_HASH).expect("hash"),
     )
-    .expect("request")
 }
 
 fn chain_head_response(
@@ -314,8 +314,12 @@ fn chain_head_response(
     provider_time_unix_ms: Option<u64>,
 ) -> BtcChainHeadResponse {
     BtcChainHeadResponse {
-        evidence: RedactedBtcSourceEvidence::from_request(request, "main", BtcSourceStatus::Synced)
-            .expect("evidence"),
+        evidence: RedactedBtcSourceEvidence::from_binding(
+            &make_binding(),
+            "main",
+            BtcSourceStatus::Synced,
+        )
+        .expect("evidence"),
         head_kind: request.selection().head_kind(),
         finality: request.selection().finality(),
         block_height,
@@ -324,13 +328,15 @@ fn chain_head_response(
     }
 }
 
-fn routed_provider(transport: Arc<MockTransport>) -> BtcJsonRpcChainHeadProvider {
+fn routed_provider(transport: Arc<MockTransport>) -> BtcJsonRpcSourceProvider {
     let mut routes = BTreeMap::new();
     routes.insert(
         BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
         transport as Arc<dyn BtcJsonRpcChainHeadTransport>,
     );
-    BtcJsonRpcChainHeadProvider::new(routes)
+    BtcJsonRpcRouter::new(routes)
+        .bind_source(make_binding())
+        .expect("bind source")
 }
 
 fn observe_input(
@@ -398,18 +404,19 @@ fn observe_config() -> ObserveBtcChainHeadConfig {
 }
 
 #[test]
-fn chain_head_request_uses_semantic_config_fields() {
+fn chain_head_binding_and_request_use_certified_config() {
     let config = ObserveBtcChainHeadConfig {
         head_kind: "confirmed".to_owned(),
         confirmation_depth: Some(std::num::NonZeroU64::new(6).expect("nonzero")),
         ..observe_config()
     };
 
+    let binding = chain_head_binding(&config).expect("binding");
     let request = chain_head_request(&config).expect("request");
 
-    assert_eq!(request.network_id().as_str(), "bitcoin-mainnet");
-    assert_eq!(request.source_identity().as_str(), "public-bitcoin-core");
-    assert_eq!(request.bitcoin_network(), "main");
+    assert_eq!(binding.network_id().as_str(), "bitcoin-mainnet");
+    assert_eq!(binding.source_identity().as_str(), "public-bitcoin-core");
+    assert_eq!(binding.bitcoin_network().as_str(), "main");
     assert_eq!(
         request.selection(),
         BtcHeadSelection::confirmed(6).expect("confirmed")
@@ -819,7 +826,7 @@ async fn replay_fact_from_recorded_provider(
     input: &ObserveBtcChainHeadInput,
 ) -> Result<BtcChainHeadFact> {
     let request = chain_head_request(config)?;
-    let provider = RecordedBtcChainHeadProvider::new(response);
+    let provider = RecordedBtcChainHeadProvider::new(make_binding(), response);
     let response = provider
         .read_chain_head(&request)
         .await
@@ -850,7 +857,7 @@ async fn recorded_provider_rejects_mismatched_recorded_evidence() {
     let request = make_request(BtcHeadSelection::best());
     let mismatched_request = make_request(BtcHeadSelection::confirmed(6).expect("confirmed"));
     let response = chain_head_response(&mismatched_request, 849_994, CONFIRMED_HASH, None);
-    let provider = RecordedBtcChainHeadProvider::new(response);
+    let provider = RecordedBtcChainHeadProvider::new(make_binding(), response);
 
     let error = provider
         .read_chain_head(&request)

@@ -18,16 +18,16 @@ pub(crate) fn register_btc_collector_runners_if_configured(
     let (Some(btc), Some(fact_index)) = (btc, fact_index) else {
         return Ok(());
     };
-    let btc = Arc::new(btc_json_rpc_read_provider(btc)?);
+    let btc = Arc::new(BtcJsonRpcProviderFactory::new(btc_json_rpc_router(btc)?));
     let capabilities =
         mfm_adapters_btc_jsonrpc::BtcJsonRpcRunnerCapabilities::new(artifacts, btc, fact_index);
     mfm_adapters_btc_jsonrpc::register_btc_jsonrpc_runners(registry, capabilities)?;
     Ok(())
 }
 
-pub(crate) fn btc_json_rpc_read_provider(
+pub(crate) fn btc_json_rpc_router(
     btc: mfm_runtime_config::BtcRuntimeConfig,
-) -> mfm_runtime::Result<mfm_transports_btc_jsonrpc_http::BtcJsonRpcChainHeadProvider> {
+) -> mfm_runtime::Result<mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter> {
     let mut routes = BTreeMap::new();
     for (source_identity, route) in btc.routes() {
         let client = btc_json_rpc_client(route)?;
@@ -37,7 +37,32 @@ pub(crate) fn btc_json_rpc_read_provider(
                 as Arc<dyn mfm_transports_btc_jsonrpc_http::BtcJsonRpcChainHeadTransport>,
         );
     }
-    Ok(mfm_transports_btc_jsonrpc_http::BtcJsonRpcChainHeadProvider::new(routes))
+    Ok(mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter::new(
+        routes,
+    ))
+}
+
+pub(crate) struct BtcJsonRpcProviderFactory {
+    router: mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter,
+}
+
+impl BtcJsonRpcProviderFactory {
+    pub(crate) fn new(router: mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter) -> Self {
+        Self { router }
+    }
+}
+
+impl mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory for BtcJsonRpcProviderFactory {
+    fn bind_source(
+        &self,
+        binding: mfm_btc_capabilities::BtcSourceBinding,
+    ) -> mfm_runtime::Result<Arc<dyn mfm_btc_capabilities::BtcChainHeadReadProvider>> {
+        let provider = self
+            .router
+            .bind_source(binding)
+            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+        Ok(Arc::new(provider) as Arc<dyn mfm_btc_capabilities::BtcChainHeadReadProvider>)
+    }
 }
 
 pub(crate) fn production_fact_index_read_provider(

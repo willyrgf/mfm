@@ -561,17 +561,25 @@ replay adapters only. Live capability construction during replay is a contract v
 Replay service construction itself is evidence-only app assembly: it must not construct the live
 runner registry, live transports, signer providers, keystores, or live capability runtime config.
 
-Live provider identity is enforced by provider implementations for each capability request from the
-semantic request authority, such as EVM `network_id` plus expected chain id or Bitcoin `network_id`,
-`source_identity`, and expected network tag. A route that resolves but observes incompatible source
-evidence fails after `RunAdmitted` as an attempt/capability failure with a closed redacted provider
-diagnostic. Provider diagnostics carry a provider family, stable diagnostic code, optional
-redaction-safe operation id, and closed boolean/integer/id fields only. Examples include HTTP
-status, JSON-RPC numeric code, response-shape failure, unsupported operation, operation incomplete,
-and source mismatch. They must not carry RPC URLs, authorization headers, file paths, provider
-messages, request/response bodies, signer material, or signed transactions. Replay providers rebuild
-the certified request authority and verify recorded evidence against it without resolving source
-refs or policy ids through current runtime config.
+Live provider identity is enforced by **provider-bound semantic source binding**, not by
+request-owned source fields. Adapters and app assembly derive checked capability-owned bindings
+(EVM `EvmNetworkBinding`: `network_id` + expected chain id; Bitcoin `BtcSourceBinding`:
+`network_id`, `source_identity`, and expected network tag) from certified config/intent, then bind
+raw routers/clients once per binding. Only the returned bound providers implement live capability
+traits. Capability requests carry operation parameters only. Raw routers/clients expose no-IO
+binding validation and bind constructors only; they do not implement live capability provider
+traits. Bound providers own private sealed call pipelines that mint private verified-call/session
+tokens before raw operation IO, probe source identity on each call, and attach redacted evidence on
+success. A route that resolves but observes incompatible source evidence fails after `RunAdmitted`
+as an attempt/capability failure with a closed redacted provider diagnostic. Provider diagnostics
+carry a provider family, stable diagnostic code, optional redaction-safe operation id, and closed
+boolean/integer/id fields only. Examples include HTTP status, JSON-RPC numeric code, response-shape
+failure, unsupported operation, operation incomplete, and source mismatch. They must not carry RPC
+URLs, authorization headers, file paths, provider messages, request/response bodies, signer
+material, or signed transactions. Replay providers or direct replay verifiers validate recorded
+evidence against certified semantic binding plus the operation request only, without runtime
+config, route registries, live probes, or resolving source refs/policy ids through current process
+config.
 
 Manual-resolution replay additionally verifies that the stream prefix derives `ManualBlocked`, the
 event matches certified policy, evidence and authorization artifacts match certified roles and

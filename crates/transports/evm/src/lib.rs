@@ -44,7 +44,7 @@ use mfm_evm_capabilities::{
     EvmChainIdentityResponse, EvmCodeReadProvider, EvmCodeReadRequest, EvmCodeReadResponse,
     EvmFeeReadProvider, EvmFeeReadRequest, EvmFeeReadResponse, EvmGasEstimateProvider,
     EvmGasEstimateRequest, EvmGasEstimateResponse, EvmLogEntry, EvmLogsReadProvider,
-    EvmLogsReadRequest, EvmLogsReadResponse, EvmNetworkId, EvmNonceOccupancy,
+    EvmLogsReadRequest, EvmLogsReadResponse, EvmNetworkBinding, EvmNetworkId, EvmNonceOccupancy,
     EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest, EvmNonceOccupancyReadResponse,
     EvmNonceReadProvider, EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider,
     EvmReceiptReadRequest, EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef,
@@ -310,21 +310,32 @@ impl EvmJsonRpcClient {
         }
     }
 
-    /// Validates that a semantic network route resolves to a source policy without network I/O.
-    pub fn validate_route_binding(&self, network_id: &EvmNetworkId) -> TransportResult<()> {
-        let route = self.routes.route(network_id)?;
+    /// Validates that a semantic network binding resolves to a source policy without network I/O.
+    pub fn validate_network_binding(&self, binding: &EvmNetworkBinding) -> TransportResult<()> {
+        let route = self.routes.route(binding.network_id())?;
         self.registry
             .candidates(route.policy_id(), route.source_ref())
             .map(|_| ())
     }
 
+    /// Binds a checked semantic network binding to a live capability provider.
+    pub fn bind_network(
+        &self,
+        binding: EvmNetworkBinding,
+    ) -> TransportResult<EvmJsonRpcNetworkProvider> {
+        self.validate_network_binding(&binding)?;
+        Ok(EvmJsonRpcNetworkProvider {
+            client: self.clone(),
+            binding,
+        })
+    }
+
     async fn chain_identity_impl(
         &self,
-        request: &EvmChainIdentityRequest,
+        binding: &EvmNetworkBinding,
+        _request: &EvmChainIdentityRequest,
     ) -> TransportResult<EvmChainIdentityResponse> {
-        let selected = self
-            .verified_source(request.network_id(), request.expected_chain_id())
-            .await?;
+        let selected = self.verified_source(binding).await?;
         let client_version = self
             .rpc_call(selected.source, "web3_clientVersion", json!([]))
             .await
@@ -339,11 +350,10 @@ impl EvmJsonRpcClient {
 
     async fn block_read_impl(
         &self,
+        binding: &EvmNetworkBinding,
         request: &EvmBlockReadRequest,
     ) -> TransportResult<EvmBlockReadResponse> {
-        let selected = self
-            .verified_source(request.network_id(), request.expected_chain_id())
-            .await?;
+        let selected = self.verified_source(binding).await?;
         let value = match request.block() {
             EvmBlockSelector::Hash(hash) => {
                 self.rpc_call(
@@ -378,11 +388,10 @@ impl EvmJsonRpcClient {
 
     async fn call_read_impl(
         &self,
+        binding: &EvmNetworkBinding,
         request: &EvmCallReadRequest,
     ) -> TransportResult<EvmCallReadResponse> {
-        let selected = self
-            .verified_source(request.network_id(), request.expected_chain_id())
-            .await?;
+        let selected = self.verified_source(binding).await?;
         let result = self
             .rpc_call(
                 selected.source,
@@ -402,11 +411,10 @@ impl EvmJsonRpcClient {
 
     async fn code_read_impl(
         &self,
+        binding: &EvmNetworkBinding,
         request: &EvmCodeReadRequest,
     ) -> TransportResult<EvmCodeReadResponse> {
-        let selected = self
-            .verified_source(request.network_id(), request.expected_chain_id())
-            .await?;
+        let selected = self.verified_source(binding).await?;
         let result = self
             .rpc_call(
                 selected.source,
@@ -429,11 +437,10 @@ impl EvmJsonRpcClient {
 
     async fn balance_read_impl(
         &self,
+        binding: &EvmNetworkBinding,
         request: &EvmBalanceReadRequest,
     ) -> TransportResult<EvmBalanceReadResponse> {
-        let selected = self
-            .verified_source(request.network_id(), request.expected_chain_id())
-            .await?;
+        let selected = self.verified_source(binding).await?;
         let result = self
             .rpc_call(
                 selected.source,
@@ -453,11 +460,10 @@ impl EvmJsonRpcClient {
 
     async fn logs_read_impl(
         &self,
+        binding: &EvmNetworkBinding,
         request: &EvmLogsReadRequest,
     ) -> TransportResult<EvmLogsReadResponse> {
-        let selected = self
-            .verified_source(request.network_id(), request.expected_chain_id())
-            .await?;
+        let selected = self.verified_source(binding).await?;
         let mut filter = serde_json::Map::new();
         filter.insert(
             "fromBlock".to_owned(),
@@ -505,11 +511,10 @@ impl EvmJsonRpcClient {
 
     async fn nonce_read_impl(
         &self,
+        binding: &EvmNetworkBinding,
         request: &EvmNonceReadRequest,
     ) -> TransportResult<EvmNonceReadResponse> {
-        let selected = self
-            .verified_source(request.network_id(), request.expected_chain_id())
-            .await?;
+        let selected = self.verified_source(binding).await?;
         let result = self
             .rpc_call(
                 selected.source,
@@ -529,11 +534,10 @@ impl EvmJsonRpcClient {
 
     async fn fee_read_impl(
         &self,
-        request: &EvmFeeReadRequest,
+        binding: &EvmNetworkBinding,
+        _request: &EvmFeeReadRequest,
     ) -> TransportResult<EvmFeeReadResponse> {
-        let selected = self
-            .verified_source(request.network_id(), request.expected_chain_id())
-            .await?;
+        let selected = self.verified_source(binding).await?;
         let legacy_gas_price = self
             .rpc_call(selected.source, "eth_gasPrice", json!([]))
             .await?
@@ -585,11 +589,10 @@ impl EvmJsonRpcClient {
 
     async fn gas_estimate_impl(
         &self,
+        binding: &EvmNetworkBinding,
         request: &EvmGasEstimateRequest,
     ) -> TransportResult<EvmGasEstimateResponse> {
-        let selected = self
-            .verified_source(request.network_id(), request.expected_chain_id())
-            .await?;
+        let selected = self.verified_source(binding).await?;
         let mut call = serde_json::Map::new();
         if let Some(from) = request.from() {
             call.insert("from".to_owned(), json!(format!("{from:?}")));
@@ -621,11 +624,10 @@ impl EvmJsonRpcClient {
 
     async fn submit_impl(
         &self,
+        binding: &EvmNetworkBinding,
         request: &EvmTransactionSubmitRequest,
     ) -> TransportResult<EvmTransactionSubmitResponse> {
-        let selected = self
-            .verified_source(request.network_id(), request.expected_chain_id())
-            .await?;
+        let selected = self.verified_source(binding).await?;
         let result = self
             .rpc_call(
                 selected.source,
@@ -645,11 +647,10 @@ impl EvmJsonRpcClient {
 
     async fn receipt_read_impl(
         &self,
+        binding: &EvmNetworkBinding,
         request: &EvmReceiptReadRequest,
     ) -> TransportResult<EvmReceiptReadResponse> {
-        let selected = self
-            .verified_source(request.network_id(), request.expected_chain_id())
-            .await?;
+        let selected = self.verified_source(binding).await?;
         let result = self
             .rpc_call(
                 selected.source,
@@ -684,11 +685,10 @@ impl EvmJsonRpcClient {
 
     async fn nonce_occupancy_read_impl(
         &self,
+        binding: &EvmNetworkBinding,
         request: &EvmNonceOccupancyReadRequest,
     ) -> TransportResult<EvmNonceOccupancyReadResponse> {
-        let selected = self
-            .verified_source(request.network_id(), request.expected_chain_id())
-            .await?;
+        let selected = self.verified_source(binding).await?;
         let account = format!("{:?}", request.account()).to_ascii_lowercase();
         for block_tag in ["latest", "pending"] {
             let result = self
@@ -743,23 +743,22 @@ impl EvmJsonRpcClient {
 
     async fn verified_source<'a>(
         &'a self,
-        network_id: &EvmNetworkId,
-        expected_chain_id: u64,
-    ) -> TransportResult<VerifiedSource<'a>> {
-        let route = self.routes.route(network_id)?;
+        binding: &EvmNetworkBinding,
+    ) -> TransportResult<VerifiedEvmCall<'a>> {
+        let route = self.routes.route(binding.network_id())?;
         let mut last_failure = EvmTransportError::SourceUnavailable;
         for source in self
             .registry
             .candidates(route.policy_id(), route.source_ref())?
         {
             match self.chain_id_for_source(source).await {
-                Ok(chain_id) if chain_id == expected_chain_id => {
-                    return Ok(VerifiedSource {
+                Ok(chain_id) if chain_id == binding.expected_chain_id() => {
+                    return Ok(VerifiedEvmCall {
                         source,
                         chain_id,
                         evidence: RedactedEvmSourceEvidence {
-                            network_id: network_id.clone(),
-                            expected_chain_id,
+                            network_id: binding.network_id().clone(),
+                            expected_chain_id: binding.expected_chain_id(),
                             observed_chain_id: chain_id,
                             source_ref: source.id.clone(),
                             policy_id: route.policy_id().clone(),
@@ -768,8 +767,8 @@ impl EvmJsonRpcClient {
                 }
                 Ok(chain_id) => {
                     let evidence = RedactedEvmSourceEvidence {
-                        network_id: network_id.clone(),
-                        expected_chain_id,
+                        network_id: binding.network_id().clone(),
+                        expected_chain_id: binding.expected_chain_id(),
                         observed_chain_id: chain_id,
                         source_ref: source.id.clone(),
                         policy_id: route.policy_id().clone(),
@@ -922,18 +921,33 @@ impl fmt::Debug for EvmJsonRpcClient {
     }
 }
 
-struct VerifiedSource<'a> {
+struct VerifiedEvmCall<'a> {
     source: &'a EvmRuntimeSource,
     chain_id: u64,
     evidence: RedactedEvmSourceEvidence,
 }
 
+/// EVM capability provider bound to a checked semantic network binding.
+#[derive(Clone)]
+pub struct EvmJsonRpcNetworkProvider {
+    client: EvmJsonRpcClient,
+    binding: EvmNetworkBinding,
+}
+
+impl EvmJsonRpcNetworkProvider {
+    /// Returns the private semantic binding owned by this provider.
+    pub const fn binding(&self) -> &EvmNetworkBinding {
+        &self.binding
+    }
+}
+
 macro_rules! impl_provider {
     ($trait:ident, $method:ident, $req:ty, $resp:ty, $inner:ident) => {
-        impl $trait for EvmJsonRpcClient {
+        impl $trait for EvmJsonRpcNetworkProvider {
             fn $method<'a>(&'a self, request: &'a $req) -> EvmCapabilityFuture<'a, $resp> {
                 Box::pin(async move {
-                    self.$inner(request)
+                    self.client
+                        .$inner(&self.binding, request)
                         .await
                         .map_err(capability_error_from_transport)
                 })

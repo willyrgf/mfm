@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use mfm_certify::CertificationRegistry;
-use mfm_evm_capabilities::EvmNetworkId;
+use mfm_evm_capabilities::{EvmNetworkBinding, EvmNetworkId};
 use mfm_signers_keystore::{KeystoreSignerProvider, KeystoreSignerRegistryEntry};
 use mfm_signing::SignerRef;
 use mfm_store::v1 as store;
@@ -38,18 +38,28 @@ impl RuntimeConfigEvmContractRuntimeFactory {
         self.runtime_config.load_runtime_config_with_signers()
     }
 
-    fn evm_client_for(
+    fn network_binding(
+        &self,
+        network_id: &str,
+        expected_chain_id: u64,
+    ) -> mfm_runtime::Result<EvmNetworkBinding> {
+        let network_id = EvmNetworkId::new(network_id)
+            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+        EvmNetworkBinding::new(network_id, expected_chain_id)
+            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))
+    }
+
+    fn bound_evm_provider(
         &self,
         evm: mfm_runtime_config::EvmRuntimeConfig,
         network_id: &str,
-    ) -> mfm_runtime::Result<mfm_transports_evm::EvmJsonRpcClient> {
-        let network_id = EvmNetworkId::new(network_id)
-            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+        expected_chain_id: u64,
+    ) -> mfm_runtime::Result<mfm_transports_evm::EvmJsonRpcNetworkProvider> {
+        let binding = self.network_binding(network_id, expected_chain_id)?;
         let client = evm_json_rpc_client(evm)?;
         client
-            .validate_route_binding(&network_id)
-            .map_err(runtime_evm_transport_error)?;
-        Ok(client)
+            .bind_network(binding)
+            .map_err(runtime_evm_transport_error)
     }
 }
 
@@ -63,6 +73,7 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
     fn validate_runtime_for(
         &self,
         network_id: &str,
+        expected_chain_id: u64,
         signer_ref: Option<&SignerRef>,
     ) -> mfm_runtime::Result<()> {
         let (evm, signer_configured) = if let Some(signer_ref) = signer_ref {
@@ -74,7 +85,11 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
         } else {
             (self.load_evm()?, true)
         };
-        self.evm_client_for(evm, network_id)?;
+        let binding = self.network_binding(network_id, expected_chain_id)?;
+        let client = evm_json_rpc_client(evm)?;
+        client
+            .validate_network_binding(&binding)
+            .map_err(runtime_evm_transport_error)?;
         if !signer_configured {
             return Err(mfm_runtime::RuntimeError::RunnerBinding(
                 "missing EVM signer binding".to_owned(),
@@ -86,8 +101,10 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
     fn read_runtime_for(
         &self,
         network_id: &str,
+        expected_chain_id: u64,
     ) -> mfm_runtime::Result<mfm_adapters_evm_contracts::EvmContractReadRuntime> {
-        let evm_provider = self.evm_client_for(self.load_evm()?, network_id)?;
+        let evm_provider =
+            self.bound_evm_provider(self.load_evm()?, network_id, expected_chain_id)?;
         Ok(
             mfm_adapters_evm_contracts::EvmContractReadRuntime::new_with_source_run_import_registry(
                 Arc::new(evm_provider),
@@ -99,16 +116,16 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
     fn runtime_for(
         &self,
         network_id: &str,
+        expected_chain_id: u64,
     ) -> mfm_runtime::Result<mfm_adapters_evm_contracts::EvmContractRuntime> {
         let runtime_config = self.load_runtime_config_with_signers()?;
         let evm = runtime_config.evm().cloned().ok_or_else(|| {
             mfm_runtime::RuntimeError::RunnerBinding("missing EVM runtime config".to_owned())
         })?;
-        let evm_client = self.evm_client_for(evm, network_id)?;
-        let evm_provider = Arc::new(evm_client);
+        let evm_provider = self.bound_evm_provider(evm, network_id, expected_chain_id)?;
         let signer = Arc::new(keystore_signer_provider_from_config(&runtime_config)?);
         Ok(mfm_adapters_evm_contracts::EvmContractRuntime::new(
-            evm_provider,
+            Arc::new(evm_provider),
             signer,
         ))
     }
@@ -158,8 +175,3 @@ pub(crate) fn register_contract_lifecycle_runners(
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-fn test_run_store() -> mfm_store::v1::AsyncInMemoryRunStore {
-    mfm_store::v1::AsyncInMemoryRunStore::default()
-}

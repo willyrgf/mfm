@@ -7,19 +7,19 @@
 //!
 //! ```rust
 //! use mfm_btc_capabilities::{
-//!     BtcChainHeadReadCapability, BtcChainHeadRequest, BtcHeadSelection, BtcNetworkId,
-//!     BtcSourceIdentity,
+//!     BitcoinNetworkTag, BtcChainHeadReadCapability, BtcChainHeadRequest, BtcHeadSelection,
+//!     BtcNetworkId, BtcSourceBinding, BtcSourceIdentity,
 //! };
 //! use mfm_capabilities::CapabilitySpec;
 //!
-//! let request = BtcChainHeadRequest::new(
+//! let binding = BtcSourceBinding::new(
 //!     BtcNetworkId::new("bitcoin-mainnet")?,
 //!     BtcSourceIdentity::new("public-bitcoin-core")?,
-//!     "main",
-//!     BtcHeadSelection::best(),
+//!     BitcoinNetworkTag::Main,
 //! )?;
-//! assert_eq!(request.network_id().as_str(), "bitcoin-mainnet");
-//! assert_eq!(request.bitcoin_network(), "main");
+//! let request = BtcChainHeadRequest::new(BtcHeadSelection::best());
+//! assert_eq!(binding.network_id().as_str(), "bitcoin-mainnet");
+//! assert_eq!(binding.bitcoin_network().as_str(), "main");
 //! assert_eq!(BtcChainHeadReadCapability::name(), "mfm.bitcoin.chain_head.read");
 //! assert_eq!(request.selection().head_kind(), mfm_btc_capabilities::BtcHeadKind::Best);
 //! # Ok::<(), mfm_btc_capabilities::BtcCapabilityError>(())
@@ -72,11 +72,10 @@ impl CapabilitySpec for BtcChainHeadReadCapability {
 
 /// Provider interface for Bitcoin chain-head reads.
 pub trait BtcChainHeadReadProvider: Send + Sync {
-    /// Reads a Bitcoin chain head from the selected source.
+    /// Reads a Bitcoin chain head for the provider-bound source.
     ///
-    /// A successful response has already enforced request-local provider authority, including
-    /// source identity, Bitcoin network identity, and head selection. Returned source evidence
-    /// matches the request by construction.
+    /// A successful response has already enforced provider-bound source binding and the requested
+    /// head selection. Returned source evidence matches the provider binding by construction.
     fn read_chain_head<'a>(
         &'a self,
         request: &'a BtcChainHeadRequest,
@@ -111,11 +110,11 @@ impl CapabilitySpec for BtcBalanceReadCapability {
 
 /// Provider interface for Bitcoin address balance reads.
 pub trait BtcBalanceReadProvider: Send + Sync {
-    /// Reads a Bitcoin address balance from the selected source.
+    /// Reads a Bitcoin address balance for the provider-bound source.
     ///
-    /// A successful response has already enforced request-local provider authority, including
-    /// source identity, Bitcoin network identity, address, and exact block anchor. Returned source
-    /// evidence matches the request by construction.
+    /// A successful response has already enforced provider-bound source binding plus address and
+    /// exact block-anchor invariants. Returned source evidence matches the provider binding by
+    /// construction.
     fn read_balance<'a>(
         &'a self,
         request: &'a BtcBalanceReadRequest,
@@ -193,21 +192,76 @@ checked_btc_public_id!(
     "Returns the checked source identity string."
 );
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BtcRequestSource {
-    network_id: BtcNetworkId,
-    source_identity: BtcSourceIdentity,
-    bitcoin_network: String,
+/// Checked Bitcoin Core network tag used for source binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BitcoinNetworkTag {
+    /// Bitcoin mainnet (`main`).
+    Main,
+    /// Bitcoin testnet (`test`).
+    Test,
+    /// Bitcoin signet (`signet`).
+    Signet,
+    /// Bitcoin regtest (`regtest`).
+    Regtest,
 }
 
-impl BtcRequestSource {
-    fn new(
+impl BitcoinNetworkTag {
+    /// Parses a Bitcoin Core network tag (`main`, `test`, `signet`, or `regtest`).
+    pub fn parse(value: impl AsRef<str>) -> Result<Self> {
+        match value.as_ref() {
+            "main" => Ok(Self::Main),
+            "test" => Ok(Self::Test),
+            "signet" => Ok(Self::Signet),
+            "regtest" => Ok(Self::Regtest),
+            _ => Err(BtcCapabilityError::InvalidRequest {
+                reason: BtcInvalidRequest::InvalidBitcoinNetwork,
+            }),
+        }
+    }
+
+    /// Returns the stable Bitcoin Core network tag string.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Test => "test",
+            Self::Signet => "signet",
+            Self::Regtest => "regtest",
+        }
+    }
+}
+
+impl fmt::Display for BitcoinNetworkTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for BitcoinNetworkTag {
+    type Err = BtcCapabilityError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        Self::parse(value)
+    }
+}
+
+/// Checked semantic Bitcoin source binding used to bind live providers and verify recorded evidence.
+///
+/// This is constructible semantic input, not runtime/store proof authority. It does not prove that a
+/// live call used the right source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtcSourceBinding {
+    network_id: BtcNetworkId,
+    source_identity: BtcSourceIdentity,
+    bitcoin_network: BitcoinNetworkTag,
+}
+
+impl BtcSourceBinding {
+    /// Creates a checked Bitcoin source binding.
+    pub fn new(
         network_id: BtcNetworkId,
         source_identity: BtcSourceIdentity,
-        bitcoin_network: impl Into<String>,
+        bitcoin_network: BitcoinNetworkTag,
     ) -> Result<Self> {
-        let bitcoin_network = bitcoin_network.into();
-        validate_bitcoin_network(&bitcoin_network)?;
         Ok(Self {
             network_id,
             source_identity,
@@ -215,16 +269,32 @@ impl BtcRequestSource {
         })
     }
 
-    const fn network_id(&self) -> &BtcNetworkId {
+    /// Creates a binding by parsing the Bitcoin Core network tag string.
+    pub fn parse(
+        network_id: BtcNetworkId,
+        source_identity: BtcSourceIdentity,
+        bitcoin_network: impl AsRef<str>,
+    ) -> Result<Self> {
+        Self::new(
+            network_id,
+            source_identity,
+            BitcoinNetworkTag::parse(bitcoin_network)?,
+        )
+    }
+
+    /// Returns the semantic network id.
+    pub const fn network_id(&self) -> &BtcNetworkId {
         &self.network_id
     }
 
-    const fn source_identity(&self) -> &BtcSourceIdentity {
+    /// Returns the semantic source identity.
+    pub const fn source_identity(&self) -> &BtcSourceIdentity {
         &self.source_identity
     }
 
-    fn bitcoin_network(&self) -> &str {
-        &self.bitcoin_network
+    /// Returns the expected Bitcoin Core network tag.
+    pub const fn bitcoin_network(&self) -> BitcoinNetworkTag {
+        self.bitcoin_network
     }
 }
 
@@ -318,40 +388,18 @@ impl BtcHeadSelection {
     }
 }
 
-/// Request for a Bitcoin chain-head read.
+/// Operation-only request for a Bitcoin chain-head read.
+///
+/// Source binding is owned by the bound provider, not this request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtcChainHeadRequest {
-    source: BtcRequestSource,
     selection: BtcHeadSelection,
 }
 
 impl BtcChainHeadRequest {
-    /// Creates a Bitcoin chain-head request from semantic source authority and selection.
-    pub fn new(
-        network_id: BtcNetworkId,
-        source_identity: BtcSourceIdentity,
-        bitcoin_network: impl Into<String>,
-        selection: BtcHeadSelection,
-    ) -> Result<Self> {
-        Ok(Self {
-            source: BtcRequestSource::new(network_id, source_identity, bitcoin_network)?,
-            selection,
-        })
-    }
-
-    /// Returns the semantic network id.
-    pub const fn network_id(&self) -> &BtcNetworkId {
-        self.source.network_id()
-    }
-
-    /// Returns the semantic source identity.
-    pub const fn source_identity(&self) -> &BtcSourceIdentity {
-        self.source.source_identity()
-    }
-
-    /// Returns the expected Bitcoin Core network tag (`main`, `test`, `signet`, or `regtest`).
-    pub fn bitcoin_network(&self) -> &str {
-        self.source.bitcoin_network()
+    /// Creates a Bitcoin chain-head request from head selection only.
+    pub const fn new(selection: BtcHeadSelection) -> Self {
+        Self { selection }
     }
 
     /// Returns the requested head selection.
@@ -360,46 +408,24 @@ impl BtcChainHeadRequest {
     }
 }
 
-/// Request for a Bitcoin address balance read.
+/// Operation-only request for a Bitcoin address balance read.
+///
+/// Source binding is owned by the bound provider, not this request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtcBalanceReadRequest {
-    source: BtcRequestSource,
     address: BtcAddress,
     block_height: u64,
     block_hash: BtcBlockHash,
 }
 
 impl BtcBalanceReadRequest {
-    /// Creates a Bitcoin balance request from semantic source authority and exact block anchor.
-    pub fn new(
-        network_id: BtcNetworkId,
-        source_identity: BtcSourceIdentity,
-        bitcoin_network: impl Into<String>,
-        address: BtcAddress,
-        block_height: u64,
-        block_hash: BtcBlockHash,
-    ) -> Result<Self> {
-        Ok(Self {
-            source: BtcRequestSource::new(network_id, source_identity, bitcoin_network)?,
+    /// Creates a Bitcoin balance request from address and exact block anchor.
+    pub const fn new(address: BtcAddress, block_height: u64, block_hash: BtcBlockHash) -> Self {
+        Self {
             address,
             block_height,
             block_hash,
-        })
-    }
-
-    /// Returns the semantic network id.
-    pub const fn network_id(&self) -> &BtcNetworkId {
-        self.source.network_id()
-    }
-
-    /// Returns the semantic source identity.
-    pub const fn source_identity(&self) -> &BtcSourceIdentity {
-        self.source.source_identity()
-    }
-
-    /// Returns the expected Bitcoin Core network tag (`main`, `test`, `signet`, or `regtest`).
-    pub fn bitcoin_network(&self) -> &str {
-        self.source.bitcoin_network()
+        }
     }
 
     /// Returns the public Bitcoin address to observe.
@@ -434,45 +460,27 @@ pub struct RedactedBtcSourceEvidence {
 }
 
 impl RedactedBtcSourceEvidence {
-    fn from_source(
-        source: &BtcRequestSource,
-        observed_bitcoin_network: impl Into<String>,
+    /// Builds evidence from a provider-bound source binding and observed source status.
+    pub fn from_binding(
+        binding: &BtcSourceBinding,
+        observed_bitcoin_network: impl AsRef<str>,
         source_status: BtcSourceStatus,
     ) -> Result<Self> {
-        let observed_bitcoin_network = observed_bitcoin_network.into();
-        validate_bitcoin_network(&observed_bitcoin_network)?;
+        let observed = BitcoinNetworkTag::parse(observed_bitcoin_network.as_ref())?;
         let evidence = Self {
-            network_id: source.network_id().clone(),
-            source_identity: source.source_identity().clone(),
-            bitcoin_network: source.bitcoin_network().to_owned(),
-            observed_bitcoin_network,
+            network_id: binding.network_id().clone(),
+            source_identity: binding.source_identity().clone(),
+            bitcoin_network: binding.bitcoin_network().as_str().to_owned(),
+            observed_bitcoin_network: observed.as_str().to_owned(),
             source_status,
         };
-        if evidence.observed_bitcoin_network == source.bitcoin_network() {
+        if evidence.observed_bitcoin_network == evidence.bitcoin_network {
             Ok(evidence)
         } else {
             Err(BtcCapabilityError::SourceMismatch {
                 diagnostic: evidence.source_mismatch_diagnostic(),
             })
         }
-    }
-
-    /// Builds evidence from a chain-head request and observed source status.
-    pub fn from_request(
-        request: &BtcChainHeadRequest,
-        observed_bitcoin_network: impl Into<String>,
-        source_status: BtcSourceStatus,
-    ) -> Result<Self> {
-        Self::from_source(&request.source, observed_bitcoin_network, source_status)
-    }
-
-    /// Builds evidence from a balance request and observed source status.
-    pub fn from_balance_request(
-        request: &BtcBalanceReadRequest,
-        observed_bitcoin_network: impl Into<String>,
-        source_status: BtcSourceStatus,
-    ) -> Result<Self> {
-        Self::from_source(&request.source, observed_bitcoin_network, source_status)
     }
 
     /// Returns closed redacted source-mismatch diagnostic details.
@@ -735,15 +743,6 @@ fn invalid_identifier(_source: mfm_ids::CheckedStringError) -> BtcCapabilityErro
     }
 }
 
-fn validate_bitcoin_network(value: &str) -> Result<()> {
-    match value {
-        "main" | "test" | "signet" | "regtest" => Ok(()),
-        _ => Err(BtcCapabilityError::InvalidRequest {
-            reason: BtcInvalidRequest::InvalidBitcoinNetwork,
-        }),
-    }
-}
-
 fn is_supported_bitcoin_address_envelope(value: &str) -> bool {
     if value.trim() != value || value.len() < 14 || value.len() > 90 || !value.is_ascii() {
         return false;
@@ -764,14 +763,13 @@ fn is_supported_bitcoin_address_envelope(value: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn request(selection: BtcHeadSelection) -> BtcChainHeadRequest {
-        BtcChainHeadRequest::new(
+    fn binding() -> BtcSourceBinding {
+        BtcSourceBinding::new(
             BtcNetworkId::new("bitcoin-mainnet").expect("network"),
             BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
-            "main",
-            selection,
+            BitcoinNetworkTag::Main,
         )
-        .expect("request")
+        .expect("binding")
     }
 
     #[test]
@@ -811,35 +809,45 @@ mod tests {
     }
 
     #[test]
-    fn chain_head_request_exposes_semantic_accessors() {
-        let request = request(BtcHeadSelection::best());
+    fn chain_head_request_is_operation_only() {
+        let request = BtcChainHeadRequest::new(BtcHeadSelection::best());
 
-        assert_eq!(request.network_id().as_str(), "bitcoin-mainnet");
-        assert_eq!(request.source_identity().as_str(), "public-bitcoin-core");
-        assert_eq!(request.bitcoin_network(), "main");
         assert_eq!(request.selection(), BtcHeadSelection::best());
     }
 
     #[test]
-    fn response_evidence_is_built_from_request_source() {
-        let request = request(BtcHeadSelection::best());
+    fn source_binding_exposes_semantic_accessors() {
+        let binding = binding();
+
+        assert_eq!(binding.network_id().as_str(), "bitcoin-mainnet");
+        assert_eq!(binding.source_identity().as_str(), "public-bitcoin-core");
+        assert_eq!(binding.bitcoin_network(), BitcoinNetworkTag::Main);
+        assert_eq!(binding.bitcoin_network().as_str(), "main");
+    }
+
+    #[test]
+    fn response_evidence_is_built_from_source_binding() {
+        let binding = binding();
         let evidence =
-            RedactedBtcSourceEvidence::from_request(&request, "main", BtcSourceStatus::Synced)
+            RedactedBtcSourceEvidence::from_binding(&binding, "main", BtcSourceStatus::Synced)
                 .expect("evidence");
 
-        assert_eq!(evidence.network_id, request.network_id().clone());
-        assert_eq!(evidence.source_identity, request.source_identity().clone());
-        assert_eq!(evidence.bitcoin_network, request.bitcoin_network());
-        assert_eq!(evidence.observed_bitcoin_network, request.bitcoin_network());
+        assert_eq!(evidence.network_id, binding.network_id().clone());
+        assert_eq!(evidence.source_identity, binding.source_identity().clone());
+        assert_eq!(evidence.bitcoin_network, binding.bitcoin_network().as_str());
+        assert_eq!(
+            evidence.observed_bitcoin_network,
+            binding.bitcoin_network().as_str()
+        );
         assert_eq!(evidence.source_status, BtcSourceStatus::Synced);
     }
 
     #[test]
     fn source_mismatch_diagnostic_stays_redacted() {
-        let request = request(BtcHeadSelection::best());
+        let binding = binding();
         let mismatched = RedactedBtcSourceEvidence {
             source_identity: BtcSourceIdentity::new("different-semantic-source").expect("source"),
-            ..RedactedBtcSourceEvidence::from_request(&request, "main", BtcSourceStatus::Unknown)
+            ..RedactedBtcSourceEvidence::from_binding(&binding, "main", BtcSourceStatus::Unknown)
                 .expect("evidence")
         };
 
@@ -854,12 +862,9 @@ mod tests {
 
     #[test]
     fn response_evidence_rejects_observed_bitcoin_network_mismatch() {
-        let error = RedactedBtcSourceEvidence::from_request(
-            &request(BtcHeadSelection::best()),
-            "test",
-            BtcSourceStatus::Synced,
-        )
-        .expect_err("observed network mismatch");
+        let error =
+            RedactedBtcSourceEvidence::from_binding(&binding(), "test", BtcSourceStatus::Synced)
+                .expect_err("observed network mismatch");
 
         assert!(matches!(error, BtcCapabilityError::SourceMismatch { .. }));
     }

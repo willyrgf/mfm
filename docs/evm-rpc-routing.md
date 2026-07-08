@@ -53,19 +53,19 @@ JSON with the same shape is also accepted by `mfm-runtime-config`.
 Runtime config validation rejects source-level chain ids. Expected chain id comes from workflow
 semantics: portfolio `NetworkConfig.chain_id` or contract lifecycle `network.expected_chain_id`.
 
-## Source-Bound Requests
+## Provider-Bound Network Binding
 
-Adapters construct EVM capability requests from workflow config for every live EVM call. Each
-request carries:
+Adapters derive a checked semantic `EvmNetworkBinding` (`network_id` + expected chain id) from
+certified workflow config/intent and bind the raw JSON-RPC client once per binding. The returned
+bound network provider implements EVM capability traits. Capability requests carry operation
+parameters only (block selector, address, calldata, etc.) and do not include source-binding fields.
 
-- semantic `network_id`
-- expected EVM chain id
-
-The EVM transport owns route and source resolution. It resolves `network_id` through runtime config,
-selects a configured source/policy, probes chain identity, and returns redacted evidence containing
-the semantic network id, expected chain id, observed chain id, selected source ref, and policy id.
-A successful provider response has already enforced the request-local route and chain identity, and
-the returned source evidence matches the request by construction.
+The raw client owns route/source registries and no-IO binding validation. It does not implement
+live capability provider traits. Every bound-provider call goes through a provider-owned sealed
+pipeline that probes chain identity (`eth_chainId`), selects a configured source/policy, and returns
+redacted evidence containing the semantic network id, expected chain id, observed chain id,
+selected source ref, and policy id. A successful response has already enforced provider-bound
+source binding, and the returned source evidence matches the binding by construction.
 
 The selected source and policy ids are audit provenance only. Replay and public output must not
 resolve them against current runtime config.

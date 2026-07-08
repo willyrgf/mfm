@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 use super::*;
 use crate::{
     make_run_services_with_certification_registry, prepare_entry_point_run_launch,
@@ -51,6 +52,20 @@ const TEST_SIGNER_HEX: &str = "4c0883a69102937d6231471b5dbb6204fe512961708279c2f
 
 type ContractRunStore = store::AsyncInMemoryRunStore;
 type ContractRunServices = RunServices<ContractRunStore, ContractArtifactOverlay>;
+
+#[allow(dead_code)]
+fn test_network_id() -> EvmNetworkId {
+    EvmNetworkId::new("reth-dev").expect("network")
+}
+
+#[allow(dead_code)]
+fn test_chain_id() -> u64 {
+    31337
+}
+
+fn test_run_store() -> ContractRunStore {
+    store::AsyncInMemoryRunStore::default()
+}
 
 fn test_evm_provider_failure() -> EvmCapabilityError {
     EvmCapabilityError::provider_failure(mfm_evm_capabilities::evm_diagnostic(
@@ -926,16 +941,25 @@ impl EvmContractRuntimeFactory for TestRuntimeFactory {
     fn validate_runtime_for(
         &self,
         _network_id: &str,
+        _expected_chain_id: u64,
         _signer_ref: Option<&SignerRef>,
     ) -> mfm_runtime::Result<()> {
         Ok(())
     }
 
-    fn read_runtime_for(&self, _network_id: &str) -> mfm_runtime::Result<EvmContractReadRuntime> {
+    fn read_runtime_for(
+        &self,
+        _network_id: &str,
+        _expected_chain_id: u64,
+    ) -> mfm_runtime::Result<EvmContractReadRuntime> {
         Ok(self.read_runtime.clone())
     }
 
-    fn runtime_for(&self, _network_id: &str) -> mfm_runtime::Result<EvmContractRuntime> {
+    fn runtime_for(
+        &self,
+        _network_id: &str,
+        _expected_chain_id: u64,
+    ) -> mfm_runtime::Result<EvmContractRuntime> {
         Ok(self.runtime.clone())
     }
 }
@@ -1009,15 +1033,15 @@ enum TestPrepareReadKind {
 impl EvmChainIdentityProvider for TestEvmProvider {
     fn chain_identity<'a>(
         &'a self,
-        request: &'a EvmChainIdentityRequest,
+        _request: &'a EvmChainIdentityRequest,
     ) -> EvmCapabilityFuture<'a, EvmChainIdentityResponse> {
         Box::pin(async move {
             if let Some(delay) = self.chain_identity_delay {
                 tokio::time::sleep(delay).await;
             }
             Ok(EvmChainIdentityResponse {
-                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
-                chain_id: request.expected_chain_id(),
+                evidence: self.evidence(&test_network_id(), test_chain_id()),
+                chain_id: test_chain_id(),
                 client_version: Some("mfm-test-evm".to_owned()),
             })
         })
@@ -1035,7 +1059,7 @@ impl EvmBlockReadProvider for TestEvmProvider {
         assert_eq!(request.block(), &EvmBlockSelector::Latest);
         Box::pin(async move {
             Ok(EvmBlockReadResponse {
-                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
+                evidence: self.evidence(&test_network_id(), test_chain_id()),
                 block_number: 64,
                 block_hash: Default::default(),
             })
@@ -1046,7 +1070,7 @@ impl EvmBlockReadProvider for TestEvmProvider {
 impl EvmNonceReadProvider for TestEvmProvider {
     fn read_nonce<'a>(
         &'a self,
-        request: &'a EvmNonceReadRequest,
+        _request: &'a EvmNonceReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmNonceReadResponse> {
         if !self.mutation {
             return failed_evm();
@@ -1054,7 +1078,7 @@ impl EvmNonceReadProvider for TestEvmProvider {
         Box::pin(async move {
             self.record_prepare_read(TestPrepareReadKind::Nonce)?;
             Ok(EvmNonceReadResponse {
-                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
+                evidence: self.evidence(&test_network_id(), test_chain_id()),
                 nonce: 7,
             })
         })
@@ -1064,7 +1088,7 @@ impl EvmNonceReadProvider for TestEvmProvider {
 impl EvmFeeReadProvider for TestEvmProvider {
     fn read_fee<'a>(
         &'a self,
-        request: &'a EvmFeeReadRequest,
+        _request: &'a EvmFeeReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmFeeReadResponse> {
         if !self.mutation {
             return failed_evm();
@@ -1072,7 +1096,7 @@ impl EvmFeeReadProvider for TestEvmProvider {
         Box::pin(async move {
             self.record_prepare_read(TestPrepareReadKind::Fee)?;
             Ok(EvmFeeReadResponse {
-                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
+                evidence: self.evidence(&test_network_id(), test_chain_id()),
                 base_fee_per_gas: Some(5),
                 priority_fee_per_gas: Some(3),
                 max_fee_per_gas: Some(11),
@@ -1085,7 +1109,7 @@ impl EvmFeeReadProvider for TestEvmProvider {
 impl EvmGasEstimateProvider for TestEvmProvider {
     fn estimate_gas<'a>(
         &'a self,
-        request: &'a EvmGasEstimateRequest,
+        _request: &'a EvmGasEstimateRequest,
     ) -> EvmCapabilityFuture<'a, EvmGasEstimateResponse> {
         if !self.mutation {
             return failed_evm();
@@ -1093,7 +1117,7 @@ impl EvmGasEstimateProvider for TestEvmProvider {
         Box::pin(async move {
             self.record_prepare_read(TestPrepareReadKind::Gas)?;
             Ok(EvmGasEstimateResponse {
-                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
+                evidence: self.evidence(&test_network_id(), test_chain_id()),
                 gas_limit: 21_000,
             })
         })
@@ -1110,7 +1134,7 @@ impl EvmTransactionSubmitProvider for TestEvmProvider {
         }
         Box::pin(async move {
             Ok(EvmTransactionSubmitResponse {
-                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
+                evidence: self.evidence(&test_network_id(), test_chain_id()),
                 transaction_hash: request.signed_payload().transaction_hash(),
             })
         })
@@ -1134,7 +1158,7 @@ impl EvmReceiptReadProvider for TestEvmProvider {
             let mut reads = self.reads.lock().map_err(|_| test_evm_provider_failure())?;
             reads.receipt += 1;
             Ok(EvmReceiptReadResponse {
-                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
+                evidence: self.evidence(&test_network_id(), test_chain_id()),
                 transaction_hash: request.transaction_hash(),
                 block_number: 42,
                 status: true,
@@ -1146,11 +1170,11 @@ impl EvmReceiptReadProvider for TestEvmProvider {
 impl EvmNonceOccupancyReadProvider for TestEvmProvider {
     fn read_nonce_occupancy<'a>(
         &'a self,
-        request: &'a EvmNonceOccupancyReadRequest,
+        _request: &'a EvmNonceOccupancyReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmNonceOccupancyReadResponse> {
         Box::pin(async move {
             Ok(EvmNonceOccupancyReadResponse {
-                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
+                evidence: self.evidence(&test_network_id(), test_chain_id()),
                 outcome: EvmNonceOccupancy::Unknown,
             })
         })
@@ -1160,13 +1184,13 @@ impl EvmNonceOccupancyReadProvider for TestEvmProvider {
 impl EvmCallReadProvider for TestEvmProvider {
     fn read_call<'a>(
         &'a self,
-        request: &'a EvmCallReadRequest,
+        _request: &'a EvmCallReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmCallReadResponse> {
         Box::pin(async move {
             let mut return_data = vec![0_u8; 32];
             return_data[31] = 1;
             Ok(EvmCallReadResponse {
-                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
+                evidence: self.evidence(&test_network_id(), test_chain_id()),
                 return_data,
             })
         })
@@ -1176,12 +1200,12 @@ impl EvmCallReadProvider for TestEvmProvider {
 impl EvmCodeReadProvider for TestEvmProvider {
     fn read_code<'a>(
         &'a self,
-        request: &'a EvmCodeReadRequest,
+        _request: &'a EvmCodeReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmCodeReadResponse> {
         Box::pin(async move {
             let code = vec![0x60, 0x00];
             Ok(EvmCodeReadResponse {
-                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
+                evidence: self.evidence(&test_network_id(), test_chain_id()),
                 code_hash: keccak256(&code),
                 code,
             })
@@ -1196,7 +1220,7 @@ impl EvmLogsReadProvider for TestEvmProvider {
     ) -> EvmCapabilityFuture<'a, EvmLogsReadResponse> {
         Box::pin(async move {
             Ok(EvmLogsReadResponse {
-                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
+                evidence: self.evidence(&test_network_id(), test_chain_id()),
                 logs: vec![EvmLogEntry {
                     address: request.address().expect("validation log address"),
                     topics: request.topics().to_vec(),
