@@ -7,20 +7,21 @@
 //!
 //! ```rust
 //! use mfm_btc_capabilities::{
-//!     BtcChainGuard, BtcChainHeadReadCapability, BtcHeadSelection, BtcNetworkId,
+//!     BtcChainHeadReadCapability, BtcChainHeadRequest, BtcHeadSelection, BtcNetworkId,
 //!     BtcSourceIdentity,
 //! };
 //! use mfm_capabilities::CapabilitySpec;
 //!
-//! let guard = BtcChainGuard::new(
+//! let request = BtcChainHeadRequest::new(
 //!     BtcNetworkId::new("bitcoin-mainnet")?,
 //!     BtcSourceIdentity::new("public-bitcoin-core")?,
 //!     "main",
+//!     BtcHeadSelection::best(),
 //! )?;
-//! assert_eq!(guard.network_id().as_str(), "bitcoin-mainnet");
-//! assert_eq!(guard.bitcoin_network(), "main");
+//! assert_eq!(request.network_id().as_str(), "bitcoin-mainnet");
+//! assert_eq!(request.bitcoin_network(), "main");
 //! assert_eq!(BtcChainHeadReadCapability::name(), "mfm.bitcoin.chain_head.read");
-//! assert_eq!(BtcHeadSelection::best().head_kind(), mfm_btc_capabilities::BtcHeadKind::Best);
+//! assert_eq!(request.selection().head_kind(), mfm_btc_capabilities::BtcHeadKind::Best);
 //! # Ok::<(), mfm_btc_capabilities::BtcCapabilityError>(())
 //! ```
 
@@ -72,6 +73,10 @@ impl CapabilitySpec for BtcChainHeadReadCapability {
 /// Provider interface for Bitcoin chain-head reads.
 pub trait BtcChainHeadReadProvider: Send + Sync {
     /// Reads a Bitcoin chain head from the selected source.
+    ///
+    /// A successful response has already enforced request-local provider authority, including
+    /// source identity, Bitcoin network identity, and head selection. Returned source evidence
+    /// matches the request by construction.
     fn read_chain_head<'a>(
         &'a self,
         request: &'a BtcChainHeadRequest,
@@ -107,6 +112,10 @@ impl CapabilitySpec for BtcBalanceReadCapability {
 /// Provider interface for Bitcoin address balance reads.
 pub trait BtcBalanceReadProvider: Send + Sync {
     /// Reads a Bitcoin address balance from the selected source.
+    ///
+    /// A successful response has already enforced request-local provider authority, including
+    /// source identity, Bitcoin network identity, address, and exact block anchor. Returned source
+    /// evidence matches the request by construction.
     fn read_balance<'a>(
         &'a self,
         request: &'a BtcBalanceReadRequest,
@@ -184,17 +193,15 @@ checked_btc_public_id!(
     "Returns the checked source identity string."
 );
 
-/// Semantic Bitcoin chain guard derived from workflow config.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BtcChainGuard {
+struct BtcRequestSource {
     network_id: BtcNetworkId,
     source_identity: BtcSourceIdentity,
     bitcoin_network: String,
 }
 
-impl BtcChainGuard {
-    /// Creates a semantic chain guard.
-    pub fn new(
+impl BtcRequestSource {
+    fn new(
         network_id: BtcNetworkId,
         source_identity: BtcSourceIdentity,
         bitcoin_network: impl Into<String>,
@@ -208,18 +215,15 @@ impl BtcChainGuard {
         })
     }
 
-    /// Returns the semantic network id.
-    pub const fn network_id(&self) -> &BtcNetworkId {
+    const fn network_id(&self) -> &BtcNetworkId {
         &self.network_id
     }
 
-    /// Returns the semantic source identity.
-    pub const fn source_identity(&self) -> &BtcSourceIdentity {
+    const fn source_identity(&self) -> &BtcSourceIdentity {
         &self.source_identity
     }
 
-    /// Returns the expected Bitcoin Core network tag (`main`, `test`, `signet`, or `regtest`).
-    pub fn bitcoin_network(&self) -> &str {
+    fn bitcoin_network(&self) -> &str {
         &self.bitcoin_network
     }
 }
@@ -317,33 +321,111 @@ impl BtcHeadSelection {
 /// Request for a Bitcoin chain-head read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtcChainHeadRequest {
-    /// Semantic chain guard.
-    pub guard: BtcChainGuard,
-    /// Requested head selection.
-    pub selection: BtcHeadSelection,
+    source: BtcRequestSource,
+    selection: BtcHeadSelection,
+}
+
+impl BtcChainHeadRequest {
+    /// Creates a Bitcoin chain-head request from semantic source authority and selection.
+    pub fn new(
+        network_id: BtcNetworkId,
+        source_identity: BtcSourceIdentity,
+        bitcoin_network: impl Into<String>,
+        selection: BtcHeadSelection,
+    ) -> Result<Self> {
+        Ok(Self {
+            source: BtcRequestSource::new(network_id, source_identity, bitcoin_network)?,
+            selection,
+        })
+    }
+
+    /// Returns the semantic network id.
+    pub const fn network_id(&self) -> &BtcNetworkId {
+        self.source.network_id()
+    }
+
+    /// Returns the semantic source identity.
+    pub const fn source_identity(&self) -> &BtcSourceIdentity {
+        self.source.source_identity()
+    }
+
+    /// Returns the expected Bitcoin Core network tag (`main`, `test`, `signet`, or `regtest`).
+    pub fn bitcoin_network(&self) -> &str {
+        self.source.bitcoin_network()
+    }
+
+    /// Returns the requested head selection.
+    pub const fn selection(&self) -> BtcHeadSelection {
+        self.selection
+    }
 }
 
 /// Request for a Bitcoin address balance read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtcBalanceReadRequest {
-    /// Semantic chain guard.
-    pub guard: BtcChainGuard,
-    /// Public Bitcoin address to observe.
-    pub address: BtcAddress,
-    /// Exact UTXO-set block height requested from the provider.
-    pub block_height: u64,
-    /// Exact UTXO-set block hash requested from the provider.
-    pub block_hash: BtcBlockHash,
+    source: BtcRequestSource,
+    address: BtcAddress,
+    block_height: u64,
+    block_hash: BtcBlockHash,
+}
+
+impl BtcBalanceReadRequest {
+    /// Creates a Bitcoin balance request from semantic source authority and exact block anchor.
+    pub fn new(
+        network_id: BtcNetworkId,
+        source_identity: BtcSourceIdentity,
+        bitcoin_network: impl Into<String>,
+        address: BtcAddress,
+        block_height: u64,
+        block_hash: BtcBlockHash,
+    ) -> Result<Self> {
+        Ok(Self {
+            source: BtcRequestSource::new(network_id, source_identity, bitcoin_network)?,
+            address,
+            block_height,
+            block_hash,
+        })
+    }
+
+    /// Returns the semantic network id.
+    pub const fn network_id(&self) -> &BtcNetworkId {
+        self.source.network_id()
+    }
+
+    /// Returns the semantic source identity.
+    pub const fn source_identity(&self) -> &BtcSourceIdentity {
+        self.source.source_identity()
+    }
+
+    /// Returns the expected Bitcoin Core network tag (`main`, `test`, `signet`, or `regtest`).
+    pub fn bitcoin_network(&self) -> &str {
+        self.source.bitcoin_network()
+    }
+
+    /// Returns the public Bitcoin address to observe.
+    pub const fn address(&self) -> &BtcAddress {
+        &self.address
+    }
+
+    /// Returns the exact UTXO-set block height requested from the provider.
+    pub const fn block_height(&self) -> u64 {
+        self.block_height
+    }
+
+    /// Returns the exact UTXO-set block hash requested from the provider.
+    pub const fn block_hash(&self) -> &BtcBlockHash {
+        &self.block_hash
+    }
 }
 
 /// Redacted Bitcoin source evidence attached to provider responses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedactedBtcSourceEvidence {
-    /// Semantic network id from the request guard.
+    /// Semantic network id from the request.
     pub network_id: BtcNetworkId,
     /// Semantic source identity observed by the provider.
     pub source_identity: BtcSourceIdentity,
-    /// Expected Bitcoin Core network tag from the request guard.
+    /// Expected Bitcoin Core network tag from the request.
     pub bitcoin_network: String,
     /// Observed Bitcoin Core network tag from the provider.
     pub observed_bitcoin_network: String,
@@ -352,23 +434,27 @@ pub struct RedactedBtcSourceEvidence {
 }
 
 impl RedactedBtcSourceEvidence {
-    /// Builds evidence from a guard and observed source status.
-    pub fn from_guard(
-        guard: &BtcChainGuard,
+    fn from_source(
+        source: &BtcRequestSource,
         observed_bitcoin_network: impl Into<String>,
         source_status: BtcSourceStatus,
     ) -> Result<Self> {
         let observed_bitcoin_network = observed_bitcoin_network.into();
         validate_bitcoin_network(&observed_bitcoin_network)?;
         let evidence = Self {
-            network_id: guard.network_id().clone(),
-            source_identity: guard.source_identity().clone(),
-            bitcoin_network: guard.bitcoin_network().to_owned(),
+            network_id: source.network_id().clone(),
+            source_identity: source.source_identity().clone(),
+            bitcoin_network: source.bitcoin_network().to_owned(),
             observed_bitcoin_network,
             source_status,
         };
-        evidence.verify_guard(guard)?;
-        Ok(evidence)
+        if evidence.observed_bitcoin_network == source.bitcoin_network() {
+            Ok(evidence)
+        } else {
+            Err(BtcCapabilityError::SourceMismatch {
+                diagnostic: evidence.source_mismatch_diagnostic(),
+            })
+        }
     }
 
     /// Builds evidence from a chain-head request and observed source status.
@@ -377,22 +463,16 @@ impl RedactedBtcSourceEvidence {
         observed_bitcoin_network: impl Into<String>,
         source_status: BtcSourceStatus,
     ) -> Result<Self> {
-        Self::from_guard(&request.guard, observed_bitcoin_network, source_status)
+        Self::from_source(&request.source, observed_bitcoin_network, source_status)
     }
 
-    /// Verifies that provider evidence matches the semantic request guard.
-    pub fn verify_guard(&self, guard: &BtcChainGuard) -> Result<()> {
-        if &self.network_id == guard.network_id()
-            && &self.source_identity == guard.source_identity()
-            && self.bitcoin_network == guard.bitcoin_network()
-            && self.observed_bitcoin_network == guard.bitcoin_network()
-        {
-            Ok(())
-        } else {
-            Err(BtcCapabilityError::SourceMismatch {
-                diagnostic: self.source_mismatch_diagnostic(),
-            })
-        }
+    /// Builds evidence from a balance request and observed source status.
+    pub fn from_balance_request(
+        request: &BtcBalanceReadRequest,
+        observed_bitcoin_network: impl Into<String>,
+        source_status: BtcSourceStatus,
+    ) -> Result<Self> {
+        Self::from_source(&request.source, observed_bitcoin_network, source_status)
     }
 
     /// Returns closed redacted source-mismatch diagnostic details.
@@ -572,22 +652,6 @@ pub struct BtcChainHeadResponse {
     pub provider_time_unix_ms: Option<u64>,
 }
 
-impl BtcChainHeadResponse {
-    /// Verifies that this response matches the request guard and head selection.
-    pub fn verify_request(&self, request: &BtcChainHeadRequest) -> Result<()> {
-        self.evidence.verify_guard(&request.guard)?;
-        if self.head_kind == request.selection.head_kind()
-            && self.finality == request.selection.finality()
-        {
-            Ok(())
-        } else {
-            Err(BtcCapabilityError::SourceMismatch {
-                diagnostic: self.evidence.source_mismatch_diagnostic(),
-            })
-        }
-    }
-}
-
 /// Response for a Bitcoin address balance read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtcBalanceReadResponse {
@@ -601,23 +665,6 @@ pub struct BtcBalanceReadResponse {
     pub block_height: u64,
     /// UTXO set block hash used by the provider.
     pub block_hash: BtcBlockHash,
-}
-
-impl BtcBalanceReadResponse {
-    /// Verifies that this response matches the request guard, address, and exact anchor.
-    pub fn verify_request(&self, request: &BtcBalanceReadRequest) -> Result<()> {
-        self.evidence.verify_guard(&request.guard)?;
-        if self.address == request.address
-            && self.block_height == request.block_height
-            && self.block_hash == request.block_hash
-        {
-            Ok(())
-        } else {
-            Err(BtcCapabilityError::SourceMismatch {
-                diagnostic: self.evidence.source_mismatch_diagnostic(),
-            })
-        }
-    }
 }
 
 /// Closed invalid-request reasons.
@@ -717,20 +764,14 @@ fn is_supported_bitcoin_address_envelope(value: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn guard() -> BtcChainGuard {
-        BtcChainGuard::new(
+    fn request(selection: BtcHeadSelection) -> BtcChainHeadRequest {
+        BtcChainHeadRequest::new(
             BtcNetworkId::new("bitcoin-mainnet").expect("network"),
             BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
             "main",
-        )
-        .expect("guard")
-    }
-
-    fn request(selection: BtcHeadSelection) -> BtcChainHeadRequest {
-        BtcChainHeadRequest {
-            guard: guard(),
             selection,
-        }
+        )
+        .expect("request")
     }
 
     #[test]
@@ -770,19 +811,31 @@ mod tests {
     }
 
     #[test]
-    fn response_evidence_verifies_request() {
+    fn chain_head_request_exposes_semantic_accessors() {
+        let request = request(BtcHeadSelection::best());
+
+        assert_eq!(request.network_id().as_str(), "bitcoin-mainnet");
+        assert_eq!(request.source_identity().as_str(), "public-bitcoin-core");
+        assert_eq!(request.bitcoin_network(), "main");
+        assert_eq!(request.selection(), BtcHeadSelection::best());
+    }
+
+    #[test]
+    fn response_evidence_is_built_from_request_source() {
         let request = request(BtcHeadSelection::best());
         let evidence =
             RedactedBtcSourceEvidence::from_request(&request, "main", BtcSourceStatus::Synced)
                 .expect("evidence");
 
-        evidence
-            .verify_guard(&request.guard)
-            .expect("matching evidence");
+        assert_eq!(evidence.network_id, request.network_id().clone());
+        assert_eq!(evidence.source_identity, request.source_identity().clone());
+        assert_eq!(evidence.bitcoin_network, request.bitcoin_network());
+        assert_eq!(evidence.observed_bitcoin_network, request.bitcoin_network());
+        assert_eq!(evidence.source_status, BtcSourceStatus::Synced);
     }
 
     #[test]
-    fn response_evidence_rejects_mismatch_without_concrete_source_details() {
+    fn source_mismatch_diagnostic_stays_redacted() {
         let request = request(BtcHeadSelection::best());
         let mismatched = RedactedBtcSourceEvidence {
             source_identity: BtcSourceIdentity::new("different-semantic-source").expect("source"),
@@ -790,12 +843,9 @@ mod tests {
                 .expect("evidence")
         };
 
-        let error = mismatched
-            .verify_guard(&request.guard)
-            .expect_err("mismatch should fail");
-        let rendered = format!("{error:?} {error}");
+        let diagnostic = mismatched.source_mismatch_diagnostic();
+        let rendered = format!("{diagnostic:?} {diagnostic}");
 
-        assert!(matches!(error, BtcCapabilityError::SourceMismatch { .. }));
         assert!(rendered.contains("different-semantic-source"));
         assert!(!rendered.contains("http://"));
         assert!(!rendered.contains(concat!("Bear", "er")));

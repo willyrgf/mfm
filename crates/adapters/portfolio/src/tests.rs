@@ -61,9 +61,9 @@ fn bitcoin_capability_backend_observes_native_balance_with_anchor() {
 }
 
 #[test]
-fn bitcoin_capability_backend_rejects_balance_response_that_violates_exact_anchor() {
+fn bitcoin_capability_backend_maps_provider_source_mismatch() {
     let (network, config) = bitcoin_observe_config();
-    let btc = Arc::new(MockPortfolioBtc::mismatched_balance_anchor());
+    let btc = Arc::new(MockPortfolioBtc::rejecting_balance());
     let backend = CapabilityPortfolioBackend::new(Arc::new(UnavailablePortfolioEvm), Some(btc));
 
     let anchor =
@@ -218,25 +218,20 @@ where
 }
 
 const BTC_HASH: &str = "00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc";
-const BTC_NEXT_HASH: &str = "00000000000000000002b2a7f3e0d5c4b6a897887766554433221100ffeeddcc";
-
 struct MockPortfolioBtc {
-    balance_height: u64,
-    balance_hash: &'static str,
+    reject_balance: bool,
 }
 
 impl MockPortfolioBtc {
     fn matching() -> Self {
         Self {
-            balance_height: 850_000,
-            balance_hash: BTC_HASH,
+            reject_balance: false,
         }
     }
 
-    fn mismatched_balance_anchor() -> Self {
+    fn rejecting_balance() -> Self {
         Self {
-            balance_height: 850_001,
-            balance_hash: BTC_NEXT_HASH,
+            reject_balance: true,
         }
     }
 }
@@ -254,8 +249,8 @@ impl BtcChainHeadReadProvider for MockPortfolioBtc {
                     BtcSourceStatus::Synced,
                 )
                 .expect("evidence"),
-                head_kind: request.selection.head_kind(),
-                finality: request.selection.finality(),
+                head_kind: request.selection().head_kind(),
+                finality: request.selection().finality(),
                 block_height: 850_000,
                 block_hash: BtcBlockHash::new(BTC_HASH).expect("hash"),
                 provider_time_unix_ms: None,
@@ -269,20 +264,31 @@ impl BtcBalanceReadProvider for MockPortfolioBtc {
         &'a self,
         request: &'a BtcBalanceReadRequest,
     ) -> mfm_btc_capabilities::BtcCapabilityFuture<'a, BtcBalanceReadResponse> {
-        let balance_height = self.balance_height;
-        let balance_hash = self.balance_hash;
+        let reject_balance = self.reject_balance;
         Box::pin(async move {
+            if reject_balance {
+                return Err(BtcCapabilityError::SourceMismatch {
+                    diagnostic: RedactedBtcSourceEvidence {
+                        network_id: request.network_id().clone(),
+                        source_identity: request.source_identity().clone(),
+                        bitcoin_network: request.bitcoin_network().to_owned(),
+                        observed_bitcoin_network: request.bitcoin_network().to_owned(),
+                        source_status: BtcSourceStatus::Synced,
+                    }
+                    .source_mismatch_diagnostic(),
+                });
+            }
             Ok(BtcBalanceReadResponse {
-                evidence: RedactedBtcSourceEvidence::from_guard(
-                    &request.guard,
+                evidence: RedactedBtcSourceEvidence::from_balance_request(
+                    request,
                     "main",
                     BtcSourceStatus::Synced,
                 )
                 .expect("evidence"),
-                address: request.address.clone(),
+                address: request.address().clone(),
                 balance_sats: 123_456_789,
-                block_height: balance_height,
-                block_hash: BtcBlockHash::new(balance_hash).expect("hash"),
+                block_height: request.block_height(),
+                block_hash: request.block_hash().clone(),
             })
         })
     }
@@ -321,13 +327,6 @@ impl EvmCallReadProvider for UnavailablePortfolioEvm {
     ) -> EvmCapabilityFuture<'a, EvmCallReadResponse> {
         Box::pin(async { Err(unavailable_evm_error()) })
     }
-}
-
-#[test]
-fn decode_replay_config_rejects_invalid_serialized_config() {
-    let error = decode_replay_config::<ProjectReportConfig>(br#"{"report_version":0}"#)
-        .expect_err("zero report version must fail decoding");
-    assert!(error.to_string().contains("nonzero u64"));
 }
 
 fn executable_identity_summary(factories: [&str; 2]) -> Vec<String> {

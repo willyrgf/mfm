@@ -1336,37 +1336,49 @@ fn resource_key_status_redacts_raw_key() {
 }
 
 #[test]
-fn replay_diagnostic_rejects_digest_matched_evm_guard_tampering() {
-    let certified_guard = EvmChainGuard::new(
-        EvmNetworkId::new("rest-control-eth").expect("network id"),
-        31337,
-    )
-    .expect("guard");
-
+fn replay_diagnostic_rejects_digest_matched_malformed_evm_chain_mismatch_details() {
     for details in [
         serde_json::json!({
-            "network_id": "rest-control-eth",
-            "expected_chain_id": 31338,
-            "observed_chain_id": 31339,
-            "source_ref": "primary",
-            "policy_id": "primary",
-        }),
-        serde_json::json!({
-            "network_id": "other-eth",
+            "network_id": "bad network id",
             "expected_chain_id": 31337,
             "observed_chain_id": 31338,
             "source_ref": "primary",
             "policy_id": "primary",
         }),
+        serde_json::json!({
+            "network_id": "rest-control-eth",
+            "expected_chain_id": 0,
+            "observed_chain_id": 31338,
+            "source_ref": "primary",
+            "policy_id": "primary",
+        }),
+        serde_json::json!({
+            "network_id": "rest-control-eth",
+            "expected_chain_id": 31337,
+            "observed_chain_id": 31337,
+            "source_ref": "primary",
+            "policy_id": "primary",
+        }),
+        serde_json::json!({
+            "network_id": "rest-control-eth",
+            "expected_chain_id": 31337,
+            "observed_chain_id": 31338,
+            "source_ref": "primary",
+            "policy_id": "primary",
+            "unexpected": true,
+        }),
+        serde_json::json!({
+            "network_id": "rest-control-eth",
+            "expected_chain_id": 31337,
+            "observed_chain_id": 31338,
+            "source_ref": "bad source ref",
+            "policy_id": "primary",
+        }),
     ] {
         let digest = canonical_value_digest(&details).expect("details digest");
         let expected = events::RedactedJson::new(digest);
-        let error = verify_replay_public_details(
-            Some(&expected),
-            &details,
-            std::slice::from_ref(&certified_guard),
-        )
-        .expect_err("digest-matched guard tampering must fail replay");
+        let error = verify_replay_public_details(Some(&expected), &details)
+            .expect_err("digest-matched malformed public details must fail replay");
 
         assert_eq!(error.code, "ReplayDiagnosticInvalid");
     }

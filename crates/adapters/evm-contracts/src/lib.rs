@@ -10,10 +10,7 @@
 //!
 //! ```rust
 //! use mfm_adapters_evm_contracts::replay_verifier_id;
-//! use mfm_evm_capabilities::{EvmChainGuard, EvmNetworkId};
 //!
-//! let guard = EvmChainGuard::new(EvmNetworkId::new("reth-dev")?, 31337)?;
-//! assert_eq!(guard.expected_chain_id(), 31337);
 //! assert_eq!(replay_verifier_id()?.as_str(), "mfm.evm.contract.replay.v1");
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
@@ -30,12 +27,12 @@ use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1::{self as events, side_effect};
 use mfm_evm_capabilities::{
     EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockSelector, EvmCallReadProvider,
-    EvmCallReadRequest, EvmCapabilityError, EvmChainGuard, EvmChainIdentityProvider,
-    EvmChainIdentityRequest, EvmChainIdentityResponse, EvmCodeReadProvider, EvmCodeReadRequest,
-    EvmFeeReadProvider, EvmFeeReadRequest, EvmGasEstimateProvider, EvmGasEstimateRequest,
-    EvmLogsReadProvider, EvmLogsReadRequest, EvmNetworkId, EvmNonceOccupancy,
-    EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest, EvmNonceReadProvider,
-    EvmNonceReadRequest, EvmReceiptReadProvider, EvmReceiptReadRequest, EvmReceiptReadResponse,
+    EvmCallReadRequest, EvmCapabilityError, EvmChainIdentityProvider, EvmChainIdentityRequest,
+    EvmChainIdentityResponse, EvmCodeReadProvider, EvmCodeReadRequest, EvmFeeReadProvider,
+    EvmFeeReadRequest, EvmGasEstimateProvider, EvmGasEstimateRequest, EvmLogsReadProvider,
+    EvmLogsReadRequest, EvmNetworkId, EvmNonceOccupancy, EvmNonceOccupancyReadProvider,
+    EvmNonceOccupancyReadRequest, EvmNonceReadProvider, EvmNonceReadRequest,
+    EvmReceiptReadProvider, EvmReceiptReadRequest, EvmReceiptReadResponse,
     EvmTransactionSubmitCapability, EvmTransactionSubmitProvider, EvmTransactionSubmitRequest,
     RedactedEvmSourceEvidence, SignedEvmPayload,
 };
@@ -396,16 +393,16 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         network_id: &str,
         expected_chain_id: u64,
     ) -> Result<u64> {
-        let guard = evm_chain_guard(network_id, expected_chain_id)?;
+        let network_id = evm_network_id(network_id)?;
         let response = self
             .mutation
             .block
-            .read_block(&EvmBlockReadRequest {
-                guard: guard.clone(),
-                block: EvmBlockSelector::Latest,
-            })
+            .read_block(&evm_block_read_request(
+                &network_id,
+                expected_chain_id,
+                EvmBlockSelector::Latest,
+            )?)
             .await?;
-        response.evidence.verify_guard(&guard)?;
         Ok(response.block_number)
     }
 
@@ -541,7 +538,6 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             prepared.evidence().expected_chain_id,
         )
         .await?;
-        let guard = verified_chain.guard;
         let mut submissions = Vec::with_capacity(prepared.signing_requests.len());
         for (transaction, signing_request) in prepared
             .evidence()
@@ -569,12 +565,12 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             let response = self
                 .mutation
                 .submit
-                .submit_transaction(&EvmTransactionSubmitRequest {
-                    guard: guard.clone(),
-                    signed_payload: payload,
-                })
+                .submit_transaction(&evm_submit_request(
+                    &verified_chain.network_id,
+                    verified_chain.expected_chain_id,
+                    payload,
+                )?)
                 .await?;
-            response.evidence.verify_guard(&guard)?;
             if response.transaction_hash != expected_hash {
                 return Err(EvmContractAdapterError::TransactionHashMismatch);
             }
@@ -597,18 +593,19 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         submissions: &[ContractTransactionSubmission],
     ) -> Result<Vec<ContractTransactionReceipt>> {
         let transaction_hashes = verify_prepared_submission_transactions(prepared, submissions)?;
-        let guard = evm_chain_guard(&prepared.network_id, prepared.expected_chain_id)?;
+        let network_id = evm_network_id(&prepared.network_id)?;
         let mut receipts = Vec::with_capacity(submissions.len());
         for transaction_hash in transaction_hashes {
             let response = self
                 .mutation
                 .receipt
-                .read_receipt(&EvmReceiptReadRequest {
-                    guard: guard.clone(),
+                .read_receipt(&evm_receipt_request(
+                    &network_id,
+                    prepared.expected_chain_id,
                     transaction_hash,
-                })
+                )?)
                 .await?;
-            let response = verify_receipt_response(&guard, transaction_hash, response)?;
+            let response = verify_receipt_response(transaction_hash, response)?;
             receipts.push(ContractTransactionReceipt {
                 receipt_version: 1,
                 context_ref: prepared.context_ref.clone(),
@@ -627,7 +624,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         &self,
         prepared: &PreparedContractInvocation,
     ) -> Result<PreparedSubmissionReconciliation> {
-        let guard = evm_chain_guard(&prepared.network_id, prepared.expected_chain_id)?;
+        let network_id = evm_network_id(&prepared.network_id)?;
         let anchor_submissions = prepared_anchor_submissions(prepared)?;
         let mut unlanded_transactions = Vec::new();
         for (transaction, submission) in prepared
@@ -642,14 +639,15 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             match self
                 .mutation
                 .receipt
-                .read_receipt(&EvmReceiptReadRequest {
-                    guard: guard.clone(),
+                .read_receipt(&evm_receipt_request(
+                    &network_id,
+                    prepared.expected_chain_id,
                     transaction_hash,
-                })
+                )?)
                 .await
             {
                 Ok(response) => {
-                    verify_receipt_response(&guard, transaction_hash, response)?;
+                    verify_receipt_response(transaction_hash, response)?;
                 }
                 Err(EvmCapabilityError::ReceiptPending) => {
                     unlanded_transactions.push(transaction);
@@ -675,17 +673,15 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         let pending_nonce = match self
             .mutation
             .nonce
-            .read_nonce(&EvmNonceReadRequest {
-                guard: guard.clone(),
-                account: expected_signer,
-                block: EvmBlockSelector::Pending,
-            })
+            .read_nonce(&evm_nonce_read_request(
+                &network_id,
+                prepared.expected_chain_id,
+                expected_signer,
+                EvmBlockSelector::Pending,
+            )?)
             .await
         {
-            Ok(response) => {
-                response.evidence.verify_guard(&guard)?;
-                response.nonce
-            }
+            Ok(response) => response.nonce,
             Err(EvmCapabilityError::Provider { .. }) => {
                 return Ok(PreparedSubmissionReconciliation::Indeterminate(
                     anchor_submissions,
@@ -700,44 +696,40 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             match self
                 .mutation
                 .nonce_occupancy
-                .read_nonce_occupancy(&EvmNonceOccupancyReadRequest {
-                    guard: guard.clone(),
-                    account: expected_signer,
-                    nonce: transaction.nonce,
-                    excluded_transaction_hash: parse_prepared_transaction_hash(
-                        &transaction.expected_transaction_hash,
-                    )?,
-                })
+                .read_nonce_occupancy(&evm_nonce_occupancy_request(
+                    &network_id,
+                    prepared.expected_chain_id,
+                    expected_signer,
+                    transaction.nonce,
+                    parse_prepared_transaction_hash(&transaction.expected_transaction_hash)?,
+                )?)
                 .await
             {
-                Ok(response) => {
-                    response.evidence.verify_guard(&guard)?;
-                    match response.outcome {
-                        EvmNonceOccupancy::Occupied {
-                            transaction_hash,
-                            block_number,
-                        } => {
-                            return Ok(PreparedSubmissionReconciliation::NotSubmitted(
-                                ContractNotSubmittedProof {
-                                    proof_version: 1,
-                                    expected_transaction_hash: transaction
-                                        .expected_transaction_hash
-                                        .clone(),
-                                    occupying_transaction_hash: format!("{transaction_hash:?}"),
-                                    occupying_block_number: block_number,
-                                    signer_address: prepared.expected_signer_address.clone(),
-                                    nonce: transaction.nonce,
-                                    evidence_chain_id: response.evidence.observed_chain_id,
-                                },
-                            ));
-                        }
-                        EvmNonceOccupancy::Unknown => {
-                            return Ok(PreparedSubmissionReconciliation::Indeterminate(
-                                anchor_submissions,
-                            ));
-                        }
+                Ok(response) => match response.outcome {
+                    EvmNonceOccupancy::Occupied {
+                        transaction_hash,
+                        block_number,
+                    } => {
+                        return Ok(PreparedSubmissionReconciliation::NotSubmitted(
+                            ContractNotSubmittedProof {
+                                proof_version: 1,
+                                expected_transaction_hash: transaction
+                                    .expected_transaction_hash
+                                    .clone(),
+                                occupying_transaction_hash: format!("{transaction_hash:?}"),
+                                occupying_block_number: block_number,
+                                signer_address: prepared.expected_signer_address.clone(),
+                                nonce: transaction.nonce,
+                                evidence_chain_id: response.evidence.observed_chain_id,
+                            },
+                        ));
                     }
-                }
+                    EvmNonceOccupancy::Unknown => {
+                        return Ok(PreparedSubmissionReconciliation::Indeterminate(
+                            anchor_submissions,
+                        ));
+                    }
+                },
                 Err(EvmCapabilityError::Provider { .. }) => {
                     return Ok(PreparedSubmissionReconciliation::Indeterminate(
                         anchor_submissions,
@@ -786,27 +778,26 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         let verified_chain =
             verified_chain_identity(self.mutation.chain_identity, network_id, expected_chain_id)
                 .await?;
-        let guard = verified_chain.guard;
 
         let nonce_response = self
             .mutation
             .nonce
-            .read_nonce(&EvmNonceReadRequest {
-                guard: guard.clone(),
-                account: expected_signer,
-                block: EvmBlockSelector::Latest,
-            })
+            .read_nonce(&evm_nonce_read_request(
+                &verified_chain.network_id,
+                verified_chain.expected_chain_id,
+                expected_signer,
+                EvmBlockSelector::Latest,
+            )?)
             .await?;
-        nonce_response.evidence.verify_guard(&guard)?;
         let nonce = nonce_response.nonce;
         let fees = self
             .mutation
             .fee
-            .read_fee(&EvmFeeReadRequest {
-                guard: guard.clone(),
-            })
+            .read_fee(&evm_fee_read_request(
+                &verified_chain.network_id,
+                verified_chain.expected_chain_id,
+            )?)
             .await?;
-        fees.evidence.verify_guard(&guard)?;
 
         let mut evidence = Vec::with_capacity(tx_inputs.len());
         let mut signing_requests = Vec::with_capacity(tx_inputs.len());
@@ -817,15 +808,15 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                     let gas = self
                         .mutation
                         .gas
-                        .estimate_gas(&EvmGasEstimateRequest {
-                            guard: guard.clone(),
-                            from: Some(expected_signer),
-                            to: input.to,
-                            value_wei: input.value_wei,
-                            data: input.data.clone(),
-                        })
+                        .estimate_gas(&evm_gas_estimate_request(
+                            &verified_chain.network_id,
+                            verified_chain.expected_chain_id,
+                            Some(expected_signer),
+                            input.to,
+                            input.value_wei,
+                            input.data.clone(),
+                        )?)
                         .await?;
-                    gas.evidence.verify_guard(&guard)?;
                     gas.gas_limit
                 }
             };
@@ -977,7 +968,8 @@ async fn validate_context_contract_with_reads(
     let evaluated = evaluate_assertions(
         reads,
         assertion_context.as_ref(),
-        &chain.guard,
+        &chain.network_id,
+        chain.expected_chain_id,
         &request.read_assertions,
         &request.event_assertions,
     )
@@ -1099,7 +1091,8 @@ async fn import_configured_with_reads(
                 let evaluated = evaluate_assertions(
                     reads,
                     assertion_context.as_ref(),
-                    &verified.guard,
+                    &verified.network_id,
+                    verified.expected_chain_id,
                     &adoption.evidence_policy.initial_read_assertions,
                     &adoption.evidence_policy.initial_event_assertions,
                 )
@@ -1133,7 +1126,8 @@ async fn import_configured_with_reads(
 }
 
 struct VerifiedExternalAdoption {
-    guard: EvmChainGuard,
+    network_id: EvmNetworkId,
+    expected_chain_id: u64,
     evidence: ExternalAdoptionEvidence,
 }
 
@@ -1149,7 +1143,6 @@ async fn verify_external_adoption(
         context.value().network.expected_chain_id(),
     )
     .await?;
-    let guard = chain.guard;
     let mut code_read_evidence = None;
     if adoption.evidence_policy.require_code
         || adoption.evidence_policy.expected_code_hash.is_some()
@@ -1166,13 +1159,13 @@ async fn verify_external_adoption(
                 });
         let response = reads
             .code
-            .read_code(&EvmCodeReadRequest {
-                guard: guard.clone(),
+            .read_code(&evm_code_read_request(
+                &chain.network_id,
+                chain.expected_chain_id,
                 address,
-                block: block_selector(Some(&block), true)?,
-            })
+                block_selector(Some(&block), true)?,
+            )?)
             .await?;
-        response.evidence.verify_guard(&guard)?;
         if adoption.evidence_policy.require_code && response.code.is_empty() {
             return Err(EvmContractAdapterError::ExternalCodeMissing);
         }
@@ -1201,7 +1194,11 @@ async fn verify_external_adoption(
         read_assertion_evidence: Vec::new(),
         event_assertion_evidence: Vec::new(),
     };
-    Ok(VerifiedExternalAdoption { guard, evidence })
+    Ok(VerifiedExternalAdoption {
+        network_id: chain.network_id,
+        expected_chain_id: chain.expected_chain_id,
+        evidence,
+    })
 }
 
 fn external_evm_source_evidence(evidence: &RedactedEvmSourceEvidence) -> ExternalEvmSourceEvidence {
@@ -1889,7 +1886,8 @@ where
 }
 
 struct VerifiedChainIdentity {
-    guard: EvmChainGuard,
+    network_id: EvmNetworkId,
+    expected_chain_id: u64,
     response: EvmChainIdentityResponse,
 }
 
@@ -1898,13 +1896,10 @@ async fn verified_chain_identity(
     network_id: &str,
     expected_chain_id: u64,
 ) -> Result<VerifiedChainIdentity> {
-    let guard = evm_chain_guard(network_id, expected_chain_id)?;
+    let network_id = evm_network_id(network_id)?;
     let chain = provider
-        .chain_identity(&EvmChainIdentityRequest {
-            guard: guard.clone(),
-        })
+        .chain_identity(&evm_chain_identity_request(&network_id, expected_chain_id)?)
         .await?;
-    chain.evidence.verify_guard(&guard)?;
     if chain.chain_id != expected_chain_id {
         return Err(EvmCapabilityError::SourceMismatch {
             diagnostic: chain
@@ -1915,7 +1910,8 @@ async fn verified_chain_identity(
         .into());
     }
     Ok(VerifiedChainIdentity {
-        guard,
+        network_id,
+        expected_chain_id,
         response: chain,
     })
 }
@@ -1957,7 +1953,8 @@ fn validation_assertions_required(
 async fn evaluate_assertions(
     reads: EvmContractReadProviders<'_>,
     context: Option<&ValidationAssertionContext>,
-    guard: &EvmChainGuard,
+    network_id: &EvmNetworkId,
+    expected_chain_id: u64,
     read_assertions: &[ReadAssertionConfig],
     event_assertions: &[EventAssertionConfig],
 ) -> Result<EvaluatedAssertions> {
@@ -1979,15 +1976,15 @@ async fn evaluate_assertions(
     for (assertion, prepared) in read_assertions.iter().zip(prepared_reads.iter()) {
         let response = reads
             .call
-            .read_call(&EvmCallReadRequest {
-                guard: guard.clone(),
-                to: context.address,
-                calldata: hex_to_bytes(&prepared.data_hex)
+            .read_call(&evm_call_read_request(
+                network_id,
+                expected_chain_id,
+                context.address,
+                hex_to_bytes(&prepared.data_hex)
                     .map_err(|error| EvmContractAdapterError::Model(error.message))?,
-                block: EvmBlockSelector::Latest,
-            })
+                EvmBlockSelector::Latest,
+            )?)
             .await?;
-        response.evidence.verify_guard(guard)?;
         let actual_json = decode_single_output_to_json(
             &prepared.outputs,
             &bytes_to_hex_prefixed(&response.return_data),
@@ -2018,15 +2015,15 @@ async fn evaluate_assertions(
             .map_err(|_| EvmContractAdapterError::Model("invalid event topic".to_owned()))?;
         let logs = reads
             .logs
-            .read_logs(&EvmLogsReadRequest {
-                guard: guard.clone(),
-                from_block: block_selector(assertion.from_block.as_ref(), false)?,
-                to_block: block_selector(assertion.to_block.as_ref(), true)?,
-                address: Some(context.address),
-                topics: vec![topic],
-            })
+            .read_logs(&evm_logs_read_request(
+                network_id,
+                expected_chain_id,
+                block_selector(assertion.from_block.as_ref(), false)?,
+                block_selector(assertion.to_block.as_ref(), true)?,
+                Some(context.address),
+                vec![topic],
+            )?)
             .await?;
-        logs.evidence.verify_guard(guard)?;
         let observed_count = logs.logs.len() as u64;
         let result = ValidationEventResult {
             event: prepared.event.clone(),
@@ -4376,11 +4373,9 @@ fn parse_prepared_transaction_hash(value: &str) -> Result<B256> {
 }
 
 fn verify_receipt_response(
-    guard: &EvmChainGuard,
     expected_hash: B256,
     response: EvmReceiptReadResponse,
 ) -> Result<EvmReceiptReadResponse> {
-    response.evidence.verify_guard(guard)?;
     if response.transaction_hash != expected_hash {
         return Err(EvmContractAdapterError::TransactionHashMismatch);
     }
@@ -6498,8 +6493,134 @@ fn idempotency_key_ref(
     ))?)
 }
 
-fn evm_chain_guard(network_id: &str, expected_chain_id: u64) -> Result<EvmChainGuard> {
-    EvmChainGuard::new(EvmNetworkId::new(network_id)?, expected_chain_id).map_err(Into::into)
+fn evm_network_id(network_id: &str) -> Result<EvmNetworkId> {
+    EvmNetworkId::new(network_id).map_err(Into::into)
+}
+
+fn evm_chain_identity_request(
+    network_id: &EvmNetworkId,
+    expected_chain_id: u64,
+) -> Result<EvmChainIdentityRequest> {
+    EvmChainIdentityRequest::new(network_id.clone(), expected_chain_id).map_err(Into::into)
+}
+
+fn evm_block_read_request(
+    network_id: &EvmNetworkId,
+    expected_chain_id: u64,
+    block: EvmBlockSelector,
+) -> Result<EvmBlockReadRequest> {
+    EvmBlockReadRequest::new(network_id.clone(), expected_chain_id, block).map_err(Into::into)
+}
+
+fn evm_nonce_read_request(
+    network_id: &EvmNetworkId,
+    expected_chain_id: u64,
+    account: Address,
+    block: EvmBlockSelector,
+) -> Result<EvmNonceReadRequest> {
+    EvmNonceReadRequest::new(network_id.clone(), expected_chain_id, account, block)
+        .map_err(Into::into)
+}
+
+fn evm_fee_read_request(
+    network_id: &EvmNetworkId,
+    expected_chain_id: u64,
+) -> Result<EvmFeeReadRequest> {
+    EvmFeeReadRequest::new(network_id.clone(), expected_chain_id).map_err(Into::into)
+}
+
+fn evm_gas_estimate_request(
+    network_id: &EvmNetworkId,
+    expected_chain_id: u64,
+    from: Option<Address>,
+    to: Option<Address>,
+    value_wei: u128,
+    data: Vec<u8>,
+) -> Result<EvmGasEstimateRequest> {
+    EvmGasEstimateRequest::new(
+        network_id.clone(),
+        expected_chain_id,
+        from,
+        to,
+        value_wei,
+        data,
+    )
+    .map_err(Into::into)
+}
+
+fn evm_submit_request(
+    network_id: &EvmNetworkId,
+    expected_chain_id: u64,
+    signed_payload: SignedEvmPayload,
+) -> Result<EvmTransactionSubmitRequest> {
+    EvmTransactionSubmitRequest::new(network_id.clone(), expected_chain_id, signed_payload)
+        .map_err(Into::into)
+}
+
+fn evm_receipt_request(
+    network_id: &EvmNetworkId,
+    expected_chain_id: u64,
+    transaction_hash: B256,
+) -> Result<EvmReceiptReadRequest> {
+    EvmReceiptReadRequest::new(network_id.clone(), expected_chain_id, transaction_hash)
+        .map_err(Into::into)
+}
+
+fn evm_nonce_occupancy_request(
+    network_id: &EvmNetworkId,
+    expected_chain_id: u64,
+    account: Address,
+    nonce: u64,
+    excluded_transaction_hash: B256,
+) -> Result<EvmNonceOccupancyReadRequest> {
+    EvmNonceOccupancyReadRequest::new(
+        network_id.clone(),
+        expected_chain_id,
+        account,
+        nonce,
+        excluded_transaction_hash,
+    )
+    .map_err(Into::into)
+}
+
+fn evm_code_read_request(
+    network_id: &EvmNetworkId,
+    expected_chain_id: u64,
+    address: Address,
+    block: EvmBlockSelector,
+) -> Result<EvmCodeReadRequest> {
+    EvmCodeReadRequest::new(network_id.clone(), expected_chain_id, address, block)
+        .map_err(Into::into)
+}
+
+fn evm_call_read_request(
+    network_id: &EvmNetworkId,
+    expected_chain_id: u64,
+    to: Address,
+    calldata: Vec<u8>,
+    block: EvmBlockSelector,
+) -> Result<EvmCallReadRequest> {
+    EvmCallReadRequest::new(network_id.clone(), expected_chain_id, to, calldata, block)
+        .map_err(Into::into)
+}
+
+fn evm_logs_read_request(
+    network_id: &EvmNetworkId,
+    expected_chain_id: u64,
+    from_block: EvmBlockSelector,
+    to_block: EvmBlockSelector,
+    address: Option<Address>,
+    topics: Vec<B256>,
+) -> Result<EvmLogsReadRequest> {
+    EvmLogsReadRequest::new(
+        network_id.clone(),
+        expected_chain_id,
+        from_block,
+        to_block,
+        address,
+        topics,
+    )
+    .map_err(Into::into)
 }
 
 fn runtime_plan_error(error: mfm_program::PlanError) -> mfm_runtime::RuntimeError {

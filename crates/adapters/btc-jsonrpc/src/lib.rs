@@ -3,14 +3,15 @@
 //!
 //! This crate binds reusable Bitcoin state contracts to explicit Bitcoin read capabilities and
 //! the reusable Bitcoin Core JSON-RPC HTTP transport. Protocol IO stays in the transport crate;
-//! this crate owns request mapping, runner registration, fact recording, and replay helpers over
-//! recorded evidence.
+//! this crate owns request mapping, runner registration, fact recording, and recorded provider
+//! backends over replay evidence.
 
 use std::marker::PhantomData;
 use std::sync::Arc;
 
 use mfm_btc_capabilities::{
-    BtcCapabilityError, BtcChainHeadReadProvider, BtcChainHeadRequest, BtcChainHeadResponse,
+    BtcCapabilityError, BtcCapabilityFuture, BtcChainHeadReadProvider, BtcChainHeadRequest,
+    BtcChainHeadResponse, BtcNetworkId, BtcSourceIdentity,
 };
 use mfm_events::v1 as events;
 use mfm_fact_capabilities::{
@@ -26,11 +27,11 @@ use mfm_runtime::{
 };
 use mfm_states_btc::{
     btc_jsonrpc_adapter_kind, btc_jsonrpc_adapter_version, chain_head_fact_visibility,
-    collector_checkpoint_fact_visibility, normalize_chain_head_response, BtcChainHeadFact,
-    BtcFactRecordCapability, CollectorCheckpointFact, CollectorCheckpointResponse,
-    LoadedCollectorCheckpoint, ObserveBtcChainHeadConfig, ObserveBtcChainHeadInput,
-    ObserveBtcChainHeadState, QueryCollectorCheckpointConfig, QueryCollectorCheckpointInput,
-    QueryCollectorCheckpointState, RecordBtcChainHeadFactState, RecordCollectorCheckpointState,
+    collector_checkpoint_fact_visibility, BtcFactRecordCapability, CollectorCheckpointFact,
+    CollectorCheckpointResponse, LoadedCollectorCheckpoint, ObserveBtcChainHeadConfig,
+    ObserveBtcChainHeadInput, ObserveBtcChainHeadState, QueryCollectorCheckpointConfig,
+    QueryCollectorCheckpointInput, QueryCollectorCheckpointState, RecordBtcChainHeadFactState,
+    RecordCollectorCheckpointState,
 };
 use mfm_store::v1 as store;
 use mfm_values::MfmValue;
@@ -137,33 +138,74 @@ pub fn register_btc_jsonrpc_runners(
     Ok(())
 }
 
-/// Rebuilds a chain-head fact from recorded request, response, and observe input evidence.
-pub fn replay_chain_head_fact_from_evidence(
-    request: &BtcChainHeadRequest,
-    response: &BtcChainHeadResponse,
-    input: &ObserveBtcChainHeadInput,
-) -> Result<BtcChainHeadFact> {
-    normalize_chain_head_response(request, response, input)
-        .map(|observation| observation.into_fact())
-        .map_err(|_| BtcJsonRpcAdapterError::ReplayEvidenceMismatch)
+/// Recorded Bitcoin chain-head provider backend for replay.
+#[derive(Debug, Clone)]
+pub struct RecordedBtcChainHeadProvider {
+    response: BtcChainHeadResponse,
 }
 
-/// Verifies recorded Bitcoin source evidence against the original request.
-pub fn verify_recorded_chain_head_evidence(
-    request: &BtcChainHeadRequest,
-    response: &BtcChainHeadResponse,
-) -> Result<()> {
-    response
-        .verify_request(request)
-        .map_err(|_| BtcJsonRpcAdapterError::ReplayEvidenceMismatch)
+impl RecordedBtcChainHeadProvider {
+    /// Creates a recorded provider over a captured chain-head response.
+    pub const fn new(response: BtcChainHeadResponse) -> Self {
+        Self { response }
+    }
+}
+
+impl BtcChainHeadReadProvider for RecordedBtcChainHeadProvider {
+    fn read_chain_head<'a>(
+        &'a self,
+        request: &'a BtcChainHeadRequest,
+    ) -> BtcCapabilityFuture<'a, BtcChainHeadResponse> {
+        Box::pin(async move { recorded_chain_head_response(request, &self.response) })
+    }
 }
 
 /// Redaction-safe Bitcoin JSON-RPC adapter error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BtcJsonRpcAdapterError {
+    /// Adapter could not build a capability request from certified state config.
+    #[error("Bitcoin adapter could not build capability request")]
+    InvalidCapabilityRequest,
     /// Replay evidence did not match the certified request.
     #[error("Bitcoin replay evidence did not match request")]
     ReplayEvidenceMismatch,
+}
+
+fn chain_head_request(config: &ObserveBtcChainHeadConfig) -> Result<BtcChainHeadRequest> {
+    let selection = config
+        .selection()
+        .map_err(|_| BtcJsonRpcAdapterError::InvalidCapabilityRequest)?;
+    let network_id = BtcNetworkId::new(&config.network)
+        .map_err(|_| BtcJsonRpcAdapterError::InvalidCapabilityRequest)?;
+    let source_identity = BtcSourceIdentity::new(&config.semantic_source_identity)
+        .map_err(|_| BtcJsonRpcAdapterError::InvalidCapabilityRequest)?;
+    BtcChainHeadRequest::new(
+        network_id,
+        source_identity,
+        &config.bitcoin_network,
+        selection,
+    )
+    .map_err(|_| BtcJsonRpcAdapterError::InvalidCapabilityRequest)
+}
+
+fn recorded_chain_head_response(
+    request: &BtcChainHeadRequest,
+    response: &BtcChainHeadResponse,
+) -> mfm_btc_capabilities::Result<BtcChainHeadResponse> {
+    let evidence = &response.evidence;
+    if &evidence.network_id == request.network_id()
+        && &evidence.source_identity == request.source_identity()
+        && evidence.bitcoin_network == request.bitcoin_network()
+        && evidence.observed_bitcoin_network == request.bitcoin_network()
+        && response.head_kind == request.selection().head_kind()
+        && response.finality == request.selection().finality()
+    {
+        Ok(response.clone())
+    } else {
+        Err(BtcCapabilityError::SourceMismatch {
+            diagnostic: evidence.source_mismatch_diagnostic(),
+        })
+    }
 }
 
 struct ObserveChainHeadRunner {
@@ -177,6 +219,7 @@ impl ErasedNodeRunner for ObserveChainHeadRunner {
             let config =
                 load_runner_config::<ObserveBtcChainHeadConfig>(&ctx, self.artifacts.as_ref())
                     .await?;
+            let request = chain_head_request(config.as_ref()).map_err(btc_adapter_runtime_error)?;
             let state = ObserveBtcChainHeadState::new(config).map_err(|error| {
                 mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
             })?;
@@ -185,7 +228,6 @@ impl ErasedNodeRunner for ObserveChainHeadRunner {
                 self.artifacts.as_ref(),
             )
             .await?;
-            let request = state.request().map_err(btc_state_runtime_error)?;
             let response = self
                 .btc
                 .read_chain_head(&request)
@@ -413,6 +455,10 @@ fn fact_index_runtime_error(
 }
 
 fn btc_state_runtime_error(error: mfm_states_btc::BtcStateError) -> mfm_runtime::RuntimeError {
+    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+}
+
+fn btc_adapter_runtime_error(error: BtcJsonRpcAdapterError) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
 }
 

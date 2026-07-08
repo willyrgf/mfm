@@ -5,26 +5,23 @@
 //! EVM, and Bitcoin capability contracts. Concrete artifact stores and live transports are supplied
 //! by app assembly.
 
-use std::{fmt, sync::Arc};
+use std::sync::Arc;
 
 use alloy_primitives::{Address, U256};
 use mfm_btc_capabilities::{
     BtcAddress, BtcBalanceReadProvider, BtcBalanceReadRequest, BtcBlockHash, BtcCapabilityError,
-    BtcChainGuard, BtcChainHeadReadProvider, BtcChainHeadRequest, BtcHeadSelection, BtcNetworkId,
+    BtcChainHeadReadProvider, BtcChainHeadRequest, BtcHeadSelection, BtcNetworkId,
     BtcSourceIdentity,
 };
 use mfm_capabilities::{ProviderDiagnosticCode, RedactedProviderDiagnostic};
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
     EvmBalanceReadProvider, EvmBalanceReadRequest, EvmBlockReadProvider, EvmBlockReadRequest,
-    EvmBlockSelector, EvmCallReadProvider, EvmCallReadRequest, EvmCapabilityError, EvmChainGuard,
-    EvmNetworkId,
+    EvmBlockSelector, EvmCallReadProvider, EvmCallReadRequest, EvmCapabilityError, EvmNetworkId,
 };
 use mfm_evm_core::encoding::{encode_erc20_balance_of, encode_erc20_decimals, parse_u8_u256};
 use mfm_evm_core::hex::hex_to_bytes;
-use mfm_ids::SchemaId;
 use mfm_portfolio_model::portfolio::ExecutionAnchor;
-use mfm_program::ValidatedConfig;
 use mfm_runtime::{
     load_launch_config, load_materialized_input_value, load_materialized_struct_input,
     load_non_empty_materialized_input, load_runner_config, CapabilityImplementationId,
@@ -44,8 +41,7 @@ use mfm_state_portfolio::{
     ResolveSubjectsConfig, ResolveSubjectsState, ResolveValuationsConfig, ResolveValuationsState,
 };
 use mfm_store::v1 as store;
-use mfm_values::{MfmConfig, MfmValue};
-use serde::de::DeserializeOwned;
+use mfm_values::MfmValue;
 
 const READ_FACTORY: &str = "read_external";
 const PURE_FACTORY: &str = "pure";
@@ -70,51 +66,14 @@ impl<T> PortfolioBtcProvider for T where T: BtcChainHeadReadProvider + BtcBalanc
 
 /// Runtime validator for portfolio read routes required before run admission.
 pub trait PortfolioRuntimeValidator: Send + Sync {
-    /// Validates that the process can resolve an EVM guard without live network IO.
-    fn validate_evm_guard(&self, guard: &EvmChainGuard) -> mfm_runtime::Result<()>;
+    /// Validates that the process can resolve an EVM route without live network IO.
+    fn validate_evm_route_binding(&self, network_id: &EvmNetworkId) -> mfm_runtime::Result<()>;
 
-    /// Validates that the process has a Bitcoin read provider for a guard.
-    fn validate_btc_guard(&self, guard: &BtcChainGuard) -> mfm_runtime::Result<()>;
-}
-
-/// Redaction-safe portfolio adapter error.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PortfolioAdapterError {
-    message: String,
-}
-
-impl PortfolioAdapterError {
-    fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-impl fmt::Display for PortfolioAdapterError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for PortfolioAdapterError {}
-
-/// Extracts certified EVM guards from a portfolio launch config artifact.
-pub fn evm_chain_guards_from_launch_config(
-    schema_id: &SchemaId,
-    bytes: &[u8],
-) -> Result<Vec<EvmChainGuard>, PortfolioAdapterError> {
-    if schema_id == &config_schema::<PinViewsConfig>()? {
-        let config = decode_replay_config::<PinViewsConfig>(bytes)?;
-        return evm_guards_from_network_intents(pin_view_read_intents(&config))
-            .map_err(portfolio_adapter_error);
-    }
-    if schema_id == &config_schema::<ObserveBatchConfig>()? {
-        let config = decode_replay_config::<ObserveBatchConfig>(bytes)?;
-        return evm_guards_from_network_intents(observe_batch_network_read_intent(&config))
-            .map_err(portfolio_adapter_error);
-    }
-    Ok(Vec::new())
+    /// Validates that the process has a Bitcoin route for a source identity.
+    fn validate_btc_source_binding(
+        &self,
+        source_identity: &BtcSourceIdentity,
+    ) -> mfm_runtime::Result<()>;
 }
 
 /// Runtime capabilities used by portfolio adapter runners.
@@ -442,44 +401,21 @@ where
     ErasedRunnerOutput::state_output(&ctx, value)
 }
 
-fn decode_replay_config<T>(bytes: &[u8]) -> Result<T, PortfolioAdapterError>
-where
-    T: MfmConfig + DeserializeOwned,
-{
-    let config = serde_json::from_slice(bytes)
-        .map_err(|error| PortfolioAdapterError::new(format!("config decode failed: {error}")))?;
-    ValidatedConfig::new(config)
-        .map(ValidatedConfig::into_inner)
-        .map_err(|error| PortfolioAdapterError::new(format!("config validation failed: {error}")))
-}
-
-fn config_schema<T>() -> Result<SchemaId, PortfolioAdapterError>
-where
-    T: MfmConfig,
-{
-    T::schema_id()
-        .map_err(|error| PortfolioAdapterError::new(format!("config schema failed: {error}")))
-}
-
 fn validate_network_read_intents(
     runtime: &dyn PortfolioRuntimeValidator,
     intents: impl IntoIterator<Item = PortfolioNetworkReadIntent>,
 ) -> mfm_runtime::Result<()> {
     for intent in intents {
         match intent {
-            PortfolioNetworkReadIntent::Evm {
-                network_id,
-                chain_id,
-            } => runtime.validate_evm_guard(
-                &portfolio_evm_guard(&network_id, chain_id)
-                    .map_err(portfolio_runtime_binding_error)?,
-            )?,
+            PortfolioNetworkReadIntent::Evm { network_id, .. } => runtime
+                .validate_evm_route_binding(
+                    &portfolio_evm_network_id(&network_id)
+                        .map_err(portfolio_runtime_binding_error)?,
+                )?,
             PortfolioNetworkReadIntent::Bitcoin {
-                network_id,
-                source_identity,
-                bitcoin_network,
-            } => runtime.validate_btc_guard(
-                &portfolio_btc_guard(&network_id, &source_identity, &bitcoin_network)
+                source_identity, ..
+            } => runtime.validate_btc_source_binding(
+                &portfolio_btc_source_identity(&source_identity)
                     .map_err(portfolio_runtime_binding_error)?,
             )?,
         }
@@ -487,61 +423,79 @@ fn validate_network_read_intents(
     Ok(())
 }
 
-fn evm_guards_from_network_intents(
-    intents: impl IntoIterator<Item = PortfolioNetworkReadIntent>,
-) -> Result<Vec<EvmChainGuard>, PortfolioReadError> {
-    let mut guards = Vec::new();
-    for intent in intents {
-        if let PortfolioNetworkReadIntent::Evm {
-            network_id,
-            chain_id,
-        } = intent
-        {
-            guards.push(portfolio_evm_guard(&network_id, chain_id)?);
-        }
-    }
-    Ok(guards)
-}
-
-fn portfolio_evm_guard(
-    network_id: &str,
-    expected_chain_id: u64,
-) -> Result<EvmChainGuard, PortfolioReadError> {
-    let network_id = EvmNetworkId::new(network_id).map_err(|_| {
+fn portfolio_evm_network_id(network_id: &str) -> Result<EvmNetworkId, PortfolioReadError> {
+    EvmNetworkId::new(network_id).map_err(|_| {
         PortfolioReadError::new(
             "network_id_invalid",
-            "portfolio network id could not be used as an EVM guard",
-        )
-    })?;
-    EvmChainGuard::new(network_id, expected_chain_id).map_err(|_| {
-        PortfolioReadError::new(
-            "chain_id_invalid",
-            "portfolio EVM chain id could not be used as an EVM guard",
+            "portfolio network id could not be used as an EVM request",
         )
     })
 }
 
-fn portfolio_btc_guard(
-    network_id: &str,
+fn portfolio_btc_source_identity(
     source_identity: &str,
-    bitcoin_network: &str,
-) -> Result<BtcChainGuard, PortfolioReadError> {
-    let network_id = BtcNetworkId::new(network_id).map_err(|_| {
-        PortfolioReadError::new(
-            "network_id_invalid",
-            "portfolio network id could not be used as a Bitcoin guard",
-        )
-    })?;
-    let source_identity = BtcSourceIdentity::new(source_identity).map_err(|_| {
+) -> Result<BtcSourceIdentity, PortfolioReadError> {
+    BtcSourceIdentity::new(source_identity).map_err(|_| {
         PortfolioReadError::new(
             "source_identity_invalid",
             "portfolio source identity could not be used as Bitcoin source identity",
         )
+    })
+}
+
+fn portfolio_btc_chain_head_request(
+    network_id: &str,
+    source_identity: &str,
+    bitcoin_network: &str,
+) -> Result<BtcChainHeadRequest, PortfolioReadError> {
+    let network_id = BtcNetworkId::new(network_id).map_err(|_| {
+        PortfolioReadError::new(
+            "network_id_invalid",
+            "portfolio network id could not be used as a Bitcoin request",
+        )
     })?;
-    BtcChainGuard::new(network_id, source_identity, bitcoin_network).map_err(|_| {
+    let source_identity = portfolio_btc_source_identity(source_identity)?;
+    BtcChainHeadRequest::new(
+        network_id,
+        source_identity,
+        bitcoin_network,
+        BtcHeadSelection::best(),
+    )
+    .map_err(|_| {
         PortfolioReadError::new(
             "bitcoin_network_invalid",
-            "portfolio Bitcoin network tag could not be used as a Bitcoin guard",
+            "portfolio Bitcoin network tag could not be used as a Bitcoin request",
+        )
+    })
+}
+
+fn portfolio_btc_balance_request(
+    network_id: &str,
+    source_identity: &str,
+    bitcoin_network: &str,
+    address: BtcAddress,
+    block_height: u64,
+    block_hash: BtcBlockHash,
+) -> Result<BtcBalanceReadRequest, PortfolioReadError> {
+    let network_id = BtcNetworkId::new(network_id).map_err(|_| {
+        PortfolioReadError::new(
+            "network_id_invalid",
+            "portfolio network id could not be used as a Bitcoin request",
+        )
+    })?;
+    let source_identity = portfolio_btc_source_identity(source_identity)?;
+    BtcBalanceReadRequest::new(
+        network_id,
+        source_identity,
+        bitcoin_network,
+        address,
+        block_height,
+        block_hash,
+    )
+    .map_err(|_| {
+        PortfolioReadError::new(
+            "bitcoin_network_invalid",
+            "portfolio Bitcoin network tag could not be used as a Bitcoin request",
         )
     })
 }
@@ -582,18 +536,14 @@ impl CapabilityPortfolioBackend {
         network_id: &str,
         chain_id: u64,
     ) -> Result<ExecutionAnchor, PortfolioReadError> {
-        let guard = portfolio_evm_guard(network_id, chain_id)?;
+        let network_id = portfolio_evm_network_id(network_id)?;
         let response = self
             .evm
-            .read_block(&EvmBlockReadRequest {
-                guard: guard.clone(),
-                block: EvmBlockSelector::Latest,
-            })
+            .read_block(
+                &EvmBlockReadRequest::new(network_id, chain_id, EvmBlockSelector::Latest)
+                    .map_err(portfolio_evm_capability_error)?,
+            )
             .await
-            .map_err(portfolio_evm_capability_error)?;
-        response
-            .evidence
-            .verify_guard(&guard)
             .map_err(portfolio_evm_capability_error)?;
         Ok(ExecutionAnchor::Evm {
             chain_id,
@@ -607,18 +557,12 @@ impl CapabilityPortfolioBackend {
         source_identity: &str,
         bitcoin_network: &str,
     ) -> Result<ExecutionAnchor, PortfolioReadError> {
-        let guard = portfolio_btc_guard(network_id, source_identity, bitcoin_network)?;
-        let request = BtcChainHeadRequest {
-            guard,
-            selection: BtcHeadSelection::best(),
-        };
+        let request =
+            portfolio_btc_chain_head_request(network_id, source_identity, bitcoin_network)?;
         let btc = self.btc.as_ref().ok_or_else(missing_btc_provider)?;
         let response = btc
             .read_chain_head(&request)
             .await
-            .map_err(portfolio_btc_capability_error)?;
-        response
-            .verify_request(&request)
             .map_err(portfolio_btc_capability_error)?;
         Ok(ExecutionAnchor::Bitcoin {
             height: response.block_height,
@@ -660,14 +604,18 @@ impl CapabilityPortfolioBackend {
             } => {
                 let account = parse_address(account, "wallet address")?;
                 let token = parse_address(token_address, "token address")?;
-                let guard = portfolio_evm_guard(network_id, *chain_id)?;
+                let network_id = portfolio_evm_network_id(network_id)?;
                 let decimals = match decimals {
                     Some(decimals) => *decimals,
-                    None => self.erc20_decimals(&guard, token, *block_number).await?,
+                    None => {
+                        self.erc20_decimals(&network_id, *chain_id, token, *block_number)
+                            .await?
+                    }
                 };
                 let raw = self
                     .evm_call_u256(
-                        &guard,
+                        &network_id,
+                        *chain_id,
                         token,
                         encode_erc20_balance_of(&account),
                         *block_number,
@@ -710,19 +658,19 @@ impl CapabilityPortfolioBackend {
         anchor: &ExecutionAnchor,
     ) -> Result<RawBalanceObservation, PortfolioReadError> {
         let account = parse_address(account, "wallet address")?;
-        let guard = portfolio_evm_guard(network_id, chain_id)?;
+        let network_id = portfolio_evm_network_id(network_id)?;
         let response = self
             .evm
-            .read_balance(&EvmBalanceReadRequest {
-                guard: guard.clone(),
-                account,
-                block: EvmBlockSelector::Number(block_number),
-            })
+            .read_balance(
+                &EvmBalanceReadRequest::new(
+                    network_id,
+                    chain_id,
+                    account,
+                    EvmBlockSelector::Number(block_number),
+                )
+                .map_err(portfolio_evm_capability_error)?,
+            )
             .await
-            .map_err(portfolio_evm_capability_error)?;
-        response
-            .evidence
-            .verify_guard(&guard)
             .map_err(portfolio_evm_capability_error)?;
         Ok(RawBalanceObservation::new(
             response.balance_wei,
@@ -740,22 +688,20 @@ impl CapabilityPortfolioBackend {
         anchor: &ExecutionAnchor,
         decimals: u8,
     ) -> Result<RawBalanceObservation, PortfolioReadError> {
-        let guard = portfolio_btc_guard(network_id, source_identity, bitcoin_network)?;
         let address = parse_btc_address(address)?;
         let (block_height, block_hash) = btc_anchor_parts(anchor)?;
-        let request = BtcBalanceReadRequest {
-            guard,
+        let request = portfolio_btc_balance_request(
+            network_id,
+            source_identity,
+            bitcoin_network,
             address,
             block_height,
             block_hash,
-        };
+        )?;
         let btc = self.btc.as_ref().ok_or_else(missing_btc_provider)?;
         let response = btc
             .read_balance(&request)
             .await
-            .map_err(portfolio_btc_capability_error)?;
-        response
-            .verify_request(&request)
             .map_err(portfolio_btc_capability_error)?;
         Ok(RawBalanceObservation::new(
             U256::from(response.balance_sats),
@@ -766,12 +712,19 @@ impl CapabilityPortfolioBackend {
 
     async fn erc20_decimals(
         &self,
-        guard: &EvmChainGuard,
+        network_id: &EvmNetworkId,
+        chain_id: u64,
         token: Address,
         block_number: u64,
     ) -> Result<u8, PortfolioReadError> {
         let raw = self
-            .evm_call_u256(guard, token, encode_erc20_decimals(), block_number)
+            .evm_call_u256(
+                network_id,
+                chain_id,
+                token,
+                encode_erc20_decimals(),
+                block_number,
+            )
             .await?;
         parse_u8_u256(raw).map_err(|_| {
             PortfolioReadError::new(
@@ -783,7 +736,8 @@ impl CapabilityPortfolioBackend {
 
     async fn evm_call_u256(
         &self,
-        guard: &EvmChainGuard,
+        network_id: &EvmNetworkId,
+        chain_id: u64,
         to: Address,
         calldata_hex: String,
         block_number: u64,
@@ -793,17 +747,17 @@ impl CapabilityPortfolioBackend {
         })?;
         let response = self
             .evm
-            .read_call(&EvmCallReadRequest {
-                guard: guard.clone(),
-                to,
-                calldata,
-                block: EvmBlockSelector::Number(block_number),
-            })
+            .read_call(
+                &EvmCallReadRequest::new(
+                    network_id.clone(),
+                    chain_id,
+                    to,
+                    calldata,
+                    EvmBlockSelector::Number(block_number),
+                )
+                .map_err(portfolio_evm_capability_error)?,
+            )
             .await
-            .map_err(portfolio_evm_capability_error)?;
-        response
-            .evidence
-            .verify_guard(guard)
             .map_err(portfolio_evm_capability_error)?;
         decode_u256_return(&response.return_data)
     }
@@ -926,10 +880,6 @@ fn portfolio_read_runtime_error(error: PortfolioReadError) -> mfm_runtime::Runti
 
 fn portfolio_runtime_binding_error(error: PortfolioReadError) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
-}
-
-fn portfolio_adapter_error(error: PortfolioReadError) -> PortfolioAdapterError {
-    PortfolioAdapterError::new(error.to_string())
 }
 
 #[cfg(test)]

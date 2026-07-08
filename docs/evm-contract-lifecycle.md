@@ -21,7 +21,7 @@ The context carries semantic identity such as:
 
 `network_id` is semantic workflow data. It is not an RPC endpoint, source id, credential, or runtime
 route. Live transports resolve it through runtime config and verify the observed chain id for each
-guarded request.
+source-bound request.
 
 Phase actions are local work descriptions. They do not carry independent network authority:
 
@@ -140,9 +140,9 @@ inputs match the certified source cell and consuming node context. Output admiss
 committed `CellProduced` context and staged artifact evidence against the certified cell
 constraints.
 
-Adapters derive EVM chain guards and capability requests from the certified context plus
-context-bound inputs. Transports only prove live route behavior, including observed chain id. A
-transport guard does not prove that a contract instance belongs to a lifecycle context.
+Adapters derive EVM capability requests from the certified context plus context-bound inputs.
+Transports only prove live route behavior, including observed chain id. Transport source evidence
+does not prove that a contract instance belongs to a lifecycle context.
 
 Replay uses the stored certified spec, typed run stream, retained artifacts, side-effect evidence,
 import evidence, validation evidence, and public-output evidence. Replay must not use live RPC,

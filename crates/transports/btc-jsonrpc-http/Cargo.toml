@@ -21,3 +21,4 @@ mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-ids = { path = "../../kernel/ids" }
 
 [dev-dependencies]
+tokio = { workspace = true }

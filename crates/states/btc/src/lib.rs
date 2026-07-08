@@ -9,7 +9,7 @@ use std::future;
 use std::num::NonZeroU64;
 
 use mfm_btc_capabilities::{
-    BtcCapabilityError, BtcChainGuard, BtcChainHeadReadCapability, BtcChainHeadRequest,
+    BtcCapabilityError, BtcChainHeadReadCapability,
     BtcChainHeadResponse as CapabilityChainHeadResponse, BtcFinality, BtcHeadKind,
     BtcHeadSelection, BtcNetworkId, BtcSourceIdentity, BtcSourceStatus,
 };
@@ -131,8 +131,8 @@ pub enum BtcStateError {
         /// Stable redacted reason.
         reason: String,
     },
-    /// A capability response failed request verification.
-    #[error("Bitcoin capability response did not match the state request")]
+    /// A capability provider reported source mismatch.
+    #[error("Bitcoin capability provider reported source mismatch")]
     SourceMismatch,
     /// A capability provider failed without exposing source details.
     #[error("Bitcoin capability provider failed")]
@@ -685,13 +685,10 @@ pub fn validate_observe_chain_head_config(
 }
 
 impl ObserveBtcChainHeadConfig {
-    /// Builds the typed capability request for this bounded observation.
-    pub fn request(&self) -> Result<BtcChainHeadRequest, BtcStateError> {
+    /// Returns the semantic head selection requested by this bounded observation.
+    pub fn selection(&self) -> Result<BtcHeadSelection, BtcStateError> {
         validate_observe_chain_head_config(self)
             .map_err(|reason| BtcStateError::InvalidInput { reason })?;
-        let network = BtcNetworkId::new(&self.network)?;
-        let source_identity = BtcSourceIdentity::new(&self.semantic_source_identity)?;
-        let guard = BtcChainGuard::new(network, source_identity, &self.bitcoin_network)?;
         let selection = match self.head_kind.as_str() {
             "best" => BtcHeadSelection::best(),
             "confirmed" => BtcHeadSelection::confirmed(
@@ -705,7 +702,7 @@ impl ObserveBtcChainHeadConfig {
                 })
             }
         };
-        Ok(BtcChainHeadRequest { guard, selection })
+        Ok(selection)
     }
 }
 
@@ -788,12 +785,12 @@ impl BtcChainHeadObservation {
 
 /// Normalizes a verified Bitcoin capability response into a chain-head observation output.
 pub fn normalize_chain_head_response(
-    request: &BtcChainHeadRequest,
+    config: &ObserveBtcChainHeadConfig,
     response: &CapabilityChainHeadResponse,
     input: &ObserveBtcChainHeadInput,
 ) -> Result<BtcChainHeadObservation, BtcStateError> {
-    response.verify_request(request)?;
-    validate_loaded_checkpoint_for_request(request, &input.loaded_checkpoint)?;
+    let selection = config.selection()?;
+    validate_loaded_checkpoint_for_config(config, selection, &input.loaded_checkpoint)?;
     let observation = BtcChainHeadObservation::new(
         BtcChainHeadSubject::from_capability_response(response),
         BtcChainHeadResponse::from_capability_response(response, input.context.observed_at_unix_ms),
@@ -809,19 +806,13 @@ pub struct ObserveBtcChainHeadState {
 }
 
 impl ObserveBtcChainHeadState {
-    /// Builds the Bitcoin chain-head request declared by this state config.
-    pub fn request(&self) -> Result<BtcChainHeadRequest, BtcStateError> {
-        self.config.request()
-    }
-
     /// Materializes a normalized observation from a verified capability response.
     pub fn materialize_response(
         &self,
         input: &ObserveBtcChainHeadInput,
         response: &CapabilityChainHeadResponse,
     ) -> Result<BtcChainHeadObservation, BtcStateError> {
-        let request = self.request()?;
-        normalize_chain_head_response(&request, response, input)
+        normalize_chain_head_response(&self.config, response, input)
     }
 }
 
@@ -865,9 +856,13 @@ impl ReadState for ObserveBtcChainHeadState {
         _caps: &'a Self::Caps,
         _context: &'a mfm_program::CertifiedContext<Self::Context>,
     ) -> Self::RunFuture<'a> {
-        if let Err(error) = self.request().and_then(|request| {
-            validate_loaded_checkpoint_for_request(&request, &input.loaded_checkpoint)
-        }) {
+        let selection = match self.config.selection() {
+            Ok(selection) => selection,
+            Err(error) => return future::ready(Err(StateError::from(error))),
+        };
+        if let Err(error) =
+            validate_loaded_checkpoint_for_config(&self.config, selection, &input.loaded_checkpoint)
+        {
             return future::ready(Err(StateError::from(error)));
         }
         future::ready(Err(adapter_required_error(Self::name())))
@@ -1341,8 +1336,9 @@ fn build_checkpoint_fact_from_outputs(
     Ok(CollectorCheckpointFact::new(subject, response))
 }
 
-fn validate_loaded_checkpoint_for_request(
-    request: &BtcChainHeadRequest,
+fn validate_loaded_checkpoint_for_config(
+    config: &ObserveBtcChainHeadConfig,
+    selection: BtcHeadSelection,
     loaded_checkpoint: &LoadedCollectorCheckpoint,
 ) -> Result<(), BtcStateError> {
     let Some(checkpoint) = loaded_checkpoint.checkpoint() else {
@@ -1350,12 +1346,12 @@ fn validate_loaded_checkpoint_for_request(
     };
     let subject = checkpoint.subject();
     let response = checkpoint.response();
-    if subject.network() != request.guard.network_id().as_str()
-        || subject.bitcoin_network() != request.guard.bitcoin_network()
-        || subject.semantic_source_identity() != request.guard.source_identity().as_str()
+    if subject.network() != config.network.as_str()
+        || subject.bitcoin_network() != config.bitcoin_network.as_str()
+        || subject.semantic_source_identity() != config.semantic_source_identity.as_str()
         || subject.scope() != DEFAULT_SCOPE
-        || response.finality_policy() != finality_policy_tag(request.selection.finality())
-        || response.confirmation_depth() != request.selection.finality().confirmation_depth()
+        || response.finality_policy() != finality_policy_tag(selection.finality())
+        || response.confirmation_depth() != selection.finality().confirmation_depth()
     {
         return Err(BtcStateError::InvalidInput {
             reason: "loaded checkpoint is incompatible with requested Bitcoin source".to_owned(),
@@ -1608,23 +1604,26 @@ mod tests {
         }
     }
 
-    fn capability_response() -> (BtcChainHeadRequest, CapabilityChainHeadResponse) {
-        let request = observe_config().request().expect("request");
-        let evidence =
-            RedactedBtcSourceEvidence::from_request(&request, "main", BtcSourceStatus::Synced)
-                .expect("evidence");
-        let response = CapabilityChainHeadResponse {
-            evidence,
-            head_kind: request.selection.head_kind(),
-            finality: request.selection.finality(),
+    fn capability_response() -> CapabilityChainHeadResponse {
+        let config = observe_config();
+        CapabilityChainHeadResponse {
+            evidence: RedactedBtcSourceEvidence {
+                network_id: BtcNetworkId::new(&config.network).expect("network"),
+                source_identity: BtcSourceIdentity::new(&config.semantic_source_identity)
+                    .expect("source"),
+                bitcoin_network: config.bitcoin_network.clone(),
+                observed_bitcoin_network: config.bitcoin_network.clone(),
+                source_status: BtcSourceStatus::Synced,
+            },
+            head_kind: BtcHeadKind::Best,
+            finality: BtcFinality::BestAvailable,
             block_height: 850_000,
             block_hash: BtcBlockHash::new(
                 "00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc",
             )
             .expect("block hash"),
             provider_time_unix_ms: Some(1_720_000_000_000),
-        };
-        (request, response)
+        }
     }
 
     fn observe_input(checkpoint: Option<CollectorCheckpointFact>) -> ObserveBtcChainHeadInput {
@@ -1718,8 +1717,9 @@ mod tests {
 
     #[test]
     fn normalized_chain_head_fact_material_contains_no_floats_or_runtime_routes() {
-        let (request, response) = capability_response();
-        let observation = normalize_chain_head_response(&request, &response, &observe_input(None))
+        let config = observe_config();
+        let response = capability_response();
+        let observation = normalize_chain_head_response(&config, &response, &observe_input(None))
             .expect("observation");
         let fact = observation.to_fact();
         let value = serde_json::to_value(&fact).expect("json");
@@ -1866,7 +1866,7 @@ mod tests {
 
     #[test]
     fn observe_rejects_invalid_loaded_checkpoints() {
-        let (_request, response) = capability_response();
+        let response = capability_response();
         let state =
             ObserveBtcChainHeadState::new(ValidatedConfig::new(observe_config()).expect("config"))
                 .expect("state");
@@ -1901,8 +1901,9 @@ mod tests {
 
     #[test]
     fn record_states_transform_typed_upstream_outputs() {
-        let (request, response) = capability_response();
-        let observation = normalize_chain_head_response(&request, &response, &observe_input(None))
+        let config = observe_config();
+        let response = capability_response();
+        let observation = normalize_chain_head_response(&config, &response, &observe_input(None))
             .expect("observation");
 
         let chain_head_state = RecordBtcChainHeadFactState::new(
@@ -1950,8 +1951,9 @@ mod tests {
 
     #[test]
     fn checkpoint_record_uses_recorded_fact_and_loaded_checkpoint() {
-        let (request, response) = capability_response();
-        let observation = normalize_chain_head_response(&request, &response, &observe_input(None))
+        let config = observe_config();
+        let response = capability_response();
+        let observation = normalize_chain_head_response(&config, &response, &observe_input(None))
             .expect("observation");
         let fact = observation.to_fact();
         let previous = checkpoint_fact(849_999);
@@ -1981,8 +1983,9 @@ mod tests {
 
     #[test]
     fn checkpoint_record_rejects_incompatible_loaded_checkpoint() {
-        let (request, response) = capability_response();
-        let observation = normalize_chain_head_response(&request, &response, &observe_input(None))
+        let config = observe_config();
+        let response = capability_response();
+        let observation = normalize_chain_head_response(&config, &response, &observe_input(None))
             .expect("observation");
         let state = RecordCollectorCheckpointState::new(
             ValidatedConfig::new(checkpoint_record_config()).expect("config"),

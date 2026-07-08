@@ -40,7 +40,7 @@ use mfm_evm_capabilities::{
     evm_diagnostic, EvmBalanceReadProvider, EvmBalanceReadRequest, EvmBalanceReadResponse,
     EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockReadResponse, EvmBlockSelector,
     EvmCallReadProvider, EvmCallReadRequest, EvmCallReadResponse, EvmCapabilityError,
-    EvmCapabilityFuture, EvmChainGuard, EvmChainIdentityProvider, EvmChainIdentityRequest,
+    EvmCapabilityFuture, EvmChainIdentityProvider, EvmChainIdentityRequest,
     EvmChainIdentityResponse, EvmCodeReadProvider, EvmCodeReadRequest, EvmCodeReadResponse,
     EvmFeeReadProvider, EvmFeeReadRequest, EvmFeeReadResponse, EvmGasEstimateProvider,
     EvmGasEstimateRequest, EvmGasEstimateResponse, EvmLogEntry, EvmLogsReadProvider,
@@ -310,11 +310,6 @@ impl EvmJsonRpcClient {
         }
     }
 
-    /// Validates that a guard can resolve to a source policy without network I/O.
-    pub fn validate_guard(&self, guard: &EvmChainGuard) -> TransportResult<()> {
-        self.validate_route_binding(guard.network_id())
-    }
-
     /// Validates that a semantic network route resolves to a source policy without network I/O.
     pub fn validate_route_binding(&self, network_id: &EvmNetworkId) -> TransportResult<()> {
         let route = self.routes.route(network_id)?;
@@ -327,7 +322,9 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmChainIdentityRequest,
     ) -> TransportResult<EvmChainIdentityResponse> {
-        let selected = self.verified_source(&request.guard).await?;
+        let selected = self
+            .verified_source(request.network_id(), request.expected_chain_id())
+            .await?;
         let client_version = self
             .rpc_call(selected.source, "web3_clientVersion", json!([]))
             .await
@@ -344,8 +341,10 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmBlockReadRequest,
     ) -> TransportResult<EvmBlockReadResponse> {
-        let selected = self.verified_source(&request.guard).await?;
-        let value = match &request.block {
+        let selected = self
+            .verified_source(request.network_id(), request.expected_chain_id())
+            .await?;
+        let value = match request.block() {
             EvmBlockSelector::Hash(hash) => {
                 self.rpc_call(
                     selected.source,
@@ -369,7 +368,7 @@ impl EvmJsonRpcClient {
             .ok_or(EvmTransportError::InvalidResponse)
             .and_then(parse_u64)?;
         let block_hash = parse_b256_field(&value, "hash")?;
-        validate_block_identity(&request.block, block_number, block_hash)?;
+        validate_block_identity(request.block(), block_number, block_hash)?;
         Ok(EvmBlockReadResponse {
             evidence: selected.evidence,
             block_number,
@@ -381,15 +380,17 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmCallReadRequest,
     ) -> TransportResult<EvmCallReadResponse> {
-        let selected = self.verified_source(&request.guard).await?;
+        let selected = self
+            .verified_source(request.network_id(), request.expected_chain_id())
+            .await?;
         let result = self
             .rpc_call(
                 selected.source,
                 "eth_call",
                 json!([{
-                    "to": format!("{:?}", request.to),
-                    "data": bytes_to_hex_prefixed(&request.calldata),
-                }, block_selector_tag(&request.block)]),
+                    "to": format!("{:?}", request.to()),
+                    "data": bytes_to_hex_prefixed(request.calldata()),
+                }, block_selector_tag(request.block())]),
             )
             .await?;
         let raw = result.as_str().ok_or(EvmTransportError::InvalidResponse)?;
@@ -403,14 +404,16 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmCodeReadRequest,
     ) -> TransportResult<EvmCodeReadResponse> {
-        let selected = self.verified_source(&request.guard).await?;
+        let selected = self
+            .verified_source(request.network_id(), request.expected_chain_id())
+            .await?;
         let result = self
             .rpc_call(
                 selected.source,
                 "eth_getCode",
                 json!([
-                    format!("{:?}", request.address),
-                    block_selector_tag(&request.block)
+                    format!("{:?}", request.address()),
+                    block_selector_tag(request.block())
                 ]),
             )
             .await?;
@@ -428,14 +431,16 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmBalanceReadRequest,
     ) -> TransportResult<EvmBalanceReadResponse> {
-        let selected = self.verified_source(&request.guard).await?;
+        let selected = self
+            .verified_source(request.network_id(), request.expected_chain_id())
+            .await?;
         let result = self
             .rpc_call(
                 selected.source,
                 "eth_getBalance",
                 json!([
-                    format!("{:?}", request.account),
-                    block_selector_tag(&request.block)
+                    format!("{:?}", request.account()),
+                    block_selector_tag(request.block())
                 ]),
             )
             .await?;
@@ -450,24 +455,26 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmLogsReadRequest,
     ) -> TransportResult<EvmLogsReadResponse> {
-        let selected = self.verified_source(&request.guard).await?;
+        let selected = self
+            .verified_source(request.network_id(), request.expected_chain_id())
+            .await?;
         let mut filter = serde_json::Map::new();
         filter.insert(
             "fromBlock".to_owned(),
-            json!(block_selector_tag(&request.from_block)),
+            json!(block_selector_tag(request.from_block())),
         );
         filter.insert(
             "toBlock".to_owned(),
-            json!(block_selector_tag(&request.to_block)),
+            json!(block_selector_tag(request.to_block())),
         );
-        if let Some(address) = request.address {
+        if let Some(address) = request.address() {
             filter.insert("address".to_owned(), json!(format!("{address:?}")));
         }
-        if !request.topics.is_empty() {
+        if !request.topics().is_empty() {
             filter.insert(
                 "topics".to_owned(),
                 json!(request
-                    .topics
+                    .topics()
                     .iter()
                     .map(|topic| format!("{topic:?}"))
                     .collect::<Vec<_>>()),
@@ -500,14 +507,16 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmNonceReadRequest,
     ) -> TransportResult<EvmNonceReadResponse> {
-        let selected = self.verified_source(&request.guard).await?;
+        let selected = self
+            .verified_source(request.network_id(), request.expected_chain_id())
+            .await?;
         let result = self
             .rpc_call(
                 selected.source,
                 "eth_getTransactionCount",
                 json!([
-                    format!("{:?}", request.account),
-                    block_selector_tag(&request.block)
+                    format!("{:?}", request.account()),
+                    block_selector_tag(request.block())
                 ]),
             )
             .await?;
@@ -522,7 +531,9 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmFeeReadRequest,
     ) -> TransportResult<EvmFeeReadResponse> {
-        let selected = self.verified_source(&request.guard).await?;
+        let selected = self
+            .verified_source(request.network_id(), request.expected_chain_id())
+            .await?;
         let legacy_gas_price = self
             .rpc_call(selected.source, "eth_gasPrice", json!([]))
             .await?
@@ -576,21 +587,23 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmGasEstimateRequest,
     ) -> TransportResult<EvmGasEstimateResponse> {
-        let selected = self.verified_source(&request.guard).await?;
+        let selected = self
+            .verified_source(request.network_id(), request.expected_chain_id())
+            .await?;
         let mut call = serde_json::Map::new();
-        if let Some(from) = request.from {
+        if let Some(from) = request.from() {
             call.insert("from".to_owned(), json!(format!("{from:?}")));
         }
-        if let Some(to) = request.to {
+        if let Some(to) = request.to() {
             call.insert("to".to_owned(), json!(format!("{to:?}")));
         }
         call.insert(
             "value".to_owned(),
-            json!(format!("0x{:x}", request.value_wei)),
+            json!(format!("0x{:x}", request.value_wei())),
         );
         call.insert(
             "data".to_owned(),
-            json!(bytes_to_hex_prefixed(&request.data)),
+            json!(bytes_to_hex_prefixed(request.data())),
         );
         let result = self
             .rpc_call(
@@ -610,16 +623,18 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmTransactionSubmitRequest,
     ) -> TransportResult<EvmTransactionSubmitResponse> {
-        let selected = self.verified_source(&request.guard).await?;
+        let selected = self
+            .verified_source(request.network_id(), request.expected_chain_id())
+            .await?;
         let result = self
             .rpc_call(
                 selected.source,
                 "eth_sendRawTransaction",
-                json!([bytes_to_hex_prefixed(request.signed_payload.bytes())]),
+                json!([bytes_to_hex_prefixed(request.signed_payload().bytes())]),
             )
             .await?;
         let hash = parse_b256_str(result.as_str().ok_or(EvmTransportError::InvalidResponse)?)?;
-        if hash != request.signed_payload.transaction_hash() {
+        if hash != request.signed_payload().transaction_hash() {
             return Err(EvmTransportError::InvalidResponse);
         }
         Ok(EvmTransactionSubmitResponse {
@@ -632,19 +647,21 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmReceiptReadRequest,
     ) -> TransportResult<EvmReceiptReadResponse> {
-        let selected = self.verified_source(&request.guard).await?;
+        let selected = self
+            .verified_source(request.network_id(), request.expected_chain_id())
+            .await?;
         let result = self
             .rpc_call(
                 selected.source,
                 "eth_getTransactionReceipt",
-                json!([format!("{:?}", request.transaction_hash)]),
+                json!([format!("{:?}", request.transaction_hash())]),
             )
             .await?;
         if result.is_null() {
             return Err(EvmTransportError::ReceiptPending);
         }
         let transaction_hash = parse_b256_field(&result, "transactionHash")?;
-        if transaction_hash != request.transaction_hash {
+        if transaction_hash != request.transaction_hash() {
             return Err(EvmTransportError::InvalidResponse);
         }
         let block_number = result
@@ -669,8 +686,10 @@ impl EvmJsonRpcClient {
         &self,
         request: &EvmNonceOccupancyReadRequest,
     ) -> TransportResult<EvmNonceOccupancyReadResponse> {
-        let selected = self.verified_source(&request.guard).await?;
-        let account = format!("{:?}", request.account).to_ascii_lowercase();
+        let selected = self
+            .verified_source(request.network_id(), request.expected_chain_id())
+            .await?;
+        let account = format!("{:?}", request.account()).to_ascii_lowercase();
         for block_tag in ["latest", "pending"] {
             let result = self
                 .rpc_call(
@@ -692,11 +711,11 @@ impl EvmJsonRpcClient {
                 let Some(raw_nonce) = transaction.get("nonce").and_then(Value::as_str) else {
                     continue;
                 };
-                if parse_u64(raw_nonce)? != request.nonce {
+                if parse_u64(raw_nonce)? != request.nonce() {
                     continue;
                 }
                 let hash = parse_b256_field(transaction, "hash")?;
-                if hash == request.excluded_transaction_hash {
+                if hash == request.excluded_transaction_hash() {
                     return Ok(EvmNonceOccupancyReadResponse {
                         evidence: selected.evidence,
                         outcome: EvmNonceOccupancy::Unknown,
@@ -724,22 +743,23 @@ impl EvmJsonRpcClient {
 
     async fn verified_source<'a>(
         &'a self,
-        guard: &EvmChainGuard,
+        network_id: &EvmNetworkId,
+        expected_chain_id: u64,
     ) -> TransportResult<VerifiedSource<'a>> {
-        let route = self.routes.route(guard.network_id())?;
+        let route = self.routes.route(network_id)?;
         let mut last_failure = EvmTransportError::SourceUnavailable;
         for source in self
             .registry
             .candidates(route.policy_id(), route.source_ref())?
         {
             match self.chain_id_for_source(source).await {
-                Ok(chain_id) if chain_id == guard.expected_chain_id() => {
+                Ok(chain_id) if chain_id == expected_chain_id => {
                     return Ok(VerifiedSource {
                         source,
                         chain_id,
                         evidence: RedactedEvmSourceEvidence {
-                            network_id: guard.network_id().clone(),
-                            expected_chain_id: guard.expected_chain_id(),
+                            network_id: network_id.clone(),
+                            expected_chain_id,
                             observed_chain_id: chain_id,
                             source_ref: source.id.clone(),
                             policy_id: route.policy_id().clone(),
@@ -748,8 +768,8 @@ impl EvmJsonRpcClient {
                 }
                 Ok(chain_id) => {
                     let evidence = RedactedEvmSourceEvidence {
-                        network_id: guard.network_id().clone(),
-                        expected_chain_id: guard.expected_chain_id(),
+                        network_id: network_id.clone(),
+                        expected_chain_id,
                         observed_chain_id: chain_id,
                         source_ref: source.id.clone(),
                         policy_id: route.policy_id().clone(),
@@ -1115,27 +1135,27 @@ fn validate_log_matches_request(
     request: &EvmLogsReadRequest,
     log: &EvmLogEntry,
 ) -> TransportResult<()> {
-    if let Some(expected_address) = request.address {
+    if let Some(expected_address) = request.address() {
         if expected_address != log.address {
             return Err(EvmTransportError::InvalidResponse);
         }
     }
-    for (expected, observed) in request.topics.iter().zip(log.topics.iter()) {
+    for (expected, observed) in request.topics().iter().zip(log.topics.iter()) {
         if expected != observed {
             return Err(EvmTransportError::InvalidResponse);
         }
     }
-    if log.topics.len() < request.topics.len() {
+    if log.topics.len() < request.topics().len() {
         return Err(EvmTransportError::InvalidResponse);
     }
     if let Some(block_number) = log.block_number {
-        if let EvmBlockSelector::Number(from_block) = request.from_block {
-            if block_number < from_block {
+        if let EvmBlockSelector::Number(from_block) = request.from_block() {
+            if block_number < *from_block {
                 return Err(EvmTransportError::InvalidResponse);
             }
         }
-        if let EvmBlockSelector::Number(to_block) = request.to_block {
-            if block_number > to_block {
+        if let EvmBlockSelector::Number(to_block) = request.to_block() {
+            if block_number > *to_block {
                 return Err(EvmTransportError::InvalidResponse);
             }
         }

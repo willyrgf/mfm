@@ -2,9 +2,8 @@ use super::*;
 use ed25519_dalek::SigningKey;
 use mfm_artifact_capabilities::ArtifactEvidenceRef;
 use mfm_btc_capabilities::{
-    BtcAddress, BtcBalanceReadProvider, BtcBalanceReadRequest, BtcBlockHash, BtcChainGuard,
-    BtcFinality, BtcHeadSelection, BtcNetworkId, BtcSourceIdentity, BtcSourceStatus,
-    RedactedBtcSourceEvidence,
+    BtcAddress, BtcBalanceReadProvider, BtcBalanceReadRequest, BtcBlockHash, BtcFinality,
+    BtcHeadSelection, BtcNetworkId, BtcSourceIdentity, BtcSourceStatus, RedactedBtcSourceEvidence,
 };
 use mfm_canonical::sha256_digest_bytes;
 use mfm_facts::{
@@ -20,7 +19,8 @@ use mfm_ids::{
 };
 use mfm_spec::v1::MediaType;
 use mfm_states_btc::{
-    CollectorCheckpointSubject, RecordCollectorCheckpointConfig, RecordCollectorCheckpointInput,
+    normalize_chain_head_response, BtcChainHeadFact, CollectorCheckpointSubject,
+    ObserveBtcChainHeadConfig, RecordCollectorCheckpointConfig, RecordCollectorCheckpointInput,
 };
 use mfm_store::v1::{
     self as store,
@@ -286,29 +286,25 @@ impl BtcJsonRpcChainHeadTransport for MockTransport {
 }
 
 fn make_request(selection: BtcHeadSelection) -> BtcChainHeadRequest {
-    BtcChainHeadRequest {
-        guard: BtcChainGuard::new(
-            BtcNetworkId::new("bitcoin-mainnet").expect("network"),
-            BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
-            "main",
-        )
-        .expect("guard"),
+    BtcChainHeadRequest::new(
+        BtcNetworkId::new("bitcoin-mainnet").expect("network"),
+        BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
+        "main",
         selection,
-    }
+    )
+    .expect("request")
 }
 
 fn make_balance_request(address: &str) -> BtcBalanceReadRequest {
-    BtcBalanceReadRequest {
-        guard: BtcChainGuard::new(
-            BtcNetworkId::new("bitcoin-mainnet").expect("network"),
-            BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
-            "main",
-        )
-        .expect("guard"),
-        address: BtcAddress::new(address).expect("address"),
-        block_height: 850_000,
-        block_hash: BtcBlockHash::new(BEST_HASH).expect("hash"),
-    }
+    BtcBalanceReadRequest::new(
+        BtcNetworkId::new("bitcoin-mainnet").expect("network"),
+        BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
+        "main",
+        BtcAddress::new(address).expect("address"),
+        850_000,
+        BtcBlockHash::new(BEST_HASH).expect("hash"),
+    )
+    .expect("request")
 }
 
 fn chain_head_response(
@@ -320,8 +316,8 @@ fn chain_head_response(
     BtcChainHeadResponse {
         evidence: RedactedBtcSourceEvidence::from_request(request, "main", BtcSourceStatus::Synced)
             .expect("evidence"),
-        head_kind: request.selection.head_kind(),
-        finality: request.selection.finality(),
+        head_kind: request.selection().head_kind(),
+        finality: request.selection().finality(),
         block_height,
         block_hash: BtcBlockHash::new(block_hash).expect("hash"),
         provider_time_unix_ms,
@@ -388,6 +384,36 @@ fn checkpoint_query_config() -> QueryCollectorCheckpointConfig {
         bitcoin_network: "main".to_owned(),
         store_scope: "mfm.store.default".to_owned(),
     }
+}
+
+fn observe_config() -> ObserveBtcChainHeadConfig {
+    ObserveBtcChainHeadConfig {
+        network: "bitcoin-mainnet".to_owned(),
+        bitcoin_network: "main".to_owned(),
+        semantic_source_identity: "public-bitcoin-core".to_owned(),
+        head_kind: "best".to_owned(),
+        confirmation_depth: None,
+        max_source_reads: std::num::NonZeroU64::new(1).expect("nonzero"),
+    }
+}
+
+#[test]
+fn chain_head_request_uses_semantic_config_fields() {
+    let config = ObserveBtcChainHeadConfig {
+        head_kind: "confirmed".to_owned(),
+        confirmation_depth: Some(std::num::NonZeroU64::new(6).expect("nonzero")),
+        ..observe_config()
+    };
+
+    let request = chain_head_request(&config).expect("request");
+
+    assert_eq!(request.network_id().as_str(), "bitcoin-mainnet");
+    assert_eq!(request.source_identity().as_str(), "public-bitcoin-core");
+    assert_eq!(request.bitcoin_network(), "main");
+    assert_eq!(
+        request.selection(),
+        BtcHeadSelection::confirmed(6).expect("confirmed")
+    );
 }
 
 fn checkpoint_query_input() -> QueryCollectorCheckpointInput {
@@ -787,34 +813,57 @@ async fn provider_classifies_json_rpc_failure_without_message() {
     assert!(!rendered.contains("secret provider message"));
 }
 
-#[test]
-fn replay_helper_verifies_recorded_evidence_without_transport() {
-    let request = make_request(BtcHeadSelection::best());
+async fn replay_fact_from_recorded_provider(
+    config: &ObserveBtcChainHeadConfig,
+    response: BtcChainHeadResponse,
+    input: &ObserveBtcChainHeadInput,
+) -> Result<BtcChainHeadFact> {
+    let request = chain_head_request(config)?;
+    let provider = RecordedBtcChainHeadProvider::new(response);
+    let response = provider
+        .read_chain_head(&request)
+        .await
+        .map_err(|_| BtcJsonRpcAdapterError::ReplayEvidenceMismatch)?;
+    normalize_chain_head_response(config, &response, input)
+        .map(|observation| observation.into_fact())
+        .map_err(|_| BtcJsonRpcAdapterError::ReplayEvidenceMismatch)
+}
+
+#[tokio::test]
+async fn recorded_provider_verifies_evidence_and_materializes_fact() {
+    let config = observe_config();
+    let request = chain_head_request(&config).expect("request");
     let response = chain_head_response(&request, 850_000, BEST_HASH, Some(1_720_000_000_000));
 
-    verify_recorded_chain_head_evidence(&request, &response).expect("evidence");
-    let fact = replay_chain_head_fact_from_evidence(
-        &request,
-        &response,
+    let fact = replay_fact_from_recorded_provider(
+        &config,
+        response,
         &observe_input(None, Some(1_720_000_001_000)),
     )
+    .await
     .expect("replay fact");
     assert_eq!(fact.response().block_height(), 850_000);
 }
 
-#[test]
-fn replay_helper_rejects_mismatched_recorded_evidence() {
+#[tokio::test]
+async fn recorded_provider_rejects_mismatched_recorded_evidence() {
     let request = make_request(BtcHeadSelection::best());
     let mismatched_request = make_request(BtcHeadSelection::confirmed(6).expect("confirmed"));
     let response = chain_head_response(&mismatched_request, 849_994, CONFIRMED_HASH, None);
+    let provider = RecordedBtcChainHeadProvider::new(response);
 
-    let error = verify_recorded_chain_head_evidence(&request, &response).expect_err("mismatch");
-    assert_eq!(error, BtcJsonRpcAdapterError::ReplayEvidenceMismatch);
+    let error = provider
+        .read_chain_head(&request)
+        .await
+        .expect_err("mismatch");
+
+    assert!(matches!(error, BtcCapabilityError::SourceMismatch { .. }));
 }
 
-#[test]
-fn replay_helper_rejects_incompatible_loaded_checkpoints() {
-    let request = make_request(BtcHeadSelection::best());
+#[tokio::test]
+async fn recorded_provider_replay_rejects_incompatible_loaded_checkpoints() {
+    let config = observe_config();
+    let request = chain_head_request(&config).expect("request");
     let response = chain_head_response(&request, 850_000, BEST_HASH, Some(1_720_000_000_000));
 
     for (name, input) in [
@@ -830,8 +879,9 @@ fn replay_helper_rejects_incompatible_loaded_checkpoints() {
             observe_input(Some(checkpoint_fact(850_001)), Some(1_720_000_001_000)),
         ),
     ] {
-        let error =
-            replay_chain_head_fact_from_evidence(&request, &response, &input).expect_err(name);
+        let error = replay_fact_from_recorded_provider(&config, response.clone(), &input)
+            .await
+            .expect_err(name);
 
         assert_eq!(
             error,
@@ -841,15 +891,17 @@ fn replay_helper_rejects_incompatible_loaded_checkpoints() {
     }
 }
 
-#[test]
-fn checkpoint_record_fixture_uses_recorded_chain_head_fact() {
-    let request = make_request(BtcHeadSelection::best());
+#[tokio::test]
+async fn checkpoint_record_fixture_uses_recorded_chain_head_fact() {
+    let config = observe_config();
+    let request = chain_head_request(&config).expect("request");
     let response = chain_head_response(&request, 850_000, BEST_HASH, Some(1_720_000_000_000));
-    let chain_head_fact = replay_chain_head_fact_from_evidence(
-        &request,
-        &response,
+    let chain_head_fact = replay_fact_from_recorded_provider(
+        &config,
+        response,
         &observe_input(None, Some(1_720_000_001_000)),
     )
+    .await
     .expect("chain-head fact");
     let state = RecordCollectorCheckpointState::new(
         ValidatedConfig::new(checkpoint_record_config()).expect("config"),

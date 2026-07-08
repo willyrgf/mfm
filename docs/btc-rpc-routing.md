@@ -32,10 +32,10 @@ The only supported Bitcoin runtime shape is `btc.routes.<source_identity>`. The 
 `btc.json_rpc` shape is intentionally rejected. Route keys are semantic `BtcSourceIdentity` values,
 not endpoint names, URLs, credential ids, or fallback policies.
 
-## Guarded Reads
+## Source-Bound Reads
 
-Adapters derive a `BtcChainGuard` from workflow config for every live Bitcoin call. The guard
-contains:
+Adapters construct BTC capability requests from workflow config for every live Bitcoin call. Each
+request carries:
 
 - semantic `network_id`
 - semantic `source_identity`
@@ -43,8 +43,9 @@ contains:
 
 The Bitcoin transport resolves `source_identity` through runtime config, probes
 `getblockchaininfo`, and returns redacted evidence containing both expected and observed Bitcoin
-network tags. If the observed tag differs from the guard, the provider returns a source-mismatch
-diagnostic. `validate_guard` only checks that the route exists; it does not perform network IO.
+network tags. If the observed tag differs from the request authority, the provider returns a
+source-mismatch diagnostic. `validate_source_binding` only checks that the route exists; it does not
+perform network IO.
 
 Provider diagnostics may carry stable operation ids and closed public fields such as network tags,
 heights, hashes, and numeric status codes. They must never carry RPC URLs, credentials, file paths,
@@ -54,7 +55,7 @@ provider messages, request bodies, or response bodies.
 
 Portfolio Bitcoin balance reads are exact-anchor requests. The request carries the address,
 `block_height`, and `block_hash` obtained from the pinned execution anchor. The response must verify
-the same address, guard evidence, height, and hash.
+the same address, source evidence, height, and hash.
 
 Bitcoin Core `scantxoutset` cannot prove an arbitrary prior exact anchor, so the live Bitcoin Core
 provider rejects portfolio balance reads with `unsupported_operation` before scanning. This is a
@@ -71,14 +72,14 @@ network tag so checkpoints cannot cross expected Bitcoin networks.
 ## Replay
 
 Replay uses the stored certified spec, typed run stream, typed artifacts, and replay verifiers. It
-must not open live RPC connections or consult runtime config. Replay verifies recorded Bitcoin
-evidence against the certified request guard.
+must not open live RPC connections or consult runtime config. Replay providers rebuild the certified
+request authority and verify recorded Bitcoin evidence against those request fields.
 
 ## Contributor Guidance
 
 - Keep runtime config parsing in `mfm-runtime-config`.
 - Keep live Bitcoin route resolution in `mfm-transports-btc-jsonrpc-http`.
-- Keep workflow-specific guard derivation in adapters.
+- Keep workflow-specific request construction in adapters.
 - Keep binaries limited to parsing and passing runtime config paths.
 - Do not add fallback source routing, old singleton config compatibility, or current-only balance
   semantics without a deliberate new design.

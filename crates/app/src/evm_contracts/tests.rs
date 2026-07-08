@@ -20,11 +20,12 @@ use mfm_evm_capabilities::{
     EvmChainIdentityResponse, EvmCodeReadProvider, EvmCodeReadRequest, EvmCodeReadResponse,
     EvmFeeReadProvider, EvmFeeReadRequest, EvmFeeReadResponse, EvmGasEstimateProvider,
     EvmGasEstimateRequest, EvmGasEstimateResponse, EvmLogEntry, EvmLogsReadProvider,
-    EvmLogsReadRequest, EvmLogsReadResponse, EvmNonceOccupancy, EvmNonceOccupancyReadProvider,
-    EvmNonceOccupancyReadRequest, EvmNonceOccupancyReadResponse, EvmNonceReadProvider,
-    EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider, EvmReceiptReadRequest,
-    EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef, EvmTransactionSubmitProvider,
-    EvmTransactionSubmitRequest, EvmTransactionSubmitResponse, RedactedEvmSourceEvidence,
+    EvmLogsReadRequest, EvmLogsReadResponse, EvmNetworkId, EvmNonceOccupancy,
+    EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest, EvmNonceOccupancyReadResponse,
+    EvmNonceReadProvider, EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider,
+    EvmReceiptReadRequest, EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef,
+    EvmTransactionSubmitProvider, EvmTransactionSubmitRequest, EvmTransactionSubmitResponse,
+    RedactedEvmSourceEvidence,
 };
 use mfm_evm_contract_model::{
     ContextBoundValidationReport, ContractArtifactConfig, LifecycleArtifactEvidenceRef,
@@ -708,7 +709,7 @@ async fn app_runner_resumes_replays_and_renders_deploy_lifecycle_run() {
 }
 
 #[tokio::test]
-async fn replay_diagnostic_resolves_evm_guard_from_side_effect_submit_node() {
+async fn replay_diagnostic_accepts_side_effect_submit_node_public_details() {
     let signer = test_contract_signer();
     let (_store, services) = contract_test_services(|artifacts| {
         TestRuntimeFactory::with_signer(artifacts, Arc::new(signer.provider), true)
@@ -742,21 +743,9 @@ async fn replay_diagnostic_resolves_evm_guard_from_side_effect_submit_node() {
     assert!(submit_node.side_effect.is_some());
     assert_ne!(
         verify_node.config_ref.schema_id, submit_node.config_ref.schema_id,
-        "verifier framework config must not be used as EVM guard authority"
+        "verifier framework config must not be used as EVM route authority"
     );
 
-    let guards = crate::certified_evm_chain_guards_for_failed_node(
-        &runtime_spec,
-        &request.evidence,
-        &verify_node.node_id,
-    )
-    .expect("verifier diagnostics derive submit-node guards");
-    assert!(
-        guards.iter().any(|guard| {
-            guard.network_id().as_str() == "reth-dev" && guard.expected_chain_id() == 31337
-        }),
-        "derived guards must include the submit node's certified EVM guard"
-    );
     let details = json!({
         "network_id": "reth-dev",
         "expected_chain_id": 31337,
@@ -766,8 +755,8 @@ async fn replay_diagnostic_resolves_evm_guard_from_side_effect_submit_node() {
     });
     let expected =
         events::RedactedJson::new(crate::canonical_value_digest(&details).expect("details digest"));
-    crate::verify_replay_public_details(Some(&expected), &details, &guards)
-        .expect("verifier diagnostic details match submit-node guard");
+    crate::verify_replay_public_details(Some(&expected), &details)
+        .expect("verifier diagnostic details are valid public chain-mismatch details");
 }
 
 #[tokio::test]
@@ -978,11 +967,15 @@ struct TestEvmReads {
 }
 
 impl TestEvmProvider {
-    fn evidence(&self, guard: &EvmChainGuard) -> RedactedEvmSourceEvidence {
+    fn evidence(
+        &self,
+        network_id: &EvmNetworkId,
+        expected_chain_id: u64,
+    ) -> RedactedEvmSourceEvidence {
         RedactedEvmSourceEvidence {
-            network_id: guard.network_id().clone(),
-            expected_chain_id: guard.expected_chain_id(),
-            observed_chain_id: guard.expected_chain_id(),
+            network_id: network_id.clone(),
+            expected_chain_id,
+            observed_chain_id: expected_chain_id,
             source_ref: self.source_ref.clone(),
             policy_id: self.policy_id.clone(),
         }
@@ -1023,8 +1016,8 @@ impl EvmChainIdentityProvider for TestEvmProvider {
                 tokio::time::sleep(delay).await;
             }
             Ok(EvmChainIdentityResponse {
-                evidence: self.evidence(&request.guard),
-                chain_id: request.guard.expected_chain_id(),
+                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
+                chain_id: request.expected_chain_id(),
                 client_version: Some("mfm-test-evm".to_owned()),
             })
         })
@@ -1039,10 +1032,10 @@ impl EvmBlockReadProvider for TestEvmProvider {
         if !self.mutation {
             return failed_evm();
         }
-        assert_eq!(request.block, EvmBlockSelector::Latest);
+        assert_eq!(request.block(), &EvmBlockSelector::Latest);
         Box::pin(async move {
             Ok(EvmBlockReadResponse {
-                evidence: self.evidence(&request.guard),
+                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
                 block_number: 64,
                 block_hash: Default::default(),
             })
@@ -1061,7 +1054,7 @@ impl EvmNonceReadProvider for TestEvmProvider {
         Box::pin(async move {
             self.record_prepare_read(TestPrepareReadKind::Nonce)?;
             Ok(EvmNonceReadResponse {
-                evidence: self.evidence(&request.guard),
+                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
                 nonce: 7,
             })
         })
@@ -1079,7 +1072,7 @@ impl EvmFeeReadProvider for TestEvmProvider {
         Box::pin(async move {
             self.record_prepare_read(TestPrepareReadKind::Fee)?;
             Ok(EvmFeeReadResponse {
-                evidence: self.evidence(&request.guard),
+                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
                 base_fee_per_gas: Some(5),
                 priority_fee_per_gas: Some(3),
                 max_fee_per_gas: Some(11),
@@ -1100,7 +1093,7 @@ impl EvmGasEstimateProvider for TestEvmProvider {
         Box::pin(async move {
             self.record_prepare_read(TestPrepareReadKind::Gas)?;
             Ok(EvmGasEstimateResponse {
-                evidence: self.evidence(&request.guard),
+                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
                 gas_limit: 21_000,
             })
         })
@@ -1117,8 +1110,8 @@ impl EvmTransactionSubmitProvider for TestEvmProvider {
         }
         Box::pin(async move {
             Ok(EvmTransactionSubmitResponse {
-                evidence: self.evidence(&request.guard),
-                transaction_hash: request.signed_payload.transaction_hash(),
+                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
+                transaction_hash: request.signed_payload().transaction_hash(),
             })
         })
     }
@@ -1141,8 +1134,8 @@ impl EvmReceiptReadProvider for TestEvmProvider {
             let mut reads = self.reads.lock().map_err(|_| test_evm_provider_failure())?;
             reads.receipt += 1;
             Ok(EvmReceiptReadResponse {
-                evidence: self.evidence(&request.guard),
-                transaction_hash: request.transaction_hash,
+                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
+                transaction_hash: request.transaction_hash(),
                 block_number: 42,
                 status: true,
             })
@@ -1157,7 +1150,7 @@ impl EvmNonceOccupancyReadProvider for TestEvmProvider {
     ) -> EvmCapabilityFuture<'a, EvmNonceOccupancyReadResponse> {
         Box::pin(async move {
             Ok(EvmNonceOccupancyReadResponse {
-                evidence: self.evidence(&request.guard),
+                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
                 outcome: EvmNonceOccupancy::Unknown,
             })
         })
@@ -1173,7 +1166,7 @@ impl EvmCallReadProvider for TestEvmProvider {
             let mut return_data = vec![0_u8; 32];
             return_data[31] = 1;
             Ok(EvmCallReadResponse {
-                evidence: self.evidence(&request.guard),
+                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
                 return_data,
             })
         })
@@ -1188,7 +1181,7 @@ impl EvmCodeReadProvider for TestEvmProvider {
         Box::pin(async move {
             let code = vec![0x60, 0x00];
             Ok(EvmCodeReadResponse {
-                evidence: self.evidence(&request.guard),
+                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
                 code_hash: keccak256(&code),
                 code,
             })
@@ -1203,10 +1196,10 @@ impl EvmLogsReadProvider for TestEvmProvider {
     ) -> EvmCapabilityFuture<'a, EvmLogsReadResponse> {
         Box::pin(async move {
             Ok(EvmLogsReadResponse {
-                evidence: self.evidence(&request.guard),
+                evidence: self.evidence(request.network_id(), request.expected_chain_id()),
                 logs: vec![EvmLogEntry {
-                    address: request.address.expect("validation log address"),
-                    topics: request.topics.clone(),
+                    address: request.address().expect("validation log address"),
+                    topics: request.topics().to_vec(),
                     data: Vec::new(),
                     block_number: Some(42),
                     transaction_hash: None,

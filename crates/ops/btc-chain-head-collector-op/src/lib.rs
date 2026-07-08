@@ -134,7 +134,7 @@ pub fn validate_btc_chain_head_collector_config(
         .map_err(|error| error.to_string())?;
     config
         .observe_chain_head_config()
-        .request()
+        .selection()
         .map_err(|error| error.to_string())?;
     mfm_states_btc::validate_record_collector_checkpoint_config(
         &config.record_checkpoint_config(),

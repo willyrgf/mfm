@@ -53,9 +53,10 @@ JSON with the same shape is also accepted by `mfm-runtime-config`.
 Runtime config validation rejects source-level chain ids. Expected chain id comes from workflow
 semantics: portfolio `NetworkConfig.chain_id` or contract lifecycle `network.expected_chain_id`.
 
-## Guarded Requests
+## Source-Bound Requests
 
-Adapters derive an `EvmChainGuard` from workflow config for every live EVM call. The guard contains:
+Adapters construct EVM capability requests from workflow config for every live EVM call. Each
+request carries:
 
 - semantic `network_id`
 - expected EVM chain id
@@ -63,6 +64,8 @@ Adapters derive an `EvmChainGuard` from workflow config for every live EVM call.
 The EVM transport owns route and source resolution. It resolves `network_id` through runtime config,
 selects a configured source/policy, probes chain identity, and returns redacted evidence containing
 the semantic network id, expected chain id, observed chain id, selected source ref, and policy id.
+A successful provider response has already enforced the request-local route and chain identity, and
+the returned source evidence matches the request by construction.
 
 The selected source and policy ids are audit provenance only. Replay and public output must not
 resolve them against current runtime config.
@@ -94,7 +97,7 @@ validation evidence, and terminal output artifacts against that expected authori
 
 - Keep runtime config parsing in `mfm-runtime-config`.
 - Keep live EVM source and route resolution in `mfm-transports-evm`.
-- Keep workflow-specific guard derivation in adapters.
+- Keep workflow-specific request construction in adapters.
 - Keep binaries limited to parsing and passing runtime config paths.
 - Add tests that prove replay uses recorded evidence and fails closed on missing or mismatched
   facts, receipts, confirmations, artifacts, or verifier identities.

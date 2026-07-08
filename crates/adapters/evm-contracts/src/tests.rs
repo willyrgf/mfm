@@ -36,21 +36,24 @@ fn test_evm_provider_failure() -> EvmCapabilityError {
     ))
 }
 
-fn evidence_for_guard(guard: &EvmChainGuard) -> RedactedEvmSourceEvidence {
+fn evidence_for_source(
+    network_id: &EvmNetworkId,
+    expected_chain_id: u64,
+) -> RedactedEvmSourceEvidence {
     RedactedEvmSourceEvidence {
-        network_id: guard.network_id().clone(),
-        expected_chain_id: guard.expected_chain_id(),
-        observed_chain_id: guard.expected_chain_id(),
+        network_id: network_id.clone(),
+        expected_chain_id,
+        observed_chain_id: expected_chain_id,
         source_ref: EvmSourceRef::new("local").expect("source"),
         policy_id: EvmSourcePolicyId::new("test").expect("policy"),
     }
 }
 
-fn mismatched_evidence_for_guard(guard: &EvmChainGuard) -> RedactedEvmSourceEvidence {
-    RedactedEvmSourceEvidence {
-        observed_chain_id: guard.expected_chain_id() + 1,
-        ..evidence_for_guard(guard)
-    }
+fn evidence_for_request(
+    network_id: &EvmNetworkId,
+    expected_chain_id: u64,
+) -> RedactedEvmSourceEvidence {
+    evidence_for_source(network_id, expected_chain_id)
 }
 
 fn artifact_json() -> serde_json::Value {
@@ -1212,7 +1215,6 @@ enum TestEvmProviderMode {
     },
     ReceiptFailure,
     Finality,
-    FinalityMismatchedEvidence,
 }
 
 impl TestEvmProviders {
@@ -1247,10 +1249,6 @@ impl TestEvmProviders {
 
     fn finality() -> Self {
         Self::new(TestEvmProviderMode::Finality)
-    }
-
-    fn finality_mismatched_evidence() -> Self {
-        Self::new(TestEvmProviderMode::FinalityMismatchedEvidence)
     }
 
     fn submit_hash_mismatch(returned_hash: B256, submit_count: Arc<Mutex<u32>>) -> Self {
@@ -1430,8 +1428,11 @@ impl EvmChainIdentityProvider for TestEvmProviders {
             | TestEvmProviderMode::Recovery { .. }
             | TestEvmProviderMode::SubmitHashMismatch { .. } => Box::pin(async {
                 Ok(EvmChainIdentityResponse {
-                    evidence: evidence_for_guard(&request.guard),
-                    chain_id: request.guard.expected_chain_id(),
+                    evidence: evidence_for_request(
+                        request.network_id(),
+                        request.expected_chain_id(),
+                    ),
+                    chain_id: request.expected_chain_id(),
                     client_version: Some("test-client".to_owned()),
                 })
             }),
@@ -1446,13 +1447,9 @@ impl EvmBlockReadProvider for TestEvmProviders {
         request: &'a EvmBlockReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmBlockReadResponse> {
         match self.mode {
-            TestEvmProviderMode::Finality | TestEvmProviderMode::FinalityMismatchedEvidence => {
-                let evidence = match self.mode {
-                    TestEvmProviderMode::FinalityMismatchedEvidence => {
-                        mismatched_evidence_for_guard(&request.guard)
-                    }
-                    _ => evidence_for_guard(&request.guard),
-                };
+            TestEvmProviderMode::Finality => {
+                let evidence =
+                    evidence_for_request(request.network_id(), request.expected_chain_id());
                 Box::pin(async move {
                     Ok(EvmBlockReadResponse {
                         evidence,
@@ -1474,15 +1471,21 @@ impl EvmNonceReadProvider for TestEvmProviders {
         match self.mode {
             TestEvmProviderMode::Preparation => Box::pin(async {
                 Ok(EvmNonceReadResponse {
-                    evidence: evidence_for_guard(&request.guard),
+                    evidence: evidence_for_request(
+                        request.network_id(),
+                        request.expected_chain_id(),
+                    ),
                     nonce: 7,
                 })
             }),
             TestEvmProviderMode::Recovery { pending_nonce, .. } => {
-                assert_eq!(request.block, EvmBlockSelector::Pending);
+                assert_eq!(request.block(), &EvmBlockSelector::Pending);
                 Box::pin(async move {
                     Ok(EvmNonceReadResponse {
-                        evidence: evidence_for_guard(&request.guard),
+                        evidence: evidence_for_request(
+                            request.network_id(),
+                            request.expected_chain_id(),
+                        ),
                         nonce: pending_nonce,
                     })
                 })
@@ -1500,7 +1503,10 @@ impl EvmFeeReadProvider for TestEvmProviders {
         match self.mode {
             TestEvmProviderMode::Preparation => Box::pin(async {
                 Ok(EvmFeeReadResponse {
-                    evidence: evidence_for_guard(&request.guard),
+                    evidence: evidence_for_request(
+                        request.network_id(),
+                        request.expected_chain_id(),
+                    ),
                     base_fee_per_gas: Some(5),
                     priority_fee_per_gas: Some(3),
                     max_fee_per_gas: Some(11),
@@ -1520,7 +1526,10 @@ impl EvmGasEstimateProvider for TestEvmProviders {
         match self.mode {
             TestEvmProviderMode::Preparation => Box::pin(async {
                 Ok(EvmGasEstimateResponse {
-                    evidence: evidence_for_guard(&request.guard),
+                    evidence: evidence_for_request(
+                        request.network_id(),
+                        request.expected_chain_id(),
+                    ),
                     gas_limit: 21_000,
                 })
             }),
@@ -1537,8 +1546,9 @@ impl EvmTransactionSubmitProvider for TestEvmProviders {
         match self.mode {
             TestEvmProviderMode::Recovery { .. } => {
                 let submit_count = Arc::clone(&self.submit_count);
-                let transaction_hash = request.signed_payload.transaction_hash();
-                let evidence = evidence_for_guard(&request.guard);
+                let transaction_hash = request.signed_payload().transaction_hash();
+                let evidence =
+                    evidence_for_request(request.network_id(), request.expected_chain_id());
                 Box::pin(async move {
                     *submit_count.lock().expect("submit count") += 1;
                     Ok(mfm_evm_capabilities::EvmTransactionSubmitResponse {
@@ -1549,7 +1559,8 @@ impl EvmTransactionSubmitProvider for TestEvmProviders {
             }
             TestEvmProviderMode::SubmitHashMismatch { returned_hash } => {
                 let submit_count = Arc::clone(&self.submit_count);
-                let evidence = evidence_for_guard(&request.guard);
+                let evidence =
+                    evidence_for_request(request.network_id(), request.expected_chain_id());
                 Box::pin(async move {
                     *submit_count.lock().expect("submit count") += 1;
                     Ok(mfm_evm_capabilities::EvmTransactionSubmitResponse {
@@ -1570,8 +1581,9 @@ impl EvmReceiptReadProvider for TestEvmProviders {
     ) -> EvmCapabilityFuture<'a, EvmReceiptReadResponse> {
         match self.mode {
             TestEvmProviderMode::Recovery { receipt_mode, .. } => {
-                let transaction_hash = request.transaction_hash;
-                let evidence = evidence_for_guard(&request.guard);
+                let transaction_hash = request.transaction_hash();
+                let evidence =
+                    evidence_for_request(request.network_id(), request.expected_chain_id());
                 Box::pin(async move {
                     match receipt_mode {
                         RecoveryReceiptMode::Landed => Ok(EvmReceiptReadResponse {
@@ -1605,8 +1617,9 @@ impl EvmNonceOccupancyReadProvider for TestEvmProviders {
     ) -> EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmNonceOccupancyReadResponse> {
         match self.mode {
             TestEvmProviderMode::Recovery { occupancy_mode, .. } => {
-                let nonce = request.nonce;
-                let evidence = evidence_for_guard(&request.guard);
+                let nonce = request.nonce();
+                let evidence =
+                    evidence_for_request(request.network_id(), request.expected_chain_id());
                 Box::pin(async move {
                     match occupancy_mode {
                         RecoveryOccupancyMode::Unknown => {
@@ -1649,7 +1662,7 @@ impl EvmCodeReadProvider for TestEvmProviders {
         Box::pin(async {
             let code = vec![0x60, 0x00];
             Ok(EvmCodeReadResponse {
-                evidence: evidence_for_guard(&request.guard),
+                evidence: evidence_for_request(request.network_id(), request.expected_chain_id()),
                 code_hash: keccak256(&code),
                 code,
             })
@@ -3373,22 +3386,6 @@ async fn finality_confirmation_requires_certified_depth() {
         .await
         .expect_err("insufficient confirmations");
     assert!(matches!(error, mfm_runtime::RuntimeError::Blocked(_)));
-}
-
-#[tokio::test]
-async fn finality_rejects_mismatched_guard_evidence() {
-    let runtime = runtime_from_provider(TestEvmProviders::finality_mismatched_evidence());
-    let receipt = finality_receipt();
-
-    let error = verified_test_finality(&runtime, &receipt, 1)
-        .await
-        .expect_err("mismatched evidence");
-
-    assert!(matches!(
-        error,
-        mfm_runtime::RuntimeError::InvalidRunnerOutputDiagnostic { .. }
-    ));
-    assert!(error.to_string().contains("EVM source evidence"));
 }
 
 #[test]

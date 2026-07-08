@@ -471,8 +471,8 @@ impl BtcChainHeadReadProvider for MockBtcProvider {
                     BtcSourceStatus::Synced,
                 )
                 .expect("evidence"),
-                head_kind: request.selection.head_kind(),
-                finality: request.selection.finality(),
+                head_kind: request.selection().head_kind(),
+                finality: request.selection().finality(),
                 block_height: head.height,
                 block_hash: BtcBlockHash::new(head.hash).expect("block hash"),
                 provider_time_unix_ms: head.provider_time_unix_ms,

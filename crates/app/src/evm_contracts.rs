@@ -8,9 +8,6 @@ use mfm_store::v1 as store;
 
 use crate::{evm_json_rpc_client, runtime_evm_transport_error, RuntimeConfigLoader};
 
-#[cfg(test)]
-use mfm_evm_capabilities::EvmChainGuard;
-
 #[derive(Clone)]
 struct RuntimeConfigEvmContractRuntimeFactory {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
