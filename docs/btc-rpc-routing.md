@@ -32,18 +32,20 @@ The only supported Bitcoin runtime shape is `btc.routes.<source_identity>`. The 
 `btc.json_rpc` shape is intentionally rejected. Route keys are semantic `BtcSourceIdentity` values,
 not endpoint names, URLs, credential ids, or fallback policies.
 
-## Source-Bound Reads
+## Provider-Bound Reads
 
-Adapters construct BTC capability requests from workflow config for every live Bitcoin call. Each
-request carries:
+App assembly creates a raw `BtcJsonRpcRouter` from runtime config. Runners and adapters derive a
+`BtcSourceBinding` from certified workflow semantics, validate that binding without network IO, and
+bind it to a `BtcJsonRpcSourceProvider` before any live call.
 
-- semantic `network_id`
-- semantic `source_identity`
-- expected Bitcoin Core network tag: `main`, `test`, `signet`, or `regtest`
+BTC capability requests are operation-only. Chain-head requests carry only the requested head
+selection. Portfolio balance requests carry only the address, `block_height`, and `block_hash`
+obtained from the pinned execution anchor. They do not carry `network_id`, `source_identity`,
+expected network tags, endpoints, or credentials.
 
-The Bitcoin transport resolves `source_identity` through runtime config, probes
+The bound Bitcoin provider resolves `source_identity` through runtime config, probes
 `getblockchaininfo`, and returns redacted evidence containing both expected and observed Bitcoin
-network tags. If the observed tag differs from the request authority, the provider returns a
+network tags. If the observed tag differs from the provider binding, the provider returns a
 source-mismatch diagnostic. `validate_source_binding` only checks that the route exists; it does not
 perform network IO.
 
@@ -53,9 +55,8 @@ provider messages, request bodies, or response bodies.
 
 ## Strict Portfolio Snapshots
 
-Portfolio Bitcoin balance reads are exact-anchor requests. The request carries the address,
-`block_height`, and `block_hash` obtained from the pinned execution anchor. The response must verify
-the same address, source evidence, height, and hash.
+Portfolio Bitcoin balance reads are exact-anchor requests. The response must verify the same
+address, provider source evidence, height, and hash.
 
 Bitcoin Core `scantxoutset` cannot prove an arbitrary prior exact anchor, so the live Bitcoin Core
 provider rejects portfolio balance reads with `unsupported_operation` before scanning. This is a
@@ -73,13 +74,14 @@ network tag so checkpoints cannot cross expected Bitcoin networks.
 
 Replay uses the stored certified spec, typed run stream, typed artifacts, and replay verifiers. It
 must not open live RPC connections or consult runtime config. Replay providers rebuild the certified
-request authority and verify recorded Bitcoin evidence against those request fields.
+provider binding and verify recorded Bitcoin evidence against that binding and operation request.
 
 ## Contributor Guidance
 
 - Keep runtime config parsing in `mfm-runtime-config`.
 - Keep live Bitcoin route resolution in `mfm-transports-btc-jsonrpc-http`.
-- Keep workflow-specific request construction in adapters.
+- Bind live providers from certified semantic source intent before issuing operation-only requests.
+- Keep workflow-specific operation construction in adapters.
 - Keep binaries limited to parsing and passing runtime config paths.
 - Do not add fallback source routing, old singleton config compatibility, or current-only balance
   semantics without a deliberate new design.

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use mfm_btc_capabilities::{
     BtcBlockHash, BtcCapabilityFuture, BtcChainHeadReadProvider, BtcChainHeadRequest,
-    BtcChainHeadResponse, BtcSourceStatus, RedactedBtcSourceEvidence,
+    BtcChainHeadResponse, BtcSourceBinding, BtcSourceStatus, RedactedBtcSourceEvidence,
 };
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1::{ArtifactRole, KernelEventPayload};
@@ -271,7 +271,7 @@ async fn bitcoin_chain_head_collector_recovers_interrupted_observation_without_p
 fn collector_services(
     store: AsyncInMemoryRunStore,
     artifacts: Arc<dyn RetainedArtifactReadProvider>,
-    btc: Arc<dyn BtcChainHeadReadProvider>,
+    btc: Arc<dyn mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory>,
     fact_index: Arc<InMemoryControlFactIndexProvider>,
 ) -> mfm_app::RunServices<AsyncInMemoryRunStore, AsyncInMemoryRunStore> {
     let receipt_trust_root = fact_index.receipt_trust_root();
@@ -433,16 +433,17 @@ struct MockHead {
     provider_time_unix_ms: Option<u64>,
 }
 
+#[derive(Clone)]
 struct MockBtcProvider {
-    heads: Mutex<VecDeque<MockHead>>,
-    calls: Mutex<usize>,
+    heads: Arc<Mutex<VecDeque<MockHead>>>,
+    calls: Arc<Mutex<usize>>,
 }
 
 impl MockBtcProvider {
     fn new(heads: Vec<MockHead>) -> Self {
         Self {
-            heads: Mutex::new(heads.into()),
-            calls: Mutex::new(0),
+            heads: Arc::new(Mutex::new(heads.into())),
+            calls: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -451,22 +452,47 @@ impl MockBtcProvider {
     }
 }
 
-impl BtcChainHeadReadProvider for MockBtcProvider {
+impl mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory for MockBtcProvider {
+    fn validate_source_binding(
+        &self,
+        _binding: &BtcSourceBinding,
+    ) -> mfm_btc_capabilities::Result<()> {
+        Ok(())
+    }
+
+    fn bind_source(
+        &self,
+        binding: BtcSourceBinding,
+    ) -> mfm_btc_capabilities::Result<Arc<dyn BtcChainHeadReadProvider>> {
+        Ok(Arc::new(BoundMockBtcProvider {
+            provider: self.clone(),
+            binding,
+        }))
+    }
+}
+
+struct BoundMockBtcProvider {
+    provider: MockBtcProvider,
+    binding: BtcSourceBinding,
+}
+
+impl BtcChainHeadReadProvider for BoundMockBtcProvider {
     fn read_chain_head<'a>(
         &'a self,
         request: &'a BtcChainHeadRequest,
     ) -> BtcCapabilityFuture<'a, BtcChainHeadResponse> {
         Box::pin(async move {
-            *self.calls.lock().expect("btc calls") += 1;
+            *self.provider.calls.lock().expect("btc calls") += 1;
             let head = self
+                .provider
                 .heads
                 .lock()
                 .expect("btc heads")
                 .pop_front()
                 .expect("mock head");
             Ok(BtcChainHeadResponse {
-                evidence: RedactedBtcSourceEvidence::from_request(
-                    request,
+                evidence: RedactedBtcSourceEvidence::from_binding(
+                    &self.binding,
                     "main",
                     BtcSourceStatus::Synced,
                 )
@@ -481,16 +507,17 @@ impl BtcChainHeadReadProvider for MockBtcProvider {
     }
 }
 
+#[derive(Clone)]
 struct BlockingBtcProvider {
-    called: Mutex<Option<oneshot::Sender<()>>>,
-    calls: Mutex<usize>,
+    called: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    calls: Arc<Mutex<usize>>,
 }
 
 impl BlockingBtcProvider {
     fn new(called: oneshot::Sender<()>) -> Self {
         Self {
-            called: Mutex::new(Some(called)),
-            calls: Mutex::new(0),
+            called: Arc::new(Mutex::new(Some(called))),
+            calls: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -499,14 +526,42 @@ impl BlockingBtcProvider {
     }
 }
 
-impl BtcChainHeadReadProvider for BlockingBtcProvider {
+impl mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory for BlockingBtcProvider {
+    fn validate_source_binding(
+        &self,
+        _binding: &BtcSourceBinding,
+    ) -> mfm_btc_capabilities::Result<()> {
+        Ok(())
+    }
+
+    fn bind_source(
+        &self,
+        _binding: BtcSourceBinding,
+    ) -> mfm_btc_capabilities::Result<Arc<dyn BtcChainHeadReadProvider>> {
+        Ok(Arc::new(BoundBlockingBtcProvider {
+            provider: self.clone(),
+        }))
+    }
+}
+
+struct BoundBlockingBtcProvider {
+    provider: BlockingBtcProvider,
+}
+
+impl BtcChainHeadReadProvider for BoundBlockingBtcProvider {
     fn read_chain_head<'a>(
         &'a self,
         _request: &'a BtcChainHeadRequest,
     ) -> BtcCapabilityFuture<'a, BtcChainHeadResponse> {
         Box::pin(async move {
-            *self.calls.lock().expect("blocking btc calls") += 1;
-            if let Some(called) = self.called.lock().expect("blocking btc signal").take() {
+            *self.provider.calls.lock().expect("blocking btc calls") += 1;
+            if let Some(called) = self
+                .provider
+                .called
+                .lock()
+                .expect("blocking btc signal")
+                .take()
+            {
                 let _ = called.send(());
             }
             future::pending::<mfm_btc_capabilities::Result<BtcChainHeadResponse>>().await

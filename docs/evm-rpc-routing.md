@@ -53,19 +53,21 @@ JSON with the same shape is also accepted by `mfm-runtime-config`.
 Runtime config validation rejects source-level chain ids. Expected chain id comes from workflow
 semantics: portfolio `NetworkConfig.chain_id` or contract lifecycle `network.expected_chain_id`.
 
-## Source-Bound Requests
+## Provider-Bound Requests
 
-Adapters construct EVM capability requests from workflow config for every live EVM call. Each
-request carries:
+App assembly creates a raw `EvmJsonRpcClient` from runtime config. Runners and adapters derive an
+`EvmNetworkBinding` from certified workflow semantics, validate that binding without network IO, and
+bind it to an `EvmJsonRpcNetworkProvider` before any live call.
 
-- semantic `network_id`
-- expected EVM chain id
+EVM capability requests are operation-only. They carry operation parameters such as block selectors,
+accounts, calldata, log filters, signed payloads, or transaction hashes. They do not carry
+`network_id`, expected chain id, source refs, policy ids, endpoints, or credentials.
 
-The EVM transport owns route and source resolution. It resolves `network_id` through runtime config,
-selects a configured source/policy, probes chain identity, and returns redacted evidence containing
-the semantic network id, expected chain id, observed chain id, selected source ref, and policy id.
-A successful provider response has already enforced the request-local route and chain identity, and
-the returned source evidence matches the request by construction.
+The bound provider owns route and source resolution. It resolves the bound `network_id` through
+runtime config, selects a configured source/policy, probes chain identity, and returns redacted
+evidence containing the semantic network id, expected chain id, observed chain id, selected source
+ref, and policy id. A successful provider response has already enforced the provider binding and
+operation-specific identity checks.
 
 The selected source and policy ids are audit provenance only. Replay and public output must not
 resolve them against current runtime config.
@@ -89,7 +91,7 @@ transactions remain runtime-only and must be redacted from diagnostics.
 Replay uses the stored certified spec, typed run stream, typed artifacts, and replay verifiers. It
 must not open live RPC connections or consult runtime config.
 
-EVM contract replay recomputes expected requests from the certified lifecycle context and
+EVM contract replay recomputes the certified semantic binding from the lifecycle context and
 context-bound artifacts, then checks stored fact evidence, side-effect evidence, import evidence,
 validation evidence, and terminal output artifacts against that expected authority.
 
@@ -97,7 +99,8 @@ validation evidence, and terminal output artifacts against that expected authori
 
 - Keep runtime config parsing in `mfm-runtime-config`.
 - Keep live EVM source and route resolution in `mfm-transports-evm`.
-- Keep workflow-specific request construction in adapters.
+- Bind live providers from certified semantic source intent before issuing operation-only requests.
+- Keep workflow-specific operation construction in adapters.
 - Keep binaries limited to parsing and passing runtime config paths.
 - Add tests that prove replay uses recorded evidence and fails closed on missing or mismatched
   facts, receipts, confirmations, artifacts, or verifier identities.

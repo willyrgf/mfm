@@ -9,12 +9,14 @@
 //! ```rust
 //! use mfm_capabilities::CapabilitySpec;
 //! use mfm_evm_capabilities::{
-//!     EvmFeeReadCapability, EvmFeeReadRequest, EvmNetworkId,
+//!     EvmFeeReadCapability, EvmFeeReadRequest, EvmNetworkBinding, EvmNetworkId,
 //! };
 //!
-//! let request = EvmFeeReadRequest::new(EvmNetworkId::new("ethereum-mainnet")?, 1)?;
-//! assert_eq!(request.network_id().as_str(), "ethereum-mainnet");
+//! let binding = EvmNetworkBinding::new(EvmNetworkId::new("ethereum-mainnet")?, 1)?;
+//! let request = EvmFeeReadRequest::new();
+//! assert_eq!(binding.network_id().as_str(), "ethereum-mainnet");
 //! assert_eq!(EvmFeeReadCapability::name(), "mfm.evm.fee.read");
+//! assert_eq!(request, EvmFeeReadRequest::new());
 //! # Ok::<(), mfm_evm_capabilities::EvmCapabilityError>(())
 //! ```
 
@@ -153,9 +155,8 @@ fn evm_capability_version(name: &'static str) -> mfm_capabilities::Result<Capabi
 pub trait EvmChainIdentityProvider: Send + Sync {
     /// Reads chain identity from the selected EVM source.
     ///
-    /// A successful response has already enforced request-local provider authority, including
-    /// source identity and chain identity. Returned source evidence matches the request by
-    /// construction.
+    /// A successful response has already enforced provider-bound source authority and chain
+    /// identity. Returned source evidence matches the provider binding by construction.
     fn chain_identity<'a>(
         &'a self,
         request: &'a EvmChainIdentityRequest,
@@ -166,8 +167,8 @@ pub trait EvmChainIdentityProvider: Send + Sync {
 pub trait EvmBlockReadProvider: Send + Sync {
     /// Reads an EVM block summary.
     ///
-    /// A successful response has already enforced request-local provider authority. Returned source
-    /// evidence matches the request by construction.
+    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// evidence matches the provider binding by construction.
     fn read_block<'a>(
         &'a self,
         request: &'a EvmBlockReadRequest,
@@ -178,8 +179,8 @@ pub trait EvmBlockReadProvider: Send + Sync {
 pub trait EvmBalanceReadProvider: Send + Sync {
     /// Reads an account balance at the selected block.
     ///
-    /// A successful response has already enforced request-local provider authority. Returned source
-    /// evidence matches the request by construction.
+    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// evidence matches the provider binding by construction.
     fn read_balance<'a>(
         &'a self,
         request: &'a EvmBalanceReadRequest,
@@ -190,8 +191,8 @@ pub trait EvmBalanceReadProvider: Send + Sync {
 pub trait EvmCallReadProvider: Send + Sync {
     /// Executes a read-only EVM call.
     ///
-    /// A successful response has already enforced request-local provider authority. Returned source
-    /// evidence matches the request by construction.
+    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// evidence matches the provider binding by construction.
     fn read_call<'a>(
         &'a self,
         request: &'a EvmCallReadRequest,
@@ -202,8 +203,8 @@ pub trait EvmCallReadProvider: Send + Sync {
 pub trait EvmCodeReadProvider: Send + Sync {
     /// Reads deployed bytecode at an address and block.
     ///
-    /// A successful response has already enforced request-local provider authority. Returned source
-    /// evidence matches the request by construction.
+    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// evidence matches the provider binding by construction.
     fn read_code<'a>(
         &'a self,
         request: &'a EvmCodeReadRequest,
@@ -214,8 +215,8 @@ pub trait EvmCodeReadProvider: Send + Sync {
 pub trait EvmLogsReadProvider: Send + Sync {
     /// Reads EVM logs matching a filter.
     ///
-    /// A successful response has already enforced request-local provider authority. Returned source
-    /// evidence matches the request by construction.
+    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// evidence matches the provider binding by construction.
     fn read_logs<'a>(
         &'a self,
         request: &'a EvmLogsReadRequest,
@@ -226,8 +227,8 @@ pub trait EvmLogsReadProvider: Send + Sync {
 pub trait EvmNonceReadProvider: Send + Sync {
     /// Reads the account transaction count.
     ///
-    /// A successful response has already enforced request-local provider authority. Returned source
-    /// evidence matches the request by construction.
+    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// evidence matches the provider binding by construction.
     fn read_nonce<'a>(
         &'a self,
         request: &'a EvmNonceReadRequest,
@@ -238,8 +239,8 @@ pub trait EvmNonceReadProvider: Send + Sync {
 pub trait EvmFeeReadProvider: Send + Sync {
     /// Reads fee-market inputs.
     ///
-    /// A successful response has already enforced request-local provider authority. Returned source
-    /// evidence matches the request by construction.
+    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// evidence matches the provider binding by construction.
     fn read_fee<'a>(
         &'a self,
         request: &'a EvmFeeReadRequest,
@@ -250,8 +251,8 @@ pub trait EvmFeeReadProvider: Send + Sync {
 pub trait EvmGasEstimateProvider: Send + Sync {
     /// Estimates gas for an EVM transaction intent.
     ///
-    /// A successful response has already enforced request-local provider authority. Returned source
-    /// evidence matches the request by construction.
+    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// evidence matches the provider binding by construction.
     fn estimate_gas<'a>(
         &'a self,
         request: &'a EvmGasEstimateRequest,
@@ -262,8 +263,8 @@ pub trait EvmGasEstimateProvider: Send + Sync {
 pub trait EvmTransactionSubmitProvider: Send + Sync {
     /// Submits a signed EVM payload.
     ///
-    /// A successful response has already enforced request-local provider authority. Returned source
-    /// evidence matches the request by construction.
+    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// evidence matches the provider binding by construction.
     fn submit_transaction<'a>(
         &'a self,
         request: &'a EvmTransactionSubmitRequest,
@@ -274,8 +275,9 @@ pub trait EvmTransactionSubmitProvider: Send + Sync {
 pub trait EvmReceiptReadProvider: Send + Sync {
     /// Reads an EVM transaction receipt.
     ///
-    /// A successful response has already enforced request-local provider authority. Returned source
-    /// evidence and receipt transaction hash match the request by construction.
+    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// evidence matches the provider binding, and the receipt transaction hash matches the request
+    /// by construction.
     fn read_receipt<'a>(
         &'a self,
         request: &'a EvmReceiptReadRequest,
@@ -286,8 +288,8 @@ pub trait EvmReceiptReadProvider: Send + Sync {
 pub trait EvmNonceOccupancyReadProvider: Send + Sync {
     /// Reads explicit evidence for whether a concrete sender nonce is occupied by a non-anchor tx.
     ///
-    /// A successful response has already enforced request-local provider authority. Returned source
-    /// evidence matches the request by construction.
+    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// evidence matches the provider binding by construction.
     fn read_nonce_occupancy<'a>(
         &'a self,
         request: &'a EvmNonceOccupancyReadRequest,
@@ -429,14 +431,16 @@ impl From<EvmSourcePolicyId> for String {
     }
 }
 
+/// Checked semantic EVM network binding owned by a bound provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct EvmRequestSource {
+pub struct EvmNetworkBinding {
     network_id: EvmNetworkId,
     expected_chain_id: NonZeroU64,
 }
 
-impl EvmRequestSource {
-    fn new(network_id: EvmNetworkId, expected_chain_id: u64) -> Result<Self> {
+impl EvmNetworkBinding {
+    /// Creates a checked semantic EVM network binding.
+    pub fn new(network_id: EvmNetworkId, expected_chain_id: u64) -> Result<Self> {
         let expected_chain_id =
             NonZeroU64::new(expected_chain_id).ok_or(EvmCapabilityError::InvalidRequest {
                 reason: EvmInvalidRequest::ZeroExpectedChainId,
@@ -447,11 +451,13 @@ impl EvmRequestSource {
         })
     }
 
-    const fn network_id(&self) -> &EvmNetworkId {
+    /// Returns the semantic network id.
+    pub const fn network_id(&self) -> &EvmNetworkId {
         &self.network_id
     }
 
-    const fn expected_chain_id(&self) -> u64 {
+    /// Returns the expected EVM chain id.
+    pub const fn expected_chain_id(&self) -> u64 {
         self.expected_chain_id.get()
     }
 }
@@ -459,9 +465,9 @@ impl EvmRequestSource {
 /// Redacted EVM source evidence attached to provider responses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedactedEvmSourceEvidence {
-    /// Semantic network id from the request.
+    /// Semantic network id from the provider binding.
     pub network_id: EvmNetworkId,
-    /// Expected EVM chain id from the request.
+    /// Expected EVM chain id from the provider binding.
     pub expected_chain_id: u64,
     /// Observed EVM chain id.
     pub observed_chain_id: u64,
@@ -472,6 +478,22 @@ pub struct RedactedEvmSourceEvidence {
 }
 
 impl RedactedEvmSourceEvidence {
+    /// Builds redacted source evidence from a provider binding and selected runtime source.
+    pub fn from_binding(
+        binding: &EvmNetworkBinding,
+        observed_chain_id: u64,
+        source_ref: EvmSourceRef,
+        policy_id: EvmSourcePolicyId,
+    ) -> Self {
+        Self {
+            network_id: binding.network_id().clone(),
+            expected_chain_id: binding.expected_chain_id(),
+            observed_chain_id,
+            source_ref,
+            policy_id,
+        }
+    }
+
     /// Returns evidence for the same source selection with a supplied observed chain id.
     pub fn with_observed_chain_id(&self, observed_chain_id: u64) -> Self {
         Self {
@@ -523,27 +545,19 @@ pub enum EvmBlockSelector {
 }
 
 /// Request for chain identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmChainIdentityRequest {
-    source: EvmRequestSource,
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvmChainIdentityRequest;
 
 impl EvmChainIdentityRequest {
     /// Creates an EVM chain identity request.
-    pub fn new(network_id: EvmNetworkId, expected_chain_id: u64) -> Result<Self> {
-        Ok(Self {
-            source: EvmRequestSource::new(network_id, expected_chain_id)?,
-        })
+    pub const fn new() -> Self {
+        Self
     }
+}
 
-    /// Returns the semantic network id.
-    pub const fn network_id(&self) -> &EvmNetworkId {
-        self.source.network_id()
-    }
-
-    /// Returns the expected EVM chain id.
-    pub const fn expected_chain_id(&self) -> u64 {
-        self.source.expected_chain_id()
+impl Default for EvmChainIdentityRequest {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -561,31 +575,13 @@ pub struct EvmChainIdentityResponse {
 /// Request for an EVM block summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmBlockReadRequest {
-    source: EvmRequestSource,
     block: EvmBlockSelector,
 }
 
 impl EvmBlockReadRequest {
     /// Creates an EVM block read request.
-    pub fn new(
-        network_id: EvmNetworkId,
-        expected_chain_id: u64,
-        block: EvmBlockSelector,
-    ) -> Result<Self> {
-        Ok(Self {
-            source: EvmRequestSource::new(network_id, expected_chain_id)?,
-            block,
-        })
-    }
-
-    /// Returns the semantic network id.
-    pub const fn network_id(&self) -> &EvmNetworkId {
-        self.source.network_id()
-    }
-
-    /// Returns the expected EVM chain id.
-    pub const fn expected_chain_id(&self) -> u64 {
-        self.source.expected_chain_id()
+    pub fn new(block: EvmBlockSelector) -> Self {
+        Self { block }
     }
 
     /// Returns the requested block selector.
@@ -608,34 +604,14 @@ pub struct EvmBlockReadResponse {
 /// Request for an EVM account balance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmBalanceReadRequest {
-    source: EvmRequestSource,
     account: Address,
     block: EvmBlockSelector,
 }
 
 impl EvmBalanceReadRequest {
     /// Creates an EVM balance read request.
-    pub fn new(
-        network_id: EvmNetworkId,
-        expected_chain_id: u64,
-        account: Address,
-        block: EvmBlockSelector,
-    ) -> Result<Self> {
-        Ok(Self {
-            source: EvmRequestSource::new(network_id, expected_chain_id)?,
-            account,
-            block,
-        })
-    }
-
-    /// Returns the semantic network id.
-    pub const fn network_id(&self) -> &EvmNetworkId {
-        self.source.network_id()
-    }
-
-    /// Returns the expected EVM chain id.
-    pub const fn expected_chain_id(&self) -> u64 {
-        self.source.expected_chain_id()
+    pub const fn new(account: Address, block: EvmBlockSelector) -> Self {
+        Self { account, block }
     }
 
     /// Returns the account address.
@@ -661,7 +637,6 @@ pub struct EvmBalanceReadResponse {
 /// Request for a read-only EVM call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmCallReadRequest {
-    source: EvmRequestSource,
     to: Address,
     calldata: Vec<u8>,
     block: EvmBlockSelector,
@@ -669,29 +644,12 @@ pub struct EvmCallReadRequest {
 
 impl EvmCallReadRequest {
     /// Creates an EVM call read request.
-    pub fn new(
-        network_id: EvmNetworkId,
-        expected_chain_id: u64,
-        to: Address,
-        calldata: Vec<u8>,
-        block: EvmBlockSelector,
-    ) -> Result<Self> {
-        Ok(Self {
-            source: EvmRequestSource::new(network_id, expected_chain_id)?,
+    pub fn new(to: Address, calldata: Vec<u8>, block: EvmBlockSelector) -> Self {
+        Self {
             to,
             calldata,
             block,
-        })
-    }
-
-    /// Returns the semantic network id.
-    pub const fn network_id(&self) -> &EvmNetworkId {
-        self.source.network_id()
-    }
-
-    /// Returns the expected EVM chain id.
-    pub const fn expected_chain_id(&self) -> u64 {
-        self.source.expected_chain_id()
+        }
     }
 
     /// Returns the destination contract address.
@@ -722,34 +680,14 @@ pub struct EvmCallReadResponse {
 /// Request for deployed EVM bytecode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmCodeReadRequest {
-    source: EvmRequestSource,
     address: Address,
     block: EvmBlockSelector,
 }
 
 impl EvmCodeReadRequest {
     /// Creates an EVM code read request.
-    pub fn new(
-        network_id: EvmNetworkId,
-        expected_chain_id: u64,
-        address: Address,
-        block: EvmBlockSelector,
-    ) -> Result<Self> {
-        Ok(Self {
-            source: EvmRequestSource::new(network_id, expected_chain_id)?,
-            address,
-            block,
-        })
-    }
-
-    /// Returns the semantic network id.
-    pub const fn network_id(&self) -> &EvmNetworkId {
-        self.source.network_id()
-    }
-
-    /// Returns the expected EVM chain id.
-    pub const fn expected_chain_id(&self) -> u64 {
-        self.source.expected_chain_id()
+    pub const fn new(address: Address, block: EvmBlockSelector) -> Self {
+        Self { address, block }
     }
 
     /// Returns the contract/account address to inspect.
@@ -777,7 +715,6 @@ pub struct EvmCodeReadResponse {
 /// Request for EVM logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmLogsReadRequest {
-    source: EvmRequestSource,
     from_block: EvmBlockSelector,
     to_block: EvmBlockSelector,
     address: Option<Address>,
@@ -787,30 +724,17 @@ pub struct EvmLogsReadRequest {
 impl EvmLogsReadRequest {
     /// Creates an EVM logs read request.
     pub fn new(
-        network_id: EvmNetworkId,
-        expected_chain_id: u64,
         from_block: EvmBlockSelector,
         to_block: EvmBlockSelector,
         address: Option<Address>,
         topics: Vec<B256>,
-    ) -> Result<Self> {
-        Ok(Self {
-            source: EvmRequestSource::new(network_id, expected_chain_id)?,
+    ) -> Self {
+        Self {
             from_block,
             to_block,
             address,
             topics,
-        })
-    }
-
-    /// Returns the semantic network id.
-    pub const fn network_id(&self) -> &EvmNetworkId {
-        self.source.network_id()
-    }
-
-    /// Returns the expected EVM chain id.
-    pub const fn expected_chain_id(&self) -> u64 {
-        self.source.expected_chain_id()
+        }
     }
 
     /// Returns the start block selector.
@@ -863,34 +787,14 @@ pub struct EvmLogsReadResponse {
 /// Request for an account nonce.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmNonceReadRequest {
-    source: EvmRequestSource,
     account: Address,
     block: EvmBlockSelector,
 }
 
 impl EvmNonceReadRequest {
     /// Creates an EVM nonce read request.
-    pub fn new(
-        network_id: EvmNetworkId,
-        expected_chain_id: u64,
-        account: Address,
-        block: EvmBlockSelector,
-    ) -> Result<Self> {
-        Ok(Self {
-            source: EvmRequestSource::new(network_id, expected_chain_id)?,
-            account,
-            block,
-        })
-    }
-
-    /// Returns the semantic network id.
-    pub const fn network_id(&self) -> &EvmNetworkId {
-        self.source.network_id()
-    }
-
-    /// Returns the expected EVM chain id.
-    pub const fn expected_chain_id(&self) -> u64 {
-        self.source.expected_chain_id()
+    pub const fn new(account: Address, block: EvmBlockSelector) -> Self {
+        Self { account, block }
     }
 
     /// Returns the account address.
@@ -914,27 +818,19 @@ pub struct EvmNonceReadResponse {
 }
 
 /// Request for EVM fee-market data.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmFeeReadRequest {
-    source: EvmRequestSource,
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvmFeeReadRequest;
 
 impl EvmFeeReadRequest {
     /// Creates an EVM fee read request.
-    pub fn new(network_id: EvmNetworkId, expected_chain_id: u64) -> Result<Self> {
-        Ok(Self {
-            source: EvmRequestSource::new(network_id, expected_chain_id)?,
-        })
+    pub const fn new() -> Self {
+        Self
     }
+}
 
-    /// Returns the semantic network id.
-    pub const fn network_id(&self) -> &EvmNetworkId {
-        self.source.network_id()
-    }
-
-    /// Returns the expected EVM chain id.
-    pub const fn expected_chain_id(&self) -> u64 {
-        self.source.expected_chain_id()
+impl Default for EvmFeeReadRequest {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -956,7 +852,6 @@ pub struct EvmFeeReadResponse {
 /// Request for an EVM gas estimate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmGasEstimateRequest {
-    source: EvmRequestSource,
     from: Option<Address>,
     to: Option<Address>,
     value_wei: u128,
@@ -965,31 +860,13 @@ pub struct EvmGasEstimateRequest {
 
 impl EvmGasEstimateRequest {
     /// Creates an EVM gas estimate request.
-    pub fn new(
-        network_id: EvmNetworkId,
-        expected_chain_id: u64,
-        from: Option<Address>,
-        to: Option<Address>,
-        value_wei: u128,
-        data: Vec<u8>,
-    ) -> Result<Self> {
-        Ok(Self {
-            source: EvmRequestSource::new(network_id, expected_chain_id)?,
+    pub fn new(from: Option<Address>, to: Option<Address>, value_wei: u128, data: Vec<u8>) -> Self {
+        Self {
             from,
             to,
             value_wei,
             data,
-        })
-    }
-
-    /// Returns the semantic network id.
-    pub const fn network_id(&self) -> &EvmNetworkId {
-        self.source.network_id()
-    }
-
-    /// Returns the expected EVM chain id.
-    pub const fn expected_chain_id(&self) -> u64 {
-        self.source.expected_chain_id()
+        }
     }
 
     /// Returns the sender address, when supplied.
@@ -1066,31 +943,13 @@ impl fmt::Debug for SignedEvmPayload {
 /// Request for EVM transaction submission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmTransactionSubmitRequest {
-    source: EvmRequestSource,
     signed_payload: SignedEvmPayload,
 }
 
 impl EvmTransactionSubmitRequest {
     /// Creates an EVM transaction submission request.
-    pub fn new(
-        network_id: EvmNetworkId,
-        expected_chain_id: u64,
-        signed_payload: SignedEvmPayload,
-    ) -> Result<Self> {
-        Ok(Self {
-            source: EvmRequestSource::new(network_id, expected_chain_id)?,
-            signed_payload,
-        })
-    }
-
-    /// Returns the semantic network id.
-    pub const fn network_id(&self) -> &EvmNetworkId {
-        self.source.network_id()
-    }
-
-    /// Returns the expected EVM chain id.
-    pub const fn expected_chain_id(&self) -> u64 {
-        self.source.expected_chain_id()
+    pub const fn new(signed_payload: SignedEvmPayload) -> Self {
+        Self { signed_payload }
     }
 
     /// Returns the transient signed payload.
@@ -1111,31 +970,13 @@ pub struct EvmTransactionSubmitResponse {
 /// Request for an EVM transaction receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmReceiptReadRequest {
-    source: EvmRequestSource,
     transaction_hash: B256,
 }
 
 impl EvmReceiptReadRequest {
     /// Creates an EVM receipt read request.
-    pub fn new(
-        network_id: EvmNetworkId,
-        expected_chain_id: u64,
-        transaction_hash: B256,
-    ) -> Result<Self> {
-        Ok(Self {
-            source: EvmRequestSource::new(network_id, expected_chain_id)?,
-            transaction_hash,
-        })
-    }
-
-    /// Returns the semantic network id.
-    pub const fn network_id(&self) -> &EvmNetworkId {
-        self.source.network_id()
-    }
-
-    /// Returns the expected EVM chain id.
-    pub const fn expected_chain_id(&self) -> u64 {
-        self.source.expected_chain_id()
+    pub const fn new(transaction_hash: B256) -> Self {
+        Self { transaction_hash }
     }
 
     /// Returns the transaction hash.
@@ -1160,7 +1001,6 @@ pub struct EvmReceiptReadResponse {
 /// Request for account nonce occupancy investigation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmNonceOccupancyReadRequest {
-    source: EvmRequestSource,
     account: Address,
     nonce: u64,
     excluded_transaction_hash: B256,
@@ -1168,29 +1008,12 @@ pub struct EvmNonceOccupancyReadRequest {
 
 impl EvmNonceOccupancyReadRequest {
     /// Creates an EVM nonce occupancy read request.
-    pub fn new(
-        network_id: EvmNetworkId,
-        expected_chain_id: u64,
-        account: Address,
-        nonce: u64,
-        excluded_transaction_hash: B256,
-    ) -> Result<Self> {
-        Ok(Self {
-            source: EvmRequestSource::new(network_id, expected_chain_id)?,
+    pub fn new(account: Address, nonce: u64, excluded_transaction_hash: B256) -> Self {
+        Self {
             account,
             nonce,
             excluded_transaction_hash,
-        })
-    }
-
-    /// Returns the semantic network id.
-    pub const fn network_id(&self) -> &EvmNetworkId {
-        self.source.network_id()
-    }
-
-    /// Returns the expected EVM chain id.
-    pub const fn expected_chain_id(&self) -> u64 {
-        self.source.expected_chain_id()
+        }
     }
 
     /// Returns the sender account whose nonce is being investigated.
@@ -1318,17 +1141,15 @@ mod tests {
     }
 
     #[test]
-    fn fee_request_exposes_source_accessors() {
-        let request = EvmFeeReadRequest::new(EvmNetworkId::new("mainnet").expect("network"), 1)
-            .expect("request");
+    fn fee_request_is_operation_only() {
+        let request = EvmFeeReadRequest::new();
 
-        assert_eq!(request.network_id().as_str(), "mainnet");
-        assert_eq!(request.expected_chain_id(), 1);
+        assert_eq!(request, EvmFeeReadRequest);
     }
 
     #[test]
-    fn request_source_rejects_zero_expected_chain_id() {
-        let error = EvmFeeReadRequest::new(EvmNetworkId::new("mainnet").expect("network"), 0)
+    fn network_binding_rejects_zero_expected_chain_id() {
+        let error = EvmNetworkBinding::new(EvmNetworkId::new("mainnet").expect("network"), 0)
             .expect_err("zero chain id");
 
         assert_eq!(

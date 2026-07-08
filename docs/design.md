@@ -561,17 +561,18 @@ replay adapters only. Live capability construction during replay is a contract v
 Replay service construction itself is evidence-only app assembly: it must not construct the live
 runner registry, live transports, signer providers, keystores, or live capability runtime config.
 
-Live provider identity is enforced by provider implementations for each capability request from the
-semantic request authority, such as EVM `network_id` plus expected chain id or Bitcoin `network_id`,
-`source_identity`, and expected network tag. A route that resolves but observes incompatible source
-evidence fails after `RunAdmitted` as an attempt/capability failure with a closed redacted provider
-diagnostic. Provider diagnostics carry a provider family, stable diagnostic code, optional
-redaction-safe operation id, and closed boolean/integer/id fields only. Examples include HTTP
-status, JSON-RPC numeric code, response-shape failure, unsupported operation, operation incomplete,
-and source mismatch. They must not carry RPC URLs, authorization headers, file paths, provider
-messages, request/response bodies, signer material, or signed transactions. Replay providers rebuild
-the certified request authority and verify recorded evidence against it without resolving source
-refs or policy ids through current runtime config.
+Live provider identity is enforced by bound provider implementations. Runners derive a certified
+semantic binding, such as EVM `network_id` plus expected chain id or Bitcoin `network_id`,
+`source_identity`, and expected network tag, before issuing operation-only capability requests. A
+route that resolves but observes incompatible source evidence fails after `RunAdmitted` as an
+attempt/capability failure with a closed redacted provider diagnostic. Provider diagnostics carry a
+provider family, stable diagnostic code, optional redaction-safe operation id, and closed
+boolean/integer/id fields only. Examples include HTTP status, JSON-RPC numeric code,
+response-shape failure, unsupported operation, operation incomplete, and source mismatch. They must
+not carry RPC URLs, authorization headers, file paths, provider messages, request/response bodies,
+signer material, or signed transactions. Replay providers rebuild the certified provider binding
+and verify recorded evidence against that binding without resolving source refs or policy ids
+through current runtime config.
 
 Manual-resolution replay additionally verifies that the stream prefix derives `ManualBlocked`, the
 event matches certified policy, evidence and authorization artifacts match certified roles and

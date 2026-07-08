@@ -21,7 +21,7 @@ The context carries semantic identity such as:
 
 `network_id` is semantic workflow data. It is not an RPC endpoint, source id, credential, or runtime
 route. Live transports resolve it through runtime config and verify the observed chain id for each
-source-bound request.
+provider-bound EVM network binding before executing operation-only requests.
 
 Phase actions are local work descriptions. They do not carry independent network authority:
 

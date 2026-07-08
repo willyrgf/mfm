@@ -3,7 +3,7 @@ use super::*;
 use std::{collections::BTreeMap, sync::Arc};
 
 use mfm_btc_capabilities::{
-    BtcBalanceReadResponse, BtcBlockHash, BtcChainHeadResponse, BtcSourceStatus,
+    BtcBalanceReadResponse, BtcBlockHash, BtcChainHeadResponse, BtcSourceBinding, BtcSourceStatus,
     RedactedBtcSourceEvidence,
 };
 use mfm_evm_capabilities::{
@@ -236,15 +236,36 @@ impl MockPortfolioBtc {
     }
 }
 
-impl BtcChainHeadReadProvider for MockPortfolioBtc {
+impl PortfolioBtcProviderFactory for MockPortfolioBtc {
+    fn validate_btc_source_binding(&self, _binding: &BtcSourceBinding) -> mfm_runtime::Result<()> {
+        Ok(())
+    }
+
+    fn bind_btc_source(
+        &self,
+        binding: BtcSourceBinding,
+    ) -> mfm_btc_capabilities::Result<Arc<dyn PortfolioBtcProvider>> {
+        Ok(Arc::new(MockPortfolioBoundBtc {
+            binding,
+            reject_balance: self.reject_balance,
+        }))
+    }
+}
+
+struct MockPortfolioBoundBtc {
+    binding: BtcSourceBinding,
+    reject_balance: bool,
+}
+
+impl BtcChainHeadReadProvider for MockPortfolioBoundBtc {
     fn read_chain_head<'a>(
         &'a self,
         request: &'a BtcChainHeadRequest,
     ) -> mfm_btc_capabilities::BtcCapabilityFuture<'a, BtcChainHeadResponse> {
         Box::pin(async move {
             Ok(BtcChainHeadResponse {
-                evidence: RedactedBtcSourceEvidence::from_request(
-                    request,
+                evidence: RedactedBtcSourceEvidence::from_binding(
+                    &self.binding,
                     "main",
                     BtcSourceStatus::Synced,
                 )
@@ -259,7 +280,7 @@ impl BtcChainHeadReadProvider for MockPortfolioBtc {
     }
 }
 
-impl BtcBalanceReadProvider for MockPortfolioBtc {
+impl BtcBalanceReadProvider for MockPortfolioBoundBtc {
     fn read_balance<'a>(
         &'a self,
         request: &'a BtcBalanceReadRequest,
@@ -269,18 +290,22 @@ impl BtcBalanceReadProvider for MockPortfolioBtc {
             if reject_balance {
                 return Err(BtcCapabilityError::SourceMismatch {
                     diagnostic: RedactedBtcSourceEvidence {
-                        network_id: request.network_id().clone(),
-                        source_identity: request.source_identity().clone(),
-                        bitcoin_network: request.bitcoin_network().to_owned(),
-                        observed_bitcoin_network: request.bitcoin_network().to_owned(),
+                        network_id: self.binding.network_id().clone(),
+                        source_identity: self.binding.source_identity().clone(),
+                        bitcoin_network: self.binding.bitcoin_network().as_str().to_owned(),
+                        observed_bitcoin_network: self
+                            .binding
+                            .bitcoin_network()
+                            .as_str()
+                            .to_owned(),
                         source_status: BtcSourceStatus::Synced,
                     }
                     .source_mismatch_diagnostic(),
                 });
             }
             Ok(BtcBalanceReadResponse {
-                evidence: RedactedBtcSourceEvidence::from_balance_request(
-                    request,
+                evidence: RedactedBtcSourceEvidence::from_binding(
+                    &self.binding,
                     "main",
                     BtcSourceStatus::Synced,
                 )
@@ -300,6 +325,22 @@ fn unavailable_evm_error() -> EvmCapabilityError {
     EvmCapabilityError::provider_failure(mfm_evm_capabilities::evm_diagnostic(
         mfm_capabilities::ProviderDiagnosticCode::SourceUnavailable,
     ))
+}
+
+impl PortfolioEvmProviderFactory for UnavailablePortfolioEvm {
+    fn validate_evm_network_binding(
+        &self,
+        _binding: &EvmNetworkBinding,
+    ) -> mfm_runtime::Result<()> {
+        Ok(())
+    }
+
+    fn bind_evm_network(
+        &self,
+        _binding: EvmNetworkBinding,
+    ) -> mfm_evm_capabilities::Result<Arc<dyn PortfolioEvmProvider>> {
+        Ok(Arc::new(UnavailablePortfolioEvm))
+    }
 }
 
 impl EvmBlockReadProvider for UnavailablePortfolioEvm {

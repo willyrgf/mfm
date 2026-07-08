@@ -657,27 +657,23 @@ fn production_runner_registry_inner(
 ) -> Result<ErasedRunnerRegistry, AppError> {
     let mut registry = ErasedRunnerRegistry::new();
     let portfolio_artifacts: Arc<dyn store::RetainedArtifactReadProvider> = artifacts.clone();
-    let portfolio_runtime = Arc::new(RuntimeConfigPortfolioRuntime::new(
-        runtime_config.clone(),
-        btc_config.clone(),
-    ));
-    let portfolio_evm: Arc<dyn mfm_adapters_portfolio::PortfolioEvmProvider> =
+    let portfolio_runtime = Arc::new(RuntimeConfigPortfolioRuntime::new(runtime_config.clone()));
+    let portfolio_evm: Arc<dyn mfm_adapters_portfolio::PortfolioEvmProviderFactory> =
         portfolio_runtime.clone();
-    let portfolio_btc: Option<Arc<dyn mfm_adapters_portfolio::PortfolioBtcProvider>> = btc_config
-        .clone()
-        .map(|config| {
-            btc_collector::btc_json_rpc_read_provider(config).map(|provider| {
-                Arc::new(provider) as Arc<dyn mfm_adapters_portfolio::PortfolioBtcProvider>
+    let portfolio_btc: Option<Arc<dyn mfm_adapters_portfolio::PortfolioBtcProviderFactory>> =
+        btc_config
+            .clone()
+            .map(|config| {
+                btc_collector::btc_json_rpc_provider_factory(config).map(|factory| {
+                    Arc::new(factory)
+                        as Arc<dyn mfm_adapters_portfolio::PortfolioBtcProviderFactory>
+                })
             })
-        })
-        .transpose()?;
-    let portfolio_runtime: Arc<dyn mfm_adapters_portfolio::PortfolioRuntimeValidator> =
-        portfolio_runtime;
+            .transpose()?;
     let portfolio_capabilities = mfm_adapters_portfolio::PortfolioRunnerCapabilities::new(
         portfolio_artifacts,
         portfolio_evm,
         portfolio_btc,
-        portfolio_runtime,
     );
     mfm_adapters_portfolio::register_portfolio_runners(&mut registry, portfolio_capabilities)?;
     let source_run_registry = production_certification_registry()?;
@@ -700,96 +696,45 @@ fn production_runner_registry_inner(
 #[derive(Clone)]
 struct RuntimeConfigPortfolioRuntime {
     runtime_config: RuntimeConfigLoader,
-    btc_config: Option<mfm_runtime_config::BtcRuntimeConfig>,
 }
 
 impl RuntimeConfigPortfolioRuntime {
-    fn new(
-        runtime_config: RuntimeConfigLoader,
-        btc_config: Option<mfm_runtime_config::BtcRuntimeConfig>,
-    ) -> Self {
-        Self {
-            runtime_config,
-            btc_config,
-        }
+    fn new(runtime_config: RuntimeConfigLoader) -> Self {
+        Self { runtime_config }
     }
 
     fn evm_client(&self) -> mfm_runtime::Result<mfm_transports_evm::EvmJsonRpcClient> {
         self.runtime_config.load_evm().and_then(evm_json_rpc_client)
     }
-
-    fn btc_provider(
-        &self,
-    ) -> mfm_runtime::Result<mfm_transports_btc_jsonrpc_http::BtcJsonRpcChainHeadProvider> {
-        let btc = self.btc_config.clone().ok_or_else(|| {
-            mfm_runtime::RuntimeError::RunnerBinding("missing Bitcoin runtime config".to_owned())
-        })?;
-        btc_collector::btc_json_rpc_read_provider(btc)
-    }
 }
 
-impl mfm_adapters_portfolio::PortfolioRuntimeValidator for RuntimeConfigPortfolioRuntime {
-    fn validate_evm_route_binding(
+impl mfm_adapters_portfolio::PortfolioEvmProviderFactory for RuntimeConfigPortfolioRuntime {
+    fn validate_evm_network_binding(
         &self,
-        network_id: &mfm_evm_capabilities::EvmNetworkId,
+        binding: &mfm_evm_capabilities::EvmNetworkBinding,
     ) -> mfm_runtime::Result<()> {
         self.evm_client()?
-            .validate_route_binding(network_id)
+            .validate_network_binding(binding)
             .map_err(runtime_evm_transport_error)
     }
 
-    fn validate_btc_source_binding(
+    fn bind_evm_network(
         &self,
-        source_identity: &mfm_btc_capabilities::BtcSourceIdentity,
-    ) -> mfm_runtime::Result<()> {
-        self.btc_provider()?
-            .validate_source_binding(source_identity)
-            .map_err(runtime_btc_capability_error)
-    }
-}
-
-impl mfm_evm_capabilities::EvmBlockReadProvider for RuntimeConfigPortfolioRuntime {
-    fn read_block<'a>(
-        &'a self,
-        request: &'a mfm_evm_capabilities::EvmBlockReadRequest,
-    ) -> mfm_evm_capabilities::EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmBlockReadResponse>
-    {
-        Box::pin(async move {
-            let client = self
-                .evm_client()
-                .map_err(portfolio_runtime_config_capability_error)?;
-            mfm_evm_capabilities::EvmBlockReadProvider::read_block(&client, request).await
-        })
-    }
-}
-
-impl mfm_evm_capabilities::EvmBalanceReadProvider for RuntimeConfigPortfolioRuntime {
-    fn read_balance<'a>(
-        &'a self,
-        request: &'a mfm_evm_capabilities::EvmBalanceReadRequest,
-    ) -> mfm_evm_capabilities::EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmBalanceReadResponse>
-    {
-        Box::pin(async move {
-            let client = self
-                .evm_client()
-                .map_err(portfolio_runtime_config_capability_error)?;
-            mfm_evm_capabilities::EvmBalanceReadProvider::read_balance(&client, request).await
-        })
-    }
-}
-
-impl mfm_evm_capabilities::EvmCallReadProvider for RuntimeConfigPortfolioRuntime {
-    fn read_call<'a>(
-        &'a self,
-        request: &'a mfm_evm_capabilities::EvmCallReadRequest,
-    ) -> mfm_evm_capabilities::EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmCallReadResponse>
-    {
-        Box::pin(async move {
-            let client = self
-                .evm_client()
-                .map_err(portfolio_runtime_config_capability_error)?;
-            mfm_evm_capabilities::EvmCallReadProvider::read_call(&client, request).await
-        })
+        binding: mfm_evm_capabilities::EvmNetworkBinding,
+    ) -> mfm_evm_capabilities::Result<Arc<dyn mfm_adapters_portfolio::PortfolioEvmProvider>> {
+        let client = self
+            .evm_client()
+            .map_err(portfolio_runtime_config_capability_error)?;
+        client
+            .bind_network(binding)
+            .map(|provider| {
+                Arc::new(provider) as Arc<dyn mfm_adapters_portfolio::PortfolioEvmProvider>
+            })
+            .map_err(|error| {
+                mfm_evm_capabilities::EvmCapabilityError::provider_failure(
+                    error.into_provider_diagnostic(),
+                )
+            })
     }
 }
 

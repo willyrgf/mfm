@@ -224,8 +224,7 @@ impl BtcJsonRpcSourceProvider {
         verified: &VerifiedBtcCall,
         request: &BtcChainHeadRequest,
     ) -> mfm_btc_capabilities::Result<BtcChainHeadResponse> {
-        let (height, hash) =
-            selected_head(&*verified.transport, &verified.info, request).await?;
+        let (height, hash) = selected_head(&*verified.transport, &verified.info, request).await?;
         let header = verified
             .transport
             .get_block_header(hash.as_str())
@@ -969,9 +968,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicU64;
 
-    use mfm_btc_capabilities::{
-        BitcoinNetworkTag, BtcAddress, BtcHeadSelection, BtcNetworkId,
-    };
+    use mfm_btc_capabilities::{BitcoinNetworkTag, BtcAddress, BtcHeadSelection, BtcNetworkId};
 
     const BEST_BLOCK_HASH: &str =
         "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5";
