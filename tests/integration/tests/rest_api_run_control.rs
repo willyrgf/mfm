@@ -391,7 +391,9 @@ async fn portfolio_report_hard_fails_without_platform_facts_after_admission() {
         .oneshot(empty_post(&format!("/v1/runs/{run_id}/replay")))
         .await
         .expect("replay response");
-    assert_eq!(replay.status(), StatusCode::OK);
+    let replay_status = replay.status();
+    let replay_body = response_json(replay).await;
+    assert_eq!(replay_status, StatusCode::OK, "{replay_body}");
 }
 
 #[tokio::test]
@@ -428,7 +430,9 @@ async fn portfolio_select_holdings_missing_facts_is_attempt_failure() {
         .oneshot(empty_post(&format!("/v1/runs/{run_id}/replay")))
         .await
         .expect("replay response");
-    assert_eq!(replay.status(), StatusCode::OK);
+    let replay_status = replay.status();
+    let replay_body = response_json(replay).await;
+    assert_eq!(replay_status, StatusCode::OK, "{replay_body}");
 }
 
 #[tokio::test]

@@ -1428,6 +1428,21 @@ fn replay_diagnostic_rejects_digest_matched_malformed_evm_chain_mismatch_details
     }
 }
 
+#[test]
+fn replay_diagnostic_accepts_generic_details_with_network_id() {
+    let details = serde_json::json!({
+        "domain_code": "missing_fact",
+        "domain_message": "missing_fact: no acceptable Platform fact",
+        "holding_key": "wallet_main/eth.native/ethereum-mainnet/ethereum-mainnet",
+        "network_id": "ethereum-mainnet",
+    });
+    let digest = canonical_value_digest(&details).expect("details digest");
+    let expected = events::RedactedJson::new(digest);
+
+    verify_replay_public_details(Some(&expected), &details)
+        .expect("generic diagnostic details must not be classified as EVM mismatch evidence");
+}
+
 #[tokio::test]
 async fn run_read_services_are_evidence_only() {
     let source = include_str!("lib.rs");

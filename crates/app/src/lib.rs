@@ -2642,8 +2642,7 @@ fn is_evm_chain_mismatch_details(value: &serde_json::Value) -> bool {
     let Some(object) = value.as_object() else {
         return false;
     };
-    object.contains_key("network_id")
-        || object.contains_key("expected_chain_id")
+    object.contains_key("expected_chain_id")
         || object.contains_key("observed_chain_id")
         || object.contains_key("source_ref")
         || object.contains_key("policy_id")
