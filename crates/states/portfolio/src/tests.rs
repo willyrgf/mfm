@@ -216,6 +216,42 @@ fn fixed_price_selection_assembles_report_totals() {
 }
 
 #[test]
+fn assemble_hard_fails_when_required_holding_observation_missing() {
+    let portfolio = sample_portfolio();
+    let subjects = resolve_subjects_from_config(
+        &ResolveSubjectsConfig::new(portfolio.wallets.clone()).expect("subjects config"),
+    );
+    let valuations = resolve_valuations_from_config(
+        &ResolveValuationsConfig::new(
+            portfolio.symbol_configs.clone(),
+            ValuationSourceRegistry {
+                sources: Vec::new(),
+            },
+        )
+        .expect("valuation config"),
+    )
+    .expect("valuations");
+
+    let err = assemble_snapshot(
+        &AssembleSnapshotConfig::new(2, portfolio).expect("assemble config"),
+        AssembleSnapshotInput {
+            subjects,
+            holdings: SelectedHoldings {
+                observations: Vec::new(),
+            },
+            valuations,
+        },
+        42,
+    )
+    .expect_err("missing required holding must hard-fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("missing_fact"),
+        "expected missing_fact hard-fail, got {msg}"
+    );
+}
+
+#[test]
 fn resolve_valuations_fixed_unit_price_only() {
     let symbol = test_symbol("ethereum-mainnet");
     let valuations = resolve_valuations_from_config(

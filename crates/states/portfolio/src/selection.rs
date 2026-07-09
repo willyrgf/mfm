@@ -283,8 +283,13 @@ pub fn select_network_coherent(
                     Some(network_id.clone()),
                 ));
             }
-            // LWW v1: store_commit_order DESC only.
-            at.sort_by_key(|candidate| std::cmp::Reverse(candidate.store_commit_order));
+            // LWW v1: store_commit_order DESC, then fact_claim_id DESC (RFC secondary).
+            at.sort_by(|left, right| {
+                right
+                    .store_commit_order
+                    .cmp(&left.store_commit_order)
+                    .then_with(|| right.fact_claim_id.cmp(&left.fact_claim_id))
+            });
             let winner = at[0];
             selected.push(SelectedHolding {
                 key: key.clone(),
@@ -625,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn lww_prefers_higher_store_commit_order_only() {
+    fn lww_prefers_higher_store_commit_order_then_fact_claim_id() {
         let a = key("w1", "btc", "bitcoin-mainnet");
         let mut map = BTreeMap::new();
         map.insert(
@@ -652,6 +657,32 @@ mod tests {
         let selected = select_network_coherent(&map).expect("select");
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].fact_claim_id, "newer-commit");
+        assert_eq!(selected[0].store_commit_order, 20);
+
+        // Equal store_commit_order: fact_claim_id DESC is the secondary tie-break.
+        map.insert(
+            a,
+            vec![
+                candidate(
+                    "bitcoin-mainnet",
+                    50,
+                    "hash50",
+                    20,
+                    "claim-aaa",
+                    material("w1", "btc", "bitcoin-mainnet", 50, "hash50"),
+                ),
+                candidate(
+                    "bitcoin-mainnet",
+                    50,
+                    "hash50",
+                    20,
+                    "claim-zzz",
+                    material("w1", "btc", "bitcoin-mainnet", 50, "hash50"),
+                ),
+            ],
+        );
+        let selected = select_network_coherent(&map).expect("select equal commit");
+        assert_eq!(selected[0].fact_claim_id, "claim-zzz");
         assert_eq!(selected[0].store_commit_order, 20);
     }
 

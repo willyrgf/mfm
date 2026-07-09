@@ -1051,6 +1051,37 @@ fn resolved_valuation_for_quote(
     }
 }
 
+/// Hard-fail when any configured wallet×symbol required holding lacks an observation.
+///
+/// Defense-in-depth for the pure assemble path: SelectHoldings is the graph authority, but
+/// assemble must not emit a successful snapshot with empty/partial required holdings.
+fn require_required_holdings_present(
+    portfolio: &PortfolioConfig,
+    observations: &[Observation],
+) -> Result<(), PortfolioHoldingSelectionError> {
+    let present: BTreeSet<(String, String)> = observations
+        .iter()
+        .map(|observation| (observation.wallet_id.clone(), observation.symbol_id.clone()))
+        .collect();
+    for wallet in &portfolio.wallets {
+        for symbol_id in &wallet.symbol_ids {
+            let key = (wallet.wallet_id.to_string(), symbol_id.to_string());
+            if !present.contains(&key) {
+                return Err(PortfolioHoldingSelectionError::new(
+                    PortfolioHoldingErrorCode::MissingFact,
+                    format!(
+                        "required holding missing observation for wallet `{}` symbol `{symbol_id}`",
+                        wallet.wallet_id
+                    ),
+                    Some(format!("{}/{}", wallet.wallet_id, symbol_id)),
+                    Some(wallet.network_id.to_string()),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Assembles the canonical portfolio snapshot (hard-fail; pins from selected observations).
 pub fn assemble_snapshot(
     config: &AssembleSnapshotConfig,
@@ -1066,6 +1097,13 @@ pub fn assemble_snapshot(
     })?;
     let observations =
         apply_valuations_to_observations(input.holdings.observations, &input.valuations, &symbols)?;
+    require_required_holdings_present(&config.portfolio, &observations).map_err(|error| {
+        StateError::Message(format!(
+            "{code}: {message}",
+            code = error.code,
+            message = error.message
+        ))
+    })?;
     let network_pins = project_network_pins_from_observations(&observations).map_err(|error| {
         StateError::Message(format!(
             "{code}: {message}",
@@ -1086,35 +1124,33 @@ pub fn assemble_snapshot(
         subjects_by_wallet.insert(subject.wallet_id.clone(), subject);
     }
 
-    let mut wallets = config
-        .portfolio
-        .wallets
-        .iter()
-        .map(|wallet| {
-            let subject = subjects_by_wallet
-                .get(wallet.wallet_id.as_str())
-                .cloned()
-                .unwrap_or_else(|| ResolvedSubject {
-                    wallet_id: wallet.wallet_id.to_string(),
-                    address: wallet.subject.address_str().to_owned(),
-                    subject_kind: wallet.subject.kind(),
-                    network_id: wallet.network_id.to_string(),
-                    implementation_kind: wallet_implementation_kind(&wallet.implementation)
-                        .to_owned(),
-                });
-            let mut wallet = WalletSnapshot {
-                wallet_id: wallet.wallet_id.to_string(),
-                address: subject.address,
-                subject_kind: subject.subject_kind,
-                network_id: subject.network_id,
-                observations: observations_by_wallet
-                    .remove(wallet.wallet_id.as_str())
-                    .unwrap_or_default(),
-            };
-            wallet.normalize();
-            wallet
-        })
-        .collect::<Vec<_>>();
+    let mut wallets = Vec::with_capacity(config.portfolio.wallets.len());
+    for wallet_cfg in &config.portfolio.wallets {
+        let subject = subjects_by_wallet
+            .get(wallet_cfg.wallet_id.as_str())
+            .cloned()
+            .unwrap_or_else(|| ResolvedSubject {
+                wallet_id: wallet_cfg.wallet_id.to_string(),
+                address: wallet_cfg.subject.address_str().to_owned(),
+                subject_kind: wallet_cfg.subject.kind(),
+                network_id: wallet_cfg.network_id.to_string(),
+                implementation_kind: wallet_implementation_kind(&wallet_cfg.implementation)
+                    .to_owned(),
+            });
+        // Required holdings already verified; absent wallet key means zero symbols configured.
+        let observations = observations_by_wallet
+            .remove(wallet_cfg.wallet_id.as_str())
+            .unwrap_or_default();
+        let mut wallet = WalletSnapshot {
+            wallet_id: wallet_cfg.wallet_id.to_string(),
+            address: subject.address,
+            subject_kind: subject.subject_kind,
+            network_id: subject.network_id,
+            observations,
+        };
+        wallet.normalize();
+        wallets.push(wallet);
+    }
     wallets.sort_by(|left, right| left.wallet_id.cmp(&right.wallet_id));
 
     let mut symbol_configs = config.portfolio.symbol_configs.clone();
