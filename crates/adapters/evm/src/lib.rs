@@ -25,11 +25,11 @@ use mfm_runtime::{
 };
 use mfm_states_evm::{
     assemble_evm_native_balance_batch, evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version,
-    materialize_evm_joint_tip, native_balance_record_visibility, AssembleEvmNativeBalanceBatchConfig,
-    AssembleEvmNativeBalanceBatchInput, AssembleEvmNativeBalanceBatchState, EvmFactRecordCapability,
-    ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput, ObserveEvmNativeBalanceState,
-    RecordEvmNativeBalanceFactState, ResolveEvmJointTipConfig, ResolveEvmJointTipInput,
-    ResolveEvmJointTipState,
+    materialize_evm_joint_tip, native_balance_record_visibility,
+    AssembleEvmNativeBalanceBatchConfig, AssembleEvmNativeBalanceBatchInput,
+    AssembleEvmNativeBalanceBatchState, EvmFactRecordCapability, ObserveEvmNativeBalanceConfig,
+    ObserveEvmNativeBalanceInput, ObserveEvmNativeBalanceState, RecordEvmNativeBalanceFactState,
+    ResolveEvmJointTipConfig, ResolveEvmJointTipInput, ResolveEvmJointTipState,
 };
 use mfm_store::v1 as store;
 use mfm_values::MfmValue;
@@ -131,10 +131,12 @@ pub fn register_evm_collectors_runners(
     )?;
     registrations.register_state_descriptor_with_factory::<RecordEvmNativeBalanceFactState>(
         &managed_write_factory,
-        Arc::new(ManagedFactRecordRunner::<RecordEvmNativeBalanceFactState>::new(
-            artifacts.clone(),
-            native_balance_record_visibility(),
-        )),
+        Arc::new(
+            ManagedFactRecordRunner::<RecordEvmNativeBalanceFactState>::new(
+                artifacts.clone(),
+                native_balance_record_visibility(),
+            ),
+        ),
     )?;
     registrations.register_state_descriptor_with_factory::<AssembleEvmNativeBalanceBatchState>(
         &pure_factory,
@@ -249,8 +251,8 @@ impl ErasedNodeRunner for ObserveNativeBalanceRunner {
             .await?;
             let account =
                 parse_account(&state.config().account).map_err(evm_adapter_runtime_error)?;
-            let tip_hash =
-                parse_block_hash(input.joint_tip.block_hash()).map_err(evm_adapter_runtime_error)?;
+            let tip_hash = parse_block_hash(input.joint_tip.block_hash())
+                .map_err(evm_adapter_runtime_error)?;
             let provider = self
                 .evm
                 .bind_network(binding)
@@ -310,8 +312,9 @@ impl ErasedNodeRunner for AssembleNativeBalanceBatchRunner {
                 self.artifacts.as_ref(),
             )
             .await?;
-            let summary = assemble_evm_native_balance_batch(input)
-                .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+            let summary = assemble_evm_native_balance_batch(input).map_err(|error| {
+                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+            })?;
             ErasedRunnerOutput::state_output(&ctx, &summary)
         })
     }

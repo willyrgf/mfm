@@ -44,8 +44,9 @@ use mfm_portfolio_model::portfolio::{
 };
 use mfm_portfolio_model::symbol::{
     validate_valuation_source_registry, BalanceReaderConfig, Observation, ObservationQuantity,
-    ObservationSource, ObservationValue, ObservationValueSourceRef, QuoteCode, QuoteValuationConfig,
-    SymbolConfig, SymbolKind, SymbolRole, ValuationReaderConfig, ValuationSourceRegistry,
+    ObservationSource, ObservationValue, ObservationValueSourceRef, QuoteCode,
+    QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole, ValuationReaderConfig,
+    ValuationSourceRegistry,
 };
 use mfm_portfolio_model::wallet::{WalletConfig, WalletImplementationConfig, WalletSubjectKind};
 use mfm_program::{
@@ -211,7 +212,10 @@ pub struct SelectHoldingsConfig {
 
 impl SelectHoldingsConfig {
     /// Creates validated select-holdings config with the cutover policy id.
-    pub fn new(portfolio: PortfolioConfig, store_scope: impl Into<String>) -> Result<Self, ConfigError> {
+    pub fn new(
+        portfolio: PortfolioConfig,
+        store_scope: impl Into<String>,
+    ) -> Result<Self, ConfigError> {
         let config = Self {
             portfolio,
             store_scope: store_scope.into(),
@@ -840,28 +844,37 @@ pub fn expand_required_holdings(
                     Some(wallet.network_id.to_string()),
                 )
             })?;
-            let network = networks.get(symbol.network_id.as_str()).copied().ok_or_else(|| {
-                PortfolioHoldingSelectionError::new(
-                    PortfolioHoldingErrorCode::UnsupportedRequirement,
-                    format!(
-                        "missing network `{}` for symbol `{}`",
-                        symbol.network_id, symbol.symbol_id
-                    ),
-                    Some(format!("{}/{}", wallet.wallet_id, symbol.symbol_id)),
-                    Some(symbol.network_id.to_string()),
-                )
-            })?;
+            let network = networks
+                .get(symbol.network_id.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    PortfolioHoldingSelectionError::new(
+                        PortfolioHoldingErrorCode::UnsupportedRequirement,
+                        format!(
+                            "missing network `{}` for symbol `{}`",
+                            symbol.network_id, symbol.symbol_id
+                        ),
+                        Some(format!("{}/{}", wallet.wallet_id, symbol.symbol_id)),
+                        Some(symbol.network_id.to_string()),
+                    )
+                })?;
             let family = match network.family() {
                 NetworkFamilyConfig::Bitcoin => "bitcoin",
                 NetworkFamilyConfig::Evm => "evm",
             };
             let is_native = matches!(
                 (&symbol.kind, &symbol.balance_reader),
-                (SymbolKind::NativeBalance, BalanceReaderConfig::NativeBalance {})
+                (
+                    SymbolKind::NativeBalance,
+                    BalanceReaderConfig::NativeBalance {}
+                )
             );
             if matches!(
                 (&symbol.kind, &symbol.balance_reader),
-                (SymbolKind::Erc20Balance, BalanceReaderConfig::Erc20Balance { .. })
+                (
+                    SymbolKind::Erc20Balance,
+                    BalanceReaderConfig::Erc20Balance { .. }
+                )
             ) {
                 return Err(PortfolioHoldingSelectionError::new(
                     PortfolioHoldingErrorCode::UnsupportedRequirement,
@@ -873,11 +886,12 @@ pub fn expand_required_holdings(
                     Some(symbol.network_id.to_string()),
                 ));
             }
-            let projection = project_holding_fact_for_network(family, is_native).map_err(|mut err| {
-                err.holding_key = Some(format!("{}/{}", wallet.wallet_id, symbol.symbol_id));
-                err.network_id = Some(symbol.network_id.to_string());
-                err
-            })?;
+            let projection =
+                project_holding_fact_for_network(family, is_native).map_err(|mut err| {
+                    err.holding_key = Some(format!("{}/{}", wallet.wallet_id, symbol.symbol_id));
+                    err.network_id = Some(symbol.network_id.to_string());
+                    err
+                })?;
             requirements.push(RequiredHoldingRequirement {
                 key: RequiredHoldingKey {
                     wallet_id: wallet.wallet_id.to_string(),
@@ -983,9 +997,11 @@ pub fn apply_valuations_to_observations(
                         observation.symbol_id, quote.quote
                     ))
                 })?;
-            let value_dec =
-                multiply_decimal_strings(&observation.quantity.amount_dec, &resolved.unit_price_dec)
-                    .map_err(|error| StateError::Message(error.to_string()))?;
+            let value_dec = multiply_decimal_strings(
+                &observation.quantity.amount_dec,
+                &resolved.unit_price_dec,
+            )
+            .map_err(|error| StateError::Message(error.to_string()))?;
             values.push(ObservationValue {
                 quote: resolved.quote,
                 priced_symbol_id: resolved.priced_symbol_id.clone(),
@@ -1041,15 +1057,20 @@ pub fn assemble_snapshot(
     generated_at_ms: u64,
 ) -> StateResult<PortfolioSnapshot> {
     let symbols = symbols_by_id(&config.portfolio.symbol_configs).map_err(|error| {
-        StateError::Message(format!("{code}: {message}", code = error.code, message = error.message))
+        StateError::Message(format!(
+            "{code}: {message}",
+            code = error.code,
+            message = error.message
+        ))
     })?;
-    let observations = apply_valuations_to_observations(
-        input.holdings.observations,
-        &input.valuations,
-        &symbols,
-    )?;
+    let observations =
+        apply_valuations_to_observations(input.holdings.observations, &input.valuations, &symbols)?;
     let network_pins = project_network_pins_from_observations(&observations).map_err(|error| {
-        StateError::Message(format!("{code}: {message}", code = error.code, message = error.message))
+        StateError::Message(format!(
+            "{code}: {message}",
+            code = error.code,
+            message = error.message
+        ))
     })?;
 
     let mut observations_by_wallet: BTreeMap<String, Vec<Observation>> = BTreeMap::new();

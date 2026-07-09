@@ -31,10 +31,10 @@ use mfm_program::{
 pub use mfm_state_portfolio::{
     balance_reader_kind, portfolio_adapter_kind, portfolio_adapter_version, AssembleSnapshotConfig,
     AssembleSnapshotInput, AssembleSnapshotInputHandles, AssembleSnapshotState,
-    PortfolioOperationOutputs, PortfolioPublicOutputs, PortfolioWorkflowConfig, ProjectReportConfig,
-    ProjectReportInput, ProjectReportInputHandles, ProjectReportState, ResolveSubjectsConfig,
-    ResolveSubjectsState, ResolveValuationsConfig, ResolveValuationsState, SelectHoldingsConfig,
-    SelectHoldingsState, SelectedHoldings, DEFAULT_PORTFOLIO_STORE_SCOPE,
+    PortfolioOperationOutputs, PortfolioPublicOutputs, PortfolioWorkflowConfig,
+    ProjectReportConfig, ProjectReportInput, ProjectReportInputHandles, ProjectReportState,
+    ResolveSubjectsConfig, ResolveSubjectsState, ResolveValuationsConfig, ResolveValuationsState,
+    SelectHoldingsConfig, SelectHoldingsState, SelectedHoldings, DEFAULT_PORTFOLIO_STORE_SCOPE,
 };
 
 const PORTFOLIO_OPERATION_KIND_NAME: &str = "tracker_workflow";

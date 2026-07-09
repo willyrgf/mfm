@@ -412,12 +412,11 @@ fn prepare_btc_collector_internal_test_launch() -> Result<RunLaunchRequest, AppE
         mfm_op_btc_collectors::BtcChainHeadCollectorConfig::default(),
     )
     .expect("btc collector draft");
-    let observation_context_seed = CanonicalSeed::from_value(
-        &mfm_op_btc_collectors::BtcChainHeadObservationContext {
+    let observation_context_seed =
+        CanonicalSeed::from_value(&mfm_op_btc_collectors::BtcChainHeadObservationContext {
             observed_at_unix_ms: None,
-        },
-    )
-    .expect("observation context seed");
+        })
+        .expect("observation context seed");
     let seeds = BTreeMap::from([(
         draft.seeds()[0].seed_id.clone(),
         observation_context_seed.canonical_json().clone(),

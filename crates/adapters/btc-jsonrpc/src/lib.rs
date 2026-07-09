@@ -217,8 +217,9 @@ impl ErasedNodeRunner for AssembleAddressBalanceBatchRunner {
                 self.artifacts.as_ref(),
             )
             .await?;
-            let summary = assemble_btc_address_balance_batch(input)
-                .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+            let summary = assemble_btc_address_balance_batch(input).map_err(|error| {
+                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+            })?;
             ErasedRunnerOutput::state_output(&ctx, &summary)
         })
     }
@@ -495,7 +496,8 @@ struct ObserveAddressBalanceRunner {
 impl ErasedNodeRunner for ObserveAddressBalanceRunner {
     fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
         let config = load_launch_config::<ObserveBtcAddressBalanceConfig>(&ctx)?;
-        let binding = address_balance_binding(config.as_ref()).map_err(btc_adapter_runtime_error)?;
+        let binding =
+            address_balance_binding(config.as_ref()).map_err(btc_adapter_runtime_error)?;
         self.btc
             .validate_source_binding(&binding)
             .map_err(btc_capability_runtime_error)
@@ -503,11 +505,9 @@ impl ErasedNodeRunner for ObserveAddressBalanceRunner {
 
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config = load_runner_config::<ObserveBtcAddressBalanceConfig>(
-                &ctx,
-                self.artifacts.as_ref(),
-            )
-            .await?;
+            let config =
+                load_runner_config::<ObserveBtcAddressBalanceConfig>(&ctx, self.artifacts.as_ref())
+                    .await?;
             let binding =
                 address_balance_binding(config.as_ref()).map_err(btc_adapter_runtime_error)?;
             let state = ObserveBtcAddressBalanceState::new(config).map_err(|error| {

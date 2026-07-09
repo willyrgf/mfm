@@ -523,9 +523,7 @@ pub fn normalize_evm_native_balance_observation(
             reason: "tip drift or hash mismatch before Platform write".to_owned(),
         });
     }
-    if balance_evidence_chain_id != config.chain_id
-        || balance_evidence_network != config.network
-    {
+    if balance_evidence_chain_id != config.chain_id || balance_evidence_network != config.network {
         return Err(EvmStateError::InvalidInput {
             reason: "balance response evidence does not match collector config".to_owned(),
         });
@@ -551,7 +549,9 @@ pub fn normalize_evm_native_balance_observation(
         coverage,
         HoldingSourceStatus::Ok,
     )?;
-    Ok(EvmAddressNativeBalanceObservation::new(subject, response, 1))
+    Ok(EvmAddressNativeBalanceObservation::new(
+        subject, response, 1,
+    ))
 }
 
 /// Convenience normalize from a capability balance response + joint tip verification.
@@ -693,9 +693,9 @@ impl StateSpec for RecordEvmNativeBalanceFactState {
     }
 
     fn emitted_fact_descriptors() -> mfm_program::Result<Vec<FactDescriptorRef>> {
-        Ok(vec![
-            fact_descriptor_ref::<EvmAddressNativeBalanceSnapshotFact>()?,
-        ])
+        Ok(vec![fact_descriptor_ref::<
+            EvmAddressNativeBalanceSnapshotFact,
+        >()?])
     }
 
     fn new(_config: ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
@@ -939,7 +939,8 @@ mod tests {
 
     #[test]
     fn prove_before_write_rejects_missing_hash_and_tip_drift() {
-        let tip = materialize_evm_joint_tip(&tip_config(), &block_response(100, HASH_A)).expect("tip");
+        let tip =
+            materialize_evm_joint_tip(&tip_config(), &block_response(100, HASH_A)).expect("tip");
         let drifted = EvmJointTip::new("ethereum-mainnet", 1, 101, HASH_A).expect("drift tip");
         let error = normalize_evm_native_balance_from_capability(
             &observe_config(ACCT_A),
@@ -948,7 +949,9 @@ mod tests {
             &balance_response(1),
         )
         .expect_err("drift");
-        assert!(error.to_string().contains("tip drift") || error.to_string().contains("hash mismatch"));
+        assert!(
+            error.to_string().contains("tip drift") || error.to_string().contains("hash mismatch")
+        );
 
         let mismatched = EvmJointTip::new("ethereum-mainnet", 1, 100, HASH_B).expect("hash tip");
         let error = normalize_evm_native_balance_from_capability(
@@ -958,12 +961,15 @@ mod tests {
             &balance_response(1),
         )
         .expect_err("hash");
-        assert!(error.to_string().contains("tip drift") || error.to_string().contains("hash mismatch"));
+        assert!(
+            error.to_string().contains("tip drift") || error.to_string().contains("hash mismatch")
+        );
     }
 
     #[test]
     fn prove_before_write_admits_hash_bound_balance() {
-        let tip = materialize_evm_joint_tip(&tip_config(), &block_response(100, HASH_A)).expect("tip");
+        let tip =
+            materialize_evm_joint_tip(&tip_config(), &block_response(100, HASH_A)).expect("tip");
         let obs = normalize_evm_native_balance_from_capability(
             &observe_config(ACCT_A),
             &tip,
@@ -984,7 +990,8 @@ mod tests {
 
     #[test]
     fn multi_subject_batch_must_share_one_joint_tip() {
-        let tip = materialize_evm_joint_tip(&tip_config(), &block_response(100, HASH_A)).expect("tip");
+        let tip =
+            materialize_evm_joint_tip(&tip_config(), &block_response(100, HASH_A)).expect("tip");
         let obs_a = normalize_evm_native_balance_from_capability(
             &observe_config(ACCT_A),
             &tip,
@@ -1001,7 +1008,8 @@ mod tests {
         .expect("b");
         require_shared_evm_joint_tip(&[&obs_a, &obs_b]).expect("shared");
 
-        let other = materialize_evm_joint_tip(&tip_config(), &block_response(99, HASH_B)).expect("other");
+        let other =
+            materialize_evm_joint_tip(&tip_config(), &block_response(99, HASH_B)).expect("other");
         let obs_b_drifted = normalize_evm_native_balance_from_capability(
             &observe_config(ACCT_B),
             &other,
@@ -1009,7 +1017,8 @@ mod tests {
             &balance_response(2),
         )
         .expect("b drifted");
-        let error = require_shared_evm_joint_tip(&[&obs_a, &obs_b_drifted]).expect_err("not shared");
+        let error =
+            require_shared_evm_joint_tip(&[&obs_a, &obs_b_drifted]).expect_err("not shared");
         assert!(error.to_string().contains("share one joint tip"));
     }
 

@@ -287,10 +287,7 @@ mod tests {
             .await
             .expect("report-only portfolio admits without live EVM runtime config");
 
-        assert_eq!(
-            outcome.status(),
-            crate::RunLaunchOutcomeStatus::Admitted
-        );
+        assert_eq!(outcome.status(), crate::RunLaunchOutcomeStatus::Admitted);
     }
 
     #[tokio::test]
@@ -305,10 +302,7 @@ mod tests {
             .await
             .expect("report-only portfolio admits without live BTC runtime config");
 
-        assert_eq!(
-            outcome.status(),
-            crate::RunLaunchOutcomeStatus::Admitted
-        );
+        assert_eq!(outcome.status(), crate::RunLaunchOutcomeStatus::Admitted);
     }
 
     #[tokio::test]

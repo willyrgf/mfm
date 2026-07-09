@@ -28,15 +28,16 @@ use mfm_program::{
 };
 use mfm_program_derive::{MfmConfig, OperationOutput, PublicOutputs};
 pub use mfm_states_evm::{
-    AssembleEvmNativeBalanceBatchConfig, AssembleEvmNativeBalanceBatchInput,
-    AssembleEvmNativeBalanceBatchInputHandles, AssembleEvmNativeBalanceBatchState,
-    EvmAddressNativeBalanceObservation, EvmAddressNativeBalanceSnapshotFact, EvmJointTip,
-    EvmNativeBalanceBatchSummary, ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput,
+    default_native_decimals, AssembleEvmNativeBalanceBatchConfig,
+    AssembleEvmNativeBalanceBatchInput, AssembleEvmNativeBalanceBatchInputHandles,
+    AssembleEvmNativeBalanceBatchState, EvmAddressNativeBalanceObservation,
+    EvmAddressNativeBalanceSnapshotFact, EvmJointTip, EvmNativeBalanceBatchSummary,
+    ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput,
     ObserveEvmNativeBalanceInputHandles, ObserveEvmNativeBalanceState,
     RecordEvmNativeBalanceFactConfig, RecordEvmNativeBalanceFactInput,
     RecordEvmNativeBalanceFactInputHandles, RecordEvmNativeBalanceFactState,
     ResolveEvmJointTipConfig, ResolveEvmJointTipInput, ResolveEvmJointTipInputHandles,
-    ResolveEvmJointTipState, default_native_decimals,
+    ResolveEvmJointTipState,
 };
 use serde::{Deserialize, Serialize};
 

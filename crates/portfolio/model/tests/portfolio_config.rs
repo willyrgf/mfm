@@ -4,8 +4,8 @@ use mfm_portfolio_model::metadata::PublicMetadata;
 use mfm_portfolio_model::portfolio::*;
 use mfm_portfolio_model::symbol::{
     BalanceReaderConfig, Observation, ObservationAnchor, ObservationQuantity, ObservationSource,
-    ObservationValue, ObservationValueSourceRef, QuoteCode, SymbolKind,
-    SymbolRole, ValuationSourceRegistry,
+    ObservationValue, ObservationValueSourceRef, QuoteCode, SymbolKind, SymbolRole,
+    ValuationSourceRegistry,
 };
 use mfm_portfolio_model::wallet::{WalletImplementationConfig, WalletSubjectKind};
 use serde_json::{json, Value};
@@ -278,7 +278,6 @@ fn invalid_ref_detection_catches_cross_links() {
             underlying_symbol_id: "unknown-symbol".to_string(),
         },
     );
-
 }
 
 #[test]

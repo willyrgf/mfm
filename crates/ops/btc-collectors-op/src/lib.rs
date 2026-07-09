@@ -45,8 +45,9 @@ pub use mfm_states_btc::{
     RecordBtcAddressBalanceFactInputHandles, RecordBtcAddressBalanceFactState,
     RecordBtcChainHeadFactConfig, RecordBtcChainHeadFactInput, RecordBtcChainHeadFactInputHandles,
     RecordBtcChainHeadFactState, RecordCollectorCheckpointConfig, RecordCollectorCheckpointInput,
-    RecordCollectorCheckpointInputHandles, RecordCollectorCheckpointState, ResolveBtcJointTipConfig,
-    ResolveBtcJointTipInput, ResolveBtcJointTipInputHandles, ResolveBtcJointTipState,
+    RecordCollectorCheckpointInputHandles, RecordCollectorCheckpointState,
+    ResolveBtcJointTipConfig, ResolveBtcJointTipInput, ResolveBtcJointTipInputHandles,
+    ResolveBtcJointTipState,
 };
 use serde::{Deserialize, Serialize};
 
@@ -505,12 +506,14 @@ pub fn btc_address_balance_collector_program_draft(
                     observed_at_unix_ms: None,
                 })?,
             )?;
-            let result = root.scope().call::<BtcAddressBalanceCollectorOperation, _>(
-                OperationKey::new(BALANCE_OP_KEY)?,
-                BtcAddressBalanceCollectorOperation,
-                config,
-                observation_context,
-            )?;
+            let result = root
+                .scope()
+                .call::<BtcAddressBalanceCollectorOperation, _>(
+                    OperationKey::new(BALANCE_OP_KEY)?,
+                    BtcAddressBalanceCollectorOperation,
+                    config,
+                    observation_context,
+                )?;
             root.bind_public_outputs(
                 PublicOutputKey::new(BALANCE_PUBLIC_OUTPUT_KEY)?,
                 &BtcAddressBalanceCollectorPublicOutputs {

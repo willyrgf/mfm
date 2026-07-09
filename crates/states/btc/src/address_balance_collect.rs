@@ -10,13 +10,13 @@ use std::str::FromStr;
 
 use mfm_btc_capabilities::{
     BtcAddress, BtcBalanceReadCapability, BtcBalanceReadResponse, BtcBlockHash,
-    BtcChainHeadReadCapability, BtcChainHeadResponse as CapabilityChainHeadResponse, BtcHeadSelection,
-    BtcNetworkId, BtcSourceIdentity, BtcSourceStatus,
+    BtcChainHeadReadCapability, BtcChainHeadResponse as CapabilityChainHeadResponse,
+    BtcHeadSelection, BtcNetworkId, BtcSourceIdentity, BtcSourceStatus,
 };
+use mfm_capabilities::NoCaps;
 use mfm_effects::{ManagedPlatformWrite, Pure, ReadExternal};
 use mfm_facts::{CoverageStatus, HoldingSourceStatus};
 use mfm_ids::{StateKind, StateVersion};
-use mfm_capabilities::NoCaps;
 use mfm_program::{
     fact_descriptor_ref, AdapterBindingSpec, FactDescriptorRef, ManagedWriteState, NoContext,
     PureState, ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
@@ -387,7 +387,8 @@ pub fn validate_observe_btc_address_balance_config(
     BtcNetworkId::new(&config.network).map_err(|error| error.to_string())?;
     validate_bitcoin_network(&config.bitcoin_network)?;
     BtcSourceIdentity::new(&config.semantic_source_identity).map_err(|error| error.to_string())?;
-    BtcAddress::new(&config.address).map_err(|_| "address is not a supported Bitcoin address".to_owned())?;
+    BtcAddress::new(&config.address)
+        .map_err(|_| "address is not a supported Bitcoin address".to_owned())?;
     let coverage = CoverageStatus::from_str(&config.coverage)
         .map_err(|_| format!("unknown coverage status {:?}", config.coverage))?;
     if !coverage.is_admissible_for_write() {
@@ -841,7 +842,7 @@ pub fn assemble_btc_address_balance_batch(
 mod tests {
     use super::*;
     use mfm_btc_capabilities::{
-        BitcoinNetworkTag, BtcHeadKind, BtcFinality, BtcNetworkId, BtcSourceBinding,
+        BitcoinNetworkTag, BtcFinality, BtcHeadKind, BtcNetworkId, BtcSourceBinding,
         BtcSourceIdentity, RedactedBtcSourceEvidence,
     };
     use mfm_program::StateSpec;
@@ -881,7 +882,11 @@ mod tests {
         )
     }
 
-    fn chain_head_response(height: u64, hash: &str, status: BtcSourceStatus) -> CapabilityChainHeadResponse {
+    fn chain_head_response(
+        height: u64,
+        hash: &str,
+        status: BtcSourceStatus,
+    ) -> CapabilityChainHeadResponse {
         CapabilityChainHeadResponse {
             evidence: RedactedBtcSourceEvidence::from_binding(&binding(), "main", status)
                 .expect("evidence"),
@@ -943,13 +948,17 @@ mod tests {
         let error =
             normalize_btc_address_balance_observation(&observe_config(ADDR_A), &tip, &drifted)
                 .expect_err("drift");
-        assert!(error.to_string().contains("tip drift") || error.to_string().contains("hash mismatch"));
+        assert!(
+            error.to_string().contains("tip drift") || error.to_string().contains("hash mismatch")
+        );
 
         let mismatched = balance_response(ADDR_A, 100, HASH_B, 50);
         let error =
             normalize_btc_address_balance_observation(&observe_config(ADDR_A), &tip, &mismatched)
                 .expect_err("hash mismatch");
-        assert!(error.to_string().contains("tip drift") || error.to_string().contains("hash mismatch"));
+        assert!(
+            error.to_string().contains("tip drift") || error.to_string().contains("hash mismatch")
+        );
     }
 
     #[test]
@@ -960,9 +969,8 @@ mod tests {
         )
         .expect("tip");
         let balance = balance_response(ADDR_A, 100, HASH_A, 42);
-        let ok =
-            normalize_btc_address_balance_observation(&observe_config(ADDR_A), &tip, &balance)
-                .expect("ok");
+        let ok = normalize_btc_address_balance_observation(&observe_config(ADDR_A), &tip, &balance)
+            .expect("ok");
         assert_eq!(ok.response().anchor_height(), 100);
         assert_eq!(ok.response().anchor_hash(), HASH_A);
         assert_eq!(ok.response().balance_sats(), 42);
@@ -1045,8 +1053,7 @@ mod tests {
         // Tamper by rebuilding observation with empty-hash response via serde.
         let mut value = serde_json::to_value(&obs).expect("json");
         value["response"]["anchor_hash"] = serde_json::json!("");
-        let tampered: BtcAddressBalanceObservation =
-            serde_json::from_value(value).expect("decode");
+        let tampered: BtcAddressBalanceObservation = serde_json::from_value(value).expect("decode");
         let state = RecordBtcAddressBalanceFactState;
         let context = mfm_program::CertifiedContext::no_context();
         let result = poll_ready(state.run(

@@ -21,6 +21,7 @@ use mfm_facts::{
     ScopeDecisionEvidence, StoreScopeRef,
 };
 use mfm_ids::{ContentDigest, DigestAlgorithm};
+use mfm_portfolio_model::symbol::ObservationAnchor;
 use mfm_program::{MfmFactType, StateSpec, ValidatedConfig};
 use mfm_runtime::{
     load_materialized_input_value, load_materialized_struct_input, load_runner_config,
@@ -32,11 +33,11 @@ use mfm_state_portfolio::{
     assemble_snapshot, balance_reader_kind, expand_required_holdings,
     observations_from_selected_holdings, portfolio_adapter_kind, portfolio_adapter_version,
     project_network_pins_from_observations, resolve_subjects_from_config,
-    resolve_valuations_from_config, select_network_coherent, symbols_by_id_map, HoldingAnchor,
-    AssembleSnapshotConfig, AssembleSnapshotInput, AssembleSnapshotState, HoldingCandidate,
-    HoldingFactProjection, PortfolioHoldingErrorCode, PortfolioHoldingSelectionError,
-    ProjectReportConfig, ProjectReportInput, ProjectReportState, RequiredHoldingKey,
-    RequiredHoldingRequirement, ResolveSubjectsConfig, ResolveSubjectsState,
+    resolve_valuations_from_config, select_network_coherent, symbols_by_id_map,
+    AssembleSnapshotConfig, AssembleSnapshotInput, AssembleSnapshotState, HoldingAnchor,
+    HoldingCandidate, HoldingFactProjection, PortfolioHoldingErrorCode,
+    PortfolioHoldingSelectionError, ProjectReportConfig, ProjectReportInput, ProjectReportState,
+    RequiredHoldingKey, RequiredHoldingRequirement, ResolveSubjectsConfig, ResolveSubjectsState,
     ResolveValuationsConfig, ResolveValuationsState, SelectHoldingsConfig, SelectHoldingsState,
     SelectedHoldingMaterial, SelectedHoldings,
 };
@@ -48,7 +49,6 @@ use mfm_states_evm::{
     normalize_evm_address_native_balance, EvmAddressNativeBalanceResponse,
     EvmAddressNativeBalanceSnapshotFact, EvmAddressNativeBalanceSubject,
 };
-use mfm_portfolio_model::symbol::ObservationAnchor;
 use mfm_store::v1 as store;
 use mfm_values::MfmValue;
 
@@ -194,8 +194,9 @@ impl ErasedNodeRunner for ResolveValuationsRunner {
             let config =
                 load_runner_config::<ResolveValuationsConfig>(&ctx, self.artifacts.as_ref())
                     .await?;
-            let output = resolve_valuations_from_config(config.as_ref())
-                .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+            let output = resolve_valuations_from_config(config.as_ref()).map_err(|error| {
+                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+            })?;
             state_output(ctx, &output)
         })
     }
@@ -215,8 +216,9 @@ impl ErasedNodeRunner for AssembleSnapshotRunner {
                 self.artifacts.as_ref(),
             )
             .await?;
-            let output = assemble_snapshot(config.as_ref(), input, 0)
-                .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+            let output = assemble_snapshot(config.as_ref(), input, 0).map_err(|error| {
+                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+            })?;
             state_output(ctx, &output)
         })
     }
@@ -255,7 +257,8 @@ async fn select_holdings(
     let state = SelectHoldingsState::new(config)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
     let config = state.config();
-    let requirements = expand_required_holdings(config, &subjects).map_err(holding_runtime_error)?;
+    let requirements =
+        expand_required_holdings(config, &subjects).map_err(holding_runtime_error)?;
 
     let mut candidates_by_holding: BTreeMap<RequiredHoldingKey, Vec<HoldingCandidate>> =
         BTreeMap::new();
@@ -287,13 +290,15 @@ async fn select_holdings(
             .or_default();
     }
 
-    let selected = select_network_coherent(&candidates_by_holding).map_err(holding_runtime_error)?;
+    let selected =
+        select_network_coherent(&candidates_by_holding).map_err(holding_runtime_error)?;
     let selected_claim_ids: BTreeSet<String> = selected
         .iter()
         .map(|item| item.fact_claim_id.clone())
         .collect();
 
-    let symbols = symbols_by_id_map(&config.portfolio().symbol_configs).map_err(holding_runtime_error)?;
+    let symbols =
+        symbols_by_id_map(&config.portfolio().symbol_configs).map_err(holding_runtime_error)?;
     let observations =
         observations_from_selected_holdings(&selected, &symbols).map_err(holding_runtime_error)?;
     // Guard: residual pin projection consistency (also enforced at assemble).

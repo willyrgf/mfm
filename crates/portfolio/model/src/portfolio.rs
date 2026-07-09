@@ -11,8 +11,8 @@ use crate::ids::{
 };
 use crate::metadata::PublicMetadata;
 use crate::symbol::{
-    validate_symbol_config, BalanceReaderConfig, Observation, QuoteCode,
-    SymbolConfig, SymbolConfigError, SymbolKind, ValuationReaderConfig, ValuationSourceConfig,
+    validate_symbol_config, BalanceReaderConfig, Observation, QuoteCode, SymbolConfig,
+    SymbolConfigError, SymbolKind, ValuationReaderConfig, ValuationSourceConfig,
     ValuationSourceRegistry, ValuationSourceRegistryError,
 };
 use crate::wallet::{WalletConfig, WalletSubjectKind};

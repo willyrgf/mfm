@@ -2,7 +2,9 @@ use super::*;
 use std::collections::BTreeMap;
 
 use mfm_portfolio_model::metadata::PublicMetadata;
-use mfm_portfolio_model::portfolio::{ExecutionAnchor, NetworkConfig, NetworkFamilyConfig, PortfolioConfig};
+use mfm_portfolio_model::portfolio::{
+    ExecutionAnchor, NetworkConfig, NetworkFamilyConfig, PortfolioConfig,
+};
 use mfm_portfolio_model::symbol::{
     BalanceReaderConfig, Observation, ObservationAnchor, ObservationQuantity, ObservationSource,
     QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole, SymbolValuationConfig,
