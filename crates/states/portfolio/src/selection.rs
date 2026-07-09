@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use mfm_canonical::sha256_digest_bytes;
+use mfm_facts::FactClaimId;
 use mfm_ids::{ContentDigest, DigestAlgorithm};
 use mfm_portfolio_model::portfolio::{ExecutionAnchor, NetworkPin};
 use mfm_portfolio_model::symbol::{Observation, ObservationAnchor, ObservationSource};
@@ -141,10 +142,10 @@ pub struct HoldingCandidate {
     pub network_id: String,
     /// Anchor at which the balance was proven.
     pub anchor: HoldingAnchor,
-    /// Store commit order for LWW at same subject+anchor (v1: DESC only).
+    /// Primary LWW ordering for candidates at the same subject and anchor.
     pub store_commit_order: u64,
-    /// Opaque claim/fact identity for evidence binding only.
-    pub fact_claim_id: String,
+    /// Claim identity for deterministic LWW tie-breaking and evidence binding.
+    pub fact_claim_id: FactClaimId,
     /// Hydrated response payload opaque to pure selection (passed through).
     pub response_material: SelectedHoldingMaterial,
 }
@@ -213,7 +214,7 @@ pub struct NormalizedHoldingFields {
 pub fn holding_candidate_from_normalized(
     key: &RequiredHoldingKey,
     store_commit_order: u64,
-    fact_claim_id: impl Into<String>,
+    fact_claim_id: FactClaimId,
     fields: NormalizedHoldingFields,
 ) -> Result<HoldingCandidate, PortfolioHoldingSelectionError> {
     let (height, hash) = match &fields.observation_anchor {
@@ -233,7 +234,7 @@ pub fn holding_candidate_from_normalized(
         network_id: key.network_id.clone(),
         anchor,
         store_commit_order,
-        fact_claim_id: fact_claim_id.into(),
+        fact_claim_id,
         response_material: SelectedHoldingMaterial {
             wallet_id: key.wallet_id.clone(),
             symbol_id: key.symbol_id.clone(),
@@ -258,7 +259,7 @@ pub struct SelectedHolding {
     /// Store commit order of the winning candidate.
     pub store_commit_order: u64,
     /// Fact claim id of the winning candidate.
-    pub fact_claim_id: String,
+    pub fact_claim_id: FactClaimId,
     /// Material for observation construction.
     pub material: SelectedHoldingMaterial,
 }
@@ -357,7 +358,7 @@ pub fn select_network_coherent(
                     Some(network_id.clone()),
                 ));
             }
-            // LWW v1: store_commit_order DESC, then fact_claim_id DESC (RFC secondary).
+            // LWW v1: store_commit_order DESC, then FactClaimId coordinate DESC (RFC secondary).
             at.sort_by(|left, right| {
                 right
                     .store_commit_order
@@ -548,6 +549,7 @@ pub fn project_holding_fact_for_network(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mfm_ids::RunId;
     use mfm_portfolio_model::metadata::PublicMetadata;
     use mfm_portfolio_model::symbol::{ObservationQuantity, SymbolKind, SymbolRole};
 
@@ -557,6 +559,18 @@ mod tests {
             symbol_id: symbol.to_owned(),
             network_id: network.to_owned(),
         }
+    }
+
+    fn claim(source_seq: u64) -> FactClaimId {
+        FactClaimId::new(
+            RunId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                sha256_digest_bytes(b"portfolio-selection-test-run"),
+            ),
+            source_seq,
+            0,
+        )
+        .expect("claim id")
     }
 
     fn material(
@@ -587,14 +601,14 @@ mod tests {
         height: u64,
         hash: &str,
         store_commit_order: u64,
-        claim: &str,
+        claim_sequence: u64,
         material: SelectedHoldingMaterial,
     ) -> HoldingCandidate {
         HoldingCandidate {
             network_id: network.to_owned(),
             anchor: HoldingAnchor::new(height, hash).expect("anchor"),
             store_commit_order,
-            fact_claim_id: claim.to_owned(),
+            fact_claim_id: claim(claim_sequence),
             response_material: material,
         }
     }
@@ -613,7 +627,7 @@ mod tests {
                     100,
                     "hash100",
                     2,
-                    "claim-a-100",
+                    100,
                     material("w1", "btc", "bitcoin-mainnet", 100, "hash100"),
                 ),
                 candidate(
@@ -621,7 +635,7 @@ mod tests {
                     99,
                     "hash99",
                     1,
-                    "claim-a-99",
+                    99,
                     material("w1", "btc", "bitcoin-mainnet", 99, "hash99"),
                 ),
             ],
@@ -633,7 +647,7 @@ mod tests {
                 99,
                 "hash99",
                 3,
-                "claim-b-99",
+                99,
                 material("w2", "btc", "bitcoin-mainnet", 99, "hash99"),
             )],
         );
@@ -649,7 +663,7 @@ mod tests {
                 .find(|s| s.key == a)
                 .expect("a")
                 .fact_claim_id,
-            "claim-a-99"
+            claim(99)
         );
         assert_eq!(
             selected
@@ -657,7 +671,7 @@ mod tests {
                 .find(|s| s.key == b)
                 .expect("b")
                 .fact_claim_id,
-            "claim-b-99"
+            claim(99)
         );
     }
 
@@ -673,7 +687,7 @@ mod tests {
                 100,
                 "hash100",
                 1,
-                "a",
+                1,
                 material("w1", "btc", "bitcoin-mainnet", 100, "hash100"),
             )],
         );
@@ -684,7 +698,7 @@ mod tests {
                 99,
                 "hash99",
                 1,
-                "b",
+                2,
                 material("w2", "btc", "bitcoin-mainnet", 99, "hash99"),
             )],
         );
@@ -704,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn lww_prefers_higher_store_commit_order_then_fact_claim_id() {
+    fn lww_prefers_higher_store_commit_order_then_typed_fact_claim_id() {
         let a = key("w1", "btc", "bitcoin-mainnet");
         let mut map = BTreeMap::new();
         map.insert(
@@ -715,7 +729,7 @@ mod tests {
                     50,
                     "hash50",
                     10,
-                    "older-commit",
+                    1,
                     material("w1", "btc", "bitcoin-mainnet", 50, "hash50"),
                 ),
                 candidate(
@@ -723,17 +737,18 @@ mod tests {
                     50,
                     "hash50",
                     20,
-                    "newer-commit",
+                    2,
                     material("w1", "btc", "bitcoin-mainnet", 50, "hash50"),
                 ),
             ],
         );
         let selected = select_network_coherent(&map).expect("select");
         assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].fact_claim_id, "newer-commit");
+        assert_eq!(selected[0].fact_claim_id, claim(2));
         assert_eq!(selected[0].store_commit_order, 20);
 
-        // Equal store_commit_order: fact_claim_id DESC is the secondary tie-break.
+        // Equal store_commit_order: compare typed coordinates, not decimal text where `9`
+        // sorts after `10` lexically.
         map.insert(
             a,
             vec![
@@ -742,7 +757,7 @@ mod tests {
                     50,
                     "hash50",
                     20,
-                    "claim-aaa",
+                    9,
                     material("w1", "btc", "bitcoin-mainnet", 50, "hash50"),
                 ),
                 candidate(
@@ -750,13 +765,13 @@ mod tests {
                     50,
                     "hash50",
                     20,
-                    "claim-zzz",
+                    10,
                     material("w1", "btc", "bitcoin-mainnet", 50, "hash50"),
                 ),
             ],
         );
         let selected = select_network_coherent(&map).expect("select equal commit");
-        assert_eq!(selected[0].fact_claim_id, "claim-zzz");
+        assert_eq!(selected[0].fact_claim_id, claim(10));
         assert_eq!(selected[0].store_commit_order, 20);
     }
 
@@ -921,7 +936,7 @@ mod tests {
         let candidate = holding_candidate_from_normalized(
             &key,
             9,
-            "claim-1",
+            claim(1),
             NormalizedHoldingFields {
                 balance_reader_kind: "native_balance".to_owned(),
                 raw_dec: "1000".to_owned(),
@@ -937,7 +952,7 @@ mod tests {
         )
         .expect("candidate");
         assert_eq!(candidate.store_commit_order, 9);
-        assert_eq!(candidate.fact_claim_id, "claim-1");
+        assert_eq!(candidate.fact_claim_id, claim(1));
         assert_eq!(candidate.anchor.height, 42);
         assert_eq!(candidate.response_material.wallet_id, "w1");
         assert_eq!(candidate.response_material.coverage, "configured_only");
@@ -953,7 +968,7 @@ mod tests {
         let err = holding_candidate_from_normalized(
             &key,
             1,
-            "claim",
+            claim(1),
             NormalizedHoldingFields {
                 balance_reader_kind: "native_balance".to_owned(),
                 raw_dec: "0".to_owned(),

@@ -14,7 +14,7 @@ use mfm_fact_capabilities::{
     FactIndexReadEvidence, FactIndexReadProvider, FactIndexReadRequest, FactIndexReadResponse,
     FactQueryReceiptTrustRootMaterial,
 };
-use mfm_facts::{FactCanonicalScalar, ScopeDecisionEvidence, StoreScopeRef};
+use mfm_facts::{FactCanonicalScalar, FactClaimId, ScopeDecisionEvidence, StoreScopeRef};
 use mfm_portfolio_model::symbol::ObservationAnchor;
 use mfm_program::{StateSpec, ValidatedConfig};
 use mfm_runtime::{
@@ -298,7 +298,7 @@ async fn select_holdings(
         select_network_coherent(&candidates_by_holding).map_err(holding_runtime_error)?;
     let selected_claim_ids: BTreeSet<String> = selected
         .iter()
-        .map(|item| item.fact_claim_id.clone())
+        .map(|item| fact_claim_id_string(&item.fact_claim_id))
         .collect();
 
     let symbols =
@@ -332,8 +332,8 @@ async fn candidates_for_requirement(
     let mut claim_ids = Vec::new();
     for row in response.rows() {
         let fact_ref = row.fact_ref();
-        let claim_id = fact_claim_id_string(fact_ref.fact_claim_id());
-        claim_ids.push(claim_id.clone());
+        let claim_id = fact_ref.fact_claim_id().clone();
+        claim_ids.push(fact_claim_id_string(&claim_id));
         let store_commit_order = store_commit_order_from_row(row).ok_or_else(|| {
             mfm_runtime::RuntimeError::InvalidRunnerOutput(
                 "missing_fact: holding fact row missing store_commit_order".to_owned(),
@@ -489,7 +489,7 @@ fn btc_holding_candidate(
     requirement: &RequiredHoldingRequirement,
     response: &BtcAddressBalanceResponse,
     store_commit_order: u64,
-    fact_claim_id: impl Into<String>,
+    fact_claim_id: FactClaimId,
 ) -> Result<HoldingCandidate, PortfolioHoldingSelectionError> {
     let subject = requirement_to_btc_subject(requirement).map_err(|error| {
         PortfolioHoldingSelectionError::new(
@@ -530,7 +530,7 @@ fn evm_holding_candidate(
     requirement: &RequiredHoldingRequirement,
     response: &EvmAddressNativeBalanceResponse,
     store_commit_order: u64,
-    fact_claim_id: impl Into<String>,
+    fact_claim_id: FactClaimId,
 ) -> Result<HoldingCandidate, PortfolioHoldingSelectionError> {
     let subject = requirement_to_evm_subject(requirement).map_err(|error| {
         PortfolioHoldingSelectionError::new(
