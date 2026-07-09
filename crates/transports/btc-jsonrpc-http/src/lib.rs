@@ -278,21 +278,6 @@ impl BtcJsonRpcSourceProvider {
         })
     }
 
-    async fn read_chain_head_inner(
-        &self,
-        request: &BtcChainHeadRequest,
-    ) -> mfm_btc_capabilities::Result<BtcChainHeadResponse> {
-        let verified = self.prepare_call().await?;
-        self.read_chain_head_checked(&verified, request).await
-    }
-
-    async fn read_balance_inner(
-        &self,
-        request: &BtcBalanceReadRequest,
-    ) -> mfm_btc_capabilities::Result<BtcBalanceReadResponse> {
-        let verified = self.prepare_call().await?;
-        self.read_balance_checked(&verified, request).await
-    }
 }
 
 impl BtcChainHeadReadProvider for BtcJsonRpcSourceProvider {
@@ -300,7 +285,10 @@ impl BtcChainHeadReadProvider for BtcJsonRpcSourceProvider {
         &'a self,
         request: &'a BtcChainHeadRequest,
     ) -> BtcCapabilityFuture<'a, BtcChainHeadResponse> {
-        Box::pin(async move { self.read_chain_head_inner(request).await })
+        Box::pin(async move {
+            let verified = self.prepare_call().await?;
+            self.read_chain_head_checked(&verified, request).await
+        })
     }
 }
 
@@ -309,7 +297,10 @@ impl BtcBalanceReadProvider for BtcJsonRpcSourceProvider {
         &'a self,
         request: &'a BtcBalanceReadRequest,
     ) -> BtcCapabilityFuture<'a, BtcBalanceReadResponse> {
-        Box::pin(async move { self.read_balance_inner(request).await })
+        Box::pin(async move {
+            let verified = self.prepare_call().await?;
+            self.read_balance_checked(&verified, request).await
+        })
     }
 }
 
