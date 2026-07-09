@@ -6404,19 +6404,14 @@ fn idempotency_key_ref(
     ))?)
 }
 
-fn evm_network_id(network_id: &str) -> Result<EvmNetworkId> {
-    EvmNetworkId::new(network_id).map_err(Into::into)
-}
-
-fn evm_network_binding(network_id: &str, expected_chain_id: u64) -> Result<EvmNetworkBinding> {
-    EvmNetworkBinding::new(evm_network_id(network_id)?, expected_chain_id).map_err(Into::into)
-}
-
 fn runtime_evm_network_binding(
     network_id: &str,
     expected_chain_id: u64,
 ) -> mfm_runtime::Result<EvmNetworkBinding> {
-    evm_network_binding(network_id, expected_chain_id).map_err(Into::into)
+    let network_id = EvmNetworkId::new(network_id).map_err(EvmContractAdapterError::from)?;
+    EvmNetworkBinding::new(network_id, expected_chain_id)
+        .map_err(EvmContractAdapterError::from)
+        .map_err(Into::into)
 }
 
 fn runtime_evm_network_binding_for_context(
