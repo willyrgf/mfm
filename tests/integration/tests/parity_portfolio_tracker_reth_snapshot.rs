@@ -1,7 +1,13 @@
+//! Portfolio Reth parity feature tests after the fact-backed cutover.
+//!
+//! Report is Platform-fact-only. Live Reth crawl is not report authority.
+//! Without admitted holding facts the run hard-fails even if Reth is up.
+//! Collect-then-report (external multi-run) is the operator path for success.
+
 #![cfg(feature = "parity-tests")]
 #![allow(clippy::disallowed_methods)]
 
-use mfm_app::RunModeStatus;
+use tower::ServiceExt;
 
 mod support;
 
@@ -75,15 +81,6 @@ fn canonical_portfolio_snapshot_payload(wallet_address: &str, chain_id: u64) -> 
     })
 }
 
-fn find_quote_total<'a>(totals: &'a serde_json::Value, quote: &str) -> &'a serde_json::Value {
-    totals
-        .as_array()
-        .expect("quote totals array")
-        .iter()
-        .find(|total| total["quote"] == quote)
-        .unwrap_or_else(|| panic!("missing quote total for {quote}"))
-}
-
 fn parse_u64_hex(s: &str) -> u64 {
     let Some(rest) = s.strip_prefix("0x") else {
         panic!("missing 0x prefix: {s}");
@@ -126,8 +123,11 @@ async fn rpc_call(rpc_url: &str, method: &str, params: serde_json::Value) -> ser
         .unwrap_or_else(|| panic!("json-rpc {method} response missing result: {payload}"))
 }
 
+/// Report-only cutover: even with live Reth + runtime config, portfolio_snapshot
+/// must not complete without admitted Platform holding facts. Live crawl is not
+/// report authority.
 #[tokio::test]
-async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
+async fn parity_portfolio_snapshot_hard_fails_without_platform_holding_facts() {
     let rpc_url = required_rpc_url();
 
     let chain_id_hex = rpc_call(&rpc_url, "eth_chainId", serde_json::json!([])).await;
@@ -137,57 +137,33 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
         .expect("eth_chainId hex");
     let _runtime_config = set_runtime_source_registry(&rpc_url);
 
-    // Intentionally use a fixed address. This keeps the test independent of `eth_accounts`
-    // support/configuration in the node.
     let wallet_address = "0x000000000000000000000000000000000000dead";
 
-    let response = support::run_portfolio_snapshot(canonical_portfolio_snapshot_payload(
-        wallet_address,
-        chain_id,
-    ))
-    .await;
-    assert_eq!(response.run.run_mode, RunModeStatus::Completed);
-    let public_output = response
-        .public_output
-        .json
-        .as_ref()
-        .expect("public output json");
-    let report = &public_output["report"];
-    assert_eq!(report["portfolio_id"], "reth-eth-only");
-    // report-only cutover: soft error_count removed
-    let report_wallet = &report["wallet_summaries"][0];
-    let report_wallet_usd = find_quote_total(&report_wallet["totals_by_quote"], "USD");
-    let report_portfolio_usd = find_quote_total(&report["totals_by_quote"], "USD");
-    assert_eq!(report_wallet_usd["collateral_value_dec"], "0");
-    assert_eq!(report_wallet_usd["debt_value_dec"], "0");
-    assert_eq!(report_wallet_usd["staked_value_dec"], "0");
-    assert_eq!(report_wallet_usd, report_portfolio_usd);
-
-    let out = &public_output["snapshot"];
-    assert_eq!(out["portfolio_id"], "reth-eth-only");
-    assert_eq!(out["network_pins"][0]["anchor"]["chain_id"], chain_id);
-    assert!(out["network_pins"][0]["anchor"]["block_hash"]
-        .as_str()
-        .is_some_and(|value| value.starts_with("0x") && value.len() == 66));
-    assert_eq!(out["wallets"][0]["address"], wallet_address);
-    assert_eq!(
-        out["wallets"][0]["observations"]
-            .as_array()
-            .map(|v: &Vec<serde_json::Value>| v.len()),
-        Some(1)
+    // support::run_portfolio_snapshot asserts Completed — call REST helper path instead.
+    let app = mfm_rest_api::make_app(support::in_memory_rest_app_state());
+    let response = app
+        .oneshot(support::json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "op": "portfolio_snapshot",
+                "config_format": "json",
+                "config": canonical_portfolio_snapshot_payload(wallet_address, chain_id),
+            }),
+        ))
+        .await
+        .expect("portfolio rest response");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body = support::response_json(response).await;
+    assert_eq!(body["status"], "success");
+    let run_mode = body["data"]["run"]["run_mode"].as_str().expect("run_mode");
+    assert_ne!(
+        run_mode, "completed",
+        "live Reth must not make report succeed without Platform holding facts"
     );
-    assert_eq!(out["wallets"][0]["observations"][0]["symbol_id"], SYMBOL_ID);
-    assert_eq!(
-        out["wallets"][0]["observations"][0]["values"][0]["quote"],
-        "USD"
+    assert!(
+        body["data"].get("public_output").is_none() || body["data"]["public_output"].is_null(),
+        "no public snapshot without admitted holding facts"
     );
-    assert_eq!(
-        out["wallets"][0]["observations"][0]["values"][0]["unit_price_dec"],
-        "1800.00"
-    );
-    let observation_value = &out["wallets"][0]["observations"][0]["values"][0]["value_dec"];
-    assert_eq!(report_wallet_usd["assets_value_dec"], *observation_value);
-    assert_eq!(report_wallet_usd["net_value_dec"], *observation_value);
 }
 
 fn set_runtime_source_registry(rpc_url: &str) -> support::EnvVarRestore {
