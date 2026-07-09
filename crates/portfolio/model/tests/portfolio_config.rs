@@ -227,6 +227,17 @@ fn invalid_ref_detection_catches_cross_links() {
         },
     );
 
+    let mut duplicate_wallet_symbol = canonical_config_json();
+    duplicate_wallet_symbol["wallets"][0]["symbol_ids"] =
+        json!(["eth.native.ethereum-mainnet", "eth.native.ethereum-mainnet"]);
+    assert_decode_error(
+        &duplicate_wallet_symbol,
+        PortfolioConfigError::DuplicateWalletSymbol {
+            wallet_id: "wallet_treasury_eth".to_string(),
+            symbol_id: "eth.native.ethereum-mainnet".to_string(),
+        },
+    );
+
     let mut symbol_network = canonical_config_json();
     symbol_network["symbol_configs"][0]["network_id"] = json!("unknown-network");
     assert_decode_error(

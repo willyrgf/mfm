@@ -825,6 +825,14 @@ pub enum PortfolioConfigError {
         /// Unknown symbol id.
         symbol_id: String,
     },
+    /// Wallet listed the same symbol more than once.
+    #[error("wallet `{wallet_id}` listed symbol `{symbol_id}` more than once")]
+    DuplicateWalletSymbol {
+        /// Wallet id associated with the failure.
+        wallet_id: String,
+        /// Repeated symbol id.
+        symbol_id: String,
+    },
     /// Wallet referenced a symbol configured for a different network.
     #[error("wallet `{wallet_id}` on network `{wallet_network_id}` referenced symbol `{symbol_id}` on network `{symbol_network_id}`")]
     WalletSymbolNetworkMismatch {
@@ -1010,7 +1018,14 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
                 network_family: network.family(),
             });
         }
+        let mut wallet_symbol_ids = HashSet::new();
         for symbol_id in &wallet.symbol_ids {
+            if !wallet_symbol_ids.insert(symbol_id) {
+                return Err(PortfolioConfigError::DuplicateWalletSymbol {
+                    wallet_id: wallet.wallet_id.to_string(),
+                    symbol_id: symbol_id.to_string(),
+                });
+            }
             if !symbol_ids.contains(symbol_id) {
                 return Err(PortfolioConfigError::UnknownWalletSymbol {
                     wallet_id: wallet.wallet_id.to_string(),
