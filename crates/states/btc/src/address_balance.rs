@@ -1,5 +1,6 @@
 //! Bitcoin address balance snapshot fact (`bitcoin.address_balance_snapshot`).
 
+use mfm_btc_capabilities::BtcBlockHash;
 use mfm_facts::{CoverageStatus, FactAudience, FactVisibility, HoldingSourceStatus};
 use mfm_program_derive::{MfmFactType, MfmValue};
 use serde::{Deserialize, Serialize};
@@ -101,7 +102,7 @@ pub struct BtcAddressBalanceResponse {
 }
 
 impl BtcAddressBalanceResponse {
-    /// Creates response material, failing closed on missing hash or inadmissible coverage/status.
+    /// Creates response material, failing closed on malformed hash or inadmissible coverage/status.
     pub fn new(
         anchor_height: u64,
         anchor_hash: impl Into<String>,
@@ -109,12 +110,7 @@ impl BtcAddressBalanceResponse {
         coverage: CoverageStatus,
         source_status: HoldingSourceStatus,
     ) -> Result<Self, BtcStateError> {
-        let anchor_hash = anchor_hash.into();
-        if anchor_hash.trim().is_empty() {
-            return Err(BtcStateError::InvalidInput {
-                reason: "address balance anchor_hash is required".to_owned(),
-            });
-        }
+        let anchor_hash = require_btc_anchor_hash(anchor_hash)?;
         if !coverage.is_admissible_for_write() {
             return Err(BtcStateError::InvalidInput {
                 reason: format!(
@@ -376,11 +372,7 @@ pub fn normalize_btc_address_balance(
     subject: &BtcAddressBalanceSubject,
     response: &BtcAddressBalanceResponse,
 ) -> Result<NormalizedBtcAddressHolding, BtcStateError> {
-    if response.anchor_hash().trim().is_empty() {
-        return Err(BtcStateError::InvalidInput {
-            reason: "address balance anchor_hash is required".to_owned(),
-        });
-    }
+    let anchor_hash = require_btc_anchor_hash(response.anchor_hash())?;
     let coverage = response.coverage_status()?;
     let source_status = response.holding_source_status()?;
     if !coverage.is_acceptable_for_report() {
@@ -405,10 +397,20 @@ pub fn normalize_btc_address_balance(
         address: subject.address().to_owned(),
         balance_sats: response.balance_sats(),
         anchor_height: response.anchor_height(),
-        anchor_hash: response.anchor_hash().to_owned(),
+        anchor_hash,
         coverage,
         source_status,
     })
+}
+
+/// Requires a 32-byte lowercase hex Bitcoin block hash (empty and malformed fail closed).
+fn require_btc_anchor_hash(anchor_hash: impl Into<String>) -> Result<String, BtcStateError> {
+    let anchor_hash = anchor_hash.into();
+    BtcBlockHash::new(anchor_hash.trim())
+        .map(|hash| hash.as_str().to_owned())
+        .map_err(|_| BtcStateError::InvalidInput {
+            reason: "address balance anchor_hash must be a 32-byte hex hash".to_owned(),
+        })
 }
 
 #[cfg(test)]
@@ -486,6 +488,17 @@ mod tests {
             HoldingSourceStatus::Ok,
         )
         .is_err());
+        assert!(
+            BtcAddressBalanceResponse::new(
+                100,
+                "not-a-hash",
+                1,
+                CoverageStatus::ConfiguredOnly,
+                HoldingSourceStatus::Ok,
+            )
+            .is_err(),
+            "malformed nonempty hash must fail write admission"
+        );
         assert!(BtcAddressBalanceResponse::new(
             100,
             "00".repeat(32),
@@ -529,6 +542,15 @@ mod tests {
             "source_status": "ok",
         }));
         assert!(normalize_btc_address_balance(&valid_subject(), &missing_hash).is_err());
+
+        let malformed_hash = response_from_json(serde_json::json!({
+            "anchor_height": 99,
+            "anchor_hash": "zz".repeat(32),
+            "balance_sats": 7,
+            "coverage": "configured_only",
+            "source_status": "ok",
+        }));
+        assert!(normalize_btc_address_balance(&valid_subject(), &malformed_hash).is_err());
 
         let incomplete = response_from_json(serde_json::json!({
             "anchor_height": 99,

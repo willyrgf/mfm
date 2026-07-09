@@ -127,7 +127,7 @@ pub struct EvmAddressNativeBalanceResponse {
 }
 
 impl EvmAddressNativeBalanceResponse {
-    /// Creates response material, failing closed on missing hash or inadmissible coverage/status.
+    /// Creates response material, failing closed on malformed hash or inadmissible coverage/status.
     pub fn new(
         block_number: u64,
         block_hash: impl Into<String>,
@@ -136,13 +136,8 @@ impl EvmAddressNativeBalanceResponse {
         coverage: CoverageStatus,
         source_status: HoldingSourceStatus,
     ) -> Result<Self, EvmStateError> {
-        let block_hash = block_hash.into();
+        let block_hash = require_evm_block_hash(block_hash)?;
         let raw_wei = raw_wei.into();
-        if block_hash.trim().is_empty() {
-            return Err(EvmStateError::InvalidInput {
-                reason: "native balance block_hash is required".to_owned(),
-            });
-        }
         if raw_wei.trim().is_empty() || !raw_wei.chars().all(|c| c.is_ascii_digit()) {
             return Err(EvmStateError::InvalidInput {
                 reason: "raw_wei must be a non-empty decimal digit string".to_owned(),
@@ -418,11 +413,7 @@ pub fn normalize_evm_address_native_balance(
     subject: &EvmAddressNativeBalanceSubject,
     response: &EvmAddressNativeBalanceResponse,
 ) -> Result<NormalizedEvmNativeHolding, EvmStateError> {
-    if response.block_hash().trim().is_empty() {
-        return Err(EvmStateError::InvalidInput {
-            reason: "native balance block_hash is required".to_owned(),
-        });
-    }
+    let block_hash = require_evm_block_hash(response.block_hash())?;
     let coverage = response.coverage_status()?;
     let source_status = response.holding_source_status()?;
     if !coverage.is_acceptable_for_report() {
@@ -448,10 +439,24 @@ pub fn normalize_evm_address_native_balance(
         raw_wei: response.raw_wei().to_owned(),
         decimals: response.decimals(),
         block_number: response.block_number(),
-        block_hash: response.block_hash().to_owned(),
+        block_hash,
         coverage,
         source_status,
     })
+}
+
+/// Requires a 32-byte hex EVM block hash (optional `0x` prefix). Empty and malformed fail closed.
+pub(crate) fn require_evm_block_hash(
+    block_hash: impl Into<String>,
+) -> Result<String, EvmStateError> {
+    let block_hash = block_hash.into();
+    let hex = block_hash.strip_prefix("0x").unwrap_or(block_hash.as_str());
+    if hex.is_empty() || hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(EvmStateError::InvalidInput {
+            reason: "block_hash must be 32-byte hex (optional 0x prefix)".to_owned(),
+        });
+    }
+    Ok(block_hash)
 }
 
 #[cfg(test)]
@@ -518,6 +523,18 @@ mod tests {
             HoldingSourceStatus::Ok,
         )
         .is_err());
+        assert!(
+            EvmAddressNativeBalanceResponse::new(
+                1,
+                "not-a-hash",
+                "0",
+                18,
+                CoverageStatus::ConfiguredOnly,
+                HoldingSourceStatus::Ok,
+            )
+            .is_err(),
+            "malformed nonempty hash must fail write admission"
+        );
         assert!(EvmAddressNativeBalanceResponse::new(
             1,
             "0x".to_owned() + &"ab".repeat(32),

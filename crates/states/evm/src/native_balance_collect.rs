@@ -181,13 +181,7 @@ fn format_block_hash(hash: &alloy_primitives::B256) -> String {
 }
 
 fn validate_block_hash(value: &str) -> Result<(), EvmStateError> {
-    let hex = value.strip_prefix("0x").unwrap_or(value);
-    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(EvmStateError::InvalidInput {
-            reason: "block_hash must be 32-byte hex (optional 0x prefix)".to_owned(),
-        });
-    }
-    Ok(())
+    crate::require_evm_block_hash(value).map(|_| ())
 }
 
 fn validate_account(value: &str) -> Result<(), EvmStateError> {
