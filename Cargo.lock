@@ -2477,6 +2477,8 @@ dependencies = [
  "mfm-rest-api",
  "mfm-runtime",
  "mfm-spec",
+ "mfm-states-btc",
+ "mfm-states-evm",
  "mfm-store",
  "mfm-stream-store-postgres",
  "mfm_core",
@@ -2822,6 +2824,21 @@ dependencies = [
  "mfm-capabilities",
  "mfm-effects",
  "mfm-fact-capabilities",
+ "mfm-facts",
+ "mfm-ids",
+ "mfm-program",
+ "mfm-program-derive",
+ "mfm-values",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "mfm-states-evm"
+version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
  "mfm-facts",
  "mfm-ids",
  "mfm-program",

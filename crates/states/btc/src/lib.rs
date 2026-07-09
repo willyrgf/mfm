@@ -2,8 +2,17 @@
 //! Reusable Bitcoin fact state contracts.
 //!
 //! This crate owns typed Bitcoin facts and state-layer contracts used to observe bounded
-//! chain-head data and carry collector checkpoints. It defines no JSON-RPC transport, runtime
-//! source routing, workflow topology, CLI, REST, or app registration.
+//! chain-head data, address balance snapshots, and collector checkpoints. It defines no
+//! JSON-RPC transport, runtime source routing, workflow topology, CLI, REST, or app
+//! registration.
+
+mod address_balance;
+
+pub use address_balance::{
+    address_balance_fact_visibility, normalize_btc_address_balance,
+    normalize_btc_address_balance_fact, BtcAddressBalanceResponse, BtcAddressBalanceSnapshotFact,
+    BtcAddressBalanceSubject, NormalizedBtcAddressHolding,
+};
 
 use std::future;
 use std::num::NonZeroU64;

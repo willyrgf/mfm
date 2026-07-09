@@ -104,9 +104,9 @@ pub use receipt::{
 pub use scalar::FactCanonicalScalar;
 pub use subject::{FactFieldValue, FactKey, FactSubjectMaterialV1};
 pub use tags::{
-    FactAudience, FactFieldExposure, FactFieldExtraction, FactFieldSource, FactFieldValueType,
-    FactMetadataField, FactQueryOperator, FactScale, FactVisibility, FactVisibilityScope,
-    NullOrdering, SortDirection,
+    CoverageStatus, FactAudience, FactFieldExposure, FactFieldExtraction, FactFieldSource,
+    FactFieldValueType, FactMetadataField, FactQueryOperator, FactScale, FactVisibility,
+    FactVisibilityScope, HoldingSourceStatus, NullOrdering, SortDirection,
 };
 
 #[cfg(test)]
