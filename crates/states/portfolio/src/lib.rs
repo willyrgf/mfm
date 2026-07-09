@@ -1435,20 +1435,6 @@ pub fn pinned_anchor_for<'a>(
         .map(|view| &view.anchor)
 }
 
-/// Returns the pinned EVM block number for `network_id`, or zero when no EVM view exists.
-pub fn evm_block_number_for(views: &PinnedViews, network_id: &str) -> u64 {
-    views
-        .views
-        .iter()
-        .find_map(|view| match &view.anchor {
-            ExecutionAnchor::Evm { block_number, .. } if view.network_id == network_id => {
-                Some(*block_number)
-            }
-            _ => None,
-        })
-        .unwrap_or_default()
-}
-
 /// Builds an observation batch containing a missing pinned-view domain error.
 pub fn observation_batch_missing_pinned_view(
     config: &ObserveBatchConfig,
