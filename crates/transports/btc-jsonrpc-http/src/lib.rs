@@ -476,84 +476,44 @@ fn sanitized_content_type(headers: &reqwest::header::HeaderMap) -> Option<String
 
 /// Error returned when a Bitcoin BTC-denominated JSON amount cannot be represented exactly.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum BtcAmountParseError {
-    /// The amount token or string was empty.
+enum BtcAmountParseError {
     #[error("bitcoin amount was empty")]
     Empty,
-    /// The amount was negative.
     #[error("bitcoin amount must not be negative")]
     Negative,
-    /// The amount was not a plain base-10 integer or decimal.
     #[error("bitcoin amount must be a base-10 integer or decimal")]
     Invalid,
-    /// The amount had more than eight decimal places.
     #[error("bitcoin amount must not have more than 8 decimal places")]
     TooPrecise,
-    /// The amount exceeded `u64` satoshi range.
     #[error("bitcoin amount overflowed satoshi range")]
     Overflow,
 }
 
 /// Response from `getblockchaininfo`.
 #[derive(Clone, Debug, Deserialize)]
-pub struct BlockchainInfo {
-    /// Current block height.
-    pub blocks: u64,
-    /// Best block hash.
-    pub bestblockhash: String,
-    /// Current chain name (e.g. "main", "test", "signet", "regtest").
-    pub chain: String,
-    /// Whether the node reports initial block download, when present.
+struct BlockchainInfo {
+    blocks: u64,
+    bestblockhash: String,
+    chain: String,
     #[serde(default)]
-    pub initialblockdownload: Option<bool>,
+    initialblockdownload: Option<bool>,
 }
 
 /// Response from `getblockheader` with verbose output.
 #[derive(Clone, Debug, Deserialize)]
-pub struct BlockHeaderInfo {
-    /// Block hash.
-    pub hash: String,
-    /// Block height.
-    pub height: u64,
-    /// Block timestamp in Unix seconds.
-    pub time: u64,
-}
-
-/// One unspent output returned by `scantxoutset`.
-#[derive(Clone, Debug)]
-pub struct ScannedUtxo {
-    /// Transaction ID.
-    pub txid: String,
-    /// Output index.
-    pub vout: u32,
-    /// Value in satoshis.
-    pub amount_sats: u64,
-    /// Block height where this output was confirmed.
-    pub height: u64,
-}
-
-/// Response from `scantxoutset`.
-#[derive(Clone, Debug)]
-pub struct ScanTxOutSetResult {
-    /// Whether the scan completed successfully.
-    pub success: bool,
-    /// Block height of the scanned UTXO set.
-    pub height: u64,
-    /// Best block hash of the scanned UTXO set.
-    pub bestblock: String,
-    /// Total amount in satoshis across all matching UTXOs.
-    pub total_amount_sats: u64,
-    /// Individual unspent outputs.
-    pub unspents: Vec<ScannedUtxo>,
-}
-
-#[derive(Deserialize)]
-struct ScannedUtxoWire<'a> {
-    txid: String,
-    vout: u32,
-    #[serde(borrow)]
-    amount: &'a RawValue,
+struct BlockHeaderInfo {
+    hash: String,
     height: u64,
+    time: u64,
+}
+
+/// Response from `scantxoutset` with only the fields used by the bound provider.
+#[derive(Clone, Debug)]
+struct ScanTxOutSetResult {
+    success: bool,
+    height: u64,
+    bestblock: String,
+    total_amount_sats: u64,
 }
 
 #[derive(Deserialize)]
@@ -565,8 +525,6 @@ struct ScanTxOutSetResultWire<'a> {
     bestblock: String,
     #[serde(borrow)]
     total_amount: &'a RawValue,
-    #[serde(default, borrow)]
-    unspents: Vec<ScannedUtxoWire<'a>>,
 }
 
 impl<'de> Deserialize<'de> for ScanTxOutSetResult {
@@ -577,27 +535,11 @@ impl<'de> Deserialize<'de> for ScanTxOutSetResult {
         let wire = ScanTxOutSetResultWire::deserialize(deserializer)?;
         let total_amount_sats =
             btc_amount_json_to_sats(wire.total_amount.get()).map_err(de::Error::custom)?;
-        let unspents = wire
-            .unspents
-            .into_iter()
-            .map(|utxo| {
-                let amount_sats =
-                    btc_amount_json_to_sats(utxo.amount.get()).map_err(de::Error::custom)?;
-                Ok(ScannedUtxo {
-                    txid: utxo.txid,
-                    vout: utxo.vout,
-                    amount_sats,
-                    height: utxo.height,
-                })
-            })
-            .collect::<Result<Vec<_>, D::Error>>()?;
-
         Ok(Self {
             success: wire.success,
             height: wire.height,
             bestblock: wire.bestblock,
             total_amount_sats,
-            unspents,
         })
     }
 }
@@ -630,7 +572,7 @@ struct JsonRpcErrorObj {
 /// The input must be the raw JSON token for an integer, decimal number, or string containing
 /// a plain decimal amount. Exponents, negative values, and fractional precision above eight
 /// places are rejected.
-pub fn btc_amount_json_to_sats(raw_json: &str) -> Result<u64, BtcAmountParseError> {
+fn btc_amount_json_to_sats(raw_json: &str) -> Result<u64, BtcAmountParseError> {
     let raw = raw_json.trim();
     if raw.is_empty() {
         return Err(BtcAmountParseError::Empty);
@@ -1171,7 +1113,6 @@ mod tests {
                     height: self.scan_height,
                     bestblock: self.scan_bestblock.clone(),
                     total_amount_sats: self.scan_total_sats,
-                    unspents: Vec::new(),
                 })
             })
         }
@@ -1647,7 +1588,7 @@ mod tests {
 
     #[test]
     fn scan_tx_out_set_results_deserialize_populated_and_empty_responses() {
-        for (case, json, expected_unspents, expected_total_sats) in [
+        for (case, json, expected_total_sats) in [
             (
                 "populated",
                 r#"{
@@ -1667,7 +1608,6 @@ mod tests {
                     ],
                     "total_amount": 0.05000000
                 }"#,
-                1,
                 5_000_000,
             ),
             (
@@ -1681,18 +1621,18 @@ mod tests {
                     "total_amount": 0
                 }"#,
                 0,
-                0,
             ),
         ] {
             let result: ScanTxOutSetResult = serde_json::from_str(json).expect(case);
 
             assert!(result.success, "{case}");
-            assert_eq!(result.unspents.len(), expected_unspents, "{case}");
+            assert_eq!(result.height, 840000, "{case}");
+            assert_eq!(
+                result.bestblock,
+                "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5",
+                "{case}"
+            );
             assert_eq!(result.total_amount_sats, expected_total_sats, "{case}");
-            if case == "populated" {
-                assert_eq!(result.unspents[0].txid, "abc123");
-                assert_eq!(result.unspents[0].amount_sats, 1);
-            }
         }
     }
 
