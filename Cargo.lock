@@ -2893,6 +2893,7 @@ dependencies = [
  "mfm-capabilities",
  "mfm-effects",
  "mfm-evm-capabilities",
+ "mfm-evm-core",
  "mfm-fact-capabilities",
  "mfm-facts",
  "mfm-ids",

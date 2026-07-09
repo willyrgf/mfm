@@ -425,11 +425,8 @@ fn verify_evm_native_balance_observation_replay(
     let response = output.response();
     if subject.network() != config.network.as_str()
         || subject.chain_id() != config.chain_id
-        || !subject
-            .account()
-            .eq_ignore_ascii_case(config.account.as_str())
-        || output.source_read_count() == 0
-        || output.source_read_count() > config.max_source_reads.get()
+        || subject.account() != config.account.as_str()
+        || output.source_read_count() != config.max_source_reads.get()
     {
         return Err(replay_evm_mismatch(
             "EVM native-balance observation did not match certified config binding",

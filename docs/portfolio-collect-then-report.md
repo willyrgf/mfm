@@ -39,11 +39,13 @@ Operators run collectors, then report, as separate certified runs:
    run evm_native_balance
      network = ethereum-mainnet
      chain_id = 1
-     accounts = [ ... configured accounts ... ]
+     accounts = [ ... lowercase 0x-prefixed configured accounts ... ]
    ```
 
    Graph: `resolve_joint_tip` (latest block hash) once → per account balance at
-   block hash → re-verify tip → `record` → assemble batch.
+   that block hash → re-verify the canonical block → `record` → assemble batch.
+   Each account observation consumes exactly two source reads: the pinned block
+   lookup and the balance lookup.
 
 3. **Report** (facts only; no live chain reads):
 

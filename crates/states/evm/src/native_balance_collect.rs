@@ -26,14 +26,18 @@ use mfm_values::NonEmpty;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    address_native_balance_fact_visibility, EvmAddressNativeBalanceResponse,
-    EvmAddressNativeBalanceSnapshotFact, EvmAddressNativeBalanceSubject, EvmStateError,
+    address_native_balance_fact_visibility, validate_canonical_evm_account,
+    EvmAddressNativeBalanceResponse, EvmAddressNativeBalanceSnapshotFact,
+    EvmAddressNativeBalanceSubject, EvmStateError,
 };
 
 const NAMESPACE: &str = "mfm.evm";
 const EVM_JSONRPC_ADAPTER_NAME: &str = "jsonrpc";
 const EVM_JSONRPC_ADAPTER_VERSION: &str = "mfm.evm.jsonrpc.adapter.v1";
 const DEFAULT_NATIVE_DECIMALS: u8 = 18;
+
+/// Exact number of source reads required by one hash-pinned native-balance observation.
+pub const EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS: u64 = 2;
 
 /// Returns the stable EVM JSON-RPC adapter kind for native collectors.
 pub fn evm_jsonrpc_adapter_kind() -> Result<AdapterKind, mfm_ids::IdentityError> {
@@ -182,19 +186,6 @@ fn format_block_hash(hash: &alloy_primitives::B256) -> String {
 
 fn validate_block_hash(value: &str) -> Result<(), EvmStateError> {
     crate::require_evm_block_hash(value).map(|_| ())
-}
-
-fn validate_account(value: &str) -> Result<(), EvmStateError> {
-    let hex = value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-        .unwrap_or(value);
-    if hex.len() != 40 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(EvmStateError::InvalidInput {
-            reason: "account must be a 20-byte hex address".to_owned(),
-        });
-    }
-    Ok(())
 }
 
 /// Requires every observation in a same-network batch to share one joint tip anchor.
@@ -374,7 +365,12 @@ pub fn validate_observe_evm_native_balance_config(
     if config.chain_id == 0 {
         return Err("chain_id must be non-zero".to_owned());
     }
-    validate_account(&config.account).map_err(|error| error.to_string())?;
+    validate_canonical_evm_account(&config.account).map_err(|error| error.to_string())?;
+    if config.max_source_reads.get() != EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS {
+        return Err(format!(
+            "max_source_reads must equal {EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS} for native balance observation"
+        ));
+    }
     let coverage = CoverageStatus::from_str(&config.coverage)
         .map_err(|_| format!("unknown coverage status {:?}", config.coverage))?;
     if !coverage.is_admissible_for_write() {
@@ -519,7 +515,9 @@ pub fn normalize_evm_native_balance_observation(
         HoldingSourceStatus::Ok,
     )?;
     Ok(EvmAddressNativeBalanceObservation::new(
-        subject, response, 1,
+        subject,
+        response,
+        EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS,
     ))
 }
 
@@ -862,7 +860,7 @@ mod tests {
         ResolveEvmJointTipConfig {
             network: "ethereum-mainnet".to_owned(),
             chain_id: 1,
-            max_source_reads: NonZeroU64::new(1).expect("nz"),
+            max_source_reads: NonZeroU64::new(1).expect("non-zero source reads"),
         }
     }
 
@@ -873,7 +871,8 @@ mod tests {
             account: account.to_owned(),
             coverage: "configured_only".to_owned(),
             decimals: 18,
-            max_source_reads: NonZeroU64::new(1).expect("nz"),
+            max_source_reads: NonZeroU64::new(EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS)
+                .expect("non-zero source reads"),
         }
     }
 
@@ -950,11 +949,30 @@ mod tests {
         assert_eq!(obs.response().block_hash(), HASH_A);
         assert_eq!(obs.response().raw_wei(), "42");
         assert_eq!(obs.response().source_status(), "ok");
+        assert_eq!(
+            obs.source_read_count(),
+            EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS
+        );
         let json = serde_json::to_string(&obs.to_fact()).expect("json");
         for forbidden in ["wallet_id", "symbol_id", "rpc_url", "password", "http://"] {
             assert!(!json.contains(forbidden), "leaked {forbidden}");
         }
         let _ = Address::from_str(ACCT_A).expect("acct");
+    }
+
+    #[test]
+    fn observe_config_requires_canonical_account_and_exact_read_budget() {
+        let mut noncanonical = observe_config(ACCT_A);
+        noncanonical.account = "0x00000000000000000000000000000000000000AA".to_owned();
+        assert!(validate_observe_evm_native_balance_config(&noncanonical)
+            .expect_err("mixed-case account")
+            .contains("normalized lowercase"));
+
+        let mut too_small = observe_config(ACCT_A);
+        too_small.max_source_reads = NonZeroU64::new(1).expect("non-zero");
+        assert!(validate_observe_evm_native_balance_config(&too_small)
+            .expect_err("insufficient read budget")
+            .contains("must equal 2"));
     }
 
     #[test]

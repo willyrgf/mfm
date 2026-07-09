@@ -23,9 +23,10 @@ pub use native_balance_collect::{
     RecordEvmNativeBalanceFactConfig, RecordEvmNativeBalanceFactInput,
     RecordEvmNativeBalanceFactInputHandles, RecordEvmNativeBalanceFactState,
     ResolveEvmJointTipConfig, ResolveEvmJointTipInput, ResolveEvmJointTipInputHandles,
-    ResolveEvmJointTipState,
+    ResolveEvmJointTipState, EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS,
 };
 
+use mfm_evm_core::encoding::normalize_address;
 use mfm_facts::{
     compile_fact_query_plan, CanonicalFactQueryPlan, CoverageStatus, FactAudience,
     FactCanonicalScalar, FactFieldId, FactOrderingName, FactQueryInput, FactQueryOperator,
@@ -91,6 +92,7 @@ impl EvmAddressNativeBalanceSubject {
                 reason: "chain_id must be non-zero".to_owned(),
             });
         }
+        validate_canonical_evm_account(&account)?;
         Ok(Self {
             network,
             chain_id,
@@ -112,6 +114,18 @@ impl EvmAddressNativeBalanceSubject {
     pub fn account(&self) -> &str {
         &self.account
     }
+}
+
+pub(crate) fn validate_canonical_evm_account(account: &str) -> Result<(), EvmStateError> {
+    let normalized = normalize_address(account).map_err(|_| EvmStateError::InvalidInput {
+        reason: "account must be a 20-byte hex address".to_owned(),
+    })?;
+    if normalized != account {
+        return Err(EvmStateError::InvalidInput {
+            reason: "account must be a normalized lowercase 0x-prefixed EVM address".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// Observed result for an EVM native address balance snapshot fact.
@@ -545,6 +559,18 @@ mod tests {
             "0x0000000000000000000000000000000000000001",
         )
         .expect("subject")
+    }
+
+    #[test]
+    fn subject_rejects_noncanonical_account() {
+        let error = EvmAddressNativeBalanceSubject::new(
+            "ethereum-mainnet",
+            1,
+            "0x00000000000000000000000000000000000000AA",
+        )
+        .expect_err("mixed-case account must be rejected");
+
+        assert!(error.to_string().contains("normalized lowercase"));
     }
 
     #[test]

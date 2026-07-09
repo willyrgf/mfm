@@ -38,7 +38,7 @@ pub use mfm_states_evm::{
     RecordEvmNativeBalanceFactConfig, RecordEvmNativeBalanceFactInput,
     RecordEvmNativeBalanceFactInputHandles, RecordEvmNativeBalanceFactState,
     ResolveEvmJointTipConfig, ResolveEvmJointTipInput, ResolveEvmJointTipInputHandles,
-    ResolveEvmJointTipState,
+    ResolveEvmJointTipState, EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -116,7 +116,8 @@ impl EvmNativeBalanceConfig {
             account: account.to_owned(),
             coverage: self.coverage.clone(),
             decimals: self.decimals,
-            max_source_reads: NonZeroU64::new(1).expect("non-zero static value"),
+            max_source_reads: NonZeroU64::new(EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS)
+                .expect("native observation source reads are non-zero"),
         }
     }
 }
@@ -128,12 +129,12 @@ pub fn validate_evm_native_balance_config(config: &EvmNativeBalanceConfig) -> Re
     }
     let mut seen = std::collections::BTreeSet::new();
     for account in &config.accounts {
-        if !seen.insert(account.as_str()) {
-            return Err(format!("duplicate account in batch: {account}"));
-        }
         mfm_states_evm::validate_observe_evm_native_balance_config(
             &config.observe_config_for_account(account),
         )?;
+        if !seen.insert(account.as_str()) {
+            return Err(format!("duplicate account in batch: {account}"));
+        }
     }
     mfm_states_evm::validate_resolve_evm_joint_tip_config(&config.joint_tip_config())?;
     Ok(())
@@ -328,5 +329,17 @@ mod tests {
                 "observe must depend on shared joint tip: {rendered}"
             );
         }
+    }
+
+    #[test]
+    fn native_balance_config_rejects_noncanonical_accounts() {
+        let config = EvmNativeBalanceConfig {
+            accounts: vec!["0x00000000000000000000000000000000000000AA".to_owned()],
+            ..EvmNativeBalanceConfig::default()
+        };
+
+        assert!(validate_evm_native_balance_config(&config)
+            .expect_err("mixed-case account must be rejected")
+            .contains("normalized lowercase"));
     }
 }
