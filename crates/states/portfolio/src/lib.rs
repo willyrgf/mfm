@@ -1,8 +1,8 @@
 #![warn(missing_docs)]
-//! Typed portfolio-domain state contracts.
+//! Typed portfolio-domain state contracts for fact-backed report-only snapshots.
 //!
-//! This crate owns the reusable typed state, value, input, and capability contracts for portfolio
-//! snapshots.
+//! After the collectors cutover, `portfolio_snapshot` is select-centric:
+//! `ResolveSubjects → SelectHoldings → ResolveValuations → AssembleSnapshot → ProjectReport`.
 //!
 //! # Examples
 //!
@@ -29,35 +29,45 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future;
 use std::num::NonZeroU64;
 
-use alloy_primitives::U256;
 use mfm_canonical::sha256_digest_bytes;
-use mfm_capabilities::{CapabilityError, CapabilitySpec, NoCaps, ReadExternalRole};
+use mfm_capabilities::NoCaps;
 use mfm_effects::{Pure, ReadExternal};
-use mfm_evm_core::encoding::format_u256_units;
+use mfm_fact_capabilities::{FactIndexReadCapability, FactIndexReadRequest};
+use mfm_facts::{
+    compile_fact_query_plan, FactAudience, FactCanonicalScalar, FactFieldId, FactOrderingName,
+    FactQueryInput, FactQueryOperator, FactQueryPredicate, FactQueryScope, FactSelectionEvidence,
+    FactVisibilityScope, ScopeDecisionEvidence, StoreScopeRef,
+};
 use mfm_ids::{
-    AdapterKind, AdapterVersion, CapabilityKind, CapabilityVersion, DigestAlgorithm, StateKind,
-    StateVersion,
+    AdapterKind, AdapterVersion, ContentDigest, DigestAlgorithm, StateKind, StateVersion,
 };
 use mfm_portfolio_config::PortfolioSnapshotCanonicalConfig;
 use mfm_portfolio_model::aave::AAVE_V3_PROTOCOL_ID;
 use mfm_portfolio_model::portfolio::{
-    ExecutionAnchor, NetworkConfig, NetworkPin, PortfolioConfig, PortfolioQuoteTotal,
-    PortfolioReport, PortfolioSnapshot, PortfolioSnapshotError, ValidatedNetworkConfigs,
-    ValidatedPortfolioBundle, ValidatedPortfolioConfig, ValidatedSymbolConfigs,
+    NetworkConfig, NetworkFamilyConfig, PortfolioConfig, PortfolioQuoteTotal, PortfolioReport,
+    PortfolioSnapshot, ValidatedPortfolioBundle, ValidatedPortfolioConfig, ValidatedSymbolConfigs,
     ValidatedWalletConfigs, WalletReport, WalletSnapshot,
 };
 use mfm_portfolio_model::symbol::{
-    validate_symbol_config, validate_valuation_source_registry, BalanceReaderConfig, Observation,
-    ObservationAnchor, ObservationQuantity, ObservationSource, ObservationValue,
-    ObservationValueSourceRef, QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolRole,
-    ValuationReaderConfig, ValuationSourceRegistry,
+    validate_valuation_source_registry, BalanceReaderConfig, Observation, ObservationAnchor,
+    ObservationQuantity, ObservationSource, ObservationValue, ObservationValueSourceRef, QuoteCode,
+    QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole, ValuationReaderConfig,
+    ValuationSourceRegistry,
 };
 use mfm_portfolio_model::wallet::{WalletConfig, WalletImplementationConfig, WalletSubjectKind};
 use mfm_program::{
-    AdapterBindingSpec, NoContext, PureState, ReadState, StateError, StateResult, StateSpec,
+    AdapterBindingSpec, MfmFactType, NoContext, PureState, ReadState, StateError, StateResult,
+    StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs, StateInput};
-use mfm_values::{ConfigError, NonEmpty};
+use mfm_states_btc::{
+    normalize_btc_address_balance, BtcAddressBalanceResponse, BtcAddressBalanceSnapshotFact,
+};
+use mfm_states_evm::{
+    normalize_evm_address_native_balance, EvmAddressNativeBalanceResponse,
+    EvmAddressNativeBalanceSnapshotFact,
+};
+use mfm_values::ConfigError;
 use num_bigint::BigInt;
 use num_traits::{Signed, Zero};
 use serde::{Deserialize, Serialize};
@@ -65,6 +75,8 @@ use serde::{Deserialize, Serialize};
 const NAMESPACE: &str = "mfm.portfolio";
 const ADAPTER_NAME: &str = "typed-portfolio";
 const ADAPTER_VERSION: &str = "mfm.portfolio.adapter.typed.v1";
+/// Default store scope used by portfolio Platform holding selection.
+pub const DEFAULT_PORTFOLIO_STORE_SCOPE: &str = "mfm.store.default";
 
 /// Returns the typed portfolio adapter kind.
 pub fn portfolio_adapter_kind() -> Result<AdapterKind, mfm_ids::IdentityError> {
@@ -107,174 +119,14 @@ fn state_version(name: &'static str) -> mfm_program::Result<StateVersion> {
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
 }
 
-fn capability_kind(name: &'static str) -> mfm_capabilities::Result<CapabilityKind> {
-    CapabilityKind::new(
-        NAMESPACE,
-        name,
+fn selection_scope_decision_hash() -> ContentDigest {
+    ContentDigest::from_digest(
         DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(format!("mfm.portfolio.capability:{name}").as_bytes()),
+        sha256_digest_bytes(b"mfm.portfolio.holding.select.scope.v1"),
     )
-    .map_err(|error| CapabilityError::Identity(error.to_string()))
 }
 
-/// Read capability used by typed portfolio states that observe external chains.
-pub struct PortfolioReadCapability;
-
-impl CapabilitySpec for PortfolioReadCapability {
-    type Role = ReadExternalRole;
-
-    fn kind() -> mfm_capabilities::Result<CapabilityKind> {
-        capability_kind("read")
-    }
-
-    fn version() -> mfm_capabilities::Result<CapabilityVersion> {
-        CapabilityVersion::new("mfm.portfolio.capability.read.v1")
-            .map_err(|error| CapabilityError::Identity(error.to_string()))
-    }
-
-    fn name() -> &'static str {
-        "mfm.portfolio.read"
-    }
-}
-
-/// Raw balance read result returned by adapter-executed portfolio reads.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RawBalanceObservation {
-    /// Raw balance integer in the symbol's native base unit.
-    pub raw: U256,
-    /// Decimal precision for rendering the raw amount.
-    pub decimals: u8,
-    /// Concrete observation anchor, when the executed read returns its own source anchor.
-    pub anchor: Option<ExecutionAnchor>,
-}
-
-impl RawBalanceObservation {
-    /// Creates a raw balance observation.
-    pub fn new(raw: U256, decimals: u8, anchor: Option<ExecutionAnchor>) -> Self {
-        Self {
-            raw,
-            decimals,
-            anchor,
-        }
-    }
-}
-
-/// Classified network read intent derived from portfolio state config.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PortfolioNetworkReadIntent {
-    /// Read an Ethereum-compatible network.
-    Evm {
-        /// Stable portfolio network id.
-        network_id: String,
-        /// Expected EVM chain id.
-        chain_id: u64,
-    },
-    /// Read a Bitcoin-family network.
-    Bitcoin {
-        /// Stable portfolio network id.
-        network_id: String,
-        /// Semantic source identity expected for the read.
-        source_identity: String,
-        /// Expected Bitcoin Core network tag.
-        bitcoin_network: String,
-    },
-}
-
-/// Classified raw balance read intent derived from portfolio state config.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PortfolioBalanceReadIntent {
-    /// Read an EVM native account balance.
-    EvmNativeBalance {
-        /// Stable portfolio network id.
-        network_id: String,
-        /// Expected EVM chain id.
-        chain_id: u64,
-        /// Canonical account address.
-        account: String,
-        /// Pinned EVM block number.
-        block_number: u64,
-        /// Pinned EVM block hash.
-        block_hash: String,
-        /// Decimal precision used for rendering the raw amount.
-        decimals: u8,
-        /// Pinned execution anchor that must be preserved in the observation.
-        anchor: ExecutionAnchor,
-    },
-    /// Read an ERC-20 balance.
-    Erc20Balance {
-        /// Stable portfolio network id.
-        network_id: String,
-        /// Expected EVM chain id.
-        chain_id: u64,
-        /// Canonical account address.
-        account: String,
-        /// Canonical token contract address.
-        token_address: String,
-        /// Pinned EVM block number.
-        block_number: u64,
-        /// Pinned EVM block hash.
-        block_hash: String,
-        /// Optional configured token decimals. When absent, the adapter must read token decimals.
-        decimals: Option<u8>,
-        /// Pinned execution anchor that must be preserved in the observation.
-        anchor: ExecutionAnchor,
-    },
-    /// Read a Bitcoin native address balance.
-    BitcoinNativeBalance {
-        /// Stable portfolio network id.
-        network_id: String,
-        /// Semantic source identity expected for the read.
-        source_identity: String,
-        /// Expected Bitcoin Core network tag.
-        bitcoin_network: String,
-        /// Canonical Bitcoin address.
-        address: String,
-        /// Pinned execution anchor that the returned balance must match.
-        anchor: ExecutionAnchor,
-        /// Decimal precision used for rendering the raw amount.
-        decimals: u8,
-    },
-}
-
-/// Redaction-safe external read error reported by portfolio read execution.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{code}: {message}")]
-pub struct PortfolioReadError {
-    /// Stable machine-readable error code.
-    pub code: String,
-    /// Redacted human-readable message.
-    pub message: String,
-    /// Optional closed redacted diagnostic details for retained runtime evidence.
-    pub redacted_details: Option<serde_json::Value>,
-    /// Whether this read error must fail the runtime attempt instead of becoming domain output.
-    pub fatal_attempt_failure: bool,
-}
-
-impl PortfolioReadError {
-    /// Builds a redaction-safe portfolio read error.
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-            redacted_details: None,
-            fatal_attempt_failure: false,
-        }
-    }
-
-    /// Attaches closed redacted diagnostic details.
-    pub fn with_redacted_details(mut self, details: serde_json::Value) -> Self {
-        self.redacted_details = Some(details);
-        self
-    }
-
-    /// Marks this read error as a runtime attempt failure.
-    pub fn with_fatal_attempt_failure(mut self) -> Self {
-        self.fatal_attempt_failure = true;
-        self
-    }
-}
-
-/// Root typed portfolio workflow config.
+/// Root workflow config for the portfolio snapshot operation.
 #[derive(Debug, Clone, Serialize, PartialEq, MfmConfig)]
 #[mfm(
     schema = "mfm.portfolio.config.workflow",
@@ -364,48 +216,51 @@ impl ResolveSubjectsConfig {
     }
 }
 
-/// Config for execution-view pinning.
-#[derive(Debug, Clone, Serialize, PartialEq, MfmConfig)]
+/// Config for Platform fact-backed holding selection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
 #[mfm(
-    schema = "mfm.portfolio.config.pin_views",
-    validate = "validate_pin_views_config"
+    schema = "mfm.portfolio.config.select_holdings",
+    validate = "validate_select_holdings_config"
 )]
-pub struct PinViewsConfig {
-    /// Networks to pin.
-    pinned_networks: Vec<NetworkConfig>,
+pub struct SelectHoldingsConfig {
+    /// Portfolio requirements used for subject projection.
+    portfolio: PortfolioConfig,
+    /// Store scope for Platform fact-index reads.
+    store_scope: String,
+    /// Fixed certified selection policy id.
+    selection_policy_id: String,
 }
 
-impl PinViewsConfig {
-    /// Creates validated view-pinning config.
-    pub fn new(networks: Vec<NetworkConfig>) -> Result<Self, ConfigError> {
+impl SelectHoldingsConfig {
+    /// Creates validated select-holdings config with the cutover policy id.
+    pub fn new(portfolio: PortfolioConfig, store_scope: impl Into<String>) -> Result<Self, ConfigError> {
         let config = Self {
-            pinned_networks: networks,
+            portfolio,
+            store_scope: store_scope.into(),
+            selection_policy_id: PORTFOLIO_HOLDING_LATEST_NETWORK_COHERENT_POLICY_ID.to_owned(),
         };
-        validate_pin_views_config(&config).map_err(ConfigError::new)?;
+        validate_select_holdings_config(&config).map_err(ConfigError::new)?;
         Ok(config)
     }
 
-    /// Returns the networks to pin.
-    pub fn networks(&self) -> &[NetworkConfig] {
-        &self.pinned_networks
+    /// Creates config using the default store scope.
+    pub fn with_default_store_scope(portfolio: PortfolioConfig) -> Result<Self, ConfigError> {
+        Self::new(portfolio, DEFAULT_PORTFOLIO_STORE_SCOPE)
     }
-}
 
-impl<'de> Deserialize<'de> for PinViewsConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawPinViewsConfig {
-            pinned_networks: Vec<NetworkConfig>,
-        }
+    /// Returns the portfolio requirements.
+    pub const fn portfolio(&self) -> &PortfolioConfig {
+        &self.portfolio
+    }
 
-        let raw = RawPinViewsConfig::deserialize(deserializer)?;
-        Ok(Self {
-            pinned_networks: raw.pinned_networks,
-        })
+    /// Returns the store scope.
+    pub fn store_scope(&self) -> &str {
+        &self.store_scope
+    }
+
+    /// Returns the certified selection policy id.
+    pub fn selection_policy_id(&self) -> &str {
+        &self.selection_policy_id
     }
 }
 
@@ -444,85 +299,6 @@ impl ResolveValuationsConfig {
     /// Returns the typed valuation source registry.
     pub const fn valuation_source_registry(&self) -> &ValuationSourceRegistry {
         &self.valuation_source_registry
-    }
-}
-
-/// Config for one typed observation fanout state.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
-#[mfm(
-    schema = "mfm.portfolio.config.observe_batch",
-    validate = "validate_observe_batch_config"
-)]
-pub struct ObserveBatchConfig {
-    /// Wallet being observed.
-    wallet: WalletConfig,
-    /// Symbol being observed for the wallet.
-    symbol: SymbolConfig,
-    /// Network shared by the wallet and symbol.
-    network: NetworkConfig,
-}
-
-impl ObserveBatchConfig {
-    /// Creates validated observation-batch config.
-    pub fn new(
-        wallet: WalletConfig,
-        symbol: SymbolConfig,
-        network: NetworkConfig,
-    ) -> Result<Self, ConfigError> {
-        let config = Self {
-            wallet,
-            symbol,
-            network,
-        };
-        validate_observe_batch_config(&config).map_err(ConfigError::new)?;
-        Ok(config)
-    }
-
-    /// Returns the wallet being observed.
-    pub const fn wallet(&self) -> &WalletConfig {
-        &self.wallet
-    }
-
-    /// Returns the symbol being observed.
-    pub const fn symbol(&self) -> &SymbolConfig {
-        &self.symbol
-    }
-
-    /// Returns the network shared by the wallet and symbol.
-    pub const fn network(&self) -> &NetworkConfig {
-        &self.network
-    }
-}
-
-/// Config for observation fan-in.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, MfmConfig)]
-#[mfm(schema = "mfm.portfolio.config.merge_observations")]
-pub struct MergeObservationsConfig {}
-
-impl MergeObservationsConfig {
-    /// Creates validated observation-merge config.
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
-impl<'de> Deserialize<'de> for MergeObservationsConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawMergeObservationsConfig {}
-
-        let _raw = RawMergeObservationsConfig::deserialize(deserializer)?;
-        Ok(Self::new())
-    }
-}
-
-impl Default for MergeObservationsConfig {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -576,8 +352,7 @@ impl ProjectReportConfig {
     pub fn new(report_version: u64) -> Result<Self, ConfigError> {
         let report_version = NonZeroU64::new(report_version)
             .ok_or_else(|| ConfigError::new("report schema version must be non-zero"))?;
-        let config = Self { report_version };
-        Ok(config)
+        Ok(Self { report_version })
     }
 
     /// Returns the report schema version to emit.
@@ -601,10 +376,18 @@ fn validate_resolve_subjects_config(config: &ResolveSubjectsConfig) -> Result<()
         .map_err(|error| error.to_string())
 }
 
-fn validate_pin_views_config(config: &PinViewsConfig) -> Result<(), String> {
-    ValidatedNetworkConfigs::new(config.pinned_networks.clone())
+fn validate_select_holdings_config(config: &SelectHoldingsConfig) -> Result<(), String> {
+    ValidatedPortfolioConfig::new(config.portfolio.clone())
         .map(|_| ())
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    StoreScopeRef::new(&config.store_scope).map_err(|error| error.to_string())?;
+    if config.selection_policy_id != PORTFOLIO_HOLDING_LATEST_NETWORK_COHERENT_POLICY_ID {
+        return Err(format!(
+            "unsupported selection policy id `{}`",
+            config.selection_policy_id
+        ));
+    }
+    Ok(())
 }
 
 fn validate_resolve_valuations_config(config: &ResolveValuationsConfig) -> Result<(), String> {
@@ -612,7 +395,15 @@ fn validate_resolve_valuations_config(config: &ResolveValuationsConfig) -> Resul
         .map(|_| ())
         .map_err(|error| error.to_string())?;
     validate_valuation_source_registry(&config.valuation_source_registry)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    for symbol in &config.symbol_configs {
+        for quote in &symbol.valuation.quotes {
+            match &quote.reader {
+                ValuationReaderConfig::FixedUnitPrice { .. } => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_assemble_snapshot_config(config: &AssembleSnapshotConfig) -> Result<(), String> {
@@ -653,32 +444,6 @@ pub struct ResolvedSubjects {
     pub subjects: Vec<ResolvedSubject>,
 }
 
-/// Pinned execution view for one network.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "pinned-view",
-    schema = "mfm.portfolio.pinned_view"
-)]
-pub struct PinnedView {
-    /// Stable network identifier.
-    pub network_id: String,
-    /// Concrete pinned execution anchor.
-    pub anchor: ExecutionAnchor,
-}
-
-/// Pinned execution views.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "pinned-views",
-    schema = "mfm.portfolio.pinned_views"
-)]
-pub struct PinnedViews {
-    /// Views in canonical network order.
-    pub views: Vec<PinnedView>,
-}
-
 /// Resolved unit-price valuation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[mfm(
@@ -701,7 +466,7 @@ pub struct ResolvedValuation {
     pub source_refs: Vec<ObservationValueSourceRef>,
 }
 
-/// Resolved valuation collection.
+/// Resolved valuation collection (hard-fail: empty only when no symbols; no soft errors).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmValue)]
 #[mfm(
     namespace = "mfm.portfolio",
@@ -711,50 +476,18 @@ pub struct ResolvedValuation {
 pub struct ResolvedValuations {
     /// Valuations in canonical symbol/quote order.
     pub valuations: Vec<ResolvedValuation>,
-    /// Non-fatal valuation resolution errors.
-    pub errors: Vec<PortfolioSnapshotError>,
 }
 
-/// Observations emitted by one fanout state.
+/// Selected holdings material emitted by SelectHoldings (observations without valuation join).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmValue)]
 #[mfm(
     namespace = "mfm.portfolio",
-    name = "observation-batch",
-    schema = "mfm.portfolio.observation_batch"
+    name = "selected-holdings",
+    schema = "mfm.portfolio.selected_holdings"
 )]
-pub struct ObservationBatch {
-    /// Stable batch key.
-    pub batch_id: String,
-    /// Observations in canonical order.
+pub struct SelectedHoldings {
+    /// Selected observations in canonical wallet/symbol order. `values` may be empty until assemble.
     pub observations: Vec<Observation>,
-    /// Non-fatal observation errors.
-    pub errors: Vec<PortfolioSnapshotError>,
-}
-
-/// Merged observation fan-in output.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "merged-observations",
-    schema = "mfm.portfolio.merged_observations"
-)]
-pub struct MergedObservations {
-    /// Observations in stable domain-key fan-in order, then canonical observation order.
-    pub observations: Vec<Observation>,
-    /// Non-fatal observation errors.
-    pub errors: Vec<PortfolioSnapshotError>,
-}
-
-/// Input consumed by typed observation fanout states.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, StateInput)]
-#[mfm(schema = "mfm.portfolio.input.observe_batch")]
-pub struct ObserveBatchInput {
-    /// Resolved wallet subjects.
-    pub subjects: ResolvedSubjects,
-    /// Pinned network views.
-    pub views: PinnedViews,
-    /// Resolved valuation routes.
-    pub valuations: ResolvedValuations,
 }
 
 /// Input consumed by typed snapshot assembly.
@@ -763,10 +496,10 @@ pub struct ObserveBatchInput {
 pub struct AssembleSnapshotInput {
     /// Resolved wallet subjects.
     pub subjects: ResolvedSubjects,
-    /// Pinned network views.
-    pub views: PinnedViews,
-    /// Merged observation fan-in output.
-    pub observations: MergedObservations,
+    /// Selected holdings from Platform fact selection.
+    pub holdings: SelectedHoldings,
+    /// Resolved fixed unit-price valuations.
+    pub valuations: ResolvedValuations,
 }
 
 /// Input consumed by report projection.
@@ -839,27 +572,79 @@ impl PureState for ResolveSubjectsState {
     }
 }
 
-/// State that pins concrete execution views for configured networks.
-pub struct PinViewsState;
+/// State that selects required holdings from Platform facts (adapter-bound).
+pub struct SelectHoldingsState {
+    config: SelectHoldingsConfig,
+}
 
-impl StateSpec for PinViewsState {
-    type Config = PinViewsConfig;
+impl SelectHoldingsState {
+    /// Returns the validated config.
+    pub const fn config(&self) -> &SelectHoldingsConfig {
+        &self.config
+    }
+
+    /// Expands required holdings from config + resolved subjects.
+    pub fn expand_requirements(
+        &self,
+        subjects: &ResolvedSubjects,
+    ) -> Result<Vec<RequiredHoldingRequirement>, PortfolioHoldingSelectionError> {
+        expand_required_holdings(&self.config, subjects)
+    }
+
+    /// Builds a Platform fact-index request for one required holding.
+    pub fn fact_index_request(
+        &self,
+        requirement: &RequiredHoldingRequirement,
+    ) -> Result<FactIndexReadRequest, PortfolioHoldingSelectionError> {
+        holding_fact_index_request(&self.config, requirement)
+    }
+
+    /// Builds selection evidence for one holding query using selected claim ids.
+    pub fn selection_evidence_for_claims(
+        &self,
+        row_claim_ids: &[String],
+        selected_claim_ids: &BTreeSet<String>,
+    ) -> Result<FactSelectionEvidence, PortfolioHoldingSelectionError> {
+        let mut selected_indices = Vec::new();
+        for (index, claim_id) in row_claim_ids.iter().enumerate() {
+            if selected_claim_ids.contains(claim_id) {
+                selected_indices.push(index as u64);
+            }
+        }
+        FactSelectionEvidence::new(
+            portfolio_holding_selection_policy_digest(),
+            selected_indices,
+            None,
+        )
+        .map_err(|error| {
+            PortfolioHoldingSelectionError::new(
+                PortfolioHoldingErrorCode::AmbiguousFacts,
+                error.to_string(),
+                None,
+                None,
+            )
+        })
+    }
+}
+
+impl StateSpec for SelectHoldingsState {
+    type Config = SelectHoldingsConfig;
     type Context = NoContext;
-    type Input = ();
-    type Output = PinnedViews;
+    type Input = ResolvedSubjects;
+    type Output = SelectedHoldings;
     type Effect = ReadExternal;
-    type Caps = (PortfolioReadCapability,);
+    type Caps = (FactIndexReadCapability,);
 
     fn kind() -> mfm_program::Result<StateKind> {
-        state_kind("pin_views")
+        state_kind("select_holdings")
     }
 
     fn version() -> mfm_program::Result<StateVersion> {
-        state_version("pin_views")
+        state_version("select_holdings")
     }
 
     fn name() -> &'static str {
-        "mfm.portfolio.pin_views"
+        "mfm.portfolio.select_holdings"
     }
 
     fn adapter_bindings() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
@@ -867,12 +652,13 @@ impl StateSpec for PinViewsState {
     }
 
     fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
-        let _config = config.into_inner();
-        Ok(Self)
+        Ok(Self {
+            config: config.into_inner(),
+        })
     }
 }
 
-impl ReadState for PinViewsState {
+impl ReadState for SelectHoldingsState {
     type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
 
     fn run<'a>(
@@ -881,11 +667,14 @@ impl ReadState for PinViewsState {
         _caps: &'a Self::Caps,
         _context: &'a mfm_program::CertifiedContext<Self::Context>,
     ) -> Self::RunFuture<'a> {
-        future::ready(Err(adapter_bound_read_state_error(Self::name())))
+        future::ready(Err(StateError::Message(format!(
+            "{} requires adapter-bound Platform fact-index execution",
+            Self::name()
+        ))))
     }
 }
 
-/// State that resolves configured valuation routes.
+/// State that resolves configured valuation routes (FixedUnitPrice only).
 pub struct ResolveValuationsState {
     config: ResolveValuationsConfig,
 }
@@ -893,7 +682,7 @@ pub struct ResolveValuationsState {
 impl StateSpec for ResolveValuationsState {
     type Config = ResolveValuationsConfig;
     type Context = NoContext;
-    type Input = PinnedViews;
+    type Input = ();
     type Output = ResolvedValuations;
     type Effect = Pure;
     type Caps = NoCaps;
@@ -920,96 +709,10 @@ impl StateSpec for ResolveValuationsState {
 impl PureState for ResolveValuationsState {
     fn run(
         &self,
-        views: Self::Input,
+        _input: Self::Input,
         _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
-        Ok(resolve_valuations_from_config(&self.config, &views))
-    }
-}
-
-/// State that observes one wallet/symbol batch.
-pub struct ObserveBatchState;
-
-impl StateSpec for ObserveBatchState {
-    type Config = ObserveBatchConfig;
-    type Context = NoContext;
-    type Input = ObserveBatchInput;
-    type Output = ObservationBatch;
-    type Effect = ReadExternal;
-    type Caps = (PortfolioReadCapability,);
-
-    fn kind() -> mfm_program::Result<StateKind> {
-        state_kind("observe_batch")
-    }
-
-    fn version() -> mfm_program::Result<StateVersion> {
-        state_version("observe_batch")
-    }
-
-    fn name() -> &'static str {
-        "mfm.portfolio.observe_batch"
-    }
-
-    fn adapter_bindings() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
-        adapter_binding()
-    }
-
-    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
-        let _config = config.into_inner();
-        Ok(Self)
-    }
-}
-
-impl ReadState for ObserveBatchState {
-    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
-
-    fn run<'a>(
-        &'a self,
-        input: Self::Input,
-        _caps: &'a Self::Caps,
-        _context: &'a mfm_program::CertifiedContext<Self::Context>,
-    ) -> Self::RunFuture<'a> {
-        let _input = input;
-        future::ready(Err(adapter_bound_read_state_error(Self::name())))
-    }
-}
-
-/// State that merges non-empty observation batches.
-pub struct MergeObservationsState;
-
-impl StateSpec for MergeObservationsState {
-    type Config = MergeObservationsConfig;
-    type Context = NoContext;
-    type Input = NonEmpty<ObservationBatch>;
-    type Output = MergedObservations;
-    type Effect = Pure;
-    type Caps = NoCaps;
-
-    fn kind() -> mfm_program::Result<StateKind> {
-        state_kind("merge_observations")
-    }
-
-    fn version() -> mfm_program::Result<StateVersion> {
-        state_version("merge_observations")
-    }
-
-    fn name() -> &'static str {
-        "mfm.portfolio.merge_observations"
-    }
-
-    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
-        let _config = config.into_inner();
-        Ok(Self)
-    }
-}
-
-impl PureState for MergeObservationsState {
-    fn run(
-        &self,
-        input: Self::Input,
-        _context: &mfm_program::CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Output> {
-        Ok(merge_observation_batches(input))
+        resolve_valuations_from_config(&self.config)
     }
 }
 
@@ -1051,7 +754,7 @@ impl PureState for AssembleSnapshotState {
         input: Self::Input,
         _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
-        Ok(assemble_snapshot(&self.config, input, 0))
+        assemble_snapshot(&self.config, input, 0)
     }
 }
 
@@ -1097,6 +800,21 @@ impl PureState for ProjectReportState {
     }
 }
 
+/// One required holding expanded from portfolio config + resolved subjects.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequiredHoldingRequirement {
+    /// Selection key.
+    pub key: RequiredHoldingKey,
+    /// Cutover fact projection kind.
+    pub projection: HoldingFactProjection,
+    /// Wallet address for subject predicates.
+    pub address: String,
+    /// Symbol config for observation join.
+    pub symbol: SymbolConfig,
+    /// Network config for subject predicates.
+    pub network: NetworkConfig,
+}
+
 /// Resolves configured wallets into typed subjects.
 pub fn resolve_subjects_from_config(config: &ResolveSubjectsConfig) -> ResolvedSubjects {
     let mut subjects = config
@@ -1114,159 +832,498 @@ pub fn resolve_subjects_from_config(config: &ResolveSubjectsConfig) -> ResolvedS
     ResolvedSubjects { subjects }
 }
 
-/// Builds a pinned view for `network` using the supplied execution anchor.
-pub fn pinned_view_for_network(network: &NetworkConfig, anchor: ExecutionAnchor) -> PinnedView {
-    PinnedView {
-        network_id: network.network_id().to_string(),
-        anchor,
-    }
-}
-
-/// Builds a canonical pinned-view collection.
-pub fn pinned_views_from_views(mut views: Vec<PinnedView>) -> PinnedViews {
-    views.sort_by(|left, right| left.network_id.cmp(&right.network_id));
-    PinnedViews { views }
-}
-
-/// Classifies the network read intent for a configured portfolio network.
-pub fn network_read_intent_for_network(network: &NetworkConfig) -> PortfolioNetworkReadIntent {
-    match network {
-        NetworkConfig::Evm {
-            network_id,
-            chain_id,
-            ..
-        } => PortfolioNetworkReadIntent::Evm {
-            network_id: network_id.to_string(),
-            chain_id: chain_id.get(),
-        },
-        NetworkConfig::Bitcoin {
-            network_id,
-            source_identity,
-            bitcoin_network,
-            ..
-        } => PortfolioNetworkReadIntent::Bitcoin {
-            network_id: network_id.to_string(),
-            source_identity: source_identity.to_string(),
-            bitcoin_network: bitcoin_network.clone(),
-        },
-    }
-}
-
-/// Classifies the network reads needed to pin all configured execution views.
-pub fn pin_view_read_intents(config: &PinViewsConfig) -> Vec<PortfolioNetworkReadIntent> {
-    config
-        .networks()
+/// Expands wallet×symbol requirements into cutover-supported holding requirements.
+pub fn expand_required_holdings(
+    config: &SelectHoldingsConfig,
+    subjects: &ResolvedSubjects,
+) -> Result<Vec<RequiredHoldingRequirement>, PortfolioHoldingSelectionError> {
+    let networks = networks_by_id(&config.portfolio.networks)?;
+    let symbols = symbols_by_id(&config.portfolio.symbol_configs)?;
+    let subjects_by_wallet = subjects
+        .subjects
         .iter()
-        .map(network_read_intent_for_network)
-        .collect()
-}
+        .map(|subject| (subject.wallet_id.as_str(), subject))
+        .collect::<BTreeMap<_, _>>();
 
-/// Classifies the network read required by a supported observation batch.
-pub fn observe_batch_network_read_intent(
-    config: &ObserveBatchConfig,
-) -> Option<PortfolioNetworkReadIntent> {
-    match (&config.network, &config.symbol.balance_reader) {
-        (NetworkConfig::Evm { .. }, BalanceReaderConfig::NativeBalance {})
-        | (NetworkConfig::Evm { .. }, BalanceReaderConfig::Erc20Balance { .. })
-        | (NetworkConfig::Bitcoin { .. }, BalanceReaderConfig::NativeBalance {}) => {
-            Some(network_read_intent_for_network(&config.network))
+    let mut requirements = Vec::new();
+    for wallet in &config.portfolio.wallets {
+        let subject = subjects_by_wallet
+            .get(wallet.wallet_id.as_str())
+            .copied()
+            .ok_or_else(|| {
+                PortfolioHoldingSelectionError::new(
+                    PortfolioHoldingErrorCode::MissingFact,
+                    format!("missing resolved subject for wallet {}", wallet.wallet_id),
+                    Some(wallet.wallet_id.to_string()),
+                    Some(wallet.network_id.to_string()),
+                )
+            })?;
+        for symbol_id in &wallet.symbol_ids {
+            let symbol = symbols.get(symbol_id.as_str()).copied().ok_or_else(|| {
+                PortfolioHoldingSelectionError::new(
+                    PortfolioHoldingErrorCode::UnsupportedRequirement,
+                    format!(
+                        "wallet `{}` referenced unknown symbol `{symbol_id}`",
+                        wallet.wallet_id
+                    ),
+                    Some(format!("{}/{}", wallet.wallet_id, symbol_id)),
+                    Some(wallet.network_id.to_string()),
+                )
+            })?;
+            let network = networks.get(symbol.network_id.as_str()).copied().ok_or_else(|| {
+                PortfolioHoldingSelectionError::new(
+                    PortfolioHoldingErrorCode::UnsupportedRequirement,
+                    format!(
+                        "missing network `{}` for symbol `{}`",
+                        symbol.network_id, symbol.symbol_id
+                    ),
+                    Some(format!("{}/{}", wallet.wallet_id, symbol.symbol_id)),
+                    Some(symbol.network_id.to_string()),
+                )
+            })?;
+            let family = match network.family() {
+                NetworkFamilyConfig::Bitcoin => "bitcoin",
+                NetworkFamilyConfig::Evm => "evm",
+            };
+            let is_native = matches!(
+                (&symbol.kind, &symbol.balance_reader),
+                (SymbolKind::NativeBalance, BalanceReaderConfig::NativeBalance {})
+            );
+            if matches!(
+                (&symbol.kind, &symbol.balance_reader),
+                (SymbolKind::Erc20Balance, BalanceReaderConfig::Erc20Balance { .. })
+            ) {
+                return Err(PortfolioHoldingSelectionError::new(
+                    PortfolioHoldingErrorCode::UnsupportedRequirement,
+                    format!(
+                        "ERC-20 symbol `{}` is not supported at cutover",
+                        symbol.symbol_id
+                    ),
+                    Some(format!("{}/{}", wallet.wallet_id, symbol.symbol_id)),
+                    Some(symbol.network_id.to_string()),
+                ));
+            }
+            let projection = project_holding_fact_for_network(family, is_native).map_err(|mut err| {
+                err.holding_key = Some(format!("{}/{}", wallet.wallet_id, symbol.symbol_id));
+                err.network_id = Some(symbol.network_id.to_string());
+                err
+            })?;
+            requirements.push(RequiredHoldingRequirement {
+                key: RequiredHoldingKey {
+                    wallet_id: wallet.wallet_id.to_string(),
+                    symbol_id: symbol.symbol_id.to_string(),
+                    network_id: symbol.network_id.to_string(),
+                },
+                projection,
+                address: subject.address.clone(),
+                symbol: symbol.clone(),
+                network: network.clone(),
+            });
         }
-        (NetworkConfig::Bitcoin { .. }, BalanceReaderConfig::Erc20Balance { .. })
-        | (_, BalanceReaderConfig::ProtocolPosition { .. }) => None,
     }
+    requirements.sort_by(|left, right| {
+        (
+            left.key.network_id.as_str(),
+            left.key.wallet_id.as_str(),
+            left.key.symbol_id.as_str(),
+        )
+            .cmp(&(
+                right.key.network_id.as_str(),
+                right.key.wallet_id.as_str(),
+                right.key.symbol_id.as_str(),
+            ))
+    });
+    Ok(requirements)
 }
 
-/// Classifies the raw balance read required by one observation batch at a pinned anchor.
-pub fn observe_batch_read_intent(
-    config: &ObserveBatchConfig,
-    anchor: &ExecutionAnchor,
-) -> Result<PortfolioBalanceReadIntent, PortfolioReadError> {
-    match &config.symbol.balance_reader {
-        BalanceReaderConfig::NativeBalance {} => match &config.network {
-            NetworkConfig::Evm {
-                network_id,
-                chain_id,
-                ..
-            } => {
-                let (block_number, block_hash) = evm_anchor_parts(chain_id.get(), anchor)?;
-                Ok(PortfolioBalanceReadIntent::EvmNativeBalance {
-                    network_id: network_id.to_string(),
-                    chain_id: chain_id.get(),
-                    account: wallet_evm_address(config)?,
-                    block_number,
-                    block_hash,
-                    decimals: config.symbol.decimals.unwrap_or(18),
-                    anchor: anchor.clone(),
-                })
-            }
-            NetworkConfig::Bitcoin {
-                network_id,
-                source_identity,
-                bitcoin_network,
-                ..
-            } => {
-                ensure_bitcoin_anchor(anchor)?;
-                Ok(PortfolioBalanceReadIntent::BitcoinNativeBalance {
-                    network_id: network_id.to_string(),
-                    source_identity: source_identity.to_string(),
-                    bitcoin_network: bitcoin_network.clone(),
-                    address: wallet_btc_address(config)?,
-                    anchor: anchor.clone(),
-                    decimals: config.symbol.decimals.unwrap_or(8),
-                })
-            }
-        },
-        BalanceReaderConfig::Erc20Balance { token_address } => match &config.network {
-            NetworkConfig::Evm {
-                network_id,
-                chain_id,
-                ..
-            } => {
-                let (block_number, block_hash) = evm_anchor_parts(chain_id.get(), anchor)?;
-                Ok(PortfolioBalanceReadIntent::Erc20Balance {
-                    network_id: network_id.to_string(),
-                    chain_id: chain_id.get(),
-                    account: wallet_evm_address(config)?,
-                    token_address: token_address.to_string(),
-                    block_number,
-                    block_hash,
-                    decimals: config.symbol.decimals,
-                    anchor: anchor.clone(),
-                })
-            }
-            NetworkConfig::Bitcoin { .. } => Err(unsupported_balance_reader_error()),
-        },
-        BalanceReaderConfig::ProtocolPosition { .. } => Err(unsupported_balance_reader_error()),
-    }
+/// Builds a Platform Exact full-set fact-index request for one required holding.
+pub fn holding_fact_index_request(
+    config: &SelectHoldingsConfig,
+    requirement: &RequiredHoldingRequirement,
+) -> Result<FactIndexReadRequest, PortfolioHoldingSelectionError> {
+    let store_scope = StoreScopeRef::new(&config.store_scope).map_err(|error| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::UnsupportedRequirement,
+            error.to_string(),
+            Some(requirement.key.as_key_str()),
+            Some(requirement.key.network_id.clone()),
+        )
+    })?;
+    let (descriptor, predicates, return_fields, ordering) = match requirement.projection {
+        HoldingFactProjection::BitcoinAddressBalance => {
+            let descriptor = BtcAddressBalanceSnapshotFact::descriptor().map_err(|error| {
+                PortfolioHoldingSelectionError::new(
+                    PortfolioHoldingErrorCode::UnsupportedRequirement,
+                    error.to_string(),
+                    Some(requirement.key.as_key_str()),
+                    Some(requirement.key.network_id.clone()),
+                )
+            })?;
+            let bitcoin_network = requirement.network.bitcoin_network().ok_or_else(|| {
+                PortfolioHoldingSelectionError::new(
+                    PortfolioHoldingErrorCode::UnsupportedRequirement,
+                    "bitcoin network tag missing",
+                    Some(requirement.key.as_key_str()),
+                    Some(requirement.key.network_id.clone()),
+                )
+            })?;
+            let source_identity = requirement
+                .network
+                .source_identity()
+                .map(|id| id.to_string())
+                .ok_or_else(|| {
+                    PortfolioHoldingSelectionError::new(
+                        PortfolioHoldingErrorCode::UnsupportedRequirement,
+                        "bitcoin source identity missing",
+                        Some(requirement.key.as_key_str()),
+                        Some(requirement.key.network_id.clone()),
+                    )
+                })?;
+            (
+                descriptor,
+                vec![
+                    equal_predicate("subject.network", requirement.key.network_id.as_str())?,
+                    equal_predicate("subject.bitcoin_network", bitcoin_network)?,
+                    equal_predicate("subject.semantic_source_identity", &source_identity)?,
+                    equal_predicate("subject.address", &requirement.address)?,
+                ],
+                vec![
+                    field_id("result.anchor_height")?,
+                    field_id("result.anchor_hash")?,
+                    field_id("result.balance_sats")?,
+                    field_id("result.coverage")?,
+                    field_id("result.source_status")?,
+                    field_id("metadata.store_commit_order")?,
+                ],
+                FactOrderingName::new("result.anchor_height.desc").map_err(|error| {
+                    PortfolioHoldingSelectionError::new(
+                        PortfolioHoldingErrorCode::UnsupportedRequirement,
+                        error.to_string(),
+                        Some(requirement.key.as_key_str()),
+                        Some(requirement.key.network_id.clone()),
+                    )
+                })?,
+            )
+        }
+        HoldingFactProjection::EvmNativeBalance => {
+            let descriptor =
+                EvmAddressNativeBalanceSnapshotFact::descriptor().map_err(|error| {
+                    PortfolioHoldingSelectionError::new(
+                        PortfolioHoldingErrorCode::UnsupportedRequirement,
+                        error.to_string(),
+                        Some(requirement.key.as_key_str()),
+                        Some(requirement.key.network_id.clone()),
+                    )
+                })?;
+            let chain_id = requirement.network.chain_id_u64().ok_or_else(|| {
+                PortfolioHoldingSelectionError::new(
+                    PortfolioHoldingErrorCode::UnsupportedRequirement,
+                    "evm chain_id missing",
+                    Some(requirement.key.as_key_str()),
+                    Some(requirement.key.network_id.clone()),
+                )
+            })?;
+            (
+                descriptor,
+                vec![
+                    equal_predicate("subject.network", requirement.key.network_id.as_str())?,
+                    equal_predicate_u64("subject.chain_id", chain_id)?,
+                    equal_predicate("subject.account", &requirement.address)?,
+                ],
+                vec![
+                    field_id("result.block_number")?,
+                    field_id("result.block_hash")?,
+                    field_id("result.raw_wei")?,
+                    field_id("result.decimals")?,
+                    field_id("result.coverage")?,
+                    field_id("result.source_status")?,
+                    field_id("metadata.store_commit_order")?,
+                ],
+                FactOrderingName::new("result.block_number.desc").map_err(|error| {
+                    PortfolioHoldingSelectionError::new(
+                        PortfolioHoldingErrorCode::UnsupportedRequirement,
+                        error.to_string(),
+                        Some(requirement.key.as_key_str()),
+                        Some(requirement.key.network_id.clone()),
+                    )
+                })?,
+            )
+        }
+    };
+
+    let input = FactQueryInput::new(
+        store_scope,
+        FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
+        ScopeDecisionEvidence::new(selection_scope_decision_hash()),
+        predicates,
+        return_fields,
+        ordering,
+        None, // full candidate set — never limit=1 as selection
+    )
+    .map_err(|error| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::UnsupportedRequirement,
+            error.to_string(),
+            Some(requirement.key.as_key_str()),
+            Some(requirement.key.network_id.clone()),
+        )
+    })?;
+    let plan = compile_fact_query_plan(&descriptor, input).map_err(|error| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::UnsupportedRequirement,
+            error.to_string(),
+            Some(requirement.key.as_key_str()),
+            Some(requirement.key.network_id.clone()),
+        )
+    })?;
+    FactIndexReadRequest::new(plan).map_err(|error| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::UnsupportedRequirement,
+            error.to_string(),
+            Some(requirement.key.as_key_str()),
+            Some(requirement.key.network_id.clone()),
+        )
+    })
 }
 
-/// Resolves configured valuation routes.
+/// Builds a holding candidate from a hydrated Bitcoin address balance response.
+pub fn btc_holding_candidate(
+    requirement: &RequiredHoldingRequirement,
+    response: &BtcAddressBalanceResponse,
+    store_commit_order: u64,
+    fact_claim_id: impl Into<String>,
+) -> Result<HoldingCandidate, PortfolioHoldingSelectionError> {
+    let subject = mfm_states_btc::BtcAddressBalanceSubject::new(
+        requirement.key.network_id.clone(),
+        requirement
+            .network
+            .bitcoin_network()
+            .unwrap_or_default()
+            .to_owned(),
+        requirement
+            .network
+            .source_identity()
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
+        requirement.address.clone(),
+    )
+    .map_err(|error| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::MissingFact,
+            error.to_string(),
+            Some(requirement.key.as_key_str()),
+            Some(requirement.key.network_id.clone()),
+        )
+    })?;
+    let normalized = normalize_btc_address_balance(&subject, response).map_err(|error| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::MissingFact,
+            error.to_string(),
+            Some(requirement.key.as_key_str()),
+            Some(requirement.key.network_id.clone()),
+        )
+    })?;
+    let decimals = requirement.symbol.decimals.unwrap_or(8);
+    let anchor = HoldingAnchor::new(normalized.anchor_height, normalized.anchor_hash.clone())?;
+    Ok(HoldingCandidate {
+        network_id: requirement.key.network_id.clone(),
+        anchor,
+        store_commit_order,
+        fact_claim_id: fact_claim_id.into(),
+        response_material: SelectedHoldingMaterial {
+            wallet_id: requirement.key.wallet_id.clone(),
+            symbol_id: requirement.key.symbol_id.clone(),
+            network_id: requirement.key.network_id.clone(),
+            balance_reader_kind: balance_reader_kind(&requirement.symbol.balance_reader).to_owned(),
+            raw_dec: normalized.balance_sats.to_string(),
+            decimals,
+            observation_anchor: ObservationAnchor::Bitcoin {
+                height: normalized.anchor_height,
+                block_hash: normalized.anchor_hash,
+            },
+            coverage: normalized.coverage.as_str().to_owned(),
+            source_status: normalized.source_status.as_str().to_owned(),
+        },
+    })
+}
+
+/// Builds a holding candidate from a hydrated EVM native balance response.
+pub fn evm_holding_candidate(
+    requirement: &RequiredHoldingRequirement,
+    response: &EvmAddressNativeBalanceResponse,
+    store_commit_order: u64,
+    fact_claim_id: impl Into<String>,
+) -> Result<HoldingCandidate, PortfolioHoldingSelectionError> {
+    let chain_id = requirement.network.chain_id_u64().ok_or_else(|| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::UnsupportedRequirement,
+            "evm chain_id missing",
+            Some(requirement.key.as_key_str()),
+            Some(requirement.key.network_id.clone()),
+        )
+    })?;
+    let subject = mfm_states_evm::EvmAddressNativeBalanceSubject::new(
+        requirement.key.network_id.clone(),
+        chain_id,
+        requirement.address.clone(),
+    )
+    .map_err(|error| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::MissingFact,
+            error.to_string(),
+            Some(requirement.key.as_key_str()),
+            Some(requirement.key.network_id.clone()),
+        )
+    })?;
+    let normalized = normalize_evm_address_native_balance(&subject, response).map_err(|error| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::MissingFact,
+            error.to_string(),
+            Some(requirement.key.as_key_str()),
+            Some(requirement.key.network_id.clone()),
+        )
+    })?;
+    let decimals = requirement.symbol.decimals.unwrap_or(normalized.decimals);
+    let anchor = HoldingAnchor::new(normalized.block_number, normalized.block_hash.clone())?;
+    Ok(HoldingCandidate {
+        network_id: requirement.key.network_id.clone(),
+        anchor,
+        store_commit_order,
+        fact_claim_id: fact_claim_id.into(),
+        response_material: SelectedHoldingMaterial {
+            wallet_id: requirement.key.wallet_id.clone(),
+            symbol_id: requirement.key.symbol_id.clone(),
+            network_id: requirement.key.network_id.clone(),
+            balance_reader_kind: balance_reader_kind(&requirement.symbol.balance_reader).to_owned(),
+            raw_dec: normalized.raw_wei,
+            decimals,
+            observation_anchor: ObservationAnchor::Evm {
+                chain_id: normalized.chain_id,
+                block_number: normalized.block_number,
+                block_hash: normalized.block_hash,
+            },
+            coverage: normalized.coverage.as_str().to_owned(),
+            source_status: normalized.source_status.as_str().to_owned(),
+        },
+    })
+}
+
+/// Builds quantity-only observations from selected holdings (valuation join deferred).
+pub fn observations_from_selected_holdings(
+    selected: &[SelectedHolding],
+    symbols_by_id: &BTreeMap<&str, &SymbolConfig>,
+) -> Result<Vec<Observation>, PortfolioHoldingSelectionError> {
+    let mut observations = Vec::with_capacity(selected.len());
+    for item in selected {
+        let symbol = symbols_by_id
+            .get(item.key.symbol_id.as_str())
+            .copied()
+            .ok_or_else(|| {
+                PortfolioHoldingSelectionError::new(
+                    PortfolioHoldingErrorCode::UnsupportedRequirement,
+                    format!("missing symbol config for {}", item.key.symbol_id),
+                    Some(item.key.as_key_str()),
+                    Some(item.key.network_id.clone()),
+                )
+            })?;
+        let amount_dec = amount_dec_from_raw(&item.material.raw_dec, item.material.decimals)?;
+        let mut observation = Observation {
+            wallet_id: item.material.wallet_id.clone(),
+            symbol_id: item.material.symbol_id.clone(),
+            display_symbol: symbol.display_symbol.clone(),
+            kind: symbol.kind,
+            role: symbol.role,
+            network_id: item.material.network_id.clone(),
+            protocol: symbol.protocol.as_ref().map(ToString::to_string),
+            quantity: ObservationQuantity {
+                raw_dec: item.material.raw_dec.clone(),
+                decimals: item.material.decimals,
+                amount_dec,
+            },
+            values: Vec::new(),
+            source: ObservationSource {
+                balance_reader_kind: item.material.balance_reader_kind.clone(),
+                network_id: item.material.network_id.clone(),
+                anchor: item.material.observation_anchor.clone(),
+            },
+            metadata: symbol.metadata.clone(),
+        };
+        observation.normalize();
+        observations.push(observation);
+    }
+    Ok(observations)
+}
+
+/// Joins fixed unit-price valuations onto observations (hard-fail on missing route).
+pub fn apply_valuations_to_observations(
+    mut observations: Vec<Observation>,
+    valuations: &ResolvedValuations,
+    symbols_by_id: &BTreeMap<&str, &SymbolConfig>,
+) -> StateResult<Vec<Observation>> {
+    for observation in &mut observations {
+        let symbol = symbols_by_id
+            .get(observation.symbol_id.as_str())
+            .copied()
+            .ok_or_else(|| {
+                StateError::Message(format!(
+                    "missing symbol config for observation {}",
+                    observation.symbol_id
+                ))
+            })?;
+        let mut values = Vec::new();
+        for quote in &symbol.valuation.quotes {
+            let resolved = valuations
+                .valuations
+                .iter()
+                .find(|valuation| {
+                    valuation.symbol_id == observation.symbol_id.as_str()
+                        && valuation.quote == quote.quote
+                })
+                .ok_or_else(|| {
+                    StateError::Message(format!(
+                        "missing_fixed_unit_price: missing valuation for symbol `{}` quote `{}`",
+                        observation.symbol_id, quote.quote
+                    ))
+                })?;
+            let value_dec =
+                multiply_decimal_strings(&observation.quantity.amount_dec, &resolved.unit_price_dec)
+                    .map_err(|error| StateError::Message(error.to_string()))?;
+            values.push(ObservationValue {
+                quote: resolved.quote,
+                priced_symbol_id: resolved.priced_symbol_id.clone(),
+                value_dec,
+                unit_price_dec: resolved.unit_price_dec.clone(),
+                valuation_reader_kind: resolved.valuation_reader_kind.clone(),
+                source_refs: resolved.source_refs.clone(),
+            });
+        }
+        values.sort_by_key(|value| value.quote);
+        observation.values = values;
+        observation.normalize();
+    }
+    Ok(observations)
+}
+
+/// Resolves configured valuation routes (FixedUnitPrice only; hard-fail).
 pub fn resolve_valuations_from_config(
     config: &ResolveValuationsConfig,
-    views: &PinnedViews,
-) -> ResolvedValuations {
+) -> StateResult<ResolvedValuations> {
     let mut valuations = Vec::new();
-    let mut errors = Vec::new();
     for symbol in &config.symbol_configs {
         for quote in &symbol.valuation.quotes {
-            match resolved_valuation_for_quote(symbol, quote, views) {
-                Ok(valuation) => valuations.push(valuation),
-                Err(error) => errors.push(*error),
-            }
+            valuations.push(resolved_valuation_for_quote(symbol, quote)?);
         }
     }
     valuations.sort_by(|left, right| {
         (left.symbol_id.as_str(), left.quote).cmp(&(right.symbol_id.as_str(), right.quote))
     });
-    errors.sort_by(|left, right| error_sort_key(left).cmp(&error_sort_key(right)));
-    ResolvedValuations { valuations, errors }
+    Ok(ResolvedValuations { valuations })
 }
 
 fn resolved_valuation_for_quote(
     symbol: &SymbolConfig,
     quote: &QuoteValuationConfig,
-    views: &PinnedViews,
-) -> Result<ResolvedValuation, Box<PortfolioSnapshotError>> {
+) -> StateResult<ResolvedValuation> {
     match &quote.reader {
         ValuationReaderConfig::FixedUnitPrice { unit_price_dec } => Ok(ResolvedValuation {
             symbol_id: symbol.symbol_id.to_string(),
@@ -1276,289 +1333,29 @@ fn resolved_valuation_for_quote(
             valuation_reader_kind: "fixed_unit_price".to_owned(),
             source_refs: Vec::new(),
         }),
-        ValuationReaderConfig::DirectPrice { source } => {
-            let Some(view) = views
-                .views
-                .iter()
-                .find(|view| view.network_id == source.network_id.as_str())
-            else {
-                return Err(Box::new(snapshot_error(
-                    "missing_valuation_source_view",
-                    format!(
-                        "missing pinned view `{}` for direct price source `{}`",
-                        source.network_id, source.source_id
-                    ),
-                    None,
-                    Some(&symbol.symbol_id),
-                    Some(&source.network_id),
-                    Some("direct_price"),
-                )));
-            };
-            Err(Box::new(snapshot_error(
-                "unsupported_valuation_reader",
-                "direct price valuation is not enabled in the typed portfolio runner",
-                None,
-                Some(&symbol.symbol_id),
-                Some(&source.network_id),
-                Some(observation_anchor_reader_kind(&view.anchor)),
-            )))
-        }
-        ValuationReaderConfig::DerivedUnitPrice { .. } => Err(Box::new(snapshot_error(
-            "unsupported_valuation_reader",
-            "derived unit price valuation is not enabled in the typed portfolio runner",
-            None,
-            Some(&symbol.symbol_id),
-            Some(&symbol.network_id),
-            Some("derived_unit_price"),
-        ))),
     }
 }
 
-/// Builds an observation batch from an externally read raw balance.
-pub fn observation_batch_from_raw_balance(
-    config: &ObserveBatchConfig,
-    input: &ObserveBatchInput,
-    balance: RawBalanceObservation,
-) -> ObservationBatch {
-    let mut errors = input.valuations.errors.clone();
-    let batch_id = observation_batch_id(&config.wallet.wallet_id, &config.symbol.symbol_id);
-    let Some(subject) = input
-        .subjects
-        .subjects
-        .iter()
-        .find(|subject| subject.wallet_id == config.wallet.wallet_id.as_str())
-    else {
-        errors.push(snapshot_error(
-            "missing_resolved_subject",
-            "missing resolved subject for observation batch",
-            Some(&config.wallet.wallet_id),
-            Some(&config.symbol.symbol_id),
-            Some(config.network.network_id()),
-            None,
-        ));
-        return ObservationBatch {
-            batch_id,
-            observations: Vec::new(),
-            errors,
-        };
-    };
-    let Some(view) = input
-        .views
-        .views
-        .iter()
-        .find(|view| view.network_id == config.network.network_id().as_str())
-    else {
-        return observation_batch_missing_pinned_view(config, errors);
-    };
-    let amount_dec = format_u256_units(&balance.raw, balance.decimals);
-    let values = observation_values(config, input, &amount_dec, &mut errors);
-    if values.is_empty() {
-        errors.push(snapshot_error(
-            "missing_observation_values",
-            "observation had no resolved valuation values",
-            Some(&config.wallet.wallet_id),
-            Some(&config.symbol.symbol_id),
-            Some(config.network.network_id()),
-            Some(balance_reader_kind(&config.symbol.balance_reader)),
-        ));
-        return ObservationBatch {
-            batch_id,
-            observations: Vec::new(),
-            errors,
-        };
-    }
-
-    let anchor_source = balance.anchor.as_ref().unwrap_or(&view.anchor);
-    let anchor = match anchor_source {
-        ExecutionAnchor::Evm {
-            chain_id,
-            block_number,
-            block_hash,
-        } => ObservationAnchor::Evm {
-            chain_id: *chain_id,
-            block_number: *block_number,
-            block_hash: block_hash.clone(),
-        },
-        ExecutionAnchor::Bitcoin { height, block_hash } => ObservationAnchor::Bitcoin {
-            height: *height,
-            block_hash: block_hash.clone(),
-        },
-    };
-    let mut observation = Observation {
-        wallet_id: subject.wallet_id.clone(),
-        symbol_id: config.symbol.symbol_id.to_string(),
-        display_symbol: config.symbol.display_symbol.clone(),
-        kind: config.symbol.kind,
-        role: config.symbol.role,
-        network_id: config.network.network_id().to_string(),
-        protocol: config.symbol.protocol.as_ref().map(ToString::to_string),
-        quantity: ObservationQuantity {
-            raw_dec: balance.raw.to_string(),
-            decimals: balance.decimals,
-            amount_dec,
-        },
-        values,
-        source: ObservationSource {
-            balance_reader_kind: balance_reader_kind(&config.symbol.balance_reader).to_owned(),
-            network_id: config.network.network_id().to_string(),
-            anchor,
-        },
-        metadata: config.symbol.metadata.clone(),
-    };
-    observation.normalize();
-    ObservationBatch {
-        batch_id,
-        observations: vec![observation],
-        errors,
-    }
-}
-
-/// Builds an observation batch containing a redaction-safe external-read error.
-pub fn observation_batch_error(
-    config: &ObserveBatchConfig,
-    code: impl Into<String>,
-    message: impl Into<String>,
-) -> ObservationBatch {
-    ObservationBatch {
-        batch_id: observation_batch_id(&config.wallet.wallet_id, &config.symbol.symbol_id),
-        observations: Vec::new(),
-        errors: vec![snapshot_error(
-            code,
-            message,
-            Some(&config.wallet.wallet_id),
-            Some(&config.symbol.symbol_id),
-            Some(config.network.network_id()),
-            Some(balance_reader_kind(&config.symbol.balance_reader)),
-        )],
-    }
-}
-
-/// Returns the pinned execution anchor for `network_id`.
-pub fn pinned_anchor_for<'a>(
-    views: &'a PinnedViews,
-    network_id: &str,
-) -> Option<&'a ExecutionAnchor> {
-    views
-        .views
-        .iter()
-        .find(|view| view.network_id == network_id)
-        .map(|view| &view.anchor)
-}
-
-/// Builds an observation batch containing a missing pinned-view domain error.
-pub fn observation_batch_missing_pinned_view(
-    config: &ObserveBatchConfig,
-    mut errors: Vec<PortfolioSnapshotError>,
-) -> ObservationBatch {
-    errors.push(snapshot_error(
-        "missing_pinned_view",
-        "missing pinned view for observation batch",
-        Some(&config.wallet.wallet_id),
-        Some(&config.symbol.symbol_id),
-        Some(config.network.network_id()),
-        None,
-    ));
-    ObservationBatch {
-        batch_id: observation_batch_id(&config.wallet.wallet_id, &config.symbol.symbol_id),
-        observations: Vec::new(),
-        errors,
-    }
-}
-
-fn evm_anchor_parts(
-    expected_chain_id: u64,
-    anchor: &ExecutionAnchor,
-) -> Result<(u64, String), PortfolioReadError> {
-    match anchor {
-        ExecutionAnchor::Evm {
-            chain_id,
-            block_number,
-            block_hash,
-        } if *chain_id == expected_chain_id => Ok((*block_number, block_hash.clone())),
-        ExecutionAnchor::Evm { .. } => Err(PortfolioReadError::new(
-            "network_anchor_mismatch",
-            "portfolio EVM read anchor did not match the configured network",
-        )),
-        ExecutionAnchor::Bitcoin { .. } => Err(PortfolioReadError::new(
-            "network_anchor_mismatch",
-            "portfolio EVM read received a non-EVM execution anchor",
-        )),
-    }
-}
-
-fn ensure_bitcoin_anchor(anchor: &ExecutionAnchor) -> Result<(), PortfolioReadError> {
-    match anchor {
-        ExecutionAnchor::Bitcoin { .. } => Ok(()),
-        ExecutionAnchor::Evm { .. } => Err(PortfolioReadError::new(
-            "network_anchor_mismatch",
-            "portfolio Bitcoin read received a non-Bitcoin execution anchor",
-        )),
-    }
-}
-
-fn wallet_evm_address(config: &ObserveBatchConfig) -> Result<String, PortfolioReadError> {
-    let Some(address) = config.wallet.subject.evm_address() else {
-        return Err(PortfolioReadError::new(
-            "invalid_wallet_subject",
-            "wallet subject was not an EVM address for portfolio EVM read",
-        ));
-    };
-    Ok(address.to_string())
-}
-
-fn wallet_btc_address(config: &ObserveBatchConfig) -> Result<String, PortfolioReadError> {
-    if config.wallet.subject.kind() != WalletSubjectKind::BitcoinAddress {
-        return Err(PortfolioReadError::new(
-            "invalid_wallet_subject",
-            "wallet subject was not a Bitcoin address for portfolio Bitcoin read",
-        ));
-    }
-    Ok(config.wallet.subject.address_str().to_owned())
-}
-
-fn unsupported_balance_reader_error() -> PortfolioReadError {
-    PortfolioReadError::new(
-        "unsupported_balance_reader",
-        "portfolio balance reader is not enabled in the typed portfolio runner",
-    )
-}
-
-fn adapter_bound_read_state_error(state_name: &str) -> StateError {
-    StateError::Message(format!(
-        "{state_name} requires adapter-bound external read execution"
-    ))
-}
-
-/// Merges non-empty observation batches.
-pub fn merge_observation_batches(input: NonEmpty<ObservationBatch>) -> MergedObservations {
-    let mut observations = Vec::new();
-    let mut errors = Vec::new();
-    for batch in input.values() {
-        observations.extend(batch.observations.clone());
-        errors.extend(batch.errors.clone());
-    }
-    for observation in &mut observations {
-        observation.normalize();
-    }
-    observations.sort_by(|left, right| {
-        (left.wallet_id.as_str(), left.symbol_id.as_str())
-            .cmp(&(right.wallet_id.as_str(), right.symbol_id.as_str()))
-    });
-    errors.sort_by(|left, right| error_sort_key(left).cmp(&error_sort_key(right)));
-    MergedObservations {
-        observations,
-        errors,
-    }
-}
-
-/// Assembles the canonical portfolio snapshot.
+/// Assembles the canonical portfolio snapshot (hard-fail; pins from selected observations).
 pub fn assemble_snapshot(
     config: &AssembleSnapshotConfig,
     input: AssembleSnapshotInput,
     generated_at_ms: u64,
-) -> PortfolioSnapshot {
+) -> StateResult<PortfolioSnapshot> {
+    let symbols = symbols_by_id(&config.portfolio.symbol_configs).map_err(|error| {
+        StateError::Message(format!("{code}: {message}", code = error.code, message = error.message))
+    })?;
+    let observations = apply_valuations_to_observations(
+        input.holdings.observations,
+        &input.valuations,
+        &symbols,
+    )?;
+    let network_pins = project_network_pins_from_observations(&observations).map_err(|error| {
+        StateError::Message(format!("{code}: {message}", code = error.code, message = error.message))
+    })?;
+
     let mut observations_by_wallet: BTreeMap<String, Vec<Observation>> = BTreeMap::new();
-    for observation in input.observations.observations {
+    for observation in observations {
         observations_by_wallet
             .entry(observation.wallet_id.clone())
             .or_default()
@@ -1600,17 +1397,6 @@ pub fn assemble_snapshot(
         .collect::<Vec<_>>();
     wallets.sort_by(|left, right| left.wallet_id.cmp(&right.wallet_id));
 
-    let mut network_pins = input
-        .views
-        .views
-        .into_iter()
-        .map(|view| NetworkPin {
-            network_id: view.network_id,
-            anchor: view.anchor,
-        })
-        .collect::<Vec<_>>();
-    network_pins.sort_by(|left, right| left.network_id.cmp(&right.network_id));
-
     let mut symbol_configs = config.portfolio.symbol_configs.clone();
     for symbol in &mut symbol_configs {
         symbol.normalize();
@@ -1624,10 +1410,9 @@ pub fn assemble_snapshot(
         network_pins,
         wallets,
         symbol_configs,
-        errors: input.observations.errors,
     };
     snapshot.normalize();
-    snapshot
+    Ok(snapshot)
 }
 
 /// Projects a canonical portfolio report from a snapshot.
@@ -1658,15 +1443,9 @@ pub fn project_report_from_snapshot(
         network_pins: snapshot.network_pins,
         wallet_summaries,
         totals_by_quote: quote_totals_to_vec(portfolio_totals),
-        error_count: snapshot.errors.len() as u64,
     };
     report.normalize();
     Ok(report)
-}
-
-/// Returns the canonical observation batch id for a wallet/symbol pair.
-pub fn observation_batch_id(wallet_id: &str, symbol_id: &str) -> String {
-    format!("wallet/{wallet_id}/symbol/{symbol_id}")
 }
 
 /// Returns the canonical balance reader kind string.
@@ -1685,104 +1464,109 @@ pub fn balance_reader_kind(reader: &BalanceReaderConfig) -> &'static str {
     }
 }
 
-fn observation_values(
-    config: &ObserveBatchConfig,
-    input: &ObserveBatchInput,
-    amount_dec: &str,
-    errors: &mut Vec<PortfolioSnapshotError>,
-) -> Vec<ObservationValue> {
-    let mut values = Vec::new();
-    for quote in &config.symbol.valuation.quotes {
-        let Some(resolved) = input.valuations.valuations.iter().find(|valuation| {
-            valuation.symbol_id == config.symbol.symbol_id.as_str()
-                && valuation.quote == quote.quote
-        }) else {
-            errors.push(snapshot_error(
-                "missing_resolved_valuation",
-                format!("missing valuation for quote `{}`", quote.quote),
-                Some(&config.wallet.wallet_id),
-                Some(&config.symbol.symbol_id),
-                Some(config.network.network_id()),
-                Some("valuation"),
-            ));
-            continue;
-        };
-        match multiply_decimal_strings(amount_dec, &resolved.unit_price_dec) {
-            Ok(value_dec) => values.push(ObservationValue {
-                quote: resolved.quote,
-                priced_symbol_id: resolved.priced_symbol_id.clone(),
-                value_dec,
-                unit_price_dec: resolved.unit_price_dec.clone(),
-                valuation_reader_kind: resolved.valuation_reader_kind.clone(),
-                source_refs: resolved.source_refs.clone(),
-            }),
-            Err(error) => errors.push(snapshot_error(
-                "invalid_decimal_string",
-                error.to_string(),
-                Some(&config.wallet.wallet_id),
-                Some(&config.symbol.symbol_id),
-                Some(config.network.network_id()),
-                Some("valuation"),
-            )),
-        }
-    }
-    values.sort_by_key(|value| value.quote);
-    values
+/// Builds a symbols-by-id index for assemble / observation join.
+pub fn symbols_by_id_map(
+    symbols: &[SymbolConfig],
+) -> Result<BTreeMap<&str, &SymbolConfig>, PortfolioHoldingSelectionError> {
+    symbols_by_id(symbols)
 }
 
-fn validate_observe_batch_config(config: &ObserveBatchConfig) -> Result<(), String> {
-    validate_symbol_config(&config.symbol).map_err(|error| error.to_string())?;
-    if &config.wallet.network_id != config.network.network_id() {
-        return Err(format!(
-            "wallet `{}` network `{}` did not match observation network `{}`",
-            config.wallet.wallet_id,
-            config.wallet.network_id,
-            config.network.network_id()
-        ));
-    }
-    if &config.symbol.network_id != config.network.network_id() {
-        return Err(format!(
-            "symbol `{}` network `{}` did not match observation network `{}`",
-            config.symbol.symbol_id,
-            config.symbol.network_id,
-            config.network.network_id()
-        ));
-    }
-    if !config
-        .wallet
-        .symbol_ids
-        .iter()
-        .any(|symbol_id| symbol_id == &config.symbol.symbol_id)
-    {
-        return Err(format!(
-            "wallet `{}` did not include observation symbol `{}`",
-            config.wallet.wallet_id, config.symbol.symbol_id
-        ));
-    }
-    if let BalanceReaderConfig::ProtocolPosition {
-        protocol,
-        reader,
-        config: protocol_config,
-    } = &config.symbol.balance_reader
-    {
-        if config.symbol.protocol.as_deref() != Some(protocol.as_str()) {
-            return Err(format!(
-                "symbol `{}` protocol did not match typed protocol reader `{}`",
-                config.symbol.symbol_id, protocol
-            ));
-        }
-        if protocol.as_str() == AAVE_V3_PROTOCOL_ID
-            && reader.as_str() != protocol_config.reader_name()
+fn networks_by_id(
+    networks: &[NetworkConfig],
+) -> Result<BTreeMap<&str, &NetworkConfig>, PortfolioHoldingSelectionError> {
+    let mut by_id = BTreeMap::new();
+    for network in networks {
+        if by_id
+            .insert(network.network_id().as_str(), network)
+            .is_some()
         {
-            return Err(format!(
-                "symbol `{}` Aave reader `{}` did not match typed config reader `{}`",
-                config.symbol.symbol_id,
-                reader,
-                protocol_config.reader_name()
+            return Err(PortfolioHoldingSelectionError::new(
+                PortfolioHoldingErrorCode::UnsupportedRequirement,
+                format!("duplicate network id `{}`", network.network_id()),
+                None,
+                Some(network.network_id().to_string()),
             ));
         }
     }
-    Ok(())
+    Ok(by_id)
+}
+
+fn symbols_by_id(
+    symbols: &[SymbolConfig],
+) -> Result<BTreeMap<&str, &SymbolConfig>, PortfolioHoldingSelectionError> {
+    let mut by_id = BTreeMap::new();
+    for symbol in symbols {
+        if by_id.insert(symbol.symbol_id.as_str(), symbol).is_some() {
+            return Err(PortfolioHoldingSelectionError::new(
+                PortfolioHoldingErrorCode::UnsupportedRequirement,
+                format!("duplicate symbol id `{}`", symbol.symbol_id),
+                None,
+                Some(symbol.network_id.to_string()),
+            ));
+        }
+    }
+    Ok(by_id)
+}
+
+fn field_id(id: &str) -> Result<FactFieldId, PortfolioHoldingSelectionError> {
+    FactFieldId::new(id).map_err(|error| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::UnsupportedRequirement,
+            error.to_string(),
+            None,
+            None,
+        )
+    })
+}
+
+fn equal_predicate(
+    id: &str,
+    value: &str,
+) -> Result<FactQueryPredicate, PortfolioHoldingSelectionError> {
+    Ok(FactQueryPredicate::new(
+        field_id(id)?,
+        FactQueryOperator::Equal,
+        FactCanonicalScalar::string(value),
+    ))
+}
+
+fn equal_predicate_u64(
+    id: &str,
+    value: u64,
+) -> Result<FactQueryPredicate, PortfolioHoldingSelectionError> {
+    Ok(FactQueryPredicate::new(
+        field_id(id)?,
+        FactQueryOperator::Equal,
+        FactCanonicalScalar::UnsignedInteger(value),
+    ))
+}
+
+fn amount_dec_from_raw(
+    raw_dec: &str,
+    decimals: u8,
+) -> Result<String, PortfolioHoldingSelectionError> {
+    if raw_dec.is_empty() || !raw_dec.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err(PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::MissingFact,
+            format!("invalid raw balance decimal `{raw_dec}`"),
+            None,
+            None,
+        ));
+    }
+    Ok(format_decimal_amount(raw_dec, decimals))
+}
+
+fn format_decimal_amount(raw_dec: &str, decimals: u8) -> String {
+    let d = decimals as usize;
+    if d == 0 {
+        return raw_dec.to_owned();
+    }
+    if raw_dec.len() <= d {
+        format!("0.{}{}", "0".repeat(d - raw_dec.len()), raw_dec)
+    } else {
+        let split = raw_dec.len() - d;
+        format!("{}.{}", &raw_dec[..split], &raw_dec[split..])
+    }
 }
 
 fn wallet_implementation_kind(implementation: &WalletImplementationConfig) -> &'static str {
@@ -1792,40 +1576,6 @@ fn wallet_implementation_kind(implementation: &WalletImplementationConfig) -> &'
         WalletImplementationConfig::NodeManagedAccount { .. } => "node_managed_account",
         WalletImplementationConfig::ExternalSigner { .. } => "external_signer",
     }
-}
-
-fn observation_anchor_reader_kind(anchor: &ExecutionAnchor) -> &'static str {
-    match anchor {
-        ExecutionAnchor::Evm { .. } => "evm_oracle",
-        ExecutionAnchor::Bitcoin { .. } => "bitcoin",
-    }
-}
-
-fn snapshot_error(
-    code: impl Into<String>,
-    message: impl Into<String>,
-    wallet_id: Option<&str>,
-    symbol_id: Option<&str>,
-    network_id: Option<&str>,
-    reader_kind: Option<&str>,
-) -> PortfolioSnapshotError {
-    PortfolioSnapshotError {
-        code: code.into(),
-        message: message.into(),
-        wallet_id: wallet_id.map(ToOwned::to_owned),
-        symbol_id: symbol_id.map(ToOwned::to_owned),
-        network_id: network_id.map(ToOwned::to_owned),
-        reader_kind: reader_kind.map(ToOwned::to_owned),
-    }
-}
-
-fn error_sort_key(error: &PortfolioSnapshotError) -> (&str, &str, &str, &str) {
-    (
-        error.network_id.as_deref().unwrap_or(""),
-        error.wallet_id.as_deref().unwrap_or(""),
-        error.symbol_id.as_deref().unwrap_or(""),
-        error.code.as_str(),
-    )
 }
 
 fn collect_report_quotes(snapshot: &PortfolioSnapshot) -> Vec<QuoteCode> {
