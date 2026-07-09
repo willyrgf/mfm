@@ -190,21 +190,33 @@ impl RequiredHoldingKey {
     }
 }
 
+/// Family-normalized quantity/anchor fields used to build a [`HoldingCandidate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedHoldingFields {
+    /// Balance reader kind tag for observation source.
+    pub balance_reader_kind: String,
+    /// Raw amount decimal string.
+    pub raw_dec: String,
+    /// Token decimals.
+    pub decimals: u8,
+    /// Family-specific execution anchor for observation source.
+    pub observation_anchor: ObservationAnchor,
+    /// Coverage tag (already filtered acceptable by family normalize).
+    pub coverage: String,
+    /// Source status tag.
+    pub source_status: String,
+}
+
 /// Builds a holding candidate from family-normalized scalars (no BTC/EVM types).
 ///
 /// Family crates own normalize/acceptability; this joins report keys and selection anchors.
 pub fn holding_candidate_from_normalized(
     key: &RequiredHoldingKey,
-    balance_reader_kind: &str,
     store_commit_order: u64,
     fact_claim_id: impl Into<String>,
-    raw_dec: String,
-    decimals: u8,
-    observation_anchor: ObservationAnchor,
-    coverage: impl Into<String>,
-    source_status: impl Into<String>,
+    fields: NormalizedHoldingFields,
 ) -> Result<HoldingCandidate, PortfolioHoldingSelectionError> {
-    let (height, hash) = match &observation_anchor {
+    let (height, hash) = match &fields.observation_anchor {
         ObservationAnchor::Bitcoin { height, block_hash } => (*height, block_hash.clone()),
         ObservationAnchor::Evm {
             block_number,
@@ -226,12 +238,12 @@ pub fn holding_candidate_from_normalized(
             wallet_id: key.wallet_id.clone(),
             symbol_id: key.symbol_id.clone(),
             network_id: key.network_id.clone(),
-            balance_reader_kind: balance_reader_kind.to_owned(),
-            raw_dec,
-            decimals,
-            observation_anchor,
-            coverage: coverage.into(),
-            source_status: source_status.into(),
+            balance_reader_kind: fields.balance_reader_kind,
+            raw_dec: fields.raw_dec,
+            decimals: fields.decimals,
+            observation_anchor: fields.observation_anchor,
+            coverage: fields.coverage,
+            source_status: fields.source_status,
         },
     })
 }
@@ -908,18 +920,20 @@ mod tests {
         };
         let candidate = holding_candidate_from_normalized(
             &key,
-            "native_balance",
             9,
             "claim-1",
-            "1000".to_owned(),
-            18,
-            ObservationAnchor::Evm {
-                chain_id: 1,
-                block_number: 42,
-                block_hash: "0x".to_owned() + &"ab".repeat(32),
+            NormalizedHoldingFields {
+                balance_reader_kind: "native_balance".to_owned(),
+                raw_dec: "1000".to_owned(),
+                decimals: 18,
+                observation_anchor: ObservationAnchor::Evm {
+                    chain_id: 1,
+                    block_number: 42,
+                    block_hash: "0x".to_owned() + &"ab".repeat(32),
+                },
+                coverage: "configured_only".to_owned(),
+                source_status: "ok".to_owned(),
             },
-            "configured_only",
-            "ok",
         )
         .expect("candidate");
         assert_eq!(candidate.store_commit_order, 9);
@@ -938,17 +952,19 @@ mod tests {
         };
         let err = holding_candidate_from_normalized(
             &key,
-            "native_balance",
             1,
             "claim",
-            "0".to_owned(),
-            8,
-            ObservationAnchor::Bitcoin {
-                height: 1,
-                block_hash: "   ".to_owned(),
+            NormalizedHoldingFields {
+                balance_reader_kind: "native_balance".to_owned(),
+                raw_dec: "0".to_owned(),
+                decimals: 8,
+                observation_anchor: ObservationAnchor::Bitcoin {
+                    height: 1,
+                    block_hash: "   ".to_owned(),
+                },
+                coverage: "configured_only".to_owned(),
+                source_status: "ok".to_owned(),
             },
-            "configured_only",
-            "ok",
         )
         .expect_err("empty hash");
         assert_eq!(err.code, PortfolioHoldingErrorCode::MissingFact);

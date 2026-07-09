@@ -30,7 +30,7 @@ use mfm_state_portfolio::{
     portfolio_holding_select_scope_decision_hash, project_network_pins_from_observations,
     resolve_subjects_from_config, resolve_valuations_from_config, select_network_coherent,
     symbols_by_id_map, AssembleSnapshotConfig, AssembleSnapshotInput, AssembleSnapshotState,
-    HoldingCandidate, HoldingFactProjection, PortfolioHoldingErrorCode,
+    HoldingCandidate, HoldingFactProjection, NormalizedHoldingFields, PortfolioHoldingErrorCode,
     PortfolioHoldingSelectionError, ProjectReportConfig, ProjectReportInput, ProjectReportState,
     RequiredHoldingKey, RequiredHoldingRequirement, ResolveSubjectsConfig, ResolveSubjectsState,
     ResolveValuationsConfig, ResolveValuationsState, SelectHoldingsConfig, SelectHoldingsState,
@@ -279,11 +279,7 @@ async fn select_holdings(
             "fact-index batch response count does not match request count".to_owned(),
         ));
     }
-    for ((requirement, request), response) in requirements
-        .iter()
-        .zip(requests.into_iter())
-        .zip(responses.into_iter())
-    {
+    for ((requirement, request), response) in requirements.iter().zip(requests).zip(responses) {
         let (candidates, claim_ids) =
             candidates_for_requirement(requirement, &response, artifacts).await?;
         candidates_by_holding.insert(requirement.key.clone(), candidates);
@@ -514,17 +510,19 @@ fn btc_holding_candidate(
     let decimals = requirement.symbol.decimals.unwrap_or(8);
     holding_candidate_from_normalized(
         &requirement.key,
-        balance_reader_kind(&requirement.symbol.balance_reader),
         store_commit_order,
         fact_claim_id,
-        normalized.balance_sats.to_string(),
-        decimals,
-        ObservationAnchor::Bitcoin {
-            height: normalized.anchor_height,
-            block_hash: normalized.anchor_hash,
+        NormalizedHoldingFields {
+            balance_reader_kind: balance_reader_kind(&requirement.symbol.balance_reader).to_owned(),
+            raw_dec: normalized.balance_sats.to_string(),
+            decimals,
+            observation_anchor: ObservationAnchor::Bitcoin {
+                height: normalized.anchor_height,
+                block_hash: normalized.anchor_hash,
+            },
+            coverage: normalized.coverage.as_str().to_owned(),
+            source_status: normalized.source_status.as_str().to_owned(),
         },
-        normalized.coverage.as_str(),
-        normalized.source_status.as_str(),
     )
 }
 
@@ -553,18 +551,20 @@ fn evm_holding_candidate(
     let decimals = requirement.symbol.decimals.unwrap_or(normalized.decimals);
     holding_candidate_from_normalized(
         &requirement.key,
-        balance_reader_kind(&requirement.symbol.balance_reader),
         store_commit_order,
         fact_claim_id,
-        normalized.raw_wei,
-        decimals,
-        ObservationAnchor::Evm {
-            chain_id: normalized.chain_id,
-            block_number: normalized.block_number,
-            block_hash: normalized.block_hash,
+        NormalizedHoldingFields {
+            balance_reader_kind: balance_reader_kind(&requirement.symbol.balance_reader).to_owned(),
+            raw_dec: normalized.raw_wei,
+            decimals,
+            observation_anchor: ObservationAnchor::Evm {
+                chain_id: normalized.chain_id,
+                block_number: normalized.block_number,
+                block_hash: normalized.block_hash,
+            },
+            coverage: normalized.coverage.as_str().to_owned(),
+            source_status: normalized.source_status.as_str().to_owned(),
         },
-        normalized.coverage.as_str(),
-        normalized.source_status.as_str(),
     )
 }
 

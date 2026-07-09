@@ -22,7 +22,7 @@ pub use selection::{
     portfolio_holding_select_scope_decision_hash, portfolio_holding_selection_policy_digest,
     project_holding_fact_for_network, project_holding_fact_kind,
     project_network_pins_from_observations, select_network_coherent, HoldingAnchor,
-    HoldingCandidate, HoldingFactProjection, PortfolioHoldingErrorCode,
+    HoldingCandidate, HoldingFactProjection, NormalizedHoldingFields, PortfolioHoldingErrorCode,
     PortfolioHoldingSelectionError, RequiredHoldingKey, SelectedHolding, SelectedHoldingMaterial,
     PORTFOLIO_HOLDING_LATEST_NETWORK_COHERENT_POLICY_ID,
 };
