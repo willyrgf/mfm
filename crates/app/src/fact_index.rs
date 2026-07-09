@@ -12,37 +12,20 @@ use mfm_fact_capabilities::{
 };
 use mfm_store::v1 as store;
 
-use crate::{AppError, ErrorClass, ProductionRunStore};
+use crate::ProductionRunStore;
 
 /// Builds the production Platform/Control fact-index provider from a Postgres run store.
 ///
-/// Requires a fact-receipt trust root on the store authority. Production run services,
-/// REST live services, and portfolio/BTC collector registration use this provider only.
+/// The fact-receipt trust root is loaded only for a nonempty read batch, so process assembly does
+/// not depend on unrelated receipt authority state.
 pub fn production_fact_index_read_provider(
     store: ProductionRunStore,
-) -> Result<Arc<dyn FactIndexReadProvider>, AppError> {
-    let trust_root = store
-        .store_authority()
-        .fact_receipt_trust_root()
-        .ok_or_else(missing_fact_receipt_trust_root)?
-        .to_material();
-    Ok(Arc::new(PostgresFactIndexReadProvider {
-        store,
-        trust_root,
-    }))
-}
-
-fn missing_fact_receipt_trust_root() -> AppError {
-    AppError::backend(
-        ErrorClass::BadRequest,
-        "MissingFactReceiptTrustRoot",
-        "Postgres run store is missing fact receipt trust root required for Platform fact-index",
-    )
+) -> Arc<dyn FactIndexReadProvider> {
+    Arc::new(PostgresFactIndexReadProvider { store })
 }
 
 struct PostgresFactIndexReadProvider {
     store: ProductionRunStore,
-    trust_root: FactQueryReceiptTrustRootMaterial,
 }
 
 impl FactIndexReadProvider for PostgresFactIndexReadProvider {
@@ -54,6 +37,16 @@ impl FactIndexReadProvider for PostgresFactIndexReadProvider {
             if requests.is_empty() {
                 return Ok(Vec::new());
             }
+            let trust_root = self
+                .store
+                .store_authority()
+                .fact_receipt_trust_root()
+                .ok_or_else(|| {
+                    mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(
+                        "missing fact receipt trust root",
+                    )
+                })?
+                .to_material();
             let plans: Vec<_> = requests
                 .iter()
                 .map(|request| request.plan().clone())
@@ -67,7 +60,7 @@ impl FactIndexReadProvider for PostgresFactIndexReadProvider {
                 .map(|result| {
                     FactIndexReadResponse::from_receipt(
                         result.receipt().clone(),
-                        self.trust_root.clone(),
+                        trust_root.clone(),
                     )
                 })
                 .collect())

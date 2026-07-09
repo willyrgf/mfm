@@ -283,7 +283,7 @@ pub async fn make_default_run_store() -> Result<ProductionRunStore, ApiError> {
 /// Builds default production REST API state from environment-selected stores.
 pub async fn make_default_app_state() -> Result<DefaultAppState, ApiError> {
     let store = make_default_run_store().await?;
-    let fact_index = mfm_app::production_fact_index_read_provider(store.clone())?;
+    let fact_index = mfm_app::production_fact_index_read_provider(store.clone());
     let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
     Ok(AppState {
         store,

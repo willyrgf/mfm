@@ -568,7 +568,7 @@ pub async fn connect_production_run_services(
 ) -> Result<ProductionRunServices, AppError> {
     let store = connect_production_run_store_with_optional_fact_query_signer(database_url).await?;
     // Portfolio SelectHoldings and BTC collectors require the Postgres fact-index provider.
-    let fact_index = production_fact_index_read_provider(store.clone())?;
+    let fact_index = production_fact_index_read_provider(store.clone());
     let runners =
         production_runner_registry(Arc::new(store.clone()), fact_index, runtime_config_path)?;
     let certification_registry = production_certification_registry()?;
