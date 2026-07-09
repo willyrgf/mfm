@@ -901,4 +901,72 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    fn holding_candidate_from_normalized_builds_anchor_and_material() {
+        let key = RequiredHoldingKey {
+            wallet_id: "w1".to_owned(),
+            symbol_id: "eth.native".to_owned(),
+            network_id: "ethereum-mainnet".to_owned(),
+        };
+        let candidate = holding_candidate_from_normalized(
+            &key,
+            "native_balance",
+            9,
+            "claim-1",
+            "1000".to_owned(),
+            18,
+            ObservationAnchor::Evm {
+                chain_id: 1,
+                block_number: 42,
+                block_hash: "0x".to_owned() + &"ab".repeat(32),
+            },
+            "configured_only",
+            "ok",
+        )
+        .expect("candidate");
+        assert_eq!(candidate.store_commit_order, 9);
+        assert_eq!(candidate.fact_claim_id, "claim-1");
+        assert_eq!(candidate.anchor.height, 42);
+        assert_eq!(candidate.response_material.wallet_id, "w1");
+        assert_eq!(candidate.response_material.coverage, "configured_only");
+    }
+
+    #[test]
+    fn holding_candidate_rejects_empty_hash() {
+        let key = RequiredHoldingKey {
+            wallet_id: "w1".to_owned(),
+            symbol_id: "btc.native".to_owned(),
+            network_id: "bitcoin-mainnet".to_owned(),
+        };
+        let err = holding_candidate_from_normalized(
+            &key,
+            "native_balance",
+            1,
+            "claim",
+            "0".to_owned(),
+            8,
+            ObservationAnchor::Bitcoin {
+                height: 1,
+                block_hash: "   ".to_owned(),
+            },
+            "configured_only",
+            "ok",
+        )
+        .expect_err("empty hash");
+        assert_eq!(err.code, PortfolioHoldingErrorCode::MissingFact);
+    }
+
+    #[test]
+    fn filter_empty_codes_are_missing_and_unsupported() {
+        assert!(is_filter_empty_holding_error(
+            PortfolioHoldingErrorCode::MissingFact
+        ));
+        assert!(is_filter_empty_holding_error(
+            PortfolioHoldingErrorCode::UnsupportedRequirement
+        ));
+        assert!(!is_filter_empty_holding_error(
+            PortfolioHoldingErrorCode::NoCommonNetworkAnchor
+        ));
+    }
 }
