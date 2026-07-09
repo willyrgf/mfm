@@ -57,7 +57,7 @@ kind = "native_balance"
 [portfolio.symbol_configs.valuation]
 # Fixed prices are deterministic placeholders. Replace these before relying on USD totals.
 quotes = [
-  { quote = "USD", priced_symbol_id = "eth.native.ethereum-mainnet", reader = { kind = "fixed_unit_price", unit_price_dec = "0.00" } },
+  { quote = "USD", priced_symbol_id = "eth.native.ethereum-mainnet", unit_price_dec = "0.00" },
 ]
 
 [[portfolio.symbol_configs]]
@@ -75,6 +75,6 @@ kind = "native_balance"
 [portfolio.symbol_configs.valuation]
 # Fixed prices are deterministic placeholders. Replace these before relying on USD totals.
 quotes = [
-  { quote = "USD", priced_symbol_id = "btc.native.bitcoin-mainnet", reader = { kind = "fixed_unit_price", unit_price_dec = "0.00" } },
+  { quote = "USD", priced_symbol_id = "btc.native.bitcoin-mainnet", unit_price_dec = "0.00" },
 ]
 

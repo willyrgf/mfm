@@ -8,7 +8,6 @@ use mfm_portfolio_model::portfolio::{
 use mfm_portfolio_model::symbol::{
     BalanceReaderConfig, Observation, ObservationAnchor, ObservationQuantity, ObservationSource,
     QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole, SymbolValuationConfig,
-    ValuationReaderConfig,
 };
 use mfm_portfolio_model::wallet::{
     WalletConfig, WalletImplementationConfig, WalletSubject, WalletSubjectKind,
@@ -62,9 +61,7 @@ fn test_symbol(network_id: &str) -> SymbolConfig {
                 priced_symbol_id: "eth.native.ethereum-mainnet"
                     .parse()
                     .expect("valid priced symbol id"),
-                reader: ValuationReaderConfig::FixedUnitPrice {
-                    unit_price_dec: "2.5".parse().expect("valid unit price"),
-                },
+                unit_price_dec: "2.5".parse().expect("valid unit price"),
             }],
         },
         decimals: Some(18),
@@ -247,8 +244,5 @@ fn resolve_valuations_fixed_unit_price_only() {
     )
     .expect("ok");
     assert_eq!(valuations.valuations.len(), 1);
-    assert_eq!(
-        valuations.valuations[0].valuation_reader_kind,
-        "fixed_unit_price"
-    );
+    assert_eq!(valuations.valuations[0].unit_price_dec, "2.5");
 }

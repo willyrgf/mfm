@@ -11,7 +11,7 @@ use crate::ids::{
 use crate::metadata::PublicMetadata;
 use crate::symbol::{
     validate_symbol_config, BalanceReaderConfig, Observation, QuoteCode, SymbolConfig,
-    SymbolConfigError, SymbolKind, ValuationReaderConfig,
+    SymbolConfigError, SymbolKind,
 };
 use crate::wallet::{WalletConfig, WalletSubjectKind};
 
@@ -1114,9 +1114,6 @@ fn validate_symbol_quote_routes(
                 quote: quote.quote,
                 priced_symbol_id: quote.priced_symbol_id.to_string(),
             });
-        }
-        match &quote.reader {
-            ValuationReaderConfig::FixedUnitPrice { .. } => {}
         }
     }
 

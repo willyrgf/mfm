@@ -27,7 +27,7 @@ use mfm_portfolio_model::portfolio::{
 };
 use mfm_portfolio_model::symbol::{
     BalanceReaderConfig, QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole,
-    SymbolValuationConfig, ValuationReaderConfig,
+    SymbolValuationConfig,
 };
 use mfm_portfolio_model::wallet::{
     WalletConfig, WalletImplementationConfig, WalletSubject, WalletSubjectKind,
@@ -455,9 +455,7 @@ fn dual_mainnet_portfolio() -> PortfolioConfig {
                     quotes: vec![QuoteValuationConfig {
                         quote: QuoteCode::Usd,
                         priced_symbol_id: "eth.native.ethereum-mainnet".parse().expect("priced"),
-                        reader: ValuationReaderConfig::FixedUnitPrice {
-                            unit_price_dec: "2.5".parse().expect("price"),
-                        },
+                        unit_price_dec: "2.5".parse().expect("price"),
                     }],
                 },
                 decimals: Some(18),
@@ -476,9 +474,7 @@ fn dual_mainnet_portfolio() -> PortfolioConfig {
                     quotes: vec![QuoteValuationConfig {
                         quote: QuoteCode::Usd,
                         priced_symbol_id: "btc.native.bitcoin-mainnet".parse().expect("priced"),
-                        reader: ValuationReaderConfig::FixedUnitPrice {
-                            unit_price_dec: "1".parse().expect("price"),
-                        },
+                        unit_price_dec: "1".parse().expect("price"),
                     }],
                 },
                 decimals: Some(8),
@@ -541,9 +537,7 @@ fn dual_wallet_same_network_portfolio() -> PortfolioConfig {
                 quotes: vec![QuoteValuationConfig {
                     quote: QuoteCode::Usd,
                     priced_symbol_id: "eth.native.ethereum-mainnet".parse().expect("priced"),
-                    reader: ValuationReaderConfig::FixedUnitPrice {
-                        unit_price_dec: "1".parse().expect("price"),
-                    },
+                    unit_price_dec: "1".parse().expect("price"),
                 }],
             },
             decimals: Some(18),

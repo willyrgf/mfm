@@ -217,7 +217,7 @@ mod tests {
     use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig, PortfolioConfig};
     use mfm_portfolio_model::symbol::{
         BalanceReaderConfig, QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole,
-        SymbolValuationConfig, ValuationReaderConfig,
+        SymbolValuationConfig,
     };
     use mfm_portfolio_model::wallet::{
         WalletConfig, WalletImplementationConfig, WalletSubject, WalletSubjectKind,
@@ -343,9 +343,7 @@ mod tests {
                         priced_symbol_id: "eth.native.ethereum-mainnet"
                             .parse()
                             .expect("valid priced symbol id"),
-                        reader: ValuationReaderConfig::FixedUnitPrice {
-                            unit_price_dec: "1800.00".parse().expect("valid unit price"),
-                        },
+                        unit_price_dec: "1800.00".parse().expect("valid unit price"),
                     }],
                 },
                 decimals: Some(18),

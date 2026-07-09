@@ -61,10 +61,7 @@ fn canonical_portfolio_snapshot_payload(wallet_address: &str, chain_id: u64) -> 
                             {
                                 "quote": "USD",
                                 "priced_symbol_id": SYMBOL_ID,
-                                "reader": {
-                                    "kind": "fixed_unit_price",
-                                    "unit_price_dec": "1800.00"
-                                }
+                                "unit_price_dec": "1800.00"
                             }
                         ]
                     },

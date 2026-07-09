@@ -4,7 +4,7 @@
 
 use mfm_portfolio_model::symbol::{
     BalanceReaderConfig, QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolConfigError,
-    SymbolKind, SymbolRole, SymbolValuationConfig, ValuationReaderConfig,
+    SymbolKind, SymbolRole, SymbolValuationConfig,
 };
 
 #[test]
@@ -25,9 +25,7 @@ fn symbol_config_accepts_fixed_unit_price_only() {
                 priced_symbol_id: "eth.native.ethereum-mainnet"
                     .parse()
                     .expect("valid priced symbol id"),
-                reader: ValuationReaderConfig::FixedUnitPrice {
-                    unit_price_dec: "1800.00".parse().expect("valid unit price"),
-                },
+                unit_price_dec: "1800.00".parse().expect("valid unit price"),
             }],
         },
         decimals: Some(18),
@@ -57,18 +55,14 @@ fn symbol_config_rejects_duplicate_quote_routes() {
                     priced_symbol_id: "eth.native.ethereum-mainnet"
                         .parse()
                         .expect("valid priced symbol id"),
-                    reader: ValuationReaderConfig::FixedUnitPrice {
-                        unit_price_dec: "1800.00".parse().expect("valid unit price"),
-                    },
+                    unit_price_dec: "1800.00".parse().expect("valid unit price"),
                 },
                 QuoteValuationConfig {
                     quote: QuoteCode::Usd,
                     priced_symbol_id: "eth.native.ethereum-mainnet"
                         .parse()
                         .expect("valid priced symbol id"),
-                    reader: ValuationReaderConfig::FixedUnitPrice {
-                        unit_price_dec: "1900.00".parse().expect("valid unit price"),
-                    },
+                    unit_price_dec: "1900.00".parse().expect("valid unit price"),
                 },
             ],
         },

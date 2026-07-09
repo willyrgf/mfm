@@ -745,10 +745,7 @@ fn portfolio_snapshot_config() -> serde_json::Value {
                             {
                                 "quote": "USD",
                                 "priced_symbol_id": "eth.native.rest-control-eth",
-                                "reader": {
-                                    "kind": "fixed_unit_price",
-                                    "unit_price_dec": "2.50"
-                                }
+                                "unit_price_dec": "2.50"
                             }
                         ]
                     },

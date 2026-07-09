@@ -58,10 +58,7 @@
 //!                             {
 //!                                 "quote": "USD",
 //!                                 "priced_symbol_id": "eth.native.ethereum-mainnet",
-//!                                 "reader": {
-//!                                     "kind": "fixed_unit_price",
-//!                                     "unit_price_dec": "1800.00"
-//!                                 }
+//!                                 "unit_price_dec": "1800.00"
 //!                             }
 //!                         ]
 //!                     },
@@ -335,10 +332,7 @@ mod tests {
                                 {
                                     "quote": "USD",
                                     "priced_symbol_id": "eth.native.ethereum-mainnet",
-                                    "reader": {
-                                        "kind": "fixed_unit_price",
-                                        "unit_price_dec": "1800.00"
-                                    }
+                                    "unit_price_dec": "1800.00"
                                 }
                             ]
                         },

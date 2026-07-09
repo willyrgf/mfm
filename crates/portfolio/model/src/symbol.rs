@@ -255,24 +255,8 @@ pub struct QuoteValuationConfig {
     pub quote: QuoteCode,
     /// Symbol whose unit price applies to the observation.
     pub priced_symbol_id: SymbolId,
-    /// Reader configuration used to obtain the unit price.
-    pub reader: ValuationReaderConfig,
-}
-
-/// Supported valuation reader kinds.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "valuation-reader-config",
-    schema = "mfm.portfolio.valuation_reader_config"
-)]
-pub enum ValuationReaderConfig {
-    /// Fixed unit price encoded as a decimal string.
-    FixedUnitPrice {
-        /// Decimal string for the unit price.
-        unit_price_dec: UnitPriceDecimal,
-    },
+    /// Fixed unit price as a decimal string (cutover valuation surface).
+    pub unit_price_dec: UnitPriceDecimal,
 }
 
 /// Canonical wallet observation emitted by runtime states.
@@ -352,8 +336,6 @@ pub struct ObservationValue {
     pub value_dec: String,
     /// Unit price in the quote unit.
     pub unit_price_dec: String,
-    /// Canonical valuation reader kind.
-    pub valuation_reader_kind: String,
 }
 
 /// Concrete execution anchor captured for one observation source.
@@ -464,17 +446,7 @@ pub fn validate_symbol_config(cfg: &SymbolConfig) -> Result<(), SymbolConfigErro
         if !seen_quotes.insert(quote.quote) {
             return Err(SymbolConfigError::DuplicateQuoteValuation { quote: quote.quote });
         }
-        validate_valuation_reader_config(quote.quote, &quote.reader)?;
     }
 
     Ok(())
-}
-
-fn validate_valuation_reader_config(
-    _quote: QuoteCode,
-    reader: &ValuationReaderConfig,
-) -> Result<(), SymbolConfigError> {
-    match reader {
-        ValuationReaderConfig::FixedUnitPrice { .. } => Ok(()),
-    }
 }

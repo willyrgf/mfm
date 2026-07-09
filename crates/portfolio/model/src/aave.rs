@@ -557,7 +557,7 @@ mod tests {
     use crate::portfolio::PortfolioConfig;
     use crate::symbol::{
         QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole,
-        SymbolValuationConfig, ValuationReaderConfig,
+        SymbolValuationConfig,
     };
     use serde_json::{json, Value};
 
@@ -607,9 +607,7 @@ mod tests {
         QuoteValuationConfig {
             quote: QuoteCode::Usd,
             priced_symbol_id: priced_symbol_id.parse().expect("valid priced symbol id"),
-            reader: ValuationReaderConfig::FixedUnitPrice {
-                unit_price_dec: "1.00".parse().expect("valid unit price"),
-            },
+            unit_price_dec: "1.00".parse().expect("valid unit price"),
         }
     }
 

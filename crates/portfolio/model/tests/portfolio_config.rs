@@ -169,10 +169,7 @@ fn validated_portfolio_config_indexes_normalized_authority() {
                         {
                             "quote": "USD",
                             "priced_symbol_id": "eth.native.ethereum-mainnet",
-                            "reader": {
-                                "kind": "fixed_unit_price",
-                                "unit_price_dec": "1800.00"
-                            }
+                            "unit_price_dec": "1800.00"
                         }
                     ]
                 },
@@ -347,10 +344,7 @@ fn validation_rejects_quote_route_mismatches() {
         {
             "quote": "USD",
             "priced_symbol_id": "eth.native.ethereum-mainnet",
-            "reader": {
-                "kind": "fixed_unit_price",
-                "unit_price_dec": "1.0"
-            }
+            "unit_price_dec": "1.0"
         }
     ]);
     assert_decode_error(
@@ -586,18 +580,12 @@ fn canonical_config_json() -> Value {
                         {
                             "quote": "USD",
                             "priced_symbol_id": "eth.native.ethereum-mainnet",
-                            "reader": {
-                                "kind": "fixed_unit_price",
-                                "unit_price_dec": "1800.0"
-                            }
+                            "unit_price_dec": "1800.0"
                         },
                         {
                             "quote": "BTC",
                             "priced_symbol_id": "eth.native.ethereum-mainnet",
-                            "reader": {
-                                "kind": "fixed_unit_price",
-                                "unit_price_dec": "0.05"
-                            }
+                            "unit_price_dec": "0.05"
                         }
                     ]
                 },
@@ -621,18 +609,12 @@ fn canonical_config_json() -> Value {
                         {
                             "quote": "USD",
                             "priced_symbol_id": "usdc.wallet.ethereum-mainnet",
-                            "reader": {
-                                "kind": "fixed_unit_price",
-                                "unit_price_dec": "1.0"
-                            }
+                            "unit_price_dec": "1.0"
                         },
                         {
                             "quote": "BTC",
                             "priced_symbol_id": "usdc.wallet.ethereum-mainnet",
-                            "reader": {
-                                "kind": "fixed_unit_price",
-                                "unit_price_dec": "0.00001"
-                            }
+                            "unit_price_dec": "0.00001"
                         }
                     ]
                 },
@@ -655,18 +637,12 @@ fn canonical_config_json() -> Value {
                         {
                             "quote": "USD",
                             "priced_symbol_id": "eth.native.arbitrum-mainnet",
-                            "reader": {
-                                "kind": "fixed_unit_price",
-                                "unit_price_dec": "1800.0"
-                            }
+                            "unit_price_dec": "1800.0"
                         },
                         {
                             "quote": "BTC",
                             "priced_symbol_id": "eth.native.arbitrum-mainnet",
-                            "reader": {
-                                "kind": "fixed_unit_price",
-                                "unit_price_dec": "0.05"
-                            }
+                            "unit_price_dec": "0.05"
                         }
                     ]
                 },
@@ -704,7 +680,6 @@ fn observation(wallet_id: &str, symbol_id: &str, value_order: Vec<QuoteCode>) ->
                 priced_symbol_id: symbol_id.to_string(),
                 value_dec: "1".to_string(),
                 unit_price_dec: "1".to_string(),
-                valuation_reader_kind: "fixed_unit_price".to_string(),
             })
             .collect(),
         source: ObservationSource {

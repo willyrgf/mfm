@@ -408,10 +408,7 @@ fn dual_mainnet_portfolio_json() -> serde_json::Value {
                         "quotes": [{
                             "quote": "USD",
                             "priced_symbol_id": "eth.native.ethereum-mainnet",
-                            "reader": {
-                                "kind": "fixed_unit_price",
-                                "unit_price_dec": "2.5"
-                            }
+                            "unit_price_dec": "2.5"
                         }]
                     },
                     "metadata": {}
@@ -428,10 +425,7 @@ fn dual_mainnet_portfolio_json() -> serde_json::Value {
                         "quotes": [{
                             "quote": "USD",
                             "priced_symbol_id": "btc.native.bitcoin-mainnet",
-                            "reader": {
-                                "kind": "fixed_unit_price",
-                                "unit_price_dec": "1"
-                            }
+                            "unit_price_dec": "1"
                         }]
                     },
                     "metadata": {}

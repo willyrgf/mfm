@@ -247,10 +247,7 @@ fn portfolio_payload() -> serde_json::Value {
                             {
                                 "quote": "USD",
                                 "priced_symbol_id": "eth.native.typed-local-eth",
-                                "reader": {
-                                    "kind": "fixed_unit_price",
-                                    "unit_price_dec": "2.50"
-                                }
+                                "unit_price_dec": "2.50"
                             }
                         ]
                     },
@@ -310,8 +307,6 @@ kind = "native_balance"
 quote = "USD"
 priced_symbol_id = "eth.native.typed-local-eth"
 
-[portfolio.symbol_configs.valuation.quotes.reader]
-kind = "fixed_unit_price"
 unit_price_dec = "2.50"
 
 [portfolio.symbol_configs.metadata]

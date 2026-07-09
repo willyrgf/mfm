@@ -335,10 +335,7 @@ mod tests {
                                 {
                                     "quote": "USD",
                                     "priced_symbol_id": "eth.native.ethereum-mainnet",
-                                    "reader": {
-                                        "kind": "fixed_unit_price",
-                                        "unit_price_dec": "1800.00"
-                                    }
+                                    "unit_price_dec": "1800.00"
                                 }
                             ]
                         },
@@ -398,8 +395,6 @@ kind = "native_balance"
 quote = "USD"
 priced_symbol_id = "eth.native.ethereum-mainnet"
 
-[portfolio.symbol_configs.valuation.quotes.reader]
-kind = "fixed_unit_price"
 unit_price_dec = "1800.00"
 
 [portfolio.symbol_configs.metadata]

@@ -44,7 +44,7 @@ use mfm_portfolio_model::portfolio::{
 };
 use mfm_portfolio_model::symbol::{
     BalanceReaderConfig, Observation, ObservationQuantity, ObservationSource, ObservationValue,
-    QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole, ValuationReaderConfig,
+    QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole,
 };
 use mfm_portfolio_model::wallet::{WalletConfig, WalletImplementationConfig, WalletSubjectKind};
 use mfm_program::{
@@ -341,15 +341,7 @@ fn validate_select_holdings_config(config: &SelectHoldingsConfig) -> Result<(), 
 fn validate_resolve_valuations_config(config: &ResolveValuationsConfig) -> Result<(), String> {
     ValidatedSymbolConfigs::new(config.symbol_configs.clone())
         .map(|_| ())
-        .map_err(|error| error.to_string())?;
-    for symbol in &config.symbol_configs {
-        for quote in &symbol.valuation.quotes {
-            match &quote.reader {
-                ValuationReaderConfig::FixedUnitPrice { .. } => {}
-            }
-        }
-    }
-    Ok(())
+        .map_err(|error| error.to_string())
 }
 
 fn validate_assemble_snapshot_config(config: &AssembleSnapshotConfig) -> Result<(), String> {
@@ -406,8 +398,6 @@ pub struct ResolvedValuation {
     pub priced_symbol_id: String,
     /// Decimal-string unit price.
     pub unit_price_dec: String,
-    /// Canonical valuation reader kind.
-    pub valuation_reader_kind: String,
 }
 
 /// Resolved valuation collection (hard-fail: empty only when no symbols; no soft errors).
@@ -610,7 +600,7 @@ impl ReadState for SelectHoldingsState {
     }
 }
 
-/// State that resolves configured valuation routes (FixedUnitPrice only).
+/// State that resolves configured fixed unit-price valuation routes.
 pub struct ResolveValuationsState {
     config: ResolveValuationsConfig,
 }
@@ -970,7 +960,6 @@ pub fn apply_valuations_to_observations(
                 priced_symbol_id: resolved.priced_symbol_id.clone(),
                 value_dec,
                 unit_price_dec: resolved.unit_price_dec.clone(),
-                valuation_reader_kind: resolved.valuation_reader_kind.clone(),
             });
         }
         values.sort_by_key(|value| value.quote);
@@ -980,7 +969,7 @@ pub fn apply_valuations_to_observations(
     Ok(observations)
 }
 
-/// Resolves configured valuation routes (FixedUnitPrice only; hard-fail).
+/// Resolves configured fixed unit-price valuation routes (hard-fail).
 pub fn resolve_valuations_from_config(
     config: &ResolveValuationsConfig,
 ) -> StateResult<ResolvedValuations> {
@@ -1000,15 +989,12 @@ fn resolved_valuation_for_quote(
     symbol: &SymbolConfig,
     quote: &QuoteValuationConfig,
 ) -> StateResult<ResolvedValuation> {
-    match &quote.reader {
-        ValuationReaderConfig::FixedUnitPrice { unit_price_dec } => Ok(ResolvedValuation {
-            symbol_id: symbol.symbol_id.to_string(),
-            quote: quote.quote,
-            priced_symbol_id: quote.priced_symbol_id.to_string(),
-            unit_price_dec: unit_price_dec.to_string(),
-            valuation_reader_kind: "fixed_unit_price".to_owned(),
-        }),
-    }
+    Ok(ResolvedValuation {
+        symbol_id: symbol.symbol_id.to_string(),
+        quote: quote.quote,
+        priced_symbol_id: quote.priced_symbol_id.to_string(),
+        unit_price_dec: quote.unit_price_dec.to_string(),
+    })
 }
 
 /// Hard-fail when any configured wallet×symbol required holding lacks an observation.
