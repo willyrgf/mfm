@@ -1,7 +1,6 @@
 use super::*;
 use std::collections::BTreeMap;
 
-use mfm_facts::FactAudience;
 use mfm_portfolio_model::metadata::PublicMetadata;
 use mfm_portfolio_model::portfolio::{ExecutionAnchor, NetworkConfig, NetworkFamilyConfig, PortfolioConfig};
 use mfm_portfolio_model::symbol::{
@@ -134,23 +133,6 @@ fn expand_requirements_projects_evm_native_and_rejects_erc20() {
     );
     let err = expand_required_holdings(&config, &subjects).expect_err("erc20 unsupported");
     assert_eq!(err.code, PortfolioHoldingErrorCode::UnsupportedRequirement);
-}
-
-#[test]
-fn holding_fact_index_request_is_platform_full_set() {
-    let portfolio = sample_portfolio();
-    let config =
-        SelectHoldingsConfig::with_default_store_scope(portfolio.clone()).expect("select config");
-    let subjects = resolve_subjects_from_config(
-        &ResolveSubjectsConfig::new(portfolio.wallets.clone()).expect("subjects config"),
-    );
-    let requirements = expand_required_holdings(&config, &subjects).expect("requirements");
-    let request = holding_fact_index_request(&config, &requirements[0]).expect("request");
-    assert_eq!(
-        request.plan().query_scope().audience(),
-        FactAudience::Platform
-    );
-    assert_eq!(request.plan().limit(), None);
 }
 
 #[test]

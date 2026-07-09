@@ -9,13 +9,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use mfm_artifact_capabilities::{fact_response_artifact_requirement, hydrate_fact_response_json};
+use mfm_canonical::sha256_digest_bytes;
 use mfm_events::v1 as events;
 use mfm_fact_capabilities::{
-    FactIndexReadEvidence, FactIndexReadProvider, FactIndexReadResponse,
+    FactIndexReadEvidence, FactIndexReadProvider, FactIndexReadRequest, FactIndexReadResponse,
     FactQueryReceiptTrustRootMaterial,
 };
-use mfm_facts::FactCanonicalScalar;
-use mfm_program::{StateSpec, ValidatedConfig};
+use mfm_facts::{
+    compile_fact_query_plan, FactAudience, FactCanonicalScalar, FactFieldId, FactOrderingName,
+    FactQueryInput, FactQueryOperator, FactQueryPredicate, FactQueryScope, FactVisibilityScope,
+    ScopeDecisionEvidence, StoreScopeRef,
+};
+use mfm_ids::{ContentDigest, DigestAlgorithm};
+use mfm_program::{MfmFactType, StateSpec, ValidatedConfig};
 use mfm_runtime::{
     load_materialized_input_value, load_materialized_struct_input, load_runner_config,
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
@@ -23,19 +29,26 @@ use mfm_runtime::{
     RunnerOutputBuilder, RunnerRegistrationBuilder,
 };
 use mfm_state_portfolio::{
-    assemble_snapshot, btc_holding_candidate, evm_holding_candidate, expand_required_holdings,
-    holding_fact_index_request, observations_from_selected_holdings, portfolio_adapter_kind,
-    portfolio_adapter_version, project_network_pins_from_observations, resolve_subjects_from_config,
-    resolve_valuations_from_config, select_network_coherent, symbols_by_id_map,
+    assemble_snapshot, balance_reader_kind, expand_required_holdings,
+    observations_from_selected_holdings, portfolio_adapter_kind, portfolio_adapter_version,
+    project_network_pins_from_observations, resolve_subjects_from_config,
+    resolve_valuations_from_config, select_network_coherent, symbols_by_id_map, HoldingAnchor,
     AssembleSnapshotConfig, AssembleSnapshotInput, AssembleSnapshotState, HoldingCandidate,
     HoldingFactProjection, PortfolioHoldingErrorCode, PortfolioHoldingSelectionError,
     ProjectReportConfig, ProjectReportInput, ProjectReportState, RequiredHoldingKey,
     RequiredHoldingRequirement, ResolveSubjectsConfig, ResolveSubjectsState,
     ResolveValuationsConfig, ResolveValuationsState, SelectHoldingsConfig, SelectHoldingsState,
-    SelectedHoldings,
+    SelectedHoldingMaterial, SelectedHoldings,
 };
-use mfm_states_btc::BtcAddressBalanceResponse;
-use mfm_states_evm::EvmAddressNativeBalanceResponse;
+use mfm_states_btc::{
+    normalize_btc_address_balance, BtcAddressBalanceResponse, BtcAddressBalanceSnapshotFact,
+    BtcAddressBalanceSubject,
+};
+use mfm_states_evm::{
+    normalize_evm_address_native_balance, EvmAddressNativeBalanceResponse,
+    EvmAddressNativeBalanceSnapshotFact, EvmAddressNativeBalanceSubject,
+};
+use mfm_portfolio_model::symbol::ObservationAnchor;
 use mfm_store::v1 as store;
 use mfm_values::MfmValue;
 
@@ -254,7 +267,8 @@ async fn select_holdings(
     )> = Vec::new();
 
     for requirement in &requirements {
-        let request = holding_fact_index_request(config, requirement).map_err(holding_runtime_error)?;
+        let request =
+            holding_fact_index_request(config, requirement).map_err(holding_runtime_error)?;
         let response = fact_index
             .read_fact_index(&request)
             .await
@@ -332,10 +346,7 @@ async fn candidates_for_requirement(
                     // Coverage/status filter-empty collapses to missing_fact at select time.
                     Err(error)
                         if error.code == PortfolioHoldingErrorCode::MissingFact
-                            || error.code == PortfolioHoldingErrorCode::UnsupportedRequirement =>
-                    {
-                        // Drop non-acceptable candidates; pure select fails if set empty.
-                    }
+                            || error.code == PortfolioHoldingErrorCode::UnsupportedRequirement => {}
                     Err(error) => return Err(holding_runtime_error(error)),
                 }
             }
@@ -355,6 +366,315 @@ async fn candidates_for_requirement(
         }
     }
     Ok((candidates, claim_ids))
+}
+
+fn holding_fact_index_request(
+    config: &SelectHoldingsConfig,
+    requirement: &RequiredHoldingRequirement,
+) -> Result<FactIndexReadRequest, PortfolioHoldingSelectionError> {
+    let store_scope = StoreScopeRef::new(config.store_scope()).map_err(|error| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::UnsupportedRequirement,
+            error.to_string(),
+            Some(requirement.key.as_key_str()),
+            Some(requirement.key.network_id.clone()),
+        )
+    })?;
+    let (descriptor, predicates, return_fields, ordering) = match requirement.projection {
+        HoldingFactProjection::BitcoinAddressBalance => {
+            let descriptor = BtcAddressBalanceSnapshotFact::descriptor().map_err(|error| {
+                PortfolioHoldingSelectionError::new(
+                    PortfolioHoldingErrorCode::UnsupportedRequirement,
+                    error.to_string(),
+                    Some(requirement.key.as_key_str()),
+                    Some(requirement.key.network_id.clone()),
+                )
+            })?;
+            let bitcoin_network = requirement.network.bitcoin_network().ok_or_else(|| {
+                PortfolioHoldingSelectionError::new(
+                    PortfolioHoldingErrorCode::UnsupportedRequirement,
+                    "bitcoin network tag missing",
+                    Some(requirement.key.as_key_str()),
+                    Some(requirement.key.network_id.clone()),
+                )
+            })?;
+            let source_identity = requirement
+                .network
+                .source_identity()
+                .map(|id| id.to_string())
+                .ok_or_else(|| {
+                    PortfolioHoldingSelectionError::new(
+                        PortfolioHoldingErrorCode::UnsupportedRequirement,
+                        "bitcoin source identity missing",
+                        Some(requirement.key.as_key_str()),
+                        Some(requirement.key.network_id.clone()),
+                    )
+                })?;
+            (
+                descriptor,
+                vec![
+                    equal_predicate("subject.network", requirement.key.network_id.as_str())?,
+                    equal_predicate("subject.bitcoin_network", bitcoin_network)?,
+                    equal_predicate("subject.semantic_source_identity", &source_identity)?,
+                    equal_predicate("subject.address", &requirement.address)?,
+                ],
+                vec![
+                    field_id("result.anchor_height")?,
+                    field_id("result.anchor_hash")?,
+                    field_id("result.balance_sats")?,
+                    field_id("result.coverage")?,
+                    field_id("result.source_status")?,
+                    field_id("metadata.store_commit_order")?,
+                ],
+                FactOrderingName::new("result.anchor_height.desc").map_err(|error| {
+                    PortfolioHoldingSelectionError::new(
+                        PortfolioHoldingErrorCode::UnsupportedRequirement,
+                        error.to_string(),
+                        Some(requirement.key.as_key_str()),
+                        Some(requirement.key.network_id.clone()),
+                    )
+                })?,
+            )
+        }
+        HoldingFactProjection::EvmNativeBalance => {
+            let descriptor =
+                EvmAddressNativeBalanceSnapshotFact::descriptor().map_err(|error| {
+                    PortfolioHoldingSelectionError::new(
+                        PortfolioHoldingErrorCode::UnsupportedRequirement,
+                        error.to_string(),
+                        Some(requirement.key.as_key_str()),
+                        Some(requirement.key.network_id.clone()),
+                    )
+                })?;
+            let chain_id = requirement.network.chain_id_u64().ok_or_else(|| {
+                PortfolioHoldingSelectionError::new(
+                    PortfolioHoldingErrorCode::UnsupportedRequirement,
+                    "evm chain_id missing",
+                    Some(requirement.key.as_key_str()),
+                    Some(requirement.key.network_id.clone()),
+                )
+            })?;
+            (
+                descriptor,
+                vec![
+                    equal_predicate("subject.network", requirement.key.network_id.as_str())?,
+                    equal_predicate_u64("subject.chain_id", chain_id)?,
+                    equal_predicate("subject.account", &requirement.address)?,
+                ],
+                vec![
+                    field_id("result.block_number")?,
+                    field_id("result.block_hash")?,
+                    field_id("result.raw_wei")?,
+                    field_id("result.decimals")?,
+                    field_id("result.coverage")?,
+                    field_id("result.source_status")?,
+                    field_id("metadata.store_commit_order")?,
+                ],
+                FactOrderingName::new("result.block_number.desc").map_err(|error| {
+                    PortfolioHoldingSelectionError::new(
+                        PortfolioHoldingErrorCode::UnsupportedRequirement,
+                        error.to_string(),
+                        Some(requirement.key.as_key_str()),
+                        Some(requirement.key.network_id.clone()),
+                    )
+                })?,
+            )
+        }
+    };
+
+    let input = FactQueryInput::new(
+        store_scope,
+        FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
+        ScopeDecisionEvidence::new(selection_scope_decision_hash()),
+        predicates,
+        return_fields,
+        ordering,
+        None,
+    )
+    .map_err(|error| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::UnsupportedRequirement,
+            error.to_string(),
+            Some(requirement.key.as_key_str()),
+            Some(requirement.key.network_id.clone()),
+        )
+    })?;
+    let plan = compile_fact_query_plan(&descriptor, input).map_err(|error| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::UnsupportedRequirement,
+            error.to_string(),
+            Some(requirement.key.as_key_str()),
+            Some(requirement.key.network_id.clone()),
+        )
+    })?;
+    FactIndexReadRequest::new(plan).map_err(|error| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::UnsupportedRequirement,
+            error.to_string(),
+            Some(requirement.key.as_key_str()),
+            Some(requirement.key.network_id.clone()),
+        )
+    })
+}
+
+fn btc_holding_candidate(
+    requirement: &RequiredHoldingRequirement,
+    response: &BtcAddressBalanceResponse,
+    store_commit_order: u64,
+    fact_claim_id: impl Into<String>,
+) -> Result<HoldingCandidate, PortfolioHoldingSelectionError> {
+    let subject = BtcAddressBalanceSubject::new(
+        requirement.key.network_id.clone(),
+        requirement
+            .network
+            .bitcoin_network()
+            .unwrap_or_default()
+            .to_owned(),
+        requirement
+            .network
+            .source_identity()
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
+        requirement.address.clone(),
+    )
+    .map_err(|error| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::MissingFact,
+            error.to_string(),
+            Some(requirement.key.as_key_str()),
+            Some(requirement.key.network_id.clone()),
+        )
+    })?;
+    let normalized = normalize_btc_address_balance(&subject, response).map_err(|error| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::MissingFact,
+            error.to_string(),
+            Some(requirement.key.as_key_str()),
+            Some(requirement.key.network_id.clone()),
+        )
+    })?;
+    let decimals = requirement.symbol.decimals.unwrap_or(8);
+    let anchor = HoldingAnchor::new(normalized.anchor_height, normalized.anchor_hash.clone())?;
+    Ok(HoldingCandidate {
+        network_id: requirement.key.network_id.clone(),
+        anchor,
+        store_commit_order,
+        fact_claim_id: fact_claim_id.into(),
+        response_material: SelectedHoldingMaterial {
+            wallet_id: requirement.key.wallet_id.clone(),
+            symbol_id: requirement.key.symbol_id.clone(),
+            network_id: requirement.key.network_id.clone(),
+            balance_reader_kind: balance_reader_kind(&requirement.symbol.balance_reader).to_owned(),
+            raw_dec: normalized.balance_sats.to_string(),
+            decimals,
+            observation_anchor: ObservationAnchor::Bitcoin {
+                height: normalized.anchor_height,
+                block_hash: normalized.anchor_hash,
+            },
+            coverage: normalized.coverage.as_str().to_owned(),
+            source_status: normalized.source_status.as_str().to_owned(),
+        },
+    })
+}
+
+fn evm_holding_candidate(
+    requirement: &RequiredHoldingRequirement,
+    response: &EvmAddressNativeBalanceResponse,
+    store_commit_order: u64,
+    fact_claim_id: impl Into<String>,
+) -> Result<HoldingCandidate, PortfolioHoldingSelectionError> {
+    let chain_id = requirement.network.chain_id_u64().ok_or_else(|| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::UnsupportedRequirement,
+            "evm chain_id missing",
+            Some(requirement.key.as_key_str()),
+            Some(requirement.key.network_id.clone()),
+        )
+    })?;
+    let subject = EvmAddressNativeBalanceSubject::new(
+        requirement.key.network_id.clone(),
+        chain_id,
+        requirement.address.clone(),
+    )
+    .map_err(|error| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::MissingFact,
+            error.to_string(),
+            Some(requirement.key.as_key_str()),
+            Some(requirement.key.network_id.clone()),
+        )
+    })?;
+    let normalized = normalize_evm_address_native_balance(&subject, response).map_err(|error| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::MissingFact,
+            error.to_string(),
+            Some(requirement.key.as_key_str()),
+            Some(requirement.key.network_id.clone()),
+        )
+    })?;
+    let decimals = requirement.symbol.decimals.unwrap_or(normalized.decimals);
+    let anchor = HoldingAnchor::new(normalized.block_number, normalized.block_hash.clone())?;
+    Ok(HoldingCandidate {
+        network_id: requirement.key.network_id.clone(),
+        anchor,
+        store_commit_order,
+        fact_claim_id: fact_claim_id.into(),
+        response_material: SelectedHoldingMaterial {
+            wallet_id: requirement.key.wallet_id.clone(),
+            symbol_id: requirement.key.symbol_id.clone(),
+            network_id: requirement.key.network_id.clone(),
+            balance_reader_kind: balance_reader_kind(&requirement.symbol.balance_reader).to_owned(),
+            raw_dec: normalized.raw_wei,
+            decimals,
+            observation_anchor: ObservationAnchor::Evm {
+                chain_id: normalized.chain_id,
+                block_number: normalized.block_number,
+                block_hash: normalized.block_hash,
+            },
+            coverage: normalized.coverage.as_str().to_owned(),
+            source_status: normalized.source_status.as_str().to_owned(),
+        },
+    })
+}
+
+fn selection_scope_decision_hash() -> ContentDigest {
+    ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(b"mfm.portfolio.holding.select.scope.v1"),
+    )
+}
+
+fn field_id(id: &str) -> Result<FactFieldId, PortfolioHoldingSelectionError> {
+    FactFieldId::new(id).map_err(|error| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::UnsupportedRequirement,
+            error.to_string(),
+            None,
+            None,
+        )
+    })
+}
+
+fn equal_predicate(
+    id: &str,
+    value: &str,
+) -> Result<FactQueryPredicate, PortfolioHoldingSelectionError> {
+    Ok(FactQueryPredicate::new(
+        field_id(id)?,
+        FactQueryOperator::Equal,
+        FactCanonicalScalar::string(value),
+    ))
+}
+
+fn equal_predicate_u64(
+    id: &str,
+    value: u64,
+) -> Result<FactQueryPredicate, PortfolioHoldingSelectionError> {
+    Ok(FactQueryPredicate::new(
+        field_id(id)?,
+        FactQueryOperator::Equal,
+        FactCanonicalScalar::UnsignedInteger(value),
+    ))
 }
 
 fn store_commit_order_from_row(row: &mfm_fact_capabilities::FactIndexReadRow) -> Option<u64> {

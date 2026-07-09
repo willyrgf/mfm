@@ -27,5 +27,3 @@ mfm-program-derive = { path = "../../kernel/program-derive", version = "0.1.0" }
 mfm-values = { path = "../../kernel/values", version = "0.1.0" }
 mfm-portfolio-config = { path = "../../portfolio-config", version = "0.1.0" }
 mfm-portfolio-model = { path = "../../portfolio/model", version = "0.1.0" }
-mfm-states-btc = { path = "../btc", version = "0.1.0" }
-mfm-states-evm = { path = "../evm", version = "0.1.0" }

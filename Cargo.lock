@@ -2808,8 +2808,6 @@ dependencies = [
  "mfm-portfolio-model",
  "mfm-program",
  "mfm-program-derive",
- "mfm-states-btc",
- "mfm-states-evm",
  "mfm-values",
  "num-bigint",
  "num-traits",
