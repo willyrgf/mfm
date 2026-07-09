@@ -94,22 +94,6 @@ impl InMemoryControlFactIndexProvider {
 }
 
 impl FactIndexReadProvider for InMemoryControlFactIndexProvider {
-    fn read_fact_index<'a>(
-        &'a self,
-        request: &'a FactIndexReadRequest,
-    ) -> mfm_fact_capabilities::FactIndexReadFuture<'a> {
-        Box::pin(async move {
-            let mut responses = self
-                .read_fact_index_batch(std::slice::from_ref(request))
-                .await?;
-            responses.pop().ok_or_else(|| {
-                mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(
-                    "fact-index batch returned no response for single request",
-                )
-            })
-        })
-    }
-
     fn read_fact_index_batch<'a>(
         &'a self,
         requests: &'a [FactIndexReadRequest],
