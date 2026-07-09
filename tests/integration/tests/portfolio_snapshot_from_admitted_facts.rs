@@ -22,8 +22,7 @@ use mfm_ids::{
 };
 use mfm_integration_tests::test_support::{
     fact_query_evidences, prepare_portfolio_launch_for_store, seed_platform_holding_facts_for_test,
-    FactProjectionFixtureInputForTest, InMemoryControlFactIndexProvider,
-    PlatformHoldingFactSeedForTest,
+    FactProjectionFixtureInputForTest, PlatformHoldingFactSeedForTest, ProjectionFactIndexProvider,
 };
 use mfm_program::MfmFactType;
 use mfm_states_btc::{
@@ -48,7 +47,7 @@ async fn portfolio_snapshot_completes_from_seeded_platform_holdings_without_live
     let store = AsyncInMemoryRunStore::default();
     seed_dual_mainnet_holdings(&store);
 
-    let fact_index = Arc::new(InMemoryControlFactIndexProvider::new(store.clone()));
+    let fact_index = Arc::new(ProjectionFactIndexProvider::new(store.clone()));
     let services = portfolio_services(store.clone(), fact_index.clone());
 
     let prepared =
@@ -139,7 +138,7 @@ async fn portfolio_snapshot_completes_from_seeded_platform_holdings_without_live
 
 fn portfolio_services(
     store: AsyncInMemoryRunStore,
-    fact_index: Arc<InMemoryControlFactIndexProvider>,
+    fact_index: Arc<ProjectionFactIndexProvider>,
 ) -> mfm_app::RunServices<AsyncInMemoryRunStore, AsyncInMemoryRunStore> {
     let receipt_trust_root = fact_index.receipt_trust_root();
     let artifacts: Arc<dyn RetainedArtifactReadProvider> = Arc::new(store.clone());

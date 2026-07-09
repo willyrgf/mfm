@@ -577,7 +577,7 @@ async fn app_resume_runtime_config_ingress_failures_before_claim_or_attempt() {
     let artifacts = ContractArtifactOverlay::new(Arc::new(store));
     let error = match crate::production_runner_registry(
         Arc::new(artifacts),
-        crate::unit_test_fact_index_provider(),
+        crate::ProjectionFactIndexProvider::empty_arc(),
         Some(&runtime_config_path),
     ) {
         Ok(_) => {
@@ -683,7 +683,7 @@ async fn assert_resume_runtime_config_ingress_failure(
 
     let resume_runners = crate::production_runner_registry(
         Arc::new(artifacts.clone()),
-        crate::unit_test_fact_index_provider(),
+        crate::ProjectionFactIndexProvider::empty_arc(),
         runtime_config_path,
     )
     .expect("production runners");

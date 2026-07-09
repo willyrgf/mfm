@@ -1496,7 +1496,7 @@ async fn btc_collector_launch_requires_runtime_config_before_admission() {
     let run_id = request.run_id.clone();
     let runners = production_runner_registry(
         Arc::new(store.clone()),
-        crate::unit_test_fact_index_provider(),
+        crate::ProjectionFactIndexProvider::empty_arc(),
         None,
     )
     .expect("production runners without btc config");

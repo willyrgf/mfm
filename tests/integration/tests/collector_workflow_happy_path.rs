@@ -10,7 +10,7 @@ use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1::{ArtifactRole, KernelEventPayload};
 use mfm_facts::{FactAudience, FactCanonicalScalar};
 use mfm_ids::SeedId;
-use mfm_integration_tests::test_support::{fact_query_evidences, InMemoryControlFactIndexProvider};
+use mfm_integration_tests::test_support::{fact_query_evidences, ProjectionFactIndexProvider};
 use mfm_op_btc_collectors::{
     btc_chain_head_collector_cycle_program_draft, BtcChainHeadCollectorConfig,
     BtcChainHeadObservationContext,
@@ -41,7 +41,7 @@ async fn bitcoin_chain_head_collector_two_cycles_record_checkpoint_and_public_fa
             provider_time_unix_ms: Some(1_720_000_600_000),
         },
     ]));
-    let fact_index = Arc::new(InMemoryControlFactIndexProvider::new(store.clone()));
+    let fact_index = Arc::new(ProjectionFactIndexProvider::new(store.clone()));
     let services = collector_services(store.clone(), artifacts, btc.clone(), fact_index.clone());
 
     let first = launch_cycle(
@@ -162,7 +162,7 @@ async fn bitcoin_chain_head_collector_recovers_interrupted_observation_without_p
         hash: FIRST_HASH,
         provider_time_unix_ms: Some(1_720_000_000_000),
     }]));
-    let fact_index = Arc::new(InMemoryControlFactIndexProvider::new(store.clone()));
+    let fact_index = Arc::new(ProjectionFactIndexProvider::new(store.clone()));
     let first_services = collector_services(
         store.clone(),
         artifacts.clone(),
@@ -272,7 +272,7 @@ fn collector_services(
     store: AsyncInMemoryRunStore,
     artifacts: Arc<dyn RetainedArtifactReadProvider>,
     btc: Arc<dyn mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory>,
-    fact_index: Arc<InMemoryControlFactIndexProvider>,
+    fact_index: Arc<ProjectionFactIndexProvider>,
 ) -> mfm_app::RunServices<AsyncInMemoryRunStore, AsyncInMemoryRunStore> {
     let receipt_trust_root = fact_index.receipt_trust_root();
     let capabilities =

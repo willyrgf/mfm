@@ -32,7 +32,7 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
     let store = store::AsyncInMemoryRunStore::default();
     let runners = mfm_app::production_runner_registry(
         Arc::new(store.clone()),
-        mfm_app::unit_test_fact_index_provider(),
+        mfm_app::ProjectionFactIndexProvider::empty_arc(),
         None,
     )
     .expect("runners");

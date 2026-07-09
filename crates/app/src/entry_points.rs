@@ -371,7 +371,7 @@ mod tests {
         let prepared = fixture.prepare_sample_portfolio(None);
         let runners = crate::production_runner_registry(
             Arc::new(fixture.store.clone()),
-            crate::unit_test_fact_index_provider(),
+            crate::ProjectionFactIndexProvider::empty_arc(),
             None,
         )
         .expect("runners");
@@ -734,7 +734,7 @@ mod tests {
         > {
             let runners = crate::production_runner_registry(
                 Arc::new(self.store.clone()),
-                crate::unit_test_fact_index_provider(),
+                crate::ProjectionFactIndexProvider::empty_arc(),
                 Some(&self.runtime_config_path),
             )
             .expect("runners");

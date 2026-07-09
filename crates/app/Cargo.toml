@@ -18,6 +18,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"
 uuid = { version = "1.0", features = ["v4"] }
 thiserror = { workspace = true }
 zeroize = "1.7"
+ed25519-dalek = { workspace = true }
 
 mfm-adapters-btc-jsonrpc = { path = "../adapters/btc-jsonrpc" }
 mfm-adapters-evm = { path = "../adapters/evm" }
@@ -51,7 +52,7 @@ mfm-runtime-config = { path = "../runtime-config" }
 mfm-signers-keystore = { path = "../signers/keystore" }
 mfm-signing = { path = "../signing" }
 mfm-spec = { path = "../kernel/spec" }
-mfm-store = { path = "../kernel/store" }
+mfm-store = { path = "../kernel/store", features = ["test-support"] }
 mfm-stream-store-postgres = { path = "../storages/stream-store-postgres" }
 mfm-transports-evm = { path = "../transports/evm" }
 mfm-transports-proof = { path = "../transports/proof" }
@@ -59,11 +60,9 @@ mfm-values = { path = "../kernel/values" }
 
 [dev-dependencies]
 alloy-primitives = { workspace = true }
-ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-effects = { path = "../kernel/effects" }
 mfm-manual-auth = { path = "../kernel/manual-auth" }
-mfm-store = { path = "../kernel/store", features = ["test-support"] }
 mfm_core = { path = "../core" }
 mfm-program-derive = { path = "../kernel/program-derive" }
 tempfile = "3.0"

@@ -227,7 +227,7 @@ where
     let certified = prepared.request.certified_spec.clone();
     let runners = mfm_app::production_runner_registry(
         Arc::new(store.clone()),
-        mfm_app::unit_test_fact_index_provider(),
+        mfm_app::ProjectionFactIndexProvider::empty_arc(),
         None,
     )
     .expect("production runners");

@@ -3,18 +3,12 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::Request;
-use ed25519_dalek::SigningKey;
 use mfm_core::keystore::{Keystore, KeystoreConfig};
 use mfm_events::v1::{ArtifactRole, KernelEventPayload};
-use mfm_fact_capabilities::{
-    FactIndexReadProvider, FactIndexReadRequest, FactIndexReadResponse,
-    FactQueryReceiptTrustRootMaterial,
-};
-use mfm_facts::{StoreIdentity, StoreKeyId, StoreReceiptAuthenticationScheme};
 use mfm_store::v1 as store;
 use mfm_store::v1::RetainedArtifactReadProvider;
 
@@ -38,107 +32,19 @@ pub use store::test_support::{
 /// In-memory REST app state used by integration tests.
 pub type InMemoryRestAppState = mfm_rest_api::AppState<store::AsyncInMemoryRunStore>;
 
+/// Store-backed projection fact-index (shared with app process assembly tests).
+pub use mfm_app::ProjectionFactIndexProvider;
+
 /// Builds in-memory REST app state.
 pub fn in_memory_rest_app_state() -> InMemoryRestAppState {
     let store = store::AsyncInMemoryRunStore::default();
-    let fact_index = Arc::new(InMemoryControlFactIndexProvider::new(store.clone()));
+    let fact_index = Arc::new(ProjectionFactIndexProvider::new(store.clone()));
     let fact_query_receipt_trust_root = Some(fact_index.receipt_trust_root());
     mfm_rest_api::AppState {
         store,
         runtime_config_path: None,
         fact_query_receipt_trust_root,
         fact_index,
-    }
-}
-
-/// Projection-backed Control fact-index provider for in-memory integration tests.
-pub struct InMemoryControlFactIndexProvider {
-    store: store::AsyncInMemoryRunStore,
-    signing_key: SigningKey,
-    store_identity: StoreIdentity,
-    key_id: StoreKeyId,
-    returned_row_counts: Mutex<Vec<usize>>,
-}
-
-impl InMemoryControlFactIndexProvider {
-    /// Builds a provider that reads fact rows from the supplied in-memory store projection.
-    pub fn new(store: store::AsyncInMemoryRunStore) -> Self {
-        Self {
-            store,
-            signing_key: SigningKey::from_bytes(&[0x43; 32]),
-            store_identity: StoreIdentity::new("mfm.integration.in_memory")
-                .expect("store identity"),
-            key_id: StoreKeyId::new("integration.fact.read").expect("store key id"),
-            returned_row_counts: Mutex::new(Vec::new()),
-        }
-    }
-
-    /// Returns one row count per fact-index read, in call order.
-    pub fn returned_row_counts(&self) -> Vec<usize> {
-        self.returned_row_counts.lock().expect("row counts").clone()
-    }
-
-    /// Returns the store trust root matching this provider's signed receipts.
-    pub fn receipt_trust_root(&self) -> store::FactQueryReceiptTrustRoot {
-        store::test_support::fact_query_receipt_trust_root_for_test(
-            &self.signing_key,
-            self.store_identity.clone(),
-            self.key_id.clone(),
-        )
-    }
-
-    fn trust_root(&self) -> FactQueryReceiptTrustRootMaterial {
-        FactQueryReceiptTrustRootMaterial::new(
-            self.store_identity.clone(),
-            StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
-            self.key_id.clone(),
-            self.signing_key.verifying_key().to_bytes(),
-        )
-    }
-}
-
-impl FactIndexReadProvider for InMemoryControlFactIndexProvider {
-    fn read_fact_index_batch<'a>(
-        &'a self,
-        requests: &'a [FactIndexReadRequest],
-    ) -> mfm_fact_capabilities::FactIndexReadBatchFuture<'a> {
-        Box::pin(async move {
-            if requests.is_empty() {
-                return Ok(Vec::new());
-            }
-            // One frozen projection for the whole batch (shared selection frontier).
-            let projection = self.store.projection_snapshot().expect("projection");
-            let trust_root = self.receipt_trust_root();
-            let mut responses = Vec::with_capacity(requests.len());
-            for request in requests {
-                let rows = store::test_support::execute_fact_query_projection_for_test(
-                    &projection,
-                    request.plan(),
-                )
-                .expect("rows");
-                self.returned_row_counts
-                    .lock()
-                    .expect("row counts")
-                    .push(rows.len());
-                let receipt =
-                    store::test_support::signed_fact_query_receipt_for_projection_for_test(
-                        request.plan(),
-                        &projection,
-                        &self.signing_key,
-                        self.store_identity.clone(),
-                        self.key_id.clone(),
-                        &rows,
-                    );
-                let plan_hash = mfm_facts::fact_query_plan_hash(request.plan()).expect("plan hash");
-                store::verify_fact_query_receipt_authentication(&plan_hash, &receipt, &trust_root)
-                    .expect("receipt authentication");
-                responses.push(FactIndexReadResponse::from_receipt(
-                    receipt,
-                    self.trust_root(),
-                ));
-            }
-            Ok(responses)
-        })
     }
 }
 

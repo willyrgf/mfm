@@ -74,6 +74,7 @@ mod entry_point;
 mod entry_points;
 mod evm_collector;
 mod evm_contracts;
+mod fact_index;
 mod live_transports;
 mod public_facts;
 
@@ -664,35 +665,12 @@ pub fn production_runner_registry(
 }
 
 /// Builds the production Postgres Platform/Control fact-index provider.
-pub use btc_collector::production_fact_index_read_provider;
+pub use fact_index::production_fact_index_read_provider;
 /// Platform/Control fact-index capability used by portfolio and BTC collector runners.
 pub use mfm_fact_capabilities::FactIndexReadProvider;
 
-/// Explicit fail-closed fact-index for tests that only need runner registration.
-///
-/// Production assembly always uses [`production_fact_index_read_provider`]. Tests that exercise
-/// SelectHoldings must pass a projection-backed provider (for example the integration
-/// in-memory fact-index), not this helper.
-pub fn unit_test_fact_index_provider() -> Arc<dyn mfm_fact_capabilities::FactIndexReadProvider> {
-    Arc::new(UnitTestFactIndexProvider)
-}
-
-struct UnitTestFactIndexProvider;
-
-impl mfm_fact_capabilities::FactIndexReadProvider for UnitTestFactIndexProvider {
-    fn read_fact_index_batch<'a>(
-        &'a self,
-        _requests: &'a [mfm_fact_capabilities::FactIndexReadRequest],
-    ) -> mfm_fact_capabilities::FactIndexReadBatchFuture<'a> {
-        Box::pin(async {
-            Err(
-                mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(
-                    "unit-test fact-index provider must not serve SelectHoldings; wire a real projection provider",
-                ),
-            )
-        })
-    }
-}
+/// Projection-backed in-memory fact-index for store-backed tests and process assembly fixtures.
+pub use fact_index::ProjectionFactIndexProvider;
 
 /// Builds an adapter-facing artifact read provider from a retained artifact reader.
 pub fn artifact_read_provider_from_retained<A>(artifacts: A) -> Arc<dyn ArtifactReadProvider>
