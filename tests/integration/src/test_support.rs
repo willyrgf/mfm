@@ -29,6 +29,12 @@ pub use run_control_support::{
     RuntimeConfigSignerBinding, ENV_RUNTIME_CONFIG_FILE,
 };
 
+/// Re-export: merge-safe Platform holding seed for store-backed portfolio report tests.
+pub use store::test_support::{
+    seed_platform_holding_facts_for_test, FactProjectionFixtureInputForTest,
+    PlatformHoldingFactSeedForTest,
+};
+
 /// In-memory REST app state used by integration tests.
 pub type InMemoryRestAppState = mfm_rest_api::AppState<store::AsyncInMemoryRunStore>;
 
