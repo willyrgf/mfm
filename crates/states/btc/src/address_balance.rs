@@ -383,10 +383,11 @@ pub fn platform_address_balance_candidate_plan(
 ) -> Result<CanonicalFactQueryPlan, BtcStateError> {
     use mfm_program::MfmFactType;
 
-    let descriptor =
-        BtcAddressBalanceSnapshotFact::descriptor().map_err(|error| BtcStateError::InvalidInput {
+    let descriptor = BtcAddressBalanceSnapshotFact::descriptor().map_err(|error| {
+        BtcStateError::InvalidInput {
             reason: error.to_string(),
-        })?;
+        }
+    })?;
     let field = |id: &str| -> Result<FactFieldId, BtcStateError> {
         FactFieldId::new(id).map_err(|error| BtcStateError::InvalidInput {
             reason: error.to_string(),
@@ -666,9 +667,7 @@ mod tests {
 
     #[test]
     fn platform_candidate_query_plan_is_exact_full_set_not_limit_one() {
-        use mfm_facts::{
-            FactAudience, ScopeDecisionEvidence, StoreScopeRef,
-        };
+        use mfm_facts::{FactAudience, ScopeDecisionEvidence, StoreScopeRef};
         use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes};
 
         let subject = valid_subject();

@@ -205,10 +205,7 @@ pub fn holding_candidate_from_normalized(
     source_status: impl Into<String>,
 ) -> Result<HoldingCandidate, PortfolioHoldingSelectionError> {
     let (height, hash) = match &observation_anchor {
-        ObservationAnchor::Bitcoin {
-            height,
-            block_hash,
-        } => (*height, block_hash.clone()),
+        ObservationAnchor::Bitcoin { height, block_hash } => (*height, block_hash.clone()),
         ObservationAnchor::Evm {
             block_number,
             block_hash,

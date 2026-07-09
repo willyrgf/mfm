@@ -12,9 +12,9 @@ use mfm_canonical::sha256_digest_bytes;
 use mfm_facts::{
     fact_descriptor_hash, DescriptorCatalogWatermark, FactAudience, FactClaimId,
     FactFieldValueType, FactProducerProvenance, FactProjectionGeneration, FactQueryReceipt,
-    FactQueryResultRow, FactResponseEvidence, FactSubjectRef, FactVisibility, FactVisibilityScope,
-    InternalFactRef, InternalFactRefParts, StoreCommitWatermark, StoreIdentity, StoreKeyId,
-    StoreReadFrontier, StoreReceiptAuthenticationScheme,
+    FactQueryResultRow, FactQueryScope, FactResponseEvidence, FactSubjectRef, FactVisibility,
+    FactVisibilityScope, InternalFactRef, InternalFactRefParts, StoreCommitWatermark,
+    StoreIdentity, StoreKeyId, StoreReadFrontier, StoreReceiptAuthenticationScheme, StoreScopeRef,
 };
 use mfm_facts::{CoverageStatus, HoldingSourceStatus};
 use mfm_ids::{
@@ -32,12 +32,13 @@ use mfm_portfolio_model::symbol::{
 use mfm_portfolio_model::wallet::{
     WalletConfig, WalletImplementationConfig, WalletSubject, WalletSubjectKind,
 };
+use mfm_program::MfmFactType;
 use mfm_program::ValidatedConfig;
 use mfm_state_portfolio::{
     project_network_pins_from_observations, resolve_subjects_from_config, ResolveSubjectsConfig,
 };
-use mfm_states_btc::BtcAddressBalanceResponse;
-use mfm_states_evm::EvmAddressNativeBalanceResponse;
+use mfm_states_btc::{BtcAddressBalanceResponse, BtcAddressBalanceSnapshotFact};
+use mfm_states_evm::{EvmAddressNativeBalanceResponse, EvmAddressNativeBalanceSnapshotFact};
 use mfm_store::v1::test_support::{
     signed_fact_query_receipt_for_test, SignedFactQueryReceiptFixtureInputForTest,
 };
