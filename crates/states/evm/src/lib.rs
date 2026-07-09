@@ -26,7 +26,12 @@ pub use native_balance_collect::{
     ResolveEvmJointTipState,
 };
 
-use mfm_facts::{CoverageStatus, FactAudience, FactVisibility, HoldingSourceStatus};
+use mfm_facts::{
+    compile_fact_query_plan, CanonicalFactQueryPlan, CoverageStatus, FactAudience,
+    FactCanonicalScalar, FactFieldId, FactOrderingName, FactQueryInput, FactQueryOperator,
+    FactQueryPredicate, FactQueryScope, FactVisibility, FactVisibilityScope, HoldingSourceStatus,
+    ScopeDecisionEvidence, StoreScopeRef,
+};
 use mfm_program::StateError;
 use mfm_program_derive::{MfmFactType as DeriveMfmFactType, MfmValue};
 use serde::{Deserialize, Serialize};
@@ -408,6 +413,74 @@ pub fn normalize_evm_address_native_balance_fact(
     normalize_evm_address_native_balance(fact.subject(), fact.response())
 }
 
+/// Builds the Platform fact-index plan for portfolio (or other) candidate selection.
+///
+/// Exact subject predicates, full return set including `metadata.store_commit_order`,
+/// block_number-desc ordering, and **`limit: None`** so selection sees the full set.
+pub fn platform_native_balance_candidate_plan(
+    store_scope: &StoreScopeRef,
+    scope_decision: ScopeDecisionEvidence,
+    subject: &EvmAddressNativeBalanceSubject,
+) -> Result<CanonicalFactQueryPlan, EvmStateError> {
+    use mfm_program::MfmFactType;
+
+    let descriptor = EvmAddressNativeBalanceSnapshotFact::descriptor().map_err(|error| {
+        EvmStateError::InvalidInput {
+            reason: error.to_string(),
+        }
+    })?;
+    let field = |id: &str| -> Result<FactFieldId, EvmStateError> {
+        FactFieldId::new(id).map_err(|error| EvmStateError::InvalidInput {
+            reason: error.to_string(),
+        })
+    };
+    let eq_str = |id: &str, value: &str| -> Result<FactQueryPredicate, EvmStateError> {
+        Ok(FactQueryPredicate::new(
+            field(id)?,
+            FactQueryOperator::Equal,
+            FactCanonicalScalar::string(value),
+        ))
+    };
+    let eq_u64 = |id: &str, value: u64| -> Result<FactQueryPredicate, EvmStateError> {
+        Ok(FactQueryPredicate::new(
+            field(id)?,
+            FactQueryOperator::Equal,
+            FactCanonicalScalar::UnsignedInteger(value),
+        ))
+    };
+    let input = FactQueryInput::new(
+        store_scope.clone(),
+        FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
+        scope_decision,
+        vec![
+            eq_str("subject.network", subject.network())?,
+            eq_u64("subject.chain_id", subject.chain_id())?,
+            eq_str("subject.account", subject.account())?,
+        ],
+        vec![
+            field("result.block_number")?,
+            field("result.block_hash")?,
+            field("result.raw_wei")?,
+            field("result.decimals")?,
+            field("result.coverage")?,
+            field("result.source_status")?,
+            field("metadata.store_commit_order")?,
+        ],
+        FactOrderingName::new("result.block_number.desc").map_err(|error| {
+            EvmStateError::InvalidInput {
+                reason: error.to_string(),
+            }
+        })?,
+        None,
+    )
+    .map_err(|error| EvmStateError::InvalidInput {
+        reason: error.to_string(),
+    })?;
+    compile_fact_query_plan(&descriptor, input).map_err(|error| EvmStateError::InvalidInput {
+        reason: error.to_string(),
+    })
+}
+
 /// Pure normalize from subject + response material.
 pub fn normalize_evm_address_native_balance(
     subject: &EvmAddressNativeBalanceSubject,
@@ -632,52 +705,22 @@ mod tests {
 
     #[test]
     fn platform_candidate_query_plan_is_exact_full_set_not_limit_one() {
-        use mfm_facts::{
-            compile_fact_query_plan, FactAudience, FactCanonicalScalar, FactFieldId,
-            FactOrderingName, FactQueryInput, FactQueryOperator, FactQueryPredicate,
-            FactQueryScope, FactVisibilityScope, ScopeDecisionEvidence, StoreScopeRef,
-        };
+        use mfm_facts::{FactAudience, ScopeDecisionEvidence, StoreScopeRef};
         use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes};
 
-        let descriptor = EvmAddressNativeBalanceSnapshotFact::descriptor().expect("descriptor");
         let subject = valid_subject();
-        let input = FactQueryInput::new(
-            StoreScopeRef::new("mfm.store.default").expect("store"),
-            FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
-            ScopeDecisionEvidence::new(ContentDigest::from_digest(
-                DigestAlgorithm::Sha256JcsV1,
-                DigestBytes::from_array([0x51; 32]),
-            )),
-            vec![
-                FactQueryPredicate::new(
-                    FactFieldId::new("subject.network").expect("field"),
-                    FactQueryOperator::Equal,
-                    FactCanonicalScalar::string(subject.network()),
-                ),
-                FactQueryPredicate::new(
-                    FactFieldId::new("subject.chain_id").expect("field"),
-                    FactQueryOperator::Equal,
-                    FactCanonicalScalar::UnsignedInteger(subject.chain_id()),
-                ),
-                FactQueryPredicate::new(
-                    FactFieldId::new("subject.account").expect("field"),
-                    FactQueryOperator::Equal,
-                    FactCanonicalScalar::string(subject.account()),
-                ),
-            ],
-            vec![
-                FactFieldId::new("result.block_number").expect("field"),
-                FactFieldId::new("result.block_hash").expect("field"),
-                FactFieldId::new("result.raw_wei").expect("field"),
-                FactFieldId::new("result.coverage").expect("field"),
-                FactFieldId::new("result.source_status").expect("field"),
-            ],
-            FactOrderingName::new("result.block_number.desc").expect("ordering"),
-            None,
-        )
-        .expect("query input");
-        let plan = compile_fact_query_plan(&descriptor, input).expect("plan");
+        let store_scope = StoreScopeRef::new("mfm.store.default").expect("store");
+        let scope_decision = ScopeDecisionEvidence::new(ContentDigest::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0x51; 32]),
+        ));
+        let plan = platform_native_balance_candidate_plan(&store_scope, scope_decision, &subject)
+            .expect("plan");
         assert_eq!(plan.query_scope().audience(), FactAudience::Platform);
         assert_eq!(plan.limit(), None);
+        assert_eq!(plan.ordering().name().as_str(), "result.block_number.desc");
+        let query = plan.canonical_query().as_str();
+        assert!(query.contains("metadata.store_commit_order"));
+        assert!(query.contains("result.block_hash"));
     }
 }
