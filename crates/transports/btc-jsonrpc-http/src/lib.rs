@@ -873,7 +873,7 @@ fn provider_block_hash(
 }
 
 fn missing_route_diagnostic(source_identity: &BtcSourceIdentity) -> RedactedProviderDiagnostic {
-    btc_operation_diagnostic(ProviderDiagnosticCode::SourceMismatch, "route_lookup").with_field(
+    btc_operation_diagnostic(ProviderDiagnosticCode::RouteUnavailable, "route_lookup").with_field(
         diagnostic_id("source_identity"),
         ProviderDiagnosticValue::Id(diagnostic_id(source_identity.as_str())),
     )
@@ -1149,7 +1149,10 @@ mod tests {
             .expect_err("route should be missing");
         let rendered = format!("{error:?} {error}");
 
-        assert!(matches!(error, BtcCapabilityError::Provider { .. }));
+        let BtcCapabilityError::Provider { diagnostic } = error else {
+            panic!("expected provider diagnostic");
+        };
+        assert_eq!(diagnostic.stable_error_code(), "bitcoin_route_unavailable");
         assert!(rendered.contains("public-bitcoin-core"));
         assert!(!rendered.contains("http://"));
         assert!(!rendered.contains(concat!("Author", "ization")));

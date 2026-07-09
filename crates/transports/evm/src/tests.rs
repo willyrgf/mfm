@@ -401,6 +401,24 @@ async fn rejects_log_entries_that_contradict_filter() {
 }
 
 #[tokio::test]
+async fn rejects_numeric_log_range_when_log_omits_block_number() {
+    let server = TestRpcServer::spawn_log_missing_block_number("0x1").await;
+    let client = client_for(&server.url, "primary", "mainnet");
+
+    let error = client
+        .read_logs(&EvmLogsReadRequest::new(
+            EvmBlockSelector::Number(42),
+            EvmBlockSelector::Number(42),
+            Some(address!("0x1111111111111111111111111111111111111111")),
+            vec![HASH_HEX.parse::<B256>().expect("hash")],
+        ))
+        .await
+        .expect_err("missing block number cannot prove numeric range");
+
+    assert_eq!(error, evm_response_invalid_error());
+}
+
+#[tokio::test]
 async fn runtime_sources_redact_url_and_authorization() {
     let server = TestRpcServer::spawn("0x1").await;
     let source = EvmRuntimeSource::new(
@@ -540,6 +558,10 @@ impl TestRpcServer {
 
     async fn spawn_log_filter_mismatch(chain_id: &'static str) -> Self {
         Self::spawn_with_mode(TestRpcMode::LogFilterMismatch { chain_id }).await
+    }
+
+    async fn spawn_log_missing_block_number(chain_id: &'static str) -> Self {
+        Self::spawn_with_mode(TestRpcMode::LogMissingBlockNumber { chain_id }).await
     }
 
     async fn spawn_failure() -> Self {
@@ -713,6 +735,20 @@ impl TestRpcServer {
                                 body
                             )
                         }
+                        TestRpcMode::LogMissingBlockNumber { chain_id } => {
+                            let result = log_missing_block_number_rpc_result(chain_id, &method);
+                            let body = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "result": result,
+                            })
+                            .to_string();
+                            format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                                body.len(),
+                                body
+                            )
+                        }
                         TestRpcMode::Failure => {
                             "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n"
                                 .to_owned()
@@ -759,6 +795,7 @@ enum TestRpcMode {
     BlockIdentityMismatch { chain_id: &'static str },
     ReceiptHashMismatch { chain_id: &'static str },
     LogFilterMismatch { chain_id: &'static str },
+    LogMissingBlockNumber { chain_id: &'static str },
     Failure,
     JsonRpcFailure,
 }
@@ -892,6 +929,20 @@ fn log_filter_mismatch_rpc_result(chain_id: &str, method: &str) -> Value {
             "topics": [OCCUPYING_HASH_HEX],
             "data": "0x1234",
             "blockNumber": "0x2b",
+            "transactionHash": HASH_HEX,
+            "logIndex": "0x0",
+        }]),
+        other => rpc_result(chain_id, other),
+    }
+}
+
+fn log_missing_block_number_rpc_result(chain_id: &str, method: &str) -> Value {
+    match method {
+        "eth_chainId" => json!(chain_id),
+        "eth_getLogs" => json!([{
+            "address": "0x1111111111111111111111111111111111111111",
+            "topics": [HASH_HEX],
+            "data": "0x1234",
             "transactionHash": HASH_HEX,
             "logIndex": "0x0",
         }]),

@@ -739,19 +739,22 @@ impl EvmJsonRpcClient {
                             chain_id,
                             source.id.clone(),
                             route.policy_id().clone(),
-                        ),
+                        )
+                        .map_err(source_evidence_error_into_transport)?,
                     });
                 }
                 Ok(chain_id) => {
-                    let evidence = RedactedEvmSourceEvidence::from_binding(
+                    let error = RedactedEvmSourceEvidence::from_binding(
                         binding,
                         chain_id,
                         source.id.clone(),
                         route.policy_id().clone(),
-                    );
-                    return Err(EvmTransportError::SourceMismatch {
-                        diagnostic: evidence.source_mismatch_diagnostic(),
-                    });
+                    )
+                    .expect_err("mismatched chain id must fail closed");
+                    let EvmCapabilityError::SourceMismatch { diagnostic } = error else {
+                        return Err(EvmTransportError::InvalidResponse);
+                    };
+                    return Err(EvmTransportError::SourceMismatch { diagnostic });
                 }
                 Err(error) if error.can_try_next_source() => {
                     last_failure = error;
@@ -1104,6 +1107,15 @@ fn capability_error_from_transport(error: EvmTransportError) -> EvmCapabilityErr
     }
 }
 
+fn source_evidence_error_into_transport(error: EvmCapabilityError) -> EvmTransportError {
+    match error {
+        EvmCapabilityError::SourceMismatch { diagnostic } => {
+            EvmTransportError::SourceMismatch { diagnostic }
+        }
+        _ => EvmTransportError::InvalidResponse,
+    }
+}
+
 fn block_selector_tag(selector: &EvmBlockSelector) -> String {
     match selector {
         EvmBlockSelector::Latest => "latest".to_owned(),
@@ -1213,6 +1225,11 @@ fn validate_log_matches_request(
         }
     }
     if log.topics.len() < request.topics().len() {
+        return Err(EvmTransportError::InvalidResponse);
+    }
+    let requires_block_number = matches!(request.from_block(), EvmBlockSelector::Number(_))
+        || matches!(request.to_block(), EvmBlockSelector::Number(_));
+    if requires_block_number && log.block_number.is_none() {
         return Err(EvmTransportError::InvalidResponse);
     }
     if let Some(block_number) = log.block_number {

@@ -484,24 +484,20 @@ impl RedactedEvmSourceEvidence {
         observed_chain_id: u64,
         source_ref: EvmSourceRef,
         policy_id: EvmSourcePolicyId,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let evidence = Self {
             network_id: binding.network_id().clone(),
             expected_chain_id: binding.expected_chain_id(),
             observed_chain_id,
             source_ref,
             policy_id,
-        }
-    }
-
-    /// Returns evidence for the same source selection with a supplied observed chain id.
-    pub fn with_observed_chain_id(&self, observed_chain_id: u64) -> Self {
-        Self {
-            network_id: self.network_id.clone(),
-            expected_chain_id: self.expected_chain_id,
-            observed_chain_id,
-            source_ref: self.source_ref.clone(),
-            policy_id: self.policy_id.clone(),
+        };
+        if observed_chain_id == binding.expected_chain_id() {
+            Ok(evidence)
+        } else {
+            Err(EvmCapabilityError::SourceMismatch {
+                diagnostic: evidence.source_mismatch_diagnostic(),
+            })
         }
     }
 
@@ -1158,6 +1154,25 @@ mod tests {
                 reason: EvmInvalidRequest::ZeroExpectedChainId,
             }
         );
+    }
+
+    #[test]
+    fn source_evidence_from_binding_fails_closed_on_chain_mismatch() {
+        let binding = EvmNetworkBinding::new(EvmNetworkId::new("mainnet").expect("network"), 1)
+            .expect("binding");
+        let error = RedactedEvmSourceEvidence::from_binding(
+            &binding,
+            2,
+            EvmSourceRef::new("primary").expect("source"),
+            EvmSourcePolicyId::new("policy").expect("policy"),
+        )
+        .expect_err("chain mismatch must fail closed");
+
+        let EvmCapabilityError::SourceMismatch { diagnostic } = error else {
+            panic!("expected source mismatch");
+        };
+        assert_eq!(diagnostic.stable_error_code(), "evm_source_mismatch");
+        assert!(diagnostic.summary().contains("observed_chain_id=2"));
     }
 
     #[test]
