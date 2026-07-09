@@ -506,6 +506,8 @@ fn observed_attempt_failure_info(
         return Ok(None);
     };
     let retryable = retryability.retryable_for(failure_class);
+    let details = observed_failure_diagnostic_details(error).cloned();
+    let domain = domain_failure_from_diagnostic(details.as_ref());
     let failure = match failure_class {
         ObservedFailureClass::InputMaterialization => events::MfmErrorInfo::new(
             events::ErrorCode::new("input_materialization_failed")?,
@@ -513,12 +515,21 @@ fn observed_attempt_failure_info(
             retryable,
             "attempt input materialization failed",
         )?,
-        ObservedFailureClass::InvalidRunnerOutput => events::MfmErrorInfo::new(
-            events::ErrorCode::new("runner_output_invalid")?,
-            events::ErrorCategory::Validation,
-            retryable,
-            "runner output failed validation",
-        )?,
+        ObservedFailureClass::InvalidRunnerOutput => {
+            let (code, safe_message) = match domain {
+                Some((code, message)) => (code, message),
+                None => (
+                    events::ErrorCode::new("runner_output_invalid")?,
+                    "runner output failed validation".to_owned(),
+                ),
+            };
+            events::MfmErrorInfo::new(
+                code,
+                events::ErrorCategory::Validation,
+                retryable,
+                safe_message,
+            )?
+        }
         ObservedFailureClass::RuntimeValidation => events::MfmErrorInfo::new(
             events::ErrorCode::new("runtime_validation_failed")?,
             events::ErrorCategory::Validation,
@@ -526,7 +537,6 @@ fn observed_attempt_failure_info(
             "runtime validation failed while handling attempt",
         )?,
     };
-    let details = observed_failure_diagnostic_details(error).cloned();
     let error = if let Some(details) = &details {
         let details_digest = canonical_json(details.value().clone())?.content_digest();
         failure.with_public_details(events::RedactedJson::new(details_digest))?
@@ -534,6 +544,25 @@ fn observed_attempt_failure_info(
         failure
     };
     Ok(Some(ObservedAttemptFailureInfo { error, details }))
+}
+
+/// When diagnostic details carry a valid `domain_code`, surface it as the public attempt error code.
+fn domain_failure_from_diagnostic(
+    details: Option<&RuntimeDiagnosticDetails>,
+) -> Option<(events::ErrorCode, String)> {
+    let value = details?.value();
+    let domain_code = value.get("domain_code")?.as_str()?;
+    if domain_code.is_empty() {
+        return None;
+    }
+    let code = events::ErrorCode::new(domain_code).ok()?;
+    let safe_message = value
+        .get("domain_message")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| domain_code.to_owned());
+    Some((code, safe_message))
 }
 
 fn observed_failure_class(error: &RuntimeError) -> Option<ObservedFailureClass> {

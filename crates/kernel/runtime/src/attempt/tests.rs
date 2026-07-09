@@ -161,3 +161,35 @@ fn observed_failure_retryability_follows_policy_and_failure_class() {
     assert!(!retry_materialization.retryable_for(ObservedFailureClass::InvalidRunnerOutput));
     assert!(!retry_materialization.retryable_for(ObservedFailureClass::RuntimeValidation));
 }
+
+#[test]
+fn invalid_runner_output_diagnostic_surfaces_domain_code_on_attempt_failure() {
+    let error = RuntimeError::InvalidRunnerOutputDiagnostic {
+        message: "missing_fact: no acceptable Platform fact".to_owned(),
+        details: RuntimeDiagnosticDetails::from_json(serde_json::json!({
+            "domain_code": "missing_fact",
+            "domain_message": "missing_fact: no acceptable Platform fact",
+        })),
+    };
+    let info = observed_attempt_failure_info(
+        &error,
+        ObservedFailureRetryabilityPolicy {
+            input_materialization_retryable: false,
+        },
+    )
+    .expect("map failure")
+    .expect("observed failure");
+    assert_eq!(info.error.code.as_str(), "missing_fact");
+    assert!(info.error.safe_message.contains("missing_fact"));
+
+    let generic = RuntimeError::InvalidRunnerOutput("not a domain error".to_owned());
+    let info = observed_attempt_failure_info(
+        &generic,
+        ObservedFailureRetryabilityPolicy {
+            input_materialization_retryable: false,
+        },
+    )
+    .expect("map failure")
+    .expect("observed failure");
+    assert_eq!(info.error.code.as_str(), "runner_output_invalid");
+}

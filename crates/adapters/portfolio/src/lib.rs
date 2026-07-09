@@ -731,11 +731,22 @@ fn fact_query_trust_root(
 }
 
 fn holding_runtime_error(error: PortfolioHoldingSelectionError) -> mfm_runtime::RuntimeError {
-    mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
-        "{code}: {message}",
-        code = error.code.as_str(),
-        message = error.message
-    ))
+    let code = error.code.as_str();
+    let message = error.message.clone();
+    let mut details = serde_json::json!({
+        "domain_code": code,
+        "domain_message": format!("{code}: {message}"),
+    });
+    if let Some(holding_key) = &error.holding_key {
+        details["holding_key"] = serde_json::json!(holding_key);
+    }
+    if let Some(network_id) = &error.network_id {
+        details["network_id"] = serde_json::json!(network_id);
+    }
+    mfm_runtime::RuntimeError::InvalidRunnerOutputDiagnostic {
+        message: format!("{code}: {message}"),
+        details: mfm_runtime::RuntimeDiagnosticDetails::from_json(details),
+    }
 }
 
 fn fact_index_runtime_error(
