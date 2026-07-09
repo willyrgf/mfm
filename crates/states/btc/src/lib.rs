@@ -7,11 +7,22 @@
 //! registration.
 
 mod address_balance;
+mod address_balance_collect;
 
 pub use address_balance::{
     address_balance_fact_visibility, normalize_btc_address_balance,
     normalize_btc_address_balance_fact, BtcAddressBalanceResponse, BtcAddressBalanceSnapshotFact,
     BtcAddressBalanceSubject, NormalizedBtcAddressHolding,
+};
+pub use address_balance_collect::{
+    address_balance_record_visibility, materialize_btc_joint_tip,
+    normalize_btc_address_balance_observation, require_shared_joint_tip,
+    validate_observe_btc_address_balance_config, validate_resolve_btc_joint_tip_config,
+    BtcAddressBalanceObservation, BtcAddressBalanceObservationContext, BtcJointTip,
+    ObserveBtcAddressBalanceConfig, ObserveBtcAddressBalanceInput, ObserveBtcAddressBalanceState,
+    RecordBtcAddressBalanceFactConfig, RecordBtcAddressBalanceFactInput,
+    RecordBtcAddressBalanceFactState, ResolveBtcJointTipConfig, ResolveBtcJointTipInput,
+    ResolveBtcJointTipState,
 };
 
 use std::future;

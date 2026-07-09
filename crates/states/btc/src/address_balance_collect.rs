@@ -1,0 +1,934 @@
+//! Bitcoin address-balance collector states: joint tip → observe → record.
+//!
+//! Snapshot pattern only: resolve one joint tip per same-network batch, pin balance
+//! reads at that height+hash, fail closed before Platform write when prove-before-write
+//! invariants do not hold.
+
+use std::future;
+use std::num::NonZeroU64;
+use std::str::FromStr;
+
+use mfm_btc_capabilities::{
+    BtcAddress, BtcBalanceReadCapability, BtcBalanceReadResponse, BtcBlockHash,
+    BtcChainHeadReadCapability, BtcChainHeadResponse as CapabilityChainHeadResponse, BtcHeadSelection,
+    BtcNetworkId, BtcSourceIdentity, BtcSourceStatus,
+};
+use mfm_effects::{ManagedPlatformWrite, ReadExternal};
+use mfm_facts::{CoverageStatus, HoldingSourceStatus};
+use mfm_ids::{StateKind, StateVersion};
+use mfm_program::{
+    fact_descriptor_ref, AdapterBindingSpec, FactDescriptorRef, ManagedWriteState, NoContext,
+    ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
+};
+use mfm_program_derive::{MfmConfig, MfmValue, StateInput};
+use serde::{Deserialize, Serialize};
+
+use crate::address_balance::{
+    address_balance_fact_visibility, BtcAddressBalanceResponse, BtcAddressBalanceSnapshotFact,
+    BtcAddressBalanceSubject,
+};
+use crate::{
+    adapter_binding, adapter_required_error, state_kind, state_version, validate_bitcoin_network,
+    validate_observe_chain_head_config, BtcFactRecordCapability, BtcStateError,
+    ObserveBtcChainHeadConfig,
+};
+
+/// Shared joint tip resolved once for a same-network multi-subject batch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.bitcoin",
+    name = "joint_tip",
+    version = "1",
+    schema = "mfm.bitcoin.state.value.joint_tip"
+)]
+pub struct BtcJointTip {
+    network: String,
+    bitcoin_network: String,
+    semantic_source_identity: String,
+    block_height: u64,
+    block_hash: String,
+    observed_source_status: String,
+    observed_bitcoin_network: String,
+}
+
+impl BtcJointTip {
+    /// Creates a joint tip from already-checked components.
+    pub fn new(
+        network: impl Into<String>,
+        bitcoin_network: impl Into<String>,
+        semantic_source_identity: impl Into<String>,
+        block_height: u64,
+        block_hash: impl Into<String>,
+        observed_source_status: impl Into<String>,
+        observed_bitcoin_network: impl Into<String>,
+    ) -> Result<Self, BtcStateError> {
+        let network = network.into();
+        let bitcoin_network = bitcoin_network.into();
+        let semantic_source_identity = semantic_source_identity.into();
+        let block_hash = block_hash.into();
+        let observed_source_status = observed_source_status.into();
+        let observed_bitcoin_network = observed_bitcoin_network.into();
+        if network.trim().is_empty()
+            || bitcoin_network.trim().is_empty()
+            || semantic_source_identity.trim().is_empty()
+            || block_hash.trim().is_empty()
+            || observed_source_status.trim().is_empty()
+            || observed_bitcoin_network.trim().is_empty()
+        {
+            return Err(BtcStateError::InvalidInput {
+                reason: "joint tip fields must be non-empty".to_owned(),
+            });
+        }
+        validate_bitcoin_network(&bitcoin_network)
+            .map_err(|reason| BtcStateError::InvalidInput { reason })?;
+        validate_bitcoin_network(&observed_bitcoin_network)
+            .map_err(|reason| BtcStateError::InvalidInput { reason })?;
+        BtcBlockHash::new(&block_hash).map_err(|_| BtcStateError::InvalidInput {
+            reason: "joint tip block_hash must be a 32-byte hex hash".to_owned(),
+        })?;
+        Ok(Self {
+            network,
+            bitcoin_network,
+            semantic_source_identity,
+            block_height,
+            block_hash,
+            observed_source_status,
+            observed_bitcoin_network,
+        })
+    }
+
+    /// Materializes a joint tip from a verified chain-head capability response.
+    pub fn from_capability_response(
+        response: &CapabilityChainHeadResponse,
+    ) -> Result<Self, BtcStateError> {
+        let evidence = &response.evidence;
+        Self::new(
+            evidence.network_id.as_str(),
+            evidence.bitcoin_network.as_str(),
+            evidence.source_identity.as_str(),
+            response.block_height,
+            response.block_hash.as_str(),
+            evidence.source_status.as_str(),
+            evidence.observed_bitcoin_network.as_str(),
+        )
+    }
+
+    /// Returns the semantic network id.
+    pub fn network(&self) -> &str {
+        &self.network
+    }
+
+    /// Returns the Bitcoin Core network tag.
+    pub fn bitcoin_network(&self) -> &str {
+        &self.bitcoin_network
+    }
+
+    /// Returns the non-secret semantic source identity.
+    pub fn semantic_source_identity(&self) -> &str {
+        &self.semantic_source_identity
+    }
+
+    /// Returns the joint tip block height.
+    pub const fn block_height(&self) -> u64 {
+        self.block_height
+    }
+
+    /// Returns the joint tip block hash.
+    pub fn block_hash(&self) -> &str {
+        &self.block_hash
+    }
+
+    /// Returns the provider source status tag (`synced`, `initial_block_download`, `unknown`).
+    pub fn observed_source_status(&self) -> &str {
+        &self.observed_source_status
+    }
+
+    /// Returns the provider-observed Bitcoin network tag.
+    pub fn observed_bitcoin_network(&self) -> &str {
+        &self.observed_bitcoin_network
+    }
+
+    /// Returns whether this tip is admissible as a balance-write anchor.
+    pub fn is_admissible_for_balance_write(&self) -> bool {
+        self.observed_source_status == BtcSourceStatus::Synced.as_str()
+            && self.observed_bitcoin_network == self.bitcoin_network
+            && !self.block_hash.trim().is_empty()
+    }
+}
+
+/// Requires every observation in a same-network batch to share one joint tip anchor.
+pub fn require_shared_joint_tip(
+    observations: &[&BtcAddressBalanceObservation],
+) -> Result<(), BtcStateError> {
+    let Some(first) = observations.first() else {
+        return Err(BtcStateError::InvalidInput {
+            reason: "shared tip batch requires at least one observation".to_owned(),
+        });
+    };
+    let height = first.response().anchor_height();
+    let hash = first.response().anchor_hash();
+    let network = first.subject().network();
+    for observation in observations.iter().skip(1) {
+        if observation.subject().network() != network {
+            return Err(BtcStateError::InvalidInput {
+                reason: "shared tip batch subjects must share one network".to_owned(),
+            });
+        }
+        if observation.response().anchor_height() != height
+            || observation.response().anchor_hash() != hash
+        {
+            return Err(BtcStateError::InvalidInput {
+                reason: "multi-subject same-network batch must share one joint tip".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Config for resolving a joint tip once per same-network collector batch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[mfm(
+    schema = "mfm.bitcoin.state.config.resolve_joint_tip",
+    validate = "validate_resolve_btc_joint_tip_config"
+)]
+pub struct ResolveBtcJointTipConfig {
+    /// Semantic network id.
+    pub network: String,
+    /// Expected Bitcoin Core network tag (`main`, `test`, `signet`, or `regtest`).
+    pub bitcoin_network: String,
+    /// Non-secret semantic source identity.
+    pub semantic_source_identity: String,
+    /// Head kind requested for the joint tip (`best` or `confirmed`).
+    pub head_kind: String,
+    /// Optional confirmation depth for confirmed-head reads.
+    pub confirmation_depth: Option<NonZeroU64>,
+    /// Maximum number of source reads this bounded state may request.
+    pub max_source_reads: NonZeroU64,
+}
+
+/// Validates joint-tip resolve config.
+pub fn validate_resolve_btc_joint_tip_config(
+    config: &ResolveBtcJointTipConfig,
+) -> Result<(), String> {
+    validate_observe_chain_head_config(&ObserveBtcChainHeadConfig {
+        network: config.network.clone(),
+        bitcoin_network: config.bitcoin_network.clone(),
+        semantic_source_identity: config.semantic_source_identity.clone(),
+        head_kind: config.head_kind.clone(),
+        confirmation_depth: config.confirmation_depth,
+        max_source_reads: config.max_source_reads,
+    })
+}
+
+impl ResolveBtcJointTipConfig {
+    /// Returns the semantic head selection for this joint tip.
+    pub fn selection(&self) -> Result<BtcHeadSelection, BtcStateError> {
+        validate_resolve_btc_joint_tip_config(self)
+            .map_err(|reason| BtcStateError::InvalidInput { reason })?;
+        match self.head_kind.as_str() {
+            "best" => Ok(BtcHeadSelection::best()),
+            "confirmed" => BtcHeadSelection::confirmed(
+                self.confirmation_depth
+                    .expect("validated confirmation depth")
+                    .get(),
+            )
+            .map_err(BtcStateError::from),
+            _ => Err(BtcStateError::InvalidInput {
+                reason: "head_kind must be `best` or `confirmed`".to_owned(),
+            }),
+        }
+    }
+
+    /// Builds an observe chain-head config with the same binding and selection.
+    pub fn as_observe_chain_head_config(&self) -> ObserveBtcChainHeadConfig {
+        ObserveBtcChainHeadConfig {
+            network: self.network.clone(),
+            bitcoin_network: self.bitcoin_network.clone(),
+            semantic_source_identity: self.semantic_source_identity.clone(),
+            head_kind: self.head_kind.clone(),
+            confirmation_depth: self.confirmation_depth,
+            max_source_reads: self.max_source_reads,
+        }
+    }
+}
+
+/// Input for joint-tip resolution (adapter-supplied observation context only).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, StateInput)]
+#[mfm(schema = "mfm.bitcoin.state.input.resolve_joint_tip")]
+pub struct ResolveBtcJointTipInput {
+    /// Optional observation context supplied by the adapter.
+    pub context: BtcAddressBalanceObservationContext,
+}
+
+/// Adapter-supplied context for balance observation materialization.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.bitcoin",
+    name = "address_balance_observation_context",
+    version = "1",
+    schema = "mfm.bitcoin.state.value.address_balance_observation_context"
+)]
+pub struct BtcAddressBalanceObservationContext {
+    /// State observation time in Unix milliseconds, when supplied by an adapter.
+    pub observed_at_unix_ms: Option<u64>,
+}
+
+/// State contract for resolving one joint tip for a same-network batch.
+pub struct ResolveBtcJointTipState {
+    config: ResolveBtcJointTipConfig,
+}
+
+impl ResolveBtcJointTipState {
+    /// Materializes a joint tip from a verified chain-head capability response.
+    pub fn materialize_response(
+        &self,
+        response: &CapabilityChainHeadResponse,
+    ) -> Result<BtcJointTip, BtcStateError> {
+        materialize_btc_joint_tip(&self.config, response)
+    }
+}
+
+/// Materializes and admits a joint tip from a verified chain-head response.
+pub fn materialize_btc_joint_tip(
+    config: &ResolveBtcJointTipConfig,
+    response: &CapabilityChainHeadResponse,
+) -> Result<BtcJointTip, BtcStateError> {
+    let _selection = config.selection()?;
+    let tip = BtcJointTip::from_capability_response(response)?;
+    if tip.network() != config.network
+        || tip.bitcoin_network() != config.bitcoin_network
+        || tip.semantic_source_identity() != config.semantic_source_identity
+    {
+        return Err(BtcStateError::SourceMismatch);
+    }
+    if !tip.is_admissible_for_balance_write() {
+        return Err(BtcStateError::InvalidInput {
+            reason: "joint tip is not admissible for balance write (source must be synced)"
+                .to_owned(),
+        });
+    }
+    Ok(tip)
+}
+
+impl StateSpec for ResolveBtcJointTipState {
+    type Config = ResolveBtcJointTipConfig;
+    type Context = NoContext;
+    type Input = ResolveBtcJointTipInput;
+    type Output = BtcJointTip;
+    type Effect = ReadExternal;
+    type Caps = (BtcChainHeadReadCapability,);
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        state_kind("joint_tip.resolve")
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        state_version("joint_tip.resolve")
+    }
+
+    fn name() -> &'static str {
+        "mfm.bitcoin.joint_tip.resolve"
+    }
+
+    fn adapter_bindings() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
+        adapter_binding()
+    }
+
+    fn new(config: ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
+    }
+}
+
+impl ReadState for ResolveBtcJointTipState {
+    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
+
+    fn run<'a>(
+        &'a self,
+        _input: Self::Input,
+        _caps: &'a Self::Caps,
+        _context: &'a mfm_program::CertifiedContext<Self::Context>,
+    ) -> Self::RunFuture<'a> {
+        if let Err(error) = self.config.selection() {
+            return future::ready(Err(StateError::from(error)));
+        }
+        future::ready(Err(adapter_required_error(Self::name())))
+    }
+}
+
+/// Config for a Bitcoin address-balance observation state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[mfm(
+    schema = "mfm.bitcoin.state.config.observe_address_balance",
+    validate = "validate_observe_btc_address_balance_config"
+)]
+pub struct ObserveBtcAddressBalanceConfig {
+    /// Semantic network id.
+    pub network: String,
+    /// Expected Bitcoin Core network tag.
+    pub bitcoin_network: String,
+    /// Non-secret semantic source identity.
+    pub semantic_source_identity: String,
+    /// Public Bitcoin address to observe.
+    pub address: String,
+    /// Coverage claim written on success (`configured_only` or `complete_at_anchor`).
+    pub coverage: String,
+    /// Maximum number of source reads this bounded state may request.
+    pub max_source_reads: NonZeroU64,
+}
+
+/// Validates address-balance observation config.
+pub fn validate_observe_btc_address_balance_config(
+    config: &ObserveBtcAddressBalanceConfig,
+) -> Result<(), String> {
+    BtcNetworkId::new(&config.network).map_err(|error| error.to_string())?;
+    validate_bitcoin_network(&config.bitcoin_network)?;
+    BtcSourceIdentity::new(&config.semantic_source_identity).map_err(|error| error.to_string())?;
+    BtcAddress::new(&config.address).map_err(|_| "address is not a supported Bitcoin address".to_owned())?;
+    let coverage = CoverageStatus::from_str(&config.coverage)
+        .map_err(|_| format!("unknown coverage status {:?}", config.coverage))?;
+    if !coverage.is_admissible_for_write() {
+        return Err(format!(
+            "coverage {} is not admissible for Platform write",
+            coverage.as_str()
+        ));
+    }
+    Ok(())
+}
+
+impl ObserveBtcAddressBalanceConfig {
+    /// Parses the configured coverage claim.
+    pub fn coverage_status(&self) -> Result<CoverageStatus, BtcStateError> {
+        validate_observe_btc_address_balance_config(self)
+            .map_err(|reason| BtcStateError::InvalidInput { reason })?;
+        CoverageStatus::from_str(&self.coverage).map_err(|_| BtcStateError::InvalidInput {
+            reason: format!("unknown coverage status {:?}", self.coverage),
+        })
+    }
+}
+
+/// Input for a pinned address-balance observation (joint tip is required).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, StateInput)]
+#[mfm(schema = "mfm.bitcoin.state.input.observe_address_balance")]
+pub struct ObserveBtcAddressBalanceInput {
+    /// Joint tip resolved once for this same-network batch.
+    pub joint_tip: BtcJointTip,
+    /// Optional observation context supplied by the adapter.
+    pub context: BtcAddressBalanceObservationContext,
+}
+
+/// Normalized address-balance observation state output.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.bitcoin",
+    name = "address_balance_observation",
+    version = "1",
+    schema = "mfm.bitcoin.state.output.address_balance_observation"
+)]
+pub struct BtcAddressBalanceObservation {
+    subject: BtcAddressBalanceSubject,
+    response: BtcAddressBalanceResponse,
+    source_read_count: u64,
+}
+
+impl BtcAddressBalanceObservation {
+    /// Creates normalized observation output.
+    pub const fn new(
+        subject: BtcAddressBalanceSubject,
+        response: BtcAddressBalanceResponse,
+        source_read_count: u64,
+    ) -> Self {
+        Self {
+            subject,
+            response,
+            source_read_count,
+        }
+    }
+
+    /// Returns the normalized subject.
+    pub const fn subject(&self) -> &BtcAddressBalanceSubject {
+        &self.subject
+    }
+
+    /// Returns the normalized response.
+    pub const fn response(&self) -> &BtcAddressBalanceResponse {
+        &self.response
+    }
+
+    /// Builds the platform fact from this observation.
+    pub fn to_fact(&self) -> BtcAddressBalanceSnapshotFact {
+        BtcAddressBalanceSnapshotFact::new(self.subject.clone(), self.response.clone())
+    }
+
+    /// Converts this observation into the platform fact.
+    pub fn into_fact(self) -> BtcAddressBalanceSnapshotFact {
+        BtcAddressBalanceSnapshotFact::new(self.subject, self.response)
+    }
+
+    /// Returns the number of source reads used by this bounded observation.
+    pub const fn source_read_count(&self) -> u64 {
+        self.source_read_count
+    }
+}
+
+/// Proves balance@joint-tip before constructing an admissible observation DTO.
+///
+/// Fail closed on missing hash, tip/hash mismatch, address mismatch, inadmissible
+/// coverage/status, or unsynced joint tip.
+pub fn normalize_btc_address_balance_observation(
+    config: &ObserveBtcAddressBalanceConfig,
+    joint_tip: &BtcJointTip,
+    balance: &BtcBalanceReadResponse,
+) -> Result<BtcAddressBalanceObservation, BtcStateError> {
+    validate_observe_btc_address_balance_config(config)
+        .map_err(|reason| BtcStateError::InvalidInput { reason })?;
+    if !joint_tip.is_admissible_for_balance_write() {
+        return Err(BtcStateError::InvalidInput {
+            reason: "joint tip is not admissible for balance write".to_owned(),
+        });
+    }
+    if joint_tip.network() != config.network
+        || joint_tip.bitcoin_network() != config.bitcoin_network
+        || joint_tip.semantic_source_identity() != config.semantic_source_identity
+    {
+        return Err(BtcStateError::InvalidInput {
+            reason: "joint tip binding does not match address balance config".to_owned(),
+        });
+    }
+    if balance.address.as_str() != config.address {
+        return Err(BtcStateError::InvalidInput {
+            reason: "balance response address does not match observation config".to_owned(),
+        });
+    }
+    if balance.block_height != joint_tip.block_height()
+        || balance.block_hash.as_str() != joint_tip.block_hash()
+    {
+        return Err(BtcStateError::InvalidInput {
+            reason: "balance tip drift or hash mismatch before Platform write".to_owned(),
+        });
+    }
+    let evidence = &balance.evidence;
+    if evidence.network_id.as_str() != config.network
+        || evidence.source_identity.as_str() != config.semantic_source_identity
+        || evidence.bitcoin_network != config.bitcoin_network
+        || evidence.observed_bitcoin_network != config.bitcoin_network
+    {
+        return Err(BtcStateError::SourceMismatch);
+    }
+    if evidence.source_status != BtcSourceStatus::Synced {
+        return Err(BtcStateError::InvalidInput {
+            reason: "balance source must be synced for Platform write".to_owned(),
+        });
+    }
+    let coverage = config.coverage_status()?;
+    let subject = BtcAddressBalanceSubject::new(
+        config.network.clone(),
+        config.bitcoin_network.clone(),
+        config.semantic_source_identity.clone(),
+        config.address.clone(),
+    )?;
+    let response = BtcAddressBalanceResponse::new(
+        joint_tip.block_height(),
+        joint_tip.block_hash(),
+        balance.balance_sats,
+        coverage,
+        HoldingSourceStatus::Ok,
+    )?;
+    Ok(BtcAddressBalanceObservation::new(subject, response, 1))
+}
+
+/// State contract for a pinned Bitcoin address-balance observation.
+pub struct ObserveBtcAddressBalanceState {
+    config: ObserveBtcAddressBalanceConfig,
+}
+
+impl ObserveBtcAddressBalanceState {
+    /// Materializes a normalized observation from joint tip + verified balance response.
+    pub fn materialize_response(
+        &self,
+        input: &ObserveBtcAddressBalanceInput,
+        balance: &BtcBalanceReadResponse,
+    ) -> Result<BtcAddressBalanceObservation, BtcStateError> {
+        normalize_btc_address_balance_observation(&self.config, &input.joint_tip, balance)
+    }
+
+    /// Returns the certified config.
+    pub fn config(&self) -> &ObserveBtcAddressBalanceConfig {
+        &self.config
+    }
+}
+
+impl StateSpec for ObserveBtcAddressBalanceState {
+    type Config = ObserveBtcAddressBalanceConfig;
+    type Context = NoContext;
+    type Input = ObserveBtcAddressBalanceInput;
+    type Output = BtcAddressBalanceObservation;
+    type Effect = ReadExternal;
+    type Caps = (BtcBalanceReadCapability,);
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        state_kind("address_balance.observe")
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        state_version("address_balance.observe")
+    }
+
+    fn name() -> &'static str {
+        "mfm.bitcoin.address_balance.observe"
+    }
+
+    fn adapter_bindings() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
+        adapter_binding()
+    }
+
+    fn new(config: ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
+    }
+}
+
+impl ReadState for ObserveBtcAddressBalanceState {
+    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
+
+    fn run<'a>(
+        &'a self,
+        input: Self::Input,
+        _caps: &'a Self::Caps,
+        _context: &'a mfm_program::CertifiedContext<Self::Context>,
+    ) -> Self::RunFuture<'a> {
+        if let Err(error) = validate_observe_btc_address_balance_config(&self.config) {
+            return future::ready(Err(StateError::from(BtcStateError::InvalidInput {
+                reason: error,
+            })));
+        }
+        if !input.joint_tip.is_admissible_for_balance_write() {
+            return future::ready(Err(StateError::from(BtcStateError::InvalidInput {
+                reason: "joint tip is not admissible for balance write".to_owned(),
+            })));
+        }
+        future::ready(Err(adapter_required_error(Self::name())))
+    }
+}
+
+/// Config for recording a Bitcoin address-balance Platform fact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[mfm(schema = "mfm.bitcoin.state.config.record_address_balance_fact")]
+pub struct RecordBtcAddressBalanceFactConfig {}
+
+/// Input for recording a Bitcoin address-balance fact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, StateInput)]
+#[mfm(schema = "mfm.bitcoin.state.input.record_address_balance_fact")]
+pub struct RecordBtcAddressBalanceFactInput {
+    /// Whole address-balance observation output to transform into a fact.
+    pub observation: BtcAddressBalanceObservation,
+}
+
+/// State contract for recording a Bitcoin address-balance Platform fact.
+pub struct RecordBtcAddressBalanceFactState;
+
+impl StateSpec for RecordBtcAddressBalanceFactState {
+    type Config = RecordBtcAddressBalanceFactConfig;
+    type Context = NoContext;
+    type Input = RecordBtcAddressBalanceFactInput;
+    type Output = BtcAddressBalanceSnapshotFact;
+    type Effect = ManagedPlatformWrite;
+    type Caps = (BtcFactRecordCapability,);
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        state_kind("address_balance.record")
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        state_version("address_balance.record")
+    }
+
+    fn name() -> &'static str {
+        "mfm.bitcoin.address_balance.record"
+    }
+
+    fn adapter_bindings() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
+        adapter_binding()
+    }
+
+    fn emitted_fact_descriptors() -> mfm_program::Result<Vec<FactDescriptorRef>> {
+        Ok(vec![fact_descriptor_ref::<BtcAddressBalanceSnapshotFact>()?])
+    }
+
+    fn new(_config: ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self)
+    }
+}
+
+impl ManagedWriteState for RecordBtcAddressBalanceFactState {
+    type RunFuture<'a> = future::Ready<StateResult<Self::Output>>;
+
+    fn run<'a>(
+        &'a self,
+        input: Self::Input,
+        _caps: &'a Self::Caps,
+        _context: &'a mfm_program::CertifiedContext<Self::Context>,
+    ) -> Self::RunFuture<'a> {
+        // Re-admit response before write (fail closed on tampered observation DTOs).
+        let response = input.observation.response();
+        match BtcAddressBalanceResponse::new(
+            response.anchor_height(),
+            response.anchor_hash(),
+            response.balance_sats(),
+            match response.coverage_status() {
+                Ok(coverage) => coverage,
+                Err(error) => return future::ready(Err(StateError::from(error))),
+            },
+            match response.holding_source_status() {
+                Ok(status) => status,
+                Err(error) => return future::ready(Err(StateError::from(error))),
+            },
+        ) {
+            Ok(_) => future::ready(Ok(input.observation.into_fact())),
+            Err(error) => future::ready(Err(StateError::from(error))),
+        }
+    }
+}
+
+/// Returns Platform visibility for address-balance facts (adapter record runner).
+pub fn address_balance_record_visibility() -> mfm_facts::FactVisibility {
+    address_balance_fact_visibility()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mfm_btc_capabilities::{
+        BitcoinNetworkTag, BtcHeadKind, BtcFinality, BtcNetworkId, BtcSourceBinding,
+        BtcSourceIdentity, RedactedBtcSourceEvidence,
+    };
+    use mfm_program::StateSpec;
+
+    const HASH_A: &str = "00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc";
+    const HASH_B: &str = "00000000000000000002b2a7f3e0d5c4b6a897887766554433221100ffeeddcc";
+    const ADDR_A: &str = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
+    const ADDR_B: &str = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
+
+    fn tip_config() -> ResolveBtcJointTipConfig {
+        ResolveBtcJointTipConfig {
+            network: "bitcoin-mainnet".to_owned(),
+            bitcoin_network: "main".to_owned(),
+            semantic_source_identity: "public-bitcoin-core".to_owned(),
+            head_kind: "best".to_owned(),
+            confirmation_depth: None,
+            max_source_reads: NonZeroU64::new(1).expect("nz"),
+        }
+    }
+
+    fn observe_config(address: &str) -> ObserveBtcAddressBalanceConfig {
+        ObserveBtcAddressBalanceConfig {
+            network: "bitcoin-mainnet".to_owned(),
+            bitcoin_network: "main".to_owned(),
+            semantic_source_identity: "public-bitcoin-core".to_owned(),
+            address: address.to_owned(),
+            coverage: "configured_only".to_owned(),
+            max_source_reads: NonZeroU64::new(1).expect("nz"),
+        }
+    }
+
+    fn binding() -> BtcSourceBinding {
+        BtcSourceBinding::new(
+            BtcNetworkId::new("bitcoin-mainnet").expect("network"),
+            BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
+            BitcoinNetworkTag::Main,
+        )
+    }
+
+    fn chain_head_response(height: u64, hash: &str, status: BtcSourceStatus) -> CapabilityChainHeadResponse {
+        CapabilityChainHeadResponse {
+            evidence: RedactedBtcSourceEvidence::from_binding(&binding(), "main", status)
+                .expect("evidence"),
+            head_kind: BtcHeadKind::Best,
+            finality: BtcFinality::BestAvailable,
+            block_height: height,
+            block_hash: BtcBlockHash::new(hash).expect("hash"),
+            provider_time_unix_ms: None,
+        }
+    }
+
+    fn balance_response(
+        address: &str,
+        height: u64,
+        hash: &str,
+        balance_sats: u64,
+    ) -> BtcBalanceReadResponse {
+        BtcBalanceReadResponse {
+            evidence: RedactedBtcSourceEvidence::from_binding(
+                &binding(),
+                "main",
+                BtcSourceStatus::Synced,
+            )
+            .expect("evidence"),
+            address: BtcAddress::new(address).expect("address"),
+            balance_sats,
+            block_height: height,
+            block_hash: BtcBlockHash::new(hash).expect("hash"),
+        }
+    }
+
+    #[test]
+    fn joint_tip_rejects_ibd_and_missing_hash() {
+        let ibd = chain_head_response(100, HASH_A, BtcSourceStatus::InitialBlockDownload);
+        let error = materialize_btc_joint_tip(&tip_config(), &ibd).expect_err("ibd");
+        assert!(error.to_string().contains("not admissible"));
+
+        // Construct tip with empty hash via new() path.
+        let empty = BtcJointTip::new(
+            "bitcoin-mainnet",
+            "main",
+            "public-bitcoin-core",
+            100,
+            "",
+            "synced",
+            "main",
+        );
+        assert!(empty.is_err());
+    }
+
+    #[test]
+    fn prove_before_write_rejects_tip_drift_and_hash_mismatch() {
+        let tip = materialize_btc_joint_tip(
+            &tip_config(),
+            &chain_head_response(100, HASH_A, BtcSourceStatus::Synced),
+        )
+        .expect("tip");
+        let drifted = balance_response(ADDR_A, 101, HASH_A, 50);
+        let error =
+            normalize_btc_address_balance_observation(&observe_config(ADDR_A), &tip, &drifted)
+                .expect_err("drift");
+        assert!(error.to_string().contains("tip drift") || error.to_string().contains("hash mismatch"));
+
+        let mismatched = balance_response(ADDR_A, 100, HASH_B, 50);
+        let error =
+            normalize_btc_address_balance_observation(&observe_config(ADDR_A), &tip, &mismatched)
+                .expect_err("hash mismatch");
+        assert!(error.to_string().contains("tip drift") || error.to_string().contains("hash mismatch"));
+    }
+
+    #[test]
+    fn prove_before_write_requires_height_hash_and_admissible_coverage_status() {
+        let tip = materialize_btc_joint_tip(
+            &tip_config(),
+            &chain_head_response(100, HASH_A, BtcSourceStatus::Synced),
+        )
+        .expect("tip");
+        let balance = balance_response(ADDR_A, 100, HASH_A, 42);
+        let ok =
+            normalize_btc_address_balance_observation(&observe_config(ADDR_A), &tip, &balance)
+                .expect("ok");
+        assert_eq!(ok.response().anchor_height(), 100);
+        assert_eq!(ok.response().anchor_hash(), HASH_A);
+        assert_eq!(ok.response().balance_sats(), 42);
+        assert_eq!(ok.response().coverage(), "configured_only");
+        assert_eq!(ok.response().source_status(), "ok");
+        assert!(!ok.subject().address().is_empty());
+        // No wallet_id / symbol_id on subject.
+        let json = serde_json::to_string(&ok.to_fact()).expect("json");
+        for forbidden in ["wallet_id", "symbol_id", "rpc_url", "password", "http://"] {
+            assert!(!json.contains(forbidden), "leaked {forbidden}");
+        }
+
+        let mut bad_coverage = observe_config(ADDR_A);
+        bad_coverage.coverage = "truncated".to_owned();
+        assert!(validate_observe_btc_address_balance_config(&bad_coverage).is_err());
+    }
+
+    #[test]
+    fn multi_subject_batch_must_share_one_joint_tip() {
+        let tip = materialize_btc_joint_tip(
+            &tip_config(),
+            &chain_head_response(100, HASH_A, BtcSourceStatus::Synced),
+        )
+        .expect("tip");
+        let obs_a = normalize_btc_address_balance_observation(
+            &observe_config(ADDR_A),
+            &tip,
+            &balance_response(ADDR_A, 100, HASH_A, 1),
+        )
+        .expect("a");
+        let obs_b = normalize_btc_address_balance_observation(
+            &observe_config(ADDR_B),
+            &tip,
+            &balance_response(ADDR_B, 100, HASH_A, 2),
+        )
+        .expect("b");
+        require_shared_joint_tip(&[&obs_a, &obs_b]).expect("shared");
+
+        let other_tip = materialize_btc_joint_tip(
+            &tip_config(),
+            &chain_head_response(99, HASH_B, BtcSourceStatus::Synced),
+        )
+        .expect("other tip");
+        let obs_b_drifted = normalize_btc_address_balance_observation(
+            &observe_config(ADDR_B),
+            &other_tip,
+            &balance_response(ADDR_B, 99, HASH_B, 2),
+        )
+        .expect("b drifted");
+        let error = require_shared_joint_tip(&[&obs_a, &obs_b_drifted]).expect_err("not shared");
+        assert!(error.to_string().contains("share one joint tip"));
+    }
+
+    #[test]
+    fn record_state_advertises_address_balance_fact_descriptor() {
+        let descriptors =
+            RecordBtcAddressBalanceFactState::emitted_fact_descriptors().expect("descriptors");
+        assert_eq!(descriptors.len(), 1);
+        assert!(ObserveBtcAddressBalanceState::emitted_fact_descriptors()
+            .expect("observe")
+            .is_empty());
+        assert!(ResolveBtcJointTipState::emitted_fact_descriptors()
+            .expect("tip")
+            .is_empty());
+    }
+
+    #[test]
+    fn record_rejects_inadmissible_observation_response() {
+        let tip = materialize_btc_joint_tip(
+            &tip_config(),
+            &chain_head_response(100, HASH_A, BtcSourceStatus::Synced),
+        )
+        .expect("tip");
+        let obs = normalize_btc_address_balance_observation(
+            &observe_config(ADDR_A),
+            &tip,
+            &balance_response(ADDR_A, 100, HASH_A, 1),
+        )
+        .expect("obs");
+        // Tamper by rebuilding observation with empty-hash response via serde.
+        let mut value = serde_json::to_value(&obs).expect("json");
+        value["response"]["anchor_hash"] = serde_json::json!("");
+        let tampered: BtcAddressBalanceObservation =
+            serde_json::from_value(value).expect("decode");
+        let state = RecordBtcAddressBalanceFactState;
+        let context = mfm_program::CertifiedContext::no_context();
+        let result = poll_ready(state.run(
+            RecordBtcAddressBalanceFactInput {
+                observation: tampered,
+            },
+            &(BtcFactRecordCapability,),
+            &context,
+        ));
+        assert!(result.is_err());
+    }
+
+    fn poll_ready<F>(future: F) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        let mut future = std::pin::pin!(future);
+        match std::future::Future::poll(future.as_mut(), &mut cx) {
+            std::task::Poll::Ready(output) => output,
+            std::task::Poll::Pending => panic!("pending"),
+        }
+    }
+}
