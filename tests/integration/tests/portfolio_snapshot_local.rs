@@ -1,9 +1,13 @@
+//! Portfolio snapshot integration after the fact-backed cutover.
+//!
+//! Report is Platform-fact-only: without admitted holding facts the run hard-fails.
+//! Live chain RPC is not report authority (collect-then-report is external multi-run).
+
 #![allow(clippy::disallowed_methods)]
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use axum::{routing::post, Json, Router};
-use mfm_app::{PublicOpName, RunModeStatus};
+use mfm_app::PublicOpName;
 use mfm_events::v1 as events;
 use mfm_ids::RunId;
 use mfm_store::v1::{self as store, RunEventStore};
@@ -14,72 +18,24 @@ mod support;
 use support::{empty_post, json_post, response_json};
 
 const NETWORK_ID: &str = "typed-local-eth";
-const RPC_URL_FILE_ENV: &str = "MFM_TEST_PORTFOLIO_RPC_URL_FILE";
-const EVM_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
-static RPC_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
-async fn portfolio_snapshot_starts_to_completion() {
-    let _env_guard = RPC_ENV_LOCK.lock().await;
-    let rpc_url = start_rpc_mock().await;
-    let _runtime_config = set_rpc_env(rpc_url);
-
-    let result = support::resume_portfolio_snapshot(portfolio_payload()).await;
-    assert_eq!(result.started.run_mode, RunModeStatus::Completed);
-    assert_eq!(result.resumed.run_mode, RunModeStatus::Completed);
-    assert_eq!(result.started.spec_hash, result.resumed.spec_hash);
-    assert_eq!(result.authority.spec_hash, result.resumed.spec_hash);
-    assert!(!result.authority.certificate_hash.is_empty());
-    assert!(result.authority.retained_artifacts > 0);
-    assert_eq!(
-        result.authority.public_output_event_id,
-        result.public_output.event_id
+async fn portfolio_snapshot_hard_fails_without_platform_holding_facts() {
+    let app = rest_test_app();
+    let body = portfolio_snapshot_post(&app, &portfolio_payload()).await;
+    let run_mode = body["data"]["run"]["run_mode"].as_str().expect("run_mode");
+    assert_ne!(
+        run_mode, "completed",
+        "report-only portfolio must not complete without admitted Platform holding facts"
     );
-    assert_eq!(
-        result.authority.public_output_rendered_digest,
-        result.public_output.rendered_digest
-    );
-
-    let public_output = result
-        .public_output
-        .json
-        .as_ref()
-        .expect("public output json");
-    let snapshot = &public_output["snapshot"];
-    let report = &public_output["report"];
-    assert_eq!(snapshot["portfolio_id"], "typed-local");
-    assert_eq!(snapshot["network_pins"][0]["anchor"]["block_number"], 100);
-    assert_eq!(
-        snapshot["network_pins"][0]["anchor"]["block_hash"],
-        EVM_HASH
-    );
-    assert_eq!(
-        snapshot["wallets"][0]["observations"][0]["quantity"]["amount_dec"],
-        "1.000000000000000000"
-    );
-    assert_eq!(
-        snapshot["wallets"][0]["observations"][0]["values"][0]["value_dec"],
-        "2.500000000000000000"
-    );
-    // report-only cutover: soft error_count removed
-    assert_eq!(
-        report["totals_by_quote"][0]["assets_value_dec"],
-        "2.500000000000000000"
+    assert!(
+        body["data"].get("public_output").is_none() || body["data"]["public_output"].is_null(),
+        "no public snapshot when required facts are missing"
     );
 }
 
 #[tokio::test]
-async fn rest_portfolio_snapshot_matches_public_output() {
-    let _env_guard = RPC_ENV_LOCK.lock().await;
-    let rpc_url = start_rpc_mock().await;
-    let _runtime_config = set_rpc_env(rpc_url);
-
-    let expected = support::run_portfolio_snapshot(portfolio_payload()).await;
-    let expected_public_output = expected
-        .public_output
-        .json
-        .as_ref()
-        .expect("expected public output json");
+async fn rest_portfolio_snapshot_fails_closed_without_facts() {
     let app = rest_test_app();
     let response = app
         .oneshot(json_post(
@@ -93,62 +49,85 @@ async fn rest_portfolio_snapshot_matches_public_output() {
         .await
         .expect("portfolio rest response");
     assert_eq!(response.status(), StatusCode::OK);
-
     let body = response_json(response).await;
     assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["run"]["run_mode"], "completed");
-    assert_eq!(body["data"]["run"]["spec_hash"], expected.run.spec_hash);
+    let run_mode = body["data"]["run"]["run_mode"].as_str().expect("run_mode");
+    assert_ne!(run_mode, "completed");
+    assert!(body["data"]["run"]["run_id"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn rest_portfolio_snapshot_defaults_toml_fails_closed_without_facts() {
+    let state = support::in_memory_rest_app_state();
+    let store = state.store.clone();
+    let app = mfm_rest_api::make_app(state);
+    let response = app
+        .oneshot(json_post(
+            "/v1/runs/start",
+            json!({
+                "op": "portfolio_snapshot",
+                "config": portfolio_payload_toml(),
+            }),
+        ))
+        .await
+        .expect("portfolio toml rest response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["status"], "success");
+    let run_mode = body["data"]["run"]["run_mode"].as_str().expect("run_mode");
+    assert_ne!(run_mode, "completed");
+    let run_id = RunId::parse(body["data"]["run"]["run_id"].as_str().expect("run id"))
+        .expect("typed run id");
+    let stream = store.load_run_stream(&run_id).await.expect("run stream");
+    assert_portfolio_entry_point_evidence(&stream);
+}
+
+#[tokio::test]
+async fn portfolio_select_centric_runner_summary_without_facts() {
+    let state = support::in_memory_rest_app_state();
+    let store = state.store.clone();
+    let app = mfm_rest_api::make_app(state);
+    let response = portfolio_snapshot_post(&app, &portfolio_payload()).await;
+    let run_id = RunId::parse(response["data"]["run"]["run_id"].as_str().expect("run id"))
+        .expect("typed run id");
+    let stream = store.load_run_stream(&run_id).await.expect("run stream");
+    assert_portfolio_entry_point_evidence(&stream);
+    let actual = portfolio_runner_output_summary(&stream);
     assert!(
-        body["data"]["public_output"]["event_id"]
-            .as_str()
-            .is_some_and(|event_id| event_id.starts_with("event:sha256-jcs-v1:")),
-        "REST public-output response must expose typed event evidence"
+        actual
+            .iter()
+            .any(|line| line.contains("mfm.portfolio/resolve_subjects")),
+        "expected resolve_subjects: {actual:?}"
     );
-    assert_eq!(
-        body["data"]["public_output"]["rendered_digest"],
-        expected.authority.public_output_rendered_digest
+    assert!(
+        actual.iter().all(|line| {
+            !line.contains("pin_views")
+                && !line.contains("observe_batch")
+                && !line.contains("merge_observations")
+        }),
+        "live pin/observe/merge must not appear: {actual:?}"
     );
-    assert_eq!(
-        &body["data"]["public_output"]["json"], expected_public_output,
-        "REST portfolio route must render the same public JSON as the typed workflow helper"
+    assert!(
+        actual.iter().all(|line| {
+            !line.contains("assemble_snapshot") && !line.contains("project_report")
+        }),
+        "assemble/project must not complete without selected holdings: {actual:?}"
     );
 }
 
 #[tokio::test]
-async fn read_only_routes_work_without_runtime_config() {
-    let _env_guard = RPC_ENV_LOCK.lock().await;
-    let rpc_url = start_rpc_mock().await;
-    let runtime_config = set_rpc_file_env(rpc_url);
-    let runtime_config_path = runtime_config.runtime_config_path.clone();
-    let rpc_url_path = runtime_config.rpc_url_path.clone();
+async fn failed_run_status_stream_and_replay_remain_readable() {
     let app = rest_test_app();
-    let response = local_portfolio_snapshot_post(&app, &portfolio_payload()).await;
+    let response = portfolio_snapshot_post(&app, &portfolio_payload()).await;
     let run_id = response["data"]["run"]["run_id"]
         .as_str()
         .expect("run id")
         .to_owned();
-    let public_schema_id = response["data"]["public_output"]["public_schema_id"]
+    let run_mode = response["data"]["run"]["run_mode"]
         .as_str()
-        .expect("public schema id")
+        .expect("run_mode")
         .to_owned();
-
-    drop(runtime_config);
-    assert!(
-        std::env::var_os(support::ENV_RUNTIME_CONFIG_FILE).is_none(),
-        "runtime config selector must be absent before evidence-only reads"
-    );
-    assert!(
-        std::env::var_os(RPC_URL_FILE_ENV).is_none(),
-        "RPC value file selector must be absent before evidence-only reads"
-    );
-    assert!(
-        !runtime_config_path.exists(),
-        "runtime config file must be absent before evidence-only reads"
-    );
-    assert!(
-        !rpc_url_path.exists(),
-        "RPC value file must be absent before evidence-only reads"
-    );
+    assert_ne!(run_mode, "completed");
 
     let status = app
         .clone()
@@ -164,7 +143,7 @@ async fn read_only_routes_work_without_runtime_config() {
     assert_eq!(status.status(), StatusCode::OK);
     let status_body = response_json(status).await;
     assert_eq!(status_body["status"], "success");
-    assert_eq!(status_body["data"]["run_mode"], "completed");
+    assert_eq!(status_body["data"]["run_mode"], run_mode);
 
     let stream = app
         .clone()
@@ -195,115 +174,10 @@ async fn read_only_routes_work_without_runtime_config() {
     assert_eq!(replay.status(), StatusCode::OK);
     let replay_body = response_json(replay).await;
     assert_eq!(replay_body["status"], "success");
-    assert_eq!(replay_body["data"]["run_mode"], "completed");
-
-    let public_output = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!(
-                    "/v1/runs/{run_id}/public-output/{public_schema_id}"
-                ))
-                .body(Body::empty())
-                .expect("public output request"),
-        )
-        .await
-        .expect("public output response");
-    assert_eq!(public_output.status(), StatusCode::OK);
-    let public_output_body = response_json(public_output).await;
-    assert_eq!(public_output_body["status"], "success");
-    assert_eq!(
-        public_output_body["data"]["json"]["snapshot"]["portfolio_id"],
-        "typed-local"
-    );
+    assert_eq!(replay_body["data"]["run_mode"], run_mode);
 }
 
-#[tokio::test]
-async fn rest_portfolio_snapshot_defaults_toml_and_renders_public_output() {
-    let _env_guard = RPC_ENV_LOCK.lock().await;
-    let rpc_url = start_rpc_mock().await;
-    let _runtime_config = set_rpc_env(rpc_url);
-
-    let state = support::in_memory_rest_app_state();
-    let store = state.store.clone();
-    let app = mfm_rest_api::make_app(state);
-    let response = app
-        .oneshot(json_post(
-            "/v1/runs/start",
-            json!({
-                "op": "portfolio_snapshot",
-                "config": portfolio_payload_toml(),
-            }),
-        ))
-        .await
-        .expect("portfolio toml rest response");
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["run"]["run_mode"], "completed");
-    assert_eq!(
-        body["data"]["public_output"]["json"]["snapshot"]["portfolio_id"],
-        "typed-local"
-    );
-    assert_eq!(
-        body["data"]["public_output"]["json"]["snapshot"]["wallets"][0]["observations"][0]
-            ["values"][0]["value_dec"],
-        "2.500000000000000000"
-    );
-
-    let run_id = RunId::parse(body["data"]["run"]["run_id"].as_str().expect("run id"))
-        .expect("typed run id");
-    let stream = store.load_run_stream(&run_id).await.expect("run stream");
-    assert_portfolio_entry_point_evidence(&stream);
-}
-
-#[tokio::test]
-async fn portfolio_runner_output_summary_matches_golden() {
-    let _env_guard = RPC_ENV_LOCK.lock().await;
-    let rpc_url = start_rpc_mock().await;
-    let _runtime_config = set_rpc_env(rpc_url);
-
-    let state = support::in_memory_rest_app_state();
-    let store = state.store.clone();
-    let app = mfm_rest_api::make_app(state);
-    let response = local_portfolio_snapshot_post(&app, &portfolio_payload()).await;
-    let run_id = RunId::parse(response["data"]["run"]["run_id"].as_str().expect("run id"))
-        .expect("typed run id");
-    let stream = store.load_run_stream(&run_id).await.expect("run stream");
-
-    assert_portfolio_entry_point_evidence(&stream);
-    let mut actual = portfolio_runner_output_summary(&stream);
-    actual.sort();
-    let mut expected = [
-        "attempt-output:mfm.portfolio/pin_views:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
-        "attempt-output:mfm.portfolio/resolve_valuations:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
-        "attempt-output:mfm.portfolio/resolve_subjects:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
-        "attempt-output:mfm.portfolio/observe_batch:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
-        "attempt-output:mfm.portfolio/merge_observations:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
-        "attempt-output:mfm.portfolio/assemble_snapshot:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
-        "attempt-output:mfm.portfolio/project_report:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect::<Vec<_>>();
-    expected.sort();
-    assert_eq!(actual, expected);
-}
-
-async fn start_rpc_mock() -> String {
-    let app = Router::new().route("/", post(rpc_handler));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind rpc mock");
-    let addr = listener.local_addr().expect("rpc mock addr");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("rpc mock serve");
-    });
-    format!("http://{addr}")
-}
-
-async fn local_portfolio_snapshot_post(
+async fn portfolio_snapshot_post(
     app: &axum::Router,
     payload: &serde_json::Value,
 ) -> serde_json::Value {
@@ -325,107 +199,8 @@ async fn local_portfolio_snapshot_post(
     body
 }
 
-fn set_rpc_env(rpc_url: String) -> support::EnvVarRestore {
-    support::set_evm_runtime_config_env_for_test(NETWORK_ID, &rpc_url)
-}
-
-fn set_rpc_file_env(rpc_url: String) -> RuntimeFileEnvGuard {
-    let temp_dir = tempfile::tempdir().expect("runtime config tempdir");
-    let rpc_url_path = temp_dir.path().join("rpc-url.txt");
-    std::fs::write(&rpc_url_path, rpc_url).expect("write rpc url file");
-    let runtime_config_path = temp_dir.path().join("runtime.toml");
-    std::fs::write(
-        &runtime_config_path,
-        format!(
-            r#"
-[evm.sources.{network}]
-rpc_url_file_env = "{rpc_url_file_env}"
-
-[evm.routes.{network}]
-source_ref = {network}
-"#,
-            network = toml_string(NETWORK_ID),
-            rpc_url_file_env = RPC_URL_FILE_ENV,
-        ),
-    )
-    .expect("write runtime config");
-
-    let previous_runtime_config = std::env::var_os(support::ENV_RUNTIME_CONFIG_FILE);
-    let previous_rpc_url_file = std::env::var_os(RPC_URL_FILE_ENV);
-    std::env::set_var(support::ENV_RUNTIME_CONFIG_FILE, &runtime_config_path);
-    std::env::set_var(RPC_URL_FILE_ENV, &rpc_url_path);
-
-    RuntimeFileEnvGuard {
-        previous_runtime_config,
-        previous_rpc_url_file,
-        runtime_config_path,
-        rpc_url_path,
-        _temp_dir: temp_dir,
-    }
-}
-
-struct RuntimeFileEnvGuard {
-    previous_runtime_config: Option<std::ffi::OsString>,
-    previous_rpc_url_file: Option<std::ffi::OsString>,
-    runtime_config_path: std::path::PathBuf,
-    rpc_url_path: std::path::PathBuf,
-    _temp_dir: tempfile::TempDir,
-}
-
-impl Drop for RuntimeFileEnvGuard {
-    fn drop(&mut self) {
-        restore_env(
-            support::ENV_RUNTIME_CONFIG_FILE,
-            self.previous_runtime_config.as_ref(),
-        );
-        restore_env(RPC_URL_FILE_ENV, self.previous_rpc_url_file.as_ref());
-    }
-}
-
-fn restore_env(name: &str, previous: Option<&std::ffi::OsString>) {
-    match previous {
-        Some(value) => std::env::set_var(name, value),
-        None => std::env::remove_var(name),
-    }
-}
-
-fn toml_string(value: &str) -> String {
-    serde_json::to_string(value).expect("toml-compatible string")
-}
-
 fn rest_test_app() -> axum::Router {
     mfm_rest_api::make_app(support::in_memory_rest_app_state())
-}
-
-async fn rpc_handler(Json(request): Json<serde_json::Value>) -> Json<serde_json::Value> {
-    let id = request.get("id").cloned().unwrap_or_else(|| json!(1));
-    let method = request
-        .get("method")
-        .and_then(|value| value.as_str())
-        .expect("json-rpc method");
-    let result = match method {
-        "eth_chainId" => json!("0x7a69"),
-        "eth_getBlockByNumber" => json!({
-            "number": "0x64",
-            "hash": EVM_HASH
-        }),
-        "eth_getBalance" => {
-            assert_eq!(
-                request["params"][1],
-                json!({
-                    "blockHash": EVM_HASH,
-                    "requireCanonical": true,
-                })
-            );
-            json!("0xde0b6b3a7640000")
-        }
-        other => panic!("unexpected rpc method {other}"),
-    };
-    Json(json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": result
-    }))
 }
 
 fn portfolio_payload() -> serde_json::Value {
