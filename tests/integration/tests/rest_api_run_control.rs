@@ -655,10 +655,9 @@ async fn malformed_runtime_config_does_not_block_read_only_routes() {
         ))
         .await
         .expect("live start response");
-    assert_eq!(start.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(start.status(), StatusCode::OK);
     let body = response_json(start).await;
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["error"]["code"], "LaunchRunnerUnavailable");
+    assert_eq!(body["data"]["outcome"], "admitted");
     let rendered = body.to_string();
     assert!(!rendered.contains(&runtime_config_path.display().to_string()));
     assert!(!rendered.contains("not valid toml"));

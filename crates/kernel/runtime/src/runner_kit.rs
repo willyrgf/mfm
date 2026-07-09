@@ -1580,6 +1580,28 @@ impl<'a> RunnerRegistrationBuilder<'a> {
         self.register_state_descriptor::<S>(factory.factory_id(), factory.executable(), runner)
     }
 
+    /// Registers a typed state runner when its capabilities are bound by process assembly.
+    pub fn register_state_runner_with_factory<S>(
+        &mut self,
+        factory: &RunnerFactoryBinding,
+        runner: Arc<dyn ErasedNodeRunner>,
+    ) -> Result<mfm_program::StateDescriptorIdentity>
+    where
+        S: StateSpec,
+        S::Effect: EffectRunner<S>,
+        S::Caps: CapabilitySetFor<S::Effect>,
+    {
+        let descriptor = mfm_program::state_descriptor::<S>()
+            .map_err(|error| RuntimeError::RunnerBinding(error.to_string()))?;
+        self.register_runner(
+            descriptor.descriptor_id().clone(),
+            factory.factory_id(),
+            factory.executable(),
+            runner,
+        )?;
+        Ok(descriptor)
+    }
+
     /// Registers the adapter-owned runner used by side-effect verify framework nodes
     /// for one certified side-effect submit descriptor.
     pub fn register_side_effect_verify_runner(

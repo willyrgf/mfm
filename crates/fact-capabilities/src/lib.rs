@@ -102,6 +102,9 @@ impl CapabilitySpec for FactRecordCapability {
 
 /// Provider interface for internal fact-index reads.
 pub trait FactIndexReadProvider: Send + Sync {
+    /// Returns the stable identity of the concrete process-level fact-index implementation.
+    fn implementation_id(&self) -> &'static str;
+
     /// Executes an already-compiled canonical fact query plan.
     ///
     /// Default path runs a one-element [`Self::read_fact_index_batch`] so single and multi

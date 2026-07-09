@@ -4,10 +4,8 @@
 //!   mock-transport collect (BTC + EVM natives, shared joint tip) → portfolio_snapshot Completes
 //! without seed helpers and without live chain crawl in the report graph.
 //!
-//! BTC and EVM collectors register distinct FactRecord capability implementations; a single
-//! dual registry collides today. Collect phases therefore run as sequential family services
-//! against one shared store projection (production can register at most one write impl per
-//! capability kind until that constraint is lifted).
+//! The test composes all collector and portfolio runners in one registry with process-owned
+//! fact capabilities, matching the production assembly boundary.
 
 #![allow(clippy::disallowed_methods)]
 
@@ -30,7 +28,7 @@ use mfm_facts::FactAudience;
 use mfm_ids::RunId;
 use mfm_integration_tests::test_support::{
     prepare_entry_point_launch_for_store, prepare_portfolio_launch_for_store,
-    ProjectionFactIndexProvider,
+    register_process_fact_capabilities, ProjectionFactIndexProvider,
 };
 use mfm_store::v1::{
     AsyncInMemoryRunStore, ProjectionSnapshot, RetainedArtifactReadProvider, RunEventStore,
@@ -84,13 +82,17 @@ async fn collect_then_report_completes_from_collector_written_platform_holdings(
     let btc = Arc::new(MockBtcBalanceProvider::new());
     let evm = Arc::new(MockEvmBalanceProvider::new());
 
-    // 1) Collect BTC then EVM natives into the same store projection (sequential family services).
-    let btc_services = btc_collector_services(store.clone(), btc.clone(), fact_index.clone());
-    let btc_run = launch_btc_balance_collector(&btc_services, &store, "collect-btc").await;
+    // 1) Collect BTC then EVM natives through one production-equivalent registry.
+    let services = unified_collect_then_report_services(
+        store.clone(),
+        btc.clone(),
+        evm.clone(),
+        fact_index.clone(),
+    );
+    let btc_run = launch_btc_balance_collector(&services, &store, "collect-btc").await;
     assert_eq!(btc_run.run_mode, mfm_app::RunModeStatus::Completed);
 
-    let evm_services = evm_collector_services(store.clone(), evm.clone(), fact_index.clone());
-    let evm_run = launch_evm_balance_collector(&evm_services, &store, "collect-evm").await;
+    let evm_run = launch_evm_balance_collector(&services, &store, "collect-evm").await;
     assert_eq!(evm_run.run_mode, mfm_app::RunModeStatus::Completed);
 
     let projection = store.projection_snapshot().expect("after collect");
@@ -100,10 +102,9 @@ async fn collect_then_report_completes_from_collector_written_platform_holdings(
     assert!(evm.block_calls() >= 1 && evm.balance_calls() >= 1);
 
     // 2) Report-only portfolio_snapshot over admitted facts (no live chain in report).
-    let report_services = portfolio_report_services(store.clone(), fact_index.clone());
     let prepared =
         prepare_portfolio_launch_for_store(&store, &dual_mainnet_portfolio_json(), None).await;
-    let report = report_services
+    let report = services
         .launch_prepared_entry_point_run(prepared)
         .await
         .unwrap_or_else(|error| panic!("portfolio launch: {error:?}"));
@@ -152,6 +153,8 @@ fn btc_collector_services(
     let receipt_trust_root = fact_index.receipt_trust_root();
     let artifacts: Arc<dyn RetainedArtifactReadProvider> = Arc::new(store.clone());
     let mut runners = mfm_runtime::ErasedRunnerRegistry::new();
+    register_process_fact_capabilities(&mut runners, fact_index.as_ref())
+        .expect("process fact capabilities");
     mfm_adapters_btc_jsonrpc::register_btc_jsonrpc_runners(
         &mut runners,
         mfm_adapters_btc_jsonrpc::BtcJsonRpcRunnerCapabilities::new(
@@ -178,6 +181,8 @@ fn evm_collector_services(
     let receipt_trust_root = fact_index.receipt_trust_root();
     let artifacts: Arc<dyn RetainedArtifactReadProvider> = Arc::new(store.clone());
     let mut runners = mfm_runtime::ErasedRunnerRegistry::new();
+    register_process_fact_capabilities(&mut runners, fact_index.as_ref())
+        .expect("process fact capabilities");
     mfm_adapters_evm::register_evm_collectors_runners(
         &mut runners,
         mfm_adapters_evm::EvmRunnerCapabilities::new(artifacts, evm),
@@ -192,13 +197,31 @@ fn evm_collector_services(
     )
 }
 
-fn portfolio_report_services(
+fn unified_collect_then_report_services(
     store: AsyncInMemoryRunStore,
+    btc: Arc<MockBtcBalanceProvider>,
+    evm: Arc<MockEvmBalanceProvider>,
     fact_index: Arc<ProjectionFactIndexProvider>,
 ) -> mfm_app::RunServices<AsyncInMemoryRunStore, AsyncInMemoryRunStore> {
     let receipt_trust_root = fact_index.receipt_trust_root();
     let artifacts: Arc<dyn RetainedArtifactReadProvider> = Arc::new(store.clone());
     let mut runners = mfm_runtime::ErasedRunnerRegistry::new();
+    register_process_fact_capabilities(&mut runners, fact_index.as_ref())
+        .expect("process fact capabilities");
+    mfm_adapters_btc_jsonrpc::register_btc_jsonrpc_runners(
+        &mut runners,
+        mfm_adapters_btc_jsonrpc::BtcJsonRpcRunnerCapabilities::new(
+            artifacts.clone(),
+            btc,
+            fact_index.clone(),
+        ),
+    )
+    .expect("btc runners");
+    mfm_adapters_evm::register_evm_collectors_runners(
+        &mut runners,
+        mfm_adapters_evm::EvmRunnerCapabilities::new(artifacts.clone(), evm),
+    )
+    .expect("evm runners");
     mfm_adapters_portfolio::register_portfolio_runners(
         &mut runners,
         mfm_adapters_portfolio::PortfolioRunnerCapabilities::new(artifacts, fact_index),

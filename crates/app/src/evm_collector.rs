@@ -5,15 +5,11 @@ use mfm_store::v1 as store;
 
 use crate::{live_transports::LiveTransportRuntime, AppError};
 
-pub(crate) fn register_evm_collector_runners_if_configured(
+pub(crate) fn register_evm_collector_runners(
     registry: &mut mfm_runtime::ErasedRunnerRegistry,
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     runtime_config: Arc<LiveTransportRuntime>,
-    evm_configured: bool,
 ) -> Result<(), AppError> {
-    if !evm_configured {
-        return Ok(());
-    }
     let evm: Arc<dyn mfm_adapters_evm::EvmProviderFactory> = runtime_config;
     let capabilities = mfm_adapters_evm::EvmRunnerCapabilities::new(artifacts, evm);
     mfm_adapters_evm::register_evm_collectors_runners(registry, capabilities)?;

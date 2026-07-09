@@ -81,6 +81,10 @@ impl MockFactIndex {
 }
 
 impl FactIndexReadProvider for MockFactIndex {
+    fn implementation_id(&self) -> &'static str {
+        "mfm.adapters.btc-jsonrpc.test.fact-index.v1"
+    }
+
     fn read_fact_index_batch<'a>(
         &'a self,
         requests: &'a [mfm_fact_capabilities::FactIndexReadRequest],

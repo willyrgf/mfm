@@ -21,8 +21,9 @@ use mfm_ids::{
     DigestBytes, EventId, NodeId, RunId,
 };
 use mfm_integration_tests::test_support::{
-    fact_query_evidences, prepare_portfolio_launch_for_store, seed_platform_holding_facts_for_test,
-    FactProjectionFixtureInputForTest, PlatformHoldingFactSeedForTest, ProjectionFactIndexProvider,
+    fact_query_evidences, prepare_portfolio_launch_for_store, register_process_fact_capabilities,
+    seed_platform_holding_facts_for_test, FactProjectionFixtureInputForTest,
+    PlatformHoldingFactSeedForTest, ProjectionFactIndexProvider,
 };
 use mfm_program::MfmFactType;
 use mfm_states_btc::{
@@ -143,8 +144,10 @@ fn portfolio_services(
     let receipt_trust_root = fact_index.receipt_trust_root();
     let artifacts: Arc<dyn RetainedArtifactReadProvider> = Arc::new(store.clone());
     let portfolio_capabilities =
-        mfm_adapters_portfolio::PortfolioRunnerCapabilities::new(artifacts, fact_index);
+        mfm_adapters_portfolio::PortfolioRunnerCapabilities::new(artifacts, fact_index.clone());
     let mut runners = mfm_runtime::ErasedRunnerRegistry::new();
+    register_process_fact_capabilities(&mut runners, fact_index.as_ref())
+        .expect("process fact capabilities");
     mfm_adapters_portfolio::register_portfolio_runners(&mut runners, portfolio_capabilities)
         .expect("portfolio runners");
     let runtime_artifacts = Arc::new(store.clone());

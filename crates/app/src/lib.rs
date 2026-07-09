@@ -91,6 +91,8 @@ pub const MFM_RUNTIME_CONFIG_FILE: &str = "MFM_RUNTIME_CONFIG_FILE";
 /// Environment variable that selects the Ed25519 fact-query receipt signing-key file.
 pub const MFM_FACT_RECEIPT_SIGNING_KEY_FILE: &str = "MFM_FACT_RECEIPT_SIGNING_KEY_FILE";
 
+const MANAGED_FACT_RECORD_CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.runtime.managed-fact-record.v1";
+
 /// Shared observability configuration used by typed binaries.
 pub mod observability;
 
@@ -632,9 +634,15 @@ pub fn production_runner_registry(
     let runtime_config = Arc::new(LiveTransportRuntime::new(
         RuntimeConfigLoader::from_path_or_env(runtime_config_path),
     ));
-    let btc_configured = runtime_config.btc_configured()?;
-    let evm_configured = runtime_config.evm_configured()?;
     let mut registry = ErasedRunnerRegistry::new();
+    registry.register_capability_spec::<mfm_fact_capabilities::FactIndexReadCapability>(
+        mfm_runtime::CapabilityImplementationId::new(fact_index.implementation_id())?,
+    )?;
+    registry.register_capability_spec::<mfm_fact_capabilities::FactRecordCapability>(
+        mfm_runtime::CapabilityImplementationId::new(
+            MANAGED_FACT_RECORD_CAPABILITY_IMPLEMENTATION_ID,
+        )?,
+    )?;
     let portfolio_capabilities = mfm_adapters_portfolio::PortfolioRunnerCapabilities::new(
         artifacts.clone(),
         fact_index.clone(),
@@ -647,19 +655,13 @@ pub fn production_runner_registry(
         runtime_config.clone(),
         source_run_registry,
     )?;
-    btc_collector::register_btc_collector_runners_if_configured(
+    btc_collector::register_btc_collector_runners(
         &mut registry,
         artifacts.clone(),
         fact_index,
         runtime_config.clone(),
-        btc_configured,
     )?;
-    evm_collector::register_evm_collector_runners_if_configured(
-        &mut registry,
-        artifacts,
-        runtime_config,
-        evm_configured,
-    )?;
+    evm_collector::register_evm_collector_runners(&mut registry, artifacts, runtime_config)?;
     mfm_transports_proof::register_deterministic_proof_runners(&mut registry)?;
     Ok(registry)
 }

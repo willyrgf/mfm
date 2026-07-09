@@ -161,14 +161,14 @@ pub fn register_btc_jsonrpc_runners(
             btc,
         }),
     )?;
-    registrations.register_state_descriptor_with_factory::<RecordBtcChainHeadFactState>(
+    registrations.register_state_runner_with_factory::<RecordBtcChainHeadFactState>(
         &managed_write_factory,
         Arc::new(ManagedFactRecordRunner::<RecordBtcChainHeadFactState>::new(
             artifacts.clone(),
             chain_head_fact_visibility(),
         )),
     )?;
-    registrations.register_state_descriptor_with_factory::<RecordBtcAddressBalanceFactState>(
+    registrations.register_state_runner_with_factory::<RecordBtcAddressBalanceFactState>(
         &managed_write_factory,
         Arc::new(
             ManagedFactRecordRunner::<RecordBtcAddressBalanceFactState>::new(
@@ -177,14 +177,14 @@ pub fn register_btc_jsonrpc_runners(
             ),
         ),
     )?;
-    registrations.register_state_descriptor_with_factory::<QueryCollectorCheckpointState>(
+    registrations.register_state_runner_with_factory::<QueryCollectorCheckpointState>(
         &read_factory,
         Arc::new(QueryCheckpointRunner {
             artifacts: artifacts.clone(),
             fact_index,
         }),
     )?;
-    registrations.register_state_descriptor_with_factory::<RecordCollectorCheckpointState>(
+    registrations.register_state_runner_with_factory::<RecordCollectorCheckpointState>(
         &managed_write_factory,
         Arc::new(
             ManagedFactRecordRunner::<RecordCollectorCheckpointState>::new(

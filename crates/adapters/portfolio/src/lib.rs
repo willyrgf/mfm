@@ -111,7 +111,7 @@ pub fn register_portfolio_runners(
             artifacts: artifacts.clone(),
         }),
     )?;
-    registrations.register_state_descriptor_with_factory::<SelectHoldingsState>(
+    registrations.register_state_runner_with_factory::<SelectHoldingsState>(
         &read_factory,
         Arc::new(SelectHoldingsRunner {
             artifacts: artifacts.clone(),

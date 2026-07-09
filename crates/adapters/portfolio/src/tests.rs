@@ -657,6 +657,10 @@ impl MockFactIndex {
 }
 
 impl FactIndexReadProvider for MockFactIndex {
+    fn implementation_id(&self) -> &'static str {
+        "mfm.adapters.portfolio.test.fact-index.v1"
+    }
+
     fn read_fact_index_batch<'a>(
         &'a self,
         requests: &'a [FactIndexReadRequest],

@@ -46,48 +46,18 @@ fn run_read_services_carry_explicit_fact_query_receipt_trust_root() {
 }
 
 #[test]
-fn live_transport_runtime_caches_parsed_runtime_config() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let config_path = dir.path().join("runtime.toml");
-    std::fs::write(
-        &config_path,
-        r#"
-        [btc.routes.public-bitcoin-core]
-        rpc_url = "http://127.0.0.1:8332"
-        "#,
-    )
-    .expect("write runtime config");
-    let runtime = crate::live_transports::LiveTransportRuntime::new(
-        crate::live_transports::RuntimeConfigLoader::from_path_or_env(Some(&config_path)),
-    );
-
-    assert!(runtime.btc_configured().expect("btc configured"));
-
-    std::fs::write(&config_path, "not valid toml = [").expect("replace runtime config");
-
-    assert!(
-        runtime.btc_configured().expect("cached btc configured"),
-        "live runtime must not reparse runtime config after first use"
-    );
-}
-
-#[test]
-fn live_transport_runtime_rejects_malformed_btc_runtime_config() {
+fn production_runner_registry_defers_malformed_runtime_config() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config_path = dir.path().join("runtime.toml");
     std::fs::write(&config_path, "not valid toml = [").expect("write runtime config");
-    let runtime = crate::live_transports::LiveTransportRuntime::new(
-        crate::live_transports::RuntimeConfigLoader::from_path_or_env(Some(&config_path)),
-    );
+    let store = store::AsyncInMemoryRunStore::default();
 
-    let error = runtime
-        .btc_configured()
-        .expect_err("malformed present config must not be treated as absent BTC config");
-
-    assert!(
-        matches!(error, mfm_runtime::RuntimeError::RunnerBinding(ref message) if message.contains("syntax")),
-        "{error}"
-    );
+    production_runner_registry(
+        Arc::new(store),
+        crate::ProjectionFactIndexProvider::empty_arc(),
+        Some(&config_path),
+    )
+    .expect("runner registration must not parse live runtime config");
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
@@ -1504,7 +1474,7 @@ fn production_registry_certifies_btc_collector_descriptors() {
 }
 
 #[tokio::test]
-async fn btc_collector_launch_requires_runtime_config_before_admission() {
+async fn btc_collector_launch_defers_runtime_config_to_ingress() {
     let store = store::AsyncInMemoryRunStore::default();
     let request =
         prepare_btc_collector_internal_test_launch().expect("btc collector launch request");
@@ -1514,7 +1484,7 @@ async fn btc_collector_launch_requires_runtime_config_before_admission() {
         crate::ProjectionFactIndexProvider::empty_arc(),
         None,
     )
-    .expect("production runners without btc config");
+    .expect("production runners without BTC config");
     let services = make_run_services_with_certification_registry(
         runners,
         store.clone(),
@@ -1525,9 +1495,9 @@ async fn btc_collector_launch_requires_runtime_config_before_admission() {
     let error = services
         .launch_run(request)
         .await
-        .expect_err("missing btc runtime config rejects before admission");
+        .expect_err("missing BTC runtime config rejects at ingress before admission");
 
-    assert_eq!(error.code, "LaunchRunnerUnavailable");
+    assert_eq!(error.code, "LaunchRuntimeError");
     assert!(store
         .load_run_stream(&run_id)
         .await

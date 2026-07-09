@@ -4,7 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use mfm_capabilities::{CapabilityDescriptor, CapabilitySetDescriptor};
+use mfm_capabilities::{CapabilityDescriptor, CapabilitySetDescriptor, CapabilitySpec};
 use mfm_events::v1 as events;
 use mfm_ids::{AdapterKind, AdapterVersion, DescriptorId, RuntimeBindingId};
 use mfm_spec::v1 as spec;
@@ -548,6 +548,22 @@ impl ErasedRunnerRegistry {
                 entry.get().implementation_id
             ))),
         }
+    }
+
+    /// Registers one concrete implementation for a typed capability contract.
+    pub fn register_capability_spec<C>(
+        &mut self,
+        implementation_id: CapabilityImplementationId,
+    ) -> Result<()>
+    where
+        C: CapabilitySpec,
+    {
+        let descriptor =
+            C::descriptor().map_err(|error| RuntimeError::RunnerBinding(error.to_string()))?;
+        self.register_capability(CapabilityImplementationBinding::new(
+            descriptor,
+            implementation_id,
+        ))
     }
 
     /// Registers executable evidence for one certified adapter binding.

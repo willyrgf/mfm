@@ -275,9 +275,17 @@ fn collector_services(
     fact_index: Arc<ProjectionFactIndexProvider>,
 ) -> mfm_app::RunServices<AsyncInMemoryRunStore, AsyncInMemoryRunStore> {
     let receipt_trust_root = fact_index.receipt_trust_root();
-    let capabilities =
-        mfm_adapters_btc_jsonrpc::BtcJsonRpcRunnerCapabilities::new(artifacts, btc, fact_index);
+    let capabilities = mfm_adapters_btc_jsonrpc::BtcJsonRpcRunnerCapabilities::new(
+        artifacts,
+        btc,
+        fact_index.clone(),
+    );
     let mut runners = mfm_runtime::ErasedRunnerRegistry::new();
+    mfm_integration_tests::test_support::register_process_fact_capabilities(
+        &mut runners,
+        fact_index.as_ref(),
+    )
+    .expect("process fact capabilities");
     mfm_adapters_btc_jsonrpc::register_btc_jsonrpc_runners(&mut runners, capabilities)
         .expect("btc runners");
     let runtime_artifacts = Arc::new(store.clone());

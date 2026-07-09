@@ -573,22 +573,7 @@ async fn app_resume_runtime_config_ingress_failures_before_claim_or_attempt() {
     let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
     let runtime_config_path = runtime_config_dir.path().join("runtime.toml");
     std::fs::write(&runtime_config_path, "[evm.sources.bad\n").expect("write malformed config");
-    let store = test_run_store();
-    let artifacts = ContractArtifactOverlay::new(Arc::new(store));
-    let error = match crate::production_runner_registry(
-        Arc::new(artifacts),
-        crate::ProjectionFactIndexProvider::empty_arc(),
-        Some(&runtime_config_path),
-    ) {
-        Ok(_) => {
-            panic!("malformed runtime config must fail before production runners are built")
-        }
-        Err(error) => error,
-    };
-
-    assert_eq!(error.class, ErrorClass::BadRequest);
-    assert_eq!(error.code, "LaunchRunnerUnavailable");
-    assert_eq!(error.message, "A required typed runner is unavailable");
+    assert_resume_runtime_config_ingress_failure(Some(&runtime_config_path)).await;
 }
 
 #[tokio::test]

@@ -133,7 +133,7 @@ pub fn register_evm_collectors_runners(
             evm,
         }),
     )?;
-    registrations.register_state_descriptor_with_factory::<RecordEvmNativeBalanceFactState>(
+    registrations.register_state_runner_with_factory::<RecordEvmNativeBalanceFactState>(
         &managed_write_factory,
         Arc::new(
             ManagedFactRecordRunner::<RecordEvmNativeBalanceFactState>::new(

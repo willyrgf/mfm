@@ -29,6 +29,10 @@ struct PostgresFactIndexReadProvider {
 }
 
 impl FactIndexReadProvider for PostgresFactIndexReadProvider {
+    fn implementation_id(&self) -> &'static str {
+        "mfm.app.postgres.fact-index.v1"
+    }
+
     fn read_fact_index_batch<'a>(
         &'a self,
         requests: &'a [FactIndexReadRequest],
@@ -134,6 +138,10 @@ impl ProjectionFactIndexProvider {
 }
 
 impl FactIndexReadProvider for ProjectionFactIndexProvider {
+    fn implementation_id(&self) -> &'static str {
+        "mfm.app.projection.fact-index.v1"
+    }
+
     fn read_fact_index_batch<'a>(
         &'a self,
         requests: &'a [FactIndexReadRequest],
