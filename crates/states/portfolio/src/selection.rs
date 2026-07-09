@@ -284,7 +284,7 @@ pub fn select_network_coherent(
                 ));
             }
             // LWW v1: store_commit_order DESC only.
-            at.sort_by(|left, right| right.store_commit_order.cmp(&left.store_commit_order));
+            at.sort_by_key(|candidate| std::cmp::Reverse(candidate.store_commit_order));
             let winner = at[0];
             selected.push(SelectedHolding {
                 key: key.clone(),
