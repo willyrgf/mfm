@@ -6910,6 +6910,38 @@ impl AsyncInMemoryRunStore {
         Ok(())
     }
 
+    /// Injects pre-built envelopes into run streams without re-applying projections.
+    ///
+    /// Used by Platform holding seed helpers so `verify_replay` can load cross-run
+    /// `FactRecorded` source events for fact-query evidence, while live SelectHoldings
+    /// continues to use the already-merged projection authority.
+    pub fn seed_run_stream_envelopes_for_test(
+        &self,
+        envelopes: impl IntoIterator<Item = KernelEventEnvelope>,
+    ) -> Result<()> {
+        let mut store = self.lock_inner()?;
+        let mut by_run: BTreeMap<RunId, Vec<KernelEventEnvelope>> = BTreeMap::new();
+        for envelope in envelopes {
+            by_run
+                .entry(envelope.run_id().clone())
+                .or_default()
+                .push(envelope);
+        }
+        for (run_id, mut events) in by_run {
+            events.sort_by_key(|event| (event.seq().as_u64(), event.ordinal().as_u32()));
+            let Some(first) = events.first() else {
+                continue;
+            };
+            let seq = first.seq();
+            let commit_key = first.commit_key().clone();
+            let fingerprint = CommitFingerprint(first.payload_hash().clone());
+            let batch =
+                CommittedBatch::from_persisted_events(run_id.clone(), commit_key, fingerprint, seq, events)?;
+            store.streams.entry(run_id).or_default().push(batch);
+        }
+        Ok(())
+    }
+
     /// Marks an execution claim expired for tests that need stale-claim recovery without sleeping.
     pub fn expire_execution_claim_for_test(&self, run_id: &RunId) -> Result<bool> {
         let mut store = self.lock_inner()?;

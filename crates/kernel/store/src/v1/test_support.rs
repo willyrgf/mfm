@@ -153,6 +153,8 @@ pub struct FactProjectionFixtureForTest {
     pub terms: Vec<FactIndexTermProjection>,
     /// Verified response artifact evidence.
     pub response_artifact_evidence: ArtifactEvidenceRef,
+    /// Canonical response JSON bytes retained as the FactResponse artifact.
+    pub response_bytes: Vec<u8>,
 }
 
 /// Builds a fact record, optional index row, and optional term rows for projection fixtures.
@@ -165,15 +167,16 @@ pub fn fact_projection_fixture_for_test(
         .map_err(|error| StoreError::Identity(error.to_string()))?;
     let subject = mfm_facts::fact_subject_evidence_from_material(descriptor, &subject_material)
         .map_err(|error| StoreError::Identity(error.to_string()))?;
-    let response_bytes = CanonicalJsonBytes::from_value(&input.response);
-    let response_hash = response_bytes.content_digest();
+    let response_canonical = CanonicalJsonBytes::from_value(&input.response);
+    let response_bytes = response_canonical.as_bytes().to_vec();
+    let response_hash = response_canonical.content_digest();
     let response_artifact_id = input.response_artifact_id.unwrap_or_else(|| {
         ArtifactId::from_digest(response_hash.algorithm(), *response_hash.digest())
     });
     let response_artifact_evidence = ArtifactEvidenceRef {
         artifact_id: response_artifact_id.clone(),
         digest: response_hash.clone(),
-        byte_len: response_bytes.as_bytes().len() as u64,
+        byte_len: response_bytes.len() as u64,
         media_type: spec::MediaType::new("application/json").expect("json media type"),
         schema_id: Some(input.response_schema_id.clone()),
         semantic_type_id: None,
@@ -224,6 +227,7 @@ pub fn fact_projection_fixture_for_test(
             index: None,
             terms: Vec::new(),
             response_artifact_evidence,
+            response_bytes,
         });
     };
     let metadata = mfm_facts::FactExtractionMetadata::new(
@@ -249,7 +253,162 @@ pub fn fact_projection_fixture_for_test(
         index: Some(index),
         terms,
         response_artifact_evidence,
+        response_bytes,
     })
+}
+
+/// One Platform holding fact to seed into an in-memory store for report SelectHoldings tests.
+///
+/// Built through the same FactRecorded-shaped projection fixtures as production admission
+/// (no SQL fact_index pokes). Callers supply real holding descriptors and subject/response
+/// material that match portfolio SelectHoldings query predicates.
+#[derive(Debug, Clone)]
+pub struct PlatformHoldingFactSeedForTest {
+    /// Holding fact descriptor (BTC address balance or EVM native balance at cutover).
+    pub descriptor: mfm_facts::FactDescriptor,
+    /// Fact-record projection input (subject/response/visibility/claim identity/producer).
+    pub input: FactProjectionFixtureInputForTest,
+}
+
+/// Seeds Platform holding facts into an in-memory run store for fact-backed report tests.
+///
+/// This is the **single** merge-safe seed path for certified `portfolio_snapshot` complete
+/// tests. For each seed it:
+/// 1. Builds descriptor + FactRecorded-shaped record/index/term fixtures.
+/// 2. Builds a matching source-run `FactRecorded` stream envelope and aligns
+///    `source_event_id` to the envelope's derived event id (required for
+///    `verify_fact_query_returned_ref` during report replay).
+/// 3. Merges projection rows into the store's current projection (does not clobber run state).
+/// 4. Retains descriptor and FactResponse artifact bytes.
+/// 5. Admits those evidences into the store **artifact authority map** (required so
+///    SelectHoldings fact-query retention staging does not fail with MissingArtifact /
+///    redacted RunStoreRejected).
+/// 6. Injects the source `FactRecorded` envelopes so `verify_replay` can load cross-run
+///    source fact events for FactQueryEvidence.
+///
+/// Call this on the same store used for report launch/resume. Do not dual-store.
+pub fn seed_platform_holding_facts_for_test(
+    store: &AsyncInMemoryRunStore,
+    seeds: impl IntoIterator<Item = PlatformHoldingFactSeedForTest>,
+) -> Result<()> {
+    let existing = store.projection_snapshot()?;
+    let mut parts = ProjectionSnapshotParts::from_snapshot(&existing);
+    let mut retained = Vec::new();
+    let mut admitted_evidence = Vec::new();
+    let mut source_envelopes = Vec::new();
+
+    for seed in seeds {
+        let descriptor_fixture =
+            fact_descriptor_projection_fixture_for_test(seed.descriptor.clone())?;
+        let descriptor_hash = descriptor_fixture.descriptor_hash.clone();
+        let mut fact_fixture =
+            fact_projection_fixture_for_test(&seed.descriptor, descriptor_hash.clone(), seed.input)?;
+
+        // Source-run FactRecorded envelope: replay loads these by claim coordinates.
+        // Use a dedicated source-run SpecHash (not the consumer program); retained
+        // source facts are not re-checked against the consumer certified graph.
+        let source_spec_hash = SpecHash::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0x5f; 32]),
+        );
+        let source_run_id = fact_fixture.record.source_run_id.clone();
+        let source_seq = fact_fixture.record.source_seq;
+        let source_ordinal = fact_fixture.record.source_ordinal;
+        let commit_id = fact_fixture
+            .index
+            .as_ref()
+            .map(|index| index.commit_id.clone())
+            .unwrap_or_else(|| {
+                CommitKey::new(format!("holding-source-{source_seq}")).expect("commit key")
+            });
+        let payload = events::KernelEventPayload::FactRecorded(events::FactRecorded {
+            spec_hash: source_spec_hash,
+            node_id: fact_fixture.record.node_id.clone(),
+            attempt_id: fact_fixture.record.attempt_id.clone(),
+            claim: fact_fixture.record.claim.clone(),
+        });
+        let envelope = persisted_kernel_event_envelope_with_ordinal_for_test(
+            &source_run_id,
+            source_seq,
+            source_ordinal,
+            commit_id.clone(),
+            payload,
+        );
+        // Align projection source_event_id with the derived envelope event id.
+        fact_fixture.record.source_event_id = envelope.event_id().clone();
+        if let Some(index) = fact_fixture.index.as_mut() {
+            index.source_event_id = envelope.event_id().clone();
+        }
+        source_envelopes.push(envelope);
+
+        match parts.fact_descriptors.get(&descriptor_hash) {
+            Some(existing)
+                if existing.descriptor_artifact_id
+                    == descriptor_fixture.projection.descriptor_artifact_id
+                    && existing.descriptor_artifact_evidence
+                        == descriptor_fixture.projection.descriptor_artifact_evidence => {}
+            Some(_) => {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("fact_descriptor:{descriptor_hash}"),
+                    message: "conflicting platform holding descriptor seed".to_owned(),
+                });
+            }
+            None => {
+                parts.fact_descriptors.insert(
+                    descriptor_hash.clone(),
+                    descriptor_fixture.projection.clone(),
+                );
+                retained.push(descriptor_fixture.descriptor_artifact);
+                admitted_evidence.push(descriptor_fixture.descriptor_evidence);
+            }
+        }
+
+        let claim_id = fact_fixture.record.fact_claim_id.clone();
+        if parts.fact_records.contains_key(&claim_id) {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("fact_record:{claim_id:?}"),
+                message: "duplicate platform holding fact claim seed".to_owned(),
+            });
+        }
+        parts
+            .fact_records
+            .insert(claim_id.clone(), fact_fixture.record.clone());
+        if let Some(index) = fact_fixture.index.clone() {
+            parts.fact_index_entries.insert(claim_id.clone(), index);
+        }
+        for term in fact_fixture.terms {
+            parts
+                .fact_term_entries
+                .insert((term.fact_claim_id.clone(), term.field_id.clone()), term);
+        }
+
+        let response_evidence = fact_fixture.response_artifact_evidence.clone();
+        let response_requirement = events::EventArtifactRequirement {
+            source: events::EventArtifactReferenceSource::FactResponse,
+            artifact_id: response_evidence.artifact_id.clone(),
+            digest: Some(response_evidence.digest.clone()),
+            byte_len: Some(response_evidence.byte_len),
+            media_type: Some(response_evidence.media_type.clone()),
+            schema_id: response_evidence.schema_id.clone(),
+            semantic_type_id: None,
+            producer_node_id: response_evidence.producer_node_id.clone(),
+            producer_seed_id: None,
+            artifact_role: Some(events::ArtifactRole::FactResponse),
+        };
+        let response_artifact = VerifiedRunArtifactBytes::new(
+            fact_fixture.response_bytes,
+            response_evidence.clone(),
+            &response_requirement,
+        )?;
+        retained.push(response_artifact);
+        admitted_evidence.push(response_evidence);
+    }
+
+    let projection = ProjectionSnapshot::from_parts(parts)?;
+    store.seed_projection_snapshot_for_test(projection, retained)?;
+    store.seed_artifact_evidence_for_test(&admitted_evidence)?;
+    store.seed_run_stream_envelopes_for_test(source_envelopes)?;
+    Ok(())
 }
 
 /// Polls an in-memory store future that is expected to complete immediately.
