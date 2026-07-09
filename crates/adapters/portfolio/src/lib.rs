@@ -458,12 +458,11 @@ fn portfolio_btc_source_binding(
             "portfolio Bitcoin network tag could not be used as a Bitcoin source binding",
         )
     })?;
-    BtcSourceBinding::new(network_id, source_identity, bitcoin_network).map_err(|_| {
-        PortfolioReadError::new(
-            "bitcoin_source_binding_invalid",
-            "portfolio Bitcoin source binding was invalid",
-        )
-    })
+    Ok(BtcSourceBinding::new(
+        network_id,
+        source_identity,
+        bitcoin_network,
+    ))
 }
 
 type PortfolioEvmProviderCache = Mutex<BTreeMap<(String, u64), Arc<dyn PortfolioEvmProvider>>>;

@@ -180,7 +180,6 @@ fn source_binding() -> BtcSourceBinding {
         BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
         BitcoinNetworkTag::Main,
     )
-    .expect("binding")
 }
 
 fn make_request(selection: BtcHeadSelection) -> BtcChainHeadRequest {

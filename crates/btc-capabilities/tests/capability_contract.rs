@@ -82,8 +82,7 @@ fn balance_request_is_operation_only_and_evidence_uses_binding() {
         BtcNetworkId::new("bitcoin-mainnet").expect("network"),
         BtcSourceIdentity::new("bitcoin-mainnet").expect("source"),
         BitcoinNetworkTag::Main,
-    )
-    .expect("binding");
+    );
     let request = BtcBalanceReadRequest::new(address.clone(), 850_000, block_hash.clone());
     let evidence =
         RedactedBtcSourceEvidence::from_binding(&binding, "main", BtcSourceStatus::Synced)

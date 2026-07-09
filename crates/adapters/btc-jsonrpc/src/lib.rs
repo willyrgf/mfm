@@ -200,8 +200,11 @@ fn chain_head_binding(config: &ObserveBtcChainHeadConfig) -> Result<BtcSourceBin
         .map_err(|_| BtcJsonRpcAdapterError::InvalidCapabilityRequest)?;
     let bitcoin_network = BitcoinNetworkTag::new(&config.bitcoin_network)
         .map_err(|_| BtcJsonRpcAdapterError::InvalidCapabilityRequest)?;
-    BtcSourceBinding::new(network_id, source_identity, bitcoin_network)
-        .map_err(|_| BtcJsonRpcAdapterError::InvalidCapabilityRequest)
+    Ok(BtcSourceBinding::new(
+        network_id,
+        source_identity,
+        bitcoin_network,
+    ))
 }
 
 fn chain_head_request(config: &ObserveBtcChainHeadConfig) -> Result<BtcChainHeadRequest> {

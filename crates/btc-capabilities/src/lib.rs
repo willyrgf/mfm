@@ -16,7 +16,7 @@
 //!     BtcNetworkId::new("bitcoin-mainnet")?,
 //!     BtcSourceIdentity::new("public-bitcoin-core")?,
 //!     BitcoinNetworkTag::Main,
-//! )?;
+//! );
 //! let request = BtcChainHeadRequest::new(BtcHeadSelection::best());
 //! assert_eq!(binding.network_id().as_str(), "bitcoin-mainnet");
 //! assert_eq!(binding.bitcoin_network().as_str(), "main");
@@ -268,17 +268,17 @@ pub struct BtcSourceBinding {
 }
 
 impl BtcSourceBinding {
-    /// Creates a checked semantic Bitcoin source binding.
-    pub fn new(
+    /// Creates a semantic Bitcoin source binding from already-checked components.
+    pub const fn new(
         network_id: BtcNetworkId,
         source_identity: BtcSourceIdentity,
         bitcoin_network: BitcoinNetworkTag,
-    ) -> Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             network_id,
             source_identity,
             bitcoin_network,
-        })
+        }
     }
 
     /// Returns the semantic Bitcoin network id.
@@ -774,7 +774,6 @@ mod tests {
             BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
             BitcoinNetworkTag::Main,
         )
-        .expect("binding")
     }
 
     fn request(selection: BtcHeadSelection) -> BtcChainHeadRequest {

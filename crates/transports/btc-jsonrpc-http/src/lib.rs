@@ -1128,7 +1128,6 @@ mod tests {
             source_identity(),
             BitcoinNetworkTag::Main,
         )
-        .expect("binding")
     }
 
     fn router_with(
