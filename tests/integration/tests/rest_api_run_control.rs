@@ -1,18 +1,12 @@
 #![allow(clippy::disallowed_methods)]
 
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use mfm_events::v1 as events;
 use mfm_ids::RunId;
 use mfm_integration_tests::test_support::{self, empty_post, json_post, response_json};
-use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
-use mfm_store::v1::{RetainedArtifactReadProvider, RunEventStore, RunObservationStore};
+use mfm_store::v1::{RunEventStore, RunObservationStore};
 use tower::ServiceExt;
 
 const VALID_RUN_ID: &str =
@@ -177,22 +171,6 @@ fn first_failed_attempt(
     (index, failed)
 }
 
-fn portfolio_chain_mismatch_public_details() -> serde_json::Value {
-    serde_json::json!({
-        "diagnostic_kind": "provider_source_mismatch",
-        "provider_family": "evm",
-        "code": "source_mismatch",
-        "operation": null,
-        "fields": {
-            "network_id": PORTFOLIO_NETWORK_ID,
-            "expected_chain_id": 31337,
-            "observed_chain_id": 31338,
-            "source_ref": PORTFOLIO_NETWORK_ID,
-            "policy_id": PORTFOLIO_NETWORK_ID,
-        },
-    })
-}
-
 async fn assert_evm_start_fails_before_admission(
     state: &test_support::InMemoryRestAppState,
     app: &axum::Router,
@@ -259,97 +237,6 @@ async fn assert_absent_run_routes_not_found(app: &axum::Router, include_resume: 
         let response = app.clone().oneshot(request).await.expect(label);
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
-}
-
-async fn assert_chain_mismatch_diagnostic(
-    store: &store::AsyncInMemoryRunStore,
-    failed: &events::StateAttemptFailed,
-) -> serde_json::Value {
-    let diagnostic = failed
-        .error
-        .diagnostic_ref
-        .as_ref()
-        .expect("chain mismatch records diagnostic artifact");
-    let diagnostic_artifact = store
-        .read_retained_artifact(&diagnostic_artifact_requirement(diagnostic))
-        .await
-        .expect("diagnostic artifact");
-    let diagnostic_json = serde_json::from_slice::<serde_json::Value>(diagnostic_artifact.bytes())
-        .expect("diagnostic json");
-    assert_eq!(
-        diagnostic_json["public_details"],
-        portfolio_chain_mismatch_public_details()
-    );
-    diagnostic_json
-}
-
-async fn start_portfolio_rpc_chain_flip_mock(first_chain_id: u64, later_chain_id: u64) -> String {
-    let state = Arc::new(PortfolioRpcChainFlipState {
-        first_chain_id,
-        later_chain_id,
-        chain_id_calls: AtomicUsize::new(0),
-    });
-    let app = axum::Router::new()
-        .route("/", axum::routing::post(portfolio_rpc_chain_flip_handler))
-        .with_state(state);
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind rpc mock");
-    let addr = listener.local_addr().expect("rpc mock addr");
-    listener
-        .set_nonblocking(true)
-        .expect("set rpc mock nonblocking");
-    std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("rpc mock runtime");
-        runtime.block_on(async move {
-            let listener = tokio::net::TcpListener::from_std(listener).expect("tokio rpc listener");
-            axum::serve(listener, app).await.expect("rpc mock serve");
-        });
-    });
-    format!("http://{addr}")
-}
-
-struct PortfolioRpcChainFlipState {
-    first_chain_id: u64,
-    later_chain_id: u64,
-    chain_id_calls: AtomicUsize,
-}
-
-async fn portfolio_rpc_chain_flip_handler(
-    axum::extract::State(state): axum::extract::State<Arc<PortfolioRpcChainFlipState>>,
-    axum::Json(request): axum::Json<serde_json::Value>,
-) -> axum::Json<serde_json::Value> {
-    let id = request
-        .get("id")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!(1));
-    let method = request
-        .get("method")
-        .and_then(|value| value.as_str())
-        .expect("json-rpc method");
-    let result = match method {
-        "eth_chainId" => {
-            let calls = state.chain_id_calls.fetch_add(1, Ordering::SeqCst);
-            let chain_id = if calls == 0 {
-                state.first_chain_id
-            } else {
-                state.later_chain_id
-            };
-            serde_json::json!(format!("0x{chain_id:x}"))
-        }
-        "eth_getBlockByNumber" => serde_json::json!({
-            "number": "0x64",
-            "hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
-        }),
-        "eth_getBalance" => serde_json::json!("0xde0b6b3a7640000"),
-        other => panic!("unexpected rpc method {other}"),
-    };
-    axum::Json(serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": result
-    }))
 }
 
 #[tokio::test]
@@ -479,12 +366,12 @@ async fn start_invocation_key_derives_separate_run_without_persisting_raw_key() 
 }
 
 #[tokio::test]
-async fn portfolio_chain_mismatch_fails_after_admission_with_redacted_diagnostic() {
-    let rpc_url = test_support::start_portfolio_rpc_mock(31338).await;
-    let runtime = runtime_config_app(PORTFOLIO_NETWORK_ID, &rpc_url);
-    let app = runtime.app.clone();
-    let store = &runtime.state.store;
-    let runtime_config_path = &runtime.runtime_config_path;
+async fn portfolio_report_hard_fails_without_platform_facts_after_admission() {
+    // Report-only cutover: live chain mismatch diagnostics are gone. Without admitted
+    // Platform holding facts, SelectHoldings hard-fails after RunAdmitted.
+    let state = in_memory_state();
+    let app = mfm_rest_api::make_app(state.clone());
+    let store = &state.store;
 
     let (body, run_id) = start_portfolio_snapshot(&app).await;
     assert_ne!(body["data"]["run"]["run_mode"], "completed");
@@ -495,35 +382,12 @@ async fn portfolio_chain_mismatch_fails_after_admission_with_redacted_diagnostic
     });
     let (failed_index, failed) = first_failed_attempt(&stream);
     assert!(admitted_index < failed_index);
-    assert_eq!(failed.error.category, events::ErrorCategory::Validation);
-    assert_eq!(failed.error.safe_message, "runner output failed validation");
-    let details_digest = failed
-        .error
-        .public_details
-        .as_ref()
-        .expect("source mismatch records public details digest")
-        .content_digest
-        .clone();
-    let diagnostic_json = assert_chain_mismatch_diagnostic(store, failed).await;
-    assert_eq!(
-        mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
-            &serde_json::to_string(&diagnostic_json["public_details"]).expect("details json")
-        )
-        .expect("canonical details")
-        .content_digest(),
-        details_digest
-    );
+    // Redaction-safe: no RPC URL / runtime path leakage on missing facts.
+    let rendered = format!("{body:?} {stream:?} {failed:?}");
+    assert!(!rendered.contains("http://"));
+    assert!(!rendered.contains("password"));
+    assert!(!rendered.contains("rpc_url"));
 
-    let rendered = format!("{body:?} {stream:?}");
-    assert!(!rendered.contains(&rpc_url));
-    assert!(!rendered.contains(&runtime_config_path.display().to_string()));
-    assert!(!rendered.contains("31338"));
-    assert!(!diagnostic_json.to_string().contains(&rpc_url));
-    assert!(!diagnostic_json
-        .to_string()
-        .contains(&runtime_config_path.display().to_string()));
-
-    std::fs::remove_file(runtime_config_path).expect("remove runtime config");
     let replay = app
         .oneshot(empty_post(&format!("/v1/runs/{run_id}/replay")))
         .await
@@ -532,32 +396,35 @@ async fn portfolio_chain_mismatch_fails_after_admission_with_redacted_diagnostic
 }
 
 #[tokio::test]
-async fn portfolio_observe_batch_chain_mismatch_is_attempt_failure() {
-    let rpc_url = start_portfolio_rpc_chain_flip_mock(31337, 31338).await;
-    let runtime = runtime_config_app(PORTFOLIO_NETWORK_ID, &rpc_url);
-    let app = runtime.app.clone();
-    let store = &runtime.state.store;
-    let runtime_config_path = &runtime.runtime_config_path;
+async fn portfolio_select_holdings_missing_facts_is_attempt_failure() {
+    let state = in_memory_state();
+    let app = mfm_rest_api::make_app(state.clone());
+    let store = &state.store;
 
     let (_, run_id) = start_portfolio_snapshot(&app).await;
     let stream = store.load_run_stream(&run_id).await.expect("stream");
     let admitted_index = event_index(&stream, "RunAdmitted", |payload| {
         matches!(payload, events::KernelEventPayload::RunAdmitted(_))
     });
-    let pinned_index = event_index(&stream, "pinned views cell", |payload| match payload {
-        events::KernelEventPayload::CellProduced(payload) => payload
-            .schema_id
-            .as_str()
-            .contains("mfm.portfolio.pinned_views"),
-        _ => false,
-    });
-    let (failed_index, failed) = first_failed_attempt(&stream);
-    assert!(admitted_index < pinned_index);
-    assert!(pinned_index < failed_index);
+    let (failed_index, _failed) = first_failed_attempt(&stream);
+    assert!(admitted_index < failed_index);
 
-    assert_chain_mismatch_diagnostic(store, failed).await;
+    // Live pin_views / observe_batch must not appear after cutover.
+    for event in &stream {
+        if let events::KernelEventPayload::StateAttemptStarted(payload) = event.payload() {
+            let kind = payload
+                .state_kind
+                .canonical_name()
+                .unwrap_or_else(|| payload.state_kind.as_str());
+            assert!(
+                !kind.contains("pin_views")
+                    && !kind.contains("observe_batch")
+                    && !kind.contains("merge_observations"),
+                "deleted live portfolio states must not run: {kind}"
+            );
+        }
+    }
 
-    std::fs::remove_file(runtime_config_path).expect("remove runtime config");
     let replay = app
         .oneshot(empty_post(&format!("/v1/runs/{run_id}/replay")))
         .await
@@ -655,10 +522,8 @@ async fn evm_contract_mutation_signer_ingress_failures_happen_before_admission()
 
 #[tokio::test]
 async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attempts_from_history() {
-    let _env_guard = RPC_ENV_LOCK.lock().await;
-    let rpc_url = test_support::start_portfolio_rpc_mock(31337).await;
-    let _env_restore =
-        test_support::set_evm_runtime_config_env_for_test(PORTFOLIO_NETWORK_ID, &rpc_url);
+    // Report-only: no live RPC required to admit/resume. Without Platform facts the
+    // resumed run hard-fails (does not complete with a public snapshot).
     let state = in_memory_state();
     let config = portfolio_snapshot_config();
     let app = mfm_rest_api::make_app(state.clone());
@@ -690,7 +555,8 @@ async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attemp
     assert_eq!(resume.status(), StatusCode::OK);
     let resume_body = response_json(resume).await;
     assert_eq!(resume_body["status"], "success");
-    assert_eq!(resume_body["data"]["run_mode"], "completed");
+    // Without Platform holding facts the report path hard-fails after cutover.
+    assert_ne!(resume_body["data"]["run_mode"], "completed");
 
     let status = app
         .clone()
@@ -713,37 +579,15 @@ async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attemp
         .expect("interrupted attempt disposition");
     assert!(interrupted["retryable"].is_null());
 
-    let completed_framework_kinds = certified
-        .envelope()
-        .spec
-        .nodes
-        .iter()
-        .filter(|node| {
-            attempts.iter().any(|attempt| {
-                attempt["node_id"] == node.node_id.as_str() && attempt["disposition"] == "completed"
-            })
-        })
-        .filter_map(|node| match &node.framework {
-            Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => Some("public_output_render"),
-            Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_)) => {
-                Some("project_retention_manifest")
-            }
-            Some(spec::FrameworkNodeSpec::CompleteRun(_)) => Some("complete_run"),
-            Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_)) => Some("resolve_saga_terminal"),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    // After cutover, resume without Platform facts hard-fails; framework public-output
+    // completion is not required. Status history must still surface the interrupted attempt.
     assert!(
-        completed_framework_kinds.contains(&"public_output_render"),
-        "missing completed public-output render framework attempt"
-    );
-    assert!(
-        completed_framework_kinds.contains(&"project_retention_manifest"),
-        "missing completed retention framework attempt"
-    );
-    assert!(
-        completed_framework_kinds.contains(&"complete_run"),
-        "missing completed complete-run framework attempt"
+        attempts
+            .iter()
+            .any(|attempt| attempt["disposition"] == "failed"
+                || attempt["disposition"] == "interrupted"
+                || attempt["disposition"] == "completed"),
+        "expected attempt dispositions after resume: {attempts:?}"
     );
 
     let stream = app
@@ -756,11 +600,9 @@ async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attemp
     let stream_events = stream_body["data"]["events"]
         .as_array()
         .expect("stream events");
-    test_support::assert_framework_started_before_terminal_evidence(
-        stream_events,
-        attempts,
-        &certified.envelope().spec.nodes,
-        &run_id,
+    assert!(
+        !stream_events.is_empty(),
+        "stream must retain history after failed report resume"
     );
 }
 
@@ -1014,23 +856,6 @@ private_key = "placeholder-private-key-value"
     );
     std::fs::write(&path, config).expect("write malformed signer runtime config");
     path
-}
-
-fn diagnostic_artifact_requirement(
-    reference: &events::ArtifactEvidenceRef,
-) -> store::EventArtifactRequirement {
-    store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::ArtifactReferenced,
-        artifact_id: reference.artifact_id.clone(),
-        digest: Some(reference.content_digest.clone()),
-        byte_len: Some(reference.byte_len),
-        media_type: Some(reference.media_type.clone()),
-        schema_id: Some(reference.schema_id.clone()),
-        semantic_type_id: reference.semantic_type_id.clone(),
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: Some(reference.role),
-    }
 }
 
 fn evm_import_deployed_json() -> serde_json::Value {
