@@ -214,6 +214,14 @@ to own generic transport or signer behavior.
 
 Transports implement reusable protocols and live/replay capability backends.
 
+Live transports that satisfy capability contracts expose bound providers, not raw routers or
+unchecked clients. App/adapters derive certified semantic bindings, bind providers once per source
+intent, and issue operation-only requests. Provider implementations own the mandatory validation
+path: route/source resolution, live identity probes, operation checks, response identity checks, and
+redacted diagnostics must be non-bypassable. Raw capability IO must remain unreachable without a
+private provider-minted verified call/session value; do not add public middleware, decorators,
+`inner`, `unchecked`, or `skip_validation` APIs for production transport authority.
+
 Transports may:
 
 - consume typed runtime source and route descriptors supplied by app assembly
