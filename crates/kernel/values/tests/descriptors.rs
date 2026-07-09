@@ -183,7 +183,7 @@ fn non_empty_value_collection_rejects_empty_runtime_materialization() {
     assert_eq!(decoded.values(), std::slice::from_ref(&value));
 
     assert!(NonEmpty::<ExampleValue>::try_from_vec(Vec::new()).is_err());
-    assert!(serde_json::from_str::<NonEmpty<ExampleValue>>("{\"values\":[]}").is_err());
+    assert!(serde_json::from_str::<NonEmpty<ExampleValue>>("[]").is_err());
 }
 
 #[test]

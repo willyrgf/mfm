@@ -1189,8 +1189,10 @@ pub enum SkipCode {
 }
 
 /// Runtime non-empty input collection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(bound(serialize = "T: Serialize"))]
+///
+/// Wire format is a JSON array (not `{ "values": [...] }`) so it matches
+/// [`SchemaShape::NonEmptyVec`] materialization used by state-input binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NonEmpty<T: MfmValue> {
     values: Vec<T>,
 }
@@ -1220,19 +1222,22 @@ impl<T: MfmValue> NonEmpty<T> {
     }
 }
 
+impl<T: MfmValue + Serialize> Serialize for NonEmpty<T> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.values.serialize(serializer)
+    }
+}
+
 impl<'de, T: MfmValue> Deserialize<'de> for NonEmpty<T> {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        #[serde(bound(deserialize = "T: serde::de::DeserializeOwned"))]
-        struct NonEmptyWire<T: MfmValue> {
-            values: Vec<T>,
-        }
-
-        let wire = NonEmptyWire::<T>::deserialize(deserializer)?;
-        NonEmpty::try_from_vec(wire.values).map_err(de::Error::custom)
+        let values = Vec::<T>::deserialize(deserializer)?;
+        NonEmpty::try_from_vec(values).map_err(de::Error::custom)
     }
 }
 
