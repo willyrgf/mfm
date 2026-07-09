@@ -1,9 +1,11 @@
 //! Store-backed portfolio_snapshot complete path from admitted Platform holding facts.
 //!
-//! Seeds dual-mainnet natives via `seed_platform_holding_facts_for_test` (FactRecorded-shaped
-//! projection + artifact authority map + retained descriptor/response bytes), then drives the
-//! certified `portfolio_snapshot` entry-point to Completed with chain providers unbound.
-//! Replay freezes fact-index call counts (SelectHoldings must not re-query live frontier).
+//! Uses the merge-safe **fixture seed** `seed_platform_holding_facts_for_test` (FactRecorded-shaped
+//! projection + artifact authority + source envelopes — not live collector IO). Drives certified
+//! `portfolio_snapshot` to Completed with chain providers unbound. Replay freezes fact-index call
+//! counts (SelectHoldings must not re-query live frontier).
+//!
+//! Residual (not this test): mock-transport collect observe→record entry points then report.
 
 #![allow(clippy::disallowed_methods)]
 

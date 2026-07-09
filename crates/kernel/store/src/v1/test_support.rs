@@ -272,8 +272,13 @@ pub struct PlatformHoldingFactSeedForTest {
 
 /// Seeds Platform holding facts into an in-memory run store for fact-backed report tests.
 ///
-/// This is the **single** merge-safe seed path for certified `portfolio_snapshot` complete
-/// tests. For each seed it:
+/// **Fixture path (not live collector IO):** builds FactRecorded-**shaped** projection rows +
+/// source-run `FactRecorded` envelopes and admits descriptor/response artifact authority so
+/// SelectHoldings + report replay work without driving collectors. Prefer this for pure
+/// report/replay CI. For real collector admission confidence, drive observe+record entry
+/// points (or managed `record_fact`) into the same store, then run `portfolio_snapshot`.
+///
+/// For each seed it:
 /// 1. Builds descriptor + FactRecorded-shaped record/index/term fixtures.
 /// 2. Builds a matching source-run `FactRecorded` stream envelope and aligns
 ///    `source_event_id` to the envelope's derived event id (required for
