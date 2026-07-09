@@ -33,9 +33,12 @@ use std::str::FromStr;
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{
-    CapabilityError, CapabilitySpec, ProviderDiagnosticCode, ProviderDiagnosticValue,
-    ReadExternalRole, RedactedProviderDiagnostic,
+    CapabilityError, CapabilitySpec, ProviderDiagnosticValue, ReadExternalRole,
+    RedactedProviderDiagnostic,
 };
+// Re-export closed diagnostic code so adapter/integration tests can construct
+// redacted provider failures without depending on mfm-capabilities directly.
+pub use mfm_capabilities::ProviderDiagnosticCode;
 use mfm_ids::{CapabilityKind, CapabilityVersion, DigestAlgorithm, LocalPublicId};
 
 /// Result type for Bitcoin capability contracts.

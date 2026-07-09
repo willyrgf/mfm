@@ -525,7 +525,7 @@ impl mfm_btc_capabilities::BtcBalanceReadProvider for BoundMockBtcProvider {
         Box::pin(async move {
             Err(mfm_btc_capabilities::BtcCapabilityError::provider_failure(
                 mfm_btc_capabilities::btc_diagnostic(
-                    mfm_capabilities::ProviderDiagnosticCode::UnsupportedOperation,
+                    mfm_btc_capabilities::ProviderDiagnosticCode::UnsupportedOperation,
                 ),
             ))
         })
