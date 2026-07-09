@@ -6935,8 +6935,13 @@ impl AsyncInMemoryRunStore {
             let seq = first.seq();
             let commit_key = first.commit_key().clone();
             let fingerprint = CommitFingerprint(first.payload_hash().clone());
-            let batch =
-                CommittedBatch::from_persisted_events(run_id.clone(), commit_key, fingerprint, seq, events)?;
+            let batch = CommittedBatch::from_persisted_events(
+                run_id.clone(),
+                commit_key,
+                fingerprint,
+                seq,
+                events,
+            )?;
             store.streams.entry(run_id).or_default().push(batch);
         }
         Ok(())

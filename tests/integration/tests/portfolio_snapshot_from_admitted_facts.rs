@@ -174,8 +174,8 @@ fn seed_dual_mainnet_holdings(store: &AsyncInMemoryRunStore) {
     .expect("btc response");
     let btc_descriptor = BtcAddressBalanceSnapshotFact::descriptor().expect("btc descriptor");
 
-    let evm_subject =
-        EvmAddressNativeBalanceSubject::new("ethereum-mainnet", 1, ETH_ACCOUNT).expect("evm subject");
+    let evm_subject = EvmAddressNativeBalanceSubject::new("ethereum-mainnet", 1, ETH_ACCOUNT)
+        .expect("evm subject");
     let evm_response = EvmAddressNativeBalanceResponse::new(
         21_000_000,
         EVM_HASH,
@@ -185,8 +185,7 @@ fn seed_dual_mainnet_holdings(store: &AsyncInMemoryRunStore) {
         HoldingSourceStatus::Ok,
     )
     .expect("evm response");
-    let evm_descriptor =
-        EvmAddressNativeBalanceSnapshotFact::descriptor().expect("evm descriptor");
+    let evm_descriptor = EvmAddressNativeBalanceSnapshotFact::descriptor().expect("evm descriptor");
 
     seed_platform_holding_facts_for_test(
         store,

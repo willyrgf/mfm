@@ -301,8 +301,11 @@ pub fn seed_platform_holding_facts_for_test(
         let descriptor_fixture =
             fact_descriptor_projection_fixture_for_test(seed.descriptor.clone())?;
         let descriptor_hash = descriptor_fixture.descriptor_hash.clone();
-        let mut fact_fixture =
-            fact_projection_fixture_for_test(&seed.descriptor, descriptor_hash.clone(), seed.input)?;
+        let mut fact_fixture = fact_projection_fixture_for_test(
+            &seed.descriptor,
+            descriptor_hash.clone(),
+            seed.input,
+        )?;
 
         // Source-run FactRecorded envelope: replay loads these by claim coordinates.
         // Use a dedicated source-run SpecHash (not the consumer program); retained
