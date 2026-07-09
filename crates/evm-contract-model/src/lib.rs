@@ -1554,9 +1554,9 @@ impl<'de> Deserialize<'de> for AdoptExternalAddress {
     schema = "mfm.evm.contract.value.external_evm_source_evidence"
 )]
 pub struct ExternalEvmSourceEvidence {
-    /// Semantic network id supplied to the provider guard.
+    /// Semantic network id captured from the bound provider evidence.
     pub network_id: String,
-    /// Expected EVM chain id supplied to the provider guard.
+    /// Expected EVM chain id captured from the certified network context.
     pub expected_chain_id: u64,
     /// Observed EVM chain id reported by the provider.
     pub observed_chain_id: u64,

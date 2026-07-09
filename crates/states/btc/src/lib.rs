@@ -252,9 +252,24 @@ impl BtcChainHeadResponse {
         &self.block_hash
     }
 
-    /// Returns the observed source status tag.
+    /// Returns the observed source synchronization status tag.
     pub fn observed_source_status(&self) -> &str {
         &self.observed_source_status
+    }
+
+    /// Returns the provider-observed Bitcoin network tag.
+    pub fn observed_bitcoin_network(&self) -> &str {
+        &self.observed_bitcoin_network
+    }
+
+    /// Returns the finality policy tag attached to the observation.
+    pub fn finality_policy(&self) -> &str {
+        &self.finality_policy
+    }
+
+    /// Returns the confirmation depth attached to the observation, when any.
+    pub const fn confirmation_depth(&self) -> Option<u64> {
+        self.confirmation_depth
     }
 
     /// Returns the provider-reported block time in Unix milliseconds.

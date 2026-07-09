@@ -388,12 +388,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
     }
 
     /// Reads the latest block number for mutation finality checks.
-    pub async fn latest_block_number(
-        &self,
-        network_id: &str,
-        expected_chain_id: u64,
-    ) -> Result<u64> {
-        let _binding = evm_network_binding(network_id, expected_chain_id)?;
+    pub async fn latest_block_number(&self) -> Result<u64> {
         let response = self
             .mutation
             .block
@@ -528,12 +523,6 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         &self,
         prepared: &PreparedContractMutation,
     ) -> Result<Vec<ContractTransactionSubmission>> {
-        let _verified_chain = verified_chain_identity(
-            self.mutation.chain_identity,
-            &prepared.evidence().network_id,
-            prepared.evidence().expected_chain_id,
-        )
-        .await?;
         let mut submissions = Vec::with_capacity(prepared.signing_requests.len());
         for (transaction, signing_request) in prepared
             .evidence()
@@ -585,7 +574,6 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         submissions: &[ContractTransactionSubmission],
     ) -> Result<Vec<ContractTransactionReceipt>> {
         let transaction_hashes = verify_prepared_submission_transactions(prepared, submissions)?;
-        let _binding = evm_network_binding(&prepared.network_id, prepared.expected_chain_id)?;
         let mut receipts = Vec::with_capacity(submissions.len());
         for transaction_hash in transaction_hashes {
             let response = self
@@ -612,7 +600,6 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         &self,
         prepared: &PreparedContractInvocation,
     ) -> Result<PreparedSubmissionReconciliation> {
-        let _binding = evm_network_binding(&prepared.network_id, prepared.expected_chain_id)?;
         let anchor_submissions = prepared_anchor_submissions(prepared)?;
         let mut unlanded_transactions = Vec::new();
         for (transaction, submission) in prepared
@@ -755,9 +742,6 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             max_receipt_polls,
             tx_inputs,
         } = request;
-        let _verified_chain =
-            verified_chain_identity(self.mutation.chain_identity, network_id, expected_chain_id)
-                .await?;
 
         let nonce_response = self
             .mutation
@@ -926,12 +910,7 @@ async fn validate_context_contract_with_reads(
     }
     ensure_configured_input_context(input, context)?;
 
-    let chain = verified_chain_identity(
-        reads.chain_identity,
-        context.value().network.network_id.as_str(),
-        context.value().network.expected_chain_id(),
-    )
-    .await?;
+    let chain = read_chain_identity(reads.chain_identity).await?;
 
     let assertion_context = prepare_validation_assertion_context(
         artifact,
@@ -963,11 +942,8 @@ async fn validate_context_contract_with_reads(
         configured_input_digest: request.configured_input_digest.clone(),
         evm_network_context_ref: evm_network_context_ref(&context.value().network)?,
         resource_stage: ContractLifecycleStage::Configured,
-        observed_chain_id: chain.response.chain_id,
-        client_version: chain
-            .response
-            .client_version
-            .unwrap_or_else(|| "unknown".to_owned()),
+        observed_chain_id: chain.chain_id,
+        client_version: chain.client_version.unwrap_or_else(|| "unknown".to_owned()),
         configuration_read_results,
         configuration_event_results,
         read_results: evaluated.read_results,
@@ -1104,12 +1080,7 @@ async fn verify_external_adoption(
     context: &mfm_program::CertifiedContext<EvmContractContext>,
     resource_stage: ContractLifecycleStage,
 ) -> Result<VerifiedExternalAdoption> {
-    let chain = verified_chain_identity(
-        reads.chain_identity,
-        context.value().network.network_id.as_str(),
-        context.value().network.expected_chain_id(),
-    )
-    .await?;
+    let chain = read_chain_identity(reads.chain_identity).await?;
     let mut code_read_evidence = None;
     if adoption.evidence_policy.require_code
         || adoption.evidence_policy.expected_code_hash.is_some()
@@ -1154,7 +1125,7 @@ async fn verify_external_adoption(
         context_ref: mfm_values::ContextRefValue::from(context.context_ref().clone()),
         evm_network_context_ref: evm_network_context_ref(&context.value().network)?,
         resource_stage,
-        observed_chain_id: chain.response.chain_id,
+        observed_chain_id: chain.chain_id,
         code_read_evidence,
         read_assertion_evidence: Vec::new(),
         event_assertion_evidence: Vec::new(),
@@ -1846,29 +1817,13 @@ where
         .map_err(|error| EvmContractAdapterError::Model(error.to_string()))
 }
 
-struct VerifiedChainIdentity {
-    response: EvmChainIdentityResponse,
-}
-
-async fn verified_chain_identity(
+async fn read_chain_identity(
     provider: &dyn EvmChainIdentityProvider,
-    network_id: &str,
-    expected_chain_id: u64,
-) -> Result<VerifiedChainIdentity> {
-    let binding = evm_network_binding(network_id, expected_chain_id)?;
-    let chain = provider
+) -> Result<EvmChainIdentityResponse> {
+    provider
         .chain_identity(&EvmChainIdentityRequest::new())
-        .await?;
-    if chain.chain_id != binding.expected_chain_id() {
-        return Err(EvmCapabilityError::SourceMismatch {
-            diagnostic: chain
-                .evidence
-                .with_observed_chain_id(chain.chain_id)
-                .source_mismatch_diagnostic(),
-        }
-        .into());
-    }
-    Ok(VerifiedChainIdentity { response: chain })
+        .await
+        .map_err(Into::into)
 }
 
 struct ValidationAssertionContext {
@@ -5818,7 +5773,7 @@ where
         receipt: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
         Box::pin(async {
-            let (plan, runtime) = self
+            let (_plan, runtime) = self
                 .load_plan_and_runtime(ctx, submit_node, submit_inputs)
                 .await?;
             let required_depth = finalized_depth_for_submit_node(submit_node)?;
@@ -5833,8 +5788,6 @@ where
             let receipt = P::receipt_with_evidence(receipt, &receipt_evidence);
             let confirmations = verified_finality_confirmations(
                 &runtime,
-                plan.network_id(),
-                plan.expected_chain_id(),
                 P::receipt_transactions(&receipt),
                 required_depth,
             )
@@ -6237,8 +6190,6 @@ fn finalized_depth_for_submit_node(submit_node: &spec::NodeSpec) -> mfm_runtime:
 
 async fn verified_finality_confirmations(
     runtime: &EvmContractRuntime,
-    network_id: &str,
-    expected_chain_id: u64,
     receipts: &[ContractTransactionReceipt],
     required_depth: u64,
 ) -> mfm_runtime::Result<u64> {
@@ -6250,7 +6201,7 @@ async fn verified_finality_confirmations(
     };
     let latest_block = runtime
         .adapter()
-        .latest_block_number(network_id, expected_chain_id)
+        .latest_block_number()
         .await
         .map_err(mfm_runtime::RuntimeError::from)?;
     let confirmations = latest_block

@@ -2951,8 +2951,6 @@ async fn verified_test_finality(
 ) -> mfm_runtime::Result<u64> {
     verified_finality_confirmations(
         runtime,
-        "ethereum-mainnet",
-        1,
         std::slice::from_ref(receipt),
         required_confirmations,
     )

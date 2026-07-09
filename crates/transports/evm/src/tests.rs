@@ -20,7 +20,7 @@ async fn selects_source_by_policy_and_records_redacted_evidence() {
     let client = client_for(&server.url, "primary", "mainnet");
 
     let response = client
-        .chain_identity(&chain_request("mainnet", 1))
+        .chain_identity(&chain_request())
         .await
         .expect("chain identity");
 
@@ -39,7 +39,7 @@ async fn rejects_chain_id_mismatch_without_leaking_source_details() {
     let client = client_for(&server.url, "primary", "mainnet");
 
     let error = client
-        .chain_identity(&chain_request("mainnet", 1))
+        .chain_identity(&chain_request())
         .await
         .expect_err("source mismatch");
 
@@ -68,7 +68,7 @@ async fn classifies_http_status_failure_without_body() {
     let client = client_for(&server.url, "primary", "mainnet");
 
     let error = client
-        .chain_identity(&chain_request("mainnet", 1))
+        .chain_identity(&chain_request())
         .await
         .expect_err("provider failure");
     let rendered = format!("{error:?} {error}");
@@ -91,7 +91,7 @@ async fn classifies_json_rpc_failure_without_message() {
     let client = client_for(&server.url, "primary", "mainnet");
 
     let error = client
-        .chain_identity(&chain_request("mainnet", 1))
+        .chain_identity(&chain_request())
         .await
         .expect_err("provider failure");
     let rendered = format!("{error:?} {error}");
@@ -334,7 +334,7 @@ async fn supports_legacy_fee_source_without_eip1559_methods() {
 }
 
 #[test]
-fn route_binding_validation_does_not_require_guard_or_live_io() {
+fn network_binding_validation_does_not_require_guard_or_live_io() {
     let client = raw_client_for("http://127.0.0.1:1", "primary", "mainnet");
 
     client
@@ -342,7 +342,7 @@ fn route_binding_validation_does_not_require_guard_or_live_io() {
         .expect("route binding");
 
     let missing = client
-        .validate_route_binding(&EvmNetworkId::new("sepolia").expect("network"))
+        .validate_network_binding(&network_binding("sepolia", 1))
         .expect_err("missing route");
     assert_eq!(missing, EvmTransportError::RouteUnavailable);
 }
@@ -457,7 +457,7 @@ async fn ordered_policy_falls_back_after_request_failure() {
     .expect("network binding");
 
     let response = client
-        .chain_identity(&chain_request("mainnet", 1))
+        .chain_identity(&chain_request())
         .await
         .expect("fallback response");
 
@@ -500,7 +500,7 @@ fn network_binding(network_id: &str, expected_chain_id: u64) -> EvmNetworkBindin
     .expect("network binding")
 }
 
-fn chain_request(_network_id: &str, _expected_chain_id: u64) -> EvmChainIdentityRequest {
+fn chain_request() -> EvmChainIdentityRequest {
     EvmChainIdentityRequest::new()
 }
 

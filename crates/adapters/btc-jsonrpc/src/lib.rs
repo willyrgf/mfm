@@ -10,8 +10,9 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use mfm_btc_capabilities::{
-    BitcoinNetworkTag, BtcCapabilityError, BtcCapabilityFuture, BtcChainHeadReadProvider,
-    BtcChainHeadRequest, BtcChainHeadResponse, BtcNetworkId, BtcSourceBinding, BtcSourceIdentity,
+    BitcoinNetworkTag, BtcBlockHash, BtcCapabilityError, BtcCapabilityFuture,
+    BtcChainHeadReadProvider, BtcChainHeadRequest, BtcChainHeadResponse, BtcFinality, BtcHeadKind,
+    BtcNetworkId, BtcSourceBinding, BtcSourceIdentity, BtcSourceStatus, RedactedBtcSourceEvidence,
 };
 use mfm_events::v1 as events;
 use mfm_fact_capabilities::{
@@ -19,6 +20,7 @@ use mfm_fact_capabilities::{
     FactQueryReceiptTrustRootMaterial,
 };
 use mfm_program::{ManagedWriteState, MfmFactType, StateSpec, ValidatedConfig};
+use mfm_replay::v1 as replay;
 use mfm_runtime::{
     load_launch_config, load_materialized_struct_input, load_runner_config,
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
@@ -28,14 +30,15 @@ use mfm_runtime::{
 };
 use mfm_states_btc::{
     btc_jsonrpc_adapter_kind, btc_jsonrpc_adapter_version, chain_head_fact_visibility,
-    collector_checkpoint_fact_visibility, BtcFactRecordCapability, CollectorCheckpointFact,
-    CollectorCheckpointResponse, LoadedCollectorCheckpoint, ObserveBtcChainHeadConfig,
-    ObserveBtcChainHeadInput, ObserveBtcChainHeadState, QueryCollectorCheckpointConfig,
-    QueryCollectorCheckpointInput, QueryCollectorCheckpointState, RecordBtcChainHeadFactState,
-    RecordCollectorCheckpointState,
+    collector_checkpoint_fact_visibility, BtcChainHeadObservation, BtcFactRecordCapability,
+    CollectorCheckpointFact, CollectorCheckpointResponse, LoadedCollectorCheckpoint,
+    ObserveBtcChainHeadConfig, ObserveBtcChainHeadInput, ObserveBtcChainHeadState,
+    QueryCollectorCheckpointConfig, QueryCollectorCheckpointInput, QueryCollectorCheckpointState,
+    RecordBtcChainHeadFactState, RecordCollectorCheckpointState,
 };
 use mfm_store::v1 as store;
-use mfm_values::MfmValue;
+use mfm_values::{MfmConfig, MfmValue};
+use serde::de::DeserializeOwned;
 
 const READ_FACTORY: &str = "read_external";
 const MANAGED_WRITE_FACTORY: &str = "managed_platform_write";
@@ -454,9 +457,151 @@ pub fn replay_loaded_checkpoint_from_evidence(
     evidence: &mfm_facts::FactQueryEvidence,
     response: Option<CollectorCheckpointResponse>,
 ) -> Result<LoadedCollectorCheckpoint> {
+    let request = config
+        .request()
+        .map_err(|_| BtcJsonRpcAdapterError::ReplayEvidenceMismatch)?;
+    if evidence.plan() != request.plan() {
+        return Err(BtcJsonRpcAdapterError::ReplayEvidenceMismatch);
+    }
     config
         .loaded_checkpoint_from_replay_evidence(evidence, response)
         .map_err(|_| BtcJsonRpcAdapterError::ReplayEvidenceMismatch)
+}
+
+/// Verifies Bitcoin JSON-RPC replay evidence when present in a broker stream.
+///
+/// Returns `Ok(false)` when the stream contains no Bitcoin chain-head observation outputs.
+pub fn verify_btc_jsonrpc_replay(broker: &replay::ReplayBroker) -> replay::Result<bool> {
+    let state_kind = ObserveBtcChainHeadState::kind().map_err(replay_adapter_error)?;
+    let state_version = ObserveBtcChainHeadState::version().map_err(replay_adapter_error)?;
+    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
+        Ok(node.state_kind == state_kind && node.state_version == state_version)
+    })?;
+    for frame in &frames {
+        verify_btc_chain_head_observation_replay(broker, frame)?;
+    }
+    Ok(!frames.is_empty())
+}
+
+fn verify_btc_chain_head_observation_replay(
+    broker: &replay::ReplayBroker,
+    frame: &replay::ProducedCellReplayFrame,
+) -> replay::Result<()> {
+    let config: ObserveBtcChainHeadConfig = replay_node_config(broker, &frame.node)?;
+    let binding = chain_head_binding(&config).map_err(replay_adapter_error)?;
+    let request = chain_head_request(&config).map_err(replay_adapter_error)?;
+    let output: BtcChainHeadObservation =
+        serde_json::from_slice(&frame.artifact_bytes).map_err(replay_json_error)?;
+    let response = replay_capability_response_from_observation(&binding, &output)?;
+    recorded_chain_head_response(&binding, &request, &response).map_err(replay_adapter_error)?;
+    Ok(())
+}
+
+fn replay_capability_response_from_observation(
+    binding: &BtcSourceBinding,
+    output: &BtcChainHeadObservation,
+) -> replay::Result<BtcChainHeadResponse> {
+    let subject = output.subject();
+    let response = output.response();
+    if subject.network() != binding.network_id().as_str()
+        || subject.bitcoin_network() != binding.bitcoin_network().as_str()
+        || subject.semantic_source_identity() != binding.source_identity().as_str()
+        || output.source_read_count() != 1
+    {
+        return Err(replay_btc_mismatch(
+            "Bitcoin observation output did not match certified source binding",
+        ));
+    }
+    let head_kind = replay_head_kind(subject.head_kind())?;
+    let finality = replay_finality(response.finality_policy(), response.confirmation_depth())?;
+    let source_status = replay_source_status(response.observed_source_status())?;
+    let evidence = RedactedBtcSourceEvidence::from_binding(
+        binding,
+        response.observed_bitcoin_network(),
+        source_status,
+    )
+    .map_err(replay_adapter_error)?;
+    Ok(BtcChainHeadResponse {
+        evidence,
+        head_kind,
+        finality,
+        block_height: response.block_height(),
+        block_hash: BtcBlockHash::new(response.block_hash()).map_err(replay_adapter_error)?,
+        provider_time_unix_ms: response.provider_time_unix_ms(),
+    })
+}
+
+fn replay_head_kind(value: &str) -> replay::Result<BtcHeadKind> {
+    match value {
+        "best" => Ok(BtcHeadKind::Best),
+        "confirmed" => Ok(BtcHeadKind::Confirmed),
+        _ => Err(replay_btc_mismatch("Bitcoin replay head kind was invalid")),
+    }
+}
+
+fn replay_finality(value: &str, confirmation_depth: Option<u64>) -> replay::Result<BtcFinality> {
+    match (value, confirmation_depth) {
+        ("best_available", None) => Ok(BtcFinality::BestAvailable),
+        ("confirmations", Some(depth)) => {
+            BtcFinality::confirmations(depth).map_err(replay_adapter_error)
+        }
+        _ => Err(replay_btc_mismatch("Bitcoin replay finality was invalid")),
+    }
+}
+
+fn replay_source_status(value: &str) -> replay::Result<BtcSourceStatus> {
+    match value {
+        "synced" => Ok(BtcSourceStatus::Synced),
+        "initial_block_download" => Ok(BtcSourceStatus::InitialBlockDownload),
+        "unknown" => Ok(BtcSourceStatus::Unknown),
+        _ => Err(replay_btc_mismatch(
+            "Bitcoin replay source status was invalid",
+        )),
+    }
+}
+
+fn replay_node_config<T>(
+    broker: &replay::ReplayBroker,
+    node: &mfm_spec::v1::NodeSpec,
+) -> replay::Result<T>
+where
+    T: MfmConfig + DeserializeOwned,
+{
+    let requirement = store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::RunConfig,
+        artifact_id: node.config_ref.artifact_id.clone(),
+        digest: Some(node.config_ref.digest.clone()),
+        byte_len: Some(node.config_ref.byte_len),
+        media_type: Some(node.config_ref.media_type.clone()),
+        schema_id: Some(node.config_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: Some(events::ArtifactRole::TypedConfig),
+    };
+    let artifact = broker.retained_artifact(&requirement)?;
+    let config: T = serde_json::from_slice(&artifact.artifact_bytes).map_err(replay_json_error)?;
+    ValidatedConfig::new(config)
+        .map(ValidatedConfig::into_inner)
+        .map_err(replay_adapter_error)
+}
+
+fn replay_json_error(error: serde_json::Error) -> replay::ReplayError {
+    replay::ReplayError::new(
+        replay::ReplayErrorKind::CertifiedEvidenceMismatch,
+        error.to_string(),
+    )
+}
+
+fn replay_adapter_error(error: impl std::fmt::Display) -> replay::ReplayError {
+    replay::ReplayError::new(
+        replay::ReplayErrorKind::CertifiedEvidenceMismatch,
+        error.to_string(),
+    )
+}
+
+fn replay_btc_mismatch(message: &'static str) -> replay::ReplayError {
+    replay::ReplayError::new(replay::ReplayErrorKind::CertifiedEvidenceMismatch, message)
 }
 
 fn fact_query_trust_root(

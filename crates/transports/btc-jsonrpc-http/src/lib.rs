@@ -81,29 +81,23 @@ pub struct BtcJsonRpcClient {
     next_id: AtomicU64,
 }
 
-/// Boxed future returned by Bitcoin JSON-RPC transport abstractions.
-pub type BtcTransportFuture<'a, T> =
+type BtcTransportFuture<'a, T> =
     Pin<Box<dyn Future<Output = std::result::Result<T, BtcRpcError>> + Send + 'a>>;
 
-/// Minimal Bitcoin JSON-RPC transport surface needed by the capability provider.
-pub trait BtcJsonRpcChainHeadTransport: Send + Sync {
-    /// Reads current blockchain summary information.
+trait BtcJsonRpcChainHeadTransport: Send + Sync {
     fn get_blockchain_info<'a>(&'a self) -> BtcTransportFuture<'a, BlockchainInfo>;
 
-    /// Reads the block hash for a selected height.
-    fn get_block_hash<'a>(&'a self, height: u64) -> BtcTransportFuture<'a, String>;
+    fn get_block_hash<'a>(
+        &'a self,
+        verified: &'a VerifiedBtcCall,
+        height: u64,
+    ) -> BtcTransportFuture<'a, String>;
 
-    /// Reads verbose block-header metadata for a block hash.
     fn get_block_header<'a>(
         &'a self,
+        verified: &'a VerifiedBtcCall,
         block_hash: &'a str,
     ) -> BtcTransportFuture<'a, BlockHeaderInfo>;
-
-    /// Scans the UTXO set for a single address.
-    fn scan_tx_out_set<'a>(
-        &'a self,
-        address: &'a str,
-    ) -> BtcTransportFuture<'a, ScanTxOutSetResult>;
 }
 
 impl BtcJsonRpcChainHeadTransport for BtcJsonRpcClient {
@@ -111,22 +105,22 @@ impl BtcJsonRpcChainHeadTransport for BtcJsonRpcClient {
         Box::pin(async move { BtcJsonRpcClient::get_blockchain_info(self).await })
     }
 
-    fn get_block_hash<'a>(&'a self, height: u64) -> BtcTransportFuture<'a, String> {
-        Box::pin(async move { BtcJsonRpcClient::get_block_hash(self, height).await })
+    fn get_block_hash<'a>(
+        &'a self,
+        verified: &'a VerifiedBtcCall,
+        height: u64,
+    ) -> BtcTransportFuture<'a, String> {
+        Box::pin(async move { BtcJsonRpcClient::get_block_hash(self, verified, height).await })
     }
 
     fn get_block_header<'a>(
         &'a self,
+        verified: &'a VerifiedBtcCall,
         block_hash: &'a str,
     ) -> BtcTransportFuture<'a, BlockHeaderInfo> {
-        Box::pin(async move { BtcJsonRpcClient::get_block_header(self, block_hash).await })
-    }
-
-    fn scan_tx_out_set<'a>(
-        &'a self,
-        address: &'a str,
-    ) -> BtcTransportFuture<'a, ScanTxOutSetResult> {
-        Box::pin(async move { BtcJsonRpcClient::scan_tx_out_set(self, address).await })
+        Box::pin(
+            async move { BtcJsonRpcClient::get_block_header(self, verified, block_hash).await },
+        )
     }
 }
 
@@ -141,7 +135,19 @@ pub struct BtcJsonRpcRouter {
 
 impl BtcJsonRpcRouter {
     /// Creates a router over JSON-RPC transports keyed by semantic source identity.
-    pub fn new(routes: BTreeMap<BtcSourceIdentity, Arc<dyn BtcJsonRpcChainHeadTransport>>) -> Self {
+    pub fn new(routes: BTreeMap<BtcSourceIdentity, Arc<BtcJsonRpcClient>>) -> Self {
+        Self {
+            routes: routes
+                .into_iter()
+                .map(|(source, client)| (source, client as Arc<dyn BtcJsonRpcChainHeadTransport>))
+                .collect(),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_for_transport(
+        routes: BTreeMap<BtcSourceIdentity, Arc<dyn BtcJsonRpcChainHeadTransport>>,
+    ) -> Self {
         Self { routes }
     }
 
@@ -224,10 +230,10 @@ impl BtcJsonRpcSourceProvider {
         verified: &VerifiedBtcCall,
         request: &BtcChainHeadRequest,
     ) -> mfm_btc_capabilities::Result<BtcChainHeadResponse> {
-        let (height, hash) = selected_head(&*verified.transport, &verified.info, request).await?;
+        let (height, hash) = selected_head(verified, request).await?;
         let header = verified
             .transport
-            .get_block_header(hash.as_str())
+            .get_block_header(verified, hash.as_str())
             .await
             .map_err(|error| btc_rpc_provider_error("getblockheader", error))?;
         verify_header(&header, height, hash.as_str())?;
@@ -596,13 +602,6 @@ struct JsonRpcResponse {
     error: Option<JsonRpcErrorObj>,
 }
 
-#[derive(Deserialize)]
-struct JsonRpcRawResponse<'a> {
-    #[serde(borrow)]
-    result: Option<&'a RawValue>,
-    error: Option<JsonRpcErrorObj>,
-}
-
 /// JSON-RPC 2.0 error object.
 #[derive(Deserialize)]
 struct JsonRpcErrorObj {
@@ -728,26 +727,6 @@ impl BtcJsonRpcClient {
         rpc_resp.result.ok_or(BtcRpcError::MissingResult)
     }
 
-    async fn rpc_call_raw_scan_result(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<ScanTxOutSetResult, BtcRpcError> {
-        let text = self.rpc_call_text(method, params).await?;
-        let rpc_resp: JsonRpcRawResponse =
-            serde_json::from_str(&text).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))?;
-
-        if let Some(err) = rpc_resp.error {
-            return Err(BtcRpcError::JsonRpcError {
-                code: err.code,
-                message: diagnostic_message(&err.message),
-            });
-        }
-
-        let result = rpc_resp.result.ok_or(BtcRpcError::MissingResult)?;
-        serde_json::from_str(result.get()).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))
-    }
-
     async fn rpc_call_text(
         &self,
         method: &str,
@@ -790,64 +769,48 @@ impl BtcJsonRpcClient {
         Ok(text)
     }
 
-    /// Calls `getblockchaininfo` and returns the current chain state.
-    pub async fn get_blockchain_info(&self) -> Result<BlockchainInfo, BtcRpcError> {
+    async fn get_blockchain_info(&self) -> Result<BlockchainInfo, BtcRpcError> {
         let result = self
             .rpc_call("getblockchaininfo", serde_json::json!([]))
             .await?;
         serde_json::from_value(result).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))
     }
 
-    /// Calls `getblockhash` for the given block height.
-    pub async fn get_block_hash(&self, height: u64) -> Result<String, BtcRpcError> {
+    async fn get_block_hash(
+        &self,
+        _verified: &VerifiedBtcCall,
+        height: u64,
+    ) -> Result<String, BtcRpcError> {
         let result = self
             .rpc_call("getblockhash", serde_json::json!([height]))
             .await?;
         serde_json::from_value(result).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))
     }
 
-    /// Calls `getblockheader` with verbose output for the given block hash.
-    pub async fn get_block_header(&self, block_hash: &str) -> Result<BlockHeaderInfo, BtcRpcError> {
+    async fn get_block_header(
+        &self,
+        _verified: &VerifiedBtcCall,
+        block_hash: &str,
+    ) -> Result<BlockHeaderInfo, BtcRpcError> {
         let result = self
             .rpc_call("getblockheader", serde_json::json!([block_hash, true]))
             .await?;
         serde_json::from_value(result).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))
     }
-
-    /// Calls `scantxoutset` for a single address descriptor.
-    ///
-    /// Uses `"start"` action to perform a fresh scan. The descriptor uses `addr(ADDRESS)` format.
-    pub async fn scan_tx_out_set(&self, address: &str) -> Result<ScanTxOutSetResult, BtcRpcError> {
-        let params = serde_json::json!([
-            "start",
-            [{ "desc": format!("addr({address})") }]
-        ]);
-        self.rpc_call_raw_scan_result("scantxoutset", params).await
-    }
-
-    /// Returns the total balance in satoshis for a single address.
-    ///
-    /// Convenience method that calls [`scan_tx_out_set`](Self::scan_tx_out_set) and converts
-    /// the BTC amount to satoshis.
-    pub async fn address_balance_sats(&self, address: &str) -> Result<u64, BtcRpcError> {
-        let result = self.scan_tx_out_set(address).await?;
-        Ok(result.total_amount_sats)
-    }
 }
 
 async fn selected_head(
-    transport: &dyn BtcJsonRpcChainHeadTransport,
-    info: &BlockchainInfo,
+    verified: &VerifiedBtcCall,
     request: &BtcChainHeadRequest,
 ) -> mfm_btc_capabilities::Result<(u64, BtcBlockHash)> {
     match request.selection().finality() {
         BtcFinality::BestAvailable => {
-            let hash = provider_block_hash("getblockchaininfo", &info.bestblockhash)?;
-            Ok((info.blocks, hash))
+            let hash = provider_block_hash("getblockchaininfo", &verified.info.bestblockhash)?;
+            Ok((verified.info.blocks, hash))
         }
         BtcFinality::Confirmations(confirmations) => {
             let confirmations = confirmations.get();
-            if info.blocks < confirmations {
+            if verified.info.blocks < confirmations {
                 return Err(btc_provider_failure(
                     btc_operation_diagnostic(
                         ProviderDiagnosticCode::OperationIncomplete,
@@ -855,7 +818,7 @@ async fn selected_head(
                     )
                     .with_field(
                         diagnostic_id("source_height"),
-                        ProviderDiagnosticValue::U64(info.blocks),
+                        ProviderDiagnosticValue::U64(verified.info.blocks),
                     )
                     .with_field(
                         diagnostic_id("confirmations"),
@@ -863,9 +826,10 @@ async fn selected_head(
                     ),
                 ));
             }
-            let height = info.blocks - confirmations;
-            let hash = transport
-                .get_block_hash(height)
+            let height = verified.info.blocks - confirmations;
+            let hash = verified
+                .transport
+                .get_block_hash(verified, height)
                 .await
                 .map_err(|error| btc_rpc_provider_error("getblockhash", error))?;
             Ok((height, provider_block_hash("getblockhash", &hash)?))
@@ -979,7 +943,6 @@ mod tests {
         blockchain_info_calls: AtomicU64,
         block_hash_calls: AtomicU64,
         block_header_calls: AtomicU64,
-        scan_calls: AtomicU64,
     }
 
     impl MockBtcTransport {
@@ -990,7 +953,6 @@ mod tests {
                 blockchain_info_calls: AtomicU64::new(0),
                 block_hash_calls: AtomicU64::new(0),
                 block_header_calls: AtomicU64::new(0),
-                scan_calls: AtomicU64::new(0),
             }
         }
 
@@ -1022,7 +984,11 @@ mod tests {
             })
         }
 
-        fn get_block_hash<'a>(&'a self, _height: u64) -> BtcTransportFuture<'a, String> {
+        fn get_block_hash<'a>(
+            &'a self,
+            _verified: &'a VerifiedBtcCall,
+            _height: u64,
+        ) -> BtcTransportFuture<'a, String> {
             Box::pin(async move {
                 self.block_hash_calls.fetch_add(1, Ordering::Relaxed);
                 Ok(BEST_BLOCK_HASH.to_string())
@@ -1031,6 +997,7 @@ mod tests {
 
         fn get_block_header<'a>(
             &'a self,
+            _verified: &'a VerifiedBtcCall,
             block_hash: &'a str,
         ) -> BtcTransportFuture<'a, BlockHeaderInfo> {
             Box::pin(async move {
@@ -1039,22 +1006,6 @@ mod tests {
                     hash: block_hash.to_string(),
                     height: 840_000,
                     time: 1_713_571_767,
-                })
-            })
-        }
-
-        fn scan_tx_out_set<'a>(
-            &'a self,
-            _address: &'a str,
-        ) -> BtcTransportFuture<'a, ScanTxOutSetResult> {
-            Box::pin(async move {
-                self.scan_calls.fetch_add(1, Ordering::Relaxed);
-                Ok(ScanTxOutSetResult {
-                    success: true,
-                    height: 840_000,
-                    bestblock: BEST_BLOCK_HASH.to_string(),
-                    total_amount_sats: 42,
-                    unspents: Vec::new(),
                 })
             })
         }
@@ -1082,7 +1033,7 @@ mod tests {
             source_identity,
             transport as Arc<dyn BtcJsonRpcChainHeadTransport>,
         );
-        BtcJsonRpcRouter::new(routes)
+        BtcJsonRpcRouter::new_for_transport(routes)
     }
 
     fn provider_with(
@@ -1221,7 +1172,6 @@ mod tests {
         assert_eq!(transport.blockchain_info_calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.block_hash_calls.load(Ordering::Relaxed), 0);
         assert_eq!(transport.block_header_calls.load(Ordering::Relaxed), 0);
-        assert_eq!(transport.scan_calls.load(Ordering::Relaxed), 0);
         assert!(!rendered.contains("http://"));
         assert!(!rendered.contains(concat!("Author", "ization")));
         assert!(!rendered.contains("secret"));
@@ -1274,7 +1224,29 @@ mod tests {
 
         assert!(matches!(error, BtcCapabilityError::SourceMismatch { .. }));
         assert_eq!(transport.blockchain_info_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(transport.scan_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn balance_unsupported_after_source_proof_without_operation_rpc() {
+        let transport = Arc::new(MockBtcTransport::new("main"));
+        let provider = provider_with(source_identity(), transport.clone());
+        let request = balance_request();
+
+        let error = provider
+            .read_balance(&request)
+            .await
+            .expect_err("balance read unsupported");
+
+        let BtcCapabilityError::Provider { diagnostic } = error else {
+            panic!("expected provider diagnostic");
+        };
+        assert_eq!(
+            diagnostic.stable_error_code(),
+            "bitcoin_unsupported_operation"
+        );
+        assert_eq!(transport.blockchain_info_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.block_hash_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(transport.block_header_calls.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

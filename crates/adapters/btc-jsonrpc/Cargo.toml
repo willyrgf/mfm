@@ -23,7 +23,9 @@ mfm-fact-capabilities = { path = "../../fact-capabilities" }
 mfm-facts = { path = "../../kernel/facts" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
+mfm-replay = { path = "../../kernel/replay" }
 mfm-runtime = { path = "../../kernel/runtime" }
+mfm-spec = { path = "../../kernel/spec" }
 mfm-store = { path = "../../kernel/store" }
 mfm-states-btc = { path = "../../states/btc" }
 mfm-values = { path = "../../kernel/values" }
@@ -31,6 +33,4 @@ mfm-values = { path = "../../kernel/values" }
 [dev-dependencies]
 ed25519-dalek = { workspace = true }
 mfm-store = { path = "../../kernel/store", features = ["test-support"] }
-mfm-spec = { path = "../../kernel/spec" }
-mfm-transports-btc-jsonrpc-http = { path = "../../transports/btc-jsonrpc-http" }
 tokio = { workspace = true }

@@ -148,6 +148,24 @@ fn transport_provider_boundaries_reject_old_source_binding_surfaces() {
     }
 
     let evm_transport = include_str!("../../transports/evm/src/lib.rs");
+    assert!(
+        !evm_transport.contains("pub fn validate_route_binding"),
+        "EVM transport must not expose route-only source validation"
+    );
+    assert!(
+        !evm_transport.contains("async fn rpc_call("),
+        "EVM raw operation RPC must be split into verified/source-probe paths"
+    );
+    assert!(
+        !evm_transport.contains("binding: &EvmNetworkBinding,\n        request: &Evm"),
+        "EVM operation helpers must require VerifiedEvmCall, not source bindings"
+    );
+    assert!(
+        evm_transport
+            .contains("verified_rpc_call(\n        &self,\n        verified: &VerifiedEvmCall"),
+        "EVM operation RPC helper must require a private verified-call token"
+    );
+    assert_no_generic_evm_source_rpc_helper(evm_transport);
     for provider_trait in [
         "EvmChainIdentityProvider",
         "EvmBlockReadProvider",
@@ -172,6 +190,77 @@ fn transport_provider_boundaries_reject_old_source_binding_surfaces() {
             && evm_transport.contains("impl $trait for EvmJsonRpcNetworkProvider"),
         "EVM transport provider impl macro must target the bound network provider"
     );
+
+    let btc_transport = include_str!("../../transports/btc-jsonrpc-http/src/lib.rs");
+    for forbidden in [
+        "pub trait BtcJsonRpcChainHeadTransport",
+        "pub type BtcTransportFuture",
+        "pub async fn get_blockchain_info",
+        "pub async fn get_block_hash",
+        "pub async fn get_block_header",
+        "pub async fn scan_tx_out_set",
+        "pub async fn address_balance_sats",
+    ] {
+        assert!(
+            !btc_transport.contains(forbidden),
+            "BTC transport must not expose raw live JSON-RPC bypass surface {forbidden}"
+        );
+    }
+    for provider_trait in ["BtcChainHeadReadProvider", "BtcBalanceReadProvider"] {
+        for raw_type in ["BtcJsonRpcClient", "BtcJsonRpcRouter"] {
+            assert!(
+                !btc_transport.contains(&format!("impl {provider_trait} for {raw_type}")),
+                "raw BTC type {raw_type} must not implement {provider_trait}"
+            );
+        }
+    }
+    assert_btc_operation_io_requires_verified_call(btc_transport);
+
+    let app = include_str!("../src/lib.rs");
+    assert!(
+        app.contains("mfm_adapters_btc_jsonrpc::verify_btc_jsonrpc_replay(&broker)"),
+        "app replay must wire the BTC recorded-evidence verifier"
+    );
+}
+
+fn assert_btc_operation_io_requires_verified_call(source: &str) {
+    for operation in ["get_block_hash", "get_block_header"] {
+        let signature = format!("fn {operation}");
+        for (offset, _) in source.match_indices(&signature) {
+            let args = function_args(source, offset);
+            assert!(
+                args.contains("VerifiedBtcCall"),
+                "BTC operation helper {operation} must require VerifiedBtcCall"
+            );
+        }
+    }
+
+    for (offset, _) in source.match_indices("fn selected_head") {
+        let args = function_args(source, offset);
+        assert!(
+            args.contains("VerifiedBtcCall")
+                && !args.contains("BtcJsonRpcChainHeadTransport")
+                && !args.contains("BlockchainInfo"),
+            "BTC selected_head must use VerifiedBtcCall instead of raw transport or probe output"
+        );
+    }
+}
+
+fn assert_no_generic_evm_source_rpc_helper(source: &str) {
+    assert!(
+        !source.contains("source_probe_rpc_call"),
+        "EVM source-probe IO must stay closed to eth_chainId and must not expose a generic RPC helper"
+    );
+
+    for (offset, _) in source.match_indices("fn ") {
+        let args = function_args(source, offset);
+        assert!(
+            !(args.contains("source: &EvmRuntimeSource")
+                && args.contains("method: &'static str")
+                && args.contains("params: Value")),
+            "EVM operation RPC helpers must not accept source + method + params without VerifiedEvmCall"
+        );
+    }
 }
 
 fn assert_no_source_bearing_request_constructors(
@@ -192,6 +281,27 @@ fn assert_no_source_bearing_request_constructors(
             }
         }
     }
+}
+
+fn function_args(source: &str, offset: usize) -> &str {
+    let Some(open_relative) = source[offset..].find('(') else {
+        return "";
+    };
+    let start = offset + open_relative + 1;
+    let mut depth = 1_usize;
+    for (relative, ch) in source[start..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[start..start + relative];
+                }
+            }
+            _ => {}
+        }
+    }
+    &source[start..source.len().min(start + 240)]
 }
 
 fn constructor_args<'a>(source: &'a str, offset: usize, constructor: &str) -> &'a str {
