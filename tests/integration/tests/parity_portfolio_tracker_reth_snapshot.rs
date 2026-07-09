@@ -154,7 +154,7 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
         .expect("public output json");
     let report = &public_output["report"];
     assert_eq!(report["portfolio_id"], "reth-eth-only");
-    assert_eq!(report["error_count"], 0);
+    // report-only cutover: soft error_count removed
     let report_wallet = &report["wallet_summaries"][0];
     let report_wallet_usd = find_quote_total(&report_wallet["totals_by_quote"], "USD");
     let report_portfolio_usd = find_quote_total(&report["totals_by_quote"], "USD");

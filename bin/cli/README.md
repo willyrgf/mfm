@@ -445,6 +445,11 @@ mfm_cli run start --op portfolio_snapshot --config portfolio.toml
 mfm_cli run start --op evm_contract_lifecycle --config lifecycle.toml
 ```
 
+`portfolio_snapshot` is **report-only**: it selects Platform holding facts (BTC/EVM native at
+cutover) under the network-coherent policy and hard-fails when required facts are missing. It does
+not crawl live chain balances. Collect balances into Platform facts first (collector ops), then run
+the report. Soft partial success (`error_count`) is not part of the public report surface.
+
 EVM contract entry-point config shapes and import authority rules are documented in
 [`../../docs/evm-contract-lifecycle.md`](../../docs/evm-contract-lifecycle.md).
 

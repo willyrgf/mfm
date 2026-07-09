@@ -569,14 +569,14 @@ pub async fn connect_production_run_services(
     ));
     let btc_configured = runtime_config.btc_configured()?;
     let store = connect_production_run_store_with_optional_fact_query_signer(database_url).await?;
-    let fact_index =
-        if btc_configured && store.store_authority().fact_receipt_trust_root().is_some() {
-            Some(btc_collector::production_fact_index_read_provider(
-                store.clone(),
-            )?)
-        } else {
-            None
-        };
+    // Portfolio report and BTC collectors both need Platform/Control fact-index when trust root exists.
+    let fact_index = if store.store_authority().fact_receipt_trust_root().is_some() {
+        Some(btc_collector::production_fact_index_read_provider(
+            store.clone(),
+        )?)
+    } else {
+        None
+    };
     let runners = production_runner_registry_inner(
         Arc::new(store.clone()),
         fact_index,
@@ -666,11 +666,14 @@ fn production_runner_registry_inner(
 ) -> Result<ErasedRunnerRegistry, AppError> {
     let mut registry = ErasedRunnerRegistry::new();
     let portfolio_artifacts: Arc<dyn store::RetainedArtifactReadProvider> = artifacts.clone();
-    let portfolio_transport: Arc<dyn mfm_adapters_portfolio::PortfolioTransportFactory> =
-        runtime_config.clone();
+    // Report-only portfolio requires a fact-index provider. When none is wired (tests without
+    // store authority), bind an unavailable provider so registration succeeds and live runs fail closed.
+    let portfolio_fact_index: Arc<dyn mfm_fact_capabilities::FactIndexReadProvider> = fact_index
+        .clone()
+        .unwrap_or_else(|| Arc::new(UnavailableFactIndexReadProvider));
     let portfolio_capabilities = mfm_adapters_portfolio::PortfolioRunnerCapabilities::new(
         portfolio_artifacts,
-        portfolio_transport,
+        portfolio_fact_index,
     );
     mfm_adapters_portfolio::register_portfolio_runners(&mut registry, portfolio_capabilities)?;
     let source_run_registry = production_certification_registry()?;
@@ -689,6 +692,24 @@ fn production_runner_registry_inner(
     )?;
     mfm_transports_proof::register_deterministic_proof_runners(&mut registry)?;
     Ok(registry)
+}
+
+/// Fact-index stub used when process assembly has no store trust root.
+struct UnavailableFactIndexReadProvider;
+
+impl mfm_fact_capabilities::FactIndexReadProvider for UnavailableFactIndexReadProvider {
+    fn read_fact_index<'a>(
+        &'a self,
+        _request: &'a mfm_fact_capabilities::FactIndexReadRequest,
+    ) -> mfm_fact_capabilities::FactIndexReadFuture<'a> {
+        Box::pin(async {
+            Err(
+                mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(
+                    "Platform fact-index is not configured for this process",
+                ),
+            )
+        })
+    }
 }
 
 /// Builds an adapter-facing artifact read provider from a retained artifact reader.

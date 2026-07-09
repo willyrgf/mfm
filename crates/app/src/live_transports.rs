@@ -171,47 +171,6 @@ impl LiveTransportRuntime {
     }
 }
 
-impl mfm_adapters_portfolio::PortfolioTransportFactory for LiveTransportRuntime {
-    fn validate_evm_network_binding(&self, binding: &EvmNetworkBinding) -> mfm_runtime::Result<()> {
-        LiveTransportRuntime::validate_evm_network_binding(self, binding)
-    }
-
-    fn bind_evm_network(
-        &self,
-        binding: EvmNetworkBinding,
-    ) -> mfm_evm_capabilities::Result<Arc<dyn mfm_adapters_portfolio::PortfolioEvmProvider>> {
-        self.evm_client()
-            .map_err(portfolio_runtime_config_capability_error)?
-            .bind_network(binding)
-            .map(|provider| {
-                Arc::new(provider) as Arc<dyn mfm_adapters_portfolio::PortfolioEvmProvider>
-            })
-            .map_err(|error| {
-                mfm_evm_capabilities::EvmCapabilityError::provider_failure(
-                    error.into_provider_diagnostic(),
-                )
-            })
-    }
-
-    fn validate_btc_source_binding(&self, binding: &BtcSourceBinding) -> mfm_runtime::Result<()> {
-        self.btc_router()?
-            .validate_source_binding(binding)
-            .map_err(runtime_btc_capability_error)
-    }
-
-    fn bind_btc_source(
-        &self,
-        binding: BtcSourceBinding,
-    ) -> mfm_btc_capabilities::Result<Arc<dyn mfm_adapters_portfolio::PortfolioBtcProvider>> {
-        let router = self
-            .btc_router()
-            .map_err(runtime_config_btc_capability_error)?;
-        router.bind_source(binding).map(|provider| {
-            Arc::new(provider) as Arc<dyn mfm_adapters_portfolio::PortfolioBtcProvider>
-        })
-    }
-}
-
 impl mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory for LiveTransportRuntime {
     fn validate_source_binding(
         &self,
@@ -349,22 +308,6 @@ fn runtime_evm_transport_error(
     error: mfm_transports_evm::EvmTransportError,
 ) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
-}
-
-fn runtime_btc_capability_error(
-    error: mfm_btc_capabilities::BtcCapabilityError,
-) -> mfm_runtime::RuntimeError {
-    mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
-}
-
-fn portfolio_runtime_config_capability_error(
-    _error: mfm_runtime::RuntimeError,
-) -> mfm_evm_capabilities::EvmCapabilityError {
-    mfm_evm_capabilities::EvmCapabilityError::provider_failure(
-        mfm_evm_capabilities::evm_diagnostic(
-            mfm_capabilities::ProviderDiagnosticCode::ProviderConfigurationInvalid,
-        ),
-    )
 }
 
 fn runtime_config_btc_capability_error(

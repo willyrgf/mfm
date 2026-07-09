@@ -1,8 +1,7 @@
 #![warn(missing_docs)]
-//! Typed portfolio tracker workflow operation.
+//! Typed portfolio tracker workflow operation (fact-backed report-only).
 //!
-//! The portfolio tracker workflow is authored through `mfm-program` and lowers to certified typed
-//! state programs.
+//! Graph: ResolveSubjects → SelectHoldings → ResolveValuations → AssembleSnapshot → ProjectReport.
 //!
 //! # Examples
 //!
@@ -16,8 +15,6 @@
 //! # }
 //! ```
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use mfm_authored_config::{EntryPointDescriptor, TOML_JSON_AUTHORED_CONFIG_FORMATS};
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_portfolio_config::{
@@ -25,29 +22,23 @@ use mfm_portfolio_config::{
     PortfolioSnapshotConfigError,
 };
 use mfm_portfolio_model::domain_key::{
-    ObservationBatchDomainKey, ReportDomainKey, SubjectDomainKey, ValuationDomainKey, ViewDomainKey,
+    HoldingsDomainKey, ReportDomainKey, SubjectDomainKey, ValuationDomainKey,
 };
-use mfm_portfolio_model::portfolio::{NetworkConfig, PortfolioConfig};
-use mfm_portfolio_model::symbol::SymbolConfig;
-use mfm_portfolio_model::wallet::WalletConfig;
 use mfm_program::{
-    build_root_with_registries, DomainKeyedNonEmptyHandles, NoContext, Operation,
-    OperationExpansion, OperationKey, PublicOutputKey, RootBuilder, ScopeKey, StateKey,
-    TypedProgramLaunchPlan,
+    build_root_with_registries, NoContext, Operation, OperationExpansion, OperationKey,
+    PublicOutputKey, RootBuilder, ScopeKey, StateKey, TypedProgramLaunchPlan,
 };
 pub use mfm_state_portfolio::{
-    balance_reader_kind, observation_batch_id, portfolio_adapter_kind, portfolio_adapter_version,
-    AssembleSnapshotConfig, AssembleSnapshotInput, AssembleSnapshotInputHandles,
-    AssembleSnapshotState, MergeObservationsConfig, MergeObservationsState, ObservationBatch,
-    ObserveBatchConfig, ObserveBatchInput, ObserveBatchInputHandles, ObserveBatchState,
-    PinViewsConfig, PinViewsState, PortfolioOperationOutputs, PortfolioPublicOutputs,
-    PortfolioWorkflowConfig, ProjectReportConfig, ProjectReportInput, ProjectReportInputHandles,
-    ProjectReportState, ResolveSubjectsConfig, ResolveSubjectsState, ResolveValuationsConfig,
-    ResolveValuationsState,
+    balance_reader_kind, portfolio_adapter_kind, portfolio_adapter_version, AssembleSnapshotConfig,
+    AssembleSnapshotInput, AssembleSnapshotInputHandles, AssembleSnapshotState,
+    PortfolioOperationOutputs, PortfolioPublicOutputs, PortfolioWorkflowConfig, ProjectReportConfig,
+    ProjectReportInput, ProjectReportInputHandles, ProjectReportState, ResolveSubjectsConfig,
+    ResolveSubjectsState, ResolveValuationsConfig, ResolveValuationsState, SelectHoldingsConfig,
+    SelectHoldingsState, SelectedHoldings, DEFAULT_PORTFOLIO_STORE_SCOPE,
 };
 
 const PORTFOLIO_OPERATION_KIND_NAME: &str = "tracker_workflow";
-const PORTFOLIO_OPERATION_VERSION: &str = "mfm.portfolio.operation.tracker_workflow.v1";
+const PORTFOLIO_OPERATION_VERSION: &str = "mfm.portfolio.operation.tracker_workflow.v2";
 const ROOT_SCOPE: &str = "portfolio";
 const OP_KEY: &str = "portfolio_tracker";
 const PUBLIC_OUTPUT_KEY: &str = "portfolio";
@@ -98,11 +89,10 @@ impl Operation for PortfolioTrackerWorkflowOperation {
         let config = config.into_inner();
         let portfolio = config.portfolio().clone().normalized();
         let valuation_source_registry = config.valuation_source_registry().clone().normalized();
-        let networks_by_id = networks_by_id(&portfolio.networks)?;
 
         let subject_key = SubjectDomainKey::new("portfolio_subjects")
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
-        let view_key = ViewDomainKey::new("portfolio_views")
+        let holdings_key = HoldingsDomainKey::new("portfolio_holdings")
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
         let valuation_key = ValuationDomainKey::new("portfolio_valuations")
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
@@ -117,13 +107,13 @@ impl Operation for PortfolioTrackerWorkflowOperation {
             (),
             vec![subject_key],
         )?;
-        let views = builder.state_with_domain_keys::<PinViewsState, _, _>(
-            StateKey::new("pin_views")?,
+        let holdings = builder.state_with_domain_keys::<SelectHoldingsState, _, _>(
+            StateKey::new("select_holdings")?,
             NoContext,
-            PinViewsConfig::new(portfolio.networks.clone())
+            SelectHoldingsConfig::with_default_store_scope(portfolio.clone())
                 .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
-            (),
-            vec![view_key],
+            subjects.clone(),
+            vec![holdings_key],
         )?;
         let valuations = builder.state_with_domain_keys::<ResolveValuationsState, _, _>(
             StateKey::new("resolve_valuations")?,
@@ -133,50 +123,8 @@ impl Operation for PortfolioTrackerWorkflowOperation {
                 valuation_source_registry,
             )
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
-            views.clone(),
+            (),
             vec![valuation_key],
-        )?;
-
-        let mut observation_handles = Vec::new();
-        let mut seen_observation_keys = BTreeSet::new();
-        for (wallet, symbol) in observation_targets(&portfolio)? {
-            let network = networks_by_id
-                .get(symbol.network_id.as_str())
-                .copied()
-                .ok_or_else(|| {
-                    mfm_program::PlanError::Key(format!(
-                        "missing network `{}` for symbol `{}`",
-                        symbol.network_id, symbol.symbol_id
-                    ))
-                })?;
-            let batch_key = observation_batch_id(&wallet.wallet_id, &symbol.symbol_id);
-            if !seen_observation_keys.insert(batch_key.clone()) {
-                return Err(mfm_program::PlanError::DuplicateDomainKey(batch_key));
-            }
-            let observation_key = ObservationBatchDomainKey::new(batch_key.clone())
-                .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
-            let handle = builder.state_with_domain_keys::<ObserveBatchState, _, _>(
-                StateKey::new(format!("observe/{batch_key}"))?,
-                NoContext,
-                ObserveBatchConfig::new(wallet.clone(), symbol.clone(), network.clone())
-                    .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
-                ObserveBatchInputHandles {
-                    subjects: subjects.clone(),
-                    views: views.clone(),
-                    valuations: valuations.clone(),
-                },
-                vec![observation_key.clone()],
-            )?;
-            observation_handles.push((observation_key, handle));
-        }
-
-        let observations = builder.state::<MergeObservationsState, _>(
-            StateKey::new("merge_observations")?,
-            NoContext,
-            MergeObservationsConfig::new(),
-            DomainKeyedNonEmptyHandles::<ObservationBatchDomainKey, ObservationBatch>::new(
-                observation_handles,
-            )?,
         )?;
         let snapshot = builder.state::<AssembleSnapshotState, _>(
             StateKey::new("assemble_snapshot")?,
@@ -185,8 +133,8 @@ impl Operation for PortfolioTrackerWorkflowOperation {
                 .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
             AssembleSnapshotInputHandles {
                 subjects,
-                views,
-                observations,
+                holdings,
+                valuations,
             },
         )?;
         let report = builder.state_with_domain_keys::<ProjectReportState, _, _>(
@@ -210,10 +158,8 @@ mfm_certify::define_program_descriptor_registry! {
     certification: pub register_portfolio_certification_descriptors,
     states: [
         ResolveSubjectsState,
-        PinViewsState,
+        SelectHoldingsState,
         ResolveValuationsState,
-        ObserveBatchState,
-        MergeObservationsState,
         AssembleSnapshotState,
         ProjectReportState,
     ],
@@ -267,94 +213,26 @@ pub enum PortfolioSnapshotPlanError {
     Plan(#[from] mfm_program::PlanError),
 }
 
-fn networks_by_id(
-    networks: &[NetworkConfig],
-) -> mfm_program::Result<BTreeMap<&str, &NetworkConfig>> {
-    let mut by_id = BTreeMap::new();
-    for network in networks {
-        if by_id
-            .insert(network.network_id().as_str(), network)
-            .is_some()
-        {
-            return Err(mfm_program::PlanError::DuplicateDomainKey(
-                network.network_id().to_string(),
-            ));
-        }
-    }
-    Ok(by_id)
-}
-
-fn symbols_by_id(symbols: &[SymbolConfig]) -> mfm_program::Result<BTreeMap<&str, &SymbolConfig>> {
-    let mut by_id = BTreeMap::new();
-    for symbol in symbols {
-        if by_id.insert(symbol.symbol_id.as_str(), symbol).is_some() {
-            return Err(mfm_program::PlanError::DuplicateDomainKey(
-                symbol.symbol_id.to_string(),
-            ));
-        }
-    }
-    Ok(by_id)
-}
-
-fn observation_targets(
-    portfolio: &PortfolioConfig,
-) -> mfm_program::Result<Vec<(&WalletConfig, &SymbolConfig)>> {
-    let symbols = symbols_by_id(&portfolio.symbol_configs)?;
-    let mut targets = Vec::new();
-    for wallet in &portfolio.wallets {
-        for symbol_id in &wallet.symbol_ids {
-            let symbol = symbols.get(symbol_id.as_str()).copied().ok_or_else(|| {
-                mfm_program::PlanError::Key(format!(
-                    "wallet `{}` referenced unknown symbol `{symbol_id}`",
-                    wallet.wallet_id
-                ))
-            })?;
-            targets.push((wallet, symbol));
-        }
-    }
-    targets.sort_by(|left, right| {
-        (
-            left.0.wallet_id.as_str(),
-            left.1.network_id.as_str(),
-            left.1.symbol_id.as_str(),
-        )
-            .cmp(&(
-                right.0.wallet_id.as_str(),
-                right.1.network_id.as_str(),
-                right.1.symbol_id.as_str(),
-            ))
-    });
-    Ok(targets)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use mfm_certify::certify_program_draft;
     use mfm_portfolio_model::metadata::PublicMetadata;
-    use mfm_portfolio_model::portfolio::NetworkFamilyConfig;
+    use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig, PortfolioConfig};
     use mfm_portfolio_model::symbol::{
-        BalanceReaderConfig, QuoteCode, QuoteValuationConfig, SymbolKind, SymbolRole,
+        BalanceReaderConfig, QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole,
         SymbolValuationConfig, ValuationReaderConfig, ValuationSourceRegistry,
     };
     use mfm_portfolio_model::wallet::{
-        WalletImplementationConfig, WalletSubject, WalletSubjectKind,
+        WalletConfig, WalletImplementationConfig, WalletSubject, WalletSubjectKind,
     };
     use serde_json::Value;
+    use std::collections::BTreeMap;
 
     #[test]
-    fn portfolio_program_lowers_to_typed_state_contracts() {
+    fn portfolio_program_lowers_to_select_centric_graph() {
         let draft = portfolio_program_draft(sample_workflow_config()).expect("draft");
-        assert_eq!(draft.state_nodes().len(), 7);
-        assert_eq!(
-            draft
-                .state_nodes()
-                .iter()
-                .filter(|node| !node.output_domain_keys.is_empty())
-                .count(),
-            5,
-            "subject, view, valuation, observation batch, and report outputs need domain-key lineage"
-        );
+        assert_eq!(draft.state_nodes().len(), 5);
         let state_keys = draft
             .state_nodes()
             .iter()
@@ -364,58 +242,22 @@ mod tests {
             state_keys,
             [
                 "resolve_subjects",
-                "pin_views",
+                "select_holdings",
                 "resolve_valuations",
-                "observe/wallet/wallet_main/symbol/eth.native.ethereum-mainnet",
-                "merge_observations",
                 "assemble_snapshot",
                 "project_report",
             ]
+        );
+        assert!(
+            !state_keys.iter().any(|key| {
+                key.contains("pin_views")
+                    || key.contains("observe")
+                    || key.contains("merge_observations")
+            }),
+            "live pin/observe/merge must be absent: {state_keys:?}"
         );
 
         let certified = certify_program_draft(&draft).expect("certified portfolio spec");
-        assert_eq!(
-            certified
-                .envelope()
-                .spec
-                .nodes
-                .iter()
-                .map(|node| node.stable_key.as_str())
-                .collect::<Vec<_>>(),
-            [
-                "resolve_subjects",
-                "pin_views",
-                "resolve_valuations",
-                "observe/wallet/wallet_main/symbol/eth.native.ethereum-mainnet",
-                "merge_observations",
-                "assemble_snapshot",
-                "project_report",
-                "portfolio",
-                "framework/project-retention-manifest",
-                "framework/complete-run",
-                "framework/resolve-saga-terminal",
-            ]
-        );
-        assert_eq!(
-            draft
-                .public_output_spec()
-                .outputs()
-                .iter()
-                .map(|output| output.public_field_path().as_str())
-                .collect::<Vec<_>>(),
-            ["snapshot", "report"]
-        );
-        assert_eq!(
-            certified
-                .envelope()
-                .spec
-                .value_lineages
-                .iter()
-                .filter(|lineage| !lineage.domain_keys.is_empty())
-                .count(),
-            5,
-            "certified portfolio spec must retain value-lineage domain keys"
-        );
         certified.envelope().verify_hash().expect("hash verifies");
         let spec_json = certified
             .envelope()
@@ -423,23 +265,11 @@ mod tests {
             .canonical_json()
             .expect("canonical spec");
         let spec_value: Value = serde_json::from_slice(spec_json.as_bytes()).expect("spec json");
-        assert!(spec_value
-            .to_string()
-            .contains("\"ordering\":\"stable_domain_key\""));
-    }
-
-    #[test]
-    fn duplicate_observation_domain_key_is_rejected() {
-        let mut portfolio = sample_portfolio_config();
-        portfolio.wallets[0].symbol_ids.push(
-            "eth.native.ethereum-mainnet"
-                .parse()
-                .expect("valid symbol id"),
-        );
-        let config = PortfolioWorkflowConfig::new(portfolio, sample_valuation_source_registry())
-            .expect("workflow config");
-        let err = portfolio_program_draft(config).expect_err("duplicate domain key");
-        assert!(matches!(err, mfm_program::PlanError::DuplicateDomainKey(_)));
+        let as_text = spec_value.to_string();
+        assert!(as_text.contains("select_holdings"));
+        assert!(!as_text.contains("pin_views"));
+        assert!(!as_text.contains("observe_batch"));
+        assert!(!as_text.contains("merge_observations"));
     }
 
     #[test]

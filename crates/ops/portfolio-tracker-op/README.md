@@ -1,21 +1,22 @@
 # mfm-op-portfolio-tracker
 
-Typed portfolio tracking operation:
+Typed portfolio tracking operation (report-only after collectors cutover):
 
 - `mfm.portfolio.tracker_workflow`: typed operation authored through `mfm-program` and certified
   into a typed execution spec
 
-This op is a thin typed planner for the canonical multi-network portfolio snapshot flow. It wires
-typed state contracts through handles, domain-keyed fanout/fanin, non-empty observation batches,
-and typed public outputs:
+## Graph
 
-- `ResolveSubjects`
-- `PinViews`
-- `ResolveValuations`
-- `ObserveBatch`
-- `MergeObservations`
-- `AssembleSnapshot`
-- `ProjectReport`
+```text
+ResolveSubjects
+  → SelectHoldings           // Platform fact-index + network-coherent select
+  → ResolveValuations        // FixedUnitPrice only
+  → AssembleSnapshot         // network_pins from selected holding anchors
+  → ProjectReport
+```
+
+Live `PinViews` / `ObserveBatch` / `MergeObservations` are **not** part of this op. Collectors
+write Platform holding facts in separate runs; this op only reports.
 
 Runtime execution is provided by the typed runner registry in `mfm-adapters-portfolio`.
 

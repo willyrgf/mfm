@@ -61,7 +61,7 @@ async fn portfolio_snapshot_starts_to_completion() {
         snapshot["wallets"][0]["observations"][0]["values"][0]["value_dec"],
         "2.500000000000000000"
     );
-    assert_eq!(report["error_count"], 0);
+    // report-only cutover: soft error_count removed
     assert_eq!(
         report["totals_by_quote"][0]["assets_value_dec"],
         "2.500000000000000000"
