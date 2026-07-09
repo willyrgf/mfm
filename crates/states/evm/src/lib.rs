@@ -2,10 +2,30 @@
 //! Reusable EVM holding fact state contracts.
 //!
 //! This crate owns typed EVM native balance snapshot facts used by portfolio collectors
-//! and report selection. It defines no JSON-RPC transport, runtime source routing,
-//! workflow topology, CLI, REST, or app registration.
+//! and report selection, plus native balance collector observe/record states. It defines
+//! no JSON-RPC transport, runtime source routing, workflow topology, CLI, REST, or app
+//! registration.
 //!
 //! Contract lifecycle states live in `mfm-state-evm-contracts`, not here.
+
+mod native_balance_collect;
+
+pub use native_balance_collect::{
+    assemble_evm_native_balance_batch, default_native_decimals, evm_jsonrpc_adapter_kind,
+    evm_jsonrpc_adapter_version, materialize_evm_joint_tip, native_balance_record_visibility,
+    normalize_evm_native_balance_from_capability, normalize_evm_native_balance_observation,
+    require_shared_evm_joint_tip, validate_observe_evm_native_balance_config,
+    validate_resolve_evm_joint_tip_config, AssembleEvmNativeBalanceBatchConfig,
+    AssembleEvmNativeBalanceBatchInput, AssembleEvmNativeBalanceBatchInputHandles,
+    AssembleEvmNativeBalanceBatchState, EvmAddressNativeBalanceObservation,
+    EvmFactRecordCapability, EvmJointTip, EvmNativeBalanceBatchSummary,
+    ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput,
+    ObserveEvmNativeBalanceInputHandles, ObserveEvmNativeBalanceState,
+    RecordEvmNativeBalanceFactConfig, RecordEvmNativeBalanceFactInput,
+    RecordEvmNativeBalanceFactInputHandles, RecordEvmNativeBalanceFactState,
+    ResolveEvmJointTipConfig, ResolveEvmJointTipInput, ResolveEvmJointTipInputHandles,
+    ResolveEvmJointTipState,
+};
 
 use mfm_facts::{CoverageStatus, FactAudience, FactVisibility, HoldingSourceStatus};
 use mfm_program::StateError;

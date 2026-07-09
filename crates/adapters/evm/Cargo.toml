@@ -1,0 +1,30 @@
+[package]
+name = "mfm-adapters-evm"
+version = "0.1.0"
+edition = "2021"
+description = "EVM native collector adapter runners for typed workflow execution"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+
+[package.metadata.mfm]
+category = "adapter"
+
+[dependencies]
+alloy-primitives = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+mfm-canonical = { path = "../../kernel/canonical" }
+mfm-capabilities = { path = "../../kernel/capabilities" }
+mfm-events = { path = "../../kernel/events" }
+mfm-evm-capabilities = { path = "../../evm-capabilities" }
+mfm-facts = { path = "../../kernel/facts" }
+mfm-ids = { path = "../../kernel/ids" }
+mfm-program = { path = "../../kernel/program" }
+mfm-runtime = { path = "../../kernel/runtime" }
+mfm-states-evm = { path = "../../states/evm" }
+mfm-store = { path = "../../kernel/store" }
+mfm-values = { path = "../../kernel/values" }
+
+[dev-dependencies]
+serde_json = { workspace = true }

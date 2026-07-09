@@ -57,6 +57,13 @@ impl LiveTransportRuntime {
         self.btc_router_optional().map(|router| router.is_some())
     }
 
+    pub(crate) fn evm_configured(&self) -> mfm_runtime::Result<bool> {
+        Ok(self
+            .runtime_config_optional()?
+            .and_then(|config| config.evm().cloned())
+            .is_some())
+    }
+
     pub(crate) fn validate_evm_network_binding(
         &self,
         binding: &EvmNetworkBinding,

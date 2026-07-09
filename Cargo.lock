@@ -2118,6 +2118,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-adapters-evm"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-events",
+ "mfm-evm-capabilities",
+ "mfm-facts",
+ "mfm-ids",
+ "mfm-program",
+ "mfm-runtime",
+ "mfm-states-evm",
+ "mfm-store",
+ "mfm-values",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "mfm-adapters-evm-contracts"
 version = "0.1.0"
 dependencies = [
@@ -2180,6 +2201,7 @@ dependencies = [
  "ed25519-dalek",
  "k256",
  "mfm-adapters-btc-jsonrpc",
+ "mfm-adapters-evm",
  "mfm-adapters-evm-contracts",
  "mfm-adapters-portfolio",
  "mfm-artifact-capabilities",
@@ -2198,6 +2220,7 @@ dependencies = [
  "mfm-ids",
  "mfm-manual-auth",
  "mfm-op-btc-collectors",
+ "mfm-op-evm-collectors",
  "mfm-op-evm-contract-lifecycle",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
@@ -2524,6 +2547,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-op-evm-collectors"
+version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-certify",
+ "mfm-ids",
+ "mfm-program",
+ "mfm-program-derive",
+ "mfm-states-evm",
+ "mfm-values",
+ "serde",
+]
+
+[[package]]
 name = "mfm-op-evm-contract-lifecycle"
 version = "0.1.0"
 dependencies = [
@@ -2840,7 +2877,11 @@ dependencies = [
 name = "mfm-states-evm"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-effects",
+ "mfm-evm-capabilities",
  "mfm-facts",
  "mfm-ids",
  "mfm-program",

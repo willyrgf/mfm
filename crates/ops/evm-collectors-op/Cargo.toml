@@ -1,28 +1,23 @@
 [package]
-name = "mfm-states-evm"
+name = "mfm-op-evm-collectors"
 version = "0.1.0"
 edition = "2021"
-description = "Reusable EVM native holding fact state contracts for MFM"
+description = "Deterministic EVM native balance collector family operations"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
 [package.metadata.mfm]
-category = "state"
+category = "operation"
 
 [dependencies]
-alloy-primitives = { workspace = true }
 serde = { workspace = true }
-thiserror = { workspace = true }
 
 mfm-canonical = { path = "../../kernel/canonical", version = "0.1.0" }
-mfm-capabilities = { path = "../../kernel/capabilities", version = "0.1.0" }
-mfm-effects = { path = "../../kernel/effects", version = "0.1.0" }
-mfm-evm-capabilities = { path = "../../evm-capabilities", version = "0.1.0" }
-mfm-facts = { path = "../../kernel/facts", version = "0.1.0" }
+mfm-certify = { path = "../../kernel/certify", version = "0.1.0" }
 mfm-ids = { path = "../../kernel/ids", version = "0.1.0" }
 mfm-program = { path = "../../kernel/program", version = "0.1.0" }
 mfm-program-derive = { path = "../../kernel/program-derive", version = "0.1.0" }
+mfm-states-evm = { path = "../../states/evm", version = "0.1.0" }
 mfm-values = { path = "../../kernel/values", version = "0.1.0" }
 
 [dev-dependencies]
-serde_json = { workspace = true }

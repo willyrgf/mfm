@@ -72,6 +72,7 @@ pub(crate) use public_facts::{public_ref_id, query_public_facts, AppFactQueryRow
 mod btc_collector;
 mod entry_point;
 mod entry_points;
+mod evm_collector;
 mod evm_contracts;
 mod live_transports;
 mod public_facts;
@@ -577,11 +578,13 @@ pub async fn connect_production_run_services(
     } else {
         None
     };
+    let evm_configured = runtime_config.evm_configured()?;
     let runners = production_runner_registry_inner(
         Arc::new(store.clone()),
         fact_index,
         runtime_config,
         btc_configured,
+        evm_configured,
     )?;
     let certification_registry = production_certification_registry()?;
     let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
@@ -642,7 +645,14 @@ pub fn production_runner_registry(
         RuntimeConfigLoader::from_path_or_env(runtime_config_path),
     ));
     let btc_configured = runtime_config.btc_configured()?;
-    production_runner_registry_inner(artifacts, None, runtime_config, btc_configured)
+    let evm_configured = runtime_config.evm_configured()?;
+    production_runner_registry_inner(
+        artifacts,
+        None,
+        runtime_config,
+        btc_configured,
+        evm_configured,
+    )
 }
 
 /// Builds the production typed runner registry with an explicit internal fact-index provider.
@@ -655,7 +665,14 @@ pub fn production_runner_registry_with_fact_index_provider(
         RuntimeConfigLoader::from_path_or_env(runtime_config_path),
     ));
     let btc_configured = runtime_config.btc_configured()?;
-    production_runner_registry_inner(artifacts, Some(fact_index), runtime_config, btc_configured)
+    let evm_configured = runtime_config.evm_configured()?;
+    production_runner_registry_inner(
+        artifacts,
+        Some(fact_index),
+        runtime_config,
+        btc_configured,
+        evm_configured,
+    )
 }
 
 fn production_runner_registry_inner(
@@ -663,6 +680,7 @@ fn production_runner_registry_inner(
     fact_index: Option<Arc<dyn mfm_fact_capabilities::FactIndexReadProvider>>,
     runtime_config: Arc<LiveTransportRuntime>,
     btc_configured: bool,
+    evm_configured: bool,
 ) -> Result<ErasedRunnerRegistry, AppError> {
     let mut registry = ErasedRunnerRegistry::new();
     let portfolio_artifacts: Arc<dyn store::RetainedArtifactReadProvider> = artifacts.clone();
@@ -685,10 +703,16 @@ fn production_runner_registry_inner(
     )?;
     btc_collector::register_btc_collector_runners_if_configured(
         &mut registry,
-        artifacts,
+        artifacts.clone(),
         fact_index,
-        runtime_config,
+        runtime_config.clone(),
         btc_configured,
+    )?;
+    evm_collector::register_evm_collector_runners_if_configured(
+        &mut registry,
+        artifacts,
+        runtime_config,
+        evm_configured,
     )?;
     mfm_transports_proof::register_deterministic_proof_runners(&mut registry)?;
     Ok(registry)
@@ -788,6 +812,8 @@ pub fn production_certification_registry() -> Result<CertificationRegistry, AppE
     registry.register_fact_type::<mfm_op_btc_collectors::BtcChainHeadFact>()?;
     registry.register_fact_type::<mfm_op_btc_collectors::CollectorCheckpointFact>()?;
     registry.register_fact_type::<mfm_op_btc_collectors::BtcAddressBalanceSnapshotFact>()?;
+    mfm_op_evm_collectors::register_evm_collectors_certification_descriptors(&mut registry)?;
+    registry.register_fact_type::<mfm_op_evm_collectors::EvmAddressNativeBalanceSnapshotFact>()?;
     mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
         &mut registry,
     )?;

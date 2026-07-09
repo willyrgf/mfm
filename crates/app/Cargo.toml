@@ -20,6 +20,7 @@ thiserror = { workspace = true }
 zeroize = "1.7"
 
 mfm-adapters-btc-jsonrpc = { path = "../adapters/btc-jsonrpc" }
+mfm-adapters-evm = { path = "../adapters/evm" }
 mfm-adapters-evm-contracts = { path = "../adapters/evm-contracts" }
 mfm-adapters-portfolio = { path = "../adapters/portfolio" }
 mfm-authored-config = { path = "../authored-config" }
@@ -37,6 +38,7 @@ mfm-fact-capabilities = { path = "../fact-capabilities" }
 mfm-facts = { path = "../kernel/facts" }
 mfm-ids = { path = "../kernel/ids" }
 mfm-op-btc-collectors = { path = "../ops/btc-collectors-op" }
+mfm-op-evm-collectors = { path = "../ops/evm-collectors-op" }
 mfm-op-evm-contract-lifecycle = { path = "../ops/evm-contract-lifecycle-op" }
 mfm-op-portfolio-tracker = { path = "../ops/portfolio-tracker-op" }
 mfm-op-proof = { path = "../ops/proof-op" }

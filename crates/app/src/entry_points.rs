@@ -268,10 +268,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn evm_portfolio_launch_requires_runtime_config_before_admission() {
+    async fn report_only_portfolio_admits_without_live_evm_runtime_config() {
+        // After collectors cutover, portfolio_snapshot never constructs live chain providers.
+        // Missing runtime config must not block admission as LaunchRunnerUnavailable.
         let fixture = EntryPointRunFixture::in_memory().await;
         let prepared = fixture.prepare_sample_portfolio(None);
-        let run_id = prepared.request.run_id.clone();
         let runners = crate::production_runner_registry(Arc::new(fixture.store.clone()), None)
             .expect("runners");
         let services = crate::make_run_services_with_certification_registry(
@@ -281,39 +282,33 @@ mod tests {
             fixture.prep.certification_registry.clone(),
         );
 
-        let error = services
+        let outcome = services
             .launch_run(prepared.request)
             .await
-            .expect_err("missing runtime config rejects EVM portfolio before admission");
+            .expect("report-only portfolio admits without live EVM runtime config");
 
-        assert_eq!(error.code, "LaunchRunnerUnavailable");
-        assert!(fixture
-            .store
-            .load_run_stream(&run_id)
-            .await
-            .expect("run stream")
-            .is_empty());
+        assert_eq!(
+            outcome.status(),
+            crate::RunLaunchOutcomeStatus::Admitted
+        );
     }
 
     #[tokio::test]
-    async fn btc_portfolio_launch_requires_runtime_config_before_admission() {
+    async fn report_only_portfolio_admits_without_live_btc_runtime_config() {
+        // Bitcoin portfolio report is facts-only; BTC JSON-RPC is required for collectors, not report.
         let fixture = EntryPointRunFixture::in_memory().await;
         let prepared = fixture.prepare_bitcoin_portfolio(None);
-        let run_id = prepared.request.run_id.clone();
         let services = fixture.services();
 
-        let error = services
+        let outcome = services
             .launch_run(prepared.request)
             .await
-            .expect_err("missing BTC runtime config rejects Bitcoin portfolio before admission");
+            .expect("report-only portfolio admits without live BTC runtime config");
 
-        assert_eq!(error.code, "LaunchRunnerUnavailable");
-        assert!(fixture
-            .store
-            .load_run_stream(&run_id)
-            .await
-            .expect("run stream")
-            .is_empty());
+        assert_eq!(
+            outcome.status(),
+            crate::RunLaunchOutcomeStatus::Admitted
+        );
     }
 
     #[tokio::test]
