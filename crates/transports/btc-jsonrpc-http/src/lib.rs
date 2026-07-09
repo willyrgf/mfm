@@ -1365,6 +1365,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bound_provider_probes_source_for_each_operation_call() {
+        let transport = Arc::new(MockBtcTransport::new("main"));
+        let provider = provider_with(source_identity(), transport.clone());
+
+        provider
+            .read_chain_head(&chain_head_request(BtcHeadSelection::best()))
+            .await
+            .expect("chain head");
+        provider
+            .read_balance(&balance_request())
+            .await
+            .expect("balance");
+
+        assert_eq!(transport.blockchain_info_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(transport.block_header_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.scan_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
     async fn balance_source_mismatch_fails_before_scan() {
         let transport = Arc::new(MockBtcTransport::new("test"));
         let provider = provider_with(source_identity(), transport.clone());

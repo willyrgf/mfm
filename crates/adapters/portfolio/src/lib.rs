@@ -5,7 +5,8 @@
 //! EVM, and Bitcoin capability contracts. Concrete artifact stores and live transports are supplied
 //! by app assembly.
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use alloy_primitives::{Address, B256, U256};
 use mfm_btc_capabilities::{
@@ -475,22 +476,23 @@ fn portfolio_btc_source_binding(
     })
 }
 
-fn portfolio_btc_balance_request(
-    address: BtcAddress,
-    block_height: u64,
-    block_hash: BtcBlockHash,
-) -> BtcBalanceReadRequest {
-    BtcBalanceReadRequest::new(address, block_height, block_hash)
-}
+type PortfolioEvmProviderCache = Mutex<BTreeMap<(String, u64), Arc<dyn PortfolioEvmProvider>>>;
+type PortfolioBtcProviderCache =
+    Mutex<BTreeMap<(String, String, String), Arc<dyn PortfolioBtcProvider>>>;
 
-#[derive(Clone)]
 struct CapabilityPortfolioBackend {
     transport: Arc<dyn PortfolioTransportFactory>,
+    evm_providers: PortfolioEvmProviderCache,
+    btc_providers: PortfolioBtcProviderCache,
 }
 
 impl CapabilityPortfolioBackend {
     fn new(transport: Arc<dyn PortfolioTransportFactory>) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            evm_providers: Mutex::new(BTreeMap::new()),
+            btc_providers: Mutex::new(BTreeMap::new()),
+        }
     }
 
     async fn read_execution_anchor(
@@ -518,11 +520,7 @@ impl CapabilityPortfolioBackend {
         network_id: &str,
         chain_id: u64,
     ) -> Result<ExecutionAnchor, PortfolioReadError> {
-        let binding = portfolio_evm_network_binding(network_id, chain_id)?;
-        let provider = self
-            .transport
-            .bind_evm_network(binding)
-            .map_err(portfolio_evm_capability_error)?;
+        let provider = self.evm_provider(network_id, chain_id)?;
         let response = provider
             .read_block(&EvmBlockReadRequest::new(EvmBlockSelector::Latest))
             .await
@@ -540,11 +538,7 @@ impl CapabilityPortfolioBackend {
         source_identity: &str,
         bitcoin_network: &str,
     ) -> Result<ExecutionAnchor, PortfolioReadError> {
-        let binding = portfolio_btc_source_binding(network_id, source_identity, bitcoin_network)?;
-        let provider = self
-            .transport
-            .bind_btc_source(binding)
-            .map_err(portfolio_btc_capability_error)?;
+        let provider = self.btc_provider(network_id, source_identity, bitcoin_network)?;
         let request = BtcChainHeadRequest::new(BtcHeadSelection::best());
         let response = provider
             .read_chain_head(&request)
@@ -642,11 +636,7 @@ impl CapabilityPortfolioBackend {
     ) -> Result<RawBalanceObservation, PortfolioReadError> {
         let account = parse_address(account, "wallet address")?;
         let block_hash = parse_evm_block_hash(block_hash)?;
-        let binding = portfolio_evm_network_binding(network_id, chain_id)?;
-        let provider = self
-            .transport
-            .bind_evm_network(binding)
-            .map_err(portfolio_evm_capability_error)?;
+        let provider = self.evm_provider(network_id, chain_id)?;
         let response = provider
             .read_balance(&EvmBalanceReadRequest::new(
                 account,
@@ -672,12 +662,8 @@ impl CapabilityPortfolioBackend {
     ) -> Result<RawBalanceObservation, PortfolioReadError> {
         let address = parse_btc_address(address)?;
         let (block_height, block_hash) = btc_anchor_parts(anchor)?;
-        let binding = portfolio_btc_source_binding(network_id, source_identity, bitcoin_network)?;
-        let request = portfolio_btc_balance_request(address, block_height, block_hash);
-        let provider = self
-            .transport
-            .bind_btc_source(binding)
-            .map_err(portfolio_btc_capability_error)?;
+        let request = BtcBalanceReadRequest::new(address, block_height, block_hash);
+        let provider = self.btc_provider(network_id, source_identity, bitcoin_network)?;
         let response = provider
             .read_balance(&request)
             .await
@@ -724,11 +710,7 @@ impl CapabilityPortfolioBackend {
         let calldata = hex_to_bytes(&calldata_hex).map_err(|_| {
             PortfolioReadError::new("invalid_call_data", "portfolio EVM call data was invalid")
         })?;
-        let binding = portfolio_evm_network_binding(network_id, chain_id)?;
-        let provider = self
-            .transport
-            .bind_evm_network(binding)
-            .map_err(portfolio_evm_capability_error)?;
+        let provider = self.evm_provider(network_id, chain_id)?;
         let response = provider
             .read_call(&EvmCallReadRequest::new(
                 to,
@@ -739,6 +721,62 @@ impl CapabilityPortfolioBackend {
             .map_err(portfolio_evm_capability_error)?;
         decode_u256_return(&response.return_data)
     }
+
+    fn evm_provider(
+        &self,
+        network_id: &str,
+        chain_id: u64,
+    ) -> Result<Arc<dyn PortfolioEvmProvider>, PortfolioReadError> {
+        let binding = portfolio_evm_network_binding(network_id, chain_id)?;
+        let key = (network_id.to_owned(), chain_id);
+        let mut providers = self
+            .evm_providers
+            .lock()
+            .map_err(|_| portfolio_provider_cache_error())?;
+        if let Some(provider) = providers.get(&key).cloned() {
+            return Ok(provider);
+        }
+        let provider = self
+            .transport
+            .bind_evm_network(binding)
+            .map_err(portfolio_evm_capability_error)?;
+        providers.insert(key, Arc::clone(&provider));
+        Ok(provider)
+    }
+
+    fn btc_provider(
+        &self,
+        network_id: &str,
+        source_identity: &str,
+        bitcoin_network: &str,
+    ) -> Result<Arc<dyn PortfolioBtcProvider>, PortfolioReadError> {
+        let binding = portfolio_btc_source_binding(network_id, source_identity, bitcoin_network)?;
+        let key = (
+            network_id.to_owned(),
+            source_identity.to_owned(),
+            bitcoin_network.to_owned(),
+        );
+        let mut providers = self
+            .btc_providers
+            .lock()
+            .map_err(|_| portfolio_provider_cache_error())?;
+        if let Some(provider) = providers.get(&key).cloned() {
+            return Ok(provider);
+        }
+        let provider = self
+            .transport
+            .bind_btc_source(binding)
+            .map_err(portfolio_btc_capability_error)?;
+        providers.insert(key, Arc::clone(&provider));
+        Ok(provider)
+    }
+}
+
+fn portfolio_provider_cache_error() -> PortfolioReadError {
+    PortfolioReadError::new(
+        "portfolio_provider_cache_unavailable",
+        "portfolio provider cache was unavailable",
+    )
 }
 
 fn btc_anchor_parts(anchor: &ExecutionAnchor) -> Result<(u64, BtcBlockHash), PortfolioReadError> {

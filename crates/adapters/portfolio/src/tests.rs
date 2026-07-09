@@ -1,6 +1,12 @@
 use super::*;
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
 use mfm_btc_capabilities::{
     BtcBalanceReadResponse, BtcBlockHash, BtcChainHeadResponse, BtcSourceBinding, BtcSourceStatus,
@@ -90,6 +96,30 @@ fn bitcoin_capability_backend_maps_provider_source_mismatch() {
             },
         }))
     );
+}
+
+#[test]
+fn capability_backend_caches_bound_providers_per_certified_binding() {
+    let transport = Arc::new(MockPortfolioTransport::matching());
+    let backend = CapabilityPortfolioBackend::new(transport.clone());
+
+    let first_btc = backend
+        .btc_provider("bitcoin-mainnet", "bitcoin-mainnet", "main")
+        .expect("first btc provider");
+    let second_btc = backend
+        .btc_provider("bitcoin-mainnet", "bitcoin-mainnet", "main")
+        .expect("second btc provider");
+    let first_evm = backend
+        .evm_provider("ethereum-mainnet", 1)
+        .expect("first evm provider");
+    let second_evm = backend
+        .evm_provider("ethereum-mainnet", 1)
+        .expect("second evm provider");
+
+    assert!(Arc::ptr_eq(&first_btc, &second_btc));
+    assert!(Arc::ptr_eq(&first_evm, &second_evm));
+    assert_eq!(transport.btc_bind_count(), 1);
+    assert_eq!(transport.evm_bind_count(), 1);
 }
 
 #[test]
@@ -219,19 +249,33 @@ where
 const BTC_HASH: &str = "00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc";
 struct MockPortfolioTransport {
     reject_balance: bool,
+    evm_bind_calls: AtomicUsize,
+    btc_bind_calls: AtomicUsize,
 }
 
 impl MockPortfolioTransport {
     fn matching() -> Self {
         Self {
             reject_balance: false,
+            evm_bind_calls: AtomicUsize::new(0),
+            btc_bind_calls: AtomicUsize::new(0),
         }
     }
 
     fn rejecting_balance() -> Self {
         Self {
             reject_balance: true,
+            evm_bind_calls: AtomicUsize::new(0),
+            btc_bind_calls: AtomicUsize::new(0),
         }
+    }
+
+    fn evm_bind_count(&self) -> usize {
+        self.evm_bind_calls.load(Ordering::Relaxed)
+    }
+
+    fn btc_bind_count(&self) -> usize {
+        self.btc_bind_calls.load(Ordering::Relaxed)
     }
 }
 
@@ -247,6 +291,7 @@ impl PortfolioTransportFactory for MockPortfolioTransport {
         &self,
         _binding: EvmNetworkBinding,
     ) -> mfm_evm_capabilities::Result<Arc<dyn PortfolioEvmProvider>> {
+        self.evm_bind_calls.fetch_add(1, Ordering::Relaxed);
         Ok(Arc::new(UnavailablePortfolioEvm))
     }
 
@@ -258,6 +303,7 @@ impl PortfolioTransportFactory for MockPortfolioTransport {
         &self,
         binding: BtcSourceBinding,
     ) -> mfm_btc_capabilities::Result<Arc<dyn PortfolioBtcProvider>> {
+        self.btc_bind_calls.fetch_add(1, Ordering::Relaxed);
         Ok(Arc::new(MockPortfolioBoundBtc {
             binding,
             reject_balance: self.reject_balance,
