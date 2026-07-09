@@ -575,13 +575,16 @@ async fn app_resume_runtime_config_ingress_failures_before_claim_or_attempt() {
     std::fs::write(&runtime_config_path, "[evm.sources.bad\n").expect("write malformed config");
     let store = test_run_store();
     let artifacts = ContractArtifactOverlay::new(Arc::new(store));
-    let error =
-        match crate::production_runner_registry(Arc::new(artifacts), Some(&runtime_config_path)) {
-            Ok(_) => {
-                panic!("malformed runtime config must fail before production runners are built")
-            }
-            Err(error) => error,
-        };
+    let error = match crate::production_runner_registry(
+        Arc::new(artifacts),
+        crate::unit_test_fact_index_provider(),
+        Some(&runtime_config_path),
+    ) {
+        Ok(_) => {
+            panic!("malformed runtime config must fail before production runners are built")
+        }
+        Err(error) => error,
+    };
 
     assert_eq!(error.class, ErrorClass::BadRequest);
     assert_eq!(error.code, "LaunchRunnerUnavailable");
@@ -678,9 +681,12 @@ async fn assert_resume_runtime_config_ingress_failure(
         "test setup must admit only RunAdmitted"
     );
 
-    let resume_runners =
-        crate::production_runner_registry(Arc::new(artifacts.clone()), runtime_config_path)
-            .expect("production runners");
+    let resume_runners = crate::production_runner_registry(
+        Arc::new(artifacts.clone()),
+        crate::unit_test_fact_index_provider(),
+        runtime_config_path,
+    )
+    .expect("production runners");
     let resume_services =
         contract_lifecycle_services(&store, artifacts, resume_runners, certification);
     let error = resume_services

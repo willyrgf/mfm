@@ -85,10 +85,13 @@ async fn parity_rest_postgres_smoke() {
     create_schema(&database_url, &schema).await;
     let scoped_database_url = schema_scoped_database_url(&database_url, &schema);
     let store = connect_postgres_with_retry(&scoped_database_url, 20, 250).await;
+    // Ready/smoke only: does not exercise SelectHoldings. Production portfolio paths must use
+    // production_fact_index_read_provider(store).
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         store,
         runtime_config_path: None,
         fact_query_receipt_trust_root: None,
+        fact_index: mfm_app::unit_test_fact_index_provider(),
     });
 
     let ready = app

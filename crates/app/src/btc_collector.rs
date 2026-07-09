@@ -11,13 +11,13 @@ use crate::{live_transports::LiveTransportRuntime, AppError, ErrorClass, Product
 pub(crate) fn register_btc_collector_runners_if_configured(
     registry: &mut mfm_runtime::ErasedRunnerRegistry,
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-    fact_index: Option<Arc<dyn FactIndexReadProvider>>,
+    fact_index: Arc<dyn FactIndexReadProvider>,
     runtime_config: Arc<LiveTransportRuntime>,
     btc_configured: bool,
 ) -> Result<(), AppError> {
-    let Some(fact_index) = fact_index.filter(|_| btc_configured) else {
+    if !btc_configured {
         return Ok(());
-    };
+    }
     let btc: Arc<dyn mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory> = runtime_config;
     let capabilities =
         mfm_adapters_btc_jsonrpc::BtcJsonRpcRunnerCapabilities::new(artifacts, btc, fact_index);
@@ -25,13 +25,17 @@ pub(crate) fn register_btc_collector_runners_if_configured(
     Ok(())
 }
 
-pub(crate) fn production_fact_index_read_provider(
+/// Builds the production Platform/Control fact-index provider from a Postgres run store.
+///
+/// Requires a fact-receipt trust root on the store authority. Production run services and
+/// portfolio/BTC collector registration always use this provider (no unavailable stub).
+pub fn production_fact_index_read_provider(
     store: ProductionRunStore,
 ) -> Result<Arc<dyn FactIndexReadProvider>, AppError> {
     let trust_root = store
         .store_authority()
         .fact_receipt_trust_root()
-        .ok_or_else(launch_runner_unavailable)?
+        .ok_or_else(missing_fact_receipt_trust_root)?
         .to_material();
     Ok(Arc::new(PostgresFactIndexReadProvider {
         store,
@@ -39,11 +43,11 @@ pub(crate) fn production_fact_index_read_provider(
     }))
 }
 
-fn launch_runner_unavailable() -> AppError {
+fn missing_fact_receipt_trust_root() -> AppError {
     AppError::backend(
         ErrorClass::BadRequest,
-        "LaunchRunnerUnavailable",
-        "A required typed runner is unavailable",
+        "MissingFactReceiptTrustRoot",
+        "Postgres run store is missing fact receipt trust root required for Platform fact-index",
     )
 }
 

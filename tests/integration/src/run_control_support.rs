@@ -225,8 +225,12 @@ where
     let prepared = prepare_portfolio_launch_for_store(store, config, None).await;
     let run_id = prepared.request.run_id.clone();
     let certified = prepared.request.certified_spec.clone();
-    let runners = mfm_app::production_runner_registry(Arc::new(store.clone()), None)
-        .expect("production runners");
+    let runners = mfm_app::production_runner_registry(
+        Arc::new(store.clone()),
+        mfm_app::unit_test_fact_index_provider(),
+        None,
+    )
+    .expect("production runners");
     let scheduler = mfm_runtime::SerialTypedScheduler::new(runners, Arc::new(store.clone()));
     let runtime_spec = mfm_runtime::CertifiedRuntimeSpec::new(prepared.request.certified_spec)
         .expect("runtime spec");

@@ -30,8 +30,12 @@ const PROOF_SECRET_SENTINEL: &str = "manual-secret-proof-sentinel";
 #[tokio::test]
 async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_bytes() {
     let store = store::AsyncInMemoryRunStore::default();
-    let runners =
-        mfm_app::production_runner_registry(Arc::new(store.clone()), None).expect("runners");
+    let runners = mfm_app::production_runner_registry(
+        Arc::new(store.clone()),
+        mfm_app::unit_test_fact_index_provider(),
+        None,
+    )
+    .expect("runners");
     let registry = mfm_app::production_certification_registry().expect("cert registry");
     let services = mfm_app::make_run_services_with_certification_registry(
         runners,

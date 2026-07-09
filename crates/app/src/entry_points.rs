@@ -369,8 +369,12 @@ mod tests {
         // Missing runtime config must not block admission as LaunchRunnerUnavailable.
         let fixture = EntryPointRunFixture::in_memory().await;
         let prepared = fixture.prepare_sample_portfolio(None);
-        let runners = crate::production_runner_registry(Arc::new(fixture.store.clone()), None)
-            .expect("runners");
+        let runners = crate::production_runner_registry(
+            Arc::new(fixture.store.clone()),
+            crate::unit_test_fact_index_provider(),
+            None,
+        )
+        .expect("runners");
         let services = crate::make_run_services_with_certification_registry(
             runners,
             fixture.store.clone(),
@@ -730,6 +734,7 @@ mod tests {
         > {
             let runners = crate::production_runner_registry(
                 Arc::new(self.store.clone()),
+                crate::unit_test_fact_index_provider(),
                 Some(&self.runtime_config_path),
             )
             .expect("runners");

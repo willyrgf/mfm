@@ -565,27 +565,11 @@ pub async fn connect_production_run_services(
     database_url: Option<&str>,
     runtime_config_path: Option<&Path>,
 ) -> Result<ProductionRunServices, AppError> {
-    let runtime_config = Arc::new(LiveTransportRuntime::new(
-        RuntimeConfigLoader::from_path_or_env(runtime_config_path),
-    ));
-    let btc_configured = runtime_config.btc_configured()?;
     let store = connect_production_run_store_with_optional_fact_query_signer(database_url).await?;
-    // Portfolio report and BTC collectors both need Platform/Control fact-index when trust root exists.
-    let fact_index = if store.store_authority().fact_receipt_trust_root().is_some() {
-        Some(btc_collector::production_fact_index_read_provider(
-            store.clone(),
-        )?)
-    } else {
-        None
-    };
-    let evm_configured = runtime_config.evm_configured()?;
-    let runners = production_runner_registry_inner(
-        Arc::new(store.clone()),
-        fact_index,
-        runtime_config,
-        btc_configured,
-        evm_configured,
-    )?;
+    // Portfolio SelectHoldings and BTC collectors require the Postgres fact-index provider.
+    let fact_index = production_fact_index_read_provider(store.clone())?;
+    let runners =
+        production_runner_registry(Arc::new(store.clone()), fact_index, runtime_config_path)?;
     let certification_registry = production_certification_registry()?;
     let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
     Ok(
@@ -635,28 +619,11 @@ pub async fn connect_production_fact_query_run_read_services(
 
 /// Builds the production typed runner registry for this process.
 ///
-/// Framework public-output render nodes are resolved by `mfm-runtime` as built-ins. Enabled
-/// domain runners register here as certified typed descriptor bindings.
+/// Framework public-output render nodes are resolved by `mfm-runtime` as built-ins. Domain runners
+/// register here as certified typed descriptor bindings. Portfolio report and BTC collectors require
+/// an explicit Platform/Control [`mfm_fact_capabilities::FactIndexReadProvider`] — production wiring
+/// must supply the Postgres implementation from [`production_fact_index_read_provider`].
 pub fn production_runner_registry(
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-    runtime_config_path: Option<&Path>,
-) -> Result<ErasedRunnerRegistry, AppError> {
-    let runtime_config = Arc::new(LiveTransportRuntime::new(
-        RuntimeConfigLoader::from_path_or_env(runtime_config_path),
-    ));
-    let btc_configured = runtime_config.btc_configured()?;
-    let evm_configured = runtime_config.evm_configured()?;
-    production_runner_registry_inner(
-        artifacts,
-        None,
-        runtime_config,
-        btc_configured,
-        evm_configured,
-    )
-}
-
-/// Builds the production typed runner registry with an explicit internal fact-index provider.
-pub fn production_runner_registry_with_fact_index_provider(
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     fact_index: Arc<dyn mfm_fact_capabilities::FactIndexReadProvider>,
     runtime_config_path: Option<&Path>,
@@ -666,32 +633,10 @@ pub fn production_runner_registry_with_fact_index_provider(
     ));
     let btc_configured = runtime_config.btc_configured()?;
     let evm_configured = runtime_config.evm_configured()?;
-    production_runner_registry_inner(
-        artifacts,
-        Some(fact_index),
-        runtime_config,
-        btc_configured,
-        evm_configured,
-    )
-}
-
-fn production_runner_registry_inner(
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-    fact_index: Option<Arc<dyn mfm_fact_capabilities::FactIndexReadProvider>>,
-    runtime_config: Arc<LiveTransportRuntime>,
-    btc_configured: bool,
-    evm_configured: bool,
-) -> Result<ErasedRunnerRegistry, AppError> {
     let mut registry = ErasedRunnerRegistry::new();
-    let portfolio_artifacts: Arc<dyn store::RetainedArtifactReadProvider> = artifacts.clone();
-    // Report-only portfolio requires a fact-index provider. When none is wired (tests without
-    // store authority), bind an unavailable provider so registration succeeds and live runs fail closed.
-    let portfolio_fact_index: Arc<dyn mfm_fact_capabilities::FactIndexReadProvider> = fact_index
-        .clone()
-        .unwrap_or_else(|| Arc::new(UnavailableFactIndexReadProvider));
     let portfolio_capabilities = mfm_adapters_portfolio::PortfolioRunnerCapabilities::new(
-        portfolio_artifacts,
-        portfolio_fact_index,
+        artifacts.clone(),
+        fact_index.clone(),
     );
     mfm_adapters_portfolio::register_portfolio_runners(&mut registry, portfolio_capabilities)?;
     let source_run_registry = production_certification_registry()?;
@@ -718,10 +663,23 @@ fn production_runner_registry_inner(
     Ok(registry)
 }
 
-/// Fact-index stub used when process assembly has no store trust root.
-struct UnavailableFactIndexReadProvider;
+/// Builds the production Postgres Platform/Control fact-index provider.
+pub use btc_collector::production_fact_index_read_provider;
+/// Platform/Control fact-index capability used by portfolio and BTC collector runners.
+pub use mfm_fact_capabilities::FactIndexReadProvider;
 
-impl mfm_fact_capabilities::FactIndexReadProvider for UnavailableFactIndexReadProvider {
+/// Explicit fail-closed fact-index for tests that only need runner registration.
+///
+/// Production assembly always uses [`production_fact_index_read_provider`]. Tests that exercise
+/// SelectHoldings must pass a projection-backed provider (for example the integration
+/// in-memory fact-index), not this helper.
+pub fn unit_test_fact_index_provider() -> Arc<dyn mfm_fact_capabilities::FactIndexReadProvider> {
+    Arc::new(UnitTestFactIndexProvider)
+}
+
+struct UnitTestFactIndexProvider;
+
+impl mfm_fact_capabilities::FactIndexReadProvider for UnitTestFactIndexProvider {
     fn read_fact_index_batch<'a>(
         &'a self,
         _requests: &'a [mfm_fact_capabilities::FactIndexReadRequest],
@@ -729,7 +687,7 @@ impl mfm_fact_capabilities::FactIndexReadProvider for UnavailableFactIndexReadPr
         Box::pin(async {
             Err(
                 mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(
-                    "Platform fact-index is not configured for this process",
+                    "unit-test fact-index provider must not serve SelectHoldings; wire a real projection provider",
                 ),
             )
         })

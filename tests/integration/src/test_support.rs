@@ -3,7 +3,7 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
 use axum::http::Request;
@@ -40,10 +40,14 @@ pub type InMemoryRestAppState = mfm_rest_api::AppState<store::AsyncInMemoryRunSt
 
 /// Builds in-memory REST app state.
 pub fn in_memory_rest_app_state() -> InMemoryRestAppState {
+    let store = store::AsyncInMemoryRunStore::default();
+    let fact_index = Arc::new(InMemoryControlFactIndexProvider::new(store.clone()));
+    let fact_query_receipt_trust_root = Some(fact_index.receipt_trust_root());
     mfm_rest_api::AppState {
-        store: store::AsyncInMemoryRunStore::default(),
+        store,
         runtime_config_path: None,
-        fact_query_receipt_trust_root: None,
+        fact_query_receipt_trust_root,
+        fact_index,
     }
 }
 
