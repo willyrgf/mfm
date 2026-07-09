@@ -2153,22 +2153,23 @@ dependencies = [
 name = "mfm-adapters-portfolio"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives",
- "mfm-btc-capabilities",
+ "mfm-artifact-capabilities",
  "mfm-canonical",
- "mfm-capabilities",
  "mfm-events",
- "mfm-evm-capabilities",
- "mfm-evm-core",
+ "mfm-fact-capabilities",
+ "mfm-facts",
  "mfm-ids",
  "mfm-portfolio-model",
  "mfm-program",
  "mfm-runtime",
  "mfm-state-portfolio",
+ "mfm-states-btc",
+ "mfm-states-evm",
  "mfm-store",
  "mfm-values",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -2797,16 +2798,18 @@ dependencies = [
 name = "mfm-state-portfolio"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-effects",
- "mfm-evm-core",
+ "mfm-fact-capabilities",
+ "mfm-facts",
  "mfm-ids",
  "mfm-portfolio-config",
  "mfm-portfolio-model",
  "mfm-program",
  "mfm-program-derive",
+ "mfm-states-btc",
+ "mfm-states-evm",
  "mfm-values",
  "num-bigint",
  "num-traits",
