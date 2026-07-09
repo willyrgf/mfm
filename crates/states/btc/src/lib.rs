@@ -11,8 +11,9 @@ mod address_balance_collect;
 
 pub use address_balance::{
     address_balance_fact_visibility, normalize_btc_address_balance,
-    normalize_btc_address_balance_fact, BtcAddressBalanceResponse, BtcAddressBalanceSnapshotFact,
-    BtcAddressBalanceSubject, NormalizedBtcAddressHolding,
+    normalize_btc_address_balance_fact, platform_address_balance_candidate_plan,
+    BtcAddressBalanceResponse, BtcAddressBalanceSnapshotFact, BtcAddressBalanceSubject,
+    NormalizedBtcAddressHolding,
 };
 pub use address_balance_collect::{
     address_balance_record_visibility, assemble_btc_address_balance_batch,
