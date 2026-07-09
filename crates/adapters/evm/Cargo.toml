@@ -22,10 +22,13 @@ mfm-fact-capabilities = { path = "../../fact-capabilities" }
 mfm-facts = { path = "../../kernel/facts" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
+mfm-replay = { path = "../../kernel/replay" }
 mfm-runtime = { path = "../../kernel/runtime" }
+mfm-spec = { path = "../../kernel/spec" }
 mfm-states-evm = { path = "../../states/evm" }
 mfm-store = { path = "../../kernel/store" }
 mfm-values = { path = "../../kernel/values" }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

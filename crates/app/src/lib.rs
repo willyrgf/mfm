@@ -722,19 +722,6 @@ fn production_runner_registry_inner(
 struct UnavailableFactIndexReadProvider;
 
 impl mfm_fact_capabilities::FactIndexReadProvider for UnavailableFactIndexReadProvider {
-    fn read_fact_index<'a>(
-        &'a self,
-        _request: &'a mfm_fact_capabilities::FactIndexReadRequest,
-    ) -> mfm_fact_capabilities::FactIndexReadFuture<'a> {
-        Box::pin(async {
-            Err(
-                mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(
-                    "Platform fact-index is not configured for this process",
-                ),
-            )
-        })
-    }
-
     fn read_fact_index_batch<'a>(
         &'a self,
         _requests: &'a [mfm_fact_capabilities::FactIndexReadRequest],
@@ -2532,6 +2519,7 @@ where
         let broker = ReplayBroker::from_read_authority(authority)?;
         let stream = context.events();
         mfm_adapters_btc_jsonrpc::verify_btc_jsonrpc_replay(&broker)?;
+        mfm_adapters_evm::verify_evm_native_balance_replay(&broker)?;
         mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&broker, self.registry)?;
         mfm_transports_proof::verify_deterministic_proof_replay(&broker)?;
         let projection = broker.projection_snapshot();

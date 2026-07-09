@@ -35,13 +35,13 @@ use mfm_states_btc::{
     btc_jsonrpc_adapter_kind, btc_jsonrpc_adapter_version, chain_head_fact_visibility,
     collector_checkpoint_fact_visibility, AssembleBtcAddressBalanceBatchConfig,
     AssembleBtcAddressBalanceBatchInput, AssembleBtcAddressBalanceBatchState,
-    BtcChainHeadObservation, BtcJointTip, CollectorCheckpointFact, CollectorCheckpointResponse,
-    LoadedCollectorCheckpoint, ObserveBtcAddressBalanceConfig, ObserveBtcAddressBalanceInput,
-    ObserveBtcAddressBalanceState, ObserveBtcChainHeadConfig, ObserveBtcChainHeadInput,
-    ObserveBtcChainHeadState, QueryCollectorCheckpointConfig, QueryCollectorCheckpointInput,
-    QueryCollectorCheckpointState, RecordBtcAddressBalanceFactState, RecordBtcChainHeadFactState,
-    RecordCollectorCheckpointState, ResolveBtcJointTipConfig, ResolveBtcJointTipInput,
-    ResolveBtcJointTipState,
+    BtcAddressBalanceObservation, BtcChainHeadObservation, BtcJointTip, CollectorCheckpointFact,
+    CollectorCheckpointResponse, LoadedCollectorCheckpoint, ObserveBtcAddressBalanceConfig,
+    ObserveBtcAddressBalanceInput, ObserveBtcAddressBalanceState, ObserveBtcChainHeadConfig,
+    ObserveBtcChainHeadInput, ObserveBtcChainHeadState, QueryCollectorCheckpointConfig,
+    QueryCollectorCheckpointInput, QueryCollectorCheckpointState, RecordBtcAddressBalanceFactState,
+    RecordBtcChainHeadFactState, RecordCollectorCheckpointState, ResolveBtcJointTipConfig,
+    ResolveBtcJointTipInput, ResolveBtcJointTipState,
 };
 use mfm_store::v1 as store;
 use mfm_values::{MfmConfig, MfmValue};
@@ -710,19 +710,34 @@ pub fn replay_loaded_checkpoint_from_evidence(
         .map_err(|_| BtcJsonRpcAdapterError::ReplayEvidenceMismatch)
 }
 
-/// Verifies Bitcoin JSON-RPC replay evidence when present in a broker stream.
+/// Verifies Bitcoin JSON-RPC observation cell outputs when present in a broker stream.
 ///
-/// Returns `Ok(false)` when the stream contains no Bitcoin chain-head observation outputs.
+/// Covers chain-head and address-balance observe states. Returns `Ok(false)` when the stream
+/// contains no matching Bitcoin observation outputs.
 pub fn verify_btc_jsonrpc_replay(broker: &replay::ReplayBroker) -> replay::Result<bool> {
-    let state_kind = ObserveBtcChainHeadState::kind().map_err(replay_adapter_error)?;
-    let state_version = ObserveBtcChainHeadState::version().map_err(replay_adapter_error)?;
-    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
-        Ok(node.state_kind == state_kind && node.state_version == state_version)
+    let mut found = false;
+
+    let chain_head_kind = ObserveBtcChainHeadState::kind().map_err(replay_adapter_error)?;
+    let chain_head_version = ObserveBtcChainHeadState::version().map_err(replay_adapter_error)?;
+    let chain_head_frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
+        Ok(node.state_kind == chain_head_kind && node.state_version == chain_head_version)
     })?;
-    for frame in &frames {
+    for frame in &chain_head_frames {
         verify_btc_chain_head_observation_replay(broker, frame)?;
+        found = true;
     }
-    Ok(!frames.is_empty())
+
+    let balance_kind = ObserveBtcAddressBalanceState::kind().map_err(replay_adapter_error)?;
+    let balance_version = ObserveBtcAddressBalanceState::version().map_err(replay_adapter_error)?;
+    let balance_frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
+        Ok(node.state_kind == balance_kind && node.state_version == balance_version)
+    })?;
+    for frame in &balance_frames {
+        verify_btc_address_balance_observation_replay(broker, frame)?;
+        found = true;
+    }
+
+    Ok(found)
 }
 
 fn verify_btc_chain_head_observation_replay(
@@ -736,6 +751,48 @@ fn verify_btc_chain_head_observation_replay(
         serde_json::from_slice(&frame.artifact_bytes).map_err(replay_json_error)?;
     let response = replay_capability_response_from_observation(&binding, &output)?;
     recorded_chain_head_response(&binding, &request, &response).map_err(replay_adapter_error)?;
+    Ok(())
+}
+
+fn verify_btc_address_balance_observation_replay(
+    broker: &replay::ReplayBroker,
+    frame: &replay::ProducedCellReplayFrame,
+) -> replay::Result<()> {
+    let config: ObserveBtcAddressBalanceConfig = replay_node_config(broker, &frame.node)?;
+    let binding = address_balance_binding(&config).map_err(replay_adapter_error)?;
+    let output: BtcAddressBalanceObservation =
+        serde_json::from_slice(&frame.artifact_bytes).map_err(replay_json_error)?;
+    let subject = output.subject();
+    let response = output.response();
+    if subject.network() != config.network.as_str()
+        || subject.bitcoin_network() != config.bitcoin_network.as_str()
+        || subject.semantic_source_identity() != config.semantic_source_identity.as_str()
+        || subject.address() != config.address.as_str()
+        || output.source_read_count() == 0
+        || output.source_read_count() > config.max_source_reads.get()
+    {
+        return Err(replay_btc_mismatch(
+            "Bitcoin address-balance observation did not match certified config binding",
+        ));
+    }
+    let address = BtcAddress::new(subject.address()).map_err(replay_adapter_error)?;
+    let block_hash = BtcBlockHash::new(response.anchor_hash()).map_err(replay_adapter_error)?;
+    let request = BtcBalanceReadRequest::new(address.clone(), response.anchor_height(), block_hash);
+    let evidence = RedactedBtcSourceEvidence::from_binding(
+        &binding,
+        subject.bitcoin_network(),
+        BtcSourceStatus::Synced,
+    )
+    .map_err(replay_adapter_error)?;
+    let capability_response = BtcBalanceReadResponse {
+        evidence,
+        address,
+        balance_sats: response.balance_sats(),
+        block_height: response.anchor_height(),
+        block_hash: BtcBlockHash::new(response.anchor_hash()).map_err(replay_adapter_error)?,
+    };
+    recorded_balance_response(&binding, &request, &capability_response)
+        .map_err(replay_adapter_error)?;
     Ok(())
 }
 

@@ -16,7 +16,8 @@ use mfm_evm_capabilities::{
     EvmBlockSelector, EvmCapabilityError, EvmNetworkBinding, EvmNetworkId,
 };
 use mfm_fact_capabilities::FactRecordCapability;
-use mfm_program::{ManagedWriteState, MfmFactType, StateSpec};
+use mfm_program::{ManagedWriteState, MfmFactType, StateSpec, ValidatedConfig};
+use mfm_replay::v1 as replay;
 use mfm_runtime::{
     load_launch_config, load_materialized_struct_input, load_runner_config,
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
@@ -28,12 +29,14 @@ use mfm_states_evm::{
     assemble_evm_native_balance_batch, evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version,
     materialize_evm_joint_tip, native_balance_record_visibility,
     AssembleEvmNativeBalanceBatchConfig, AssembleEvmNativeBalanceBatchInput,
-    AssembleEvmNativeBalanceBatchState, ObserveEvmNativeBalanceConfig,
-    ObserveEvmNativeBalanceInput, ObserveEvmNativeBalanceState, RecordEvmNativeBalanceFactState,
-    ResolveEvmJointTipConfig, ResolveEvmJointTipInput, ResolveEvmJointTipState,
+    AssembleEvmNativeBalanceBatchState, EvmAddressNativeBalanceObservation,
+    ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput, ObserveEvmNativeBalanceState,
+    RecordEvmNativeBalanceFactState, ResolveEvmJointTipConfig, ResolveEvmJointTipInput,
+    ResolveEvmJointTipState,
 };
 use mfm_store::v1 as store;
-use mfm_values::MfmValue;
+use mfm_values::{MfmConfig, MfmValue};
+use serde::de::DeserializeOwned;
 
 const PURE_FACTORY: &str = "pure";
 const READ_FACTORY: &str = "read_external";
@@ -393,4 +396,103 @@ fn evm_adapter_runtime_error(error: EvmAdapterError) -> mfm_runtime::RuntimeErro
 
 fn adapter_identity_error(error: mfm_ids::IdentityError) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
+}
+
+/// Verifies EVM native-balance observation cell outputs when present in a broker stream.
+///
+/// Returns `Ok(false)` when the stream contains no matching observe outputs.
+pub fn verify_evm_native_balance_replay(broker: &replay::ReplayBroker) -> replay::Result<bool> {
+    let state_kind = ObserveEvmNativeBalanceState::kind().map_err(replay_adapter_error)?;
+    let state_version = ObserveEvmNativeBalanceState::version().map_err(replay_adapter_error)?;
+    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
+        Ok(node.state_kind == state_kind && node.state_version == state_version)
+    })?;
+    for frame in &frames {
+        verify_evm_native_balance_observation_replay(broker, frame)?;
+    }
+    Ok(!frames.is_empty())
+}
+
+fn verify_evm_native_balance_observation_replay(
+    broker: &replay::ReplayBroker,
+    frame: &replay::ProducedCellReplayFrame,
+) -> replay::Result<()> {
+    let config: ObserveEvmNativeBalanceConfig = replay_node_config(broker, &frame.node)?;
+    let binding = balance_binding(&config).map_err(replay_adapter_error)?;
+    let output: EvmAddressNativeBalanceObservation =
+        serde_json::from_slice(&frame.artifact_bytes).map_err(replay_json_error)?;
+    let subject = output.subject();
+    let response = output.response();
+    if subject.network() != config.network.as_str()
+        || subject.chain_id() != config.chain_id
+        || !subject
+            .account()
+            .eq_ignore_ascii_case(config.account.as_str())
+        || output.source_read_count() == 0
+        || output.source_read_count() > config.max_source_reads.get()
+    {
+        return Err(replay_evm_mismatch(
+            "EVM native-balance observation did not match certified config binding",
+        ));
+    }
+    if binding.network_id().as_str() != config.network.as_str()
+        || binding.expected_chain_id() != config.chain_id
+    {
+        return Err(replay_evm_mismatch(
+            "EVM native-balance observation binding did not match certified network",
+        ));
+    }
+    // Response constructor already enforces 32-byte hex; re-check for decoded cell bytes.
+    parse_block_hash(response.block_hash()).map_err(replay_adapter_error)?;
+    parse_account(subject.account()).map_err(replay_adapter_error)?;
+    if response.raw_wei().is_empty() || !response.raw_wei().chars().all(|c| c.is_ascii_digit()) {
+        return Err(replay_evm_mismatch(
+            "EVM native-balance observation raw_wei was invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn replay_node_config<T>(
+    broker: &replay::ReplayBroker,
+    node: &mfm_spec::v1::NodeSpec,
+) -> replay::Result<T>
+where
+    T: MfmConfig + DeserializeOwned,
+{
+    let requirement = store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::RunConfig,
+        artifact_id: node.config_ref.artifact_id.clone(),
+        digest: Some(node.config_ref.digest.clone()),
+        byte_len: Some(node.config_ref.byte_len),
+        media_type: Some(node.config_ref.media_type.clone()),
+        schema_id: Some(node.config_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: Some(events::ArtifactRole::TypedConfig),
+    };
+    let artifact = broker.retained_artifact(&requirement)?;
+    let config: T = serde_json::from_slice(&artifact.artifact_bytes).map_err(replay_json_error)?;
+    ValidatedConfig::new(config)
+        .map(ValidatedConfig::into_inner)
+        .map_err(replay_adapter_error)
+}
+
+fn replay_json_error(error: serde_json::Error) -> replay::ReplayError {
+    replay::ReplayError::new(
+        replay::ReplayErrorKind::CertifiedEvidenceMismatch,
+        error.to_string(),
+    )
+}
+
+fn replay_adapter_error(error: impl std::fmt::Display) -> replay::ReplayError {
+    replay::ReplayError::new(
+        replay::ReplayErrorKind::CertifiedEvidenceMismatch,
+        error.to_string(),
+    )
+}
+
+fn replay_evm_mismatch(message: &'static str) -> replay::ReplayError {
+    replay::ReplayError::new(replay::ReplayErrorKind::CertifiedEvidenceMismatch, message)
 }
