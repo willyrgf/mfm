@@ -30,14 +30,16 @@ collectors (separate runs): ObserveSource → RecordDataFact
 portfolio_snapshot (report-only):
   ResolveSubjects
     → ResolveValuations          (pure; no PinnedViews)
-    → QueryHoldingFacts*         (Platform FactIndexRead + hydrate + selection evidence)
+    → QueryHoldingFacts*         (Platform FactIndexRead + hydrate + network-coherent select)
     → MergeObservations
     → AssembleSnapshot           (network_pins from selected anchors; hard-fail)
     → ProjectReport
 ```
 
-**As-of authority forever:** anchors on selected Platform data facts + named selection policy.  
-**`network_pins` forever:** pure projection of selected required holding anchors — never config, never live head, never pin-facts.
+**As-of authority forever:** anchors on selected Platform data facts + named selection policy  
+(`latest-network-coherent.v1`).  
+**`network_pins` forever:** pure projection of selected required holding anchors — never config, never live head, never pin-facts.  
+**Cutover kinds:** mandatory height+hash; collectors prove balance@anchor at write.
 
 ```text
 A (Platform FactIndexRead + shared hydrate helpers)
@@ -118,8 +120,8 @@ Wire as string tags on fact responses (no floats). Public enums with parse/`as_s
 | Type | Role |
 |---|---|
 | Subject | `network`, `bitcoin_network`, `semantic_source_identity`, `address` |
-| Response | `anchor_height`, `anchor_hash` (prefer required), `balance_sats`, `coverage`, `source_status` |
-| Fact | `MfmFactType`, Platform visibility, descriptor orderings for latest-acceptable |
+| Response | **mandatory** `anchor_height`, **mandatory** `anchor_hash`, `balance_sats`, `coverage`, `source_status` |
+| Fact | `MfmFactType`, Platform visibility, descriptor orderings for network-coherent selection |
 
 Style: private fields + public accessors (match `BtcChainHeadFact`).  
 **Never** on fact: `wallet_id`, `symbol_id`, RPC URLs, provider diagnostics.
@@ -129,7 +131,7 @@ Style: private fields + public accessors (match `BtcChainHeadFact`).
 | Type | Role |
 |---|---|
 | Subject | `network`, `chain_id`, `account` |
-| Response | `block_number`, `block_hash` (prefer required), `raw_wei` decimal string, `decimals`, `coverage`, `source_status` |
+| Response | **mandatory** `block_number`, **mandatory** `block_hash`, `raw_wei` decimal string, `decimals`, `coverage`, `source_status` |
 | Fact | Platform; same discipline |
 
 **Do not** put holding facts in `states/evm-contracts` or `portfolio-facts`.
@@ -148,8 +150,8 @@ No `ObservationNormalizer` trait. No cross-family `HoldingsFact` enum.
 **Not a trait. Not a registry. Not a pluggable policy object.**
 
 ```text
-PORTFOLIO_HOLDING_LATEST_ACCEPTABLE_POLICY_ID =
-  "mfm.portfolio.holding.latest-acceptable.v1"
+PORTFOLIO_HOLDING_LATEST_NETWORK_COHERENT_POLICY_ID =
+  "mfm.portfolio.holding.latest-network-coherent.v1"
 
 // digest: ContentDigest via sha256 of policy id bytes
 // (mirror BTC checkpoint CHECKPOINT_QUERY_SELECTION_POLICY style)
@@ -157,18 +159,30 @@ PORTFOLIO_HOLDING_LATEST_ACCEPTABLE_POLICY_ID =
 
 Home: `mfm-state-portfolio` as `pub const` + small digest helper.
 
-**Total order (candidate scan before limit 1):**
+**Rejected:** independent per-holding latest then fail on pin disagreement (misses coherent older
+snapshots: A@100+A@99, B@99 would pick A@100+B@99 and fail).
 
-1. result anchor height / block number **desc**
-2. `metadata.store_commit_order` **desc**
-3. claim id **desc** only if orderable in store; else document (1)+(2) as total order
+**Network-coherent algorithm (normative):**
+
+1. Group required holdings by network.
+2. For each holding, load **acceptable** candidates (subject + coverage/source allow-lists).
+3. Intersect candidate anchors as `(height, hash)` across holdings in the group.
+4. If any holding has zero candidates → `missing_fact`.
+5. If intersection empty → `no_common_network_anchor`.
+6. Choose max common anchor by height desc, then hash bytes desc.
+7. For each holding, select the candidate at that anchor; if multiple at same subject+anchor →
+   LWW by `store_commit_order` desc, then `fact_claim_id` desc (v1).
 
 Allow-lists (certified fixed for v1):
 
 - coverage ∈ `{configured_only, complete_at_anchor}`
 - source_status ∈ `{ok}`
 
-Later (series E only): new policy id `mfm.portfolio.holding.at-or-before.v1` + bounds params — **same machinery**, not a pin table.
+Same-subject/same-anchor payload conflicts: v1 LWW. Optional later: fail `conflicting_facts` when
+response content hashes differ.
+
+Later (series E only): new policy id `mfm.portfolio.holding.at-or-before.v1` + bounds params —
+**same network-coherent machinery**, not a pin table.
 
 ## 5. Portfolio report states after cutover (series C)
 
@@ -176,7 +190,7 @@ Later (series E only): new policy id `mfm.portfolio.holding.at-or-before.v1` + b
 |---|---|
 | `ResolveSubjectsState` | Keep |
 | `ResolveValuationsState` | Keep; **no** `PinnedViews` input; FixedUnitPrice only |
-| `QueryHoldingFactsState` | **New** — Platform fact-index; fanout per required symbol |
+| `QueryHoldingFactsState` | **New** — Platform fact-index; load candidates; network-coherent select |
 | `MergeObservationsState` | Keep |
 | `AssembleSnapshotState` | Keep; **no** views; pins from observations |
 | `ProjectReportState` | Keep |
@@ -191,7 +205,14 @@ Later (series E only): new policy id `mfm.portfolio.holding.at-or-before.v1` + b
 | Config | wallet, symbol, network, store_scope, fixed policy id, allow-lists, subject predicate material |
 | Input | subjects (+ valuations if observation values join here) — **no pins** |
 | Caps | `(FactIndexReadCapability,)` only |
-| Output | `ObservationBatch` with **one** observation on success, or hard-fail |
+| Output | `ObservationBatch` with **one** observation per required holding on success, or hard-fail |
+
+Selection may be implemented as:
+
+- pure portfolio function after loading candidate sets per holding, or  
+- query fanout that loads candidates + a pure `select_network_coherent(...)` step  
+
+Prefer **one pure selection function** tested independently of adapters.
 
 ### Assemble / pins
 
@@ -204,7 +225,8 @@ fn project_network_pins_from_observations(
 ```
 
 - One pin per network among required selected holdings  
-- Disagreement → `inconsistent_network_anchors`  
+- Under network-coherent policy, same-network anchors already match; residual disagreement →
+  `inconsistent_network_anchors` (guard)  
 - Pins are **never** selection inputs  
 
 ### Valuations
@@ -217,13 +239,15 @@ fn project_network_pins_from_observations(
 
 | Code | When |
 |---|---|
-| `missing_fact` | no acceptable Platform fact |
+| `missing_fact` | no acceptable Platform fact for a required subject |
+| `no_common_network_anchor` | empty intersection of acceptable anchors in a network group |
 | `unacceptable_coverage` | optional; may collapse into `missing_fact` |
 | `unacceptable_source_status` | optional; may collapse |
 | `ambiguous_facts` | selection cardinality violated |
-| `inconsistent_network_anchors` | same-network anchor disagreement |
+| `inconsistent_network_anchors` | residual same-network disagreement after selection (guard) |
 | `unsupported_requirement` | no projection rule (e.g. ERC-20 at cutover) |
 | `as_of_not_exact` | **series E only** |
+| `conflicting_facts` | **optional later**, same subject+anchor different response hash |
 
 **No** `pin_mismatch`. Required-symbol misses fail the **run**, not soft `PortfolioSnapshot.errors`. Keep `errors: []` on success if the field remains for DTO stability.
 
@@ -241,7 +265,8 @@ fn project_network_pins_from_observations(
 | Residual `PinViews` / input `network_pins` | `QueryHoldingFacts`; pins output-only |
 | `SelectionPolicy` trait | string `policy_id` + fixed functions |
 | `ReportAsOf` authority type | later bounds as policy params |
-| `pin_mismatch` error | `missing_fact` / `inconsistent_network_anchors` |
+| `pin_mismatch` error | `missing_fact` / `no_common_network_anchor` |
+| Independent per-holding latest | network-coherent common anchor selection |
 | `SourceStatus` without qualifier | `HoldingSourceStatus` (not `BtcSourceStatus`) |
 | Cross-family `HoldingsFact` | monomorphic family facts |
 | Separate `PlatformFactIndexReadCapability` | widen existing request |
@@ -324,13 +349,15 @@ Certified states can read **Platform** facts with Control-parity evidence/replay
 
 ### Goal
 
-Dual-mainnet **native** fact kinds exist with mandatory anchors, coverage/source, Platform visibility, fixture admission via real `FactRecorded`, and pure normalize helpers. Collectors not required yet.
+Dual-mainnet **native** fact kinds exist with **mandatory height+hash**, coverage/source, Platform
+visibility (returnable field table per RFC), fixture admission via real `FactRecorded`, and pure
+normalize helpers. Collectors not required yet.
 
 ### Commits (suggested)
 
 1. `CoverageStatus` + `HoldingSourceStatus` pure enums (single owner)  
-2. `bitcoin.address_balance_snapshot` fact types + descriptors + tests  
-3. New `mfm-states-evm` + `evm.address_native_balance_snapshot`  
+2. `bitcoin.address_balance_snapshot` fact types + descriptors + tests (mandatory hash)  
+3. New `mfm-states-evm` + `evm.address_native_balance_snapshot` (mandatory hash)  
 4. Fixture admission test_support (real claim + artifact + projection)  
 5. Pure portfolio normalize helpers: fact material → observation fields (unit tests)  
 
@@ -345,9 +372,9 @@ Dual-mainnet **native** fact kinds exist with mandatory anchors, coverage/source
 
 ### ADD
 
-- Fact kinds + descriptors with sortable anchor fields  
-- Visibility helpers Platform indexed  
-- Fail-closed normalize when anchor missing  
+- Fact kinds + descriptors with sortable anchor height **and** hash fields  
+- Visibility helpers Platform indexed; classify returnable vs hidden per RFC  
+- Fail-closed normalize when height or hash missing  
 - Fixture API e.g. admit holding fact through real admission  
 
 ### DELETE
@@ -358,15 +385,16 @@ Dual-mainnet **native** fact kinds exist with mandatory anchors, coverage/source
 ### Tests
 
 - Descriptor field ids / orderings  
-- Missing anchor rejected  
+- Missing height or hash rejected  
 - Closed enum parse  
 - Fixture: Platform query by subject predicates returns fact  
 - Response JSON round-trip (no floats)  
-- Pure unit: BTC sats / EVM wei → observation quantity + anchor  
+- Pure unit: BTC sats / EVM wei → observation quantity + full anchor  
 
 ### Done when
 
 - [ ] Both native kinds admit + query under Platform in tests  
+- [ ] Missing hash cannot admit  
 - [ ] No raw SQL index poking  
 - [ ] Report graph still live (branch WIP OK)  
 
@@ -382,15 +410,18 @@ Dual-mainnet **native** fact kinds exist with mandatory anchors, coverage/source
 
 ### Goal
 
-Public `portfolio_snapshot` is **report-only**. Live pin/observe deleted. `latest-acceptable.v1` only. Hard-fail. `network_pins` from selected anchors only. Parity tests off live Reth crawl.
+Public `portfolio_snapshot` is **report-only**. Live pin/observe deleted.
+`latest-network-coherent.v1` only. Hard-fail. `network_pins` from selected anchors only. Parity
+tests off live Reth crawl; report succeeds without live chain when facts are present.
 
 ### Commits (suggested)
 
-1. Pure portfolio projection table + selection policy constants + pin projection + hard-fail assemble (unit tests, no live delete yet if needed for green intermediate — prefer delete in same series tip)  
-2. `QueryHoldingFactsState` + adapter Platform fact-index runner  
+1. Pure portfolio projection table + `latest-network-coherent.v1` selection (unit tests: A@100/99 +
+   B@99 → both @99; empty intersection → `no_common_network_anchor`) + pin projection  
+2. `QueryHoldingFactsState` (or candidate load + pure select) + adapter Platform fact-index runner  
 3. Op topology rewire; valuations without views; reject DirectPrice  
 4. **DELETE** pin/observe/capability/transport factory; app registration cleanup  
-5. Rewrite integration/parity tests to fixtures  
+5. Rewrite integration/parity tests to fixtures (succeed without live chain providers)  
 6. Docs: report-only semantics, useless without facts  
 
 ### Crates / files
@@ -407,15 +438,15 @@ Public `portfolio_snapshot` is **report-only**. Live pin/observe deleted. `lates
 ```text
 ResolveSubjects
   → ResolveValuations          // pure fixed prices
-  → QueryHoldingFacts*         // Platform fact-index fanout
+  → QueryHoldingFacts*         // Platform fact-index + network-coherent select
   → MergeObservations
   → AssembleSnapshot           // pins from observations
   → ProjectReport
 ```
 
-- Policy constants + selection evidence helpers  
+- Policy constants + pure `select_network_coherent(...)` + selection evidence helpers  
 - Subject projection: BTC + EVM native only; else `unsupported_requirement`  
-- Hard-fail error code mapping  
+- Hard-fail error code mapping including `no_common_network_anchor`  
 
 ### DELETE (complete list)
 
@@ -454,13 +485,14 @@ ResolveSubjects
 
 - Topology: no pin/observe nodes  
 - Projection table + unsupported ERC-20  
-- Selection prefers higher anchor; not limit-1-then-reject-coverage  
-- Inconsistent anchors fail  
+- Network-coherent selection: A@100/99 + B@99 → both @99  
+- Empty common set → `no_common_network_anchor`  
 - Missing fact fails run  
+- LWW at same subject+anchor  
 - Adapter Platform query + hydrate → Observation  
-- Replay without live index/chain  
-- Fixture dual-mainnet report succeeds  
-- Report fails with no facts / providers down  
+- Replay without live index/chain; **never** requires live providers  
+- Fixture dual-mainnet report **succeeds with chain providers unbound**  
+- Report fails with no facts  
 - Certification registry green  
 
 ### Done when
@@ -468,6 +500,7 @@ ResolveSubjects
 - [ ] Public meaning = report-only  
 - [ ] No live PinViews/ObserveBatch registration  
 - [ ] No dual IO truth  
+- [ ] Report works without live chain when facts present  
 - [ ] Product honesty: useless without admitted facts  
 
 ### Risks
@@ -482,15 +515,9 @@ ResolveSubjects
 
 ### Goal
 
-Operators collect dual-mainnet native balances into Platform facts, then report. Snapshot pattern only. Same-network multi-subject **SHOULD** share joint tip. Collector replay without live RPC.
-
-### Commits (suggested)
-
-1. BTC observe+record address balance states; adapter runner; op packaging into family collectors crate  
-2. EVM native observe+record + `ops/evm-collectors-op` + adapter  
-3. Shared fact-record capability if second writer forces it; delete BTC-only record exclusivity  
-4. End-to-end collect → report; shared-tip consistency tests  
-5. Document multi-run full-refresh recipe  
+Operators collect dual-mainnet native balances into Platform facts, then report. Snapshot pattern
+only. **Write-time anchor integrity** (balance proven at mandatory height+hash). Same-network
+multi-subject **SHOULD** share joint tip. Collector replay without live RPC.
 
 ### Pattern
 
@@ -499,10 +526,11 @@ ObserveSource (joint tip + balance + coverage + source_status)
   → RecordDataFact (ManagedPlatformWrite, Platform)
 ```
 
-- BTC: resolve tip inside observe, then existing pin-in balance read at that tip  
-- EVM: balance at tip with hash when available  
-- Fail closed before write on unsupported/failed  
+- BTC: resolve tip inside observe, pin-in balance at that tip/hash; fail on tip drift  
+- EVM: balance at block hash (EIP-1898 or equivalent verification); fail if hash missing/mismatch  
+- Fail closed before write on unsupported/failed/truncated  
 - Coverage default: `configured_only`  
+- Joint tip sharing is operational; network-coherent report still recovers common older anchors  
 
 ### ADD
 
@@ -517,10 +545,12 @@ ObserveSource (joint tip + balance + coverage + source_status)
 
 ### Tests
 
-- Normalize + fail-closed  
+- Normalize + fail-closed (missing hash, tip drift, hash mismatch)  
 - Adapter mock transport  
+- Collector fails if providers unavailable or balance@hash unprovable  
 - Collector replay without live RPC  
 - Collect → report dual-mainnet  
+
 - Shared tip → consistent `network_pins`  
 
 ### Done when
@@ -583,14 +613,16 @@ ObserveSource (joint tip + balance + coverage + source_status)
 ### Merge tip (A+B+C+preferred D)
 
 - [ ] Report consumes only Platform facts with recorded query evidence  
-- [ ] Report fails if live chain providers unavailable  
-- [ ] Missing / inconsistent-anchor failures for required symbols  
-- [ ] Replay without live fact-index or chain  
+- [ ] Report **succeeds without live chain providers** when required facts/artifacts present  
+- [ ] Report fails on missing facts / `no_common_network_anchor` / unsupported requirement  
+- [ ] Replay never constructs live providers / never re-queries live fact-index frontier  
+- [ ] Network-coherent selection unit: A@100/99 + B@99 → both @99  
+- [ ] Cutover facts reject missing block hash  
 - [ ] No PinViews/ObserveBatch registration  
 - [ ] Fixtures via real fact admission  
 - [ ] `network_pins` match selected fact anchors only  
-- [ ] No secrets on persisted/public surfaces  
-- [ ] With D: collect-then-report works; collector replay clean  
+- [ ] Platform field exposure matches RFC table; no secrets/routing  
+- [ ] With D: collect-then-report works; collectors prove balance@hash; collector replay clean  
 - [ ] `nix run .#ci` for final merge-readiness  
 
 ---
@@ -604,9 +636,12 @@ ObserveSource (joint tip + balance + coverage + source_status)
 5. Hard-fail configured symbols; no soft zero portfolio.  
 6. Coverage / HoldingSourceStatus single pure owner.  
 7. Shared fact-record extraction at second writer (D), not preemptively in A.  
-8. Selection policy = string id + monomorphic functions; no policy traits.  
-9. Series A does not ship portfolio report public APIs.  
-10. ERC-20 out of cutover scope.  
+8. Selection = `latest-network-coherent.v1` (not independent per-holding latest).  
+9. Cutover BTC/EVM: mandatory height+hash; write-time balance@anchor integrity.  
+10. v1 same-subject/same-anchor LWW; optional later conflict detection.  
+11. Series A does not ship portfolio report public APIs.  
+12. ERC-20 out of cutover scope.  
+13. Platform visibility intentional for public chain data; explicit field exposure.
 
 ---
 
