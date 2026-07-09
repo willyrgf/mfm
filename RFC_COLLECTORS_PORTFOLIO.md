@@ -755,8 +755,8 @@ normalization, and assembly only.
 Near-term collectors:
 
 - `btc_chain_head_collector` (exists; progressive template — **not** report pin authority)
-- `bitcoin_address_balance_collector` (snapshot re-read; total balance)
-- `evm_account_balance_collector` (snapshot re-read)
+- `bitcoin_address_balance` (snapshot re-read; total balance)
+- `evm_native_balance` (snapshot re-read)
 - `evm_token_balance_collector` (snapshot re-read; after cutover natives)
 
 Later collectors:

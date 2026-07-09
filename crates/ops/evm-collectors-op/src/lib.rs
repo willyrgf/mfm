@@ -9,11 +9,11 @@
 //!
 //! ```rust
 //! use mfm_op_evm_collectors::{
-//!     evm_native_balance_collector_program_draft, EvmNativeBalanceCollectorConfig,
+//!     evm_native_balance_program_draft, EvmNativeBalanceConfig,
 //! };
 //!
-//! let draft = evm_native_balance_collector_program_draft(
-//!     EvmNativeBalanceCollectorConfig::default(),
+//! let draft = evm_native_balance_program_draft(
+//!     EvmNativeBalanceConfig::default(),
 //! )
 //! .unwrap();
 //! assert!(draft.state_nodes().len() >= 3);
@@ -42,10 +42,10 @@ pub use mfm_states_evm::{
 use serde::{Deserialize, Serialize};
 
 const OP_NAMESPACE: &str = "mfm.evm";
-const BALANCE_OP_KIND_NAME: &str = "evm_native_balance_collector";
-const BALANCE_OP_VERSION: &str = "mfm.evm.operation.evm_native_balance_collector.v1";
-const BALANCE_ROOT_SCOPE: &str = "evm_native_balance_collector";
-const BALANCE_OP_KEY: &str = "evm_native_balance_collector";
+const BALANCE_OP_KIND_NAME: &str = "evm_native_balance";
+const BALANCE_OP_VERSION: &str = "mfm.evm.operation.evm_native_balance.v1";
+const BALANCE_ROOT_SCOPE: &str = "evm_native_balance";
+const BALANCE_OP_KEY: &str = "evm_native_balance";
 const BALANCE_PUBLIC_OUTPUT_KEY: &str = "balance_batch";
 
 /// Planning config for a multi-account EVM native balance collector batch.
@@ -54,10 +54,10 @@ const BALANCE_PUBLIC_OUTPUT_KEY: &str = "balance_batch";
 /// in expand (F26).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
 #[mfm(
-    schema = "mfm.evm.operation.config.evm_native_balance_collector",
-    validate = "validate_evm_native_balance_collector_config"
+    schema = "mfm.evm.operation.config.evm_native_balance",
+    validate = "validate_evm_native_balance_config"
 )]
-pub struct EvmNativeBalanceCollectorConfig {
+pub struct EvmNativeBalanceConfig {
     /// Semantic network id.
     pub network: String,
     /// Expected EVM chain id.
@@ -72,7 +72,7 @@ pub struct EvmNativeBalanceCollectorConfig {
     pub max_source_reads: NonZeroU64,
 }
 
-impl Default for EvmNativeBalanceCollectorConfig {
+impl Default for EvmNativeBalanceConfig {
     fn default() -> Self {
         Self {
             network: "ethereum-mainnet".to_owned(),
@@ -85,7 +85,7 @@ impl Default for EvmNativeBalanceCollectorConfig {
     }
 }
 
-impl EvmNativeBalanceCollectorConfig {
+impl EvmNativeBalanceConfig {
     /// Builds the joint-tip resolve config for this batch.
     pub fn joint_tip_config(&self) -> ResolveEvmJointTipConfig {
         ResolveEvmJointTipConfig {
@@ -109,9 +109,7 @@ impl EvmNativeBalanceCollectorConfig {
 }
 
 /// Validates multi-account native balance collector planning config.
-pub fn validate_evm_native_balance_collector_config(
-    config: &EvmNativeBalanceCollectorConfig,
-) -> Result<(), String> {
+pub fn validate_evm_native_balance_config(config: &EvmNativeBalanceConfig) -> Result<(), String> {
     if config.accounts.is_empty() {
         return Err("accounts must contain at least one address".to_owned());
     }
@@ -130,8 +128,8 @@ pub fn validate_evm_native_balance_collector_config(
 
 /// Output handles produced by one EVM native balance collector batch.
 #[derive(OperationOutput)]
-#[mfm(schema = "mfm.evm.operation_outputs.evm_native_balance_collector")]
-pub struct EvmNativeBalanceCollectorOutputs<'program, 'scope> {
+#[mfm(schema = "mfm.evm.operation_outputs.evm_native_balance")]
+pub struct EvmNativeBalanceOutputs<'program, 'scope> {
     /// Joint tip shared by every subject in the batch.
     pub joint_tip: mfm_program::Handle<'program, 'scope, EvmJointTip>,
     /// Batch summary after shared-tip verification.
@@ -140,26 +138,26 @@ pub struct EvmNativeBalanceCollectorOutputs<'program, 'scope> {
 
 /// Root public outputs for the native balance collector.
 #[derive(PublicOutputs)]
-#[mfm(schema = "mfm.evm.public_outputs.evm_native_balance_collector")]
-pub struct EvmNativeBalanceCollectorPublicOutputs<'program, 'scope> {
+#[mfm(schema = "mfm.evm.public_outputs.evm_native_balance")]
+pub struct EvmNativeBalancePublicOutputs<'program, 'scope> {
     /// Batch summary produced by the collector.
     pub batch_summary: mfm_program::Handle<'program, 'scope, EvmNativeBalanceBatchSummary>,
 }
 
 /// Deterministic multi-account EVM native balance collector operation.
-pub struct EvmNativeBalanceCollectorOperation;
+pub struct EvmNativeBalanceOperation;
 
-impl Operation for EvmNativeBalanceCollectorOperation {
-    type Config = EvmNativeBalanceCollectorConfig;
+impl Operation for EvmNativeBalanceOperation {
+    type Config = EvmNativeBalanceConfig;
     type Input<'program, 'scope> = ();
-    type Output<'program, 'scope> = EvmNativeBalanceCollectorOutputs<'program, 'scope>;
+    type Output<'program, 'scope> = EvmNativeBalanceOutputs<'program, 'scope>;
 
     fn kind() -> mfm_program::Result<OperationKind> {
         OperationKind::new(
             OP_NAMESPACE,
             BALANCE_OP_KIND_NAME,
             DigestAlgorithm::Sha256JcsV1,
-            mfm_canonical::sha256_digest_bytes(b"mfm.evm.operation:evm_native_balance_collector"),
+            mfm_canonical::sha256_digest_bytes(b"mfm.evm.operation:evm_native_balance"),
         )
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
     }
@@ -170,7 +168,7 @@ impl Operation for EvmNativeBalanceCollectorOperation {
     }
 
     fn name() -> &'static str {
-        "mfm.evm.evm_native_balance_collector"
+        "mfm.evm.evm_native_balance"
     }
 
     fn expand<'program, 'scope>(
@@ -222,7 +220,7 @@ impl Operation for EvmNativeBalanceCollectorOperation {
             },
         )?;
 
-        Ok(EvmNativeBalanceCollectorOutputs {
+        Ok(EvmNativeBalanceOutputs {
             joint_tip,
             batch_summary,
         })
@@ -230,23 +228,23 @@ impl Operation for EvmNativeBalanceCollectorOperation {
 }
 
 /// Builds a typed program draft for a multi-account EVM native balance collector batch.
-pub fn evm_native_balance_collector_program_draft(
-    config: EvmNativeBalanceCollectorConfig,
+pub fn evm_native_balance_program_draft(
+    config: EvmNativeBalanceConfig,
 ) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
     build_root_with_registries(
         ScopeKey::new(BALANCE_ROOT_SCOPE)?,
         evm_collectors_state_registry()?,
         evm_collectors_operation_registry()?,
         |root: &mut RootBuilder<'_, '_>| {
-            let result = root.scope().call::<EvmNativeBalanceCollectorOperation, _>(
+            let result = root.scope().call::<EvmNativeBalanceOperation, _>(
                 OperationKey::new(BALANCE_OP_KEY)?,
-                EvmNativeBalanceCollectorOperation,
+                EvmNativeBalanceOperation,
                 config,
                 (),
             )?;
             root.bind_public_outputs(
                 PublicOutputKey::new(BALANCE_PUBLIC_OUTPUT_KEY)?,
-                &EvmNativeBalanceCollectorPublicOutputs {
+                &EvmNativeBalancePublicOutputs {
                     batch_summary: result.batch_summary,
                 },
             )
@@ -264,7 +262,7 @@ mfm_certify::define_program_descriptor_registry! {
         RecordEvmNativeBalanceFactState,
         AssembleEvmNativeBalanceBatchState,
     ],
-    operations: [EvmNativeBalanceCollectorOperation],
+    operations: [EvmNativeBalanceOperation],
 }
 
 #[cfg(test)]
@@ -273,20 +271,19 @@ mod tests {
 
     #[test]
     fn default_config_is_valid() {
-        validate_evm_native_balance_collector_config(&EvmNativeBalanceCollectorConfig::default())
-            .expect("default");
+        validate_evm_native_balance_config(&EvmNativeBalanceConfig::default()).expect("default");
     }
 
     #[test]
     fn multi_account_draft_shares_one_joint_tip_node() {
-        let config = EvmNativeBalanceCollectorConfig {
+        let config = EvmNativeBalanceConfig {
             accounts: vec![
                 "0x0000000000000000000000000000000000000001".to_owned(),
                 "0x0000000000000000000000000000000000000002".to_owned(),
             ],
-            ..EvmNativeBalanceCollectorConfig::default()
+            ..EvmNativeBalanceConfig::default()
         };
-        let draft = evm_native_balance_collector_program_draft(config).expect("draft");
+        let draft = evm_native_balance_program_draft(config).expect("draft");
         let nodes = draft.state_nodes();
         let joint_tip_nodes = nodes
             .iter()

@@ -286,10 +286,10 @@ pub fn btc_chain_head_collector_cycle_program_draft(
 
 // --- Address-balance collector (joint tip + multi-address pin-in reads) ------
 
-const BALANCE_OP_KIND_NAME: &str = "btc_address_balance_collector";
-const BALANCE_OP_VERSION: &str = "mfm.bitcoin.operation.btc_address_balance_collector.v1";
-const BALANCE_ROOT_SCOPE: &str = "btc_address_balance_collector";
-const BALANCE_OP_KEY: &str = "btc_address_balance_collector";
+const BALANCE_OP_KIND_NAME: &str = "btc_address_balance";
+const BALANCE_OP_VERSION: &str = "mfm.bitcoin.operation.btc_address_balance.v1";
+const BALANCE_ROOT_SCOPE: &str = "btc_address_balance";
+const BALANCE_OP_KEY: &str = "btc_address_balance";
 const BALANCE_PUBLIC_OUTPUT_KEY: &str = "balance_batch";
 const BALANCE_CONTEXT_SEED_KEY: &str = "balance_observation_context";
 
@@ -299,10 +299,10 @@ const BALANCE_CONTEXT_SEED_KEY: &str = "balance_observation_context";
 /// in expand (F26).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
 #[mfm(
-    schema = "mfm.bitcoin.operation.config.btc_address_balance_collector",
-    validate = "validate_btc_address_balance_collector_config"
+    schema = "mfm.bitcoin.operation.config.btc_address_balance",
+    validate = "validate_btc_address_balance_config"
 )]
-pub struct BtcAddressBalanceCollectorConfig {
+pub struct BtcAddressBalanceConfig {
     /// Semantic Bitcoin network id.
     pub network: String,
     /// Expected Bitcoin Core network tag.
@@ -321,7 +321,7 @@ pub struct BtcAddressBalanceCollectorConfig {
     pub max_source_reads: NonZeroU64,
 }
 
-impl Default for BtcAddressBalanceCollectorConfig {
+impl Default for BtcAddressBalanceConfig {
     fn default() -> Self {
         Self {
             network: "bitcoin-mainnet".to_owned(),
@@ -336,7 +336,7 @@ impl Default for BtcAddressBalanceCollectorConfig {
     }
 }
 
-impl BtcAddressBalanceCollectorConfig {
+impl BtcAddressBalanceConfig {
     /// Builds the joint-tip resolve config for this batch.
     pub fn joint_tip_config(&self) -> ResolveBtcJointTipConfig {
         ResolveBtcJointTipConfig {
@@ -363,9 +363,7 @@ impl BtcAddressBalanceCollectorConfig {
 }
 
 /// Validates multi-address balance collector planning config.
-pub fn validate_btc_address_balance_collector_config(
-    config: &BtcAddressBalanceCollectorConfig,
-) -> Result<(), String> {
+pub fn validate_btc_address_balance_config(config: &BtcAddressBalanceConfig) -> Result<(), String> {
     if config.addresses.is_empty() {
         return Err("addresses must contain at least one public Bitcoin address".to_owned());
     }
@@ -384,8 +382,8 @@ pub fn validate_btc_address_balance_collector_config(
 
 /// Output handles produced by one Bitcoin address-balance collector batch.
 #[derive(OperationOutput)]
-#[mfm(schema = "mfm.bitcoin.operation_outputs.btc_address_balance_collector")]
-pub struct BtcAddressBalanceCollectorOutputs<'program, 'scope> {
+#[mfm(schema = "mfm.bitcoin.operation_outputs.btc_address_balance")]
+pub struct BtcAddressBalanceOutputs<'program, 'scope> {
     /// Joint tip shared by every subject in the batch.
     pub joint_tip: mfm_program::Handle<'program, 'scope, BtcJointTip>,
     /// Batch summary after shared-tip verification.
@@ -394,8 +392,8 @@ pub struct BtcAddressBalanceCollectorOutputs<'program, 'scope> {
 
 /// Root public outputs for the address-balance collector.
 #[derive(PublicOutputs)]
-#[mfm(schema = "mfm.bitcoin.public_outputs.btc_address_balance_collector")]
-pub struct BtcAddressBalanceCollectorPublicOutputs<'program, 'scope> {
+#[mfm(schema = "mfm.bitcoin.public_outputs.btc_address_balance")]
+pub struct BtcAddressBalancePublicOutputs<'program, 'scope> {
     /// Batch summary produced by the collector.
     pub batch_summary: mfm_program::Handle<'program, 'scope, BtcAddressBalanceBatchSummary>,
 }
@@ -404,21 +402,19 @@ pub struct BtcAddressBalanceCollectorPublicOutputs<'program, 'scope> {
 ///
 /// Expand resolves joint tip **once**, then observes and records each address
 /// at that tip. Recorded facts are verified to share the tip before summary.
-pub struct BtcAddressBalanceCollectorOperation;
+pub struct BtcAddressBalanceOperation;
 
-impl Operation for BtcAddressBalanceCollectorOperation {
-    type Config = BtcAddressBalanceCollectorConfig;
+impl Operation for BtcAddressBalanceOperation {
+    type Config = BtcAddressBalanceConfig;
     type Input<'program, 'scope> = Handle<'program, 'scope, BtcAddressBalanceObservationContext>;
-    type Output<'program, 'scope> = BtcAddressBalanceCollectorOutputs<'program, 'scope>;
+    type Output<'program, 'scope> = BtcAddressBalanceOutputs<'program, 'scope>;
 
     fn kind() -> mfm_program::Result<OperationKind> {
         OperationKind::new(
             OP_NAMESPACE,
             BALANCE_OP_KIND_NAME,
             DigestAlgorithm::Sha256JcsV1,
-            mfm_canonical::sha256_digest_bytes(
-                b"mfm.bitcoin.operation:btc_address_balance_collector",
-            ),
+            mfm_canonical::sha256_digest_bytes(b"mfm.bitcoin.operation:btc_address_balance"),
         )
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
     }
@@ -429,7 +425,7 @@ impl Operation for BtcAddressBalanceCollectorOperation {
     }
 
     fn name() -> &'static str {
-        "mfm.bitcoin.btc_address_balance_collector"
+        "mfm.bitcoin.btc_address_balance"
     }
 
     fn expand<'program, 'scope>(
@@ -484,7 +480,7 @@ impl Operation for BtcAddressBalanceCollectorOperation {
             },
         )?;
 
-        Ok(BtcAddressBalanceCollectorOutputs {
+        Ok(BtcAddressBalanceOutputs {
             joint_tip,
             batch_summary,
         })
@@ -492,8 +488,8 @@ impl Operation for BtcAddressBalanceCollectorOperation {
 }
 
 /// Builds a typed program draft for a multi-address Bitcoin balance collector batch.
-pub fn btc_address_balance_collector_program_draft(
-    config: BtcAddressBalanceCollectorConfig,
+pub fn btc_address_balance_program_draft(
+    config: BtcAddressBalanceConfig,
 ) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
     build_root_with_registries(
         ScopeKey::new(BALANCE_ROOT_SCOPE)?,
@@ -506,17 +502,15 @@ pub fn btc_address_balance_collector_program_draft(
                     observed_at_unix_ms: None,
                 })?,
             )?;
-            let result = root
-                .scope()
-                .call::<BtcAddressBalanceCollectorOperation, _>(
-                    OperationKey::new(BALANCE_OP_KEY)?,
-                    BtcAddressBalanceCollectorOperation,
-                    config,
-                    observation_context,
-                )?;
+            let result = root.scope().call::<BtcAddressBalanceOperation, _>(
+                OperationKey::new(BALANCE_OP_KEY)?,
+                BtcAddressBalanceOperation,
+                config,
+                observation_context,
+            )?;
             root.bind_public_outputs(
                 PublicOutputKey::new(BALANCE_PUBLIC_OUTPUT_KEY)?,
-                &BtcAddressBalanceCollectorPublicOutputs {
+                &BtcAddressBalancePublicOutputs {
                     batch_summary: result.batch_summary,
                 },
             )
@@ -540,7 +534,7 @@ mfm_certify::define_program_descriptor_registry! {
     ],
     operations: [
         BtcChainHeadCollectorCycleOperation,
-        BtcAddressBalanceCollectorOperation,
+        BtcAddressBalanceOperation,
     ],
 }
 
@@ -576,20 +570,20 @@ mod tests {
 
     #[test]
     fn default_balance_config_is_valid() {
-        validate_btc_address_balance_collector_config(&BtcAddressBalanceCollectorConfig::default())
+        validate_btc_address_balance_config(&BtcAddressBalanceConfig::default())
             .expect("default balance config");
     }
 
     #[test]
     fn multi_address_draft_shares_one_joint_tip_node() {
-        let config = BtcAddressBalanceCollectorConfig {
+        let config = BtcAddressBalanceConfig {
             addresses: vec![
                 "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh".to_owned(),
                 "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4".to_owned(),
             ],
-            ..BtcAddressBalanceCollectorConfig::default()
+            ..BtcAddressBalanceConfig::default()
         };
-        let draft = btc_address_balance_collector_program_draft(config).expect("draft");
+        let draft = btc_address_balance_program_draft(config).expect("draft");
         let nodes = draft.state_nodes();
         let joint_tip_nodes = nodes
             .iter()

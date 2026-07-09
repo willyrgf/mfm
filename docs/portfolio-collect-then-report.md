@@ -8,7 +8,7 @@ path and **no** mixed certified draft that expands collectors inside the report 
 
 | Surface | Role |
 |---|---|
-| `btc_address_balance_collector` / `evm_native_balance_collector` | Observe chain (joint tip + pin-in balances) → record Platform facts |
+| `btc_address_balance` / `evm_native_balance` | Observe chain (joint tip + pin-in balances) → record Platform facts |
 | `btc_chain_head_collector_cycle` | Control checkpoint / chain-head observation only — **not** report pin authority |
 | `portfolio_snapshot` | Resolve subjects → SelectHoldings → valuations → assemble → project report |
 
@@ -26,7 +26,7 @@ Operators run collectors, then report, as separate certified runs:
 1. **Collect BTC** (same-network multi-address batch shares one joint tip):
 
    ```text
-   run btc_address_balance_collector
+   run btc_address_balance
      network = bitcoin-mainnet
      addresses = [ ... configured BTC addresses ... ]
    ```
@@ -36,7 +36,7 @@ Operators run collectors, then report, as separate certified runs:
 2. **Collect EVM** (same chain multi-account batch shares one joint tip):
 
    ```text
-   run evm_native_balance_collector
+   run evm_native_balance
      network = ethereum-mainnet
      chain_id = 1
      accounts = [ ... configured accounts ... ]
