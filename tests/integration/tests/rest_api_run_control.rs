@@ -14,7 +14,6 @@ const VALID_RUN_ID: &str =
 const VALID_SCHEMA_ID: &str =
     "schema:mfm.test.public:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000002";
 const PORTFOLIO_NETWORK_ID: &str = "rest-control-eth";
-static RPC_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn test_app() -> axum::Router {
     let state = test_support::in_memory_rest_app_state();
@@ -36,7 +35,7 @@ fn state_and_app_with_runtime_config(
 
 struct RuntimeConfigApp {
     _runtime_config_dir: tempfile::TempDir,
-    runtime_config_path: std::path::PathBuf,
+    _runtime_config_path: std::path::PathBuf,
     state: test_support::InMemoryRestAppState,
     app: axum::Router,
 }
@@ -65,7 +64,7 @@ fn runtime_config_app_with(
     let (state, app) = state_and_app_with_runtime_config(runtime_config_path.clone());
     RuntimeConfigApp {
         _runtime_config_dir: runtime_config_dir,
-        runtime_config_path,
+        _runtime_config_path: runtime_config_path,
         state,
         app,
     }
