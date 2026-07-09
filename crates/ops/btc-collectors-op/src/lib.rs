@@ -24,10 +24,12 @@
 
 use std::num::NonZeroU64;
 
+use mfm_authored_config::{EntryPointDescriptor, TOML_JSON_AUTHORED_CONFIG_FORMATS};
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, Handle, NoContext, NonEmptyHandles, Operation,
     OperationExpansion, OperationKey, PublicOutputKey, RootBuilder, ScopeKey, SeedKey, StateKey,
+    TypedProgramLaunchPlan,
 };
 use mfm_program_derive::{MfmConfig, OperationOutput, PublicOutputs};
 pub use mfm_states_btc::{
@@ -293,6 +295,18 @@ const BALANCE_OP_KEY: &str = "btc_address_balance";
 const BALANCE_PUBLIC_OUTPUT_KEY: &str = "balance_batch";
 const BALANCE_CONTEXT_SEED_KEY: &str = "balance_observation_context";
 
+/// Public Bitcoin address-balance collector entry-point descriptor.
+///
+/// External multi-run only: writes Platform holding facts. Not report pin authority
+/// and not mixed into `portfolio_snapshot` expand.
+pub const BTC_ADDRESS_BALANCE_ENTRY_POINT: EntryPointDescriptor = EntryPointDescriptor {
+    namespace: "mfm.bitcoin",
+    name: "btc_address_balance",
+    public_name: "btc_address_balance",
+    version: 1,
+    accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
+};
+
 /// Planning config for a multi-address Bitcoin native balance collector batch.
 ///
 /// Multi-subject same-network batches **must** share one joint tip resolved once
@@ -516,6 +530,38 @@ pub fn btc_address_balance_program_draft(
             )
         },
     )
+}
+
+/// Plans a Bitcoin address-balance collector entry-point program.
+pub fn plan_btc_address_balance_entry_point(
+    config: BtcAddressBalanceConfig,
+) -> mfm_program::Result<TypedProgramLaunchPlan> {
+    let draft = btc_address_balance_program_draft(config)?;
+    let seed_material = btc_address_balance_entry_point_seed_material(&draft)?;
+    TypedProgramLaunchPlan::from_draft_and_seed_material(draft, seed_material)
+}
+
+fn btc_address_balance_entry_point_seed_material(
+    draft: &mfm_program::TypedProgramDraft,
+) -> mfm_program::Result<
+    std::collections::BTreeMap<mfm_ids::SeedId, mfm_canonical::PlainCanonicalJsonBytes>,
+> {
+    let mut seeds = std::collections::BTreeMap::new();
+    for seed in draft.seeds() {
+        if seed.key.as_str() != BALANCE_CONTEXT_SEED_KEY {
+            return Err(mfm_program::PlanError::Key(format!(
+                "unexpected btc address balance seed key: {}",
+                seed.key.as_str()
+            )));
+        }
+        let bytes = CanonicalSeed::from_value(&BtcAddressBalanceObservationContext {
+            observed_at_unix_ms: None,
+        })?
+        .canonical_json()
+        .clone();
+        seeds.insert(seed.seed_id.clone(), bytes);
+    }
+    Ok(seeds)
 }
 
 mfm_certify::define_program_descriptor_registry! {

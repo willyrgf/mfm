@@ -21,10 +21,11 @@
 
 use std::num::NonZeroU64;
 
+use mfm_authored_config::{EntryPointDescriptor, TOML_JSON_AUTHORED_CONFIG_FORMATS};
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_program::{
     build_root_with_registries, NoContext, NonEmptyHandles, Operation, OperationExpansion,
-    OperationKey, PublicOutputKey, RootBuilder, ScopeKey, StateKey,
+    OperationKey, PublicOutputKey, RootBuilder, ScopeKey, StateKey, TypedProgramLaunchPlan,
 };
 use mfm_program_derive::{MfmConfig, OperationOutput, PublicOutputs};
 pub use mfm_states_evm::{
@@ -47,6 +48,18 @@ const BALANCE_OP_VERSION: &str = "mfm.evm.operation.evm_native_balance.v1";
 const BALANCE_ROOT_SCOPE: &str = "evm_native_balance";
 const BALANCE_OP_KEY: &str = "evm_native_balance";
 const BALANCE_PUBLIC_OUTPUT_KEY: &str = "balance_batch";
+
+/// Public EVM native-balance collector entry-point descriptor.
+///
+/// External multi-run only: writes Platform holding facts. Not report pin authority
+/// and not mixed into `portfolio_snapshot` expand.
+pub const EVM_NATIVE_BALANCE_ENTRY_POINT: EntryPointDescriptor = EntryPointDescriptor {
+    namespace: "mfm.evm",
+    name: "evm_native_balance",
+    public_name: "evm_native_balance",
+    version: 1,
+    accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
+};
 
 /// Planning config for a multi-account EVM native balance collector batch.
 ///
@@ -250,6 +263,13 @@ pub fn evm_native_balance_program_draft(
             )
         },
     )
+}
+
+/// Plans an EVM native-balance collector entry-point program.
+pub fn plan_evm_native_balance_entry_point(
+    config: EvmNativeBalanceConfig,
+) -> mfm_program::Result<TypedProgramLaunchPlan> {
+    TypedProgramLaunchPlan::from_draft(evm_native_balance_program_draft(config)?)
 }
 
 mfm_certify::define_program_descriptor_registry! {

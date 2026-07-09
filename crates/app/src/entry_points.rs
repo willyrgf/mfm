@@ -29,9 +29,18 @@ pub(crate) fn production_entry_point_op_registry() -> Result<EntryPointOpRegistr
         mfm_op_evm_contract_lifecycle::plan_contract_lifecycle_entry_point,
         evm_contract_plan_error,
     )?)?;
-    // The Bitcoin chain-head collector op currently exposes a typed draft builder and
-    // certification descriptors, but no app-neutral public entry-point descriptor/planner.
-    // Keep it off the public entry-point registry until the op crate owns that public surface.
+    registry.register(EntryPointPlannerAdapter::new(
+        mfm_op_btc_collectors::BTC_ADDRESS_BALANCE_ENTRY_POINT,
+        mfm_op_btc_collectors::plan_btc_address_balance_entry_point,
+        btc_collector_plan_error,
+    )?)?;
+    registry.register(EntryPointPlannerAdapter::new(
+        mfm_op_evm_collectors::EVM_NATIVE_BALANCE_ENTRY_POINT,
+        mfm_op_evm_collectors::plan_evm_native_balance_entry_point,
+        evm_collector_plan_error,
+    )?)?;
+    // btc_chain_head_collector_cycle remains off the public entry-point registry: it is a
+    // control checkpoint / chain-head surface, not report pin authority or a balance collector.
     Ok(registry)
 }
 
@@ -54,6 +63,20 @@ fn evm_contract_plan_error(_error: mfm_program::PlanError) -> OpLaunchError {
     OpLaunchError::new(
         "EvmContractPlanFailed",
         "EVM contract entry-point planning failed",
+    )
+}
+
+fn btc_collector_plan_error(_error: mfm_program::PlanError) -> OpLaunchError {
+    OpLaunchError::new(
+        "BtcAddressBalancePlanFailed",
+        "Bitcoin address-balance collector entry-point planning failed",
+    )
+}
+
+fn evm_collector_plan_error(_error: mfm_program::PlanError) -> OpLaunchError {
+    OpLaunchError::new(
+        "EvmNativeBalancePlanFailed",
+        "EVM native-balance collector entry-point planning failed",
     )
 }
 
@@ -92,16 +115,89 @@ mod tests {
     }
 
     #[test]
-    fn production_registry_does_not_expose_btc_collector_without_op_entry_point() {
+    fn production_registry_resolves_balance_collector_entry_points() {
+        let registry = production_entry_point_op_registry().expect("registry");
+        let btc =
+            PublicOpName::new(mfm_op_btc_collectors::BTC_ADDRESS_BALANCE_ENTRY_POINT.public_name)
+                .expect("btc name");
+        let evm =
+            PublicOpName::new(mfm_op_evm_collectors::EVM_NATIVE_BALANCE_ENTRY_POINT.public_name)
+                .expect("evm name");
+
+        let btc_op = registry.resolve_latest(&btc).expect("btc address balance");
+        let evm_op = registry.resolve_latest(&evm).expect("evm native balance");
+        assert_eq!(btc_op.version(), OpVersion::new(1).unwrap());
+        assert_eq!(evm_op.version(), OpVersion::new(1).unwrap());
+        assert_eq!(
+            btc_op.accepted_config_formats(),
+            &[AuthoredConfigFormat::Toml, AuthoredConfigFormat::Json]
+        );
+        assert_eq!(
+            evm_op.accepted_config_formats(),
+            &[AuthoredConfigFormat::Toml, AuthoredConfigFormat::Json]
+        );
+    }
+
+    #[test]
+    fn production_registry_does_not_expose_btc_chain_head_as_public_entry_point() {
         let registry = production_entry_point_op_registry().expect("registry");
         let public_name = PublicOpName::new("btc_chain_head_collector").expect("name");
 
         let error = match registry.resolve_latest(&public_name) {
-            Ok(_) => panic!("btc collector is not public entry point yet"),
+            Ok(_) => panic!("chain-head collector is not a public balance entry point"),
             Err(error) => error,
         };
 
         assert_eq!(error.code(), "EntryPointOpNotFound");
+    }
+
+    #[test]
+    fn btc_address_balance_entry_point_plans_from_json_config() {
+        let registry = production_entry_point_op_registry().expect("registry");
+        let public_name =
+            PublicOpName::new(mfm_op_btc_collectors::BTC_ADDRESS_BALANCE_ENTRY_POINT.public_name)
+                .expect("name");
+        let op = registry.resolve_latest(&public_name).expect("btc op");
+        let authored = AuthoredConfig::new(
+            AuthoredConfigFormat::Json,
+            r#"{
+                "network": "bitcoin-mainnet",
+                "bitcoin_network": "main",
+                "semantic_source_identity": "public-bitcoin-core",
+                "addresses": ["bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"],
+                "head_kind": "best",
+                "coverage": "configured_only",
+                "max_source_reads": 1
+            }"#,
+        )
+        .expect("authored");
+        let plan = op.plan(authored).expect("btc plan");
+        assert!(!plan.draft.state_nodes().is_empty());
+        assert!(!plan.config_material.is_empty());
+    }
+
+    #[test]
+    fn evm_native_balance_entry_point_plans_from_json_config() {
+        let registry = production_entry_point_op_registry().expect("registry");
+        let public_name =
+            PublicOpName::new(mfm_op_evm_collectors::EVM_NATIVE_BALANCE_ENTRY_POINT.public_name)
+                .expect("name");
+        let op = registry.resolve_latest(&public_name).expect("evm op");
+        let authored = AuthoredConfig::new(
+            AuthoredConfigFormat::Json,
+            r#"{
+                "network": "ethereum-mainnet",
+                "chain_id": 1,
+                "accounts": ["0x0000000000000000000000000000000000000001"],
+                "coverage": "configured_only",
+                "decimals": 18,
+                "max_source_reads": 1
+            }"#,
+        )
+        .expect("authored");
+        let plan = op.plan(authored).expect("evm plan");
+        assert!(!plan.draft.state_nodes().is_empty());
+        assert!(!plan.config_material.is_empty());
     }
 
     #[test]
