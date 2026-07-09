@@ -302,11 +302,7 @@ async fn launch_prepared(
     run
 }
 
-fn assert_platform_holding_kind(
-    projection: &ProjectionSnapshot,
-    fact_kind: &str,
-    expected: usize,
-) {
+fn assert_platform_holding_kind(projection: &ProjectionSnapshot, fact_kind: &str, expected: usize) {
     let count = projection
         .fact_index_entries()
         .filter(|(_claim, entry)| {

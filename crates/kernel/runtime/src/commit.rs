@@ -242,8 +242,7 @@ impl CommitPlanner {
         )?;
         // Content-addressed configs can share bytes/artifact_id while differing by schema_id
         // (for example two empty `{}` configs). Stage by exact evidence identity.
-        let mut config_staged_artifacts =
-            launch_artifacts_by_evidence(config_inputs, "config")?;
+        let mut config_staged_artifacts = launch_artifacts_by_evidence(config_inputs, "config")?;
         let fact_descriptor_artifacts = validate_fact_descriptor_launch_artifacts(
             runtime_spec,
             evidence.fact_descriptor_artifacts,
