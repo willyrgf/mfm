@@ -11,7 +11,7 @@ use crate::ids::{
 };
 use crate::metadata::PublicMetadata;
 use crate::symbol::{
-    validate_symbol_config, BalanceReaderConfig, Observation, PriceSourceRef, QuoteCode,
+    validate_symbol_config, BalanceReaderConfig, Observation, QuoteCode,
     SymbolConfig, SymbolConfigError, SymbolKind, ValuationReaderConfig, ValuationSourceConfig,
     ValuationSourceRegistry, ValuationSourceRegistryError,
 };
@@ -653,8 +653,6 @@ pub struct PortfolioSnapshot {
     pub wallets: Vec<WalletSnapshot>,
     /// Symbol configs used to interpret the snapshot.
     pub symbol_configs: Vec<SymbolConfig>,
-    /// Snapshot errors.
-    pub errors: Vec<PortfolioSnapshotError>,
 }
 
 impl PortfolioSnapshot {
@@ -672,43 +670,7 @@ impl PortfolioSnapshot {
         }
         self.symbol_configs
             .sort_by(|left, right| left.symbol_id.cmp(&right.symbol_id));
-        self.errors.sort_by(|left, right| {
-            (
-                left.network_id.as_deref().unwrap_or(""),
-                left.wallet_id.as_deref().unwrap_or(""),
-                left.symbol_id.as_deref().unwrap_or(""),
-                left.code.as_str(),
-            )
-                .cmp(&(
-                    right.network_id.as_deref().unwrap_or(""),
-                    right.wallet_id.as_deref().unwrap_or(""),
-                    right.symbol_id.as_deref().unwrap_or(""),
-                    right.code.as_str(),
-                ))
-        });
     }
-}
-
-/// Canonical snapshot error.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "portfolio-snapshot-error",
-    schema = "mfm.portfolio.snapshot_error"
-)]
-pub struct PortfolioSnapshotError {
-    /// Stable machine-readable error code.
-    pub code: String,
-    /// Human-readable error message.
-    pub message: String,
-    /// Optional wallet identifier associated with the error.
-    pub wallet_id: Option<String>,
-    /// Optional symbol identifier associated with the error.
-    pub symbol_id: Option<String>,
-    /// Optional network identifier associated with the error.
-    pub network_id: Option<String>,
-    /// Optional reader kind associated with the error.
-    pub reader_kind: Option<String>,
 }
 
 /// Canonical report derived from the snapshot artifact.
@@ -731,8 +693,6 @@ pub struct PortfolioReport {
     pub wallet_summaries: Vec<WalletReport>,
     /// Portfolio-level quote totals.
     pub totals_by_quote: Vec<PortfolioQuoteTotal>,
-    /// Total number of errors in the snapshot.
-    pub error_count: u64,
 }
 
 impl PortfolioReport {
@@ -1219,38 +1179,11 @@ fn validate_portfolio_bundle_sources(
         }
     }
 
+    let _ = (registry, source_index);
     for symbol in &cfg.symbol_configs {
         for quote in &symbol.valuation.quotes {
             match &quote.reader {
                 ValuationReaderConfig::FixedUnitPrice { .. } => {}
-                ValuationReaderConfig::DirectPrice { source } => {
-                    validate_price_source_registry_match(
-                        symbol,
-                        quote.quote,
-                        source,
-                        registry,
-                        source_index,
-                    )?;
-                }
-                ValuationReaderConfig::DerivedUnitPrice {
-                    numerator,
-                    denominator,
-                } => {
-                    validate_price_source_registry_match(
-                        symbol,
-                        quote.quote,
-                        numerator,
-                        registry,
-                        source_index,
-                    )?;
-                    validate_price_source_registry_match(
-                        symbol,
-                        quote.quote,
-                        denominator,
-                        registry,
-                        source_index,
-                    )?;
-                }
             }
         }
     }
@@ -1334,77 +1267,9 @@ fn validate_symbol_quote_routes(
         }
         match &quote.reader {
             ValuationReaderConfig::FixedUnitPrice { .. } => {}
-            ValuationReaderConfig::DirectPrice { source } => {
-                if !network_ids.contains(&source.network_id) {
-                    return Err(PortfolioConfigError::UnknownPriceSourceNetwork {
-                        symbol_id: symbol.symbol_id.to_string(),
-                        quote: quote.quote,
-                        network_id: source.network_id.to_string(),
-                        reader_kind: "direct_price",
-                    });
-                }
-            }
-            ValuationReaderConfig::DerivedUnitPrice {
-                numerator,
-                denominator,
-            } => {
-                for source in [numerator, denominator] {
-                    if !network_ids.contains(&source.network_id) {
-                        return Err(PortfolioConfigError::UnknownPriceSourceNetwork {
-                            symbol_id: symbol.symbol_id.to_string(),
-                            quote: quote.quote,
-                            network_id: source.network_id.to_string(),
-                            reader_kind: "derived_unit_price",
-                        });
-                    }
-                }
-            }
         }
     }
 
-    Ok(())
-}
-
-fn validate_price_source_registry_match(
-    symbol: &SymbolConfig,
-    quote: QuoteCode,
-    source_ref: &PriceSourceRef,
-    registry: &ValuationSourceRegistry,
-    source_index: &BTreeMap<ValuationSourceId, usize>,
-) -> Result<(), PortfolioConfigError> {
-    let Some(index) = source_index.get(&source_ref.source_id) else {
-        return Err(PortfolioConfigError::UnknownValuationSource {
-            symbol_id: symbol.symbol_id.to_string(),
-            quote,
-            source_id: source_ref.source_id.to_string(),
-        });
-    };
-    let source_cfg = &registry.sources[*index];
-
-    if source_cfg.network_id != source_ref.network_id {
-        return Err(PortfolioConfigError::ValuationSourceMismatch {
-            symbol_id: symbol.symbol_id.to_string(),
-            quote,
-            source_id: source_ref.source_id.to_string(),
-            field: "network_id",
-        });
-    }
-    if source_cfg.base_symbol_id != source_ref.base_symbol_id {
-        return Err(PortfolioConfigError::ValuationSourceMismatch {
-            symbol_id: symbol.symbol_id.to_string(),
-            quote,
-            source_id: source_ref.source_id.to_string(),
-            field: "base_symbol_id",
-        });
-    }
-    if source_cfg.quote != source_ref.quote {
-        return Err(PortfolioConfigError::ValuationSourceMismatch {
-            symbol_id: symbol.symbol_id.to_string(),
-            quote,
-            source_id: source_ref.source_id.to_string(),
-            field: "quote",
-        });
-    }
-
+    let _ = network_ids;
     Ok(())
 }

@@ -51,13 +51,6 @@ stable_domain_key_type!(
     "Stable domain key for a portfolio subject instance."
 );
 stable_domain_key_type!(
-    ViewDomainKey,
-    view_key,
-    "view-domain-key",
-    "mfm.portfolio.domain_key.view",
-    "Stable domain key for a portfolio execution view instance."
-);
-stable_domain_key_type!(
     ValuationDomainKey,
     valuation_key,
     "valuation-domain-key",
@@ -65,11 +58,11 @@ stable_domain_key_type!(
     "Stable domain key for a portfolio valuation instance."
 );
 stable_domain_key_type!(
-    ObservationBatchDomainKey,
-    observation_batch_key,
-    "observation-batch-domain-key",
-    "mfm.portfolio.domain_key.observation_batch",
-    "Stable domain key for a portfolio observation batch instance."
+    HoldingsDomainKey,
+    holdings_key,
+    "holdings-domain-key",
+    "mfm.portfolio.domain_key.holdings",
+    "Stable domain key for selected portfolio holdings."
 );
 stable_domain_key_type!(
     ReportDomainKey,
@@ -80,9 +73,8 @@ stable_domain_key_type!(
 );
 
 impl mfm_program::StableDomainKey for SubjectDomainKey {}
-impl mfm_program::StableDomainKey for ViewDomainKey {}
 impl mfm_program::StableDomainKey for ValuationDomainKey {}
-impl mfm_program::StableDomainKey for ObservationBatchDomainKey {}
+impl mfm_program::StableDomainKey for HoldingsDomainKey {}
 impl mfm_program::StableDomainKey for ReportDomainKey {}
 
 #[cfg(test)]

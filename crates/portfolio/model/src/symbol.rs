@@ -449,18 +449,6 @@ pub enum ValuationReaderConfig {
         /// Decimal string for the unit price.
         unit_price_dec: UnitPriceDecimal,
     },
-    /// Direct unit price from one source.
-    DirectPrice {
-        /// Price source definition.
-        source: PriceSourceRef,
-    },
-    /// Derived unit price computed from numerator and denominator sources.
-    DerivedUnitPrice {
-        /// Numerator source definition.
-        numerator: PriceSourceRef,
-        /// Denominator source definition.
-        denominator: PriceSourceRef,
-    },
 }
 
 /// Canonical wallet observation emitted by runtime states.
@@ -650,16 +638,6 @@ pub enum SymbolConfigError {
         /// Underlying scalar validation failure.
         source: PortfolioScalarError,
     },
-    /// Derived price source quotes did not match.
-    #[error("derived_unit_price quotes must match for quote `{quote}` (got `{numerator_quote}` and `{denominator_quote}`)")]
-    DerivedPriceQuoteMismatch {
-        /// Quote whose route was invalid.
-        quote: QuoteCode,
-        /// Numerator quote code.
-        numerator_quote: QuoteCode,
-        /// Denominator quote code.
-        denominator_quote: QuoteCode,
-    },
 }
 
 /// Validation errors for valuation source registries.
@@ -738,25 +716,10 @@ pub fn validate_valuation_source_registry(
 }
 
 fn validate_valuation_reader_config(
-    quote: QuoteCode,
+    _quote: QuoteCode,
     reader: &ValuationReaderConfig,
 ) -> Result<(), SymbolConfigError> {
     match reader {
-        ValuationReaderConfig::FixedUnitPrice { .. } => {}
-        ValuationReaderConfig::DirectPrice { .. } => {}
-        ValuationReaderConfig::DerivedUnitPrice {
-            numerator,
-            denominator,
-        } => {
-            if numerator.quote != denominator.quote {
-                return Err(SymbolConfigError::DerivedPriceQuoteMismatch {
-                    quote,
-                    numerator_quote: numerator.quote,
-                    denominator_quote: denominator.quote,
-                });
-            }
-        }
+        ValuationReaderConfig::FixedUnitPrice { .. } => Ok(()),
     }
-
-    Ok(())
 }

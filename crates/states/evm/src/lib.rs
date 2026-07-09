@@ -297,7 +297,7 @@ impl EvmAddressNativeBalanceResponse {
         less_than,
         less_than_or_equal
     ),
-    exposure = "query_only",
+    exposure = "returnable",
     sortable
 ))]
 #[mfm_fact(ordering(

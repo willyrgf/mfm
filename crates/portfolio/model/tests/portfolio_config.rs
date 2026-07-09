@@ -4,7 +4,7 @@ use mfm_portfolio_model::metadata::PublicMetadata;
 use mfm_portfolio_model::portfolio::*;
 use mfm_portfolio_model::symbol::{
     BalanceReaderConfig, Observation, ObservationAnchor, ObservationQuantity, ObservationSource,
-    ObservationValue, ObservationValueSourceRef, QuoteCode, SymbolConfigError, SymbolKind,
+    ObservationValue, ObservationValueSourceRef, QuoteCode, SymbolKind,
     SymbolRole, ValuationSourceRegistry,
 };
 use mfm_portfolio_model::wallet::{WalletImplementationConfig, WalletSubjectKind};
@@ -279,18 +279,6 @@ fn invalid_ref_detection_catches_cross_links() {
         },
     );
 
-    let mut source_network = canonical_config_json();
-    source_network["symbol_configs"][0]["valuation"]["quotes"][0]["reader"]["source"]
-        ["network_id"] = json!("unknown-network");
-    assert_decode_error(
-        &source_network,
-        PortfolioConfigError::UnknownPriceSourceNetwork {
-            symbol_id: "eth.native.ethereum-mainnet".to_string(),
-            quote: QuoteCode::Usd,
-            network_id: "unknown-network".to_string(),
-            reader_kind: "direct_price",
-        },
-    );
 }
 
 #[test]
@@ -378,13 +366,8 @@ fn validation_rejects_quote_route_mismatches() {
             "quote": "USD",
             "priced_symbol_id": "eth.native.ethereum-mainnet",
             "reader": {
-                "kind": "direct_price",
-                "source": {
-                    "source_id": "chainlink_eth_usd",
-                    "network_id": "ethereum-mainnet",
-                    "base_symbol_id": "eth.native.ethereum-mainnet",
-                    "quote": "USD"
-                }
+                "kind": "fixed_unit_price",
+                "unit_price_dec": "1.0"
             }
         }
     ]);
@@ -403,21 +386,6 @@ fn validation_rejects_quote_route_mismatches() {
         PortfolioConfigError::UnexpectedValuationQuote {
             symbol_id: "eth.native.ethereum-mainnet".to_string(),
             quote: QuoteCode::Btc,
-        },
-    );
-
-    let mut derived_mismatch = canonical_config_json();
-    derived_mismatch["symbol_configs"][1]["valuation"]["quotes"][1]["reader"]["denominator"]
-        ["quote"] = json!("BTC");
-    assert_decode_error(
-        &derived_mismatch,
-        PortfolioConfigError::InvalidSymbolConfig {
-            symbol_id: "usdc.wallet.ethereum-mainnet".to_string(),
-            source: Box::new(SymbolConfigError::DerivedPriceQuoteMismatch {
-                quote: QuoteCode::Btc,
-                numerator_quote: QuoteCode::Usd,
-                denominator_quote: QuoteCode::Btc,
-            }),
         },
     );
 }
@@ -534,29 +502,10 @@ fn normalization_sorts_config_and_runtime_outputs() {
             },
         ],
         symbol_configs: cfg.symbol_configs.clone(),
-        errors: vec![
-            PortfolioSnapshotError {
-                code: "wallet_error".to_string(),
-                message: "wallet".to_string(),
-                wallet_id: Some("wallet_treasury_eth".to_string()),
-                symbol_id: None,
-                network_id: Some("ethereum-mainnet".to_string()),
-                reader_kind: None,
-            },
-            PortfolioSnapshotError {
-                code: "symbol_error".to_string(),
-                message: "symbol".to_string(),
-                wallet_id: Some("wallet_ops_arb".to_string()),
-                symbol_id: Some("eth.native.arbitrum-mainnet".to_string()),
-                network_id: Some("arbitrum-mainnet".to_string()),
-                reader_kind: None,
-            },
-        ],
     };
     snapshot.network_pins.reverse();
     snapshot.wallets.reverse();
     snapshot.wallets[0].observations.reverse();
-    snapshot.errors.reverse();
     snapshot.normalize();
 
     assert_eq!(
@@ -585,14 +534,6 @@ fn normalization_sorts_config_and_runtime_outputs() {
             "eth.native.ethereum-mainnet",
             "usdc.wallet.ethereum-mainnet",
         ]
-    );
-    assert_eq!(
-        snapshot
-            .errors
-            .iter()
-            .map(|error| error.code.as_str())
-            .collect::<Vec<_>>(),
-        vec!["symbol_error", "wallet_error"]
     );
 }
 
@@ -664,26 +605,16 @@ fn canonical_config_json() -> Value {
                             "quote": "USD",
                             "priced_symbol_id": "eth.native.ethereum-mainnet",
                             "reader": {
-                                "kind": "direct_price",
-                                "source": {
-                                    "source_id": "chainlink_eth_usd",
-                                    "network_id": "ethereum-mainnet",
-                                    "base_symbol_id": "eth.native.ethereum-mainnet",
-                                    "quote": "USD"
-                                }
+                                "kind": "fixed_unit_price",
+                                "unit_price_dec": "1800.0"
                             }
                         },
                         {
                             "quote": "BTC",
                             "priced_symbol_id": "eth.native.ethereum-mainnet",
                             "reader": {
-                                "kind": "direct_price",
-                                "source": {
-                                    "source_id": "chainlink_eth_btc",
-                                    "network_id": "ethereum-mainnet",
-                                    "base_symbol_id": "eth.native.ethereum-mainnet",
-                                    "quote": "BTC"
-                                }
+                                "kind": "fixed_unit_price",
+                                "unit_price_dec": "0.05"
                             }
                         }
                     ]
@@ -709,32 +640,16 @@ fn canonical_config_json() -> Value {
                             "quote": "USD",
                             "priced_symbol_id": "usdc.wallet.ethereum-mainnet",
                             "reader": {
-                                "kind": "direct_price",
-                                "source": {
-                                    "source_id": "chainlink_usdc_usd",
-                                    "network_id": "ethereum-mainnet",
-                                    "base_symbol_id": "usdc.wallet.ethereum-mainnet",
-                                    "quote": "USD"
-                                }
+                                "kind": "fixed_unit_price",
+                                "unit_price_dec": "1.0"
                             }
                         },
                         {
                             "quote": "BTC",
                             "priced_symbol_id": "usdc.wallet.ethereum-mainnet",
                             "reader": {
-                                "kind": "derived_unit_price",
-                                "numerator": {
-                                    "source_id": "chainlink_usdc_usd",
-                                    "network_id": "ethereum-mainnet",
-                                    "base_symbol_id": "usdc.wallet.ethereum-mainnet",
-                                    "quote": "USD"
-                                },
-                                "denominator": {
-                                    "source_id": "chainlink_btc_usd",
-                                    "network_id": "ethereum-mainnet",
-                                    "base_symbol_id": "btc.wallet.ethereum-mainnet",
-                                    "quote": "USD"
-                                }
+                                "kind": "fixed_unit_price",
+                                "unit_price_dec": "0.00001"
                             }
                         }
                     ]
@@ -759,26 +674,16 @@ fn canonical_config_json() -> Value {
                             "quote": "USD",
                             "priced_symbol_id": "eth.native.arbitrum-mainnet",
                             "reader": {
-                                "kind": "direct_price",
-                                "source": {
-                                    "source_id": "chainlink_eth_usd",
-                                    "network_id": "arbitrum-mainnet",
-                                    "base_symbol_id": "eth.native.arbitrum-mainnet",
-                                    "quote": "USD"
-                                }
+                                "kind": "fixed_unit_price",
+                                "unit_price_dec": "1800.0"
                             }
                         },
                         {
                             "quote": "BTC",
                             "priced_symbol_id": "eth.native.arbitrum-mainnet",
                             "reader": {
-                                "kind": "direct_price",
-                                "source": {
-                                    "source_id": "chainlink_eth_btc",
-                                    "network_id": "arbitrum-mainnet",
-                                    "base_symbol_id": "eth.native.arbitrum-mainnet",
-                                    "quote": "BTC"
-                                }
+                                "kind": "fixed_unit_price",
+                                "unit_price_dec": "0.05"
                             }
                         }
                     ]
@@ -817,7 +722,7 @@ fn observation(wallet_id: &str, symbol_id: &str, value_order: Vec<QuoteCode>) ->
                 priced_symbol_id: symbol_id.to_string(),
                 value_dec: "1".to_string(),
                 unit_price_dec: "1".to_string(),
-                valuation_reader_kind: "direct_price".to_string(),
+                valuation_reader_kind: "fixed_unit_price".to_string(),
                 source_refs: vec![ObservationValueSourceRef {
                     source_id: "src".to_string(),
                     network_id: if symbol_id.contains("arbitrum") {
