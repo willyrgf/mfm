@@ -60,12 +60,15 @@ certified workflow config/intent and bind the raw JSON-RPC client once per bindi
 bound network provider implements EVM capability traits. Capability requests carry operation
 parameters only (block selector, address, calldata, etc.) and do not include source-binding fields.
 
-The raw client owns route/source registries and no-IO binding validation. It does not implement
-live capability provider traits. Every bound-provider call goes through a provider-owned sealed
-pipeline that probes chain identity (`eth_chainId`), selects a configured source/policy, and returns
-redacted evidence containing the semantic network id, expected chain id, observed chain id,
-selected source ref, and policy id. A successful response has already enforced provider-bound
-source binding, and the returned source evidence matches the binding by construction.
+The raw client owns route/source registries, no-IO binding validation, and bind constructors. It
+does not implement live capability provider traits. Every bound-provider call enters a
+provider-owned sealed pipeline (`prepare_call`) that selects a configured source/policy, probes
+chain identity (`eth_chainId`), and mints a private `VerifiedEvmCall` token. Capability-provider
+operation JSON-RPC requires that token; probe IO is a closed path separate from operation IO. On
+success the provider returns redacted evidence containing the semantic network id, expected chain
+id, observed chain id, selected source ref, and policy id. A successful response has already
+enforced provider-bound source binding, and the returned source evidence matches the binding by
+construction. Adapters must not re-validate live source evidence after a successful provider call.
 
 The selected source and policy ids are audit provenance only. Replay and public output must not
 resolve them against current runtime config.

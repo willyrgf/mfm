@@ -1,10 +1,14 @@
 #![warn(missing_docs)]
-//! Bitcoin Core JSON-RPC over HTTP client.
+//! Bitcoin Core JSON-RPC over HTTP transport.
 //!
-//! Minimal typed client for the Bitcoin Core RPCs needed by the mfm semantic runtime:
-//! - `getblockchaininfo` — current chain height and best block hash (anchor)
-//! - `getblockhash` and `getblockheader` — selected chain-head metadata
-//! - `scantxoutset` — UTXO balance for a given address (observation)
+//! Production public surface:
+//! - [`BtcJsonRpcConfig`] + [`BtcJsonRpcClient::new`]
+//! - [`BtcJsonRpcRouter::{new, validate_source_binding, bind_source}`]
+//! - bound [`BtcJsonRpcSourceProvider`] capability implementations
+//!
+//! Probe (`getblockchaininfo`) and capability operation RPCs are crate-private. Live capability
+//! methods enter a sealed `prepare_call` path that mints a private verified-call token; operation
+//! IO requires that token. The transport trait used for in-crate mocking is not public.
 //!
 //! The client speaks plain JSON-RPC 2.0 over HTTP with optional Basic auth, using `reqwest`.
 //! Debug output and errors redact RPC URL credentials, query strings, passwords, and raw response
@@ -82,24 +86,30 @@ pub struct BtcJsonRpcClient {
 }
 
 /// Boxed future returned by Bitcoin JSON-RPC transport abstractions.
-pub type BtcTransportFuture<'a, T> =
+///
+/// Crate-private: production callers use [`BtcJsonRpcClient`] via the router and bound provider,
+/// not dyn transport trait objects.
+type BtcTransportFuture<'a, T> =
     Pin<Box<dyn Future<Output = std::result::Result<T, BtcRpcError>> + Send + 'a>>;
 
-/// Minimal Bitcoin JSON-RPC transport surface needed by the capability provider.
-pub trait BtcJsonRpcChainHeadTransport: Send + Sync {
-    /// Reads current blockchain summary information.
+/// Minimal Bitcoin JSON-RPC transport surface needed by the sealed provider pipeline.
+///
+/// Crate-private so adapters and app cannot call probe/operation methods via a public dyn trait.
+/// Production code constructs [`BtcJsonRpcRouter`] from concrete [`BtcJsonRpcClient`] values only.
+trait BtcJsonRpcChainHeadTransport: Send + Sync {
+    /// Identity probe (`getblockchaininfo`). Only for sealed `prepare_call`.
     fn get_blockchain_info<'a>(&'a self) -> BtcTransportFuture<'a, BlockchainInfo>;
 
-    /// Reads the block hash for a selected height.
+    /// Reads the block hash for a selected height (capability operation IO).
     fn get_block_hash<'a>(&'a self, height: u64) -> BtcTransportFuture<'a, String>;
 
-    /// Reads verbose block-header metadata for a block hash.
+    /// Reads verbose block-header metadata for a block hash (capability operation IO).
     fn get_block_header<'a>(
         &'a self,
         block_hash: &'a str,
     ) -> BtcTransportFuture<'a, BlockHeaderInfo>;
 
-    /// Scans the UTXO set for a single address.
+    /// Scans the UTXO set for a single address (capability operation IO).
     fn scan_tx_out_set<'a>(
         &'a self,
         address: &'a str,
@@ -140,8 +150,28 @@ pub struct BtcJsonRpcRouter {
 }
 
 impl BtcJsonRpcRouter {
-    /// Creates a router over JSON-RPC transports keyed by semantic source identity.
-    pub fn new(routes: BTreeMap<BtcSourceIdentity, Arc<dyn BtcJsonRpcChainHeadTransport>>) -> Self {
+    /// Creates a router over concrete JSON-RPC clients keyed by semantic source identity.
+    ///
+    /// Converts clients to crate-private transport trait objects inside this crate. There is no
+    /// public dyn-transport constructor; production code must pass [`BtcJsonRpcClient`] values.
+    pub fn new(routes: BTreeMap<BtcSourceIdentity, Arc<BtcJsonRpcClient>>) -> Self {
+        Self {
+            routes: routes
+                .into_iter()
+                .map(|(identity, client)| {
+                    (identity, client as Arc<dyn BtcJsonRpcChainHeadTransport>)
+                })
+                .collect(),
+        }
+    }
+
+    /// Test-only router constructor that injects mock transports.
+    ///
+    /// Not a production dual path: unavailable outside `#[cfg(test)]` of this crate.
+    #[cfg(test)]
+    fn from_transports(
+        routes: BTreeMap<BtcSourceIdentity, Arc<dyn BtcJsonRpcChainHeadTransport>>,
+    ) -> Self {
         Self { routes }
     }
 
@@ -195,16 +225,53 @@ struct VerifiedBtcCall {
     evidence: RedactedBtcSourceEvidence,
 }
 
+impl VerifiedBtcCall {
+    /// Token-gated `getblockhash` operation IO.
+    async fn get_block_hash(&self, height: u64) -> mfm_btc_capabilities::Result<String> {
+        self.transport
+            .get_block_hash(height)
+            .await
+            .map_err(|error| btc_rpc_provider_error("getblockhash", error))
+    }
+
+    /// Token-gated `getblockheader` operation IO.
+    async fn get_block_header(
+        &self,
+        block_hash: &str,
+    ) -> mfm_btc_capabilities::Result<BlockHeaderInfo> {
+        self.transport
+            .get_block_header(block_hash)
+            .await
+            .map_err(|error| btc_rpc_provider_error("getblockheader", error))
+    }
+
+    /// Token-gated `scantxoutset` operation IO (reserved for future exact-balance support).
+    #[allow(dead_code)]
+    async fn scan_tx_out_set(
+        &self,
+        address: &str,
+    ) -> mfm_btc_capabilities::Result<ScanTxOutSetResult> {
+        self.transport
+            .scan_tx_out_set(address)
+            .await
+            .map_err(|error| btc_rpc_provider_error("scantxoutset", error))
+    }
+}
+
 impl BtcJsonRpcSourceProvider {
     /// Returns the private semantic binding owned by this provider.
     pub const fn binding(&self) -> &BtcSourceBinding {
         &self.binding
     }
 
+    /// Call-prepare: resolve bound source route, probe `getblockchaininfo`, mint verified token.
+    ///
+    /// The identity probe is a private pre-token path; capability operation IO requires the token.
     async fn prepare_call(&self) -> mfm_btc_capabilities::Result<VerifiedBtcCall> {
         let transport = self
             .router
             .transport_for_source_identity(self.binding.source_identity())?;
+        // Private identity probe — not a general operation helper and not token-gated.
         let info = transport
             .get_blockchain_info()
             .await
@@ -224,12 +291,8 @@ impl BtcJsonRpcSourceProvider {
         verified: &VerifiedBtcCall,
         request: &BtcChainHeadRequest,
     ) -> mfm_btc_capabilities::Result<BtcChainHeadResponse> {
-        let (height, hash) = selected_head(&*verified.transport, &verified.info, request).await?;
-        let header = verified
-            .transport
-            .get_block_header(hash.as_str())
-            .await
-            .map_err(|error| btc_rpc_provider_error("getblockheader", error))?;
+        let (height, hash) = selected_head(verified, request).await?;
+        let header = verified.get_block_header(hash.as_str()).await?;
         verify_header(&header, height, hash.as_str())?;
         let provider_time_unix_ms = header.time.checked_mul(1000);
         Ok(BtcChainHeadResponse {
@@ -247,6 +310,7 @@ impl BtcJsonRpcSourceProvider {
         _verified: &VerifiedBtcCall,
         request: &BtcBalanceReadRequest,
     ) -> mfm_btc_capabilities::Result<BtcBalanceReadResponse> {
+        // Token-gated path: prepare_call already ran. Live Core cannot prove exact anchors.
         Err(btc_provider_failure(
             btc_operation_diagnostic(ProviderDiagnosticCode::UnsupportedOperation, "read_balance")
                 .with_field(
@@ -790,34 +854,32 @@ impl BtcJsonRpcClient {
         Ok(text)
     }
 
-    /// Calls `getblockchaininfo` and returns the current chain state.
-    pub async fn get_blockchain_info(&self) -> Result<BlockchainInfo, BtcRpcError> {
+    /// Identity probe for sealed `prepare_call` only (not a public production API).
+    async fn get_blockchain_info(&self) -> Result<BlockchainInfo, BtcRpcError> {
         let result = self
             .rpc_call("getblockchaininfo", serde_json::json!([]))
             .await?;
         serde_json::from_value(result).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))
     }
 
-    /// Calls `getblockhash` for the given block height.
-    pub async fn get_block_hash(&self, height: u64) -> Result<String, BtcRpcError> {
+    /// Operation IO for the sealed bound-provider path only.
+    async fn get_block_hash(&self, height: u64) -> Result<String, BtcRpcError> {
         let result = self
             .rpc_call("getblockhash", serde_json::json!([height]))
             .await?;
         serde_json::from_value(result).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))
     }
 
-    /// Calls `getblockheader` with verbose output for the given block hash.
-    pub async fn get_block_header(&self, block_hash: &str) -> Result<BlockHeaderInfo, BtcRpcError> {
+    /// Operation IO for the sealed bound-provider path only.
+    async fn get_block_header(&self, block_hash: &str) -> Result<BlockHeaderInfo, BtcRpcError> {
         let result = self
             .rpc_call("getblockheader", serde_json::json!([block_hash, true]))
             .await?;
         serde_json::from_value(result).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))
     }
 
-    /// Calls `scantxoutset` for a single address descriptor.
-    ///
-    /// Uses `"start"` action to perform a fresh scan. The descriptor uses `addr(ADDRESS)` format.
-    pub async fn scan_tx_out_set(&self, address: &str) -> Result<ScanTxOutSetResult, BtcRpcError> {
+    /// Operation IO for the sealed bound-provider path only.
+    async fn scan_tx_out_set(&self, address: &str) -> Result<ScanTxOutSetResult, BtcRpcError> {
         let params = serde_json::json!([
             "start",
             [{ "desc": format!("addr({address})") }]
@@ -825,29 +887,27 @@ impl BtcJsonRpcClient {
         self.rpc_call_raw_scan_result("scantxoutset", params).await
     }
 
-    /// Returns the total balance in satoshis for a single address.
-    ///
-    /// Convenience method that calls [`scan_tx_out_set`](Self::scan_tx_out_set) and converts
-    /// the BTC amount to satoshis.
-    pub async fn address_balance_sats(&self, address: &str) -> Result<u64, BtcRpcError> {
+    /// Convenience helper over sealed `scan_tx_out_set` (crate-private).
+    #[allow(dead_code)]
+    async fn address_balance_sats(&self, address: &str) -> Result<u64, BtcRpcError> {
         let result = self.scan_tx_out_set(address).await?;
         Ok(result.total_amount_sats)
     }
 }
 
+/// Selects the requested head using token-gated operation helpers only.
 async fn selected_head(
-    transport: &dyn BtcJsonRpcChainHeadTransport,
-    info: &BlockchainInfo,
+    verified: &VerifiedBtcCall,
     request: &BtcChainHeadRequest,
 ) -> mfm_btc_capabilities::Result<(u64, BtcBlockHash)> {
     match request.selection().finality() {
         BtcFinality::BestAvailable => {
-            let hash = provider_block_hash("getblockchaininfo", &info.bestblockhash)?;
-            Ok((info.blocks, hash))
+            let hash = provider_block_hash("getblockchaininfo", &verified.info.bestblockhash)?;
+            Ok((verified.info.blocks, hash))
         }
         BtcFinality::Confirmations(confirmations) => {
             let confirmations = confirmations.get();
-            if info.blocks < confirmations {
+            if verified.info.blocks < confirmations {
                 return Err(btc_provider_failure(
                     btc_operation_diagnostic(
                         ProviderDiagnosticCode::OperationIncomplete,
@@ -855,7 +915,7 @@ async fn selected_head(
                     )
                     .with_field(
                         diagnostic_id("source_height"),
-                        ProviderDiagnosticValue::U64(info.blocks),
+                        ProviderDiagnosticValue::U64(verified.info.blocks),
                     )
                     .with_field(
                         diagnostic_id("confirmations"),
@@ -863,11 +923,8 @@ async fn selected_head(
                     ),
                 ));
             }
-            let height = info.blocks - confirmations;
-            let hash = transport
-                .get_block_hash(height)
-                .await
-                .map_err(|error| btc_rpc_provider_error("getblockhash", error))?;
+            let height = verified.info.blocks - confirmations;
+            let hash = verified.get_block_hash(height).await?;
             Ok((height, provider_block_hash("getblockhash", &hash)?))
         }
     }
@@ -972,10 +1029,20 @@ mod tests {
 
     const BEST_BLOCK_HASH: &str =
         "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5";
+    const CONFIRMED_BLOCK_HASH: &str =
+        "00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc";
+    const TIP_HEIGHT: u64 = 840_000;
+
+    #[derive(Clone, Copy)]
+    enum MockInfoFailure {
+        Http,
+        HttpStatus,
+        JsonRpcSecret,
+    }
 
     struct MockBtcTransport {
         chain: &'static str,
-        fail_blockchain_info: bool,
+        info_failure: Option<MockInfoFailure>,
         blockchain_info_calls: AtomicU64,
         block_hash_calls: AtomicU64,
         block_header_calls: AtomicU64,
@@ -986,7 +1053,7 @@ mod tests {
         fn new(chain: &'static str) -> Self {
             Self {
                 chain,
-                fail_blockchain_info: false,
+                info_failure: None,
                 blockchain_info_calls: AtomicU64::new(0),
                 block_hash_calls: AtomicU64::new(0),
                 block_header_calls: AtomicU64::new(0),
@@ -994,9 +1061,9 @@ mod tests {
             }
         }
 
-        fn failing_blockchain_info() -> Self {
+        fn with_info_failure(failure: MockInfoFailure) -> Self {
             Self {
-                fail_blockchain_info: true,
+                info_failure: Some(failure),
                 ..Self::new("main")
             }
         }
@@ -1006,15 +1073,27 @@ mod tests {
         fn get_blockchain_info<'a>(&'a self) -> BtcTransportFuture<'a, BlockchainInfo> {
             Box::pin(async move {
                 self.blockchain_info_calls.fetch_add(1, Ordering::Relaxed);
-                if self.fail_blockchain_info {
-                    return Err(BtcRpcError::JsonRpcError {
-                        code: -32603,
-                        message: "Authorization: Bearer secret at http://user:pass@node.invalid"
-                            .to_string(),
+                if let Some(failure) = self.info_failure {
+                    return Err(match failure {
+                        MockInfoFailure::Http => BtcRpcError::Http(
+                            "http://user:password@localhost:8332 Authorization: Bearer secret"
+                                .to_string(),
+                        ),
+                        MockInfoFailure::HttpStatus => BtcRpcError::HttpStatus {
+                            status: 403,
+                            body_len: Some(64),
+                            content_type: Some("text/plain".to_string()),
+                        },
+                        MockInfoFailure::JsonRpcSecret => BtcRpcError::JsonRpcError {
+                            code: -32601,
+                            message:
+                                "Authorization: Bearer secret at http://user:pass@node.invalid"
+                                    .to_string(),
+                        },
                     });
                 }
                 Ok(BlockchainInfo {
-                    blocks: 840_000,
+                    blocks: TIP_HEIGHT,
                     bestblockhash: BEST_BLOCK_HASH.to_string(),
                     chain: self.chain.to_string(),
                     initialblockdownload: Some(false),
@@ -1022,10 +1101,14 @@ mod tests {
             })
         }
 
-        fn get_block_hash<'a>(&'a self, _height: u64) -> BtcTransportFuture<'a, String> {
+        fn get_block_hash<'a>(&'a self, height: u64) -> BtcTransportFuture<'a, String> {
             Box::pin(async move {
                 self.block_hash_calls.fetch_add(1, Ordering::Relaxed);
-                Ok(BEST_BLOCK_HASH.to_string())
+                if height == TIP_HEIGHT {
+                    Ok(BEST_BLOCK_HASH.to_string())
+                } else {
+                    Ok(CONFIRMED_BLOCK_HASH.to_string())
+                }
             })
         }
 
@@ -1035,9 +1118,14 @@ mod tests {
         ) -> BtcTransportFuture<'a, BlockHeaderInfo> {
             Box::pin(async move {
                 self.block_header_calls.fetch_add(1, Ordering::Relaxed);
+                let height = if block_hash == CONFIRMED_BLOCK_HASH {
+                    TIP_HEIGHT - 6
+                } else {
+                    TIP_HEIGHT
+                };
                 Ok(BlockHeaderInfo {
                     hash: block_hash.to_string(),
-                    height: 840_000,
+                    height,
                     time: 1_713_571_767,
                 })
             })
@@ -1051,7 +1139,7 @@ mod tests {
                 self.scan_calls.fetch_add(1, Ordering::Relaxed);
                 Ok(ScanTxOutSetResult {
                     success: true,
-                    height: 840_000,
+                    height: TIP_HEIGHT,
                     bestblock: BEST_BLOCK_HASH.to_string(),
                     total_amount_sats: 42,
                     unspents: Vec::new(),
@@ -1082,7 +1170,7 @@ mod tests {
             source_identity,
             transport as Arc<dyn BtcJsonRpcChainHeadTransport>,
         );
-        BtcJsonRpcRouter::new(routes)
+        BtcJsonRpcRouter::from_transports(routes)
     }
 
     fn provider_with(
@@ -1192,7 +1280,7 @@ mod tests {
 
     #[test]
     fn missing_source_binding_is_redacted() {
-        let router = BtcJsonRpcRouter::new(BTreeMap::new());
+        let router = BtcJsonRpcRouter::from_transports(BTreeMap::new());
         let error = router
             .validate_source_binding(&source_binding())
             .expect_err("route should be missing");
@@ -1228,6 +1316,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_maps_best_and_confirmed_head_requests() {
+        for (name, selection, expected_height, expected_hash, expected_hash_calls) in [
+            (
+                "best head",
+                BtcHeadSelection::best(),
+                TIP_HEIGHT,
+                BEST_BLOCK_HASH,
+                0,
+            ),
+            (
+                "confirmed head",
+                BtcHeadSelection::confirmed(6).expect("confirmed"),
+                TIP_HEIGHT - 6,
+                CONFIRMED_BLOCK_HASH,
+                1,
+            ),
+        ] {
+            let transport = Arc::new(MockBtcTransport::new("main"));
+            let provider = provider_with(source_identity(), transport.clone());
+            let request = chain_head_request(selection);
+            let response = provider.read_chain_head(&request).await.expect(name);
+
+            assert_eq!(response.block_height, expected_height, "{name}");
+            assert_eq!(response.block_hash.as_str(), expected_hash, "{name}");
+            assert_eq!(
+                response.provider_time_unix_ms,
+                Some(1_713_571_767_000),
+                "{name}"
+            );
+            assert_eq!(
+                transport.blockchain_info_calls.load(Ordering::Relaxed),
+                1,
+                "{name}"
+            );
+            assert_eq!(
+                transport.block_hash_calls.load(Ordering::Relaxed),
+                expected_hash_calls,
+                "{name}"
+            );
+            assert_eq!(
+                transport.block_header_calls.load(Ordering::Relaxed),
+                1,
+                "{name}"
+            );
+            assert_eq!(transport.scan_calls.load(Ordering::Relaxed), 0, "{name}");
+        }
+    }
+
+    #[tokio::test]
     async fn successful_response_evidence_matches_binding_by_construction() {
         let transport = Arc::new(MockBtcTransport::new("main"));
         let provider = provider_with(source_identity(), transport.clone());
@@ -1254,7 +1391,7 @@ mod tests {
         );
         assert_eq!(response.head_kind, request.selection().head_kind());
         assert_eq!(response.finality, request.selection().finality());
-        assert_eq!(response.block_height, 840_000);
+        assert_eq!(response.block_height, TIP_HEIGHT);
         assert_eq!(response.block_hash.as_str(), BEST_BLOCK_HASH);
         assert_eq!(response.provider_time_unix_ms, Some(1_713_571_767_000));
         assert_eq!(transport.blockchain_info_calls.load(Ordering::Relaxed), 1);
@@ -1278,18 +1415,92 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_diagnostic_discards_provider_messages() {
-        let transport = Arc::new(MockBtcTransport::failing_blockchain_info());
-        let provider = provider_with(source_identity(), transport);
-        let request = chain_head_request(BtcHeadSelection::best());
+    async fn balance_rejects_exact_anchor_without_utxo_scan() {
+        let transport = Arc::new(MockBtcTransport::new("main"));
+        let provider = provider_with(source_identity(), transport.clone());
+        let request = balance_request();
 
         let error = provider
-            .read_chain_head(&request)
+            .read_balance(&request)
+            .await
+            .expect_err("exact anchored balance unsupported");
+        let BtcCapabilityError::Provider { diagnostic } = error else {
+            panic!("expected provider diagnostic");
+        };
+
+        assert_eq!(
+            diagnostic.stable_error_code(),
+            "bitcoin_unsupported_operation"
+        );
+        assert_eq!(transport.blockchain_info_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.scan_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn provider_classifies_http_failure_without_secrets() {
+        let transport = Arc::new(MockBtcTransport::with_info_failure(MockInfoFailure::Http));
+        let provider = provider_with(source_identity(), transport);
+        let error = provider
+            .read_chain_head(&chain_head_request(BtcHeadSelection::best()))
             .await
             .expect_err("provider failure");
         let rendered = format!("{error:?} {error}");
+        let BtcCapabilityError::Provider { diagnostic } = error else {
+            panic!("expected provider diagnostic");
+        };
 
-        assert!(matches!(error, BtcCapabilityError::Provider { .. }));
+        assert_eq!(diagnostic.stable_error_code(), "bitcoin_transport_failed");
+        assert_eq!(
+            diagnostic.summary(),
+            "transport_failed operation=getblockchaininfo"
+        );
+        assert!(!rendered.contains("localhost"));
+        assert!(!rendered.contains("password"));
+        assert!(!rendered.contains("secret"));
+        assert!(!rendered.contains(concat!("Author", "ization")));
+    }
+
+    #[tokio::test]
+    async fn provider_classifies_http_status_failure_without_body() {
+        let transport = Arc::new(MockBtcTransport::with_info_failure(
+            MockInfoFailure::HttpStatus,
+        ));
+        let provider = provider_with(source_identity(), transport);
+        let error = provider
+            .read_chain_head(&chain_head_request(BtcHeadSelection::best()))
+            .await
+            .expect_err("provider failure");
+        let BtcCapabilityError::Provider { diagnostic } = error else {
+            panic!("expected provider diagnostic");
+        };
+
+        assert_eq!(diagnostic.stable_error_code(), "bitcoin_rpc_http_status");
+        assert_eq!(
+            diagnostic.summary(),
+            "rpc_http_status operation=getblockchaininfo http_status=403"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_classifies_json_rpc_failure_without_message() {
+        let transport = Arc::new(MockBtcTransport::with_info_failure(
+            MockInfoFailure::JsonRpcSecret,
+        ));
+        let provider = provider_with(source_identity(), transport);
+        let error = provider
+            .read_chain_head(&chain_head_request(BtcHeadSelection::best()))
+            .await
+            .expect_err("provider failure");
+        let rendered = format!("{error:?} {error}");
+        let BtcCapabilityError::Provider { diagnostic } = error else {
+            panic!("expected provider diagnostic");
+        };
+
+        assert_eq!(diagnostic.stable_error_code(), "bitcoin_rpc_json_error");
+        assert_eq!(
+            diagnostic.summary(),
+            "rpc_json_error operation=getblockchaininfo rpc_code=-32601"
+        );
         assert!(!rendered.contains("http://"));
         assert!(!rendered.contains("user:pass"));
         assert!(!rendered.contains(concat!("Author", "ization")));

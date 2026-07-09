@@ -1,6 +1,10 @@
 # Implementation Plan: Source-Bound Transport Providers
 
-Status: engineer handoff plan for `RFC_BOUND_PROVIDERS.md`.
+Status: completed for `RFC_BOUND_PROVIDERS.md` (bound providers, operation-only requests,
+token-gated sealed pipelines, BTC public protocol seal — private client probe/ops + crate-private
+transport trait + concrete-client router constructor, adapter ceremony deletion, factory-held
+routers, boundary tests). Historical handoff notes below; prefer live code and
+`RFC_BOUND_PROVIDERS.md` as the contract.
 
 ## Mandatory Rules
 

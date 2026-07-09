@@ -2,9 +2,8 @@ use super::*;
 use ed25519_dalek::SigningKey;
 use mfm_artifact_capabilities::ArtifactEvidenceRef;
 use mfm_btc_capabilities::{
-    BitcoinNetworkTag, BtcAddress, BtcBalanceReadProvider, BtcBalanceReadRequest, BtcBlockHash,
-    BtcFinality, BtcHeadSelection, BtcNetworkId, BtcSourceBinding, BtcSourceIdentity,
-    BtcSourceStatus, RedactedBtcSourceEvidence,
+    BitcoinNetworkTag, BtcBlockHash, BtcFinality, BtcHeadSelection, BtcNetworkId, BtcSourceBinding,
+    BtcSourceIdentity, BtcSourceStatus, RedactedBtcSourceEvidence,
 };
 use mfm_canonical::sha256_digest_bytes;
 use mfm_facts::{
@@ -27,14 +26,7 @@ use mfm_store::v1::{
     self as store,
     test_support::{signed_fact_query_receipt_for_test, SignedFactQueryReceiptFixtureInputForTest},
 };
-use mfm_transports_btc_jsonrpc_http::{
-    BlockHeaderInfo, BlockchainInfo, BtcJsonRpcChainHeadTransport, BtcJsonRpcRouter,
-    BtcJsonRpcSourceProvider, BtcRpcError, BtcTransportFuture, ScanTxOutSetResult,
-};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::Mutex;
 
 const BEST_HASH: &str = "00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc";
 const CONFIRMED_HASH: &str = "00000000000000000002b2a7f3e0d5c4b6a897887766554433221100ffeeddcc";
@@ -50,25 +42,6 @@ where
         std::task::Poll::Ready(output) => output,
         std::task::Poll::Pending => panic!("test future unexpectedly pending"),
     }
-}
-
-#[derive(Default)]
-struct MockTransport {
-    calls: Mutex<Vec<String>>,
-    info_failure: Option<MockInfoFailure>,
-}
-
-impl MockTransport {
-    fn calls(&self) -> Vec<String> {
-        self.calls.lock().expect("calls").clone()
-    }
-}
-
-#[derive(Clone, Copy)]
-enum MockInfoFailure {
-    Http,
-    HttpStatus,
-    JsonRpc,
 }
 
 struct MockFactIndex {
@@ -201,91 +174,6 @@ impl store::RetainedArtifactReadProvider for MockArtifacts {
     }
 }
 
-impl BtcJsonRpcChainHeadTransport for MockTransport {
-    fn get_blockchain_info<'a>(&'a self) -> BtcTransportFuture<'a, BlockchainInfo> {
-        Box::pin(async move {
-            self.calls.lock().expect("calls").push("info".to_owned());
-            if let Some(failure) = self.info_failure {
-                return Err(match failure {
-                    MockInfoFailure::Http => BtcRpcError::Http(
-                        concat!(
-                            "http://user:password@localhost:8332 ",
-                            "Authorization: Bearer secret"
-                        )
-                        .to_owned(),
-                    ),
-                    MockInfoFailure::HttpStatus => BtcRpcError::HttpStatus {
-                        status: 403,
-                        body_len: Some(64),
-                        content_type: Some("text/plain".to_owned()),
-                    },
-                    MockInfoFailure::JsonRpc => BtcRpcError::JsonRpcError {
-                        code: -32601,
-                        message: "secret provider message".to_owned(),
-                    },
-                });
-            }
-            Ok(BlockchainInfo {
-                blocks: 850_000,
-                bestblockhash: BEST_HASH.to_owned(),
-                chain: "main".to_owned(),
-                initialblockdownload: Some(false),
-            })
-        })
-    }
-
-    fn get_block_hash<'a>(&'a self, height: u64) -> BtcTransportFuture<'a, String> {
-        Box::pin(async move {
-            self.calls
-                .lock()
-                .expect("calls")
-                .push(format!("hash:{height}"));
-            Ok(CONFIRMED_HASH.to_owned())
-        })
-    }
-
-    fn get_block_header<'a>(
-        &'a self,
-        block_hash: &'a str,
-    ) -> BtcTransportFuture<'a, BlockHeaderInfo> {
-        Box::pin(async move {
-            self.calls
-                .lock()
-                .expect("calls")
-                .push(format!("header:{block_hash}"));
-            let height = if block_hash == CONFIRMED_HASH {
-                849_994
-            } else {
-                850_000
-            };
-            Ok(BlockHeaderInfo {
-                hash: block_hash.to_owned(),
-                height,
-                time: 1_720_000_000,
-            })
-        })
-    }
-
-    fn scan_tx_out_set<'a>(
-        &'a self,
-        address: &'a str,
-    ) -> BtcTransportFuture<'a, ScanTxOutSetResult> {
-        Box::pin(async move {
-            self.calls
-                .lock()
-                .expect("calls")
-                .push(format!("scan:{address}"));
-            Ok(ScanTxOutSetResult {
-                success: true,
-                height: 850_000,
-                bestblock: BEST_HASH.to_owned(),
-                total_amount_sats: 123_456_789,
-                unspents: Vec::new(),
-            })
-        })
-    }
-}
-
 fn make_binding() -> BtcSourceBinding {
     BtcSourceBinding::new(
         BtcNetworkId::new("bitcoin-mainnet").expect("network"),
@@ -297,14 +185,6 @@ fn make_binding() -> BtcSourceBinding {
 
 fn make_request(selection: BtcHeadSelection) -> BtcChainHeadRequest {
     BtcChainHeadRequest::new(selection)
-}
-
-fn make_balance_request(address: &str) -> BtcBalanceReadRequest {
-    BtcBalanceReadRequest::new(
-        BtcAddress::new(address).expect("address"),
-        850_000,
-        BtcBlockHash::new(BEST_HASH).expect("hash"),
-    )
 }
 
 fn chain_head_response(
@@ -326,17 +206,6 @@ fn chain_head_response(
         block_hash: BtcBlockHash::new(block_hash).expect("hash"),
         provider_time_unix_ms,
     }
-}
-
-fn routed_provider(transport: Arc<MockTransport>) -> BtcJsonRpcSourceProvider {
-    let mut routes = BTreeMap::new();
-    routes.insert(
-        BtcSourceIdentity::new("public-bitcoin-core").expect("source"),
-        transport as Arc<dyn BtcJsonRpcChainHeadTransport>,
-    );
-    BtcJsonRpcRouter::new(routes)
-        .bind_source(make_binding())
-        .expect("bind source")
 }
 
 fn observe_input(
@@ -684,140 +553,6 @@ fn digest(seed: u8) -> ContentDigest {
 
 fn digest_bytes(seed: u8) -> DigestBytes {
     DigestBytes::from_array([seed; 32])
-}
-
-#[tokio::test]
-async fn provider_maps_head_requests_to_blockchain_info_and_headers() {
-    for (name, selection, expected_height, expected_hash, expected_calls) in [
-        (
-            "best head",
-            BtcHeadSelection::best(),
-            850_000,
-            BEST_HASH,
-            vec!["info".to_owned(), format!("header:{BEST_HASH}")],
-        ),
-        (
-            "confirmed head",
-            BtcHeadSelection::confirmed(6).expect("confirmed"),
-            849_994,
-            CONFIRMED_HASH,
-            vec![
-                "info".to_owned(),
-                "hash:849994".to_owned(),
-                format!("header:{CONFIRMED_HASH}"),
-            ],
-        ),
-    ] {
-        let transport = Arc::new(MockTransport::default());
-        let provider = routed_provider(transport.clone());
-        let response = provider
-            .read_chain_head(&make_request(selection))
-            .await
-            .expect(name);
-
-        assert_eq!(response.block_height, expected_height, "{name}");
-        assert_eq!(response.block_hash.as_str(), expected_hash, "{name}");
-        assert_eq!(
-            response.provider_time_unix_ms,
-            Some(1_720_000_000_000),
-            "{name}"
-        );
-        assert_eq!(transport.calls(), expected_calls, "{name}");
-    }
-}
-
-#[tokio::test]
-async fn provider_rejects_exact_balance_requests_without_utxo_scan() {
-    let address = "bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw";
-    let transport = Arc::new(MockTransport::default());
-    let provider = routed_provider(transport.clone());
-    let request = make_balance_request(address);
-    let error = provider
-        .read_balance(&request)
-        .await
-        .expect_err("exact anchored balance unsupported");
-
-    let BtcCapabilityError::Provider { diagnostic } = error else {
-        panic!("expected provider diagnostic");
-    };
-    assert_eq!(
-        diagnostic.stable_error_code(),
-        "bitcoin_unsupported_operation"
-    );
-    assert_eq!(transport.calls(), vec!["info".to_owned()]);
-}
-
-#[tokio::test]
-async fn provider_errors_discard_transport_secret_details() {
-    let transport = Arc::new(MockTransport {
-        calls: Mutex::new(Vec::new()),
-        info_failure: Some(MockInfoFailure::Http),
-    });
-    let provider = routed_provider(transport);
-    let error = provider
-        .read_chain_head(&make_request(BtcHeadSelection::best()))
-        .await
-        .expect_err("provider failure");
-    let rendered = format!("{error:?} {error}");
-
-    let BtcCapabilityError::Provider { diagnostic } = error else {
-        panic!("expected provider diagnostic");
-    };
-    assert_eq!(diagnostic.stable_error_code(), "bitcoin_transport_failed");
-    assert_eq!(
-        diagnostic.summary(),
-        "transport_failed operation=getblockchaininfo"
-    );
-    assert!(!rendered.contains("localhost"));
-    assert!(!rendered.contains("password"));
-    assert!(!rendered.contains("secret"));
-    assert!(!rendered.contains("Authorization"));
-}
-
-#[tokio::test]
-async fn provider_classifies_http_status_failure_without_body() {
-    let transport = Arc::new(MockTransport {
-        calls: Mutex::new(Vec::new()),
-        info_failure: Some(MockInfoFailure::HttpStatus),
-    });
-    let provider = routed_provider(transport);
-    let error = provider
-        .read_chain_head(&make_request(BtcHeadSelection::best()))
-        .await
-        .expect_err("provider failure");
-    let BtcCapabilityError::Provider { diagnostic } = error else {
-        panic!("expected provider diagnostic");
-    };
-
-    assert_eq!(diagnostic.stable_error_code(), "bitcoin_rpc_http_status");
-    assert_eq!(
-        diagnostic.summary(),
-        "rpc_http_status operation=getblockchaininfo http_status=403"
-    );
-}
-
-#[tokio::test]
-async fn provider_classifies_json_rpc_failure_without_message() {
-    let transport = Arc::new(MockTransport {
-        calls: Mutex::new(Vec::new()),
-        info_failure: Some(MockInfoFailure::JsonRpc),
-    });
-    let provider = routed_provider(transport);
-    let error = provider
-        .read_chain_head(&make_request(BtcHeadSelection::best()))
-        .await
-        .expect_err("provider failure");
-    let rendered = format!("{error:?} {error}");
-    let BtcCapabilityError::Provider { diagnostic } = error else {
-        panic!("expected provider diagnostic");
-    };
-
-    assert_eq!(diagnostic.stable_error_code(), "bitcoin_rpc_json_error");
-    assert_eq!(
-        diagnostic.summary(),
-        "rpc_json_error operation=getblockchaininfo rpc_code=-32601"
-    );
-    assert!(!rendered.contains("secret provider message"));
 }
 
 async fn replay_fact_from_recorded_provider(

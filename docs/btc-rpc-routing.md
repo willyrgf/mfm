@@ -40,12 +40,17 @@ binding. The returned bound source provider implements BTC capability traits. Ca
 carry operation parameters only (head selection, address, block height/hash) and do not include
 source-binding fields.
 
-The raw router owns source route maps and no-IO binding validation. It does not implement live
-capability provider traits. Every bound-provider call goes through a provider-owned sealed pipeline
-that resolves `source_identity`, probes `getblockchaininfo`, and returns redacted evidence containing
-both expected and observed Bitcoin network tags. If the observed tag differs from the provider
-binding, the provider returns a source-mismatch diagnostic. `validate_source_binding` only checks
-that the route exists; it does not perform network IO.
+The raw router owns concrete `BtcJsonRpcClient` route maps, no-IO binding validation, and bind
+constructors. It does not implement live capability provider traits and does not expose a public dyn
+transport constructor. Client probe/operation methods (`getblockchaininfo`, `getblockhash`,
+`getblockheader`, `scantxoutset`) are crate-private. Every bound-provider call enters a
+provider-owned sealed pipeline (`prepare_call`) that resolves `source_identity`, runs a private
+pre-token identity probe (`getblockchaininfo`), and mints a private `VerifiedBtcCall` token.
+Capability operation helpers are token-gated methods on that token (not bare transport calls). On
+success the provider returns redacted evidence containing both expected and observed Bitcoin network
+tags. If the observed tag differs from the provider binding, the provider returns a source-mismatch
+diagnostic. `validate_source_binding` only checks that the route exists; it does not perform network
+IO.
 
 Provider diagnostics may carry stable operation ids and closed public fields such as network tags,
 heights, hashes, and numeric status codes. They must never carry RPC URLs, credentials, file paths,

@@ -685,10 +685,13 @@ fn production_runner_registry_inner(
     Ok(registry)
 }
 
-#[derive(Clone)]
 struct RuntimeConfigPortfolioRuntime {
     runtime_config: RuntimeConfigLoader,
     btc_config: Option<mfm_runtime_config::BtcRuntimeConfig>,
+    /// Process-local EVM client built once on first use (not reloaded per bind/call).
+    evm_client: std::sync::OnceLock<mfm_transports_evm::EvmJsonRpcClient>,
+    /// Process-local BTC router built once on first use (not reloaded per bind/call).
+    btc_router: std::sync::OnceLock<mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter>,
 }
 
 impl RuntimeConfigPortfolioRuntime {
@@ -699,18 +702,39 @@ impl RuntimeConfigPortfolioRuntime {
         Self {
             runtime_config,
             btc_config,
+            evm_client: std::sync::OnceLock::new(),
+            btc_router: std::sync::OnceLock::new(),
         }
     }
 
-    fn evm_client(&self) -> mfm_runtime::Result<mfm_transports_evm::EvmJsonRpcClient> {
-        self.runtime_config.load_evm().and_then(evm_json_rpc_client)
+    fn evm_client(&self) -> mfm_runtime::Result<&mfm_transports_evm::EvmJsonRpcClient> {
+        if let Some(client) = self.evm_client.get() {
+            return Ok(client);
+        }
+        let client = self
+            .runtime_config
+            .load_evm()
+            .and_then(evm_json_rpc_client)?;
+        let _ = self.evm_client.set(client);
+        self.evm_client.get().ok_or_else(|| {
+            mfm_runtime::RuntimeError::RunnerBinding("EVM client initialization race".to_owned())
+        })
     }
 
-    fn btc_router(&self) -> mfm_runtime::Result<mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter> {
+    fn btc_router(
+        &self,
+    ) -> mfm_runtime::Result<&mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter> {
+        if let Some(router) = self.btc_router.get() {
+            return Ok(router);
+        }
         let btc = self.btc_config.clone().ok_or_else(|| {
             mfm_runtime::RuntimeError::RunnerBinding("missing Bitcoin runtime config".to_owned())
         })?;
-        btc_collector::btc_json_rpc_router(btc)
+        let router = btc_collector::btc_json_rpc_router(btc)?;
+        let _ = self.btc_router.set(router);
+        self.btc_router.get().ok_or_else(|| {
+            mfm_runtime::RuntimeError::RunnerBinding("BTC router initialization race".to_owned())
+        })
     }
 }
 

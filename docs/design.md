@@ -570,7 +570,8 @@ traits. Capability requests carry operation parameters only. Raw routers/clients
 binding validation and bind constructors only; they do not implement live capability provider
 traits. Bound providers own private sealed call pipelines that mint private verified-call/session
 tokens before raw operation IO, probe source identity on each call, and attach redacted evidence on
-success. A route that resolves but observes incompatible source evidence fails after `RunAdmitted`
+success. Adapters bind providers from certified intent and issue operation-only requests; they must
+not re-validate live source evidence after a successful provider call. A route that resolves but observes incompatible source evidence fails after `RunAdmitted`
 as an attempt/capability failure with a closed redacted provider diagnostic. Provider diagnostics
 carry a provider family, stable diagnostic code, optional redaction-safe operation id, and closed
 boolean/integer/id fields only. Examples include HTTP status, JSON-RPC numeric code, response-shape

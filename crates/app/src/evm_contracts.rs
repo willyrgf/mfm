@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use mfm_certify::CertificationRegistry;
 use mfm_evm_capabilities::{EvmNetworkBinding, EvmNetworkId};
@@ -8,11 +8,12 @@ use mfm_store::v1 as store;
 
 use crate::{evm_json_rpc_client, runtime_evm_transport_error, RuntimeConfigLoader};
 
-#[derive(Clone)]
 struct RuntimeConfigEvmContractRuntimeFactory {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     runtime_config: RuntimeConfigLoader,
     source_run_registry: CertificationRegistry,
+    /// Process-local EVM client built once on first use (not reloaded per bind/call).
+    evm_client: OnceLock<mfm_transports_evm::EvmJsonRpcClient>,
 }
 
 impl RuntimeConfigEvmContractRuntimeFactory {
@@ -25,11 +26,8 @@ impl RuntimeConfigEvmContractRuntimeFactory {
             artifacts,
             runtime_config,
             source_run_registry,
+            evm_client: OnceLock::new(),
         }
-    }
-
-    fn load_evm(&self) -> mfm_runtime::Result<mfm_runtime_config::EvmRuntimeConfig> {
-        self.runtime_config.load_evm()
     }
 
     fn load_runtime_config_with_signers(
@@ -49,15 +47,27 @@ impl RuntimeConfigEvmContractRuntimeFactory {
             .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))
     }
 
+    fn evm_client(&self) -> mfm_runtime::Result<&mfm_transports_evm::EvmJsonRpcClient> {
+        if let Some(client) = self.evm_client.get() {
+            return Ok(client);
+        }
+        let client = self
+            .runtime_config
+            .load_evm()
+            .and_then(evm_json_rpc_client)?;
+        let _ = self.evm_client.set(client);
+        self.evm_client.get().ok_or_else(|| {
+            mfm_runtime::RuntimeError::RunnerBinding("EVM client initialization race".to_owned())
+        })
+    }
+
     fn bound_evm_provider(
         &self,
-        evm: mfm_runtime_config::EvmRuntimeConfig,
         network_id: &str,
         expected_chain_id: u64,
     ) -> mfm_runtime::Result<mfm_transports_evm::EvmJsonRpcNetworkProvider> {
         let binding = self.network_binding(network_id, expected_chain_id)?;
-        let client = evm_json_rpc_client(evm)?;
-        client
+        self.evm_client()?
             .bind_network(binding)
             .map_err(runtime_evm_transport_error)
     }
@@ -76,18 +86,14 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
         expected_chain_id: u64,
         signer_ref: Option<&SignerRef>,
     ) -> mfm_runtime::Result<()> {
-        let (evm, signer_configured) = if let Some(signer_ref) = signer_ref {
+        let signer_configured = if let Some(signer_ref) = signer_ref {
             let runtime_config = self.load_runtime_config_with_signers()?;
-            let evm = runtime_config.evm().cloned().ok_or_else(|| {
-                mfm_runtime::RuntimeError::RunnerBinding("missing EVM runtime config".to_owned())
-            })?;
-            (evm, runtime_config.signers().contains_key(signer_ref))
+            runtime_config.signers().contains_key(signer_ref)
         } else {
-            (self.load_evm()?, true)
+            true
         };
         let binding = self.network_binding(network_id, expected_chain_id)?;
-        let client = evm_json_rpc_client(evm)?;
-        client
+        self.evm_client()?
             .validate_network_binding(&binding)
             .map_err(runtime_evm_transport_error)?;
         if !signer_configured {
@@ -103,8 +109,7 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
         network_id: &str,
         expected_chain_id: u64,
     ) -> mfm_runtime::Result<mfm_adapters_evm_contracts::EvmContractReadRuntime> {
-        let evm_provider =
-            self.bound_evm_provider(self.load_evm()?, network_id, expected_chain_id)?;
+        let evm_provider = self.bound_evm_provider(network_id, expected_chain_id)?;
         Ok(
             mfm_adapters_evm_contracts::EvmContractReadRuntime::new_with_source_run_import_registry(
                 Arc::new(evm_provider),
@@ -119,10 +124,7 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
         expected_chain_id: u64,
     ) -> mfm_runtime::Result<mfm_adapters_evm_contracts::EvmContractRuntime> {
         let runtime_config = self.load_runtime_config_with_signers()?;
-        let evm = runtime_config.evm().cloned().ok_or_else(|| {
-            mfm_runtime::RuntimeError::RunnerBinding("missing EVM runtime config".to_owned())
-        })?;
-        let evm_provider = self.bound_evm_provider(evm, network_id, expected_chain_id)?;
+        let evm_provider = self.bound_evm_provider(network_id, expected_chain_id)?;
         let signer = Arc::new(keystore_signer_provider_from_config(&runtime_config)?);
         Ok(mfm_adapters_evm_contracts::EvmContractRuntime::new(
             Arc::new(evm_provider),

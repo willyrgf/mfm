@@ -28,13 +28,12 @@ use mfm_events::v1::{self as events, side_effect};
 use mfm_evm_capabilities::{
     EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockSelector, EvmCallReadProvider,
     EvmCallReadRequest, EvmCapabilityError, EvmChainIdentityProvider, EvmChainIdentityRequest,
-    EvmChainIdentityResponse, EvmCodeReadProvider, EvmCodeReadRequest, EvmFeeReadProvider,
-    EvmFeeReadRequest, EvmGasEstimateProvider, EvmGasEstimateRequest, EvmLogsReadProvider,
-    EvmLogsReadRequest, EvmNetworkBinding, EvmNetworkId, EvmNonceOccupancy,
-    EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest, EvmNonceReadProvider,
-    EvmNonceReadRequest, EvmReceiptReadProvider, EvmReceiptReadRequest, EvmReceiptReadResponse,
-    EvmTransactionSubmitCapability, EvmTransactionSubmitProvider, EvmTransactionSubmitRequest,
-    RedactedEvmSourceEvidence, SignedEvmPayload,
+    EvmCodeReadProvider, EvmCodeReadRequest, EvmFeeReadProvider, EvmFeeReadRequest,
+    EvmGasEstimateProvider, EvmGasEstimateRequest, EvmLogsReadProvider, EvmLogsReadRequest,
+    EvmNetworkId, EvmNonceOccupancy, EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest,
+    EvmNonceReadProvider, EvmNonceReadRequest, EvmReceiptReadProvider, EvmReceiptReadRequest,
+    EvmReceiptReadResponse, EvmTransactionSubmitCapability, EvmTransactionSubmitProvider,
+    EvmTransactionSubmitRequest, RedactedEvmSourceEvidence, SignedEvmPayload,
 };
 use mfm_evm_contract_config::{
     ConfigureAction, DeployAction, EvmSignerIntent, EvmTransactionPolicy,
@@ -419,7 +418,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         let data = deploy_action_data(action, artifact)?;
         self.prepare_transactions(prepare_transactions_request(
             ContractMutationPhase::Deploy,
-            ContractMutationNetworkAuthority::from_context(
+            ContractMutationNetworkContext::from_context(
                 context,
                 ContractLifecycleStage::Deployed,
             )?,
@@ -453,7 +452,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             configure_action_transaction_inputs(action, artifact, input.deployed.address.as_str())?;
         self.prepare_transactions(prepare_transactions_request(
             ContractMutationPhase::Configure,
-            ContractMutationNetworkAuthority::from_context(
+            ContractMutationNetworkContext::from_context(
                 context,
                 ContractLifecycleStage::Configured,
             )?,
@@ -481,7 +480,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         reconstruct_prepared_mutation(prepared_mutation_reconstruction(
             evidence,
             ContractMutationPhase::Deploy,
-            ContractMutationNetworkAuthority::from_context(
+            ContractMutationNetworkContext::from_context(
                 context,
                 ContractLifecycleStage::Deployed,
             )?,
@@ -514,7 +513,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         reconstruct_prepared_mutation(prepared_mutation_reconstruction(
             evidence,
             ContractMutationPhase::Configure,
-            ContractMutationNetworkAuthority::from_context(
+            ContractMutationNetworkContext::from_context(
                 context,
                 ContractLifecycleStage::Configured,
             )?,
@@ -528,12 +527,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         &self,
         prepared: &PreparedContractMutation,
     ) -> Result<Vec<ContractTransactionSubmission>> {
-        let _verified_chain = verified_chain_identity(
-            self.mutation.chain_identity,
-            &prepared.evidence().network_id,
-            prepared.evidence().expected_chain_id,
-        )
-        .await?;
+        // Bound providers enforce live source identity on every capability call.
         let mut submissions = Vec::with_capacity(prepared.signing_requests.len());
         for (transaction, signing_request) in prepared
             .evidence()
@@ -753,9 +747,8 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             max_receipt_polls,
             tx_inputs,
         } = request;
-        let _verified_chain =
-            verified_chain_identity(self.mutation.chain_identity, network_id, expected_chain_id)
-                .await?;
+        // Bound providers enforce live source identity on every capability call.
+        // expected_chain_id remains domain prepared-tx signing semantics, not a transport gate.
 
         let nonce_response = self
             .mutation
@@ -920,12 +913,11 @@ async fn validate_context_contract_with_reads(
     }
     ensure_configured_input_context(input, context)?;
 
-    let chain = verified_chain_identity(
-        reads.chain_identity,
-        context.value().network.network_id.as_str(),
-        context.value().network.expected_chain_id(),
-    )
-    .await?;
+    // Domain read for report fields only; live source proof is owned by the bound provider.
+    let chain = reads
+        .chain_identity
+        .chain_identity(&chain_identity_request())
+        .await?;
 
     let assertion_context = prepare_validation_assertion_context(
         artifact,
@@ -957,11 +949,8 @@ async fn validate_context_contract_with_reads(
         configured_input_digest: request.configured_input_digest.clone(),
         evm_network_context_ref: evm_network_context_ref(&context.value().network)?,
         resource_stage: ContractLifecycleStage::Configured,
-        observed_chain_id: chain.response.chain_id,
-        client_version: chain
-            .response
-            .client_version
-            .unwrap_or_else(|| "unknown".to_owned()),
+        observed_chain_id: chain.chain_id,
+        client_version: chain.client_version.unwrap_or_else(|| "unknown".to_owned()),
         configuration_read_results,
         configuration_event_results,
         read_results: evaluated.read_results,
@@ -1098,12 +1087,11 @@ async fn verify_external_adoption(
     context: &mfm_program::CertifiedContext<EvmContractContext>,
     resource_stage: ContractLifecycleStage,
 ) -> Result<VerifiedExternalAdoption> {
-    let chain = verified_chain_identity(
-        reads.chain_identity,
-        context.value().network.network_id.as_str(),
-        context.value().network.expected_chain_id(),
-    )
-    .await?;
+    // Domain read for adoption evidence fields; live source proof is owned by the bound provider.
+    let chain = reads
+        .chain_identity
+        .chain_identity(&chain_identity_request())
+        .await?;
     let mut code_read_evidence = None;
     if adoption.evidence_policy.require_code
         || adoption.evidence_policy.expected_code_hash.is_some()
@@ -1148,7 +1136,7 @@ async fn verify_external_adoption(
         context_ref: mfm_values::ContextRefValue::from(context.context_ref().clone()),
         evm_network_context_ref: evm_network_context_ref(&context.value().network)?,
         resource_stage,
-        observed_chain_id: chain.response.chain_id,
+        observed_chain_id: chain.chain_id,
         code_read_evidence,
         read_assertion_evidence: Vec::new(),
         event_assertion_evidence: Vec::new(),
@@ -1840,31 +1828,6 @@ where
         .map_err(|error| EvmContractAdapterError::Model(error.to_string()))
 }
 
-struct VerifiedChainIdentity {
-    response: EvmChainIdentityResponse,
-}
-
-async fn verified_chain_identity(
-    provider: &dyn EvmChainIdentityProvider,
-    network_id: &str,
-    expected_chain_id: u64,
-) -> Result<VerifiedChainIdentity> {
-    let binding = EvmNetworkBinding::new(evm_network_id(network_id)?, expected_chain_id)?;
-    let chain = provider.chain_identity(&chain_identity_request()).await?;
-    // Provider-bound success already enforced chain identity; keep workflow check on response.
-    if chain.chain_id != binding.expected_chain_id() {
-        return Err(EvmCapabilityError::SourceMismatch {
-            diagnostic: chain
-                .evidence
-                .with_observed_chain_id(chain.chain_id)
-                .source_mismatch_diagnostic(),
-        }
-        .into());
-    }
-    let _ = binding;
-    Ok(VerifiedChainIdentity { response: chain })
-}
-
 struct ValidationAssertionContext {
     abi: ParsedAbi,
     address: Address,
@@ -2048,7 +2011,7 @@ impl ContractMutationActionView for ConfigureAction {
 }
 
 #[derive(Clone)]
-struct ContractMutationNetworkAuthority<'a> {
+struct ContractMutationNetworkContext<'a> {
     context_ref: mfm_values::ContextRefValue,
     evm_network_context_ref: String,
     resource_stage: ContractLifecycleStage,
@@ -2056,7 +2019,7 @@ struct ContractMutationNetworkAuthority<'a> {
     expected_chain_id: u64,
 }
 
-impl<'a> ContractMutationNetworkAuthority<'a> {
+impl<'a> ContractMutationNetworkContext<'a> {
     fn from_context(
         context: &'a mfm_program::CertifiedContext<EvmContractContext>,
         resource_stage: ContractLifecycleStage,
@@ -2083,16 +2046,16 @@ struct ResolvedContractMutationAction<'a> {
 }
 
 impl<'a> ResolvedContractMutationAction<'a> {
-    fn from_authority_and_action(
-        authority: ContractMutationNetworkAuthority<'a>,
+    fn from_network_context_and_action(
+        network: ContractMutationNetworkContext<'a>,
         action: &'a impl ContractMutationActionView,
     ) -> Result<Self> {
         Ok(Self {
-            network_id: authority.network_id,
-            expected_chain_id: authority.expected_chain_id,
-            context_ref: authority.context_ref,
-            evm_network_context_ref: authority.evm_network_context_ref,
-            resource_stage: authority.resource_stage,
+            network_id: network.network_id,
+            expected_chain_id: network.expected_chain_id,
+            context_ref: network.context_ref,
+            evm_network_context_ref: network.evm_network_context_ref,
+            resource_stage: network.resource_stage,
             signer_ref: action
                 .signer()
                 .signer_ref()
@@ -2108,11 +2071,12 @@ impl<'a> ResolvedContractMutationAction<'a> {
 
 fn prepare_transactions_request<'a>(
     phase: ContractMutationPhase,
-    authority: ContractMutationNetworkAuthority<'a>,
+    network: ContractMutationNetworkContext<'a>,
     action: &'a impl ContractMutationActionView,
     tx_inputs: Vec<PreparedTransactionInput>,
 ) -> Result<PrepareTransactionsRequest<'a>> {
-    let resolved = ResolvedContractMutationAction::from_authority_and_action(authority, action)?;
+    let resolved =
+        ResolvedContractMutationAction::from_network_context_and_action(network, action)?;
     Ok(PrepareTransactionsRequest {
         phase,
         context_ref: resolved.context_ref,
@@ -2133,11 +2097,12 @@ fn prepare_transactions_request<'a>(
 fn prepared_mutation_reconstruction<'a>(
     evidence: &'a PreparedContractInvocation,
     phase: ContractMutationPhase,
-    authority: ContractMutationNetworkAuthority<'a>,
+    network: ContractMutationNetworkContext<'a>,
     action: &'a impl ContractMutationActionView,
     tx_inputs: Vec<PreparedTransactionInput>,
 ) -> Result<PreparedMutationReconstruction<'a>> {
-    let resolved = ResolvedContractMutationAction::from_authority_and_action(authority, action)?;
+    let resolved =
+        ResolvedContractMutationAction::from_network_context_and_action(network, action)?;
     Ok(PreparedMutationReconstruction {
         evidence,
         phase,
@@ -6471,10 +6436,6 @@ fn idempotency_key_ref(
         "mfm.evm.contract.idem.{}",
         short_stable_id_fragment(&idempotency.key, 32)
     ))?)
-}
-
-fn evm_network_id(network_id: &str) -> Result<EvmNetworkId> {
-    EvmNetworkId::new(network_id).map_err(Into::into)
 }
 
 fn chain_identity_request() -> EvmChainIdentityRequest {

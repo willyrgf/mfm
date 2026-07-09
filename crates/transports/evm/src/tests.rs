@@ -283,6 +283,55 @@ async fn code_read_rejects_chain_id_mismatch_without_code_authority() {
 }
 
 #[tokio::test]
+async fn chain_id_mismatch_rejects_before_operation_rpc_for_core_reads() {
+    let server = TestRpcServer::spawn("0x2").await;
+    let client = bound_provider(&server.url, "primary", "mainnet", 1);
+    let account = address!("0x1111111111111111111111111111111111111111");
+
+    let block_err = client
+        .read_block(&EvmBlockReadRequest::new(EvmBlockSelector::Latest))
+        .await
+        .expect_err("block source mismatch");
+    assert!(matches!(
+        block_err,
+        EvmCapabilityError::SourceMismatch { .. }
+    ));
+
+    let balance_err = client
+        .read_balance(&EvmBalanceReadRequest::new(
+            account,
+            EvmBlockSelector::Latest,
+        ))
+        .await
+        .expect_err("balance source mismatch");
+    assert!(matches!(
+        balance_err,
+        EvmCapabilityError::SourceMismatch { .. }
+    ));
+
+    let receipt_err = client
+        .read_receipt(&EvmReceiptReadRequest::new(
+            HASH_HEX.parse::<B256>().expect("hash"),
+        ))
+        .await
+        .expect_err("receipt source mismatch");
+    assert!(matches!(
+        receipt_err,
+        EvmCapabilityError::SourceMismatch { .. }
+    ));
+
+    // Only identity probes; sealed pipeline must not issue operation methods after mismatch.
+    assert!(
+        server
+            .methods()
+            .iter()
+            .all(|method| method.as_str() == "eth_chainId"),
+        "unexpected operation methods: {:?}",
+        server.methods()
+    );
+}
+
+#[tokio::test]
 async fn nonce_occupancy_read_classifies_anchor_and_non_anchor_transactions() {
     for (name, excluded_transaction_hash, expected) in [
         (

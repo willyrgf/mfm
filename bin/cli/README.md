@@ -675,9 +675,9 @@ The CLI's process-level configuration is intentionally narrow.
   or a runtime-config keystore profile selected by `--runtime-config <PATH>` or
   `MFM_RUNTIME_CONFIG_FILE`. `--keystore-ref <REF>` defaults to `default` for runtime-config
   selection.
-- Typed EVM contract requests use semantic `network_id` plus `expected_chain_id`; transports
-  resolve `network_id` through the runtime config route registry and verify the observed chain id
-  for every guarded live request.
+- Typed EVM contract workflows carry semantic `network_id` plus `expected_chain_id` in certified
+  domain context; app assembly binds a source-bound EVM provider once per binding, and the bound
+  provider verifies the observed chain id on every live capability call through its sealed pipeline.
 - Live BTC/EVM provider failures are reported with redacted diagnostic codes such as
   `bitcoin_rpc_http_status`, `bitcoin_rpc_json_error`, `evm_rpc_http_status`, or
   `evm_source_mismatch`. Diagnostics may include closed operation ids and numeric status/error

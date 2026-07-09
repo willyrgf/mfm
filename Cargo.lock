@@ -2109,7 +2109,6 @@ dependencies = [
  "mfm-spec",
  "mfm-states-btc",
  "mfm-store",
- "mfm-transports-btc-jsonrpc-http",
  "mfm-values",
  "serde",
  "serde_json",

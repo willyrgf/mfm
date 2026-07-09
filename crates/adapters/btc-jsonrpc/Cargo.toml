@@ -32,5 +32,4 @@ mfm-values = { path = "../../kernel/values" }
 ed25519-dalek = { workspace = true }
 mfm-store = { path = "../../kernel/store", features = ["test-support"] }
 mfm-spec = { path = "../../kernel/spec" }
-mfm-transports-btc-jsonrpc-http = { path = "../../transports/btc-jsonrpc-http" }
 tokio = { workspace = true }

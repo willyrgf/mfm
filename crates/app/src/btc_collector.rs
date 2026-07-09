@@ -31,11 +31,7 @@ pub(crate) fn btc_json_rpc_router(
     let mut routes = BTreeMap::new();
     for (source_identity, route) in btc.routes() {
         let client = btc_json_rpc_client(route)?;
-        routes.insert(
-            source_identity.clone(),
-            Arc::new(client)
-                as Arc<dyn mfm_transports_btc_jsonrpc_http::BtcJsonRpcChainHeadTransport>,
-        );
+        routes.insert(source_identity.clone(), Arc::new(client));
     }
     Ok(mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter::new(
         routes,
