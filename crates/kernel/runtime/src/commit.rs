@@ -240,7 +240,10 @@ impl CommitPlanner {
                 })
                 .collect::<Result<Vec<_>>>()?,
         )?;
-        let mut config_staged_artifacts = launch_artifacts_by_id(config_inputs, "config")?;
+        // Content-addressed configs can share bytes/artifact_id while differing by schema_id
+        // (for example two empty `{}` configs). Stage by exact evidence identity.
+        let mut config_staged_artifacts =
+            launch_artifacts_by_evidence(config_inputs, "config")?;
         let fact_descriptor_artifacts = validate_fact_descriptor_launch_artifacts(
             runtime_spec,
             evidence.fact_descriptor_artifacts,
@@ -336,8 +339,9 @@ impl CommitPlanner {
             evidence: certificate_artifact,
         });
         for artifact in &config_artifacts {
+            let evidence_hash = artifact.evidence_hash()?;
             let staged = config_staged_artifacts
-                .remove(&artifact.artifact_id)
+                .remove(&(artifact.artifact_id.clone(), evidence_hash))
                 .ok_or_else(|| {
                     RuntimeError::InvalidRunStream(format!(
                         "missing staged config artifact bytes for {}",
@@ -978,23 +982,22 @@ fn committed_artifact_for_requirement(
         })
 }
 
-fn launch_artifacts_by_id(
+fn launch_artifacts_by_evidence(
     artifacts: Vec<RunLaunchArtifact>,
     kind: &'static str,
-) -> Result<BTreeMap<ArtifactId, RunLaunchArtifact>> {
-    let mut by_artifact = BTreeMap::new();
+) -> Result<BTreeMap<(ArtifactId, ContentDigest), RunLaunchArtifact>> {
+    let mut by_evidence = BTreeMap::new();
     for artifact in artifacts {
         verify_artifact_bytes(&artifact.bytes, &artifact.evidence)?;
-        if by_artifact
-            .insert(artifact.evidence.artifact_id.clone(), artifact)
-            .is_some()
-        {
+        let evidence_hash = artifact.evidence.evidence_hash()?;
+        let key = (artifact.evidence.artifact_id.clone(), evidence_hash);
+        if by_evidence.insert(key, artifact).is_some() {
             return Err(RuntimeError::InvalidRunStream(format!(
                 "duplicate staged {kind} launch artifact"
             )));
         }
     }
-    Ok(by_artifact)
+    Ok(by_evidence)
 }
 
 fn validate_fact_descriptor_launch_artifacts(
