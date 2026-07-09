@@ -1640,21 +1640,19 @@ pub mod v1 {
             &mut self,
             source_fact_events: &[RetainedSourceFactReplayEvent],
         ) -> Result<()> {
+            // Cross-run source facts are external authority for FactQueryEvidence returned-refs.
+            // They may originate from other certified programs (e.g. collectors → report), so
+            // they are NOT re-validated against this consumer program's node graph or
+            // certified_spec_hash. Claim content is bound by verify_fact_query_returned_ref
+            // against the authenticated InternalFactRef in retained query evidence.
             for source in source_fact_events {
                 let envelope = source.envelope();
-                if envelope.spec_hash() != &self.certified_spec.spec_hash {
-                    return Err(ReplayError::new(
-                        ReplayErrorKind::SpecHashMismatch,
-                        "retained source fact event spec hash does not match replay spec",
-                    ));
-                }
                 let KernelEventPayload::FactRecorded(payload) = envelope.payload() else {
                     return Err(ReplayError::new(
                         ReplayErrorKind::FactMismatch,
                         "retained source fact event payload is not FactRecorded",
                     ));
                 };
-                self.verify_fact_against_spec(payload)?;
                 self.authorize_event_artifacts(envelope.payload())?;
                 self.insert_fact_event(envelope, payload)?;
             }

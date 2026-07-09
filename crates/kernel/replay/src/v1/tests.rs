@@ -128,7 +128,11 @@ fn replay_verifies_fact_query_evidence_with_retained_cross_run_source_fact() {
     let source_run_id = run_id(0x77);
     let source_claim_id =
         mfm_facts::FactClaimId::new(source_run_id.clone(), 3, 0).expect("source claim id");
-    let source_payload = fixture.stream[2].payload().clone();
+    // Cross-op source facts keep their producing program's SpecHash (not the consumer's).
+    let mut source_payload = fixture.stream[2].payload().clone();
+    if let KernelEventPayload::FactRecorded(payload) = &mut source_payload {
+        payload.spec_hash = SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(0xef));
+    }
     let source_envelope = persisted_envelope(&source_run_id, 3, source_payload);
     let source_event_id = source_envelope.event_id().clone();
     let query = fact_query_evidence_artifact(&fixture, |fact_ref| {
