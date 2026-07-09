@@ -277,7 +277,6 @@ impl BtcJsonRpcSourceProvider {
             block_hash: request.block_hash().clone(),
         })
     }
-
 }
 
 impl BtcChainHeadReadProvider for BtcJsonRpcSourceProvider {
