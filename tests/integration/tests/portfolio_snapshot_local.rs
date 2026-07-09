@@ -260,9 +260,6 @@ fn portfolio_payload() -> serde_json::Value {
                 }
             ],
             "metadata": {}
-        },
-        "valuation_source_registry": {
-            "sources": []
         }
     })
 }
@@ -319,8 +316,6 @@ unit_price_dec = "2.50"
 
 [portfolio.symbol_configs.metadata]
 
-[valuation_source_registry]
-sources = []
 "#
     )
 }

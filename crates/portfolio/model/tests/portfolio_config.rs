@@ -4,8 +4,7 @@ use mfm_portfolio_model::metadata::PublicMetadata;
 use mfm_portfolio_model::portfolio::*;
 use mfm_portfolio_model::symbol::{
     BalanceReaderConfig, Observation, ObservationAnchor, ObservationQuantity, ObservationSource,
-    ObservationValue, ObservationValueSourceRef, QuoteCode, SymbolKind, SymbolRole,
-    ValuationSourceRegistry,
+    ObservationValue, QuoteCode, SymbolKind, SymbolRole,
 };
 use mfm_portfolio_model::wallet::{WalletImplementationConfig, WalletSubjectKind};
 use serde_json::{json, Value};
@@ -131,7 +130,7 @@ fn network_config_uses_bitcoin_source_identity_only() {
 }
 
 #[test]
-fn validated_portfolio_bundle_indexes_normalized_authority() {
+fn validated_portfolio_config_indexes_normalized_authority() {
     let portfolio = decode_portfolio_config(&json!({
         "portfolio_id": "portfolio_main",
         "quote_codes": ["USD"],
@@ -185,44 +184,28 @@ fn validated_portfolio_bundle_indexes_normalized_authority() {
         "metadata": {}
     }))
     .expect("portfolio config");
-    let bundle = ValidatedPortfolioBundle::new(
-        portfolio,
-        ValuationSourceRegistry {
-            sources: Vec::new(),
-        },
-    )
-    .expect("portfolio bundle");
+    let validated = ValidatedPortfolioConfig::new(portfolio).expect("validated portfolio");
 
+    assert_eq!(validated.quote(QuoteCode::Usd), Some(QuoteCode::Usd));
     assert_eq!(
-        bundle.portfolio().quote(QuoteCode::Usd),
-        Some(QuoteCode::Usd)
-    );
-    assert_eq!(
-        bundle
-            .portfolio()
+        validated
             .network("ethereum-mainnet")
             .expect("network")
             .chain_id_u64(),
         Some(1)
     );
     assert_eq!(
-        bundle
-            .portfolio()
+        validated
             .wallet("wallet_main")
             .expect("wallet")
             .subject
             .address_str(),
         "0x000000000000000000000000000000000000dead"
     );
-    assert!(bundle
-        .portfolio()
-        .symbol("eth.native.ethereum-mainnet")
-        .is_some());
-    assert!(bundle.valuation_source("missing").is_none());
+    assert!(validated.symbol("eth.native.ethereum-mainnet").is_some());
 
-    let (portfolio, registry) = bundle.into_parts();
+    let portfolio = validated.into_config();
     assert_eq!(portfolio.wallets[0].wallet_id, "wallet_main");
-    assert!(registry.sources.is_empty());
 }
 
 #[test]
@@ -722,23 +705,6 @@ fn observation(wallet_id: &str, symbol_id: &str, value_order: Vec<QuoteCode>) ->
                 value_dec: "1".to_string(),
                 unit_price_dec: "1".to_string(),
                 valuation_reader_kind: "fixed_unit_price".to_string(),
-                source_refs: vec![ObservationValueSourceRef {
-                    source_id: "src".to_string(),
-                    network_id: if symbol_id.contains("arbitrum") {
-                        "arbitrum-mainnet".to_string()
-                    } else {
-                        "ethereum-mainnet".to_string()
-                    },
-                    anchor: ObservationAnchor::Evm {
-                        chain_id: if symbol_id.contains("arbitrum") {
-                            42161
-                        } else {
-                            1
-                        },
-                        block_number: 1,
-                        block_hash: EVM_HASH.to_owned(),
-                    },
-                }],
             })
             .collect(),
         source: ObservationSource {

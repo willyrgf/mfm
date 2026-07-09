@@ -182,14 +182,6 @@ portfolio_id_type!(
 );
 
 portfolio_id_type!(
-    ValuationSourceId,
-    "source_id",
-    "valuation-source-id",
-    "mfm.portfolio.id.valuation_source",
-    "Stable typed portfolio valuation-source identifier."
-);
-
-portfolio_id_type!(
     ProtocolId,
     "protocol",
     "protocol-id",
@@ -203,14 +195,6 @@ portfolio_id_type!(
     "protocol-reader-id",
     "mfm.portfolio.id.protocol_reader",
     "Stable typed portfolio protocol reader identifier."
-);
-
-portfolio_id_type!(
-    OracleKindId,
-    "oracle_kind",
-    "oracle-kind-id",
-    "mfm.portfolio.id.oracle_kind",
-    "Stable typed portfolio oracle kind identifier."
 );
 
 portfolio_id_type!(

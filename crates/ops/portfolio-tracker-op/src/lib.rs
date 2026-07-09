@@ -88,7 +88,6 @@ impl Operation for PortfolioTrackerWorkflowOperation {
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
         let config = config.into_inner();
         let portfolio = config.portfolio().clone().normalized();
-        let valuation_source_registry = config.valuation_source_registry().clone().normalized();
 
         let subject_key = SubjectDomainKey::new("portfolio_subjects")
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
@@ -118,11 +117,8 @@ impl Operation for PortfolioTrackerWorkflowOperation {
         let valuations = builder.state_with_domain_keys::<ResolveValuationsState, _, _>(
             StateKey::new("resolve_valuations")?,
             NoContext,
-            ResolveValuationsConfig::new(
-                portfolio.symbol_configs.clone(),
-                valuation_source_registry,
-            )
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
+            ResolveValuationsConfig::new(portfolio.symbol_configs.clone())
+                .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
             (),
             vec![valuation_key],
         )?;
@@ -221,7 +217,7 @@ mod tests {
     use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig, PortfolioConfig};
     use mfm_portfolio_model::symbol::{
         BalanceReaderConfig, QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole,
-        SymbolValuationConfig, ValuationReaderConfig, ValuationSourceRegistry,
+        SymbolValuationConfig, ValuationReaderConfig,
     };
     use mfm_portfolio_model::wallet::{
         WalletConfig, WalletImplementationConfig, WalletSubject, WalletSubjectKind,
@@ -276,7 +272,6 @@ mod tests {
     fn portfolio_snapshot_entry_point_plan_is_draft_only() {
         let authored = mfm_portfolio_config::PortfolioSnapshotAuthoredConfig {
             portfolio: sample_portfolio_config(),
-            valuation_source_registry: sample_valuation_source_registry(),
         };
 
         let planned = plan_portfolio_snapshot_entry_point(authored).expect("entry-point plan");
@@ -302,17 +297,7 @@ mod tests {
     }
 
     fn sample_workflow_config() -> PortfolioWorkflowConfig {
-        PortfolioWorkflowConfig::new(
-            sample_portfolio_config(),
-            sample_valuation_source_registry(),
-        )
-        .expect("workflow config")
-    }
-
-    fn sample_valuation_source_registry() -> ValuationSourceRegistry {
-        ValuationSourceRegistry {
-            sources: Vec::new(),
-        }
+        PortfolioWorkflowConfig::new(sample_portfolio_config()).expect("workflow config")
     }
 
     fn sample_portfolio_config() -> PortfolioConfig {

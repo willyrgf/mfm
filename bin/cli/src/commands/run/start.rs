@@ -348,8 +348,7 @@ mod tests {
                     }
                 ],
                 "metadata": {}
-            },
-            "valuation_source_registry": { "sources": [] }
+            }
         })
         .to_string()
     }
@@ -405,8 +404,6 @@ unit_price_dec = "1800.00"
 
 [portfolio.symbol_configs.metadata]
 
-[valuation_source_registry]
-sources = []
 "#
         .to_owned()
     }

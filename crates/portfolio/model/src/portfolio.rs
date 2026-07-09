@@ -6,14 +6,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::ids::{
-    BitcoinSourceIdentityId, NetworkId, PortfolioId, PortfolioScalarError, SymbolId,
-    ValuationSourceId, WalletId,
+    BitcoinSourceIdentityId, NetworkId, PortfolioId, PortfolioScalarError, SymbolId, WalletId,
 };
 use crate::metadata::PublicMetadata;
 use crate::symbol::{
     validate_symbol_config, BalanceReaderConfig, Observation, QuoteCode, SymbolConfig,
-    SymbolConfigError, SymbolKind, ValuationReaderConfig, ValuationSourceConfig,
-    ValuationSourceRegistry, ValuationSourceRegistryError,
+    SymbolConfigError, SymbolKind, ValuationReaderConfig,
 };
 use crate::wallet::{WalletConfig, WalletSubjectKind};
 
@@ -466,61 +464,6 @@ impl ValidatedPortfolioConfig {
     }
 }
 
-/// Validated portfolio plus valuation-source registry authority.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ValidatedPortfolioBundle {
-    portfolio: ValidatedPortfolioConfig,
-    valuation_source_registry: ValuationSourceRegistry,
-    source_index: BTreeMap<ValuationSourceId, usize>,
-}
-
-impl ValidatedPortfolioBundle {
-    /// Creates a validated portfolio bundle authority.
-    pub fn new(
-        portfolio: PortfolioConfig,
-        valuation_source_registry: ValuationSourceRegistry,
-    ) -> Result<Self, PortfolioConfigError> {
-        let portfolio = ValidatedPortfolioConfig::new(portfolio)?;
-        let valuation_source_registry = valuation_source_registry
-            .validated()
-            .map_err(|source| PortfolioConfigError::InvalidValuationSourceRegistry { source })?;
-        let source_index = valuation_source_index(&valuation_source_registry);
-        validate_portfolio_bundle_sources(
-            portfolio.as_config(),
-            &valuation_source_registry,
-            &source_index,
-        )?;
-        Ok(Self {
-            portfolio,
-            valuation_source_registry,
-            source_index,
-        })
-    }
-
-    /// Returns the validated portfolio config authority.
-    pub const fn portfolio(&self) -> &ValidatedPortfolioConfig {
-        &self.portfolio
-    }
-
-    /// Returns the normalized valuation source registry.
-    pub const fn valuation_source_registry(&self) -> &ValuationSourceRegistry {
-        &self.valuation_source_registry
-    }
-
-    /// Returns a valuation source by stable id.
-    pub fn valuation_source(&self, source_id: &str) -> Option<&ValuationSourceConfig> {
-        let source_id = ValuationSourceId::new(source_id).ok()?;
-        self.source_index
-            .get(&source_id)
-            .map(|index| &self.valuation_source_registry.sources[*index])
-    }
-
-    /// Consumes this authority into normalized portfolio and registry parts.
-    pub fn into_parts(self) -> (PortfolioConfig, ValuationSourceRegistry) {
-        (self.portfolio.into_config(), self.valuation_source_registry)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PortfolioConfigIndex {
     quotes: BTreeSet<QuoteCode>,
@@ -968,56 +911,6 @@ pub enum PortfolioConfigError {
         /// Unknown underlying symbol id.
         underlying_symbol_id: String,
     },
-    /// A price source referenced an unknown network.
-    #[error("symbol `{symbol_id}` quote `{quote}` reader `{reader_kind}` referenced unknown network `{network_id}`")]
-    UnknownPriceSourceNetwork {
-        /// Symbol id associated with the failure.
-        symbol_id: String,
-        /// Quote associated with the invalid route.
-        quote: QuoteCode,
-        /// Unknown network id.
-        network_id: String,
-        /// Reader kind that held the invalid ref.
-        reader_kind: &'static str,
-    },
-    /// The valuation source registry failed local validation.
-    #[error("valuation source registry is invalid: {source}")]
-    InvalidValuationSourceRegistry {
-        /// Underlying registry validation failure.
-        source: ValuationSourceRegistryError,
-    },
-    /// A valuation source registry entry referenced an unknown network.
-    #[error("valuation source `{source_id}` referenced unknown network `{network_id}`")]
-    UnknownValuationSourceNetwork {
-        /// Valuation source id associated with the failure.
-        source_id: String,
-        /// Unknown network id.
-        network_id: String,
-    },
-    /// A price source ref did not resolve through the valuation source registry.
-    #[error(
-        "symbol `{symbol_id}` quote `{quote}` referenced unknown valuation source `{source_id}`"
-    )]
-    UnknownValuationSource {
-        /// Symbol id associated with the failure.
-        symbol_id: String,
-        /// Quote associated with the invalid route.
-        quote: QuoteCode,
-        /// Unknown valuation source id.
-        source_id: String,
-    },
-    /// A resolved valuation source entry did not match the referring source ref.
-    #[error("symbol `{symbol_id}` quote `{quote}` source `{source_id}` mismatched registry field `{field}`")]
-    ValuationSourceMismatch {
-        /// Symbol id associated with the failure.
-        symbol_id: String,
-        /// Quote associated with the invalid route.
-        quote: QuoteCode,
-        /// Resolved valuation source id.
-        source_id: String,
-        /// Registry field that mismatched the ref.
-        field: &'static str,
-    },
 }
 
 /// Decodes and validates a canonical portfolio config.
@@ -1087,7 +980,7 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
                 });
             }
         }
-        validate_symbol_quote_routes(symbol, &requested_quotes, &symbol_ids, &network_ids)?;
+        validate_symbol_quote_routes(symbol, &requested_quotes, &symbol_ids)?;
     }
 
     let mut wallet_ids = HashSet::new();
@@ -1149,48 +1042,6 @@ fn validate_portfolio_config_for_mfm(cfg: &PortfolioConfig) -> Result<(), String
         .map_err(|error| error.to_string())
 }
 
-fn valuation_source_index(
-    registry: &ValuationSourceRegistry,
-) -> BTreeMap<ValuationSourceId, usize> {
-    registry
-        .sources
-        .iter()
-        .enumerate()
-        .map(|(index, source)| (source.source_id.clone(), index))
-        .collect()
-}
-
-fn validate_portfolio_bundle_sources(
-    cfg: &PortfolioConfig,
-    registry: &ValuationSourceRegistry,
-    source_index: &BTreeMap<ValuationSourceId, usize>,
-) -> Result<(), PortfolioConfigError> {
-    let network_ids: HashSet<_> = cfg
-        .networks
-        .iter()
-        .map(|network| network.network_id().clone())
-        .collect();
-    for source in &registry.sources {
-        if !network_ids.contains(&source.network_id) {
-            return Err(PortfolioConfigError::UnknownValuationSourceNetwork {
-                source_id: source.source_id.to_string(),
-                network_id: source.network_id.to_string(),
-            });
-        }
-    }
-
-    let _ = (registry, source_index);
-    for symbol in &cfg.symbol_configs {
-        for quote in &symbol.valuation.quotes {
-            match &quote.reader {
-                ValuationReaderConfig::FixedUnitPrice { .. } => {}
-            }
-        }
-    }
-
-    Ok(())
-}
-
 fn wallet_subject_matches_network_family(
     subject_kind: WalletSubjectKind,
     network_family: NetworkFamilyConfig,
@@ -1231,7 +1082,6 @@ fn validate_symbol_quote_routes(
     symbol: &SymbolConfig,
     requested_quotes: &BTreeSet<QuoteCode>,
     symbol_ids: &HashSet<SymbolId>,
-    network_ids: &HashSet<NetworkId>,
 ) -> Result<(), PortfolioConfigError> {
     let symbol_quotes: BTreeSet<_> = symbol
         .valuation
@@ -1270,6 +1120,5 @@ fn validate_symbol_quote_routes(
         }
     }
 
-    let _ = network_ids;
     Ok(())
 }

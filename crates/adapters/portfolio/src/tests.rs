@@ -170,13 +170,7 @@ async fn select_holdings_succeeds_from_platform_facts_with_providers_unbound() {
 
     // Continue shipped pure report path: valuations + assemble + project (no live chain).
     let valuations = resolve_valuations_from_config(
-        &ResolveValuationsConfig::new(
-            portfolio.symbol_configs.clone(),
-            mfm_portfolio_model::symbol::ValuationSourceRegistry {
-                sources: Vec::new(),
-            },
-        )
-        .expect("valuations config"),
+        &ResolveValuationsConfig::new(portfolio.symbol_configs.clone()).expect("valuations config"),
     )
     .expect("resolve valuations");
     let snapshot = assemble_snapshot(

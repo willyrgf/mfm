@@ -71,8 +71,7 @@
 //!                 }
 //!             ],
 //!             "metadata": {}
-//!         },
-//!         "valuation_source_registry": { "sources": [] }
+//!         }
 //!     }"#,
 //!     AuthoredConfigFormat::Json,
 //! )?;
@@ -89,9 +88,8 @@ pub use mfm_authored_config::AuthoredConfigFormat;
 use mfm_canonical::{CanonicalError, PlainCanonicalJsonBytes};
 use mfm_ids::{ArtifactId, DigestAlgorithm};
 use mfm_portfolio_model::portfolio::{
-    PortfolioConfig, PortfolioConfigError, ValidatedPortfolioBundle,
+    PortfolioConfig, PortfolioConfigError, ValidatedPortfolioConfig,
 };
-use mfm_portfolio_model::symbol::ValuationSourceRegistry;
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -114,8 +112,6 @@ fn artifact_id_for_json(value: &Value) -> Result<ArtifactId, CanonicalError> {
 pub struct PortfolioSnapshotAuthoredConfig {
     /// Portfolio-owned config surface.
     pub portfolio: PortfolioConfig,
-    /// Sibling valuation source registry surface.
-    pub valuation_source_registry: ValuationSourceRegistry,
 }
 
 /// Canonical portfolio snapshot config used for deterministic hashing and build.
@@ -128,15 +124,12 @@ pub struct PortfolioSnapshotAuthoredConfig {
 pub struct PortfolioSnapshotCanonicalConfig {
     /// Canonical portfolio-owned config surface.
     pub portfolio: PortfolioConfig,
-    /// Canonical valuation source registry surface.
-    pub valuation_source_registry: ValuationSourceRegistry,
 }
 
 impl PortfolioSnapshotCanonicalConfig {
     /// Sorts nested collections into canonical order.
     pub fn normalize(&mut self) {
         self.portfolio.normalize();
-        self.valuation_source_registry.normalize();
     }
 
     /// Returns a normalized clone of the canonical config.
@@ -269,13 +262,8 @@ pub fn parse_portfolio_snapshot_authored_config_with_hint(
 pub fn canonicalize_portfolio_snapshot_authored_config(
     authored: PortfolioSnapshotAuthoredConfig,
 ) -> Result<PortfolioSnapshotCanonicalConfig, PortfolioSnapshotConfigError> {
-    let (portfolio, valuation_source_registry) =
-        ValidatedPortfolioBundle::new(authored.portfolio, authored.valuation_source_registry)?
-            .into_parts();
-    Ok(PortfolioSnapshotCanonicalConfig {
-        portfolio,
-        valuation_source_registry,
-    })
+    let portfolio = ValidatedPortfolioConfig::new(authored.portfolio)?.into_config();
+    Ok(PortfolioSnapshotCanonicalConfig { portfolio })
 }
 
 /// Decodes canonical portfolio snapshot config.
@@ -287,13 +275,8 @@ pub fn decode_portfolio_snapshot_canonical_config(
             stage: "canonical config",
             source,
         })?;
-    let (portfolio, valuation_source_registry) =
-        ValidatedPortfolioBundle::new(canonical.portfolio, canonical.valuation_source_registry)?
-            .into_parts();
-    Ok(PortfolioSnapshotCanonicalConfig {
-        portfolio,
-        valuation_source_registry,
-    })
+    let portfolio = ValidatedPortfolioConfig::new(canonical.portfolio)?.into_config();
+    Ok(PortfolioSnapshotCanonicalConfig { portfolio })
 }
 
 #[cfg(test)]
@@ -365,9 +348,6 @@ mod tests {
                     }
                 ],
                 "metadata": {}
-            },
-            "valuation_source_registry": {
-                "sources": []
             }
         })
     }

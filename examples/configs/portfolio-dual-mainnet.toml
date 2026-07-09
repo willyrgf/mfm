@@ -78,5 +78,3 @@ quotes = [
   { quote = "USD", priced_symbol_id = "btc.native.bitcoin-mainnet", reader = { kind = "fixed_unit_price", unit_price_dec = "0.00" } },
 ]
 
-[valuation_source_registry]
-sources = []

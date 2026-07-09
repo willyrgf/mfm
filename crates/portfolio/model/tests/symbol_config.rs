@@ -1,32 +1,88 @@
-use std::collections::BTreeMap;
+// Symbol-config tests for FixedUnitPrice-only cutover surface.
+// View-dependent valuation registry / oracle source types were deleted; series E reintroduces
+// price sources under the same authority model when needed.
 
-use mfm_portfolio_model::symbol::*;
+use mfm_portfolio_model::symbol::{
+    BalanceReaderConfig, QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolConfigError,
+    SymbolKind, SymbolRole, SymbolValuationConfig, ValuationReaderConfig,
+};
 
 #[test]
-fn valuation_source_metadata_rejects_secret_markers() {
-    let mut metadata = BTreeMap::new();
-    metadata.insert("authorization".to_string(), "redacted".to_string());
-
-    assert_eq!(
-        ValuationSourceConfig::new(
-            "chainlink_eth_usd".to_string(),
-            "ethereum-mainnet".to_string(),
-            "eth.native.ethereum-mainnet".to_string(),
-            QuoteCode::Usd,
-            ValuationSourceReaderConfig::EvmOracle {
-                oracle_kind: "chainlink".parse().expect("valid oracle kind"),
-                config: EvmOracleConfig {
-                    contract_address: "0x0000000000000000000000000000000000000001"
-                        .parse()
-                        .expect("valid address"),
+fn symbol_config_accepts_fixed_unit_price_only() {
+    let symbol = SymbolConfig {
+        symbol_id: "eth.native.ethereum-mainnet"
+            .parse()
+            .expect("valid symbol id"),
+        display_symbol: Some("ETH".to_owned()),
+        kind: SymbolKind::NativeBalance,
+        role: SymbolRole::Native,
+        network_id: "ethereum-mainnet".parse().expect("valid network id"),
+        protocol: None,
+        balance_reader: BalanceReaderConfig::NativeBalance {},
+        valuation: SymbolValuationConfig {
+            quotes: vec![QuoteValuationConfig {
+                quote: QuoteCode::Usd,
+                priced_symbol_id: "eth.native.ethereum-mainnet"
+                    .parse()
+                    .expect("valid priced symbol id"),
+                reader: ValuationReaderConfig::FixedUnitPrice {
+                    unit_price_dec: "1800.00".parse().expect("valid unit price"),
                 },
-            },
-            metadata,
-        )
-        .unwrap_err(),
-        ValuationSourceRegistryError::MetadataContainsSecret {
-            source_id: "chainlink_eth_usd".to_string(),
-            key: "authorization".to_string(),
+            }],
+        },
+        decimals: Some(18),
+        underlying_symbol_id: None,
+        metadata: Default::default(),
+    };
+
+    mfm_portfolio_model::symbol::validate_symbol_config(&symbol).expect("valid symbol");
+}
+
+#[test]
+fn symbol_config_rejects_duplicate_quote_routes() {
+    let mut symbol = SymbolConfig {
+        symbol_id: "eth.native.ethereum-mainnet"
+            .parse()
+            .expect("valid symbol id"),
+        display_symbol: Some("ETH".to_owned()),
+        kind: SymbolKind::NativeBalance,
+        role: SymbolRole::Native,
+        network_id: "ethereum-mainnet".parse().expect("valid network id"),
+        protocol: None,
+        balance_reader: BalanceReaderConfig::NativeBalance {},
+        valuation: SymbolValuationConfig {
+            quotes: vec![
+                QuoteValuationConfig {
+                    quote: QuoteCode::Usd,
+                    priced_symbol_id: "eth.native.ethereum-mainnet"
+                        .parse()
+                        .expect("valid priced symbol id"),
+                    reader: ValuationReaderConfig::FixedUnitPrice {
+                        unit_price_dec: "1800.00".parse().expect("valid unit price"),
+                    },
+                },
+                QuoteValuationConfig {
+                    quote: QuoteCode::Usd,
+                    priced_symbol_id: "eth.native.ethereum-mainnet"
+                        .parse()
+                        .expect("valid priced symbol id"),
+                    reader: ValuationReaderConfig::FixedUnitPrice {
+                        unit_price_dec: "1900.00".parse().expect("valid unit price"),
+                    },
+                },
+            ],
+        },
+        decimals: Some(18),
+        underlying_symbol_id: None,
+        metadata: Default::default(),
+    };
+    symbol.normalize();
+
+    let err = mfm_portfolio_model::symbol::validate_symbol_config(&symbol).expect_err("duplicate");
+    assert_eq!(
+        err,
+        SymbolConfigError::DuplicateQuoteValuation {
+            quote: QuoteCode::Usd
         }
     );
 }

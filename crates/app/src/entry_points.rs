@@ -860,8 +860,7 @@ source_ref = "ethereum-mainnet"
                     }
                 ],
                 "metadata": {}
-            },
-            "valuation_source_registry": { "sources": [] }
+            }
         })
         .to_string()
     }
@@ -920,8 +919,7 @@ source_ref = "ethereum-mainnet"
                     }
                 ],
                 "metadata": {}
-            },
-            "valuation_source_registry": { "sources": [] }
+            }
         })
         .to_string()
     }

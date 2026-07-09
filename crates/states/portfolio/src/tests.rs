@@ -8,7 +8,7 @@ use mfm_portfolio_model::portfolio::{
 use mfm_portfolio_model::symbol::{
     BalanceReaderConfig, Observation, ObservationAnchor, ObservationQuantity, ObservationSource,
     QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole, SymbolValuationConfig,
-    ValuationReaderConfig, ValuationSourceRegistry,
+    ValuationReaderConfig,
 };
 use mfm_portfolio_model::wallet::{
     WalletConfig, WalletImplementationConfig, WalletSubject, WalletSubjectKind,
@@ -144,13 +144,7 @@ fn fixed_price_selection_assembles_report_totals() {
         &ResolveSubjectsConfig::new(portfolio.wallets.clone()).expect("subjects config"),
     );
     let valuations = resolve_valuations_from_config(
-        &ResolveValuationsConfig::new(
-            portfolio.symbol_configs.clone(),
-            ValuationSourceRegistry {
-                sources: Vec::new(),
-            },
-        )
-        .expect("valuation config"),
+        &ResolveValuationsConfig::new(portfolio.symbol_configs.clone()).expect("valuation config"),
     )
     .expect("valuations");
 
@@ -222,13 +216,7 @@ fn assemble_hard_fails_when_required_holding_observation_missing() {
         &ResolveSubjectsConfig::new(portfolio.wallets.clone()).expect("subjects config"),
     );
     let valuations = resolve_valuations_from_config(
-        &ResolveValuationsConfig::new(
-            portfolio.symbol_configs.clone(),
-            ValuationSourceRegistry {
-                sources: Vec::new(),
-            },
-        )
-        .expect("valuation config"),
+        &ResolveValuationsConfig::new(portfolio.symbol_configs.clone()).expect("valuation config"),
     )
     .expect("valuations");
 
@@ -255,13 +243,7 @@ fn assemble_hard_fails_when_required_holding_observation_missing() {
 fn resolve_valuations_fixed_unit_price_only() {
     let symbol = test_symbol("ethereum-mainnet");
     let valuations = resolve_valuations_from_config(
-        &ResolveValuationsConfig::new(
-            vec![symbol],
-            ValuationSourceRegistry {
-                sources: Vec::new(),
-            },
-        )
-        .expect("config"),
+        &ResolveValuationsConfig::new(vec![symbol]).expect("config"),
     )
     .expect("ok");
     assert_eq!(valuations.valuations.len(), 1);

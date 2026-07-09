@@ -74,9 +74,6 @@ fn canonical_portfolio_snapshot_payload(wallet_address: &str, chain_id: u64) -> 
                 }
             ],
             "metadata": {}
-        },
-        "valuation_source_registry": {
-            "sources": []
         }
     })
 }

@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::aave::AaveProtocolPositionConfig;
 use crate::ids::{
-    NetworkId, NormalizedEvmAddress, OracleKindId, PortfolioScalarError, ProtocolId,
-    ProtocolReaderId, SymbolId, UnitPriceDecimal, ValuationSourceId,
+    NetworkId, NormalizedEvmAddress, PortfolioScalarError, ProtocolId, ProtocolReaderId, SymbolId,
+    UnitPriceDecimal,
 };
 use crate::metadata::PublicMetadata;
 
@@ -259,182 +259,6 @@ pub struct QuoteValuationConfig {
     pub reader: ValuationReaderConfig,
 }
 
-/// Source reference used by direct and derived valuation readers.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "price-source-ref",
-    schema = "mfm.portfolio.price_source_ref"
-)]
-pub struct PriceSourceRef {
-    /// Stable source identifier within the runtime environment.
-    pub source_id: ValuationSourceId,
-    /// Network on which the source must be pinned.
-    pub network_id: NetworkId,
-    /// Symbol identity used by the source.
-    pub base_symbol_id: SymbolId,
-    /// Quote unit returned by the source.
-    pub quote: QuoteCode,
-}
-
-/// Typed registry of valuation sources referenced by symbol valuation routes.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "valuation-source-registry",
-    schema = "mfm.portfolio.valuation_source_registry"
-)]
-pub struct ValuationSourceRegistry {
-    /// Configured valuation sources keyed by `source_id`.
-    pub sources: Vec<ValuationSourceConfig>,
-}
-
-impl ValuationSourceRegistry {
-    /// Creates a normalized and validated valuation source registry.
-    pub fn new(sources: Vec<ValuationSourceConfig>) -> Result<Self, ValuationSourceRegistryError> {
-        Self { sources }.validated()
-    }
-
-    /// Sorts nested collections into the canonical order used for persistence.
-    pub fn normalize(&mut self) {
-        self.sources
-            .sort_by(|left, right| left.source_id.cmp(&right.source_id));
-    }
-
-    /// Returns a normalized clone of the valuation source registry.
-    pub fn normalized(mut self) -> Self {
-        self.normalize();
-        self
-    }
-
-    /// Validates this registry, normalizes it, and returns the validated value.
-    pub fn validated(mut self) -> Result<Self, ValuationSourceRegistryError> {
-        validate_valuation_source_registry(&self)?;
-        self.normalize();
-        Ok(self)
-    }
-}
-
-/// Typed registry entry for one valuation source.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "valuation-source-config",
-    schema = "mfm.portfolio.valuation_source_config"
-)]
-pub struct ValuationSourceConfig {
-    /// Stable logical source identifier.
-    pub source_id: ValuationSourceId,
-    /// Network on which the source must be pinned.
-    pub network_id: NetworkId,
-    /// Symbol identity used by the source.
-    pub base_symbol_id: SymbolId,
-    /// Quote unit returned by the source.
-    pub quote: QuoteCode,
-    /// Reader family and its typed config blob.
-    pub reader: ValuationSourceReaderConfig,
-    /// Canonical metadata surface.
-    #[serde(default)]
-    pub metadata: PublicMetadata,
-}
-
-impl ValuationSourceConfig {
-    /// Creates a validated valuation source config.
-    pub fn new(
-        source_id: String,
-        network_id: String,
-        base_symbol_id: String,
-        quote: QuoteCode,
-        reader: ValuationSourceReaderConfig,
-        metadata: BTreeMap<String, String>,
-    ) -> Result<Self, ValuationSourceRegistryError> {
-        let source_id = ValuationSourceId::new(source_id)
-            .map_err(|source| ValuationSourceRegistryError::InvalidSourceId { source })?;
-        let network_id = NetworkId::new(network_id)
-            .map_err(|source| ValuationSourceRegistryError::InvalidNetworkId { source })?;
-        let base_symbol_id = SymbolId::new(base_symbol_id)
-            .map_err(|source| ValuationSourceRegistryError::InvalidBaseSymbolId { source })?;
-        let metadata = PublicMetadata::new(metadata).map_err(|source| {
-            ValuationSourceRegistryError::MetadataContainsSecret {
-                source_id: source_id.to_string(),
-                key: source.key().to_owned(),
-            }
-        })?;
-        let registry = ValuationSourceRegistry {
-            sources: vec![Self {
-                source_id,
-                network_id,
-                base_symbol_id,
-                quote,
-                reader,
-                metadata,
-            }],
-        };
-        let mut sources = registry.validated()?.sources;
-        Ok(sources.remove(0))
-    }
-}
-
-/// Resolved balance reader selected by runtime planning.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "resolved-symbol-balance-reader",
-    schema = "mfm.portfolio.resolved_symbol_balance_reader"
-)]
-pub struct ResolvedSymbolBalanceReader {
-    /// Canonical runtime reader kind.
-    pub kind: String,
-    /// Opaque runtime implementation reference.
-    pub implementation_ref: String,
-}
-
-/// Resolved valuation reader selected by runtime planning.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "resolved-symbol-valuation-reader",
-    schema = "mfm.portfolio.resolved_symbol_valuation_reader"
-)]
-pub struct ResolvedSymbolValuationReader {
-    /// Quote handled by the resolved reader.
-    pub quote: QuoteCode,
-    /// Canonical runtime reader kind.
-    pub kind: String,
-    /// Opaque runtime implementation reference.
-    pub implementation_ref: String,
-}
-
-/// Supported valuation source reader kinds.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "valuation-source-reader-config",
-    schema = "mfm.portfolio.valuation_source_reader_config"
-)]
-pub enum ValuationSourceReaderConfig {
-    /// EVM oracle reader selected by `oracle_kind`.
-    EvmOracle {
-        /// Concrete oracle family used at runtime.
-        oracle_kind: OracleKindId,
-        /// Typed oracle config.
-        config: EvmOracleConfig,
-    },
-}
-
-/// Typed EVM oracle reader config.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "evm-oracle-config",
-    schema = "mfm.portfolio.evm_oracle_config"
-)]
-pub struct EvmOracleConfig {
-    /// Normalized oracle contract address.
-    pub contract_address: NormalizedEvmAddress,
-}
-
 /// Supported valuation reader kinds.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -530,8 +354,6 @@ pub struct ObservationValue {
     pub unit_price_dec: String,
     /// Canonical valuation reader kind.
     pub valuation_reader_kind: String,
-    /// Concrete source refs used for the valuation.
-    pub source_refs: Vec<ObservationValueSourceRef>,
 }
 
 /// Concrete execution anchor captured for one observation source.
@@ -559,22 +381,6 @@ pub enum ObservationAnchor {
         /// Concrete pinned block hash.
         block_hash: String,
     },
-}
-
-/// Concrete price source ref pinned to a network anchor.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "observation-value-source-ref",
-    schema = "mfm.portfolio.observation_value_source_ref"
-)]
-pub struct ObservationValueSourceRef {
-    /// Stable source identifier.
-    pub source_id: String,
-    /// Stable network identifier.
-    pub network_id: String,
-    /// Concrete pinned execution anchor.
-    pub anchor: ObservationAnchor,
 }
 
 /// Concrete balance source pinned to a network anchor.
@@ -645,46 +451,6 @@ pub enum SymbolConfigError {
     },
 }
 
-/// Validation errors for valuation source registries.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum ValuationSourceRegistryError {
-    /// The JSON payload could not be decoded into the canonical type.
-    #[error("valuation source registry decode failed: {0}")]
-    Decode(String),
-    /// `source_id` did not satisfy the portfolio identifier grammar.
-    #[error("source_id is invalid: {source}")]
-    InvalidSourceId {
-        /// Underlying scalar validation failure.
-        source: PortfolioScalarError,
-    },
-    /// `network_id` did not satisfy the portfolio identifier grammar.
-    #[error("network_id is invalid: {source}")]
-    InvalidNetworkId {
-        /// Underlying scalar validation failure.
-        source: PortfolioScalarError,
-    },
-    /// `base_symbol_id` did not satisfy the portfolio identifier grammar.
-    #[error("base_symbol_id is invalid: {source}")]
-    InvalidBaseSymbolId {
-        /// Underlying scalar validation failure.
-        source: PortfolioScalarError,
-    },
-    /// Registry metadata contained a secret-shaped key or value.
-    #[error("valuation source `{source_id}` metadata key `{key}` contains secret-shaped content")]
-    MetadataContainsSecret {
-        /// Valuation source associated with the rejected metadata.
-        source_id: String,
-        /// Metadata key associated with the rejected content.
-        key: String,
-    },
-    /// The same `source_id` appeared more than once.
-    #[error("valuation source `{source_id}` must be unique")]
-    DuplicateSourceId {
-        /// Duplicate valuation source id.
-        source_id: String,
-    },
-}
-
 /// Validates a canonical symbol config.
 pub fn validate_symbol_config(cfg: &SymbolConfig) -> Result<(), SymbolConfigError> {
     match &cfg.balance_reader {
@@ -699,22 +465,6 @@ pub fn validate_symbol_config(cfg: &SymbolConfig) -> Result<(), SymbolConfigErro
             return Err(SymbolConfigError::DuplicateQuoteValuation { quote: quote.quote });
         }
         validate_valuation_reader_config(quote.quote, &quote.reader)?;
-    }
-
-    Ok(())
-}
-
-/// Validates a valuation source registry.
-pub fn validate_valuation_source_registry(
-    registry: &ValuationSourceRegistry,
-) -> Result<(), ValuationSourceRegistryError> {
-    let mut seen_ids = HashSet::new();
-    for source in &registry.sources {
-        if !seen_ids.insert(source.source_id.clone()) {
-            return Err(ValuationSourceRegistryError::DuplicateSourceId {
-                source_id: source.source_id.to_string(),
-            });
-        }
     }
 
     Ok(())

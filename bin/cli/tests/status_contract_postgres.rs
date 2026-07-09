@@ -210,8 +210,7 @@ fn sample_portfolio_config() -> Value {
                 }
             ],
             "metadata": {}
-        },
-        "valuation_source_registry": { "sources": [] }
+        }
     })
 }
 

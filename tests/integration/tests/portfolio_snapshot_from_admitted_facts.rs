@@ -438,8 +438,7 @@ fn dual_mainnet_portfolio_json() -> serde_json::Value {
                 }
             ],
             "metadata": {}
-        },
-        "valuation_source_registry": { "sources": [] }
+        }
     })
 }
 

@@ -251,8 +251,7 @@ Portfolio snapshot:
   "op": "portfolio_snapshot",
   "config_format": "json",
   "config": {
-    "portfolio": { "...": "PortfolioConfig JSON" },
-    "valuation_source_registry": { "sources": [] }
+    "portfolio": { "...": "PortfolioConfig JSON" }
   }
 }
 ```

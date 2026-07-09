@@ -39,14 +39,12 @@ use mfm_portfolio_config::PortfolioSnapshotCanonicalConfig;
 use mfm_portfolio_model::aave::AAVE_V3_PROTOCOL_ID;
 use mfm_portfolio_model::portfolio::{
     NetworkConfig, NetworkFamilyConfig, PortfolioConfig, PortfolioQuoteTotal, PortfolioReport,
-    PortfolioSnapshot, ValidatedPortfolioBundle, ValidatedPortfolioConfig, ValidatedSymbolConfigs,
-    ValidatedWalletConfigs, WalletReport, WalletSnapshot,
+    PortfolioSnapshot, ValidatedPortfolioConfig, ValidatedSymbolConfigs, ValidatedWalletConfigs,
+    WalletReport, WalletSnapshot,
 };
 use mfm_portfolio_model::symbol::{
-    validate_valuation_source_registry, BalanceReaderConfig, Observation, ObservationQuantity,
-    ObservationSource, ObservationValue, ObservationValueSourceRef, QuoteCode,
-    QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole, ValuationReaderConfig,
-    ValuationSourceRegistry,
+    BalanceReaderConfig, Observation, ObservationQuantity, ObservationSource, ObservationValue,
+    QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole, ValuationReaderConfig,
 };
 use mfm_portfolio_model::wallet::{WalletConfig, WalletImplementationConfig, WalletSubjectKind};
 use mfm_program::{
@@ -114,20 +112,12 @@ fn state_version(name: &'static str) -> mfm_program::Result<StateVersion> {
 pub struct PortfolioWorkflowConfig {
     /// Canonical portfolio config.
     portfolio: PortfolioConfig,
-    /// Canonical valuation source registry.
-    valuation_source_registry: ValuationSourceRegistry,
 }
 
 impl PortfolioWorkflowConfig {
     /// Creates a validated root portfolio workflow config.
-    pub fn new(
-        portfolio: PortfolioConfig,
-        valuation_source_registry: ValuationSourceRegistry,
-    ) -> Result<Self, ConfigError> {
-        let config = Self {
-            portfolio,
-            valuation_source_registry,
-        };
+    pub fn new(portfolio: PortfolioConfig) -> Result<Self, ConfigError> {
+        let config = Self { portfolio };
         validate_portfolio_workflow_config(&config).map_err(ConfigError::new)?;
         Ok(config)
     }
@@ -135,11 +125,6 @@ impl PortfolioWorkflowConfig {
     /// Returns the canonical portfolio config.
     pub const fn portfolio(&self) -> &PortfolioConfig {
         &self.portfolio
-    }
-
-    /// Returns the canonical valuation source registry.
-    pub const fn valuation_source_registry(&self) -> &ValuationSourceRegistry {
-        &self.valuation_source_registry
     }
 }
 
@@ -152,21 +137,18 @@ impl<'de> Deserialize<'de> for PortfolioWorkflowConfig {
         #[serde(deny_unknown_fields)]
         struct RawPortfolioWorkflowConfig {
             portfolio: PortfolioConfig,
-            valuation_source_registry: ValuationSourceRegistry,
         }
 
         let raw = RawPortfolioWorkflowConfig::deserialize(deserializer)?;
         Ok(Self {
             portfolio: raw.portfolio,
-            valuation_source_registry: raw.valuation_source_registry,
         })
     }
 }
 
 impl From<PortfolioSnapshotCanonicalConfig> for PortfolioWorkflowConfig {
     fn from(canonical: PortfolioSnapshotCanonicalConfig) -> Self {
-        Self::new(canonical.portfolio, canonical.valuation_source_registry)
-            .expect("canonical portfolio snapshot config must validate")
+        Self::new(canonical.portfolio).expect("canonical portfolio snapshot config must validate")
     }
 }
 
@@ -255,20 +237,12 @@ impl SelectHoldingsConfig {
 pub struct ResolveValuationsConfig {
     /// Symbols whose valuation routes should be resolved.
     symbol_configs: Vec<SymbolConfig>,
-    /// Typed valuation source registry.
-    valuation_source_registry: ValuationSourceRegistry,
 }
 
 impl ResolveValuationsConfig {
     /// Creates validated valuation-resolution config.
-    pub fn new(
-        symbol_configs: Vec<SymbolConfig>,
-        valuation_source_registry: ValuationSourceRegistry,
-    ) -> Result<Self, ConfigError> {
-        let config = Self {
-            symbol_configs,
-            valuation_source_registry,
-        };
+    pub fn new(symbol_configs: Vec<SymbolConfig>) -> Result<Self, ConfigError> {
+        let config = Self { symbol_configs };
         validate_resolve_valuations_config(&config).map_err(ConfigError::new)?;
         Ok(config)
     }
@@ -276,11 +250,6 @@ impl ResolveValuationsConfig {
     /// Returns the symbols whose valuation routes should be resolved.
     pub fn symbol_configs(&self) -> &[SymbolConfig] {
         &self.symbol_configs
-    }
-
-    /// Returns the typed valuation source registry.
-    pub const fn valuation_source_registry(&self) -> &ValuationSourceRegistry {
-        &self.valuation_source_registry
     }
 }
 
@@ -344,12 +313,9 @@ impl ProjectReportConfig {
 }
 
 fn validate_portfolio_workflow_config(config: &PortfolioWorkflowConfig) -> Result<(), String> {
-    ValidatedPortfolioBundle::new(
-        config.portfolio.clone(),
-        config.valuation_source_registry.clone(),
-    )
-    .map(|_| ())
-    .map_err(|error| error.to_string())
+    ValidatedPortfolioConfig::new(config.portfolio.clone())
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn validate_resolve_subjects_config(config: &ResolveSubjectsConfig) -> Result<(), String> {
@@ -375,8 +341,6 @@ fn validate_select_holdings_config(config: &SelectHoldingsConfig) -> Result<(), 
 fn validate_resolve_valuations_config(config: &ResolveValuationsConfig) -> Result<(), String> {
     ValidatedSymbolConfigs::new(config.symbol_configs.clone())
         .map(|_| ())
-        .map_err(|error| error.to_string())?;
-    validate_valuation_source_registry(&config.valuation_source_registry)
         .map_err(|error| error.to_string())?;
     for symbol in &config.symbol_configs {
         for quote in &symbol.valuation.quotes {
@@ -444,8 +408,6 @@ pub struct ResolvedValuation {
     pub unit_price_dec: String,
     /// Canonical valuation reader kind.
     pub valuation_reader_kind: String,
-    /// Concrete source refs used for the valuation.
-    pub source_refs: Vec<ObservationValueSourceRef>,
 }
 
 /// Resolved valuation collection (hard-fail: empty only when no symbols; no soft errors).
@@ -1009,7 +971,6 @@ pub fn apply_valuations_to_observations(
                 value_dec,
                 unit_price_dec: resolved.unit_price_dec.clone(),
                 valuation_reader_kind: resolved.valuation_reader_kind.clone(),
-                source_refs: resolved.source_refs.clone(),
             });
         }
         values.sort_by_key(|value| value.quote);
@@ -1046,7 +1007,6 @@ fn resolved_valuation_for_quote(
             priced_symbol_id: quote.priced_symbol_id.to_string(),
             unit_price_dec: unit_price_dec.to_string(),
             valuation_reader_kind: "fixed_unit_price".to_owned(),
-            source_refs: Vec::new(),
         }),
     }
 }

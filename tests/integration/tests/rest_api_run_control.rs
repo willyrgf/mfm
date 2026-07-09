@@ -758,9 +758,6 @@ fn portfolio_snapshot_config() -> serde_json::Value {
                 }
             ],
             "metadata": {}
-        },
-        "valuation_source_registry": {
-            "sources": []
         }
     })
 }
