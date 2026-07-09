@@ -2,23 +2,22 @@ use std::sync::Arc;
 
 use mfm_certify::CertificationRegistry;
 use mfm_evm_capabilities::EvmNetworkBinding;
-use mfm_signers_keystore::{KeystoreSignerProvider, KeystoreSignerRegistryEntry};
 use mfm_signing::SignerRef;
 use mfm_store::v1 as store;
 
-use crate::{evm_json_rpc_client, runtime_evm_transport_error, RuntimeConfigLoader};
+use crate::live_transports::LiveTransportRuntime;
 
 #[derive(Clone)]
 struct RuntimeConfigEvmContractRuntimeFactory {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-    runtime_config: RuntimeConfigLoader,
+    runtime_config: Arc<LiveTransportRuntime>,
     source_run_registry: CertificationRegistry,
 }
 
 impl RuntimeConfigEvmContractRuntimeFactory {
     fn new(
         artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-        runtime_config: RuntimeConfigLoader,
+        runtime_config: Arc<LiveTransportRuntime>,
         source_run_registry: CertificationRegistry,
     ) -> Self {
         Self {
@@ -28,36 +27,11 @@ impl RuntimeConfigEvmContractRuntimeFactory {
         }
     }
 
-    fn load_evm(&self) -> mfm_runtime::Result<mfm_runtime_config::EvmRuntimeConfig> {
-        self.runtime_config.load_evm()
-    }
-
-    fn load_runtime_config_with_signers(
-        &self,
-    ) -> mfm_runtime::Result<mfm_runtime_config::RuntimeConfig> {
-        self.runtime_config.load_runtime_config_with_signers()
-    }
-
-    fn validate_evm_for(
-        &self,
-        evm: mfm_runtime_config::EvmRuntimeConfig,
-        binding: &EvmNetworkBinding,
-    ) -> mfm_runtime::Result<()> {
-        let client = evm_json_rpc_client(evm)?;
-        client
-            .validate_network_binding(binding)
-            .map_err(runtime_evm_transport_error)
-    }
-
     fn evm_provider_for(
         &self,
-        evm: mfm_runtime_config::EvmRuntimeConfig,
         binding: EvmNetworkBinding,
     ) -> mfm_runtime::Result<mfm_transports_evm::EvmJsonRpcNetworkProvider> {
-        let client = evm_json_rpc_client(evm)?;
-        client
-            .bind_network(binding)
-            .map_err(runtime_evm_transport_error)
+        self.runtime_config.evm_provider(binding)
     }
 }
 
@@ -73,17 +47,16 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
         binding: &EvmNetworkBinding,
         signer_ref: Option<&SignerRef>,
     ) -> mfm_runtime::Result<()> {
-        let (evm, signer_configured) = if let Some(signer_ref) = signer_ref {
-            let runtime_config = self.load_runtime_config_with_signers()?;
-            let evm = runtime_config.evm().cloned().ok_or_else(|| {
-                mfm_runtime::RuntimeError::RunnerBinding("missing EVM runtime config".to_owned())
-            })?;
-            (evm, runtime_config.signers().contains_key(signer_ref))
-        } else {
-            (self.load_evm()?, true)
-        };
-        self.validate_evm_for(evm, binding)?;
-        if !signer_configured {
+        self.runtime_config.validate_evm_network_binding(binding)?;
+        if signer_ref
+            .map(|signer_ref| {
+                self.runtime_config
+                    .signer_provider()
+                    .map(|provider| provider.contains_signer(signer_ref))
+            })
+            .transpose()?
+            == Some(false)
+        {
             return Err(mfm_runtime::RuntimeError::RunnerBinding(
                 "missing EVM signer binding".to_owned(),
             ));
@@ -95,7 +68,7 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
         &self,
         binding: EvmNetworkBinding,
     ) -> mfm_runtime::Result<mfm_adapters_evm_contracts::EvmContractReadRuntime> {
-        let evm_provider = self.evm_provider_for(self.load_evm()?, binding)?;
+        let evm_provider = self.evm_provider_for(binding)?;
         Ok(
             mfm_adapters_evm_contracts::EvmContractReadRuntime::new_with_source_run_import_registry(
                 Arc::new(evm_provider),
@@ -108,12 +81,8 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
         &self,
         binding: EvmNetworkBinding,
     ) -> mfm_runtime::Result<mfm_adapters_evm_contracts::EvmContractRuntime> {
-        let runtime_config = self.load_runtime_config_with_signers()?;
-        let evm = runtime_config.evm().cloned().ok_or_else(|| {
-            mfm_runtime::RuntimeError::RunnerBinding("missing EVM runtime config".to_owned())
-        })?;
-        let evm_provider = Arc::new(self.evm_provider_for(evm, binding)?);
-        let signer = Arc::new(keystore_signer_provider_from_config(&runtime_config)?);
+        let evm_provider = Arc::new(self.evm_provider_for(binding)?);
+        let signer = self.runtime_config.signer_provider()?;
         Ok(mfm_adapters_evm_contracts::EvmContractRuntime::new(
             evm_provider,
             signer,
@@ -121,36 +90,11 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
     }
 }
 
-fn keystore_signer_provider_from_config(
-    runtime_config: &mfm_runtime_config::RuntimeConfig,
-) -> mfm_runtime::Result<KeystoreSignerProvider> {
-    let entries = runtime_config.signers().iter().map(|(signer_ref, signer)| {
-        let signer = signer.as_keystore();
-        let keystore = runtime_config
-            .keystores()
-            .get(signer.keystore_ref())
-            .ok_or_else(|| {
-                mfm_runtime::RuntimeError::RunnerBinding(
-                    "missing keystore profile for signer binding".to_owned(),
-                )
-            })?;
-        Ok(KeystoreSignerRegistryEntry::new(
-            signer_ref.clone(),
-            signer.entry_id(),
-            keystore.keystore_path().expose_path(),
-            keystore.unlock_file().expose_path(),
-        ))
-    });
-    Ok(KeystoreSignerProvider::new(
-        entries.collect::<mfm_runtime::Result<Vec<_>>>()?,
-    ))
-}
-
 /// Registers contract lifecycle runners in the process production runner registry.
 pub(crate) fn register_contract_lifecycle_runners(
     registry: &mut mfm_runtime::ErasedRunnerRegistry,
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-    runtime_config: RuntimeConfigLoader,
+    runtime_config: Arc<LiveTransportRuntime>,
     source_run_registry: CertificationRegistry,
 ) -> mfm_runtime::Result<()> {
     mfm_adapters_evm_contracts::register_contract_lifecycle_runners_with_factory(

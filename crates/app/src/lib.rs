@@ -73,7 +73,10 @@ mod btc_collector;
 mod entry_point;
 mod entry_points;
 mod evm_contracts;
+mod live_transports;
 mod public_facts;
+
+use live_transports::{LiveTransportRuntime, RuntimeConfigLoader};
 
 pub use entry_point::{
     EntryPointOpId, EntryPointOpPlan, EntryPointOpRegistry, EntryPointOpResolveError,
@@ -561,11 +564,13 @@ pub async fn connect_production_run_services(
     database_url: Option<&str>,
     runtime_config_path: Option<&Path>,
 ) -> Result<ProductionRunServices, AppError> {
-    let runtime_config = RuntimeConfigLoader::from_path_or_env(runtime_config_path);
-    let btc_config = runtime_config.load_optional_btc()?;
+    let runtime_config = Arc::new(LiveTransportRuntime::new(
+        RuntimeConfigLoader::from_path_or_env(runtime_config_path),
+    ));
+    let btc_configured = runtime_config.btc_configured()?;
     let store = connect_production_run_store_with_optional_fact_query_signer(database_url).await?;
     let fact_index =
-        if btc_config.is_some() && store.store_authority().fact_receipt_trust_root().is_some() {
+        if btc_configured && store.store_authority().fact_receipt_trust_root().is_some() {
             Some(btc_collector::production_fact_index_read_provider(
                 store.clone(),
             )?)
@@ -576,7 +581,7 @@ pub async fn connect_production_run_services(
         Arc::new(store.clone()),
         fact_index,
         runtime_config,
-        btc_config,
+        btc_configured,
     )?;
     let certification_registry = production_certification_registry()?;
     let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
@@ -633,9 +638,11 @@ pub fn production_runner_registry(
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     runtime_config_path: Option<&Path>,
 ) -> Result<ErasedRunnerRegistry, AppError> {
-    let runtime_config = RuntimeConfigLoader::from_path_or_env(runtime_config_path);
-    let btc_config = runtime_config.load_optional_btc()?;
-    production_runner_registry_inner(artifacts, None, runtime_config, btc_config)
+    let runtime_config = Arc::new(LiveTransportRuntime::new(
+        RuntimeConfigLoader::from_path_or_env(runtime_config_path),
+    ));
+    let btc_configured = runtime_config.btc_configured()?;
+    production_runner_registry_inner(artifacts, None, runtime_config, btc_configured)
 }
 
 /// Builds the production typed runner registry with an explicit internal fact-index provider.
@@ -644,36 +651,26 @@ pub fn production_runner_registry_with_fact_index_provider(
     fact_index: Arc<dyn mfm_fact_capabilities::FactIndexReadProvider>,
     runtime_config_path: Option<&Path>,
 ) -> Result<ErasedRunnerRegistry, AppError> {
-    let runtime_config = RuntimeConfigLoader::from_path_or_env(runtime_config_path);
-    let btc_config = runtime_config.load_optional_btc()?;
-    production_runner_registry_inner(artifacts, Some(fact_index), runtime_config, btc_config)
+    let runtime_config = Arc::new(LiveTransportRuntime::new(
+        RuntimeConfigLoader::from_path_or_env(runtime_config_path),
+    ));
+    let btc_configured = runtime_config.btc_configured()?;
+    production_runner_registry_inner(artifacts, Some(fact_index), runtime_config, btc_configured)
 }
 
 fn production_runner_registry_inner(
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
     fact_index: Option<Arc<dyn mfm_fact_capabilities::FactIndexReadProvider>>,
-    runtime_config: RuntimeConfigLoader,
-    btc_config: Option<mfm_runtime_config::BtcRuntimeConfig>,
+    runtime_config: Arc<LiveTransportRuntime>,
+    btc_configured: bool,
 ) -> Result<ErasedRunnerRegistry, AppError> {
     let mut registry = ErasedRunnerRegistry::new();
     let portfolio_artifacts: Arc<dyn store::RetainedArtifactReadProvider> = artifacts.clone();
-    let portfolio_runtime = Arc::new(RuntimeConfigPortfolioRuntime::new(runtime_config.clone()));
-    let portfolio_evm: Arc<dyn mfm_adapters_portfolio::PortfolioEvmProviderFactory> =
-        portfolio_runtime.clone();
-    let portfolio_btc: Option<Arc<dyn mfm_adapters_portfolio::PortfolioBtcProviderFactory>> =
-        btc_config
-            .clone()
-            .map(|config| {
-                btc_collector::btc_json_rpc_provider_factory(config).map(|factory| {
-                    Arc::new(factory)
-                        as Arc<dyn mfm_adapters_portfolio::PortfolioBtcProviderFactory>
-                })
-            })
-            .transpose()?;
+    let portfolio_transport: Arc<dyn mfm_adapters_portfolio::PortfolioTransportFactory> =
+        runtime_config.clone();
     let portfolio_capabilities = mfm_adapters_portfolio::PortfolioRunnerCapabilities::new(
         portfolio_artifacts,
-        portfolio_evm,
-        portfolio_btc,
+        portfolio_transport,
     );
     mfm_adapters_portfolio::register_portfolio_runners(&mut registry, portfolio_capabilities)?;
     let source_run_registry = production_certification_registry()?;
@@ -687,202 +684,11 @@ fn production_runner_registry_inner(
         &mut registry,
         artifacts,
         fact_index,
-        btc_config,
+        runtime_config,
+        btc_configured,
     )?;
     mfm_transports_proof::register_deterministic_proof_runners(&mut registry)?;
     Ok(registry)
-}
-
-#[derive(Clone)]
-struct RuntimeConfigPortfolioRuntime {
-    runtime_config: RuntimeConfigLoader,
-}
-
-impl RuntimeConfigPortfolioRuntime {
-    fn new(runtime_config: RuntimeConfigLoader) -> Self {
-        Self { runtime_config }
-    }
-
-    fn evm_client(&self) -> mfm_runtime::Result<mfm_transports_evm::EvmJsonRpcClient> {
-        self.runtime_config.load_evm().and_then(evm_json_rpc_client)
-    }
-}
-
-impl mfm_adapters_portfolio::PortfolioEvmProviderFactory for RuntimeConfigPortfolioRuntime {
-    fn validate_evm_network_binding(
-        &self,
-        binding: &mfm_evm_capabilities::EvmNetworkBinding,
-    ) -> mfm_runtime::Result<()> {
-        self.evm_client()?
-            .validate_network_binding(binding)
-            .map_err(runtime_evm_transport_error)
-    }
-
-    fn bind_evm_network(
-        &self,
-        binding: mfm_evm_capabilities::EvmNetworkBinding,
-    ) -> mfm_evm_capabilities::Result<Arc<dyn mfm_adapters_portfolio::PortfolioEvmProvider>> {
-        let client = self
-            .evm_client()
-            .map_err(portfolio_runtime_config_capability_error)?;
-        client
-            .bind_network(binding)
-            .map(|provider| {
-                Arc::new(provider) as Arc<dyn mfm_adapters_portfolio::PortfolioEvmProvider>
-            })
-            .map_err(|error| {
-                mfm_evm_capabilities::EvmCapabilityError::provider_failure(
-                    error.into_provider_diagnostic(),
-                )
-            })
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct RuntimeConfigLoader {
-    path: Option<PathBuf>,
-}
-
-impl RuntimeConfigLoader {
-    fn from_path_or_env(path: Option<&Path>) -> Self {
-        let path = path
-            .map(Path::to_path_buf)
-            .or_else(|| env::var_os(MFM_RUNTIME_CONFIG_FILE).map(PathBuf::from));
-        Self { path }
-    }
-
-    pub(crate) fn load_evm(&self) -> mfm_runtime::Result<mfm_runtime_config::EvmRuntimeConfig> {
-        self.load_runtime_config_with_requirements(
-            mfm_runtime_config::RuntimeConfigRequirement::evm(),
-        )
-        .and_then(|config| {
-            config.evm().cloned().ok_or_else(|| {
-                mfm_runtime::RuntimeError::RunnerBinding("missing EVM runtime config".to_owned())
-            })
-        })
-    }
-
-    pub(crate) fn load_optional_btc(
-        &self,
-    ) -> mfm_runtime::Result<Option<mfm_runtime_config::BtcRuntimeConfig>> {
-        let Some(path) = self.path.as_ref() else {
-            return Ok(None);
-        };
-        match mfm_runtime_config::RuntimeConfig::load_path_with_requirements(
-            path,
-            mfm_runtime_config::RuntimeConfigRequirement::btc(),
-        ) {
-            Ok(config) => Ok(config.btc().cloned()),
-            Err(error)
-                if (error.location() == &mfm_runtime_config::RuntimeConfigLocation::Btc
-                    && error.kind()
-                        == &mfm_runtime_config::RuntimeConfigErrorKind::MissingFamily)
-                    || matches!(
-                        error.kind(),
-                        mfm_runtime_config::RuntimeConfigErrorKind::Syntax { .. }
-                    ) =>
-            {
-                Ok(None)
-            }
-            Err(error) => Err(runtime_config_error(error)),
-        }
-    }
-
-    pub(crate) fn load_runtime_config_with_signers(
-        &self,
-    ) -> mfm_runtime::Result<mfm_runtime_config::RuntimeConfig> {
-        self.load_runtime_config_with_requirements(
-            mfm_runtime_config::RuntimeConfigRequirement::evm_with_signers(),
-        )
-    }
-
-    fn load_runtime_config_with_requirements(
-        &self,
-        requirements: mfm_runtime_config::RuntimeConfigRequirement,
-    ) -> mfm_runtime::Result<mfm_runtime_config::RuntimeConfig> {
-        let path = self.path.as_ref().ok_or_else(|| {
-            mfm_runtime::RuntimeError::RunnerBinding("missing runtime config file".to_owned())
-        })?;
-        mfm_runtime_config::RuntimeConfig::load_path_with_requirements(path, requirements)
-            .map_err(runtime_config_error)
-    }
-}
-
-fn evm_json_rpc_client(
-    evm: mfm_runtime_config::EvmRuntimeConfig,
-) -> mfm_runtime::Result<mfm_transports_evm::EvmJsonRpcClient> {
-    let sources = evm
-        .sources()
-        .iter()
-        .map(|(source_ref, source)| {
-            mfm_transports_evm::EvmRuntimeSource::new(
-                source_ref.clone(),
-                source.rpc_url().expose_secret().to_owned(),
-                source
-                    .auth_header()
-                    .map(|value| value.expose_secret().to_owned()),
-            )
-            .map_err(runtime_evm_transport_error)
-        })
-        .collect::<mfm_runtime::Result<Vec<_>>>()?;
-    let policies = evm
-        .policies()
-        .iter()
-        .map(|(policy_id, policy)| {
-            mfm_transports_evm::EvmSourcePolicy::new(
-                policy_id.clone(),
-                policy.ordered_sources().to_vec(),
-            )
-            .map_err(runtime_evm_transport_error)
-        })
-        .collect::<mfm_runtime::Result<Vec<_>>>()?;
-    let routes = evm
-        .routes()
-        .iter()
-        .map(|(network_id, route)| {
-            mfm_transports_evm::EvmRoute::new(
-                network_id.clone(),
-                route.source_ref().clone(),
-                route.policy_id().clone(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let source_registry = mfm_transports_evm::EvmSourceRegistry::new(sources, policies)
-        .map_err(runtime_evm_transport_error)?;
-    let route_registry =
-        mfm_transports_evm::EvmRouteRegistry::new(routes).map_err(runtime_evm_transport_error)?;
-    Ok(mfm_transports_evm::EvmJsonRpcClient::new(
-        source_registry,
-        route_registry,
-    ))
-}
-
-fn runtime_config_error(
-    error: mfm_runtime_config::RuntimeConfigError,
-) -> mfm_runtime::RuntimeError {
-    mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
-}
-
-fn runtime_evm_transport_error(
-    error: mfm_transports_evm::EvmTransportError,
-) -> mfm_runtime::RuntimeError {
-    mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
-}
-
-fn runtime_btc_capability_error(
-    error: mfm_btc_capabilities::BtcCapabilityError,
-) -> mfm_runtime::RuntimeError {
-    mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
-}
-
-fn portfolio_runtime_config_capability_error(
-    _error: mfm_runtime::RuntimeError,
-) -> mfm_evm_capabilities::EvmCapabilityError {
-    mfm_evm_capabilities::EvmCapabilityError::provider_failure(
-        mfm_evm_capabilities::evm_diagnostic(
-            mfm_capabilities::ProviderDiagnosticCode::ProviderConfigurationInvalid,
-        ),
-    )
 }
 
 /// Builds an adapter-facing artifact read provider from a retained artifact reader.

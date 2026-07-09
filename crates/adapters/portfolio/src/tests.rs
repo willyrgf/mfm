@@ -33,8 +33,7 @@ fn executable_identity_summary_matches_golden() {
 #[test]
 fn bitcoin_capability_backend_observes_native_balance_with_anchor() {
     let (network, config) = bitcoin_observe_config();
-    let btc = Arc::new(MockPortfolioBtc::matching());
-    let backend = CapabilityPortfolioBackend::new(Arc::new(UnavailablePortfolioEvm), Some(btc));
+    let backend = CapabilityPortfolioBackend::new(Arc::new(MockPortfolioTransport::matching()));
 
     let anchor =
         poll_ready(backend.read_execution_anchor(&network_read_intent_for_network(&network)))
@@ -63,8 +62,8 @@ fn bitcoin_capability_backend_observes_native_balance_with_anchor() {
 #[test]
 fn bitcoin_capability_backend_maps_provider_source_mismatch() {
     let (network, config) = bitcoin_observe_config();
-    let btc = Arc::new(MockPortfolioBtc::rejecting_balance());
-    let backend = CapabilityPortfolioBackend::new(Arc::new(UnavailablePortfolioEvm), Some(btc));
+    let backend =
+        CapabilityPortfolioBackend::new(Arc::new(MockPortfolioTransport::rejecting_balance()));
 
     let anchor =
         poll_ready(backend.read_execution_anchor(&network_read_intent_for_network(&network)))
@@ -218,11 +217,11 @@ where
 }
 
 const BTC_HASH: &str = "00000000000000000001b2a7f3e0d5c4b6a897887766554433221100ffeeddcc";
-struct MockPortfolioBtc {
+struct MockPortfolioTransport {
     reject_balance: bool,
 }
 
-impl MockPortfolioBtc {
+impl MockPortfolioTransport {
     fn matching() -> Self {
         Self {
             reject_balance: false,
@@ -236,7 +235,21 @@ impl MockPortfolioBtc {
     }
 }
 
-impl PortfolioBtcProviderFactory for MockPortfolioBtc {
+impl PortfolioTransportFactory for MockPortfolioTransport {
+    fn validate_evm_network_binding(
+        &self,
+        _binding: &EvmNetworkBinding,
+    ) -> mfm_runtime::Result<()> {
+        Ok(())
+    }
+
+    fn bind_evm_network(
+        &self,
+        _binding: EvmNetworkBinding,
+    ) -> mfm_evm_capabilities::Result<Arc<dyn PortfolioEvmProvider>> {
+        Ok(Arc::new(UnavailablePortfolioEvm))
+    }
+
     fn validate_btc_source_binding(&self, _binding: &BtcSourceBinding) -> mfm_runtime::Result<()> {
         Ok(())
     }
@@ -325,22 +338,6 @@ fn unavailable_evm_error() -> EvmCapabilityError {
     EvmCapabilityError::provider_failure(mfm_evm_capabilities::evm_diagnostic(
         mfm_capabilities::ProviderDiagnosticCode::SourceUnavailable,
     ))
-}
-
-impl PortfolioEvmProviderFactory for UnavailablePortfolioEvm {
-    fn validate_evm_network_binding(
-        &self,
-        _binding: &EvmNetworkBinding,
-    ) -> mfm_runtime::Result<()> {
-        Ok(())
-    }
-
-    fn bind_evm_network(
-        &self,
-        _binding: EvmNetworkBinding,
-    ) -> mfm_evm_capabilities::Result<Arc<dyn PortfolioEvmProvider>> {
-        Ok(Arc::new(UnavailablePortfolioEvm))
-    }
 }
 
 impl EvmBlockReadProvider for UnavailablePortfolioEvm {
