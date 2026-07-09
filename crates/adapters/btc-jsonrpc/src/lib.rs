@@ -355,11 +355,8 @@ fn chain_head_request(config: &ObserveBtcChainHeadConfig) -> Result<BtcChainHead
     Ok(BtcChainHeadRequest::new(selection))
 }
 
-fn joint_tip_request(config: &ResolveBtcJointTipConfig) -> Result<BtcChainHeadRequest> {
-    let selection = config
-        .selection()
-        .map_err(|_| BtcJsonRpcAdapterError::InvalidCapabilityRequest)?;
-    Ok(BtcChainHeadRequest::new(selection))
+fn joint_tip_request(config: &ResolveBtcJointTipConfig) -> BtcChainHeadRequest {
+    BtcChainHeadRequest::new(config.selection())
 }
 
 fn address_balance_request(
@@ -463,7 +460,7 @@ impl ErasedNodeRunner for ResolveJointTipRunner {
                 load_runner_config::<ResolveBtcJointTipConfig>(&ctx, self.artifacts.as_ref())
                     .await?;
             let binding = joint_tip_binding(config.as_ref()).map_err(btc_adapter_runtime_error)?;
-            let request = joint_tip_request(config.as_ref()).map_err(btc_adapter_runtime_error)?;
+            let request = joint_tip_request(config.as_ref());
             let state = ResolveBtcJointTipState::new(config).map_err(|error| {
                 mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
             })?;

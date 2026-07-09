@@ -23,7 +23,7 @@ Forbidden at cutover:
 
 Operators run collectors, then report, as separate certified runs:
 
-1. **Collect BTC** (same-network multi-address batch shares one joint tip):
+1. **Collect BTC** (same-network multi-address batch shares one best-tip joint tip):
 
    ```text
    run btc_address_balance
@@ -31,7 +31,7 @@ Operators run collectors, then report, as separate certified runs:
      addresses = [ ... configured BTC addresses ... ]
    ```
 
-   Graph: `resolve_joint_tip` once → per address `observe@hash` → `record` → assemble batch.
+   Graph: `resolve_joint_tip` at the best tip once → per address `observe@hash` → `record` → assemble batch.
 
 2. **Collect EVM** (same chain multi-account batch shares one joint tip):
 

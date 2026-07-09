@@ -165,7 +165,6 @@ mod tests {
                 "bitcoin_network": "main",
                 "semantic_source_identity": "public-bitcoin-core",
                 "addresses": ["bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"],
-                "head_kind": "best",
                 "coverage": "configured_only",
                 "max_source_reads": 1
             }"#,
@@ -174,6 +173,32 @@ mod tests {
         let plan = op.plan(authored).expect("btc plan");
         assert!(!plan.draft.state_nodes().is_empty());
         assert!(!plan.config_material.is_empty());
+    }
+
+    #[test]
+    fn btc_address_balance_entry_point_rejects_removed_head_selection_fields() {
+        let registry = production_entry_point_op_registry().expect("registry");
+        let public_name =
+            PublicOpName::new(mfm_op_btc_collectors::BTC_ADDRESS_BALANCE_ENTRY_POINT.public_name)
+                .expect("name");
+        let op = registry.resolve_latest(&public_name).expect("btc op");
+        let authored = AuthoredConfig::new(
+            AuthoredConfigFormat::Json,
+            r#"{
+                "network": "bitcoin-mainnet",
+                "bitcoin_network": "main",
+                "semantic_source_identity": "public-bitcoin-core",
+                "addresses": ["bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"],
+                "head_kind": "best",
+                "coverage": "configured_only",
+                "max_source_reads": 1
+            }"#,
+        )
+        .expect("authored");
+
+        let error = op.plan(authored).expect_err("removed field must reject");
+
+        assert_eq!(error.code(), "AuthoredConfigUnknownField");
     }
 
     #[test]

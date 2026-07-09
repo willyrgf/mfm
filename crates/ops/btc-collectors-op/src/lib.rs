@@ -325,10 +325,6 @@ pub struct BtcAddressBalanceConfig {
     pub semantic_source_identity: String,
     /// Public Bitcoin addresses to observe (at least one).
     pub addresses: Vec<String>,
-    /// Head kind for the shared joint tip (`best` or `confirmed`).
-    pub head_kind: String,
-    /// Optional confirmation depth for confirmed-head joint tips.
-    pub confirmation_depth: Option<NonZeroU64>,
     /// Coverage claim written on success (default `configured_only`).
     pub coverage: String,
     /// Maximum source reads for joint-tip resolution.
@@ -342,8 +338,6 @@ impl Default for BtcAddressBalanceConfig {
             bitcoin_network: "main".to_owned(),
             semantic_source_identity: "public-bitcoin-core".to_owned(),
             addresses: vec!["bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh".to_owned()],
-            head_kind: "best".to_owned(),
-            confirmation_depth: None,
             coverage: "configured_only".to_owned(),
             max_source_reads: NonZeroU64::new(1).expect("non-zero static value"),
         }
@@ -357,8 +351,6 @@ impl BtcAddressBalanceConfig {
             network: self.network.clone(),
             bitcoin_network: self.bitcoin_network.clone(),
             semantic_source_identity: self.semantic_source_identity.clone(),
-            head_kind: self.head_kind.clone(),
-            confirmation_depth: self.confirmation_depth,
             max_source_reads: self.max_source_reads,
         }
     }

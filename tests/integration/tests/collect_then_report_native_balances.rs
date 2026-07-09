@@ -302,7 +302,6 @@ fn btc_balance_config_json() -> serde_json::Value {
         "bitcoin_network": "main",
         "semantic_source_identity": "public-bitcoin-core",
         "addresses": [BTC_ADDRESS],
-        "head_kind": "best",
         "coverage": "configured_only",
         "max_source_reads": 1
     })

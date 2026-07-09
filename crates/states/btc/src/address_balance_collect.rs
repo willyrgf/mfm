@@ -32,7 +32,7 @@ use crate::address_balance::{
 };
 use crate::{
     adapter_binding, adapter_required_error, state_kind, state_version, validate_bitcoin_network,
-    validate_observe_chain_head_config, BtcStateError, ObserveBtcChainHeadConfig,
+    BtcStateError,
 };
 
 /// Shared joint tip resolved once for a same-network multi-subject batch.
@@ -200,10 +200,6 @@ pub struct ResolveBtcJointTipConfig {
     pub bitcoin_network: String,
     /// Non-secret semantic source identity.
     pub semantic_source_identity: String,
-    /// Head kind requested for the joint tip (`best` or `confirmed`).
-    pub head_kind: String,
-    /// Optional confirmation depth for confirmed-head reads.
-    pub confirmation_depth: Option<NonZeroU64>,
     /// Maximum number of source reads this bounded state may request.
     pub max_source_reads: NonZeroU64,
 }
@@ -212,45 +208,16 @@ pub struct ResolveBtcJointTipConfig {
 pub fn validate_resolve_btc_joint_tip_config(
     config: &ResolveBtcJointTipConfig,
 ) -> Result<(), String> {
-    validate_observe_chain_head_config(&ObserveBtcChainHeadConfig {
-        network: config.network.clone(),
-        bitcoin_network: config.bitcoin_network.clone(),
-        semantic_source_identity: config.semantic_source_identity.clone(),
-        head_kind: config.head_kind.clone(),
-        confirmation_depth: config.confirmation_depth,
-        max_source_reads: config.max_source_reads,
-    })
+    BtcNetworkId::new(&config.network).map_err(|error| error.to_string())?;
+    validate_bitcoin_network(&config.bitcoin_network)?;
+    BtcSourceIdentity::new(&config.semantic_source_identity).map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 impl ResolveBtcJointTipConfig {
-    /// Returns the semantic head selection for this joint tip.
-    pub fn selection(&self) -> Result<BtcHeadSelection, BtcStateError> {
-        validate_resolve_btc_joint_tip_config(self)
-            .map_err(|reason| BtcStateError::InvalidInput { reason })?;
-        match self.head_kind.as_str() {
-            "best" => Ok(BtcHeadSelection::best()),
-            "confirmed" => BtcHeadSelection::confirmed(
-                self.confirmation_depth
-                    .expect("validated confirmation depth")
-                    .get(),
-            )
-            .map_err(BtcStateError::from),
-            _ => Err(BtcStateError::InvalidInput {
-                reason: "head_kind must be `best` or `confirmed`".to_owned(),
-            }),
-        }
-    }
-
-    /// Builds an observe chain-head config with the same binding and selection.
-    pub fn as_observe_chain_head_config(&self) -> ObserveBtcChainHeadConfig {
-        ObserveBtcChainHeadConfig {
-            network: self.network.clone(),
-            bitcoin_network: self.bitcoin_network.clone(),
-            semantic_source_identity: self.semantic_source_identity.clone(),
-            head_kind: self.head_kind.clone(),
-            confirmation_depth: self.confirmation_depth,
-            max_source_reads: self.max_source_reads,
-        }
+    /// Returns the fixed best-tip selection for address-balance collection.
+    pub const fn selection(&self) -> BtcHeadSelection {
+        BtcHeadSelection::best()
     }
 }
 
@@ -295,7 +262,8 @@ pub fn materialize_btc_joint_tip(
     config: &ResolveBtcJointTipConfig,
     response: &CapabilityChainHeadResponse,
 ) -> Result<BtcJointTip, BtcStateError> {
-    let _selection = config.selection()?;
+    validate_resolve_btc_joint_tip_config(config)
+        .map_err(|reason| BtcStateError::InvalidInput { reason })?;
     let tip = BtcJointTip::from_capability_response(response)?;
     if tip.network() != config.network
         || tip.bitcoin_network() != config.bitcoin_network
@@ -352,9 +320,6 @@ impl ReadState for ResolveBtcJointTipState {
         _caps: &'a Self::Caps,
         _context: &'a mfm_program::CertifiedContext<Self::Context>,
     ) -> Self::RunFuture<'a> {
-        if let Err(error) = self.config.selection() {
-            return future::ready(Err(StateError::from(error)));
-        }
         future::ready(Err(adapter_required_error(Self::name())))
     }
 }
@@ -857,8 +822,6 @@ mod tests {
             network: "bitcoin-mainnet".to_owned(),
             bitcoin_network: "main".to_owned(),
             semantic_source_identity: "public-bitcoin-core".to_owned(),
-            head_kind: "best".to_owned(),
-            confirmation_depth: None,
             max_source_reads: NonZeroU64::new(1).expect("nz"),
         }
     }
@@ -872,6 +835,11 @@ mod tests {
             coverage: "configured_only".to_owned(),
             max_source_reads: NonZeroU64::new(1).expect("nz"),
         }
+    }
+
+    #[test]
+    fn joint_tip_selection_is_always_best() {
+        assert_eq!(tip_config().selection(), BtcHeadSelection::best());
     }
 
     fn binding() -> BtcSourceBinding {
