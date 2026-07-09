@@ -59,6 +59,24 @@ async fn run_start_accepts_entry_point_shape() {
 }
 
 #[tokio::test]
+async fn live_routes_reuse_cached_services_after_first_construction() {
+    let dir = test_temp_dir("live-routes-cache");
+    let config_path = dir.path().join("runtime.toml");
+    std::fs::write(&config_path, "").expect("write initial runtime config");
+    let app = make_app(AppState {
+        store: store::AsyncInMemoryRunStore::default(),
+        runtime_config_path: Some(config_path.clone()),
+        fact_query_receipt_trust_root: None,
+    });
+
+    assert_entry_point_not_found(&app).await;
+
+    std::fs::write(&config_path, "not valid toml = [").expect("replace runtime config");
+
+    assert_entry_point_not_found(&app).await;
+}
+
+#[tokio::test]
 async fn read_only_routes_ignore_malformed_runtime_config_env() {
     let _env = locked_env([(
         mfm_app::MFM_RUNTIME_CONFIG_FILE,
@@ -227,6 +245,23 @@ async fn facts_routes_expose_only_public_platform_projection_data() {
     assert_eq!(unknown_error["error"], control_error["error"]);
 }
 
+async fn assert_entry_point_not_found(app: &axum::Router) {
+    let response = app
+        .clone()
+        .oneshot(json_post(
+            "/v1/runs/start",
+            json!({
+                "op": "missing_entry_point_op",
+                "config": "portfolio_id = \"main\"\n"
+            }),
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let value = response_json(response).await;
+    assert_eq!(value["error"]["code"], "EntryPointOpNotFound");
+}
+
 async fn locked_env<const N: usize>(pairs: [(&'static str, &str); N]) -> EnvGuard {
     let guard = ENV_LOCK.lock().await;
     let mut previous = Vec::new();
@@ -254,6 +289,36 @@ impl Drop for EnvGuard {
             }
         }
     }
+}
+
+struct TestTempDir {
+    path: std::path::PathBuf,
+}
+
+impl TestTempDir {
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TestTempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn test_temp_dir(name: &str) -> TestTempDir {
+    let unique = format!(
+        "mfm-rest-api-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    );
+    let path = std::env::temp_dir().join(unique);
+    std::fs::create_dir(&path).expect("create temp dir");
+    TestTempDir { path }
 }
 
 fn set_env(key: &str, value: &str) {

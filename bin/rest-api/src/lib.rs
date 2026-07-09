@@ -17,7 +17,7 @@
 //! ```
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -188,6 +188,8 @@ pub struct AppState<S = ProductionRunStore> {
 #[derive(Clone)]
 struct RouterState<S> {
     app: AppState<S>,
+    live_services: Arc<OnceLock<Result<RunServices<S, S>, ApiError>>>,
+    read_services: Arc<OnceLock<Result<RunReadServices<S, S>, ApiError>>>,
 }
 
 trait RunCommandStore:
@@ -229,34 +231,44 @@ where
     S: RunCommandStore,
 {
     fn live_services(&self) -> Result<RunServices<S, S>, ApiError> {
-        let runners = mfm_app::production_runner_registry(
-            Arc::new(self.app.store.clone()),
-            self.app.runtime_config_path.as_deref(),
-        )?;
-        let certification_registry = mfm_app::production_certification_registry()?;
-        let fact_query_receipt_trust_root = self.app.fact_query_receipt_trust_root.clone();
-        Ok(
-            mfm_app::make_run_services_with_certification_registry_and_fact_query_trust_root(
-                runners,
-                self.app.store.clone(),
-                self.app.store.clone(),
-                certification_registry,
-                fact_query_receipt_trust_root,
-            ),
-        )
+        self.live_services
+            .get_or_init(|| {
+                let runners = mfm_app::production_runner_registry(
+                    Arc::new(self.app.store.clone()),
+                    self.app.runtime_config_path.as_deref(),
+                )?;
+                let certification_registry = mfm_app::production_certification_registry()?;
+                let fact_query_receipt_trust_root =
+                    self.app.fact_query_receipt_trust_root.clone();
+                Ok(
+                    mfm_app::make_run_services_with_certification_registry_and_fact_query_trust_root(
+                        runners,
+                        self.app.store.clone(),
+                        self.app.store.clone(),
+                        certification_registry,
+                        fact_query_receipt_trust_root,
+                    ),
+                )
+            })
+            .clone()
     }
 
     fn read_services(&self) -> Result<RunReadServices<S, S>, ApiError> {
-        let certification_registry = mfm_app::production_certification_registry()?;
-        let fact_query_receipt_trust_root = self.app.fact_query_receipt_trust_root.clone();
-        Ok(
-            mfm_app::make_run_read_services_with_certification_registry_and_fact_query_trust_root(
-                self.app.store.clone(),
-                self.app.store.clone(),
-                certification_registry,
-                fact_query_receipt_trust_root,
-            ),
-        )
+        self.read_services
+            .get_or_init(|| {
+                let certification_registry = mfm_app::production_certification_registry()?;
+                let fact_query_receipt_trust_root =
+                    self.app.fact_query_receipt_trust_root.clone();
+                Ok(
+                    mfm_app::make_run_read_services_with_certification_registry_and_fact_query_trust_root(
+                        self.app.store.clone(),
+                        self.app.store.clone(),
+                        certification_registry,
+                        fact_query_receipt_trust_root,
+                    ),
+                )
+            })
+            .clone()
     }
 }
 
@@ -292,7 +304,11 @@ where
 {
     let request_id_header = HeaderName::from_static("x-request-id");
     let make_span_header = request_id_header.clone();
-    let state = RouterState { app: state };
+    let state = RouterState {
+        app: state,
+        live_services: Arc::new(OnceLock::new()),
+        read_services: Arc::new(OnceLock::new()),
+    };
 
     Router::new()
         .route("/v1/health", get(health))

@@ -608,10 +608,9 @@ async fn evm_contract_start_rejects_old_configure_validate_envelopes_before_admi
 }
 
 #[tokio::test]
-async fn evm_contract_validation_ignores_unused_malformed_signers() {
+async fn evm_contract_validation_rejects_present_malformed_signers_before_admission() {
     let rpc_url = test_support::start_portfolio_rpc_mock(1).await;
     let runtime = malformed_signer_runtime_config_app("ethereum-mainnet", &rpc_url);
-    let store = &runtime.state.store;
 
     let (status, body) = start_entry_point(
         &runtime.app,
@@ -619,16 +618,14 @@ async fn evm_contract_validation_ignores_unused_malformed_signers() {
         evm_validate_entry_config_json(),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let run_id = RunId::parse(body["data"]["run"]["run_id"].as_str().expect("run id"))
-        .expect("typed run id");
-    let stream = store.load_run_stream(&run_id).await.expect("stream");
-    assert!(
-        stream
-            .iter()
-            .any(|event| matches!(event.payload(), events::KernelEventPayload::RunAdmitted(_))),
-        "validation must pass capability ingress without requiring signer bindings"
-    );
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["error"]["code"], "LaunchRunnerUnavailable");
+    assert_no_run_observations(
+        &runtime.state,
+        "malformed runtime config must fail before run admission",
+    )
+    .await;
 }
 
 #[tokio::test]

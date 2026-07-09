@@ -22,65 +22,19 @@ impl RuntimeConfigLoader {
         Self { path }
     }
 
-    fn load_evm(&self) -> mfm_runtime::Result<mfm_runtime_config::EvmRuntimeConfig> {
-        self.load_runtime_config_with_requirements(
-            mfm_runtime_config::RuntimeConfigRequirement::evm(),
-        )
-        .and_then(|config| {
-            config.evm().cloned().ok_or_else(|| {
-                mfm_runtime::RuntimeError::RunnerBinding("missing EVM runtime config".to_owned())
-            })
-        })
-    }
-
-    fn load_optional_btc(
-        &self,
-    ) -> mfm_runtime::Result<Option<mfm_runtime_config::BtcRuntimeConfig>> {
+    fn load_optional(&self) -> mfm_runtime::Result<Option<mfm_runtime_config::RuntimeConfig>> {
         let Some(path) = self.path.as_ref() else {
             return Ok(None);
         };
-        match mfm_runtime_config::RuntimeConfig::load_path_with_requirements(
-            path,
-            mfm_runtime_config::RuntimeConfigRequirement::btc(),
-        ) {
-            Ok(config) => Ok(config.btc().cloned()),
-            Err(error)
-                if (error.location() == &mfm_runtime_config::RuntimeConfigLocation::Btc
-                    && error.kind()
-                        == &mfm_runtime_config::RuntimeConfigErrorKind::MissingFamily)
-                    || matches!(
-                        error.kind(),
-                        mfm_runtime_config::RuntimeConfigErrorKind::Syntax { .. }
-                    ) =>
-            {
-                Ok(None)
-            }
-            Err(error) => Err(runtime_config_error(error)),
-        }
-    }
-
-    fn load_runtime_config_with_signers(
-        &self,
-    ) -> mfm_runtime::Result<mfm_runtime_config::RuntimeConfig> {
-        self.load_runtime_config_with_requirements(
-            mfm_runtime_config::RuntimeConfigRequirement::evm_with_signers(),
-        )
-    }
-
-    fn load_runtime_config_with_requirements(
-        &self,
-        requirements: mfm_runtime_config::RuntimeConfigRequirement,
-    ) -> mfm_runtime::Result<mfm_runtime_config::RuntimeConfig> {
-        let path = self.path.as_ref().ok_or_else(|| {
-            mfm_runtime::RuntimeError::RunnerBinding("missing runtime config file".to_owned())
-        })?;
-        mfm_runtime_config::RuntimeConfig::load_path_with_requirements(path, requirements)
+        mfm_runtime_config::RuntimeConfig::load_path(path)
+            .map(Some)
             .map_err(runtime_config_error)
     }
 }
 
 pub(crate) struct LiveTransportRuntime {
     runtime_config: RuntimeConfigLoader,
+    parsed_config: OnceLock<mfm_runtime::Result<Option<Arc<mfm_runtime_config::RuntimeConfig>>>>,
     evm_client: OnceLock<mfm_runtime::Result<Arc<mfm_transports_evm::EvmJsonRpcClient>>>,
     btc_router: OnceLock<
         mfm_runtime::Result<Option<Arc<mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter>>>,
@@ -92,6 +46,7 @@ impl LiveTransportRuntime {
     pub(crate) fn new(runtime_config: RuntimeConfigLoader) -> Self {
         Self {
             runtime_config,
+            parsed_config: OnceLock::new(),
             evm_client: OnceLock::new(),
             btc_router: OnceLock::new(),
             signer_provider: OnceLock::new(),
@@ -123,8 +78,7 @@ impl LiveTransportRuntime {
     pub(crate) fn signer_provider(&self) -> mfm_runtime::Result<Arc<KeystoreSignerProvider>> {
         self.signer_provider
             .get_or_init(|| {
-                self.runtime_config
-                    .load_runtime_config_with_signers()
+                self.runtime_config_with_required_signers()
                     .and_then(|config| keystore_signer_provider_from_config(&config))
                     .map(Arc::new)
             })
@@ -134,8 +88,7 @@ impl LiveTransportRuntime {
     fn evm_client(&self) -> mfm_runtime::Result<Arc<mfm_transports_evm::EvmJsonRpcClient>> {
         self.evm_client
             .get_or_init(|| {
-                self.runtime_config
-                    .load_evm()
+                self.evm_runtime_config()
                     .and_then(evm_json_rpc_client)
                     .map(Arc::new)
             })
@@ -147,8 +100,7 @@ impl LiveTransportRuntime {
     ) -> mfm_runtime::Result<Option<Arc<mfm_transports_btc_jsonrpc_http::BtcJsonRpcRouter>>> {
         self.btc_router
             .get_or_init(|| {
-                self.runtime_config
-                    .load_optional_btc()?
+                self.btc_runtime_config_optional()?
                     .map(btc_json_rpc_router)
                     .transpose()
                     .map(|router| router.map(Arc::new))
@@ -162,6 +114,60 @@ impl LiveTransportRuntime {
         self.btc_router_optional()?.ok_or_else(|| {
             mfm_runtime::RuntimeError::RunnerBinding("missing Bitcoin runtime config".to_owned())
         })
+    }
+
+    fn runtime_config_optional(
+        &self,
+    ) -> mfm_runtime::Result<Option<Arc<mfm_runtime_config::RuntimeConfig>>> {
+        self.parsed_config
+            .get_or_init(|| {
+                self.runtime_config
+                    .load_optional()
+                    .map(|config| config.map(Arc::new))
+            })
+            .clone()
+    }
+
+    fn runtime_config(&self) -> mfm_runtime::Result<Arc<mfm_runtime_config::RuntimeConfig>> {
+        self.runtime_config_optional()?.ok_or_else(|| {
+            mfm_runtime::RuntimeError::RunnerBinding("missing runtime config file".to_owned())
+        })
+    }
+
+    fn evm_runtime_config(&self) -> mfm_runtime::Result<mfm_runtime_config::EvmRuntimeConfig> {
+        self.runtime_config()?.evm().cloned().ok_or_else(|| {
+            mfm_runtime::RuntimeError::RunnerBinding("missing EVM runtime config".to_owned())
+        })
+    }
+
+    fn btc_runtime_config_optional(
+        &self,
+    ) -> mfm_runtime::Result<Option<mfm_runtime_config::BtcRuntimeConfig>> {
+        Ok(self
+            .runtime_config_optional()?
+            .and_then(|config| config.btc().cloned()))
+    }
+
+    fn runtime_config_with_required_signers(
+        &self,
+    ) -> mfm_runtime::Result<Arc<mfm_runtime_config::RuntimeConfig>> {
+        let config = self.runtime_config()?;
+        if config.evm().is_none() {
+            return Err(mfm_runtime::RuntimeError::RunnerBinding(
+                "missing EVM runtime config".to_owned(),
+            ));
+        }
+        if config.keystores().is_empty() {
+            return Err(mfm_runtime::RuntimeError::RunnerBinding(
+                "missing keystore runtime config".to_owned(),
+            ));
+        }
+        if config.signers().is_empty() {
+            return Err(mfm_runtime::RuntimeError::RunnerBinding(
+                "missing signer runtime config".to_owned(),
+            ));
+        }
+        Ok(config)
     }
 }
 

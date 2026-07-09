@@ -45,6 +45,51 @@ fn run_read_services_carry_explicit_fact_query_receipt_trust_root() {
     );
 }
 
+#[test]
+fn live_transport_runtime_caches_parsed_runtime_config() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join("runtime.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+        [btc.routes.public-bitcoin-core]
+        rpc_url = "http://127.0.0.1:8332"
+        "#,
+    )
+    .expect("write runtime config");
+    let runtime = crate::live_transports::LiveTransportRuntime::new(
+        crate::live_transports::RuntimeConfigLoader::from_path_or_env(Some(&config_path)),
+    );
+
+    assert!(runtime.btc_configured().expect("btc configured"));
+
+    std::fs::write(&config_path, "not valid toml = [").expect("replace runtime config");
+
+    assert!(
+        runtime.btc_configured().expect("cached btc configured"),
+        "live runtime must not reparse runtime config after first use"
+    );
+}
+
+#[test]
+fn live_transport_runtime_rejects_malformed_btc_runtime_config() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join("runtime.toml");
+    std::fs::write(&config_path, "not valid toml = [").expect("write runtime config");
+    let runtime = crate::live_transports::LiveTransportRuntime::new(
+        crate::live_transports::RuntimeConfigLoader::from_path_or_env(Some(&config_path)),
+    );
+
+    let error = runtime
+        .btc_configured()
+        .expect_err("malformed present config must not be treated as absent BTC config");
+
+    assert!(
+        matches!(error, mfm_runtime::RuntimeError::RunnerBinding(ref message) if message.contains("syntax")),
+        "{error}"
+    );
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[mfm(
     namespace = "mfm.app.test",
