@@ -98,6 +98,12 @@ trait BtcJsonRpcChainHeadTransport: Send + Sync {
         verified: &'a VerifiedBtcCall,
         block_hash: &'a str,
     ) -> BtcTransportFuture<'a, BlockHeaderInfo>;
+
+    fn scan_tx_out_set<'a>(
+        &'a self,
+        verified: &'a VerifiedBtcCall,
+        address: &'a str,
+    ) -> BtcTransportFuture<'a, ScanTxOutSetResult>;
 }
 
 impl BtcJsonRpcChainHeadTransport for BtcJsonRpcClient {
@@ -121,6 +127,14 @@ impl BtcJsonRpcChainHeadTransport for BtcJsonRpcClient {
         Box::pin(
             async move { BtcJsonRpcClient::get_block_header(self, verified, block_hash).await },
         )
+    }
+
+    fn scan_tx_out_set<'a>(
+        &'a self,
+        verified: &'a VerifiedBtcCall,
+        address: &'a str,
+    ) -> BtcTransportFuture<'a, ScanTxOutSetResult> {
+        Box::pin(async move { BtcJsonRpcClient::scan_tx_out_set(self, verified, address).await })
     }
 }
 
@@ -250,16 +264,23 @@ impl BtcJsonRpcSourceProvider {
 
     async fn read_balance_checked(
         &self,
-        _verified: &VerifiedBtcCall,
+        verified: &VerifiedBtcCall,
         request: &BtcBalanceReadRequest,
     ) -> mfm_btc_capabilities::Result<BtcBalanceReadResponse> {
-        Err(btc_provider_failure(
-            btc_operation_diagnostic(ProviderDiagnosticCode::UnsupportedOperation, "read_balance")
-                .with_field(
-                    diagnostic_id("block_height"),
-                    ProviderDiagnosticValue::U64(request.block_height()),
-                ),
-        ))
+        verify_current_tip_matches_balance_request(verified, request)?;
+        let scan = verified
+            .transport
+            .scan_tx_out_set(verified, request.address().as_str())
+            .await
+            .map_err(|error| btc_rpc_provider_error("scantxoutset", error))?;
+        verify_scan_matches_balance_request(&scan, request)?;
+        Ok(BtcBalanceReadResponse {
+            evidence: verified.evidence.clone(),
+            address: request.address().clone(),
+            balance_sats: scan.total_amount_sats,
+            block_height: request.block_height(),
+            block_hash: request.block_hash().clone(),
+        })
     }
 
     async fn read_chain_head_inner(
@@ -797,6 +818,20 @@ impl BtcJsonRpcClient {
             .await?;
         serde_json::from_value(result).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))
     }
+
+    async fn scan_tx_out_set(
+        &self,
+        _verified: &VerifiedBtcCall,
+        address: &str,
+    ) -> Result<ScanTxOutSetResult, BtcRpcError> {
+        let result = self
+            .rpc_call(
+                "scantxoutset",
+                serde_json::json!(["start", [{"desc": format!("addr({address})")}]]),
+            )
+            .await?;
+        serde_json::from_value(result).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))
+    }
 }
 
 async fn selected_head(
@@ -858,6 +893,84 @@ fn verify_header(
             "getblockheader",
         )))
     }
+}
+
+fn verify_current_tip_matches_balance_request(
+    verified: &VerifiedBtcCall,
+    request: &BtcBalanceReadRequest,
+) -> mfm_btc_capabilities::Result<()> {
+    let best_hash = provider_block_hash("getblockchaininfo", &verified.info.bestblockhash)?;
+    if verified.info.blocks == request.block_height()
+        && best_hash
+            .as_str()
+            .eq_ignore_ascii_case(request.block_hash().as_str())
+    {
+        Ok(())
+    } else {
+        Err(balance_anchor_unavailable_diagnostic(
+            "getblockchaininfo",
+            request,
+            verified.info.blocks,
+            best_hash.as_str(),
+        ))
+    }
+}
+
+fn verify_scan_matches_balance_request(
+    scan: &ScanTxOutSetResult,
+    request: &BtcBalanceReadRequest,
+) -> mfm_btc_capabilities::Result<()> {
+    if !scan.success {
+        return Err(btc_provider_failure(
+            btc_operation_diagnostic(ProviderDiagnosticCode::OperationIncomplete, "scantxoutset")
+                .with_field(
+                    diagnostic_id("scan_success"),
+                    ProviderDiagnosticValue::Bool(false),
+                ),
+        ));
+    }
+    let scan_hash = provider_block_hash("scantxoutset", &scan.bestblock)?;
+    if scan.height == request.block_height()
+        && scan_hash
+            .as_str()
+            .eq_ignore_ascii_case(request.block_hash().as_str())
+    {
+        Ok(())
+    } else {
+        Err(balance_anchor_unavailable_diagnostic(
+            "scantxoutset",
+            request,
+            scan.height,
+            scan_hash.as_str(),
+        ))
+    }
+}
+
+fn balance_anchor_unavailable_diagnostic(
+    operation: &'static str,
+    request: &BtcBalanceReadRequest,
+    observed_height: u64,
+    observed_hash: &str,
+) -> BtcCapabilityError {
+    btc_provider_failure(
+        btc_operation_diagnostic(ProviderDiagnosticCode::OperationIncomplete, operation)
+            .with_field(
+                diagnostic_id("requested_height"),
+                ProviderDiagnosticValue::U64(request.block_height()),
+            )
+            .with_field(
+                diagnostic_id("observed_height"),
+                ProviderDiagnosticValue::U64(observed_height),
+            )
+            .with_field(
+                diagnostic_id("requested_block_hash"),
+                ProviderDiagnosticValue::Id(diagnostic_id(request.block_hash().as_str())),
+            )
+            .with_field(
+                diagnostic_id("observed_block_hash"),
+                ProviderDiagnosticValue::Id(diagnostic_id(observed_hash)),
+            ),
+    )
 }
 
 fn provider_block_hash(
@@ -940,9 +1053,14 @@ mod tests {
     struct MockBtcTransport {
         chain: &'static str,
         fail_blockchain_info: bool,
+        scan_success: bool,
+        scan_height: u64,
+        scan_bestblock: String,
+        scan_total_sats: u64,
         blockchain_info_calls: AtomicU64,
         block_hash_calls: AtomicU64,
         block_header_calls: AtomicU64,
+        scan_calls: AtomicU64,
     }
 
     impl MockBtcTransport {
@@ -950,9 +1068,14 @@ mod tests {
             Self {
                 chain,
                 fail_blockchain_info: false,
+                scan_success: true,
+                scan_height: 840_000,
+                scan_bestblock: BEST_BLOCK_HASH.to_string(),
+                scan_total_sats: 123_456_789,
                 blockchain_info_calls: AtomicU64::new(0),
                 block_hash_calls: AtomicU64::new(0),
                 block_header_calls: AtomicU64::new(0),
+                scan_calls: AtomicU64::new(0),
             }
         }
 
@@ -961,6 +1084,17 @@ mod tests {
                 fail_blockchain_info: true,
                 ..Self::new("main")
             }
+        }
+
+        fn with_scan_tip(mut self, height: u64, bestblock: &str) -> Self {
+            self.scan_height = height;
+            self.scan_bestblock = bestblock.to_owned();
+            self
+        }
+
+        fn with_aborted_scan(mut self) -> Self {
+            self.scan_success = false;
+            self
         }
     }
 
@@ -1009,6 +1143,23 @@ mod tests {
                 })
             })
         }
+
+        fn scan_tx_out_set<'a>(
+            &'a self,
+            _verified: &'a VerifiedBtcCall,
+            _address: &'a str,
+        ) -> BtcTransportFuture<'a, ScanTxOutSetResult> {
+            Box::pin(async move {
+                self.scan_calls.fetch_add(1, Ordering::Relaxed);
+                Ok(ScanTxOutSetResult {
+                    success: self.scan_success,
+                    height: self.scan_height,
+                    bestblock: self.scan_bestblock.clone(),
+                    total_amount_sats: self.scan_total_sats,
+                    unspents: Vec::new(),
+                })
+            })
+        }
     }
 
     fn source_identity() -> BtcSourceIdentity {
@@ -1050,10 +1201,14 @@ mod tests {
     }
 
     fn balance_request() -> BtcBalanceReadRequest {
+        balance_request_at(840_000, BEST_BLOCK_HASH)
+    }
+
+    fn balance_request_at(height: u64, block_hash: &str) -> BtcBalanceReadRequest {
         BtcBalanceReadRequest::new(
             BtcAddress::new("bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw").expect("address"),
-            840_000,
-            BtcBlockHash::new(BEST_BLOCK_HASH).expect("block hash"),
+            height,
+            BtcBlockHash::new(block_hash).expect("block hash"),
         )
     }
 
@@ -1215,7 +1370,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn balance_source_mismatch_fails_before_unsupported_operation() {
+    async fn balance_source_mismatch_fails_before_scan() {
         let transport = Arc::new(MockBtcTransport::new("test"));
         let provider = provider_with(source_identity(), transport.clone());
         let request = balance_request();
@@ -1227,29 +1382,93 @@ mod tests {
 
         assert!(matches!(error, BtcCapabilityError::SourceMismatch { .. }));
         assert_eq!(transport.blockchain_info_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.scan_calls.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
-    async fn balance_unsupported_after_source_proof_without_operation_rpc() {
+    async fn balance_reads_exact_tip_with_scan_tx_out_set() {
         let transport = Arc::new(MockBtcTransport::new("main"));
         let provider = provider_with(source_identity(), transport.clone());
         let request = balance_request();
 
+        let response = provider.read_balance(&request).await.expect("balance read");
+
+        assert_eq!(response.address, request.address().clone());
+        assert_eq!(response.balance_sats, 123_456_789);
+        assert_eq!(response.block_height, request.block_height());
+        assert_eq!(response.block_hash, request.block_hash().clone());
+        assert_eq!(response.evidence.source_identity, source_identity());
+        assert_eq!(transport.blockchain_info_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.block_hash_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(transport.block_header_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(transport.scan_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn balance_rejects_stale_requested_tip_before_scan() {
+        let transport = Arc::new(MockBtcTransport::new("main"));
+        let provider = provider_with(source_identity(), transport.clone());
+        let request = balance_request_at(839_999, BEST_BLOCK_HASH);
+
         let error = provider
             .read_balance(&request)
             .await
-            .expect_err("balance read unsupported");
+            .expect_err("stale requested anchor cannot be scanned exactly");
 
         let BtcCapabilityError::Provider { diagnostic } = error else {
             panic!("expected provider diagnostic");
         };
         assert_eq!(
             diagnostic.stable_error_code(),
-            "bitcoin_unsupported_operation"
+            "bitcoin_operation_incomplete"
         );
         assert_eq!(transport.blockchain_info_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(transport.block_hash_calls.load(Ordering::Relaxed), 0);
-        assert_eq!(transport.block_header_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(transport.scan_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn balance_rejects_scan_tip_drift() {
+        let drift_hash = "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a6";
+        let transport = Arc::new(MockBtcTransport::new("main").with_scan_tip(840_001, drift_hash));
+        let provider = provider_with(source_identity(), transport.clone());
+        let request = balance_request();
+
+        let error = provider
+            .read_balance(&request)
+            .await
+            .expect_err("scan tip drift must fail");
+
+        let BtcCapabilityError::Provider { diagnostic } = error else {
+            panic!("expected provider diagnostic");
+        };
+        assert_eq!(
+            diagnostic.stable_error_code(),
+            "bitcoin_operation_incomplete"
+        );
+        assert_eq!(transport.blockchain_info_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.scan_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn balance_rejects_aborted_scan() {
+        let transport = Arc::new(MockBtcTransport::new("main").with_aborted_scan());
+        let provider = provider_with(source_identity(), transport.clone());
+        let request = balance_request();
+
+        let error = provider
+            .read_balance(&request)
+            .await
+            .expect_err("aborted scan must fail");
+
+        let BtcCapabilityError::Provider { diagnostic } = error else {
+            panic!("expected provider diagnostic");
+        };
+        assert_eq!(
+            diagnostic.stable_error_code(),
+            "bitcoin_operation_incomplete"
+        );
+        assert_eq!(transport.blockchain_info_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.scan_calls.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

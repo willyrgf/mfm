@@ -34,9 +34,10 @@ not endpoint names, URLs, credential ids, or fallback policies.
 
 ## Provider-Bound Reads
 
-App assembly creates a raw `BtcJsonRpcRouter` from runtime config. Runners and adapters derive a
-`BtcSourceBinding` from certified workflow semantics, validate that binding without network IO, and
-bind it to a `BtcJsonRpcSourceProvider` before any live call.
+App assembly creates one process-local live transport runtime from runtime config and caches the
+derived `BtcJsonRpcRouter`. Runners and adapters derive a `BtcSourceBinding` from certified
+workflow semantics, validate that binding without network IO, and bind it to a
+`BtcJsonRpcSourceProvider` before any live call.
 
 BTC capability requests are operation-only. Chain-head requests carry only the requested head
 selection. Portfolio balance requests carry only the address, `block_height`, and `block_hash`
@@ -56,13 +57,16 @@ provider messages, request bodies, or response bodies.
 ## Strict Portfolio Snapshots
 
 Portfolio Bitcoin balance reads are exact-anchor requests. The response must verify the same
-address, provider source evidence, height, and hash.
+address, provider source evidence, height, and hash. The live Bitcoin Core provider supports this
+only when the requested anchor is the node's current best tip:
 
-Bitcoin Core `scantxoutset` cannot prove an arbitrary prior exact anchor, so the live Bitcoin Core
-provider rejects portfolio balance reads with `unsupported_operation` before scanning. This is a
-fatal attempt/capability failure, not a portfolio domain observation error. The system does not add a
-current-only Bitcoin portfolio mode in this path because that would introduce a second snapshot
-semantics.
+1. `getblockchaininfo` must report the requested `block_height` and `block_hash`.
+2. `scantxoutset` scans `addr(<address>)`.
+3. The scan result `height` and `bestblock` must still match the requested anchor.
+
+If the requested anchor is stale, the node advances during the scan, or the scan does not complete,
+the provider returns `operation_incomplete` as a fatal capability failure. The system does not add a
+current-only Bitcoin portfolio mode because that would introduce a second snapshot semantics.
 
 ## Collector Checkpoints
 

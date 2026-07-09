@@ -224,14 +224,15 @@ fn transport_provider_boundaries_reject_old_source_binding_surfaces() {
 }
 
 fn assert_btc_operation_io_requires_verified_call(source: &str) {
-    for operation in ["get_block_hash", "get_block_header"] {
-        let signature = format!("fn {operation}");
-        for (offset, _) in source.match_indices(&signature) {
-            let args = function_args(source, offset);
-            assert!(
-                args.contains("VerifiedBtcCall"),
-                "BTC operation helper {operation} must require VerifiedBtcCall"
-            );
+    for operation in ["get_block_hash", "get_block_header", "scan_tx_out_set"] {
+        for signature in [format!("fn {operation}("), format!("fn {operation}<'")] {
+            for (offset, _) in source.match_indices(&signature) {
+                let args = function_args(source, offset);
+                assert!(
+                    args.contains("VerifiedBtcCall"),
+                    "BTC operation helper {operation} must require VerifiedBtcCall"
+                );
+            }
         }
     }
 
