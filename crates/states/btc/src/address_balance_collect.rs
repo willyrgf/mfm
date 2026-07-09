@@ -15,6 +15,7 @@ use mfm_btc_capabilities::{
 };
 use mfm_capabilities::NoCaps;
 use mfm_effects::{ManagedPlatformWrite, Pure, ReadExternal};
+use mfm_fact_capabilities::FactRecordCapability;
 use mfm_facts::{CoverageStatus, HoldingSourceStatus};
 use mfm_ids::{StateKind, StateVersion};
 use mfm_program::{
@@ -31,8 +32,7 @@ use crate::address_balance::{
 };
 use crate::{
     adapter_binding, adapter_required_error, state_kind, state_version, validate_bitcoin_network,
-    validate_observe_chain_head_config, BtcFactRecordCapability, BtcStateError,
-    ObserveBtcChainHeadConfig,
+    validate_observe_chain_head_config, BtcStateError, ObserveBtcChainHeadConfig,
 };
 
 /// Shared joint tip resolved once for a same-network multi-subject batch.
@@ -638,7 +638,7 @@ impl StateSpec for RecordBtcAddressBalanceFactState {
     type Input = RecordBtcAddressBalanceFactInput;
     type Output = BtcAddressBalanceSnapshotFact;
     type Effect = ManagedPlatformWrite;
-    type Caps = (BtcFactRecordCapability,);
+    type Caps = (FactRecordCapability,);
 
     fn kind() -> mfm_program::Result<StateKind> {
         state_kind("address_balance.record")
@@ -1060,7 +1060,7 @@ mod tests {
             RecordBtcAddressBalanceFactInput {
                 observation: tampered,
             },
-            &(BtcFactRecordCapability,),
+            &(FactRecordCapability,),
             &context,
         ));
         assert!(result.is_err());

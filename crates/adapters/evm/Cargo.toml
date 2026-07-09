@@ -18,6 +18,7 @@ mfm-canonical = { path = "../../kernel/canonical" }
 mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-events = { path = "../../kernel/events" }
 mfm-evm-capabilities = { path = "../../evm-capabilities" }
+mfm-fact-capabilities = { path = "../../fact-capabilities" }
 mfm-facts = { path = "../../kernel/facts" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }

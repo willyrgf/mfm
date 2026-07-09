@@ -2126,6 +2126,7 @@ dependencies = [
  "mfm-capabilities",
  "mfm-events",
  "mfm-evm-capabilities",
+ "mfm-fact-capabilities",
  "mfm-facts",
  "mfm-ids",
  "mfm-program",
@@ -2481,6 +2482,7 @@ dependencies = [
  "ed25519-dalek",
  "k256",
  "mfm-adapters-btc-jsonrpc",
+ "mfm-adapters-portfolio",
  "mfm-app",
  "mfm-artifact-capabilities",
  "mfm-authored-config",
@@ -2537,6 +2539,7 @@ dependencies = [
 name = "mfm-op-btc-collectors"
 version = "0.1.0"
 dependencies = [
+ "mfm-authored-config",
  "mfm-canonical",
  "mfm-certify",
  "mfm-ids",
@@ -2552,6 +2555,7 @@ dependencies = [
 name = "mfm-op-evm-collectors"
 version = "0.1.0"
 dependencies = [
+ "mfm-authored-config",
  "mfm-canonical",
  "mfm-certify",
  "mfm-ids",
@@ -2884,6 +2888,7 @@ dependencies = [
  "mfm-capabilities",
  "mfm-effects",
  "mfm-evm-capabilities",
+ "mfm-fact-capabilities",
  "mfm-facts",
  "mfm-ids",
  "mfm-program",

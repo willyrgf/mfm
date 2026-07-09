@@ -38,9 +38,10 @@ use mfm_btc_capabilities::{
     BtcHeadSelection, BtcNetworkId, BtcSourceIdentity, BtcSourceStatus,
 };
 use mfm_canonical::sha256_digest_bytes;
-use mfm_capabilities::{CapabilitySpec, ManagedPlatformWriteRole};
 use mfm_effects::{ManagedPlatformWrite, ReadExternal};
-use mfm_fact_capabilities::{FactIndexReadCapability, FactIndexReadRequest, FactIndexReadResponse};
+use mfm_fact_capabilities::{
+    FactIndexReadCapability, FactIndexReadRequest, FactIndexReadResponse, FactRecordCapability,
+};
 use mfm_facts::{
     compile_fact_query_plan, FactAudience, FactCanonicalScalar, FactFieldId, FactOrderingName,
     FactQueryInput, FactQueryOperator, FactQueryPredicate, FactQueryScope, FactSelectionEvidence,
@@ -118,32 +119,6 @@ fn state_version(name: &'static str) -> mfm_program::Result<StateVersion> {
 
 fn adapter_required_error(state_name: &'static str) -> StateError {
     StateError::Message(format!("{state_name} requires a Bitcoin adapter runner"))
-}
-
-/// Managed platform-write capability for recording Bitcoin fact claims.
-pub struct BtcFactRecordCapability;
-
-impl CapabilitySpec for BtcFactRecordCapability {
-    type Role = ManagedPlatformWriteRole;
-
-    fn kind() -> mfm_capabilities::Result<mfm_ids::CapabilityKind> {
-        mfm_ids::CapabilityKind::new(
-            NAMESPACE,
-            "fact.record",
-            DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(b"mfm.bitcoin.capability:fact.record"),
-        )
-        .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
-    }
-
-    fn version() -> mfm_capabilities::Result<mfm_ids::CapabilityVersion> {
-        mfm_ids::CapabilityVersion::new("mfm.bitcoin.fact.record.v1")
-            .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
-    }
-
-    fn name() -> &'static str {
-        "fact.record"
-    }
 }
 
 /// Redaction-safe state error for Bitcoin fact normalization contracts.
@@ -930,7 +905,7 @@ impl StateSpec for RecordBtcChainHeadFactState {
     type Input = RecordBtcChainHeadFactInput;
     type Output = BtcChainHeadFact;
     type Effect = ManagedPlatformWrite;
-    type Caps = (BtcFactRecordCapability,);
+    type Caps = (FactRecordCapability,);
 
     fn kind() -> mfm_program::Result<StateKind> {
         state_kind("chain_head.record")
@@ -1302,7 +1277,7 @@ impl StateSpec for RecordCollectorCheckpointState {
     type Input = RecordCollectorCheckpointInput;
     type Output = CollectorCheckpointFact;
     type Effect = ManagedPlatformWrite;
-    type Caps = (BtcFactRecordCapability,);
+    type Caps = (FactRecordCapability,);
 
     fn kind() -> mfm_program::Result<StateKind> {
         state_kind("collector_checkpoint.record")
@@ -1949,7 +1924,7 @@ mod tests {
             ValidatedConfig::new(RecordBtcChainHeadFactConfig {}).expect("config"),
         )
         .expect("state");
-        let caps = (BtcFactRecordCapability,);
+        let caps = (FactRecordCapability,);
         let context = mfm_program::CertifiedContext::no_context();
         let fact = poll_ready(chain_head_state.run(
             RecordBtcChainHeadFactInput {
@@ -2001,7 +1976,7 @@ mod tests {
         )
         .expect("state");
 
-        let caps = (BtcFactRecordCapability,);
+        let caps = (FactRecordCapability,);
         let context = mfm_program::CertifiedContext::no_context();
         let checkpoint = poll_ready(state.run(
             RecordCollectorCheckpointInput {
@@ -2031,7 +2006,7 @@ mod tests {
         )
         .expect("state");
 
-        let caps = (BtcFactRecordCapability,);
+        let caps = (FactRecordCapability,);
         let context = mfm_program::CertifiedContext::no_context();
         let error = poll_ready(state.run(
             RecordCollectorCheckpointInput {

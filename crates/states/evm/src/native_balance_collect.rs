@@ -8,12 +8,13 @@ use std::num::NonZeroU64;
 use std::str::FromStr;
 
 use mfm_canonical::sha256_digest_bytes;
-use mfm_capabilities::{CapabilitySpec, ManagedPlatformWriteRole, NoCaps};
+use mfm_capabilities::NoCaps;
 use mfm_effects::{ManagedPlatformWrite, Pure, ReadExternal};
 use mfm_evm_capabilities::{
     EvmBalanceReadCapability, EvmBalanceReadResponse, EvmBlockReadCapability, EvmBlockReadResponse,
     EvmNetworkId,
 };
+use mfm_fact_capabilities::FactRecordCapability;
 use mfm_facts::{CoverageStatus, HoldingSourceStatus};
 use mfm_ids::{AdapterKind, AdapterVersion, DigestAlgorithm, StateKind, StateVersion};
 use mfm_program::{
@@ -77,32 +78,6 @@ fn state_version(name: &'static str) -> mfm_program::Result<StateVersion> {
 
 fn adapter_required_error(state_name: &'static str) -> StateError {
     StateError::Message(format!("{state_name} requires an EVM adapter runner"))
-}
-
-/// Managed platform-write capability for recording EVM fact claims.
-pub struct EvmFactRecordCapability;
-
-impl CapabilitySpec for EvmFactRecordCapability {
-    type Role = ManagedPlatformWriteRole;
-
-    fn kind() -> mfm_capabilities::Result<mfm_ids::CapabilityKind> {
-        mfm_ids::CapabilityKind::new(
-            NAMESPACE,
-            "fact.record",
-            DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(b"mfm.evm.capability:fact.record"),
-        )
-        .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
-    }
-
-    fn version() -> mfm_capabilities::Result<mfm_ids::CapabilityVersion> {
-        mfm_ids::CapabilityVersion::new("mfm.evm.fact.record.v1")
-            .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
-    }
-
-    fn name() -> &'static str {
-        "fact.record"
-    }
 }
 
 /// Shared joint tip resolved once for a same-network multi-subject batch.
@@ -674,7 +649,7 @@ impl StateSpec for RecordEvmNativeBalanceFactState {
     type Input = RecordEvmNativeBalanceFactInput;
     type Output = EvmAddressNativeBalanceSnapshotFact;
     type Effect = ManagedPlatformWrite;
-    type Caps = (EvmFactRecordCapability,);
+    type Caps = (FactRecordCapability,);
 
     fn kind() -> mfm_program::Result<StateKind> {
         state_kind("native_balance.record")

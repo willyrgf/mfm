@@ -703,7 +703,7 @@ async fn checkpoint_record_fixture_uses_recorded_chain_head_fact() {
     )
     .expect("state");
 
-    let caps = (BtcFactRecordCapability,);
+    let caps = (mfm_fact_capabilities::FactRecordCapability,);
     let context = mfm_program::CertifiedContext::no_context();
     let checkpoint = poll_ready(state.run(
         RecordCollectorCheckpointInput {
@@ -725,11 +725,11 @@ async fn checkpoint_record_fixture_uses_recorded_chain_head_fact() {
 
 #[test]
 fn capability_binding_uses_btc_jsonrpc_adapter_identity() {
-    let binding = btc_fact_record_capability_binding().expect("binding");
+    let binding = fact_record_capability_binding().expect("binding");
 
     assert_eq!(
         binding.capability_kind().canonical_name(),
-        Some("mfm.bitcoin/fact.record")
+        Some("mfm.fact/record")
     );
     assert_eq!(
         binding.adapter_kind(),

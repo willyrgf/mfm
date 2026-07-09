@@ -15,6 +15,7 @@ use mfm_evm_capabilities::{
     EvmBalanceReadProvider, EvmBalanceReadRequest, EvmBlockReadProvider, EvmBlockReadRequest,
     EvmBlockSelector, EvmCapabilityError, EvmNetworkBinding, EvmNetworkId,
 };
+use mfm_fact_capabilities::FactRecordCapability;
 use mfm_program::{ManagedWriteState, MfmFactType, StateSpec};
 use mfm_runtime::{
     load_launch_config, load_materialized_struct_input, load_runner_config,
@@ -27,7 +28,7 @@ use mfm_states_evm::{
     assemble_evm_native_balance_batch, evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version,
     materialize_evm_joint_tip, native_balance_record_visibility,
     AssembleEvmNativeBalanceBatchConfig, AssembleEvmNativeBalanceBatchInput,
-    AssembleEvmNativeBalanceBatchState, EvmFactRecordCapability, ObserveEvmNativeBalanceConfig,
+    AssembleEvmNativeBalanceBatchState, ObserveEvmNativeBalanceConfig,
     ObserveEvmNativeBalanceInput, ObserveEvmNativeBalanceState, RecordEvmNativeBalanceFactState,
     ResolveEvmJointTipConfig, ResolveEvmJointTipInput, ResolveEvmJointTipState,
 };
@@ -341,7 +342,7 @@ impl<S> ManagedFactRecordRunner<S> {
 
 impl<S> ErasedNodeRunner for ManagedFactRecordRunner<S>
 where
-    S: ManagedWriteState<Caps = (EvmFactRecordCapability,)>,
+    S: ManagedWriteState<Caps = (FactRecordCapability,)>,
     S::Input: serde::de::DeserializeOwned,
     S::Output: MfmFactType + MfmValue,
 {
@@ -356,7 +357,7 @@ where
                     .await?;
             let context = ctx.certified_context::<S::Context>()?;
             let fact = state
-                .run(input, &(EvmFactRecordCapability,), &context)
+                .run(input, &(FactRecordCapability,), &context)
                 .await
                 .map_err(|error| {
                     mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
@@ -364,15 +365,15 @@ where
             let mut output = RunnerOutputBuilder::new(&ctx);
             output.state_output_and_record_fact(
                 mfm_runtime::FactRecordInput::new(fact, self.visibility.clone()),
-                evm_fact_record_capability_binding()?,
+                fact_record_capability_binding()?,
             )?;
             Ok(output.finish())
         })
     }
 }
 
-fn evm_fact_record_capability_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {
-    RunnerCapabilityBinding::for_capability::<EvmFactRecordCapability>(
+fn fact_record_capability_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {
+    RunnerCapabilityBinding::for_capability::<FactRecordCapability>(
         evm_jsonrpc_adapter_kind().map_err(adapter_identity_error)?,
         evm_jsonrpc_adapter_version().map_err(adapter_identity_error)?,
     )

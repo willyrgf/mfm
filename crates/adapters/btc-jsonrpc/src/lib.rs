@@ -19,7 +19,7 @@ use mfm_btc_capabilities::{
 use mfm_events::v1 as events;
 use mfm_fact_capabilities::{
     FactIndexReadEvidence, FactIndexReadProvider, FactIndexReadResponse,
-    FactQueryReceiptTrustRootMaterial,
+    FactQueryReceiptTrustRootMaterial, FactRecordCapability,
 };
 use mfm_program::{ManagedWriteState, MfmFactType, StateSpec, ValidatedConfig};
 use mfm_replay::v1 as replay;
@@ -35,13 +35,13 @@ use mfm_states_btc::{
     btc_jsonrpc_adapter_kind, btc_jsonrpc_adapter_version, chain_head_fact_visibility,
     collector_checkpoint_fact_visibility, AssembleBtcAddressBalanceBatchConfig,
     AssembleBtcAddressBalanceBatchInput, AssembleBtcAddressBalanceBatchState,
-    BtcChainHeadObservation, BtcFactRecordCapability, BtcJointTip, CollectorCheckpointFact,
-    CollectorCheckpointResponse, LoadedCollectorCheckpoint, ObserveBtcAddressBalanceConfig,
-    ObserveBtcAddressBalanceInput, ObserveBtcAddressBalanceState, ObserveBtcChainHeadConfig,
-    ObserveBtcChainHeadInput, ObserveBtcChainHeadState, QueryCollectorCheckpointConfig,
-    QueryCollectorCheckpointInput, QueryCollectorCheckpointState, RecordBtcAddressBalanceFactState,
-    RecordBtcChainHeadFactState, RecordCollectorCheckpointState, ResolveBtcJointTipConfig,
-    ResolveBtcJointTipInput, ResolveBtcJointTipState,
+    BtcChainHeadObservation, BtcJointTip, CollectorCheckpointFact, CollectorCheckpointResponse,
+    LoadedCollectorCheckpoint, ObserveBtcAddressBalanceConfig, ObserveBtcAddressBalanceInput,
+    ObserveBtcAddressBalanceState, ObserveBtcChainHeadConfig, ObserveBtcChainHeadInput,
+    ObserveBtcChainHeadState, QueryCollectorCheckpointConfig, QueryCollectorCheckpointInput,
+    QueryCollectorCheckpointState, RecordBtcAddressBalanceFactState, RecordBtcChainHeadFactState,
+    RecordCollectorCheckpointState, ResolveBtcJointTipConfig, ResolveBtcJointTipInput,
+    ResolveBtcJointTipState,
 };
 use mfm_store::v1 as store;
 use mfm_values::{MfmConfig, MfmValue};
@@ -585,7 +585,7 @@ impl ErasedNodeRunner for QueryCheckpointRunner {
 
 impl<S> ErasedNodeRunner for ManagedFactRecordRunner<S>
 where
-    S: ManagedWriteState<Caps = (BtcFactRecordCapability,)>,
+    S: ManagedWriteState<Caps = (FactRecordCapability,)>,
     S::Input: serde::de::DeserializeOwned,
     S::Output: MfmFactType + MfmValue,
 {
@@ -603,7 +603,7 @@ async fn run_managed_fact_record<S>(
     visibility: mfm_program::facts::FactVisibility,
 ) -> mfm_runtime::Result<ErasedRunnerOutput>
 where
-    S: ManagedWriteState<Caps = (BtcFactRecordCapability,)>,
+    S: ManagedWriteState<Caps = (FactRecordCapability,)>,
     S::Input: serde::de::DeserializeOwned,
     S::Output: MfmFactType + MfmValue,
 {
@@ -613,13 +613,13 @@ where
     let input = load_materialized_struct_input::<S::Input>(ctx.inputs(), artifacts).await?;
     let context = ctx.certified_context::<S::Context>()?;
     let fact = state
-        .run(input, &(BtcFactRecordCapability,), &context)
+        .run(input, &(FactRecordCapability,), &context)
         .await
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
     let mut output = RunnerOutputBuilder::new(&ctx);
     output.state_output_and_record_fact(
         mfm_runtime::FactRecordInput::new(fact, visibility),
-        btc_fact_record_capability_binding()?,
+        fact_record_capability_binding()?,
     )?;
     Ok(output.finish())
 }
@@ -853,8 +853,8 @@ fn fact_query_trust_root(
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
-fn btc_fact_record_capability_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {
-    RunnerCapabilityBinding::for_capability::<BtcFactRecordCapability>(
+fn fact_record_capability_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {
+    RunnerCapabilityBinding::for_capability::<FactRecordCapability>(
         btc_jsonrpc_adapter_kind().map_err(adapter_identity_error)?,
         btc_jsonrpc_adapter_version().map_err(adapter_identity_error)?,
     )

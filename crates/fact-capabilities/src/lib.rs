@@ -1,18 +1,21 @@
 #![warn(missing_docs)]
-//! Generic internal fact-index read capability contracts.
+//! Generic internal fact capability contracts.
 //!
-//! This crate defines the state/adapter-facing authority contract for internal
-//! Control and Platform reads from the MFM fact index. Concrete store
-//! implementations, SQL query execution, app wiring, and public fact DTO
-//! services live outside this crate. Platform index reads still require
+//! This crate defines the state/adapter-facing authority contracts for:
+//! - internal Control and Platform reads from the MFM fact index
+//! - managed Platform fact recording (shared write role for collectors)
+//!
+//! Concrete store implementations, SQL query execution, app wiring, and public
+//! fact DTO services live outside this crate. Platform index reads still require
 //! certified evidence and retained response artifacts; they are not a
 //! public-facts authority path.
 //!
 //! ```rust
 //! use mfm_capabilities::CapabilitySpec;
-//! use mfm_fact_capabilities::FactIndexReadCapability;
+//! use mfm_fact_capabilities::{FactIndexReadCapability, FactRecordCapability};
 //!
 //! assert_eq!(FactIndexReadCapability::name(), "mfm.fact.index.read");
+//! assert_eq!(FactRecordCapability::name(), "mfm.fact.record");
 //! ```
 
 use std::fmt;
@@ -20,7 +23,9 @@ use std::future::Future;
 use std::pin::Pin;
 
 use mfm_canonical::sha256_digest_bytes;
-use mfm_capabilities::{CapabilityError, CapabilitySpec, ReadExternalRole};
+use mfm_capabilities::{
+    CapabilityError, CapabilitySpec, ManagedPlatformWriteRole, ReadExternalRole,
+};
 use mfm_facts::{
     CanonicalFactQueryPlan, FactAudience, FactQueryEvidence, FactQueryReceipt, FactQueryResultRow,
     FactSelectionEvidence,
@@ -59,6 +64,35 @@ impl CapabilitySpec for FactIndexReadCapability {
 
     fn name() -> &'static str {
         "mfm.fact.index.read"
+    }
+}
+
+/// Shared managed Platform-write capability for recording fact claims.
+///
+/// Used by BTC and EVM collector record states. Family monomorphism lives in the
+/// fact types and observe transports, not in a second capability identity.
+pub struct FactRecordCapability;
+
+impl CapabilitySpec for FactRecordCapability {
+    type Role = ManagedPlatformWriteRole;
+
+    fn kind() -> mfm_capabilities::Result<CapabilityKind> {
+        CapabilityKind::new(
+            "mfm.fact",
+            "record",
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(b"mfm.fact.capability:record"),
+        )
+        .map_err(|error| CapabilityError::Identity(error.to_string()))
+    }
+
+    fn version() -> mfm_capabilities::Result<CapabilityVersion> {
+        CapabilityVersion::new("mfm.fact.record.v1")
+            .map_err(|error| CapabilityError::Identity(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.fact.record"
     }
 }
 
