@@ -11,10 +11,11 @@ use std::sync::Arc;
 
 use mfm_artifact_capabilities::{fact_response_artifact_requirement, hydrate_fact_response_json};
 use mfm_btc_capabilities::{
-    BitcoinNetworkTag, BtcAddress, BtcBalanceReadProvider, BtcBalanceReadRequest,
-    BtcBalanceReadResponse, BtcBlockHash, BtcCapabilityError, BtcCapabilityFuture,
-    BtcChainHeadReadProvider, BtcChainHeadRequest, BtcChainHeadResponse, BtcFinality, BtcHeadKind,
-    BtcNetworkId, BtcSourceBinding, BtcSourceIdentity, BtcSourceStatus, RedactedBtcSourceEvidence,
+    BitcoinNetworkTag, BtcAddress, BtcBalanceReadCapability, BtcBalanceReadProvider,
+    BtcBalanceReadRequest, BtcBalanceReadResponse, BtcBlockHash, BtcCapabilityError,
+    BtcCapabilityFuture, BtcChainHeadReadCapability, BtcChainHeadReadProvider, BtcChainHeadRequest,
+    BtcChainHeadResponse, BtcFinality, BtcHeadKind, BtcNetworkId, BtcSourceBinding,
+    BtcSourceIdentity, BtcSourceStatus, RedactedBtcSourceEvidence,
 };
 use mfm_events::v1 as events;
 use mfm_fact_capabilities::{
@@ -117,11 +118,16 @@ pub fn register_btc_jsonrpc_runners(
     registry: &mut ErasedRunnerRegistry,
     capabilities: BtcJsonRpcRunnerCapabilities,
 ) -> mfm_runtime::Result<()> {
-    let implementation_id = CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?;
     let artifacts = capabilities.artifacts();
     let btc = capabilities.btc();
     let fact_index = capabilities.fact_index();
-    let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
+    registry.register_capability_spec::<BtcChainHeadReadCapability>(
+        CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?,
+    )?;
+    registry.register_capability_spec::<BtcBalanceReadCapability>(
+        CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?,
+    )?;
+    let mut registrations = RunnerRegistrationBuilder::new(registry);
     let executable_identities = RunnerExecutableIdentityTemplate::new(
         "mfm-adapters-btc-jsonrpc",
         "typed-bitcoin-jsonrpc",
@@ -140,21 +146,21 @@ pub fn register_btc_jsonrpc_runners(
         btc_jsonrpc_adapter_version().map_err(adapter_identity_error)?,
         &adapter_factory,
     )?;
-    registrations.register_state_descriptor_with_factory::<ObserveBtcChainHeadState>(
+    registrations.register_state_runner_with_factory::<ObserveBtcChainHeadState>(
         &read_factory,
         Arc::new(ObserveChainHeadRunner {
             artifacts: artifacts.clone(),
             btc: btc.clone(),
         }),
     )?;
-    registrations.register_state_descriptor_with_factory::<ResolveBtcJointTipState>(
+    registrations.register_state_runner_with_factory::<ResolveBtcJointTipState>(
         &read_factory,
         Arc::new(ResolveJointTipRunner {
             artifacts: artifacts.clone(),
             btc: btc.clone(),
         }),
     )?;
-    registrations.register_state_descriptor_with_factory::<ObserveBtcAddressBalanceState>(
+    registrations.register_state_runner_with_factory::<ObserveBtcAddressBalanceState>(
         &read_factory,
         Arc::new(ObserveAddressBalanceRunner {
             artifacts: artifacts.clone(),
@@ -193,7 +199,7 @@ pub fn register_btc_jsonrpc_runners(
             ),
         ),
     )?;
-    registrations.register_state_descriptor_with_factory::<AssembleBtcAddressBalanceBatchState>(
+    registrations.register_state_runner_with_factory::<AssembleBtcAddressBalanceBatchState>(
         &pure_factory,
         Arc::new(AssembleAddressBalanceBatchRunner { artifacts }),
     )?;

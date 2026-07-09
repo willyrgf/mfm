@@ -4833,7 +4833,29 @@ pub fn register_contract_lifecycle_runners_with_factory(
     factory: Arc<dyn EvmContractRuntimeFactory>,
 ) -> mfm_runtime::Result<()> {
     let implementation_id = CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?;
-    let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
+    let deploy_descriptor = mfm_program::state_descriptor::<ContextBoundDeployContractState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    let configure_descriptor =
+        mfm_program::state_descriptor::<ContextBoundConfigureContractState>()
+            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    let validate_descriptor = mfm_program::state_descriptor::<ContextBoundValidateContractState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    let import_deployed_descriptor =
+        mfm_program::state_descriptor::<mfm_state_evm_contracts::ImportDeployedContractState>()
+            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    let import_configured_descriptor =
+        mfm_program::state_descriptor::<mfm_state_evm_contracts::ImportConfiguredContractState>()
+            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    for descriptor in [
+        &deploy_descriptor,
+        &configure_descriptor,
+        &validate_descriptor,
+        &import_deployed_descriptor,
+        &import_configured_descriptor,
+    ] {
+        registry.register_capability_set(descriptor.capabilities(), implementation_id.clone())?;
+    }
+    let mut registrations = RunnerRegistrationBuilder::new(registry);
     let executable_identities = RunnerExecutableIdentityTemplate::new(
         "mfm-adapters-evm-contracts",
         "evm-contract-lifecycle-context",
@@ -4853,7 +4875,7 @@ pub fn register_contract_lifecycle_runners_with_factory(
         &adapter_factory,
     )?;
     let deploy = registrations
-        .register_state_descriptor_with_factory::<ContextBoundDeployContractState>(
+        .register_state_runner_with_factory::<ContextBoundDeployContractState>(
             &side_effect_factory,
             Arc::new(ContractMutationRunner::<ContextDeployMutationPlan> {
                 factory: factory.clone(),
@@ -4862,7 +4884,7 @@ pub fn register_contract_lifecycle_runners_with_factory(
             }),
         )?;
     let configure = registrations
-        .register_state_descriptor_with_factory::<ContextBoundConfigureContractState>(
+        .register_state_runner_with_factory::<ContextBoundConfigureContractState>(
             &side_effect_factory,
             Arc::new(ContractMutationRunner::<ContextConfigureMutationPlan> {
                 factory: factory.clone(),
@@ -4870,21 +4892,22 @@ pub fn register_contract_lifecycle_runners_with_factory(
                 _phase: PhantomData,
             }),
         )?;
-    registrations.register_state_descriptor_with_factory::<ContextBoundValidateContractState>(
+    registrations.register_state_runner_with_factory::<ContextBoundValidateContractState>(
         &read_factory,
         Arc::new(ContextContractValidateRunner {
             factory: factory.clone(),
             extractor: TypedContextOutputExtractor::new(),
         }),
     )?;
-    registrations.register_state_descriptor_with_factory::<mfm_state_evm_contracts::ImportDeployedContractState>(
-        &read_factory,
-        Arc::new(ImportDeployedRunner {
-            factory: factory.clone(),
-            extractor: TypedContextOutputExtractor::new(),
-        }),
-    )?;
-    registrations.register_state_descriptor_with_factory::<mfm_state_evm_contracts::ImportConfiguredContractState>(
+    registrations
+        .register_state_runner_with_factory::<mfm_state_evm_contracts::ImportDeployedContractState>(
+            &read_factory,
+            Arc::new(ImportDeployedRunner {
+                factory: factory.clone(),
+                extractor: TypedContextOutputExtractor::new(),
+            }),
+        )?;
+    registrations.register_state_runner_with_factory::<mfm_state_evm_contracts::ImportConfiguredContractState>(
         &read_factory,
         Arc::new(ImportConfiguredRunner {
             factory: factory.clone(),

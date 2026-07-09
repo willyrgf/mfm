@@ -44,8 +44,7 @@ use mfm_store::v1::test_support::{
 };
 
 #[test]
-fn portfolio_capability_implementation_id_is_stable() {
-    assert_eq!(CAPABILITY_IMPLEMENTATION_ID, "mfm.portfolio.runtime.v1");
+fn portfolio_runner_registration_keeps_factory_identity_explicit() {
     assert_eq!(PURE_FACTORY, "pure");
     assert_eq!(READ_FACTORY, "read_external");
     assert_eq!(ADAPTER_FACTORY, "portfolio_adapter");

@@ -45,30 +45,32 @@ pub fn register_deterministic_proof_runners(
     registry: &mut ErasedRunnerRegistry,
 ) -> mfm_runtime::Result<()> {
     let implementation_id = CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?;
-    let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
     let adapter_factory = events::RunnerFactoryId::new(ADAPTER_FACTORY)?;
+    let read = mfm_program::state_descriptor::<ProofReadFactState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    let side_effect = mfm_program::state_descriptor::<ProofApplySideEffectState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    let assemble = mfm_program::state_descriptor::<ProofAssembleOutputState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    registry.register_capability_set(read.capabilities(), implementation_id.clone())?;
+    registry.register_capability_set(side_effect.capabilities(), implementation_id)?;
+    let mut registrations = RunnerRegistrationBuilder::new(registry);
     registrations.register_adapter_executable(
         proof_adapter_kind()?,
         proof_adapter_version()?,
         executable(adapter_factory)?,
     )?;
 
-    let read = mfm_program::state_descriptor::<ProofReadFactState>()
-        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
     let read_factory = events::RunnerFactoryId::new(READ_FACTORY)?;
-    registrations.register_descriptor(
+    registrations.register_runner(
         read.descriptor_id().clone(),
-        read.capabilities(),
         read_factory.clone(),
         executable(read_factory.clone())?,
         Arc::new(ProofReadRunner),
     )?;
-    let side_effect = mfm_program::state_descriptor::<ProofApplySideEffectState>()
-        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
     let side_effect_factory = events::RunnerFactoryId::new(SIDE_EFFECT_FACTORY)?;
-    registrations.register_descriptor(
+    registrations.register_runner(
         side_effect.descriptor_id().clone(),
-        side_effect.capabilities(),
         side_effect_factory.clone(),
         executable(side_effect_factory)?,
         Arc::new(ProofSideEffectRunner),
@@ -79,12 +81,9 @@ pub fn register_deterministic_proof_runners(
         executable(read_factory)?,
         Arc::new(ProofSideEffectRunner),
     )?;
-    let assemble = mfm_program::state_descriptor::<ProofAssembleOutputState>()
-        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
     let assemble_factory = events::RunnerFactoryId::new(PURE_FACTORY)?;
-    registrations.register_descriptor(
+    registrations.register_runner(
         assemble.descriptor_id().clone(),
-        assemble.capabilities(),
         assemble_factory.clone(),
         executable(assemble_factory)?,
         Arc::new(ProofAssembleRunner),

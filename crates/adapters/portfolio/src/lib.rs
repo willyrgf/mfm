@@ -19,9 +19,8 @@ use mfm_portfolio_model::symbol::ObservationAnchor;
 use mfm_program::{StateSpec, ValidatedConfig};
 use mfm_runtime::{
     load_materialized_input_value, load_materialized_struct_input, load_runner_config,
-    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
-    ErasedRunnerOutput, ErasedRunnerRegistry, RunnerExecutableIdentityTemplate,
-    RunnerOutputBuilder, RunnerRegistrationBuilder,
+    ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
+    RunnerExecutableIdentityTemplate, RunnerOutputBuilder, RunnerRegistrationBuilder,
 };
 use mfm_state_portfolio::{
     assemble_snapshot, balance_reader_kind, expand_required_holdings,
@@ -50,7 +49,6 @@ use mfm_values::MfmValue;
 const PURE_FACTORY: &str = "pure";
 const READ_FACTORY: &str = "read_external";
 const ADAPTER_FACTORY: &str = "portfolio_adapter";
-const CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.portfolio.runtime.v1";
 
 /// Runtime capabilities used by portfolio adapter runners.
 #[derive(Clone)]
@@ -85,10 +83,9 @@ pub fn register_portfolio_runners(
     registry: &mut ErasedRunnerRegistry,
     capabilities: PortfolioRunnerCapabilities,
 ) -> mfm_runtime::Result<()> {
-    let implementation_id = CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?;
     let artifacts = capabilities.artifacts();
     let fact_index = capabilities.fact_index();
-    let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
+    let mut registrations = RunnerRegistrationBuilder::new(registry);
     let executable_identities = RunnerExecutableIdentityTemplate::new(
         "mfm-adapters-portfolio",
         "typed-portfolio",
@@ -105,7 +102,7 @@ pub fn register_portfolio_runners(
         portfolio_adapter_version()?,
         &adapter_factory,
     )?;
-    registrations.register_state_descriptor_with_factory::<ResolveSubjectsState>(
+    registrations.register_state_runner_with_factory::<ResolveSubjectsState>(
         &pure_factory,
         Arc::new(ResolveSubjectsRunner {
             artifacts: artifacts.clone(),
@@ -118,19 +115,19 @@ pub fn register_portfolio_runners(
             fact_index,
         }),
     )?;
-    registrations.register_state_descriptor_with_factory::<ResolveValuationsState>(
+    registrations.register_state_runner_with_factory::<ResolveValuationsState>(
         &pure_factory,
         Arc::new(ResolveValuationsRunner {
             artifacts: artifacts.clone(),
         }),
     )?;
-    registrations.register_state_descriptor_with_factory::<AssembleSnapshotState>(
+    registrations.register_state_runner_with_factory::<AssembleSnapshotState>(
         &pure_factory,
         Arc::new(AssembleSnapshotRunner {
             artifacts: artifacts.clone(),
         }),
     )?;
-    registrations.register_state_descriptor_with_factory::<ProjectReportState>(
+    registrations.register_state_runner_with_factory::<ProjectReportState>(
         &pure_factory,
         Arc::new(ProjectReportRunner { artifacts }),
     )?;

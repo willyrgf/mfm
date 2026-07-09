@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
-use mfm_capabilities::{CapabilitySetDescriptor, CapabilitySetFor, CapabilitySpec};
+use mfm_capabilities::{CapabilitySetFor, CapabilitySpec};
 use mfm_events::v1::{self as events, side_effect};
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
@@ -17,11 +17,10 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{
     artifacts::fact_query_returned_ref_retention_refs, AdapterExecutableBinding,
-    CapabilityImplementationId, ContextOutputExtractor, ErasedNodeRunner, ErasedRunCtx,
-    ErasedRunnerBinding, ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCell,
-    MaterializedCellTerminal, MaterializedInputNode, MaterializedInputs, Result,
-    RunnerEventPayload, RunnerFactRecorded, RunnerIngressContext, RuntimeError, StagedArtifact,
-    StagedRetentionRefs,
+    ContextOutputExtractor, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding,
+    ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCell, MaterializedCellTerminal,
+    MaterializedInputNode, MaterializedInputs, Result, RunnerEventPayload, RunnerFactRecorded,
+    RunnerIngressContext, RuntimeError, StagedArtifact, StagedRetentionRefs,
 };
 
 /// Canonical JSON artifact prepared by a typed runner before runtime staging.
@@ -1491,29 +1490,12 @@ fn insert_retention_ref(
 /// Builder for registering runner bindings while keeping executable identity explicit.
 pub struct RunnerRegistrationBuilder<'a> {
     registry: &'a mut ErasedRunnerRegistry,
-    implementation_id: CapabilityImplementationId,
 }
 
 impl<'a> RunnerRegistrationBuilder<'a> {
-    /// Creates a registration builder for one concrete capability implementation id.
-    pub fn new(
-        registry: &'a mut ErasedRunnerRegistry,
-        implementation_id: CapabilityImplementationId,
-    ) -> Self {
-        Self {
-            registry,
-            implementation_id,
-        }
-    }
-
-    /// Registers the configured implementation id for a certified capability set.
-    pub fn register_capability_set(
-        &mut self,
-        capabilities: &CapabilitySetDescriptor,
-    ) -> Result<&mut Self> {
-        self.registry
-            .register_capability_set(capabilities, self.implementation_id.clone())?;
-        Ok(self)
+    /// Creates a runner registration builder.
+    pub fn new(registry: &'a mut ErasedRunnerRegistry) -> Self {
+        Self { registry }
     }
 
     /// Registers one descriptor runner using caller-supplied factory and executable identity.
@@ -1527,57 +1509,6 @@ impl<'a> RunnerRegistrationBuilder<'a> {
         let binding = ErasedRunnerBinding::new(descriptor_id, factory_id, executable, runner)?;
         self.registry.register(binding)?;
         Ok(self)
-    }
-
-    /// Registers capabilities and a runner for one certified state descriptor.
-    pub fn register_descriptor(
-        &mut self,
-        descriptor_id: DescriptorId,
-        capabilities: &CapabilitySetDescriptor,
-        factory_id: events::RunnerFactoryId,
-        executable: events::ExecutableIdentity,
-        runner: Arc<dyn ErasedNodeRunner>,
-    ) -> Result<&mut Self> {
-        self.register_capability_set(capabilities)?;
-        self.register_runner(descriptor_id, factory_id, executable, runner)
-    }
-
-    /// Registers capabilities and a runner for one typed state descriptor.
-    pub fn register_state_descriptor<S>(
-        &mut self,
-        factory_id: events::RunnerFactoryId,
-        executable: events::ExecutableIdentity,
-        runner: Arc<dyn ErasedNodeRunner>,
-    ) -> Result<mfm_program::StateDescriptorIdentity>
-    where
-        S: StateSpec,
-        S::Effect: EffectRunner<S>,
-        S::Caps: CapabilitySetFor<S::Effect>,
-    {
-        let descriptor = mfm_program::state_descriptor::<S>()
-            .map_err(|error| RuntimeError::RunnerBinding(error.to_string()))?;
-        self.register_descriptor(
-            descriptor.descriptor_id().clone(),
-            descriptor.capabilities(),
-            factory_id,
-            executable,
-            runner,
-        )?;
-        Ok(descriptor)
-    }
-
-    /// Registers capabilities and a runner for one typed state descriptor using a bound factory.
-    pub fn register_state_descriptor_with_factory<S>(
-        &mut self,
-        factory: &RunnerFactoryBinding,
-        runner: Arc<dyn ErasedNodeRunner>,
-    ) -> Result<mfm_program::StateDescriptorIdentity>
-    where
-        S: StateSpec,
-        S::Effect: EffectRunner<S>,
-        S::Caps: CapabilitySetFor<S::Effect>,
-    {
-        self.register_state_descriptor::<S>(factory.factory_id(), factory.executable(), runner)
     }
 
     /// Registers a typed state runner when its capabilities are bound by process assembly.

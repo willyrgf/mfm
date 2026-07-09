@@ -3934,10 +3934,12 @@ fn runner_registration_builder_preserves_explicit_binding_authority() {
         .expect("implementation id");
     let mut registry = ErasedRunnerRegistry::new();
 
-    RunnerRegistrationBuilder::new(&mut registry, implementation_id.clone())
-        .register_descriptor(
+    registry
+        .register_capability_set(&node.capability_bindings, implementation_id.clone())
+        .expect("capability registration");
+    RunnerRegistrationBuilder::new(&mut registry)
+        .register_runner(
             node.descriptor_id.clone(),
-            &node.capability_bindings,
             factory_id.clone(),
             executable.clone(),
             Arc::new(RecordingRunner {
@@ -3984,21 +3986,29 @@ fn runner_registration_builder_preserves_explicit_binding_authority() {
         CapabilityImplementationId::new("mfm.test.runner-kit-typed-registration")
             .expect("typed implementation id");
     let mut typed_registry = ErasedRunnerRegistry::new();
+    typed_registry
+        .register_capability_set(
+            &typed_node.capability_bindings,
+            typed_implementation_id.clone(),
+        )
+        .expect("typed capability registration");
     let registered_descriptor =
-        RunnerRegistrationBuilder::new(&mut typed_registry, typed_implementation_id.clone())
-            .register_state_descriptor::<RuntimeReadState>(
-                typed_factory.clone(),
-                typed_executable.clone(),
-                Arc::new(RecordingRunner {
-                    expected_caps: vec![(
-                        typed_fixture.cap_kind.clone(),
-                        typed_fixture.cap_version.clone(),
-                    )],
-                    output_artifact: artifact(0xd1),
-                    output_digest: content(0xd2),
-                }),
-            )
-            .expect("typed runner registration");
+        mfm_program::state_descriptor::<RuntimeReadState>().expect("typed descriptor");
+    RunnerRegistrationBuilder::new(&mut typed_registry)
+        .register_runner(
+            registered_descriptor.descriptor_id().clone(),
+            typed_factory.clone(),
+            typed_executable.clone(),
+            Arc::new(RecordingRunner {
+                expected_caps: vec![(
+                    typed_fixture.cap_kind.clone(),
+                    typed_fixture.cap_version.clone(),
+                )],
+                output_artifact: artifact(0xd1),
+                output_digest: content(0xd2),
+            }),
+        )
+        .expect("typed runner registration");
     assert_eq!(
         registered_descriptor.descriptor_id(),
         expected_descriptor.descriptor_id()
@@ -4025,14 +4035,8 @@ fn runner_registration_builder_preserves_explicit_binding_authority() {
 
     let wrong_factory = events::RunnerFactoryId::new("pure").expect("factory");
     let mut mismatch_registry = ErasedRunnerRegistry::new();
-    let error = match RunnerRegistrationBuilder::new(
-        &mut mismatch_registry,
-        CapabilityImplementationId::new("mfm.test.runner-kit-registration-mismatch")
-            .expect("implementation id"),
-    )
-    .register_descriptor(
+    let error = match RunnerRegistrationBuilder::new(&mut mismatch_registry).register_runner(
         node.descriptor_id.clone(),
-        &node.capability_bindings,
         factory_id,
         events::ExecutableIdentity {
             factory_id: wrong_factory,

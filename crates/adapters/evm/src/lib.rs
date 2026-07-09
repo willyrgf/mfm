@@ -12,8 +12,9 @@ use std::sync::Arc;
 use alloy_primitives::{Address, B256};
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
-    EvmBalanceReadProvider, EvmBalanceReadRequest, EvmBlockReadProvider, EvmBlockReadRequest,
-    EvmBlockSelector, EvmCapabilityError, EvmNetworkBinding, EvmNetworkId,
+    EvmBalanceReadCapability, EvmBalanceReadProvider, EvmBalanceReadRequest,
+    EvmBlockReadCapability, EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockSelector,
+    EvmCapabilityError, EvmNetworkBinding, EvmNetworkId,
 };
 use mfm_fact_capabilities::FactRecordCapability;
 use mfm_program::{ManagedWriteState, MfmFactType, StateSpec, ValidatedConfig};
@@ -97,10 +98,15 @@ pub fn register_evm_collectors_runners(
     registry: &mut ErasedRunnerRegistry,
     capabilities: EvmRunnerCapabilities,
 ) -> mfm_runtime::Result<()> {
-    let implementation_id = CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?;
     let artifacts = capabilities.artifacts();
     let evm = capabilities.evm();
-    let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
+    registry.register_capability_spec::<EvmBlockReadCapability>(
+        CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?,
+    )?;
+    registry.register_capability_spec::<EvmBalanceReadCapability>(
+        CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?,
+    )?;
+    let mut registrations = RunnerRegistrationBuilder::new(registry);
     let executable_identities = RunnerExecutableIdentityTemplate::new(
         "mfm-adapters-evm",
         "typed-evm-jsonrpc",
@@ -119,14 +125,14 @@ pub fn register_evm_collectors_runners(
         evm_jsonrpc_adapter_version().map_err(adapter_identity_error)?,
         &adapter_factory,
     )?;
-    registrations.register_state_descriptor_with_factory::<ResolveEvmJointTipState>(
+    registrations.register_state_runner_with_factory::<ResolveEvmJointTipState>(
         &read_factory,
         Arc::new(ResolveJointTipRunner {
             artifacts: artifacts.clone(),
             evm: evm.clone(),
         }),
     )?;
-    registrations.register_state_descriptor_with_factory::<ObserveEvmNativeBalanceState>(
+    registrations.register_state_runner_with_factory::<ObserveEvmNativeBalanceState>(
         &read_factory,
         Arc::new(ObserveNativeBalanceRunner {
             artifacts: artifacts.clone(),
@@ -142,7 +148,7 @@ pub fn register_evm_collectors_runners(
             ),
         ),
     )?;
-    registrations.register_state_descriptor_with_factory::<AssembleEvmNativeBalanceBatchState>(
+    registrations.register_state_runner_with_factory::<AssembleEvmNativeBalanceBatchState>(
         &pure_factory,
         Arc::new(AssembleNativeBalanceBatchRunner { artifacts }),
     )?;

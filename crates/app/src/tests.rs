@@ -345,31 +345,33 @@ fn app_fact_runner_registry(
         nix_output_hash: None,
     };
     let mut registry = ErasedRunnerRegistry::new();
-    mfm_runtime::RunnerRegistrationBuilder::new(
-        &mut registry,
-        mfm_runtime::CapabilityImplementationId::new("mfm.app.test.fact-runner")
-            .expect("implementation id"),
-    )
-    .register_descriptor(
-        node.descriptor_id.clone(),
-        &node.capability_bindings,
-        factory_id.clone(),
-        executable,
-        Arc::new(AppFactRecordingRunner { visibility }),
-    )
-    .expect("app fact runner registration")
-    .register_adapter_executable(
-        app_fact_adapter_kind(),
-        app_fact_adapter_version(),
-        events::ExecutableIdentity {
-            factory_id,
-            cargo_package_digest: content_digest_for_bytes(b"mfm.app.test.fact-adapter.cargo"),
-            binary_digest: content_digest_for_bytes(b"mfm.app.test.fact-adapter.binary"),
-            nix_derivation_hash: None,
-            nix_output_hash: None,
-        },
-    )
-    .expect("app fact runner registration");
+    registry
+        .register_capability_set(
+            &node.capability_bindings,
+            mfm_runtime::CapabilityImplementationId::new("mfm.app.test.fact-runner")
+                .expect("implementation id"),
+        )
+        .expect("app fact capability registration");
+    mfm_runtime::RunnerRegistrationBuilder::new(&mut registry)
+        .register_runner(
+            node.descriptor_id.clone(),
+            factory_id.clone(),
+            executable,
+            Arc::new(AppFactRecordingRunner { visibility }),
+        )
+        .expect("app fact runner registration")
+        .register_adapter_executable(
+            app_fact_adapter_kind(),
+            app_fact_adapter_version(),
+            events::ExecutableIdentity {
+                factory_id,
+                cargo_package_digest: content_digest_for_bytes(b"mfm.app.test.fact-adapter.cargo"),
+                binary_digest: content_digest_for_bytes(b"mfm.app.test.fact-adapter.binary"),
+                nix_derivation_hash: None,
+                nix_output_hash: None,
+            },
+        )
+        .expect("app fact runner registration");
     registry
 }
 
