@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::ids::{
-    ControlScopeId, NetworkId, PortfolioId, PortfolioScalarError, SymbolId, ValuationSourceId,
-    WalletId,
+    BitcoinSourceIdentityId, NetworkId, PortfolioId, PortfolioScalarError, SymbolId,
+    ValuationSourceId, WalletId,
 };
 use crate::metadata::PublicMetadata;
 use crate::symbol::{
@@ -119,6 +119,7 @@ impl PortfolioConfig {
 /// Canonical network configuration.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
 #[serde(tag = "family", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.portfolio",
     name = "network-config",
@@ -131,8 +132,6 @@ pub enum NetworkConfig {
         network_id: NetworkId,
         /// Non-zero EVM chain id for the network.
         chain_id: NonZeroU64,
-        /// Stable control-plane scope used for managed rpc.control reads on this network.
-        control_scope: ControlScopeId,
         /// Canonical metadata surface.
         #[serde(default)]
         metadata: PublicMetadata,
@@ -143,8 +142,8 @@ pub enum NetworkConfig {
         network_id: NetworkId,
         /// Expected Bitcoin Core network tag (`main`, `test`, `signet`, or `regtest`).
         bitcoin_network: String,
-        /// Stable control-plane scope used for managed rpc.control reads on this network.
-        control_scope: ControlScopeId,
+        /// Semantic Bitcoin source identity used to bind runtime routes and evidence.
+        source_identity: BitcoinSourceIdentityId,
         /// Canonical metadata surface.
         #[serde(default)]
         metadata: PublicMetadata,
@@ -158,13 +157,11 @@ impl NetworkConfig {
         family: NetworkFamilyConfig,
         chain_id: Option<u64>,
         bitcoin_network: Option<String>,
-        control_scope: String,
+        source_identity: Option<String>,
         metadata: BTreeMap<String, String>,
     ) -> Result<Self, PortfolioConfigError> {
         let network_id = NetworkId::new(network_id)
             .map_err(|source| PortfolioConfigError::InvalidNetworkId { source })?;
-        let control_scope = ControlScopeId::new(control_scope)
-            .map_err(|source| PortfolioConfigError::InvalidNetworkControlScope { source })?;
         let metadata = PublicMetadata::new(metadata).map_err(|source| {
             PortfolioConfigError::NetworkMetadataContainsSecret {
                 network_id: network_id.to_string(),
@@ -173,6 +170,11 @@ impl NetworkConfig {
         })?;
         match family {
             NetworkFamilyConfig::Evm => {
+                if source_identity.is_some() {
+                    return Err(PortfolioConfigError::UnexpectedEvmSourceIdentity {
+                        network_id: network_id.to_string(),
+                    });
+                }
                 if bitcoin_network.is_some() {
                     return Err(PortfolioConfigError::UnexpectedEvmBitcoinNetwork {
                         network_id: network_id.to_string(),
@@ -191,7 +193,6 @@ impl NetworkConfig {
                 Self::Evm {
                     network_id,
                     chain_id,
-                    control_scope,
                     metadata,
                 }
                 .validated()
@@ -212,10 +213,22 @@ impl NetworkConfig {
                         network_id: network_id.to_string(),
                     }
                 })?;
+                let Some(source_identity) = source_identity else {
+                    return Err(PortfolioConfigError::MissingBitcoinSourceIdentity {
+                        network_id: network_id.to_string(),
+                    });
+                };
+                let source_identity =
+                    BitcoinSourceIdentityId::new(source_identity).map_err(|source| {
+                        PortfolioConfigError::InvalidBitcoinSourceIdentity {
+                            network_id: network_id.to_string(),
+                            source,
+                        }
+                    })?;
                 Self::Bitcoin {
                     network_id,
                     bitcoin_network,
-                    control_scope,
+                    source_identity,
                     metadata,
                 }
                 .validated()
@@ -269,10 +282,13 @@ impl NetworkConfig {
         }
     }
 
-    /// Returns the stable control-plane scope for managed reads on this network.
-    pub fn control_scope(&self) -> &ControlScopeId {
+    /// Returns the Bitcoin source identity when this is a Bitcoin network.
+    pub fn source_identity(&self) -> Option<&BitcoinSourceIdentityId> {
         match self {
-            Self::Evm { control_scope, .. } | Self::Bitcoin { control_scope, .. } => control_scope,
+            Self::Evm { .. } => None,
+            Self::Bitcoin {
+                source_identity, ..
+            } => Some(source_identity),
         }
     }
 
@@ -802,9 +818,23 @@ pub enum PortfolioConfigError {
         /// Underlying scalar validation failure.
         source: PortfolioScalarError,
     },
-    /// `control_scope` did not satisfy the portfolio identifier grammar.
-    #[error("control_scope is invalid: {source}")]
-    InvalidNetworkControlScope {
+    /// EVM networks must not declare a Bitcoin source identity.
+    #[error("network `{network_id}` with family `evm` must not declare source_identity")]
+    UnexpectedEvmSourceIdentity {
+        /// Network id associated with the failure.
+        network_id: String,
+    },
+    /// Bitcoin networks require a source identity.
+    #[error("network `{network_id}` with family `bitcoin` must declare source_identity")]
+    MissingBitcoinSourceIdentity {
+        /// Network id associated with the failure.
+        network_id: String,
+    },
+    /// `source_identity` did not satisfy the local public id grammar.
+    #[error("network `{network_id}` source_identity is invalid: {source}")]
+    InvalidBitcoinSourceIdentity {
+        /// Network id associated with the failure.
+        network_id: String,
         /// Underlying scalar validation failure.
         source: PortfolioScalarError,
     },

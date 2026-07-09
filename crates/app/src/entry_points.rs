@@ -732,7 +732,6 @@ source_ref = "ethereum-mainnet"
                         "network_id": "ethereum-mainnet",
                         "family": "evm",
                         "chain_id": 1,
-                        "control_scope": "shared",
                         "metadata": {}
                     }
                 ],
@@ -792,7 +791,7 @@ source_ref = "ethereum-mainnet"
                         "network_id": "bitcoin-mainnet",
                         "family": "bitcoin",
                         "bitcoin_network": "main",
-                        "control_scope": "bitcoin-mainnet",
+                        "source_identity": "bitcoin-mainnet",
                         "metadata": {}
                     }
                 ],

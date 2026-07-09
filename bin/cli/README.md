@@ -685,8 +685,7 @@ The CLI's process-level configuration is intentionally narrow.
   runtime config paths.
 - Typed EVM contract requests use non-secret `signer_ref`; app assembly resolves it against the
   runtime config signer registry when mutation workflows require signing.
-- Portfolio configs may also use `control_scope` when source-selection partitioning is part of the
-  domain request identity.
+- Bitcoin portfolio configs use non-secret `source_identity` to select the semantic runtime route.
 
 - Typed EVM RPC note: per-request `rpc_url` override is not supported.
 - Typed EVM RPC runbook: [`../../docs/evm-rpc-routing.md`](../../docs/evm-rpc-routing.md)

@@ -83,7 +83,6 @@ fn facts_commands_use_public_evidence_only_services() {
         "RunPrivate",
         "audience:",
         "scope:",
-        "control_scope",
         "runtime_config",
         "MFM_RUNTIME_CONFIG_FILE",
     ] {

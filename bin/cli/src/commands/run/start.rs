@@ -305,7 +305,6 @@ mod tests {
                         "network_id": "ethereum-mainnet",
                         "family": "evm",
                         "chain_id": 1,
-                        "control_scope": "shared",
                         "metadata": {}
                     }
                 ],
@@ -366,7 +365,6 @@ quote_codes = ["USD"]
 network_id = "ethereum-mainnet"
 family = "evm"
 chain_id = 1
-control_scope = "shared"
 
 [portfolio.networks.metadata]
 

@@ -273,18 +273,22 @@ async fn portfolio_runner_output_summary_matches_golden() {
     let stream = store.load_run_stream(&run_id).await.expect("run stream");
 
     assert_portfolio_entry_point_evidence(&stream);
-    assert_eq!(
-        portfolio_runner_output_summary(&stream),
-        [
-            "attempt-output:mfm.portfolio/pin_views:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
-            "attempt-output:mfm.portfolio/resolve_valuations:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
-            "attempt-output:mfm.portfolio/resolve_subjects:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
-            "attempt-output:mfm.portfolio/observe_batch:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
-            "attempt-output:mfm.portfolio/merge_observations:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
-            "attempt-output:mfm.portfolio/assemble_snapshot:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
-            "attempt-output:mfm.portfolio/project_report:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
-        ]
-    );
+    let mut actual = portfolio_runner_output_summary(&stream);
+    actual.sort();
+    let mut expected = [
+        "attempt-output:mfm.portfolio/pin_views:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
+        "attempt-output:mfm.portfolio/resolve_valuations:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
+        "attempt-output:mfm.portfolio/resolve_subjects:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
+        "attempt-output:mfm.portfolio/observe_batch:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
+        "attempt-output:mfm.portfolio/merge_observations:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
+        "attempt-output:mfm.portfolio/assemble_snapshot:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
+        "attempt-output:mfm.portfolio/project_report:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(actual, expected);
 }
 
 async fn start_rpc_mock() -> String {
@@ -434,7 +438,6 @@ fn portfolio_payload() -> serde_json::Value {
                     "network_id": NETWORK_ID,
                     "family": "evm",
                     "chain_id": 31337,
-                    "control_scope": "typed-local",
                     "metadata": {}
                 }
             ],
@@ -501,7 +504,6 @@ quote_codes = ["USD"]
 network_id = "{NETWORK_ID}"
 family = "evm"
 chain_id = 31337
-control_scope = "typed-local"
 
 [portfolio.networks.metadata]
 

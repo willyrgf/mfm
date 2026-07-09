@@ -3,7 +3,7 @@ use std::ops::Deref;
 use std::str::FromStr;
 
 use mfm_evm_core::encoding::normalize_address;
-use mfm_ids::{CheckedStringError, StableAuthorKey};
+use mfm_ids::{CheckedStringError, LocalPublicId, StableAuthorKey};
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +35,16 @@ pub enum PortfolioScalarError {
         kind: &'static str,
         /// Rejected scalar value.
         value: String,
+    },
+    /// A scalar was not a checked local public id.
+    #[error("{kind} `{value}` did not satisfy local public id grammar: {source}")]
+    InvalidLocalPublicId {
+        /// Human-readable scalar kind.
+        kind: &'static str,
+        /// Rejected scalar value.
+        value: String,
+        /// Underlying local public id grammar error.
+        source: CheckedStringError,
     },
 }
 
@@ -219,13 +229,105 @@ portfolio_id_type!(
     "Stable typed Aave reserve identifier."
 );
 
-portfolio_id_type!(
-    ControlScopeId,
-    "control_scope",
-    "control-scope-id",
-    "mfm.portfolio.id.control_scope",
-    "Stable typed portfolio control-plane scope identifier."
-);
+/// Stable typed Bitcoin source identity selected by portfolio network config.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, MfmValue)]
+#[serde(try_from = "String", into = "String")]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "bitcoin-source-identity",
+    schema = "mfm.portfolio.id.bitcoin_source_identity",
+    transparent_string
+)]
+pub struct BitcoinSourceIdentityId {
+    raw: String,
+}
+
+impl BitcoinSourceIdentityId {
+    /// Creates a checked Bitcoin source identity.
+    pub fn new(value: impl Into<String>) -> Result<Self, PortfolioScalarError> {
+        let raw = value.into();
+        let raw = LocalPublicId::new(&raw)
+            .map_err(|source| PortfolioScalarError::InvalidLocalPublicId {
+                kind: "source_identity",
+                value: raw.clone(),
+                source,
+            })?
+            .into_string();
+        Ok(Self { raw })
+    }
+
+    /// Returns the canonical string representation.
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    /// Consumes this authority into its canonical string representation.
+    pub fn into_string(self) -> String {
+        self.raw
+    }
+}
+
+impl AsRef<str> for BitcoinSourceIdentityId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Deref for BitcoinSourceIdentityId {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for BitcoinSourceIdentityId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for BitcoinSourceIdentityId {
+    type Err = PortfolioScalarError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for BitcoinSourceIdentityId {
+    type Error = PortfolioScalarError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<&str> for BitcoinSourceIdentityId {
+    type Error = PortfolioScalarError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<BitcoinSourceIdentityId> for String {
+    fn from(value: BitcoinSourceIdentityId) -> Self {
+        value.raw
+    }
+}
+
+impl PartialEq<&str> for BitcoinSourceIdentityId {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<BitcoinSourceIdentityId> for &str {
+    fn eq(&self, other: &BitcoinSourceIdentityId) -> bool {
+        *self == other.as_str()
+    }
+}
 
 portfolio_id_type!(
     KeystoreEntryId,

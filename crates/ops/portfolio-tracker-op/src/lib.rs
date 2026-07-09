@@ -494,7 +494,7 @@ mod tests {
                 NetworkFamilyConfig::Evm,
                 Some(1),
                 None,
-                "shared".to_owned(),
+                None,
                 BTreeMap::new(),
             )
             .expect("valid network config")],

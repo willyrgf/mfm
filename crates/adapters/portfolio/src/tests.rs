@@ -188,7 +188,7 @@ fn bitcoin_observe_config() -> (NetworkConfig, ObserveBatchConfig) {
         NetworkFamilyConfig::Bitcoin,
         None,
         Some("main".to_owned()),
-        "bitcoin-mainnet".to_owned(),
+        Some("bitcoin-mainnet".to_owned()),
         BTreeMap::new(),
     )
     .expect("network");

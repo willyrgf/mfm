@@ -17,7 +17,7 @@ fn test_network(network_id: &str, chain_id: u64) -> NetworkConfig {
         NetworkFamilyConfig::Evm,
         Some(chain_id),
         None,
-        "shared".to_owned(),
+        None,
         BTreeMap::new(),
     )
     .expect("valid network config")
@@ -336,7 +336,7 @@ fn test_evm_network(network_id: &str, chain_id: u64) -> NetworkConfig {
         NetworkFamilyConfig::Evm,
         Some(chain_id),
         None,
-        "shared".to_owned(),
+        None,
         BTreeMap::new(),
     )
     .expect("valid EVM network")
@@ -348,7 +348,7 @@ fn test_bitcoin_network() -> NetworkConfig {
         NetworkFamilyConfig::Bitcoin,
         None,
         Some("main".to_owned()),
-        "bitcoin-mainnet".to_owned(),
+        Some("bitcoin-mainnet".to_owned()),
         BTreeMap::new(),
     )
     .expect("valid Bitcoin network")

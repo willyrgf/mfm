@@ -870,7 +870,6 @@ fn portfolio_snapshot_config() -> serde_json::Value {
                     "network_id": PORTFOLIO_NETWORK_ID,
                     "family": "evm",
                     "chain_id": 31337,
-                    "control_scope": "rest-control",
                     "metadata": {}
                 }
             ],

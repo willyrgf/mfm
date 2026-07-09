@@ -1131,12 +1131,12 @@ pub fn network_read_intent_for_network(network: &NetworkConfig) -> PortfolioNetw
         },
         NetworkConfig::Bitcoin {
             network_id,
-            control_scope,
+            source_identity,
             bitcoin_network,
             ..
         } => PortfolioNetworkReadIntent::Bitcoin {
             network_id: network_id.to_string(),
-            source_identity: control_scope.to_string(),
+            source_identity: source_identity.to_string(),
             bitcoin_network: bitcoin_network.clone(),
         },
     }
@@ -1191,14 +1191,14 @@ pub fn observe_batch_read_intent(
             }
             NetworkConfig::Bitcoin {
                 network_id,
-                control_scope,
+                source_identity,
                 bitcoin_network,
                 ..
             } => {
                 ensure_bitcoin_anchor(anchor)?;
                 Ok(PortfolioBalanceReadIntent::BitcoinNativeBalance {
                     network_id: network_id.to_string(),
-                    source_identity: control_scope.to_string(),
+                    source_identity: source_identity.to_string(),
                     bitcoin_network: bitcoin_network.clone(),
                     address: wallet_btc_address(config)?,
                     anchor: anchor.clone(),

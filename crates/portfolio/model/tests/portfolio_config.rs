@@ -43,7 +43,7 @@ fn validated_config_wrappers_roundtrip_and_reject_duplicate_ids() {
         NetworkFamilyConfig::Evm,
         Some(1),
         None,
-        "shared".to_owned(),
+        None,
         BTreeMap::new(),
     )
     .expect("network config");
@@ -83,6 +83,54 @@ fn validated_config_wrappers_roundtrip_and_reject_duplicate_ids() {
 }
 
 #[test]
+fn network_config_uses_bitcoin_source_identity_only() {
+    let evm_with_source = NetworkConfig::new(
+        "ethereum-mainnet".to_owned(),
+        NetworkFamilyConfig::Evm,
+        Some(1),
+        None,
+        Some("ethereum-mainnet".to_owned()),
+        BTreeMap::new(),
+    )
+    .expect_err("EVM source identity must be rejected");
+    assert!(matches!(
+        evm_with_source,
+        PortfolioConfigError::UnexpectedEvmSourceIdentity { network_id }
+            if network_id == "ethereum-mainnet"
+    ));
+
+    let bitcoin_missing_source = NetworkConfig::new(
+        "bitcoin-mainnet".to_owned(),
+        NetworkFamilyConfig::Bitcoin,
+        None,
+        Some("main".to_owned()),
+        None,
+        BTreeMap::new(),
+    )
+    .expect_err("Bitcoin source identity is required");
+    assert!(matches!(
+        bitcoin_missing_source,
+        PortfolioConfigError::MissingBitcoinSourceIdentity { network_id }
+            if network_id == "bitcoin-mainnet"
+    ));
+
+    let bitcoin_invalid_source = NetworkConfig::new(
+        "bitcoin-mainnet".to_owned(),
+        NetworkFamilyConfig::Bitcoin,
+        None,
+        Some("main".to_owned()),
+        Some("portfolio/main-wallet".to_owned()),
+        BTreeMap::new(),
+    )
+    .expect_err("Bitcoin source identity uses local public id grammar");
+    assert!(matches!(
+        bitcoin_invalid_source,
+        PortfolioConfigError::InvalidBitcoinSourceIdentity { network_id, .. }
+            if network_id == "bitcoin-mainnet"
+    ));
+}
+
+#[test]
 fn validated_portfolio_bundle_indexes_normalized_authority() {
     let portfolio = decode_portfolio_config(&json!({
         "portfolio_id": "portfolio_main",
@@ -92,7 +140,6 @@ fn validated_portfolio_bundle_indexes_normalized_authority() {
                 "network_id": "ethereum-mainnet",
                 "family": "evm",
                 "chain_id": 1,
-                "control_scope": "shared",
                 "metadata": {}
             }
         ],
@@ -558,14 +605,12 @@ fn canonical_config_json() -> Value {
                 "network_id": "ethereum-mainnet",
                 "family": "evm",
                 "chain_id": 1,
-                "control_scope": "shared",
                 "metadata": {}
             },
             {
                 "network_id": "arbitrum-mainnet",
                 "family": "evm",
                 "chain_id": 42161,
-                "control_scope": "shared",
                 "metadata": {}
             }
         ],

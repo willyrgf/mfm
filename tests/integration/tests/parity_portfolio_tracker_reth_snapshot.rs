@@ -7,14 +7,9 @@ mod support;
 
 const NETWORK_ID: &str = "reth-local";
 const SYMBOL_ID: &str = "eth.native.reth-local";
-const CONTROL_SCOPE: &str = "parity/portfolio-snapshot/eth-only";
 const DEFAULT_PARITY_RETH_HTTP_PORT: &str = "8565";
 
-fn canonical_portfolio_snapshot_payload(
-    wallet_address: &str,
-    chain_id: u64,
-    control_scope: &str,
-) -> serde_json::Value {
+fn canonical_portfolio_snapshot_payload(wallet_address: &str, chain_id: u64) -> serde_json::Value {
     serde_json::json!({
         "portfolio": {
             "portfolio_id": "reth-eth-only",
@@ -24,7 +19,6 @@ fn canonical_portfolio_snapshot_payload(
                     "network_id": NETWORK_ID,
                     "family": "evm",
                     "chain_id": chain_id,
-                    "control_scope": control_scope,
                     "metadata": {}
                 }
             ],
@@ -135,7 +129,6 @@ async fn rpc_call(rpc_url: &str, method: &str, params: serde_json::Value) -> ser
 #[tokio::test]
 async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
     let rpc_url = required_rpc_url();
-    let control_scope = format!("{CONTROL_SCOPE}.{}", uuid::Uuid::new_v4().simple());
 
     let chain_id_hex = rpc_call(&rpc_url, "eth_chainId", serde_json::json!([])).await;
     let chain_id = chain_id_hex
@@ -151,7 +144,6 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
     let response = support::run_portfolio_snapshot(canonical_portfolio_snapshot_payload(
         wallet_address,
         chain_id,
-        &control_scope,
     ))
     .await;
     assert_eq!(response.run.run_mode, RunModeStatus::Completed);

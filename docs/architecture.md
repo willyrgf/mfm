@@ -419,9 +419,7 @@ Keep these concepts distinct:
 
 - `network_id`: semantic domain network label
 - `expected_chain_id`: concrete chain identity returned by the network
-- `source_id`: process-local runtime source routing key, not workflow semantic config unless the
-  selected source itself is domain intent
-- `control_scope`: MFM execution partition, only if truly semantic
+- `source_identity`: non-secret source selection, only when the selected source is domain intent
 - `signer_ref`: non-secret signer reference
 
 Local development chains must not be labeled as mainnet networks unless they are actually mainnet.

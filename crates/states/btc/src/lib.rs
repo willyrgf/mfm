@@ -1438,7 +1438,7 @@ fn collector_checkpoint_query_input(
             reason: error.to_string(),
         })?,
         FactQueryScope::new(FactAudience::Control, FactVisibilityScope::Default),
-        ScopeDecisionEvidence::new(control_scope_decision_hash()),
+        ScopeDecisionEvidence::new(checkpoint_scope_decision_hash()),
         vec![
             query_predicate(
                 "subject.collector_kind",
@@ -1540,10 +1540,10 @@ fn validate_non_secret_label(name: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn control_scope_decision_hash() -> ContentDigest {
+fn checkpoint_scope_decision_hash() -> ContentDigest {
     ContentDigest::from_digest(
         DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(b"mfm.bitcoin.collector-checkpoint.control-scope.default.v1"),
+        sha256_digest_bytes(b"mfm.bitcoin.collector-checkpoint.scope.default.v1"),
     )
 }
 
