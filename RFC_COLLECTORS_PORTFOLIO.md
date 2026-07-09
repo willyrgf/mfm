@@ -1,26 +1,24 @@
 # RFC: Fact-Backed Portfolio Collectors And Reports
 
-Status: Draft
+Status: Draft (architect-hardened)
 
 ## Summary
 
-`portfolio_snapshot` should not be a live crawler.
+`portfolio_snapshot` must not be a live crawler.
 
-The current portfolio workflow attempts to pin chains, read wallet balances, value positions, and
-assemble a report in one run. That works for narrow configured examples, but it is the wrong shape
-for real portfolios. A portfolio view may require Bitcoin balances, EVM native balances, ERC-20
-balances, token discovery, protocol positions, prices, metadata, freshness checks, and coverage
-proofs. Pulling all of that on the fly makes the report workflow slow, incomplete, hard to replay,
-and easy to misrepresent as complete.
+The current portfolio workflow pins chains, reads wallet balances, values positions, and assembles a
+report in one run. That shape works for narrow configured demos and fails for real portfolios. A
+portfolio view may need Bitcoin balances, EVM native balances, ERC-20 balances, token discovery,
+protocol positions, prices, metadata, freshness, and coverage proofs. Doing that on the fly makes
+the report slow, incomplete, hard to replay, and easy to misrepresent as complete.
 
-The target architecture is:
+Target architecture:
 
 ```text
 protocol IO (transports)
   -> family adapter binds observe/record runners
-  -> family collector Operation (snapshot or progressive pattern)
+  -> family collector Operation (snapshot re-read near-term; progressive later)
   -> durable source-near Platform data facts (each with an explicit anchor)
-     (+ Control cursors only when progressive)
   -> portfolio report Operation
      (Platform fact-index only; certified selection policy)
   -> PortfolioSnapshot + PortfolioReport public outputs
@@ -29,7 +27,7 @@ protocol IO (transports)
 
 Collectors produce reusable facts. Portfolio reporting consumes facts only.
 
-**As-of is a single authority model (long-term and near-term):**
+**As-of is a single authority model forever:**
 
 1. Every Platform data fact carries its own source-near anchor (chain height/hash, oracle/time, etc.).
 2. The certified report selects facts under a named selection policy family
@@ -46,7 +44,7 @@ Collectors produce reusable facts. Portfolio reporting consumes facts only.
 
 ```text
 collectors: observe(source @ joint anchor) → Platform data facts
-report:     certified policy → select facts → Observations + network_pins(from selected anchors)
+report:     certified policy → SelectHoldings → Observations + network_pins(from selected anchors)
 replay:     recorded fact-query evidence only
 ```
 
@@ -56,12 +54,26 @@ Public surfaces after cutover:
 |---|---|
 | `portfolio_snapshot` | fact-backed report only |
 | collector entry points / internal ops | source IO that records facts |
-| CLI/docs "full refresh" | external multi-run orchestration (collect, then report), not a dual-IO certified op |
+| CLI/docs "full refresh" | external multi-run orchestration (collect, then report); never a mixed certified draft |
 
 This RFC is a breaking redesign on a breaking-change branch. Dual live+facts paths, silent
-fallbacks, and crate-per-collector scaffolding are rejected. Live portfolio pin and observe code is
-deleted when the fact-backed report lands. Delivery is **one PR** with progressive **commits**; git
-history is recovery.
+fallbacks, soft-success partial snapshots, and crate-per-collector scaffolding are rejected. Live
+portfolio pin and observe code is deleted when the fact-backed report lands. Delivery is **one PR**
+with progressive **commits**; git history is recovery.
+
+## Project rules
+
+These rules govern every commit on this branch:
+
+0. Prefer fewer concepts, paths, types, and duplicated responsibilities. Reduce LOC without cryptic
+   code.
+1. No backward compatibility. Do not preserve live crawl APIs, dual IO paths, or soft-success
+   snapshot shapes for callers of the old design.
+2. No fallbacks. Delete old code when the replacement lands. Git history is recovery.
+3. Progressive commits within one PR. Keep each commit reviewable and local.
+4. Follow `docs/code-quality.md` for every code, test, documentation, build, and workflow change.
+5. No dual public truth on the merge tip. Intermediate WIP commits may break portfolio; the tip
+   intended for merge must not keep live pin/observe beside facts.
 
 ## Problem
 
@@ -83,7 +95,7 @@ the data universe it searched.
 ### Zero Is Not The Same As Complete
 
 If a report cannot discover all tokens, prices, or protocol positions, a zero total is misleading.
-The workflow needs to distinguish:
+Collection and reporting must distinguish:
 
 - complete at anchor
 - configured assets only
@@ -93,28 +105,31 @@ The workflow needs to distinguish:
 - source unsupported
 - source failed
 
-Coverage is a first-class output of collection. It is not a UI detail.
+Coverage is a first-class output of collection. It is not a UI detail. Public report success under
+`configured_symbols` must remain visibly incomplete discovery: success means “all configured
+requirements were selected,” not “the wallet was fully scanned.”
 
 ### Reporting And Collection Have Different Lifecycles
 
 Collection is source-facing and operational:
 
-- progressive collectors may need control cursors
 - collectors may run periodically
 - collectors may fan out by address, chain, token, price source, or protocol at planning time
 - collectors may use different providers over time
 - collectors may retry or lag behind the latest chain head
+- progressive collectors (later) may need control cursors; progressive chain-head / Control cursor
+  facts are **never** report pin authority
 
 Reporting is deterministic and compositional:
 
-- it should select facts by subject, coverage, and a certified selection policy over fact anchors
-- it should materialize fact response artifacts
-- it should normalize facts into the existing portfolio `Observation` view (including anchors)
-- it should produce stable public outputs (`network_pins` as projection of selected anchors)
-- replay should use recorded fact-query evidence, not live IO
+- it selects facts by subject, coverage, and a certified selection policy over fact anchors
+- it materializes fact response artifacts under recorded query evidence
+- it normalizes facts into the existing portfolio `Observation` view (including anchors)
+- it produces stable public outputs (`network_pins` as projection of selected anchors)
+- replay uses recorded fact-query evidence, not live IO
 
-Putting both lifecycles in one state graph creates a workflow that is hard to certify, hard to
-resume, and hard to explain.
+Putting both lifecycles in one certified state graph creates a workflow that is hard to certify,
+hard to resume, and hard to explain. Mixed certified collectors+report drafts are **rejected**.
 
 ### Live Portfolio Graph Is Dual IO Today
 
@@ -130,7 +145,8 @@ ResolveSubjects
   -> ProjectReport
 ```
 
-Both `PinViews` and `ObserveBatch` are live chain IO. Cutover deletes **both**.
+Both `PinViews` and `ObserveBatch` are live chain IO. Cutover deletes **both**, plus
+`MergeObservations` when selection owns the full observation set.
 
 **Migration of as-of authority:**
 
@@ -145,9 +161,8 @@ as-of is later expressed as selection **bounds** (filters), not as a pin table t
 
 ### Collector Surface Area Will Explode Without A Standard
 
-Near-term collectors already include chain-head, Bitcoin balance, EVM native balance, and EVM token
-balance. Later collectors add discovery, metadata, prices, and protocol positions. Without a
-minimal standard:
+Near-term collectors already include chain-head, Bitcoin balance, EVM native balance, and later EVM
+token balance. Without a minimal standard:
 
 - N nearly-identical op crates appear for thin topology glue
 - checkpoint/control machinery is copied with wrong watermark semantics
@@ -155,7 +170,8 @@ minimal standard:
 - a mega "collector framework" freezes tomorrow's discovery into today's balance reads
 
 The expensive mistakes are dual IO truth paths and framework soup. The cheap mistake is pasting a
-small `expand` again. Optimize for the expensive mistakes.
+small `expand` again. Optimize for the expensive mistakes. Prefer family monocrates and shared
+runners only when a second real consumer exists.
 
 ## Goals
 
@@ -165,15 +181,16 @@ small `expand` again. Optimize for the expensive mistakes.
 - Add durable source-near facts for holdings, prices, metadata, and coverage; each data fact carries
   an explicit time/chain anchor.
 - Use a **single long-term as-of authority**: fact anchors + certified selection policy;
-  `network_pins` are projection only.
-- Make missing, stale, incomplete, or unsupported source data explicit report **run** failures.
+  `network_pins` are projection only forever.
+- Make missing, incomplete, or unsupported required data explicit report **run** failures.
 - Use recorded fact-query evidence for report replay.
 - Keep chain/indexer/oracle IO in collectors, adapters, transports, and provider backends.
 - Keep operation crates deterministic and states free of ambient IO.
-- Use two collector control patterns without inventing a collector framework.
 - Organize collectors by family monocrates so growth is O(families), not O(collectors).
-- Prefer fewer concepts: no report pin table, no pin-facts as report authority, no dual pin paths.
-- Support configured symbols before open-ended token discovery.
+- Prefer fewer concepts: no report pin table, no pin-facts as report authority, no dual pin paths,
+  no soft-success error vectors on public snapshots.
+- Support configured symbols before open-ended token discovery, with public honesty that success is
+  not full discovery.
 - Delete live portfolio pin and observe with the fact-backed report on this branch.
 - Deliver as one PR with progressive commits; do not leave dual public truth on the merge tip.
 
@@ -204,6 +221,11 @@ small `expand` again. Optimize for the expensive mistakes.
 - Do not require a global multi-chain block identity for portfolio truth (independent L1s yield
   independent pins).
 - Do not ship soft-success snapshots with empty/zeroed required holdings under `configured_symbols`.
+- Do not keep `PortfolioSnapshot.errors`, `PortfolioSnapshotError`, or intermediate soft error
+  vectors that enable partial public success.
+- Do not certify a mixed collectors+report draft.
+- Do not keep view-dependent valuation readers (`DirectPrice` and peers) on the cutover surface.
+- Do not treat `limit=1` fact queries as selection authority.
 
 ---
 
@@ -221,22 +243,29 @@ exist on the app public-facts surface (CLI/REST DTOs). That surface is **not** r
 **Platform** audience reads with the same evidence class as Control reads today. Do not invent a
 second query stack. Do not route report semantics through public-facts HTTP/CLI.
 
-Normative sequence for each report fact selection:
+Normative sequence for report fact selection:
 
 ```text
 compile canonical fact query plan (from certified report config + subject projection + policy)
-  -> FactIndexRead (Platform audience)
+  -> FactIndexRead (Platform audience) over the requirement set
   -> authenticated receipt + trust root + selection evidence
   -> hydrate retained FactResponse artifact(s)
   -> validate selection cardinality and acceptability
+  -> SelectHoldings (network-coherent policy over full acceptable candidate sets)
   -> normalize into Observation (including fact anchor)
 ```
+
+Prefer **one selection frontier/receipt** for the requirement set when the capability allows it.
+Do not invent N independent authority receipts when one receipt can pin the candidate inputs for
+the whole select step.
 
 Replay rules:
 
 - replay uses recorded fact-query evidence and retained response artifacts only
 - replay must not re-query the live index frontier and accept newer facts
 - public-facts API and ambient store SQL are forbidden as semantic authority for report states
+- selection inputs must be receipt-pinned or fully retained so network-coherent selection is
+  deterministic on replay
 
 Hydration is mandatory for report holding facts: receipt alone is not enough when the balance
 payload lives in the retained response artifact.
@@ -248,9 +277,8 @@ Who may call Platform fact-index in certified runs:
 - collectors must not Platform-query prior portfolio holdings (review policy; observe is source IO)
 
 Commit series A extracts a shared fact-index query path (audience-agnostic request, hydrate,
-evidence) so portfolio does not copy the BTC Control runner. Packaging may stay in an existing
-adapter tree temporarily; the shared functions must exist on the branch before report cutover
-commits.
+evidence) so portfolio does not copy the BTC Control runner. That shared fact kit is intentional
+packaging work at A / second consumer — not “when cheap.”
 
 ### 2. Anchors On Facts (As-Of Model) — Single Authority
 
@@ -263,7 +291,7 @@ Two different concepts must not be conflated:
 | Selection policy | Hash-defining rule choosing which acceptable fact wins per requirement | **Yes — certified** |
 | Optional as-of bounds | Certified **filters** inside selection policy (later) | Yes as policy params, **not** as pins |
 | Public `network_pins` | Projection of selected required holding anchors | **No — descriptive output only** |
-| Progressive chain-head / Control cursor facts | Collector ops | **Not** report pin authority |
+| Progressive chain-head / Control cursor facts | Collector ops only | **Not** report pin authority |
 
 **Decision (long-term and near-term):** there is **one** as-of authority for report truth:
 **anchors on selected facts**, under a certified selection policy.
@@ -271,13 +299,14 @@ Two different concepts must not be conflated:
 - No separate hash-defining report pin table.
 - No pin-facts as report pin authority.
 - No live `PinViews`.
-- Progressive chain-head / Control cursor facts remain collector ops only.
+- Progressive chain-head / Control cursor facts remain collector ops only and **must never** become
+  report pin authority.
 - Optional historical bounds are parameters of the **same selection policy family**, not a parallel
   path where `network_pins` may come from either config or facts.
 
 ```text
 collectors: observe(source @ joint anchor) → Platform data facts
-report:     certified policy → select facts → Observations + network_pins(from selected anchors)
+report:     certified policy → SelectHoldings → Observations + network_pins(from selected anchors)
 replay:     recorded fact-query evidence only
 ```
 
@@ -307,8 +336,10 @@ group required holdings by network
 
 for each network group G:
   for each holding h in G:
-    load acceptable Platform candidates for h
+    load the full acceptable Platform candidate set for h
       (subject predicates + coverage allow-list + source_status allow-list)
+    // Candidate completeness is mandatory: full acceptable sets.
+    // limit=1 is never selection authority.
     if any holding has zero candidates -> missing_fact
 
   let common_anchors = intersection over h in G of
@@ -323,7 +354,8 @@ for each network group G:
   for each holding h in G:
     select the unique acceptable candidate at chosen_anchor
     if multiple candidates at same subject+chosen_anchor:
-      order by store_commit_order desc, then fact_claim_id desc  // v1 LWW
+      order by store_commit_order desc
+      then, only if clean and available, fact_claim_id desc  // secondary only if clean
       accept first
     if zero at chosen_anchor after filters -> missing_fact (should not happen if intersection correct)
 
@@ -333,13 +365,15 @@ if plan/receipt cardinality violated after policy -> ambiguous_facts
 Acceptability filters apply before intersection and selection. Do **not** take raw latest-per-holding
 with `limit=1` and only then check network coherence.
 
-**Same-subject / same-anchor conflicts (v1):**
+**Same-subject / same-anchor conflicts (cutover):**
 
-- Selection is deterministic last-write-wins via `store_commit_order` then `fact_claim_id`.
+- Selection is deterministic last-write-wins via `store_commit_order`.
+- Secondary key (`fact_claim_id` or equivalent) is used **only if clean and available** on the
+  retained selection inputs; do not invent a dual conflict mode.
 - Different `semantic_source_identity` (or family equivalent) is a different subject — not a conflict.
-- Same subject + same anchor + different response payload: v1 LWW is allowed and documented.
-  Optional later: fail closed if two acceptable candidates share subject+anchor but differ in
-  content-addressed response hash (`conflicting_facts`). Not required for cutover.
+- Same subject + same anchor + different response payload: cutover LWW is allowed and documented.
+  Optional later `conflicting_facts` (fail closed on content-hash mismatch) is series E work and is
+  **not** a cutover error code.
 
 **Long-term extension (same authority model; not dual path):**
 
@@ -355,6 +389,7 @@ same network-coherent selection, restricted to candidates with
 Optional later strict mode: selected anchor must equal bound or fail `as_of_not_exact`. Default is
 upper-bound filter with **actual** selected anchors projected to `network_pins`. Bounds do not invent
 missing history; missing data still fails `missing_fact` / `no_common_network_anchor`.
+`as_of_not_exact` is **not** a cutover error code.
 
 Recollect-at-bound is a **collector** recipe. Report stays facts-only and never live-pins.
 
@@ -365,7 +400,7 @@ Recollect-at-bound is a **collector** recipe. Report stays facts-only and never 
 - Under `latest-network-coherent.v1`, same-network selected holdings already share one
   `(height, hash)` by construction; project that pin.
 - If any residual disagreement appears (bug / wrong policy) → run fails
-  `inconsistent_network_anchors`.
+  `inconsistent_network_anchors` (guard only; not a product soft path).
 - Do **not** invent pins from live chain head, report config, or chain-head facts.
 - Do **not** maintain a parallel pin table that can desync from selected facts.
 - Do **not** use `network_pins` as input to selection (no feedback loop).
@@ -385,11 +420,11 @@ Recollect-at-bound is a **collector** recipe. Report stays facts-only and never 
 
 | Hazard | Handling |
 |---|---|
-| Tip race same network (collect A at H, B at H+1) | Network-coherent selection picks the newest **common** anchor if one exists (e.g. both at H), else `no_common_network_anchor`. Collectors that write multiple subjects on one network **SHOULD** share one observe tip so the newest tip is common. |
+| Tip race same network (collect A at H, B at H+1) | Network-coherent selection picks the newest **common** anchor if one exists (e.g. both at H), else `no_common_network_anchor`. Collectors that write multiple subjects on one network in one batch **MUST** share one observe tip so the newest tip is common. |
 | Tip race across networks | Allowed; pins differ by network. |
 | Reorg after fact write | Facts remain historical observations. New collectors write superseding higher/finalized anchors. Network-coherent latest moves forward when all holdings have the new anchor. Do not silently rewrite old facts. |
 | Same height, different hash | Distinct anchors; intersection requires matching hash. Cutover kinds mandate hash so fork siblings cannot be silently mixed. |
-| Finality | Collectors may encode finality metadata on progressive facts. Report acceptability may later filter by fact-carried finality — never via live head checks in the report. |
+| Finality | Collectors may encode finality metadata on progressive facts later. Report acceptability may later filter by fact-carried finality — never via live head checks in the report. |
 
 #### Multi-run full refresh (no pin handoff)
 
@@ -400,6 +435,7 @@ collectors write Platform facts with observed anchors
 ```
 
 There is no collect→pin_table→report glue. Collectors and report share the store's fact index only.
+Composition is external multi-run only.
 
 #### Prices / second time axis (same model, two anchor families)
 
@@ -461,30 +497,42 @@ These are hash-defining certified config or fixed policy digests. They are not a
 
 **v1 `configured_symbols` is hard-fail only.** Any required-symbol selection or normalization
 failure fails the **state/run**. Do not emit a successful public snapshot with empty wallets or
-zeroed required holdings. Soft `PortfolioSnapshot.errors` partial success is **out of scope** until
-a real partial-success product requirement exists.
+zeroed required holdings.
 
-Stable run failure codes (map to CLI/public error surface):
+**Soft-success DELETE (cutover and merge tip):**
+
+- Delete `PortfolioSnapshot.errors` as a public soft-success channel.
+- Delete `PortfolioSnapshotError` and intermediate soft error vectors used to green-path partial
+  holdings.
+- Delete assembly paths that zero required holdings and still report success.
+- Partial-success product modes are out of scope until a real requirement exists; they are not
+  reintroduced as a silent default.
+
+**Minimal cutover error codes** (map to CLI/public error surface):
 
 | Code | When |
 |---|---|
-| `missing_fact` | no acceptable Platform fact for a required subject |
+| `missing_fact` | no acceptable Platform fact for a required subject after filters (includes former unacceptable coverage / source status outcomes) |
 | `no_common_network_anchor` | network group has acceptable facts but empty intersection of anchors |
-| `unacceptable_coverage` | only candidates failed coverage allow-list (if distinguished before empty set) |
-| `unacceptable_source_status` | only candidates failed source status allow-list |
-| `ambiguous_facts` | selection cardinality violated after policy |
-| `inconsistent_network_anchors` | residual same-network anchor disagreement after selection (bug/guard) |
 | `unsupported_requirement` | portfolio requirement has no projection rule |
-| `as_of_not_exact` | **later only**, strict equality historical mode |
-| `conflicting_facts` | **optional later**, same subject+anchor with different response hash |
+| `ambiguous_facts` | selection cardinality violated after policy / receipt plan |
 
-Prefer collapsing filter-empty outcomes to `missing_fact` when simpler; keep
-`no_common_network_anchor` distinct from `missing_fact` so operators can tell "no data" from "data
-exists but not cohered". Do **not** introduce `pin_mismatch` (that code implies a pin table).
+Fold former `unacceptable_coverage` and `unacceptable_source_status` into `missing_fact` at
+cutover. Keep `no_common_network_anchor` distinct from `missing_fact` so operators can tell "no
+data" from "data exists but not cohered". Do **not** introduce `pin_mismatch`.
 
-Valuation placeholders: fixed unit prices (including intentional dual-mainnet zeros) are not
-selection failures. View-dependent valuation readers (`DirectPrice`) are config-rejected until price
-facts land.
+**Not cutover codes** (series E or guards only if needed later):
+
+| Code | Status |
+|---|---|
+| `as_of_not_exact` | series E strict historical mode only |
+| `conflicting_facts` | optional series E content-hash conflict mode only |
+| `inconsistent_network_anchors` | residual guard after selection (bug), not product soft path |
+
+Valuation at cutover: fixed unit prices (including intentional dual-mainnet zeros) are pure config
+placeholders, not selection failures. View-dependent valuation readers (`DirectPrice` and peers) are
+**deleted from the cutover surface**. They may be reintroduced in series E as new work when price
+facts land — not preserved under feature flags.
 
 ### 5. Snapshot Collector Observe Anchor Integrity (Writers)
 
@@ -499,19 +547,25 @@ The observation is valid only if the balance (or holding payload) was actually r
 recorded `(height, hash)`. Multi-cap composition (head read then balance read) vs a single combined
 RPC is packaging; **proving balance@anchor** is not.
 
+**Prove-before-write monomorphic must-rules (no mega trait):**
+
+- **EVM:** balance/read path **MUST** bind to block hash (prefer EIP-1898 block-hash selectors, or
+  explicit hash verification around the read). Missing hash, tip drift, or hash mismatch fails closed
+  before Platform write.
+- **BTC:** pin-in balance requests **MUST** carry/verify the best block used (height **and** hash).
+  Tip mismatch or missing hash fails closed before Platform write.
+- Encode these as monomorphic family rules on the observe/normalize path. Do **not** invent a
+  generic prove-before-write mega trait or cross-family capability soup.
+
 Normative write rules for cutover kinds:
 
 - Recorded anchor height **and** block hash are mandatory on the observation and the Platform fact.
-- The domain capability / adapter path must pin the balance read to that hash (or verify the provider
-  response against it) before normalize succeeds.
-  - **EVM:** prefer EIP-1898 block-hash selectors, or explicit hash verification around the read.
-  - **BTC:** existing pin-in balance requests must carry/verify the best block used; tip mismatch
-    fails closed before write.
 - Fail closed before Platform write if tip drifts, hash mismatches, or hash is missing.
 - Report trusts admitted facts + retained evidence; it does **not** re-verify against live chain.
 
-Collectors that write multiple subjects on one network **SHOULD** resolve tip once and share that
-joint anchor across the batch so the newest tip is a common anchor for network-coherent selection.
+Collectors that write multiple subjects on one network in one batch **MUST** resolve tip once and
+share that joint anchor across the batch so the newest tip is a common anchor for network-coherent
+selection.
 
 Report never supplies pins.
 
@@ -519,13 +573,12 @@ Report never supplies pins.
 
 | Surface | Meaning after cutover |
 |---|---|
-| `portfolio_snapshot` | **report-only**: resolve subjects, query Platform facts under selection policy, project report |
-| collector ops | source IO only; record Platform data facts (+ Control cursors if progressive) |
+| `portfolio_snapshot` | **report-only**: resolve subjects, select Platform holdings under policy, project report |
+| collector ops | source IO only; record Platform data facts (+ Control cursors if progressive later) |
 | full refresh | **external** multi-run recipe: run required collectors, then run `portfolio_snapshot` |
 
-A single certified draft that mixes collectors and report is optional later. Not required for
-cutover. Kernel multi-run orchestration is not a new authority layer; CLI/docs/app recipes are
-non-authority glue.
+A single certified draft that mixes collectors and report is **rejected**. Kernel multi-run
+orchestration is not a new authority layer; CLI/docs/app recipes are non-authority glue.
 
 Discovery that changes required symbols always creates a new planning boundary / new certified run.
 
@@ -544,12 +597,15 @@ fallback beside facts.
 2. Minimal holding fact **schemas** exist for dual-mainnet natives (schemas first; collectors later
    are writers).
 3. Fixture/seed admission via real `FactRecorded` + descriptor admission (test/CI path).
-4. Fact-backed report graph replaces pin+observe with `latest-network-coherent.v1`.
+4. Fact-backed report graph replaces pin+observe with `SelectHoldings` under
+   `latest-network-coherent.v1`.
 5. Live portfolio pin/observe paths and portfolio-only live balance/head transports are deleted.
-6. Public `portfolio_snapshot` means report-only.
-7. Portfolio integration/parity tests rewritten off live Reth crawl (fixtures + collectors when
+6. Soft-success snapshot error channels and zeroed-required-holdings success paths are deleted.
+7. Public `portfolio_snapshot` means report-only.
+8. Portfolio integration/parity tests rewritten off live Reth crawl (fixtures + collectors when
    present).
-8. `network_pins` projected only from selected fact anchors (single projection rule).
+9. `network_pins` projected only from selected fact anchors (single projection rule).
+10. Public success honesty: configured mode/coverage is visible so success ≠ full discovery.
 
 **Product honesty:** after cutover, `portfolio_snapshot` is useless without admitted facts.
 Dual-mainnet demo requires either fixture seed (CI) or collectors (operator). Prefer landing
@@ -564,21 +620,25 @@ Typed closed enums with a single pure owner. Near-term report-accept set is mini
 
 | Value | Meaning | May write Platform fact? | Report accept? |
 |---|---|---|---|
-| `complete_at_anchor` | source proved completeness for the claimed universe | yes | yes |
-| `configured_only` | only configured assets; wallet discovery incomplete by design | yes | yes |
-| `truncated` | source truncated / incomplete pagination | **prefer fail closed before write** for near-term collectors | no |
-| `incomplete` | known incomplete observation | **prefer fail closed before write** for near-term collectors | no |
+| `complete_at_anchor` | source proved completeness for the claimed universe | **yes** | yes |
+| `configured_only` | only configured assets; wallet discovery incomplete by design | **yes** | yes |
+| `truncated` | source truncated / incomplete pagination | **no** — fail closed before write | n/a |
+| `incomplete` | known incomplete observation | **no** — fail closed before write | n/a |
 
 **SourceStatus**
 
 | Value | Meaning | May write Platform fact? | Report accept? |
 |---|---|---|---|
-| `ok` | observation succeeded | yes | yes |
-| `unsupported` | source cannot serve this subject | no — fail closed before write | n/a |
-| `failed` | source error | no — fail closed before write | n/a |
+| `ok` | observation succeeded | **yes** | yes |
+| `unsupported` | source cannot serve this subject | **no** — fail closed before write | n/a |
+| `failed` | source error | **no** — fail closed before write | n/a |
+
+Writers **MUST** fail closed: `truncated`, `incomplete`, `unsupported`, and `failed` never write
+Platform facts. Only `configured_only|complete_at_anchor` combined with `ok` may write.
 
 Configured collectors default to `configured_only`. Most JSON-RPC balance reads cannot claim
-full-wallet completeness.
+full-wallet completeness. Public report success under configured mode must expose that coverage so
+callers cannot confuse success with full discovery.
 
 ### 9. Near-Term Bitcoin Holding Fact
 
@@ -592,39 +652,42 @@ Delete from portfolio report topology and adapters:
 
 - `PinViewsState` live head/anchor reads
 - `ObserveBatchState` live balance reads
+- `MergeObservations` (select-centric graph owns the full observation set)
 - `PortfolioReadCapability` / transport-factory paths used only for live pin or balance crawl
+- soft-success error fields and zeroed-required-holdings assembly paths
+- view-dependent valuation readers (`DirectPrice` and peers) from the cutover surface
 
-Target shape:
+Target shape (select-centric; **not** a QueryHoldingFacts* + Merge crawl isomorphism):
 
 ```text
 ResolveSubjects
+  -> SelectHoldings             (Platform fact-index + network-coherent selection over full
+                                 acceptable candidate sets; produces Observations)
   -> ResolveValuations          (pure, config-only fixed placeholders; no PinnedViews input)
-  -> QueryHoldingFacts*         (Platform fact-index; static fanout per required symbol)
-  -> MergeObservations
   -> AssembleSnapshot           (network_pins from selected fact anchors; hard-fail only)
   -> ProjectReport
 ```
 
-`ResolveValuations`: pure, config-only. Drop `PinnedViews` dependency. `DirectPrice` /
-view-dependent readers: config validation reject until price phase.
+`SelectHoldings` is the named selection state. It owns:
 
-`AssembleSnapshot`: no live `views` input. Inputs are subjects, valuations, observation batch (with
-anchors), and assembly config. Project `network_pins` per Contract 2 single rule forever.
+- subject projection into fact queries
+- Platform fact-index read under recorded evidence (prefer one frontier/receipt for the requirement
+  set)
+- acceptability filters
+- network-coherent selection over **full** acceptable candidate sets
+- normalization into the complete observation set for required holdings
 
-### 11. Progressive Resume Invariants (Progressive Collectors Only)
+Do not reintroduce a crawl-shaped fanout + merge topology that re-creates live observe batching
+under new names.
 
-For progressive collectors (not required for report cutover, but shape-wide when progressive lands):
+`ResolveValuations`: pure, config-only. Drop `PinnedViews` dependency. No view-dependent readers at
+cutover.
 
-1. Data fact records before control cursor advance.
-2. Cursor advance derives only from certified observation/data-fact material + prior cursor.
-3. Watermarks must not regress.
-4. Observe is `ReadExternal` only; record is `ManagedPlatformWrite` only.
-5. Snapshot re-reads may append multiple Platform facts for the same subject; report selection is
-   totally ordered by the named selection policy.
+`AssembleSnapshot`: no live `views` input. Inputs are subjects, valuations, the selected observation
+set (with anchors), and assembly config. Project `network_pins` per Contract 2 single rule forever.
+Hard-fail only; no soft error vectors.
 
-Progressive chain-head facts are **not** report pins. They stay collector/control ops.
-
-### 12. Fixture And Test Admission
+### 11. Fixture And Test Admission
 
 Facts used by report tests enter through `FactRecorded` + descriptor admission. Prefer a tiny
 certified writer graph or a named `test_support` API that emits real claims, response artifacts, and
@@ -632,26 +695,27 @@ projections.
 
 **Forbidden:** SQL inserts into `fact_index` / `fact_index_terms` without admission authority.
 
-### 13. Phase 1 Owns Minimal Fact Schemas
+### 12. Phase 1 Owns Minimal Fact Schemas
 
 Cutover fixtures and report selection require fact kinds before collectors exist. **Schemas first**;
 collectors are writers:
 
 - `bitcoin.address_balance_snapshot` in `states/btc` (or module split thereof)
-- `evm.address_native_balance_snapshot` in `states/evm` (new crate when first EVM fact lands)
+- `evm.address_native_balance_snapshot` in `states/evm` (new crate when first EVM fact lands;
+  intentional packaging at series B)
 
 Collectors (later commits on the same branch) write those kinds. They do not own the first
 definition.
 
-### 14. Collectors Vs Report Config
+### 13. Collectors Vs Report Config
 
 | Collectors write | Report certifies |
 |---|---|
 | Joint observation DTO → Platform data fact | Subject projection table |
 | Explicit anchor on every data fact | Selection policy id (+ optional bounds later) |
-| Coverage + source status | Coverage / source status allow-lists |
-| Progressive cursors (Control) when progressive | Fail-closed cardinality and consistency rules |
-| Prefer shared tip for multi-subject same network | Public `network_pins` projection rule (fixed forever) |
+| Coverage + source status (write only ok + configured_only/complete_at_anchor) | Coverage / source status allow-lists |
+| Shared joint tip for in-batch multi-subject same network | Fail-closed cardinality and consistency rules |
+| Progressive cursors (Control) when progressive later | Public `network_pins` projection rule (fixed forever) |
 
 Collectors **must not** Platform-query prior portfolio holdings for observe. Report **must not**
 live-read chain heads or balances.
@@ -707,32 +771,36 @@ Later collectors:
 
 The shared platform is already the framework. Collectors must not invent a second one.
 
-Two control patterns exist as review heuristics, not a framework crate or shape enum.
+Two control patterns exist as review heuristics, not a framework crate or shape enum. Progressive
+collectors are **not** co-specified as a peer chapter of report cutover; one forbid sentence
+suffices: progressive chain-head / Control cursor facts are never report pin authority.
 
-### Progressive (cursor / watermark)
-
-```text
-QueryControlCursor -> ObserveSource -> RecordDataFact -> RecordControlCursor
-```
-
-| Role | Effect | Capability | Audience |
-|---|---|---|---|
-| QueryControlCursor | `ReadExternal` | Fact-index read (Control) | reads Control |
-| ObserveSource | `ReadExternal` | domain source read | none yet |
-| RecordDataFact | `ManagedPlatformWrite` | shared fact-record role | Platform |
-| RecordControlCursor | `ManagedPlatformWrite` | shared fact-record role | Control |
-
-Existing `btc_chain_head_collector` is the progressive template. Its Platform/Control outputs are
-not report pin inputs.
-
-### Snapshot re-read (configured balances / prices)
+### Snapshot re-read (configured balances / prices) — cutover default
 
 ```text
 ObserveSource (anchor + balances in one observation DTO)
   -> RecordDataFact
 ```
 
-Coverage and source status live on the data fact. Control cursors are not required.
+Coverage and source status live on the data fact. Control cursors are not required. Only
+`configured_only|complete_at_anchor` + `ok` may write Platform facts.
+
+### Progressive (cursor / watermark) — later; not report authority
+
+```text
+QueryControlCursor -> ObserveSource -> RecordDataFact -> RecordControlCursor
+```
+
+When progressive collectors land later:
+
+1. Data fact records before control cursor advance.
+2. Cursor advance derives only from certified observation/data-fact material + prior cursor.
+3. Watermarks must not regress.
+4. Observe is `ReadExternal` only; record is `ManagedPlatformWrite` only.
+5. Snapshot re-reads may append multiple Platform facts for the same subject; report selection is
+   totally ordered by the named selection policy.
+
+Progressive chain-head facts are **not** report pins. They stay collector/control ops.
 
 ### Shared Vs Specialized
 
@@ -742,8 +810,10 @@ Coverage and source status live on the data fact. Control cursors are not requir
 | Managed fact-record runner (second writer) | progressive cursor types |
 | Fact-record capability role | observe config / normalize |
 | Coverage / source status enums | domain read caps, transports, family op expand |
+| Prove-before-write rules as family monomorphic musts | no mega prove trait |
 
-Copy-paste thin Operation `expand` until a third real duplicate hurts.
+Copy-paste thin Operation `expand` until a third real duplicate hurts. Shared fact kit extraction is
+intentional progressive packaging (series A / second consumer), not opportunistic cleanup.
 
 ### Explicit Non-Abstractions
 
@@ -762,15 +832,21 @@ Copy-paste thin Operation `expand` until a third real duplicate hurts.
 13. No dual rule where `network_pins` may come from either config or facts.
 14. No public-facts CLI/REST as certified report authority.
 15. No soft-success zeroed required holdings under `configured_symbols`.
-16. No wall-clock staleness as uncertified ambient policy.
-17. No fake global multi-chain block identity for portfolio truth.
+16. No `PortfolioSnapshot.errors` / soft error vectors as public success channel.
+17. No wall-clock staleness as uncertified ambient policy.
+18. No fake global multi-chain block identity for portfolio truth.
+19. No mixed certified collectors+report draft.
+20. No view-dependent valuation readers on the cutover surface.
+21. No `limit=1` as selection authority; full acceptable candidate sets only.
+22. No dual conflict mode at cutover (LWW via `store_commit_order`; secondary only if clean).
+23. No mega prove-before-write trait; monomorphic EVM/BTC must-rules only.
 
 ### Capability Matrix
 
 | Need | Capability class |
 |---|---|
 | Source observation | family domain read caps |
-| Progressive cursor load | fact-index read (Control) |
+| Progressive cursor load (later) | fact-index read (Control) |
 | Record data / cursor facts | shared managed fact-record role |
 | Portfolio report selection | fact-index read (Platform) + recorded evidence |
 
@@ -786,13 +862,13 @@ Organize by durable family and layer monocrates, not by collector recipe name.
 4. HTTP/RPC → `transports/*`.
 5. Bind intent + evidence → `adapters/{protocol}`.
 6. Report DTO / wallet config / valuation join → portfolio model/config/state/op.
-7. Shared runner mechanics → shared kit, not copy-paste.
+7. Shared runner mechanics → shared kit when a second consumer needs it.
 8. Workflow names stop at ops.
 9. New collector = module + Operation + states + adapter registration lines.
 10. Portfolio crates must not grow source-near holding fact types.
 11. Collector ops must not depend on portfolio report DTOs.
 
-### Target Tree (Guidance, Not A Phase Gate)
+### Target Tree (Guidance With Intentional Packaging Gates)
 
 ```text
 crates/
@@ -800,16 +876,22 @@ crates/
   states/btc/                 # chain-head + address balance facts
   states/evm/                 # native (+ later token) balance facts
   states/portfolio/           # report only
-  ops/btc-collectors-op/      # when second BTC cycle lands
-  ops/evm-collectors-op/      # when EVM collectors land
+  ops/btc-collectors-op/      # family monocrate when BTC collectors consolidate
+  ops/evm-collectors-op/      # family monocrate when EVM collectors land
   ops/portfolio-tracker-op/   # fact-backed report only after cutover
   adapters/btc-jsonrpc/
   adapters/evm/               # when EVM collectors land
-  adapters/portfolio/         # Platform fact-index + pure report only after cutover
+  adapters/portfolio/         # report-only after cutover (Platform fact-index + pure report)
 ```
 
-Non-critical packaging when cheap: rename chain-head op crate, rehome `collectors/proof`, extract
-`adapters/fact`.
+**Intentional progressive packaging (not “when cheap”):**
+
+| Gate | Packaging work |
+|---|---|
+| Series A / second consumer | Shared fact-index query kit (audience-agnostic request, hydrate, evidence) |
+| Series B | `states/evm` monocrate when first EVM fact kind lands |
+| Series C | Portfolio adapter becomes report-only (delete live pin/balance transports) |
+| Series D | Family op monocrates for collectors (`btc-collectors-op`, `evm-collectors-op` as needed) |
 
 ### Deletes At Cutover
 
@@ -817,15 +899,23 @@ Non-critical packaging when cheap: rename chain-head op crate, rehome `collector
 |---|---|
 | Live `PinViewsState` | live chain IO; replaced by fact anchors + selection policy |
 | Live `ObserveBatchState` | live chain IO |
+| `MergeObservations` | crawl isomorphism; select-centric graph owns full observation set |
 | Portfolio-only live pin/balance transports | dual truth |
 | Soft-success zeroed required holdings | false completeness |
+| `PortfolioSnapshot.errors`, `PortfolioSnapshotError`, soft error vectors | soft-success channel |
 | Dual-mode "live if facts missing" | dual truth |
+| View-dependent valuation readers (`DirectPrice` etc.) | not cutover surface; reintroduce in E as new work |
 | Any report pin table field that owns `network_pins` | dual as-of authority |
+| Mixed certified collectors+report drafts | composition is external multi-run only |
 
 ## Asset Universe Policy
 
 Near-term: only configured symbols matter. Missing/unacceptable facts for required symbols fail the
 run. Unconfigured tokens are out of scope. The report must not claim complete wallet discovery.
+
+Public success honesty: configured mode and selected coverage (`configured_only` vs
+`complete_at_anchor`) must remain visible on public outputs or stable report metadata so success is
+not misread as full wallet discovery.
 
 Do not invent `asset_universe.mode` TOML until discovery work starts. Configured-symbols is the only
 report mode until then.
@@ -894,53 +984,78 @@ audience does not mean every internal detail is returnable.
 
 ## Implementation Plan (One PR, Progressive Commits)
 
+Engineer-facing commit order, delete lists, tests, and packaging gates live in
+`PLAN_IMPL_RFC_COLLECTORS_PORTFOLIO.md`. That plan is the implementer checklist; this RFC is the
+normative design contract.
+
 Branch delivery: **one PR**. Sequence by **commit**. Keep the eventual merge tip free of dual public
-truth. Intermediate WIP commits may break portfolio while the branch is open.
+truth. Intermediate WIP commits may break portfolio while the branch is open. No backward
+compatibility; no fallbacks; delete old code; git history is recovery.
 
 ### Commit series A — Platform fact-index substrate
 
 - Extend `FactIndexReadRequest` for Platform audience (or audience allow-list).
 - Evidence/receipt/trust-root/hydrate/replay parity with Control.
-- Shared query helper extracted so portfolio will not reimplement BTC Control runner.
+- Shared fact-index query kit extracted intentionally (second consumer / portfolio will not
+  reimplement BTC Control runner).
+- Prefer one selection frontier/receipt shape usable for a requirement set.
 - Tests: Platform query, replay without live re-query; no public-facts authority.
+- Packaging: shared fact kit at A / second consumer (intentional, not “when cheap”).
 
 ### Commit series B — Minimal holding fact schemas + fixtures
 
 - Define `bitcoin.address_balance_snapshot` and `evm.address_native_balance_snapshot` (types,
   descriptors, Platform visibility, **mandatory anchors**, coverage/source enums accept set).
+- Stand up `states/evm` when first EVM fact kind lands (intentional packaging at B).
 - Fixture admission via real `FactRecorded` path / certified tiny writer / named test_support.
 - Pure normalize helpers: fact → `Observation` (including anchor).
+- Writers-side vocabulary enforces only `configured_only|complete_at_anchor` + `ok` may write.
 
 ### Commit series C — Fact-backed report graph + delete live crawl
 
 - Subject projection + selection policy `latest-network-coherent.v1` only.
-- Report topology: subjects → pure valuations → Platform fact queries → network-coherent select →
-  merge → assemble → project.
-- `network_pins` from selected fact anchors only; hard-fail `no_common_network_anchor` / missing.
+- Report topology:
+  `ResolveSubjects → SelectHoldings → ResolveValuations → AssembleSnapshot → ProjectReport`.
+- `SelectHoldings` owns full acceptable candidate sets, network-coherent selection, and observation
+  normalization; delete crawl-shaped QueryHoldingFacts* + Merge isomorphism.
+- `network_pins` from selected fact anchors only; hard-fail `no_common_network_anchor` / `missing_fact`.
+- Minimal cutover codes only: `missing_fact`, `no_common_network_anchor`, `unsupported_requirement`,
+  `ambiguous_facts`.
 - Delete `PinViews`, `ObserveBatch`, portfolio live pin/balance transports.
-- Public `portfolio_snapshot` = report-only.
+- Delete soft-success channels: `PortfolioSnapshot.errors`, `PortfolioSnapshotError`, intermediate
+  soft error vectors, zeroed required holdings on success.
+- Delete view-dependent valuation readers from cutover surface.
+- Public `portfolio_snapshot` = report-only; portfolio adapter is report-only (intentional at C).
 - Rewrite portfolio integration/parity tests to fixtures (report succeeds **without** live chain
   providers when facts are present).
+- Public success honesty: configured mode/coverage visible.
 - **Do not** add report pin table fields or `at-or-before` yet (strict subset of long-term model).
 
 ### Commit series D — Configured collectors (same branch, preferred before merge)
 
-- BTC address balance snapshot collector (observe → record; **mandatory height+hash**; prove
-  balance@anchor).
-- EVM native balance collector (EIP-1898 / hash-bound reads; **mandatory height+hash**).
-- Multi-subject same-network writers **SHOULD** share one observe tip.
+- BTC address balance snapshot collector (observe → record; **mandatory height+hash**; monomorphic
+  prove balance@anchor).
+- EVM native balance collector (EIP-1898 / hash-bound reads; **mandatory height+hash**; monomorphic
+  prove).
+- In-batch multi-subject same-network writers **MUST** share one observe tip.
+- Writers fail closed for truncated/incomplete/unsupported/failed — never write Platform facts.
 - Shared fact-record role/runners when second writer needs them; delete BTC-bound record authority
   if still present.
-- Collector replay tests; document multi-run collect-then-report recipe.
+- Family op monocrates intentional packaging at D (`btc-collectors-op` / `evm-collectors-op` as
+  needed).
+- Collector replay tests; document multi-run collect-then-report recipe (external only).
 - Optional: ERC-20 configured token collector after natives.
 
 ### Commit series E — Later extensions (same model; no dual authority)
 
 - Prices/metadata with oracle anchors; certified price selection join.
+- Reintroduce view-dependent valuation readers **as new work** only if product needs them; not as
+  restoration of deleted cutover surface under a flag.
 - Optional `at-or-before.v1` + certified bounds encoding (filters only; `network_pins` rule unchanged).
 - Optional strict equality historical mode (`as_of_not_exact`).
+- Optional `conflicting_facts` if product wants content-hash fail-closed instead of pure LWW.
 - Freshness thresholds as certified policy over fact-carried times.
-- Discovery; packaging renames.
+- Discovery; progressive collectors (still never report pin authority).
 
 Adding bounds later is a new policy id / config fields, **not** a rewrite of `network_pins`
 semantics.
@@ -954,24 +1069,33 @@ semantics.
 | Public-facts API as report authority? | No. |
 | Separate report pin table (any phase)? | **No.** As-of lives on fact anchors; optional later bounds are selection filters only. |
 | How do `network_pins` form? | **Always** projected from selected required holding fact anchors. Never from config pin tables, live head, or pin-facts. |
-| Is `network_pins` semantic authority? | **No.** Descriptive projection only. |
+| Is `network_pins` semantic authority? | **No.** Descriptive projection only forever. |
 | Selection policy? | Near-term: `mfm.portfolio.holding.latest-network-coherent.v1` (newest common acceptable anchor per network). Long-term: add `at-or-before.v1` (+ optional strict equality) in the same family. |
 | Independent per-holding latest then fail? | **No** — rejects coherent older snapshots. |
+| Report graph shape? | Select-centric: `ResolveSubjects → SelectHoldings → ResolveValuations → AssembleSnapshot → ProjectReport`. Not QueryHoldingFacts* + Merge crawl isomorphism. |
+| Candidate completeness? | Full acceptable sets; `limit=1` is never selection authority. Selection inputs receipt-pinned or fully retained for replay. Prefer one frontier/receipt for the requirement set. |
 | Cutover BTC/EVM anchor hash? | **Mandatory** height + hash. |
-| Same-subject/same-anchor conflict? | v1 deterministic LWW; optional later `conflicting_facts` on response-hash mismatch. |
-| Pin-as-fact for report? | **No** as report authority. Progressive chain-head facts stay collector/control. |
+| Same-subject/same-anchor conflict? | Cutover LWW via `store_commit_order`; secondary only if clean. No dual conflict mode at cutover. |
+| Pin-as-fact for report? | **No** as report authority. Progressive chain-head facts stay collector/control and never report pin authority. |
 | Multi-chain point-in-time? | Per-network pins; no fake global block across independent chains. |
-| Fail-closed? | Hard-fail run for required symbols; no soft-success partial snapshots in v1. |
-| Snapshot observe integrity? | Balance must be proven at recorded anchor before write; multi-cap vs one RPC is packaging only. |
+| Fail-closed report? | Hard-fail run for required symbols; soft-success channels deleted. |
+| Soft-success DTOs? | Delete `PortfolioSnapshot.errors`, `PortfolioSnapshotError`, intermediate soft error vectors, zeroed required holdings on success. |
+| Cutover error codes? | `missing_fact`, `no_common_network_anchor`, `unsupported_requirement`, `ambiguous_facts`. Fold unacceptable_* into `missing_fact`. Omit `as_of_not_exact` / `conflicting_facts` from cutover. |
+| Writer fail-closed? | Only `configured_only\|complete_at_anchor` + `ok` may write Platform facts; truncated/incomplete/unsupported/failed never write. |
+| Snapshot observe integrity? | Prove-before-write monomorphic must-rules (EVM hash-bound, BTC tip/hash); no mega trait. |
+| In-batch multi-subject same network? | **MUST** share joint observe tip. |
 | Platform holding facts? | Intentional for public chain data; field exposure table required; no secrets/routing. |
 | Public `portfolio_snapshot`? | Report-only after cutover. |
-| Composition? | External multi-run recipe; no pin-table handoff. |
+| Composition? | External multi-run recipe only; mixed certified collectors+report draft **rejected**. |
 | Live PinViews + ObserveBatch? | Deleted at cutover. |
+| View-dependent valuation readers? | Deleted from cutover surface; reintroduce in E as new work if needed. |
 | Near-term BTC fact? | `bitcoin.address_balance_snapshot`. |
 | Who owns cutover fact schemas? | Commit series B. Collectors are writers. |
 | Cutover ERC-20? | Out of scope; natives only. |
-| Delivery shape? | One PR, progressive commits. |
+| Delivery shape? | One PR, progressive commits; no backward compatibility; no fallbacks; no dual public truth on merge tip. |
+| Packaging? | Intentional progressive work: shared fact kit at A/second consumer; `states/evm` at B; portfolio adapter report-only at C; family op monocrates at D. |
 | Mega framework / crate-per-collector / always-4-node? | No. |
+| Public success honesty? | Configured mode/coverage visible so success ≠ full discovery. |
 
 ## Open Questions
 
@@ -982,7 +1106,6 @@ semantics.
 - Price↔holding join rule parameters (still selection over price facts, not a second pin table).
 - First token discovery provider: local Reth/Erigon, hosted index, or provider-neutral logs.
 - When (if ever) full Bitcoin UTXO retention is required.
-- Exact packaging of shared fact runners (`adapters/fact` vs internal kit).
 
 ## Verification Expectations
 
@@ -991,17 +1114,22 @@ On the merge tip of this branch:
 - report consumes only Platform facts with recorded query evidence
 - report **succeeds without live chain providers** when required facts, response artifacts, and
   query evidence are present
-- report **fails** when required facts are missing / no common network anchor / unsupported
-  requirement (hard-fail codes)
+- report **fails** with minimal cutover codes when required facts are missing, no common network
+  anchor exists, requirement is unsupported, or selection is ambiguous
 - replay never constructs live chain providers and never re-queries the live fact-index frontier
-- no live PinViews/ObserveBatch registration for portfolio report
-- fixture facts admitted through real fact authority
+- selection inputs are receipt-pinned or fully retained; network-coherent selection is deterministic
+  on replay
+- no live PinViews/ObserveBatch/MergeObservations registration for portfolio report
+- no soft-success public snapshot path (`PortfolioSnapshot.errors` gone; no zeroed required holdings
+  on success)
+- no view-dependent valuation readers on cutover surface
+- fixture facts admitted through real `FactRecorded` authority
 - `network_pins` match selected fact anchors only (no config pin table)
 - network-coherent selection recovers common older anchors (A@100+A@99, B@99 → select both @99)
-- cutover holding facts reject missing block hash
-- no-secret persisted/public surfaces; Platform field exposure matches the table above
-- when collectors land: collect-then-report dual-mainnet recipe works; collector fails if providers
-  unavailable or balance@hash cannot be proven; collector replay without live source; multi-subject
-  same-network shared tip preferred
-
-Final merge-readiness uses the repository's normal Nixfied gates.
+- candidate selection uses full acceptable sets (not `limit=1` authority)
+- public success under configured mode does not claim full discovery (coverage/mode visible)
+- collectors that write multi-subject same-network batches share one joint tip
+- writers never admit Platform facts with truncated/incomplete/unsupported/failed status
+- collectors prove balance@hash before write (EVM hash-bound; BTC tip/hash)
+- no mixed certified collectors+report draft; composition is external multi-run only
+- no dual public truth: live portfolio crawl deleted when fact-backed report lands
