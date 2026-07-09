@@ -25,6 +25,22 @@ pub fn portfolio_holding_selection_policy_digest() -> ContentDigest {
     )
 }
 
+/// Scope decision digest for Platform holding candidate fact-index queries.
+pub fn portfolio_holding_select_scope_decision_hash() -> ContentDigest {
+    ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(b"mfm.portfolio.holding.select.scope.v1"),
+    )
+}
+
+/// Whether a candidate-build error should drop the row (filter-empty → missing_fact later).
+pub const fn is_filter_empty_holding_error(code: PortfolioHoldingErrorCode) -> bool {
+    matches!(
+        code,
+        PortfolioHoldingErrorCode::MissingFact | PortfolioHoldingErrorCode::UnsupportedRequirement
+    )
+}
+
 /// Minimal public hard-fail codes for portfolio holding selection / assembly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PortfolioHoldingErrorCode {
@@ -172,6 +188,55 @@ impl RequiredHoldingKey {
     pub fn as_key_str(&self) -> String {
         format!("{}/{}/{}", self.wallet_id, self.symbol_id, self.network_id)
     }
+}
+
+/// Builds a holding candidate from family-normalized scalars (no BTC/EVM types).
+///
+/// Family crates own normalize/acceptability; this joins report keys and selection anchors.
+pub fn holding_candidate_from_normalized(
+    key: &RequiredHoldingKey,
+    balance_reader_kind: &str,
+    store_commit_order: u64,
+    fact_claim_id: impl Into<String>,
+    raw_dec: String,
+    decimals: u8,
+    observation_anchor: ObservationAnchor,
+    coverage: impl Into<String>,
+    source_status: impl Into<String>,
+) -> Result<HoldingCandidate, PortfolioHoldingSelectionError> {
+    let (height, hash) = match &observation_anchor {
+        ObservationAnchor::Bitcoin {
+            height,
+            block_hash,
+        } => (*height, block_hash.clone()),
+        ObservationAnchor::Evm {
+            block_number,
+            block_hash,
+            ..
+        } => (*block_number, block_hash.clone()),
+    };
+    let anchor = HoldingAnchor::new(height, hash).map_err(|mut error| {
+        error.holding_key = Some(key.as_key_str());
+        error.network_id = Some(key.network_id.clone());
+        error
+    })?;
+    Ok(HoldingCandidate {
+        network_id: key.network_id.clone(),
+        anchor,
+        store_commit_order,
+        fact_claim_id: fact_claim_id.into(),
+        response_material: SelectedHoldingMaterial {
+            wallet_id: key.wallet_id.clone(),
+            symbol_id: key.symbol_id.clone(),
+            network_id: key.network_id.clone(),
+            balance_reader_kind: balance_reader_kind.to_owned(),
+            raw_dec,
+            decimals,
+            observation_anchor,
+            coverage: coverage.into(),
+            source_status: source_status.into(),
+        },
+    })
 }
 
 /// One selected holding after network-coherent selection.
