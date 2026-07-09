@@ -53,7 +53,9 @@ Operators run collectors, then report, as separate certified runs:
    ```
 
    Selection is network-coherent over Platform facts under fixed policy
-   `network_coherent_latest.v1`. Pins are projected from selected fact anchors.
+   `mfm.portfolio.holding.latest-network-coherent.v1`. Pins are projected from
+   selected fact anchors. Each public observation carries selected holding
+   `coverage` (`configured_only` or `complete_at_anchor`).
 
 Repeat collect runs whenever configured subjects need fresh anchors; then re-run report.
 

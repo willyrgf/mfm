@@ -441,14 +441,23 @@ mfm_cli run start --op <NAME> --config <PATH> [OPTIONS]
 Examples:
 
 ```sh
+mfm_cli run start --op btc_address_balance --config btc-balance.toml
+mfm_cli run start --op evm_native_balance --config evm-balance.toml
 mfm_cli run start --op portfolio_snapshot --config portfolio.toml
 mfm_cli run start --op evm_contract_lifecycle --config lifecycle.toml
 ```
 
+Collector entry points (`btc_address_balance`, `evm_native_balance`) write Platform holding facts
+from live chain reads (joint tip once per same-network batch). They are external multi-run only and
+are not mixed into the report graph. See
+[`../../docs/portfolio-collect-then-report.md`](../../docs/portfolio-collect-then-report.md).
+
 `portfolio_snapshot` is **report-only**: it selects Platform holding facts (BTC/EVM native at
-cutover) under the network-coherent policy and hard-fails when required facts are missing. It does
-not crawl live chain balances. Collect balances into Platform facts first (collector ops), then run
-the report. Soft partial success (`error_count`) is not part of the public report surface.
+cutover) under the network-coherent policy
+`mfm.portfolio.holding.latest-network-coherent.v1` and hard-fails when required facts are missing.
+It does not crawl live chain balances. Collect balances into Platform facts first, then run the
+report. Soft partial success (`error_count`) is not part of the public report surface. Public
+observations include selected holding `coverage` for configured-mode honesty.
 
 EVM contract entry-point config shapes and import authority rules are documented in
 [`../../docs/evm-contract-lifecycle.md`](../../docs/evm-contract-lifecycle.md).

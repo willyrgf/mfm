@@ -31,6 +31,7 @@ mfm-manual-auth = { path = "../../crates/kernel/manual-auth" }
 mfm-store = { path = "../../crates/kernel/store", features = ["test-support"] }
 mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
 mfm-adapters-btc-jsonrpc = { path = "../../crates/adapters/btc-jsonrpc" }
+mfm-adapters-portfolio = { path = "../../crates/adapters/portfolio" }
 mfm-artifact-capabilities = { path = "../../crates/artifact-capabilities" }
 mfm-btc-capabilities = { path = "../../crates/btc-capabilities" }
 mfm-fact-capabilities = { path = "../../crates/fact-capabilities" }
