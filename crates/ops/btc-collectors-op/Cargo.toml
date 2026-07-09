@@ -1,8 +1,8 @@
 [package]
-name = "mfm-op-btc-chain-head-collector"
+name = "mfm-op-btc-collectors"
 version = "0.1.0"
 edition = "2021"
-description = "Deterministic Bitcoin chain-head collector cycle operation"
+description = "Deterministic Bitcoin collector family operations (chain-head and address-balance)"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
@@ -21,3 +21,4 @@ mfm-states-btc = { path = "../../states/btc", version = "0.1.0" }
 mfm-values = { path = "../../kernel/values", version = "0.1.0" }
 
 [dev-dependencies]
+serde_json = { workspace = true }

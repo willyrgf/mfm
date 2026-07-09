@@ -3,7 +3,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use mfm_btc_capabilities::{BtcChainHeadReadProvider, BtcSourceBinding};
+use mfm_btc_capabilities::{BtcBalanceReadProvider, BtcChainHeadReadProvider, BtcSourceBinding};
 use mfm_evm_capabilities::EvmNetworkBinding;
 use mfm_signers_keystore::{KeystoreSignerProvider, KeystoreSignerRegistryEntry};
 
@@ -192,6 +192,18 @@ impl mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory for LiveTransportRunt
         router
             .bind_source(binding)
             .map(|provider| Arc::new(provider) as Arc<dyn BtcChainHeadReadProvider>)
+    }
+
+    fn bind_balance_source(
+        &self,
+        binding: BtcSourceBinding,
+    ) -> mfm_btc_capabilities::Result<Arc<dyn BtcBalanceReadProvider>> {
+        let router = self
+            .btc_router()
+            .map_err(runtime_config_btc_capability_error)?;
+        router
+            .bind_source(binding)
+            .map(|provider| Arc::new(provider) as Arc<dyn BtcBalanceReadProvider>)
     }
 }
 

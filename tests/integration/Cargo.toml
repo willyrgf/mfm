@@ -35,7 +35,7 @@ mfm-artifact-capabilities = { path = "../../crates/artifact-capabilities" }
 mfm-btc-capabilities = { path = "../../crates/btc-capabilities" }
 mfm-fact-capabilities = { path = "../../crates/fact-capabilities" }
 mfm-op-proof = { path = "../../crates/ops/proof-op" }
-mfm-op-btc-chain-head-collector = { path = "../../crates/ops/btc-chain-head-collector-op" }
+mfm-op-btc-collectors = { path = "../../crates/ops/btc-collectors-op" }
 mfm-op-evm-contract-lifecycle = { path = "../../crates/ops/evm-contract-lifecycle-op" }
 mfm-states-btc = { path = "../../crates/states/btc" }
 mfm-states-evm = { path = "../../crates/states/evm" }

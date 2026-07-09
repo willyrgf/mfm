@@ -408,12 +408,12 @@ fn prepare_app_fact_launch(include_fact_descriptor: bool) -> Result<RunLaunchReq
 }
 
 fn prepare_btc_collector_internal_test_launch() -> Result<RunLaunchRequest, AppError> {
-    let draft = mfm_op_btc_chain_head_collector::btc_chain_head_collector_cycle_program_draft(
-        mfm_op_btc_chain_head_collector::BtcChainHeadCollectorConfig::default(),
+    let draft = mfm_op_btc_collectors::btc_chain_head_collector_cycle_program_draft(
+        mfm_op_btc_collectors::BtcChainHeadCollectorConfig::default(),
     )
     .expect("btc collector draft");
     let observation_context_seed = CanonicalSeed::from_value(
-        &mfm_op_btc_chain_head_collector::BtcChainHeadObservationContext {
+        &mfm_op_btc_collectors::BtcChainHeadObservationContext {
             observed_at_unix_ms: None,
         },
     )

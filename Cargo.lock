@@ -2197,7 +2197,7 @@ dependencies = [
  "mfm-facts",
  "mfm-ids",
  "mfm-manual-auth",
- "mfm-op-btc-chain-head-collector",
+ "mfm-op-btc-collectors",
  "mfm-op-evm-contract-lifecycle",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
@@ -2469,7 +2469,7 @@ dependencies = [
  "mfm-facts",
  "mfm-ids",
  "mfm-manual-auth",
- "mfm-op-btc-chain-head-collector",
+ "mfm-op-btc-collectors",
  "mfm-op-evm-contract-lifecycle",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
@@ -2509,7 +2509,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-op-btc-chain-head-collector"
+name = "mfm-op-btc-collectors"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
@@ -2520,6 +2520,7 @@ dependencies = [
  "mfm-states-btc",
  "mfm-values",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

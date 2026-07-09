@@ -11,7 +11,7 @@ use mfm_events::v1::{ArtifactRole, KernelEventPayload};
 use mfm_facts::{FactAudience, FactCanonicalScalar};
 use mfm_ids::SeedId;
 use mfm_integration_tests::test_support::{fact_query_evidences, InMemoryControlFactIndexProvider};
-use mfm_op_btc_chain_head_collector::{
+use mfm_op_btc_collectors::{
     btc_chain_head_collector_cycle_program_draft, BtcChainHeadCollectorConfig,
     BtcChainHeadObservationContext,
 };
@@ -469,6 +469,16 @@ impl mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory for MockBtcProvider {
             binding,
         }))
     }
+
+    fn bind_balance_source(
+        &self,
+        binding: BtcSourceBinding,
+    ) -> mfm_btc_capabilities::Result<Arc<dyn mfm_btc_capabilities::BtcBalanceReadProvider>> {
+        Ok(Arc::new(BoundMockBtcProvider {
+            provider: self.clone(),
+            binding,
+        }))
+    }
 }
 
 struct BoundMockBtcProvider {
@@ -503,6 +513,21 @@ impl BtcChainHeadReadProvider for BoundMockBtcProvider {
                 block_hash: BtcBlockHash::new(head.hash).expect("block hash"),
                 provider_time_unix_ms: head.provider_time_unix_ms,
             })
+        })
+    }
+}
+
+impl mfm_btc_capabilities::BtcBalanceReadProvider for BoundMockBtcProvider {
+    fn read_balance<'a>(
+        &'a self,
+        _request: &'a mfm_btc_capabilities::BtcBalanceReadRequest,
+    ) -> BtcCapabilityFuture<'a, mfm_btc_capabilities::BtcBalanceReadResponse> {
+        Box::pin(async move {
+            Err(mfm_btc_capabilities::BtcCapabilityError::provider_failure(
+                mfm_btc_capabilities::btc_diagnostic(
+                    mfm_capabilities::ProviderDiagnosticCode::UnsupportedOperation,
+                ),
+            ))
         })
     }
 }
@@ -542,6 +567,15 @@ impl mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory for BlockingBtcProvid
             provider: self.clone(),
         }))
     }
+
+    fn bind_balance_source(
+        &self,
+        _binding: BtcSourceBinding,
+    ) -> mfm_btc_capabilities::Result<Arc<dyn mfm_btc_capabilities::BtcBalanceReadProvider>> {
+        Ok(Arc::new(BoundBlockingBtcProvider {
+            provider: self.clone(),
+        }))
+    }
 }
 
 struct BoundBlockingBtcProvider {
@@ -565,6 +599,20 @@ impl BtcChainHeadReadProvider for BoundBlockingBtcProvider {
                 let _ = called.send(());
             }
             future::pending::<mfm_btc_capabilities::Result<BtcChainHeadResponse>>().await
+        })
+    }
+}
+
+impl mfm_btc_capabilities::BtcBalanceReadProvider for BoundBlockingBtcProvider {
+    fn read_balance<'a>(
+        &'a self,
+        _request: &'a mfm_btc_capabilities::BtcBalanceReadRequest,
+    ) -> BtcCapabilityFuture<'a, mfm_btc_capabilities::BtcBalanceReadResponse> {
+        Box::pin(async move {
+            future::pending::<
+                mfm_btc_capabilities::Result<mfm_btc_capabilities::BtcBalanceReadResponse>,
+            >()
+            .await
         })
     }
 }

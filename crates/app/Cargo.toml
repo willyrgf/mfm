@@ -36,7 +36,7 @@ mfm-evm-contract-model = { path = "../evm-contract-model" }
 mfm-fact-capabilities = { path = "../fact-capabilities" }
 mfm-facts = { path = "../kernel/facts" }
 mfm-ids = { path = "../kernel/ids" }
-mfm-op-btc-chain-head-collector = { path = "../ops/btc-chain-head-collector-op" }
+mfm-op-btc-collectors = { path = "../ops/btc-collectors-op" }
 mfm-op-evm-contract-lifecycle = { path = "../ops/evm-contract-lifecycle-op" }
 mfm-op-portfolio-tracker = { path = "../ops/portfolio-tracker-op" }
 mfm-op-proof = { path = "../ops/proof-op" }

@@ -1,4 +1,4 @@
-use mfm_op_btc_chain_head_collector::{
+use mfm_op_btc_collectors::{
     btc_chain_head_collector_cycle_program_draft, btc_chain_head_collector_operation_registry,
     BtcChainHeadCollectorConfig, BtcChainHeadCollectorCycleOperation, BtcChainHeadFact,
     CollectorCheckpointFact, ObserveBtcChainHeadState, QueryCollectorCheckpointState,

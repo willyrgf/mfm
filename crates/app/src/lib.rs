@@ -784,11 +784,10 @@ fn capability_artifact_error_from_store(
 /// Builds the trusted production certification registry for typed spec certification and replay verification.
 pub fn production_certification_registry() -> Result<CertificationRegistry, AppError> {
     let mut registry = CertificationRegistry::new();
-    mfm_op_btc_chain_head_collector::register_btc_chain_head_collector_certification_descriptors(
-        &mut registry,
-    )?;
-    registry.register_fact_type::<mfm_op_btc_chain_head_collector::BtcChainHeadFact>()?;
-    registry.register_fact_type::<mfm_op_btc_chain_head_collector::CollectorCheckpointFact>()?;
+    mfm_op_btc_collectors::register_btc_collectors_certification_descriptors(&mut registry)?;
+    registry.register_fact_type::<mfm_op_btc_collectors::BtcChainHeadFact>()?;
+    registry.register_fact_type::<mfm_op_btc_collectors::CollectorCheckpointFact>()?;
+    registry.register_fact_type::<mfm_op_btc_collectors::BtcAddressBalanceSnapshotFact>()?;
     mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
         &mut registry,
     )?;

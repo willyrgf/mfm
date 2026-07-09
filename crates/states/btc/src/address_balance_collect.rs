@@ -13,14 +13,16 @@ use mfm_btc_capabilities::{
     BtcChainHeadReadCapability, BtcChainHeadResponse as CapabilityChainHeadResponse, BtcHeadSelection,
     BtcNetworkId, BtcSourceIdentity, BtcSourceStatus,
 };
-use mfm_effects::{ManagedPlatformWrite, ReadExternal};
+use mfm_effects::{ManagedPlatformWrite, Pure, ReadExternal};
 use mfm_facts::{CoverageStatus, HoldingSourceStatus};
 use mfm_ids::{StateKind, StateVersion};
+use mfm_capabilities::NoCaps;
 use mfm_program::{
     fact_descriptor_ref, AdapterBindingSpec, FactDescriptorRef, ManagedWriteState, NoContext,
-    ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
+    PureState, ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, StateInput};
+use mfm_values::NonEmpty;
 use serde::{Deserialize, Serialize};
 
 use crate::address_balance::{
@@ -695,6 +697,144 @@ impl ManagedWriteState for RecordBtcAddressBalanceFactState {
 /// Returns Platform visibility for address-balance facts (adapter record runner).
 pub fn address_balance_record_visibility() -> mfm_facts::FactVisibility {
     address_balance_fact_visibility()
+}
+
+/// Config for assembling a multi-address balance batch summary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[mfm(schema = "mfm.bitcoin.state.config.assemble_address_balance_batch")]
+pub struct AssembleBtcAddressBalanceBatchConfig {}
+
+/// Input for assembling a multi-address balance batch summary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, StateInput)]
+#[mfm(schema = "mfm.bitcoin.state.input.assemble_address_balance_batch")]
+pub struct AssembleBtcAddressBalanceBatchInput {
+    /// Joint tip shared by the batch.
+    pub joint_tip: BtcJointTip,
+    /// Recorded address-balance facts (at least one).
+    pub balance_facts: NonEmpty<BtcAddressBalanceSnapshotFact>,
+}
+
+/// Summary of a multi-address same-network balance collector batch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.bitcoin",
+    name = "address_balance_batch_summary",
+    version = "1",
+    schema = "mfm.bitcoin.state.output.address_balance_batch_summary"
+)]
+pub struct BtcAddressBalanceBatchSummary {
+    network: String,
+    bitcoin_network: String,
+    semantic_source_identity: String,
+    joint_tip_height: u64,
+    joint_tip_hash: String,
+    address_count: u64,
+}
+
+impl BtcAddressBalanceBatchSummary {
+    /// Returns the semantic network id.
+    pub fn network(&self) -> &str {
+        &self.network
+    }
+
+    /// Returns the joint tip height shared by the batch.
+    pub const fn joint_tip_height(&self) -> u64 {
+        self.joint_tip_height
+    }
+
+    /// Returns the joint tip hash shared by the batch.
+    pub fn joint_tip_hash(&self) -> &str {
+        &self.joint_tip_hash
+    }
+
+    /// Returns the number of addresses collected.
+    pub const fn address_count(&self) -> u64 {
+        self.address_count
+    }
+}
+
+/// Pure state that verifies shared tip and summarizes a balance batch.
+pub struct AssembleBtcAddressBalanceBatchState;
+
+impl StateSpec for AssembleBtcAddressBalanceBatchState {
+    type Config = AssembleBtcAddressBalanceBatchConfig;
+    type Context = NoContext;
+    type Input = AssembleBtcAddressBalanceBatchInput;
+    type Output = BtcAddressBalanceBatchSummary;
+    type Effect = Pure;
+    type Caps = NoCaps;
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        state_kind("address_balance.assemble_batch")
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        state_version("address_balance.assemble_batch")
+    }
+
+    fn name() -> &'static str {
+        "mfm.bitcoin.address_balance.assemble_batch"
+    }
+
+    fn new(_config: ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self)
+    }
+}
+
+impl PureState for AssembleBtcAddressBalanceBatchState {
+    fn run(
+        &self,
+        input: Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        assemble_btc_address_balance_batch(input)
+    }
+}
+
+/// Verifies shared tip across recorded facts and builds a batch summary.
+pub fn assemble_btc_address_balance_batch(
+    input: AssembleBtcAddressBalanceBatchInput,
+) -> StateResult<BtcAddressBalanceBatchSummary> {
+    let facts = input.balance_facts.values();
+    let observations: Vec<BtcAddressBalanceObservation> = facts
+        .iter()
+        .map(|fact| {
+            BtcAddressBalanceObservation::new(fact.subject().clone(), fact.response().clone(), 1)
+        })
+        .collect();
+    let refs: Vec<&BtcAddressBalanceObservation> = observations.iter().collect();
+    require_shared_joint_tip(&refs).map_err(StateError::from)?;
+    let first = facts
+        .first()
+        .expect("NonEmpty guarantees at least one fact");
+    if first.response().anchor_height() != input.joint_tip.block_height()
+        || first.response().anchor_hash() != input.joint_tip.block_hash()
+    {
+        return Err(StateError::from(BtcStateError::InvalidInput {
+            reason: "recorded facts do not match batch joint tip".to_owned(),
+        }));
+    }
+    if first.subject().network() != input.joint_tip.network()
+        || first.subject().bitcoin_network() != input.joint_tip.bitcoin_network()
+        || first.subject().semantic_source_identity() != input.joint_tip.semantic_source_identity()
+    {
+        return Err(StateError::from(BtcStateError::InvalidInput {
+            reason: "recorded facts do not match joint tip binding".to_owned(),
+        }));
+    }
+    let address_count = u64::try_from(facts.len()).map_err(|_| {
+        StateError::from(BtcStateError::InvalidInput {
+            reason: "address count overflow".to_owned(),
+        })
+    })?;
+    Ok(BtcAddressBalanceBatchSummary {
+        network: input.joint_tip.network().to_owned(),
+        bitcoin_network: input.joint_tip.bitcoin_network().to_owned(),
+        semantic_source_identity: input.joint_tip.semantic_source_identity().to_owned(),
+        joint_tip_height: input.joint_tip.block_height(),
+        joint_tip_hash: input.joint_tip.block_hash().to_owned(),
+        address_count,
+    })
 }
 
 #[cfg(test)]

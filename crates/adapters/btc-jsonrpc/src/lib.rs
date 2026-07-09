@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use mfm_artifact_capabilities::{fact_response_artifact_requirement, hydrate_fact_response_json};
 use mfm_btc_capabilities::{
-    BitcoinNetworkTag, BtcBlockHash, BtcCapabilityError, BtcCapabilityFuture,
+    BitcoinNetworkTag, BtcAddress, BtcBalanceReadProvider, BtcBalanceReadRequest,
+    BtcBalanceReadResponse, BtcBlockHash, BtcCapabilityError, BtcCapabilityFuture,
     BtcChainHeadReadProvider, BtcChainHeadRequest, BtcChainHeadResponse, BtcFinality, BtcHeadKind,
     BtcNetworkId, BtcSourceBinding, BtcSourceIdentity, BtcSourceStatus, RedactedBtcSourceEvidence,
 };
@@ -30,17 +31,23 @@ use mfm_runtime::{
     RunnerRegistrationBuilder,
 };
 use mfm_states_btc::{
+    address_balance_record_visibility, assemble_btc_address_balance_batch,
     btc_jsonrpc_adapter_kind, btc_jsonrpc_adapter_version, chain_head_fact_visibility,
-    collector_checkpoint_fact_visibility, BtcChainHeadObservation, BtcFactRecordCapability,
-    CollectorCheckpointFact, CollectorCheckpointResponse, LoadedCollectorCheckpoint,
-    ObserveBtcChainHeadConfig, ObserveBtcChainHeadInput, ObserveBtcChainHeadState,
-    QueryCollectorCheckpointConfig, QueryCollectorCheckpointInput, QueryCollectorCheckpointState,
-    RecordBtcChainHeadFactState, RecordCollectorCheckpointState,
+    collector_checkpoint_fact_visibility, AssembleBtcAddressBalanceBatchConfig,
+    AssembleBtcAddressBalanceBatchInput, AssembleBtcAddressBalanceBatchState,
+    BtcChainHeadObservation, BtcFactRecordCapability, BtcJointTip, CollectorCheckpointFact,
+    CollectorCheckpointResponse, LoadedCollectorCheckpoint, ObserveBtcAddressBalanceConfig,
+    ObserveBtcAddressBalanceInput, ObserveBtcAddressBalanceState, ObserveBtcChainHeadConfig,
+    ObserveBtcChainHeadInput, ObserveBtcChainHeadState, QueryCollectorCheckpointConfig,
+    QueryCollectorCheckpointInput, QueryCollectorCheckpointState, RecordBtcAddressBalanceFactState,
+    RecordBtcChainHeadFactState, RecordCollectorCheckpointState, ResolveBtcJointTipConfig,
+    ResolveBtcJointTipInput, ResolveBtcJointTipState,
 };
 use mfm_store::v1 as store;
 use mfm_values::{MfmConfig, MfmValue};
 use serde::de::DeserializeOwned;
 
+const PURE_FACTORY: &str = "pure";
 const READ_FACTORY: &str = "read_external";
 const MANAGED_WRITE_FACTORY: &str = "managed_platform_write";
 const ADAPTER_FACTORY: &str = "btc_jsonrpc_adapter";
@@ -49,7 +56,7 @@ const CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.bitcoin.jsonrpc.runtime.v1";
 /// Result type for Bitcoin JSON-RPC adapter operations.
 pub type Result<T> = std::result::Result<T, BtcJsonRpcAdapterError>;
 
-/// Factory for Bitcoin chain-head providers bound to a certified source binding.
+/// Factory for Bitcoin chain-head and balance providers bound to a certified source binding.
 pub trait BtcChainHeadProviderFactory: Send + Sync {
     /// Validates that the binding can resolve without live network IO.
     fn validate_source_binding(
@@ -62,6 +69,12 @@ pub trait BtcChainHeadProviderFactory: Send + Sync {
         &self,
         binding: BtcSourceBinding,
     ) -> mfm_btc_capabilities::Result<Arc<dyn BtcChainHeadReadProvider>>;
+
+    /// Binds a checked source binding to an address-balance provider.
+    fn bind_balance_source(
+        &self,
+        binding: BtcSourceBinding,
+    ) -> mfm_btc_capabilities::Result<Arc<dyn BtcBalanceReadProvider>>;
 }
 
 /// Runtime capabilities used by Bitcoin JSON-RPC adapter runners.
@@ -114,6 +127,8 @@ pub fn register_btc_jsonrpc_runners(
         "typed-bitcoin-jsonrpc",
         env!("CARGO_PKG_VERSION"),
     )?;
+    let pure_factory =
+        executable_identities.factory_binding(events::RunnerFactoryId::new(PURE_FACTORY)?);
     let read_factory =
         executable_identities.factory_binding(events::RunnerFactoryId::new(READ_FACTORY)?);
     let managed_write_factory =
@@ -129,6 +144,20 @@ pub fn register_btc_jsonrpc_runners(
         &read_factory,
         Arc::new(ObserveChainHeadRunner {
             artifacts: artifacts.clone(),
+            btc: btc.clone(),
+        }),
+    )?;
+    registrations.register_state_descriptor_with_factory::<ResolveBtcJointTipState>(
+        &read_factory,
+        Arc::new(ResolveJointTipRunner {
+            artifacts: artifacts.clone(),
+            btc: btc.clone(),
+        }),
+    )?;
+    registrations.register_state_descriptor_with_factory::<ObserveBtcAddressBalanceState>(
+        &read_factory,
+        Arc::new(ObserveAddressBalanceRunner {
+            artifacts: artifacts.clone(),
             btc,
         }),
     )?;
@@ -138,6 +167,15 @@ pub fn register_btc_jsonrpc_runners(
             artifacts.clone(),
             chain_head_fact_visibility(),
         )),
+    )?;
+    registrations.register_state_descriptor_with_factory::<RecordBtcAddressBalanceFactState>(
+        &managed_write_factory,
+        Arc::new(
+            ManagedFactRecordRunner::<RecordBtcAddressBalanceFactState>::new(
+                artifacts.clone(),
+                address_balance_record_visibility(),
+            ),
+        ),
     )?;
     registrations.register_state_descriptor_with_factory::<QueryCollectorCheckpointState>(
         &read_factory,
@@ -150,12 +188,40 @@ pub fn register_btc_jsonrpc_runners(
         &managed_write_factory,
         Arc::new(
             ManagedFactRecordRunner::<RecordCollectorCheckpointState>::new(
-                artifacts,
+                artifacts.clone(),
                 collector_checkpoint_fact_visibility(),
             ),
         ),
     )?;
+    registrations.register_state_descriptor_with_factory::<AssembleBtcAddressBalanceBatchState>(
+        &pure_factory,
+        Arc::new(AssembleAddressBalanceBatchRunner { artifacts }),
+    )?;
     Ok(())
+}
+
+struct AssembleAddressBalanceBatchRunner {
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
+}
+
+impl ErasedNodeRunner for AssembleAddressBalanceBatchRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            let _config = load_runner_config::<AssembleBtcAddressBalanceBatchConfig>(
+                &ctx,
+                self.artifacts.as_ref(),
+            )
+            .await?;
+            let input = load_materialized_struct_input::<AssembleBtcAddressBalanceBatchInput>(
+                ctx.inputs(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
+            let summary = assemble_btc_address_balance_batch(input)
+                .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+            ErasedRunnerOutput::state_output(&ctx, &summary)
+        })
+    }
 }
 
 /// Recorded Bitcoin chain-head provider backend for replay.
@@ -183,6 +249,51 @@ impl BtcChainHeadReadProvider for RecordedBtcChainHeadProvider {
     }
 }
 
+/// Recorded Bitcoin address-balance provider backend for replay.
+#[derive(Debug, Clone)]
+pub struct RecordedBtcBalanceProvider {
+    binding: BtcSourceBinding,
+    response: BtcBalanceReadResponse,
+}
+
+impl RecordedBtcBalanceProvider {
+    /// Creates a recorded balance provider bound to certified source binding and response.
+    pub const fn new(binding: BtcSourceBinding, response: BtcBalanceReadResponse) -> Self {
+        Self { binding, response }
+    }
+}
+
+impl BtcBalanceReadProvider for RecordedBtcBalanceProvider {
+    fn read_balance<'a>(
+        &'a self,
+        request: &'a BtcBalanceReadRequest,
+    ) -> BtcCapabilityFuture<'a, BtcBalanceReadResponse> {
+        Box::pin(async move { recorded_balance_response(&self.binding, request, &self.response) })
+    }
+}
+
+fn recorded_balance_response(
+    binding: &BtcSourceBinding,
+    request: &BtcBalanceReadRequest,
+    response: &BtcBalanceReadResponse,
+) -> mfm_btc_capabilities::Result<BtcBalanceReadResponse> {
+    let evidence = &response.evidence;
+    if &evidence.network_id == binding.network_id()
+        && &evidence.source_identity == binding.source_identity()
+        && evidence.bitcoin_network == binding.bitcoin_network().as_str()
+        && evidence.observed_bitcoin_network == binding.bitcoin_network().as_str()
+        && response.address.as_str() == request.address().as_str()
+        && response.block_height == request.block_height()
+        && response.block_hash.as_str() == request.block_hash().as_str()
+    {
+        Ok(response.clone())
+    } else {
+        Err(BtcCapabilityError::SourceMismatch {
+            diagnostic: evidence.source_mismatch_diagnostic(),
+        })
+    }
+}
+
 /// Redaction-safe Bitcoin JSON-RPC adapter error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BtcJsonRpcAdapterError {
@@ -195,11 +306,39 @@ pub enum BtcJsonRpcAdapterError {
 }
 
 fn chain_head_binding(config: &ObserveBtcChainHeadConfig) -> Result<BtcSourceBinding> {
-    let network_id = BtcNetworkId::new(&config.network)
+    source_binding_from_parts(
+        &config.network,
+        &config.bitcoin_network,
+        &config.semantic_source_identity,
+    )
+}
+
+fn joint_tip_binding(config: &ResolveBtcJointTipConfig) -> Result<BtcSourceBinding> {
+    source_binding_from_parts(
+        &config.network,
+        &config.bitcoin_network,
+        &config.semantic_source_identity,
+    )
+}
+
+fn address_balance_binding(config: &ObserveBtcAddressBalanceConfig) -> Result<BtcSourceBinding> {
+    source_binding_from_parts(
+        &config.network,
+        &config.bitcoin_network,
+        &config.semantic_source_identity,
+    )
+}
+
+fn source_binding_from_parts(
+    network: &str,
+    bitcoin_network: &str,
+    semantic_source_identity: &str,
+) -> Result<BtcSourceBinding> {
+    let network_id =
+        BtcNetworkId::new(network).map_err(|_| BtcJsonRpcAdapterError::InvalidCapabilityRequest)?;
+    let source_identity = BtcSourceIdentity::new(semantic_source_identity)
         .map_err(|_| BtcJsonRpcAdapterError::InvalidCapabilityRequest)?;
-    let source_identity = BtcSourceIdentity::new(&config.semantic_source_identity)
-        .map_err(|_| BtcJsonRpcAdapterError::InvalidCapabilityRequest)?;
-    let bitcoin_network = BitcoinNetworkTag::new(&config.bitcoin_network)
+    let bitcoin_network = BitcoinNetworkTag::new(bitcoin_network)
         .map_err(|_| BtcJsonRpcAdapterError::InvalidCapabilityRequest)?;
     Ok(BtcSourceBinding::new(
         network_id,
@@ -213,6 +352,28 @@ fn chain_head_request(config: &ObserveBtcChainHeadConfig) -> Result<BtcChainHead
         .selection()
         .map_err(|_| BtcJsonRpcAdapterError::InvalidCapabilityRequest)?;
     Ok(BtcChainHeadRequest::new(selection))
+}
+
+fn joint_tip_request(config: &ResolveBtcJointTipConfig) -> Result<BtcChainHeadRequest> {
+    let selection = config
+        .selection()
+        .map_err(|_| BtcJsonRpcAdapterError::InvalidCapabilityRequest)?;
+    Ok(BtcChainHeadRequest::new(selection))
+}
+
+fn address_balance_request(
+    config: &ObserveBtcAddressBalanceConfig,
+    joint_tip: &BtcJointTip,
+) -> Result<BtcBalanceReadRequest> {
+    let address = BtcAddress::new(&config.address)
+        .map_err(|_| BtcJsonRpcAdapterError::InvalidCapabilityRequest)?;
+    let block_hash = BtcBlockHash::new(joint_tip.block_hash())
+        .map_err(|_| BtcJsonRpcAdapterError::InvalidCapabilityRequest)?;
+    Ok(BtcBalanceReadRequest::new(
+        address,
+        joint_tip.block_height(),
+        block_hash,
+    ))
 }
 
 fn recorded_chain_head_response(
@@ -277,6 +438,100 @@ impl ErasedNodeRunner for ObserveChainHeadRunner {
                 .materialize_response(&input, &response)
                 .map_err(btc_state_runtime_error)?;
             ErasedRunnerOutput::state_output(&ctx, &fact)
+        })
+    }
+}
+
+struct ResolveJointTipRunner {
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
+    btc: Arc<dyn BtcChainHeadProviderFactory>,
+}
+
+impl ErasedNodeRunner for ResolveJointTipRunner {
+    fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
+        let config = load_launch_config::<ResolveBtcJointTipConfig>(&ctx)?;
+        let binding = joint_tip_binding(config.as_ref()).map_err(btc_adapter_runtime_error)?;
+        self.btc
+            .validate_source_binding(&binding)
+            .map_err(btc_capability_runtime_error)
+    }
+
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            let config =
+                load_runner_config::<ResolveBtcJointTipConfig>(&ctx, self.artifacts.as_ref())
+                    .await?;
+            let binding = joint_tip_binding(config.as_ref()).map_err(btc_adapter_runtime_error)?;
+            let request = joint_tip_request(config.as_ref()).map_err(btc_adapter_runtime_error)?;
+            let state = ResolveBtcJointTipState::new(config).map_err(|error| {
+                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+            })?;
+            let _input = load_materialized_struct_input::<ResolveBtcJointTipInput>(
+                ctx.inputs(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
+            let btc = self
+                .btc
+                .bind_source(binding)
+                .map_err(btc_capability_runtime_error)?;
+            let response = btc
+                .read_chain_head(&request)
+                .await
+                .map_err(btc_capability_runtime_error)?;
+            let tip = state
+                .materialize_response(&response)
+                .map_err(btc_state_runtime_error)?;
+            ErasedRunnerOutput::state_output(&ctx, &tip)
+        })
+    }
+}
+
+struct ObserveAddressBalanceRunner {
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
+    btc: Arc<dyn BtcChainHeadProviderFactory>,
+}
+
+impl ErasedNodeRunner for ObserveAddressBalanceRunner {
+    fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
+        let config = load_launch_config::<ObserveBtcAddressBalanceConfig>(&ctx)?;
+        let binding = address_balance_binding(config.as_ref()).map_err(btc_adapter_runtime_error)?;
+        self.btc
+            .validate_source_binding(&binding)
+            .map_err(btc_capability_runtime_error)
+    }
+
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            let config = load_runner_config::<ObserveBtcAddressBalanceConfig>(
+                &ctx,
+                self.artifacts.as_ref(),
+            )
+            .await?;
+            let binding =
+                address_balance_binding(config.as_ref()).map_err(btc_adapter_runtime_error)?;
+            let state = ObserveBtcAddressBalanceState::new(config).map_err(|error| {
+                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+            })?;
+            let input = load_materialized_struct_input::<ObserveBtcAddressBalanceInput>(
+                ctx.inputs(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
+            let request = address_balance_request(state.config(), &input.joint_tip)
+                .map_err(btc_adapter_runtime_error)?;
+            let btc = self
+                .btc
+                .bind_balance_source(binding)
+                .map_err(btc_capability_runtime_error)?;
+            let response = btc
+                .read_balance(&request)
+                .await
+                .map_err(btc_capability_runtime_error)?;
+            let observation = state
+                .materialize_response(&input, &response)
+                .map_err(btc_state_runtime_error)?;
+            ErasedRunnerOutput::state_output(&ctx, &observation)
         })
     }
 }

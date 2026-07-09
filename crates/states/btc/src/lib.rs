@@ -15,14 +15,18 @@ pub use address_balance::{
     BtcAddressBalanceSubject, NormalizedBtcAddressHolding,
 };
 pub use address_balance_collect::{
-    address_balance_record_visibility, materialize_btc_joint_tip,
-    normalize_btc_address_balance_observation, require_shared_joint_tip,
+    address_balance_record_visibility, assemble_btc_address_balance_batch,
+    materialize_btc_joint_tip, normalize_btc_address_balance_observation, require_shared_joint_tip,
     validate_observe_btc_address_balance_config, validate_resolve_btc_joint_tip_config,
-    BtcAddressBalanceObservation, BtcAddressBalanceObservationContext, BtcJointTip,
-    ObserveBtcAddressBalanceConfig, ObserveBtcAddressBalanceInput, ObserveBtcAddressBalanceState,
-    RecordBtcAddressBalanceFactConfig, RecordBtcAddressBalanceFactInput,
+    AssembleBtcAddressBalanceBatchConfig, AssembleBtcAddressBalanceBatchInput,
+    AssembleBtcAddressBalanceBatchInputHandles, AssembleBtcAddressBalanceBatchState,
+    BtcAddressBalanceBatchSummary, BtcAddressBalanceObservation,
+    BtcAddressBalanceObservationContext, BtcJointTip, ObserveBtcAddressBalanceConfig,
+    ObserveBtcAddressBalanceInput, ObserveBtcAddressBalanceInputHandles,
+    ObserveBtcAddressBalanceState, RecordBtcAddressBalanceFactConfig,
+    RecordBtcAddressBalanceFactInput, RecordBtcAddressBalanceFactInputHandles,
     RecordBtcAddressBalanceFactState, ResolveBtcJointTipConfig, ResolveBtcJointTipInput,
-    ResolveBtcJointTipState,
+    ResolveBtcJointTipInputHandles, ResolveBtcJointTipState,
 };
 
 use std::future;
@@ -2153,7 +2157,7 @@ mod tests {
             "mfm-stream-store-postgres",
             "mfm-btc-jsonrpc-http",
             "mfm-adapters-btc-jsonrpc",
-            "mfm-op-btc-chain-head-collector",
+            "mfm-op-btc-collectors",
         ] {
             assert!(
                 !manifest.contains(forbidden),
