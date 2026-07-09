@@ -300,7 +300,7 @@ fn hydrate_fact_response_json_decodes_payload_and_rejects_invalid_json() {
             ..
         }
     ));
-    assert_eq!(err.to_string().contains("password"), false);
+    assert!(!err.to_string().contains("password"));
 }
 
 fn internal_fact_ref(bytes: &[u8]) -> InternalFactRef {
