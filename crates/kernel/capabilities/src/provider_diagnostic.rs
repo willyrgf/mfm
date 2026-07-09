@@ -127,7 +127,7 @@ pub enum ProviderDiagnosticCode {
     ResponseInvalid,
     /// Provider response did not contain the required result value.
     ResponseMissingResult,
-    /// Provider evidence did not match the semantic request.
+    /// Provider evidence did not match the provider binding.
     SourceMismatch,
     /// Requested operation is not supported by the provider binding.
     UnsupportedOperation,

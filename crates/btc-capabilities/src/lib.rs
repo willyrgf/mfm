@@ -74,7 +74,7 @@ impl CapabilitySpec for BtcChainHeadReadCapability {
 pub trait BtcChainHeadReadProvider: Send + Sync {
     /// Reads a Bitcoin chain head from the selected source.
     ///
-    /// A successful response has already enforced provider-bound source authority and
+    /// A successful response has already enforced the provider binding and
     /// operation-specific head selection invariants. Returned source evidence matches the
     /// provider binding by construction.
     fn read_chain_head<'a>(
@@ -113,7 +113,7 @@ impl CapabilitySpec for BtcBalanceReadCapability {
 pub trait BtcBalanceReadProvider: Send + Sync {
     /// Reads a Bitcoin address balance from the selected source.
     ///
-    /// A successful response has already enforced provider-bound source authority plus address and
+    /// A successful response has already enforced the provider binding plus address and
     /// exact block-anchor invariants. Returned source evidence matches the provider binding by
     /// construction.
     fn read_balance<'a>(
@@ -701,8 +701,8 @@ pub enum BtcCapabilityError {
         /// Closed redacted provider diagnostic.
         diagnostic: RedactedProviderDiagnostic,
     },
-    /// Provider evidence did not match the semantic request.
-    #[error("Bitcoin source evidence did not match request: {diagnostic}")]
+    /// Provider evidence did not match the provider binding.
+    #[error("Bitcoin source evidence did not match provider binding: {diagnostic}")]
     SourceMismatch {
         /// Closed redacted source-mismatch diagnostic.
         diagnostic: RedactedProviderDiagnostic,

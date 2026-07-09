@@ -397,7 +397,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         Ok(response.block_number)
     }
 
-    /// Prepares a context-bound deploy invocation from certified context authority.
+    /// Prepares a context-bound deploy invocation from certified context.
     pub async fn prepare_context_deploy_invocation(
         &self,
         action: &ValidatedConfig<DeployAction>,
@@ -414,7 +414,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         let data = deploy_action_data(action, artifact)?;
         self.prepare_transactions(prepare_transactions_request(
             ContractMutationPhase::Deploy,
-            ContractMutationNetworkAuthority::from_context(
+            ContractMutationNetworkContext::from_context(
                 context,
                 ContractLifecycleStage::Deployed,
             )?,
@@ -428,7 +428,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         .await
     }
 
-    /// Prepares context-bound configure invocations from certified context authority.
+    /// Prepares context-bound configure invocations from certified context.
     pub async fn prepare_context_configure_invocation(
         &self,
         action: &ValidatedConfig<ConfigureAction>,
@@ -448,7 +448,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             configure_action_transaction_inputs(action, artifact, input.deployed.address.as_str())?;
         self.prepare_transactions(prepare_transactions_request(
             ContractMutationPhase::Configure,
-            ContractMutationNetworkAuthority::from_context(
+            ContractMutationNetworkContext::from_context(
                 context,
                 ContractLifecycleStage::Configured,
             )?,
@@ -476,7 +476,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         reconstruct_prepared_mutation(prepared_mutation_reconstruction(
             evidence,
             ContractMutationPhase::Deploy,
-            ContractMutationNetworkAuthority::from_context(
+            ContractMutationNetworkContext::from_context(
                 context,
                 ContractLifecycleStage::Deployed,
             )?,
@@ -509,7 +509,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         reconstruct_prepared_mutation(prepared_mutation_reconstruction(
             evidence,
             ContractMutationPhase::Configure,
-            ContractMutationNetworkAuthority::from_context(
+            ContractMutationNetworkContext::from_context(
                 context,
                 ContractLifecycleStage::Configured,
             )?,
@@ -710,7 +710,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         ))
     }
 
-    /// Executes context-bound validation reads against certified context authority.
+    /// Executes context-bound validation reads against certified context.
     pub async fn validate_context_contract(
         &self,
         action: &ValidatedConfig<ValidateAction>,
@@ -2009,7 +2009,7 @@ impl ContractMutationActionView for ConfigureAction {
 }
 
 #[derive(Clone)]
-struct ContractMutationNetworkAuthority<'a> {
+struct ContractMutationNetworkContext<'a> {
     context_ref: mfm_values::ContextRefValue,
     evm_network_context_ref: String,
     resource_stage: ContractLifecycleStage,
@@ -2017,7 +2017,7 @@ struct ContractMutationNetworkAuthority<'a> {
     expected_chain_id: u64,
 }
 
-impl<'a> ContractMutationNetworkAuthority<'a> {
+impl<'a> ContractMutationNetworkContext<'a> {
     fn from_context(
         context: &'a mfm_program::CertifiedContext<EvmContractContext>,
         resource_stage: ContractLifecycleStage,
@@ -2044,16 +2044,16 @@ struct ResolvedContractMutationAction<'a> {
 }
 
 impl<'a> ResolvedContractMutationAction<'a> {
-    fn from_authority_and_action(
-        authority: ContractMutationNetworkAuthority<'a>,
+    fn from_context_and_action(
+        network_context: ContractMutationNetworkContext<'a>,
         action: &'a impl ContractMutationActionView,
     ) -> Result<Self> {
         Ok(Self {
-            network_id: authority.network_id,
-            expected_chain_id: authority.expected_chain_id,
-            context_ref: authority.context_ref,
-            evm_network_context_ref: authority.evm_network_context_ref,
-            resource_stage: authority.resource_stage,
+            network_id: network_context.network_id,
+            expected_chain_id: network_context.expected_chain_id,
+            context_ref: network_context.context_ref,
+            evm_network_context_ref: network_context.evm_network_context_ref,
+            resource_stage: network_context.resource_stage,
             signer_ref: action
                 .signer()
                 .signer_ref()
@@ -2069,11 +2069,12 @@ impl<'a> ResolvedContractMutationAction<'a> {
 
 fn prepare_transactions_request<'a>(
     phase: ContractMutationPhase,
-    authority: ContractMutationNetworkAuthority<'a>,
+    network_context: ContractMutationNetworkContext<'a>,
     action: &'a impl ContractMutationActionView,
     tx_inputs: Vec<PreparedTransactionInput>,
 ) -> Result<PrepareTransactionsRequest<'a>> {
-    let resolved = ResolvedContractMutationAction::from_authority_and_action(authority, action)?;
+    let resolved =
+        ResolvedContractMutationAction::from_context_and_action(network_context, action)?;
     Ok(PrepareTransactionsRequest {
         phase,
         context_ref: resolved.context_ref,
@@ -2094,11 +2095,12 @@ fn prepare_transactions_request<'a>(
 fn prepared_mutation_reconstruction<'a>(
     evidence: &'a PreparedContractInvocation,
     phase: ContractMutationPhase,
-    authority: ContractMutationNetworkAuthority<'a>,
+    network_context: ContractMutationNetworkContext<'a>,
     action: &'a impl ContractMutationActionView,
     tx_inputs: Vec<PreparedTransactionInput>,
 ) -> Result<PreparedMutationReconstruction<'a>> {
-    let resolved = ResolvedContractMutationAction::from_authority_and_action(authority, action)?;
+    let resolved =
+        ResolvedContractMutationAction::from_context_and_action(network_context, action)?;
     Ok(PreparedMutationReconstruction {
         evidence,
         phase,

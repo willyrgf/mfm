@@ -216,11 +216,6 @@ struct VerifiedBtcCall {
 }
 
 impl BtcJsonRpcSourceProvider {
-    /// Returns the private semantic binding owned by this provider.
-    pub const fn binding(&self) -> &BtcSourceBinding {
-        &self.binding
-    }
-
     async fn prepare_call(&self) -> mfm_btc_capabilities::Result<VerifiedBtcCall> {
         let transport = self
             .router

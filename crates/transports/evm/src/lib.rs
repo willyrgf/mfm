@@ -970,13 +970,6 @@ pub struct EvmJsonRpcNetworkProvider {
     binding: EvmNetworkBinding,
 }
 
-impl EvmJsonRpcNetworkProvider {
-    /// Returns the checked semantic network binding owned by this provider.
-    pub const fn binding(&self) -> &EvmNetworkBinding {
-        &self.binding
-    }
-}
-
 impl fmt::Debug for EvmJsonRpcNetworkProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EvmJsonRpcNetworkProvider")

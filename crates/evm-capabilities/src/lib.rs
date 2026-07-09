@@ -155,7 +155,7 @@ fn evm_capability_version(name: &'static str) -> mfm_capabilities::Result<Capabi
 pub trait EvmChainIdentityProvider: Send + Sync {
     /// Reads chain identity from the selected EVM source.
     ///
-    /// A successful response has already enforced provider-bound source authority and chain
+    /// A successful response has already enforced the provider binding and chain
     /// identity. Returned source evidence matches the provider binding by construction.
     fn chain_identity<'a>(
         &'a self,
@@ -167,7 +167,7 @@ pub trait EvmChainIdentityProvider: Send + Sync {
 pub trait EvmBlockReadProvider: Send + Sync {
     /// Reads an EVM block summary.
     ///
-    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// A successful response has already enforced the provider binding. Returned source
     /// evidence matches the provider binding by construction.
     fn read_block<'a>(
         &'a self,
@@ -179,7 +179,7 @@ pub trait EvmBlockReadProvider: Send + Sync {
 pub trait EvmBalanceReadProvider: Send + Sync {
     /// Reads an account balance at the selected block.
     ///
-    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// A successful response has already enforced the provider binding. Returned source
     /// evidence matches the provider binding by construction.
     fn read_balance<'a>(
         &'a self,
@@ -191,7 +191,7 @@ pub trait EvmBalanceReadProvider: Send + Sync {
 pub trait EvmCallReadProvider: Send + Sync {
     /// Executes a read-only EVM call.
     ///
-    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// A successful response has already enforced the provider binding. Returned source
     /// evidence matches the provider binding by construction.
     fn read_call<'a>(
         &'a self,
@@ -203,7 +203,7 @@ pub trait EvmCallReadProvider: Send + Sync {
 pub trait EvmCodeReadProvider: Send + Sync {
     /// Reads deployed bytecode at an address and block.
     ///
-    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// A successful response has already enforced the provider binding. Returned source
     /// evidence matches the provider binding by construction.
     fn read_code<'a>(
         &'a self,
@@ -215,7 +215,7 @@ pub trait EvmCodeReadProvider: Send + Sync {
 pub trait EvmLogsReadProvider: Send + Sync {
     /// Reads EVM logs matching a filter.
     ///
-    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// A successful response has already enforced the provider binding. Returned source
     /// evidence matches the provider binding by construction.
     fn read_logs<'a>(
         &'a self,
@@ -227,7 +227,7 @@ pub trait EvmLogsReadProvider: Send + Sync {
 pub trait EvmNonceReadProvider: Send + Sync {
     /// Reads the account transaction count.
     ///
-    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// A successful response has already enforced the provider binding. Returned source
     /// evidence matches the provider binding by construction.
     fn read_nonce<'a>(
         &'a self,
@@ -239,7 +239,7 @@ pub trait EvmNonceReadProvider: Send + Sync {
 pub trait EvmFeeReadProvider: Send + Sync {
     /// Reads fee-market inputs.
     ///
-    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// A successful response has already enforced the provider binding. Returned source
     /// evidence matches the provider binding by construction.
     fn read_fee<'a>(
         &'a self,
@@ -251,7 +251,7 @@ pub trait EvmFeeReadProvider: Send + Sync {
 pub trait EvmGasEstimateProvider: Send + Sync {
     /// Estimates gas for an EVM transaction intent.
     ///
-    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// A successful response has already enforced the provider binding. Returned source
     /// evidence matches the provider binding by construction.
     fn estimate_gas<'a>(
         &'a self,
@@ -263,7 +263,7 @@ pub trait EvmGasEstimateProvider: Send + Sync {
 pub trait EvmTransactionSubmitProvider: Send + Sync {
     /// Submits a signed EVM payload.
     ///
-    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// A successful response has already enforced the provider binding. Returned source
     /// evidence matches the provider binding by construction.
     fn submit_transaction<'a>(
         &'a self,
@@ -275,7 +275,7 @@ pub trait EvmTransactionSubmitProvider: Send + Sync {
 pub trait EvmReceiptReadProvider: Send + Sync {
     /// Reads an EVM transaction receipt.
     ///
-    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// A successful response has already enforced the provider binding. Returned source
     /// evidence matches the provider binding, and the receipt transaction hash matches the request
     /// by construction.
     fn read_receipt<'a>(
@@ -288,7 +288,7 @@ pub trait EvmReceiptReadProvider: Send + Sync {
 pub trait EvmNonceOccupancyReadProvider: Send + Sync {
     /// Reads explicit evidence for whether a concrete sender nonce is occupied by a non-anchor tx.
     ///
-    /// A successful response has already enforced provider-bound source authority. Returned source
+    /// A successful response has already enforced the provider binding. Returned source
     /// evidence matches the provider binding by construction.
     fn read_nonce_occupancy<'a>(
         &'a self,
@@ -1077,8 +1077,8 @@ pub enum EvmCapabilityError {
         /// Closed redacted provider diagnostic.
         diagnostic: RedactedProviderDiagnostic,
     },
-    /// Provider evidence did not match the semantic request.
-    #[error("EVM source evidence did not match request: {diagnostic}")]
+    /// Provider evidence did not match the provider binding.
+    #[error("EVM source evidence did not match provider binding: {diagnostic}")]
     SourceMismatch {
         /// Closed redacted source-mismatch diagnostic.
         diagnostic: RedactedProviderDiagnostic,
