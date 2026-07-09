@@ -42,6 +42,10 @@ authority, replay authority, public-output authority, or terminal status.
 For the proposed consolidation of public run-start ingress around registered entry-point
 operations, see `docs/RFC_ENTRYPOINT_OP.md`.
 
+For fact-backed portfolio collectors and report-only `portfolio_snapshot` cutover authority,
+see `docs/RFC_COLLECTORS_PORTFOLIO.md` and the operator recipe in
+`docs/portfolio-collect-then-report.md`.
+
 ## Authority Contract
 
 The typed boundary separates data, evidence, authority, and implementation artifacts:
