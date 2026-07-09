@@ -2,8 +2,11 @@
 //! Generic internal fact-index read capability contracts.
 //!
 //! This crate defines the state/adapter-facing authority contract for internal
-//! reads from the MFM fact index. Concrete store implementations, SQL query
-//! execution, app wiring, and public fact DTO services live outside this crate.
+//! Control and Platform reads from the MFM fact index. Concrete store
+//! implementations, SQL query execution, app wiring, and public fact DTO
+//! services live outside this crate. Platform index reads still require
+//! certified evidence and retained response artifacts; they are not a
+//! public-facts authority path.
 //!
 //! ```rust
 //! use mfm_capabilities::CapabilitySpec;
@@ -65,7 +68,11 @@ pub trait FactIndexReadProvider: Send + Sync {
     fn read_fact_index<'a>(&'a self, request: &'a FactIndexReadRequest) -> FactIndexReadFuture<'a>;
 }
 
-/// Request to read internal Control facts from the fact index.
+/// Request to read internal Control or Platform facts from the fact index.
+///
+/// Certified states may query both audiences through this single capability.
+/// Platform reads still require certified evidence and retained response
+/// artifacts; they are not a public-facts authority path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactIndexReadRequest {
     plan: CanonicalFactQueryPlan,
@@ -73,10 +80,13 @@ pub struct FactIndexReadRequest {
 
 impl FactIndexReadRequest {
     /// Creates a fact-index read request from an already-compiled plan.
+    ///
+    /// Accepts plans scoped to [`FactAudience::Control`] or
+    /// [`FactAudience::Platform`]. Other audiences fail closed.
     pub fn new(plan: CanonicalFactQueryPlan) -> Result<Self> {
-        if plan.query_scope().audience() != FactAudience::Control {
+        if !is_supported_fact_index_audience(plan.query_scope().audience()) {
             return Err(FactIndexReadError::InvalidRequest {
-                reason: FactIndexInvalidRequest::NonControlAudience,
+                reason: FactIndexInvalidRequest::UnsupportedAudience,
             });
         }
         Ok(Self { plan })
@@ -194,8 +204,15 @@ impl FactIndexReadEvidence {
 /// Closed invalid-request reasons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactIndexInvalidRequest {
-    /// The compiled plan was not scoped to the internal Control audience.
-    NonControlAudience,
+    /// The compiled plan audience is outside the certified fact-index allowlist.
+    UnsupportedAudience,
+}
+
+/// Returns whether an audience may be used with certified fact-index reads.
+///
+/// Allowlist: Control (operational cursors) and Platform (reportable holdings).
+const fn is_supported_fact_index_audience(audience: FactAudience) -> bool {
+    matches!(audience, FactAudience::Control | FactAudience::Platform)
 }
 
 /// Closed provider failure reasons.
@@ -283,41 +300,54 @@ mod tests {
     }
 
     #[test]
-    fn request_rejects_public_platform_scope() {
-        let error = FactIndexReadRequest::new(plan(FactAudience::Platform))
-            .expect_err("platform scope must be rejected");
-
-        assert_eq!(
-            error,
-            FactIndexReadError::InvalidRequest {
-                reason: FactIndexInvalidRequest::NonControlAudience,
-            }
-        );
+    fn request_accepts_control_and_platform_audiences() {
+        for audience in [FactAudience::Control, FactAudience::Platform] {
+            let request =
+                FactIndexReadRequest::new(plan(audience)).expect("supported audience request");
+            assert_eq!(request.plan().query_scope().audience(), audience);
+            assert!(is_supported_fact_index_audience(audience));
+        }
     }
 
     #[test]
-    fn response_rows_receipt_and_evidence_shape_are_pinned() {
-        let request = FactIndexReadRequest::new(plan(FactAudience::Control)).expect("request");
-        let receipt = receipt_with_summary(request.plan(), internal_fact_ref(1));
-        let response = FactIndexReadResponse::from_receipt(receipt.clone(), trust_root());
+    fn request_allowlist_covers_control_and_platform() {
+        // Exhaustive over current FactAudience variants: both are allowed.
+        // When a new audience is added, is_supported_fact_index_audience must
+        // stay fail-closed (return false) until deliberately allowlisted.
+        assert!(is_supported_fact_index_audience(FactAudience::Control));
+        assert!(is_supported_fact_index_audience(FactAudience::Platform));
+    }
 
-        assert_eq!(response.rows().len(), 1);
-        assert_eq!(response.rows()[0].fact_ref(), &receipt.returned_refs()[0]);
-        assert_eq!(response.rows()[0].returned_fields().len(), 1);
-        assert_eq!(response.receipt(), &receipt);
-        assert_eq!(
-            response.trust_root().scheme(),
-            StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1
-        );
+    #[test]
+    fn response_rows_receipt_and_evidence_shape_are_pinned_for_control_and_platform() {
+        for audience in [FactAudience::Control, FactAudience::Platform] {
+            let request = FactIndexReadRequest::new(plan(audience)).expect("request");
+            let receipt = receipt_with_summary(request.plan(), internal_fact_ref(1));
+            let response = FactIndexReadResponse::from_receipt(receipt.clone(), trust_root());
 
-        let selection = FactSelectionEvidence::new(digest(0x71), vec![0], None).expect("selection");
-        let evidence = response
-            .into_evidence(&request, selection)
-            .expect("evidence");
+            assert_eq!(response.rows().len(), 1);
+            assert_eq!(response.rows()[0].fact_ref(), &receipt.returned_refs()[0]);
+            assert_eq!(response.rows()[0].returned_fields().len(), 1);
+            assert_eq!(response.receipt(), &receipt);
+            assert_eq!(
+                response.trust_root().scheme(),
+                StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1
+            );
 
-        assert_eq!(evidence.query_evidence().plan(), request.plan());
-        assert_eq!(evidence.query_evidence().receipt(), &receipt);
-        assert_eq!(evidence.trust_root().key_id().as_str(), "fact.read.key");
+            let selection =
+                FactSelectionEvidence::new(digest(0x71), vec![0], None).expect("selection");
+            let evidence = response
+                .into_evidence(&request, selection)
+                .expect("evidence");
+
+            assert_eq!(evidence.query_evidence().plan(), request.plan());
+            assert_eq!(evidence.query_evidence().receipt(), &receipt);
+            assert_eq!(evidence.trust_root().key_id().as_str(), "fact.read.key");
+            assert_eq!(
+                evidence.query_evidence().plan().query_scope().audience(),
+                audience
+            );
+        }
     }
 
     #[test]
@@ -488,7 +518,7 @@ mod tests {
         let rows = [FactQueryResultRow::new(fact_ref, returned_fields)];
         let read_frontier = StoreReadFrontier::new(
             StoreScopeRef::new("mfm.store.default").expect("store scope"),
-            FactQueryScope::new(FactAudience::Control, FactVisibilityScope::Default),
+            plan.query_scope().clone(),
             DescriptorCatalogWatermark::new(1),
             FactProjectionGeneration::new(1),
             11,

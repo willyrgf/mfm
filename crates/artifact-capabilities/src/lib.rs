@@ -195,17 +195,7 @@ impl ArtifactReadRequest {
 
     /// Creates a request for a fact response artifact pinned by an internal fact ref.
     pub fn from_internal_fact_response_ref(fact_ref: &InternalFactRef) -> Self {
-        Self::from_expectation(ArtifactEvidenceExpectation {
-            artifact_id: fact_ref.artifact_id().clone(),
-            digest: Some(fact_ref.response_hash().clone()),
-            byte_len: None,
-            media_type: None,
-            schema_id: OptionalEvidence::Present(fact_ref.response_schema_id().clone()),
-            semantic_type_id: OptionalEvidence::Any,
-            producer_node_id: OptionalEvidence::Present(fact_ref.producer_node_id().clone()),
-            producer_seed_id: OptionalEvidence::Any,
-            artifact_role: Some(ArtifactRole::FactResponse),
-        })
+        Self::from_expectation(fact_response_evidence_expectation(fact_ref))
     }
 
     /// Creates a request for a certified config artifact reference.
@@ -372,6 +362,57 @@ fn optional_present_ref<T>(value: &OptionalEvidence<T>) -> Option<&T> {
         OptionalEvidence::Present(value) => Some(value),
         OptionalEvidence::Any | OptionalEvidence::Absent => None,
     }
+}
+
+fn fact_response_evidence_expectation(fact_ref: &InternalFactRef) -> ArtifactEvidenceExpectation {
+    ArtifactEvidenceExpectation {
+        artifact_id: fact_ref.artifact_id().clone(),
+        digest: Some(fact_ref.response_hash().clone()),
+        byte_len: None,
+        media_type: None,
+        schema_id: OptionalEvidence::Present(fact_ref.response_schema_id().clone()),
+        semantic_type_id: OptionalEvidence::Any,
+        producer_node_id: OptionalEvidence::Present(fact_ref.producer_node_id().clone()),
+        producer_seed_id: OptionalEvidence::Any,
+        artifact_role: Some(ArtifactRole::FactResponse),
+    }
+}
+
+/// Builds a store event artifact requirement for a fact response pinned by an
+/// internal fact ref.
+///
+/// Shared kit for certified fact-index consumers (BTC Control checkpoints,
+/// portfolio Platform holding reads): load retained response bytes by this
+/// requirement, then decode with [`hydrate_fact_response_json`].
+pub fn fact_response_artifact_requirement(
+    fact_ref: &InternalFactRef,
+) -> store::EventArtifactRequirement {
+    store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::FactResponse,
+        artifact_id: fact_ref.artifact_id().clone(),
+        digest: Some(fact_ref.response_hash().clone()),
+        byte_len: None,
+        media_type: None,
+        schema_id: Some(fact_ref.response_schema_id().clone()),
+        semantic_type_id: None,
+        producer_node_id: Some(fact_ref.producer_node_id().clone()),
+        producer_seed_id: None,
+        artifact_role: Some(ArtifactRole::FactResponse),
+    }
+}
+
+/// Decodes retained fact-response artifact bytes as typed JSON.
+///
+/// Pure hydrate helper used after loading bytes via
+/// [`fact_response_artifact_requirement`]. Does not perform IO.
+pub fn hydrate_fact_response_json<T>(fact_ref: &InternalFactRef, bytes: &[u8]) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_slice(bytes).map_err(|_error| ArtifactReadError::Decode {
+        artifact_id: Box::new(fact_ref.artifact_id().clone()),
+        format: ArtifactReadDecodeFormat::Json,
+    })
 }
 
 impl ArtifactEvidenceExpectation {

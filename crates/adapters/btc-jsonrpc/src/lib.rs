@@ -9,6 +9,7 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use mfm_artifact_capabilities::{fact_response_artifact_requirement, hydrate_fact_response_json};
 use mfm_btc_capabilities::{
     BitcoinNetworkTag, BtcBlockHash, BtcCapabilityError, BtcCapabilityFuture,
     BtcChainHeadReadProvider, BtcChainHeadRequest, BtcChainHeadResponse, BtcFinality, BtcHeadKind,
@@ -426,7 +427,7 @@ async fn checkpoint_from_response(
                 .await
                 .map_err(runtime_artifact_read_error)?;
             let checkpoint_response: CollectorCheckpointResponse =
-                serde_json::from_slice(artifact.bytes()).map_err(|error| {
+                hydrate_fact_response_json(fact_ref, artifact.bytes()).map_err(|error| {
                     mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
                 })?;
             state
@@ -434,23 +435,6 @@ async fn checkpoint_from_response(
                 .map(Some)
                 .map_err(btc_state_runtime_error)
         }
-    }
-}
-
-fn fact_response_artifact_requirement(
-    fact_ref: &mfm_facts::InternalFactRef,
-) -> store::EventArtifactRequirement {
-    store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::FactResponse,
-        artifact_id: fact_ref.artifact_id().clone(),
-        digest: Some(fact_ref.response_hash().clone()),
-        byte_len: None,
-        media_type: None,
-        schema_id: Some(fact_ref.response_schema_id().clone()),
-        semantic_type_id: None,
-        producer_node_id: Some(fact_ref.producer_node_id().clone()),
-        producer_seed_id: None,
-        artifact_role: Some(events::ArtifactRole::FactResponse),
     }
 }
 

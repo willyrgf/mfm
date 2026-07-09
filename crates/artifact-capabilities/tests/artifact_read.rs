@@ -1,11 +1,17 @@
 use mfm_artifact_capabilities::*;
 use mfm_canonical::sha256_digest_bytes;
 use mfm_events::v1::ArtifactRole;
+use mfm_facts::{
+    FactAudience, FactClaimId, FactKey, FactProducerProvenance, FactResponseEvidence,
+    FactSubjectRef, FactVisibility, InternalFactRef, InternalFactRefParts,
+};
 use mfm_ids::{
-    ArtifactId, ContentDigest, DigestAlgorithm, NodeId, SchemaId, SeedId, SemanticTypeId,
+    AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
+    DigestAlgorithm, EventId, NodeId, RunId, SchemaId, SeedId, SemanticTypeId,
 };
 use mfm_spec::v1::MediaType;
 use mfm_store::v1 as store;
+use serde::Deserialize;
 
 fn digest(bytes: &[u8]) -> ContentDigest {
     ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes))
@@ -234,4 +240,125 @@ fn errors_are_redaction_safe() {
     assert!(!rendered.contains("private_key"));
     assert!(!rendered.contains(String::from_utf8_lossy(&bytes).as_ref()));
     assert!(!rendered.contains(evidence.digest.as_str()));
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct SampleFactResponse {
+    height: u64,
+    hash: String,
+}
+
+#[test]
+fn fact_response_artifact_requirement_pins_response_identity() {
+    let bytes = br#"{"height":100,"hash":"0xabc"}"#;
+    let fact_ref = internal_fact_ref(bytes);
+
+    let requirement = fact_response_artifact_requirement(&fact_ref);
+
+    assert_eq!(
+        requirement.source,
+        store::EventArtifactReferenceSource::FactResponse
+    );
+    assert_eq!(&requirement.artifact_id, fact_ref.artifact_id());
+    assert_eq!(requirement.digest.as_ref(), Some(fact_ref.response_hash()));
+    assert_eq!(
+        requirement.schema_id.as_ref(),
+        Some(fact_ref.response_schema_id())
+    );
+    assert_eq!(
+        requirement.producer_node_id.as_ref(),
+        Some(fact_ref.producer_node_id())
+    );
+    assert_eq!(requirement.artifact_role, Some(ArtifactRole::FactResponse));
+    assert!(requirement.byte_len.is_none());
+    assert!(requirement.media_type.is_none());
+    assert!(requirement.semantic_type_id.is_none());
+    assert!(requirement.producer_seed_id.is_none());
+}
+
+#[test]
+fn hydrate_fact_response_json_decodes_payload_and_rejects_invalid_json() {
+    let ok_bytes = br#"{"height":100,"hash":"0xabc"}"#;
+    let fact_ref = internal_fact_ref(ok_bytes);
+
+    let decoded: SampleFactResponse =
+        hydrate_fact_response_json(&fact_ref, ok_bytes).expect("hydrate");
+    assert_eq!(
+        decoded,
+        SampleFactResponse {
+            height: 100,
+            hash: "0xabc".to_owned(),
+        }
+    );
+
+    let err = hydrate_fact_response_json::<SampleFactResponse>(&fact_ref, br#"not-json"#)
+        .expect_err("invalid json");
+    assert!(matches!(
+        err,
+        ArtifactReadError::Decode {
+            format: ArtifactReadDecodeFormat::Json,
+            ..
+        }
+    ));
+    assert_eq!(err.to_string().contains("password"), false);
+}
+
+fn internal_fact_ref(bytes: &[u8]) -> InternalFactRef {
+    let response_digest = digest(bytes);
+    let artifact_id =
+        ArtifactId::from_digest(response_digest.algorithm(), *response_digest.digest());
+    let producer = node_id("fact-producer");
+    let schema = schema_id("mfm.test.fact_response");
+    InternalFactRef::new(InternalFactRefParts {
+        fact_claim_id: FactClaimId::new(
+            RunId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                sha256_digest_bytes(b"fact-run"),
+            ),
+            1,
+            0,
+        )
+        .expect("claim id"),
+        source_event_id: EventId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(b"fact-event"),
+        ),
+        recorded_at: "2026-07-02T00:00:00Z".to_owned(),
+        producer_node_id: producer.clone(),
+        observed_at: Some("2026-07-02T00:00:00Z".to_owned()),
+        visibility: FactVisibility::indexed_default(FactAudience::Control),
+        fact_kind: mfm_facts::FactKind::new("test.fact").expect("kind"),
+        fact_descriptor_hash: digest(b"descriptor"),
+        subject: FactSubjectRef::new(
+            digest(b"subject-ns"),
+            FactKey::from_digest(digest(b"subject-key")),
+            digest(b"subject-material"),
+        ),
+        request: None,
+        response: FactResponseEvidence::new(
+            schema,
+            response_digest,
+            artifact_id,
+            digest(b"artifact-evidence"),
+        ),
+        producer: FactProducerProvenance::new(
+            CapabilityKind::new(
+                "mfm.test",
+                "read",
+                DigestAlgorithm::Sha256JcsV1,
+                sha256_digest_bytes(b"cap-kind"),
+            )
+            .expect("capability kind"),
+            CapabilityVersion::new("mfm.test.read.v1").expect("capability version"),
+            AdapterKind::new(
+                "mfm.test",
+                "adapter",
+                DigestAlgorithm::Sha256JcsV1,
+                sha256_digest_bytes(b"adapter-kind"),
+            )
+            .expect("adapter kind"),
+            AdapterVersion::new("mfm.test.adapter.v1").expect("adapter version"),
+        ),
+    })
+    .expect("fact ref")
 }
