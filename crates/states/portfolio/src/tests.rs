@@ -9,6 +9,8 @@ use mfm_portfolio_model::symbol::{SymbolKind, SymbolValuationConfig};
 use mfm_portfolio_model::wallet::WalletSubject;
 use mfm_values::MfmConfig as _;
 
+const EVM_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
+
 fn test_network(network_id: &str, chain_id: u64) -> NetworkConfig {
     NetworkConfig::new(
         network_id.to_owned(),
@@ -153,6 +155,7 @@ fn observation_read_intent_classifies_erc20_balance() {
             &ExecutionAnchor::Evm {
                 chain_id: 1,
                 block_number: 123,
+                block_hash: EVM_HASH.to_owned(),
             },
         )
         .expect("read intent"),
@@ -162,10 +165,12 @@ fn observation_read_intent_classifies_erc20_balance() {
             account: "0x000000000000000000000000000000000000dead".to_owned(),
             token_address: "0x0000000000000000000000000000000000000001".to_owned(),
             block_number: 123,
+            block_hash: EVM_HASH.to_owned(),
             decimals: None,
             anchor: ExecutionAnchor::Evm {
                 chain_id: 1,
                 block_number: 123,
+                block_hash: EVM_HASH.to_owned(),
             },
         }
     );
@@ -236,6 +241,7 @@ fn protocol_position_classifies_as_unsupported_without_network_requirement() {
         &ExecutionAnchor::Evm {
             chain_id: 1,
             block_number: 123,
+            block_hash: EVM_HASH.to_owned(),
         },
     )
     .expect_err("protocol positions are unsupported by the typed read adapter");
@@ -263,6 +269,7 @@ fn fixed_price_observation_projects_report_totals() {
                 anchor: ExecutionAnchor::Evm {
                     chain_id: 1,
                     block_number: 10,
+                    block_hash: EVM_HASH.to_owned(),
                 },
             }],
         },

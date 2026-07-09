@@ -550,12 +550,14 @@ pub struct ObservationValue {
     schema = "mfm.portfolio.observation_anchor"
 )]
 pub enum ObservationAnchor {
-    /// EVM observation pinned to one block on one chain.
+    /// EVM observation pinned to one block hash and number on one chain.
     Evm {
         /// EVM chain id.
         chain_id: u64,
         /// Concrete pinned block number.
         block_number: u64,
+        /// Concrete pinned block hash.
+        block_hash: String,
     },
     /// Bitcoin observation pinned to one height and block hash.
     Bitcoin {

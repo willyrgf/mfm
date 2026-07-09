@@ -10,6 +10,8 @@ use mfm_portfolio_model::symbol::{
 use mfm_portfolio_model::wallet::{WalletImplementationConfig, WalletSubjectKind};
 use serde_json::{json, Value};
 
+const EVM_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
+
 #[test]
 fn decode_canonical_portfolio_config() {
     let cfg = decode_portfolio_config(&canonical_config_json()).expect("config should decode");
@@ -441,6 +443,7 @@ fn normalization_sorts_config_and_runtime_outputs() {
                 anchor: ExecutionAnchor::Evm {
                     chain_id: 1,
                     block_number: 10,
+                    block_hash: EVM_HASH.to_owned(),
                 },
             },
             NetworkPin {
@@ -448,6 +451,7 @@ fn normalization_sorts_config_and_runtime_outputs() {
                 anchor: ExecutionAnchor::Evm {
                     chain_id: 42161,
                     block_number: 20,
+                    block_hash: EVM_HASH.to_owned(),
                 },
             },
         ],
@@ -783,6 +787,7 @@ fn observation(wallet_id: &str, symbol_id: &str, value_order: Vec<QuoteCode>) ->
                             1
                         },
                         block_number: 1,
+                        block_hash: EVM_HASH.to_owned(),
                     },
                 }],
             })
@@ -801,6 +806,7 @@ fn observation(wallet_id: &str, symbol_id: &str, value_order: Vec<QuoteCode>) ->
                     1
                 },
                 block_number: 1,
+                block_hash: EVM_HASH.to_owned(),
             },
         },
         metadata: PublicMetadata::default(),

@@ -373,7 +373,7 @@ impl EvmJsonRpcClient {
                 self.verified_rpc_call(
                     selected,
                     "eth_getBlockByNumber",
-                    json!([block_selector_tag(selector), false]),
+                    json!([block_selector_tag(selector)?, false]),
                 )
                 .await?
             }
@@ -404,7 +404,7 @@ impl EvmJsonRpcClient {
                 json!([{
                     "to": format!("{:?}", request.to()),
                     "data": bytes_to_hex_prefixed(request.calldata()),
-                }, block_selector_tag(request.block())]),
+                }, block_selector_param(request.block())]),
             )
             .await?;
         let raw = result.as_str().ok_or(EvmTransportError::InvalidResponse)?;
@@ -425,7 +425,7 @@ impl EvmJsonRpcClient {
                 "eth_getCode",
                 json!([
                     format!("{:?}", request.address()),
-                    block_selector_tag(request.block())
+                    block_selector_param(request.block())
                 ]),
             )
             .await?;
@@ -450,7 +450,7 @@ impl EvmJsonRpcClient {
                 "eth_getBalance",
                 json!([
                     format!("{:?}", request.account()),
-                    block_selector_tag(request.block())
+                    block_selector_param(request.block())
                 ]),
             )
             .await?;
@@ -469,11 +469,11 @@ impl EvmJsonRpcClient {
         let mut filter = serde_json::Map::new();
         filter.insert(
             "fromBlock".to_owned(),
-            json!(block_selector_tag(request.from_block())),
+            json!(block_selector_tag(request.from_block())?),
         );
         filter.insert(
             "toBlock".to_owned(),
-            json!(block_selector_tag(request.to_block())),
+            json!(block_selector_tag(request.to_block())?),
         );
         if let Some(address) = request.address() {
             filter.insert("address".to_owned(), json!(format!("{address:?}")));
@@ -518,7 +518,7 @@ impl EvmJsonRpcClient {
                 "eth_getTransactionCount",
                 json!([
                     format!("{:?}", request.account()),
-                    block_selector_tag(request.block())
+                    block_selector_param(request.block())
                 ]),
             )
             .await?;
@@ -1116,12 +1116,24 @@ fn source_evidence_error_into_transport(error: EvmCapabilityError) -> EvmTranspo
     }
 }
 
-fn block_selector_tag(selector: &EvmBlockSelector) -> String {
+fn block_selector_tag(selector: &EvmBlockSelector) -> TransportResult<String> {
     match selector {
-        EvmBlockSelector::Latest => "latest".to_owned(),
-        EvmBlockSelector::Pending => "pending".to_owned(),
-        EvmBlockSelector::Number(number) => format!("0x{number:x}"),
-        EvmBlockSelector::Hash(hash) => format!("{hash:?}"),
+        EvmBlockSelector::Latest => Ok("latest".to_owned()),
+        EvmBlockSelector::Pending => Ok("pending".to_owned()),
+        EvmBlockSelector::Number(number) => Ok(format!("0x{number:x}")),
+        EvmBlockSelector::Hash(_) => Err(EvmTransportError::InvalidResponse),
+    }
+}
+
+fn block_selector_param(selector: &EvmBlockSelector) -> Value {
+    match selector {
+        EvmBlockSelector::Latest => json!("latest"),
+        EvmBlockSelector::Pending => json!("pending"),
+        EvmBlockSelector::Number(number) => json!(format!("0x{number:x}")),
+        EvmBlockSelector::Hash(hash) => json!({
+            "blockHash": format!("{hash:?}"),
+            "requireCanonical": true,
+        }),
     }
 }
 

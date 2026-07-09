@@ -15,6 +15,7 @@ use support::{empty_post, json_post, response_json};
 
 const NETWORK_ID: &str = "typed-local-eth";
 const RPC_URL_FILE_ENV: &str = "MFM_TEST_PORTFOLIO_RPC_URL_FILE";
+const EVM_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 static RPC_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
@@ -48,6 +49,10 @@ async fn portfolio_snapshot_starts_to_completion() {
     let report = &public_output["report"];
     assert_eq!(snapshot["portfolio_id"], "typed-local");
     assert_eq!(snapshot["network_pins"][0]["anchor"]["block_number"], 100);
+    assert_eq!(
+        snapshot["network_pins"][0]["anchor"]["block_hash"],
+        EVM_HASH
+    );
     assert_eq!(
         snapshot["wallets"][0]["observations"][0]["quantity"]["amount_dec"],
         "1.000000000000000000"
@@ -398,9 +403,18 @@ async fn rpc_handler(Json(request): Json<serde_json::Value>) -> Json<serde_json:
         "eth_chainId" => json!("0x7a69"),
         "eth_getBlockByNumber" => json!({
             "number": "0x64",
-            "hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+            "hash": EVM_HASH
         }),
-        "eth_getBalance" => json!("0xde0b6b3a7640000"),
+        "eth_getBalance" => {
+            assert_eq!(
+                request["params"][1],
+                json!({
+                    "blockHash": EVM_HASH,
+                    "requireCanonical": true,
+                })
+            );
+            json!("0xde0b6b3a7640000")
+        }
         other => panic!("unexpected rpc method {other}"),
     };
     Json(json!({

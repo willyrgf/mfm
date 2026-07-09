@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 use mfm_btc_capabilities::{
     BitcoinNetworkTag, BtcAddress, BtcBalanceReadProvider, BtcBalanceReadRequest, BtcBlockHash,
     BtcCapabilityError, BtcChainHeadReadProvider, BtcChainHeadRequest, BtcHeadSelection,
@@ -530,6 +530,7 @@ impl CapabilityPortfolioBackend {
         Ok(ExecutionAnchor::Evm {
             chain_id,
             block_number: response.block_number,
+            block_hash: format!("{:?}", response.block_hash),
         })
     }
 
@@ -564,17 +565,13 @@ impl CapabilityPortfolioBackend {
                 network_id,
                 chain_id,
                 account,
-                block_number,
+                block_number: _,
+                block_hash,
                 decimals,
                 anchor,
             } => {
                 self.read_evm_balance(
-                    network_id,
-                    *chain_id,
-                    account,
-                    *block_number,
-                    *decimals,
-                    anchor,
+                    network_id, *chain_id, account, block_hash, *decimals, anchor,
                 )
                 .await
             }
@@ -583,16 +580,18 @@ impl CapabilityPortfolioBackend {
                 chain_id,
                 account,
                 token_address,
-                block_number,
+                block_number: _,
+                block_hash,
                 decimals,
                 anchor,
             } => {
                 let account = parse_address(account, "wallet address")?;
                 let token = parse_address(token_address, "token address")?;
+                let block_hash = parse_evm_block_hash(block_hash)?;
                 let decimals = match decimals {
                     Some(decimals) => *decimals,
                     None => {
-                        self.erc20_decimals(network_id, *chain_id, token, *block_number)
+                        self.erc20_decimals(network_id, *chain_id, token, block_hash)
                             .await?
                     }
                 };
@@ -602,7 +601,7 @@ impl CapabilityPortfolioBackend {
                         *chain_id,
                         token,
                         encode_erc20_balance_of(&account),
-                        *block_number,
+                        block_hash,
                     )
                     .await?;
                 Ok(RawBalanceObservation::new(
@@ -637,11 +636,12 @@ impl CapabilityPortfolioBackend {
         network_id: &str,
         chain_id: u64,
         account: &str,
-        block_number: u64,
+        block_hash: &str,
         decimals: u8,
         anchor: &ExecutionAnchor,
     ) -> Result<RawBalanceObservation, PortfolioReadError> {
         let account = parse_address(account, "wallet address")?;
+        let block_hash = parse_evm_block_hash(block_hash)?;
         let binding = portfolio_evm_network_binding(network_id, chain_id)?;
         let provider = self
             .transport
@@ -650,7 +650,7 @@ impl CapabilityPortfolioBackend {
         let response = provider
             .read_balance(&EvmBalanceReadRequest::new(
                 account,
-                EvmBlockSelector::Number(block_number),
+                EvmBlockSelector::Hash(block_hash),
             ))
             .await
             .map_err(portfolio_evm_capability_error)?;
@@ -694,7 +694,7 @@ impl CapabilityPortfolioBackend {
         network_id: &str,
         chain_id: u64,
         token: Address,
-        block_number: u64,
+        block_hash: B256,
     ) -> Result<u8, PortfolioReadError> {
         let raw = self
             .evm_call_u256(
@@ -702,7 +702,7 @@ impl CapabilityPortfolioBackend {
                 chain_id,
                 token,
                 encode_erc20_decimals(),
-                block_number,
+                block_hash,
             )
             .await?;
         parse_u8_u256(raw).map_err(|_| {
@@ -719,7 +719,7 @@ impl CapabilityPortfolioBackend {
         chain_id: u64,
         to: Address,
         calldata_hex: String,
-        block_number: u64,
+        block_hash: B256,
     ) -> Result<U256, PortfolioReadError> {
         let calldata = hex_to_bytes(&calldata_hex).map_err(|_| {
             PortfolioReadError::new("invalid_call_data", "portfolio EVM call data was invalid")
@@ -733,7 +733,7 @@ impl CapabilityPortfolioBackend {
             .read_call(&EvmCallReadRequest::new(
                 to,
                 calldata,
-                EvmBlockSelector::Number(block_number),
+                EvmBlockSelector::Hash(block_hash),
             ))
             .await
             .map_err(portfolio_evm_capability_error)?;
@@ -774,6 +774,15 @@ fn parse_address(value: &str, label: &'static str) -> Result<Address, PortfolioR
         PortfolioReadError::new(
             "invalid_evm_address",
             format!("{label} was invalid for portfolio EVM read"),
+        )
+    })
+}
+
+fn parse_evm_block_hash(value: &str) -> Result<B256, PortfolioReadError> {
+    value.parse().map_err(|_| {
+        PortfolioReadError::new(
+            "evm_anchor_invalid",
+            "portfolio EVM execution anchor block hash was invalid",
         )
     })
 }

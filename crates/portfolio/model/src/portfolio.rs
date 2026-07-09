@@ -552,12 +552,14 @@ impl PortfolioConfigIndex {
     schema = "mfm.portfolio.execution_anchor"
 )]
 pub enum ExecutionAnchor {
-    /// EVM execution pinned to one block number on one chain id.
+    /// EVM execution pinned to one block hash and number on one chain id.
     Evm {
         /// EVM chain id.
         chain_id: u64,
         /// Concrete pinned block number.
         block_number: u64,
+        /// Concrete pinned block hash.
+        block_hash: String,
     },
     /// Bitcoin execution pinned to one height and block hash.
     Bitcoin {

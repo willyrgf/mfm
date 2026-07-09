@@ -183,6 +183,8 @@ pub enum PortfolioBalanceReadIntent {
         account: String,
         /// Pinned EVM block number.
         block_number: u64,
+        /// Pinned EVM block hash.
+        block_hash: String,
         /// Decimal precision used for rendering the raw amount.
         decimals: u8,
         /// Pinned execution anchor that must be preserved in the observation.
@@ -200,6 +202,8 @@ pub enum PortfolioBalanceReadIntent {
         token_address: String,
         /// Pinned EVM block number.
         block_number: u64,
+        /// Pinned EVM block hash.
+        block_hash: String,
         /// Optional configured token decimals. When absent, the adapter must read token decimals.
         decimals: Option<u8>,
         /// Pinned execution anchor that must be preserved in the observation.
@@ -1173,14 +1177,18 @@ pub fn observe_batch_read_intent(
                 network_id,
                 chain_id,
                 ..
-            } => Ok(PortfolioBalanceReadIntent::EvmNativeBalance {
-                network_id: network_id.to_string(),
-                chain_id: chain_id.get(),
-                account: wallet_evm_address(config)?,
-                block_number: evm_block_number_from_anchor(chain_id.get(), anchor)?,
-                decimals: config.symbol.decimals.unwrap_or(18),
-                anchor: anchor.clone(),
-            }),
+            } => {
+                let (block_number, block_hash) = evm_anchor_parts(chain_id.get(), anchor)?;
+                Ok(PortfolioBalanceReadIntent::EvmNativeBalance {
+                    network_id: network_id.to_string(),
+                    chain_id: chain_id.get(),
+                    account: wallet_evm_address(config)?,
+                    block_number,
+                    block_hash,
+                    decimals: config.symbol.decimals.unwrap_or(18),
+                    anchor: anchor.clone(),
+                })
+            }
             NetworkConfig::Bitcoin {
                 network_id,
                 control_scope,
@@ -1203,15 +1211,19 @@ pub fn observe_batch_read_intent(
                 network_id,
                 chain_id,
                 ..
-            } => Ok(PortfolioBalanceReadIntent::Erc20Balance {
-                network_id: network_id.to_string(),
-                chain_id: chain_id.get(),
-                account: wallet_evm_address(config)?,
-                token_address: token_address.to_string(),
-                block_number: evm_block_number_from_anchor(chain_id.get(), anchor)?,
-                decimals: config.symbol.decimals,
-                anchor: anchor.clone(),
-            }),
+            } => {
+                let (block_number, block_hash) = evm_anchor_parts(chain_id.get(), anchor)?;
+                Ok(PortfolioBalanceReadIntent::Erc20Balance {
+                    network_id: network_id.to_string(),
+                    chain_id: chain_id.get(),
+                    account: wallet_evm_address(config)?,
+                    token_address: token_address.to_string(),
+                    block_number,
+                    block_hash,
+                    decimals: config.symbol.decimals,
+                    anchor: anchor.clone(),
+                })
+            }
             NetworkConfig::Bitcoin { .. } => Err(unsupported_balance_reader_error()),
         },
         BalanceReaderConfig::ProtocolPosition { .. } => Err(unsupported_balance_reader_error()),
@@ -1351,9 +1363,11 @@ pub fn observation_batch_from_raw_balance(
         ExecutionAnchor::Evm {
             chain_id,
             block_number,
+            block_hash,
         } => ObservationAnchor::Evm {
             chain_id: *chain_id,
             block_number: *block_number,
+            block_hash: block_hash.clone(),
         },
         ExecutionAnchor::Bitcoin { height, block_hash } => ObservationAnchor::Bitcoin {
             height: *height,
@@ -1455,15 +1469,16 @@ pub fn observation_batch_missing_pinned_view(
     }
 }
 
-fn evm_block_number_from_anchor(
+fn evm_anchor_parts(
     expected_chain_id: u64,
     anchor: &ExecutionAnchor,
-) -> Result<u64, PortfolioReadError> {
+) -> Result<(u64, String), PortfolioReadError> {
     match anchor {
         ExecutionAnchor::Evm {
             chain_id,
             block_number,
-        } if *chain_id == expected_chain_id => Ok(*block_number),
+            block_hash,
+        } if *chain_id == expected_chain_id => Ok((*block_number, block_hash.clone())),
         ExecutionAnchor::Evm { .. } => Err(PortfolioReadError::new(
             "network_anchor_mismatch",
             "portfolio EVM read anchor did not match the configured network",

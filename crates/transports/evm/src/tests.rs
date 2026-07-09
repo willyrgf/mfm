@@ -1,7 +1,7 @@
 use super::*;
 use alloy_primitives::{address, B256, U256};
 use mfm_evm_capabilities::{EvmTransactionSubmitRequest, SignedEvmPayload};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -233,7 +233,23 @@ async fn supports_core_evm_json_rpc_calls() {
 
 #[test]
 fn block_selector_tag_supports_pending_nonce_reads() {
-    assert_eq!(block_selector_tag(&EvmBlockSelector::Pending), "pending");
+    assert_eq!(
+        block_selector_tag(&EvmBlockSelector::Pending).expect("pending tag"),
+        "pending"
+    );
+}
+
+#[test]
+fn hash_block_selector_params_require_canonical() {
+    let hash = HASH_HEX.parse::<B256>().expect("hash");
+
+    assert_eq!(
+        block_selector_param(&EvmBlockSelector::Hash(hash)),
+        json!({
+            "blockHash": HASH_HEX,
+            "requireCanonical": true,
+        })
+    );
 }
 
 #[tokio::test]

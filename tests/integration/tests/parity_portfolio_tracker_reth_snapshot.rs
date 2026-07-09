@@ -174,6 +174,9 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
     let out = &public_output["snapshot"];
     assert_eq!(out["portfolio_id"], "reth-eth-only");
     assert_eq!(out["network_pins"][0]["anchor"]["chain_id"], chain_id);
+    assert!(out["network_pins"][0]["anchor"]["block_hash"]
+        .as_str()
+        .is_some_and(|value| value.starts_with("0x") && value.len() == 66));
     assert_eq!(out["wallets"][0]["address"], wallet_address);
     assert_eq!(
         out["wallets"][0]["observations"]

@@ -55,9 +55,10 @@ semantics: portfolio `NetworkConfig.chain_id` or contract lifecycle `network.exp
 
 ## Provider-Bound Requests
 
-App assembly creates a raw `EvmJsonRpcClient` from runtime config. Runners and adapters derive an
-`EvmNetworkBinding` from certified workflow semantics, validate that binding without network IO, and
-bind it to an `EvmJsonRpcNetworkProvider` before any live call.
+App assembly creates one process-local live transport runtime from runtime config and caches the
+derived `EvmJsonRpcClient`. Runners and adapters derive an `EvmNetworkBinding` from certified
+workflow semantics, validate that binding without network IO, and bind it to an
+`EvmJsonRpcNetworkProvider` before any live call.
 
 EVM capability requests are operation-only. They carry operation parameters such as block selectors,
 accounts, calldata, log filters, signed payloads, or transaction hashes. They do not carry
@@ -71,6 +72,11 @@ operation-specific identity checks.
 
 The selected source and policy ids are audit provenance only. Replay and public output must not
 resolve them against current runtime config.
+
+Portfolio snapshots pin EVM views by chain id, block number, and block hash. Later EVM balance and
+contract-call reads use the pinned block hash as an EIP-1898 block selector with
+`requireCanonical: true`; the stored block number is audit context and must not be used as the
+provider read selector.
 
 Transport failures, HTTP status failures, JSON-RPC error objects, malformed responses, and source
 mismatches are classified as redacted provider diagnostics. Diagnostics may carry the stable EVM
