@@ -105,8 +105,8 @@ async fn select_holdings_succeeds_from_platform_facts_with_providers_unbound() {
         .await
         .expect("select holdings from Platform facts");
 
-    // No live chain providers were constructed; only fact-index + retained artifacts.
-    assert_eq!(fact_index.calls(), 2);
+    // No live chain providers; one shared-frontier batch fact-index read + retained artifacts.
+    assert_eq!(fact_index.calls(), 1);
     assert_eq!(selected.observations.len(), 2);
     assert_eq!(evidences.len(), 2);
 
@@ -667,37 +667,58 @@ impl FactIndexReadProvider for MockFactIndex {
         request: &'a FactIndexReadRequest,
     ) -> mfm_fact_capabilities::FactIndexReadFuture<'a> {
         Box::pin(async move {
+            let mut responses = self
+                .read_fact_index_batch(std::slice::from_ref(request))
+                .await?;
+            responses.pop().ok_or_else(|| {
+                mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(
+                    "fact-index batch returned no response for single request",
+                )
+            })
+        })
+    }
+
+    fn read_fact_index_batch<'a>(
+        &'a self,
+        requests: &'a [FactIndexReadRequest],
+    ) -> mfm_fact_capabilities::FactIndexReadBatchFuture<'a> {
+        Box::pin(async move {
+            // One batch call counts as one shared-frontier selection read.
             *self.calls.lock().expect("calls") += 1;
-            let plan = request.plan();
-            let kind = plan_fact_kind(plan);
-            let account = plan_account_predicate(plan);
+            let mut responses = Vec::with_capacity(requests.len());
+            for request in requests {
+                let plan = request.plan();
+                let kind = plan_fact_kind(plan);
+                let account = plan_account_predicate(plan);
 
-            // Prefer account-keyed fixtures (same-network multi-wallet tests); fall
-            // back to fact-kind keyed fixtures (dual-mainnet BTC+EVM).
-            let refs_with_order: Vec<(InternalFactRef, u64)> = account
-                .as_ref()
-                .and_then(|acct| self.by_account.get(acct.as_str()).cloned())
-                .or_else(|| self.by_kind.get(&kind).cloned())
-                .unwrap_or_default();
+                // Prefer account-keyed fixtures (same-network multi-wallet tests); fall
+                // back to fact-kind keyed fixtures (dual-mainnet BTC+EVM).
+                let refs_with_order: Vec<(InternalFactRef, u64)> = account
+                    .as_ref()
+                    .and_then(|acct| self.by_account.get(acct.as_str()).cloned())
+                    .or_else(|| self.by_kind.get(&kind).cloned())
+                    .unwrap_or_default();
 
-            let rows: Vec<FactQueryResultRow> = refs_with_order
-                .into_iter()
-                .map(|(fact_ref, order)| {
-                    FactQueryResultRow::new(
-                        fact_ref,
-                        vec![mfm_facts::FactFieldValue::new(
-                            mfm_facts::FactFieldId::new("metadata.store_commit_order")
-                                .expect("field"),
-                            FactFieldValueType::UnsignedInteger,
-                            FactCanonicalScalar::UnsignedInteger(order),
+                let rows: Vec<FactQueryResultRow> = refs_with_order
+                    .into_iter()
+                    .map(|(fact_ref, order)| {
+                        FactQueryResultRow::new(
+                            fact_ref,
+                            vec![mfm_facts::FactFieldValue::new(
+                                mfm_facts::FactFieldId::new("metadata.store_commit_order")
+                                    .expect("field"),
+                                FactFieldValueType::UnsignedInteger,
+                                FactCanonicalScalar::UnsignedInteger(order),
+                            )
+                            .expect("field value")],
                         )
-                        .expect("field value")],
-                    )
-                })
-                .collect();
+                    })
+                    .collect();
 
-            let receipt = signed_receipt_for_plan(plan, &rows);
-            Ok(FactIndexReadResponse::from_receipt(receipt, trust_root()))
+                let receipt = signed_receipt_for_plan(plan, &rows);
+                responses.push(FactIndexReadResponse::from_receipt(receipt, trust_root()));
+            }
+            Ok(responses)
         })
     }
 }

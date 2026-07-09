@@ -734,6 +734,19 @@ impl mfm_fact_capabilities::FactIndexReadProvider for UnavailableFactIndexReadPr
             )
         })
     }
+
+    fn read_fact_index_batch<'a>(
+        &'a self,
+        _requests: &'a [mfm_fact_capabilities::FactIndexReadRequest],
+    ) -> mfm_fact_capabilities::FactIndexReadBatchFuture<'a> {
+        Box::pin(async {
+            Err(
+                mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(
+                    "Platform fact-index is not configured for this process",
+                ),
+            )
+        })
+    }
 }
 
 /// Builds an adapter-facing artifact read provider from a retained artifact reader.

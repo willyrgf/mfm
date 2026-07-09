@@ -86,6 +86,22 @@ impl FactIndexReadProvider for MockFactIndex {
         request: &'a mfm_fact_capabilities::FactIndexReadRequest,
     ) -> mfm_fact_capabilities::FactIndexReadFuture<'a> {
         Box::pin(async move {
+            let mut responses = self
+                .read_fact_index_batch(std::slice::from_ref(request))
+                .await?;
+            responses.pop().ok_or_else(|| {
+                mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(
+                    "fact-index batch returned no response for single request",
+                )
+            })
+        })
+    }
+
+    fn read_fact_index_batch<'a>(
+        &'a self,
+        requests: &'a [mfm_fact_capabilities::FactIndexReadRequest],
+    ) -> mfm_fact_capabilities::FactIndexReadBatchFuture<'a> {
+        Box::pin(async move {
             *self.calls.lock().expect("calls") += 1;
             if self.fail {
                 return Err(
@@ -94,10 +110,15 @@ impl FactIndexReadProvider for MockFactIndex {
                     ),
                 );
             }
-            Ok(mfm_fact_capabilities::FactIndexReadResponse::from_receipt(
-                fact_query_receipt(request.plan(), self.refs.clone()),
-                trust_root(),
-            ))
+            Ok(requests
+                .iter()
+                .map(|request| {
+                    mfm_fact_capabilities::FactIndexReadResponse::from_receipt(
+                        fact_query_receipt(request.plan(), self.refs.clone()),
+                        trust_root(),
+                    )
+                })
+                .collect())
         })
     }
 }

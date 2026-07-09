@@ -41,6 +41,10 @@ pub type Result<T> = std::result::Result<T, FactIndexReadError>;
 pub type FactIndexReadFuture<'a> =
     Pin<Box<dyn Future<Output = Result<FactIndexReadResponse>> + Send + 'a>>;
 
+/// Boxed future returned by batch fact-index read providers.
+pub type FactIndexReadBatchFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<FactIndexReadResponse>>> + Send + 'a>>;
+
 /// Internal fact-index read authority.
 pub struct FactIndexReadCapability;
 
@@ -99,7 +103,31 @@ impl CapabilitySpec for FactRecordCapability {
 /// Provider interface for internal fact-index reads.
 pub trait FactIndexReadProvider: Send + Sync {
     /// Executes an already-compiled canonical fact query plan.
-    fn read_fact_index<'a>(&'a self, request: &'a FactIndexReadRequest) -> FactIndexReadFuture<'a>;
+    ///
+    /// Default path runs a one-element [`Self::read_fact_index_batch`] so single and multi
+    /// reads share one provider implementation.
+    fn read_fact_index<'a>(&'a self, request: &'a FactIndexReadRequest) -> FactIndexReadFuture<'a> {
+        Box::pin(async move {
+            let mut responses = self
+                .read_fact_index_batch(std::slice::from_ref(request))
+                .await?;
+            responses.pop().ok_or_else(|| {
+                FactIndexReadError::redacted_provider_failure(
+                    "fact-index batch returned no response for single request",
+                )
+            })
+        })
+    }
+
+    /// Executes multiple plans under **one shared store read snapshot**.
+    ///
+    /// Multi-holding portfolio selection must use this entry point so candidate sets share
+    /// one selection frontier. Implementations must not open independent snapshots per
+    /// request when `requests.len() > 1`. Empty input returns an empty vec.
+    fn read_fact_index_batch<'a>(
+        &'a self,
+        requests: &'a [FactIndexReadRequest],
+    ) -> FactIndexReadBatchFuture<'a>;
 }
 
 /// Request to read internal Control or Platform facts from the fact index.

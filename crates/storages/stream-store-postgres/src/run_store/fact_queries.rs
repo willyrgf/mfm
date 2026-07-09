@@ -12,21 +12,37 @@ impl PostgresRunStore {
         &self,
         plan: &mfm_facts::CanonicalFactQueryPlan,
     ) -> Result<PostgresFactQueryResult> {
+        let mut results = self
+            .execute_fact_queries(std::slice::from_ref(plan))
+            .await?;
+        Ok(results
+            .pop()
+            .expect("single-plan fact query batch always returns one result"))
+    }
+
+    /// Executes many descriptor-scoped plans under one REPEATABLE READ snapshot.
+    pub async fn execute_fact_queries(
+        &self,
+        plans: &[mfm_facts::CanonicalFactQueryPlan],
+    ) -> Result<Vec<PostgresFactQueryResult>> {
+        if plans.is_empty() {
+            return Ok(Vec::new());
+        }
         let signer = require_fact_receipt_signer(self.fact_receipt_signer.as_ref())?;
         let trust_root = self
             .authority
             .fact_receipt_trust_root()
             .ok_or_else(|| receipt_authentication_store_error("missing fact receipt trust root"))?;
-        execute_fact_query_client(&self.pool, plan, signer, trust_root).await
+        execute_fact_queries_client(&self.pool, plans, signer, trust_root).await
     }
 }
 
-async fn execute_fact_query_client(
+async fn execute_fact_queries_client(
     pool: &PgPool,
-    plan: &mfm_facts::CanonicalFactQueryPlan,
+    plans: &[mfm_facts::CanonicalFactQueryPlan],
     signer: &PostgresFactReceiptSigner,
     trust_root: &mfm_store::v1::FactQueryReceiptTrustRoot,
-) -> Result<PostgresFactQueryResult> {
+) -> Result<Vec<PostgresFactQueryResult>> {
     let mut tx = pool
         .begin()
         .await
@@ -35,11 +51,14 @@ async fn execute_fact_query_client(
         .execute(&mut *tx)
         .await
         .map_err(|error| database_error("failed to set fact query transaction mode", error))?;
-    let result = execute_fact_query_tx(&mut tx, plan, signer, trust_root).await?;
+    let mut results = Vec::with_capacity(plans.len());
+    for plan in plans {
+        results.push(execute_fact_query_tx(&mut tx, plan, signer, trust_root).await?);
+    }
     tx.commit()
         .await
         .map_err(|error| database_error("failed to commit fact query transaction", error))?;
-    Ok(result)
+    Ok(results)
 }
 
 async fn execute_fact_query_tx(

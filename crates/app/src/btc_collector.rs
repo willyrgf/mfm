@@ -58,15 +58,42 @@ impl FactIndexReadProvider for PostgresFactIndexReadProvider {
         request: &'a FactIndexReadRequest,
     ) -> mfm_fact_capabilities::FactIndexReadFuture<'a> {
         Box::pin(async move {
-            let result = self
-                .store
-                .execute_fact_query(request.plan())
-                .await
-                .map_err(mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure)?;
-            Ok(FactIndexReadResponse::from_receipt(
-                result.receipt().clone(),
-                self.trust_root.clone(),
-            ))
+            let mut responses = self
+                .read_fact_index_batch(std::slice::from_ref(request))
+                .await?;
+            responses.pop().ok_or_else(|| {
+                mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(
+                    "fact-index batch returned no response for single request",
+                )
+            })
+        })
+    }
+
+    fn read_fact_index_batch<'a>(
+        &'a self,
+        requests: &'a [FactIndexReadRequest],
+    ) -> mfm_fact_capabilities::FactIndexReadBatchFuture<'a> {
+        Box::pin(async move {
+            if requests.is_empty() {
+                return Ok(Vec::new());
+            }
+            let plans: Vec<_> = requests
+                .iter()
+                .map(|request| request.plan().clone())
+                .collect();
+            let results =
+                self.store.execute_fact_queries(&plans).await.map_err(
+                    mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure,
+                )?;
+            Ok(results
+                .into_iter()
+                .map(|result| {
+                    FactIndexReadResponse::from_receipt(
+                        result.receipt().clone(),
+                        self.trust_root.clone(),
+                    )
+                })
+                .collect())
         })
     }
 }

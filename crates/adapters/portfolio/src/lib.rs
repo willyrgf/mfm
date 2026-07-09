@@ -269,13 +269,26 @@ async fn select_holdings(
         FactIndexReadResponse,
     )> = Vec::new();
 
+    // One shared fact-index snapshot for all required holdings (single selection frontier).
+    let mut requests = Vec::with_capacity(requirements.len());
     for requirement in &requirements {
-        let request =
-            holding_fact_index_request(config, requirement).map_err(holding_runtime_error)?;
-        let response = fact_index
-            .read_fact_index(&request)
-            .await
-            .map_err(fact_index_runtime_error)?;
+        requests
+            .push(holding_fact_index_request(config, requirement).map_err(holding_runtime_error)?);
+    }
+    let responses = fact_index
+        .read_fact_index_batch(&requests)
+        .await
+        .map_err(fact_index_runtime_error)?;
+    if responses.len() != requests.len() {
+        return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
+            "fact-index batch response count does not match request count".to_owned(),
+        ));
+    }
+    for ((requirement, request), response) in requirements
+        .iter()
+        .zip(requests.into_iter())
+        .zip(responses.into_iter())
+    {
         let (candidates, claim_ids) =
             candidates_for_requirement(requirement, &response, artifacts).await?;
         candidates_by_holding.insert(requirement.key.clone(), candidates);
