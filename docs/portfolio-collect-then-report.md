@@ -86,3 +86,7 @@ example separate single-address runs at different tips), network-coherent
 selection may fall back to an older common anchor or fail with
 `no_common_network_anchor`. Prefer one multi-address/multi-account batch per
 network so the newest tip is common.
+
+## Design contract
+
+Normative authority model and cutover rules: [`RFC_COLLECTORS_PORTFOLIO.md`](./RFC_COLLECTORS_PORTFOLIO.md).

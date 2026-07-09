@@ -1,6 +1,6 @@
 # RFC: Fact-Backed Portfolio Collectors And Reports
 
-Status: Draft (architect-hardened)
+Status: Implemented (cutover on collectors-portf; merge-ready contract)
 
 ## Summary
 
@@ -985,7 +985,7 @@ audience does not mean every internal detail is returnable.
 ## Implementation Plan (One PR, Progressive Commits)
 
 Engineer-facing commit order, delete lists, tests, and packaging gates live in
-`PLAN_IMPL_RFC_COLLECTORS_PORTFOLIO.md`. That plan is the implementer checklist; this RFC is the
+git history (implementation plan; not retained on merge tip). That plan is the implementer checklist; this RFC is the
 normative design contract.
 
 Branch delivery: **one PR**. Sequence by **commit**. Keep the eventual merge tip free of dual public
