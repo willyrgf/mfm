@@ -417,35 +417,20 @@ fn validate_network_read_intents(
     Ok(())
 }
 
-fn portfolio_evm_network_id(network_id: &str) -> Result<EvmNetworkId, PortfolioReadError> {
-    EvmNetworkId::new(network_id).map_err(|_| {
-        PortfolioReadError::new(
-            "network_id_invalid",
-            "portfolio network id could not be used as an EVM request",
-        )
-    })
-}
-
 fn portfolio_evm_network_binding(
     network_id: &str,
     expected_chain_id: u64,
 ) -> Result<EvmNetworkBinding, PortfolioReadError> {
-    let network_id = portfolio_evm_network_id(network_id)?;
+    let network_id = EvmNetworkId::new(network_id).map_err(|_| {
+        PortfolioReadError::new(
+            "network_id_invalid",
+            "portfolio network id could not be used as an EVM request",
+        )
+    })?;
     EvmNetworkBinding::new(network_id, expected_chain_id).map_err(|_| {
         PortfolioReadError::new(
             "chain_id_invalid",
             "portfolio expected EVM chain id could not be used as an EVM source binding",
-        )
-    })
-}
-
-fn portfolio_btc_source_identity(
-    source_identity: &str,
-) -> Result<BtcSourceIdentity, PortfolioReadError> {
-    BtcSourceIdentity::new(source_identity).map_err(|_| {
-        PortfolioReadError::new(
-            "source_identity_invalid",
-            "portfolio source identity could not be used as Bitcoin source identity",
         )
     })
 }
@@ -461,7 +446,12 @@ fn portfolio_btc_source_binding(
             "portfolio network id could not be used as a Bitcoin source binding",
         )
     })?;
-    let source_identity = portfolio_btc_source_identity(source_identity)?;
+    let source_identity = BtcSourceIdentity::new(source_identity).map_err(|_| {
+        PortfolioReadError::new(
+            "source_identity_invalid",
+            "portfolio source identity could not be used as Bitcoin source identity",
+        )
+    })?;
     let bitcoin_network = BitcoinNetworkTag::new(bitcoin_network).map_err(|_| {
         PortfolioReadError::new(
             "bitcoin_network_invalid",
