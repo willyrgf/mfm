@@ -840,7 +840,8 @@ async fn selected_head(
         }
         BtcFinality::Confirmations(confirmations) => {
             let confirmations = confirmations.get();
-            if verified.info.blocks < confirmations {
+            let available_confirmations = verified.info.blocks.saturating_add(1);
+            if available_confirmations < confirmations {
                 return Err(btc_provider_failure(
                     btc_operation_diagnostic(
                         ProviderDiagnosticCode::OperationIncomplete,
@@ -856,7 +857,7 @@ async fn selected_head(
                     ),
                 ));
             }
-            let height = verified.info.blocks - confirmations;
+            let height = verified.info.blocks + 1 - confirmations;
             let hash = verified
                 .transport
                 .get_block_hash(verified, height)
@@ -1044,9 +1045,11 @@ mod tests {
 
     const BEST_BLOCK_HASH: &str =
         "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5";
+    const NO_REQUESTED_BLOCK_HASH_HEIGHT: u64 = u64::MAX;
 
     struct MockBtcTransport {
         chain: &'static str,
+        blocks: u64,
         fail_blockchain_info: bool,
         scan_success: bool,
         scan_height: u64,
@@ -1054,6 +1057,7 @@ mod tests {
         scan_total_sats: u64,
         blockchain_info_calls: AtomicU64,
         block_hash_calls: AtomicU64,
+        requested_block_hash_height: AtomicU64,
         block_header_calls: AtomicU64,
         scan_calls: AtomicU64,
     }
@@ -1062,6 +1066,7 @@ mod tests {
         fn new(chain: &'static str) -> Self {
             Self {
                 chain,
+                blocks: 840_000,
                 fail_blockchain_info: false,
                 scan_success: true,
                 scan_height: 840_000,
@@ -1069,6 +1074,7 @@ mod tests {
                 scan_total_sats: 123_456_789,
                 blockchain_info_calls: AtomicU64::new(0),
                 block_hash_calls: AtomicU64::new(0),
+                requested_block_hash_height: AtomicU64::new(NO_REQUESTED_BLOCK_HASH_HEIGHT),
                 block_header_calls: AtomicU64::new(0),
                 scan_calls: AtomicU64::new(0),
             }
@@ -1079,6 +1085,12 @@ mod tests {
                 fail_blockchain_info: true,
                 ..Self::new("main")
             }
+        }
+
+        fn with_tip(mut self, height: u64) -> Self {
+            self.blocks = height;
+            self.scan_height = height;
+            self
         }
 
         fn with_scan_tip(mut self, height: u64, bestblock: &str) -> Self {
@@ -1105,7 +1117,7 @@ mod tests {
                     });
                 }
                 Ok(BlockchainInfo {
-                    blocks: 840_000,
+                    blocks: self.blocks,
                     bestblockhash: BEST_BLOCK_HASH.to_string(),
                     chain: self.chain.to_string(),
                     initialblockdownload: Some(false),
@@ -1116,10 +1128,12 @@ mod tests {
         fn get_block_hash<'a>(
             &'a self,
             _verified: &'a VerifiedBtcCall,
-            _height: u64,
+            height: u64,
         ) -> BtcTransportFuture<'a, String> {
             Box::pin(async move {
                 self.block_hash_calls.fetch_add(1, Ordering::Relaxed);
+                self.requested_block_hash_height
+                    .store(height, Ordering::Relaxed);
                 Ok(BEST_BLOCK_HASH.to_string())
             })
         }
@@ -1131,9 +1145,15 @@ mod tests {
         ) -> BtcTransportFuture<'a, BlockHeaderInfo> {
             Box::pin(async move {
                 self.block_header_calls.fetch_add(1, Ordering::Relaxed);
+                let requested_height = self.requested_block_hash_height.load(Ordering::Relaxed);
+                let height = if requested_height == NO_REQUESTED_BLOCK_HASH_HEIGHT {
+                    self.blocks
+                } else {
+                    requested_height
+                };
                 Ok(BlockHeaderInfo {
                     hash: block_hash.to_string(),
-                    height: 840_000,
+                    height,
                     time: 1_713_571_767,
                 })
             })
@@ -1362,6 +1382,72 @@ mod tests {
         assert_eq!(response.provider_time_unix_ms, Some(1_713_571_767_000));
         assert_eq!(transport.blockchain_info_calls.load(Ordering::Relaxed), 1);
         assert_eq!(transport.block_header_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn confirmed_depth_one_selects_current_tip() {
+        let transport = Arc::new(MockBtcTransport::new("main").with_tip(840_000));
+        let provider = provider_with(source_identity(), transport.clone());
+        let request = chain_head_request(BtcHeadSelection::confirmed(1).expect("selection"));
+
+        let response = provider
+            .read_chain_head(&request)
+            .await
+            .expect("confirmed head");
+
+        assert_eq!(response.block_height, 840_000);
+        assert_eq!(
+            transport
+                .requested_block_hash_height
+                .load(Ordering::Relaxed),
+            840_000
+        );
+        assert_eq!(transport.block_hash_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.block_header_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn confirmed_depth_selects_highest_satisfying_height() {
+        let transport = Arc::new(MockBtcTransport::new("main").with_tip(840_000));
+        let provider = provider_with(source_identity(), transport.clone());
+        let request = chain_head_request(BtcHeadSelection::confirmed(6).expect("selection"));
+
+        let response = provider
+            .read_chain_head(&request)
+            .await
+            .expect("confirmed head");
+
+        assert_eq!(response.block_height, 839_995);
+        assert_eq!(
+            transport
+                .requested_block_hash_height
+                .load(Ordering::Relaxed),
+            839_995
+        );
+        assert_eq!(transport.block_hash_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(transport.block_header_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn confirmed_depth_rejects_insufficient_available_height() {
+        let transport = Arc::new(MockBtcTransport::new("main").with_tip(4));
+        let provider = provider_with(source_identity(), transport.clone());
+        let request = chain_head_request(BtcHeadSelection::confirmed(6).expect("selection"));
+
+        let error = provider
+            .read_chain_head(&request)
+            .await
+            .expect_err("insufficient chain height");
+
+        let BtcCapabilityError::Provider { diagnostic } = error else {
+            panic!("expected provider diagnostic");
+        };
+        assert_eq!(
+            diagnostic.stable_error_code(),
+            "bitcoin_operation_incomplete"
+        );
+        assert_eq!(transport.block_hash_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(transport.block_header_calls.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
