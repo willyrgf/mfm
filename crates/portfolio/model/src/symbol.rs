@@ -479,6 +479,11 @@ pub struct Observation {
     pub values: Vec<ObservationValue>,
     /// Balance source information pinned to a block.
     pub source: ObservationSource,
+    /// Selected holding coverage honesty tag (`configured_only` or `complete_at_anchor`).
+    ///
+    /// Populated from the selected Platform holding fact so public snapshot/report
+    /// success cannot be misread as full wallet discovery when coverage is configured-only.
+    pub coverage: String,
     /// Canonical metadata surface.
     #[serde(default)]
     pub metadata: PublicMetadata,

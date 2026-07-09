@@ -125,6 +125,7 @@ async fn select_holdings_succeeds_from_platform_facts_with_providers_unbound() {
         .expect("evm observation");
 
     assert_eq!(btc_obs.quantity.raw_dec, "100000");
+    assert_eq!(btc_obs.coverage, "configured_only");
     assert_eq!(
         btc_obs.source.anchor,
         ObservationAnchor::Bitcoin {
@@ -133,6 +134,7 @@ async fn select_holdings_succeeds_from_platform_facts_with_providers_unbound() {
         }
     );
     assert_eq!(evm_obs.quantity.raw_dec, "1000000000000000000");
+    assert_eq!(evm_obs.coverage, "configured_only");
     assert_eq!(
         evm_obs.source.anchor,
         ObservationAnchor::Evm {
@@ -191,6 +193,24 @@ async fn select_holdings_succeeds_from_platform_facts_with_providers_unbound() {
     .expect("assemble snapshot from selected holdings");
     assert_eq!(snapshot.network_pins, pins);
     assert_eq!(snapshot.wallets.len(), 2);
+    // Public snapshot JSON must retain selected coverage honesty (W1).
+    let snapshot_json = serde_json::to_value(&snapshot).expect("snapshot json");
+    let coverage_tags = snapshot_json
+        .pointer("/wallets")
+        .and_then(|w| w.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|wallet| wallet.get("observations")?.as_array())
+        .flatten()
+        .filter_map(|obs| obs.get("coverage")?.as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        coverage_tags.len(),
+        2,
+        "coverage present on each observation"
+    );
+    assert!(coverage_tags.iter().all(|c| c == "configured_only"));
+
     let report =
         mfm_state_portfolio::project_report_from_snapshot(snapshot, 2).expect("project report");
     assert_eq!(report.portfolio_id, "dual-mainnet");
@@ -311,6 +331,68 @@ async fn select_holdings_hard_fails_when_platform_facts_missing() {
     assert!(
         msg.contains("missing_fact") || msg.contains("no acceptable"),
         "expected missing_fact hard-fail, got {msg}"
+    );
+}
+
+/// Candidates present but all fail coverage/status filter → hard missing_fact (not soft success).
+#[tokio::test]
+async fn select_holdings_hard_fails_when_only_truncated_candidates_present() {
+    let portfolio = dual_mainnet_portfolio();
+    let config =
+        SelectHoldingsConfig::with_default_store_scope(portfolio.clone()).expect("select config");
+    let subjects = resolve_subjects_from_config(
+        &ResolveSubjectsConfig::new(portfolio.wallets.clone()).expect("subjects config"),
+    );
+
+    // Truncated is not constructible via Response::new (write-admission fail-closed).
+    // Build inadmissible rows the same way a tampered/legacy payload would hydrate.
+    let truncated_btc = serde_json::from_value::<BtcAddressBalanceResponse>(serde_json::json!({
+        "anchor_height": 850_000,
+        "anchor_hash": "ab".repeat(32),
+        "balance_sats": 100_000,
+        "coverage": "truncated",
+        "source_status": "ok"
+    }))
+    .expect("truncated btc response");
+    let truncated_evm =
+        serde_json::from_value::<EvmAddressNativeBalanceResponse>(serde_json::json!({
+            "block_number": 21_000_000,
+            "block_hash": "0x".to_owned() + &"cd".repeat(32),
+            "raw_wei": "1000000000000000000",
+            "decimals": 18,
+            "coverage": "truncated",
+            "source_status": "ok"
+        }))
+        .expect("truncated evm response");
+
+    let (btc_bytes, btc_evidence, btc_ref) =
+        holding_artifact_and_ref(&truncated_btc, "bitcoin.address_balance_snapshot", 3, 17);
+    let (evm_bytes, evm_evidence, evm_ref) =
+        holding_artifact_and_ref(&truncated_evm, "evm.address_native_balance_snapshot", 4, 19);
+
+    let artifacts = MockArtifacts::with_map(HashMap::from([
+        (btc_ref.artifact_id().clone(), (btc_bytes, btc_evidence)),
+        (evm_ref.artifact_id().clone(), (evm_bytes, evm_evidence)),
+    ]));
+    let fact_index = MockFactIndex::with_plan_refs(HashMap::from([
+        (
+            "bitcoin.address_balance_snapshot".to_owned(),
+            vec![(btc_ref, 17)],
+        ),
+        (
+            "evm.address_native_balance_snapshot".to_owned(),
+            vec![(evm_ref, 19)],
+        ),
+    ]));
+
+    let validated = ValidatedConfig::new(config).expect("validated");
+    let err = select_holdings(validated, subjects, &artifacts, &fact_index)
+        .await
+        .expect_err("truncated-only candidates must hard-fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("missing_fact") || msg.contains("no acceptable"),
+        "coverage filter-empty must surface missing_fact, got {msg}"
     );
 }
 

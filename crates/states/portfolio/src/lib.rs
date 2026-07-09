@@ -958,6 +958,7 @@ pub fn observations_from_selected_holdings(
                 network_id: item.material.network_id.clone(),
                 anchor: item.material.observation_anchor.clone(),
             },
+            coverage: item.material.coverage.clone(),
             metadata: symbol.metadata.clone(),
         };
         observation.normalize();

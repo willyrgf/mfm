@@ -177,6 +177,7 @@ fn fixed_price_selection_assembles_report_totals() {
                 block_hash: EVM_HASH.to_owned(),
             },
         },
+        coverage: "configured_only".to_owned(),
         metadata: PublicMetadata::default(),
     };
     observation.normalize();

@@ -681,6 +681,7 @@ mod tests {
                         block_hash: "0xabc".to_owned(),
                     },
                 },
+                coverage: "configured_only".to_owned(),
                 metadata: PublicMetadata::default(),
             },
             Observation {
@@ -706,6 +707,7 @@ mod tests {
                         block_hash: "0xabc".to_owned(),
                     },
                 },
+                coverage: "configured_only".to_owned(),
                 metadata: PublicMetadata::default(),
             },
         ];
@@ -748,6 +750,7 @@ mod tests {
                         block_hash: "0xabc".to_owned(),
                     },
                 },
+                coverage: "configured_only".to_owned(),
                 metadata: PublicMetadata::default(),
             },
             Observation {
@@ -773,6 +776,7 @@ mod tests {
                         block_hash: "0xdef".to_owned(),
                     },
                 },
+                coverage: "configured_only".to_owned(),
                 metadata: PublicMetadata::default(),
             },
         ];

@@ -758,6 +758,7 @@ fn observation(wallet_id: &str, symbol_id: &str, value_order: Vec<QuoteCode>) ->
                 block_hash: EVM_HASH.to_owned(),
             },
         },
+        coverage: "configured_only".to_string(),
         metadata: PublicMetadata::default(),
     }
 }
