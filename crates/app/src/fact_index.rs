@@ -4,12 +4,13 @@
 //! Store-backed tests use [`ProjectionFactIndexProvider`] over an in-memory projection.
 //! Adapter unit tests keep local plan fixtures (`MockFactIndex` in adapter crates).
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use mfm_fact_capabilities::{
-    FactIndexReadProvider, FactIndexReadRequest, FactIndexReadResponse,
-    FactQueryReceiptTrustRootMaterial,
-};
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::Mutex;
+
+use mfm_fact_capabilities::{FactIndexReadProvider, FactIndexReadRequest};
+#[cfg(any(test, feature = "test-support"))]
 use mfm_store::v1 as store;
 
 use crate::ProductionRunStore;
@@ -41,16 +42,6 @@ impl FactIndexReadProvider for PostgresFactIndexReadProvider {
             if requests.is_empty() {
                 return Ok(Vec::new());
             }
-            let trust_root = self
-                .store
-                .store_authority()
-                .fact_receipt_trust_root()
-                .ok_or_else(|| {
-                    mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(
-                        "missing fact receipt trust root",
-                    )
-                })?
-                .to_material();
             let plans: Vec<_> = requests
                 .iter()
                 .map(|request| request.plan().clone())
@@ -59,15 +50,7 @@ impl FactIndexReadProvider for PostgresFactIndexReadProvider {
                 self.store.execute_fact_queries(&plans).await.map_err(
                     mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure,
                 )?;
-            Ok(results
-                .into_iter()
-                .map(|result| {
-                    FactIndexReadResponse::from_receipt(
-                        result.receipt().clone(),
-                        trust_root.clone(),
-                    )
-                })
-                .collect())
+            Ok(results)
         })
     }
 }
@@ -77,6 +60,7 @@ impl FactIndexReadProvider for PostgresFactIndexReadProvider {
 /// Single store-backed test/process-assembly provider (not production Postgres). Freezes one
 /// projection for the whole batch (shared selection frontier), signs receipts with a fixed test
 /// key, and verifies authentication before returning rows.
+#[cfg(any(test, feature = "test-support"))]
 pub struct ProjectionFactIndexProvider {
     store: store::AsyncInMemoryRunStore,
     signing_key: ed25519_dalek::SigningKey,
@@ -85,6 +69,7 @@ pub struct ProjectionFactIndexProvider {
     returned_row_counts: Mutex<Vec<usize>>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl ProjectionFactIndexProvider {
     /// Builds a provider that reads fact rows from the supplied in-memory store projection.
     pub fn new(store: store::AsyncInMemoryRunStore) -> Self {
@@ -126,17 +111,9 @@ impl ProjectionFactIndexProvider {
             self.key_id.clone(),
         )
     }
-
-    fn trust_root_material(&self) -> FactQueryReceiptTrustRootMaterial {
-        FactQueryReceiptTrustRootMaterial::new(
-            self.store_identity.clone(),
-            mfm_facts::StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
-            self.key_id.clone(),
-            self.signing_key.verifying_key().to_bytes(),
-        )
-    }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl FactIndexReadProvider for ProjectionFactIndexProvider {
     fn implementation_id(&self) -> &'static str {
         "mfm.app.projection.fact-index.v1"
@@ -184,10 +161,10 @@ impl FactIndexReadProvider for ProjectionFactIndexProvider {
                     .map_err(|error| {
                         mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(error)
                     })?;
-                responses.push(FactIndexReadResponse::from_receipt(
-                    receipt,
-                    self.trust_root_material(),
-                ));
+                let result = mfm_facts::FactQueryResult::new(rows, receipt).map_err(|error| {
+                    mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(error)
+                })?;
+                responses.push(result);
             }
             Ok(responses)
         })

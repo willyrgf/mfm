@@ -72,7 +72,9 @@ impl ResourceLaneBlockWitness {
 /// non-framework-special attempts. New attempts append `StateAttemptStarted` before sealed runner
 /// invocation construction, so observed materialization and runner-output validation failures can
 /// terminalize through runtime-owned failure-safe evidence.
-pub(crate) struct AttemptLifecycle;
+pub(crate) struct AttemptLifecycle {
+    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+}
 
 /// Trusted context for terminalizing an observed post-start attempt failure.
 #[derive(Clone, Copy)]
@@ -127,8 +129,12 @@ enum ObservedFailureClass {
 
 impl AttemptLifecycle {
     /// Creates a lifecycle bound to runtime-owned append planning.
-    pub(crate) fn new() -> Self {
-        Self
+    pub(crate) fn new(
+        fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+    ) -> Self {
+        Self {
+            fact_query_receipt_trust_root,
+        }
     }
 
     /// Runs one ordinary attempt against an async typed store.
@@ -303,7 +309,10 @@ impl AttemptLifecycle {
         };
         let output = match binding
             .runner
-            .run_erased(ErasedRunCtx::from_prepared(&invocation))
+            .run_erased(ErasedRunCtx::from_prepared(
+                &invocation,
+                self.fact_query_receipt_trust_root.as_ref(),
+            ))
             .await
         {
             Ok(output) => output,

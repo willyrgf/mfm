@@ -24,12 +24,19 @@ use crate::{attempt_id, CertifiedRuntimeSpec, Result, RuntimeError};
 /// Lifecycle for framework nodes that append `StateAttemptStarted` before running.
 pub(crate) struct FrameworkAttemptLifecycle<'a> {
     artifact_store: &'a dyn RuntimeArtifactStore,
+    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
 }
 
 impl<'a> FrameworkAttemptLifecycle<'a> {
     /// Creates a framework attempt lifecycle over runtime-owned artifact storage.
-    pub(crate) fn new(artifact_store: &'a dyn RuntimeArtifactStore) -> Self {
-        Self { artifact_store }
+    pub(crate) fn new(
+        artifact_store: &'a dyn RuntimeArtifactStore,
+        fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+    ) -> Self {
+        Self {
+            artifact_store,
+            fact_query_receipt_trust_root,
+        }
     }
 
     /// Returns whether this certified node uses the framework started-before-run lifecycle.
@@ -187,7 +194,10 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
         .build()?;
         let output = binding
             .runner
-            .run_erased(ErasedRunCtx::from_prepared(&invocation))
+            .run_erased(ErasedRunCtx::from_prepared(
+                &invocation,
+                self.fact_query_receipt_trust_root.as_ref(),
+            ))
             .await?;
         let proof = if matches!(
             &node.framework,

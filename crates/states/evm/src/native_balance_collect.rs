@@ -185,7 +185,7 @@ fn format_block_hash(hash: &alloy_primitives::B256) -> String {
 }
 
 fn validate_block_hash(value: &str) -> Result<(), EvmStateError> {
-    crate::require_evm_block_hash(value).map(|_| ())
+    crate::canonical_evm_block_hash(value).map(|_| ())
 }
 
 /// Requires every observation in a same-network batch to share one joint tip anchor.

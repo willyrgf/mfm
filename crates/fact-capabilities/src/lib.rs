@@ -26,24 +26,19 @@ use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{
     CapabilityError, CapabilitySpec, ManagedPlatformWriteRole, ReadExternalRole,
 };
-use mfm_facts::{
-    CanonicalFactQueryPlan, FactAudience, FactQueryEvidence, FactQueryReceipt, FactQueryResultRow,
-    FactSelectionEvidence,
-};
+use mfm_facts::{CanonicalFactQueryPlan, FactAudience, FactQueryResult};
 use mfm_ids::{CapabilityKind, CapabilityVersion, DigestAlgorithm};
-
-pub use mfm_facts::FactQueryReceiptTrustRootMaterial;
 
 /// Result type for fact-index read capability contracts.
 pub type Result<T> = std::result::Result<T, FactIndexReadError>;
 
 /// Boxed future returned by fact-index read providers.
 pub type FactIndexReadFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<FactIndexReadResponse>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<FactQueryResult>> + Send + 'a>>;
 
 /// Boxed future returned by batch fact-index read providers.
 pub type FactIndexReadBatchFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<Vec<FactIndexReadResponse>>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<Vec<FactQueryResult>>> + Send + 'a>>;
 
 /// Internal fact-index read authority.
 pub struct FactIndexReadCapability;
@@ -163,109 +158,6 @@ impl FactIndexReadRequest {
     }
 }
 
-/// One row returned by an internal fact-index read.
-pub type FactIndexReadRow = FactQueryResultRow;
-
-/// Response from an internal fact-index read.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FactIndexReadResponse {
-    rows: Vec<FactIndexReadRow>,
-    receipt: FactQueryReceipt,
-    trust_root: FactQueryReceiptTrustRootMaterial,
-}
-
-impl FactIndexReadResponse {
-    /// Creates a response and validates rows against the authenticated receipt shape.
-    pub fn new(
-        rows: Vec<FactIndexReadRow>,
-        receipt: FactQueryReceipt,
-        trust_root: FactQueryReceiptTrustRootMaterial,
-    ) -> Result<Self> {
-        mfm_facts::validate_fact_query_result_rows(&rows, &receipt)
-            .map_err(|reason| FactIndexReadError::Receipt { reason })?;
-        Ok(Self {
-            rows,
-            receipt,
-            trust_root,
-        })
-    }
-
-    /// Creates a response whose row list is derived directly from the receipt.
-    pub fn from_receipt(
-        receipt: FactQueryReceipt,
-        trust_root: FactQueryReceiptTrustRootMaterial,
-    ) -> Self {
-        let rows = mfm_facts::fact_query_result_rows_from_receipt(&receipt);
-        Self {
-            rows,
-            receipt,
-            trust_root,
-        }
-    }
-
-    /// Returns returned rows in receipt order.
-    pub fn rows(&self) -> &[FactIndexReadRow] {
-        &self.rows
-    }
-
-    /// Returns the store-authenticated query receipt.
-    pub const fn receipt(&self) -> &FactQueryReceipt {
-        &self.receipt
-    }
-
-    /// Returns the trust root material needed to verify the receipt later.
-    pub const fn trust_root(&self) -> &FactQueryReceiptTrustRootMaterial {
-        &self.trust_root
-    }
-
-    /// Builds replay evidence for pinning this read into a consuming run.
-    pub fn into_evidence(
-        self,
-        request: &FactIndexReadRequest,
-        selection: FactSelectionEvidence,
-    ) -> Result<FactIndexReadEvidence> {
-        FactIndexReadEvidence::new(
-            FactQueryEvidence::new(request.plan().clone(), self.receipt, selection),
-            self.trust_root,
-        )
-    }
-}
-
-/// Replay evidence and trust-root material produced from a fact-index read.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FactIndexReadEvidence {
-    query_evidence: FactQueryEvidence,
-    trust_root: FactQueryReceiptTrustRootMaterial,
-}
-
-impl FactIndexReadEvidence {
-    /// Creates read evidence and validates the replay evidence shape.
-    pub fn new(
-        query_evidence: FactQueryEvidence,
-        trust_root: FactQueryReceiptTrustRootMaterial,
-    ) -> Result<Self> {
-        mfm_facts::validate_fact_query_evidence(&query_evidence).map_err(|_| {
-            FactIndexReadError::Evidence {
-                reason: FactIndexEvidenceFailure::InvalidShape,
-            }
-        })?;
-        Ok(Self {
-            query_evidence,
-            trust_root,
-        })
-    }
-
-    /// Returns pinned query replay evidence.
-    pub const fn query_evidence(&self) -> &FactQueryEvidence {
-        &self.query_evidence
-    }
-
-    /// Returns public trust-root material for receipt verification.
-    pub const fn trust_root(&self) -> &FactQueryReceiptTrustRootMaterial {
-        &self.trust_root
-    }
-}
-
 /// Closed invalid-request reasons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactIndexInvalidRequest {
@@ -287,16 +179,6 @@ pub enum FactIndexProviderFailure {
     Failed,
 }
 
-/// Closed receipt mismatch reasons.
-pub type FactIndexReceiptFailure = mfm_facts::FactQueryResultMismatch;
-
-/// Closed evidence validation reasons.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FactIndexEvidenceFailure {
-    /// Query evidence failed facts-kernel shape validation.
-    InvalidShape,
-}
-
 /// Redaction-safe fact-index read capability error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FactIndexReadError {
@@ -311,18 +193,6 @@ pub enum FactIndexReadError {
     Provider {
         /// Closed provider failure reason.
         reason: FactIndexProviderFailure,
-    },
-    /// Provider response did not match its authenticated receipt.
-    #[error("fact-index read receipt was invalid")]
-    Receipt {
-        /// Closed receipt failure reason.
-        reason: FactIndexReceiptFailure,
-    },
-    /// Replay evidence failed contract validation.
-    #[error("fact-index read evidence was invalid")]
-    Evidence {
-        /// Closed evidence failure reason.
-        reason: FactIndexEvidenceFailure,
     },
 }
 
@@ -339,19 +209,11 @@ impl FactIndexReadError {
 mod tests {
     use mfm_capabilities::{CapabilityRole, CapabilitySpec};
     use mfm_facts::{
-        DescriptorCatalogWatermark, FactCanonicalScalar, FactClaimId, FactFieldId, FactFieldValue,
-        FactFieldValueType, FactOrderingName, FactOrderingPolicy, FactOrderingTerm,
-        FactProducerProvenance, FactProjectionGeneration, FactQueryScope, FactResponseEvidence,
-        FactSubjectRef, FactVisibility, FactVisibilityScope, InternalFactRef, InternalFactRefParts,
-        NullOrdering, ReturnedFactFieldSummary, ReturnedFieldSummaries, ScopeDecisionEvidence,
-        SortDirection, StoreCommitOrder, StoreIdentity, StoreKeyId, StoreReadFrontier,
-        StoreReadFrontierType, StoreReceiptAuthentication, StoreReceiptAuthenticationScheme,
+        FactCanonicalScalar, FactFieldId, FactOrderingName, FactOrderingPolicy, FactOrderingTerm,
+        FactQueryScope, FactVisibilityScope, NullOrdering, ScopeDecisionEvidence, SortDirection,
         StoreScopeRef,
     };
-    use mfm_ids::{
-        AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
-        DigestAlgorithm, DigestBytes, EventId, RunId, SchemaId,
-    };
+    use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, SchemaId};
 
     use super::*;
 
@@ -381,76 +243,6 @@ mod tests {
         // stay fail-closed (return false) until deliberately allowlisted.
         assert!(is_supported_fact_index_audience(FactAudience::Control));
         assert!(is_supported_fact_index_audience(FactAudience::Platform));
-    }
-
-    #[test]
-    fn response_rows_receipt_and_evidence_shape_are_pinned_for_control_and_platform() {
-        for audience in [FactAudience::Control, FactAudience::Platform] {
-            let request = FactIndexReadRequest::new(plan(audience)).expect("request");
-            let receipt = receipt_with_summary(request.plan(), internal_fact_ref(1));
-            let response = FactIndexReadResponse::from_receipt(receipt.clone(), trust_root());
-
-            assert_eq!(response.rows().len(), 1);
-            assert_eq!(response.rows()[0].fact_ref(), &receipt.returned_refs()[0]);
-            assert_eq!(response.rows()[0].returned_fields().len(), 1);
-            assert_eq!(response.receipt(), &receipt);
-            assert_eq!(
-                response.trust_root().scheme(),
-                StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1
-            );
-
-            let selection =
-                FactSelectionEvidence::new(digest(0x71), vec![0], None).expect("selection");
-            let evidence = response
-                .into_evidence(&request, selection)
-                .expect("evidence");
-
-            assert_eq!(evidence.query_evidence().plan(), request.plan());
-            assert_eq!(evidence.query_evidence().receipt(), &receipt);
-            assert_eq!(evidence.trust_root().key_id().as_str(), "fact.read.key");
-            assert_eq!(
-                evidence.query_evidence().plan().query_scope().audience(),
-                audience
-            );
-        }
-    }
-
-    #[test]
-    fn response_rejects_rows_that_do_not_match_receipt_shape() {
-        enum Case {
-            UnpinnedFieldSummaries,
-            RowRefMismatch,
-        }
-
-        for (case, expected) in [
-            (
-                Case::UnpinnedFieldSummaries,
-                FactIndexReceiptFailure::UnpinnedFieldSummaries,
-            ),
-            (
-                Case::RowRefMismatch,
-                FactIndexReceiptFailure::RowRefMismatch,
-            ),
-        ] {
-            let (row, receipt) = match case {
-                Case::UnpinnedFieldSummaries => {
-                    let fact_ref = internal_fact_ref(1);
-                    (
-                        FactIndexReadRow::new(fact_ref.clone(), vec![summary_value(42)]),
-                        receipt_without_summaries(&plan(FactAudience::Control), fact_ref),
-                    )
-                }
-                Case::RowRefMismatch => (
-                    FactIndexReadRow::new(internal_fact_ref(2), Vec::new()),
-                    receipt_without_summaries(&plan(FactAudience::Control), internal_fact_ref(1)),
-                ),
-            };
-
-            let error =
-                FactIndexReadResponse::new(vec![row], receipt, trust_root()).expect_err("shape");
-
-            assert_eq!(error, FactIndexReadError::Receipt { reason: expected });
-        }
     }
 
     #[test]
@@ -551,132 +343,6 @@ mod tests {
         mfm_facts::compile_fact_query_plan(&descriptor, input).expect("plan")
     }
 
-    fn receipt_with_summary(
-        plan: &CanonicalFactQueryPlan,
-        fact_ref: InternalFactRef,
-    ) -> FactQueryReceipt {
-        let returned_field_summaries =
-            ReturnedFieldSummaries::new(vec![ReturnedFactFieldSummary::new(
-                fact_ref.fact_claim_id().clone(),
-                vec![summary_value(42)],
-            )]);
-        receipt(plan, fact_ref, Some(returned_field_summaries))
-    }
-
-    fn receipt_without_summaries(
-        plan: &CanonicalFactQueryPlan,
-        fact_ref: InternalFactRef,
-    ) -> FactQueryReceipt {
-        receipt(plan, fact_ref, None)
-    }
-
-    fn receipt(
-        plan: &CanonicalFactQueryPlan,
-        fact_ref: InternalFactRef,
-        returned_field_summaries: Option<ReturnedFieldSummaries>,
-    ) -> FactQueryReceipt {
-        let returned_fields = returned_field_summaries
-            .as_ref()
-            .and_then(|summaries| summaries.summaries().first())
-            .map(|summary| summary.fields().to_vec())
-            .unwrap_or_default();
-        let rows = [FactQueryResultRow::new(fact_ref, returned_fields)];
-        let read_frontier = StoreReadFrontier::new(
-            StoreScopeRef::new("mfm.store.default").expect("store scope"),
-            plan.query_scope().clone(),
-            DescriptorCatalogWatermark::new(1),
-            FactProjectionGeneration::new(1),
-            StoreCommitOrder::new(11),
-        );
-        let plan_hash = mfm_facts::fact_query_plan_hash(plan).expect("plan hash");
-        let material = mfm_facts::FactQueryReceiptMaterial::from_rows(
-            &plan_hash,
-            read_frontier,
-            StoreReadFrontierType::Snapshot,
-            &rows,
-            returned_field_summaries.is_some(),
-            None,
-        )
-        .expect("receipt material");
-        material.into_receipt(
-            StoreReceiptAuthentication::new(
-                StoreIdentity::new("store.default").expect("store identity"),
-                StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
-                Some(StoreKeyId::new("fact.read.key").expect("key id")),
-                vec![0x11; 64],
-            )
-            .expect("auth"),
-        )
-    }
-
-    fn summary_value(value: u64) -> FactFieldValue {
-        FactFieldValue::new(
-            FactFieldId::new("result.height").expect("field"),
-            FactFieldValueType::UnsignedInteger,
-            FactCanonicalScalar::UnsignedInteger(value),
-        )
-        .expect("summary")
-    }
-
-    fn trust_root() -> FactQueryReceiptTrustRootMaterial {
-        FactQueryReceiptTrustRootMaterial::new(
-            StoreIdentity::new("store.default").expect("store identity"),
-            StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
-            StoreKeyId::new("fact.read.key").expect("key id"),
-            [7_u8; 32],
-        )
-    }
-
-    fn internal_fact_ref(seed: u8) -> InternalFactRef {
-        InternalFactRef::new(InternalFactRefParts {
-            fact_claim_id: FactClaimId::new(run_id(seed), 9, 0).expect("claim id"),
-            source_event_id: EventId::from_digest(
-                DigestAlgorithm::Sha256JcsV1,
-                digest_bytes(seed + 1),
-            ),
-            recorded_at: "2026-07-02T00:00:00Z".to_owned(),
-            producer_node_id: mfm_ids::NodeId::from_digest(
-                DigestAlgorithm::Sha256JcsV1,
-                digest_bytes(seed + 2),
-            ),
-            observed_at: Some("2026-07-02T00:00:00Z".to_owned()),
-            visibility: FactVisibility::indexed_default(FactAudience::Control),
-            fact_kind: mfm_facts::FactKind::new("collector.checkpoint").expect("kind"),
-            fact_descriptor_hash: digest(seed + 2),
-            subject: FactSubjectRef::new(
-                digest(seed + 3),
-                mfm_facts::FactKey::from_digest(digest(seed + 4)),
-                digest(seed + 5),
-            ),
-            request: None,
-            response: FactResponseEvidence::new(
-                schema_id(seed + 6),
-                digest(seed + 7),
-                ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(seed + 8)),
-                digest(seed + 9),
-            ),
-            producer: FactProducerProvenance::new(
-                CapabilityKind::new(
-                    "mfm.fact",
-                    "index.read",
-                    DigestAlgorithm::Sha256JcsV1,
-                    digest_bytes(seed + 10),
-                )
-                .expect("capability kind"),
-                CapabilityVersion::new("mfm.fact.index.read.v1").expect("capability version"),
-                AdapterKind::new(
-                    "mfm.fact",
-                    "index.adapter",
-                    DigestAlgorithm::Sha256JcsV1,
-                    digest_bytes(seed + 11),
-                )
-                .expect("adapter kind"),
-                AdapterVersion::new("mfm.fact.index.adapter.v1").expect("adapter version"),
-            ),
-        })
-        .expect("fact ref")
-    }
-
     fn schema_id(seed: u8) -> SchemaId {
         SchemaId::new(
             "mfm.fact.test",
@@ -685,10 +351,6 @@ mod tests {
             digest_bytes(seed),
         )
         .expect("schema id")
-    }
-
-    fn run_id(seed: u8) -> RunId {
-        RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(seed))
     }
 
     fn digest(seed: u8) -> ContentDigest {

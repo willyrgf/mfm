@@ -34,9 +34,10 @@ use mfm_states_evm::{
     materialize_evm_joint_tip, native_balance_record_visibility,
     normalize_evm_native_balance_observation, AssembleEvmNativeBalanceBatchConfig,
     AssembleEvmNativeBalanceBatchInput, AssembleEvmNativeBalanceBatchState,
-    EvmAddressNativeBalanceSnapshotFact, EvmJointTip, ObserveEvmNativeBalanceConfig,
-    ObserveEvmNativeBalanceInput, ObserveEvmNativeBalanceState, RecordEvmNativeBalanceFactState,
-    ResolveEvmJointTipConfig, ResolveEvmJointTipInput, ResolveEvmJointTipState,
+    EvmAddressNativeBalanceObservation, EvmAddressNativeBalanceSnapshotFact, EvmJointTip,
+    ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput, ObserveEvmNativeBalanceState,
+    RecordEvmNativeBalanceFactState, ResolveEvmJointTipConfig, ResolveEvmJointTipInput,
+    ResolveEvmJointTipState,
 };
 use mfm_store::v1 as store;
 use mfm_values::{MfmConfig, MfmValue, NonEmpty};
@@ -288,7 +289,10 @@ fn balance_binding(config: &ObserveEvmNativeBalanceConfig) -> Result<EvmNetworkB
 }
 
 fn parse_block_hash(value: &str) -> Result<B256> {
-    let hex = value.strip_prefix("0x").unwrap_or(value);
+    let hex = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
     B256::from_str(hex).map_err(|_| EvmAdapterError::InvalidCapabilityRequest)
 }
 
@@ -543,6 +547,7 @@ pub fn verify_evm_native_balance_replay(broker: &replay::ReplayBroker) -> replay
     for frame in &frames {
         verify_evm_native_balance_observation_replay(broker, frame)?;
     }
+    verify_evm_native_balance_fact_replay(broker)?;
     verify_evm_shared_joint_tips(broker, &frames)?;
     verify_evm_native_balance_batch_replay(broker)?;
     Ok(())
@@ -622,7 +627,7 @@ fn verify_evm_native_balance_observation_replay(
         || evidence.balance_request_block_selector != expected_selector
         || evidence.verification_request_block_selector != expected_selector
         || evidence.verification_response_block_number != input_tip.block_number()
-        || evidence.verification_response_block_hash != input_tip.block_hash()
+        || verified_tip.block_hash() != input_tip.block_hash()
         || !evm_source_matches(&evidence.balance_source, &config.network, config.chain_id)
         || !evm_source_matches(
             &evidence.verification_source,
@@ -644,6 +649,121 @@ fn verify_evm_native_balance_observation_replay(
     )
     .map_err(replay_adapter_error)?;
     ensure_canonical_value_matches(&expected, &frame.artifact_bytes)
+}
+
+fn verify_evm_native_balance_fact_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
+    let state_kind = RecordEvmNativeBalanceFactState::kind().map_err(replay_adapter_error)?;
+    let state_version = RecordEvmNativeBalanceFactState::version().map_err(replay_adapter_error)?;
+    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
+        Ok(node.state_kind == state_kind && node.state_version == state_version)
+    })?;
+    for frame in &frames {
+        let observation_frames = replay_input_frames(
+            broker,
+            &frame.node,
+            &EvmAddressNativeBalanceObservation::semantic_id().map_err(replay_adapter_error)?,
+            &EvmAddressNativeBalanceObservation::schema_id().map_err(replay_adapter_error)?,
+        )?;
+        if observation_frames.len() != 1 {
+            return Err(replay_evm_mismatch(
+                "EVM native-balance fact input was incomplete",
+            ));
+        }
+        let observation: EvmAddressNativeBalanceObservation =
+            decode_replay_value(&observation_frames[0])?;
+        let fact = observation.to_fact();
+        ensure_canonical_value_matches(&fact, &frame.artifact_bytes)?;
+        verify_recorded_fact_evidence(
+            broker,
+            frame,
+            &EvmAddressNativeBalanceSnapshotFact::descriptor().map_err(replay_adapter_error)?,
+            fact.subject(),
+            fact.response(),
+        )?;
+    }
+    Ok(())
+}
+
+fn verify_recorded_fact_evidence<S: serde::Serialize, R: serde::Serialize>(
+    broker: &replay::ReplayBroker,
+    frame: &replay::ProducedCellReplayFrame,
+    descriptor: &mfm_facts::FactDescriptor,
+    subject: &S,
+    response_value: &R,
+) -> replay::Result<()> {
+    let records = broker
+        .events()
+        .iter()
+        .filter_map(|event| match event.payload() {
+            events::KernelEventPayload::FactRecorded(payload)
+                if payload.node_id == frame.produced.node_id
+                    && payload.attempt_id == frame.produced.attempt_id =>
+            {
+                Some(payload)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if records.len() != 1 {
+        return Err(replay_evm_mismatch(
+            "EVM fact output did not have exactly one FactRecorded event",
+        ));
+    }
+    let claim = &records[0].claim;
+    let descriptor_hash =
+        mfm_facts::fact_descriptor_hash(descriptor).map_err(replay_adapter_error)?;
+    if claim.fact_descriptor_hash() != &descriptor_hash
+        || claim.fact_kind() != descriptor.fact_kind()
+    {
+        return Err(replay_evm_mismatch(
+            "EVM FactRecorded descriptor authority did not match the recomputed fact",
+        ));
+    }
+    let subject_json = serde_json::to_value(subject).map_err(replay_json_error)?;
+    let expected_subject = mfm_facts::typed_fact_subject_evidence(descriptor, &subject_json)
+        .map_err(replay_adapter_error)?;
+    if claim.subject() != &expected_subject {
+        return Err(replay_evm_mismatch(
+            "EVM FactRecorded subject authority did not match the recomputed fact",
+        ));
+    }
+    let expected_bytes = canonical_json_bytes(response_value)?;
+    let response = claim.response();
+    if response.response_schema_id() != descriptor.response_schema_id()
+        || response.response_hash() != &expected_bytes.content_digest()
+    {
+        return Err(replay_evm_mismatch(
+            "EVM FactRecorded response authority did not match the recomputed fact",
+        ));
+    }
+    let requirement = store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::FactResponse,
+        artifact_id: response.artifact_id().clone(),
+        evidence_hash: response.artifact_evidence_hash().clone(),
+        digest: Some(response.response_hash().clone()),
+        byte_len: Some(
+            u64::try_from(expected_bytes.as_bytes().len())
+                .map_err(|_| replay_evm_mismatch("EVM fact response length overflowed u64"))?,
+        ),
+        media_type: None,
+        schema_id: Some(response.response_schema_id().clone()),
+        semantic_type_id: None,
+        producer_node_id: Some(frame.produced.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: Some(events::ArtifactRole::FactResponse),
+    };
+    let artifact = broker.retained_artifact(&requirement)?;
+    if artifact.artifact_bytes != expected_bytes.as_bytes() {
+        return Err(replay_evm_mismatch(
+            "EVM FactRecorded response bytes did not match the recomputed fact",
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_json_bytes<T: serde::Serialize>(value: &T) -> replay::Result<PlainCanonicalJsonBytes> {
+    let json = serde_json::to_string(value).map_err(replay_json_error)?;
+    PlainCanonicalJsonBytes::from_json_str(&json).map_err(replay_adapter_error)
 }
 
 fn verify_evm_native_balance_batch_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {

@@ -7,7 +7,7 @@ edition = "2021"
 category = "binary"
 
 [features]
-parity-tests = []
+parity-tests = ["mfm-app/test-support"]
 
 [dependencies]
 tokio = { workspace = true }

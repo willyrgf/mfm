@@ -54,8 +54,6 @@ pub enum PortfolioHoldingErrorCode {
     AmbiguousFacts,
     /// Residual same-network selected anchors disagree (guard).
     InconsistentNetworkAnchors,
-    /// Selection batch receipts do not share one snapshot read frontier.
-    MixedReadFrontier,
     /// Portfolio requirement has no projection rule (e.g. ERC-20 at cutover).
     UnsupportedRequirement,
 }
@@ -68,7 +66,6 @@ impl PortfolioHoldingErrorCode {
             Self::NoCommonNetworkAnchor => "no_common_network_anchor",
             Self::AmbiguousFacts => "ambiguous_facts",
             Self::InconsistentNetworkAnchors => "inconsistent_network_anchors",
-            Self::MixedReadFrontier => "mixed_read_frontier",
             Self::UnsupportedRequirement => "unsupported_requirement",
         }
     }

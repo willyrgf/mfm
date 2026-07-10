@@ -50,12 +50,13 @@ mfm-replay = { path = "../kernel/replay" }
 mfm-runtime = { path = "../kernel/runtime" }
 mfm-runtime-config = { path = "../runtime-config" }
 mfm-state-portfolio = { path = "../states/portfolio" }
+mfm-state-evm-contracts = { path = "../states/evm-contracts" }
 mfm-states-btc = { path = "../states/btc" }
 mfm-states-evm = { path = "../states/evm" }
 mfm-signers-keystore = { path = "../signers/keystore" }
 mfm-signing = { path = "../signing" }
 mfm-spec = { path = "../kernel/spec" }
-mfm-store = { path = "../kernel/store", features = ["test-support"] }
+mfm-store = { path = "../kernel/store" }
 mfm-stream-store-postgres = { path = "../storages/stream-store-postgres" }
 mfm-transports-evm = { path = "../transports/evm" }
 mfm-transports-proof = { path = "../transports/proof" }
@@ -68,5 +69,10 @@ mfm-effects = { path = "../kernel/effects" }
 mfm-manual-auth = { path = "../kernel/manual-auth" }
 mfm_core = { path = "../core" }
 mfm-program-derive = { path = "../kernel/program-derive" }
+mfm-store = { path = "../kernel/store", features = ["test-support"] }
 tempfile = "3.0"
 trybuild = "1.0"
+
+[[test]]
+name = "manual_resolution"
+required-features = ["test-support"]

@@ -11,10 +11,7 @@ use std::sync::Arc;
 use mfm_artifact_capabilities::{fact_response_artifact_requirement, hydrate_fact_response_json};
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1 as events;
-use mfm_fact_capabilities::{
-    FactIndexReadEvidence, FactIndexReadProvider, FactIndexReadRequest, FactIndexReadResponse,
-    FactQueryReceiptTrustRootMaterial,
-};
+use mfm_fact_capabilities::{FactIndexReadProvider, FactIndexReadRequest};
 use mfm_facts::{
     fact_query_result_rows_from_receipt, FactCanonicalScalar, FactClaimId, FactQueryEvidence,
     QueryResultCardinality, ScopeDecisionEvidence, StoreReadFrontier, StoreReadFrontierType,
@@ -252,7 +249,7 @@ async fn select_holdings(
     subjects: mfm_state_portfolio::ResolvedSubjects,
     artifacts: &dyn store::RetainedArtifactReadProvider,
     fact_index: &dyn FactIndexReadProvider,
-) -> mfm_runtime::Result<(SelectedHoldings, Vec<FactIndexReadEvidence>)> {
+) -> mfm_runtime::Result<(SelectedHoldings, Vec<FactQueryEvidence>)> {
     let state = SelectHoldingsState::new(config)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
     let config = state.config();
@@ -265,7 +262,7 @@ async fn select_holdings(
     let mut request_response: Vec<(
         RequiredHoldingKey,
         mfm_fact_capabilities::FactIndexReadRequest,
-        FactIndexReadResponse,
+        mfm_facts::FactQueryResult,
     )> = Vec::new();
 
     // One shared fact-index snapshot for all required holdings (single selection frontier).
@@ -291,7 +288,9 @@ async fn select_holdings(
             .iter()
             .map(|response| response.receipt().frontier_type()),
     )
-    .map_err(holding_runtime_error)?;
+    .map_err(|message| {
+        mfm_runtime::RuntimeError::InvalidRunnerOutput(format!("runner_output_invalid: {message}"))
+    })?;
     for ((requirement, request), response) in requirements.iter().zip(requests).zip(responses) {
         let (candidates, claim_ids) =
             candidates_for_requirement(requirement, &response, artifacts).await?;
@@ -327,9 +326,11 @@ async fn select_holdings(
         let selection = state
             .selection_evidence_for_claims(&row_claim_ids, &selected_claim_ids)
             .map_err(holding_runtime_error)?;
-        let evidence = response
-            .into_evidence(&request, selection)
-            .map_err(fact_index_runtime_error)?;
+        let evidence = FactQueryEvidence::new(
+            request.plan().clone(),
+            response.receipt().clone(),
+            selection,
+        );
         evidences.push(evidence);
     }
 
@@ -342,6 +343,12 @@ async fn select_holdings(
 /// capability or transport, and it requires every complete candidate query, one shared snapshot
 /// frontier, exact response evidence, and the exact state-output bytes produced by the live path.
 pub fn verify_portfolio_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
+    let subjects_frame =
+        replay_single_state_frame::<ResolveSubjectsState>(broker, "resolved-subjects")?;
+    let subjects_config: ResolveSubjectsConfig = replay_node_config(broker, &subjects_frame.node)?;
+    let subjects = resolve_subjects_from_config(&subjects_config);
+    verify_replay_output_bytes(&subjects_frame, &subjects, "resolved subjects")?;
+
     let select_kind = SelectHoldingsState::kind().map_err(replay_adapter_error)?;
     let select_version = SelectHoldingsState::version().map_err(replay_adapter_error)?;
     let select_frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
@@ -366,8 +373,11 @@ pub fn verify_portfolio_replay(broker: &replay::ReplayBroker) -> replay::Result<
             "portfolio selection policy does not match the certified policy",
         ));
     }
-
-    let subjects = replay_subjects(broker)?;
+    if subjects_config.wallets() != config.portfolio().wallets {
+        return Err(replay_portfolio_mismatch(
+            "portfolio select config does not match resolved-subjects config",
+        ));
+    }
     let requirements =
         expand_required_holdings(&config, &subjects).map_err(replay_adapter_error)?;
     let expected_requests = requirements
@@ -396,7 +406,8 @@ pub fn verify_portfolio_replay(broker: &replay::ReplayBroker) -> replay::Result<
             .iter()
             .map(|evidence| evidence.receipt().frontier_type()),
     )
-    .map_err(|error| replay_portfolio_mismatch(error.message))?;
+    .map_err(replay_portfolio_mismatch)?;
+    let mut matched_requirements = BTreeSet::new();
     for evidence in query_evidence {
         if evidence.selection().selection_policy_hash()
             != &mfm_state_portfolio::portfolio_holding_selection_policy_digest()
@@ -412,7 +423,11 @@ pub fn verify_portfolio_replay(broker: &replay::ReplayBroker) -> replay::Result<
         }
         let Some(index) = expected_requests
             .iter()
-            .position(|request| request.plan() == evidence.plan())
+            .enumerate()
+            .find_map(|(index, request)| {
+                (!matched_requirements.contains(&index) && request.plan() == evidence.plan())
+                    .then_some(index)
+            })
         else {
             return Err(replay_portfolio_mismatch(
                 "portfolio query evidence does not match a certified holding request",
@@ -423,6 +438,7 @@ pub fn verify_portfolio_replay(broker: &replay::ReplayBroker) -> replay::Result<
                 "portfolio holding query evidence is duplicated",
             ));
         }
+        matched_requirements.insert(index);
     }
 
     let mut candidates_by_holding = BTreeMap::new();
@@ -484,23 +500,83 @@ pub fn verify_portfolio_replay(broker: &replay::ReplayBroker) -> replay::Result<
             "portfolio SelectHoldings output does not match recomputed selection",
         ));
     }
+
+    let valuations_frame =
+        replay_single_state_frame::<ResolveValuationsState>(broker, "resolved-valuations")?;
+    let valuations_config: ResolveValuationsConfig =
+        replay_node_config(broker, &valuations_frame.node)?;
+    if valuations_config.symbol_configs() != config.portfolio().symbol_configs {
+        return Err(replay_portfolio_mismatch(
+            "portfolio valuation config does not match select config",
+        ));
+    }
+    let valuations =
+        resolve_valuations_from_config(&valuations_config).map_err(replay_adapter_error)?;
+    verify_replay_output_bytes(&valuations_frame, &valuations, "resolved valuations")?;
+
+    let snapshot_frame =
+        replay_single_state_frame::<AssembleSnapshotState>(broker, "assembled snapshot")?;
+    let snapshot_config: AssembleSnapshotConfig = replay_node_config(broker, &snapshot_frame.node)?;
+    if snapshot_config.portfolio() != config.portfolio() {
+        return Err(replay_portfolio_mismatch(
+            "portfolio snapshot config does not match select config",
+        ));
+    }
+    let snapshot = assemble_snapshot(
+        &snapshot_config,
+        AssembleSnapshotInput {
+            subjects,
+            holdings: expected_output.clone(),
+            valuations,
+        },
+        0,
+    )
+    .map_err(replay_adapter_error)?;
+    verify_replay_output_bytes(&snapshot_frame, &snapshot, "assembled snapshot")?;
+
+    let report_frame = replay_single_state_frame::<ProjectReportState>(broker, "project report")?;
+    let report_config: ProjectReportConfig = replay_node_config(broker, &report_frame.node)?;
+    let report =
+        mfm_state_portfolio::project_report_from_snapshot(snapshot, report_config.report_version())
+            .map_err(replay_adapter_error)?;
+    verify_replay_output_bytes(&report_frame, &report, "project report")?;
     Ok(())
 }
 
-fn replay_subjects(
+fn replay_single_state_frame<S>(
     broker: &replay::ReplayBroker,
-) -> replay::Result<mfm_state_portfolio::ResolvedSubjects> {
-    let kind = ResolveSubjectsState::kind().map_err(replay_adapter_error)?;
-    let version = ResolveSubjectsState::version().map_err(replay_adapter_error)?;
+    label: &'static str,
+) -> replay::Result<replay::ProducedCellReplayFrame>
+where
+    S: StateSpec,
+{
+    let kind = S::kind().map_err(replay_adapter_error)?;
+    let version = S::version().map_err(replay_adapter_error)?;
     let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
         Ok(node.state_kind == kind && node.state_version == version)
     })?;
     if frames.len() != 1 {
-        return Err(replay_portfolio_mismatch(
-            "portfolio replay requires exactly one resolved-subjects output",
-        ));
+        return Err(replay_portfolio_mismatch(format!(
+            "portfolio replay requires exactly one {label} output"
+        )));
     }
-    serde_json::from_slice(&frames[0].artifact_bytes).map_err(replay_json_error)
+    Ok(frames
+        .into_iter()
+        .next()
+        .expect("one replay frame was checked"))
+}
+
+fn verify_replay_output_bytes<T: serde::Serialize>(
+    frame: &replay::ProducedCellReplayFrame,
+    expected: &T,
+    label: &'static str,
+) -> replay::Result<()> {
+    if canonical_value_bytes(expected)? != frame.artifact_bytes {
+        return Err(replay_portfolio_mismatch(format!(
+            "portfolio {label} output does not match recomputed value"
+        )));
+    }
+    Ok(())
 }
 
 fn replay_fact_query_evidence_for_attempt(
@@ -661,7 +737,7 @@ fn replay_portfolio_mismatch(message: impl Into<String>) -> replay::ReplayError 
 
 async fn candidates_for_requirement(
     requirement: &RequiredHoldingRequirement,
-    response: &FactIndexReadResponse,
+    response: &mfm_facts::FactQueryResult,
     artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> mfm_runtime::Result<(Vec<HoldingCandidate>, Vec<String>)> {
     let mut candidates = Vec::new();
@@ -902,7 +978,7 @@ fn evm_holding_candidate(
     )
 }
 
-fn store_commit_order_from_row(row: &mfm_fact_capabilities::FactIndexReadRow) -> Option<u64> {
+fn store_commit_order_from_row(row: &mfm_facts::FactQueryResultRow) -> Option<u64> {
     for field in row.returned_fields() {
         if field.field_id().as_str() == "metadata.store_commit_order" {
             if let FactCanonicalScalar::UnsignedInteger(value) = field.value() {
@@ -925,13 +1001,12 @@ fn fact_claim_id_string(claim_id: &mfm_facts::FactClaimId) -> String {
 fn select_holdings_output(
     ctx: ErasedRunCtx<'_>,
     value: &SelectedHoldings,
-    evidences: &[FactIndexReadEvidence],
+    evidences: &[FactQueryEvidence],
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let mut output = RunnerOutputBuilder::new(&ctx);
     output.state_output(value)?;
     for evidence in evidences {
-        let trust_root = fact_query_trust_root(evidence.trust_root())?;
-        output.record_fact_query_evidence(evidence.query_evidence().clone(), &trust_root)?;
+        output.record_fact_query_evidence(evidence.clone())?;
     }
     Ok(output.finish())
 }
@@ -943,39 +1018,22 @@ where
     ErasedRunnerOutput::state_output(&ctx, value)
 }
 
-fn fact_query_trust_root(
-    material: &FactQueryReceiptTrustRootMaterial,
-) -> mfm_runtime::Result<store::FactQueryReceiptTrustRoot> {
-    store::FactQueryReceiptTrustRoot::from_material(material)
-        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))
-}
-
 /// Requires one shared snapshot read frontier across a selection batch.
 ///
 /// Live select and replay share this check so mixed frontiers fail closed on both paths.
 fn require_shared_snapshot_read_frontier<'a>(
     frontiers: impl IntoIterator<Item = &'a StoreReadFrontier>,
     frontier_types: impl IntoIterator<Item = StoreReadFrontierType>,
-) -> Result<(), PortfolioHoldingSelectionError> {
+) -> Result<(), &'static str> {
     let mut expected: Option<&StoreReadFrontier> = None;
     for (frontier, frontier_type) in frontiers.into_iter().zip(frontier_types) {
         if frontier_type != StoreReadFrontierType::Snapshot {
-            return Err(PortfolioHoldingSelectionError::new(
-                PortfolioHoldingErrorCode::MixedReadFrontier,
-                "portfolio selection queries must use snapshot read frontiers",
-                None,
-                None,
-            ));
+            return Err("portfolio selection queries must use snapshot read frontiers");
         }
         match expected {
             None => expected = Some(frontier),
             Some(shared) if shared != frontier => {
-                return Err(PortfolioHoldingSelectionError::new(
-                    PortfolioHoldingErrorCode::MixedReadFrontier,
-                    "portfolio selection queries use mixed read frontiers",
-                    None,
-                    None,
-                ));
+                return Err("portfolio selection queries use mixed read frontiers");
             }
             Some(_) => {}
         }

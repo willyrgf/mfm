@@ -2349,7 +2349,7 @@ pub mod v1 {
                 .retained_artifacts
                 .values()
                 .find(|evidence| {
-                    &evidence.artifact_id == &payload.authorization_artifact_id
+                    evidence.artifact_id == payload.authorization_artifact_id
                         && verify_artifact_fields(
                             evidence,
                             &payload.authorization_hash,

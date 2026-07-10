@@ -259,20 +259,15 @@ pub(super) async fn read_observation_watch_rows(
           c.commit_id, c.store_commit_order \
          FROM commits c \
          WHERE c.store_commit_order <= $1 \
-           AND ( \
-             ($3 AND c.store_commit_order >= $2) \
-             OR \
-             (NOT $3 AND c.store_commit_order > $2) \
-           ) \
+           AND c.store_commit_order > $2 \
          ORDER BY c.store_commit_order ASC \
-         LIMIT $4",
+         LIMIT $3",
     )
     .bind(u64_to_i64(frontier_order, "observation frontier")?)
     .bind(u64_to_i64(
         cursor.store_commit_order,
         "observation cursor store commit order",
     )?)
-    .bind(cursor.kind == CursorKind::Frontier)
     .bind(i64::from(limit))
     .fetch_all(pool)
     .await

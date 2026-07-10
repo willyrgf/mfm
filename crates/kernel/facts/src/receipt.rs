@@ -143,52 +143,6 @@ impl_fact_tag!(StoreReceiptAuthenticationScheme, "store receipt authentication s
     Self::LocalEd25519Sha256JcsV1 => "local_ed25519_sha256_jcs_v1",
 });
 
-/// Store-neutral public trust-root material for fact query receipt authentication.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FactQueryReceiptTrustRootMaterial {
-    pub(crate) store_identity: StoreIdentity,
-    pub(crate) scheme: StoreReceiptAuthenticationScheme,
-    pub(crate) key_id: StoreKeyId,
-    pub(crate) verifying_key: [u8; 32],
-}
-
-impl FactQueryReceiptTrustRootMaterial {
-    /// Creates trust-root material from store-owned public verification data.
-    pub fn new(
-        store_identity: StoreIdentity,
-        scheme: StoreReceiptAuthenticationScheme,
-        key_id: StoreKeyId,
-        verifying_key: [u8; 32],
-    ) -> Self {
-        Self {
-            store_identity,
-            scheme,
-            key_id,
-            verifying_key,
-        }
-    }
-
-    /// Returns the store identity bound to this trust root.
-    pub const fn store_identity(&self) -> &StoreIdentity {
-        &self.store_identity
-    }
-
-    /// Returns the authentication scheme bound to this trust root.
-    pub const fn scheme(&self) -> StoreReceiptAuthenticationScheme {
-        self.scheme
-    }
-
-    /// Returns the non-secret key id bound to this trust root.
-    pub const fn key_id(&self) -> &StoreKeyId {
-        &self.key_id
-    }
-
-    /// Returns the raw public verifying key bytes.
-    pub const fn verifying_key(&self) -> &[u8; 32] {
-        &self.verifying_key
-    }
-}
-
 /// Store-owned receipt authentication metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreReceiptAuthentication {

@@ -135,7 +135,7 @@ fn dual_mainnet_runtime_example_resolves_from_env() {
         .btc()
         .expect("btc")
         .routes()
-        .get(&"bitcoin-mainnet".parse().expect("btc source"))
+        .get(&"public-bitcoin-core".parse().expect("btc source"))
         .expect("btc route");
     assert_value(
         btc.rpc_url(),

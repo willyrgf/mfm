@@ -1369,13 +1369,12 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
         &mut self,
         value: &T,
         evidence: mfm_facts::FactQueryEvidence,
-        trust_root: &store::FactQueryReceiptTrustRoot,
     ) -> Result<()>
     where
         T: MfmValue,
     {
         self.state_output(value)?;
-        self.record_fact_query_evidence(evidence, trust_root)
+        self.record_fact_query_evidence(evidence)
     }
 
     /// Stages a typed fact response artifact and appends the matching `FactRecorded` payload.
@@ -1450,8 +1449,16 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
     pub fn record_fact_query_evidence(
         &mut self,
         evidence: mfm_facts::FactQueryEvidence,
-        trust_root: &store::FactQueryReceiptTrustRoot,
     ) -> Result<()> {
+        let trust_root = self
+            .artifacts
+            .ctx
+            .fact_query_receipt_trust_root()
+            .ok_or_else(|| {
+                RuntimeError::InvalidRunnerOutput(
+                    "fact-query receipt authority is not configured".to_owned(),
+                )
+            })?;
         store::validate_fact_query_evidence_recording(&evidence, trust_root)
             .map_err(RuntimeError::from)?;
         let artifact = self.artifacts.fact_query_evidence(&evidence)?;

@@ -14,7 +14,7 @@ use mfm_facts::{
     FactFieldValueType, FactProducerProvenance, FactProjectionGeneration, FactQueryReceipt,
     FactQueryResultRow, FactQueryScope, FactResponseEvidence, FactSubjectRef, FactVisibility,
     FactVisibilityScope, InternalFactRef, InternalFactRefParts, StoreCommitOrder, StoreIdentity,
-    StoreKeyId, StoreReadFrontier, StoreReceiptAuthenticationScheme, StoreScopeRef,
+    StoreKeyId, StoreReadFrontier, StoreScopeRef,
 };
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
@@ -380,8 +380,8 @@ async fn select_holdings_hard_fails_on_mixed_read_frontiers() {
         .expect_err("mixed frontiers must hard-fail");
     let msg = err.to_string();
     assert!(
-        msg.contains("mixed_read_frontier"),
-        "expected mixed_read_frontier hard-fail, got {msg}"
+        msg.contains("runner_output_invalid") && msg.contains("mixed read frontiers"),
+        "expected runner_output_invalid hard-fail, got {msg}"
     );
 }
 
@@ -752,7 +752,13 @@ impl FactIndexReadProvider for MockFactIndex {
                     .collect();
 
                 let receipt = signed_receipt_for_plan(plan, &rows);
-                responses.push(FactIndexReadResponse::from_receipt(receipt, trust_root()));
+                responses.push(
+                    mfm_facts::FactQueryResult::new(
+                        mfm_facts::fact_query_result_rows_from_receipt(&receipt),
+                        receipt,
+                    )
+                    .expect("fact query result"),
+                );
             }
             Ok(responses)
         })
@@ -799,7 +805,13 @@ impl FactIndexReadProvider for MixedFrontierFactIndex {
                     &rows,
                     StoreCommitOrder::new(11 + index as u64),
                 );
-                responses.push(FactIndexReadResponse::from_receipt(receipt, trust_root()));
+                responses.push(
+                    mfm_facts::FactQueryResult::new(
+                        mfm_facts::fact_query_result_rows_from_receipt(&receipt),
+                        receipt,
+                    )
+                    .expect("fact query result"),
+                );
             }
             Ok(responses)
         })
@@ -857,16 +869,6 @@ fn signed_receipt_for_plan_with_order(
         include_returned_field_summaries: true,
         limit: None,
     })
-}
-
-fn trust_root() -> FactQueryReceiptTrustRootMaterial {
-    let key = SigningKey::from_bytes(&[7; 32]);
-    FactQueryReceiptTrustRootMaterial::new(
-        StoreIdentity::new("store.default").expect("store identity"),
-        StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
-        StoreKeyId::new("fact.read.key").expect("key id"),
-        key.verifying_key().to_bytes(),
-    )
 }
 
 struct MockArtifacts {

@@ -428,7 +428,8 @@ Status does not serialize raw resource keys, unrelated global lane holders, or s
 that blocked before appending lane evidence.
 `attempt_dispositions` reports committed attempt-level lifecycle status separately from `run_mode`;
 each entry has `node_id`, `attempt_id`, `disposition` (`started`, `completed`, `failed`, or
-`interrupted`), and status-specific fields such as `attempt_no`, `retryable`, or `output_cell_id`.
+`interrupted`), and status-specific fields such as `attempt_no`, `retryable`, `error_code`, or
+`output_cell_id`. Failed attempt event references also expose the redaction-safe `error_code`.
 `scheduler_status` is read-only `observed` for `GET /v1/runs/:run_id/status`; start/resume responses
 set it to `advanced`, `blocked`, `public_output_projected`, `execution_claim_busy`, or
 `execution_claim_lost` according to the app dispatch loop and claim-coordination outcome.

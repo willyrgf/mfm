@@ -381,16 +381,30 @@ impl<'a> PreInvocationRunCtx<'a> {
 /// Context supplied to an erased node runner.
 pub struct ErasedRunCtx<'a> {
     invocation: &'a PreparedRunnerInvocation<'a>,
+    fact_query_receipt_trust_root: Option<&'a store::FactQueryReceiptTrustRoot>,
 }
 
 impl<'a> ErasedRunCtx<'a> {
-    pub(crate) fn from_prepared(invocation: &'a PreparedRunnerInvocation<'a>) -> Self {
-        Self { invocation }
+    pub(crate) fn from_prepared(
+        invocation: &'a PreparedRunnerInvocation<'a>,
+        fact_query_receipt_trust_root: Option<&'a store::FactQueryReceiptTrustRoot>,
+    ) -> Self {
+        Self {
+            invocation,
+            fact_query_receipt_trust_root,
+        }
     }
 
     /// Prepared runner invocation backing this context.
     pub fn invocation(&self) -> &'a PreparedRunnerInvocation<'a> {
         self.invocation
+    }
+
+    /// Returns the independently configured store authority for fact-query receipts.
+    pub(crate) fn fact_query_receipt_trust_root(
+        &self,
+    ) -> Option<&'a store::FactQueryReceiptTrustRoot> {
+        self.fact_query_receipt_trust_root
     }
 
     /// Run id being executed.

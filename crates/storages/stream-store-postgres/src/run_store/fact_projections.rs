@@ -1179,12 +1179,6 @@ pub(super) fn push_fact_index_term_projection_select_list(builder: &mut QueryBui
     }
 }
 
-pub(super) fn push_fact_index_term_value_select_list(builder: &mut QueryBuilder<Postgres>) {
-    for column in FactTermValueColumn::ALL {
-        builder.push(", ").push(column.storage_column());
-    }
-}
-
 fn push_fact_index_term_select_column(
     builder: &mut QueryBuilder<Postgres>,
     column: &str,
@@ -1218,10 +1212,6 @@ impl FactTermValueColumn {
         Self::Timestamp,
         Self::Digest,
     ];
-
-    pub(super) fn for_scalar(value: &mfm_facts::FactCanonicalScalar) -> Self {
-        Self::for_value_type(value.value_type())
-    }
 
     fn for_value_type(value_type: mfm_facts::FactFieldValueType) -> Self {
         match value_type {
@@ -1344,22 +1334,6 @@ impl TermValueColumns {
         }
         columns
     }
-}
-
-pub(super) fn returned_field_summary_from_row(row: &PgRow) -> Result<mfm_facts::FactFieldValue> {
-    let (field_id, value_type, value) = fact_term_value_from_row(row)?;
-    mfm_facts::FactFieldValue::new(field_id, value_type, value).map_err(fact_error)
-}
-
-pub(super) fn fact_term_value_from_row(
-    row: &PgRow,
-) -> Result<(
-    mfm_facts::FactFieldId,
-    mfm_facts::FactFieldValueType,
-    mfm_facts::FactCanonicalScalar,
-)> {
-    let row = PgRowReader::new(row, "fact_index_terms");
-    fact_term_value_from_reader(&row)
 }
 
 fn fact_term_value_from_reader(

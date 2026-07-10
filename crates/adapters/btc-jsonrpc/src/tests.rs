@@ -101,10 +101,12 @@ impl FactIndexReadProvider for MockFactIndex {
             Ok(requests
                 .iter()
                 .map(|request| {
-                    mfm_fact_capabilities::FactIndexReadResponse::from_receipt(
-                        fact_query_receipt(request.plan(), self.refs.clone()),
-                        trust_root(),
+                    let receipt = fact_query_receipt(request.plan(), self.refs.clone());
+                    mfm_facts::FactQueryResult::new(
+                        mfm_facts::fact_query_result_rows_from_receipt(&receipt),
+                        receipt,
                     )
+                    .expect("fact query result")
                 })
                 .collect())
         })
@@ -319,16 +321,8 @@ async fn query_runner_empty_result_pins_evidence_and_returns_no_checkpoint() {
     assert_eq!(provider.calls(), 1);
     assert!(artifacts.calls().is_empty());
     assert!(loaded.checkpoint().is_none());
-    assert!(evidence
-        .query_evidence()
-        .receipt()
-        .returned_refs()
-        .is_empty());
-    assert_eq!(
-        evidence.query_evidence().selection().selected_indices(),
-        &[] as &[u64]
-    );
-    fact_query_trust_root(evidence.trust_root()).expect("store trust root");
+    assert!(evidence.receipt().returned_refs().is_empty());
+    assert_eq!(evidence.selection().selected_indices(), &[] as &[u64]);
 }
 
 #[tokio::test]
@@ -358,14 +352,8 @@ async fn query_runner_single_row_pins_evidence_and_returns_checkpoint() {
     assert_eq!(artifacts.calls(), vec![fact_ref.artifact_id().clone()]);
     assert_eq!(checkpoint.response().high_watermark_height(), 850_000);
     assert_eq!(checkpoint.response().high_watermark_hash(), BEST_HASH);
-    assert_eq!(
-        evidence.query_evidence().receipt().returned_refs(),
-        &[fact_ref]
-    );
-    assert_eq!(
-        evidence.query_evidence().selection().selected_indices(),
-        &[0]
-    );
+    assert_eq!(evidence.receipt().returned_refs(), &[fact_ref]);
+    assert_eq!(evidence.selection().selected_indices(), &[0]);
 }
 
 #[tokio::test]
@@ -486,16 +474,6 @@ fn fact_query_receipt(
 
 fn signing_key() -> SigningKey {
     SigningKey::from_bytes(&[7; 32])
-}
-
-fn trust_root() -> FactQueryReceiptTrustRootMaterial {
-    let key = signing_key();
-    FactQueryReceiptTrustRootMaterial::new(
-        StoreIdentity::new("store.default").expect("store identity"),
-        mfm_facts::StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
-        StoreKeyId::new("fact.read.key").expect("key id"),
-        key.verifying_key().to_bytes(),
-    )
 }
 
 fn internal_fact_ref(

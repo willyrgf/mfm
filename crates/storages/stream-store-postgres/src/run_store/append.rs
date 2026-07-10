@@ -54,8 +54,6 @@ impl PostgresRunStore {
             .into());
         }
 
-        let store_commit_order = next_store_commit_order_tx(&mut tx).await?;
-
         verify_prepared_artifact_bundle_tx(&mut tx, &bundle).await?;
         let mut artifacts = load_artifacts(&mut tx, request.run_id()).await?;
         mfm_store::v1::backend::admit_artifact_evidence(
@@ -89,7 +87,7 @@ impl PostgresRunStore {
         )
         .await?;
         let claim_admission = single_lane_claim_admission(request)?;
-        let base = CommitBase {
+        let mut base = CommitBase {
             artifacts,
             artifact_bytes,
             logical_keys: load_logical_keys(&mut tx, request.run_id()).await?,
@@ -98,8 +96,11 @@ impl PostgresRunStore {
             projections: projections.clone(),
             resource_lane_authority: resource_lane_state.authority,
             actual_next_seq: next_seq_from_head(head)?,
-            store_commit_order,
+            store_commit_order: StoreCommitOrder::EMPTY,
         };
+        // Validate and assemble the run-local mutation before contending on the global ordering
+        // row. The order is only needed while materializing the final envelopes and projections.
+        base.store_commit_order = next_store_commit_order_tx(&mut tx).await?;
         let staged = match stage_prepared_commit_plan(&base, plan)? {
             StagedCommitOutcome::Staged(staged) => *staged,
             StagedCommitOutcome::AdmissionBlocked(block) => {

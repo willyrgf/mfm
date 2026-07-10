@@ -20,10 +20,7 @@ use mfm_btc_capabilities::{
 };
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1 as events;
-use mfm_fact_capabilities::{
-    FactIndexReadEvidence, FactIndexReadProvider, FactIndexReadResponse,
-    FactQueryReceiptTrustRootMaterial, FactRecordCapability,
-};
+use mfm_fact_capabilities::{FactIndexReadProvider, FactRecordCapability};
 use mfm_program::{ManagedWriteState, MfmFactType, StateSpec, ValidatedConfig};
 use mfm_program_derive::MfmValue;
 use mfm_replay::v1 as replay;
@@ -38,14 +35,16 @@ use mfm_states_btc::{
     address_balance_record_visibility, assemble_btc_address_balance_batch,
     btc_jsonrpc_adapter_kind, btc_jsonrpc_adapter_version, chain_head_fact_visibility,
     collector_checkpoint_fact_visibility, normalize_btc_address_balance_observation,
-    AssembleBtcAddressBalanceBatchConfig, AssembleBtcAddressBalanceBatchInput,
-    AssembleBtcAddressBalanceBatchState, BtcAddressBalanceSnapshotFact, BtcChainHeadObservation,
-    BtcJointTip, CollectorCheckpointFact, CollectorCheckpointResponse, LoadedCollectorCheckpoint,
-    ObserveBtcAddressBalanceConfig, ObserveBtcAddressBalanceInput, ObserveBtcAddressBalanceState,
-    ObserveBtcChainHeadConfig, ObserveBtcChainHeadInput, ObserveBtcChainHeadState,
-    QueryCollectorCheckpointConfig, QueryCollectorCheckpointInput, QueryCollectorCheckpointState,
-    RecordBtcAddressBalanceFactState, RecordBtcChainHeadFactState, RecordCollectorCheckpointState,
-    ResolveBtcJointTipConfig, ResolveBtcJointTipInput, ResolveBtcJointTipState,
+    record_collector_checkpoint_from_outputs, AssembleBtcAddressBalanceBatchConfig,
+    AssembleBtcAddressBalanceBatchInput, AssembleBtcAddressBalanceBatchState,
+    BtcAddressBalanceObservation, BtcAddressBalanceSnapshotFact, BtcChainHeadFact,
+    BtcChainHeadObservation, BtcJointTip, CollectorCheckpointFact, CollectorCheckpointResponse,
+    LoadedCollectorCheckpoint, ObserveBtcAddressBalanceConfig, ObserveBtcAddressBalanceInput,
+    ObserveBtcAddressBalanceState, ObserveBtcChainHeadConfig, ObserveBtcChainHeadInput,
+    ObserveBtcChainHeadState, QueryCollectorCheckpointConfig, QueryCollectorCheckpointInput,
+    QueryCollectorCheckpointState, RecordBtcAddressBalanceFactState, RecordBtcChainHeadFactState,
+    RecordCollectorCheckpointState, ResolveBtcJointTipConfig, ResolveBtcJointTipInput,
+    ResolveBtcJointTipState,
 };
 use mfm_store::v1 as store;
 use mfm_values::{MfmConfig, MfmValue, NonEmpty};
@@ -735,15 +734,10 @@ where
 fn checkpoint_query_output(
     ctx: ErasedRunCtx<'_>,
     value: &LoadedCollectorCheckpoint,
-    evidence: &FactIndexReadEvidence,
+    evidence: &mfm_facts::FactQueryEvidence,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let trust_root = fact_query_trust_root(evidence.trust_root())?;
     let mut output = RunnerOutputBuilder::new(&ctx);
-    output.state_output_and_record_fact_query_evidence(
-        value,
-        evidence.query_evidence().clone(),
-        &trust_root,
-    )?;
+    output.state_output_and_record_fact_query_evidence(value, evidence.clone())?;
     Ok(output.finish())
 }
 
@@ -752,7 +746,7 @@ async fn query_collector_checkpoint(
     _input: QueryCollectorCheckpointInput,
     artifacts: &dyn store::RetainedArtifactReadProvider,
     fact_index: &dyn FactIndexReadProvider,
-) -> mfm_runtime::Result<(LoadedCollectorCheckpoint, FactIndexReadEvidence)> {
+) -> mfm_runtime::Result<(LoadedCollectorCheckpoint, mfm_facts::FactQueryEvidence)> {
     let state = QueryCollectorCheckpointState::new(config)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
     let request = state.request().map_err(btc_state_runtime_error)?;
@@ -767,15 +761,17 @@ async fn query_collector_checkpoint(
     let loaded = state
         .materialize_response(&response, checkpoint)
         .map_err(btc_state_runtime_error)?;
-    let evidence = response
-        .into_evidence(&request, selection)
-        .map_err(fact_index_runtime_error)?;
+    let evidence = mfm_facts::FactQueryEvidence::new(
+        request.plan().clone(),
+        response.receipt().clone(),
+        selection,
+    );
     Ok((loaded, evidence))
 }
 
 async fn checkpoint_from_response(
     state: &QueryCollectorCheckpointState,
-    response: &FactIndexReadResponse,
+    response: &mfm_facts::FactQueryResult,
     artifacts: &dyn store::RetainedArtifactReadProvider,
 ) -> mfm_runtime::Result<Option<CollectorCheckpointFact>> {
     match state
@@ -839,6 +835,9 @@ pub fn verify_btc_jsonrpc_replay(broker: &replay::ReplayBroker) -> replay::Resul
     for frame in &balance_frames {
         verify_btc_address_balance_observation_replay(broker, frame)?;
     }
+    verify_btc_chain_head_fact_replay(broker)?;
+    verify_btc_address_balance_fact_replay(broker)?;
+    verify_btc_collector_checkpoint_fact_replay(broker)?;
     verify_btc_shared_joint_tips(broker, &balance_frames)?;
     verify_btc_address_balance_batch_replay(broker)?;
     Ok(())
@@ -1094,6 +1093,200 @@ fn verify_btc_address_balance_observation_replay(
         normalize_btc_address_balance_observation(&config, &input_tip, &capability_response)
             .map_err(replay_adapter_error)?;
     ensure_canonical_value_matches(&expected, &frame.artifact_bytes)
+}
+
+fn verify_btc_chain_head_fact_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
+    let state_kind = RecordBtcChainHeadFactState::kind().map_err(replay_adapter_error)?;
+    let state_version = RecordBtcChainHeadFactState::version().map_err(replay_adapter_error)?;
+    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
+        Ok(node.state_kind == state_kind && node.state_version == state_version)
+    })?;
+    for frame in &frames {
+        let observation_frames = replay_input_frames(
+            broker,
+            &frame.node,
+            &BtcChainHeadObservation::semantic_id().map_err(replay_adapter_error)?,
+            &BtcChainHeadObservation::schema_id().map_err(replay_adapter_error)?,
+        )?;
+        if observation_frames.len() != 1 {
+            return Err(replay_btc_mismatch(
+                "Bitcoin chain-head fact input was incomplete",
+            ));
+        }
+        let observation: BtcChainHeadObservation = decode_replay_value(&observation_frames[0])?;
+        let fact = observation.to_fact();
+        ensure_canonical_value_matches(&fact, &frame.artifact_bytes)?;
+        verify_recorded_fact_evidence(
+            broker,
+            frame,
+            &BtcChainHeadFact::descriptor().map_err(replay_adapter_error)?,
+            fact.subject(),
+            fact.response(),
+        )?;
+    }
+    Ok(())
+}
+
+fn verify_btc_address_balance_fact_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
+    let state_kind = RecordBtcAddressBalanceFactState::kind().map_err(replay_adapter_error)?;
+    let state_version =
+        RecordBtcAddressBalanceFactState::version().map_err(replay_adapter_error)?;
+    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
+        Ok(node.state_kind == state_kind && node.state_version == state_version)
+    })?;
+    for frame in &frames {
+        let observation_frames = replay_input_frames(
+            broker,
+            &frame.node,
+            &BtcAddressBalanceObservation::semantic_id().map_err(replay_adapter_error)?,
+            &BtcAddressBalanceObservation::schema_id().map_err(replay_adapter_error)?,
+        )?;
+        if observation_frames.len() != 1 {
+            return Err(replay_btc_mismatch(
+                "Bitcoin address-balance fact input was incomplete",
+            ));
+        }
+        let observation: BtcAddressBalanceObservation =
+            decode_replay_value(&observation_frames[0])?;
+        let fact = observation.to_fact();
+        ensure_canonical_value_matches(&fact, &frame.artifact_bytes)?;
+        verify_recorded_fact_evidence(
+            broker,
+            frame,
+            &BtcAddressBalanceSnapshotFact::descriptor().map_err(replay_adapter_error)?,
+            fact.subject(),
+            fact.response(),
+        )?;
+    }
+    Ok(())
+}
+
+fn verify_btc_collector_checkpoint_fact_replay(
+    broker: &replay::ReplayBroker,
+) -> replay::Result<()> {
+    let state_kind = RecordCollectorCheckpointState::kind().map_err(replay_adapter_error)?;
+    let state_version = RecordCollectorCheckpointState::version().map_err(replay_adapter_error)?;
+    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
+        Ok(node.state_kind == state_kind && node.state_version == state_version)
+    })?;
+    for frame in &frames {
+        let config: mfm_states_btc::RecordCollectorCheckpointConfig =
+            replay_node_config(broker, &frame.node)?;
+        let chain_head_frames = replay_input_frames(
+            broker,
+            &frame.node,
+            &BtcChainHeadFact::semantic_id().map_err(replay_adapter_error)?,
+            &BtcChainHeadFact::schema_id().map_err(replay_adapter_error)?,
+        )?;
+        let loaded_checkpoint_frames = replay_input_frames(
+            broker,
+            &frame.node,
+            &LoadedCollectorCheckpoint::semantic_id().map_err(replay_adapter_error)?,
+            &LoadedCollectorCheckpoint::schema_id().map_err(replay_adapter_error)?,
+        )?;
+        if chain_head_frames.len() != 1 || loaded_checkpoint_frames.len() != 1 {
+            return Err(replay_btc_mismatch(
+                "Bitcoin collector checkpoint fact inputs were incomplete",
+            ));
+        }
+        let chain_head_fact: BtcChainHeadFact = decode_replay_value(&chain_head_frames[0])?;
+        let loaded_checkpoint: LoadedCollectorCheckpoint =
+            decode_replay_value(&loaded_checkpoint_frames[0])?;
+        let fact =
+            record_collector_checkpoint_from_outputs(&config, &chain_head_fact, &loaded_checkpoint)
+                .map_err(replay_adapter_error)?;
+        ensure_canonical_value_matches(&fact, &frame.artifact_bytes)?;
+        verify_recorded_fact_evidence(
+            broker,
+            frame,
+            &CollectorCheckpointFact::descriptor().map_err(replay_adapter_error)?,
+            fact.subject(),
+            fact.response(),
+        )?;
+    }
+    Ok(())
+}
+
+fn verify_recorded_fact_evidence<S: serde::Serialize, R: serde::Serialize>(
+    broker: &replay::ReplayBroker,
+    frame: &replay::ProducedCellReplayFrame,
+    descriptor: &mfm_facts::FactDescriptor,
+    subject: &S,
+    response_value: &R,
+) -> replay::Result<()> {
+    let records = broker
+        .events()
+        .iter()
+        .filter_map(|event| match event.payload() {
+            events::KernelEventPayload::FactRecorded(payload)
+                if payload.node_id == frame.produced.node_id
+                    && payload.attempt_id == frame.produced.attempt_id =>
+            {
+                Some(payload)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if records.len() != 1 {
+        return Err(replay_btc_mismatch(
+            "Bitcoin fact output did not have exactly one FactRecorded event",
+        ));
+    }
+    let claim = &records[0].claim;
+    let descriptor_hash =
+        mfm_facts::fact_descriptor_hash(descriptor).map_err(replay_adapter_error)?;
+    if claim.fact_descriptor_hash() != &descriptor_hash
+        || claim.fact_kind() != descriptor.fact_kind()
+    {
+        return Err(replay_btc_mismatch(
+            "Bitcoin FactRecorded descriptor authority did not match the recomputed fact",
+        ));
+    }
+    let subject_json = serde_json::to_value(subject).map_err(replay_json_error)?;
+    let expected_subject = mfm_facts::typed_fact_subject_evidence(descriptor, &subject_json)
+        .map_err(replay_adapter_error)?;
+    if claim.subject() != &expected_subject {
+        return Err(replay_btc_mismatch(
+            "Bitcoin FactRecorded subject authority did not match the recomputed fact",
+        ));
+    }
+    let expected_bytes = canonical_json_bytes(response_value)?;
+    let response = claim.response();
+    if response.response_schema_id() != descriptor.response_schema_id()
+        || response.response_hash() != &expected_bytes.content_digest()
+    {
+        return Err(replay_btc_mismatch(
+            "Bitcoin FactRecorded response authority did not match the recomputed fact",
+        ));
+    }
+    let requirement = store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::FactResponse,
+        artifact_id: response.artifact_id().clone(),
+        evidence_hash: response.artifact_evidence_hash().clone(),
+        digest: Some(response.response_hash().clone()),
+        byte_len: Some(
+            u64::try_from(expected_bytes.as_bytes().len())
+                .map_err(|_| replay_btc_mismatch("Bitcoin fact response length overflowed u64"))?,
+        ),
+        media_type: None,
+        schema_id: Some(response.response_schema_id().clone()),
+        semantic_type_id: None,
+        producer_node_id: Some(frame.produced.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: Some(events::ArtifactRole::FactResponse),
+    };
+    let artifact = broker.retained_artifact(&requirement)?;
+    if artifact.artifact_bytes != expected_bytes.as_bytes() {
+        return Err(replay_btc_mismatch(
+            "Bitcoin FactRecorded response bytes did not match the recomputed fact",
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_json_bytes<T: serde::Serialize>(value: &T) -> replay::Result<PlainCanonicalJsonBytes> {
+    let json = serde_json::to_string(value).map_err(replay_json_error)?;
+    PlainCanonicalJsonBytes::from_json_str(&json).map_err(replay_adapter_error)
 }
 
 fn verify_btc_address_balance_batch_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
@@ -1352,13 +1545,6 @@ fn replay_adapter_error(error: impl std::fmt::Display) -> replay::ReplayError {
 
 fn replay_btc_mismatch(message: &'static str) -> replay::ReplayError {
     replay::ReplayError::new(replay::ReplayErrorKind::CertifiedEvidenceMismatch, message)
-}
-
-fn fact_query_trust_root(
-    material: &FactQueryReceiptTrustRootMaterial,
-) -> mfm_runtime::Result<mfm_store::v1::FactQueryReceiptTrustRoot> {
-    mfm_store::v1::FactQueryReceiptTrustRoot::from_material(material)
-        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
 fn fact_record_capability_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {

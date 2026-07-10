@@ -58,7 +58,9 @@ impl ReplayVerifierRegistry {
                     verifier: verify_evm,
                 },
                 ReplayVerifierRegistration {
-                    state_keys: &[],
+                    state_keys: &[state_key::<
+                        mfm_state_evm_contracts::ContextBoundValidateContractState,
+                    >],
                     intent_matcher: Some(
                         mfm_adapters_evm_contracts::is_contract_lifecycle_replay_intent,
                     ),

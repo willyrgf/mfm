@@ -42,24 +42,24 @@ btc_response="$(mfm_cli --output-format json run start \
     --config examples/configs/btc-address-balance.toml \
     --runtime-config "$MFM_RUNTIME_CONFIG_FILE" \
     --database-url "$DATABASE_URL")"
-btc_run_id="$(printf '%s\n' "$btc_response" | jq -er '.data.run_id')"
-printf '%s\n' "$btc_response" | jq -e '.data.run_mode == "completed"'
+btc_run_id="$(printf '%s\n' "$btc_response" | jq -er '.data.run.run_id')"
+printf '%s\n' "$btc_response" | jq -e '.data.run.run_mode == "completed"'
 
 evm_response="$(mfm_cli --output-format json run start \
     --op evm_native_balance \
     --config examples/configs/evm-native-balance.toml \
     --runtime-config "$MFM_RUNTIME_CONFIG_FILE" \
     --database-url "$DATABASE_URL")"
-evm_run_id="$(printf '%s\n' "$evm_response" | jq -er '.data.run_id')"
-printf '%s\n' "$evm_response" | jq -e '.data.run_mode == "completed"'
+evm_run_id="$(printf '%s\n' "$evm_response" | jq -er '.data.run.run_id')"
+printf '%s\n' "$evm_response" | jq -e '.data.run.run_mode == "completed"'
 
 report_response="$(mfm_cli --output-format json run start \
     --op portfolio_snapshot \
     --op-version 2 \
     --config examples/configs/portfolio-dual-mainnet.toml \
     --database-url "$DATABASE_URL")"
-report_run_id="$(printf '%s\n' "$report_response" | jq -er '.data.run_id')"
-printf '%s\n' "$report_response" | jq -e '.data.run_mode == "completed"'
+report_run_id="$(printf '%s\n' "$report_response" | jq -er '.data.run.run_id')"
+printf '%s\n' "$report_response" | jq -e '.data.run.run_mode == "completed"'
 
 for run_id in "$btc_run_id" "$evm_run_id" "$report_run_id"; do
   replay_response="$(mfm_cli --output-format json run replay "$run_id" \

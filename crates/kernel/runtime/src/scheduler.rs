@@ -63,6 +63,7 @@ enum DriveStepStatus {
 pub struct SerialTypedScheduler {
     run_contexts: VerifiedRunContextLoader,
     artifact_store: Arc<dyn RuntimeArtifactStore>,
+    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
 }
 
 impl SerialTypedScheduler {
@@ -74,7 +75,17 @@ impl SerialTypedScheduler {
         Self {
             run_contexts: VerifiedRunContextLoader::new(BoundRuntimeContextLoader::new(runners)),
             artifact_store,
+            fact_query_receipt_trust_root: None,
         }
+    }
+
+    /// Binds the store-owned fact-query receipt authority used during runner output validation.
+    pub fn with_fact_query_receipt_trust_root(
+        mut self,
+        trust_root: Option<store::FactQueryReceiptTrustRoot>,
+    ) -> Self {
+        self.fact_query_receipt_trust_root = trust_root;
+        self
     }
 
     /// Prepares sealed admission launch authority for a certified run.
@@ -367,11 +378,14 @@ impl SerialTypedScheduler {
             return Ok(status);
         }
         if FrameworkAttemptLifecycle::owns_node(attempt.node) {
-            return FrameworkAttemptLifecycle::new(self.artifact_store.as_ref())
-                .run(store, runtime_spec, run_id, view, bound_context, attempt)
-                .await;
+            return FrameworkAttemptLifecycle::new(
+                self.artifact_store.as_ref(),
+                self.fact_query_receipt_trust_root.clone(),
+            )
+            .run(store, runtime_spec, run_id, view, bound_context, attempt)
+            .await;
         }
-        AttemptLifecycle::new()
+        AttemptLifecycle::new(self.fact_query_receipt_trust_root.clone())
             .run(store, runtime_spec, run_id, view, bound_context, attempt)
             .await
     }

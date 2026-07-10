@@ -2242,6 +2242,7 @@ dependencies = [
  "mfm-signers-keystore",
  "mfm-signing",
  "mfm-spec",
+ "mfm-state-evm-contracts",
  "mfm-state-portfolio",
  "mfm-states-btc",
  "mfm-states-evm",

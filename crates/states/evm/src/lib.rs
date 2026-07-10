@@ -26,6 +26,7 @@ pub use native_balance_collect::{
     ResolveEvmJointTipState, EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS,
 };
 
+use alloy_primitives::B256;
 use mfm_evm_core::encoding::normalize_address;
 use mfm_facts::{
     compile_fact_query_plan, CanonicalFactQueryPlan, FactAudience, FactCanonicalScalar,
@@ -155,7 +156,7 @@ impl EvmAddressNativeBalanceResponse {
         coverage: CoverageStatus,
         source_status: HoldingSourceStatus,
     ) -> Result<Self, EvmStateError> {
-        let block_hash = require_evm_block_hash(block_hash)?;
+        let block_hash = canonical_evm_block_hash(block_hash)?;
         let raw_wei = raw_wei.into();
         if raw_wei.trim().is_empty() || !raw_wei.chars().all(|c| c.is_ascii_digit()) {
             return Err(EvmStateError::InvalidInput {
@@ -500,7 +501,7 @@ pub fn normalize_evm_address_native_balance(
     subject: &EvmAddressNativeBalanceSubject,
     response: &EvmAddressNativeBalanceResponse,
 ) -> Result<NormalizedEvmNativeHolding, EvmStateError> {
-    let block_hash = require_evm_block_hash(response.block_hash())?;
+    let block_hash = canonical_evm_block_hash(response.block_hash())?;
     let coverage = response.coverage_status()?;
     let source_status = response.holding_source_status()?;
     Ok(NormalizedEvmNativeHolding {
@@ -516,18 +517,19 @@ pub fn normalize_evm_address_native_balance(
     })
 }
 
-/// Requires a 32-byte hex EVM block hash (optional `0x` prefix). Empty and malformed fail closed.
-pub(crate) fn require_evm_block_hash(
-    block_hash: impl Into<String>,
-) -> Result<String, EvmStateError> {
+/// Canonicalizes a 32-byte EVM block hash to lowercase `0x`-prefixed hex.
+pub fn canonical_evm_block_hash(block_hash: impl Into<String>) -> Result<String, EvmStateError> {
     let block_hash = block_hash.into();
-    let hex = block_hash.strip_prefix("0x").unwrap_or(block_hash.as_str());
-    if hex.is_empty() || hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(EvmStateError::InvalidInput {
+    let hex = block_hash
+        .strip_prefix("0x")
+        .or_else(|| block_hash.strip_prefix("0X"))
+        .unwrap_or(block_hash.as_str());
+    let parsed = hex
+        .parse::<B256>()
+        .map_err(|_| EvmStateError::InvalidInput {
             reason: "block_hash must be 32-byte hex (optional 0x prefix)".to_owned(),
-        });
-    }
-    Ok(block_hash)
+        })?;
+    Ok(format!("{parsed:#x}"))
 }
 
 #[cfg(test)]
@@ -651,6 +653,23 @@ mod tests {
         assert_eq!(normalized.decimals, 18);
         assert_eq!(normalized.block_number, 21_000_000);
         assert_eq!(normalized.chain_id, 1);
+    }
+
+    #[test]
+    fn block_hashes_are_canonicalized_for_anchor_intersection() {
+        let response = EvmAddressNativeBalanceResponse::new(
+            21_000_000,
+            format!("0X{}", "AB".repeat(32)),
+            "1",
+            18,
+            CoverageStatus::ConfiguredOnly,
+            HoldingSourceStatus::Ok,
+        )
+        .expect("uppercase hash is valid");
+        assert_eq!(
+            response.block_hash(),
+            "0xabababababababababababababababababababababababababababababababab"
+        );
     }
 
     #[test]

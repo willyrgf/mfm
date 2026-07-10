@@ -40,9 +40,7 @@ use mfm_btc_capabilities::{
 };
 use mfm_canonical::sha256_digest_bytes;
 use mfm_effects::{ManagedPlatformWrite, ReadExternal};
-use mfm_fact_capabilities::{
-    FactIndexReadCapability, FactIndexReadRequest, FactIndexReadResponse, FactRecordCapability,
-};
+use mfm_fact_capabilities::{FactIndexReadCapability, FactIndexReadRequest, FactRecordCapability};
 use mfm_facts::{
     compile_fact_query_plan, FactAudience, FactCanonicalScalar, FactFieldId, FactOrderingName,
     FactQueryInput, FactQueryOperator, FactQueryPredicate, FactQueryScope, FactSelectionEvidence,
@@ -1110,7 +1108,7 @@ impl QueryCollectorCheckpointState {
     /// Materializes a loaded checkpoint from an authenticated fact-index response.
     pub fn materialize_response(
         &self,
-        response: &FactIndexReadResponse,
+        response: &mfm_facts::FactQueryResult,
         checkpoint: Option<CollectorCheckpointFact>,
     ) -> Result<LoadedCollectorCheckpoint, BtcStateError> {
         match (has_latest_checkpoint_row(response)?, checkpoint) {
@@ -1129,7 +1127,7 @@ impl QueryCollectorCheckpointState {
     /// Returns the retained response fact ref selected by the latest-checkpoint policy.
     pub fn selected_checkpoint_response_ref<'a>(
         &self,
-        response: &'a FactIndexReadResponse,
+        response: &'a mfm_facts::FactQueryResult,
     ) -> Result<Option<&'a mfm_facts::InternalFactRef>, BtcStateError> {
         latest_checkpoint_response_ref(response)
     }
@@ -1145,7 +1143,7 @@ impl QueryCollectorCheckpointState {
     /// Builds selection evidence for the state-owned latest-checkpoint policy.
     pub fn selection_evidence(
         &self,
-        response: &FactIndexReadResponse,
+        response: &mfm_facts::FactQueryResult,
     ) -> Result<FactSelectionEvidence, BtcStateError> {
         let selected_indices = if has_latest_checkpoint_row(response)? {
             vec![0]
@@ -1160,12 +1158,12 @@ impl QueryCollectorCheckpointState {
     }
 }
 
-fn has_latest_checkpoint_row(response: &FactIndexReadResponse) -> Result<bool, BtcStateError> {
+fn has_latest_checkpoint_row(response: &mfm_facts::FactQueryResult) -> Result<bool, BtcStateError> {
     latest_checkpoint_response_ref(response).map(|row| row.is_some())
 }
 
 fn latest_checkpoint_response_ref(
-    response: &FactIndexReadResponse,
+    response: &mfm_facts::FactQueryResult,
 ) -> Result<Option<&mfm_facts::InternalFactRef>, BtcStateError> {
     match response.rows() {
         [] => Ok(None),
@@ -1317,7 +1315,7 @@ impl ManagedWriteState for RecordCollectorCheckpointState {
         _context: &'a mfm_program::CertifiedContext<Self::Context>,
     ) -> Self::RunFuture<'a> {
         future::ready(
-            build_checkpoint_fact_from_outputs(
+            record_collector_checkpoint_from_outputs(
                 &self.config,
                 &input.chain_head_fact,
                 &input.loaded_checkpoint,
@@ -1327,7 +1325,8 @@ impl ManagedWriteState for RecordCollectorCheckpointState {
     }
 }
 
-fn build_checkpoint_fact_from_outputs(
+/// Recomputes the collector checkpoint fact from the proven chain-head fact and predecessor output.
+pub fn record_collector_checkpoint_from_outputs(
     config: &RecordCollectorCheckpointConfig,
     chain_head_fact: &BtcChainHeadFact,
     loaded_checkpoint: &LoadedCollectorCheckpoint,
@@ -1844,10 +1843,7 @@ mod tests {
         .expect("state");
         let request = config.request().expect("request");
 
-        let empty_response = FactIndexReadResponse::from_receipt(
-            fact_query_receipt(request.plan(), Vec::new()),
-            trust_root(),
-        );
+        let empty_response = fact_query_result(fact_query_receipt(request.plan(), Vec::new()));
         let empty = state
             .materialize_response(&empty_response, None)
             .expect("empty materialization");
@@ -1861,10 +1857,10 @@ mod tests {
         );
 
         let checkpoint = checkpoint_fact(850_000);
-        let single_response = FactIndexReadResponse::from_receipt(
-            fact_query_receipt(request.plan(), vec![internal_fact_ref(1)]),
-            trust_root(),
-        );
+        let single_response = fact_query_result(fact_query_receipt(
+            request.plan(),
+            vec![internal_fact_ref(1)],
+        ));
         let loaded = state
             .materialize_response(&single_response, Some(checkpoint.clone()))
             .expect("single materialization");
@@ -2211,13 +2207,12 @@ mod tests {
         )
     }
 
-    fn trust_root() -> mfm_fact_capabilities::FactQueryReceiptTrustRootMaterial {
-        mfm_fact_capabilities::FactQueryReceiptTrustRootMaterial::new(
-            StoreIdentity::new("store.default").expect("store identity"),
-            StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
-            StoreKeyId::new("fact.read.key").expect("key id"),
-            [7_u8; 32],
+    fn fact_query_result(receipt: FactQueryReceipt) -> mfm_facts::FactQueryResult {
+        mfm_facts::FactQueryResult::new(
+            mfm_facts::fact_query_result_rows_from_receipt(&receipt),
+            receipt,
         )
+        .expect("fact query result")
     }
 
     fn internal_fact_ref(seed: u8) -> InternalFactRef {

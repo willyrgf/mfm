@@ -2,8 +2,7 @@
 network = "ethereum-mainnet"
 chain_id = 1
 accounts = [
-  "0x0000000000000000000000000000000000000001",
-  "0x0000000000000000000000000000000000000002",
+  "0xabdbbd00fad79b257e7313b398a1ea10d9eef8d6",
 ]
 coverage = "configured_only"
 decimals = 18

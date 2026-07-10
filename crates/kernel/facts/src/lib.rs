@@ -96,10 +96,10 @@ pub use query::{
 pub use receipt::{
     fact_query_result_rows_from_receipt, validate_fact_query_result_rows,
     DescriptorCatalogWatermark, FactProjectionGeneration, FactQueryEvidence, FactQueryReceipt,
-    FactQueryReceiptMaterial, FactQueryReceiptTrustRootMaterial, FactQueryResult,
-    FactQueryResultMismatch, FactQueryResultRow, FactSelectionEvidence, QueryResultCardinality,
-    ReturnedFactFieldSummary, ReturnedFieldSummaries, StoreCommitOrder, StoreReadFrontier,
-    StoreReadFrontierType, StoreReceiptAuthentication, StoreReceiptAuthenticationScheme,
+    FactQueryReceiptMaterial, FactQueryResult, FactQueryResultMismatch, FactQueryResultRow,
+    FactSelectionEvidence, QueryResultCardinality, ReturnedFactFieldSummary,
+    ReturnedFieldSummaries, StoreCommitOrder, StoreReadFrontier, StoreReadFrontierType,
+    StoreReceiptAuthentication, StoreReceiptAuthenticationScheme,
 };
 pub use scalar::FactCanonicalScalar;
 pub use subject::{FactFieldValue, FactKey, FactSubjectMaterialV1};

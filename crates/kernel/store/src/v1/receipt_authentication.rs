@@ -39,26 +39,6 @@ impl FactQueryReceiptTrustRoot {
         })
     }
 
-    /// Creates a validated receipt trust root from store-neutral public material.
-    pub fn from_material(material: &mfm_facts::FactQueryReceiptTrustRootMaterial) -> Result<Self> {
-        Self::new(
-            material.store_identity().clone(),
-            material.scheme(),
-            material.key_id().clone(),
-            *material.verifying_key(),
-        )
-    }
-
-    /// Returns store-neutral public material for replay-capability handoff.
-    pub fn to_material(&self) -> mfm_facts::FactQueryReceiptTrustRootMaterial {
-        mfm_facts::FactQueryReceiptTrustRootMaterial::new(
-            self.store_identity.clone(),
-            self.scheme,
-            self.key_id.clone(),
-            self.verifying_key,
-        )
-    }
-
     /// Returns the store identity bound to this trust root.
     pub const fn store_identity(&self) -> &StoreIdentity {
         &self.store_identity

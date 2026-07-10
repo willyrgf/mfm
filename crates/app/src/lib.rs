@@ -452,6 +452,14 @@ pub async fn connect_production_run_store(
     }
 }
 
+/// Connects production evidence-only services without loading a fact-receipt signing key.
+pub async fn connect_production_run_read_store(
+    database_url: Option<&str>,
+) -> Result<ProductionRunStore, AppError> {
+    let database_url = production_database_url(database_url)?;
+    Ok(ProductionRunStore::connect(&database_url).await?)
+}
+
 /// Provisions the immutable production fact-receipt trust root from the configured signing key.
 ///
 /// Only the public verifying key is inserted into Postgres. If a root already exists, the
@@ -660,7 +668,7 @@ pub async fn connect_production_run_services(
 pub async fn connect_production_run_read_services(
     database_url: Option<&str>,
 ) -> Result<ProductionRunReadServices, AppError> {
-    let store = connect_production_run_store(database_url).await?;
+    let store = connect_production_run_read_store(database_url).await?;
     let certification_registry = production_certification_registry()?;
     let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
     Ok(
@@ -725,6 +733,7 @@ pub use fact_index::production_fact_index_read_provider;
 pub use mfm_fact_capabilities::FactIndexReadProvider;
 
 /// Projection-backed in-memory fact-index for store-backed tests and process assembly fixtures.
+#[cfg(any(test, feature = "test-support"))]
 pub use fact_index::ProjectionFactIndexProvider;
 
 /// Builds an adapter-facing artifact read provider from a retained artifact reader.
@@ -1229,6 +1238,8 @@ pub struct AttemptDispositionStatus {
     pub attempt_no: Option<u32>,
     /// Retryability for failed attempts.
     pub retryable: Option<bool>,
+    /// Stable error code for failed attempts.
+    pub error_code: Option<String>,
     /// Output cell id for completed attempts.
     pub output_cell_id: Option<String>,
 }
@@ -1487,6 +1498,8 @@ pub struct RunEventRef {
     pub logical_key: String,
     /// Canonical payload hash.
     pub payload_hash: String,
+    /// Stable error code when this event is a failed state attempt.
+    pub error_code: Option<String>,
 }
 
 /// Response returned after verifying replay authority for a typed run.
@@ -1735,7 +1748,8 @@ where
         fact_query_authority_ready: bool,
     ) -> Self {
         Self {
-            scheduler,
+            scheduler: scheduler
+                .with_fact_query_receipt_trust_root(fact_query_receipt_trust_root.clone()),
             store,
             artifacts,
             certification_registry,
@@ -4567,18 +4581,25 @@ fn attempt_dispositions(projection: &store::ProjectionSnapshot) -> Vec<AttemptDi
 }
 
 fn attempt_disposition(attempt: &store::AttemptProjection) -> AttemptDispositionStatus {
-    let (disposition, attempt_no, retryable, output_cell_id) = match &attempt.status {
+    let (disposition, attempt_no, retryable, error_code, output_cell_id) = match &attempt.status {
         store::AttemptStatus::Started { attempt_no, .. } => {
-            ("started", Some(*attempt_no), None, None)
+            ("started", Some(*attempt_no), None, None, None)
         }
         store::AttemptStatus::Completed { output_cell_id } => (
             "completed",
             None,
             None,
+            None,
             Some(output_cell_id.as_str().to_owned()),
         ),
-        store::AttemptStatus::Failed { retryable, .. } => ("failed", None, Some(*retryable), None),
-        store::AttemptStatus::Interrupted => ("interrupted", None, None, None),
+        store::AttemptStatus::Failed { retryable, error } => (
+            "failed",
+            None,
+            Some(*retryable),
+            Some(error.code.as_str().to_owned()),
+            None,
+        ),
+        store::AttemptStatus::Interrupted => ("interrupted", None, None, None, None),
     };
     AttemptDispositionStatus {
         node_id: attempt.node_id.as_str().to_owned(),
@@ -4586,6 +4607,7 @@ fn attempt_disposition(attempt: &store::AttemptProjection) -> AttemptDisposition
         disposition: disposition.to_owned(),
         attempt_no,
         retryable,
+        error_code,
         output_cell_id,
     }
 }
@@ -5062,6 +5084,12 @@ fn run_event_ref(event: &store::KernelEventEnvelope) -> RunEventRef {
         commit_key: event.commit_key().as_str().to_owned(),
         logical_key: event.logical_key().as_str().to_owned(),
         payload_hash: event.payload_hash().as_str().to_owned(),
+        error_code: match event.payload() {
+            events::KernelEventPayload::StateAttemptFailed(payload) => {
+                Some(payload.error.code.as_str().to_owned())
+            }
+            _ => None,
+        },
     }
 }
 

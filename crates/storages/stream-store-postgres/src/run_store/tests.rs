@@ -2961,6 +2961,28 @@ async fn observation_change_ids_and_cursors_do_not_expose_internal_authority() {
 }
 
 #[tokio::test]
+async fn observation_frontier_cursor_excludes_the_frontier_commit() {
+    let (store, schema) = test_store().await;
+    let run = run_id(143);
+    append_run_start(&store, &run, "frontier-cursor-run-start")
+        .await
+        .expect("run start");
+
+    let first = store
+        .read_run_observations(RunObservationQuery::new(None, 10, 0))
+        .await
+        .expect("initial observation page");
+    assert_eq!(first.runs.len(), 1);
+    let second = store
+        .read_run_observations(RunObservationQuery::new(Some(first.next_cursor), 10, 0))
+        .await
+        .expect("observation page after frontier");
+    assert!(second.runs.is_empty());
+
+    drop_schema(&store, &schema).await;
+}
+
+#[tokio::test]
 async fn observation_cursor_lifecycle_rejects_malformed_unknown_and_missing_tokens() {
     let (store, schema) = test_store().await;
     let run = run_id(145);
@@ -4390,6 +4412,17 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
         .execute(&store.pool)
         .await
         .expect("delete run fact descriptor admissions");
+    let query_after_projection_delete = store
+        .execute_fact_query(&query_plan)
+        .await
+        .expect("fact query remains authoritative after projection deletion");
+    assert_eq!(query_after_projection_delete.rows().len(), 1);
+    assert_fact_query_receipt(
+        &store,
+        &query_plan,
+        &query_after_projection_delete,
+        mfm_facts::QueryResultCardinality::AtLeast(1),
+    );
     let err = store
         .status_projection_snapshot(&run)
         .await

@@ -200,6 +200,17 @@ in
         "--workspace"
       ];
     };
+    app-test-support = cargoLeaf {
+      run = [
+        "cargo"
+        "nextest"
+        "run"
+        "-p"
+        "mfm-app"
+        "--features"
+        "test-support"
+      ];
+    };
     doc-tests = cargoLeaf {
       run = [
         "cargo"
@@ -334,6 +345,7 @@ in
       kind = "composite";
       steps = nixfiedLib.seq [
         "nextest-run"
+        "app-test-support"
         "doc-tests"
       ];
     };

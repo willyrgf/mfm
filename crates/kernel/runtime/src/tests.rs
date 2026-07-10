@@ -2659,7 +2659,7 @@ fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
             mfm_facts::fact_query_evidence_schema_id().expect("query evidence schema");
         let mut query_output = RunnerOutputBuilder::new(&ctx);
         query_output
-            .record_fact_query_evidence(query_evidence, &test_fact_query_trust_root())
+            .record_fact_query_evidence(query_evidence)
             .expect("record fact query evidence");
         let query_output = query_output.finish();
         assert_eq!(query_output.staged_artifacts().len(), 1);
@@ -2779,7 +2779,8 @@ async fn fact_query_evidence_retains_non_empty_returned_fact_authority() {
         run_stream: &run_stream,
         view: &view,
     };
-    let ctx = ErasedRunCtx::from_prepared(&invocation);
+    let fact_query_receipt_trust_root = test_fact_query_trust_root();
+    let ctx = ErasedRunCtx::from_prepared(&invocation, Some(&fact_query_receipt_trust_root));
     let output_bytes = br#"{"amount":11}"#.to_vec();
     let state_evidence =
         state_output_artifact_for_bytes(ctx.node(), ctx.descriptor(), &output_bytes);
@@ -2789,7 +2790,7 @@ async fn fact_query_evidence_retains_non_empty_returned_fact_authority() {
     let query_evidence = test_fact_query_evidence_with_returned_refs(vec![fact_ref.clone()]);
     let mut query_output = RunnerOutputBuilder::new(&ctx);
     query_output
-        .record_fact_query_evidence(query_evidence, &test_fact_query_trust_root())
+        .record_fact_query_evidence(query_evidence)
         .expect("record query evidence");
     let query_output = query_output.finish();
     let mut staged_artifacts = vec![state_artifact];
@@ -3824,7 +3825,8 @@ macro_rules! with_prepared_runner_ctx {
             run_stream: &run_stream,
             view: &view,
         };
-        let $ctx = ErasedRunCtx::from_prepared(&invocation);
+        let fact_query_receipt_trust_root = test_fact_query_trust_root();
+        let $ctx = ErasedRunCtx::from_prepared(&invocation, Some(&fact_query_receipt_trust_root));
         $body
     }};
 }

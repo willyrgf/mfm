@@ -5589,6 +5589,22 @@ fn validate_run_stream_order(events: &[KernelEventEnvelope]) -> Result<()> {
                         ),
                     });
                 }
+                let previous_store_commit_order = current_store_commit_order.ok_or_else(|| {
+                    StoreError::PersistedEventMismatch {
+                        field: "store_commit_order",
+                        message: "persisted run stream has no coordinate for the previous commit"
+                            .to_owned(),
+                    }
+                })?;
+                if event.store_commit_order() <= previous_store_commit_order {
+                    return Err(StoreError::PersistedEventMismatch {
+                        field: "store_commit_order",
+                        message: format!(
+                            "persisted run stream store append coordinate {} is not greater than the previous commit",
+                            event.store_commit_order().as_u64()
+                        ),
+                    });
+                }
                 current_seq = Some(expected_next);
                 current_commit_key = Some(event.commit_key().clone());
                 current_store_commit_order = Some(event.store_commit_order());
@@ -5603,6 +5619,13 @@ fn validate_run_stream_order(events: &[KernelEventEnvelope]) -> Result<()> {
                             StreamSeq::FIRST,
                             event.seq()
                         ),
+                    });
+                }
+                if event.store_commit_order() < StoreCommitOrder::FIRST {
+                    return Err(StoreError::PersistedEventMismatch {
+                        field: "store_commit_order",
+                        message: "persisted run stream first commit has a non-positive store append coordinate"
+                            .to_owned(),
                     });
                 }
                 current_seq = Some(StreamSeq::FIRST);
@@ -5627,6 +5650,47 @@ fn validate_run_stream_order(events: &[KernelEventEnvelope]) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod stream_order_tests {
+    use super::*;
+
+    fn event(run_id: &RunId, seq: u64, store_commit_order: u64) -> KernelEventEnvelope {
+        test_support::persisted_kernel_event_envelope_for_test(
+            run_id,
+            seq,
+            store_commit_order,
+            CommitKey::new(format!("order-{seq}")).expect("commit key"),
+            KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
+                spec_hash: test_support::fixed_spec_hash_for_test(1),
+                node_id: test_support::fixed_node_id_for_test(2),
+                attempt_id: test_support::fixed_attempt_id_for_test(3),
+                attempt_no: 1,
+                state_kind: test_support::fixed_state_kind_for_test(4),
+                state_version: StateVersion::new("mfm.test.state.v1").expect("state version"),
+            }),
+        )
+    }
+
+    #[test]
+    fn committed_stream_coordinates_are_positive_and_strictly_increasing() {
+        let run_id = RunId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            test_support::fixed_digest_bytes_for_test(5),
+        );
+
+        let first = event(&run_id, 1, 2);
+        let repeated = event(&run_id, 2, 2);
+        let error = validate_run_stream_order(&[first, repeated])
+            .expect_err("repeated store coordinate must reject");
+        assert!(error.to_string().contains("not greater"), "{error}");
+
+        let non_positive = event(&run_id, 1, 0);
+        let error = validate_run_stream_order(&[non_positive])
+            .expect_err("non-positive first store coordinate must reject");
+        assert!(error.to_string().contains("non-positive"), "{error}");
+    }
 }
 
 /// Observation-only status for run list/watch pages.
