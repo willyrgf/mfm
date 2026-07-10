@@ -54,9 +54,9 @@ metadata = {}
 kind = "native_balance"
 
 [portfolio.symbol_configs.valuation]
-# Fixed prices are deterministic placeholders. Replace these before relying on USD totals.
+# Demo-only fixed prices for the collect-then-report recipe (not market data).
 quotes = [
-  { quote = "USD", priced_symbol_id = "eth.native.ethereum-mainnet", unit_price_dec = "0.00" },
+  { quote = "USD", priced_symbol_id = "eth.native.ethereum-mainnet", unit_price_dec = "1800.00" },
 ]
 
 [[portfolio.symbol_configs]]
@@ -71,7 +71,7 @@ metadata = {}
 kind = "native_balance"
 
 [portfolio.symbol_configs.valuation]
-# Fixed prices are deterministic placeholders. Replace these before relying on USD totals.
+# Demo-only fixed prices for the collect-then-report recipe (not market data).
 quotes = [
-  { quote = "USD", priced_symbol_id = "btc.native.bitcoin-mainnet", unit_price_dec = "0.00" },
+  { quote = "USD", priced_symbol_id = "btc.native.bitcoin-mainnet", unit_price_dec = "50000.00" },
 ]
