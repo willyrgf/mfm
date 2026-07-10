@@ -107,16 +107,17 @@ mod tests {
         let registry = production_entry_point_op_registry().expect("registry");
         let op = portfolio_op(&registry);
 
-        assert_eq!(op.version(), OpVersion::new(1).unwrap());
+        assert_eq!(op.descriptor().version, 1);
         assert_eq!(
             registry
                 .resolve_version(&portfolio_public_op_name(), OpVersion::new(1).unwrap())
                 .expect("portfolio snapshot v1")
-                .version(),
-            OpVersion::new(1).unwrap()
+                .descriptor()
+                .version,
+            1
         );
         assert_eq!(
-            op.accepted_config_formats(),
+            op.descriptor().accepted_config_formats,
             &[AuthoredConfigFormat::Toml, AuthoredConfigFormat::Json]
         );
     }
@@ -146,14 +147,14 @@ mod tests {
 
         let btc_op = registry.resolve_latest(&btc).expect("btc address balance");
         let evm_op = registry.resolve_latest(&evm).expect("evm native balance");
-        assert_eq!(btc_op.version(), OpVersion::new(1).unwrap());
-        assert_eq!(evm_op.version(), OpVersion::new(1).unwrap());
+        assert_eq!(btc_op.descriptor().version, 1);
+        assert_eq!(evm_op.descriptor().version, 1);
         assert_eq!(
-            btc_op.accepted_config_formats(),
+            btc_op.descriptor().accepted_config_formats,
             &[AuthoredConfigFormat::Toml, AuthoredConfigFormat::Json]
         );
         assert_eq!(
-            evm_op.accepted_config_formats(),
+            evm_op.descriptor().accepted_config_formats,
             &[AuthoredConfigFormat::Toml, AuthoredConfigFormat::Json]
         );
     }
@@ -728,7 +729,7 @@ mod tests {
             let op = registry
                 .resolve_latest(&PublicOpName::new(name).expect("name"))
                 .expect("EVM contract op");
-            assert_eq!(op.version(), OpVersion::new(1).unwrap());
+            assert_eq!(op.descriptor().version, 1);
             let authored = AuthoredConfig::new(AuthoredConfigFormat::Json, config.to_string())
                 .expect("authored");
             let plan = op.plan(authored).expect("EVM contract plan");

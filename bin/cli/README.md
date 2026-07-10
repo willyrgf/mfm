@@ -8,6 +8,7 @@ Run the packaged CLI with `nix run .#mfm -- <ARGS>`, for example:
 - `nix run .#mfm -- keystore list`
 - `nix run .#mfm -- keystore tx-sign --to ...`
 - `nix run .#mfm -- facts kinds`
+- `nix run .#mfm -- ops list`
 - `nix run .#mfm -- run status <RUN_ID>`
 
 ## Design Philosophy
@@ -31,6 +32,7 @@ mfm_cli/
 │   │   ├── result.rs      # Shared command result/error types
 │   │   ├── facts.rs       # `facts` public discovery/query subcommands
 │   │   ├── keystore/      # `keystore` subcommands (import, list, delete, tx-sign)
+│   │   ├── ops.rs         # `ops` public entry-point discovery
 │   │   └── run/           # `run` subcommands
 │   ├── support/
 │   │   ├── keystore.rs    # Keystore path/unlock/create helpers
@@ -400,6 +402,24 @@ mfm_cli --output-format json keystore tx-sign \
   --gas-limit 21000 \
   --out /tmp/signed.tx
 ```
+
+## Public Operation Commands
+
+### `ops list`
+
+Lists the public entry-point operations registered in the compiled CLI/app registry. It does not
+connect to PostgreSQL or load runtime configuration.
+
+```sh
+mfm_cli ops list
+```
+
+Text output includes the public name, version, and accepted authored-config formats. JSON output
+uses the standard success envelope and returns the registry descriptors under `operations`.
+
+The current production surface contains `btc_address_balance`, `evm_native_balance`,
+`evm_contract_deploy`, `evm_contract_configure`, `evm_contract_validate`,
+`evm_contract_lifecycle`, and `portfolio_snapshot`, all at public version `1`.
 
 ## Run Commands (Experimental)
 

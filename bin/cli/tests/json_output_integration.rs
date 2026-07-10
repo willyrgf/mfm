@@ -34,6 +34,36 @@ fn verify_error_response(output: &str) -> ErrorResponse {
     parsed
 }
 
+#[test]
+fn test_ops_list_json_output() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .args(["--output-format", "json", "ops", "list"])
+        .output()
+        .expect("run ops list");
+
+    assert!(output.status.success());
+    let data = verify_success_response(&String::from_utf8(output.stdout).expect("UTF-8 output"));
+    let operations = data["operations"].as_array().expect("operations array");
+    assert_eq!(operations.len(), 7);
+    assert!(operations.iter().all(|operation| operation["version"] == 1));
+    assert_eq!(
+        operations
+            .iter()
+            .map(|operation| operation["public_name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "btc_address_balance",
+            "evm_contract_configure",
+            "evm_contract_deploy",
+            "evm_contract_lifecycle",
+            "evm_contract_validate",
+            "evm_native_balance",
+            "portfolio_snapshot",
+        ]
+    );
+}
+
 fn json_cli_error_without_database(args: &[&str]) -> (Option<i32>, ErrorResponse) {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd

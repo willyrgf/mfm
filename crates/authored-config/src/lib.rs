@@ -195,7 +195,7 @@ pub struct NormalizedAuthoredConfig<T> {
 }
 
 /// Static operation entry-point metadata exported by operation crates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct EntryPointDescriptor {
     /// Domain namespace for the typed entry-point operation.
     pub namespace: &'static str,

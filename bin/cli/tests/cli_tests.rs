@@ -19,7 +19,48 @@ fn test_cli_help() {
         .success()
         .stdout(predicate::str::contains("MFM - On-chain operations tool"))
         .stdout(predicate::str::contains("facts"))
-        .stdout(predicate::str::contains("keystore"));
+        .stdout(predicate::str::contains("keystore"))
+        .stdout(predicate::str::contains("ops"));
+}
+
+#[test]
+fn test_ops_help_and_list() {
+    let mut help = Command::cargo_bin("mfm_cli").unwrap();
+    help.args(["ops", "--help"]);
+    help.assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Public entry-point operation discovery",
+        ))
+        .stdout(predicate::str::contains("list"));
+
+    let mut list = Command::cargo_bin("mfm_cli").unwrap();
+    let output = list
+        .args(["ops", "list"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rendered = String::from_utf8(output).expect("ops output is UTF-8");
+    for operation in [
+        "btc_address_balance",
+        "evm_contract_configure",
+        "evm_contract_deploy",
+        "evm_contract_lifecycle",
+        "evm_contract_validate",
+        "evm_native_balance",
+        "portfolio_snapshot",
+    ] {
+        assert!(
+            rendered.contains(operation),
+            "missing {operation}: {rendered}"
+        );
+    }
+    assert!(rendered
+        .lines()
+        .filter(|line| !line.is_empty())
+        .all(|line| line.contains("version=1")));
 }
 
 #[test]

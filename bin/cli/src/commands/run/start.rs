@@ -222,7 +222,9 @@ mod tests {
             let current_version = registry
                 .resolve_latest(&public_op_name)
                 .expect("EVM entry-point")
-                .version();
+                .descriptor()
+                .version;
+            let current_version = mfm_app::OpVersion::new(current_version).expect("op version");
             assert_eq!(current_version.get(), 1, "{op}");
             registry
                 .resolve_version(&public_op_name, current_version)

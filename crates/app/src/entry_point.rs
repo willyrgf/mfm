@@ -4,9 +4,7 @@ use std::marker::PhantomData;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use mfm_authored_config::{
-    AuthoredConfig, AuthoredConfigError, AuthoredConfigFormat, EntryPointDescriptor,
-};
+use mfm_authored_config::{AuthoredConfig, AuthoredConfigError, EntryPointDescriptor};
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{ContentDigest, NameToken, ResourceNamespace};
 use mfm_program::{
@@ -170,17 +168,11 @@ impl From<TypedProgramLaunchPlan> for EntryPointOpPlan {
 
 /// Operation that can plan a public entry-point run from authored config.
 pub trait LaunchableOp: Send + Sync {
+    /// Returns the static public entry-point metadata for this operation.
+    fn descriptor(&self) -> EntryPointDescriptor;
+
     /// Returns the stable entry-point operation id.
     fn op_id(&self) -> EntryPointOpId;
-
-    /// Returns the public shorthand name.
-    fn public_name(&self) -> PublicOpName;
-
-    /// Returns the public version selector.
-    fn version(&self) -> OpVersion;
-
-    /// Returns authored config formats accepted by this operation.
-    fn accepted_config_formats(&self) -> &'static [AuthoredConfigFormat];
 
     /// Deterministically plans the typed program draft and launch material.
     fn plan(&self, authored_config: AuthoredConfig) -> Result<EntryPointOpPlan, OpLaunchError>;
@@ -190,8 +182,6 @@ pub trait LaunchableOp: Send + Sync {
 pub struct EntryPointPlannerAdapter<TConfig, E> {
     descriptor: EntryPointDescriptor,
     op_id: EntryPointOpId,
-    public_name: PublicOpName,
-    version: OpVersion,
     planner: fn(TConfig) -> Result<TypedProgramLaunchPlan, E>,
     map_error: fn(E) -> OpLaunchError,
     _config: PhantomData<fn() -> TConfig>,
@@ -214,8 +204,6 @@ impl<TConfig, E> EntryPointPlannerAdapter<TConfig, E> {
         Ok(Self {
             descriptor,
             op_id: EntryPointOpId::new(descriptor.namespace, descriptor.name, version)?,
-            public_name: PublicOpName::new(descriptor.public_name)?,
-            version,
             planner,
             map_error,
             _config: PhantomData,
@@ -228,25 +216,18 @@ where
     TConfig: DeserializeOwned + Serialize + Send + Sync + 'static,
     E: Send + Sync + 'static,
 {
+    fn descriptor(&self) -> EntryPointDescriptor {
+        self.descriptor
+    }
+
     fn op_id(&self) -> EntryPointOpId {
         self.op_id.clone()
     }
 
-    fn public_name(&self) -> PublicOpName {
-        self.public_name.clone()
-    }
-
-    fn version(&self) -> OpVersion {
-        self.version
-    }
-
-    fn accepted_config_formats(&self) -> &'static [AuthoredConfigFormat] {
-        self.descriptor.accepted_config_formats
-    }
-
     fn plan(&self, authored_config: AuthoredConfig) -> Result<EntryPointOpPlan, OpLaunchError> {
         if !self
-            .accepted_config_formats()
+            .descriptor
+            .accepted_config_formats
             .contains(&authored_config.format())
         {
             return Err(OpLaunchError::new(
@@ -286,14 +267,15 @@ impl EntryPointOpRegistry {
         &mut self,
         op: Arc<dyn LaunchableOp>,
     ) -> Result<(), EntryPointOpResolveError> {
-        if op.accepted_config_formats().is_empty() {
+        let descriptor = op.descriptor();
+        if descriptor.accepted_config_formats.is_empty() {
             return Err(EntryPointOpResolveError::new(
                 "EntryPointOpConfigFormatsEmpty",
                 "entry-point op must accept at least one config format",
             ));
         }
-        let public_name = op.public_name();
-        let version = op.version();
+        let public_name = PublicOpName::new(descriptor.public_name)?;
+        let version = OpVersion::new(descriptor.version)?;
         let op_id = op.op_id();
         if op_id.version != version {
             return Err(EntryPointOpResolveError::new(
@@ -347,6 +329,15 @@ impl EntryPointOpRegistry {
         }
     }
 
+    /// Returns every registered public entry-point descriptor in deterministic order.
+    pub fn registered_entry_points(&self) -> Vec<EntryPointDescriptor> {
+        self.ops
+            .values()
+            .flat_map(BTreeMap::values)
+            .map(|op| op.descriptor())
+            .collect()
+    }
+
     /// Resolves a public name to a specific registered version.
     pub fn resolve_version(
         &self,
@@ -382,9 +373,10 @@ impl EntryPointOpRegistry {
         let mut entries = Vec::new();
         for (public_name, versions) in &self.ops {
             for (version, op) in versions {
+                let descriptor = op.descriptor();
                 let op_id = op.op_id();
-                let mut formats = op
-                    .accepted_config_formats()
+                let mut formats = descriptor
+                    .accepted_config_formats
                     .iter()
                     .map(|format| format.as_str())
                     .collect::<Vec<_>>();
@@ -487,40 +479,38 @@ impl From<AuthoredConfigError> for OpLaunchError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mfm_authored_config::AuthoredConfigFormat;
 
     static FORMATS: &[AuthoredConfigFormat] =
         &[AuthoredConfigFormat::Toml, AuthoredConfigFormat::Json];
 
     #[derive(Clone)]
     struct FakeOp {
-        public_name: PublicOpName,
-        version: OpVersion,
+        descriptor: EntryPointDescriptor,
     }
 
     impl FakeOp {
-        fn new(public_name: &str, version: u32) -> Self {
+        fn new(public_name: &'static str, version: u32) -> Self {
             Self {
-                public_name: PublicOpName::new(public_name).expect("public name"),
-                version: OpVersion::new(version).expect("version"),
+                descriptor: EntryPointDescriptor {
+                    namespace: "mfm.test",
+                    name: "fake_op",
+                    public_name,
+                    version,
+                    accepted_config_formats: FORMATS,
+                },
             }
         }
     }
 
     impl LaunchableOp for FakeOp {
+        fn descriptor(&self) -> EntryPointDescriptor {
+            self.descriptor
+        }
+
         fn op_id(&self) -> EntryPointOpId {
-            EntryPointOpId::new("mfm.test", self.public_name.as_str(), self.version).expect("op id")
-        }
-
-        fn public_name(&self) -> PublicOpName {
-            self.public_name.clone()
-        }
-
-        fn version(&self) -> OpVersion {
-            self.version
-        }
-
-        fn accepted_config_formats(&self) -> &'static [AuthoredConfigFormat] {
-            FORMATS
+            let version = OpVersion::new(self.descriptor.version).expect("version");
+            EntryPointOpId::new("mfm.test", self.descriptor.name, version).expect("op id")
         }
 
         fn plan(
@@ -611,8 +601,36 @@ mod tests {
                     .expect("versioned op"),
             };
 
-            assert_eq!(op.version().get(), expected_version);
+            assert_eq!(op.descriptor().version, expected_version);
         }
+    }
+
+    #[test]
+    fn entry_point_registry_lists_registered_descriptors_in_name_version_order() {
+        let mut registry = EntryPointOpRegistry::new();
+        registry
+            .register(FakeOp::new("portfolio_snapshot", 2))
+            .unwrap();
+        registry
+            .register(FakeOp::new("portfolio_snapshot", 1))
+            .unwrap();
+        registry
+            .register(FakeOp::new("evm_native_balance", 1))
+            .unwrap();
+
+        let descriptors = registry.registered_entry_points();
+
+        assert_eq!(
+            descriptors
+                .iter()
+                .map(|descriptor| (descriptor.public_name, descriptor.version))
+                .collect::<Vec<_>>(),
+            vec![
+                ("evm_native_balance", 1),
+                ("portfolio_snapshot", 1),
+                ("portfolio_snapshot", 2),
+            ]
+        );
     }
 
     #[test]
@@ -704,7 +722,7 @@ mod tests {
         let plan = op.plan(authored).expect("plan");
 
         assert_eq!(op.op_id().to_string(), "mfm.test:planner_adapter:1");
-        assert_eq!(op.public_name().as_str(), "planner_adapter");
+        assert_eq!(op.descriptor().public_name, "planner_adapter");
         assert!(!plan.draft.state_nodes().is_empty());
         assert!(plan.config_material.is_empty());
         assert!(plan.seed_material.is_empty());

@@ -5,6 +5,8 @@ use std::ffi::OsStr;
 mod facts;
 /// Keystore-oriented CLI commands.
 mod keystore;
+/// Public entry-point operation discovery commands.
+mod ops;
 /// Shared command result types.
 pub(crate) mod result;
 /// Run lifecycle and artifact commands.
@@ -123,6 +125,12 @@ enum Commands {
         #[command(subcommand)]
         command: keystore::KeystoreCommand,
     },
+    /// Public entry-point operation discovery
+    Ops {
+        /// Nested operation discovery command to execute.
+        #[command(subcommand)]
+        command: ops::OpsCommand,
+    },
     /// Run operations (start/resume/inspect)
     Run {
         /// Nested run command to execute.
@@ -139,6 +147,7 @@ impl Cli {
         match &self.command {
             Commands::Facts { command } => command.execute(&ctx).await,
             Commands::Keystore { command } => command.execute(&ctx).await,
+            Commands::Ops { command } => command.execute(&ctx).await,
             Commands::Run { command } => command.execute(&ctx).await,
         }
     }

@@ -8,7 +8,7 @@ use mfm_app::{
     ManualResolutionDecision, ManualResolutionRecordRequest, OpLaunchError, OpVersion,
     PublicOpName, RunModeStatus,
 };
-use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
+use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat, EntryPointDescriptor};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1 as events;
 use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, RunId};
@@ -198,25 +198,28 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
 }
 
 static CONFIG_FORMATS: &[AuthoredConfigFormat] = &[AuthoredConfigFormat::Json];
+const MANUAL_RESOLUTION_ENTRY_POINT: EntryPointDescriptor = EntryPointDescriptor {
+    namespace: "mfm.test.manual",
+    name: "manual_resolution_proof",
+    public_name: "manual_resolution_proof",
+    version: 1,
+    accepted_config_formats: CONFIG_FORMATS,
+};
 
 struct ManualResolutionProofEntryPointOp;
 
 impl LaunchableOp for ManualResolutionProofEntryPointOp {
+    fn descriptor(&self) -> EntryPointDescriptor {
+        MANUAL_RESOLUTION_ENTRY_POINT
+    }
+
     fn op_id(&self) -> EntryPointOpId {
-        EntryPointOpId::new("mfm.test.manual", "manual_resolution_proof", self.version())
-            .expect("test op id")
-    }
-
-    fn public_name(&self) -> PublicOpName {
-        PublicOpName::new("manual_resolution_proof").expect("public op name")
-    }
-
-    fn version(&self) -> OpVersion {
-        OpVersion::new(1).expect("op version")
-    }
-
-    fn accepted_config_formats(&self) -> &'static [AuthoredConfigFormat] {
-        CONFIG_FORMATS
+        EntryPointOpId::new(
+            MANUAL_RESOLUTION_ENTRY_POINT.namespace,
+            MANUAL_RESOLUTION_ENTRY_POINT.name,
+            OpVersion::new(MANUAL_RESOLUTION_ENTRY_POINT.version).expect("op version"),
+        )
+        .expect("test op id")
     }
 
     fn plan(&self, authored_config: AuthoredConfig) -> Result<EntryPointOpPlan, OpLaunchError> {
