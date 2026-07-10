@@ -328,6 +328,63 @@ async fn select_holdings_hard_fails_when_platform_facts_missing() {
     );
 }
 
+#[tokio::test]
+async fn select_holdings_hard_fails_on_mixed_read_frontiers() {
+    let portfolio = dual_mainnet_portfolio();
+    let config =
+        SelectHoldingsConfig::with_default_store_scope(portfolio.clone()).expect("select config");
+    let subjects = resolve_subjects_from_config(
+        &ResolveSubjectsConfig::new(portfolio.wallets.clone()).expect("subjects config"),
+    );
+
+    let btc_response = BtcAddressBalanceResponse::new(
+        850_000,
+        "ab".repeat(32),
+        100_000,
+        CoverageStatus::ConfiguredOnly,
+        HoldingSourceStatus::Ok,
+    )
+    .expect("btc response");
+    let evm_response = EvmAddressNativeBalanceResponse::new(
+        21_000_000,
+        "0x".to_owned() + &"cd".repeat(32),
+        "1000000000000000000",
+        18,
+        CoverageStatus::ConfiguredOnly,
+        HoldingSourceStatus::Ok,
+    )
+    .expect("evm response");
+    let (btc_bytes, btc_evidence, btc_ref) =
+        holding_artifact_and_ref(&btc_response, "bitcoin.address_balance_snapshot", 1, 17);
+    let (evm_bytes, evm_evidence, evm_ref) =
+        holding_artifact_and_ref(&evm_response, "evm.address_native_balance_snapshot", 2, 19);
+    let artifacts = MockArtifacts::with_map(HashMap::from([
+        (btc_ref.artifact_id().clone(), (btc_bytes, btc_evidence)),
+        (evm_ref.artifact_id().clone(), (evm_bytes, evm_evidence)),
+    ]));
+    let fact_index = MixedFrontierFactIndex {
+        by_kind: HashMap::from([
+            (
+                "bitcoin.address_balance_snapshot".to_owned(),
+                vec![(btc_ref, 17)],
+            ),
+            (
+                "evm.address_native_balance_snapshot".to_owned(),
+                vec![(evm_ref, 19)],
+            ),
+        ]),
+    };
+    let validated = ValidatedConfig::new(config).expect("validated");
+    let err = select_holdings(validated, subjects, &artifacts, &fact_index)
+        .await
+        .expect_err("mixed frontiers must hard-fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("mixed_read_frontier"),
+        "expected mixed_read_frontier hard-fail, got {msg}"
+    );
+}
+
 /// Candidates present but all fail coverage/status filter → hard missing_fact (not soft success).
 #[tokio::test]
 async fn select_holdings_hard_fails_when_only_truncated_candidates_present() {
@@ -702,6 +759,53 @@ impl FactIndexReadProvider for MockFactIndex {
     }
 }
 
+/// Test provider that stamps a different store-commit watermark per response.
+struct MixedFrontierFactIndex {
+    by_kind: HashMap<String, Vec<(InternalFactRef, u64)>>,
+}
+
+impl FactIndexReadProvider for MixedFrontierFactIndex {
+    fn implementation_id(&self) -> &'static str {
+        "mfm.adapters.portfolio.test.mixed-frontier.v1"
+    }
+
+    fn read_fact_index_batch<'a>(
+        &'a self,
+        requests: &'a [FactIndexReadRequest],
+    ) -> mfm_fact_capabilities::FactIndexReadBatchFuture<'a> {
+        Box::pin(async move {
+            let mut responses = Vec::with_capacity(requests.len());
+            for (index, request) in requests.iter().enumerate() {
+                let plan = request.plan();
+                let kind = plan_fact_kind(plan);
+                let refs_with_order = self.by_kind.get(&kind).cloned().unwrap_or_default();
+                let rows: Vec<FactQueryResultRow> = refs_with_order
+                    .into_iter()
+                    .map(|(fact_ref, order)| {
+                        FactQueryResultRow::new(
+                            fact_ref,
+                            vec![mfm_facts::FactFieldValue::new(
+                                mfm_facts::FactFieldId::new("metadata.store_commit_order")
+                                    .expect("field"),
+                                FactFieldValueType::UnsignedInteger,
+                                FactCanonicalScalar::UnsignedInteger(order),
+                            )
+                            .expect("field value")],
+                        )
+                    })
+                    .collect();
+                let receipt = signed_receipt_for_plan_with_order(
+                    plan,
+                    &rows,
+                    StoreCommitOrder::new(11 + index as u64),
+                );
+                responses.push(FactIndexReadResponse::from_receipt(receipt, trust_root()));
+            }
+            Ok(responses)
+        })
+    }
+}
+
 fn plan_fact_kind(plan: &mfm_facts::CanonicalFactQueryPlan) -> String {
     let value: serde_json::Value =
         serde_json::from_slice(plan.canonical_query().as_bytes()).expect("query json");
@@ -724,6 +828,14 @@ fn signed_receipt_for_plan(
     plan: &mfm_facts::CanonicalFactQueryPlan,
     rows: &[FactQueryResultRow],
 ) -> FactQueryReceipt {
+    signed_receipt_for_plan_with_order(plan, rows, StoreCommitOrder::new(11))
+}
+
+fn signed_receipt_for_plan_with_order(
+    plan: &mfm_facts::CanonicalFactQueryPlan,
+    rows: &[FactQueryResultRow],
+    store_commit_order: StoreCommitOrder,
+) -> FactQueryReceipt {
     let key = SigningKey::from_bytes(&[7; 32]);
     let store_identity = StoreIdentity::new("store.default").expect("store identity");
     let key_id = StoreKeyId::new("fact.read.key").expect("key id");
@@ -732,7 +844,7 @@ fn signed_receipt_for_plan(
         FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
         DescriptorCatalogWatermark::new(1),
         FactProjectionGeneration::new(1),
-        StoreCommitOrder::new(11),
+        store_commit_order,
     );
     let plan_hash = mfm_facts::fact_query_plan_hash(plan).expect("plan hash");
     signed_fact_query_receipt_for_test(SignedFactQueryReceiptFixtureInputForTest {

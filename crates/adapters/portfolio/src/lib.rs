@@ -283,6 +283,15 @@ async fn select_holdings(
             "fact-index batch response count does not match request count".to_owned(),
         ));
     }
+    require_shared_snapshot_read_frontier(
+        responses
+            .iter()
+            .map(|response| response.receipt().read_frontier()),
+        responses
+            .iter()
+            .map(|response| response.receipt().frontier_type()),
+    )
+    .map_err(holding_runtime_error)?;
     for ((requirement, request), response) in requirements.iter().zip(requests).zip(responses) {
         let (candidates, claim_ids) =
             candidates_for_requirement(requirement, &response, artifacts).await?;
@@ -379,7 +388,15 @@ pub fn verify_portfolio_replay(broker: &replay::ReplayBroker) -> replay::Result<
     }
 
     let mut evidence_by_requirement = vec![None; requirements.len()];
-    let mut frontier: Option<StoreReadFrontier> = None;
+    require_shared_snapshot_read_frontier(
+        query_evidence
+            .iter()
+            .map(|evidence| evidence.receipt().read_frontier()),
+        query_evidence
+            .iter()
+            .map(|evidence| evidence.receipt().frontier_type()),
+    )
+    .map_err(|error| replay_portfolio_mismatch(error.message))?;
     for evidence in query_evidence {
         if evidence.selection().selection_policy_hash()
             != &mfm_state_portfolio::portfolio_holding_selection_policy_digest()
@@ -388,21 +405,10 @@ pub fn verify_portfolio_replay(broker: &replay::ReplayBroker) -> replay::Result<
                 "portfolio query evidence uses an unknown selection policy",
             ));
         }
-        if evidence.selection().selected_summaries_digest().is_some()
-            || evidence.receipt().frontier_type() != StoreReadFrontierType::Snapshot
-        {
+        if evidence.selection().selected_summaries_digest().is_some() {
             return Err(replay_portfolio_mismatch(
                 "portfolio query evidence does not describe a complete snapshot selection",
             ));
-        }
-        match &frontier {
-            None => frontier = Some(evidence.receipt().read_frontier().clone()),
-            Some(expected) if expected != evidence.receipt().read_frontier() => {
-                return Err(replay_portfolio_mismatch(
-                    "portfolio selection queries use mixed read frontiers",
-                ));
-            }
-            Some(_) => {}
         }
         let Some(index) = expected_requests
             .iter()
@@ -929,6 +935,39 @@ fn fact_query_trust_root(
 ) -> mfm_runtime::Result<store::FactQueryReceiptTrustRoot> {
     store::FactQueryReceiptTrustRoot::from_material(material)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))
+}
+
+/// Requires one shared snapshot read frontier across a selection batch.
+///
+/// Live select and replay share this check so mixed frontiers fail closed on both paths.
+fn require_shared_snapshot_read_frontier<'a>(
+    frontiers: impl IntoIterator<Item = &'a StoreReadFrontier>,
+    frontier_types: impl IntoIterator<Item = StoreReadFrontierType>,
+) -> Result<(), PortfolioHoldingSelectionError> {
+    let mut expected: Option<&StoreReadFrontier> = None;
+    for (frontier, frontier_type) in frontiers.into_iter().zip(frontier_types) {
+        if frontier_type != StoreReadFrontierType::Snapshot {
+            return Err(PortfolioHoldingSelectionError::new(
+                PortfolioHoldingErrorCode::MixedReadFrontier,
+                "portfolio selection queries must use snapshot read frontiers",
+                None,
+                None,
+            ));
+        }
+        match expected {
+            None => expected = Some(frontier),
+            Some(shared) if shared != frontier => {
+                return Err(PortfolioHoldingSelectionError::new(
+                    PortfolioHoldingErrorCode::MixedReadFrontier,
+                    "portfolio selection queries use mixed read frontiers",
+                    None,
+                    None,
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
 }
 
 fn holding_runtime_error(error: PortfolioHoldingSelectionError) -> mfm_runtime::RuntimeError {
