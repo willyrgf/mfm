@@ -514,8 +514,12 @@ fn materialize_cell(
                     cell.cell_id
                 ))
             })?;
-            let seed_artifact =
-                committed_input_artifact(view, &cell.cell_id, &seed.seed_artifact.artifact_id)?;
+            let seed_artifact = committed_input_artifact(
+                view,
+                &cell.cell_id,
+                &seed.seed_artifact.artifact_id,
+                &seed.seed_artifact.evidence_hash,
+            )?;
             if seed_artifact.evidence.digest != seed.digest
                 || seed_artifact.evidence.byte_len != seed.seed_artifact.byte_len
                 || seed_artifact.evidence.media_type != seed.seed_artifact.media_type
@@ -579,7 +583,8 @@ fn materialize_cell(
                             )));
                         }
                     }
-                    let artifact = committed_input_artifact(view, &cell.cell_id, artifact_id)?;
+                    let artifact =
+                        committed_input_artifact(view, &cell.cell_id, artifact_id, evidence_hash)?;
                     if artifact.evidence.digest != *content_digest
                         || artifact.evidence.evidence_hash()? != *evidence_hash
                         || artifact.evidence.schema_id.as_ref() != Some(schema_id)
@@ -3194,6 +3199,7 @@ fn artifact_reference_matches_same_commit_payload(
                 && &payload.attempt_id == reference_attempt_id
                 && payload.artifact_id == reference.artifact_ref.artifact_id
                 && payload.content_digest == reference.artifact_ref.content_digest
+                && payload.evidence_hash == reference.artifact_ref.evidence_hash
                 && payload.schema_id == reference.artifact_ref.schema_id
                 && reference.artifact_ref.semantic_type_id.as_ref()
                     == Some(&payload.semantic_type_id)
@@ -3205,6 +3211,7 @@ fn artifact_reference_matches_same_commit_payload(
                 && &payload.attempt_id == reference_attempt_id
                 && response.artifact_id() == &reference.artifact_ref.artifact_id
                 && response.response_hash() == &reference.artifact_ref.content_digest
+                && response.artifact_evidence_hash() == &reference.artifact_ref.evidence_hash
                 && response.response_schema_id() == &reference.artifact_ref.schema_id
         }
         events::KernelEventPayload::PublicOutputProduced(payload) => {
@@ -3214,6 +3221,8 @@ fn artifact_reference_matches_same_commit_payload(
                 && payload.rendered_artifact_id.as_ref()
                     == Some(&reference.artifact_ref.artifact_id)
                 && payload.rendered_digest == reference.artifact_ref.content_digest
+                && payload.rendered_artifact_evidence_hash.as_ref()
+                    == Some(&reference.artifact_ref.evidence_hash)
                 && payload.public_schema_id == reference.artifact_ref.schema_id
         }
         events::KernelEventPayload::PublicOutputRenderFailed(payload) => {
@@ -3259,6 +3268,7 @@ fn event_artifact_refs_match(
         && diagnostic.schema_id == reference.artifact_ref.schema_id
         && diagnostic.semantic_type_id == reference.artifact_ref.semantic_type_id
         && diagnostic.content_digest == reference.artifact_ref.content_digest
+        && diagnostic.evidence_hash == reference.artifact_ref.evidence_hash
         && diagnostic.byte_len == reference.artifact_ref.byte_len
         && diagnostic.media_type == reference.artifact_ref.media_type
 }
@@ -3320,10 +3330,10 @@ fn committed_input_artifact(
     view: &RuntimeRunView,
     cell_id: &CellId,
     artifact_id: &ArtifactId,
+    evidence_hash: &ContentDigest,
 ) -> Result<CommittedArtifactReference> {
     view.artifact_refs
-        .values()
-        .find(|reference| &reference.evidence.artifact_id == artifact_id)
+        .get(&(artifact_id.clone(), evidence_hash.clone()))
         .cloned()
         .ok_or_else(|| {
             RuntimeError::InputMaterialization(format!(

@@ -63,9 +63,14 @@ fn replay_retained_artifact_lookup_uses_exact_evidence_identity() {
     let mut broker = replay_broker_with_facts(Vec::new());
     broker.retained_artifacts = artifacts.clone();
     broker.artifacts = artifacts;
-    broker
-        .artifact_bytes
-        .insert(first.artifact_id.clone(), vec![b'{', b'}']);
+    broker.artifact_bytes.insert(
+        (first.artifact_id.clone(), first_hash.clone()),
+        vec![b'{', b'}'],
+    );
+    broker.artifact_bytes.insert(
+        (second.artifact_id.clone(), second_hash.clone()),
+        vec![b'{', b'}'],
+    );
 
     let requirement = store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::FactResponse,
@@ -118,8 +123,18 @@ fn replay_broker_rebuilds_fact_projection_with_retained_artifact_bytes() {
     );
 
     let mut mismatched_bytes = fixture.authority();
+    let response_artifact_evidence_hash = mismatched_bytes
+        .artifact_evidence
+        .iter()
+        .find(|artifact| artifact.artifact_id == fixture.response_artifact_id)
+        .expect("response artifact evidence")
+        .evidence_hash()
+        .expect("response artifact evidence hash");
     mismatched_bytes.artifact_bytes.insert(
-        fixture.response_artifact_id.clone(),
+        (
+            fixture.response_artifact_id.clone(),
+            response_artifact_evidence_hash,
+        ),
         b"{\"amount\":999}".to_vec(),
     );
     let error = ReplayBroker::from_read_authority(mismatched_bytes)
@@ -324,6 +339,12 @@ fn replay_rejects_fact_descriptor_allowed_only_for_other_node() {
 
     let (response_artifact, response_bytes) =
         replay_stream_fact_response_artifact(&other_descriptor, 42);
+    let descriptor_artifact_key =
+        replay_artifact_authority_key(&descriptor_artifact).expect("descriptor artifact key");
+    let other_descriptor_artifact_key = replay_artifact_authority_key(&other_descriptor_artifact)
+        .expect("other descriptor artifact key");
+    let response_artifact_key =
+        replay_artifact_authority_key(&response_artifact).expect("response artifact key");
     let certified_spec = hashed_fact_replay_spec_with_other_node_descriptor(&other_descriptor);
     let run_admitted = fact_run_admitted_for_stream_with_descriptors(
         &certified_spec,
@@ -384,15 +405,12 @@ fn replay_rejects_fact_descriptor_allowed_only_for_other_node() {
             response_artifact.clone(),
         ],
         artifact_bytes: BTreeMap::from([
+            (descriptor_artifact_key, descriptor_bytes.to_vec()),
             (
-                descriptor_artifact_id(&descriptor_digest),
-                descriptor_bytes.to_vec(),
-            ),
-            (
-                descriptor_artifact_id(&other_descriptor_digest),
+                other_descriptor_artifact_key,
                 other_descriptor_bytes.to_vec(),
             ),
-            (response_artifact.artifact_id.clone(), response_bytes),
+            (response_artifact_key, response_bytes),
         ]),
         additional_artifact_evidence: Vec::new(),
         fact_query_receipt_trust_root: None,
@@ -1144,7 +1162,7 @@ struct ReplayFactStreamFixture {
     certified_spec: HashedSpecEnvelope,
     stream: Vec<KernelEventEnvelope>,
     artifact_evidence: Vec<StoredArtifactEvidenceRef>,
-    artifact_bytes: BTreeMap<ArtifactId, Vec<u8>>,
+    artifact_bytes: BTreeMap<(ArtifactId, ContentDigest), Vec<u8>>,
     run_id: RunId,
     claim_id: mfm_facts::FactClaimId,
     response_artifact_id: ArtifactId,
@@ -1194,6 +1212,8 @@ fn cell_replay_authority(
         None,
         descriptor_bytes.as_bytes().len() as u64,
     );
+    let descriptor_artifact_key =
+        replay_artifact_authority_key(&descriptor_artifact).expect("descriptor artifact key");
     let descriptor_run_ref = run_artifact_ref_from_store_artifact_for_test(&descriptor_artifact);
 
     let certified_spec = hashed_cell_replay_spec();
@@ -1300,10 +1320,7 @@ fn cell_replay_authority(
         runner_executables: Vec::new(),
         adapter_executables: Vec::new(),
         artifact_evidence,
-        artifact_bytes: BTreeMap::from([(
-            descriptor_artifact_id(&descriptor_digest),
-            descriptor_bytes.to_vec(),
-        )]),
+        artifact_bytes: BTreeMap::from([(descriptor_artifact_key, descriptor_bytes.to_vec())]),
         additional_artifact_evidence: Vec::new(),
         fact_query_receipt_trust_root: None,
         source_fact_events: Vec::new(),
@@ -1395,9 +1412,13 @@ fn replay_fact_stream_fixture() -> ReplayFactStreamFixture {
         None,
         descriptor_bytes.as_bytes().len() as u64,
     );
+    let descriptor_artifact_key =
+        replay_artifact_authority_key(&descriptor_artifact).expect("descriptor artifact key");
     let descriptor_run_ref = run_artifact_ref_from_store_artifact_for_test(&descriptor_artifact);
 
     let (response_artifact, response_bytes) = replay_stream_fact_response_artifact(&descriptor, 42);
+    let response_artifact_key =
+        replay_artifact_authority_key(&response_artifact).expect("response artifact key");
     let certified_spec = hashed_fact_replay_spec();
     let run_admitted = fact_run_admitted_for_stream(&certified_spec, descriptor_run_ref);
     let run_id = run_admitted.run_id.clone();
@@ -1445,11 +1466,8 @@ fn replay_fact_stream_fixture() -> ReplayFactStreamFixture {
             response_artifact,
         ],
         artifact_bytes: BTreeMap::from([
-            (
-                descriptor_artifact_id(&descriptor_digest),
-                descriptor_bytes.to_vec(),
-            ),
-            (response_artifact_id.clone(), response_bytes),
+            (descriptor_artifact_key, descriptor_bytes.to_vec()),
+            (response_artifact_key, response_bytes),
         ]),
         run_id: claim_id.source_run_id().clone(),
         claim_id,
@@ -1558,9 +1576,10 @@ fn append_fact_query_evidence(
         KernelEventPayload::ArtifactReferenced(query.event.clone()),
     ));
     authority.artifact_evidence.push(query.artifact.clone());
-    authority
-        .artifact_bytes
-        .insert(query.artifact.artifact_id.clone(), query.bytes.clone());
+    authority.artifact_bytes.insert(
+        replay_artifact_authority_key(&query.artifact).expect("query artifact key"),
+        query.bytes.clone(),
+    );
 }
 
 fn append_trusted_fact_query_evidence(
@@ -1974,10 +1993,6 @@ fn stored_artifact_ref(
         producer_seed_id: None,
         artifact_role: role,
     }
-}
-
-fn descriptor_artifact_id(digest: &ContentDigest) -> ArtifactId {
-    ArtifactId::from_digest(digest.algorithm(), *digest.digest())
 }
 
 fn persisted_envelope(
