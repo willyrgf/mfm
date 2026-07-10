@@ -101,6 +101,9 @@ pub struct EvmJointTip {
 
 impl EvmJointTip {
     /// Creates a joint tip from checked components.
+    ///
+    /// Block hashes are stored in canonical lowercase `0x`-prefixed form so tip
+    /// equality and portfolio anchor intersection use one identity.
     pub fn new(
         network: impl Into<String>,
         chain_id: u64,
@@ -108,10 +111,9 @@ impl EvmJointTip {
         block_hash: impl Into<String>,
     ) -> Result<Self, EvmStateError> {
         let network = network.into();
-        let block_hash = block_hash.into();
-        if network.trim().is_empty() || block_hash.trim().is_empty() {
+        if network.trim().is_empty() {
             return Err(EvmStateError::InvalidInput {
-                reason: "joint tip network and block_hash must be non-empty".to_owned(),
+                reason: "joint tip network must be non-empty".to_owned(),
             });
         }
         if chain_id == 0 {
@@ -119,7 +121,7 @@ impl EvmJointTip {
                 reason: "chain_id must be non-zero".to_owned(),
             });
         }
-        validate_block_hash(&block_hash)?;
+        let block_hash = crate::canonical_evm_block_hash(block_hash)?;
         Ok(Self {
             network,
             chain_id,
@@ -182,10 +184,6 @@ impl EvmJointTip {
 
 fn format_block_hash(hash: &alloy_primitives::B256) -> String {
     format!("{hash:#x}")
-}
-
-fn validate_block_hash(value: &str) -> Result<(), EvmStateError> {
-    crate::canonical_evm_block_hash(value).map(|_| ())
 }
 
 /// Requires every observation in a same-network batch to share one joint tip anchor.
@@ -903,6 +901,22 @@ mod tests {
             evidence: evidence(),
             balance_wei: U256::from(wei),
         }
+    }
+
+    #[test]
+    fn joint_tip_stores_canonical_block_hash() {
+        let mixed = format!("0X{}", "AB".repeat(32));
+        let tip = EvmJointTip::new("ethereum-mainnet", 1, 100, mixed).expect("tip");
+        assert_eq!(
+            tip.block_hash(),
+            "0xabababababababababababababababababababababababababababababababab"
+        );
+        let bare = "CD".repeat(32);
+        let tip = EvmJointTip::new("ethereum-mainnet", 1, 100, bare).expect("bare hex tip");
+        assert_eq!(
+            tip.block_hash(),
+            "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        );
     }
 
     #[test]
