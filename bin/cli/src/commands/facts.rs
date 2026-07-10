@@ -394,11 +394,11 @@ async fn execute_kind_query(
     query: &FactQuerySelectorArgs,
     limit: Option<u64>,
 ) -> CommandResult<QueryOutput> {
-    let services = connect_run_read_services(stores).await?;
+    let services =
+        mfm_app::connect_production_fact_public_query_service(stores.database_url.as_deref())
+            .await?;
     let request = public_fact_query_request(kind, query, limit)?;
-    Ok(CommandOutput::new(
-        services.query_public_facts(request).await?.into(),
-    ))
+    Ok(CommandOutput::new(services.query(request).await?.into()))
 }
 
 fn public_fact_query_request(

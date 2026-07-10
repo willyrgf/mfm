@@ -137,7 +137,7 @@ impl PostgresStoreAuthority {
     }
 }
 
-const CURSOR_VERSION: &str = "mfm.run_observation.cursor.v2";
+const CURSOR_VERSION: &str = "mfm.run_observation.cursor.v3";
 const OBSERVATION_NOTIFY_CHANNEL: &str = "mfm_run_observation";
 const OBSERVATION_NOTIFY_PAYLOAD: &str = "changed";
 const OBSERVATION_WAIT_POLL_INTERVAL_MS: u64 = 50;

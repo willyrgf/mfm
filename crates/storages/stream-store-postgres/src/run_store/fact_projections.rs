@@ -26,7 +26,6 @@ pub(super) struct FactDescriptorAdmissionProjection {
 }
 
 impl PhysicalFactProjections {
-    #[cfg(all(test, feature = "parity-tests"))]
     pub(super) fn from_snapshot_and_stream(
         snapshot: &ProjectionSnapshot,
         stream: &[KernelEventEnvelope],
@@ -88,25 +87,6 @@ impl PhysicalFactProjections {
                 .collect(),
         })
     }
-
-    pub(super) fn into_projection_snapshot(self) -> Result<ProjectionSnapshot> {
-        let mut parts = ProjectionSnapshotParts::default();
-        self.install_store_fact_authority(&mut parts);
-        Ok(ProjectionSnapshot::from_parts(parts)?)
-    }
-
-    pub(super) fn install_store_fact_authority(self, parts: &mut ProjectionSnapshotParts) {
-        parts.fact_descriptors = self.fact_descriptors;
-        parts.fact_records = self.fact_records;
-        parts.fact_index_entries = self.fact_index_entries;
-        parts.fact_term_entries = self.fact_term_entries;
-    }
-
-    pub(super) fn install_external_fact_indexes(self, parts: &mut ProjectionSnapshotParts) {
-        parts.fact_descriptors = self.fact_descriptors;
-        parts.fact_index_entries = self.fact_index_entries;
-        parts.fact_term_entries = self.fact_term_entries;
-    }
 }
 
 pub(super) async fn insert_fact_projection_rows_tx(
@@ -155,12 +135,6 @@ pub(super) async fn load_fact_projection_tables_tx(
     run_id: &RunId,
 ) -> Result<PhysicalFactProjections> {
     load_fact_projection_tables_scoped_tx(tx, Some(run_id)).await
-}
-
-pub(super) async fn load_store_fact_projection_tables_tx(
-    tx: &mut Transaction<'_, Postgres>,
-) -> Result<PhysicalFactProjections> {
-    load_fact_projection_tables_scoped_tx(tx, None).await
 }
 
 async fn load_fact_projection_tables_scoped_tx(

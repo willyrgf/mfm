@@ -96,6 +96,52 @@ fn replay_retained_artifact_lookup_uses_exact_evidence_identity() {
 }
 
 #[test]
+fn replay_run_admission_artifacts_use_exact_evidence_identity() {
+    let expected = run_artifact_ref(
+        ArtifactRole::TypedConfig,
+        schema_id("mfm.replay.test.config", 0xd2),
+        content_digest(0xd3),
+    );
+    let mut wrong = StoredArtifactEvidenceRef::from_run_artifact(&expected);
+    wrong.media_type = spec::MediaType::new("application/octet-stream").expect("media type");
+    let wrong_key = replay_artifact_authority_key(&wrong).expect("wrong artifact key");
+    let artifacts = BTreeMap::from([(wrong_key, wrong)]);
+
+    let error = verify_run_artifact(&artifacts, &expected, ArtifactRole::TypedConfig)
+        .expect_err("different artifact evidence must not satisfy run admission");
+    assert_eq!(error.kind, ReplayErrorKind::ArtifactMissing);
+}
+
+#[test]
+fn replay_artifact_expectations_check_artifact_id_without_hash() {
+    let expected = run_artifact_ref(
+        ArtifactRole::TypedConfig,
+        schema_id("mfm.replay.test.config", 0xd4),
+        content_digest(0xd5),
+    );
+    let expected_evidence = StoredArtifactEvidenceRef::from_run_artifact(&expected);
+    let mut wrong = expected_evidence.clone();
+    wrong.artifact_id = artifact_id(0xd6);
+    let expected_evidence_hash = expected_evidence.evidence_hash().expect("evidence hash");
+
+    let error = verify_artifact_expectation(
+        &wrong,
+        ArtifactEvidenceExpectation {
+            artifact_id: &expected_evidence.artifact_id,
+            evidence_hash: &expected_evidence_hash,
+            digest: &expected_evidence.digest,
+            schema_id: expected_evidence.schema_id.as_ref(),
+            semantic_type_id: None,
+            role: ArtifactRole::TypedConfig,
+            producer_node_id: None,
+            producer_seed_id: None,
+        },
+    )
+    .expect_err("an artifact with a different id must not satisfy the expectation");
+    assert_eq!(error.kind, ReplayErrorKind::ArtifactMismatch);
+}
+
+#[test]
 fn replay_broker_rebuilds_fact_projection_with_retained_artifact_bytes() {
     let fixture = replay_fact_stream_fixture();
 
@@ -266,18 +312,31 @@ fn replay_rejects_fact_query_evidence_with_missing_or_mismatched_authority() {
 #[test]
 fn replay_rejects_fact_query_evidence_with_mismatched_returned_refs() {
     enum ReturnedRefMismatch {
+        DescriptorHash,
         ResponseDigest,
         ObservedAt,
         ProducerNodeId,
+        Visibility,
     }
 
     for (name, mismatch) in [
+        ("descriptor hash", ReturnedRefMismatch::DescriptorHash),
         ("response digest", ReturnedRefMismatch::ResponseDigest),
         ("observed_at", ReturnedRefMismatch::ObservedAt),
         ("producer node id", ReturnedRefMismatch::ProducerNodeId),
+        ("visibility", ReturnedRefMismatch::Visibility),
     ] {
         let fixture = replay_fact_stream_fixture();
         let query = match mismatch {
+            ReturnedRefMismatch::DescriptorHash => {
+                fact_query_evidence_artifact(&fixture, |fact_ref| {
+                    let mut parts = internal_fact_ref_parts_from_ref(&fact_ref);
+                    parts.fact_descriptor_hash =
+                        mfm_facts::fact_descriptor_hash(&replay_stream_other_fact_descriptor())
+                            .expect("other descriptor hash");
+                    mfm_facts::InternalFactRef::new(parts).expect("mismatched descriptor ref")
+                })
+            }
             ReturnedRefMismatch::ResponseDigest => {
                 fact_query_evidence_artifact(&fixture, |fact_ref| {
                     let mut parts = internal_fact_ref_parts_from_ref(&fact_ref);
@@ -302,6 +361,12 @@ fn replay_rejects_fact_query_evidence_with_mismatched_returned_refs() {
                     mfm_facts::InternalFactRef::new(parts).expect("mismatched producer_node_id ref")
                 })
             }
+            ReturnedRefMismatch::Visibility => fact_query_evidence_artifact(&fixture, |fact_ref| {
+                let mut parts = internal_fact_ref_parts_from_ref(&fact_ref);
+                parts.visibility =
+                    mfm_facts::FactVisibility::indexed_default(mfm_facts::FactAudience::Control);
+                mfm_facts::InternalFactRef::new(parts).expect("mismatched visibility ref")
+            }),
         };
         let mut authority = fixture.authority();
         append_trusted_fact_query_evidence(&mut authority, &fixture.run_id, 4, &query);

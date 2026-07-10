@@ -1691,6 +1691,8 @@ fn public_output_retention_ref_keys(
                                 && reference.artifact_ref.artifact_id == payload.artifact_id
                                 && reference.artifact_ref.content_digest
                                     == payload.content_digest
+                                && reference.artifact_ref.evidence_hash
+                                    == payload.evidence_hash
                                 && reference.artifact_ref.role
                                     == events::ArtifactRole::StateOutput =>
                         {
@@ -1720,6 +1722,8 @@ fn public_output_retention_ref_keys(
                         && reference.artifact_ref.artifact_id == *artifact_id
                         && reference.artifact_ref.content_digest
                             == public_output.rendered_digest
+                        && public_output.rendered_artifact_evidence_hash.as_ref()
+                            == Some(&reference.artifact_ref.evidence_hash)
                         && reference.artifact_ref.role == events::ArtifactRole::PublicOutput =>
                 {
                     Some(event_artifact_ref_key(
@@ -1859,6 +1863,7 @@ fn validate_historical_retention_manifest_batch(
                 .to_owned(),
         ));
     }
+    let expected_manifest_evidence_hash = expected.evidence.evidence_hash()?;
 
     let receipt_bytes = retention_manifest_receipt_json(&expected, pre_projection_stream)?;
     let receipt_digest = receipt_bytes.content_digest();
@@ -1958,6 +1963,7 @@ fn validate_historical_retention_manifest_batch(
     let manifest_ref = &manifest_refs.refs[0];
     if manifest_ref.artifact_id != expected.evidence.artifact_id
         || manifest_ref.content_digest != expected.evidence.digest
+        || manifest_ref.evidence_hash != expected_manifest_evidence_hash
         || manifest_ref.role != events::ArtifactRole::RetentionManifest
     {
         return Err(RuntimeError::InvalidRunStream(
@@ -1990,6 +1996,7 @@ fn validate_historical_retention_manifest_batch(
     let receipt_ref = &receipt_refs.refs[0];
     if receipt_ref.artifact_id != receipt_artifact_id
         || receipt_ref.content_digest != receipt_digest
+        || receipt_ref.evidence_hash != produced.evidence_hash
         || receipt_ref.role != events::ArtifactRole::StateOutput
     {
         return Err(RuntimeError::InvalidRunStream(
@@ -2007,11 +2014,23 @@ fn validate_historical_retention_manifest_batch(
         &retention_node.node_id,
         &produced.attempt_id,
         &retention_node.output_cell,
-        &receipt_artifact_id,
-        &receipt_digest,
-        &expected.evidence.artifact_id,
+        &RetentionProjectionCommitEvidence {
+            receipt_artifact_id: &receipt_artifact_id,
+            receipt_digest: &receipt_digest,
+            receipt_evidence_hash: &produced.evidence_hash,
+            manifest_artifact_id: &expected.evidence.artifact_id,
+            manifest_evidence_hash: &expected_manifest_evidence_hash,
+        },
     )?;
     Ok(())
+}
+
+struct RetentionProjectionCommitEvidence<'a> {
+    receipt_artifact_id: &'a ArtifactId,
+    receipt_digest: &'a ContentDigest,
+    receipt_evidence_hash: &'a ContentDigest,
+    manifest_artifact_id: &'a ArtifactId,
+    manifest_evidence_hash: &'a ContentDigest,
 }
 
 fn validate_retention_projection_commit_payload_set(
@@ -2019,9 +2038,7 @@ fn validate_retention_projection_commit_payload_set(
     retention_node_id: &NodeId,
     attempt_id: &AttemptId,
     receipt_cell_id: &CellId,
-    receipt_artifact_id: &ArtifactId,
-    receipt_digest: &ContentDigest,
-    manifest_artifact_id: &ArtifactId,
+    evidence: &RetentionProjectionCommitEvidence<'_>,
 ) -> Result<()> {
     let mut produced = 0_usize;
     let mut completed = 0_usize;
@@ -2035,8 +2052,9 @@ fn validate_retention_projection_commit_payload_set(
                 if payload.node_id == *retention_node_id
                     && payload.attempt_id == *attempt_id
                     && payload.cell_id == *receipt_cell_id
-                    && payload.artifact_id == *receipt_artifact_id
-                    && payload.content_digest == *receipt_digest =>
+                    && payload.artifact_id == *evidence.receipt_artifact_id
+                    && payload.content_digest == *evidence.receipt_digest
+                    && payload.evidence_hash == *evidence.receipt_evidence_hash =>
             {
                 produced += 1;
             }
@@ -2050,31 +2068,32 @@ fn validate_retention_projection_commit_payload_set(
             events::KernelEventPayload::ArtifactReferenced(payload)
                 if payload.node_id.as_ref() == Some(retention_node_id)
                     && payload.attempt_id.as_ref() == Some(attempt_id)
-                    && payload.artifact_ref.artifact_id == *receipt_artifact_id
-                    && payload.artifact_ref.content_digest == *receipt_digest
+                    && payload.artifact_ref.artifact_id == *evidence.receipt_artifact_id
+                    && payload.artifact_ref.content_digest == *evidence.receipt_digest
+                    && payload.artifact_ref.evidence_hash == *evidence.receipt_evidence_hash
                     && payload.artifact_ref.role == events::ArtifactRole::StateOutput =>
             {
                 artifact_referenced += 1;
             }
             events::KernelEventPayload::RetentionManifestProjected(payload)
-                if payload.manifest_artifact_id == *manifest_artifact_id =>
+                if payload.manifest_artifact_id == *evidence.manifest_artifact_id =>
             {
                 manifest_projected += 1;
             }
             events::KernelEventPayload::RetentionRefsAppended(payload) => match payload.reason {
                 events::RetentionReason::ManifestProjection
-                    if payload
-                        .refs
-                        .iter()
-                        .all(|reference| reference.artifact_id == *manifest_artifact_id) =>
+                    if payload.refs.iter().all(|reference| {
+                        reference.artifact_id == *evidence.manifest_artifact_id
+                            && reference.evidence_hash == *evidence.manifest_evidence_hash
+                    }) =>
                 {
                     retention_refs += 1;
                 }
                 events::RetentionReason::RuntimeEvidence
-                    if payload
-                        .refs
-                        .iter()
-                        .all(|reference| reference.artifact_id == *receipt_artifact_id) =>
+                    if payload.refs.iter().all(|reference| {
+                        reference.artifact_id == *evidence.receipt_artifact_id
+                            && reference.evidence_hash == *evidence.receipt_evidence_hash
+                    }) =>
                 {
                     retention_refs += 1;
                 }
@@ -2739,11 +2758,13 @@ fn validate_historical_public_output_produced(
                 semantic_type_id,
                 artifact_id,
                 content_digest,
+                evidence_hash,
                 ..
             }) if schema_id == &cell.schema_id
                 && semantic_type_id == &cell.semantic_type_id
                 && artifact_id == &cell.artifact_id
                 && content_digest == &cell.content_digest
+                && evidence_hash == &cell.evidence_hash
                 && certified.producer == cell.producer
                 && certified.scope_id == cell.scope_id
                 && certified.value_lineage == cell.value_lineage => {}

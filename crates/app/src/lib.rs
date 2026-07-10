@@ -40,6 +40,7 @@ use mfm_runtime::{
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
+use mfm_store::v1::RunEventStore;
 use mfm_values::MfmConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::map::Entry;
@@ -458,6 +459,19 @@ pub async fn connect_production_run_read_store(
 ) -> Result<ProductionRunStore, AppError> {
     let database_url = production_database_url(database_url)?;
     Ok(ProductionRunStore::connect(&database_url).await?)
+}
+
+/// Connects the production authenticated public-fact query service.
+pub async fn connect_production_fact_public_query_service(
+    database_url: Option<&str>,
+) -> Result<ProductionFactPublicQueryService, AppError> {
+    let store = connect_production_run_store(database_url).await?;
+    let projection = store
+        .fact_projection_snapshot()
+        .await
+        .map_err(async_app_store_error)?;
+    let catalog = FactCatalogService::from_retained_public_projection(&store, &projection).await?;
+    FactPublicQueryService::new(catalog, store)
 }
 
 /// Provisions the immutable production fact-receipt trust root from the configured signing key.

@@ -13,7 +13,7 @@ struct AuthoritativeFactQueryRow {
 }
 
 impl PostgresRunStore {
-    /// Executes a descriptor-scoped canonical fact query plan against Postgres fact indexes.
+    /// Executes a descriptor-scoped canonical fact query plan from authoritative run evidence.
     pub async fn execute_fact_query(
         &self,
         plan: &mfm_facts::CanonicalFactQueryPlan,
@@ -185,7 +185,7 @@ async fn load_store_commit_order_tx(tx: &mut Transaction<'_, Postgres>) -> Resul
     )
 }
 
-async fn load_fact_authority_events_tx(
+pub(super) async fn load_fact_authority_events_tx(
     tx: &mut Transaction<'_, Postgres>,
 ) -> Result<Vec<KernelEventEnvelope>> {
     let run_admitted_schema = event_schema_id("mfm.events.v1.run_admitted")?;
@@ -203,6 +203,85 @@ async fn load_fact_authority_events_tx(
     .await
     .map_err(|error| database_error("failed to load authoritative fact events", error))?;
     rows.into_iter().map(event_envelope_from_row).collect()
+}
+
+pub(super) async fn load_authoritative_fact_projection_snapshot_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    authority_events: &[KernelEventEnvelope],
+) -> Result<ProjectionSnapshot> {
+    let run_ids = authority_events
+        .iter()
+        .filter_map(|event| match event.payload() {
+            events::KernelEventPayload::RunAdmitted(_)
+            | events::KernelEventPayload::FactRecorded(_) => Some(event.run_id().clone()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut parts = ProjectionSnapshotParts::default();
+    for run_id in run_ids {
+        let stream = load_run_stream_tx(tx, &run_id).await?;
+        let artifact_bytes = load_fact_rebuild_artifact_bytes_tx(tx, &stream).await?;
+        let snapshot = ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
+            &stream,
+            &artifact_bytes,
+        )?;
+        merge_fact_projection_family(
+            &mut parts.fact_descriptors,
+            snapshot
+                .fact_descriptors()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            "descriptor",
+        )?;
+        merge_fact_projection_family(
+            &mut parts.fact_records,
+            snapshot
+                .fact_records()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            "record",
+        )?;
+        merge_fact_projection_family(
+            &mut parts.fact_index_entries,
+            snapshot
+                .fact_index_entries()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            "index",
+        )?;
+        merge_fact_projection_family(
+            &mut parts.fact_term_entries,
+            snapshot
+                .fact_term_entries()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            "term",
+        )?;
+    }
+    Ok(ProjectionSnapshot::from_parts(parts)?)
+}
+
+fn merge_fact_projection_family<K, V>(
+    target: &mut BTreeMap<K, V>,
+    source: BTreeMap<K, V>,
+    family: &str,
+) -> Result<()>
+where
+    K: Ord,
+    V: PartialEq,
+{
+    for (key, value) in source {
+        if let Some(existing) = target.get(&key) {
+            if existing != &value {
+                return Err(PostgresStoreError::Corruption(format!(
+                    "conflicting authoritative fact {family} projection"
+                )));
+            }
+        } else {
+            target.insert(key, value);
+        }
+    }
+    Ok(())
 }
 
 fn event_schema_id(schema_name: &str) -> Result<String> {

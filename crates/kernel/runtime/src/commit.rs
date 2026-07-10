@@ -976,18 +976,15 @@ fn committed_artifact_for_requirement(
     requirement: &store::EventArtifactRequirement,
 ) -> Option<store::ArtifactEvidenceRef> {
     view.artifact_refs
-        .values()
-        .find(|reference| {
+        .get(&(
+            requirement.artifact_id.clone(),
+            requirement.evidence_hash.clone(),
+        ))
+        .filter(|reference| {
             store::validate_artifact_requirement_against_evidence(requirement, &reference.evidence)
                 .is_ok()
         })
         .map(|reference| reference.evidence.clone())
-        .or_else(|| {
-            view.config_artifacts
-                .values()
-                .find(|artifact| artifact.artifact_id == requirement.artifact_id)
-                .cloned()
-        })
 }
 
 fn launch_artifacts_by_evidence(
@@ -1434,6 +1431,7 @@ struct ValidatedStagedArtifact {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StagedArtifactRequirement {
     artifact_id: ArtifactId,
+    evidence_hash: ContentDigest,
     digest: ContentDigest,
     byte_len: Option<u64>,
     media_type: Option<spec::MediaType>,
@@ -1497,11 +1495,12 @@ fn validate_context_bound_output_artifacts(
                 &payload.context,
                 &payload.artifact_id,
                 &payload.content_digest,
+                &payload.evidence_hash,
             ))
         }
         _ => None,
     });
-    let Some((context, artifact_id, digest)) = output_context else {
+    let Some((context, artifact_id, digest, evidence_hash)) = output_context else {
         return Ok(());
     };
     if matches!(context, spec::CellContextSpec::NoContext) {
@@ -1519,6 +1518,10 @@ fn validate_context_bound_output_artifacts(
             artifact.binding == StagedArtifactBindingKind::StateOutput
                 && artifact.evidence.artifact_id == *artifact_id
                 && artifact.evidence.digest == *digest
+                && artifact
+                    .evidence
+                    .evidence_hash()
+                    .is_ok_and(|actual| actual == *evidence_hash)
         })
         .ok_or_else(|| {
             RuntimeError::InvalidRunnerOutput(format!(
@@ -1550,7 +1553,9 @@ fn validate_staged_artifact_requirement(
     binding: &StagedArtifactBindingKind,
     requirement: &StagedArtifactRequirement,
 ) -> Result<()> {
+    let actual_evidence_hash = evidence.evidence_hash()?;
     if evidence.artifact_id != requirement.artifact_id
+        || actual_evidence_hash != requirement.evidence_hash
         || evidence.digest != requirement.digest
         || requirement
             .byte_len
@@ -1758,6 +1763,7 @@ fn staged_artifact_requirement_from_event_requirement(
     }
     Ok(StagedArtifactRequirement {
         artifact_id: requirement.artifact_id,
+        evidence_hash: requirement.evidence_hash,
         digest,
         byte_len: requirement.byte_len,
         media_type: requirement.media_type,
@@ -1782,7 +1788,10 @@ fn staged_artifact_reference_payloads(
                 if payload.node_id.as_ref() == Some(&node.node_id)
                     && payload.attempt_id.as_ref() == Some(attempt_id) =>
             {
-                Some(payload.artifact_ref.artifact_id.clone())
+                Some((
+                    payload.artifact_ref.artifact_id.clone(),
+                    payload.artifact_ref.evidence_hash.clone(),
+                ))
             }
             _ => None,
         })
@@ -1792,7 +1801,8 @@ fn staged_artifact_reference_payloads(
         if staged_artifact_binding_kind(artifact.evidence.artifact_role).is_none() {
             continue;
         }
-        if existing_refs.contains(&artifact.evidence.artifact_id) {
+        let evidence_hash = artifact.evidence.evidence_hash()?;
+        if existing_refs.contains(&(artifact.evidence.artifact_id.clone(), evidence_hash.clone())) {
             continue;
         }
         let Some(schema_id) = artifact.evidence.schema_id.clone() else {
@@ -1809,7 +1819,7 @@ fn staged_artifact_reference_payloads(
                     schema_id,
                     semantic_type_id: artifact.evidence.semantic_type_id.clone(),
                     content_digest: artifact.evidence.digest.clone(),
-                    evidence_hash: artifact.evidence.evidence_hash()?,
+                    evidence_hash,
                     byte_len: artifact.evidence.byte_len,
                     media_type: artifact.evidence.media_type.clone(),
                 },

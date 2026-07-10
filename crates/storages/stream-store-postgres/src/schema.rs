@@ -622,7 +622,7 @@ const REQUIRED_CONSTRAINTS: &[&str] = &[
     "fact_index_terms_u64_range",
     "fact_index_terms_value_shape",
     "fact_projection_metadata_generation_positive",
-    "run_observation_cursors_version_v2",
+    "run_observation_cursors_version_v3",
     "run_observation_cursors_store_commit_order_nonnegative",
 ];
 
@@ -630,7 +630,6 @@ const REQUIRED_CURSOR_COLUMNS: &[&str] = &[
     "token_hash",
     "cursor_version",
     "store_epoch",
-    "cursor_kind",
     "store_commit_order",
     "issued_at",
 ];

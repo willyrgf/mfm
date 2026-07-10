@@ -9,33 +9,6 @@ pub(super) struct StoreMetadata {
 #[derive(Debug, Clone)]
 pub(super) struct CursorPosition {
     pub(super) store_commit_order: u64,
-    pub(super) kind: CursorKind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CursorKind {
-    Frontier,
-    Row,
-}
-
-impl CursorKind {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Frontier => "frontier",
-            Self::Row => "row",
-        }
-    }
-
-    fn parse(value: &str) -> Result<Self> {
-        match value {
-            "frontier" => Ok(Self::Frontier),
-            "row" => Ok(Self::Row),
-            _ => Err(StoreError::InvalidCursor {
-                message: "unknown cursor kind".to_owned(),
-            }
-            .into()),
-        }
-    }
 }
 
 pub(super) struct ObservationRow {
@@ -152,12 +125,10 @@ pub(super) async fn read_run_observation_page_once(
             })?;
         CursorPosition {
             store_commit_order: last.store_commit_order,
-            kind: CursorKind::Row,
         }
     } else {
         CursorPosition {
             store_commit_order: frontier_order,
-            kind: CursorKind::Frontier,
         }
     };
     Ok(RunObservationPage {
@@ -392,14 +363,13 @@ pub(super) async fn encode_observation_cursor(
     let token_hash = observation_cursor_token_hash(&token);
     sqlx::query(
         "INSERT INTO run_observation_cursors \
-          (token_hash, cursor_version, store_epoch, cursor_kind, store_commit_order) \
-         VALUES ($1, $2, $3, $4, $5) \
+          (token_hash, cursor_version, store_epoch, store_commit_order) \
+         VALUES ($1, $2, $3, $4) \
          ON CONFLICT (token_hash) DO NOTHING",
     )
     .bind(&token_hash)
     .bind(CURSOR_VERSION)
     .bind(&metadata.store_epoch)
-    .bind(position.kind.as_str())
     .bind(u64_to_i64(
         position.store_commit_order,
         "observation cursor store commit order",
@@ -424,8 +394,7 @@ pub(super) async fn decode_observation_cursor(
     }
     let token_hash = observation_cursor_token_hash(cursor);
     let Some(row) = sqlx::query(
-        "SELECT cursor_version, store_epoch, cursor_kind, \
-          store_commit_order \
+        "SELECT cursor_version, store_epoch, store_commit_order \
          FROM run_observation_cursors WHERE token_hash = $1",
     )
     .bind(&token_hash)
@@ -453,10 +422,6 @@ pub(super) async fn decode_observation_cursor(
         }
         .into());
     }
-    let cursor_kind: String = row
-        .try_get("cursor_kind")
-        .map_err(|error| database_error("failed to decode observation cursor kind", error))?;
-    let kind = CursorKind::parse(&cursor_kind)?;
     Ok(CursorPosition {
         store_commit_order: i64_to_nonnegative_u64(
             row.try_get("store_commit_order").map_err(|error| {
@@ -467,7 +432,6 @@ pub(super) async fn decode_observation_cursor(
             })?,
             "observation cursor store commit order",
         )?,
-        kind,
     })
 }
 

@@ -5837,11 +5837,12 @@ pub trait RunEventStore {
         run_id: &'a RunId,
     ) -> AsyncStoreFuture<'a, ProjectionSnapshot, Self::Error>;
 
-    /// Returns store-owned fact descriptor, index, and term projection authority.
+    /// Rebuilds store-scoped fact authority from committed events and exact retained artifacts.
     ///
     /// This is store-scoped rather than run-scoped: public Platform fact discovery and
     /// exact-ref lookup must see all indexed public facts available in the store, not only
-    /// facts associated with an arbitrary run selected by the caller.
+    /// facts associated with an arbitrary run selected by the caller. Physical descriptor,
+    /// index, and term tables may accelerate discovery but are not semantic authority.
     fn fact_projection_snapshot<'a>(
         &'a self,
     ) -> AsyncStoreFuture<'a, ProjectionSnapshot, Self::Error>;

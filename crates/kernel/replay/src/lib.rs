@@ -690,7 +690,7 @@ pub mod v1 {
     #[derive(Debug, Clone, Copy)]
     struct ArtifactEvidenceExpectation<'a> {
         artifact_id: &'a ArtifactId,
-        evidence_hash: Option<&'a ContentDigest>,
+        evidence_hash: &'a ContentDigest,
         digest: &'a ContentDigest,
         schema_id: Option<&'a SchemaId>,
         semantic_type_id: Option<&'a SemanticTypeId>,
@@ -706,6 +706,7 @@ pub mod v1 {
     trait SideEffectReplayArtifact {
         fn artifact_id(&self) -> &ArtifactId;
         fn evidence_hash(&self) -> &ContentDigest;
+        fn artifact_evidence_hash(&self) -> &ContentDigest;
         fn evidence_schema_id(&self) -> &SchemaId;
         fn artifact_role(&self) -> ArtifactRole;
         fn producer_node_id(&self) -> &NodeId;
@@ -722,6 +723,10 @@ pub mod v1 {
 
         fn evidence_hash(&self) -> &ContentDigest {
             &self.submission_hash
+        }
+
+        fn artifact_evidence_hash(&self) -> &ContentDigest {
+            &self.submission_artifact_evidence_hash
         }
 
         fn evidence_schema_id(&self) -> &SchemaId {
@@ -750,6 +755,10 @@ pub mod v1 {
             &self.proof_hash
         }
 
+        fn artifact_evidence_hash(&self) -> &ContentDigest {
+            &self.proof_artifact_evidence_hash
+        }
+
         fn evidence_schema_id(&self) -> &SchemaId {
             &self.proof_schema_id
         }
@@ -774,6 +783,10 @@ pub mod v1 {
 
         fn evidence_hash(&self) -> &ContentDigest {
             &self.receipt_hash
+        }
+
+        fn artifact_evidence_hash(&self) -> &ContentDigest {
+            &self.receipt_artifact_evidence_hash
         }
 
         fn evidence_schema_id(&self) -> &SchemaId {
@@ -806,6 +819,10 @@ pub mod v1 {
             &self.confirmation_hash
         }
 
+        fn artifact_evidence_hash(&self) -> &ContentDigest {
+            &self.confirmation_artifact_evidence_hash
+        }
+
         fn evidence_schema_id(&self) -> &SchemaId {
             &self.confirmation_schema_id
         }
@@ -834,6 +851,10 @@ pub mod v1 {
 
         fn evidence_hash(&self) -> &ContentDigest {
             &self.evidence_hash
+        }
+
+        fn artifact_evidence_hash(&self) -> &ContentDigest {
+            &self.evidence_artifact_evidence_hash
         }
 
         fn evidence_schema_id(&self) -> &SchemaId {
@@ -978,7 +999,7 @@ pub mod v1 {
         ) -> Result<StoredArtifactEvidenceRef> {
             self.verify_artifact(ArtifactEvidenceExpectation {
                 artifact_id: &request.artifact_id,
-                evidence_hash: Some(&request.evidence_hash),
+                evidence_hash: &request.evidence_hash,
                 digest: &request.digest,
                 schema_id: request.schema_id.as_ref(),
                 semantic_type_id: request.semantic_type_id.as_ref(),
@@ -1039,7 +1060,7 @@ pub mod v1 {
                 }
                 let artifact = self.verify_artifact(ArtifactEvidenceExpectation {
                     artifact_id: &produced.artifact_id,
-                    evidence_hash: Some(&produced.evidence_hash),
+                    evidence_hash: &produced.evidence_hash,
                     digest: &produced.content_digest,
                     schema_id: Some(&produced.schema_id),
                     semantic_type_id: Some(&produced.semantic_type_id),
@@ -1112,7 +1133,7 @@ pub mod v1 {
                 fact: fact.clone(),
                 artifact: self.verify_artifact(ArtifactEvidenceExpectation {
                     artifact_id: response.artifact_id(),
-                    evidence_hash: Some(response.artifact_evidence_hash()),
+                    evidence_hash: response.artifact_evidence_hash(),
                     digest: response.response_hash(),
                     schema_id: Some(response.response_schema_id()),
                     semantic_type_id: None,
@@ -1327,9 +1348,21 @@ pub mod v1 {
         fn authorize_certified_spec_artifacts(&mut self) -> Result<()> {
             let config_refs = self.certified_spec.spec.config_refs.clone();
             for config in config_refs {
+                let config_evidence = store::ArtifactEvidenceRef {
+                    artifact_id: config.artifact_id.clone(),
+                    digest: config.digest.clone(),
+                    byte_len: config.byte_len,
+                    media_type: config.media_type.clone(),
+                    schema_id: Some(config.schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: None,
+                    producer_seed_id: None,
+                    artifact_role: ArtifactRole::TypedConfig,
+                };
+                let evidence_hash = config_evidence.evidence_hash().map_err(ReplayError::from)?;
                 self.authorize_artifact(ArtifactEvidenceExpectation {
                     artifact_id: &config.artifact_id,
-                    evidence_hash: None,
+                    evidence_hash: &evidence_hash,
                     digest: &config.digest,
                     schema_id: Some(&config.schema_id),
                     semantic_type_id: None,
@@ -1707,7 +1740,7 @@ pub mod v1 {
             })?;
             let artifact = self.verify_artifact(ArtifactEvidenceExpectation {
                 artifact_id: &intent.intent_artifact_id,
-                evidence_hash: None,
+                evidence_hash: &intent.intent_artifact_evidence_hash,
                 digest: &intent.intent_hash,
                 schema_id: Some(&intent.intent_schema_id),
                 semantic_type_id: None,
@@ -1771,7 +1804,7 @@ pub mod v1 {
         {
             self.verify_artifact(ArtifactEvidenceExpectation {
                 artifact_id: evidence.artifact_id(),
-                evidence_hash: None,
+                evidence_hash: evidence.artifact_evidence_hash(),
                 digest: evidence.evidence_hash(),
                 schema_id: Some(evidence.evidence_schema_id()),
                 semantic_type_id: None,
@@ -1800,9 +1833,21 @@ pub mod v1 {
                     ),
                 )
             })?;
+            let evidence_hash = prepared
+                .prepared_artifact_evidence_hash
+                .as_ref()
+                .ok_or_else(|| {
+                    ReplayError::new(
+                        ReplayErrorKind::SideEffectMissing,
+                        format!(
+                            "missing prepared invocation artifact evidence hash {}",
+                            prepared.pair_id
+                        ),
+                    )
+                })?;
             let artifact = self.verify_artifact(ArtifactEvidenceExpectation {
                 artifact_id,
-                evidence_hash: None,
+                evidence_hash,
                 digest,
                 schema_id: None,
                 semantic_type_id: None,
@@ -1987,6 +2032,7 @@ pub mod v1 {
             node_id: &NodeId,
             artifact_id: &ArtifactId,
             digest: &ContentDigest,
+            evidence_hash: &ContentDigest,
         ) -> Result<bool> {
             let node = self.node(node_id)?;
             if !is_terminal_lifecycle_node(node) {
@@ -1998,8 +2044,11 @@ pub mod v1 {
                 Some(store::CellTerminalProjection::Produced {
                     artifact_id: projected_artifact_id,
                     content_digest,
+                    evidence_hash: projected_evidence_hash,
                     ..
-                }) if projected_artifact_id == artifact_id && content_digest == digest
+                }) if projected_artifact_id == artifact_id
+                    && content_digest == digest
+                    && projected_evidence_hash == evidence_hash
             ))
         }
 
@@ -2321,55 +2370,40 @@ pub mod v1 {
             let block_reason = prefix_saga.manual_block_reason.ok_or_else(|| {
                 certified_evidence_mismatch("manual resolution prefix lacks block reason")
             })?;
-            let _evidence_artifact = self
-                .retained_artifacts
-                .values()
-                .find(|evidence| {
-                    verify_artifact_fields(
-                        evidence,
-                        &payload.evidence_hash,
-                        Some(&payload.evidence_schema_id),
-                        None,
-                        ArtifactRole::ManualResolutionEvidence,
-                        None,
-                        None,
-                    )
-                    .is_ok()
-                })
-                .ok_or_else(|| {
-                    ReplayError::new(
-                        ReplayErrorKind::ArtifactMissing,
-                        format!(
-                            "missing manual resolution evidence artifact {}",
-                            payload.evidence_artifact_id
-                        ),
-                    )
-                })?;
-            let authorization_artifact = self
-                .retained_artifacts
-                .values()
-                .find(|evidence| {
-                    evidence.artifact_id == payload.authorization_artifact_id
-                        && verify_artifact_fields(
-                            evidence,
-                            &payload.authorization_hash,
-                            Some(&payload.authorization_schema_id),
-                            None,
-                            ArtifactRole::ManualResolutionAuthorization,
-                            None,
-                            None,
-                        )
-                        .is_ok()
-                })
-                .ok_or_else(|| {
-                    ReplayError::new(
-                        ReplayErrorKind::ArtifactMissing,
-                        format!(
-                            "missing manual resolution authorization artifact {}",
-                            payload.authorization_artifact_id
-                        ),
-                    )
-                })?;
+            let evidence_requirement = store::EventArtifactRequirement {
+                source: store::EventArtifactReferenceSource::ManualResolutionEvidence,
+                artifact_id: payload.evidence_artifact_id.clone(),
+                evidence_hash: payload.evidence_artifact_evidence_hash.clone(),
+                digest: Some(payload.evidence_hash.clone()),
+                byte_len: None,
+                media_type: None,
+                schema_id: Some(payload.evidence_schema_id.clone()),
+                semantic_type_id: None,
+                producer_node_id: None,
+                producer_seed_id: None,
+                artifact_role: Some(ArtifactRole::ManualResolutionEvidence),
+            };
+            let _evidence_artifact = exact_retained_artifact_for_requirement(
+                &self.retained_artifacts,
+                &evidence_requirement,
+            )?;
+            let authorization_requirement = store::EventArtifactRequirement {
+                source: store::EventArtifactReferenceSource::ManualResolutionAuthorization,
+                artifact_id: payload.authorization_artifact_id.clone(),
+                evidence_hash: payload.authorization_artifact_evidence_hash.clone(),
+                digest: Some(payload.authorization_hash.clone()),
+                byte_len: None,
+                media_type: None,
+                schema_id: Some(payload.authorization_schema_id.clone()),
+                semantic_type_id: None,
+                producer_node_id: None,
+                producer_seed_id: None,
+                artifact_role: Some(ArtifactRole::ManualResolutionAuthorization),
+            };
+            let authorization_artifact = exact_retained_artifact_for_requirement(
+                &self.retained_artifacts,
+                &authorization_requirement,
+            )?;
             let proof_bytes = self.artifact_bytes_for_evidence(authorization_artifact)?;
             let prefix = ManualResolutionPrefixAuthority::new(
                 payload.run_id.clone(),
@@ -2512,9 +2546,10 @@ pub mod v1 {
                     )
                 },
             )?;
-            self.verify_fact_query_descriptor_resolution(evidence.plan().resolved_descriptor())?;
+            let plan = evidence.plan();
+            self.verify_fact_query_descriptor_resolution(plan.resolved_descriptor())?;
             for fact_ref in evidence.receipt().returned_refs() {
-                self.verify_fact_query_returned_ref(fact_ref)?;
+                self.verify_fact_query_returned_ref(fact_ref, plan)?;
             }
             Ok(())
         }
@@ -2523,34 +2558,135 @@ pub mod v1 {
             &mut self,
             descriptor_hash: &ContentDigest,
         ) -> Result<()> {
-            let descriptor_schema_id = mfm_facts::fact_descriptor_schema_id().map_err(|error| {
-                ReplayError::new(
-                    ReplayErrorKind::CertifiedEvidenceMismatch,
-                    error.to_string(),
-                )
-            })?;
-            let evidence = self
-                .retained_artifacts
-                .values()
-                .find(|evidence| {
-                    evidence.artifact_role == ArtifactRole::FactDescriptor
-                        && &evidence.digest == descriptor_hash
-                        && evidence.schema_id.as_ref() == Some(&descriptor_schema_id)
-                })
-                .cloned()
-                .ok_or_else(|| {
-                    ReplayError::new(
+            let mut candidates = BTreeMap::new();
+            if let Some(descriptor) = self.projection.fact_descriptor(descriptor_hash) {
+                let requirement = store::EventArtifactRequirement {
+                    source: store::EventArtifactReferenceSource::FactDescriptor,
+                    artifact_id: descriptor.descriptor_artifact_id.clone(),
+                    evidence_hash: descriptor
+                        .descriptor_artifact_evidence
+                        .evidence_hash()
+                        .map_err(ReplayError::from)?,
+                    digest: Some(descriptor_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(mfm_facts::fact_descriptor_schema_id().map_err(|error| {
+                        ReplayError::new(
+                            ReplayErrorKind::CertifiedEvidenceMismatch,
+                            error.to_string(),
+                        )
+                    })?),
+                    semantic_type_id: None,
+                    producer_node_id: None,
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::FactDescriptor),
+                };
+                let evidence = exact_retained_artifact_for_requirement(
+                    &self.retained_artifacts,
+                    &requirement,
+                )?;
+                insert_fact_descriptor_candidate(&mut candidates, evidence)?;
+            }
+            for envelope in &self.stream {
+                let KernelEventPayload::RetentionRefsAppended(payload) = envelope.payload() else {
+                    continue;
+                };
+                for reference in &payload.refs {
+                    if reference.role != ArtifactRole::FactDescriptor
+                        || reference.content_digest != *descriptor_hash
+                    {
+                        continue;
+                    }
+                    let requirement = store::EventArtifactRequirement {
+                        source: store::EventArtifactReferenceSource::RetentionRef,
+                        artifact_id: reference.artifact_id.clone(),
+                        evidence_hash: reference.evidence_hash.clone(),
+                        digest: Some(reference.content_digest.clone()),
+                        byte_len: None,
+                        media_type: None,
+                        schema_id: None,
+                        semantic_type_id: None,
+                        producer_node_id: None,
+                        producer_seed_id: None,
+                        artifact_role: Some(ArtifactRole::FactDescriptor),
+                    };
+                    let evidence = exact_retained_artifact_for_requirement(
+                        &self.retained_artifacts,
+                        &requirement,
+                    )?;
+                    insert_fact_descriptor_candidate(&mut candidates, evidence)?;
+                }
+            }
+            let evidence = match candidates.len() {
+                0 => {
+                    return Err(ReplayError::new(
                         ReplayErrorKind::ArtifactMissing,
-                        format!("missing retained fact descriptor artifact for {descriptor_hash}"),
+                        format!(
+                            "missing exact retained fact descriptor artifact for {descriptor_hash}"
+                        ),
+                    ));
+                }
+                1 => candidates
+                    .into_values()
+                    .next()
+                    .expect("one descriptor candidate"),
+                _ => {
+                    return Err(ReplayError::new(
+                        ReplayErrorKind::ArtifactMismatch,
+                        format!(
+                            "fact descriptor {descriptor_hash} has conflicting retained evidence"
+                        ),
+                    ));
+                }
+            };
+            let key = replay_artifact_authority_key(&evidence)?;
+            let bytes = self.artifact_bytes_by_key(&key)?;
+            let parsed =
+                mfm_facts::parse_canonical_fact_descriptor_bytes(bytes).map_err(|error| {
+                    ReplayError::new(
+                        ReplayErrorKind::CertifiedEvidenceMismatch,
+                        format!("fact descriptor artifact is invalid: {error}"),
                     )
                 })?;
+            let parsed_hash = mfm_facts::fact_descriptor_hash(&parsed).map_err(|error| {
+                ReplayError::new(
+                    ReplayErrorKind::CertifiedEvidenceMismatch,
+                    format!("fact descriptor artifact hash is invalid: {error}"),
+                )
+            })?;
+            if &parsed_hash != descriptor_hash {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::ArtifactMismatch,
+                    format!("fact descriptor artifact does not match {descriptor_hash}"),
+                ));
+            }
             self.insert_authorized_artifact(evidence)
         }
 
         fn verify_fact_query_returned_ref(
             &self,
             fact_ref: &mfm_facts::InternalFactRef,
+            plan: &mfm_facts::CanonicalFactQueryPlan,
         ) -> Result<()> {
+            if fact_ref.fact_descriptor_hash() != plan.resolved_descriptor() {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::FactMismatch,
+                    "returned fact ref does not match the query descriptor",
+                ));
+            }
+            let mfm_facts::FactVisibility::Indexed { audience, scope } = fact_ref.visibility()
+            else {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::FactMismatch,
+                    "returned fact ref is not indexed for query visibility",
+                ));
+            };
+            if *audience != plan.query_scope().audience() || *scope != plan.query_scope().scope() {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::FactMismatch,
+                    "returned fact ref does not match the query visibility scope",
+                ));
+            }
             let (envelope, fact) = self.fact_event_for_claim(fact_ref.fact_claim_id())?;
             let claim = &fact.claim;
             let request = claim.request();
@@ -2590,7 +2726,7 @@ pub mod v1 {
             }
             let artifact = self.verify_artifact(ArtifactEvidenceExpectation {
                 artifact_id: response.artifact_id(),
-                evidence_hash: Some(response.artifact_evidence_hash()),
+                evidence_hash: response.artifact_evidence_hash(),
                 digest: response.response_hash(),
                 schema_id: Some(response.response_schema_id()),
                 semantic_type_id: None,
@@ -2920,11 +3056,13 @@ pub mod v1 {
                     semantic_type_id,
                     artifact_id,
                     content_digest,
+                    evidence_hash,
                     ..
                 } if schema_id == &cell.schema_id
                     && semantic_type_id == &cell.semantic_type_id
                     && artifact_id == &cell.artifact_id
-                    && content_digest == &cell.content_digest =>
+                    && content_digest == &cell.content_digest
+                    && evidence_hash == &cell.evidence_hash =>
                 {
                     Ok(())
                 }
@@ -3002,7 +3140,12 @@ pub mod v1 {
             let Some(digest) = requirement.digest.as_ref() else {
                 return Ok(false);
             };
-            self.is_terminal_lifecycle_receipt_artifact(node_id, &requirement.artifact_id, digest)
+            self.is_terminal_lifecycle_receipt_artifact(
+                node_id,
+                &requirement.artifact_id,
+                digest,
+                &requirement.evidence_hash,
+            )
         }
 
         fn authorize_skipped_event_artifact_requirement(
@@ -3065,25 +3208,9 @@ pub mod v1 {
                     ),
                 ));
             }
-            let evidence = self
-                .retained_artifacts
-                .get(&(
-                    requirement.artifact_id.clone(),
-                    requirement.evidence_hash.clone(),
-                ))
-                .ok_or_else(|| {
-                    ReplayError::new(
-                        ReplayErrorKind::ArtifactMissing,
-                        format!(
-                            "missing retained artifact evidence for {}",
-                            requirement.artifact_id
-                        ),
-                    )
-                })?;
+            let evidence =
+                exact_retained_artifact_for_requirement(&self.retained_artifacts, requirement)?;
             let evidence = evidence.clone();
-            store::validate_artifact_requirement_against_evidence(requirement, &evidence).map_err(
-                |error| artifact_requirement_replay_error(error, "artifact evidence mismatch"),
-            )?;
             self.insert_authorized_artifact(evidence.clone())?;
             Ok(evidence)
         }
@@ -3094,8 +3221,7 @@ pub mod v1 {
         ) -> Result<StoredArtifactEvidenceRef> {
             let evidence = self
                 .retained_artifacts
-                .values()
-                .find(|evidence| verify_artifact_expectation(evidence, expected).is_ok())
+                .get(&(expected.artifact_id.clone(), expected.evidence_hash.clone()))
                 .ok_or_else(|| {
                     ReplayError::new(
                         ReplayErrorKind::ArtifactMissing,
@@ -3105,6 +3231,7 @@ pub mod v1 {
                         ),
                     )
                 })?;
+            verify_artifact_expectation(evidence, expected)?;
             let evidence = evidence.clone();
             self.insert_authorized_artifact(evidence.clone())?;
             Ok(evidence)
@@ -3137,8 +3264,7 @@ pub mod v1 {
         ) -> Result<StoredArtifactEvidenceRef> {
             let evidence = self
                 .artifacts
-                .values()
-                .find(|evidence| verify_artifact_expectation(evidence, expected).is_ok())
+                .get(&(expected.artifact_id.clone(), expected.evidence_hash.clone()))
                 .ok_or_else(|| {
                     ReplayError::new(
                         ReplayErrorKind::ArtifactMissing,
@@ -3148,6 +3274,7 @@ pub mod v1 {
                         ),
                     )
                 })?;
+            verify_artifact_expectation(evidence, expected)?;
             Ok(evidence.clone())
         }
 
@@ -3170,6 +3297,51 @@ pub mod v1 {
                     )
                 })
         }
+    }
+
+    fn exact_retained_artifact_for_requirement<'a>(
+        artifacts: &'a BTreeMap<ReplayArtifactAuthorityKey, StoredArtifactEvidenceRef>,
+        requirement: &store::EventArtifactRequirement,
+    ) -> Result<&'a StoredArtifactEvidenceRef> {
+        let evidence = artifacts
+            .get(&(
+                requirement.artifact_id.clone(),
+                requirement.evidence_hash.clone(),
+            ))
+            .ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::ArtifactMissing,
+                    format!(
+                        "missing retained artifact evidence for {}",
+                        requirement.artifact_id
+                    ),
+                )
+            })?;
+        store::validate_artifact_requirement_against_evidence(requirement, evidence).map_err(
+            |error| artifact_requirement_replay_error(error, "artifact evidence mismatch"),
+        )?;
+        Ok(evidence)
+    }
+
+    fn insert_fact_descriptor_candidate(
+        candidates: &mut BTreeMap<ReplayArtifactAuthorityKey, StoredArtifactEvidenceRef>,
+        evidence: &StoredArtifactEvidenceRef,
+    ) -> Result<()> {
+        let key = replay_artifact_authority_key(evidence)?;
+        if let Some(existing) = candidates.get(&key) {
+            if existing != evidence {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::ArtifactMismatch,
+                    format!(
+                        "conflicting retained fact descriptor evidence for {}",
+                        evidence.artifact_id
+                    ),
+                ));
+            }
+        } else {
+            candidates.insert(key, evidence.clone());
+        }
+        Ok(())
     }
 
     fn artifact_map(
@@ -3567,17 +3739,24 @@ pub mod v1 {
         evidence: &StoredArtifactEvidenceRef,
         expected: ArtifactEvidenceExpectation<'_>,
     ) -> Result<()> {
-        if let Some(expected_evidence_hash) = expected.evidence_hash {
-            let actual_evidence_hash = evidence.evidence_hash().map_err(ReplayError::from)?;
-            if &actual_evidence_hash != expected_evidence_hash {
-                return Err(ReplayError::new(
-                    ReplayErrorKind::ArtifactMismatch,
-                    format!(
-                        "artifact evidence hash mismatch for {}",
-                        evidence.artifact_id
-                    ),
-                ));
-            }
+        if evidence.artifact_id != *expected.artifact_id {
+            return Err(ReplayError::new(
+                ReplayErrorKind::ArtifactMismatch,
+                format!(
+                    "artifact id mismatch: expected {}, found {}",
+                    expected.artifact_id, evidence.artifact_id
+                ),
+            ));
+        }
+        let actual_evidence_hash = evidence.evidence_hash().map_err(ReplayError::from)?;
+        if &actual_evidence_hash != expected.evidence_hash {
+            return Err(ReplayError::new(
+                ReplayErrorKind::ArtifactMismatch,
+                format!(
+                    "artifact evidence hash mismatch for {}",
+                    evidence.artifact_id
+                ),
+            ));
         }
         verify_artifact_fields(
             evidence,
@@ -3791,16 +3970,18 @@ pub mod v1 {
         expected: &events::RunArtifactEvidenceRef,
         role: ArtifactRole,
     ) -> Result<()> {
-        let Some(actual) = artifacts.values().find(|actual| {
-            actual.artifact_id == expected.artifact_id
-                && actual.digest == expected.content_digest
-                && actual.byte_len == expected.byte_len
-                && actual.media_type == expected.media_type
-                && actual.schema_id == expected.schema_id
-                && actual.semantic_type_id == expected.semantic_type_id
-                && actual.artifact_role == role
-                && expected.role == role
-        }) else {
+        if expected.role != role {
+            return Err(ReplayError::new(
+                ReplayErrorKind::ArtifactMismatch,
+                format!(
+                    "run admission artifact {} has unexpected role",
+                    expected.artifact_id
+                ),
+            ));
+        }
+        let expected = store::ArtifactEvidenceRef::from_run_artifact(expected);
+        let key = replay_artifact_authority_key(&expected)?;
+        let Some(actual) = artifacts.get(&key) else {
             return Err(ReplayError::new(
                 ReplayErrorKind::ArtifactMissing,
                 format!(
@@ -3809,7 +3990,15 @@ pub mod v1 {
                 ),
             ));
         };
-        let _ = actual;
+        if actual != &expected {
+            return Err(ReplayError::new(
+                ReplayErrorKind::ArtifactMismatch,
+                format!(
+                    "run admission artifact evidence does not match {}",
+                    expected.artifact_id
+                ),
+            ));
+        }
         Ok(())
     }
 

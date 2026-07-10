@@ -2688,7 +2688,6 @@ async fn observation_row_cursor_for_commit(
                     .expect("store commit order"),
             )
             .expect("positive store commit order"),
-            kind: CursorKind::Row,
         },
     )
     .await
@@ -2919,10 +2918,7 @@ async fn observation_change_ids_and_cursors_do_not_expose_internal_authority() {
     .expect("positive store commit order");
     let public_change_id =
         observation_change_id(&metadata, &commit_id).expect("observation change id");
-    let position = CursorPosition {
-        store_commit_order,
-        kind: CursorKind::Row,
-    };
+    let position = CursorPosition { store_commit_order };
     let public_cursor = encode_observation_cursor(&store.pool, &metadata, &position)
         .await
         .expect("encode observation cursor");
@@ -2930,7 +2926,6 @@ async fn observation_change_ids_and_cursors_do_not_expose_internal_authority() {
         .await
         .expect("decode observation cursor");
     assert_eq!(decoded.store_commit_order, position.store_commit_order);
-    assert_eq!(decoded.kind, CursorKind::Row);
     assert_eq!(
         bytes_from_hex(&public_cursor)
             .expect("opaque cursor token is hex")
@@ -3075,7 +3070,7 @@ async fn observation_cursor_lifecycle_rejects_stale_format() {
 
     disable_observation_cursor_mutation_guard(&store.pool).await;
     sqlx::query(
-        "ALTER TABLE run_observation_cursors DROP CONSTRAINT run_observation_cursors_version_v2",
+        "ALTER TABLE run_observation_cursors DROP CONSTRAINT run_observation_cursors_version_v3",
     )
     .execute(&store.pool)
     .await
@@ -3232,7 +3227,6 @@ async fn observation_watch_wakes_on_notification_before_timeout() {
                     .expect("store commit order"),
             )
             .expect("positive store commit order"),
-            kind: CursorKind::Row,
         },
     )
     .await
@@ -4372,6 +4366,20 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
     );
     assert_eq!(receipt.read_frontier().projection_generation().as_u64(), 1);
     assert!(receipt.read_frontier().store_commit_order().as_u64() >= 1);
+    sqlx::query(
+        "UPDATE fact_index_terms SET value_u64 = '1' \
+         WHERE source_run_id = $1 AND field_id = 'result.height'",
+    )
+    .bind(run.as_str())
+    .execute(&store.pool)
+    .await
+    .expect("tamper fact projection term");
+    let query_after_projection_tamper = assert_single_public_fact_query(&store, &query_plan).await;
+    assert_eq!(
+        query_after_projection_tamper.rows(),
+        query_result.rows(),
+        "fact projection terms must not be semantic query authority"
+    );
     let unsigned_store = PostgresRunStore {
         pool: store.pool.clone(),
         authority: store.store_authority().clone(),
@@ -4423,6 +4431,11 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
         &query_after_projection_delete,
         mfm_facts::QueryResultCardinality::AtLeast(1),
     );
+    let fact_projection_after_delete = store
+        .fact_projection_snapshot()
+        .await
+        .expect("authoritative fact projection snapshot after cache deletion");
+    assert_fact_projection_counts(&fact_projection_after_delete, 1, 1, 1, 2);
     let err = store
         .status_projection_snapshot(&run)
         .await

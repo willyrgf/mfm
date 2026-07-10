@@ -76,8 +76,16 @@ pub(super) async fn load_fact_projection_snapshot_client(
         .begin()
         .await
         .map_err(|error| database_error("failed to start fact projection read", error))?;
-    let fact_projections = load_store_fact_projection_tables_tx(&mut tx).await?;
-    let snapshot = fact_projections.into_projection_snapshot()?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| database_error("failed to set fact projection read mode", error))?;
+    let authority_events = super::fact_queries::load_fact_authority_events_tx(&mut tx).await?;
+    let snapshot = super::fact_queries::load_authoritative_fact_projection_snapshot_tx(
+        &mut tx,
+        &authority_events,
+    )
+    .await?;
     tx.commit()
         .await
         .map_err(|error| database_error("failed to commit fact projection read", error))?;
@@ -91,10 +99,13 @@ pub(super) async fn load_stream_authoritative_projection_snapshot_tx(
     let stream = load_run_stream_tx(tx, run_id).await?;
     let snapshot = projection_snapshot_from_physical_fact_tables_tx(tx, run_id, &stream).await?;
     let resource_lane_state = load_resource_lane_state_tx(tx).await?;
-    let store_fact_projections = load_store_fact_projection_tables_tx(tx).await?;
+    let authority_events = super::fact_queries::load_fact_authority_events_tx(tx).await?;
+    let store_fact_projection =
+        super::fact_queries::load_authoritative_fact_projection_snapshot_tx(tx, &authority_events)
+            .await?;
     projection_snapshot_with_store_authority(
         &snapshot,
-        store_fact_projections,
+        &store_fact_projection,
         resource_lane_state.active,
     )
 }
@@ -104,9 +115,17 @@ pub(super) async fn projection_snapshot_from_physical_fact_tables_tx(
     run_id: &RunId,
     stream: &[KernelEventEnvelope],
 ) -> Result<ProjectionSnapshot> {
-    let snapshot = ProjectionSnapshot::rebuild_for_external_fact_indexes(stream)?;
+    let artifact_bytes = load_fact_rebuild_artifact_bytes_tx(tx, stream).await?;
+    let snapshot =
+        ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(stream, &artifact_bytes)?;
     let fact_projections = load_fact_projection_tables_tx(tx, run_id).await?;
-    projection_snapshot_with_fact_projections(&snapshot, stream, fact_projections)
+    let expected = PhysicalFactProjections::from_snapshot_and_stream(&snapshot, stream)?;
+    if fact_projections != expected {
+        return Err(PostgresStoreError::Corruption(
+            "physical fact projections did not match authoritative run stream".to_owned(),
+        ));
+    }
+    Ok(snapshot)
 }
 
 #[cfg(all(test, feature = "parity-tests"))]
@@ -255,136 +274,6 @@ pub(super) fn fold_resource_lane_state(
     Ok(ResourceLaneState { active, authority })
 }
 
-fn projection_snapshot_with_fact_projections(
-    snapshot: &ProjectionSnapshot,
-    stream: &[KernelEventEnvelope],
-    fact_projections: PhysicalFactProjections,
-) -> Result<ProjectionSnapshot> {
-    let mut admitted_descriptor_events = BTreeMap::new();
-    for event in stream {
-        if let events::KernelEventPayload::RunAdmitted(payload) = event.payload() {
-            for artifact in &payload.fact_descriptor_artifacts {
-                admitted_descriptor_events.insert(
-                    (event.run_id().clone(), artifact.content_digest.clone()),
-                    (
-                        event.seq().as_u64(),
-                        event.ordinal().as_u32(),
-                        event.event_id().clone(),
-                    ),
-                );
-            }
-        }
-    }
-    for (run_id, descriptor_hash) in admitted_descriptor_events.keys() {
-        if !fact_projections
-            .fact_descriptor_admissions
-            .contains_key(&(run_id.clone(), descriptor_hash.clone()))
-        {
-            return Err(PostgresStoreError::Corruption(format!(
-                "run-admitted fact descriptor {run_id}/{descriptor_hash} has no physical admission row",
-            )));
-        }
-    }
-    for ((run_id, descriptor_hash), admission) in &fact_projections.fact_descriptor_admissions {
-        let Some((source_seq, source_ordinal, source_event_id)) =
-            admitted_descriptor_events.get(&(run_id.clone(), descriptor_hash.clone()))
-        else {
-            return Err(PostgresStoreError::Corruption(format!(
-                "physical fact descriptor admission {run_id}/{descriptor_hash} was not admitted by the run stream",
-            )));
-        };
-        if admission.source_seq != *source_seq
-            || admission.source_ordinal != *source_ordinal
-            || admission.source_event_id != *source_event_id
-        {
-            return Err(PostgresStoreError::Corruption(format!(
-                "physical fact descriptor admission {run_id}/{descriptor_hash} does not match run stream coordinates",
-            )));
-        }
-    }
-    let admitted_descriptor_hashes = admitted_descriptor_events
-        .keys()
-        .map(|(_, descriptor_hash)| descriptor_hash.clone())
-        .collect::<BTreeSet<_>>();
-    for descriptor_hash in fact_projections.fact_descriptors.keys() {
-        if !admitted_descriptor_hashes.contains(descriptor_hash) {
-            return Err(PostgresStoreError::Corruption(format!(
-                "physical fact descriptor {descriptor_hash} has no run admission",
-            )));
-        }
-    }
-    for (claim_id, record) in snapshot.fact_records() {
-        if !fact_projections
-            .fact_descriptors
-            .contains_key(record.claim.fact_descriptor_hash())
-        {
-            return Err(PostgresStoreError::Corruption(format!(
-                "fact record {:?} references missing physical descriptor row",
-                claim_id
-            )));
-        }
-        let is_indexed = matches!(
-            record.claim.visibility(),
-            mfm_facts::FactVisibility::Indexed { .. }
-        );
-        match (
-            is_indexed,
-            fact_projections.fact_index_entries.contains_key(claim_id),
-        ) {
-            (true, false) => {
-                return Err(PostgresStoreError::Corruption(format!(
-                    "indexed fact record {:?} has no physical fact index row",
-                    claim_id
-                )));
-            }
-            (false, true) => {
-                return Err(PostgresStoreError::Corruption(format!(
-                    "private fact record {:?} unexpectedly has a physical fact index row",
-                    claim_id
-                )));
-            }
-            _ => {}
-        }
-    }
-    for claim_id in fact_projections.fact_index_entries.keys() {
-        let Some(record) = snapshot.fact_record(claim_id) else {
-            return Err(PostgresStoreError::Corruption(format!(
-                "fact index projection {:?} has no run-stream fact record",
-                claim_id
-            )));
-        };
-        if !matches!(
-            record.claim.visibility(),
-            mfm_facts::FactVisibility::Indexed { .. }
-        ) {
-            return Err(PostgresStoreError::Corruption(format!(
-                "fact index projection {:?} points at a private run-stream fact record",
-                claim_id
-            )));
-        }
-        if !fact_projections
-            .fact_descriptors
-            .contains_key(record.claim.fact_descriptor_hash())
-        {
-            return Err(PostgresStoreError::Corruption(format!(
-                "fact index projection {:?} references missing descriptor row",
-                claim_id
-            )));
-        }
-    }
-    for (claim_id, _) in fact_projections.fact_term_entries.keys() {
-        if !fact_projections.fact_index_entries.contains_key(claim_id) {
-            return Err(PostgresStoreError::Corruption(format!(
-                "fact term projection {:?} has no indexed fact row",
-                claim_id
-            )));
-        }
-    }
-    let mut parts = ProjectionSnapshotParts::from_snapshot(snapshot);
-    fact_projections.install_external_fact_indexes(&mut parts);
-    Ok(ProjectionSnapshot::from_parts(parts)?)
-}
-
 pub(super) fn projection_snapshot_with_resource_lanes(
     snapshot: &ProjectionSnapshot,
     resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
@@ -396,11 +285,9 @@ pub(super) fn projection_snapshot_with_resource_lanes(
 
 fn projection_snapshot_with_store_authority(
     snapshot: &ProjectionSnapshot,
-    fact_projections: PhysicalFactProjections,
+    fact_projection: &ProjectionSnapshot,
     resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
 ) -> Result<ProjectionSnapshot> {
-    let mut parts = ProjectionSnapshotParts::from_snapshot(snapshot);
-    fact_projections.install_store_fact_authority(&mut parts);
-    parts.resource_lanes = resource_lanes;
-    Ok(ProjectionSnapshot::from_parts(parts)?)
+    let snapshot = snapshot.with_store_authority_from(fact_projection)?;
+    projection_snapshot_with_resource_lanes(&snapshot, resource_lanes)
 }

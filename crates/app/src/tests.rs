@@ -10,7 +10,7 @@ use mfm_program::{
     StateSpec, TypedProgramLaunchPlan,
 };
 use mfm_program_derive::{MfmConfig, MfmFactType, MfmValue, PublicOutputs};
-use mfm_store::v1::{ExecutionClaimStore as _, RunEventStore as _};
+use mfm_store::v1::ExecutionClaimStore as _;
 use serde::{Deserialize, Serialize};
 
 #[test]
