@@ -201,7 +201,6 @@ fn sample_portfolio_config() -> Value {
                             }
                         ]
                     },
-                    "decimals": 18,
                     "underlying_symbol_id": null,
                     "metadata": {}
                 }

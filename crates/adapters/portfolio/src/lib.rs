@@ -822,7 +822,6 @@ fn btc_holding_candidate(
             Some(requirement.key.network_id.clone()),
         )
     })?;
-    let decimals = requirement.symbol.decimals.unwrap_or(8);
     holding_candidate_from_normalized(
         &requirement.key,
         store_commit_order,
@@ -830,7 +829,7 @@ fn btc_holding_candidate(
         NormalizedHoldingFields {
             balance_reader_kind: balance_reader_kind(&requirement.symbol.balance_reader).to_owned(),
             raw_dec: normalized.balance_sats.to_string(),
-            decimals,
+            decimals: 8,
             observation_anchor: ObservationAnchor::Bitcoin {
                 height: normalized.anchor_height,
                 block_hash: normalized.anchor_hash,
@@ -863,7 +862,6 @@ fn evm_holding_candidate(
             Some(requirement.key.network_id.clone()),
         )
     })?;
-    let decimals = requirement.symbol.decimals.unwrap_or(normalized.decimals);
     holding_candidate_from_normalized(
         &requirement.key,
         store_commit_order,
@@ -871,7 +869,7 @@ fn evm_holding_candidate(
         NormalizedHoldingFields {
             balance_reader_kind: balance_reader_kind(&requirement.symbol.balance_reader).to_owned(),
             raw_dec: normalized.raw_wei,
-            decimals,
+            decimals: normalized.decimals,
             observation_anchor: ObservationAnchor::Evm {
                 chain_id: normalized.chain_id,
                 block_number: normalized.block_number,

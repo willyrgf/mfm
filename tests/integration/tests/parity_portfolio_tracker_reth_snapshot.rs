@@ -62,7 +62,6 @@ async fn parity_portfolio_snapshot_hard_fails_without_platform_holding_facts() {
                                     "unit_price_dec": "1800.00"
                                 }]
                             },
-                            "decimals": 18,
                             "underlying_symbol_id": null,
                             "metadata": {}
                         }],

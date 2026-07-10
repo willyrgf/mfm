@@ -64,7 +64,6 @@ fn test_symbol(network_id: &str) -> SymbolConfig {
                 unit_price_dec: "2.5".parse().expect("valid unit price"),
             }],
         },
-        decimals: Some(18),
         underlying_symbol_id: None,
         metadata: PublicMetadata::default(),
     }

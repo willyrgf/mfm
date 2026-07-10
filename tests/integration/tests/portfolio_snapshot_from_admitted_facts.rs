@@ -406,7 +406,6 @@ fn dual_mainnet_portfolio_json() -> serde_json::Value {
                     "kind": "native_balance",
                     "role": "native",
                     "network_id": "ethereum-mainnet",
-                    "decimals": 18,
                     "balance_reader": { "kind": "native_balance" },
                     "valuation": {
                         "quotes": [{
@@ -423,7 +422,6 @@ fn dual_mainnet_portfolio_json() -> serde_json::Value {
                     "kind": "native_balance",
                     "role": "native",
                     "network_id": "bitcoin-mainnet",
-                    "decimals": 8,
                     "balance_reader": { "kind": "native_balance" },
                     "valuation": {
                         "quotes": [{

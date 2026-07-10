@@ -346,7 +346,6 @@ mod tests {
                         unit_price_dec: "1800.00".parse().expect("valid unit price"),
                     }],
                 },
-                decimals: Some(18),
                 underlying_symbol_id: None,
                 metadata: PublicMetadata::default(),
             }],

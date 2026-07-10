@@ -157,8 +157,7 @@ fn portfolio_payload() -> serde_json::Value {
                             }
                         ]
                     },
-                    "decimals": 18,
-                    "underlying_symbol_id": null,
+                        "underlying_symbol_id": null,
                     "metadata": {}
                 }
             ],

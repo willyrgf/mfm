@@ -28,7 +28,6 @@ fn symbol_config_accepts_fixed_unit_price_only() {
                 unit_price_dec: "1800.00".parse().expect("valid unit price"),
             }],
         },
-        decimals: Some(18),
         underlying_symbol_id: None,
         metadata: Default::default(),
     };
@@ -66,7 +65,6 @@ fn symbol_config_rejects_duplicate_quote_routes() {
                 },
             ],
         },
-        decimals: Some(18),
         underlying_symbol_id: None,
         metadata: Default::default(),
     };

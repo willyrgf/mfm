@@ -339,7 +339,6 @@ mod tests {
                                 }
                             ]
                         },
-                        "decimals": 18,
                         "underlying_symbol_id": null,
                         "metadata": {}
                     }
@@ -384,7 +383,6 @@ display_symbol = "ETH"
 kind = "native_balance"
 role = "native"
 network_id = "ethereum-mainnet"
-decimals = 18
 
 [portfolio.symbol_configs.balance_reader]
 kind = "native_balance"

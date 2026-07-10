@@ -881,7 +881,6 @@ source_ref = "ethereum-mainnet"
                                 }
                             ]
                         },
-                        "decimals": 18,
                         "underlying_symbol_id": null,
                         "metadata": {}
                     }
@@ -937,7 +936,6 @@ source_ref = "ethereum-mainnet"
                                 }
                             ]
                         },
-                        "decimals": 8,
                         "underlying_symbol_id": null,
                         "metadata": {}
                     }

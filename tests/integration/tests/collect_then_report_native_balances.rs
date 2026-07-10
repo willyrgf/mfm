@@ -33,6 +33,7 @@ use mfm_integration_tests::test_support::{
 use mfm_store::v1::{
     AsyncInMemoryRunStore, ProjectionSnapshot, RetainedArtifactReadProvider, RunEventStore,
 };
+use serde_json::Value;
 
 const BTC_ADDRESS: &str = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
 const ETH_ACCOUNT: &str = "0x000000000000000000000000000000000000dead";
@@ -139,15 +140,40 @@ async fn collect_then_report_completes_from_collector_written_platform_holdings(
     let public_output = report
         .public_output
         .expect("completed report returns public output");
-    let json = public_output
-        .json
-        .expect("public output json")
-        .as_object()
-        .expect("object")
-        .clone();
-    assert!(
-        json.contains_key("snapshot") || json.values().any(|v| v.get("network_pins").is_some()),
-        "public output should carry snapshot material: {json:?}"
+    let json = public_output.json.expect("public output json");
+    let snapshot = find_public_object(&json, is_snapshot_public_object)
+        .expect("public output should carry snapshot material");
+    assert_observation(
+        snapshot,
+        "btc.native.bitcoin-mainnet",
+        "100000",
+        8,
+        "0.00100000",
+        "50.00000000",
+    );
+    assert_observation(
+        snapshot,
+        "eth.native.ethereum-mainnet",
+        "1000000000000000000",
+        18,
+        "1.000000000000000000",
+        "1800.000000000000000000",
+    );
+    let report = find_public_object(&json, is_report_public_object)
+        .expect("public output should carry report material");
+    let usd_total = report["totals_by_quote"]
+        .as_array()
+        .expect("report quote totals")
+        .iter()
+        .find(|total| total.get("quote").and_then(Value::as_str) == Some("USD"))
+        .expect("USD portfolio total");
+    assert_eq!(
+        usd_total.get("assets_value_dec").and_then(Value::as_str),
+        Some("1850.000000000000000000")
+    );
+    assert_eq!(
+        usd_total.get("net_value_dec").and_then(Value::as_str),
+        Some("1850.000000000000000000")
     );
     services
         .verify_replay_for_run(&launch.run_id.parse().expect("report run id"))
@@ -327,6 +353,74 @@ fn assert_platform_holding_kind(projection: &ProjectionSnapshot, fact_kind: &str
     );
 }
 
+fn find_public_object(
+    value: &Value,
+    predicate: fn(&serde_json::Map<String, Value>) -> bool,
+) -> Option<&serde_json::Map<String, Value>> {
+    match value {
+        Value::Object(object) => {
+            if predicate(object) {
+                return Some(object);
+            }
+            object
+                .values()
+                .find_map(|child| find_public_object(child, predicate))
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|child| find_public_object(child, predicate)),
+        _ => None,
+    }
+}
+
+fn is_snapshot_public_object(object: &serde_json::Map<String, Value>) -> bool {
+    object.contains_key("wallets") && object.contains_key("symbol_configs")
+}
+
+fn is_report_public_object(object: &serde_json::Map<String, Value>) -> bool {
+    object.contains_key("wallet_summaries") && object.contains_key("totals_by_quote")
+}
+
+fn assert_observation(
+    snapshot: &serde_json::Map<String, Value>,
+    symbol_id: &str,
+    raw_dec: &str,
+    decimals: u64,
+    amount_dec: &str,
+    value_dec: &str,
+) {
+    let observation = snapshot["wallets"]
+        .as_array()
+        .expect("snapshot wallets")
+        .iter()
+        .flat_map(|wallet| wallet["observations"].as_array().into_iter().flatten())
+        .find(|observation| observation.get("symbol_id").and_then(Value::as_str) == Some(symbol_id))
+        .unwrap_or_else(|| panic!("missing observation for {symbol_id}: {snapshot:?}"));
+    let quantity = observation.get("quantity").expect("observation quantity");
+    assert_eq!(
+        quantity.get("raw_dec").and_then(Value::as_str),
+        Some(raw_dec)
+    );
+    assert_eq!(
+        quantity.get("decimals").and_then(Value::as_u64),
+        Some(decimals)
+    );
+    assert_eq!(
+        quantity.get("amount_dec").and_then(Value::as_str),
+        Some(amount_dec)
+    );
+    let usd_value = observation["values"]
+        .as_array()
+        .expect("observation values")
+        .iter()
+        .find(|value| value.get("quote").and_then(Value::as_str) == Some("USD"))
+        .expect("USD observation value");
+    assert_eq!(
+        usd_value.get("value_dec").and_then(Value::as_str),
+        Some(value_dec)
+    );
+}
+
 fn btc_balance_config_json() -> serde_json::Value {
     serde_json::json!({
         "network": "bitcoin-mainnet",
@@ -409,7 +503,6 @@ fn dual_mainnet_portfolio_json() -> serde_json::Value {
                             "unit_price_dec": "1800.00"
                         }]
                     },
-                    "decimals": 18,
                     "underlying_symbol_id": null,
                     "metadata": {}
                 },
@@ -428,7 +521,6 @@ fn dual_mainnet_portfolio_json() -> serde_json::Value {
                             "unit_price_dec": "50000.00"
                         }]
                     },
-                    "decimals": 8,
                     "underlying_symbol_id": null,
                     "metadata": {}
                 }

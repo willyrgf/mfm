@@ -62,7 +62,6 @@
 //!                             }
 //!                         ]
 //!                     },
-//!                     "decimals": 18,
 //!                     "underlying_symbol_id": null,
 //!                     "metadata": {}
 //!                 }
@@ -336,7 +335,6 @@ mod tests {
                                 }
                             ]
                         },
-                        "decimals": 18,
                         "underlying_symbol_id": null,
                         "metadata": {}
                     }

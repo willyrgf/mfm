@@ -48,7 +48,6 @@ display_symbol = "ETH"
 kind = "native_balance"
 role = "native"
 network_id = "ethereum-mainnet"
-decimals = 18
 metadata = {}
 
 [portfolio.symbol_configs.balance_reader]
@@ -66,7 +65,6 @@ display_symbol = "BTC"
 kind = "native_balance"
 role = "native"
 network_id = "bitcoin-mainnet"
-decimals = 8
 metadata = {}
 
 [portfolio.symbol_configs.balance_reader]
@@ -77,4 +75,3 @@ kind = "native_balance"
 quotes = [
   { quote = "USD", priced_symbol_id = "btc.native.bitcoin-mainnet", unit_price_dec = "0.00" },
 ]
-

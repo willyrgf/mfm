@@ -98,6 +98,7 @@ pub enum SymbolRole {
 
 /// Canonical symbol configuration referenced from portfolio and wallet configs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.portfolio",
     name = "symbol-config",
@@ -120,8 +121,6 @@ pub struct SymbolConfig {
     pub balance_reader: BalanceReaderConfig,
     /// Quote valuation routes for the symbol.
     pub valuation: SymbolValuationConfig,
-    /// Optional decimals used to render raw quantities.
-    pub decimals: Option<u8>,
     /// Optional underlying symbol for protocol-backed exposures.
     pub underlying_symbol_id: Option<SymbolId>,
     /// Canonical metadata surface.
@@ -141,7 +140,6 @@ impl SymbolConfig {
         protocol: Option<String>,
         balance_reader: BalanceReaderConfig,
         valuation: SymbolValuationConfig,
-        decimals: Option<u8>,
         underlying_symbol_id: Option<String>,
         metadata: BTreeMap<String, String>,
     ) -> Result<Self, SymbolConfigError> {
@@ -171,7 +169,6 @@ impl SymbolConfig {
             protocol,
             balance_reader,
             valuation,
-            decimals,
             underlying_symbol_id,
             metadata,
         }

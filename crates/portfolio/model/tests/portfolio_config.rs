@@ -173,7 +173,6 @@ fn validated_portfolio_config_indexes_normalized_authority() {
                         }
                     ]
                 },
-                "decimals": 18,
                 "underlying_symbol_id": null,
                 "metadata": {}
             }
@@ -279,13 +278,18 @@ fn typed_metadata_rejects_non_string_values() {
         decode_portfolio_config(&portfolio_metadata),
         Err(PortfolioConfigError::Decode(_))
     ));
+}
 
-    let mut float_decimals = canonical_config_json();
-    float_decimals["symbol_configs"][0]["decimals"] = json!(18.5);
-    assert!(matches!(
-        decode_portfolio_config(&float_decimals),
-        Err(PortfolioConfigError::Decode(_))
-    ));
+#[test]
+fn report_symbol_scale_overrides_are_rejected() {
+    for (index, decimals) in [(0, 18), (2, 7)] {
+        let mut symbol_scale = canonical_config_json();
+        symbol_scale["symbol_configs"][index]["decimals"] = json!(decimals);
+        assert!(matches!(
+            decode_portfolio_config(&symbol_scale),
+            Err(PortfolioConfigError::Decode(message)) if message.contains("unknown field")
+        ));
+    }
 }
 
 #[test]
@@ -600,7 +604,6 @@ fn canonical_config_json() -> Value {
                         }
                     ]
                 },
-                "decimals": 18,
                 "underlying_symbol_id": null,
                 "metadata": {}
             },
@@ -629,7 +632,6 @@ fn canonical_config_json() -> Value {
                         }
                     ]
                 },
-                "decimals": 6,
                 "underlying_symbol_id": null,
                 "metadata": {}
             },
@@ -657,7 +659,6 @@ fn canonical_config_json() -> Value {
                         }
                     ]
                 },
-                "decimals": 18,
                 "underlying_symbol_id": null,
                 "metadata": {}
             }

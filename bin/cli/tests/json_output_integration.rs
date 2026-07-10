@@ -555,7 +555,6 @@ display_symbol = "ETH"
 kind = "native_balance"
 role = "native"
 network_id = "ethereum-mainnet"
-decimals = 18
 
 [portfolio.symbol_configs.balance_reader]
 kind = "native_balance"

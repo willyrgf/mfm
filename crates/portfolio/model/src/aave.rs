@@ -641,7 +641,6 @@ mod tests {
             valuation: SymbolValuationConfig {
                 quotes: vec![fixed_usd_quote(priced_symbol_id)],
             },
-            decimals: Some(6),
             underlying_symbol_id: underlying_symbol_id
                 .map(|symbol_id| symbol_id.parse().expect("valid underlying symbol id")),
             metadata: PublicMetadata::default(),
