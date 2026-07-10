@@ -1425,8 +1425,7 @@ fn fact_query_evidence_artifact(
         ),
         mfm_facts::DescriptorCatalogWatermark::new(1),
         mfm_facts::FactProjectionGeneration::new(1),
-        3,
-        mfm_facts::StoreCommitWatermark::new(3),
+        mfm_facts::StoreCommitOrder::new(3),
     );
     let receipt = signed_fact_query_receipt_for_test(SignedFactQueryReceiptFixtureInputForTest {
         plan_hash: &plan_hash,

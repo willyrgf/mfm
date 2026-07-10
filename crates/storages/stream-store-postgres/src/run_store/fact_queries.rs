@@ -111,15 +111,13 @@ async fn load_store_read_frontier_tx(
 ) -> Result<mfm_facts::StoreReadFrontier> {
     let descriptor_catalog_watermark = load_descriptor_catalog_watermark_tx(tx).await?;
     let projection_generation = load_fact_projection_generation_tx(tx).await?;
-    let max_included_store_commit_order =
-        load_max_included_store_commit_order_tx(tx, plan.query_scope()).await?;
+    let store_commit_order = load_store_commit_order_tx(tx, plan.query_scope()).await?;
     Ok(mfm_facts::StoreReadFrontier::new(
         plan.store_scope().clone(),
         plan.query_scope().clone(),
         descriptor_catalog_watermark,
         projection_generation,
-        max_included_store_commit_order,
-        mfm_facts::StoreCommitWatermark::new(max_included_store_commit_order),
+        mfm_facts::StoreCommitOrder::new(store_commit_order),
     ))
 }
 
@@ -162,12 +160,12 @@ async fn load_fact_projection_generation_tx(
     Ok(mfm_facts::FactProjectionGeneration::new(generation))
 }
 
-async fn load_max_included_store_commit_order_tx(
+async fn load_store_commit_order_tx(
     tx: &mut Transaction<'_, Postgres>,
     query_scope: &mfm_facts::FactQueryScope,
 ) -> Result<u64> {
     let row = sqlx::query(
-        "SELECT COALESCE(MAX(store_commit_order), 0)::bigint AS commit_watermark \
+        "SELECT COALESCE(MAX(store_commit_order), 0)::bigint AS store_commit_order \
          FROM fact_index \
          WHERE audience = $1 AND visibility_scope = $2",
     )
@@ -179,7 +177,7 @@ async fn load_max_included_store_commit_order_tx(
     i64_to_nonnegative_u64(
         required_i64(
             &row,
-            "commit_watermark",
+            "store_commit_order",
             "fact_index.store_commit_order watermark",
         )?,
         "fact query commit watermark",

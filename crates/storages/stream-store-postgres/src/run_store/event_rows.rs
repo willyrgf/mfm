@@ -21,9 +21,10 @@ pub(super) async fn load_run_stream_tx(
 ) -> Result<Vec<KernelEventEnvelope>> {
     validate_persisted_run_authority_tx(tx, run_id).await?;
     let rows = sqlx::query(
-        "SELECT run_id, seq, ordinal, event_id, event_schema_id, spec_hash, commit_key, \
-         logical_key, payload_hash, payload_canonical_json \
-         FROM run_events WHERE run_id = $1 ORDER BY seq ASC, ordinal ASC",
+        "SELECT e.run_id, e.seq, e.ordinal, c.store_commit_order, e.event_id, e.event_schema_id, \
+         e.spec_hash, e.commit_key, e.logical_key, e.payload_hash, e.payload_canonical_json \
+         FROM run_events e JOIN commits c ON c.run_id = e.run_id AND c.seq = e.seq \
+         WHERE e.run_id = $1 ORDER BY e.seq ASC, e.ordinal ASC",
     )
     .bind(run_id.as_str())
     .fetch_all(&mut **tx)
@@ -48,6 +49,9 @@ pub(super) fn event_envelope_from_row(row: PgRow) -> Result<KernelEventEnvelope>
         ordinal: row
             .try_get("ordinal")
             .map_err(|error| database_error("failed to decode run event ordinal", error))?,
+        store_commit_order: row.try_get("store_commit_order").map_err(|error| {
+            database_error("failed to decode run event store commit order", error)
+        })?,
         event_id: row
             .try_get("event_id")
             .map_err(|error| database_error("failed to decode run event event_id", error))?,
@@ -93,6 +97,10 @@ pub(super) fn event_envelope_from_row(row: PgRow) -> Result<KernelEventEnvelope>
             event_schema_id: parse_identity::<SchemaId>(&row.event_schema_id)?,
             run_id: parse_identity::<RunId>(&row.run_id)?,
             seq: StreamSeq::new(i64_to_positive_u64(row.seq, "run_events.seq")?)?,
+            store_commit_order: StoreCommitOrder::new(i64_to_positive_u64(
+                row.store_commit_order,
+                "commits.store_commit_order",
+            )?),
             ordinal: CommitOrdinal::new(ordinal),
             spec_hash: parse_identity::<mfm_ids::SpecHash>(&row.spec_hash)?,
             commit_key: CommitKey::new(row.commit_key)?,
@@ -107,6 +115,7 @@ pub(super) struct RunEventRow {
     pub(super) run_id: String,
     pub(super) seq: i64,
     pub(super) ordinal: i32,
+    pub(super) store_commit_order: i64,
     pub(super) event_id: String,
     pub(super) event_schema_id: String,
     pub(super) spec_hash: String,

@@ -1587,7 +1587,7 @@ mod tests {
         DescriptorCatalogWatermark, FactClaimId, FactFieldExposure, FactFieldExtraction,
         FactFieldValueType, FactProducerProvenance, FactProjectionGeneration, FactQueryReceipt,
         FactQueryReceiptMaterial, FactResponseEvidence, FactSubjectRef, InternalFactRef,
-        InternalFactRefParts, StoreCommitWatermark, StoreIdentity, StoreKeyId, StoreReadFrontier,
+        InternalFactRefParts, StoreCommitOrder, StoreIdentity, StoreKeyId, StoreReadFrontier,
         StoreReadFrontierType, StoreReceiptAuthentication, StoreReceiptAuthenticationScheme,
     };
     use mfm_ids::{
@@ -2188,8 +2188,7 @@ mod tests {
             FactQueryScope::new(FactAudience::Control, FactVisibilityScope::Default),
             DescriptorCatalogWatermark::new(1),
             FactProjectionGeneration::new(1),
-            11,
-            StoreCommitWatermark::new(11),
+            StoreCommitOrder::new(11),
         );
         let plan_hash = fact_query_plan_hash(plan).expect("plan hash");
         let material = FactQueryReceiptMaterial::from_rows(

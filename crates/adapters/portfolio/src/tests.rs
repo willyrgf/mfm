@@ -13,8 +13,8 @@ use mfm_facts::{
     fact_descriptor_hash, DescriptorCatalogWatermark, FactAudience, FactClaimId,
     FactFieldValueType, FactProducerProvenance, FactProjectionGeneration, FactQueryReceipt,
     FactQueryResultRow, FactQueryScope, FactResponseEvidence, FactSubjectRef, FactVisibility,
-    FactVisibilityScope, InternalFactRef, InternalFactRefParts, StoreCommitWatermark,
-    StoreIdentity, StoreKeyId, StoreReadFrontier, StoreReceiptAuthenticationScheme, StoreScopeRef,
+    FactVisibilityScope, InternalFactRef, InternalFactRefParts, StoreCommitOrder, StoreIdentity,
+    StoreKeyId, StoreReadFrontier, StoreReceiptAuthenticationScheme, StoreScopeRef,
 };
 use mfm_facts::{CoverageStatus, HoldingSourceStatus};
 use mfm_ids::{
@@ -735,8 +735,7 @@ fn signed_receipt_for_plan(
         FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
         DescriptorCatalogWatermark::new(1),
         FactProjectionGeneration::new(1),
-        11,
-        StoreCommitWatermark::new(11),
+        StoreCommitOrder::new(11),
     );
     let plan_hash = mfm_facts::fact_query_plan_hash(plan).expect("plan hash");
     signed_fact_query_receipt_for_test(SignedFactQueryReceiptFixtureInputForTest {

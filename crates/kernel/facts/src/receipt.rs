@@ -34,19 +34,33 @@ impl FactProjectionGeneration {
     }
 }
 
-/// Store commit watermark bound into query receipts.
+/// Store-wide commit coordinate bound into query receipts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct StoreCommitWatermark(u64);
+pub struct StoreCommitOrder(u64);
 
-impl StoreCommitWatermark {
-    /// Creates a store commit watermark.
+impl StoreCommitOrder {
+    /// Empty store frontier used when a query includes no committed facts.
+    pub const EMPTY: Self = Self(0);
+
+    /// First committed store coordinate.
+    pub const FIRST: Self = Self(1);
+
+    /// Creates a store commit coordinate.
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
 
-    /// Returns the watermark value.
+    /// Returns the coordinate value.
     pub const fn as_u64(self) -> u64 {
         self.0
+    }
+
+    /// Advances the coordinate, returning an error-free `None` only on overflow.
+    pub const fn checked_next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
     }
 }
 
@@ -71,8 +85,7 @@ pub struct StoreReadFrontier {
     pub(crate) query_scope: FactQueryScope,
     pub(crate) descriptor_catalog_watermark: DescriptorCatalogWatermark,
     pub(crate) projection_generation: FactProjectionGeneration,
-    pub(crate) max_included_store_commit_order: u64,
-    pub(crate) commit_watermark: StoreCommitWatermark,
+    pub(crate) store_commit_order: StoreCommitOrder,
 }
 
 impl StoreReadFrontier {
@@ -82,16 +95,14 @@ impl StoreReadFrontier {
         query_scope: FactQueryScope,
         descriptor_catalog_watermark: DescriptorCatalogWatermark,
         projection_generation: FactProjectionGeneration,
-        max_included_store_commit_order: u64,
-        commit_watermark: StoreCommitWatermark,
+        store_commit_order: StoreCommitOrder,
     ) -> Self {
         Self {
             store_scope,
             query_scope,
             descriptor_catalog_watermark,
             projection_generation,
-            max_included_store_commit_order,
-            commit_watermark,
+            store_commit_order,
         }
     }
 
@@ -115,14 +126,9 @@ impl StoreReadFrontier {
         self.projection_generation
     }
 
-    /// Returns the maximum included store commit order.
-    pub const fn max_included_store_commit_order(&self) -> u64 {
-        self.max_included_store_commit_order
-    }
-
-    /// Returns the commit watermark.
-    pub const fn commit_watermark(&self) -> StoreCommitWatermark {
-        self.commit_watermark
+    /// Returns the maximum committed store coordinate included by the query.
+    pub const fn store_commit_order(&self) -> StoreCommitOrder {
+        self.store_commit_order
     }
 }
 

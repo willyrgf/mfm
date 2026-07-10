@@ -4212,6 +4212,7 @@ fn store_owns_envelope_sequence_ordinal_and_event_id() {
     };
     let first_event = &first_batch.events()[0];
     assert_eq!(first_event.seq(), StreamSeq::FIRST);
+    assert_eq!(first_event.store_commit_order().as_u64(), 1);
     assert_eq!(first_event.ordinal().as_u32(), 0);
     assert_eq!(first_event.commit_key().as_str(), "run-start");
     assert_eq!(first_event.logical_key().as_str(), "run:admission");
@@ -4230,8 +4231,25 @@ fn store_owns_envelope_sequence_ordinal_and_event_id() {
     };
     let second_event = &second_batch.events()[0];
     assert_eq!(second_event.seq(), StreamSeq::new(2).unwrap());
+    assert_eq!(second_event.store_commit_order().as_u64(), 2);
     assert_eq!(second_event.ordinal().as_u32(), 0);
     assert_ne!(first_event.event_id(), second_event.event_id());
+
+    let other_run = run_id_with_saga_policy(142, &SagaPolicySpec::NoSideEffects);
+    let other_request = run_start_request(other_run.clone(), "other-run-start");
+    let other_plan = test_prepared_commit_plan(
+        other_request.clone(),
+        other_request.required_artifacts().to_vec(),
+    )
+    .expect("prepare second run start");
+    let CommitOutcome::Appended(other_batch) = store
+        .append_test_commit_plan(other_plan)
+        .expect("append second run start")
+    else {
+        panic!("second run start should append");
+    };
+    assert_eq!(other_batch.events()[0].seq(), StreamSeq::FIRST);
+    assert_eq!(other_batch.events()[0].store_commit_order().as_u64(), 3);
 }
 
 #[test]
@@ -7797,14 +7815,17 @@ fn fact_record_projection_constructor_derives_event_coordinates() {
     let index = mfm_store::v1::FactIndexProjection::from_record_projection(
         &without_evidence,
         event.commit_key().clone(),
-        event.seq().as_u64(),
+        event.store_commit_order().as_u64(),
         "2026-01-02T03:04:06Z",
     )
     .expect("index constructor")
     .expect("indexed fact projection");
     assert!(without_evidence.matches_index_projection(&index));
     assert_eq!(index.fact_claim_id, without_evidence.fact_claim_id);
-    assert_eq!(index.store_commit_order, event.seq().as_u64());
+    assert_eq!(
+        index.store_commit_order,
+        event.store_commit_order().as_u64()
+    );
     assert_eq!(index.recorded_at, "2026-01-02T03:04:06Z");
 
     let mut private_record = without_evidence.clone();

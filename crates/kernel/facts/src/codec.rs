@@ -1001,8 +1001,7 @@ fn parse_store_read_frontier(value: &serde_json::Value) -> Result<StoreReadFront
         QueryScopeWire::parse(json_required(object, "query_scope")?)?,
         DescriptorCatalogWatermark::new(json_u64(object, "descriptor_catalog_watermark")?),
         FactProjectionGeneration::new(json_u64(object, "projection_generation")?),
-        json_u64(object, "max_included_store_commit_order")?,
-        StoreCommitWatermark::new(json_u64(object, "commit_watermark")?),
+        StoreCommitOrder::new(json_u64(object, "store_commit_order")?),
     ))
 }
 
@@ -1857,12 +1856,8 @@ fn canonical_store_read_frontier_value(frontier: &StoreReadFrontier) -> Result<C
             CanonicalValue::Unsigned(frontier.projection_generation.as_u64()),
         ),
         (
-            "max_included_store_commit_order",
-            CanonicalValue::Unsigned(frontier.max_included_store_commit_order),
-        ),
-        (
-            "commit_watermark",
-            CanonicalValue::Unsigned(frontier.commit_watermark.as_u64()),
+            "store_commit_order",
+            CanonicalValue::Unsigned(frontier.store_commit_order.as_u64()),
         ),
     ])
 }

@@ -166,7 +166,6 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
         }
     }
     validate_trigger_contracts(pool).await?;
-    validate_append_xid_columns(pool).await?;
 
     let function_rows = sqlx::query(
         "SELECT p.proname \
@@ -350,33 +349,6 @@ fn trigger_type_has(trigger_type: i32, bit: i32) -> bool {
     trigger_type & bit == bit
 }
 
-async fn validate_append_xid_columns(pool: &PgPool) -> Result<()> {
-    let rows = sqlx::query(
-        "SELECT table_name, column_default \
-         FROM information_schema.columns \
-         WHERE table_schema = current_schema() \
-           AND column_name = 'append_xid' \
-           AND table_name = 'commits'",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
-    for table in APPEND_XID_TABLES {
-        let row = rows
-            .iter()
-            .find(|row| row.try_get::<String, _>("table_name").ok().as_deref() == Some(*table))
-            .ok_or_else(|| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
-        let default: Option<String> = row
-            .try_get("column_default")
-            .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Catalog))?;
-        if default.as_deref() != Some("pg_current_xact_id()") {
-            return Err(store_authority_error(PostgresStoreAuthorityError::Catalog));
-        }
-    }
-
-    Ok(())
-}
-
 async fn validate_store_metadata(
     pool: &PgPool,
     fact_receipt_trust_root: Option<FactQueryReceiptTrustRoot>,
@@ -487,6 +459,7 @@ fn store_authority_error(kind: PostgresStoreAuthorityError) -> PostgresStoreErro
 const REQUIRED_TABLES: &[&str] = &[
     "_sqlx_migrations",
     "store_metadata",
+    "store_commit_order",
     "fact_receipt_trust_root",
     "commits",
     "run_events",
@@ -523,10 +496,9 @@ const REQUIRED_INDEXES: &[&str] = &[
     "fact_index_terms_digest_idx",
 ];
 
-const REQUIRED_FUNCTIONS: &[&str] = &["mfm_set_append_xid", "mfm_reject_authority_mutation"];
+const REQUIRED_FUNCTIONS: &[&str] = &["mfm_reject_authority_mutation"];
 
 const REQUIRED_TRIGGERS: &[&str] = &[
-    "commits_set_append_xid",
     "store_metadata_no_update",
     "fact_receipt_trust_root_no_update",
     "commits_no_update",
@@ -540,9 +512,9 @@ const REQUIRED_TRIGGERS: &[&str] = &[
 
 const REQUIRED_CONSTRAINTS: &[&str] = &[
     "artifact_blobs_byte_len_max",
-    "commits_sort_key_v1_length",
-    "commits_sort_key_v1_prefix",
-    "commits_sort_key_not_sentinel",
+    "commits_store_commit_order_positive",
+    "commits_store_commit_order_key",
+    "store_commit_order_nonnegative",
     "store_metadata_store_scope_id_v1",
     "fact_receipt_trust_root_store_identity_v1",
     "fact_receipt_trust_root_scheme_v1",
@@ -594,8 +566,8 @@ const REQUIRED_CONSTRAINTS: &[&str] = &[
     "fact_index_terms_u64_range",
     "fact_index_terms_value_shape",
     "fact_projection_metadata_generation_positive",
-    "run_observation_cursors_version_v1",
-    "run_observation_cursors_sort_key_v1_length",
+    "run_observation_cursors_version_v2",
+    "run_observation_cursors_store_commit_order_nonnegative",
 ];
 
 const REQUIRED_CURSOR_COLUMNS: &[&str] = &[
@@ -603,12 +575,9 @@ const REQUIRED_CURSOR_COLUMNS: &[&str] = &[
     "cursor_version",
     "store_epoch",
     "cursor_kind",
-    "append_xid",
-    "commit_sort_key",
+    "store_commit_order",
     "issued_at",
 ];
-
-const APPEND_XID_TABLES: &[&str] = &["commits"];
 
 const IMMUTABLE_TABLES: &[&str] = &[
     "store_metadata",
@@ -634,16 +603,10 @@ struct FunctionContract<'a> {
     required_definition_snippets: &'a [&'a str],
 }
 
-const REQUIRED_FUNCTION_CONTRACTS: &[FunctionContract<'_>] = &[
-    FunctionContract {
-        name: "mfm_set_append_xid",
-        required_definition_snippets: &["NEW.append_xid", "pg_current_xact_id()"],
-    },
-    FunctionContract {
-        name: "mfm_reject_authority_mutation",
-        required_definition_snippets: &["RAISE EXCEPTION", "mfm authority tables are append-only"],
-    },
-];
+const REQUIRED_FUNCTION_CONTRACTS: &[FunctionContract<'_>] = &[FunctionContract {
+    name: "mfm_reject_authority_mutation",
+    required_definition_snippets: &["RAISE EXCEPTION", "mfm authority tables are append-only"],
+}];
 
 struct TriggerContract<'a> {
     name: &'a str,
@@ -657,17 +620,7 @@ struct TriggerContract<'a> {
     truncate: bool,
 }
 
-const REQUIRED_TRIGGER_CONTRACTS: &[TriggerContract<'_>] = &[TriggerContract {
-    name: "commits_set_append_xid",
-    table: "commits",
-    function: "mfm_set_append_xid",
-    row_level: true,
-    before: true,
-    insert: true,
-    update: false,
-    delete: false,
-    truncate: false,
-}];
+const REQUIRED_TRIGGER_CONTRACTS: &[TriggerContract<'_>] = &[];
 
 const FORBIDDEN_TABLES: &[&str] = &[
     "typed_run_heads",

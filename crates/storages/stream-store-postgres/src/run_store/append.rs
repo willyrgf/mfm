@@ -54,6 +54,8 @@ impl PostgresRunStore {
             .into());
         }
 
+        let store_commit_order = next_store_commit_order_tx(&mut tx).await?;
+
         verify_prepared_artifact_bundle_tx(&mut tx, &bundle).await?;
         let mut artifacts = load_artifacts(&mut tx, request.run_id()).await?;
         mfm_store::v1::backend::admit_artifact_evidence(
@@ -96,6 +98,7 @@ impl PostgresRunStore {
             projections: projections.clone(),
             resource_lane_authority: resource_lane_state.authority,
             actual_next_seq: next_seq_from_head(head)?,
+            store_commit_order,
         };
         let staged = match stage_prepared_commit_plan(&base, plan)? {
             StagedCommitOutcome::Staged(staged) => *staged,
@@ -132,6 +135,7 @@ impl PostgresRunStore {
             }
         }
         let batch = staged.batch().clone();
+        advance_store_commit_order_tx(&mut tx, batch.store_commit_order()).await?;
         let commit_id = mfm_store::v1::backend::derive_commit_id(
             request.run_id(),
             batch.seq(),
@@ -144,17 +148,10 @@ impl PostgresRunStore {
         let commit_seq = u64_to_i64(batch.seq().as_u64(), "commits.seq")?;
         let event_count = i32::try_from(batch.events().len())
             .map_err(|_| PostgresStoreError::Corruption("event count overflow".into()))?;
-        let commit_sort_key = derive_commit_sort_key(
-            request.run_id(),
-            batch.seq(),
-            request.commit_key(),
-            &commit_id,
-            &final_authority.commit_batch_hash,
-        )?;
         sqlx::query(
             "INSERT INTO commits \
-             (commit_id, run_id, seq, commit_key, commit_purpose, prepared_commit_plan_fingerprint, \
-              commit_batch_hash, commit_sort_key, event_count) \
+            (commit_id, run_id, seq, commit_key, commit_purpose, prepared_commit_plan_fingerprint, \
+              commit_batch_hash, store_commit_order, event_count) \
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
         )
         .bind(&commit_id)
@@ -164,7 +161,10 @@ impl PostgresRunStore {
         .bind(plan.purpose_name())
         .bind(fingerprint.as_digest().as_str())
         .bind(&final_authority.commit_batch_hash)
-        .bind(commit_sort_key)
+        .bind(u64_to_i64(
+            batch.store_commit_order().as_u64(),
+            "commits.store_commit_order",
+        )?)
         .bind(event_count)
         .execute(&mut *tx)
         .await

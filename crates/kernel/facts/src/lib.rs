@@ -98,7 +98,7 @@ pub use receipt::{
     DescriptorCatalogWatermark, FactProjectionGeneration, FactQueryEvidence, FactQueryReceipt,
     FactQueryReceiptMaterial, FactQueryReceiptTrustRootMaterial, FactQueryResult,
     FactQueryResultMismatch, FactQueryResultRow, FactSelectionEvidence, QueryResultCardinality,
-    ReturnedFactFieldSummary, ReturnedFieldSummaries, StoreCommitWatermark, StoreReadFrontier,
+    ReturnedFactFieldSummary, ReturnedFieldSummaries, StoreCommitOrder, StoreReadFrontier,
     StoreReadFrontierType, StoreReceiptAuthentication, StoreReceiptAuthenticationScheme,
 };
 pub use scalar::FactCanonicalScalar;

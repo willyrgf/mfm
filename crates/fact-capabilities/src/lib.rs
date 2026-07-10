@@ -344,7 +344,7 @@ mod tests {
         FactProducerProvenance, FactProjectionGeneration, FactQueryScope, FactResponseEvidence,
         FactSubjectRef, FactVisibility, FactVisibilityScope, InternalFactRef, InternalFactRefParts,
         NullOrdering, ReturnedFactFieldSummary, ReturnedFieldSummaries, ScopeDecisionEvidence,
-        SortDirection, StoreCommitWatermark, StoreIdentity, StoreKeyId, StoreReadFrontier,
+        SortDirection, StoreCommitOrder, StoreIdentity, StoreKeyId, StoreReadFrontier,
         StoreReadFrontierType, StoreReceiptAuthentication, StoreReceiptAuthenticationScheme,
         StoreScopeRef,
     };
@@ -586,8 +586,7 @@ mod tests {
             plan.query_scope().clone(),
             DescriptorCatalogWatermark::new(1),
             FactProjectionGeneration::new(1),
-            11,
-            StoreCommitWatermark::new(11),
+            StoreCommitOrder::new(11),
         );
         let plan_hash = mfm_facts::fact_query_plan_hash(plan).expect("plan hash");
         let material = mfm_facts::FactQueryReceiptMaterial::from_rows(

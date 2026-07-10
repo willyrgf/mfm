@@ -1,14 +1,5 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
 
-CREATE FUNCTION mfm_set_append_xid() RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-BEGIN
-  NEW.append_xid = pg_current_xact_id();
-  RETURN NEW;
-END;
-$$;
-
 CREATE FUNCTION mfm_reject_authority_mutation() RETURNS trigger
 LANGUAGE plpgsql
 AS $$
@@ -34,6 +25,15 @@ VALUES (
   'mfm.store_scope.v1:' || encode(public.gen_random_bytes(16), 'hex'),
   'mfm.postgres.run_store.v1'
 );
+
+CREATE TABLE store_commit_order (
+  singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+  current_order BIGINT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT store_commit_order_nonnegative CHECK (current_order >= 0)
+);
+
+INSERT INTO store_commit_order (current_order) VALUES (0);
 
 CREATE TABLE fact_receipt_trust_root (
   singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
@@ -64,24 +64,17 @@ CREATE TABLE commits (
   commit_purpose TEXT NOT NULL,
   prepared_commit_plan_fingerprint TEXT NOT NULL,
   commit_batch_hash TEXT NOT NULL,
-  commit_sort_key BYTEA NOT NULL,
+  store_commit_order BIGINT NOT NULL,
   event_count INTEGER NOT NULL,
-  append_xid XID8 NOT NULL DEFAULT pg_current_xact_id(),
   committed_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
   PRIMARY KEY (run_id, seq),
   UNIQUE (commit_id),
   UNIQUE (run_id, commit_key),
-  UNIQUE (append_xid, commit_sort_key),
+  UNIQUE (store_commit_order),
   CONSTRAINT commits_seq_positive CHECK (seq >= 1),
   CONSTRAINT commits_event_count_positive CHECK (event_count >= 1),
-  CONSTRAINT commits_sort_key_v1_length CHECK (octet_length(commit_sort_key) = 32),
-  CONSTRAINT commits_sort_key_v1_prefix CHECK (get_byte(commit_sort_key, 0) = 1),
-  CONSTRAINT commits_sort_key_not_sentinel CHECK (commit_sort_key <> decode(repeat('00', 32), 'hex'))
+  CONSTRAINT commits_store_commit_order_positive CHECK (store_commit_order >= 1)
 );
-
-CREATE TRIGGER commits_set_append_xid
-BEFORE INSERT ON commits
-FOR EACH ROW EXECUTE FUNCTION mfm_set_append_xid();
 
 CREATE TABLE run_events (
   run_id TEXT NOT NULL,
@@ -430,11 +423,10 @@ CREATE TABLE run_observation_cursors (
   cursor_version TEXT NOT NULL,
   store_epoch TEXT NOT NULL,
   cursor_kind TEXT NOT NULL CHECK (cursor_kind IN ('frontier', 'row')),
-  append_xid XID8 NOT NULL,
-  commit_sort_key BYTEA NOT NULL,
+  store_commit_order BIGINT NOT NULL,
   issued_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
-  CONSTRAINT run_observation_cursors_version_v1 CHECK (cursor_version = 'mfm.run_observation.cursor.v1'),
-  CONSTRAINT run_observation_cursors_sort_key_v1_length CHECK (octet_length(commit_sort_key) = 32)
+  CONSTRAINT run_observation_cursors_version_v2 CHECK (cursor_version = 'mfm.run_observation.cursor.v2'),
+  CONSTRAINT run_observation_cursors_store_commit_order_nonnegative CHECK (store_commit_order >= 0)
 );
 
 CREATE TRIGGER store_metadata_no_update

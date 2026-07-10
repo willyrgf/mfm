@@ -24,8 +24,10 @@ they do not own workflow semantics.
 - The typed run stream for `run:{run_id}` is append-only and authoritative.
 - Store commits are atomic: a commit either appends every payload and updates derived projections,
   or appends nothing.
-- Event envelopes, sequence numbers, ordinals, event ids, logical keys, and projections are
-  store-owned.
+- Event envelopes, run-local sequence numbers, store-wide append coordinates, ordinals, event ids,
+  logical keys, and projections are store-owned. `StreamSeq` orders one run; the durable
+  `StoreCommitOrder` totally orders committed appends across the store and is the only authority
+  for cross-run fact ordering and fact-query commit watermarks.
 - Manifest, config, seed, fact, artifact, output, and spec identities are content-addressed.
 - Hashed structured data uses canonical JSON and must not contain floats.
 - Typed values, typed configs, public outputs, and event payloads must not contain secrets.
@@ -367,11 +369,10 @@ ownership, or terminal-state authority. Observation rows and list/watch cursors 
 they are read models, not authority.
 
 Production deployments must give the Postgres run store a dedicated MFM database tenancy. List/watch
-cursors order `commits` rows by `(append_xid, commit_sort_key)` behind a snapshot `xmin`
-frontier, and PostgreSQL transaction-id horizons are affected by cluster-level transaction activity;
-unrelated long-lived transactions can therefore delay observation frontier advancement. Cursor epochs
-and artifact cleanup have no public v1 maintenance entry points; any future maintenance role must
-first specify Postgres roles, ownership, credentials, and restore/clone runbooks.
+cursors order committed `commits` rows by the durable store-owned `store_commit_order` coordinate;
+the coordinate is assigned within the append transaction and advances only with a successful commit.
+Cursor epochs and artifact cleanup have no public v1 maintenance entry points; any future maintenance
+role must first specify Postgres roles, ownership, credentials, and restore/clone runbooks.
 
 v1 has two operational lane uses:
 

@@ -153,8 +153,7 @@ fn test_fact_query_evidence_with_returned_refs(
         query_scope,
         mfm_facts::DescriptorCatalogWatermark::new(1),
         mfm_facts::FactProjectionGeneration::new(1),
-        10,
-        mfm_facts::StoreCommitWatermark::new(10),
+        mfm_facts::StoreCommitOrder::new(10),
     );
     let rows = returned_refs
         .into_iter()
@@ -9234,6 +9233,7 @@ fn rewrite_envelope(
         event_schema_id: event.event_schema_id().clone(),
         run_id: event.run_id().clone(),
         seq,
+        store_commit_order: event.store_commit_order(),
         ordinal,
         spec_hash: event.spec_hash().clone(),
         commit_key,
@@ -9263,6 +9263,7 @@ fn rewrite_envelope_payload(
         event_schema_id,
         run_id: event.run_id().clone(),
         seq: event.seq(),
+        store_commit_order: event.store_commit_order(),
         ordinal: event.ordinal(),
         spec_hash: payload.spec_hash().clone(),
         commit_key: event.commit_key().clone(),

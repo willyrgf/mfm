@@ -136,12 +136,12 @@ pub(super) async fn load_resource_lane_state_tx(
     tx: &mut Transaction<'_, Postgres>,
 ) -> Result<ResourceLaneState> {
     let rows = sqlx::query(
-        "SELECT e.run_id, e.seq, e.ordinal, e.event_id, e.event_schema_id, e.spec_hash, \
+        "SELECT e.run_id, e.seq, e.ordinal, c.store_commit_order, e.event_id, e.event_schema_id, e.spec_hash, \
          e.commit_key, e.logical_key, e.payload_hash, e.payload_canonical_json \
          FROM run_events e \
          JOIN commits c ON c.run_id = e.run_id AND c.seq = e.seq \
          WHERE e.logical_key LIKE 'resource_lane:%' \
-         ORDER BY c.append_xid ASC, c.commit_sort_key ASC, e.ordinal ASC",
+         ORDER BY c.store_commit_order ASC, e.ordinal ASC",
     )
     .fetch_all(&mut **tx)
     .await

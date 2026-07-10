@@ -8,8 +8,7 @@ pub(super) struct StoreMetadata {
 
 #[derive(Debug, Clone)]
 pub(super) struct CursorPosition {
-    pub(super) append_xid: String,
-    pub(super) commit_sort_key: Vec<u8>,
+    pub(super) store_commit_order: u64,
     pub(super) kind: CursorKind,
 }
 
@@ -41,16 +40,14 @@ impl CursorKind {
 
 pub(super) struct ObservationRow {
     pub(super) observation: RunObservation,
-    pub(super) append_xid: String,
-    pub(super) commit_sort_key: Vec<u8>,
+    pub(super) store_commit_order: u64,
 }
 
 struct ObservationCandidate {
     run_id: RunId,
     head_seq: StreamSeq,
     commit_id: String,
-    append_xid: String,
-    commit_sort_key: Vec<u8>,
+    store_commit_order: u64,
     started_at: String,
     updated_at: String,
 }
@@ -140,12 +137,12 @@ pub(super) async fn read_run_observation_page_once(
     cursor: Option<&CursorPosition>,
     limit: u32,
 ) -> Result<RunObservationPage> {
-    let frontier_xid = sealed_frontier_xid(pool).await?;
+    let frontier_order = store_commit_frontier(pool).await?;
     let rows = match cursor {
         Some(cursor) => {
-            read_observation_watch_rows(pool, metadata, cursor, &frontier_xid, limit).await?
+            read_observation_watch_rows(pool, metadata, cursor, frontier_order, limit).await?
         }
-        None => read_observation_list_rows(pool, metadata, &frontier_xid, limit).await?,
+        None => read_observation_list_rows(pool, metadata, frontier_order, limit).await?,
     };
     let next_position = if cursor.is_some() && rows.len() == limit as usize {
         let last = rows
@@ -154,14 +151,12 @@ pub(super) async fn read_run_observation_page_once(
                 message: "observation page limit was reached without a last row".to_owned(),
             })?;
         CursorPosition {
-            append_xid: last.append_xid.clone(),
-            commit_sort_key: last.commit_sort_key.clone(),
+            store_commit_order: last.store_commit_order,
             kind: CursorKind::Row,
         }
     } else {
         CursorPosition {
-            append_xid: frontier_xid,
-            commit_sort_key: frontier_sort_key(),
+            store_commit_order: frontier_order,
             kind: CursorKind::Frontier,
         }
     };
@@ -193,13 +188,18 @@ pub(super) async fn load_store_scope_id_client(pool: &PgPool) -> Result<StoreSco
         .map(|metadata| metadata.store_scope_id)
 }
 
-pub(super) async fn sealed_frontier_xid(pool: &PgPool) -> Result<String> {
-    let row = sqlx::query("SELECT pg_snapshot_xmin(pg_current_snapshot())::text AS frontier_xid")
-        .fetch_one(pool)
-        .await
-        .map_err(|error| database_error("failed to read observation frontier", error))?;
-    row.try_get("frontier_xid")
-        .map_err(|error| database_error("failed to decode observation frontier", error))
+pub(super) async fn store_commit_frontier(pool: &PgPool) -> Result<u64> {
+    let row = sqlx::query(
+        "SELECT COALESCE(MAX(store_commit_order), 0)::bigint AS frontier_order FROM commits",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|error| database_error("failed to read observation frontier", error))?;
+    i64_to_nonnegative_u64(
+        row.try_get("frontier_order")
+            .map_err(|error| database_error("failed to decode observation frontier", error))?,
+        "commits.store_commit_order frontier",
+    )
 }
 
 pub(super) async fn notify_observation_change_tx(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
@@ -215,7 +215,7 @@ pub(super) async fn notify_observation_change_tx(tx: &mut Transaction<'_, Postgr
 pub(super) async fn read_observation_list_rows(
     pool: &PgPool,
     metadata: &StoreMetadata,
-    frontier_xid: &str,
+    frontier_order: u64,
     limit: u32,
 ) -> Result<Vec<ObservationRow>> {
     let rows = sqlx::query(
@@ -227,14 +227,14 @@ pub(super) async fn read_observation_list_rows(
                'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS started_at, \
              to_char(c.committed_at AT TIME ZONE 'UTC', \
                'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at, \
-             c.commit_id, c.append_xid::text AS append_xid, c.commit_sort_key \
-           FROM commits c \
-           WHERE c.append_xid < $1::xid8 \
+             c.commit_id, c.store_commit_order \
+             FROM commits c \
+           WHERE c.store_commit_order <= $1 \
            ORDER BY c.run_id, c.seq DESC \
          ) \
-         SELECT * FROM bounded ORDER BY updated_at DESC, run_id ASC LIMIT $2",
+         SELECT * FROM bounded ORDER BY store_commit_order DESC, run_id ASC LIMIT $2",
     )
-    .bind(frontier_xid)
+    .bind(u64_to_i64(frontier_order, "observation frontier")?)
     .bind(i64::from(limit))
     .fetch_all(pool)
     .await
@@ -246,7 +246,7 @@ pub(super) async fn read_observation_watch_rows(
     pool: &PgPool,
     metadata: &StoreMetadata,
     cursor: &CursorPosition,
-    frontier_xid: &str,
+    frontier_order: u64,
     limit: u32,
 ) -> Result<Vec<ObservationRow>> {
     let rows = sqlx::query(
@@ -256,20 +256,22 @@ pub(super) async fn read_observation_watch_rows(
             'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS started_at, \
           to_char(c.committed_at AT TIME ZONE 'UTC', \
             'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at, \
-          c.commit_id, c.append_xid::text AS append_xid, c.commit_sort_key \
+          c.commit_id, c.store_commit_order \
          FROM commits c \
-         WHERE c.append_xid < $1::xid8 \
+         WHERE c.store_commit_order <= $1 \
            AND ( \
-             ($4 AND c.append_xid >= $2::xid8) \
+             ($3 AND c.store_commit_order >= $2) \
              OR \
-             (NOT $4 AND (c.append_xid, c.commit_sort_key) > ($2::xid8, $3::bytea)) \
+             (NOT $3 AND c.store_commit_order > $2) \
            ) \
-         ORDER BY c.append_xid ASC, c.commit_sort_key ASC \
-         LIMIT $5",
+         ORDER BY c.store_commit_order ASC \
+         LIMIT $4",
     )
-    .bind(frontier_xid)
-    .bind(&cursor.append_xid)
-    .bind(cursor.commit_sort_key.as_slice())
+    .bind(u64_to_i64(frontier_order, "observation frontier")?)
+    .bind(u64_to_i64(
+        cursor.store_commit_order,
+        "observation cursor store commit order",
+    )?)
     .bind(cursor.kind == CursorKind::Frontier)
     .bind(i64::from(limit))
     .fetch_all(pool)
@@ -301,12 +303,12 @@ fn observation_candidate(row: PgRow) -> Result<ObservationCandidate> {
     let commit_id: String = row
         .try_get("commit_id")
         .map_err(|error| database_error("failed to decode observation commit id", error))?;
-    let append_xid: String = row
-        .try_get("append_xid")
-        .map_err(|error| database_error("failed to decode observation append xid", error))?;
-    let commit_sort_key = row
-        .try_get("commit_sort_key")
-        .map_err(|error| database_error("failed to decode observation commit sort key", error))?;
+    let store_commit_order = i64_to_positive_u64(
+        row.try_get("store_commit_order").map_err(|error| {
+            database_error("failed to decode observation store commit order", error)
+        })?,
+        "observation store commit order",
+    )?;
     let started_at = row
         .try_get("started_at")
         .map_err(|error| database_error("failed to decode observation started_at", error))?;
@@ -317,8 +319,7 @@ fn observation_candidate(row: PgRow) -> Result<ObservationCandidate> {
         run_id: parse_identity(&run_id)?,
         head_seq: StreamSeq::new(i64_to_positive_u64(head_seq, "commits.seq")?)?,
         commit_id,
-        append_xid,
-        commit_sort_key,
+        store_commit_order,
         started_at,
         updated_at,
     })
@@ -344,8 +345,7 @@ async fn materialize_observation_row(
             completed_at,
             change_id: Some(observation_change_id(metadata, &candidate.commit_id)?),
         },
-        append_xid: candidate.append_xid,
-        commit_sort_key: candidate.commit_sort_key,
+        store_commit_order: candidate.store_commit_order,
     })
 }
 
@@ -355,9 +355,10 @@ async fn load_run_prefix(
     head_seq: StreamSeq,
 ) -> Result<Vec<KernelEventEnvelope>> {
     let rows = sqlx::query(
-        "SELECT run_id, seq, ordinal, event_id, event_schema_id, spec_hash, commit_key, \
-         logical_key, payload_hash, payload_canonical_json \
-         FROM run_events WHERE run_id = $1 AND seq <= $2 ORDER BY seq ASC, ordinal ASC",
+        "SELECT e.run_id, e.seq, e.ordinal, c.store_commit_order, e.event_id, e.event_schema_id, \
+         e.spec_hash, e.commit_key, e.logical_key, e.payload_hash, e.payload_canonical_json \
+         FROM run_events e JOIN commits c ON c.run_id = e.run_id AND c.seq = e.seq \
+         WHERE e.run_id = $1 AND e.seq <= $2 ORDER BY e.seq ASC, e.ordinal ASC",
     )
     .bind(run_id.as_str())
     .bind(u64_to_i64(head_seq.as_u64(), "commits.seq")?)
@@ -396,17 +397,18 @@ pub(super) async fn encode_observation_cursor(
     let token_hash = observation_cursor_token_hash(&token);
     sqlx::query(
         "INSERT INTO run_observation_cursors \
-          (token_hash, cursor_version, store_epoch, cursor_kind, append_xid, \
-           commit_sort_key) \
-         VALUES ($1, $2, $3, $4, $5::xid8, $6) \
+          (token_hash, cursor_version, store_epoch, cursor_kind, store_commit_order) \
+         VALUES ($1, $2, $3, $4, $5) \
          ON CONFLICT (token_hash) DO NOTHING",
     )
     .bind(&token_hash)
     .bind(CURSOR_VERSION)
     .bind(&metadata.store_epoch)
     .bind(position.kind.as_str())
-    .bind(&position.append_xid)
-    .bind(position.commit_sort_key.as_slice())
+    .bind(u64_to_i64(
+        position.store_commit_order,
+        "observation cursor store commit order",
+    )?)
     .execute(pool)
     .await
     .map_err(|error| database_error("failed to persist observation cursor token", error))?;
@@ -428,7 +430,7 @@ pub(super) async fn decode_observation_cursor(
     let token_hash = observation_cursor_token_hash(cursor);
     let Some(row) = sqlx::query(
         "SELECT cursor_version, store_epoch, cursor_kind, \
-          append_xid::text AS append_xid, commit_sort_key \
+          store_commit_order \
          FROM run_observation_cursors WHERE token_hash = $1",
     )
     .bind(&token_hash)
@@ -461,12 +463,15 @@ pub(super) async fn decode_observation_cursor(
         .map_err(|error| database_error("failed to decode observation cursor kind", error))?;
     let kind = CursorKind::parse(&cursor_kind)?;
     Ok(CursorPosition {
-        append_xid: row
-            .try_get("append_xid")
-            .map_err(|error| database_error("failed to decode observation cursor xid", error))?,
-        commit_sort_key: row.try_get("commit_sort_key").map_err(|error| {
-            database_error("failed to decode observation cursor sort key", error)
-        })?,
+        store_commit_order: i64_to_nonnegative_u64(
+            row.try_get("store_commit_order").map_err(|error| {
+                database_error(
+                    "failed to decode observation cursor store commit order",
+                    error,
+                )
+            })?,
+            "observation cursor store commit order",
+        )?,
         kind,
     })
 }
@@ -491,8 +496,4 @@ pub(super) fn observation_change_id(metadata: &StoreMetadata, commit_id: &str) -
 
 pub(super) fn observation_cursor_token_hash(token: &str) -> String {
     bytes_hex(sha256_digest_bytes(token.as_bytes()).as_bytes())
-}
-
-pub(super) fn frontier_sort_key() -> Vec<u8> {
-    vec![0; 32]
 }

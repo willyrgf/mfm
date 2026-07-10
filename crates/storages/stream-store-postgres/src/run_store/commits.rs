@@ -7,7 +7,7 @@ pub(super) async fn read_commit_by_key(
 ) -> Result<Option<CommitAuthorityRow>> {
     let row = sqlx::query(
         "SELECT commit_id, run_id, seq, commit_key, commit_purpose, \
-         prepared_commit_plan_fingerprint, commit_batch_hash, commit_sort_key, event_count \
+         prepared_commit_plan_fingerprint, commit_batch_hash, store_commit_order, event_count \
          FROM commits WHERE run_id = $1 AND commit_key = $2",
     )
     .bind(run_id.as_str())
@@ -25,7 +25,7 @@ pub(super) async fn read_commit_by_seq(
 ) -> Result<CommitAuthorityRow> {
     let row = sqlx::query(
         "SELECT commit_id, run_id, seq, commit_key, commit_purpose, \
-         prepared_commit_plan_fingerprint, commit_batch_hash, commit_sort_key, event_count \
+         prepared_commit_plan_fingerprint, commit_batch_hash, store_commit_order, event_count \
          FROM commits WHERE run_id = $1 AND seq = $2",
     )
     .bind(run_id.as_str())
@@ -54,6 +54,7 @@ pub(super) async fn load_committed_batch_tx(
         CommitKey::new(commit.commit_key)?,
         commit.prepared_commit_plan_fingerprint,
         seq,
+        commit.store_commit_order,
         events,
     )
     .map_err(PostgresStoreError::from)
@@ -65,7 +66,7 @@ pub(super) async fn load_commit_authority_rows_tx(
 ) -> Result<Vec<CommitAuthorityRow>> {
     let rows = sqlx::query(
         "SELECT commit_id, run_id, seq, commit_key, commit_purpose, \
-         prepared_commit_plan_fingerprint, commit_batch_hash, commit_sort_key, event_count \
+         prepared_commit_plan_fingerprint, commit_batch_hash, store_commit_order, event_count \
          FROM commits WHERE run_id = $1 ORDER BY seq ASC",
     )
     .bind(run_id.as_str())
@@ -226,9 +227,10 @@ pub(super) async fn load_run_commit_events_tx(
     seq: StreamSeq,
 ) -> Result<Vec<KernelEventEnvelope>> {
     let rows = sqlx::query(
-        "SELECT run_id, seq, ordinal, event_id, event_schema_id, spec_hash, commit_key, \
-         logical_key, payload_hash, payload_canonical_json \
-         FROM run_events WHERE run_id = $1 AND seq = $2 ORDER BY ordinal ASC",
+        "SELECT e.run_id, e.seq, e.ordinal, c.store_commit_order, e.event_id, e.event_schema_id, \
+         e.spec_hash, e.commit_key, e.logical_key, e.payload_hash, e.payload_canonical_json \
+         FROM run_events e JOIN commits c ON c.run_id = e.run_id AND c.seq = e.seq \
+         WHERE e.run_id = $1 AND e.seq = $2 ORDER BY e.ordinal ASC",
     )
     .bind(run_id.as_str())
     .bind(u64_to_i64(seq.as_u64(), "run_events.seq")?)
@@ -245,6 +247,7 @@ pub(super) struct CommitAuthorityRow {
     pub(super) prepared_commit_plan_fingerprint: CommitFingerprint,
     pub(super) commit_batch_hash: String,
     pub(super) seq: StreamSeq,
+    pub(super) store_commit_order: StoreCommitOrder,
     pub(super) event_count: usize,
 }
 
@@ -270,12 +273,14 @@ pub(super) fn commit_authority_row_from_row(row: PgRow) -> Result<CommitAuthorit
     let commit_batch_hash: String = row
         .try_get("commit_batch_hash")
         .map_err(|error| database_error("failed to decode commit batch hash", error))?;
-    let commit_sort_key: Vec<u8> = row
-        .try_get("commit_sort_key")
-        .map_err(|error| database_error("failed to decode commit sort key", error))?;
     let seq: i64 = row
         .try_get("seq")
         .map_err(|error| database_error("failed to decode commit seq", error))?;
+    let store_commit_order = StoreCommitOrder::new(i64_to_positive_u64(
+        row.try_get("store_commit_order")
+            .map_err(|error| database_error("failed to decode store commit order", error))?,
+        "commits.store_commit_order",
+    )?);
     let event_count: i32 = row
         .try_get("event_count")
         .map_err(|error| database_error("failed to decode commit event count", error))?;
@@ -293,18 +298,6 @@ pub(super) fn commit_authority_row_from_row(row: PgRow) -> Result<CommitAuthorit
             "commit id does not match persisted fingerprint".to_owned(),
         ));
     }
-    let expected_sort_key = derive_commit_sort_key(
-        &run_id,
-        seq,
-        &commit_key_identity,
-        &commit_id,
-        &commit_batch_hash,
-    )?;
-    if commit_sort_key != expected_sort_key {
-        return Err(PostgresStoreError::Corruption(
-            "commit sort key does not match commit authority".to_owned(),
-        ));
-    }
     Ok(CommitAuthorityRow {
         commit_id,
         run_id,
@@ -312,8 +305,55 @@ pub(super) fn commit_authority_row_from_row(row: PgRow) -> Result<CommitAuthorit
         prepared_commit_plan_fingerprint,
         commit_batch_hash,
         seq,
+        store_commit_order,
         event_count: usize::try_from(event_count).map_err(|_| {
             PostgresStoreError::Corruption("commits.event_count was negative".to_owned())
         })?,
     })
+}
+
+pub(super) async fn next_store_commit_order_tx(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<StoreCommitOrder> {
+    let row =
+        sqlx::query("SELECT current_order FROM store_commit_order WHERE singleton FOR UPDATE")
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|error| database_error("failed to lock store commit order", error))?;
+    Ok(StoreCommitOrder::new(i64_to_positive_u64(
+        row.try_get::<i64, _>("current_order")
+            .map_err(|error| database_error("failed to decode store commit order", error))?
+            .checked_add(1)
+            .ok_or(PostgresStoreError::Corruption(
+                "store commit order overflow".to_owned(),
+            ))?,
+        "next store commit order",
+    )?))
+}
+
+pub(super) async fn advance_store_commit_order_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    store_commit_order: StoreCommitOrder,
+) -> Result<()> {
+    let updated = sqlx::query(
+        "UPDATE store_commit_order SET current_order = $1 \
+         WHERE singleton AND current_order = $2",
+    )
+    .bind(u64_to_i64(
+        store_commit_order.as_u64(),
+        "store_commit_order.current_order",
+    )?)
+    .bind(u64_to_i64(
+        store_commit_order.as_u64() - 1,
+        "previous store commit order",
+    )?)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to advance store commit order", error))?;
+    if updated.rows_affected() != 1 {
+        return Err(PostgresStoreError::Corruption(
+            "store commit order advanced from an unexpected value".to_owned(),
+        ));
+    }
+    Ok(())
 }

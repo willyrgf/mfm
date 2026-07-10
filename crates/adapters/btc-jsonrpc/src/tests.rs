@@ -10,8 +10,8 @@ use mfm_facts::{
     fact_descriptor_hash, DescriptorCatalogWatermark, FactAudience, FactClaimId,
     FactProducerProvenance, FactProjectionGeneration, FactQueryReceipt, FactQueryScope,
     FactResponseEvidence, FactSelectionEvidence, FactSubjectRef, FactVisibility,
-    FactVisibilityScope, InternalFactRef, InternalFactRefParts, StoreCommitWatermark,
-    StoreIdentity, StoreKeyId, StoreReadFrontier, StoreScopeRef,
+    FactVisibilityScope, InternalFactRef, InternalFactRefParts, StoreCommitOrder, StoreIdentity,
+    StoreKeyId, StoreReadFrontier, StoreScopeRef,
 };
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
@@ -465,8 +465,7 @@ fn fact_query_receipt(
         FactQueryScope::new(FactAudience::Control, FactVisibilityScope::Default),
         DescriptorCatalogWatermark::new(1),
         FactProjectionGeneration::new(1),
-        11,
-        StoreCommitWatermark::new(11),
+        StoreCommitOrder::new(11),
     );
     let plan_hash = mfm_facts::fact_query_plan_hash(plan).expect("plan hash");
     let rows = returned_refs

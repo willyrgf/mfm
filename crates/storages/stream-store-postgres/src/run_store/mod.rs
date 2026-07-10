@@ -20,8 +20,8 @@ use mfm_store::v1::{
     ProjectionSnapshot, ProjectionSnapshotParts, ResourceLaneAuthoritySet, ResourceLaneKey,
     ResourceLaneProjection, RetainedArtifactReadFuture, RetainedArtifactReadProvider,
     RunEventStore, RunObservation, RunObservationPage, RunObservationQuery, RunObservationStore,
-    RunState, StagedCommitOutcome, StoreError, StoreErrorInspection, StoreScopeId, StoreScopeStore,
-    StreamSeq, VerifiedRunArtifactBytes,
+    RunState, StagedCommitOutcome, StoreCommitOrder, StoreError, StoreErrorInspection,
+    StoreScopeId, StoreScopeStore, StreamSeq, VerifiedRunArtifactBytes,
 };
 use serde_json::Value;
 use sqlx::{
@@ -137,7 +137,7 @@ impl PostgresStoreAuthority {
     }
 }
 
-const CURSOR_VERSION: &str = "mfm.run_observation.cursor.v1";
+const CURSOR_VERSION: &str = "mfm.run_observation.cursor.v2";
 const OBSERVATION_NOTIFY_CHANNEL: &str = "mfm_run_observation";
 const OBSERVATION_NOTIFY_PAYLOAD: &str = "changed";
 const OBSERVATION_WAIT_POLL_INTERVAL_MS: u64 = 50;
@@ -164,7 +164,6 @@ mod observations;
 mod projections;
 mod receipt_authentication;
 mod resource_lanes;
-mod stream;
 #[cfg(all(test, feature = "parity-tests"))]
 mod tests;
 #[cfg(test)]
@@ -177,7 +176,7 @@ pub use receipt_authentication::PostgresFactReceiptSigner;
 use self::{
     admission_lanes::*, artifact_admission::*, artifact_writes::*, artifacts::*, authority::*,
     commits::*, event_rows::*, fact_projections::*, observations::*, projections::*,
-    receipt_authentication::*, resource_lanes::*, stream::*, util::*,
+    receipt_authentication::*, resource_lanes::*, util::*,
 };
 
 /// PostgreSQL-backed typed run event store.

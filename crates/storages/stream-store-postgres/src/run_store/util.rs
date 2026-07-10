@@ -26,6 +26,57 @@ pub(super) fn next_seq_from_head(head: u64) -> Result<StreamSeq> {
     Ok(StreamSeq::new(next)?)
 }
 
+pub(super) async fn read_head(pool: &PgPool, run_id: &RunId) -> Result<u64> {
+    let row =
+        sqlx::query("SELECT COALESCE(MAX(seq), 0) AS head_seq FROM commits WHERE run_id = $1")
+            .bind(run_id.as_str())
+            .fetch_one(pool)
+            .await
+            .map_err(|error| database_error("failed to query run head", error))?;
+    let head_seq: i64 = row
+        .try_get("head_seq")
+        .map_err(|error| database_error("failed to decode run head", error))?;
+    i64_to_nonnegative_u64(head_seq, "commits.seq")
+}
+
+pub(super) async fn read_head_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+) -> Result<u64> {
+    let row =
+        sqlx::query("SELECT COALESCE(MAX(seq), 0) AS head_seq FROM commits WHERE run_id = $1")
+            .bind(run_id.as_str())
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|error| database_error("failed to query run head", error))?;
+    let head_seq: i64 = row
+        .try_get("head_seq")
+        .map_err(|error| database_error("failed to decode run head", error))?;
+    i64_to_nonnegative_u64(head_seq, "commits.seq")
+}
+
+pub(super) async fn lock_run_tx(tx: &mut Transaction<'_, Postgres>, run_id: &RunId) -> Result<()> {
+    const RUN_LOCK_CLASS_ID: i32 = 0x4d46_5201;
+    let object_id = advisory_object_id(run_id.as_str().as_bytes());
+    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+        .bind(RUN_LOCK_CLASS_ID)
+        .bind(object_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| database_error("failed to lock run append authority", error))?;
+    Ok(())
+}
+
+pub(super) fn advisory_object_id(bytes: &[u8]) -> i32 {
+    let digest = sha256_digest_bytes(bytes);
+    i32::from_be_bytes([
+        digest.as_bytes()[0],
+        digest.as_bytes()[1],
+        digest.as_bytes()[2],
+        digest.as_bytes()[3],
+    ])
+}
+
 pub(super) fn u64_to_i64(value: u64, field: &str) -> Result<i64> {
     i64::try_from(value).map_err(|_| {
         PostgresStoreError::Corruption(format!("{field} exceeded PostgreSQL bigint range"))

@@ -910,15 +910,15 @@ async fn load_fact_record_projections_tx(
     run_id: Option<&RunId>,
 ) -> Result<BTreeMap<mfm_facts::FactClaimId, mfm_store::v1::FactRecordProjection>> {
     let sql = if run_id.is_some() {
-        "SELECT e.run_id, e.seq, e.ordinal, e.event_id, e.event_schema_id, e.spec_hash, \
+        "SELECT e.run_id, e.seq, e.ordinal, c.store_commit_order, e.event_id, e.event_schema_id, e.spec_hash, \
          e.commit_key, e.logical_key, e.payload_hash, e.payload_canonical_json \
-         FROM run_events e \
+         FROM run_events e JOIN commits c ON c.run_id = e.run_id AND c.seq = e.seq \
          WHERE e.run_id = $1 \
          ORDER BY e.seq, e.ordinal"
     } else {
-        "SELECT e.run_id, e.seq, e.ordinal, e.event_id, e.event_schema_id, e.spec_hash, \
+        "SELECT e.run_id, e.seq, e.ordinal, c.store_commit_order, e.event_id, e.event_schema_id, e.spec_hash, \
          e.commit_key, e.logical_key, e.payload_hash, e.payload_canonical_json \
-         FROM run_events e \
+         FROM run_events e JOIN commits c ON c.run_id = e.run_id AND c.seq = e.seq \
          ORDER BY e.run_id, e.seq, e.ordinal"
     };
     let mut query = sqlx::query(sql);

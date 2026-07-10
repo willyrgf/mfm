@@ -509,7 +509,8 @@ new commit purposes must add a purpose marker and validator before stores will a
 Stores own:
 
 - event envelopes
-- sequence numbers
+- run-local sequence numbers
+- the durable store-wide append coordinate used by cross-run projections
 - ordinals
 - event ids
 - logical keys

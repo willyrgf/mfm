@@ -843,6 +843,7 @@ pub fn persisted_kernel_event_envelope_with_ordinal_for_test(
     payload: events::KernelEventPayload,
 ) -> KernelEventEnvelope {
     let seq = StreamSeq::new(seq).expect("stream seq");
+    let store_commit_order = StoreCommitOrder::new(seq.as_u64());
     let ordinal = CommitOrdinal::new(ordinal);
     let payload_hash = payload_canonical_json(&payload)
         .expect("payload canonical")
@@ -862,6 +863,7 @@ pub fn persisted_kernel_event_envelope_with_ordinal_for_test(
         event_schema_id,
         run_id: run_id.clone(),
         seq,
+        store_commit_order,
         ordinal,
         spec_hash: payload_spec_hash(&payload),
         commit_key,
@@ -1087,8 +1089,7 @@ pub fn signed_fact_query_receipt_for_projection_for_test(
         plan.query_scope().clone(),
         mfm_facts::DescriptorCatalogWatermark::new(projection.fact_descriptors().count() as u64),
         mfm_facts::FactProjectionGeneration::new(1),
-        max_order,
-        mfm_facts::StoreCommitWatermark::new(max_order),
+        mfm_facts::StoreCommitOrder::new(max_order),
     );
     let plan_hash = mfm_facts::fact_query_plan_hash(plan).expect("fact query plan hash");
     let material = mfm_facts::FactQueryReceiptMaterial::from_rows(

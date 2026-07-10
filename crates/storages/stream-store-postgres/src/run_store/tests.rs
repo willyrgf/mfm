@@ -252,29 +252,24 @@ async fn mutate_store_metadata_unchecked(pool: &PgPool, statements: &[&'static s
 }
 
 #[tokio::test]
-async fn schema_validation_proves_append_xid_trigger_contracts() {
+async fn schema_validation_accepts_store_commit_order_authority() {
     let (store, schema) = test_store().await;
     let mut tx = store.pool.begin().await.expect("begin transaction");
-    let expected_xid: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
-        .fetch_one(&mut *tx)
-        .await
-        .expect("current xact id");
-    let commit_xid: String = sqlx::query_scalar(
+    let commit_order: i64 = sqlx::query_scalar(
         "INSERT INTO commits \
          (commit_id, run_id, seq, commit_key, commit_purpose, prepared_commit_plan_fingerprint, \
-          commit_batch_hash, commit_sort_key, event_count, append_xid) \
+          commit_batch_hash, store_commit_order, event_count) \
          VALUES \
          ('schema-trigger-commit', 'schema-trigger-run', 1, 'schema-trigger-key', \
-          'schema-trigger-purpose', $1, $2, decode('01' || repeat('00', 31), 'hex'), 1, \
-          '1'::xid8) \
-         RETURNING append_xid::text",
+          'schema-trigger-purpose', $1, $2, 1, 1) \
+         RETURNING store_commit_order",
     )
     .bind(content_digest(252).as_str())
     .bind(content_digest(253).as_str())
     .fetch_one(&mut *tx)
     .await
-    .expect("insert commit with explicit xid");
-    assert_eq!(commit_xid, expected_xid);
+    .expect("insert commit with explicit store commit order");
+    assert_eq!(commit_order, 1);
     tx.rollback().await.expect("rollback manual authority rows");
     crate::schema::validate_pool(&store.pool)
         .await
@@ -294,7 +289,6 @@ async fn store_authority_rejects_schema_drift_cases() {
         RetiredFactProjectionObject,
         InvalidStoreMetadata,
         InvalidStoreScopeBinding,
-        DisabledAppendXidTrigger,
         MissingMutationGuardTrigger,
     }
 
@@ -326,10 +320,6 @@ async fn store_authority_rejects_schema_drift_cases() {
         (
             Case::InvalidStoreScopeBinding,
             PostgresStoreAuthorityError::StoreScope,
-        ),
-        (
-            Case::DisabledAppendXidTrigger,
-            PostgresStoreAuthorityError::Catalog,
         ),
         (
             Case::MissingMutationGuardTrigger,
@@ -387,12 +377,6 @@ async fn store_authority_rejects_schema_drift_cases() {
                     ],
                 )
                 .await;
-            }
-            Case::DisabledAppendXidTrigger => {
-                sqlx::query("ALTER TABLE commits DISABLE TRIGGER commits_set_append_xid")
-                    .execute(&store.pool)
-                    .await
-                    .expect("disable append xid trigger");
             }
             Case::MissingMutationGuardTrigger => {
                 sqlx::query("DROP TRIGGER run_events_no_update ON run_events")
@@ -2575,21 +2559,21 @@ async fn observation_row_cursor_for_commit(
     let metadata = load_store_metadata(&store.pool)
         .await
         .expect("load store metadata");
-    let row = sqlx::query(
-        "SELECT append_xid::text AS append_xid, commit_sort_key \
-         FROM commits WHERE run_id = $1 AND seq = $2",
-    )
-    .bind(run.as_str())
-    .bind(i64::try_from(seq).expect("seq fits i64"))
-    .fetch_one(&store.pool)
-    .await
-    .expect("load commit cursor position");
+    let row = sqlx::query("SELECT store_commit_order FROM commits WHERE run_id = $1 AND seq = $2")
+        .bind(run.as_str())
+        .bind(i64::try_from(seq).expect("seq fits i64"))
+        .fetch_one(&store.pool)
+        .await
+        .expect("load commit cursor position");
     encode_observation_cursor(
         &store.pool,
         &metadata,
         &CursorPosition {
-            append_xid: row.try_get("append_xid").expect("append xid"),
-            commit_sort_key: row.try_get("commit_sort_key").expect("sort key"),
+            store_commit_order: u64::try_from(
+                row.try_get::<i64, _>("store_commit_order")
+                    .expect("store commit order"),
+            )
+            .expect("positive store commit order"),
             kind: CursorKind::Row,
         },
     )
@@ -2677,55 +2661,51 @@ async fn prepared_commit_idempotency_fingerprint_includes_admitted_artifacts() {
 }
 
 #[tokio::test]
-async fn commit_sort_keys_use_v1_rfc_tuple() {
+async fn store_commit_orders_are_global_and_monotonic() {
     let (store, schema) = test_store().await;
-    let run = run_id(125);
-    append_run_start(&store, &run, "sort-key-run-start")
+    let first_run = run_id(125);
+    append_run_start(&store, &first_run, "store-order-run-start")
         .await
         .expect("run start");
-    append_resource_lane_attempt_start(&store, &run, "sort-key-attempt-start")
+    append_resource_lane_attempt_start(&store, &first_run, "store-order-attempt-start")
         .await
         .expect("attempt start");
+    let second_run = run_id(126);
+    append_run_start(&store, &second_run, "store-order-second-run-start")
+        .await
+        .expect("second run start");
 
     let rows = sqlx::query(
-        "SELECT seq, commit_sort_key, commit_key, commit_id, commit_batch_hash \
+        "SELECT run_id, seq, store_commit_order \
          FROM commits \
-         WHERE run_id = $1 \
-         ORDER BY seq",
+         ORDER BY store_commit_order",
     )
-    .bind(run.as_str())
     .fetch_all(&store.pool)
     .await
-    .expect("query commit sort keys");
-    assert_eq!(rows.len(), 2);
-    let mut previous: Option<Vec<u8>> = None;
-    for row in rows {
-        let seq: i64 = row.try_get("seq").expect("seq");
-        let commit_sort_key: Vec<u8> = row.try_get("commit_sort_key").expect("commit_sort_key");
-        let commit_key = CommitKey::new(row.try_get::<String, _>("commit_key").expect("key"))
-            .expect("commit key");
-        let commit_id: String = row.try_get("commit_id").expect("commit id");
-        let commit_batch_hash: String =
-            row.try_get("commit_batch_hash").expect("commit batch hash");
-        assert_eq!(commit_sort_key.len(), 32);
-        assert_eq!(commit_sort_key[0], 1);
-        assert_ne!(commit_sort_key, vec![0; 32]);
+    .expect("query store commit orders");
+    assert_eq!(rows.len(), 3);
+    for (index, row) in rows.iter().enumerate() {
         assert_eq!(
-            commit_sort_key,
-            derive_commit_sort_key(
-                &run,
-                StreamSeq::new(i64_to_positive_u64(seq, "commits.seq").expect("positive seq"))
-                    .expect("stream seq"),
-                &commit_key,
-                &commit_id,
-                &commit_batch_hash,
-            )
-            .expect("expected sort key")
+            row.try_get::<i64, _>("store_commit_order")
+                .expect("store commit order"),
+            i64::try_from(index + 1).expect("index fits i64")
         );
-        if let Some(previous) = previous.replace(commit_sort_key.clone()) {
-            assert_ne!(previous, commit_sort_key);
-        }
     }
+    assert_eq!(
+        rows[0].try_get::<String, _>("run_id").expect("run id"),
+        first_run.as_str()
+    );
+    assert_eq!(
+        rows[1].try_get::<String, _>("run_id").expect("run id"),
+        first_run.as_str()
+    );
+    assert_eq!(
+        rows[2].try_get::<String, _>("run_id").expect("run id"),
+        second_run.as_str()
+    );
+    assert_eq!(rows[0].try_get::<i64, _>("seq").expect("seq"), 1);
+    assert_eq!(rows[1].try_get::<i64, _>("seq").expect("seq"), 2);
+    assert_eq!(rows[2].try_get::<i64, _>("seq").expect("seq"), 1);
 
     drop_schema(&store, &schema).await;
 }
@@ -2769,41 +2749,22 @@ async fn strict_load_rejects_commit_batch_authority_rewritten_away_from_rows() {
         .await
         .expect("run start");
 
-    let commit_id: String =
-        sqlx::query_scalar("SELECT commit_id FROM commits WHERE run_id = $1 AND seq = 1")
-            .bind(run.as_str())
-            .fetch_one(&store.pool)
-            .await
-            .expect("load commit id");
     let forged_batch = canonical_json(serde_json::json!({
         "domain": "mfm.commit.batch.v1",
         "tampered": true,
     }))
     .expect("canonical forged batch");
     let forged_batch_hash = forged_batch.content_digest().as_str().to_owned();
-    let forged_sort_key = derive_commit_sort_key(
-        &run,
-        StreamSeq::new(1).expect("seq"),
-        &commit_key,
-        &commit_id,
-        &forged_batch_hash,
-    )
-    .expect("forged sort key");
-
     sqlx::query("ALTER TABLE commits DISABLE TRIGGER commits_no_update")
         .execute(&store.pool)
         .await
         .expect("disable commit mutation guard");
-    sqlx::query(
-        "UPDATE commits SET commit_batch_hash = $1, commit_sort_key = $2 \
-         WHERE run_id = $3 AND seq = 1",
-    )
-    .bind(&forged_batch_hash)
-    .bind(forged_sort_key)
-    .bind(run.as_str())
-    .execute(&store.pool)
-    .await
-    .expect("forge commit batch authority");
+    sqlx::query("UPDATE commits SET commit_batch_hash = $1 WHERE run_id = $2 AND seq = 1")
+        .bind(&forged_batch_hash)
+        .bind(run.as_str())
+        .execute(&store.pool)
+        .await
+        .expect("forge commit batch authority");
 
     let error = store
         .load_run_stream(&run)
@@ -2813,34 +2774,6 @@ async fn strict_load_rejects_commit_batch_authority_rewritten_away_from_rows() {
         error,
         "commit batch authority does not match persisted event and artifact bindings",
     );
-
-    drop_schema(&store, &schema).await;
-}
-
-#[tokio::test]
-async fn strict_load_rejects_corrupt_commit_sort_key() {
-    let (store, schema) = test_store().await;
-    let run = run_id(127);
-    append_run_start(&store, &run, "strict-sort-key-run-start")
-        .await
-        .expect("run start");
-
-    sqlx::query("ALTER TABLE commits DISABLE TRIGGER commits_no_update")
-        .execute(&store.pool)
-        .await
-        .expect("disable commit mutation guard");
-    sqlx::query("UPDATE commits SET commit_sort_key = $1 WHERE run_id = $2 AND seq = 1")
-        .bind(vec![1_u8; 32])
-        .bind(run.as_str())
-        .execute(&store.pool)
-        .await
-        .expect("corrupt commit sort key");
-
-    let error = store
-        .load_run_stream(&run)
-        .await
-        .expect_err("strict load rejects corrupt commit sort key");
-    assert_corruption(error, "commit sort key does not match");
 
     drop_schema(&store, &schema).await;
 }
@@ -2857,7 +2790,7 @@ async fn observation_change_ids_and_cursors_do_not_expose_internal_authority() {
         .await
         .expect("load store metadata");
     let row = sqlx::query(
-        "SELECT commit_id, append_xid::text AS append_xid, commit_sort_key \
+        "SELECT commit_id, store_commit_order \
          FROM commits WHERE run_id = $1 AND seq = 1",
     )
     .bind(run.as_str())
@@ -2865,14 +2798,15 @@ async fn observation_change_ids_and_cursors_do_not_expose_internal_authority() {
     .await
     .expect("load commit cursor authority");
     let commit_id: String = row.try_get("commit_id").expect("commit id");
-    let append_xid: String = row.try_get("append_xid").expect("append xid");
-    let commit_sort_key: Vec<u8> = row.try_get("commit_sort_key").expect("commit sort key");
+    let store_commit_order = u64::try_from(
+        row.try_get::<i64, _>("store_commit_order")
+            .expect("store commit order"),
+    )
+    .expect("positive store commit order");
     let public_change_id =
         observation_change_id(&metadata, &commit_id).expect("observation change id");
-    let commit_sort_key_hex = bytes_hex(&commit_sort_key);
     let position = CursorPosition {
-        append_xid,
-        commit_sort_key,
+        store_commit_order,
         kind: CursorKind::Row,
     };
     let public_cursor = encode_observation_cursor(&store.pool, &metadata, &position)
@@ -2881,8 +2815,7 @@ async fn observation_change_ids_and_cursors_do_not_expose_internal_authority() {
     let decoded = decode_observation_cursor(&store.pool, &public_cursor, &metadata)
         .await
         .expect("decode observation cursor");
-    assert_eq!(decoded.append_xid, position.append_xid);
-    assert_eq!(decoded.commit_sort_key, position.commit_sort_key);
+    assert_eq!(decoded.store_commit_order, position.store_commit_order);
     assert_eq!(decoded.kind, CursorKind::Row);
     assert_eq!(
         bytes_from_hex(&public_cursor)
@@ -2900,7 +2833,6 @@ async fn observation_change_ids_and_cursors_do_not_expose_internal_authority() {
         assert!(!public_value.contains('|'));
         assert!(!public_value.contains(CURSOR_VERSION));
         assert!(!public_value.contains(commit_id.as_str()));
-        assert!(!public_value.contains(commit_sort_key_hex.as_str()));
         assert!(!public_value.contains(metadata.store_epoch.as_str()));
     }
     assert_ne!(public_change_id.as_str(), commit_id);
@@ -3007,7 +2939,7 @@ async fn observation_cursor_lifecycle_rejects_stale_format() {
 
     disable_observation_cursor_mutation_guard(&store.pool).await;
     sqlx::query(
-        "ALTER TABLE run_observation_cursors DROP CONSTRAINT run_observation_cursors_version_v1",
+        "ALTER TABLE run_observation_cursors DROP CONSTRAINT run_observation_cursors_version_v2",
     )
     .execute(&store.pool)
     .await
@@ -3138,65 +3070,6 @@ async fn append_commit_emits_observation_notification() {
 }
 
 #[tokio::test]
-async fn observation_watch_polls_until_frontier_advances_without_notify() {
-    let (store, schema) = test_store().await;
-    let database_url =
-        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
-    let blocker_options = PgConnectOptions::from_str(&database_url)
-        .expect("postgres URL")
-        .options([("search_path", schema.as_str())]);
-    let blocker_pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect_with(blocker_options)
-        .await
-        .expect("connect blocker pool");
-
-    let run = run_id(154);
-    append_run_start(&store, &run, "cursor-frontier-lag-run-start")
-        .await
-        .expect("run start");
-    let cursor = observation_row_cursor_for_commit(&store, &run, 1).await;
-
-    let mut blocker = blocker_pool.begin().await.expect("begin blocker tx");
-    let _blocker_xid: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
-        .fetch_one(&mut *blocker)
-        .await
-        .expect("assign blocker xid");
-    append_retention_commit(&store, &run, 2, "cursor-frontier-lag-retention", 155)
-        .await
-        .expect("append row behind blocked frontier");
-
-    let stale_frontier_page = store
-        .read_run_observations(RunObservationQuery::new(Some(cursor.clone()), 10, 0))
-        .await
-        .expect("frontier-lagged watch page");
-    assert!(stale_frontier_page.runs.is_empty());
-
-    let watcher_store = store.clone();
-    let watcher = tokio::spawn(async move {
-        let started = Instant::now();
-        let page = watcher_store
-            .read_run_observations(RunObservationQuery::new(Some(cursor), 10, 5_000))
-            .await
-            .expect("watch observes row after frontier advances");
-        (page, started.elapsed())
-    });
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    blocker.rollback().await.expect("release blocker tx");
-    blocker_pool.close().await;
-
-    let (page, elapsed) = watcher.await.expect("watch task joins");
-    assert_eq!(page.runs.len(), 1);
-    assert_eq!(page.runs[0].head_seq.as_u64(), 2);
-    assert!(
-        elapsed < Duration::from_secs(2),
-        "watch should poll for frontier advancement without waiting for timeout; elapsed={elapsed:?}"
-    );
-
-    drop_schema(&store, &schema).await;
-}
-
-#[tokio::test]
 async fn observation_watch_wakes_on_notification_before_timeout() {
     let (store, schema) = test_store().await;
     let run = run_id(142);
@@ -3207,7 +3080,7 @@ async fn observation_watch_wakes_on_notification_before_timeout() {
         .await
         .expect("load store metadata");
     let row = sqlx::query(
-        "SELECT append_xid::text AS append_xid, commit_sort_key \
+        "SELECT store_commit_order \
          FROM commits WHERE run_id = $1 AND seq = 1",
     )
     .bind(run.as_str())
@@ -3218,8 +3091,11 @@ async fn observation_watch_wakes_on_notification_before_timeout() {
         &store.pool,
         &metadata,
         &CursorPosition {
-            append_xid: row.try_get("append_xid").expect("append xid"),
-            commit_sort_key: row.try_get("commit_sort_key").expect("sort key"),
+            store_commit_order: u64::try_from(
+                row.try_get::<i64, _>("store_commit_order")
+                    .expect("store commit order"),
+            )
+            .expect("positive store commit order"),
             kind: CursorKind::Row,
         },
     )
@@ -4352,7 +4228,7 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
         1
     );
     assert_eq!(receipt.read_frontier().projection_generation().as_u64(), 1);
-    assert!(receipt.read_frontier().max_included_store_commit_order() >= 1);
+    assert!(receipt.read_frontier().store_commit_order().as_u64() >= 1);
     let unsigned_store = PostgresRunStore {
         pool: store.pool.clone(),
         authority: store.store_authority().clone(),

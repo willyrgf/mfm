@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::{CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor};
 use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPayload};
+pub use mfm_facts::StoreCommitOrder;
 use mfm_ids::{
     short_stable_id_fragment, AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind,
     CapabilityVersion, CellId, ContentDigest, ContextResourceKind, ContextStage, DescriptorId,
@@ -482,6 +483,7 @@ pub struct KernelEventEnvelope {
     event_schema_id: SchemaId,
     run_id: RunId,
     seq: StreamSeq,
+    store_commit_order: StoreCommitOrder,
     ordinal: CommitOrdinal,
     spec_hash: SpecHash,
     commit_key: CommitKey,
@@ -505,6 +507,8 @@ pub struct PersistedKernelEventRecord {
     pub run_id: RunId,
     /// Persisted store-owned stream sequence.
     pub seq: StreamSeq,
+    /// Persisted store-wide append coordinate.
+    pub store_commit_order: StoreCommitOrder,
     /// Persisted ordinal inside the atomic commit.
     pub ordinal: CommitOrdinal,
     /// Persisted payload spec hash.
@@ -580,6 +584,7 @@ impl KernelEventEnvelope {
             event_schema_id: record.event_schema_id,
             run_id: record.run_id,
             seq: record.seq,
+            store_commit_order: record.store_commit_order,
             ordinal: record.ordinal,
             spec_hash: record.spec_hash,
             commit_key: record.commit_key,
@@ -607,6 +612,11 @@ impl KernelEventEnvelope {
     /// Store-owned stream sequence.
     pub const fn seq(&self) -> StreamSeq {
         self.seq
+    }
+
+    /// Store-wide append coordinate for the atomic commit containing this event.
+    pub const fn store_commit_order(&self) -> StoreCommitOrder {
+        self.store_commit_order
     }
 
     /// Store-owned ordinal inside the atomic commit.
@@ -2298,6 +2308,7 @@ pub struct CommittedBatch {
     commit_key: CommitKey,
     fingerprint: CommitFingerprint,
     seq: StreamSeq,
+    store_commit_order: StoreCommitOrder,
     events: Vec<KernelEventEnvelope>,
 }
 
@@ -2322,6 +2333,11 @@ impl CommittedBatch {
         self.seq
     }
 
+    /// Store-wide append coordinate for this atomic commit.
+    pub const fn store_commit_order(&self) -> StoreCommitOrder {
+        self.store_commit_order
+    }
+
     /// Store-owned envelopes created for this batch.
     pub fn events(&self) -> &[KernelEventEnvelope] {
         &self.events
@@ -2333,6 +2349,7 @@ impl CommittedBatch {
         commit_key: CommitKey,
         fingerprint: CommitFingerprint,
         seq: StreamSeq,
+        store_commit_order: StoreCommitOrder,
         events: Vec<KernelEventEnvelope>,
     ) -> Result<Self> {
         if events.is_empty() {
@@ -2354,6 +2371,13 @@ impl CommittedBatch {
                     message: "persisted commit event has a different sequence".to_owned(),
                 });
             }
+            if event.store_commit_order() != store_commit_order {
+                return Err(StoreError::PersistedEventMismatch {
+                    field: "store_commit_order",
+                    message: "persisted commit event has a different store append coordinate"
+                        .to_owned(),
+                });
+            }
             if event.commit_key() != &commit_key {
                 return Err(StoreError::PersistedEventMismatch {
                     field: "commit_key",
@@ -2372,6 +2396,7 @@ impl CommittedBatch {
             commit_key,
             fingerprint,
             seq,
+            store_commit_order,
             events,
         })
     }
@@ -5497,6 +5522,7 @@ fn validate_run_stream_order(events: &[KernelEventEnvelope]) -> Result<()> {
     let mut stream_run_id: Option<RunId> = None;
     let mut current_seq: Option<StreamSeq> = None;
     let mut current_commit_key: Option<CommitKey> = None;
+    let mut current_store_commit_order: Option<StoreCommitOrder> = None;
     let mut expected_ordinal = 0_u32;
 
     for event in events {
@@ -5522,6 +5548,15 @@ fn validate_run_stream_order(events: &[KernelEventEnvelope]) -> Result<()> {
                         ),
                     });
                 }
+                if current_store_commit_order != Some(event.store_commit_order()) {
+                    return Err(StoreError::PersistedEventMismatch {
+                        field: "store_commit_order",
+                        message: format!(
+                            "persisted run stream seq {} contains multiple store append coordinates",
+                            event.seq()
+                        ),
+                    });
+                }
             }
             Some(seq) => {
                 let expected_next = seq.checked_next()?;
@@ -5536,6 +5571,7 @@ fn validate_run_stream_order(events: &[KernelEventEnvelope]) -> Result<()> {
                 }
                 current_seq = Some(expected_next);
                 current_commit_key = Some(event.commit_key().clone());
+                current_store_commit_order = Some(event.store_commit_order());
                 expected_ordinal = 0;
             }
             None => {
@@ -5551,6 +5587,7 @@ fn validate_run_stream_order(events: &[KernelEventEnvelope]) -> Result<()> {
                 }
                 current_seq = Some(StreamSeq::FIRST);
                 current_commit_key = Some(event.commit_key().clone());
+                current_store_commit_order = Some(event.store_commit_order());
             }
         }
 
@@ -5831,6 +5868,8 @@ pub struct CommitBase {
     pub resource_lane_authority: ResourceLaneAuthoritySet,
     /// Store-owned next sequence for the run being committed.
     pub actual_next_seq: StreamSeq,
+    /// Store-owned append coordinate assigned to this atomic commit.
+    pub store_commit_order: StoreCommitOrder,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6086,6 +6125,7 @@ impl CommitStagingVerifier<'_> {
 #[derive(Debug, Clone)]
 struct RunMemoryCore {
     store_scope_id: StoreScopeId,
+    next_store_commit_order: StoreCommitOrder,
     streams: BTreeMap<RunId, Vec<CommittedBatch>>,
     commit_keys: BTreeMap<(RunId, CommitKey), CommitKeyRecord>,
     artifacts: ArtifactAuthorityMap,
@@ -6105,6 +6145,7 @@ impl Default for RunMemoryCore {
                 "mfm.store_scope.v1:00000000000000000000000000000000",
             )
             .expect("test store scope"),
+            next_store_commit_order: StoreCommitOrder::FIRST,
             streams: BTreeMap::new(),
             commit_keys: BTreeMap::new(),
             artifacts: BTreeMap::new(),
@@ -6386,6 +6427,7 @@ fn stage_run_commit_with_fingerprint(
             event_schema_id: schema_id,
             run_id: request.run_id.clone(),
             seq: request.expected_next_seq,
+            store_commit_order: base.store_commit_order,
             ordinal,
             spec_hash,
             commit_key: request.commit_key.clone(),
@@ -6438,6 +6480,7 @@ fn stage_run_commit_with_fingerprint(
             commit_key: request.commit_key.clone(),
             fingerprint,
             seq: request.expected_next_seq,
+            store_commit_order: base.store_commit_order,
             events,
         },
         logical_keys: staged_logical_keys,
@@ -6799,6 +6842,7 @@ impl RunMemoryCore {
             projections: self.projections.clone(),
             resource_lane_authority: self.resource_lane_authority.clone(),
             actual_next_seq: self.expected_next_seq(&request.run_id),
+            store_commit_order: self.next_store_commit_order,
         };
         let staged = match stage_prepared_commit_plan(&base, plan)? {
             StagedCommitOutcome::Staged(staged) => *staged,
@@ -6825,6 +6869,10 @@ impl RunMemoryCore {
             staged_projections,
             staged_resource_lane_authority,
         ) = staged.into_parts();
+        self.next_store_commit_order = batch
+            .store_commit_order()
+            .checked_next()
+            .ok_or(StoreError::SequenceOverflow)?;
         self.artifact_bytes = artifact_bytes;
         self.streams
             .entry(request.run_id.clone())
@@ -6940,8 +6988,15 @@ impl AsyncInMemoryRunStore {
                 commit_key,
                 fingerprint,
                 seq,
+                first.store_commit_order(),
                 events,
             )?;
+            store.next_store_commit_order = store.next_store_commit_order.max(
+                batch
+                    .store_commit_order()
+                    .checked_next()
+                    .ok_or(StoreError::SequenceOverflow)?,
+            );
             store.streams.entry(run_id).or_default().push(batch);
         }
         Ok(())
@@ -9180,12 +9235,14 @@ fn kernel_event_envelope_json(envelope: &KernelEventEnvelope) -> serde_json::Val
         "payload_hash": envelope.payload_hash().as_str(),
         "run_id": envelope.run_id().as_str(),
         "seq": envelope.seq().as_u64(),
+        "store_commit_order": envelope.store_commit_order().as_u64(),
         "spec_hash": envelope.spec_hash().as_str(),
     })
 }
 
 fn parse_kernel_event_envelope(json: &serde_json::Value) -> Result<KernelEventEnvelope> {
     let seq = StreamSeq::new(required_u64(json, "seq")?)?;
+    let store_commit_order = StoreCommitOrder::new(required_u64(json, "store_commit_order")?);
     let ordinal = CommitOrdinal::new(required_u32(json, "ordinal")?);
     let payload = payload_from_json_value(required_obj(json, "payload")?)?;
     KernelEventEnvelope::from_persisted_record(PersistedKernelEventRecord {
@@ -9193,6 +9250,7 @@ fn parse_kernel_event_envelope(json: &serde_json::Value) -> Result<KernelEventEn
         event_schema_id: parse_identity(required_str(json, "event_schema_id")?)?,
         run_id: parse_identity(required_str(json, "run_id")?)?,
         seq,
+        store_commit_order,
         ordinal,
         spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
         commit_key: CommitKey::new(required_str(json, "commit_key")?)?,

@@ -1238,7 +1238,7 @@ fn apply_fact_recorded(
     }
 
     let recorded_at = fact_recorded_at(envelope);
-    let store_commit_order = envelope.seq().as_u64();
+    let store_commit_order = envelope.store_commit_order().as_u64();
     let index = FactIndexProjection::from_record_projection(
         &record,
         envelope.commit_key().clone(),

@@ -77,10 +77,9 @@ Filesystem artifact roots outside this store are not read or migrated.
 
 Run this store in a dedicated MFM database tenancy and avoid sharing the
 Postgres transaction horizon with unrelated long-lived workloads. Observation
-pages seal a frontier from PostgreSQL snapshot `xmin` and order changes by
-`(commits.append_xid, commit_sort_key)`. PostgreSQL transaction IDs are a
-cluster-level resource, so unrelated transactions can delay frontier advancement
-and make list/watch lag behind strict per-run status.
+pages order committed changes by the store-owned `commits.store_commit_order`
+coordinate, so the frontier advances only when an append transaction commits.
+The coordinate is storage-private and is not exposed by public cursors.
 
 Authority and cursor tables are protected by no-update/no-delete/no-truncate
 triggers in the v1 schema. `admission_lane` and `admission_waiter` are the
