@@ -13,9 +13,9 @@ use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1 as events;
 use mfm_fact_capabilities::{FactIndexReadProvider, FactIndexReadRequest};
 use mfm_facts::{
-    fact_query_result_rows_from_receipt, FactCanonicalScalar, FactClaimId, FactQueryEvidence,
-    QueryResultCardinality, ScopeDecisionEvidence, StoreReadFrontier, StoreReadFrontierType,
-    StoreScopeRef,
+    fact_query_result_rows_from_receipt, CanonicalFactQueryPlan, FactCanonicalScalar, FactClaimId,
+    FactQueryEvidence, QueryResultCardinality, ScopeDecisionEvidence, StoreReadFrontier,
+    StoreReadFrontierType, StoreScopeRef,
 };
 use mfm_portfolio_model::symbol::ObservationAnchor;
 use mfm_program::{StateSpec, ValidatedConfig};
@@ -421,13 +421,8 @@ pub fn verify_portfolio_replay(broker: &replay::ReplayBroker) -> replay::Result<
                 "portfolio query evidence does not describe a complete snapshot selection",
             ));
         }
-        let Some(index) = expected_requests
-            .iter()
-            .enumerate()
-            .find_map(|(index, request)| {
-                (!matched_requirements.contains(&index) && request.plan() == evidence.plan())
-                    .then_some(index)
-            })
+        let Some(index) =
+            first_unmatched_plan_index(&expected_requests, &matched_requirements, evidence.plan())
         else {
             return Err(replay_portfolio_mismatch(
                 "portfolio query evidence does not match a certified holding request",
@@ -780,6 +775,20 @@ async fn candidates_for_requirement(
         }
     }
     Ok((candidates, claim_ids))
+}
+
+/// Multiset plan match: first unmatched expected request with an equal query plan.
+fn first_unmatched_plan_index(
+    expected_requests: &[FactIndexReadRequest],
+    matched_requirements: &BTreeSet<usize>,
+    plan: &CanonicalFactQueryPlan,
+) -> Option<usize> {
+    expected_requests
+        .iter()
+        .enumerate()
+        .find_map(|(index, request)| {
+            (!matched_requirements.contains(&index) && request.plan() == plan).then_some(index)
+        })
 }
 
 fn holding_fact_index_request(

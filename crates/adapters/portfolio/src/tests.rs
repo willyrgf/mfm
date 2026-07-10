@@ -896,6 +896,55 @@ impl store::RetainedArtifactReadProvider for MockArtifacts {
     }
 }
 
+#[test]
+fn multiset_plan_matching_consumes_first_unmatched_identical_plan() {
+    use std::collections::BTreeSet;
+
+    let portfolio = dual_wallet_same_network_portfolio();
+    // Force both wallets to share one address so query plans are identical.
+    let mut portfolio = portfolio;
+    let shared = portfolio.wallets[0].subject.address_str().to_owned();
+    portfolio.wallets[1].subject =
+        WalletSubject::new(shared, WalletSubjectKind::EvmAddress).expect("shared subject");
+    let config = SelectHoldingsConfig::with_default_store_scope(portfolio.clone()).expect("config");
+    let subjects = resolve_subjects_from_config(
+        &ResolveSubjectsConfig::new(portfolio.wallets.clone()).expect("subjects"),
+    );
+    let requirements = expand_required_holdings(&config, &subjects).expect("requirements");
+    assert!(requirements.len() >= 2, "need at least two requirements");
+    let expected_requests = requirements
+        .iter()
+        .map(|requirement| holding_fact_index_request(&config, requirement).expect("request"))
+        .collect::<Vec<_>>();
+    let first_plan = expected_requests[0].plan().clone();
+    let identical_pair: Vec<_> = expected_requests
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| request.plan() == &first_plan)
+        .map(|(index, _)| index)
+        .collect();
+    assert!(
+        identical_pair.len() >= 2,
+        "fixture must produce at least two identical plans for same-address wallets"
+    );
+
+    let mut matched = BTreeSet::new();
+    let first = first_unmatched_plan_index(&expected_requests, &matched, &first_plan)
+        .expect("first identical plan slot");
+    matched.insert(first);
+    let second = first_unmatched_plan_index(&expected_requests, &matched, &first_plan)
+        .expect("second identical plan slot");
+    assert_ne!(
+        first, second,
+        "duplicate plans must bind distinct requirement slots"
+    );
+    matched.insert(second);
+    assert!(
+        first_unmatched_plan_index(&expected_requests, &matched, &first_plan).is_none(),
+        "no third unmatched slot for the same plan"
+    );
+}
+
 fn run_id(seed: u8) -> RunId {
     RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(seed))
 }

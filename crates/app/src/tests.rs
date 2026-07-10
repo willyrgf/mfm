@@ -1542,6 +1542,17 @@ fn replay_diagnostic_accepts_generic_details_with_network_id() {
 #[tokio::test]
 async fn run_read_services_are_evidence_only() {
     let source = include_str!("lib.rs");
+    let production_read_store = source
+        .split("pub async fn connect_production_run_read_store")
+        .nth(1)
+        .expect("production read store constructor is present")
+        .split("/// Connects the production authenticated public-fact query service")
+        .next()
+        .expect("production read store constructor is bounded");
+    assert!(!production_read_store.contains("MFM_FACT_RECEIPT_SIGNING_KEY_FILE"));
+    assert!(!production_read_store.contains("load_fact_receipt_signing_key"));
+    assert!(!production_read_store.contains("connect_with_fact_receipt"));
+
     let production_read_constructor = source
         .split("pub async fn connect_production_run_read_services")
         .nth(1)
@@ -1551,6 +1562,9 @@ async fn run_read_services_are_evidence_only() {
         .expect("production read constructor is bounded");
     assert!(!production_read_constructor.contains("production_runner_registry"));
     assert!(!production_read_constructor.contains("std::env"));
+    assert!(!production_read_constructor.contains("MFM_FACT_RECEIPT_SIGNING_KEY_FILE"));
+    assert!(!production_read_constructor.contains("load_fact_receipt_signing_key"));
+    assert!(production_read_constructor.contains("connect_production_run_read_store"));
 
     let read_services_impl = source
         .split("pub struct RunReadServices")
@@ -1716,6 +1730,50 @@ async fn postgres_store_authority_error_is_redacted_for_public_app_surface() {
             "app error leaked `{forbidden}` in {rendered}"
         );
     }
+}
+
+#[test]
+fn public_status_dto_surfaces_attempt_error_codes() {
+    use mfm_ids::{AttemptId, EventId, NodeId};
+
+    let run_id = RunId::parse(
+        "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+    .expect("run id");
+    let node_id = NodeId::parse(
+        "node:sha256-jcs-v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+    .expect("node id");
+    let attempt_id = AttemptId::parse(
+        "attempt:sha256-jcs-v1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    )
+    .expect("attempt id");
+    let event_id = EventId::parse(
+        "event:sha256-jcs-v1:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    )
+    .expect("event id");
+    let attempt = store::AttemptProjection {
+        run_id,
+        node_id,
+        attempt_id,
+        event_id,
+        status: store::AttemptStatus::Failed {
+            retryable: false,
+            error: Box::new(
+                events::MfmErrorInfo::new(
+                    events::ErrorCode::new("missing_fact").expect("code"),
+                    events::ErrorCategory::Validation,
+                    false,
+                    "holding fact is missing".to_owned(),
+                )
+                .expect("error info"),
+            ),
+        },
+    };
+    let disposition = attempt_disposition(&attempt);
+    assert_eq!(disposition.disposition, "failed");
+    assert_eq!(disposition.error_code.as_deref(), Some("missing_fact"));
+    assert_eq!(disposition.retryable, Some(false));
 }
 
 #[test]

@@ -4558,7 +4558,7 @@ fn attempt_dispositions(projection: &store::ProjectionSnapshot) -> Vec<AttemptDi
         .collect()
 }
 
-fn attempt_disposition(attempt: &store::AttemptProjection) -> AttemptDispositionStatus {
+pub(crate) fn attempt_disposition(attempt: &store::AttemptProjection) -> AttemptDispositionStatus {
     let (disposition, attempt_no, retryable, error_code, output_cell_id) = match &attempt.status {
         store::AttemptStatus::Started { attempt_no, .. } => {
             ("started", Some(*attempt_no), None, None, None)
@@ -5053,7 +5053,7 @@ fn scheduler_status_str(status: SchedulerStatus) -> &'static str {
     }
 }
 
-fn run_event_ref(event: &store::KernelEventEnvelope) -> RunEventRef {
+pub(crate) fn run_event_ref(event: &store::KernelEventEnvelope) -> RunEventRef {
     RunEventRef {
         event_id: event.event_id().as_str().to_owned(),
         event_schema_id: event.event_schema_id().as_str().to_owned(),
