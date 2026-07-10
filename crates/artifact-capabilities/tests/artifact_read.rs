@@ -75,7 +75,8 @@ fn evidence(bytes: &[u8]) -> ArtifactEvidenceRef {
 fn verifies_artifact_bytes() {
     let bytes = br#"{"ok":true}"#.to_vec();
     let evidence = evidence(&bytes);
-    let request = ArtifactReadRequest::from_replay_authorized_evidence(evidence.clone());
+    let request = ArtifactReadRequest::from_replay_authorized_evidence(evidence.clone())
+        .expect("replay authorized request");
 
     let verified =
         VerifiedArtifactBytes::new(bytes.clone(), evidence.clone(), &request).expect("verified");
@@ -128,7 +129,8 @@ fn rejects_artifact_evidence_mismatches() {
                 expected = evidence.clone();
             }
         }
-        let request = ArtifactReadRequest::from_replay_authorized_evidence(expected);
+        let request = ArtifactReadRequest::from_replay_authorized_evidence(expected)
+            .expect("replay authorized request");
 
         let err = VerifiedArtifactBytes::new(bytes, evidence, &request).expect_err(name);
 
@@ -146,13 +148,6 @@ fn rejects_artifact_evidence_mismatches() {
 fn materialized_seed_cell_request_checks_seed_role_schema_and_semantic_identity() {
     let bytes = br#"{"seed":true}"#.to_vec();
     let seed_id = seed_id("configured");
-    let request = ArtifactReadRequest::from_materialized_seed_cell(
-        artifact_id(&bytes),
-        digest(&bytes),
-        schema_id("mfm.test.seed_schema"),
-        semantic_id("seed_value"),
-        seed_id.clone(),
-    );
     let evidence = ArtifactEvidenceRef {
         artifact_id: artifact_id(&bytes),
         digest: digest(&bytes),
@@ -161,9 +156,21 @@ fn materialized_seed_cell_request_checks_seed_role_schema_and_semantic_identity(
         schema_id: Some(schema_id("mfm.test.seed_schema")),
         semantic_type_id: Some(semantic_id("seed_value")),
         producer_node_id: None,
-        producer_seed_id: Some(seed_id),
+        producer_seed_id: Some(seed_id.clone()),
         artifact_role: ArtifactRole::SeedInput,
     };
+    let request = ArtifactReadRequest::from_materialized_seed_cell(
+        artifact_id(&bytes),
+        digest(&bytes),
+        evidence
+            .clone()
+            .into_store()
+            .evidence_hash()
+            .expect("seed evidence hash"),
+        schema_id("mfm.test.seed_schema"),
+        semantic_id("seed_value"),
+        seed_id,
+    );
 
     VerifiedArtifactBytes::new(bytes, evidence, &request).expect("verified seed cell");
 }
@@ -171,13 +178,6 @@ fn materialized_seed_cell_request_checks_seed_role_schema_and_semantic_identity(
 #[test]
 fn materialized_produced_cell_request_checks_state_output_schema_and_semantic_identity() {
     let bytes = br#"{"produced":true}"#.to_vec();
-    let request = ArtifactReadRequest::from_materialized_produced_cell(
-        artifact_id(&bytes),
-        digest(&bytes),
-        schema_id("mfm.test.output_schema"),
-        semantic_id("output_value"),
-        node_id("producer"),
-    );
     let evidence = ArtifactEvidenceRef {
         artifact_id: artifact_id(&bytes),
         digest: digest(&bytes),
@@ -189,6 +189,18 @@ fn materialized_produced_cell_request_checks_state_output_schema_and_semantic_id
         producer_seed_id: None,
         artifact_role: ArtifactRole::StateOutput,
     };
+    let request = ArtifactReadRequest::from_materialized_produced_cell(
+        artifact_id(&bytes),
+        digest(&bytes),
+        evidence
+            .clone()
+            .into_store()
+            .evidence_hash()
+            .expect("produced evidence hash"),
+        schema_id("mfm.test.output_schema"),
+        semantic_id("output_value"),
+        node_id("producer"),
+    );
 
     VerifiedArtifactBytes::new(bytes, evidence, &request).expect("verified produced cell");
 }
@@ -196,16 +208,6 @@ fn materialized_produced_cell_request_checks_state_output_schema_and_semantic_id
 #[test]
 fn side_effect_projection_request_accepts_unprojected_schema_and_semantic_identity() {
     let bytes = br#"{"prepared":true}"#.to_vec();
-    let projection = store::SideEffectArtifactProjection {
-        artifact_id: artifact_id(&bytes),
-        content_digest: digest(&bytes),
-        schema_id: None,
-    };
-    let request = ArtifactReadRequest::from_side_effect_projection(
-        &projection,
-        ArtifactRole::PreparedInvocation,
-        node_id("producer"),
-    );
     let evidence = ArtifactEvidenceRef {
         artifact_id: artifact_id(&bytes),
         digest: digest(&bytes),
@@ -217,6 +219,21 @@ fn side_effect_projection_request_accepts_unprojected_schema_and_semantic_identi
         producer_seed_id: None,
         artifact_role: ArtifactRole::PreparedInvocation,
     };
+    let projection = store::SideEffectArtifactProjection {
+        artifact_id: artifact_id(&bytes),
+        content_digest: digest(&bytes),
+        evidence_hash: evidence
+            .clone()
+            .into_store()
+            .evidence_hash()
+            .expect("prepared evidence hash"),
+        schema_id: None,
+    };
+    let request = ArtifactReadRequest::from_side_effect_projection(
+        &projection,
+        ArtifactRole::PreparedInvocation,
+        node_id("producer"),
+    );
 
     VerifiedArtifactBytes::new(bytes, evidence, &request)
         .expect("verified prepared side-effect artifact");

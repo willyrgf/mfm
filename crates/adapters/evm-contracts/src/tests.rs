@@ -729,6 +729,9 @@ fn run_artifact_ref_from_store(
         schema_id: evidence.schema_id.clone(),
         semantic_type_id: evidence.semantic_type_id.clone(),
         content_digest: evidence.digest.clone(),
+        evidence_hash: evidence
+            .evidence_hash()
+            .expect("run artifact evidence hash"),
         byte_len: evidence.byte_len,
         media_type: evidence.media_type.clone(),
     }
@@ -870,6 +873,9 @@ where
                 context: authority.source_cell_context.clone(),
                 artifact_id: source_value_artifact.artifact_id.clone(),
                 content_digest: source_value_artifact.digest.clone(),
+                evidence_hash: source_value_artifact
+                    .evidence_hash()
+                    .expect("source value evidence hash"),
                 producer_state_kind: Some(authority.source_producer_node.state_kind.clone()),
                 producer_state_version: Some(authority.source_producer_node.state_version.clone()),
             }),
@@ -2654,6 +2660,7 @@ fn replay_intent_evidence(
             intent_schema_id: ContextContractDeployIntent::schema_id().expect("intent schema"),
             intent_hash: artifact.digest.clone(),
             intent_artifact_id: artifact.artifact_id.clone(),
+            intent_artifact_evidence_hash: artifact.evidence_hash().expect("intent evidence hash"),
             idempotency_input_schema_id: ContractTransactionIdempotency::schema_id()
                 .expect("idempotency schema"),
             idempotency_input_hash: content_digest(0x4b),
@@ -2753,6 +2760,9 @@ fn replay_prepared_evidence(
             resource_key: None,
             prepared_artifact_id: Some(artifact.artifact_id.clone()),
             prepared_hash: Some(artifact.digest.clone()),
+            prepared_artifact_evidence_hash: Some(
+                artifact.evidence_hash().expect("prepared evidence hash"),
+            ),
         },
         artifact,
         artifact_bytes,
@@ -2779,6 +2789,9 @@ fn replay_submission_evidence(
                 .expect("submission schema"),
             submission_hash: artifact.digest.clone(),
             submission_artifact_id: artifact.artifact_id.clone(),
+            submission_artifact_evidence_hash: artifact
+                .evidence_hash()
+                .expect("submission evidence hash"),
         },
         artifact,
         artifact_bytes,
@@ -2818,6 +2831,9 @@ fn replay_receipt_evidence(prepared: &PreparedContractInvocation) -> replay::Rec
             receipt_schema_id: ContractDeployReceipt::schema_id().expect("receipt schema"),
             receipt_hash: artifact.digest.clone(),
             receipt_artifact_id: artifact.artifact_id.clone(),
+            receipt_artifact_evidence_hash: artifact
+                .evidence_hash()
+                .expect("receipt evidence hash"),
             replay_verifier_id: replay_verifier_id().expect("replay verifier id"),
             resource_touched_set: None,
         },

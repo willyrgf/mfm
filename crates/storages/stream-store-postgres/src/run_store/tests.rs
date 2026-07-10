@@ -748,6 +748,11 @@ fn state_attempt_interrupted() -> KernelEventPayload {
 }
 
 fn cell_produced(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
+    let evidence = store_artifact_ref(
+        artifact_id.clone(),
+        digest.clone(),
+        ArtifactRole::StateOutput,
+    );
     KernelEventPayload::CellProduced(events::CellProduced {
         spec_hash: spec_hash(1),
         node_id: node_id(20),
@@ -762,6 +767,7 @@ fn cell_produced(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventP
         context: spec::CellContextSpec::no_context(),
         artifact_id,
         content_digest: digest,
+        evidence_hash: evidence.evidence_hash().expect("cell evidence hash"),
         producer_state_kind: None,
         producer_state_version: None,
     })
@@ -999,6 +1005,7 @@ fn run_completed(run_id: RunId, outcome: events::RunCompletionOutcome) -> Kernel
 fn manual_resolution_recorded(verified: &VerifiedManualResolutionForPrefix) -> KernelEventPayload {
     let claim = verified.claim();
     let authorization = verified.authorization();
+    let artifacts = manual_resolution_artifacts(verified);
     KernelEventPayload::ManualResolutionRecorded(events::ManualResolutionRecorded {
         run_id: claim.run_id.clone(),
         spec_hash: claim.spec_hash.clone(),
@@ -1006,9 +1013,15 @@ fn manual_resolution_recorded(verified: &VerifiedManualResolutionForPrefix) -> K
         evidence_schema_id: claim.evidence.schema_id.clone(),
         evidence_hash: claim.evidence.content_hash.clone(),
         evidence_artifact_id: claim.evidence.artifact_id.clone(),
+        evidence_artifact_evidence_hash: artifacts[0]
+            .evidence_hash()
+            .expect("manual evidence hash"),
         authorization_schema_id: authorization.schema_id.clone(),
         authorization_hash: authorization.content_hash.clone(),
         authorization_artifact_id: authorization.artifact_id.clone(),
+        authorization_artifact_evidence_hash: artifacts[1]
+            .evidence_hash()
+            .expect("manual authorization evidence hash"),
         note: Some(events::ManualResolutionNote::new("reviewed evidence").expect("note")),
     })
 }
@@ -1553,6 +1566,12 @@ fn side_effect_attempt_started_for(node_id: NodeId, attempt_id: AttemptId) -> Ke
 }
 
 fn side_effect_intent(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
+    let evidence = side_effect_artifact_ref(
+        artifact_id.clone(),
+        digest.clone(),
+        schema_id("mfm.test.side_effect_intent", 70),
+        ArtifactRole::SideEffectIntent,
+    );
     KernelEventPayload::SideEffectIntentPersisted(events::side_effect::IntentPersisted {
         spec_hash: spec_hash(1),
         node_id: submit_node_id(),
@@ -1566,6 +1585,7 @@ fn side_effect_intent(artifact_id: ArtifactId, digest: ContentDigest) -> KernelE
         intent_schema_id: schema_id("mfm.test.side_effect_intent", 70),
         intent_hash: digest,
         intent_artifact_id: artifact_id,
+        intent_artifact_evidence_hash: evidence.evidence_hash().expect("intent evidence hash"),
         idempotency_input_schema_id: schema_id("mfm.test.idempotency_input", 73),
         idempotency_input_hash: content_digest(74),
         idempotency_key: events::IdempotencyKeyRef::new("idem-key-1").expect("idempotency key"),
@@ -1620,6 +1640,7 @@ fn side_effect_prepared() -> KernelEventPayload {
         resource_key: None,
         prepared_artifact_id: None,
         prepared_hash: None,
+        prepared_artifact_evidence_hash: None,
     })
 }
 
@@ -1684,6 +1705,12 @@ fn side_effect_submission_unknown(
     artifact_id: ArtifactId,
     digest: ContentDigest,
 ) -> KernelEventPayload {
+    let evidence = side_effect_artifact_ref(
+        artifact_id.clone(),
+        digest.clone(),
+        unknown_schema(),
+        ArtifactRole::SubmissionUnknownEvidence,
+    );
     KernelEventPayload::SideEffectSubmissionUnknown(events::side_effect::SubmissionUnknown {
         spec_hash: spec_hash(1),
         node_id: submit_node_id(),
@@ -1696,6 +1723,7 @@ fn side_effect_submission_unknown(
         evidence_schema_id: unknown_schema(),
         evidence_hash: digest,
         evidence_artifact_id: artifact_id,
+        evidence_artifact_evidence_hash: evidence.evidence_hash().expect("unknown evidence hash"),
     })
 }
 
@@ -1703,6 +1731,12 @@ fn side_effect_submission_observed(
     artifact_id: ArtifactId,
     digest: ContentDigest,
 ) -> KernelEventPayload {
+    let evidence = side_effect_artifact_ref(
+        artifact_id.clone(),
+        digest.clone(),
+        submission_schema(),
+        ArtifactRole::Submission,
+    );
     KernelEventPayload::SideEffectSubmissionObserved(events::side_effect::SubmissionObserved {
         spec_hash: spec_hash(1),
         node_id: submit_node_id(),
@@ -1715,10 +1749,19 @@ fn side_effect_submission_observed(
         submission_schema_id: submission_schema(),
         submission_hash: digest,
         submission_artifact_id: artifact_id,
+        submission_artifact_evidence_hash: evidence
+            .evidence_hash()
+            .expect("submission evidence hash"),
     })
 }
 
 fn side_effect_ambiguous(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
+    let evidence = side_effect_artifact_ref(
+        artifact_id.clone(),
+        digest.clone(),
+        schema_id("mfm.test.ambiguity", 84),
+        ArtifactRole::AmbiguityEvidence,
+    );
     KernelEventPayload::SideEffectAmbiguous(events::side_effect::Ambiguous {
         spec_hash: spec_hash(1),
         node_id: verify_node_id(),
@@ -1732,6 +1775,7 @@ fn side_effect_ambiguous(artifact_id: ArtifactId, digest: ContentDigest) -> Kern
         evidence_schema_id: schema_id("mfm.test.ambiguity", 84),
         evidence_hash: digest,
         evidence_artifact_id: artifact_id,
+        evidence_artifact_evidence_hash: evidence.evidence_hash().expect("ambiguity evidence hash"),
     })
 }
 

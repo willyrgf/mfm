@@ -70,7 +70,7 @@ fn replay_retained_artifact_lookup_uses_exact_evidence_identity() {
     let requirement = store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::FactResponse,
         artifact_id: second.artifact_id.clone(),
-        evidence_hash: Some(second_hash),
+        evidence_hash: second_hash,
         digest: Some(second.digest.clone()),
         byte_len: Some(second.byte_len),
         media_type: Some(second.media_type.clone()),
@@ -86,7 +86,7 @@ fn replay_retained_artifact_lookup_uses_exact_evidence_identity() {
     assert_eq!(selected.artifact.producer_node_id, second.producer_node_id);
 
     let mut wrong_key = requirement.clone();
-    wrong_key.evidence_hash = Some(first_hash);
+    wrong_key.evidence_hash = first_hash;
     assert!(broker.retained_artifact(&wrong_key).is_err());
 }
 
@@ -423,6 +423,7 @@ fn side_effect_frame_requests_are_pair_keyed() {
         submission_schema_id: schema_id("mfm.replay.test.submission", 0x42),
         submission_hash: submission_hash.clone(),
         submission_artifact_id: artifact_id(0x43),
+        submission_artifact_evidence_hash: content_digest(0x44),
     };
     let frame = SideEffectReplayFrame {
         intent: &intent,
@@ -461,6 +462,7 @@ fn side_effect_frame_not_submitted_requests_are_pair_keyed() {
         proof_schema_id: schema_id("mfm.replay.test.not_submitted", 0x53),
         proof_hash: proof_hash.clone(),
         proof_artifact_id: artifact_id(0x54),
+        proof_artifact_evidence_hash: content_digest(0x55),
     };
     let frame = SideEffectReplayFrame {
         intent: &intent,
@@ -502,6 +504,7 @@ fn side_effect_frame_receipt_request_uses_recorded_verify_evidence() {
         receipt_schema_id: schema_id("mfm.replay.test.receipt", 0x63),
         receipt_hash: receipt_hash.clone(),
         receipt_artifact_id: artifact_id(0x64),
+        receipt_artifact_evidence_hash: content_digest(0x65),
         replay_verifier_id: replay_verifier_id.clone(),
         resource_touched_set: None,
     };
@@ -699,6 +702,7 @@ fn intent_persisted(
         intent_schema_id: schema_id("mfm.replay.test.intent", 0x05),
         intent_hash: content_digest(0x06),
         intent_artifact_id: artifact_id(0x07),
+        intent_artifact_evidence_hash: content_digest(0x07),
         idempotency_input_schema_id: schema_id("mfm.replay.test.idempotency", 0x08),
         idempotency_input_hash: content_digest(0x09),
         idempotency_key: events::IdempotencyKeyRef::new("idem-key").expect("idempotency key"),
@@ -776,6 +780,7 @@ fn side_effect_confirmation(
         confirmation_schema_id: schema_id("mfm.replay.test.confirmation", 0x84),
         confirmation_hash: content_digest(0x85),
         confirmation_artifact_id: artifact_id(0x86),
+        confirmation_artifact_evidence_hash: content_digest(0x87),
         replay_verifier_id: events::ReplayVerifierId::new("mfm.replay.test.confirmation.verifier")
             .expect("replay verifier id"),
         resource_touched_set: None,
@@ -824,6 +829,7 @@ fn side_effect_receipt(
         receipt_schema_id: schema_id("mfm.replay.test.receipt", 0x8a),
         receipt_hash: content_digest(0x8b),
         receipt_artifact_id: artifact_id(0x8c),
+        receipt_artifact_evidence_hash: content_digest(0x8d),
         replay_verifier_id: events::ReplayVerifierId::new("mfm.replay.test.receipt.verifier")
             .expect("replay verifier id"),
         resource_touched_set: None,
@@ -838,9 +844,11 @@ fn manual_resolution_recorded() -> KernelEventPayload {
         evidence_schema_id: schema_id("mfm.replay.test.manual_evidence", 0x91),
         evidence_hash: content_digest(0x92),
         evidence_artifact_id: artifact_id(0x93),
+        evidence_artifact_evidence_hash: content_digest(0x93),
         authorization_schema_id: schema_id("mfm.replay.test.manual_authorization", 0x94),
         authorization_hash: content_digest(0x95),
         authorization_artifact_id: artifact_id(0x96),
+        authorization_artifact_evidence_hash: content_digest(0x96),
         note: None,
     })
 }
@@ -1060,14 +1068,26 @@ fn run_artifact_ref(
     content_digest: ContentDigest,
 ) -> events::RunArtifactEvidenceRef {
     let artifact_id = ArtifactId::from_digest(content_digest.algorithm(), *content_digest.digest());
+    let store = StoredArtifactEvidenceRef {
+        artifact_id: artifact_id.clone(),
+        digest: content_digest.clone(),
+        byte_len: 2,
+        media_type: spec::MediaType::new("application/json").expect("media type"),
+        schema_id: Some(schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: role,
+    };
     events::RunArtifactEvidenceRef {
         artifact_id,
         role,
         schema_id: Some(schema_id),
         semantic_type_id: None,
         content_digest,
+        evidence_hash: store.evidence_hash().expect("run artifact evidence hash"),
         byte_len: 2,
-        media_type: spec::MediaType::new("application/json").expect("media type"),
+        media_type: store.media_type,
     }
 }
 
@@ -1211,7 +1231,11 @@ fn cell_replay_authority(
     let terminal_payload = match terminal {
         CellReplayTerminal::Produced => {
             let output_digest = content_digest(0xe1);
-            artifact_evidence.push(state_output_artifact_ref(cell, &output_digest));
+            let output_artifact = state_output_artifact_ref(cell, &output_digest);
+            let evidence_hash = output_artifact
+                .evidence_hash()
+                .expect("state output evidence hash");
+            artifact_evidence.push(output_artifact);
             KernelEventPayload::CellProduced(events::CellProduced {
                 spec_hash: certified_spec.spec_hash.clone(),
                 node_id: node.node_id.clone(),
@@ -1227,6 +1251,7 @@ fn cell_replay_authority(
                     *output_digest.digest(),
                 ),
                 content_digest: output_digest,
+                evidence_hash,
                 producer_state_kind: Some(node.state_kind.clone()),
                 producer_state_version: Some(node.state_version.clone()),
             })
@@ -1508,6 +1533,7 @@ fn fact_query_evidence_artifact(
             schema_id: artifact.schema_id.clone().expect("schema id"),
             semantic_type_id: None,
             content_digest: artifact.digest.clone(),
+            evidence_hash: artifact.evidence_hash().expect("query evidence hash"),
             byte_len: artifact.byte_len,
             media_type: artifact.media_type.clone(),
         },

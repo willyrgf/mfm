@@ -2148,6 +2148,7 @@ impl ErasedNodeRunner for RecordingRunner {
                     context: ctx.output_cell().context.clone(),
                     artifact_id: self.output_artifact.clone(),
                     content_digest: self.output_digest.clone(),
+                    evidence_hash: self.output_digest.clone(),
                     producer_state_kind: Some(ctx.node().state_kind.clone()),
                     producer_state_version: Some(ctx.node().state_version.clone()),
                 })],
@@ -2377,6 +2378,7 @@ fn runner_kit_loads_config_and_materialized_inputs() {
             producer_node_id: node.node_id.clone(),
             artifact_id: left_evidence.artifact_id.clone(),
             content_digest: left_evidence.digest.clone(),
+            evidence_hash: left_evidence.digest.clone(),
         },
     );
     let right_a_node = runner_kit_input_cell(
@@ -2385,6 +2387,7 @@ fn runner_kit_loads_config_and_materialized_inputs() {
             seed_id: fixture.seed_ref.seed_id.clone(),
             artifact_id: right_a_evidence.artifact_id.clone(),
             content_digest: right_a_evidence.digest.clone(),
+            evidence_hash: right_a_evidence.digest.clone(),
         },
     );
     let right_b_node = runner_kit_input_cell(
@@ -2393,6 +2396,7 @@ fn runner_kit_loads_config_and_materialized_inputs() {
             producer_node_id: node.node_id.clone(),
             artifact_id: right_b_evidence.artifact_id.clone(),
             content_digest: right_b_evidence.digest.clone(),
+            evidence_hash: right_b_evidence.digest.clone(),
         },
     );
     let inputs = MaterializedInputs {
@@ -5258,7 +5262,8 @@ async fn rejected_staged_payload_mismatch_does_not_admit_artifact_evidence() {
                 value_lineage: output_cell.value_lineage.clone(),
                 context: output_cell.context.clone(),
                 artifact_id: staged_artifact.clone(),
-                content_digest: staged_digest,
+                content_digest: staged_digest.clone(),
+                evidence_hash: staged_digest,
                 producer_state_kind: Some(node.state_kind.clone()),
                 producer_state_version: Some(node.state_version.clone()),
             }),
@@ -6039,7 +6044,8 @@ async fn replay_rejects_terminal_cell_producer_outside_certified_spec() {
                     value_lineage: certified_cell.value_lineage.clone(),
                     context: certified_cell.context.clone(),
                     artifact_id,
-                    content_digest: artifact_digest,
+                    content_digest: artifact_digest.clone(),
+                    evidence_hash: artifact_digest,
                     producer_state_kind: Some(forged_node.state_kind.clone()),
                     producer_state_version: Some(forged_node.state_version.clone()),
                 }),
@@ -6185,7 +6191,8 @@ async fn replay_rejects_public_output_without_render_attempt() {
                     value_lineage: output_cell.value_lineage.clone(),
                     context: output_cell.context.clone(),
                     artifact_id: receipt_artifact,
-                    content_digest: receipt_digest,
+                    content_digest: receipt_digest.clone(),
+                    evidence_hash: receipt_digest,
                     producer_state_kind: Some(non_render_node.state_kind.clone()),
                     producer_state_version: Some(non_render_node.state_version.clone()),
                 }),
@@ -6214,11 +6221,13 @@ async fn replay_rejects_public_output_without_render_attempt() {
                         semantic_type_id: public_cell.semantic_type_id.clone(),
                         schema_id: public_cell.schema_id.clone(),
                         value_lineage: public_cell.value_lineage.clone(),
-                        content_digest: source_digest,
+                        content_digest: source_digest.clone(),
+                        evidence_hash: source_digest,
                         artifact_id: source_artifact,
                     }],
                     rendered_digest: content(0xe5),
                     rendered_artifact_id: None,
+                    rendered_artifact_evidence_hash: None,
                     renderer_descriptor_id: fixture
                         .runtime_spec
                         .spec()
@@ -6311,6 +6320,7 @@ async fn replay_rejects_public_output_with_forged_rendered_digest() {
                 schema_id: public_cell.schema_id.clone(),
                 value_lineage: public_cell.value_lineage.clone(),
                 content_digest: content_digest.clone(),
+                evidence_hash: content_digest.clone(),
                 artifact_id: artifact_id.clone(),
             }
         })
@@ -6336,7 +6346,8 @@ async fn replay_rejects_public_output_with_forged_rendered_digest() {
                     value_lineage: output_cell.value_lineage.clone(),
                     context: output_cell.context.clone(),
                     artifact_id: bad_receipt_artifact,
-                    content_digest: bad_receipt_digest,
+                    content_digest: bad_receipt_digest.clone(),
+                    evidence_hash: bad_receipt_digest,
                     producer_state_kind: Some(render_node.state_kind.clone()),
                     producer_state_version: Some(render_node.state_version.clone()),
                 }),
@@ -6350,6 +6361,7 @@ async fn replay_rejects_public_output_with_forged_rendered_digest() {
                     cells: public_cells,
                     rendered_digest: bad_rendered_digest,
                     rendered_artifact_id: None,
+                    rendered_artifact_evidence_hash: None,
                     renderer_descriptor_id: render.renderer_descriptor.descriptor_id.clone(),
                 }),
                 events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
@@ -8290,6 +8302,9 @@ async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
                     producer_seed_id: None,
                     artifact_role: events::ArtifactRole::SideEffectIntent,
                 };
+                let intent_artifact_evidence_hash = evidence.evidence_hash().map_err(|error| {
+                    RuntimeError::InvalidRunnerOutput(format!("intent evidence hash: {error}"))
+                })?;
                 let staged_artifact = StagedArtifact::inline_side_effect_artifact(
                     &ctx,
                     intent_bytes,
@@ -8315,6 +8330,7 @@ async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
                                 intent_schema_id: ctx.node().config_ref.schema_id.clone(),
                                 intent_hash,
                                 intent_artifact_id,
+                                intent_artifact_evidence_hash,
                                 idempotency_input_schema_id: ctx
                                     .node()
                                     .config_ref
@@ -8620,6 +8636,7 @@ fn side_effect_terminal_payloads_derive_attempt_failure_payload() {
                     evidence_schema_id: node.config_ref.schema_id.clone(),
                     evidence_hash: content(0xca),
                     evidence_artifact_id: artifact(0xcb),
+                    evidence_artifact_evidence_hash: content(0xca),
                 })
             }
         };
@@ -8983,6 +9000,7 @@ fn touched_set_for_emission(
             evidence_schema_id: evidence_schema_id.clone(),
             evidence_hash: evidence_hash.clone(),
             evidence_artifact_id: evidence_artifact_id.clone(),
+            evidence_artifact_evidence_hash: evidence_hash.clone(),
         }),
     }
 }
@@ -9996,7 +10014,8 @@ fn terminal_payloads(
         value_lineage: ctx.output_cell().value_lineage.clone(),
         context: ctx.output_cell().context.clone(),
         artifact_id: output_artifact,
-        content_digest: output_digest,
+        content_digest: output_digest.clone(),
+        evidence_hash: output_digest,
         producer_state_kind: Some(ctx.node().state_kind.clone()),
         producer_state_version: Some(ctx.node().state_version.clone()),
     })]
@@ -10507,6 +10526,9 @@ fn append_synthetic_exclusive_prepare(
                     intent_schema_id: node.config_ref.schema_id.clone(),
                     intent_hash: intent_hash.clone(),
                     intent_artifact_id,
+                    intent_artifact_evidence_hash: intent_artifact
+                        .evidence_hash()
+                        .expect("intent evidence hash"),
                     idempotency_input_schema_id: node.config_ref.schema_id.clone(),
                     idempotency_input_hash: content(0xc3),
                     idempotency_key: events::IdempotencyKeyRef::new(format!("idem-{commit_key}"))
@@ -10563,6 +10585,7 @@ fn append_synthetic_exclusive_prepare(
                     resource_key: Some(resource_key),
                     prepared_artifact_id: None,
                     prepared_hash: None,
+                    prepared_artifact_evidence_hash: None,
                 },
             ),
         ],
@@ -10665,8 +10688,9 @@ fn append_synthetic_submission_observed(
                 pair_role,
                 invocation_epoch: 1,
                 submission_schema_id: node.config_ref.schema_id.clone(),
-                submission_hash: digest,
+                submission_hash: digest.clone(),
                 submission_artifact_id: artifact_id,
+                submission_artifact_evidence_hash: digest,
             },
         )],
         vec![evidence],
@@ -10839,8 +10863,9 @@ fn append_synthetic_verify_receipt_observed(
                 pair_role,
                 invocation_epoch: 1,
                 receipt_schema_id: verify_node.config_ref.schema_id.clone(),
-                receipt_hash: digest,
+                receipt_hash: digest.clone(),
                 receipt_artifact_id: artifact_id,
+                receipt_artifact_evidence_hash: digest,
                 replay_verifier_id: events::ReplayVerifierId::new("mfm.test.driver.replay")
                     .expect("replay verifier"),
                 resource_touched_set: None,
@@ -10898,8 +10923,9 @@ fn append_synthetic_verify_confirmation_observed(
             pair_role,
             invocation_epoch: 1,
             confirmation_schema_id: verify_node.config_ref.schema_id.clone(),
-            confirmation_hash: digest,
+            confirmation_hash: digest.clone(),
             confirmation_artifact_id: artifact_id,
+            confirmation_artifact_evidence_hash: digest,
             replay_verifier_id: events::ReplayVerifierId::new("mfm.test.driver.replay")
                 .expect("replay verifier"),
             resource_touched_set: None,
@@ -11047,6 +11073,9 @@ fn append_synthetic_ambiguous(
             evidence_schema_id: node.config_ref.schema_id.clone(),
             evidence_hash,
             evidence_artifact_id,
+            evidence_artifact_evidence_hash: evidence
+                .evidence_hash()
+                .expect("ambiguity evidence hash"),
         }),
         events::KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
             spec_hash: fixture.runtime_spec.spec_hash().clone(),
@@ -11258,7 +11287,8 @@ fn append_terminal(
                     value_lineage: output_cell.value_lineage.clone(),
                     context: output_cell.context.clone(),
                     artifact_id,
-                    content_digest: output_digest,
+                    content_digest: output_digest.clone(),
+                    evidence_hash: output_digest,
                     producer_state_kind: Some(node.state_kind.clone()),
                     producer_state_version: Some(node.state_version.clone()),
                 }),
@@ -11400,6 +11430,9 @@ fn append_not_submitted_proven(
                     proof_schema_id: node.config_ref.schema_id.clone(),
                     proof_hash,
                     proof_artifact_id: proof_artifact,
+                    proof_artifact_evidence_hash: evidence
+                        .evidence_hash()
+                        .expect("proof evidence hash"),
                 },
             )],
             required_artifacts: vec![evidence],
@@ -12247,6 +12280,7 @@ fn fixture() -> Fixture {
             schema_id: value_schema.clone(),
             semantic_type_id: Some(semantic.clone()),
             content_digest: seed_digest.clone(),
+            evidence_hash: seed_digest.clone(),
             byte_len: TEST_SEED_BYTES.len() as u64,
             media_type: spec::MediaType::new("application/json").expect("media"),
         },
@@ -12936,7 +12970,8 @@ fn fixture_from_context_runtime_spec(
             role: events::ArtifactRole::SeedInput,
             schema_id: seed.schema_id.clone(),
             semantic_type_id: Some(seed.semantic_type_id.clone()),
-            content_digest: seed_digest,
+            content_digest: seed_digest.clone(),
+            evidence_hash: seed_digest,
             byte_len: seed_byte_len,
             media_type: spec::MediaType::new("application/json").expect("media"),
         },
@@ -13001,7 +13036,8 @@ fn fixture_from_runtime_spec(
             role: events::ArtifactRole::SeedInput,
             schema_id: seed.schema_id.clone(),
             semantic_type_id: Some(seed.semantic_type_id.clone()),
-            content_digest: seed_digest,
+            content_digest: seed_digest.clone(),
+            evidence_hash: seed_digest,
             byte_len: seed_byte_len,
             media_type: spec::MediaType::new("application/json").expect("media"),
         },
@@ -13814,17 +13850,17 @@ fn side_effect_fixture_intent_output(
     let (pair_id, pair_role) =
         side_effect_pair_fields_for_ctx(ctx, &ledger_purpose, events::SideEffectPairRole::Submit);
     let (intent_artifact_id, intent_hash) = side_effect_fixture_artifact_pair(ctx, "intent");
-    let staged_artifact = staged_side_effect_artifact(
+    let intent_evidence = side_effect_artifact(
         ctx,
-        side_effect_artifact(
-            ctx,
-            intent_artifact_id.clone(),
-            intent_hash.clone(),
-            events::ArtifactRole::SideEffectIntent,
-        ),
-        ledger.clone(),
-        invocation_epoch,
-    )?;
+        intent_artifact_id.clone(),
+        intent_hash.clone(),
+        events::ArtifactRole::SideEffectIntent,
+    );
+    let intent_artifact_evidence_hash = intent_evidence.evidence_hash().map_err(|error| {
+        RuntimeError::InvalidRunnerOutput(format!("intent evidence hash: {error}"))
+    })?;
+    let staged_artifact =
+        staged_side_effect_artifact(ctx, intent_evidence, ledger.clone(), invocation_epoch)?;
     let adapter_binding = ctx
         .node()
         .adapter_bindings
@@ -13844,6 +13880,7 @@ fn side_effect_fixture_intent_output(
             intent_schema_id: ctx.node().config_ref.schema_id.clone(),
             intent_hash,
             intent_artifact_id,
+            intent_artifact_evidence_hash,
             idempotency_input_schema_id: ctx.node().config_ref.schema_id.clone(),
             idempotency_input_hash: side_effect_fixture_digest(ctx, "idempotency"),
             idempotency_key: events::IdempotencyKeyRef::new("idem-1").expect("idempotency key"),
