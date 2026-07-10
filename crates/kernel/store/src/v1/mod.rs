@@ -15,8 +15,9 @@ pub use mfm_facts::StoreCommitOrder;
 use mfm_ids::{
     short_stable_id_fragment, AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind,
     CapabilityVersion, CellId, ContentDigest, ContextResourceKind, ContextStage, DescriptorId,
-    DigestAlgorithm, EventId, IdentityError, NodeId, RunId, SchemaId, ScopeId, SeedId,
-    SemanticTypeId, SideEffectPairId, SpecHash, StateKind, StateVersion, VisibleAscii512,
+    DigestAlgorithm, EffectKind, EffectVersion, EventId, IdentityError, LoweringVersion, NodeId,
+    RunId, SchemaId, ScopeId, SeedId, SemanticTypeId, SideEffectPairId, SpecHash, SpecVersion,
+    StateKind, StateVersion, VisibleAscii512,
 };
 use mfm_manual_auth::{ManualResolutionBlockReason, VerifiedManualResolutionForPrefix};
 use mfm_spec::v1::{

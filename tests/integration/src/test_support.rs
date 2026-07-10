@@ -26,7 +26,7 @@ pub use run_control_support::{
 
 /// Re-export: merge-safe Platform holding seed for store-backed portfolio report tests.
 pub use store::test_support::{
-    seed_platform_holding_facts_for_test, FactProjectionFixtureInputForTest,
+    append_platform_holding_facts_for_test, FactRecordFixtureInputForTest,
     PlatformHoldingFactSeedForTest,
 };
 

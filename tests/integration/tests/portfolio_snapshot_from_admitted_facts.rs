@@ -1,7 +1,6 @@
 //! Store-backed portfolio_snapshot complete path from admitted Platform holding facts.
 //!
-//! Uses the merge-safe **fixture seed** `seed_platform_holding_facts_for_test` (FactRecorded-shaped
-//! projection + artifact authority + source envelopes — not live collector IO). Drives certified
+//! Uses typed source-run append fixtures rather than direct projection injection. Drives certified
 //! `portfolio_snapshot` to Completed with chain providers unbound. Replay freezes fact-index call
 //! counts (SelectHoldings must not re-query live frontier).
 //!
@@ -16,12 +15,12 @@ use mfm_events::v1 as events;
 use mfm_facts::{FactAudience, FactProducerProvenance, FactVisibility};
 use mfm_ids::{
     AdapterKind, AdapterVersion, AttemptId, CapabilityKind, CapabilityVersion, DigestAlgorithm,
-    DigestBytes, EventId, NodeId, RunId,
+    DigestBytes, NodeId, RunId, StoreScopeId,
 };
 use mfm_integration_tests::test_support::{
-    fact_query_evidences, prepare_portfolio_launch_for_store, register_process_fact_capabilities,
-    seed_platform_holding_facts_for_test, FactProjectionFixtureInputForTest,
-    PlatformHoldingFactSeedForTest, ProjectionFactIndexProvider,
+    append_platform_holding_facts_for_test, fact_query_evidences,
+    prepare_portfolio_launch_for_store, register_process_fact_capabilities,
+    FactRecordFixtureInputForTest, PlatformHoldingFactSeedForTest, ProjectionFactIndexProvider,
 };
 use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_program::MfmFactType;
@@ -45,7 +44,7 @@ const EVM_HASH: &str = "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd
 #[tokio::test]
 async fn portfolio_snapshot_completes_from_seeded_platform_holdings_without_live_crawl() {
     let store = AsyncInMemoryRunStore::default();
-    seed_dual_mainnet_holdings(&store);
+    append_dual_mainnet_holdings(&store).await;
 
     let fact_index = Arc::new(ProjectionFactIndexProvider::new(store.clone()));
     let services = portfolio_services(store.clone(), fact_index.clone());
@@ -160,7 +159,7 @@ fn portfolio_services(
     )
 }
 
-fn seed_dual_mainnet_holdings(store: &AsyncInMemoryRunStore) {
+async fn append_dual_mainnet_holdings(store: &AsyncInMemoryRunStore) {
     let btc_subject = BtcAddressBalanceSubject::new(
         "bitcoin-mainnet",
         "main",
@@ -191,27 +190,19 @@ fn seed_dual_mainnet_holdings(store: &AsyncInMemoryRunStore) {
     .expect("evm response");
     let evm_descriptor = EvmAddressNativeBalanceSnapshotFact::descriptor().expect("evm descriptor");
 
-    seed_platform_holding_facts_for_test(
+    append_platform_holding_facts_for_test(
         store,
         [
             PlatformHoldingFactSeedForTest {
                 descriptor: btc_descriptor.clone(),
-                input: FactProjectionFixtureInputForTest {
-                    run_id: RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(0x11)),
-                    source_seq: 1,
-                    source_ordinal: 0,
-                    source_event_id: EventId::from_digest(
-                        DigestAlgorithm::Sha256JcsV1,
-                        digest_bytes(0x12),
-                    ),
+                input: FactRecordFixtureInputForTest {
+                    source_scope: holding_source_scope(0x11),
                     node_id: NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(0x13)),
                     attempt_id: AttemptId::from_digest(
                         DigestAlgorithm::Sha256JcsV1,
                         digest_bytes(0x14),
                     ),
                     commit_id: CommitKey::new("btc-holding-seed").expect("commit"),
-                    store_commit_order: 17,
-                    recorded_at: "2026-07-02T00:00:00Z".to_owned(),
                     observed_at: None,
                     visibility: FactVisibility::indexed_default(FactAudience::Platform),
                     subject: CanonicalValue::object([
@@ -266,22 +257,14 @@ fn seed_dual_mainnet_holdings(store: &AsyncInMemoryRunStore) {
             },
             PlatformHoldingFactSeedForTest {
                 descriptor: evm_descriptor.clone(),
-                input: FactProjectionFixtureInputForTest {
-                    run_id: RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(0x31)),
-                    source_seq: 2,
-                    source_ordinal: 0,
-                    source_event_id: EventId::from_digest(
-                        DigestAlgorithm::Sha256JcsV1,
-                        digest_bytes(0x32),
-                    ),
+                input: FactRecordFixtureInputForTest {
+                    source_scope: holding_source_scope(0x31),
                     node_id: NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(0x33)),
                     attempt_id: AttemptId::from_digest(
                         DigestAlgorithm::Sha256JcsV1,
                         digest_bytes(0x34),
                     ),
                     commit_id: CommitKey::new("evm-holding-seed").expect("commit"),
-                    store_commit_order: 19,
-                    recorded_at: "2026-07-02T00:00:00Z".to_owned(),
                     observed_at: None,
                     visibility: FactVisibility::indexed_default(FactAudience::Platform),
                     subject: CanonicalValue::object([
@@ -331,7 +314,16 @@ fn seed_dual_mainnet_holdings(store: &AsyncInMemoryRunStore) {
             },
         ],
     )
-    .expect("seed platform holdings");
+    .await
+    .expect("append platform holdings");
+}
+
+fn holding_source_scope(byte: u8) -> StoreScopeId {
+    StoreScopeId::new(format!(
+        "mfm.store_scope.v1:{}",
+        format!("{byte:02x}").repeat(16)
+    ))
+    .expect("holding source scope")
 }
 
 fn holding_producer(seed: u8) -> FactProducerProvenance {
