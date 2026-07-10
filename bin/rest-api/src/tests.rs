@@ -59,11 +59,56 @@ async fn run_start_accepts_entry_point_shape() {
 }
 
 #[tokio::test]
+async fn read_role_refuses_live_start_and_signed_fact_queries() {
+    let app = make_app(AppState {
+        role: RestProcessRole::Read,
+        store: store::AsyncInMemoryRunStore::default(),
+        runtime_config_path: None,
+        fact_query_receipt_trust_root: None,
+        fact_query_authority_ready: false,
+        fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
+    });
+
+    let start = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/runs/start")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"op":"portfolio_snapshot","op_version":2,"config":{}}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("start response");
+    assert_eq!(start.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let start_body = response_json(start).await;
+    assert_eq!(start_body["error"]["code"], "RestRoleReadOnly");
+
+    let facts = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/facts/chain.head")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("facts response");
+    assert_eq!(facts.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let facts_body = response_json(facts).await;
+    assert_eq!(facts_body["error"]["code"], "RestRoleReadOnly");
+}
+
+#[tokio::test]
 async fn live_routes_reuse_cached_services_after_first_construction() {
     let dir = test_temp_dir("live-routes-cache");
     let config_path = dir.path().join("runtime.toml");
     std::fs::write(&config_path, "").expect("write initial runtime config");
     let app = make_app(AppState {
+        role: RestProcessRole::Live,
         store: store::AsyncInMemoryRunStore::default(),
         runtime_config_path: Some(config_path.clone()),
         fact_query_receipt_trust_root: None,
@@ -198,6 +243,7 @@ async fn fact_query_routes_reject_malformed_query_shapes() {
 async fn facts_routes_expose_only_public_platform_projection_data() {
     let fixture = mfm_app::PublicFactVisibilityFixtureForTest::new();
     let app = make_app(AppState {
+        role: RestProcessRole::Live,
         store: fixture.store.clone(),
         runtime_config_path: None,
         fact_query_receipt_trust_root: None,
@@ -339,6 +385,7 @@ fn remove_env(key: &str) {
 
 fn test_app() -> axum::Router {
     make_app(AppState {
+        role: RestProcessRole::Live,
         store: store::AsyncInMemoryRunStore::default(),
         runtime_config_path: None,
         fact_query_receipt_trust_root: None,

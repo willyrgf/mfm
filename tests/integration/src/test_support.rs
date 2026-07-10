@@ -56,6 +56,7 @@ pub fn in_memory_rest_app_state() -> InMemoryRestAppState {
     let fact_index = Arc::new(ProjectionFactIndexProvider::new(store.clone()));
     let fact_query_receipt_trust_root = Some(fact_index.receipt_trust_root());
     mfm_rest_api::AppState {
+        role: mfm_rest_api::RestProcessRole::Live,
         store,
         runtime_config_path: None,
         fact_query_receipt_trust_root,

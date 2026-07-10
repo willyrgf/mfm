@@ -92,6 +92,7 @@ async fn parity_rest_postgres_smoke() {
     let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
     let fact_query_authority_ready = store.fact_receipt_queries_ready();
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
+        role: mfm_rest_api::RestProcessRole::Live,
         fact_index: mfm_app::production_fact_index_read_provider(store.clone()),
         store,
         runtime_config_path: None,

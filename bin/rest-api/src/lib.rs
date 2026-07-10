@@ -171,12 +171,60 @@ impl axum::response::IntoResponse for ApiError {
     }
 }
 
+/// Environment variable selecting the REST process role (`live` or `read`).
+pub const MFM_REST_ROLE: &str = "MFM_REST_ROLE";
+
+/// Process role for REST bootstrap and route admission.
+///
+/// Read processes never load fact-receipt signing material and refuse live mutation routes
+/// plus signed public fact queries. Live processes may load the signing key when configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestProcessRole {
+    /// Evidence-only status, stream, list, replay, and public-output routes.
+    Read,
+    /// Live start/resume plus optional authenticated fact-query execution.
+    Live,
+}
+
+impl RestProcessRole {
+    /// Parses the role from [`MFM_REST_ROLE`], defaulting to [`RestProcessRole::Live`].
+    pub fn from_env() -> Result<Self, ApiError> {
+        match std::env::var(MFM_REST_ROLE) {
+            Err(std::env::VarError::NotPresent) => Ok(Self::Live),
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "live" => Ok(Self::Live),
+                "read" => Ok(Self::Read),
+                _ => Err(ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InvalidRestRole",
+                    format!("{MFM_REST_ROLE} must be \"live\" or \"read\""),
+                )),
+            },
+            Err(std::env::VarError::NotUnicode(_)) => Err(ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InvalidRestRole",
+                format!("{MFM_REST_ROLE} must be valid UTF-8"),
+            )),
+        }
+    }
+
+    /// Returns the stable role tag used in errors and docs.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Live => "live",
+        }
+    }
+}
+
 /// Default production REST API state.
 pub type DefaultAppState = AppState<ProductionRunStore>;
 
 /// Shared router state injected into request handlers.
 #[derive(Clone)]
 pub struct AppState<S = ProductionRunStore> {
+    /// Process role that selected the store connector and route admission policy.
+    pub role: RestProcessRole,
     /// Certified typed run-event and artifact authority store.
     pub store: S,
     /// Optional runtime configuration file path for live capability-backed runs.
@@ -234,7 +282,30 @@ impl<S> RouterState<S>
 where
     S: RunCommandStore,
 {
+    fn require_live_role(&self) -> Result<(), ApiError> {
+        if self.app.role != RestProcessRole::Live {
+            return Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "RestRoleReadOnly",
+                "this REST process is read-only; live start/resume requires MFM_REST_ROLE=live",
+            ));
+        }
+        Ok(())
+    }
+
+    fn require_signed_query_role(&self) -> Result<(), ApiError> {
+        if self.app.role != RestProcessRole::Live {
+            return Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "RestRoleReadOnly",
+                "authenticated fact queries require MFM_REST_ROLE=live with a fact-receipt signer",
+            ));
+        }
+        Ok(())
+    }
+
     fn live_services(&self) -> Result<RunServices<S, S>, ApiError> {
+        self.require_live_role()?;
         self.live_services
             .get_or_init(|| {
                 let runners = mfm_app::production_runner_registry(
@@ -272,24 +343,37 @@ where
     }
 }
 
-/// Connects to the default certified run store.
-pub async fn make_default_run_store() -> Result<ProductionRunStore, ApiError> {
-    Ok(mfm_app::connect_production_run_store(None).await?)
+/// Connects the production run store for an explicit REST process role.
+///
+/// Read role never loads a fact-receipt signing key. Live role loads the key only when
+/// `MFM_FACT_RECEIPT_SIGNING_KEY_FILE` is configured.
+pub async fn connect_rest_run_store(role: RestProcessRole) -> Result<ProductionRunStore, ApiError> {
+    match role {
+        RestProcessRole::Read => Ok(mfm_app::connect_production_run_read_store(None).await?),
+        RestProcessRole::Live => Ok(mfm_app::connect_production_run_store(None).await?),
+    }
 }
 
-/// Builds default production REST API state from environment-selected stores.
-pub async fn make_default_app_state() -> Result<DefaultAppState, ApiError> {
-    let store = make_default_run_store().await?;
+/// Builds production REST API state for an explicit process role.
+pub async fn make_app_state_for_role(role: RestProcessRole) -> Result<DefaultAppState, ApiError> {
+    let store = connect_rest_run_store(role).await?;
     let fact_index = mfm_app::production_fact_index_read_provider(store.clone());
     let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
-    let fact_query_authority_ready = store.fact_receipt_queries_ready();
+    let fact_query_authority_ready =
+        role == RestProcessRole::Live && store.fact_receipt_queries_ready();
     Ok(AppState {
+        role,
         store,
         runtime_config_path: std::env::var_os(mfm_app::MFM_RUNTIME_CONFIG_FILE).map(PathBuf::from),
         fact_query_receipt_trust_root,
         fact_query_authority_ready,
         fact_index,
     })
+}
+
+/// Builds default production REST API state from environment-selected role and stores.
+pub async fn make_default_app_state() -> Result<DefaultAppState, ApiError> {
+    make_app_state_for_role(RestProcessRole::from_env()?).await
 }
 
 /// Builds the `axum` router for the public REST API surface.
@@ -588,6 +672,7 @@ async fn facts_query_response<S>(
 where
     S: RunCommandStore + mfm_app::PublicFactQueryExecutor,
 {
+    state.require_signed_query_role()?;
     let request = public_fact_query_request(kind, query, forced_limit)?;
     json_ok(state.read_services()?.query_public_facts(request).await?)
 }
