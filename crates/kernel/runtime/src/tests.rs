@@ -2132,6 +2132,9 @@ impl ErasedNodeRunner for RecordingRunner {
                 producer_seed_id: None,
                 artifact_role: events::ArtifactRole::StateOutput,
             };
+            let evidence_hash = artifact
+                .evidence_hash()
+                .expect("recording runner state output evidence hash");
             let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
             Ok(ErasedRunnerOutput::from_parts(
                 vec![staged_artifact],
@@ -2148,7 +2151,7 @@ impl ErasedNodeRunner for RecordingRunner {
                     context: ctx.output_cell().context.clone(),
                     artifact_id: self.output_artifact.clone(),
                     content_digest: self.output_digest.clone(),
-                    evidence_hash: self.output_digest.clone(),
+                    evidence_hash,
                     producer_state_kind: Some(ctx.node().state_kind.clone()),
                     producer_state_version: Some(ctx.node().state_version.clone()),
                 })],
@@ -2378,7 +2381,7 @@ fn runner_kit_loads_config_and_materialized_inputs() {
             producer_node_id: node.node_id.clone(),
             artifact_id: left_evidence.artifact_id.clone(),
             content_digest: left_evidence.digest.clone(),
-            evidence_hash: left_evidence.digest.clone(),
+            evidence_hash: left_evidence.evidence_hash().expect("left evidence hash"),
         },
     );
     let right_a_node = runner_kit_input_cell(
@@ -2387,7 +2390,9 @@ fn runner_kit_loads_config_and_materialized_inputs() {
             seed_id: fixture.seed_ref.seed_id.clone(),
             artifact_id: right_a_evidence.artifact_id.clone(),
             content_digest: right_a_evidence.digest.clone(),
-            evidence_hash: right_a_evidence.digest.clone(),
+            evidence_hash: right_a_evidence
+                .evidence_hash()
+                .expect("right_a evidence hash"),
         },
     );
     let right_b_node = runner_kit_input_cell(
@@ -2396,7 +2401,9 @@ fn runner_kit_loads_config_and_materialized_inputs() {
             producer_node_id: node.node_id.clone(),
             artifact_id: right_b_evidence.artifact_id.clone(),
             content_digest: right_b_evidence.digest.clone(),
-            evidence_hash: right_b_evidence.digest.clone(),
+            evidence_hash: right_b_evidence
+                .evidence_hash()
+                .expect("right_b evidence hash"),
         },
     );
     let inputs = MaterializedInputs {
@@ -6048,8 +6055,10 @@ async fn replay_rejects_terminal_cell_producer_outside_certified_spec() {
                     value_lineage: certified_cell.value_lineage.clone(),
                     context: certified_cell.context.clone(),
                     artifact_id,
-                    content_digest: artifact_digest.clone(),
-                    evidence_hash: artifact_digest,
+                    content_digest: artifact_digest,
+                    evidence_hash: forged_artifact
+                        .evidence_hash()
+                        .expect("forged terminal evidence hash"),
                     producer_state_kind: Some(forged_node.state_kind.clone()),
                     producer_state_version: Some(forged_node.state_version.clone()),
                 }),
@@ -6195,8 +6204,10 @@ async fn replay_rejects_public_output_without_render_attempt() {
                     value_lineage: output_cell.value_lineage.clone(),
                     context: output_cell.context.clone(),
                     artifact_id: receipt_artifact,
-                    content_digest: receipt_digest.clone(),
-                    evidence_hash: receipt_digest,
+                    content_digest: receipt_digest,
+                    evidence_hash: receipt_evidence
+                        .evidence_hash()
+                        .expect("forged public output receipt evidence hash"),
                     producer_state_kind: Some(non_render_node.state_kind.clone()),
                     producer_state_version: Some(non_render_node.state_version.clone()),
                 }),
@@ -6225,8 +6236,10 @@ async fn replay_rejects_public_output_without_render_attempt() {
                         semantic_type_id: public_cell.semantic_type_id.clone(),
                         schema_id: public_cell.schema_id.clone(),
                         value_lineage: public_cell.value_lineage.clone(),
-                        content_digest: source_digest.clone(),
-                        evidence_hash: source_digest,
+                        content_digest: source_digest,
+                        evidence_hash: source_evidence
+                            .evidence_hash()
+                            .expect("forged public output source evidence hash"),
                         artifact_id: source_artifact,
                     }],
                     rendered_digest: content(0xe5),
@@ -8849,6 +8862,7 @@ impl ErasedNodeRunner for TouchedSetSideEffectVerifyRunner {
                             &payload.receipt_schema_id,
                             &payload.receipt_hash,
                             &payload.receipt_artifact_id,
+                            &payload.receipt_artifact_evidence_hash,
                         );
                     }
                     RunnerEventPayload::SideEffectConfirmationObserved(payload) => {
@@ -8857,6 +8871,7 @@ impl ErasedNodeRunner for TouchedSetSideEffectVerifyRunner {
                             &payload.confirmation_schema_id,
                             &payload.confirmation_hash,
                             &payload.confirmation_artifact_id,
+                            &payload.confirmation_artifact_evidence_hash,
                         );
                     }
                     _ => {}
@@ -8988,6 +9003,7 @@ fn touched_set_for_emission(
     evidence_schema_id: &SchemaId,
     evidence_hash: &ContentDigest,
     evidence_artifact_id: &ArtifactId,
+    evidence_artifact_evidence_hash: &ContentDigest,
 ) -> Option<events::ResourceTouchedSetEvidence> {
     match emission {
         TouchedSetEmission::None => None,
@@ -8996,7 +9012,7 @@ fn touched_set_for_emission(
             evidence_schema_id: evidence_schema_id.clone(),
             evidence_hash: evidence_hash.clone(),
             evidence_artifact_id: evidence_artifact_id.clone(),
-            evidence_artifact_evidence_hash: evidence_hash.clone(),
+            evidence_artifact_evidence_hash: evidence_artifact_evidence_hash.clone(),
         }),
     }
 }
@@ -10711,7 +10727,9 @@ fn append_synthetic_submission_observed(
                 submission_schema_id: node.config_ref.schema_id.clone(),
                 submission_hash: digest.clone(),
                 submission_artifact_id: artifact_id,
-                submission_artifact_evidence_hash: digest,
+                submission_artifact_evidence_hash: evidence
+                    .evidence_hash()
+                    .expect("submission evidence hash"),
             },
         )],
         vec![evidence],
@@ -10886,7 +10904,9 @@ fn append_synthetic_verify_receipt_observed(
                 receipt_schema_id: verify_node.config_ref.schema_id.clone(),
                 receipt_hash: digest.clone(),
                 receipt_artifact_id: artifact_id,
-                receipt_artifact_evidence_hash: digest,
+                receipt_artifact_evidence_hash: evidence
+                    .evidence_hash()
+                    .expect("receipt evidence hash"),
                 replay_verifier_id: events::ReplayVerifierId::new("mfm.test.driver.replay")
                     .expect("replay verifier"),
                 resource_touched_set: None,
@@ -10946,7 +10966,9 @@ fn append_synthetic_verify_confirmation_observed(
             confirmation_schema_id: verify_node.config_ref.schema_id.clone(),
             confirmation_hash: digest.clone(),
             confirmation_artifact_id: artifact_id,
-            confirmation_artifact_evidence_hash: digest,
+            confirmation_artifact_evidence_hash: evidence
+                .evidence_hash()
+                .expect("confirmation evidence hash"),
             replay_verifier_id: events::ReplayVerifierId::new("mfm.test.driver.replay")
                 .expect("replay verifier"),
             resource_touched_set: None,
