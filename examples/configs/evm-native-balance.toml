@@ -1,0 +1,10 @@
+# Public authored config for the EVM native-balance collector.
+network = "ethereum-mainnet"
+chain_id = 1
+accounts = [
+  "0x0000000000000000000000000000000000000001",
+  "0x0000000000000000000000000000000000000002",
+]
+coverage = "configured_only"
+decimals = 18
+max_source_reads = 1

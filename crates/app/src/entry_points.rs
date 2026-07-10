@@ -246,6 +246,34 @@ mod tests {
     }
 
     #[test]
+    fn production_registry_plans_tracked_collect_then_report_configs() {
+        let registry = production_entry_point_op_registry().expect("registry");
+        for (name, raw) in [
+            (
+                "btc_address_balance",
+                include_str!("../../../examples/configs/btc-address-balance.toml"),
+            ),
+            (
+                "evm_native_balance",
+                include_str!("../../../examples/configs/evm-native-balance.toml"),
+            ),
+            (
+                "portfolio_snapshot",
+                include_str!("../../../examples/configs/portfolio-dual-mainnet.toml"),
+            ),
+        ] {
+            let public_name = PublicOpName::new(name).expect("public name");
+            let op = registry.resolve_latest(&public_name).expect("tracked op");
+            let authored = AuthoredConfig::new(AuthoredConfigFormat::Toml, raw)
+                .expect("tracked authored config");
+            let plan = op.plan(authored).expect("tracked config plan");
+
+            assert!(!plan.draft.state_nodes().is_empty(), "{name}");
+            assert!(!plan.config_material.is_empty(), "{name}");
+        }
+    }
+
+    #[test]
     fn portfolio_snapshot_entry_point_plans_from_json_config() {
         let registry = production_entry_point_op_registry().expect("registry");
         let op = portfolio_op(&registry);

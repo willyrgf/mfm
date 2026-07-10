@@ -243,6 +243,8 @@ Request notes:
 - `config_format` is `toml` or `json`; it defaults to `toml`.
 - `config` is required. With `config_format: "toml"`, it must be a string. With
   `config_format: "json"`, it may be a JSON object/array/value accepted by the selected op.
+- The production registry exposes `btc_address_balance` v1, `evm_native_balance` v1, and
+  `portfolio_snapshot` v2. It does not register the internal BTC chain-head checkpoint op.
 - Normal start derives the typed run id from certified run identity material: certified spec hash,
   store scope, and a required invocation key digest.
 - `invocation_key` is optional at the API boundary. Supplying it makes retries target the same run.

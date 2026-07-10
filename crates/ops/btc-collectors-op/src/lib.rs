@@ -310,7 +310,7 @@ pub const BTC_ADDRESS_BALANCE_ENTRY_POINT: EntryPointDescriptor = EntryPointDesc
 /// Planning config for a multi-address Bitcoin native balance collector batch.
 ///
 /// Multi-subject same-network batches **must** share one joint tip resolved once
-/// in expand (F26).
+/// in expand.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
 #[mfm(
     schema = "mfm.bitcoin.operation.config.btc_address_balance",
@@ -442,7 +442,7 @@ impl Operation for BtcAddressBalanceOperation {
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
         let config = config.into_inner();
-        // F26: resolve joint tip once for the entire same-network batch.
+        // Resolve the joint tip once for the entire same-network batch.
         let joint_tip = builder.state::<ResolveBtcJointTipState, _>(
             StateKey::new("resolve_joint_tip")?,
             NoContext,

@@ -21,45 +21,59 @@ Forbidden at cutover:
 
 ## External multi-run recipe (dual mainnet natives)
 
-Operators run collectors, then report, as separate certified runs:
+Operators run collectors, then report, as separate certified runs. The tracked configs are
+`examples/configs/btc-address-balance.toml`, `examples/configs/evm-native-balance.toml`,
+`examples/configs/portfolio-dual-mainnet.toml`, and
+`examples/configs/runtime-dual-mainnet.toml`.
 
-1. **Collect BTC** (same-network multi-address batch shares one best-tip joint tip):
+The following Bash sequence is the copy/pasteable operator path. It assumes `DATABASE_URL` points
+at a migrated Postgres store, the RPC environment variables referenced by the runtime config are
+set, `MFM_FACT_RECEIPT_SIGNING_KEY_FILE` points at the operator-only signing key, and `jq` is
+installed. The signing key is never placed in a tracked config.
 
-   ```text
-   run btc_address_balance
-     network = bitcoin-mainnet
-     addresses = [ ... configured BTC addresses ... ]
-   ```
+```bash
+export MFM_RUNTIME_CONFIG_FILE="$PWD/examples/configs/runtime-dual-mainnet.toml"
+export MFM_FACT_RECEIPT_SIGNING_KEY_FILE=/run/mfm/fact-receipt-signing-key
 
-   Graph: `resolve_joint_tip` at the best tip once → per address `observe@hash` → `record` → assemble batch.
+mfm_cli --output-format json facts provision-authority --database-url "$DATABASE_URL"
 
-2. **Collect EVM** (same chain multi-account batch shares one joint tip):
+btc_response="$(mfm_cli --output-format json run start \
+    --op btc_address_balance \
+    --config examples/configs/btc-address-balance.toml \
+    --runtime-config "$MFM_RUNTIME_CONFIG_FILE" \
+    --database-url "$DATABASE_URL")"
+btc_run_id="$(printf '%s\n' "$btc_response" | jq -er '.data.run_id')"
+printf '%s\n' "$btc_response" | jq -e '.data.run_mode == "completed"'
 
-   ```text
-   run evm_native_balance
-     network = ethereum-mainnet
-     chain_id = 1
-     accounts = [ ... lowercase 0x-prefixed configured accounts ... ]
-   ```
+evm_response="$(mfm_cli --output-format json run start \
+    --op evm_native_balance \
+    --config examples/configs/evm-native-balance.toml \
+    --runtime-config "$MFM_RUNTIME_CONFIG_FILE" \
+    --database-url "$DATABASE_URL")"
+evm_run_id="$(printf '%s\n' "$evm_response" | jq -er '.data.run_id')"
+printf '%s\n' "$evm_response" | jq -e '.data.run_mode == "completed"'
 
-   Graph: `resolve_joint_tip` (latest block hash) once → per account balance at
-   that block hash → re-verify the canonical block → `record` → assemble batch.
-   Each account observation consumes exactly two source reads: the pinned block
-   lookup and the balance lookup.
+report_response="$(mfm_cli --output-format json run start \
+    --op portfolio_snapshot \
+    --op-version 2 \
+    --config examples/configs/portfolio-dual-mainnet.toml \
+    --database-url "$DATABASE_URL")"
+report_run_id="$(printf '%s\n' "$report_response" | jq -er '.data.run_id')"
+printf '%s\n' "$report_response" | jq -e '.data.run_mode == "completed"'
 
-3. **Report** (facts only; no live chain reads):
+for run_id in "$btc_run_id" "$evm_run_id" "$report_run_id"; do
+  replay_response="$(mfm_cli --output-format json run replay "$run_id" \
+    --database-url "$DATABASE_URL")"
+  printf '%s\n' "$replay_response" | jq -e '.data.retained_artifacts > 0'
+done
+```
 
-   ```text
-   run portfolio_snapshot
-     portfolio config = dual-mainnet natives
-   ```
-
-   Selection is network-coherent over Platform facts under fixed policy
-   `mfm.portfolio.holding.latest-network-coherent.v1`. Pins are projected from
-   selected fact anchors. Each public observation carries selected holding
-   `coverage` (`configured_only` or `complete_at_anchor`).
-
-Repeat collect runs whenever configured subjects need fresh anchors; then re-run report.
+The successful sequence produces three completed run ids, then verifies replay for all three from
+retained evidence only. The BTC batch resolves one joint tip before its address reads; the EVM batch
+resolves one joint tip and performs the pinned block/balance reads for each account. The report reads
+Platform facts only, selects network-coherent anchors under
+`mfm.portfolio.holding.latest-network-coherent.v1`, and projects pins from those selected facts.
+Repeat the two collector runs when configured subjects need fresh anchors, then run the report again.
 
 ## Prove-before-write (collectors)
 
@@ -73,7 +87,7 @@ Before any Platform write, collectors fail closed when:
 - secrets / `wallet_id` / `symbol_id` would appear on fact subject/response
 
 Multi-subject same-network batches **must** share one joint tip resolved once so
-all written facts carry the same anchor (F26).
+all written facts carry the same anchor.
 
 ## Report never live-reads
 

@@ -64,7 +64,7 @@ pub const EVM_NATIVE_BALANCE_ENTRY_POINT: EntryPointDescriptor = EntryPointDescr
 /// Planning config for a multi-account EVM native balance collector batch.
 ///
 /// Multi-subject same-network batches **must** share one joint tip resolved once
-/// in expand (F26).
+/// in expand.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
 #[mfm(
     schema = "mfm.evm.operation.config.evm_native_balance",
@@ -193,7 +193,7 @@ impl Operation for EvmNativeBalanceOperation {
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
         let config = config.into_inner();
-        // F26: resolve joint tip once for the entire same-network batch.
+        // Resolve the joint tip once for the entire same-network batch.
         let joint_tip = builder.state::<ResolveEvmJointTipState, _>(
             StateKey::new("resolve_joint_tip")?,
             NoContext,

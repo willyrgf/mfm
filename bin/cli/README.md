@@ -455,9 +455,9 @@ mfm_cli run start --op <NAME> --config <PATH> [OPTIONS]
 Examples:
 
 ```sh
-mfm_cli run start --op btc_address_balance --config btc-balance.toml
-mfm_cli run start --op evm_native_balance --config evm-balance.toml
-mfm_cli run start --op portfolio_snapshot --config portfolio.toml
+mfm_cli run start --op btc_address_balance --config examples/configs/btc-address-balance.toml
+mfm_cli run start --op evm_native_balance --config examples/configs/evm-native-balance.toml
+mfm_cli run start --op portfolio_snapshot --config examples/configs/portfolio-dual-mainnet.toml
 mfm_cli run start --op evm_contract_lifecycle --config lifecycle.toml
 ```
 
@@ -481,7 +481,7 @@ EVM contract entry-point config shapes and import authority rules are documented
 For local development against a managed persistent run-store database, use:
 
 ```sh
-nix run .#mfm-start -- --op portfolio_snapshot --config portfolio.toml
+nix run .#mfm-start -- --op portfolio_snapshot --config examples/configs/portfolio-dual-mainnet.toml
 ```
 
 `.#mfm-start` starts a Nixfied-managed PostgreSQL process in slot 9 for the
@@ -492,8 +492,10 @@ runs the typed store migrations, sets `DATABASE_URL`, and then delegates to
 Run start always resolves runner executable identities before `RunAdmitted`, because those identities
 are replay authority. Specs that reference unported domain state descriptors fail with
 `LaunchRunnerUnavailable` before any typed run event is written. The production CLI runner registry
-contains the framework public-output renderer plus the portfolio and EVM contract domain runners
-used by registered entry-point ops.
+contains the framework public-output renderer plus the portfolio, BTC collector, EVM native-balance,
+and EVM contract domain runners used by registered entry-point ops. The public registry exposes
+`btc_address_balance` v1, `evm_native_balance` v1, and `portfolio_snapshot` v2; the internal BTC
+chain-head checkpoint op is not registered.
 
 JSON and text output include `launch_outcome`. Fresh admissions report `admitted`. A duplicate start
 for the same certified run identity reports `attached` without driving. If another process holds the

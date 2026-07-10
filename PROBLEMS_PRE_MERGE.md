@@ -1,6 +1,6 @@
 # Problems to Resolve Before Merge
 
-Status: **do not merge**
+Status: **resolved on this branch**
 
 This document records the architectural and code-quality problems found during the pre-merge
 review of the collectors/portfolio branch. The implementation is moving in the correct product
@@ -79,17 +79,17 @@ workarounds, schema shims, fallback behavior, or replay-only special cases.
 
 | ID | Severity | Problem | Status |
 | --- | --- | --- | --- |
-| P0-01 | P0 | Production runner registry cannot compose portfolio, BTC, and EVM runners | Open |
-| P0-02 | P0 | `store_commit_order` is run-local but used as store-wide LWW authority | Open |
-| P0-03 | P0 | Retention identity collapses distinct evidence for identical artifact bytes | Open |
-| P1-01 | P1 | Portfolio replay authenticates facts but does not verify selection semantics | Open |
-| P1-02 | P1 | Collector replay does not prove joint-tip derivation | Open |
-| P1-03 | P1 | Report config can reinterpret fact balances with incorrect decimals | Open |
-| P1-04 | P1 | Fact-receipt authority has no complete provisioning/pre-admission lifecycle | Partially addressed in the worktree |
-| P1-05 | P1 | Untyped diagnostic JSON controls public errors and replay dispatch | Concrete collision fixed; architectural issue open |
-| P2-01 | P2 | Breaking `portfolio_snapshot` behavior is still exposed as public version 1 | Open |
-| P2-02 | P2 | Holding/report policy has leaked into the domain-free kernel | Open |
-| P2-03 | P2/P3 | Operator docs, examples, tests, and diff hygiene are not merge-ready | Open |
+| P0-01 | P0 | Production runner registry cannot compose portfolio, BTC, and EVM runners | Resolved |
+| P0-02 | P0 | `store_commit_order` is run-local but used as store-wide LWW authority | Resolved |
+| P0-03 | P0 | Retention identity collapses distinct evidence for identical artifact bytes | Resolved |
+| P1-01 | P1 | Portfolio replay authenticates facts but does not verify selection semantics | Resolved |
+| P1-02 | P1 | Collector replay does not prove joint-tip derivation | Resolved |
+| P1-03 | P1 | Report config can reinterpret fact balances with incorrect decimals | Resolved |
+| P1-04 | P1 | Fact-receipt authority has no complete provisioning/pre-admission lifecycle | Resolved |
+| P1-05 | P1 | Untyped diagnostic JSON controls public errors and replay dispatch | Resolved |
+| P2-01 | P2 | Breaking `portfolio_snapshot` behavior is still exposed as public version 1 | Resolved |
+| P2-02 | P2 | Holding/report policy has leaked into the domain-free kernel | Resolved |
+| P2-03 | P2/P3 | Operator docs, examples, tests, and diff hygiene are not merge-ready | Resolved |
 
 ---
 

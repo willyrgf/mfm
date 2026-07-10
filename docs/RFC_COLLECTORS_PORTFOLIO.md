@@ -926,24 +926,24 @@ report mode until then.
 
 ### `bitcoin.address_balance_snapshot` (cutover)
 
-Subject: `network`, `bitcoin_network`, `semantic_source_identity`, `address`  
+Subject: `network`, `bitcoin_network`, `semantic_source_identity`, `address`
 Response: **mandatory** anchor height, **mandatory** anchor block hash, total sats, coverage, source
 status
 
 ### `evm.address_native_balance_snapshot` (cutover)
 
-Subject: `network`, `chain_id`, `account`  
+Subject: `network`, `chain_id`, `account`
 Response: **mandatory** block number, **mandatory** block hash, raw wei decimal string, decimals,
 coverage, source status
 
 ### `evm.address_token_balances_snapshot` (post-cutover)
 
-Subject: `network`, `chain_id`, `account`, reader/policy id, token_set_identity  
+Subject: `network`, `chain_id`, `account`, reader/policy id, token_set_identity
 Response: block anchor, token balance entries, coverage, source status
 
 ### `price.quote_snapshot` (later)
 
-Subject: `priced_symbol_id`, `quote`, `source_id`  
+Subject: `priced_symbol_id`, `quote`, `source_id`
 Response: unit price decimal string, anchor/time, freshness metadata, source status
 
 Price anchors are a separate anchor family (oracle/source time). They join via certified price
