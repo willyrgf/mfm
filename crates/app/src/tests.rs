@@ -33,7 +33,7 @@ fn run_read_services_carry_explicit_fact_query_receipt_trust_root() {
     );
     assert!(without_root.fact_query_receipt_trust_root.is_none());
 
-    let with_root = RunReadServices::new_with_certification_registry_and_fact_query_trust_root(
+    let with_root = RunReadServices::new_with_certification_registry_and_fact_query_authority(
         store.clone(),
         store,
         registry,
@@ -321,6 +321,17 @@ fn app_launch_fact_query_request() -> PublicFactQueryRequest {
         },
     )
     .expect("public fact request")
+}
+
+fn app_test_fact_receipt_trust_root() -> store::FactQueryReceiptTrustRoot {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[11; 32]);
+    store::FactQueryReceiptTrustRoot::new(
+        mfm_facts::StoreIdentity::new("store.app.test").expect("store identity"),
+        mfm_facts::StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
+        mfm_facts::StoreKeyId::new("key.app.test").expect("key id"),
+        key.verifying_key().to_bytes(),
+    )
+    .expect("trust root")
 }
 
 fn app_fact_runner_registry(
@@ -1010,8 +1021,12 @@ async fn public_fact_catalog_discovers_only_platform_descriptors() {
 #[tokio::test]
 async fn run_read_services_load_public_fact_catalog_from_retained_projection_authority() {
     let (_run_id, store, registry) = launch_app_fact_run().await;
-    let services =
-        make_run_read_services_with_certification_registry(store.clone(), store.clone(), registry);
+    let services = make_run_read_services_with_certification_registry_and_fact_query_authority(
+        store.clone(),
+        store.clone(),
+        registry,
+        Some(app_test_fact_receipt_trust_root()),
+    );
 
     assert_eq!(
         services.fact_kinds().await.expect("fact kinds"),
@@ -1078,8 +1093,12 @@ async fn run_read_services_public_fact_reads_are_store_scoped_across_runs() {
         )
         .await;
     assert_ne!(first_run_id, second_run_id);
-    let services =
-        make_run_read_services_with_certification_registry(store.clone(), store.clone(), registry);
+    let services = make_run_read_services_with_certification_registry_and_fact_query_authority(
+        store.clone(),
+        store.clone(),
+        registry,
+        Some(app_test_fact_receipt_trust_root()),
+    );
 
     assert_eq!(
         services.fact_kinds().await.expect("fact kinds"),
@@ -1482,17 +1501,17 @@ async fn btc_collector_launch_defers_runtime_config_to_ingress() {
     let request =
         prepare_btc_collector_internal_test_launch().expect("btc collector launch request");
     let run_id = request.run_id.clone();
-    let runners = production_runner_registry(
-        Arc::new(store.clone()),
-        crate::ProjectionFactIndexProvider::empty_arc(),
-        None,
-    )
-    .expect("production runners without BTC config");
-    let services = make_run_services_with_certification_registry(
+    let fact_index = crate::ProjectionFactIndexProvider::new(store.clone());
+    let fact_query_receipt_trust_root = fact_index.receipt_trust_root();
+    let runners = production_runner_registry(Arc::new(store.clone()), Arc::new(fact_index), None)
+        .expect("production runners without BTC config");
+    let services = make_run_services_with_certification_registry_and_fact_query_authority(
         runners,
         store.clone(),
         store.clone(),
         production_certification_registry().expect("production registry"),
+        Some(fact_query_receipt_trust_root),
+        true,
     );
 
     let error = services
@@ -1520,11 +1539,13 @@ async fn launch_run_reaps_expired_execution_claim_and_retries_admission() {
             mfm_program::facts::FactAudience::Platform,
         ),
     );
-    let services = make_run_services_with_certification_registry(
+    let services = make_run_services_with_certification_registry_and_fact_query_authority(
         runners,
         store.clone(),
         store.clone(),
         app_fact_certification_registry(true),
+        Some(app_test_fact_receipt_trust_root()),
+        true,
     );
     let execution_scope =
         store::ExecutionClaimScope::from_run_identity_material(&request.identity_material);
@@ -1641,10 +1662,10 @@ fn fact_query_receipt_authentication_errors_report_signer_requirement() {
             },
         ));
 
-    assert_eq!(error.code, "MissingFactReceiptSigningKey");
+    assert_eq!(error.code, "FactReceiptAuthorityUnavailable");
     assert_eq!(
         error.message,
-        "Fact receipt signing key is required for public fact queries"
+        "Fact receipt authority is required for this fact-reading workflow"
     );
     let rendered = format!("{error:?}\n{error}");
     assert!(!rendered.contains(private_diagnostic));

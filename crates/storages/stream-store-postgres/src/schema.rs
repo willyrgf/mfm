@@ -5,8 +5,10 @@ use mfm_store::v1::{FactQueryReceiptTrustRoot, StoreScopeId};
 use sqlx::{PgPool, Row};
 
 use crate::run_store::{
-    PostgresStoreAuthority, PostgresStoreAuthorityError, PostgresStoreError, Result,
+    PostgresFactReceiptSigner, PostgresStoreAuthority, PostgresStoreAuthorityError,
+    PostgresStoreError, Result,
 };
+use zeroize::{Zeroize, Zeroizing};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -27,6 +29,60 @@ impl PostgresSchema {
             .await
             .map_err(|_| PostgresStoreError::Authority(PostgresStoreAuthorityError::Connection))?;
         validate_pool(&pool).await
+    }
+
+    /// Provisions the immutable fact-receipt trust root from secret signing-key bytes.
+    ///
+    /// The secret is held only in memory. Existing authority is never replaced: the supplied
+    /// key must produce the already-persisted public root when one exists.
+    pub async fn provision_fact_receipt_trust_root(
+        database_url: &str,
+        store_identity: StoreIdentity,
+        key_id: StoreKeyId,
+        signing_key: [u8; 32],
+    ) -> Result<FactQueryReceiptTrustRoot> {
+        let pool = connect_pool(database_url).await?;
+        let authority = validate_pool(&pool).await?;
+        let mut signing_key = Zeroizing::new(signing_key);
+        let (store_identity, key_id) = authority
+            .fact_receipt_trust_root()
+            .map(|root| (root.store_identity().clone(), root.key_id().clone()))
+            .unwrap_or((store_identity, key_id));
+        let signer = PostgresFactReceiptSigner::from_ed25519_signing_key_bytes(
+            store_identity,
+            key_id,
+            *signing_key,
+        );
+        signing_key.zeroize();
+        let expected = signer.trust_root()?;
+
+        if authority.fact_receipt_trust_root().is_none() {
+            sqlx::query(
+                "INSERT INTO fact_receipt_trust_root \
+                 (store_identity, authentication_scheme, key_id, verifying_key) \
+                 VALUES ($1, $2, $3, $4) \
+                 ON CONFLICT (singleton) DO NOTHING",
+            )
+            .bind(expected.store_identity().as_str())
+            .bind(expected.scheme().as_str())
+            .bind(expected.key_id().as_str())
+            .bind(expected.verifying_key().to_vec())
+            .execute(&pool)
+            .await
+            .map_err(|_| {
+                store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot)
+            })?;
+        }
+
+        let actual = load_fact_receipt_trust_root(&pool).await?.ok_or_else(|| {
+            store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot)
+        })?;
+        if actual != expected {
+            return Err(store_authority_error(
+                PostgresStoreAuthorityError::FactReceiptTrustRoot,
+            ));
+        }
+        Ok(actual)
     }
 }
 

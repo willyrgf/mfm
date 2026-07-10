@@ -255,6 +255,11 @@ impl PostgresRunStore {
     pub fn store_authority(&self) -> &PostgresStoreAuthority {
         &self.authority
     }
+
+    /// Returns whether authenticated fact-query execution has both store authority and a signer.
+    pub fn fact_receipt_queries_ready(&self) -> bool {
+        self.authority.fact_receipt_trust_root().is_some() && self.fact_receipt_signer.is_some()
+    }
 }
 
 impl RunEventStore for PostgresRunStore {

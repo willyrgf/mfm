@@ -58,6 +58,7 @@ pub fn in_memory_rest_app_state() -> InMemoryRestAppState {
         store,
         runtime_config_path: None,
         fact_query_receipt_trust_root,
+        fact_query_authority_ready: true,
         fact_index,
     }
 }

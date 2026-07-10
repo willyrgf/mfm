@@ -19,6 +19,7 @@ use std::time::Duration;
 use mfm_artifact_capabilities::ArtifactReadProvider;
 use mfm_authored_config::AuthoredConfig;
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
+use mfm_capabilities::CapabilitySpec;
 use mfm_certify::{CertificationRegistry, CertifiedTypedSpec};
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{EvmNetworkId, EvmSourcePolicyId, EvmSourceRef};
@@ -91,6 +92,12 @@ pub const MFM_RUNTIME_CONFIG_FILE: &str = "MFM_RUNTIME_CONFIG_FILE";
 
 /// Environment variable that selects the Ed25519 fact-query receipt signing-key file.
 pub const MFM_FACT_RECEIPT_SIGNING_KEY_FILE: &str = "MFM_FACT_RECEIPT_SIGNING_KEY_FILE";
+
+/// Store identity used when provisioning the first production fact-receipt trust root.
+pub const PRODUCTION_FACT_RECEIPT_STORE_IDENTITY: &str = "mfm.postgres.fact_receipt";
+
+/// Key identity used when provisioning the first production fact-receipt trust root.
+pub const PRODUCTION_FACT_RECEIPT_KEY_ID: &str = "mfm.postgres.fact_receipt.v1";
 
 const MANAGED_FACT_RECORD_CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.runtime.managed-fact-record.v1";
 
@@ -341,34 +348,37 @@ where
     S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
-    make_run_services_with_certification_registry_and_fact_query_trust_root(
+    make_run_services_with_certification_registry_and_fact_query_authority(
         runners,
         store,
         artifacts,
         certification_registry,
         None,
+        false,
     )
 }
 
-/// Builds typed async app services with an explicit certification registry and fact-query receipt trust root.
-pub fn make_run_services_with_certification_registry_and_fact_query_trust_root<S, A>(
+/// Builds typed async app services with an explicit certification registry and fact-query authority.
+pub fn make_run_services_with_certification_registry_and_fact_query_authority<S, A>(
     runners: ErasedRunnerRegistry,
     store: S,
     artifacts: A,
     certification_registry: CertificationRegistry,
     fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+    fact_query_authority_ready: bool,
 ) -> RunServices<S, A>
 where
     S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     let runtime_artifacts = Arc::new(artifacts.clone());
-    RunServices::new_with_certification_registry_and_fact_query_trust_root(
+    RunServices::new_with_certification_registry_and_fact_query_authority(
         SerialTypedScheduler::new(runners, runtime_artifacts),
         store,
         artifacts,
         certification_registry,
         fact_query_receipt_trust_root,
+        fact_query_authority_ready,
     )
 }
 
@@ -382,7 +392,7 @@ where
     S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
-    make_run_read_services_with_certification_registry_and_fact_query_trust_root(
+    make_run_read_services_with_certification_registry_and_fact_query_authority(
         store,
         artifacts,
         certification_registry,
@@ -390,8 +400,8 @@ where
     )
 }
 
-/// Builds evidence-only async app services with an explicit certification registry and fact-query receipt trust root.
-pub fn make_run_read_services_with_certification_registry_and_fact_query_trust_root<S, A>(
+/// Builds evidence-only async app services with an explicit certification registry and fact-query authority.
+pub fn make_run_read_services_with_certification_registry_and_fact_query_authority<S, A>(
     store: S,
     artifacts: A,
     certification_registry: CertificationRegistry,
@@ -401,7 +411,7 @@ where
     S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
-    RunReadServices::new_with_certification_registry_and_fact_query_trust_root(
+    RunReadServices::new_with_certification_registry_and_fact_query_authority(
         store,
         artifacts,
         certification_registry,
@@ -418,39 +428,53 @@ pub type ProductionRunReadServices = RunReadServices<ProductionRunStore, Product
 /// Production public fact query service backed by the Postgres fact query executor.
 pub type ProductionFactPublicQueryService = FactPublicQueryService<ProductionRunStore>;
 
-/// Connects the production Postgres run store.
+/// Connects the production Postgres run store with its optional fact-query signer.
+///
+/// The signer is loaded only when [`MFM_FACT_RECEIPT_SIGNING_KEY_FILE`] is configured. Runs that
+/// do not use the fact-index capability remain usable without it; a fact-reading graph is
+/// rejected before admission when the signer/root pair is unavailable.
 pub async fn connect_production_run_store(
     database_url: Option<&str>,
 ) -> Result<ProductionRunStore, AppError> {
     let database_url = production_database_url(database_url)?;
-    Ok(ProductionRunStore::connect(&database_url).await?)
+    if configured_fact_receipt_signing_key_file().is_none() {
+        return Ok(ProductionRunStore::connect(&database_url).await?);
+    } else {
+        let mut signing_key = load_fact_receipt_signing_key_from_env()?;
+        let store = ProductionRunStore::connect_with_fact_receipt_signing_key_bytes(
+            &database_url,
+            *signing_key,
+        )
+        .await
+        .map_err(fact_receipt_signer_store_error)?;
+        signing_key.zeroize();
+        Ok(store)
+    }
 }
 
-/// Connects the production Postgres run store with a signer for authenticated fact queries.
-pub async fn connect_production_fact_query_run_store(
+/// Provisions the immutable production fact-receipt trust root from the configured signing key.
+///
+/// Only the public verifying key is inserted into Postgres. If a root already exists, the
+/// supplied key must match it exactly; the authority table is never updated or replaced.
+pub async fn provision_production_fact_receipt_authority(
     database_url: Option<&str>,
-) -> Result<ProductionRunStore, AppError> {
+) -> Result<(), AppError> {
     let database_url = production_database_url(database_url)?;
     let mut signing_key = load_fact_receipt_signing_key_from_env()?;
-    let store = ProductionRunStore::connect_with_fact_receipt_signing_key_bytes(
+    let store_identity = mfm_facts::StoreIdentity::new(PRODUCTION_FACT_RECEIPT_STORE_IDENTITY)
+        .map_err(|_| fact_receipt_authority_provisioning_error())?;
+    let key_id = mfm_facts::StoreKeyId::new(PRODUCTION_FACT_RECEIPT_KEY_ID)
+        .map_err(|_| fact_receipt_authority_provisioning_error())?;
+    ProductionPostgresSchema::provision_fact_receipt_trust_root(
         &database_url,
+        store_identity,
+        key_id,
         *signing_key,
     )
     .await
-    .map_err(fact_receipt_signer_store_error)?;
+    .map_err(|_| fact_receipt_authority_provisioning_error())?;
     signing_key.zeroize();
-    Ok(store)
-}
-
-/// Connects the production Postgres run store with a fact-query signer when configured.
-pub async fn connect_production_run_store_with_optional_fact_query_signer(
-    database_url: Option<&str>,
-) -> Result<ProductionRunStore, AppError> {
-    if configured_fact_receipt_signing_key_file().is_some() {
-        connect_production_fact_query_run_store(database_url).await
-    } else {
-        connect_production_run_store(database_url).await
-    }
+    Ok(())
 }
 
 fn production_database_url(database_url: Option<&str>) -> Result<String, AppError> {
@@ -549,19 +573,62 @@ fn fact_receipt_signer_store_error(
     }
 }
 
+fn fact_receipt_authority_provisioning_error() -> AppError {
+    AppError::backend(
+        ErrorClass::BadRequest,
+        "FactReceiptAuthorityProvisioningFailed",
+        "Fact receipt authority could not be provisioned",
+    )
+}
+
 pub(crate) fn fact_query_execution_store_error(
     error: mfm_stream_store_postgres::PostgresStoreError,
 ) -> AppError {
     match error {
         mfm_stream_store_postgres::PostgresStoreError::Store(
             store::StoreError::ReceiptAuthentication { .. },
-        ) => AppError::backend(
-            ErrorClass::BadRequest,
-            "MissingFactReceiptSigningKey",
-            "Fact receipt signing key is required for public fact queries",
-        ),
+        ) => fact_receipt_authority_unavailable_error(),
         error => AppError::from(error),
     }
+}
+
+fn fact_receipt_authority_unavailable_error() -> AppError {
+    AppError::backend(
+        ErrorClass::BadRequest,
+        "FactReceiptAuthorityUnavailable",
+        "Fact receipt authority is required for this fact-reading workflow",
+    )
+}
+
+fn runtime_spec_requires_fact_index(runtime_spec: &CertifiedRuntimeSpec) -> Result<bool, AppError> {
+    let capability_kind = mfm_fact_capabilities::FactIndexReadCapability::kind().map_err(|_| {
+        AppError::backend(
+            ErrorClass::Internal,
+            "CapabilityIdentityInvalid",
+            "Fact-index capability identity is invalid",
+        )
+    })?;
+    let capability_version =
+        mfm_fact_capabilities::FactIndexReadCapability::version().map_err(|_| {
+            AppError::backend(
+                ErrorClass::Internal,
+                "CapabilityIdentityInvalid",
+                "Fact-index capability version is invalid",
+            )
+        })?;
+    Ok(runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .chain(runtime_spec.spec().remediations.values())
+        .any(|node| {
+            node.capability_bindings
+                .capabilities
+                .iter()
+                .any(|capability| {
+                    capability.kind == capability_kind && capability.version == capability_version
+                })
+        }))
 }
 
 /// Builds production typed run services backed by the Postgres run store.
@@ -569,20 +636,22 @@ pub async fn connect_production_run_services(
     database_url: Option<&str>,
     runtime_config_path: Option<&Path>,
 ) -> Result<ProductionRunServices, AppError> {
-    let store = connect_production_run_store_with_optional_fact_query_signer(database_url).await?;
+    let store = connect_production_run_store(database_url).await?;
     // Portfolio SelectHoldings and BTC collectors require the Postgres fact-index provider.
     let fact_index = production_fact_index_read_provider(store.clone());
     let runners =
         production_runner_registry(Arc::new(store.clone()), fact_index, runtime_config_path)?;
     let certification_registry = production_certification_registry()?;
     let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
+    let fact_query_authority_ready = store.fact_receipt_queries_ready();
     Ok(
-        make_run_services_with_certification_registry_and_fact_query_trust_root(
+        make_run_services_with_certification_registry_and_fact_query_authority(
             runners,
             store.clone(),
             store,
             certification_registry,
             fact_query_receipt_trust_root,
+            fact_query_authority_ready,
         ),
     )
 }
@@ -595,26 +664,9 @@ pub async fn connect_production_run_read_services(
     let certification_registry = production_certification_registry()?;
     let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
     Ok(
-        make_run_read_services_with_certification_registry_and_fact_query_trust_root(
+        make_run_read_services_with_certification_registry_and_fact_query_authority(
             store.clone(),
-            store,
-            certification_registry,
-            fact_query_receipt_trust_root,
-        ),
-    )
-}
-
-/// Builds production read services with a signer for authenticated public fact queries.
-pub async fn connect_production_fact_query_run_read_services(
-    database_url: Option<&str>,
-) -> Result<ProductionRunReadServices, AppError> {
-    let store = connect_production_fact_query_run_store(database_url).await?;
-    let certification_registry = production_certification_registry()?;
-    let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
-    Ok(
-        make_run_read_services_with_certification_registry_and_fact_query_trust_root(
             store.clone(),
-            store,
             certification_registry,
             fact_query_receipt_trust_root,
         ),
@@ -1486,7 +1538,7 @@ where
         artifacts: A,
         certification_registry: CertificationRegistry,
     ) -> Self {
-        Self::new_with_certification_registry_and_fact_query_trust_root(
+        Self::new_with_certification_registry_and_fact_query_authority(
             store,
             artifacts,
             certification_registry,
@@ -1494,8 +1546,8 @@ where
         )
     }
 
-    /// Creates evidence-only app services with explicit fact-query receipt replay authority.
-    pub fn new_with_certification_registry_and_fact_query_trust_root(
+    /// Creates evidence-only app services with explicit fact-query receipt authority.
+    pub fn new_with_certification_registry_and_fact_query_authority(
         store: S,
         artifacts: A,
         certification_registry: CertificationRegistry,
@@ -1647,6 +1699,7 @@ pub struct RunServices<S, A> {
     artifacts: A,
     certification_registry: CertificationRegistry,
     fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+    fact_query_authority_ready: bool,
     execution_claim_heartbeat_interval: Duration,
 }
 
@@ -1662,22 +1715,24 @@ where
         artifacts: A,
         certification_registry: CertificationRegistry,
     ) -> Self {
-        Self::new_with_certification_registry_and_fact_query_trust_root(
+        Self::new_with_certification_registry_and_fact_query_authority(
             scheduler,
             store,
             artifacts,
             certification_registry,
             None,
+            false,
         )
     }
 
-    /// Creates typed async app services with explicit fact-query receipt replay authority.
-    pub fn new_with_certification_registry_and_fact_query_trust_root(
+    /// Creates typed async app services with explicit fact-query receipt authority.
+    pub fn new_with_certification_registry_and_fact_query_authority(
         scheduler: SerialTypedScheduler,
         store: S,
         artifacts: A,
         certification_registry: CertificationRegistry,
         fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+        fact_query_authority_ready: bool,
     ) -> Self {
         Self {
             scheduler,
@@ -1685,6 +1740,7 @@ where
             artifacts,
             certification_registry,
             fact_query_receipt_trust_root,
+            fact_query_authority_ready,
             execution_claim_heartbeat_interval: default_execution_claim_heartbeat_interval(),
         }
     }
@@ -1805,6 +1861,9 @@ where
             .await?
             .runtime_spec()
             .clone();
+        if runtime_spec_requires_fact_index(&runtime_spec)? && !self.fact_query_authority_ready {
+            return Err(fact_receipt_authority_unavailable_error());
+        }
         let status = self.drive_until_blocked(&runtime_spec, run_id).await?;
         self.run_response_from_verified_status(run_id, status).await
     }
@@ -1820,6 +1879,9 @@ where
             .await?
             .runtime_spec()
             .clone();
+        if runtime_spec_requires_fact_index(&runtime_spec)? && !self.fact_query_authority_ready {
+            return Err(fact_receipt_authority_unavailable_error());
+        }
         let manual_request = manual_resolution_runtime_request(req)?;
         self.scheduler
             .record_manual_resolution(&self.store, &runtime_spec, &run_id, manual_request)
@@ -1850,6 +1912,9 @@ where
         let execution_scope =
             store::ExecutionClaimScope::from_run_identity_material(&identity_material);
         let runtime_spec = CertifiedRuntimeSpec::new(req.certified_spec)?;
+        if runtime_spec_requires_fact_index(&runtime_spec)? && !self.fact_query_authority_ready {
+            return Err(fact_receipt_authority_unavailable_error());
+        }
 
         loop {
             let stream = self

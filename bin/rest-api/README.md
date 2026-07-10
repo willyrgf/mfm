@@ -49,6 +49,18 @@ store-owned `fact_receipt_trust_root`. The public fact query endpoints (`GET /v1
 authenticated receipts. The signer file may contain raw 32-byte Ed25519 key material or 64 hex
 characters.
 
+Provision a fresh migrated store before starting fact-reading runs by using the CLI once:
+
+```bash
+export MFM_FACT_RECEIPT_SIGNING_KEY_FILE=/run/mfm/fact-receipt-signing-key
+mfm_cli facts provision-authority --database-url "$DATABASE_URL"
+```
+
+Provisioning inserts only the public verifying key into the immutable `fact_receipt_trust_root`
+table. A live run that requires fact-index reads is rejected before `RunAdmitted` unless the
+matching signer is configured. There is no in-place key rotation: replace/reset the store and
+provision a new authority; old receipts remain bound to the old trust root.
+
 ## API
 
 All responses are JSON envelopes:

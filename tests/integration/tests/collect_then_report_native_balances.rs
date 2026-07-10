@@ -202,12 +202,13 @@ fn btc_collector_services(
         ),
     )
     .expect("btc runners");
-    mfm_app::RunServices::new_with_certification_registry_and_fact_query_trust_root(
+    mfm_app::RunServices::new_with_certification_registry_and_fact_query_authority(
         mfm_runtime::SerialTypedScheduler::new(runners, Arc::new(store.clone())),
         store.clone(),
         store,
         mfm_app::production_certification_registry().expect("cert"),
         Some(receipt_trust_root),
+        true,
     )
 }
 
@@ -226,12 +227,13 @@ fn evm_collector_services(
         mfm_adapters_evm::EvmRunnerCapabilities::new(artifacts, evm),
     )
     .expect("evm runners");
-    mfm_app::RunServices::new_with_certification_registry_and_fact_query_trust_root(
+    mfm_app::RunServices::new_with_certification_registry_and_fact_query_authority(
         mfm_runtime::SerialTypedScheduler::new(runners, Arc::new(store.clone())),
         store.clone(),
         store,
         mfm_app::production_certification_registry().expect("cert"),
         Some(receipt_trust_root),
+        true,
     )
 }
 
@@ -265,12 +267,13 @@ fn unified_collect_then_report_services(
         mfm_adapters_portfolio::PortfolioRunnerCapabilities::new(artifacts, fact_index),
     )
     .expect("portfolio runners");
-    mfm_app::RunServices::new_with_certification_registry_and_fact_query_trust_root(
+    mfm_app::RunServices::new_with_certification_registry_and_fact_query_authority(
         mfm_runtime::SerialTypedScheduler::new(runners, Arc::new(store.clone())),
         store.clone(),
         store,
         mfm_app::production_certification_registry().expect("cert"),
         Some(receipt_trust_root),
+        true,
     )
 }
 

@@ -3,9 +3,7 @@ use std::fmt;
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::run_store::{
-    connect_fact_query_run_read_services, connect_run_read_services, RunStoresArgs,
-};
+use crate::support::run_store::{connect_run_read_services, RunStoresArgs};
 use clap::{Args, Subcommand};
 use mfm_app::{
     PublicFactDescriptorSummary, PublicFactExplain, PublicFactKindSummary, PublicFactQueryPage,
@@ -64,6 +62,12 @@ pub(crate) enum FactsCommand {
         #[command(flatten)]
         args: ShowArgs,
     },
+    /// Provision the immutable store-owned fact-receipt trust root.
+    ProvisionAuthority {
+        /// Parsed arguments for the authority provisioning command.
+        #[command(flatten)]
+        args: ProvisionAuthorityArgs,
+    },
 }
 
 impl FactsCommand {
@@ -84,6 +88,9 @@ impl FactsCommand {
                 finish_fact_command(ctx, execute_limited_kind_query(args).await)
             }
             FactsCommand::Show { args } => finish_fact_command(ctx, execute_show(args).await),
+            FactsCommand::ProvisionAuthority { args } => {
+                finish_fact_command(ctx, execute_provision_authority(args).await)
+            }
         }
     }
 }
@@ -218,6 +225,14 @@ pub(crate) struct ShowArgs {
     pub(crate) stores: RunStoresArgs,
 }
 
+/// Arguments for `mfm facts provision-authority`.
+#[derive(Args)]
+pub(crate) struct ProvisionAuthorityArgs {
+    /// Storage configuration for the certified Postgres run store.
+    #[command(flatten)]
+    pub(crate) stores: RunStoresArgs,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct KindsOutput {
     kinds: Vec<PublicFactKindSummary>,
@@ -305,6 +320,17 @@ pub(crate) struct ShowOutput {
     fact: PublicFactRef,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ProvisionAuthorityOutput {
+    provisioned: bool,
+}
+
+impl fmt::Display for ProvisionAuthorityOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "fact_receipt_authority provisioned={}", self.provisioned)
+    }
+}
+
 impl fmt::Display for ShowOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write_fact(f, &self.fact)
@@ -348,6 +374,16 @@ async fn execute_show(args: &ShowArgs) -> CommandResult<ShowOutput> {
     }))
 }
 
+async fn execute_provision_authority(
+    args: &ProvisionAuthorityArgs,
+) -> CommandResult<ProvisionAuthorityOutput> {
+    mfm_app::provision_production_fact_receipt_authority(args.stores.database_url.as_deref())
+        .await?;
+    Ok(CommandOutput::new(ProvisionAuthorityOutput {
+        provisioned: true,
+    }))
+}
+
 async fn execute_limited_kind_query(args: &LimitedKindQueryArgs) -> CommandResult<QueryOutput> {
     execute_kind_query(&args.stores, &args.kind, &args.query, Some(args.limit)).await
 }
@@ -358,7 +394,7 @@ async fn execute_kind_query(
     query: &FactQuerySelectorArgs,
     limit: Option<u64>,
 ) -> CommandResult<QueryOutput> {
-    let services = connect_fact_query_run_read_services(stores).await?;
+    let services = connect_run_read_services(stores).await?;
     let request = public_fact_query_request(kind, query, limit)?;
     Ok(CommandOutput::new(
         services.query_public_facts(request).await?.into(),

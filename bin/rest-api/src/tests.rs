@@ -67,6 +67,7 @@ async fn live_routes_reuse_cached_services_after_first_construction() {
         store: store::AsyncInMemoryRunStore::default(),
         runtime_config_path: Some(config_path.clone()),
         fact_query_receipt_trust_root: None,
+        fact_query_authority_ready: false,
         fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     });
 
@@ -200,6 +201,7 @@ async fn facts_routes_expose_only_public_platform_projection_data() {
         store: fixture.store.clone(),
         runtime_config_path: None,
         fact_query_receipt_trust_root: None,
+        fact_query_authority_ready: false,
         fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     });
 
@@ -340,6 +342,7 @@ fn test_app() -> axum::Router {
         store: store::AsyncInMemoryRunStore::default(),
         runtime_config_path: None,
         fact_query_receipt_trust_root: None,
+        fact_query_authority_ready: false,
         fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     })
 }

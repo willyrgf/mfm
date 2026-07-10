@@ -183,6 +183,8 @@ pub struct AppState<S = ProductionRunStore> {
     pub runtime_config_path: Option<PathBuf>,
     /// Optional fact-query receipt trust root used for replay verification.
     pub fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
+    /// Whether live authenticated fact queries are ready in this process.
+    pub fact_query_authority_ready: bool,
     /// Platform/Control fact-index used by portfolio report and collector runners.
     pub fact_index: Arc<dyn mfm_app::FactIndexReadProvider>,
 }
@@ -241,15 +243,15 @@ where
                     self.app.runtime_config_path.as_deref(),
                 )?;
                 let certification_registry = mfm_app::production_certification_registry()?;
-                let fact_query_receipt_trust_root =
-                    self.app.fact_query_receipt_trust_root.clone();
+                let fact_query_receipt_trust_root = self.app.fact_query_receipt_trust_root.clone();
                 Ok(
-                    mfm_app::make_run_services_with_certification_registry_and_fact_query_trust_root(
+                    mfm_app::make_run_services_with_certification_registry_and_fact_query_authority(
                         runners,
                         self.app.store.clone(),
                         self.app.store.clone(),
                         certification_registry,
                         fact_query_receipt_trust_root,
+                        self.app.fact_query_authority_ready,
                     ),
                 )
             })
@@ -263,7 +265,7 @@ where
                 let fact_query_receipt_trust_root =
                     self.app.fact_query_receipt_trust_root.clone();
                 Ok(
-                    mfm_app::make_run_read_services_with_certification_registry_and_fact_query_trust_root(
+                    mfm_app::make_run_read_services_with_certification_registry_and_fact_query_authority(
                         self.app.store.clone(),
                         self.app.store.clone(),
                         certification_registry,
@@ -277,7 +279,7 @@ where
 
 /// Connects to the default certified run store.
 pub async fn make_default_run_store() -> Result<ProductionRunStore, ApiError> {
-    Ok(mfm_app::connect_production_run_store_with_optional_fact_query_signer(None).await?)
+    Ok(mfm_app::connect_production_run_store(None).await?)
 }
 
 /// Builds default production REST API state from environment-selected stores.
@@ -285,10 +287,12 @@ pub async fn make_default_app_state() -> Result<DefaultAppState, ApiError> {
     let store = make_default_run_store().await?;
     let fact_index = mfm_app::production_fact_index_read_provider(store.clone());
     let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
+    let fact_query_authority_ready = store.fact_receipt_queries_ready();
     Ok(AppState {
         store,
         runtime_config_path: std::env::var_os(mfm_app::MFM_RUNTIME_CONFIG_FILE).map(PathBuf::from),
         fact_query_receipt_trust_root,
+        fact_query_authority_ready,
         fact_index,
     })
 }

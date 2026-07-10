@@ -151,12 +151,13 @@ fn portfolio_services(
     mfm_adapters_portfolio::register_portfolio_runners(&mut runners, portfolio_capabilities)
         .expect("portfolio runners");
     let runtime_artifacts = Arc::new(store.clone());
-    mfm_app::RunServices::new_with_certification_registry_and_fact_query_trust_root(
+    mfm_app::RunServices::new_with_certification_registry_and_fact_query_authority(
         mfm_runtime::SerialTypedScheduler::new(runners, runtime_artifacts),
         store.clone(),
         store,
         mfm_app::production_certification_registry().expect("certification registry"),
         Some(receipt_trust_root),
+        true,
     )
 }
 

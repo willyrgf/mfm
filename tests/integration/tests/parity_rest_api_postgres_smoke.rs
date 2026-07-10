@@ -91,6 +91,7 @@ async fn parity_rest_postgres_smoke() {
         store,
         runtime_config_path: None,
         fact_query_receipt_trust_root: None,
+        fact_query_authority_ready: false,
         fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     });
 

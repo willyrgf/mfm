@@ -7,6 +7,7 @@ use mfm_store::v1 as store;
 use serde_json::Value;
 use sqlx::{AssertSqlSafe, PgPool};
 use std::process::Output;
+use tempfile::NamedTempFile;
 
 // Path-included support module is shared with other parity suites; this test only
 // uses admit/append helpers after report-only cutover (no live RPC seed path).
@@ -28,6 +29,20 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
     ProductionPostgresSchema::migrate(&scoped_database_url)
         .await
         .expect("migrate typed postgres schema");
+    let signing_key_file = NamedTempFile::new().expect("create test signing-key file");
+    std::fs::write(signing_key_file.path(), [17_u8; 32]).expect("write test signing-key file");
+    let provision = run_cli_with_key(
+        &[
+            "--output-format".to_owned(),
+            "json".to_owned(),
+            "facts".to_owned(),
+            "provision-authority".to_owned(),
+            "--database-url".to_owned(),
+            scoped_database_url.clone(),
+        ],
+        signing_key_file.path(),
+    );
+    assert_success(&provision);
     let store = ProductionRunStore::connect(&scoped_database_url)
         .await
         .expect("connect typed postgres store");
@@ -52,15 +67,18 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
     )
     .await;
 
-    let resume = run_cli(&[
-        "--output-format".to_owned(),
-        "json".to_owned(),
-        "run".to_owned(),
-        "resume".to_owned(),
-        run_id.as_str().to_owned(),
-        "--database-url".to_owned(),
-        scoped_database_url.clone(),
-    ]);
+    let resume = run_cli_with_key(
+        &[
+            "--output-format".to_owned(),
+            "json".to_owned(),
+            "run".to_owned(),
+            "resume".to_owned(),
+            run_id.as_str().to_owned(),
+            "--database-url".to_owned(),
+            scoped_database_url.clone(),
+        ],
+        signing_key_file.path(),
+    );
     assert_success(&resume);
     let resume_json = parse_success_json(&resume.stdout);
     // Without Platform holding facts the report path hard-fails after cutover.
@@ -211,11 +229,25 @@ fn sample_portfolio_config() -> Value {
 }
 
 fn run_cli(args: &[String]) -> Output {
+    run_cli_with_optional_key(args, None)
+}
+
+fn run_cli_with_key(args: &[String], signing_key_file: &std::path::Path) -> Output {
+    run_cli_with_optional_key(args, Some(signing_key_file))
+}
+
+fn run_cli_with_optional_key(
+    args: &[String],
+    signing_key_file: Option<&std::path::Path>,
+) -> Output {
     let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
-    sanitize_machine_readable_cli_env(&mut cmd)
-        .args(args)
-        .output()
-        .expect("execute mfm_cli")
+    sanitize_machine_readable_cli_env(&mut cmd);
+    if let Some(signing_key_file) = signing_key_file {
+        cmd.env("MFM_FACT_RECEIPT_SIGNING_KEY_FILE", signing_key_file);
+    } else {
+        cmd.env_remove("MFM_FACT_RECEIPT_SIGNING_KEY_FILE");
+    }
+    cmd.args(args).output().expect("execute mfm_cli")
 }
 
 fn assert_success(output: &Output) {

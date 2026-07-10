@@ -57,6 +57,11 @@ fn unique_schema() -> String {
     format!("run_store_{}_{}_{}", std::process::id(), nanos, counter)
 }
 
+fn schema_database_url(database_url: &str, schema: &str) -> String {
+    let separator = if database_url.contains('?') { '&' } else { '?' };
+    format!("{database_url}{separator}options=-csearch_path%3D{schema}")
+}
+
 fn artifact_id(byte: u8) -> ArtifactId {
     let digest = content_digest(byte);
     ArtifactId::from_digest(digest.algorithm(), *digest.digest())
@@ -75,6 +80,12 @@ fn test_prepared_artifact_bytes(
 }
 
 async fn test_store() -> (PostgresRunStore, String) {
+    test_store_with_fact_receipt_root(true).await
+}
+
+async fn test_store_with_fact_receipt_root(
+    with_fact_receipt_root: bool,
+) -> (PostgresRunStore, String) {
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
     let admin_pool = PgPool::connect(&database_url)
@@ -99,15 +110,17 @@ async fn test_store() -> (PostgresRunStore, String) {
     crate::schema::migrate_pool(&pool)
         .await
         .expect("migrate schema");
-    let fact_receipt_signer = test_fact_receipt_signer();
-    insert_fact_receipt_trust_root(&pool, &fact_receipt_signer).await;
+    let fact_receipt_signer = with_fact_receipt_root.then(test_fact_receipt_signer);
+    if let Some(signer) = &fact_receipt_signer {
+        insert_fact_receipt_trust_root(&pool, signer).await;
+    }
     let authority = crate::schema::validate_pool(&pool)
         .await
         .expect("validate schema");
     let store = PostgresRunStore {
         pool,
         authority,
-        fact_receipt_signer: Some(fact_receipt_signer),
+        fact_receipt_signer,
     };
     (store, schema)
 }
@@ -275,6 +288,42 @@ async fn schema_validation_accepts_store_commit_order_authority() {
         .await
         .expect("schema validation still passes");
 
+    drop_schema(&store, &schema).await;
+}
+
+#[tokio::test]
+async fn schema_provisions_fact_receipt_authority_once_and_only_publicly() {
+    let (store, schema) = test_store_with_fact_receipt_root(false).await;
+    assert!(!store.fact_receipt_queries_ready());
+    let database_url =
+        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
+    let scoped_database_url = schema_database_url(&database_url, &schema);
+    let expected_verifying_key = test_fact_receipt_signer().verifying_key();
+    let root = crate::PostgresSchema::provision_fact_receipt_trust_root(
+        &scoped_database_url,
+        mfm_facts::StoreIdentity::new("store.test").expect("store identity"),
+        mfm_facts::StoreKeyId::new("key.test").expect("key id"),
+        [17; 32],
+    )
+    .await
+    .expect("provision trust root");
+    assert_eq!(root.verifying_key(), &expected_verifying_key);
+
+    let same_root = crate::PostgresSchema::provision_fact_receipt_trust_root(
+        &scoped_database_url,
+        mfm_facts::StoreIdentity::new("different.identity").expect("store identity"),
+        mfm_facts::StoreKeyId::new("different.key").expect("key id"),
+        [17; 32],
+    )
+    .await
+    .expect("idempotent provisioning");
+    assert_eq!(same_root, root);
+    let persisted: Vec<u8> =
+        sqlx::query_scalar("SELECT verifying_key FROM fact_receipt_trust_root WHERE singleton")
+            .fetch_one(&store.pool)
+            .await
+            .expect("persisted public key");
+    assert_eq!(persisted, expected_verifying_key.to_vec());
     drop_schema(&store, &schema).await;
 }
 
