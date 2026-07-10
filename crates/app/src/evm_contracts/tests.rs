@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
-    make_run_services_with_certification_registry, prepare_entry_point_run_launch,
-    EntryPointRunLaunchInput, ErrorClass, RunLaunchRequest, RunModeStatus, RunServices,
+    make_run_services, prepare_entry_point_run_launch, EntryPointRunLaunchInput, ErrorClass,
+    RunLaunchRequest, RunModeStatus, RunServices,
 };
 use alloy_primitives::keccak256;
 use mfm_adapters_evm_contracts::{
@@ -273,7 +273,14 @@ fn contract_lifecycle_services(
     runners: ErasedRunnerRegistry,
     certification: CertificationRegistry,
 ) -> ContractRunServices {
-    make_run_services_with_certification_registry(runners, store.clone(), artifacts, certification)
+    make_run_services(
+        runners,
+        store.clone(),
+        artifacts,
+        certification,
+        None,
+        false,
+    )
 }
 
 fn contract_services(
@@ -488,10 +495,11 @@ async fn app_replay_rejects_missing_validation_report_retained_artifact() {
     .await;
     let (run_id, _) = launch_completed(&services, request, "launch validate lifecycle").await;
     let missing = MissingValidationReportArtifactStore::new(store);
-    let replay_services = crate::make_run_read_services_with_certification_registry(
+    let replay_services = crate::make_run_read_services(
         missing.clone(),
         missing,
         contract_lifecycle_certification_registry(),
+        None,
     );
 
     let error = replay_services

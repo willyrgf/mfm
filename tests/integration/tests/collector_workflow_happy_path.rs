@@ -95,13 +95,12 @@ async fn bitcoin_chain_head_collector_two_cycles_record_checkpoint_and_public_fa
         fact_index_reads_before_replay
     );
 
-    let read_services =
-        mfm_app::make_run_read_services_with_certification_registry_and_fact_query_authority(
-            store.clone(),
-            store.clone(),
-            mfm_app::production_certification_registry().expect("certification registry"),
-            Some(fact_index.receipt_trust_root()),
-        );
+    let read_services = mfm_app::make_run_read_services(
+        store.clone(),
+        store.clone(),
+        mfm_app::production_certification_registry().expect("certification registry"),
+        Some(fact_index.receipt_trust_root()),
+    );
     assert_eq!(
         read_services.fact_kinds().await.expect("fact kinds"),
         vec![mfm_app::PublicFactKindSummary {

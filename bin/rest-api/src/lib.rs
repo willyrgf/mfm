@@ -244,16 +244,14 @@ where
                 )?;
                 let certification_registry = mfm_app::production_certification_registry()?;
                 let fact_query_receipt_trust_root = self.app.fact_query_receipt_trust_root.clone();
-                Ok(
-                    mfm_app::make_run_services_with_certification_registry_and_fact_query_authority(
-                        runners,
-                        self.app.store.clone(),
-                        self.app.store.clone(),
-                        certification_registry,
-                        fact_query_receipt_trust_root,
-                        self.app.fact_query_authority_ready,
-                    ),
-                )
+                Ok(mfm_app::make_run_services(
+                    runners,
+                    self.app.store.clone(),
+                    self.app.store.clone(),
+                    certification_registry,
+                    fact_query_receipt_trust_root,
+                    self.app.fact_query_authority_ready,
+                ))
             })
             .clone()
     }
@@ -262,16 +260,13 @@ where
         self.read_services
             .get_or_init(|| {
                 let certification_registry = mfm_app::production_certification_registry()?;
-                let fact_query_receipt_trust_root =
-                    self.app.fact_query_receipt_trust_root.clone();
-                Ok(
-                    mfm_app::make_run_read_services_with_certification_registry_and_fact_query_authority(
-                        self.app.store.clone(),
-                        self.app.store.clone(),
-                        certification_registry,
-                        fact_query_receipt_trust_root,
-                    ),
-                )
+                let fact_query_receipt_trust_root = self.app.fact_query_receipt_trust_root.clone();
+                Ok(mfm_app::make_run_read_services(
+                    self.app.store.clone(),
+                    self.app.store.clone(),
+                    certification_registry,
+                    fact_query_receipt_trust_root,
+                ))
             })
             .clone()
     }

@@ -975,8 +975,7 @@ async fn retained_artifact_adapter_preserves_read_request_expectations() {
 #[tokio::test]
 async fn app_read_services_reconstruct_fact_bearing_status_from_committed_stream() {
     let (run_id, store, registry) = launch_app_fact_run().await;
-    let read_services =
-        make_run_read_services_with_certification_registry(store.clone(), store, registry);
+    let read_services = make_run_read_services(store.clone(), store, registry, None);
 
     let status = read_services
         .run_status(&run_id)
@@ -1002,11 +1001,8 @@ async fn app_read_services_fail_closed_for_missing_or_tampered_fact_artifacts() 
         CommittedStreamArtifactMode::TamperFactResponse,
     ] {
         let overridden = OverriddenCommittedStreamStore::new(store.clone(), mode);
-        let read_services = make_run_read_services_with_certification_registry(
-            overridden.clone(),
-            overridden,
-            registry.clone(),
-        );
+        let read_services =
+            make_run_read_services(overridden.clone(), overridden, registry.clone(), None);
 
         let status_error = read_services
             .run_status(&run_id)
@@ -1102,7 +1098,7 @@ async fn public_fact_catalog_discovers_only_platform_descriptors() {
 #[tokio::test]
 async fn run_read_services_load_public_fact_catalog_from_retained_projection_authority() {
     let (_run_id, store, registry) = launch_app_fact_run().await;
-    let services = make_run_read_services_with_certification_registry_and_fact_query_authority(
+    let services = make_run_read_services(
         store.clone(),
         store.clone(),
         registry,
@@ -1174,7 +1170,7 @@ async fn run_read_services_public_fact_reads_are_store_scoped_across_runs() {
         )
         .await;
     assert_ne!(first_run_id, second_run_id);
-    let services = make_run_read_services_with_certification_registry_and_fact_query_authority(
+    let services = make_run_read_services(
         store.clone(),
         store.clone(),
         registry,
@@ -1228,11 +1224,7 @@ async fn run_read_services_do_not_disclose_non_public_facts() {
         ),
     ] {
         let (_run_id, store, registry) = launch_app_fact_run_with_visibility(visibility).await;
-        let services = make_run_read_services_with_certification_registry(
-            store.clone(),
-            store.clone(),
-            registry,
-        );
+        let services = make_run_read_services(store.clone(), store.clone(), registry, None);
 
         assert!(
             services
@@ -1571,10 +1563,11 @@ async fn run_read_services_are_evidence_only() {
     assert!(!read_services_impl.contains("std::env"));
 
     let store = store::AsyncInMemoryRunStore::default();
-    let services = make_run_read_services_with_certification_registry(
+    let services = make_run_read_services(
         store.clone(),
         store,
         production_certification_registry().expect("cert registry"),
+        None,
     );
     let run_id = RunId::parse(
         "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000001",
@@ -1617,7 +1610,7 @@ async fn btc_collector_launch_defers_runtime_config_to_ingress() {
     let fact_query_receipt_trust_root = fact_index.receipt_trust_root();
     let runners = production_runner_registry(Arc::new(store.clone()), Arc::new(fact_index), None)
         .expect("production runners without BTC config");
-    let services = make_run_services_with_certification_registry_and_fact_query_authority(
+    let services = make_run_services(
         runners,
         store.clone(),
         store.clone(),
@@ -1651,7 +1644,7 @@ async fn launch_run_reaps_expired_execution_claim_and_retries_admission() {
             mfm_program::facts::FactAudience::Platform,
         ),
     );
-    let services = make_run_services_with_certification_registry_and_fact_query_authority(
+    let services = make_run_services(
         runners,
         store.clone(),
         store.clone(),

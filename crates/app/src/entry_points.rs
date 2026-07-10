@@ -450,15 +450,14 @@ mod tests {
             None,
         )
         .expect("runners");
-        let services =
-            crate::make_run_services_with_certification_registry_and_fact_query_authority(
-                runners,
-                fixture.store.clone(),
-                fixture.store.clone(),
-                fixture.prep.certification_registry.clone(),
-                Some(fact_query_receipt_trust_root),
-                true,
-            );
+        let services = crate::make_run_services(
+            runners,
+            fixture.store.clone(),
+            fixture.store.clone(),
+            fixture.prep.certification_registry.clone(),
+            Some(fact_query_receipt_trust_root),
+            true,
+        );
 
         let outcome = services
             .launch_run(prepared.request)
@@ -493,11 +492,13 @@ mod tests {
             None,
         )
         .expect("runners");
-        let services = crate::make_run_services_with_certification_registry(
+        let services = crate::make_run_services(
             runners,
             fixture.store.clone(),
             fixture.store.clone(),
             fixture.prep.certification_registry.clone(),
+            None,
+            false,
         );
 
         let run_id = prepared.request.run_id.clone();
@@ -647,15 +648,14 @@ mod tests {
         );
         let services = fixture.services();
         let run_id = admit_entry_point_run(&services, prepared).await;
-        let incompatible_services =
-            crate::make_run_services_with_certification_registry_and_fact_query_authority(
-                crate::ErasedRunnerRegistry::new(),
-                fixture.store.clone(),
-                fixture.store.clone(),
-                fixture.prep.certification_registry.clone(),
-                Some(crate::ProjectionFactIndexProvider::empty().receipt_trust_root()),
-                true,
-            );
+        let incompatible_services = crate::make_run_services(
+            crate::ErasedRunnerRegistry::new(),
+            fixture.store.clone(),
+            fixture.store.clone(),
+            fixture.prep.certification_registry.clone(),
+            Some(crate::ProjectionFactIndexProvider::empty().receipt_trust_root()),
+            true,
+        );
 
         let error = incompatible_services
             .resume_stored_run(&run_id)
@@ -679,15 +679,14 @@ mod tests {
         let fixture = EntryPointRunFixture::in_memory().await;
         let prepared = fixture.prepare_sample_portfolio(None);
         let run_id = prepared.request.run_id.clone();
-        let services =
-            crate::make_run_services_with_certification_registry_and_fact_query_authority(
-                crate::ErasedRunnerRegistry::new(),
-                fixture.store.clone(),
-                fixture.store.clone(),
-                fixture.prep.certification_registry.clone(),
-                Some(crate::ProjectionFactIndexProvider::empty().receipt_trust_root()),
-                true,
-            );
+        let services = crate::make_run_services(
+            crate::ErasedRunnerRegistry::new(),
+            fixture.store.clone(),
+            fixture.store.clone(),
+            fixture.prep.certification_registry.clone(),
+            Some(crate::ProjectionFactIndexProvider::empty().receipt_trust_root()),
+            true,
+        );
 
         let err = services
             .launch_run(prepared.request)
@@ -856,7 +855,7 @@ mod tests {
                 Some(&self.runtime_config_path),
             )
             .expect("runners");
-            crate::make_run_services_with_certification_registry_and_fact_query_authority(
+            crate::make_run_services(
                 runners,
                 self.store.clone(),
                 self.store.clone(),

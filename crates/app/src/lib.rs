@@ -338,29 +338,11 @@ impl From<OpLaunchError> for AppError {
     }
 }
 
-/// Builds typed async app services with an explicit trusted certification registry.
-pub fn make_run_services_with_certification_registry<S, A>(
-    runners: ErasedRunnerRegistry,
-    store: S,
-    artifacts: A,
-    certification_registry: CertificationRegistry,
-) -> RunServices<S, A>
-where
-    S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
-    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
-{
-    make_run_services_with_certification_registry_and_fact_query_authority(
-        runners,
-        store,
-        artifacts,
-        certification_registry,
-        None,
-        false,
-    )
-}
-
-/// Builds typed async app services with an explicit certification registry and fact-query authority.
-pub fn make_run_services_with_certification_registry_and_fact_query_authority<S, A>(
+/// Builds live typed async app services with explicit certification and fact-query authority.
+///
+/// Pass `fact_query_receipt_trust_root = None` and `fact_query_authority_ready = false` when the
+/// process does not verify or sign fact-query receipts.
+pub fn make_run_services<S, A>(
     runners: ErasedRunnerRegistry,
     store: S,
     artifacts: A,
@@ -383,26 +365,12 @@ where
     )
 }
 
-/// Builds evidence-only async app services with an explicit trusted certification registry.
-pub fn make_run_read_services_with_certification_registry<S, A>(
-    store: S,
-    artifacts: A,
-    certification_registry: CertificationRegistry,
-) -> RunReadServices<S, A>
-where
-    S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
-    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
-{
-    make_run_read_services_with_certification_registry_and_fact_query_authority(
-        store,
-        artifacts,
-        certification_registry,
-        None,
-    )
-}
-
-/// Builds evidence-only async app services with an explicit certification registry and fact-query authority.
-pub fn make_run_read_services_with_certification_registry_and_fact_query_authority<S, A>(
+/// Builds evidence-only async app services with explicit certification and optional fact-query
+/// trust root for replay verification.
+///
+/// Pass `fact_query_receipt_trust_root = None` when the process will not verify fact-query
+/// receipts.
+pub fn make_run_read_services<S, A>(
     store: S,
     artifacts: A,
     certification_registry: CertificationRegistry,
@@ -666,16 +634,14 @@ pub async fn connect_production_run_services(
     let certification_registry = production_certification_registry()?;
     let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
     let fact_query_authority_ready = store.fact_receipt_queries_ready();
-    Ok(
-        make_run_services_with_certification_registry_and_fact_query_authority(
-            runners,
-            store.clone(),
-            store,
-            certification_registry,
-            fact_query_receipt_trust_root,
-            fact_query_authority_ready,
-        ),
-    )
+    Ok(make_run_services(
+        runners,
+        store.clone(),
+        store,
+        certification_registry,
+        fact_query_receipt_trust_root,
+        fact_query_authority_ready,
+    ))
 }
 
 /// Builds production evidence-only run services backed by the Postgres run store.
@@ -685,14 +651,12 @@ pub async fn connect_production_run_read_services(
     let store = connect_production_run_read_store(database_url).await?;
     let certification_registry = production_certification_registry()?;
     let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
-    Ok(
-        make_run_read_services_with_certification_registry_and_fact_query_authority(
-            store.clone(),
-            store.clone(),
-            certification_registry,
-            fact_query_receipt_trust_root,
-        ),
-    )
+    Ok(make_run_read_services(
+        store.clone(),
+        store.clone(),
+        certification_registry,
+        fact_query_receipt_trust_root,
+    ))
 }
 
 /// Builds the production typed runner registry for this process.
