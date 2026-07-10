@@ -1584,10 +1584,10 @@ mod tests {
     use mfm_facts::{
         fact_descriptor_hash, fact_query_plan_hash, CanonicalFactQueryPlan,
         DescriptorCatalogWatermark, FactClaimId, FactFieldExposure, FactFieldExtraction,
-        FactFieldValueType, FactProducerProvenance, FactProjectionGeneration, FactQueryReceipt,
-        FactQueryReceiptMaterial, FactResponseEvidence, FactSubjectRef, InternalFactRef,
-        InternalFactRefParts, StoreCommitOrder, StoreIdentity, StoreKeyId, StoreReadFrontier,
-        StoreReadFrontierType, StoreReceiptAuthentication, StoreReceiptAuthenticationScheme,
+        FactFieldValueType, FactProducerProvenance, FactQueryReceipt, FactQueryReceiptMaterial,
+        FactResponseEvidence, FactSubjectRef, InternalFactRef, InternalFactRefParts,
+        StoreCommitOrder, StoreIdentity, StoreKeyId, StoreReadFrontier, StoreReadFrontierType,
+        StoreReceiptAuthentication, StoreReceiptAuthenticationScheme,
     };
     use mfm_ids::{
         ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest, DigestBytes, EventId, RunId,
@@ -2183,7 +2183,6 @@ mod tests {
             StoreScopeRef::new("mfm.store.default").expect("store scope"),
             FactQueryScope::new(FactAudience::Control, FactVisibilityScope::Default),
             DescriptorCatalogWatermark::new(1),
-            FactProjectionGeneration::new(1),
             StoreCommitOrder::new(11),
         );
         let plan_hash = fact_query_plan_hash(plan).expect("plan hash");

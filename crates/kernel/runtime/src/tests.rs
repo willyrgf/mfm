@@ -152,7 +152,6 @@ fn test_fact_query_evidence_with_returned_refs(
         store_scope,
         query_scope,
         mfm_facts::DescriptorCatalogWatermark::new(1),
-        mfm_facts::FactProjectionGeneration::new(1),
         mfm_facts::StoreCommitOrder::new(10),
     );
     let rows = returned_refs

@@ -18,22 +18,6 @@ impl DescriptorCatalogWatermark {
     }
 }
 
-/// Fact projection generation or rebuild id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FactProjectionGeneration(u64);
-
-impl FactProjectionGeneration {
-    /// Creates a fact projection generation.
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    /// Returns the generation value.
-    pub const fn as_u64(self) -> u64 {
-        self.0
-    }
-}
-
 /// Store-wide commit coordinate bound into query receipts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StoreCommitOrder(u64);
@@ -79,12 +63,14 @@ impl_fact_tag!(StoreReadFrontierType, "store read frontier type", pub(crate), "R
 });
 
 /// Semantic read frontier bound into a fact query receipt.
+///
+/// Bound fields are store authority watermarks only. Rebuildable fact-index
+/// projection telemetry is never receipt identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreReadFrontier {
     pub(crate) store_scope: StoreScopeRef,
     pub(crate) query_scope: FactQueryScope,
     pub(crate) descriptor_catalog_watermark: DescriptorCatalogWatermark,
-    pub(crate) projection_generation: FactProjectionGeneration,
     pub(crate) store_commit_order: StoreCommitOrder,
 }
 
@@ -94,14 +80,12 @@ impl StoreReadFrontier {
         store_scope: StoreScopeRef,
         query_scope: FactQueryScope,
         descriptor_catalog_watermark: DescriptorCatalogWatermark,
-        projection_generation: FactProjectionGeneration,
         store_commit_order: StoreCommitOrder,
     ) -> Self {
         Self {
             store_scope,
             query_scope,
             descriptor_catalog_watermark,
-            projection_generation,
             store_commit_order,
         }
     }
@@ -119,11 +103,6 @@ impl StoreReadFrontier {
     /// Returns the descriptor catalog watermark.
     pub const fn descriptor_catalog_watermark(&self) -> DescriptorCatalogWatermark {
         self.descriptor_catalog_watermark
-    }
-
-    /// Returns the projection generation.
-    pub const fn projection_generation(&self) -> FactProjectionGeneration {
-        self.projection_generation
     }
 
     /// Returns the maximum committed store coordinate included by the query.

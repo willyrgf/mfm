@@ -152,7 +152,7 @@ fn receipt_authentication_error(message: impl Into<String>) -> StoreError {
 #[cfg(test)]
 mod tests {
     use ed25519_dalek::SigningKey;
-    use mfm_facts::{DescriptorCatalogWatermark, FactProjectionGeneration, StoreCommitOrder};
+    use mfm_facts::{DescriptorCatalogWatermark, StoreCommitOrder};
     use mfm_facts::{
         FactAudience, FactFieldId, FactOrderingName, FactOrderingPolicy, FactOrderingTerm,
         FactQueryEvidence, FactQueryScope, FactSelectionEvidence, FactVisibilityScope,
@@ -270,7 +270,6 @@ mod tests {
             StoreScopeRef::new("default").expect("store scope"),
             FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
             DescriptorCatalogWatermark::new(1),
-            FactProjectionGeneration::new(1),
             StoreCommitOrder::new(0),
         );
         let rows: [mfm_facts::FactQueryResultRow; 0] = [];

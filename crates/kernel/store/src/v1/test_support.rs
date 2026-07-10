@@ -1541,7 +1541,6 @@ pub fn signed_fact_query_receipt_for_projection_for_test(
         plan.store_scope().clone(),
         plan.query_scope().clone(),
         mfm_facts::DescriptorCatalogWatermark::new(projection.fact_descriptors().count() as u64),
-        mfm_facts::FactProjectionGeneration::new(1),
         mfm_facts::StoreCommitOrder::new(max_order),
     );
     let plan_hash = mfm_facts::fact_query_plan_hash(plan).expect("fact query plan hash");

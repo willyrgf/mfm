@@ -115,13 +115,11 @@ async fn load_store_read_frontier_tx(
     authority_events: &[KernelEventEnvelope],
 ) -> Result<mfm_facts::StoreReadFrontier> {
     let descriptor_catalog_watermark = descriptor_catalog_watermark(authority_events)?;
-    let projection_generation = load_fact_projection_generation_tx(tx).await?;
     let store_commit_order = load_store_commit_order_tx(tx).await?;
     Ok(mfm_facts::StoreReadFrontier::new(
         plan.store_scope().clone(),
         plan.query_scope().clone(),
         descriptor_catalog_watermark,
-        projection_generation,
         mfm_facts::StoreCommitOrder::new(store_commit_order),
     ))
 }
@@ -144,28 +142,6 @@ fn descriptor_catalog_watermark(
         PostgresStoreError::Corruption("fact descriptor catalog watermark overflow".to_owned())
     })?;
     Ok(mfm_facts::DescriptorCatalogWatermark::new(count))
-}
-
-async fn load_fact_projection_generation_tx(
-    tx: &mut Transaction<'_, Postgres>,
-) -> Result<mfm_facts::FactProjectionGeneration> {
-    let row =
-        sqlx::query("SELECT projection_generation FROM fact_projection_metadata WHERE singleton")
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(|error| database_error("failed to load fact projection generation", error))?;
-    let generation = required_i64(
-        &row,
-        "projection_generation",
-        "fact_projection_metadata.projection_generation",
-    )?;
-    let generation = i64_to_nonnegative_u64(generation, "fact projection generation")?;
-    if generation == 0 {
-        return Err(PostgresStoreError::Corruption(
-            "fact projection generation was zero".to_owned(),
-        ));
-    }
-    Ok(mfm_facts::FactProjectionGeneration::new(generation))
 }
 
 async fn load_store_commit_order_tx(tx: &mut Transaction<'_, Postgres>) -> Result<u64> {

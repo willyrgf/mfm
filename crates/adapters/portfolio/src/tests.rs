@@ -11,10 +11,10 @@ use ed25519_dalek::SigningKey;
 use mfm_canonical::sha256_digest_bytes;
 use mfm_facts::{
     fact_descriptor_hash, DescriptorCatalogWatermark, FactAudience, FactClaimId,
-    FactFieldValueType, FactProducerProvenance, FactProjectionGeneration, FactQueryReceipt,
-    FactQueryResultRow, FactQueryScope, FactResponseEvidence, FactSubjectRef, FactVisibility,
-    FactVisibilityScope, InternalFactRef, InternalFactRefParts, StoreCommitOrder, StoreIdentity,
-    StoreKeyId, StoreReadFrontier, StoreScopeRef,
+    FactFieldValueType, FactProducerProvenance, FactQueryReceipt, FactQueryResultRow,
+    FactQueryScope, FactResponseEvidence, FactSubjectRef, FactVisibility, FactVisibilityScope,
+    InternalFactRef, InternalFactRefParts, StoreCommitOrder, StoreIdentity, StoreKeyId,
+    StoreReadFrontier, StoreScopeRef,
 };
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
@@ -855,7 +855,6 @@ fn signed_receipt_for_plan_with_order(
         StoreScopeRef::new("mfm.store.default").expect("store scope"),
         FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
         DescriptorCatalogWatermark::new(1),
-        FactProjectionGeneration::new(1),
         store_commit_order,
     );
     let plan_hash = mfm_facts::fact_query_plan_hash(plan).expect("plan hash");

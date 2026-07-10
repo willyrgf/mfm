@@ -8,10 +8,10 @@ use mfm_btc_capabilities::{
 use mfm_canonical::sha256_digest_bytes;
 use mfm_facts::{
     fact_descriptor_hash, DescriptorCatalogWatermark, FactAudience, FactClaimId,
-    FactProducerProvenance, FactProjectionGeneration, FactQueryReceipt, FactQueryScope,
-    FactResponseEvidence, FactSelectionEvidence, FactSubjectRef, FactVisibility,
-    FactVisibilityScope, InternalFactRef, InternalFactRefParts, StoreCommitOrder, StoreIdentity,
-    StoreKeyId, StoreReadFrontier, StoreScopeRef,
+    FactProducerProvenance, FactQueryReceipt, FactQueryScope, FactResponseEvidence,
+    FactSelectionEvidence, FactSubjectRef, FactVisibility, FactVisibilityScope, InternalFactRef,
+    InternalFactRefParts, StoreCommitOrder, StoreIdentity, StoreKeyId, StoreReadFrontier,
+    StoreScopeRef,
 };
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
@@ -452,7 +452,6 @@ fn fact_query_receipt(
         StoreScopeRef::new("mfm.store.default").expect("store scope"),
         FactQueryScope::new(FactAudience::Control, FactVisibilityScope::Default),
         DescriptorCatalogWatermark::new(1),
-        FactProjectionGeneration::new(1),
         StoreCommitOrder::new(11),
     );
     let plan_hash = mfm_facts::fact_query_plan_hash(plan).expect("plan hash");

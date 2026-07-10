@@ -4364,7 +4364,6 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
             .as_u64(),
         1
     );
-    assert_eq!(receipt.read_frontier().projection_generation().as_u64(), 1);
     assert!(receipt.read_frontier().store_commit_order().as_u64() >= 1);
     sqlx::query(
         "UPDATE fact_index_terms SET value_u64 = '1' \

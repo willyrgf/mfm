@@ -2023,7 +2023,6 @@ mod tests {
             store_scope,
             query_scope,
             mfm_facts::DescriptorCatalogWatermark::new(1),
-            mfm_facts::FactProjectionGeneration::new(1),
             mfm_facts::StoreCommitOrder::new(1),
         );
         let plan_hash = mfm_facts::fact_query_plan_hash(&plan).expect("plan hash");

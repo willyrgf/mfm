@@ -1572,7 +1572,6 @@ fn fact_query_evidence_artifact(
             mfm_facts::FactVisibilityScope::Default,
         ),
         mfm_facts::DescriptorCatalogWatermark::new(1),
-        mfm_facts::FactProjectionGeneration::new(1),
         mfm_facts::StoreCommitOrder::new(3),
     );
     let receipt = signed_fact_query_receipt_for_test(SignedFactQueryReceiptFixtureInputForTest {
