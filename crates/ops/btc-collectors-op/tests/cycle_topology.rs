@@ -1,5 +1,5 @@
 use mfm_op_btc_collectors::{
-    btc_chain_head_collector_cycle_program_draft, btc_chain_head_collector_operation_registry,
+    btc_chain_head_collector_cycle_program_draft, btc_collectors_operation_registry,
     BtcChainHeadCollectorConfig, BtcChainHeadCollectorCycleOperation, BtcChainHeadFact,
     CollectorCheckpointFact, ObserveBtcChainHeadState, QueryCollectorCheckpointState,
     RecordBtcChainHeadFactState, RecordCollectorCheckpointState,
@@ -128,7 +128,7 @@ fn descriptor_allow_lists_are_attached_to_fact_recording_nodes_and_survive_certi
 
 #[test]
 fn operation_descriptor_registers() {
-    let registry = btc_chain_head_collector_operation_registry().expect("operation registry");
+    let registry = btc_collectors_operation_registry().expect("operation registry");
     let descriptor = registry
         .operation_descriptor::<BtcChainHeadCollectorCycleOperation>()
         .expect("operation descriptor");

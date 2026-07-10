@@ -576,25 +576,6 @@ mfm_certify::define_program_descriptor_registry! {
     ],
 }
 
-/// Compatibility alias for chain-head certification registration.
-pub fn register_btc_chain_head_collector_certification_descriptors(
-    registry: &mut mfm_certify::CertificationRegistry,
-) -> mfm_certify::Result<()> {
-    register_btc_collectors_certification_descriptors(registry)
-}
-
-/// Compatibility alias for chain-head operation registry snapshot.
-pub fn btc_chain_head_collector_operation_registry(
-) -> mfm_program::Result<mfm_program::OperationRegistrySnapshot> {
-    btc_collectors_operation_registry()
-}
-
-/// Compatibility alias for chain-head state registry snapshot.
-pub fn btc_chain_head_collector_state_registry(
-) -> mfm_program::Result<mfm_program::StateRegistrySnapshot> {
-    btc_collectors_state_registry()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
