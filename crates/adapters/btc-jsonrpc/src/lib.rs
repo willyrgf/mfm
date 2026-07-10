@@ -901,7 +901,7 @@ fn checkpoint_response_from_query_evidence(
     let fact_ref = row.fact_ref();
     let requirement = fact_response_artifact_requirement(fact_ref);
     let artifact = broker.retained_artifact(&requirement)?;
-    let response: CollectorCheckpointResponse = hydrate_fact_response_json(
+    let response = hydrate_fact_response_json::<CollectorCheckpointResponse>(
         fact_ref,
         &artifact.artifact_bytes,
     )
