@@ -135,6 +135,234 @@ async fn portfolio_snapshot_completes_from_seeded_platform_holdings_without_live
     );
 }
 
+/// Two source runs admit conflicting same-subject BTC holdings. Store-owned commit order must make
+/// the later append win LWW selection (not run-local sequence).
+#[tokio::test]
+async fn portfolio_selection_prefers_later_store_append_across_runs() {
+    let store = AsyncInMemoryRunStore::default();
+    let subject = BtcAddressBalanceSubject::new(
+        "bitcoin-mainnet",
+        "main",
+        "public-bitcoin-core",
+        BTC_ADDRESS,
+    )
+    .expect("btc subject");
+    let descriptor = BtcAddressBalanceSnapshotFact::descriptor().expect("btc descriptor");
+
+    // Older long run writes balance 21 at local seq that may look "high" if misused as order.
+    let older = append_platform_holding_facts_for_test(
+        &store,
+        [btc_holding_seed(
+            &descriptor,
+            &subject,
+            100_000,
+            "older-btc-holding",
+            0x51,
+            21,
+        )],
+    )
+    .await
+    .expect("append older holding");
+    // Newer short run writes replacement balance 999.
+    let newer = append_platform_holding_facts_for_test(
+        &store,
+        [btc_holding_seed(
+            &descriptor,
+            &subject,
+            100_000,
+            "newer-btc-holding",
+            0x61,
+            999,
+        )],
+    )
+    .await
+    .expect("append newer holding");
+    let older_order = older[0]
+        .index
+        .as_ref()
+        .expect("older holding is indexed")
+        .store_commit_order;
+    let newer_order = newer[0]
+        .index
+        .as_ref()
+        .expect("newer holding is indexed")
+        .store_commit_order;
+    assert!(
+        newer_order > older_order,
+        "store must assign later append a higher store_commit_order"
+    );
+
+    // Also seed the EVM holding so dual-mainnet portfolio config can complete.
+    append_platform_holding_facts_for_test(
+        &store,
+        [PlatformHoldingFactSeedForTest {
+            descriptor: EvmAddressNativeBalanceSnapshotFact::descriptor().expect("evm descriptor"),
+            input: FactRecordFixtureInputForTest {
+                source_scope: holding_source_scope(0x71),
+                node_id: NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(0x73)),
+                attempt_id: AttemptId::from_digest(
+                    DigestAlgorithm::Sha256JcsV1,
+                    digest_bytes(0x74),
+                ),
+                commit_id: CommitKey::new("evm-for-lww").expect("commit"),
+                observed_at: None,
+                visibility: FactVisibility::indexed_default(FactAudience::Platform),
+                subject: CanonicalValue::object([
+                    (
+                        "network",
+                        CanonicalValue::String("ethereum-mainnet".to_owned()),
+                    ),
+                    ("chain_id", CanonicalValue::Unsigned(1)),
+                    ("account", CanonicalValue::String(ETH_ACCOUNT.to_owned())),
+                ])
+                .expect("evm subject"),
+                response: CanonicalValue::object([
+                    ("block_number", CanonicalValue::Unsigned(21_000_000)),
+                    ("block_hash", CanonicalValue::String(EVM_HASH.to_owned())),
+                    (
+                        "raw_wei",
+                        CanonicalValue::String("1000000000000000000".to_owned()),
+                    ),
+                    ("decimals", CanonicalValue::Unsigned(18)),
+                    (
+                        "coverage",
+                        CanonicalValue::String("configured_only".to_owned()),
+                    ),
+                    ("source_status", CanonicalValue::String("ok".to_owned())),
+                ])
+                .expect("evm response"),
+                request: None,
+                response_schema_id: EvmAddressNativeBalanceSnapshotFact::descriptor()
+                    .expect("d")
+                    .response_schema_id()
+                    .clone(),
+                response_artifact_id: None,
+                producer: holding_producer(0x80),
+            },
+        }],
+    )
+    .await
+    .expect("append evm holding");
+
+    let fact_index = Arc::new(ProjectionFactIndexProvider::new(store.clone()));
+    let services = portfolio_services(store.clone(), fact_index);
+    let prepared =
+        prepare_portfolio_launch_for_store(&store, &dual_mainnet_portfolio_json(), None).await;
+    let report = services
+        .launch_prepared_entry_point_run(prepared)
+        .await
+        .expect("portfolio launch");
+    let launch = report.run.expect("run body");
+    assert_eq!(launch.run_mode, mfm_app::RunModeStatus::Completed);
+    let rendered = report
+        .public_output
+        .expect("public output")
+        .json
+        .expect("json");
+    let btc_raw = find_observation_raw_dec(&rendered, "btc.native.bitcoin-mainnet")
+        .expect("btc observation raw_dec");
+    assert_eq!(
+        btc_raw, "999",
+        "later store append must win LWW; public output={rendered}"
+    );
+}
+
+fn btc_holding_seed(
+    descriptor: &mfm_facts::FactDescriptor,
+    subject: &BtcAddressBalanceSubject,
+    height: u64,
+    commit_id: &str,
+    seed: u8,
+    balance_sats: u64,
+) -> PlatformHoldingFactSeedForTest {
+    PlatformHoldingFactSeedForTest {
+        descriptor: descriptor.clone(),
+        input: FactRecordFixtureInputForTest {
+            source_scope: holding_source_scope(seed),
+            node_id: NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(seed + 2)),
+            attempt_id: AttemptId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                digest_bytes(seed + 3),
+            ),
+            commit_id: CommitKey::new(commit_id).expect("commit"),
+            observed_at: None,
+            visibility: FactVisibility::indexed_default(FactAudience::Platform),
+            subject: CanonicalValue::object([
+                (
+                    "network",
+                    CanonicalValue::String(subject.network().to_owned()),
+                ),
+                (
+                    "bitcoin_network",
+                    CanonicalValue::String(subject.bitcoin_network().to_owned()),
+                ),
+                (
+                    "semantic_source_identity",
+                    CanonicalValue::String(subject.semantic_source_identity().to_owned()),
+                ),
+                (
+                    "address",
+                    CanonicalValue::String(subject.address().to_owned()),
+                ),
+            ])
+            .expect("btc subject"),
+            response: CanonicalValue::object([
+                ("anchor_height", CanonicalValue::Unsigned(height)),
+                ("anchor_hash", CanonicalValue::String(BTC_HASH.to_owned())),
+                ("balance_sats", CanonicalValue::Unsigned(balance_sats)),
+                (
+                    "coverage",
+                    CanonicalValue::String("configured_only".to_owned()),
+                ),
+                ("source_status", CanonicalValue::String("ok".to_owned())),
+            ])
+            .expect("btc response"),
+            request: None,
+            response_schema_id: descriptor.response_schema_id().clone(),
+            response_artifact_id: None,
+            producer: holding_producer(seed + 0x10),
+        },
+    }
+}
+
+fn find_observation_raw_dec(rendered: &serde_json::Value, symbol_id: &str) -> Option<String> {
+    match rendered {
+        serde_json::Value::Object(map) => {
+            if let Some(wallets) = map.get("wallets").and_then(|v| v.as_array()) {
+                for wallet in wallets {
+                    let Some(observations) = wallet.get("observations").and_then(|v| v.as_array())
+                    else {
+                        continue;
+                    };
+                    for obs in observations {
+                        if obs.get("symbol_id").and_then(|v| v.as_str()) == Some(symbol_id) {
+                            return obs
+                                .pointer("/quantity/raw_dec")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_owned);
+                        }
+                    }
+                }
+            }
+            for child in map.values() {
+                if let Some(found) = find_observation_raw_dec(child, symbol_id) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                if let Some(found) = find_observation_raw_dec(item, symbol_id) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 fn portfolio_services(
     store: AsyncInMemoryRunStore,
     fact_index: Arc<ProjectionFactIndexProvider>,

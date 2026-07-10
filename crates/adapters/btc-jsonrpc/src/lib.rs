@@ -820,6 +820,7 @@ pub fn replay_loaded_checkpoint_from_evidence(
 
 /// Verifies Bitcoin JSON-RPC observation cell outputs from retained capability read evidence.
 pub fn verify_btc_jsonrpc_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
+    verify_btc_collector_checkpoint_replay(broker)?;
     verify_btc_joint_tip_replay(broker)?;
     let chain_head_kind = ObserveBtcChainHeadState::kind().map_err(replay_adapter_error)?;
     let chain_head_version = ObserveBtcChainHeadState::version().map_err(replay_adapter_error)?;
@@ -841,6 +842,111 @@ pub fn verify_btc_jsonrpc_replay(broker: &replay::ReplayBroker) -> replay::Resul
     verify_btc_shared_joint_tips(broker, &balance_frames)?;
     verify_btc_address_balance_batch_replay(broker)?;
     Ok(())
+}
+
+fn verify_btc_collector_checkpoint_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
+    let state_kind = QueryCollectorCheckpointState::kind().map_err(replay_adapter_error)?;
+    let state_version = QueryCollectorCheckpointState::version().map_err(replay_adapter_error)?;
+    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
+        Ok(node.state_kind == state_kind && node.state_version == state_version)
+    })?;
+    for frame in &frames {
+        verify_btc_collector_checkpoint_frame(broker, frame)?;
+    }
+    Ok(())
+}
+
+fn verify_btc_collector_checkpoint_frame(
+    broker: &replay::ReplayBroker,
+    frame: &replay::ProducedCellReplayFrame,
+) -> replay::Result<()> {
+    let config: QueryCollectorCheckpointConfig = replay_node_config(broker, &frame.node)?;
+    let evidences = replay_fact_query_evidence_for_attempt(
+        broker,
+        &frame.node.node_id,
+        &frame.produced.attempt_id,
+    )?;
+    if evidences.len() != 1 {
+        return Err(replay_btc_mismatch(
+            "Bitcoin collector checkpoint query must retain exactly one fact-query evidence",
+        ));
+    }
+    let evidence = &evidences[0];
+    let response = checkpoint_response_from_query_evidence(broker, evidence)?;
+    let expected = replay_loaded_checkpoint_from_evidence(&config, evidence, response)
+        .map_err(|_| {
+            replay_btc_mismatch(
+                "Bitcoin collector checkpoint replay evidence was rejected",
+            )
+        })?;
+    ensure_canonical_value_matches(&expected, &frame.artifact_bytes)
+}
+
+fn checkpoint_response_from_query_evidence(
+    broker: &replay::ReplayBroker,
+    evidence: &mfm_facts::FactQueryEvidence,
+) -> replay::Result<Option<CollectorCheckpointResponse>> {
+    let rows = mfm_facts::fact_query_result_rows_from_receipt(evidence.receipt());
+    let selected = evidence.selection().selected_indices();
+    if selected.is_empty() {
+        return Ok(None);
+    }
+    if selected.len() != 1 {
+        return Err(replay_btc_mismatch(
+            "Bitcoin collector checkpoint selection was not a single index",
+        ));
+    }
+    let index = selected[0] as usize;
+    let row = rows.get(index).ok_or_else(|| {
+        replay_btc_mismatch("Bitcoin collector checkpoint selection index was out of range")
+    })?;
+    let fact_ref = row.fact_ref();
+    let requirement = fact_response_artifact_requirement(fact_ref);
+    let artifact = broker.retained_artifact(&requirement)?;
+    let response: CollectorCheckpointResponse =
+        hydrate_fact_response_json(fact_ref, &artifact.artifact_bytes).map_err(|_| {
+            replay_btc_mismatch(
+                "Bitcoin collector checkpoint response could not be hydrated from retained evidence",
+            )
+        })?;
+    Ok(Some(response))
+}
+
+fn replay_fact_query_evidence_for_attempt(
+    broker: &replay::ReplayBroker,
+    node_id: &mfm_ids::NodeId,
+    attempt_id: &mfm_ids::AttemptId,
+) -> replay::Result<Vec<mfm_facts::FactQueryEvidence>> {
+    let mut evidence = Vec::new();
+    for event in broker.events() {
+        let events::KernelEventPayload::ArtifactReferenced(payload) = event.payload() else {
+            continue;
+        };
+        if payload.artifact_ref.role != events::ArtifactRole::FactQueryEvidence
+            || payload.node_id.as_ref() != Some(node_id)
+            || payload.attempt_id.as_ref() != Some(attempt_id)
+        {
+            continue;
+        }
+        let requirement = store::EventArtifactRequirement {
+            source: store::EventArtifactReferenceSource::ArtifactReferenced,
+            artifact_id: payload.artifact_ref.artifact_id.clone(),
+            evidence_hash: payload.artifact_ref.evidence_hash.clone(),
+            digest: Some(payload.artifact_ref.content_digest.clone()),
+            byte_len: Some(payload.artifact_ref.byte_len),
+            media_type: Some(payload.artifact_ref.media_type.clone()),
+            schema_id: Some(payload.artifact_ref.schema_id.clone()),
+            semantic_type_id: payload.artifact_ref.semantic_type_id.clone(),
+            producer_node_id: payload.node_id.clone(),
+            producer_seed_id: None,
+            artifact_role: Some(payload.artifact_ref.role),
+        };
+        let artifact = broker.retained_artifact(&requirement)?;
+        let parsed = mfm_facts::parse_canonical_fact_query_evidence_bytes(&artifact.artifact_bytes)
+            .map_err(replay_adapter_error)?;
+        evidence.push(parsed);
+    }
+    Ok(evidence)
 }
 
 fn verify_btc_shared_joint_tips(

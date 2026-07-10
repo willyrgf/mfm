@@ -1959,8 +1959,10 @@ fn persisted_envelope(
     seq: u64,
     payload: KernelEventPayload,
 ) -> KernelEventEnvelope {
+    // Explicit store order for single-run fixtures; multi-run LWW must use real appends.
     store_persisted_kernel_event_envelope_for_test(
         run_id,
+        seq,
         seq,
         store::CommitKey::new(format!("replay-test:{seq}")).expect("commit key"),
         payload,
@@ -1975,7 +1977,7 @@ fn persisted_envelope_with_ordinal(
     payload: KernelEventPayload,
 ) -> KernelEventEnvelope {
     store_persisted_kernel_event_envelope_with_ordinal_for_test(
-        run_id, seq, ordinal, commit_key, payload,
+        run_id, seq, seq, ordinal, commit_key, payload,
     )
 }
 

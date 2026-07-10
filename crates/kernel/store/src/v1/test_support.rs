@@ -1263,25 +1263,37 @@ pub fn event_id_for_envelope_inputs_for_test(
 }
 
 /// Builds a validated persisted event envelope from a typed payload.
+///
+/// Callers must supply the store-owned commit order explicitly. Do not derive it from run-local
+/// `seq`; multi-run LWW tests must use real appends or intentional distinct orders.
 pub fn persisted_kernel_event_envelope_for_test(
     run_id: &RunId,
     seq: u64,
+    store_commit_order: u64,
     commit_key: CommitKey,
     payload: events::KernelEventPayload,
 ) -> KernelEventEnvelope {
-    persisted_kernel_event_envelope_with_ordinal_for_test(run_id, seq, 0, commit_key, payload)
+    persisted_kernel_event_envelope_with_ordinal_for_test(
+        run_id,
+        seq,
+        store_commit_order,
+        0,
+        commit_key,
+        payload,
+    )
 }
 
 /// Builds a validated persisted event envelope from a typed payload and explicit commit ordinal.
 pub fn persisted_kernel_event_envelope_with_ordinal_for_test(
     run_id: &RunId,
     seq: u64,
+    store_commit_order: u64,
     ordinal: u32,
     commit_key: CommitKey,
     payload: events::KernelEventPayload,
 ) -> KernelEventEnvelope {
     let seq = StreamSeq::new(seq).expect("stream seq");
-    let store_commit_order = StoreCommitOrder::new(seq.as_u64());
+    let store_commit_order = StoreCommitOrder::new(store_commit_order);
     let ordinal = CommitOrdinal::new(ordinal);
     let payload_hash = payload_canonical_json(&payload)
         .expect("payload canonical")
