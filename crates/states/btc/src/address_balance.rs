@@ -2,11 +2,11 @@
 
 use mfm_btc_capabilities::BtcBlockHash;
 use mfm_facts::{
-    compile_fact_query_plan, CanonicalFactQueryPlan, CoverageStatus, FactAudience,
-    FactCanonicalScalar, FactFieldId, FactOrderingName, FactQueryInput, FactQueryOperator,
-    FactQueryPredicate, FactQueryScope, FactVisibility, FactVisibilityScope, HoldingSourceStatus,
-    ScopeDecisionEvidence, StoreScopeRef,
+    compile_fact_query_plan, CanonicalFactQueryPlan, FactAudience, FactCanonicalScalar,
+    FactFieldId, FactOrderingName, FactQueryInput, FactQueryOperator, FactQueryPredicate,
+    FactQueryScope, FactVisibility, FactVisibilityScope, ScopeDecisionEvidence, StoreScopeRef,
 };
+use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_program_derive::{MfmFactType, MfmValue};
 use serde::{Deserialize, Serialize};
 
@@ -444,22 +444,6 @@ pub fn normalize_btc_address_balance(
     let anchor_hash = require_btc_anchor_hash(response.anchor_hash())?;
     let coverage = response.coverage_status()?;
     let source_status = response.holding_source_status()?;
-    if !coverage.is_acceptable_for_report() {
-        return Err(BtcStateError::InvalidInput {
-            reason: format!(
-                "coverage {} is not acceptable for report selection",
-                coverage.as_str()
-            ),
-        });
-    }
-    if !source_status.is_acceptable_for_report() {
-        return Err(BtcStateError::InvalidInput {
-            reason: format!(
-                "source_status {} is not acceptable for report selection",
-                source_status.as_str()
-            ),
-        });
-    }
     Ok(NormalizedBtcAddressHolding {
         network: subject.network().to_owned(),
         bitcoin_network: subject.bitcoin_network().to_owned(),
@@ -601,8 +585,8 @@ mod tests {
     }
 
     #[test]
-    fn normalize_rejects_inadmissible_tags_even_if_response_fields_present() {
-        // Tampered payloads that bypassed constructor checks (e.g. legacy decode).
+    fn normalize_rejects_malformed_decoded_payloads() {
+        // Tampered payloads that bypassed constructor checks (e.g. direct decode).
         let missing_hash = response_from_json(serde_json::json!({
             "anchor_height": 99,
             "anchor_hash": "",
@@ -628,7 +612,7 @@ mod tests {
             "coverage": "incomplete",
             "source_status": "ok",
         }));
-        assert!(normalize_btc_address_balance(&valid_subject(), &incomplete).is_err());
+        assert!(normalize_btc_address_balance(&valid_subject(), &incomplete).is_ok());
     }
 
     #[test]

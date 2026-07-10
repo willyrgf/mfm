@@ -614,7 +614,9 @@ lag, document that explicitly and keep CI fixture-based.
 
 ### 8. Coverage And Source Status Vocabulary
 
-Typed closed enums with a single pure owner. Near-term report-accept set is minimal.
+Typed closed enums live in the pure `mfm-portfolio-model::holding` domain module. Write admission
+is universal holding-domain policy; report acceptability is selected by the versioned portfolio
+selection policy and is not an enum method.
 
 **CoverageStatus**
 

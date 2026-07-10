@@ -28,11 +28,11 @@ pub use native_balance_collect::{
 
 use mfm_evm_core::encoding::normalize_address;
 use mfm_facts::{
-    compile_fact_query_plan, CanonicalFactQueryPlan, CoverageStatus, FactAudience,
-    FactCanonicalScalar, FactFieldId, FactOrderingName, FactQueryInput, FactQueryOperator,
-    FactQueryPredicate, FactQueryScope, FactVisibility, FactVisibilityScope, HoldingSourceStatus,
-    ScopeDecisionEvidence, StoreScopeRef,
+    compile_fact_query_plan, CanonicalFactQueryPlan, FactAudience, FactCanonicalScalar,
+    FactFieldId, FactOrderingName, FactQueryInput, FactQueryOperator, FactQueryPredicate,
+    FactQueryScope, FactVisibility, FactVisibilityScope, ScopeDecisionEvidence, StoreScopeRef,
 };
+use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_program::StateError;
 use mfm_program_derive::{MfmFactType as DeriveMfmFactType, MfmValue};
 use serde::{Deserialize, Serialize};
@@ -503,22 +503,6 @@ pub fn normalize_evm_address_native_balance(
     let block_hash = require_evm_block_hash(response.block_hash())?;
     let coverage = response.coverage_status()?;
     let source_status = response.holding_source_status()?;
-    if !coverage.is_acceptable_for_report() {
-        return Err(EvmStateError::InvalidInput {
-            reason: format!(
-                "coverage {} is not acceptable for report selection",
-                coverage.as_str()
-            ),
-        });
-    }
-    if !source_status.is_acceptable_for_report() {
-        return Err(EvmStateError::InvalidInput {
-            reason: format!(
-                "source_status {} is not acceptable for report selection",
-                source_status.as_str()
-            ),
-        });
-    }
     Ok(NormalizedEvmNativeHolding {
         network: subject.network().to_owned(),
         chain_id: subject.chain_id(),
@@ -670,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_rejects_inadmissible_decoded_payloads() {
+    fn normalize_rejects_malformed_decoded_payloads() {
         let missing_hash: EvmAddressNativeBalanceResponse =
             serde_json::from_value(serde_json::json!({
                 "block_number": 10,
@@ -685,14 +669,14 @@ mod tests {
 
         let failed: EvmAddressNativeBalanceResponse = serde_json::from_value(serde_json::json!({
             "block_number": 10,
-            "block_hash": "0xhh",
+            "block_hash": "0xabababababababababababababababababababababababababababababababab",
             "raw_wei": "1",
             "decimals": 18,
             "coverage": "configured_only",
             "source_status": "failed",
         }))
         .expect("decode");
-        assert!(normalize_evm_address_native_balance(&valid_subject(), &failed).is_err());
+        assert!(normalize_evm_address_native_balance(&valid_subject(), &failed).is_ok());
     }
 
     #[test]

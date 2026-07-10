@@ -15,8 +15,8 @@ use mfm_evm_capabilities::{
     EvmNetworkId,
 };
 use mfm_fact_capabilities::FactRecordCapability;
-use mfm_facts::{CoverageStatus, HoldingSourceStatus};
 use mfm_ids::{AdapterKind, AdapterVersion, DigestAlgorithm, StateKind, StateVersion};
+use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_program::{
     fact_descriptor_ref, AdapterBindingSpec, FactDescriptorRef, ManagedWriteState, NoContext,
     PureState, ReadState, StateError, StateResult, StateSpec, ValidatedConfig,

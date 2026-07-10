@@ -16,11 +16,11 @@ use mfm_facts::{
     FactVisibilityScope, InternalFactRef, InternalFactRefParts, StoreCommitOrder, StoreIdentity,
     StoreKeyId, StoreReadFrontier, StoreReceiptAuthenticationScheme, StoreScopeRef,
 };
-use mfm_facts::{CoverageStatus, HoldingSourceStatus};
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
     DigestAlgorithm, DigestBytes, EventId, NodeId, RunId, SchemaId,
 };
+use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_portfolio_model::metadata::PublicMetadata;
 use mfm_portfolio_model::portfolio::{
     ExecutionAnchor, NetworkConfig, NetworkFamilyConfig, PortfolioConfig,

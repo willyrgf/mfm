@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use mfm_canonical::sha256_digest_bytes;
 use mfm_facts::FactClaimId;
 use mfm_ids::{ContentDigest, DigestAlgorithm};
+use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_portfolio_model::portfolio::{ExecutionAnchor, NetworkPin};
 use mfm_portfolio_model::symbol::{Observation, ObservationAnchor, ObservationSource};
 
@@ -167,7 +168,7 @@ pub struct SelectedHoldingMaterial {
     pub decimals: u8,
     /// Family-specific execution anchor for observation source.
     pub observation_anchor: ObservationAnchor,
-    /// Coverage tag (for honesty surfaces; already filtered acceptable).
+    /// Coverage tag retained for honesty surfaces after selection.
     pub coverage: String,
     /// Source status tag.
     pub source_status: String,
@@ -202,7 +203,7 @@ pub struct NormalizedHoldingFields {
     pub decimals: u8,
     /// Family-specific execution anchor for observation source.
     pub observation_anchor: ObservationAnchor,
-    /// Coverage tag (already filtered acceptable by family normalize).
+    /// Coverage tag checked by the portfolio selection policy.
     pub coverage: String,
     /// Source status tag.
     pub source_status: String,
@@ -217,6 +218,33 @@ pub fn holding_candidate_from_normalized(
     fact_claim_id: FactClaimId,
     fields: NormalizedHoldingFields,
 ) -> Result<HoldingCandidate, PortfolioHoldingSelectionError> {
+    let coverage = fields.coverage.parse::<CoverageStatus>().map_err(|_| {
+        PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::MissingFact,
+            "holding fact has unknown coverage status",
+            Some(key.as_key_str()),
+            Some(key.network_id.clone()),
+        )
+    })?;
+    let source_status = fields
+        .source_status
+        .parse::<HoldingSourceStatus>()
+        .map_err(|_| {
+            PortfolioHoldingSelectionError::new(
+                PortfolioHoldingErrorCode::MissingFact,
+                "holding fact has unknown source status",
+                Some(key.as_key_str()),
+                Some(key.network_id.clone()),
+            )
+        })?;
+    if !portfolio_selection_accepts_status(coverage, source_status) {
+        return Err(PortfolioHoldingSelectionError::new(
+            PortfolioHoldingErrorCode::MissingFact,
+            "holding fact is not acceptable for portfolio selection",
+            Some(key.as_key_str()),
+            Some(key.network_id.clone()),
+        ));
+    }
     let (height, hash) = match &fields.observation_anchor {
         ObservationAnchor::Bitcoin { height, block_hash } => (*height, block_hash.clone()),
         ObservationAnchor::Evm {
@@ -247,6 +275,19 @@ pub fn holding_candidate_from_normalized(
             source_status: fields.source_status,
         },
     })
+}
+
+fn portfolio_selection_accepts_status(
+    coverage: CoverageStatus,
+    source_status: HoldingSourceStatus,
+) -> bool {
+    matches!(
+        (coverage, source_status),
+        (
+            CoverageStatus::CompleteAtAnchor | CoverageStatus::ConfiguredOnly,
+            HoldingSourceStatus::Ok,
+        )
+    )
 }
 
 /// One selected holding after network-coherent selection.
@@ -956,6 +997,35 @@ mod tests {
         assert_eq!(candidate.anchor.height, 42);
         assert_eq!(candidate.response_material.wallet_id, "w1");
         assert_eq!(candidate.response_material.coverage, "configured_only");
+    }
+
+    #[test]
+    fn portfolio_selection_filters_unacceptable_holding_statuses() {
+        let key = RequiredHoldingKey {
+            wallet_id: "w1".to_owned(),
+            symbol_id: "eth.native".to_owned(),
+            network_id: "ethereum-mainnet".to_owned(),
+        };
+        let error = holding_candidate_from_normalized(
+            &key,
+            9,
+            claim(1),
+            NormalizedHoldingFields {
+                balance_reader_kind: "native_balance".to_owned(),
+                raw_dec: "1000".to_owned(),
+                decimals: 18,
+                observation_anchor: ObservationAnchor::Evm {
+                    chain_id: 1,
+                    block_number: 42,
+                    block_hash: "0x".to_owned() + &"ab".repeat(32),
+                },
+                coverage: "truncated".to_owned(),
+                source_status: "ok".to_owned(),
+            },
+        )
+        .expect_err("portfolio policy rejects truncated coverage");
+
+        assert_eq!(error.code, PortfolioHoldingErrorCode::MissingFact);
     }
 
     #[test]

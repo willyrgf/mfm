@@ -37,6 +37,8 @@
 pub mod aave;
 /// Stable portfolio domain keys used by typed fanout/fanin planning.
 pub mod domain_key;
+/// Shared holding-observation status vocabulary and write-admission rules.
+pub mod holding;
 /// Strong portfolio scalar identifiers used by config authorities.
 pub mod ids;
 /// Redaction-safe public metadata model used by portfolio surfaces.

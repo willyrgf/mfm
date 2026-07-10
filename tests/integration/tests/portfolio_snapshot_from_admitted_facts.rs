@@ -13,9 +13,7 @@ use std::sync::Arc;
 
 use mfm_canonical::CanonicalValue;
 use mfm_events::v1 as events;
-use mfm_facts::{
-    CoverageStatus, FactAudience, FactProducerProvenance, FactVisibility, HoldingSourceStatus,
-};
+use mfm_facts::{FactAudience, FactProducerProvenance, FactVisibility};
 use mfm_ids::{
     AdapterKind, AdapterVersion, AttemptId, CapabilityKind, CapabilityVersion, DigestAlgorithm,
     DigestBytes, EventId, NodeId, RunId,
@@ -25,6 +23,7 @@ use mfm_integration_tests::test_support::{
     seed_platform_holding_facts_for_test, FactProjectionFixtureInputForTest,
     PlatformHoldingFactSeedForTest, ProjectionFactIndexProvider,
 };
+use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_program::MfmFactType;
 use mfm_states_btc::{
     BtcAddressBalanceResponse, BtcAddressBalanceSnapshotFact, BtcAddressBalanceSubject,

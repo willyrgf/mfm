@@ -3,13 +3,13 @@
 
 use mfm_canonical::CanonicalValue;
 use mfm_facts::{
-    fact_descriptor_hash, CoverageStatus, FactAudience, FactFieldId, FactProducerProvenance,
-    FactVisibility, HoldingSourceStatus,
+    fact_descriptor_hash, FactAudience, FactFieldId, FactProducerProvenance, FactVisibility,
 };
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion,
     DigestAlgorithm, DigestBytes, EventId, NodeId, RunId, SchemaId,
 };
+use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_program::MfmFactType;
 use mfm_states_btc::{
     BtcAddressBalanceResponse, BtcAddressBalanceSnapshotFact, BtcAddressBalanceSubject,
