@@ -96,12 +96,14 @@ fn rejects_artifact_evidence_mismatches() {
         ByteLen,
     }
 
+    // Identity-bearing fields are folded into evidence_hash; exact retained-artifact
+    // reads fail closed on evidence_hash before the individual field is reported.
     for (name, mismatch, expected_field) in [
         ("digest", Mismatch::Digest, "content_digest"),
-        ("role", Mismatch::Role, "artifact_role"),
-        ("schema", Mismatch::Schema, "schema_id"),
-        ("semantic", Mismatch::Semantic, "semantic_type_id"),
-        ("producer", Mismatch::Producer, "producer_node_id"),
+        ("role", Mismatch::Role, "evidence_hash"),
+        ("schema", Mismatch::Schema, "evidence_hash"),
+        ("semantic", Mismatch::Semantic, "evidence_hash"),
+        ("producer", Mismatch::Producer, "evidence_hash"),
         ("byte length", Mismatch::ByteLen, "byte_len"),
     ] {
         let bytes = br#"{"ok":true}"#.to_vec();
