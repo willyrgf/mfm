@@ -4382,7 +4382,7 @@ async fn no_second_authority_full_run_stages_and_admits_first_artifact_reference
                 Ok(ErasedRunnerOutput::from_parts(
                     vec![staged_artifact],
                     Vec::new(),
-                    terminal_payloads(&ctx, artifact.artifact_id.clone(), artifact.digest.clone()),
+                    terminal_payloads(&ctx, &artifact),
                 ))
             })
         }
@@ -4999,14 +4999,16 @@ async fn runner_rejects_invalid_artifact_outputs() {
                     }
                     InvalidArtifactOutput::MissingStagedArtifact => Vec::new(),
                 };
+                let payload_evidence = state_output_artifact(
+                    ctx.node(),
+                    ctx.descriptor(),
+                    self.output_artifact.clone(),
+                    self.output_digest.clone(),
+                );
                 Ok(ErasedRunnerOutput::from_parts(
                     staged_artifacts,
                     Vec::new(),
-                    terminal_payloads(
-                        &ctx,
-                        self.output_artifact.clone(),
-                        self.output_digest.clone(),
-                    ),
+                    terminal_payloads(&ctx, &payload_evidence),
                 ))
             })
         }
@@ -5075,7 +5077,7 @@ async fn runner_can_commit_inline_state_output_artifact() {
                 Ok(ErasedRunnerOutput::from_parts(
                     vec![staged_artifact],
                     Vec::new(),
-                    terminal_payloads(&ctx, artifact.artifact_id.clone(), artifact.digest.clone()),
+                    terminal_payloads(&ctx, &artifact),
                 ))
             })
         }
@@ -5129,7 +5131,7 @@ async fn runner_cannot_stage_reserved_retention_reasons() {
                         authority:
                             crate::artifacts::StagedRetentionRefAuthority::CurrentCommitArtifacts,
                     }],
-                    terminal_payloads(&ctx, artifact.artifact_id.clone(), artifact.digest.clone()),
+                    terminal_payloads(&ctx, &artifact),
                 ))
             })
         }
@@ -5188,14 +5190,16 @@ async fn rejected_staged_payload_mismatch_does_not_admit_artifact_evidence() {
                     self.staged_digest.clone(),
                 );
                 let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
+                let payload_evidence = state_output_artifact(
+                    ctx.node(),
+                    ctx.descriptor(),
+                    self.payload_artifact.clone(),
+                    self.payload_digest.clone(),
+                );
                 Ok(ErasedRunnerOutput::from_parts(
                     vec![staged_artifact],
                     Vec::new(),
-                    terminal_payloads(
-                        &ctx,
-                        self.payload_artifact.clone(),
-                        self.payload_digest.clone(),
-                    ),
+                    terminal_payloads(&ctx, &payload_evidence),
                 ))
             })
         }
@@ -6777,15 +6781,11 @@ async fn recovery_reuses_committed_read_facts_for_same_attempt() {
                     producer_seed_id: None,
                     artifact_role: events::ArtifactRole::StateOutput,
                 };
-                let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
+                let staged_artifact = staged_attempt_artifact(&ctx, artifact.clone())?;
                 Ok(ErasedRunnerOutput::from_parts(
                     vec![staged_artifact],
                     Vec::new(),
-                    terminal_payloads(
-                        &ctx,
-                        self.output_artifact.clone(),
-                        self.output_digest.clone(),
-                    ),
+                    terminal_payloads(&ctx, &artifact),
                 ))
             })
         }
@@ -6877,15 +6877,11 @@ async fn recovery_retains_same_subject_facts_by_claim_id_for_same_attempt() {
                     producer_seed_id: None,
                     artifact_role: events::ArtifactRole::StateOutput,
                 };
-                let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
+                let staged_artifact = staged_attempt_artifact(&ctx, artifact.clone())?;
                 Ok(ErasedRunnerOutput::from_parts(
                     vec![staged_artifact],
                     Vec::new(),
-                    terminal_payloads(
-                        &ctx,
-                        self.output_artifact.clone(),
-                        self.output_digest.clone(),
-                    ),
+                    terminal_payloads(&ctx, &artifact),
                 ))
             })
         }
@@ -9085,15 +9081,11 @@ impl ErasedNodeRunner for PrematureSideEffectOutputRunner {
                 self.output_artifact.clone(),
                 self.output_digest.clone(),
             );
-            let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
+            let staged_artifact = staged_attempt_artifact(&ctx, artifact.clone())?;
             Ok(ErasedRunnerOutput::from_parts(
                 vec![staged_artifact],
                 Vec::new(),
-                terminal_payloads(
-                    &ctx,
-                    self.output_artifact.clone(),
-                    self.output_digest.clone(),
-                ),
+                terminal_payloads(&ctx, &artifact),
             ))
         })
     }
@@ -9998,10 +9990,41 @@ fn seed_launch_cell(seed: events::SeedCellRef) -> RunLaunchSeedCell {
     RunLaunchSeedCell { bytes, cell: seed }
 }
 
+fn seed_cell_artifact_evidence(
+    seed_id: &SeedId,
+    schema_id: SchemaId,
+    semantic_type_id: SemanticTypeId,
+    content_digest: ContentDigest,
+    byte_len: u64,
+) -> events::ArtifactEvidenceRef {
+    let store_evidence = store::ArtifactEvidenceRef {
+        artifact_id: ArtifactId::from_digest(content_digest.algorithm(), *content_digest.digest()),
+        digest: content_digest.clone(),
+        byte_len,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(schema_id.clone()),
+        semantic_type_id: Some(semantic_type_id),
+        producer_node_id: None,
+        producer_seed_id: Some(seed_id.clone()),
+        artifact_role: events::ArtifactRole::SeedInput,
+    };
+    events::ArtifactEvidenceRef {
+        artifact_id: store_evidence.artifact_id.clone(),
+        role: store_evidence.artifact_role,
+        schema_id,
+        semantic_type_id: store_evidence.semantic_type_id.clone(),
+        content_digest,
+        evidence_hash: store_evidence
+            .evidence_hash()
+            .expect("seed artifact evidence hash"),
+        byte_len,
+        media_type: store_evidence.media_type,
+    }
+}
+
 fn terminal_payloads(
     ctx: &ErasedRunCtx<'_>,
-    output_artifact: ArtifactId,
-    output_digest: ContentDigest,
+    state_evidence: &store::ArtifactEvidenceRef,
 ) -> Vec<RunnerEventPayload> {
     vec![RunnerEventPayload::CellProduced(events::CellProduced {
         spec_hash: ctx.spec_hash().clone(),
@@ -10013,9 +10036,11 @@ fn terminal_payloads(
         schema_id: ctx.descriptor().output_schema_id.clone(),
         value_lineage: ctx.output_cell().value_lineage.clone(),
         context: ctx.output_cell().context.clone(),
-        artifact_id: output_artifact,
-        content_digest: output_digest.clone(),
-        evidence_hash: output_digest,
+        artifact_id: state_evidence.artifact_id.clone(),
+        content_digest: state_evidence.digest.clone(),
+        evidence_hash: state_evidence
+            .evidence_hash()
+            .expect("state output evidence hash"),
         producer_state_kind: Some(ctx.node().state_kind.clone()),
         producer_state_version: Some(ctx.node().state_version.clone()),
     })]
@@ -10030,11 +10055,7 @@ fn fact_query_terminal_output(
     ErasedRunnerOutput::from_parts(
         staged_artifacts,
         staged_retention_refs,
-        terminal_payloads(
-            ctx,
-            state_evidence.artifact_id.clone(),
-            state_evidence.digest.clone(),
-        ),
+        terminal_payloads(ctx, state_evidence),
     )
 }
 
@@ -11266,6 +11287,9 @@ fn append_terminal(
         .expect("output cell");
     let evidence =
         state_output_artifact(node, descriptor, artifact_id.clone(), output_digest.clone());
+    let evidence_hash = evidence
+        .evidence_hash()
+        .expect("manual terminal state output evidence hash");
     store
         .append_prepared_commit(store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
@@ -11287,8 +11311,8 @@ fn append_terminal(
                     value_lineage: output_cell.value_lineage.clone(),
                     context: output_cell.context.clone(),
                     artifact_id,
-                    content_digest: output_digest.clone(),
-                    evidence_hash: output_digest,
+                    content_digest: output_digest,
+                    evidence_hash,
                     producer_state_kind: Some(node.state_kind.clone()),
                     producer_state_version: Some(node.state_version.clone()),
                 }),
@@ -12274,16 +12298,13 @@ fn fixture() -> Fixture {
         semantic_type_id: semantic.clone(),
         schema_id: value_schema.clone(),
         digest: seed_digest.clone(),
-        seed_artifact: events::ArtifactEvidenceRef {
-            artifact_id: ArtifactId::from_digest(seed_digest.algorithm(), *seed_digest.digest()),
-            role: events::ArtifactRole::SeedInput,
-            schema_id: value_schema.clone(),
-            semantic_type_id: Some(semantic.clone()),
-            content_digest: seed_digest.clone(),
-            evidence_hash: seed_digest.clone(),
-            byte_len: TEST_SEED_BYTES.len() as u64,
-            media_type: spec::MediaType::new("application/json").expect("media"),
-        },
+        seed_artifact: seed_cell_artifact_evidence(
+            &seed_id,
+            value_schema.clone(),
+            semantic.clone(),
+            seed_digest.clone(),
+            TEST_SEED_BYTES.len() as u64,
+        ),
     };
     let renderer = spec::RendererDescriptorIdentity {
         descriptor_id: DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, D1),
@@ -12965,16 +12986,13 @@ fn fixture_from_context_runtime_spec(
         semantic_type_id: seed.semantic_type_id.clone(),
         schema_id: seed.schema_id.clone(),
         digest: seed_digest.clone(),
-        seed_artifact: events::ArtifactEvidenceRef {
-            artifact_id: ArtifactId::from_digest(seed_digest.algorithm(), *seed_digest.digest()),
-            role: events::ArtifactRole::SeedInput,
-            schema_id: seed.schema_id.clone(),
-            semantic_type_id: Some(seed.semantic_type_id.clone()),
-            content_digest: seed_digest.clone(),
-            evidence_hash: seed_digest,
-            byte_len: seed_byte_len,
-            media_type: spec::MediaType::new("application/json").expect("media"),
-        },
+        seed_artifact: seed_cell_artifact_evidence(
+            &seed.seed_id,
+            seed.schema_id.clone(),
+            seed.semantic_type_id.clone(),
+            seed_digest,
+            seed_byte_len,
+        ),
     };
     let node_a = runtime_node_by_descriptor_name(&runtime_spec, "mfm.runtime.test.context_source");
     let node_b =
@@ -13031,16 +13049,13 @@ fn fixture_from_runtime_spec(
         semantic_type_id: seed.semantic_type_id.clone(),
         schema_id: seed.schema_id.clone(),
         digest: seed_digest.clone(),
-        seed_artifact: events::ArtifactEvidenceRef {
-            artifact_id: ArtifactId::from_digest(seed_digest.algorithm(), *seed_digest.digest()),
-            role: events::ArtifactRole::SeedInput,
-            schema_id: seed.schema_id.clone(),
-            semantic_type_id: Some(seed.semantic_type_id.clone()),
-            content_digest: seed_digest.clone(),
-            evidence_hash: seed_digest,
-            byte_len: seed_byte_len,
-            media_type: spec::MediaType::new("application/json").expect("media"),
-        },
+        seed_artifact: seed_cell_artifact_evidence(
+            &seed.seed_id,
+            seed.schema_id.clone(),
+            seed.semantic_type_id.clone(),
+            seed_digest,
+            seed_byte_len,
+        ),
     };
     let node_a = runtime_node_by_descriptor_name(&runtime_spec, "mfm.runtime.test.submit_a");
     let node_b_name = match shape {
