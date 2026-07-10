@@ -223,7 +223,7 @@ mod tests {
                 .resolve_latest(&public_op_name)
                 .expect("EVM entry-point")
                 .version();
-            assert_eq!(current_version.get(), 2, "{op}");
+            assert_eq!(current_version.get(), 1, "{op}");
             registry
                 .resolve_version(&public_op_name, current_version)
                 .expect("explicit EVM entry-point version");
@@ -274,7 +274,7 @@ mod tests {
         mfm_app::prepare_entry_point_run_launch(EntryPointRunLaunchInput {
             entry_point_registry: &entry_point_registry,
             public_op_name: PublicOpName::new(op)?,
-            op_version: Some(mfm_app::OpVersion::new(2)?),
+            op_version: Some(mfm_app::OpVersion::new(1)?),
             authored_config,
             certification_registry: &certification_registry,
             store_scope_id,

@@ -307,7 +307,7 @@ fn run_admitted_payload() -> KernelEventPayload {
         run_id,
         identity_material,
         entry_point: EntryPointLaunchEvidence {
-            resolved_op_id: EntryPointOpId::new("mfm.portfolio/snapshot@2").expect("op id"),
+            resolved_op_id: EntryPointOpId::new("mfm.portfolio/snapshot@1").expect("op id"),
             entry_point_registry_digest: content_digest(18),
         },
         spec_hash: spec_hash(2),

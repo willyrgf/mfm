@@ -469,8 +469,7 @@ are not mixed into the report graph. See
 `portfolio_snapshot` is **report-only**: it selects Platform holding facts (BTC/EVM native at
 cutover) under the network-coherent policy
 `mfm.portfolio.holding.latest-network-coherent.v1` and hard-fails when required facts are missing.
-It is published only as public entry-point version `2`; an explicit version `1` returns
-`EntryPointOpVersionNotFound`.
+It is published as public entry-point version `1`.
 It does not crawl live chain balances. Collect balances into Platform facts first, then run the
 report. Soft partial success (`error_count`) is not part of the public report surface. Public
 observations include selected holding `coverage` for configured-mode honesty.
@@ -493,9 +492,8 @@ Run start always resolves runner executable identities before `RunAdmitted`, bec
 are replay authority. Specs that reference unported domain state descriptors fail with
 `LaunchRunnerUnavailable` before any typed run event is written. The production CLI runner registry
 contains the framework public-output renderer plus the portfolio, BTC collector, EVM native-balance,
-and EVM contract domain runners used by registered entry-point ops. The public registry exposes
-`btc_address_balance` v1, `evm_native_balance` v1, and `portfolio_snapshot` v2; the internal BTC
-chain-head checkpoint op is not registered.
+and EVM contract domain runners used by registered entry-point ops. All currently registered public
+entry-point operations use version `1`; the internal BTC chain-head checkpoint op is not registered.
 
 JSON and text output include `launch_outcome`. Fresh admissions report `admitted`. A duplicate start
 for the same certified run identity reports `attached` without driving. If another process holds the

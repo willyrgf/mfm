@@ -77,7 +77,7 @@ async fn read_role_refuses_live_start_and_signed_fact_queries() {
                 .uri("/v1/runs/start")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"op":"portfolio_snapshot","op_version":2,"config":{}}"#,
+                    r#"{"op":"portfolio_snapshot","op_version":1,"config":{}}"#,
                 ))
                 .expect("request"),
         )

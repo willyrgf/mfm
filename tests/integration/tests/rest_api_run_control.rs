@@ -114,7 +114,7 @@ async fn start_entry_point(
             "/v1/runs/start",
             serde_json::json!({
                 "op": op,
-                "op_version": 2,
+                "op_version": 1,
                 "config_format": "json",
                 "config": config,
             }),
@@ -180,7 +180,7 @@ async fn assert_evm_start_fails_before_admission(
     let prepared = test_support::prepare_entry_point_launch_for_store(
         &state.store,
         op,
-        Some(mfm_app::OpVersion::new(2).expect("op version")),
+        Some(mfm_app::OpVersion::new(1).expect("op version")),
         &config,
         None,
     )
@@ -948,7 +948,7 @@ fn assert_evm_entry_point_evidence(evidence: &mfm_app::EntryPointLaunchEvidence,
     let op = registry
         .resolve(
             &public_name,
-            Some(mfm_app::OpVersion::new(2).expect("op version")),
+            Some(mfm_app::OpVersion::new(1).expect("op version")),
         )
         .expect("EVM entry-point op");
 

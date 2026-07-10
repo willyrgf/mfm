@@ -713,7 +713,7 @@ fn run_admitted_with_fact_descriptor(run_id: RunId) -> KernelEventPayload {
 
 fn entry_point_launch_evidence() -> events::EntryPointLaunchEvidence {
     events::EntryPointLaunchEvidence {
-        resolved_op_id: events::EntryPointOpId::new("mfm.test:portfolio_snapshot:2")
+        resolved_op_id: events::EntryPointOpId::new("mfm.test:portfolio_snapshot:1")
             .expect("entry-point op id"),
         entry_point_registry_digest: content_digest(30),
     }

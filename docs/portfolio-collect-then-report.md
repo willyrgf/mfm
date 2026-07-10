@@ -154,7 +154,7 @@ printf '%s\n' "$evm_response" | jq -e '.data.run.run_mode == "completed"'
 
 report_response="$(mfm_cli --output-format json run start \
     --op portfolio_snapshot \
-    --op-version 2 \
+    --op-version 1 \
     --config examples/configs/portfolio-dual-mainnet.toml \
     --database-url "$DATABASE_URL")"
 report_run_id="$(printf '%s\n' "$report_response" | jq -er '.data.run.run_id')"

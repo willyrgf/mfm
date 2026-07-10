@@ -422,7 +422,7 @@ fn entry_point_descriptors_are_public_launch_surface() {
     assert!(CONTRACT_ENTRY_POINTS
         .iter()
         .all(|descriptor| descriptor.namespace == "mfm.evm.contract"
-            && descriptor.version == 2
+            && descriptor.version == 1
             && descriptor.accepted_config_formats == TOML_JSON_AUTHORED_CONFIG_FORMATS));
 }
 

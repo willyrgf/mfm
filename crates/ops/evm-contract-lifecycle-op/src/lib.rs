@@ -52,7 +52,7 @@ pub const CONTRACT_DEPLOY_ENTRY_POINT: EntryPointDescriptor = EntryPointDescript
     namespace: OP_NAMESPACE,
     name: CONTEXT_DEPLOY_OP_KEY,
     public_name: "evm_contract_deploy",
-    version: 2,
+    version: 1,
     accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
 };
 
@@ -61,7 +61,7 @@ pub const CONTRACT_CONFIGURE_ENTRY_POINT: EntryPointDescriptor = EntryPointDescr
     namespace: OP_NAMESPACE,
     name: CONTEXT_CONFIGURE_OP_KEY,
     public_name: "evm_contract_configure",
-    version: 2,
+    version: 1,
     accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
 };
 
@@ -70,7 +70,7 @@ pub const CONTRACT_VALIDATE_ENTRY_POINT: EntryPointDescriptor = EntryPointDescri
     namespace: OP_NAMESPACE,
     name: CONTEXT_VALIDATE_OP_KEY,
     public_name: "evm_contract_validate",
-    version: 2,
+    version: 1,
     accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
 };
 
@@ -79,7 +79,7 @@ pub const CONTRACT_LIFECYCLE_ENTRY_POINT: EntryPointDescriptor = EntryPointDescr
     namespace: OP_NAMESPACE,
     name: CONTEXT_LIFECYCLE_OP_KEY,
     public_name: "evm_contract_lifecycle",
-    version: 2,
+    version: 1,
     accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
 };
 

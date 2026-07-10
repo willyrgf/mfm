@@ -107,13 +107,13 @@ mod tests {
         let registry = production_entry_point_op_registry().expect("registry");
         let op = portfolio_op(&registry);
 
-        assert_eq!(op.version(), OpVersion::new(2).unwrap());
+        assert_eq!(op.version(), OpVersion::new(1).unwrap());
         assert_eq!(
             registry
-                .resolve_version(&portfolio_public_op_name(), OpVersion::new(2).unwrap())
-                .expect("portfolio snapshot v2")
+                .resolve_version(&portfolio_public_op_name(), OpVersion::new(1).unwrap())
+                .expect("portfolio snapshot v1")
                 .version(),
-            OpVersion::new(2).unwrap()
+            OpVersion::new(1).unwrap()
         );
         assert_eq!(
             op.accepted_config_formats(),
@@ -122,12 +122,12 @@ mod tests {
     }
 
     #[test]
-    fn production_registry_rejects_deleted_portfolio_snapshot_v1() {
+    fn production_registry_rejects_deleted_portfolio_snapshot_v2() {
         let registry = production_entry_point_op_registry().expect("registry");
         let error = match registry
-            .resolve_version(&portfolio_public_op_name(), OpVersion::new(1).unwrap())
+            .resolve_version(&portfolio_public_op_name(), OpVersion::new(2).unwrap())
         {
-            Ok(_) => panic!("portfolio snapshot v1 was deleted"),
+            Ok(_) => panic!("portfolio snapshot v2 was deleted"),
             Err(error) => error,
         };
 
@@ -728,7 +728,7 @@ mod tests {
             let op = registry
                 .resolve_latest(&PublicOpName::new(name).expect("name"))
                 .expect("EVM contract op");
-            assert_eq!(op.version(), OpVersion::new(2).unwrap());
+            assert_eq!(op.version(), OpVersion::new(1).unwrap());
             let authored = AuthoredConfig::new(AuthoredConfigFormat::Json, config.to_string())
                 .expect("authored");
             let plan = op.plan(authored).expect("EVM contract plan");
