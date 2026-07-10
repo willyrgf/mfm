@@ -77,6 +77,7 @@ mod evm_contracts;
 mod fact_index;
 mod live_transports;
 mod public_facts;
+mod replay_verifiers;
 
 use live_transports::{LiveTransportRuntime, RuntimeConfigLoader};
 
@@ -2457,10 +2458,7 @@ where
         .await?;
         let broker = ReplayBroker::from_read_authority(authority)?;
         let stream = context.events();
-        mfm_adapters_btc_jsonrpc::verify_btc_jsonrpc_replay(&broker)?;
-        mfm_adapters_evm::verify_evm_native_balance_replay(&broker)?;
-        mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&broker, self.registry)?;
-        mfm_transports_proof::verify_deterministic_proof_replay(&broker)?;
+        replay_verifiers::ReplayVerifierRegistry::production().verify(&broker, self.registry)?;
         let projection = broker.projection_snapshot();
         let terminal_policies =
             store::SideEffectTerminalPolicies::from_spec(context.runtime_spec().spec())?;

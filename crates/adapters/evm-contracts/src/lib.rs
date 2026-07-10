@@ -2783,11 +2783,12 @@ fn contract_side_effect_replay_evidence() -> mfm_runtime::Result<SideEffectRepla
 
 /// Verifies contract lifecycle replay evidence when present in a broker stream.
 ///
-/// Returns `Ok(false)` when the stream contains no contract lifecycle evidence.
+/// A broker for another workflow is a valid no-op because the application replay registry invokes
+/// every domain verifier.
 pub fn verify_contract_lifecycle_replay(
     broker: &replay::ReplayBroker,
     source_run_registry: &mfm_certify::CertificationRegistry,
-) -> replay::Result<bool> {
+) -> replay::Result<()> {
     let frames = broker.side_effect_replay_frames_matching(is_contract_lifecycle_intent)?;
     let verifier = EvmContractLifecycleReplayVerifier::new()?;
     let mut verified_frames = Vec::with_capacity(frames.len());
@@ -2796,9 +2797,8 @@ pub fn verify_contract_lifecycle_replay(
             broker, &verifier, frame,
         )?);
     }
-    let output_count =
-        verify_contract_lifecycle_state_outputs(broker, source_run_registry, &verified_frames)?;
-    Ok(output_count > 0 || !frames.is_empty())
+    verify_contract_lifecycle_state_outputs(broker, source_run_registry, &verified_frames)?;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]

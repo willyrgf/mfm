@@ -20,12 +20,14 @@ mfm-fact-capabilities = { path = "../../fact-capabilities" }
 mfm-facts = { path = "../../kernel/facts" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
+mfm-replay = { path = "../../kernel/replay" }
 mfm-runtime = { path = "../../kernel/runtime" }
 mfm-portfolio-model = { path = "../../portfolio/model" }
 mfm-state-portfolio = { path = "../../states/portfolio" }
 mfm-states-btc = { path = "../../states/btc" }
 mfm-states-evm = { path = "../../states/evm" }
 mfm-store = { path = "../../kernel/store" }
+mfm-spec = { path = "../../kernel/spec" }
 mfm-values = { path = "../../kernel/values" }
 
 [dev-dependencies]
@@ -33,4 +35,3 @@ ed25519-dalek = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 mfm-store = { path = "../../kernel/store", features = ["test-support"] }
-mfm-spec = { path = "../../kernel/spec" }

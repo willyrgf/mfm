@@ -739,11 +739,12 @@ impl replay::SideEffectReplayVerifier for DeterministicProofReplayVerifier {
 /// Verifies deterministic proof side-effect replay evidence when a run stream contains proof
 /// events.
 ///
-/// Returns `Ok(false)` when the broker stream contains no deterministic proof side-effect intent.
-pub fn verify_deterministic_proof_replay(broker: &replay::ReplayBroker) -> replay::Result<bool> {
+/// A broker for another workflow is a valid no-op because the application replay registry invokes
+/// every domain verifier.
+pub fn verify_deterministic_proof_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
     let frames = broker.side_effect_replay_frames_matching(is_deterministic_proof_intent)?;
     if frames.is_empty() {
-        return Ok(false);
+        return Ok(());
     }
     if frames.len() > 1 {
         return Err(replay::ReplayError::new(
@@ -758,7 +759,7 @@ pub fn verify_deterministic_proof_replay(broker: &replay::ReplayBroker) -> repla
             verify_manual_resolution_proof_replay(broker, frame)?
         }
     }
-    Ok(true)
+    Ok(())
 }
 
 fn verify_accepted_proof_replay(

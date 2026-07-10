@@ -218,8 +218,8 @@ fn transport_provider_boundaries_reject_old_source_binding_surfaces() {
 
     let app = include_str!("../src/lib.rs");
     assert!(
-        app.contains("mfm_adapters_btc_jsonrpc::verify_btc_jsonrpc_replay(&broker)"),
-        "app replay must wire the BTC recorded-evidence verifier"
+        app.contains("ReplayVerifierRegistry::production().verify(&broker"),
+        "app replay must use the compiled recorded-evidence verifier registry"
     );
 }
 

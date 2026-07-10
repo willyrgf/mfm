@@ -406,8 +406,9 @@ fn adapter_identity_error(error: mfm_ids::IdentityError) -> mfm_runtime::Runtime
 
 /// Verifies EVM native-balance observation cell outputs when present in a broker stream.
 ///
-/// Returns `Ok(false)` when the stream contains no matching observe outputs.
-pub fn verify_evm_native_balance_replay(broker: &replay::ReplayBroker) -> replay::Result<bool> {
+/// A broker for another workflow is a valid no-op because the application replay registry invokes
+/// every domain verifier.
+pub fn verify_evm_native_balance_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
     let state_kind = ObserveEvmNativeBalanceState::kind().map_err(replay_adapter_error)?;
     let state_version = ObserveEvmNativeBalanceState::version().map_err(replay_adapter_error)?;
     let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
@@ -416,7 +417,7 @@ pub fn verify_evm_native_balance_replay(broker: &replay::ReplayBroker) -> replay
     for frame in &frames {
         verify_evm_native_balance_observation_replay(broker, frame)?;
     }
-    Ok(!frames.is_empty())
+    Ok(())
 }
 
 fn verify_evm_native_balance_observation_replay(

@@ -715,11 +715,9 @@ pub fn replay_loaded_checkpoint_from_evidence(
 
 /// Verifies Bitcoin JSON-RPC observation cell outputs when present in a broker stream.
 ///
-/// Covers chain-head and address-balance observe states. Returns `Ok(false)` when the stream
-/// contains no matching Bitcoin observation outputs.
-pub fn verify_btc_jsonrpc_replay(broker: &replay::ReplayBroker) -> replay::Result<bool> {
-    let mut found = false;
-
+/// Covers chain-head and address-balance observe states. A broker for another workflow is a
+/// valid no-op because the application replay registry invokes every domain verifier.
+pub fn verify_btc_jsonrpc_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
     let chain_head_kind = ObserveBtcChainHeadState::kind().map_err(replay_adapter_error)?;
     let chain_head_version = ObserveBtcChainHeadState::version().map_err(replay_adapter_error)?;
     let chain_head_frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
@@ -727,7 +725,6 @@ pub fn verify_btc_jsonrpc_replay(broker: &replay::ReplayBroker) -> replay::Resul
     })?;
     for frame in &chain_head_frames {
         verify_btc_chain_head_observation_replay(broker, frame)?;
-        found = true;
     }
 
     let balance_kind = ObserveBtcAddressBalanceState::kind().map_err(replay_adapter_error)?;
@@ -737,10 +734,9 @@ pub fn verify_btc_jsonrpc_replay(broker: &replay::ReplayBroker) -> replay::Resul
     })?;
     for frame in &balance_frames {
         verify_btc_address_balance_observation_replay(broker, frame)?;
-        found = true;
     }
 
-    Ok(found)
+    Ok(())
 }
 
 fn verify_btc_chain_head_observation_replay(
