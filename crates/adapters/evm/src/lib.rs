@@ -466,6 +466,7 @@ where
     let requirement = store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::RunConfig,
         artifact_id: node.config_ref.artifact_id.clone(),
+        evidence_hash: None,
         digest: Some(node.config_ref.digest.clone()),
         byte_len: Some(node.config_ref.byte_len),
         media_type: Some(node.config_ref.media_type.clone()),

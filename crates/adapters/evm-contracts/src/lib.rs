@@ -1734,6 +1734,7 @@ fn lifecycle_artifact_requirement(
         artifact_id: evidence
             .artifact_id()
             .map_err(EvmContractAdapterError::Model)?,
+        evidence_hash: None,
         digest: Some(
             evidence
                 .content_digest()
@@ -1760,6 +1761,7 @@ fn run_artifact_requirement(
     events::EventArtifactRequirement {
         source,
         artifact_id: artifact.artifact_id.clone(),
+        evidence_hash: None,
         digest: Some(artifact.content_digest.clone()),
         byte_len: Some(artifact.byte_len),
         media_type: Some(artifact.media_type.clone()),
@@ -2869,6 +2871,7 @@ fn replay_side_effect_intent(
     let artifact = broker.retained_artifact(&store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::SideEffectIntent,
         artifact_id: intent.intent_artifact_id.clone(),
+        evidence_hash: None,
         digest: Some(intent.intent_hash.clone()),
         byte_len: None,
         media_type: None,
@@ -3625,6 +3628,7 @@ where
     let requirement = store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::RunConfig,
         artifact_id: node.config_ref.artifact_id.clone(),
+        evidence_hash: None,
         digest: Some(node.config_ref.digest.clone()),
         byte_len: Some(node.config_ref.byte_len),
         media_type: Some(node.config_ref.media_type.clone()),
@@ -6301,6 +6305,7 @@ fn contract_profile_artifact_requirement(
         artifact_id: reference
             .artifact_id()
             .map_err(EvmContractAdapterError::Model)?,
+        evidence_hash: None,
         digest: Some(
             reference
                 .content_digest()

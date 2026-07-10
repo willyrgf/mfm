@@ -1366,7 +1366,8 @@ fn validate_historical_retention_manifest_batches(
     Ok(())
 }
 
-type RetentionRefKey = (ArtifactId, ContentDigest, events::ArtifactRole);
+type RetentionRefKey = (ArtifactId, ContentDigest);
+type TypedPayloadKey = (ArtifactId, ContentDigest, events::ArtifactRole);
 
 fn validate_historical_retention_ref_batches(
     runtime_spec: &CertifiedRuntimeSpec,
@@ -1516,8 +1517,8 @@ fn validate_historical_retention_ref_batch(
             events::KernelEventPayload::RetentionManifestProjected(_)
         )
     });
-    let artifact_refs = same_commit_artifact_reference_keys(commit);
-    let typed_payload_refs = same_commit_typed_artifact_keys(commit);
+    let artifact_refs = same_commit_artifact_reference_keys(commit)?;
+    let typed_payload_refs = same_commit_typed_artifact_keys(commit)?;
 
     for (event, payload) in retention_refs {
         if event.run_id() != &payload.run_id {
@@ -1577,13 +1578,13 @@ fn validate_historical_retention_ref_batch(
 fn validate_same_commit_retention_ref_evidence(
     payload: &events::RetentionRefsAppended,
     artifact_refs: &BTreeSet<RetentionRefKey>,
-    typed_payload_refs: &BTreeSet<RetentionRefKey>,
+    typed_payload_refs: &BTreeSet<TypedPayloadKey>,
     allow_fact_query_returned_refs: bool,
 ) -> Result<()> {
     let has_same_commit_fact_query_evidence = payload.refs.iter().any(|retention_ref| {
         retention_ref.role == events::ArtifactRole::FactQueryEvidence
             && artifact_refs.contains(&retention_ref_key(retention_ref))
-            && typed_payload_refs.contains(&retention_ref_key(retention_ref))
+            && typed_payload_refs.contains(&typed_payload_key(retention_ref))
     });
     for retention_ref in &payload.refs {
         if allow_fact_query_returned_refs
@@ -1604,7 +1605,7 @@ fn validate_same_commit_retention_ref_evidence(
                 retention_ref.artifact_id
             )));
         }
-        if !typed_payload_refs.contains(&key) {
+        if !typed_payload_refs.contains(&typed_payload_key(retention_ref)) {
             return Err(RuntimeError::InvalidRunStream(format!(
                 "retention ref for artifact {} lacks same-commit typed payload evidence",
                 retention_ref.artifact_id
@@ -1671,20 +1672,59 @@ fn public_output_retention_ref_keys(
                 && payload.attempt_id == public_output.attempt_id
                 && payload.cell_id == public_output.receipt_cell_id
             {
-                allowed.insert((
-                    payload.artifact_id.clone(),
-                    payload.content_digest.clone(),
-                    events::ArtifactRole::StateOutput,
-                ));
+                let key = commit
+                    .iter()
+                    .filter_map(|event| match event.payload() {
+                        events::KernelEventPayload::ArtifactReferenced(reference)
+                            if reference.node_id.as_ref() == Some(&payload.node_id)
+                                && reference.attempt_id.as_ref() == Some(&payload.attempt_id)
+                                && reference.artifact_ref.artifact_id == payload.artifact_id
+                                && reference.artifact_ref.content_digest
+                                    == payload.content_digest
+                                && reference.artifact_ref.role
+                                    == events::ArtifactRole::StateOutput =>
+                        {
+                            Some(event_artifact_ref_key(
+                                &reference.artifact_ref,
+                                reference.node_id.clone(),
+                                None,
+                            ))
+                        }
+                        _ => None,
+                    })
+                    .next()
+                    .transpose()?;
+                if let Some(key) = key {
+                    allowed.insert(key);
+                }
             }
         }
     }
     if let Some(artifact_id) = &public_output.rendered_artifact_id {
-        allowed.insert((
-            artifact_id.clone(),
-            public_output.rendered_digest.clone(),
-            events::ArtifactRole::PublicOutput,
-        ));
+        let key = commit
+            .iter()
+            .filter_map(|event| match event.payload() {
+                events::KernelEventPayload::ArtifactReferenced(reference)
+                    if reference.node_id.as_ref() == Some(&public_output.node_id)
+                        && reference.attempt_id.as_ref() == Some(&public_output.attempt_id)
+                        && reference.artifact_ref.artifact_id == *artifact_id
+                        && reference.artifact_ref.content_digest
+                            == public_output.rendered_digest
+                        && reference.artifact_ref.role == events::ArtifactRole::PublicOutput =>
+                {
+                    Some(event_artifact_ref_key(
+                        &reference.artifact_ref,
+                        reference.node_id.clone(),
+                        None,
+                    ))
+                }
+                _ => None,
+            })
+            .next()
+            .transpose()?;
+        if let Some(key) = key {
+            allowed.insert(key);
+        }
     }
     if allowed.is_empty() {
         return Err(RuntimeError::InvalidRunStream(
@@ -1698,37 +1738,40 @@ fn public_output_retention_ref_keys(
 fn retention_ref_key(retention_ref: &events::RetentionRef) -> RetentionRefKey {
     (
         retention_ref.artifact_id.clone(),
-        retention_ref.content_digest.clone(),
-        retention_ref.role,
+        retention_ref.evidence_hash.clone(),
     )
 }
 
-fn event_artifact_ref_key(artifact: &events::ArtifactEvidenceRef) -> RetentionRefKey {
-    (
-        artifact.artifact_id.clone(),
-        artifact.content_digest.clone(),
-        artifact.role,
-    )
+fn event_artifact_ref_key(
+    artifact: &events::ArtifactEvidenceRef,
+    producer_node_id: Option<NodeId>,
+    producer_seed_id: Option<mfm_ids::SeedId>,
+) -> Result<RetentionRefKey> {
+    let evidence = store_artifact_from_event_ref(artifact, producer_node_id, producer_seed_id);
+    Ok((evidence.artifact_id.clone(), evidence.evidence_hash()?))
 }
 
 fn same_commit_artifact_reference_keys(
     commit: &[store::KernelEventEnvelope],
-) -> BTreeSet<RetentionRefKey> {
+) -> Result<BTreeSet<RetentionRefKey>> {
     commit
         .iter()
         .filter_map(|event| match event.payload() {
             events::KernelEventPayload::ArtifactReferenced(payload) => {
-                Some(event_artifact_ref_key(&payload.artifact_ref))
+                Some((&payload.artifact_ref, payload.node_id.clone(), None))
             }
             _ => None,
+        })
+        .map(|(artifact, producer_node_id, producer_seed_id)| {
+            event_artifact_ref_key(artifact, producer_node_id, producer_seed_id)
         })
         .collect()
 }
 
 fn same_commit_typed_artifact_keys(
     commit: &[store::KernelEventEnvelope],
-) -> BTreeSet<RetentionRefKey> {
-    commit
+) -> Result<BTreeSet<TypedPayloadKey>> {
+    Ok(commit
         .iter()
         .flat_map(|event| store::event_artifact_requirements(event.payload()))
         .filter(|requirement| {
@@ -1743,7 +1786,15 @@ fn same_commit_typed_artifact_keys(
                 requirement.artifact_role?,
             ))
         })
-        .collect()
+        .collect())
+}
+
+fn typed_payload_key(retention_ref: &events::RetentionRef) -> TypedPayloadKey {
+    (
+        retention_ref.artifact_id.clone(),
+        retention_ref.content_digest.clone(),
+        retention_ref.role,
+    )
 }
 
 fn validate_historical_retention_manifest_batch(

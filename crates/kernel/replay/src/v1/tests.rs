@@ -51,6 +51,46 @@ fn recorded_fact_replay_uses_claim_id_not_fact_key() {
 }
 
 #[test]
+fn replay_retained_artifact_lookup_uses_exact_evidence_identity() {
+    let first = fact_response_artifact(0xa1);
+    let mut second = first.clone();
+    second.producer_node_id = Some(node_id(0xd1));
+    let first_hash = first.evidence_hash().expect("first evidence hash");
+    let second_hash = second.evidence_hash().expect("second evidence hash");
+    assert_ne!(first_hash, second_hash);
+
+    let artifacts = artifact_map(vec![first.clone(), second.clone()]).expect("artifact map");
+    let mut broker = replay_broker_with_facts(Vec::new());
+    broker.retained_artifacts = artifacts.clone();
+    broker.artifacts = artifacts;
+    broker
+        .artifact_bytes
+        .insert(first.artifact_id.clone(), vec![b'{', b'}']);
+
+    let requirement = store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::FactResponse,
+        artifact_id: second.artifact_id.clone(),
+        evidence_hash: Some(second_hash),
+        digest: Some(second.digest.clone()),
+        byte_len: Some(second.byte_len),
+        media_type: Some(second.media_type.clone()),
+        schema_id: second.schema_id.clone(),
+        semantic_type_id: second.semantic_type_id.clone(),
+        producer_node_id: second.producer_node_id.clone(),
+        producer_seed_id: second.producer_seed_id.clone(),
+        artifact_role: Some(second.artifact_role),
+    };
+    let selected = broker
+        .retained_artifact(&requirement)
+        .expect("exact retained evidence");
+    assert_eq!(selected.artifact.producer_node_id, second.producer_node_id);
+
+    let mut wrong_key = requirement.clone();
+    wrong_key.evidence_hash = Some(first_hash);
+    assert!(broker.retained_artifact(&wrong_key).is_err());
+}
+
+#[test]
 fn replay_broker_rebuilds_fact_projection_with_retained_artifact_bytes() {
     let fixture = replay_fact_stream_fixture();
 

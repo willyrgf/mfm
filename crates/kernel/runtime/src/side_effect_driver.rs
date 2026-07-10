@@ -74,7 +74,7 @@ where
         vec![staged_artifact],
         vec![StagedRetentionRefs::runtime_evidence(vec![intent_artifact
             .evidence
-            .retention_ref()])],
+            .retention_ref()?])],
         vec![
             pre_invocation_side_effect_intent_persisted(
                 ctx,
@@ -1308,17 +1308,17 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
                 side_effect.ledger_key.clone(),
                 side_effect.invocation_epoch,
             )?;
+            let prepared_key = (
+                prepared_artifact.evidence().artifact_id.clone(),
+                prepared_artifact.evidence().evidence_hash()?,
+            );
             if !self
                 .ctx
                 .projections()
                 .retention(self.ctx.run_id())
-                .is_some_and(|retention| {
-                    retention
-                        .refs
-                        .contains_key(&prepared_artifact.evidence().artifact_id)
-                })
+                .is_some_and(|retention| retention.refs.contains_key(&prepared_key))
             {
-                output.retain_runtime_evidence(prepared_artifact);
+                output.retain_runtime_evidence(prepared_artifact)?;
             }
         }
         output.payload(payloads.side_effect_invocation_prepared(

@@ -555,17 +555,18 @@ pub(crate) fn fact_query_returned_ref_retention_refs(
     let descriptor = projections
         .fact_descriptor(fact_ref.fact_descriptor_hash())
         .ok_or_else(|| fact_query_ref_authority_error("missing descriptor authority"))?;
+    let response_evidence = projections
+        .fact_record(fact_ref.fact_claim_id())
+        .and_then(|record| record.response_artifact_evidence.as_ref())
+        .ok_or_else(|| fact_query_ref_authority_error("missing response artifact authority"))?;
     Ok([
-        events::RetentionRef {
-            artifact_id: descriptor.descriptor_artifact_id.clone(),
-            role: events::ArtifactRole::FactDescriptor,
-            content_digest: descriptor.descriptor_hash.clone(),
-        },
-        events::RetentionRef {
-            artifact_id: fact_ref.artifact_id().clone(),
-            role: events::ArtifactRole::FactResponse,
-            content_digest: fact_ref.response_hash().clone(),
-        },
+        descriptor
+            .descriptor_artifact_evidence
+            .retention_ref()
+            .map_err(|_| fact_query_ref_authority_error("invalid descriptor artifact authority"))?,
+        response_evidence
+            .retention_ref()
+            .map_err(|_| fact_query_ref_authority_error("invalid response artifact authority"))?,
     ])
 }
 

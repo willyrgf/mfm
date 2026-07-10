@@ -2486,8 +2486,11 @@ fn retention_refs_appended(
         run_id: run_id(120),
         spec_hash: spec_hash(1),
         refs: vec![events::RetentionRef {
-            artifact_id,
+            artifact_id: artifact_id.clone(),
             role,
+            evidence_hash: store_artifact_ref(artifact_id, digest.clone())
+                .evidence_hash()
+                .expect("retention evidence hash"),
             content_digest: digest,
         }],
         reason: events::RetentionReason::RuntimeEvidence,
@@ -2539,8 +2542,11 @@ fn retention_manifest_commit_payloads(
             run_id: run_id(120),
             spec_hash: spec_hash(1),
             refs: vec![events::RetentionRef {
-                artifact_id,
+                artifact_id: artifact_id.clone(),
                 role: ArtifactRole::RetentionManifest,
+                evidence_hash: retention_manifest_artifact_ref(artifact_id, digest.clone())
+                    .evidence_hash()
+                    .expect("manifest evidence hash"),
                 content_digest: digest,
             }],
             reason: events::RetentionReason::ManifestProjection,
@@ -4400,6 +4406,9 @@ fn artifact_authority_accepts_distinct_evidence_for_same_artifact_id() {
                         refs: vec![events::RetentionRef {
                             artifact_id: artifact_id.clone(),
                             role: ArtifactRole::StateOutput,
+                            evidence_hash: first_evidence
+                                .evidence_hash()
+                                .expect("first evidence hash"),
                             content_digest: digest.clone(),
                         }],
                         reason: events::RetentionReason::RuntimeEvidence,
@@ -4408,7 +4417,7 @@ fn artifact_authority_accepts_distinct_evidence_for_same_artifact_id() {
                 required_artifacts: vec![first_evidence.clone()],
                 preconditions: run_state_preconditions(RequiredRunState::Started),
             },
-            vec![first_evidence],
+            vec![first_evidence.clone()],
         )
         .expect("append first evidence");
 
@@ -4423,8 +4432,11 @@ fn artifact_authority_accepts_distinct_evidence_for_same_artifact_id() {
                         run_id: run_id.clone(),
                         spec_hash: spec_hash(1),
                         refs: vec![events::RetentionRef {
-                            artifact_id,
+                            artifact_id: artifact_id.clone(),
                             role: ArtifactRole::StateOutput,
+                            evidence_hash: second_evidence
+                                .evidence_hash()
+                                .expect("second evidence hash"),
                             content_digest: digest,
                         }],
                         reason: events::RetentionReason::PublicOutput,
@@ -4433,9 +4445,32 @@ fn artifact_authority_accepts_distinct_evidence_for_same_artifact_id() {
                 required_artifacts: vec![second_evidence.clone()],
                 preconditions: run_state_preconditions(RequiredRunState::Started),
             },
-            vec![second_evidence],
+            vec![second_evidence.clone()],
         )
         .expect("append second evidence for same artifact id");
+
+    let retention = store
+        .projection_snapshot()
+        .retention(&run_id)
+        .expect("retention projection");
+    assert_eq!(
+        retention
+            .refs
+            .keys()
+            .filter(|(id, _)| id == &artifact_id)
+            .count(),
+        2
+    );
+    assert!(retention.refs.contains_key(&(
+        artifact_id.clone(),
+        first_evidence.evidence_hash().expect("first evidence hash"),
+    )));
+    assert!(retention.refs.contains_key(&(
+        artifact_id,
+        second_evidence
+            .evidence_hash()
+            .expect("second evidence hash"),
+    )));
 }
 
 #[test]
@@ -8060,10 +8095,11 @@ fn retention_refs_are_projected_from_authoritative_stream() {
     let snapshot = ProjectionSnapshot::rebuild_from_run_stream(&store.load_run_stream(&run_id))
         .expect("retention snapshot");
     let retention = snapshot.retention(&run_id).expect("retention projection");
+    let evidence_hash = evidence.evidence_hash().expect("retention evidence hash");
     assert_eq!(
         retention
             .refs
-            .get(&artifact_id)
+            .get(&(artifact_id.clone(), evidence_hash.clone()))
             .expect("retention ref")
             .role,
         ArtifactRole::StateOutput
@@ -8071,7 +8107,7 @@ fn retention_refs_are_projected_from_authoritative_stream() {
     assert_eq!(
         retention
             .refs
-            .get(&artifact_id)
+            .get(&(artifact_id, evidence_hash))
             .expect("retention ref")
             .content_digest,
         digest
@@ -8093,15 +8129,18 @@ fn retention_refs_validate_role_contract_shape_without_repeating_exact_fields() 
         let run_start_key = format!("{commit_key}-run-start");
         let mut store = admitted_store(&run_id, &run_start_key);
 
+        let mut retention_payload =
+            retention_refs_appended(artifact_id, digest, ArtifactRole::StateOutput);
+        let KernelEventPayload::RetentionRefsAppended(payload) = &mut retention_payload else {
+            panic!("retention payload");
+        };
+        payload.refs[0].evidence_hash = evidence.evidence_hash().expect("retention evidence hash");
+
         let error = append_run_state_commit(
             &mut store,
             &run_id,
             commit_key,
-            vec![retention_refs_appended(
-                artifact_id,
-                digest,
-                ArtifactRole::StateOutput,
-            )],
+            vec![retention_payload],
             vec![evidence],
             RequiredRunState::Started,
         )

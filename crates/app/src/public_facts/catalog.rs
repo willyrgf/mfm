@@ -278,6 +278,18 @@ fn fact_descriptor_artifact_requirement(
     Ok(store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::FactDescriptor,
         artifact_id: projection.descriptor_artifact_id.clone(),
+        evidence_hash: Some(
+            projection
+                .descriptor_artifact_evidence
+                .evidence_hash()
+                .map_err(|_| {
+                    AppError::backend(
+                        ErrorClass::Internal,
+                        "FactDescriptorEvidenceInvalid",
+                        "Fact descriptor evidence identity was invalid",
+                    )
+                })?,
+        ),
         digest: Some(projection.descriptor_hash.clone()),
         byte_len: None,
         media_type: Some(json_media_type()?),

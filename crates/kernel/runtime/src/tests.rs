@@ -2671,6 +2671,10 @@ fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
         let expected_query_retention = events::RetentionRef {
             artifact_id: query_artifact.evidence().artifact_id.clone(),
             role: events::ArtifactRole::FactQueryEvidence,
+            evidence_hash: query_artifact
+                .evidence()
+                .evidence_hash()
+                .expect("query evidence hash"),
             content_digest: query_artifact.evidence().digest.clone(),
         };
         assert_eq!(
@@ -2693,6 +2697,7 @@ fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
             .stage_attempt_artifact(&state)
             .expect("stage state output")
             .retain_runtime_evidence(&state)
+            .expect("retain state output")
             .payload(cell.clone());
         let state_output = state_output.finish();
         assert_eq!(state_output.staged_artifacts().len(), 1);
@@ -2779,7 +2784,8 @@ async fn fact_query_evidence_retains_non_empty_returned_fact_authority() {
     let mut staged_artifacts = vec![state_artifact];
     staged_artifacts.extend(query_output.staged_artifacts().iter().cloned());
     let mut missing_query_retention_refs = query_output.staged_retention_refs().to_vec();
-    missing_query_retention_refs[0].refs = vec![state_evidence.retention_ref()];
+    missing_query_retention_refs[0].refs =
+        vec![state_evidence.retention_ref().expect("state retention ref")];
     let missing_query_output = fact_query_terminal_output(
         &ctx,
         &state_evidence,
@@ -2860,17 +2866,33 @@ async fn fact_query_evidence_retains_non_empty_returned_fact_authority() {
     assert!(retained_refs.contains(&events::RetentionRef {
         artifact_id: query_reference.artifact_ref.artifact_id.clone(),
         role: events::ArtifactRole::FactQueryEvidence,
+        evidence_hash: prepared
+            .request()
+            .required_artifacts()
+            .iter()
+            .find(|evidence| {
+                evidence.artifact_id == query_reference.artifact_ref.artifact_id
+                    && evidence.digest == query_reference.artifact_ref.content_digest
+            })
+            .expect("query evidence admission")
+            .evidence_hash()
+            .expect("query evidence hash"),
         content_digest: query_reference.artifact_ref.content_digest.clone(),
     }));
     assert!(retained_refs.contains(&events::RetentionRef {
-        artifact_id: descriptor_projection.descriptor_artifact_id,
+        artifact_id: descriptor_projection.descriptor_artifact_id.clone(),
         role: events::ArtifactRole::FactDescriptor,
-        content_digest: descriptor_projection.descriptor_hash,
+        evidence_hash: descriptor_projection
+            .descriptor_artifact_evidence
+            .evidence_hash()
+            .expect("descriptor evidence hash"),
+        content_digest: descriptor_projection.descriptor_hash.clone(),
     }));
     assert!(retained_refs.contains(&events::RetentionRef {
-        artifact_id: index_projection.artifact_id,
+        artifact_id: index_projection.artifact_id.clone(),
         role: events::ArtifactRole::FactResponse,
-        content_digest: index_projection.response_hash,
+        evidence_hash: index_projection.artifact_evidence_hash.clone(),
+        content_digest: index_projection.response_hash.clone(),
     }));
     assert_eq!(retained_refs.len(), 3);
     assert!(!prepared
@@ -4542,7 +4564,8 @@ async fn scheduler_binds_staged_retention_refs_and_projects_manifest() {
         .expect("run-start retention");
     assert!(start_retention
         .refs
-        .contains_key(&fixture.seed_ref.seed_artifact.artifact_id));
+        .keys()
+        .any(|(artifact_id, _)| artifact_id == &fixture.seed_ref.seed_artifact.artifact_id));
 
     let status = drive_fixture_until_blocked(&scheduler, &mut store, &fixture)
         .await
@@ -4561,7 +4584,8 @@ async fn scheduler_binds_staged_retention_refs_and_projects_manifest() {
         .retention(&fixture.run_id)
         .expect("runtime retention")
         .refs
-        .contains_key(&render_receipt_artifact));
+        .keys()
+        .any(|(artifact_id, _)| artifact_id == &render_receipt_artifact));
 
     let projection_snapshot = store.projection_snapshot();
     let projection = projection_snapshot
@@ -4569,7 +4593,10 @@ async fn scheduler_binds_staged_retention_refs_and_projects_manifest() {
         .expect("retention projection");
     let manifest = projection.manifest.as_ref().expect("manifest");
     assert_eq!(manifest.manifest_seq, 1);
-    assert!(projection.refs.contains_key(&manifest.manifest_artifact_id));
+    assert!(projection
+        .refs
+        .keys()
+        .any(|(artifact_id, _)| artifact_id == &manifest.manifest_artifact_id));
 
     let retention_node =
         certified_retention_manifest_node(&fixture.runtime_spec).expect("retention node");
@@ -4691,7 +4718,8 @@ async fn runtime_rejects_standalone_retention_manifest_projection_history() {
         expected_next_seq: store.expected_next_seq(&fixture.run_id),
         commit_key: store::CommitKey::new("synthetic/standalone-retention-projection")
             .expect("commit key"),
-        payloads: retention_manifest_payloads(&fixture.runtime_spec, &fixture.run_id, manifest),
+        payloads: retention_manifest_payloads(&fixture.runtime_spec, &fixture.run_id, manifest)
+            .expect("retention manifest payloads"),
         required_artifacts: vec![manifest_evidence],
         preconditions: store::CommitPreconditions::default(),
     };
@@ -5092,7 +5120,7 @@ async fn runner_cannot_stage_reserved_retention_reasons() {
                 Ok(ErasedRunnerOutput::from_parts(
                     vec![staged_artifact],
                     vec![StagedRetentionRefs {
-                        refs: vec![artifact.retention_ref()],
+                        refs: vec![artifact.retention_ref()?],
                         reason: self.reason,
                         authority:
                             crate::artifacts::StagedRetentionRefAuthority::CurrentCommitArtifacts,
@@ -11525,7 +11553,8 @@ fn assert_node_failed_with_code_and_retryable(
         .any(|(_, retention)| {
             retention
                 .refs
-                .get(&diagnostic.artifact_id)
+                .values()
+                .find(|retention_ref| retention_ref.artifact_id == diagnostic.artifact_id)
                 .is_some_and(|retention_ref| {
                     retention_ref.role == events::ArtifactRole::RedactedDiagnostic
                         && retention_ref.content_digest == diagnostic.content_digest

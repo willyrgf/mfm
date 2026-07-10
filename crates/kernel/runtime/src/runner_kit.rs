@@ -90,8 +90,8 @@ impl RunnerJsonArtifact {
     }
 
     /// Returns a runtime retention ref for this artifact.
-    pub fn retention_ref(&self) -> events::RetentionRef {
-        self.evidence.retention_ref()
+    pub fn retention_ref(&self) -> Result<events::RetentionRef> {
+        Ok(self.evidence.retention_ref()?)
     }
 
     /// Splits the artifact into canonical bytes and evidence.
@@ -442,6 +442,7 @@ async fn load_materialized_cell_artifact(
         } => store::EventArtifactRequirement {
             source: store::EventArtifactReferenceSource::StateOutput,
             artifact_id: artifact_id.clone(),
+            evidence_hash: None,
             digest: Some(content_digest.clone()),
             byte_len: None,
             media_type: None,
@@ -458,6 +459,7 @@ async fn load_materialized_cell_artifact(
         } => store::EventArtifactRequirement {
             source: store::EventArtifactReferenceSource::SeedCell,
             artifact_id: artifact_id.clone(),
+            evidence_hash: None,
             digest: Some(content_digest.clone()),
             byte_len: None,
             media_type: None,
@@ -505,6 +507,7 @@ fn certified_config_requirement(node: &spec::NodeSpec) -> store::EventArtifactRe
     store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::RunConfig,
         artifact_id: node.config_ref.artifact_id.clone(),
+        evidence_hash: None,
         digest: Some(node.config_ref.digest.clone()),
         byte_len: Some(node.config_ref.byte_len),
         media_type: Some(node.config_ref.media_type.clone()),
@@ -524,6 +527,7 @@ fn side_effect_artifact_requirement(
     Ok(store::EventArtifactRequirement {
         source: side_effect_artifact_source(role)?,
         artifact_id: artifact.artifact_id.clone(),
+        evidence_hash: None,
         digest: Some(artifact.content_digest.clone()),
         byte_len: None,
         media_type: None,
@@ -1277,17 +1281,17 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
             side_effect.ledger_key.clone(),
             side_effect.invocation_epoch,
         )?;
-        self.retain_runtime_evidence(artifact);
+        self.retain_runtime_evidence(artifact)?;
         Ok(self)
     }
 
     /// Appends runtime retention refs for one artifact.
-    pub fn retain_runtime_evidence(&mut self, artifact: &RunnerJsonArtifact) -> &mut Self {
+    pub fn retain_runtime_evidence(&mut self, artifact: &RunnerJsonArtifact) -> Result<&mut Self> {
         self.staged_retention_refs
             .push(StagedRetentionRefs::runtime_evidence(vec![
-                artifact.retention_ref()
+                artifact.retention_ref()?
             ]));
-        self
+        Ok(self)
     }
 
     /// Stages a state-output artifact, retains it as runtime evidence, and emits its cell payload.
@@ -1430,7 +1434,7 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
     {
         let artifact = self.artifacts.state_output(value)?;
         self.stage_attempt_artifact(&artifact)?;
-        self.retain_runtime_evidence(&artifact);
+        self.retain_runtime_evidence(&artifact)?;
         Ok(artifact)
     }
 
@@ -1467,8 +1471,8 @@ fn fact_query_evidence_retention_refs(
     evidence: &mfm_facts::FactQueryEvidence,
     projections: &store::ProjectionSnapshot,
 ) -> Result<Vec<events::RetentionRef>> {
-    let mut refs = BTreeMap::<(ArtifactId, events::ArtifactRole), events::RetentionRef>::new();
-    insert_retention_ref(&mut refs, evidence_artifact.retention_ref());
+    let mut refs = BTreeMap::<(ArtifactId, ContentDigest), events::RetentionRef>::new();
+    insert_retention_ref(&mut refs, evidence_artifact.retention_ref()?);
 
     for fact_ref in evidence.receipt().returned_refs() {
         for retention_ref in fact_query_returned_ref_retention_refs(projections, fact_ref)? {
@@ -1480,11 +1484,14 @@ fn fact_query_evidence_retention_refs(
 }
 
 fn insert_retention_ref(
-    refs: &mut BTreeMap<(ArtifactId, events::ArtifactRole), events::RetentionRef>,
+    refs: &mut BTreeMap<(ArtifactId, ContentDigest), events::RetentionRef>,
     retention_ref: events::RetentionRef,
 ) {
-    refs.entry((retention_ref.artifact_id.clone(), retention_ref.role))
-        .or_insert(retention_ref);
+    refs.entry((
+        retention_ref.artifact_id.clone(),
+        retention_ref.evidence_hash.clone(),
+    ))
+    .or_insert(retention_ref);
 }
 
 /// Builder for registering runner bindings while keeping executable identity explicit.
@@ -2007,16 +2014,25 @@ mod tests {
         assert!(refs.contains(&events::RetentionRef {
             artifact_id: evidence_artifact.evidence.artifact_id.clone(),
             role: events::ArtifactRole::FactQueryEvidence,
+            evidence_hash: evidence_artifact
+                .evidence
+                .evidence_hash()
+                .expect("query evidence hash"),
             content_digest: evidence_artifact.evidence.digest.clone(),
         }));
         assert!(refs.contains(&events::RetentionRef {
             artifact_id: descriptor_projection.descriptor_artifact_id.clone(),
             role: events::ArtifactRole::FactDescriptor,
+            evidence_hash: descriptor_projection
+                .descriptor_artifact_evidence
+                .evidence_hash()
+                .expect("descriptor evidence hash"),
             content_digest: fact_ref.fact_descriptor_hash().clone(),
         }));
         assert!(refs.contains(&events::RetentionRef {
             artifact_id: fact_ref.artifact_id().clone(),
             role: events::ArtifactRole::FactResponse,
+            evidence_hash: fact_ref.artifact_evidence_hash().clone(),
             content_digest: fact_ref.response_hash().clone(),
         }));
     }

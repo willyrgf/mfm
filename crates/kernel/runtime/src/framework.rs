@@ -219,7 +219,7 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
     )?;
     let (receipt_artifact, receipt_cell_produced) =
         stage_framework_state_output(&ctx, receipt_bytes)?;
-    let receipt_retention_ref = receipt_artifact.evidence().retention_ref();
+    let receipt_retention_ref = receipt_artifact.evidence().retention_ref()?;
     Ok(ErasedRunnerOutput::from_parts(
         vec![receipt_artifact],
         vec![StagedRetentionRefs::framework_public_output(vec![
@@ -264,7 +264,7 @@ fn project_retention_manifest(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutpu
     let receipt_bytes = retention_manifest_receipt_json(&manifest, ctx.run_stream())?;
     let (receipt_artifact, receipt_cell_produced) =
         stage_framework_state_output(&ctx, receipt_bytes)?;
-    let receipt_retention_ref = receipt_artifact.evidence().retention_ref();
+    let receipt_retention_ref = receipt_artifact.evidence().retention_ref()?;
     Ok(ErasedRunnerOutput::from_parts(
         vec![manifest_artifact, receipt_artifact],
         vec![StagedRetentionRefs::runtime_evidence(vec![
@@ -724,6 +724,7 @@ fn retention_ref_json(retention_ref: &events::RetentionRef) -> serde_json::Value
     serde_json::json!({
         "artifact_id": retention_ref.artifact_id.as_str(),
         "content_digest": retention_ref.content_digest.as_str(),
+        "evidence_hash": retention_ref.evidence_hash.as_str(),
         "role": retention_ref.role.as_str(),
     })
 }

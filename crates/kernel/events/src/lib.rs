@@ -2069,6 +2069,8 @@ pub mod v1 {
         pub source: EventArtifactReferenceSource,
         /// Referenced artifact id.
         pub artifact_id: ArtifactId,
+        /// Expected canonical evidence identity, when the event carries an exact authority key.
+        pub evidence_hash: Option<ContentDigest>,
         /// Expected content digest, when the event carries one.
         pub digest: Option<ContentDigest>,
         /// Expected byte length, when the event carries one.
@@ -2130,6 +2132,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::FactResponse,
                     artifact_id: response.artifact_id().clone(),
+                    evidence_hash: Some(response.artifact_evidence_hash().clone()),
                     digest: Some(response.response_hash().clone()),
                     byte_len: None,
                     media_type: None,
@@ -2153,6 +2156,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::StateOutput,
                     artifact_id: payload.artifact_id.clone(),
+                    evidence_hash: None,
                     digest: Some(payload.content_digest.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2170,6 +2174,7 @@ pub mod v1 {
                     requirements.push(EventArtifactRequirement {
                         source: EventArtifactReferenceSource::PublicOutputCell,
                         artifact_id: cell.artifact_id.clone(),
+                        evidence_hash: None,
                         digest: Some(cell.content_digest.clone()),
                         byte_len: None,
                         media_type: None,
@@ -2184,6 +2189,7 @@ pub mod v1 {
                     requirements.push(EventArtifactRequirement {
                         source: EventArtifactReferenceSource::PublicOutputRendered,
                         artifact_id: artifact_id.clone(),
+                        evidence_hash: None,
                         digest: Some(payload.rendered_digest.clone()),
                         byte_len: None,
                         media_type: None,
@@ -2221,6 +2227,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::ManualResolutionEvidence,
                     artifact_id: payload.evidence_artifact_id.clone(),
+                    evidence_hash: None,
                     digest: Some(payload.evidence_hash.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2233,6 +2240,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::ManualResolutionAuthorization,
                     artifact_id: payload.authorization_artifact_id.clone(),
+                    evidence_hash: None,
                     digest: Some(payload.authorization_hash.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2253,6 +2261,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::SideEffectIntent,
                     artifact_id: payload.intent_artifact_id.clone(),
+                    evidence_hash: None,
                     digest: Some(payload.intent_hash.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2270,6 +2279,7 @@ pub mod v1 {
                     requirements.push(EventArtifactRequirement {
                         source: EventArtifactReferenceSource::PreparedInvocation,
                         artifact_id: artifact_id.clone(),
+                        evidence_hash: None,
                         digest: Some(hash.clone()),
                         byte_len: None,
                         media_type: None,
@@ -2285,6 +2295,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::NotSubmittedProof,
                     artifact_id: payload.proof_artifact_id.clone(),
+                    evidence_hash: None,
                     digest: Some(payload.proof_hash.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2299,6 +2310,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::Submission,
                     artifact_id: payload.submission_artifact_id.clone(),
+                    evidence_hash: None,
                     digest: Some(payload.submission_hash.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2313,6 +2325,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::SubmissionUnknownEvidence,
                     artifact_id: payload.evidence_artifact_id.clone(),
+                    evidence_hash: None,
                     digest: Some(payload.evidence_hash.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2327,6 +2340,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::Receipt,
                     artifact_id: payload.receipt_artifact_id.clone(),
+                    evidence_hash: None,
                     digest: Some(payload.receipt_hash.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2344,6 +2358,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::Confirmation,
                     artifact_id: payload.confirmation_artifact_id.clone(),
+                    evidence_hash: None,
                     digest: Some(payload.confirmation_hash.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2361,6 +2376,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::AmbiguityEvidence,
                     artifact_id: payload.evidence_artifact_id.clone(),
+                    evidence_hash: None,
                     digest: Some(payload.evidence_hash.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2387,6 +2403,7 @@ pub mod v1 {
                     requirements.push(EventArtifactRequirement {
                         source: EventArtifactReferenceSource::RetentionRef,
                         artifact_id: retention_ref.artifact_id.clone(),
+                        evidence_hash: Some(retention_ref.evidence_hash.clone()),
                         digest: Some(retention_ref.content_digest.clone()),
                         byte_len: None,
                         media_type: None,
@@ -2402,6 +2419,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::RetentionManifest,
                     artifact_id: payload.manifest_artifact_id.clone(),
+                    evidence_hash: None,
                     digest: Some(payload.manifest_digest.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2435,6 +2453,7 @@ pub mod v1 {
         requirements.push(EventArtifactRequirement {
             source,
             artifact_id: evidence.artifact_id.clone(),
+            evidence_hash: None,
             digest: Some(evidence.content_digest.clone()),
             byte_len: Some(evidence.byte_len),
             media_type: Some(evidence.media_type.clone()),
@@ -2456,6 +2475,7 @@ pub mod v1 {
         requirements.push(EventArtifactRequirement {
             source,
             artifact_id: evidence.artifact_id.clone(),
+            evidence_hash: None,
             digest: Some(evidence.content_digest.clone()),
             byte_len: Some(evidence.byte_len),
             media_type: Some(evidence.media_type.clone()),
@@ -2474,6 +2494,7 @@ pub mod v1 {
         requirements.push(EventArtifactRequirement {
             source: EventArtifactReferenceSource::ResourceTouchedSet,
             artifact_id: evidence.evidence_artifact_id.clone(),
+            evidence_hash: None,
             digest: Some(evidence.evidence_hash.clone()),
             byte_len: None,
             media_type: None,
@@ -2737,6 +2758,8 @@ pub mod v1 {
         pub artifact_id: ArtifactId,
         /// Artifact role retained.
         pub role: ArtifactRole,
+        /// Exact canonical artifact evidence identity retained.
+        pub evidence_hash: ContentDigest,
         /// Artifact content digest.
         pub content_digest: ContentDigest,
     }
@@ -3951,6 +3974,11 @@ pub mod v1 {
                 vec![
                     schema_field("artifact_id", "ArtifactId", EventFieldCardinality::Required),
                     schema_field("role", "ArtifactRole", EventFieldCardinality::Required),
+                    schema_field(
+                        "evidence_hash",
+                        "ContentDigest",
+                        EventFieldCardinality::Required,
+                    ),
                     schema_field(
                         "content_digest",
                         "ContentDigest",

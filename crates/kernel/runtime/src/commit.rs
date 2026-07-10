@@ -468,7 +468,7 @@ impl CommitPlanner {
                 input.runtime_spec,
                 input.run_id,
                 manifest,
-            ));
+            )?);
         }
         payloads.extend(staged_artifact_reference_payloads(
             input.runtime_spec.spec_hash(),
@@ -645,7 +645,7 @@ impl CommitPlanner {
                     events::RetentionRefsAppended {
                         run_id: input.run_id.clone(),
                         spec_hash: input.runtime_spec.spec_hash().clone(),
-                        refs: vec![artifact.evidence.retention_ref()],
+                        refs: vec![artifact.evidence.retention_ref()?],
                         reason: events::RetentionReason::RuntimeEvidence,
                     },
                 ));
@@ -939,6 +939,14 @@ fn retained_fact_artifact_evidence_for_requirement(
                 .projections
                 .fact_descriptor(descriptor_hash)
                 .filter(|descriptor| descriptor.descriptor_artifact_id == requirement.artifact_id)
+                .filter(|descriptor| {
+                    requirement.evidence_hash.as_ref().is_some_and(|expected| {
+                        descriptor
+                            .descriptor_artifact_evidence
+                            .evidence_hash()
+                            .is_ok_and(|actual| &actual == expected)
+                    })
+                })
             else {
                 return Ok(None);
             };
@@ -953,10 +961,17 @@ fn retained_fact_artifact_evidence_for_requirement(
                         .digest
                         .as_ref()
                         .is_some_and(|digest| index.response_hash == *digest)
+                    && requirement
+                        .evidence_hash
+                        .as_ref()
+                        .is_some_and(|evidence_hash| index.artifact_evidence_hash == *evidence_hash)
             })
             .and_then(|(claim_id, _index)| {
                 let record = view.projections.fact_record(claim_id)?;
-                record.response_artifact_evidence.clone()
+                let evidence = record.response_artifact_evidence.as_ref()?;
+                let evidence_hash = evidence.evidence_hash().ok()?;
+                (requirement.evidence_hash.as_ref() == Some(&evidence_hash))
+                    .then(|| evidence.clone())
             })),
         _ => Ok(None),
     }
@@ -1392,9 +1407,9 @@ pub(crate) fn retention_manifest_payloads(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
     manifest: RetentionManifestArtifact,
-) -> Vec<events::KernelEventPayload> {
-    let manifest_ref = manifest.evidence.retention_ref();
-    vec![
+) -> Result<Vec<events::KernelEventPayload>> {
+    let manifest_ref = manifest.evidence.retention_ref()?;
+    Ok(vec![
         events::KernelEventPayload::RetentionManifestProjected(
             events::RetentionManifestProjected {
                 run_id: run_id.clone(),
@@ -1411,7 +1426,7 @@ pub(crate) fn retention_manifest_payloads(
             refs: vec![manifest_ref],
             reason: events::RetentionReason::ManifestProjection,
         }),
-    ]
+    ])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1968,6 +1983,10 @@ fn artifact_evidence_for_retention_ref<'a>(
         artifact.artifact_id == retention_ref.artifact_id
             && artifact.digest == retention_ref.content_digest
             && artifact.artifact_role == retention_ref.role
+            && artifact
+                .evidence_hash()
+                .ok()
+                .is_some_and(|evidence_hash| evidence_hash == retention_ref.evidence_hash)
     })
 }
 

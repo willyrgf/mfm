@@ -142,7 +142,7 @@ async fn run_read(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutp
     let output_artifact = artifacts.state_output(&fact)?;
     let mut output = RunnerOutputBuilder::new(&ctx);
     output.stage_attempt_artifact(&output_artifact)?;
-    output.retain_runtime_evidence(&output_artifact);
+    output.retain_runtime_evidence(&output_artifact)?;
     output.payload(payloads.cell_produced(&output_artifact)?);
     Ok(output.finish())
 }
@@ -381,7 +381,7 @@ async fn run_assemble(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunner
     let artifact = artifacts.state_output(&output)?;
     let mut runner_output = RunnerOutputBuilder::new(&ctx);
     runner_output.stage_attempt_artifact(&artifact)?;
-    runner_output.retain_runtime_evidence(&artifact);
+    runner_output.retain_runtime_evidence(&artifact)?;
     runner_output.payload(payloads.cell_produced(&artifact)?);
     Ok(runner_output.finish())
 }

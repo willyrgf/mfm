@@ -1817,13 +1817,35 @@ fn retention_refs_appended_with_reason(
     role: ArtifactRole,
     reason: events::RetentionReason,
 ) -> KernelEventPayload {
+    let evidence_hash = store_artifact_ref(artifact_id.clone(), digest.clone(), role)
+        .evidence_hash()
+        .expect("retention evidence hash");
     KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
         run_id,
         spec_hash: spec_hash(1),
         refs: vec![events::RetentionRef {
             artifact_id,
             role,
+            evidence_hash,
             content_digest: digest,
+        }],
+        reason,
+    })
+}
+
+fn retention_refs_appended_for_evidence(
+    run_id: RunId,
+    evidence: &ArtifactEvidenceRef,
+    reason: events::RetentionReason,
+) -> KernelEventPayload {
+    KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
+        run_id,
+        spec_hash: spec_hash(1),
+        refs: vec![events::RetentionRef {
+            artifact_id: evidence.artifact_id.clone(),
+            role: evidence.artifact_role,
+            evidence_hash: evidence.evidence_hash().expect("retention evidence hash"),
+            content_digest: evidence.digest.clone(),
         }],
         reason,
     })
@@ -2132,11 +2154,10 @@ fn retention_artifact_bundle(
         run_id.clone(),
         StreamSeq::new(seq).expect("seq"),
         CommitKey::new(commit_key).expect("commit key"),
-        vec![retention_refs_appended(
+        vec![retention_refs_appended_for_evidence(
             run_id,
-            evidence.artifact_id.clone(),
-            evidence.digest.clone(),
-            evidence.artifact_role,
+            &evidence,
+            events::RetentionReason::RuntimeEvidence,
         )],
         vec![evidence.clone()],
         preconditions,
@@ -3211,11 +3232,9 @@ async fn artifact_authority_accepts_distinct_evidence_for_same_artifact_id() {
         run.clone(),
         store.expected_next_seq(&run).await.expect("next seq"),
         CommitKey::new("same-id-second-evidence").expect("commit key"),
-        vec![retention_refs_appended_with_reason(
+        vec![retention_refs_appended_for_evidence(
             run.clone(),
-            artifact,
-            digest,
-            ArtifactRole::StateOutput,
+            &second_evidence,
             events::RetentionReason::PublicOutput,
         )],
         vec![second_evidence.clone()],
@@ -3228,6 +3247,15 @@ async fn artifact_authority_accepts_distinct_evidence_for_same_artifact_id() {
     append_prepared(&store, second_request, vec![second_evidence])
         .await
         .expect("append second evidence for same artifact id");
+
+    let rows = sqlx::query(
+        "SELECT evidence_hash FROM artifact_admissions WHERE artifact_id = $1 ORDER BY evidence_hash",
+    )
+    .bind(artifact.as_str())
+    .fetch_all(&store.pool)
+    .await
+    .expect("retained evidence rows");
+    assert_eq!(rows.len(), 2);
 
     drop_schema(&store, &schema).await;
 }

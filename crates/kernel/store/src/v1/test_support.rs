@@ -65,6 +65,7 @@ pub fn fact_descriptor_projection_fixture_for_test(
     let descriptor_requirement = events::EventArtifactRequirement {
         source: events::EventArtifactReferenceSource::FactDescriptor,
         artifact_id: descriptor_artifact_id.clone(),
+        evidence_hash: Some(descriptor_evidence.evidence_hash()?),
         digest: Some(descriptor_hash.clone()),
         byte_len: Some(descriptor_bytes.len() as u64),
         media_type: Some(media_type),
@@ -394,6 +395,7 @@ pub fn seed_platform_holding_facts_for_test(
         let response_requirement = events::EventArtifactRequirement {
             source: events::EventArtifactReferenceSource::FactResponse,
             artifact_id: response_evidence.artifact_id.clone(),
+            evidence_hash: Some(response_evidence.evidence_hash()?),
             digest: Some(response_evidence.digest.clone()),
             byte_len: Some(response_evidence.byte_len),
             media_type: Some(response_evidence.media_type.clone()),

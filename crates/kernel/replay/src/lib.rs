@@ -998,23 +998,28 @@ pub mod v1 {
             &self,
             requirement: &store::EventArtifactRequirement,
         ) -> Result<ArtifactReplayEvidence> {
-            let evidence = self
-                .artifacts
-                .values()
-                .find(|evidence| {
+            let evidence = if let Some(evidence_hash) = &requirement.evidence_hash {
+                self.artifacts
+                    .get(&(requirement.artifact_id.clone(), evidence_hash.clone()))
+            } else {
+                self.artifacts.values().find(|evidence| {
                     store::validate_artifact_requirement_against_evidence(requirement, evidence)
                         .is_ok()
                 })
-                .cloned()
-                .ok_or_else(|| {
-                    ReplayError::new(
-                        ReplayErrorKind::ArtifactMissing,
-                        format!(
-                            "missing replay-authorized artifact evidence for {}",
-                            requirement.artifact_id
-                        ),
-                    )
-                })?;
+            }
+            .cloned()
+            .ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::ArtifactMissing,
+                    format!(
+                        "missing replay-authorized artifact evidence for {}",
+                        requirement.artifact_id
+                    ),
+                )
+            })?;
+            store::validate_artifact_requirement_against_evidence(requirement, &evidence).map_err(
+                |error| artifact_requirement_replay_error(error, "artifact evidence mismatch"),
+            )?;
             Ok(ArtifactReplayEvidence {
                 artifact_bytes: self.artifact_bytes(&evidence.artifact_id)?.to_vec(),
                 artifact: evidence,
@@ -3043,6 +3048,17 @@ pub mod v1 {
                     ),
                 ));
             }
+            if requirement.source == store::EventArtifactReferenceSource::RetentionRef
+                && requirement.evidence_hash.is_none()
+            {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::InvalidRunStream,
+                    format!(
+                        "retention requirement for {} does not carry an evidence hash",
+                        requirement.artifact_id
+                    ),
+                ));
+            }
             if requirement.artifact_role.is_none() && requirement.schema_id.is_none() {
                 return Err(ReplayError::new(
                     ReplayErrorKind::InvalidRunStream,
@@ -3069,23 +3085,28 @@ pub mod v1 {
                     ),
                 ));
             }
-            let evidence = self
-                .retained_artifacts
-                .values()
-                .find(|evidence| {
+            let evidence = if let Some(evidence_hash) = &requirement.evidence_hash {
+                self.retained_artifacts
+                    .get(&(requirement.artifact_id.clone(), evidence_hash.clone()))
+            } else {
+                self.retained_artifacts.values().find(|evidence| {
                     store::validate_artifact_requirement_against_evidence(requirement, evidence)
                         .is_ok()
                 })
-                .ok_or_else(|| {
-                    ReplayError::new(
-                        ReplayErrorKind::ArtifactMissing,
-                        format!(
-                            "missing retained artifact evidence for {}",
-                            requirement.artifact_id
-                        ),
-                    )
-                })?;
+            }
+            .ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::ArtifactMissing,
+                    format!(
+                        "missing retained artifact evidence for {}",
+                        requirement.artifact_id
+                    ),
+                )
+            })?;
             let evidence = evidence.clone();
+            store::validate_artifact_requirement_against_evidence(requirement, &evidence).map_err(
+                |error| artifact_requirement_replay_error(error, "artifact evidence mismatch"),
+            )?;
             self.insert_authorized_artifact(evidence.clone())?;
             Ok(evidence)
         }
@@ -3554,6 +3575,7 @@ pub mod v1 {
         let requirement = store::EventArtifactRequirement {
             source: store::EventArtifactReferenceSource::ArtifactReferenced,
             artifact_id: evidence.artifact_id.clone(),
+            evidence_hash: None,
             digest: Some(digest.clone()),
             byte_len: None,
             media_type: None,

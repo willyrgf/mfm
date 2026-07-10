@@ -699,6 +699,7 @@ where
             let requirement = store::EventArtifactRequirement {
                 source: store::EventArtifactReferenceSource::ArtifactReferenced,
                 artifact_id: request.artifact_id().clone(),
+                evidence_hash: None,
                 digest: request.digest().cloned(),
                 byte_len: request.byte_len(),
                 media_type: request.media_type().cloned(),
@@ -2629,6 +2630,7 @@ fn diagnostic_artifact_requirement(
     store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::ArtifactReferenced,
         artifact_id: reference.artifact_id.clone(),
+        evidence_hash: None,
         digest: Some(reference.content_digest.clone()),
         byte_len: Some(reference.byte_len),
         media_type: Some(reference.media_type.clone()),
@@ -2972,6 +2974,7 @@ fn evm_contract_profile_artifact_requirement(
         artifact_id: reference
             .artifact_id()
             .map_err(|_| certified_evm_context_artifact_error())?,
+        evidence_hash: None,
         digest: Some(
             reference
                 .content_digest()
@@ -3457,6 +3460,7 @@ fn run_artifact_requirement(
     store::EventArtifactRequirement {
         source,
         artifact_id: expected.artifact_id.clone(),
+        evidence_hash: None,
         digest: Some(expected.content_digest.clone()),
         byte_len: Some(expected.byte_len),
         media_type: Some(expected.media_type.clone()),
@@ -3474,6 +3478,7 @@ fn artifact_referenced_artifact_requirement(
     store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::ArtifactReferenced,
         artifact_id: payload.artifact_ref.artifact_id.clone(),
+        evidence_hash: None,
         digest: Some(payload.artifact_ref.content_digest.clone()),
         byte_len: Some(payload.artifact_ref.byte_len),
         media_type: Some(payload.artifact_ref.media_type.clone()),
@@ -3491,6 +3496,7 @@ fn config_ref_artifact_requirement(
     store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::RunConfig,
         artifact_id: config_ref.artifact_id.clone(),
+        evidence_hash: None,
         digest: Some(config_ref.digest.clone()),
         byte_len: Some(config_ref.byte_len),
         media_type: Some(config_ref.media_type.clone()),
@@ -3509,6 +3515,7 @@ fn seed_artifact_requirement(
     store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::SeedCell,
         artifact_id: evidence.artifact_id.clone(),
+        evidence_hash: None,
         digest: Some(evidence.digest.clone()),
         byte_len: Some(evidence.byte_len),
         media_type: Some(evidence.media_type.clone()),
@@ -3524,6 +3531,7 @@ fn seed_cell_artifact_requirement(cell: &events::SeedCellRef) -> store::EventArt
     store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::SeedCell,
         artifact_id: cell.seed_artifact.artifact_id.clone(),
+        evidence_hash: None,
         digest: Some(cell.seed_artifact.content_digest.clone()),
         byte_len: Some(cell.seed_artifact.byte_len),
         media_type: Some(cell.seed_artifact.media_type.clone()),
@@ -3551,6 +3559,7 @@ fn public_output_cell_artifact_requirement(
     store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::PublicOutputCell,
         artifact_id: cell.artifact_id.clone(),
+        evidence_hash: None,
         digest: Some(cell.content_digest.clone()),
         byte_len: None,
         media_type: None,
@@ -3571,6 +3580,7 @@ fn public_output_rendered_artifact_requirement(
     store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::PublicOutputRendered,
         artifact_id: artifact_id.clone(),
+        evidence_hash: None,
         digest: Some(rendered_digest.clone()),
         byte_len: None,
         media_type: Some(media_type),

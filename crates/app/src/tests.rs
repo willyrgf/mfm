@@ -840,6 +840,7 @@ async fn retained_artifact_adapter_preserves_read_request_expectations() {
     let expected = store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::ArtifactReferenced,
         artifact_id: config_ref.artifact_id.clone(),
+        evidence_hash: None,
         digest: Some(config_ref.digest.clone()),
         byte_len: Some(config_ref.byte_len),
         media_type: Some(config_ref.media_type.clone()),

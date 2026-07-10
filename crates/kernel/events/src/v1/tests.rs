@@ -791,7 +791,7 @@ mfm.events.v1.state_attempt_interrupted schema:mfm.events.v1.state_attempt_inter
 mfm.events.v1.state_attempt_failed schema:mfm.events.v1.state_attempt_failed:1:sha256-jcs-v1:a4377ac2f1d80a225ee915796e69afe13f23f3f5b4eb5a7ea513e17caa487d1b [StateAttemptFailureDiagnostic]
 mfm.events.v1.manual_resolution_recorded schema:mfm.events.v1.manual_resolution_recorded:1:sha256-jcs-v1:b2b4122abfda77f0a8d087ea929189cd7735ea3e2ffa963e2f600e4ae74c0293 [ManualResolutionEvidence,ManualResolutionAuthorization]
 mfm.events.v1.run_completed schema:mfm.events.v1.run_completed:1:sha256-jcs-v1:cda37495cb3c733164ce1a91f58ff6d27bdcfbf9b1f9efe5a7fd48ae68eba479 []
-mfm.events.v1.retention_refs_appended schema:mfm.events.v1.retention_refs_appended:1:sha256-jcs-v1:6aa88032678cc64b14e4854ba28d15e95fd78246f9a4a1028d3781a55fb2987e [RetentionRef]
+mfm.events.v1.retention_refs_appended schema:mfm.events.v1.retention_refs_appended:1:sha256-jcs-v1:663bf5ae092bdd865cac27fa22de22186cf13a7de88d6db60a1139519faa187e [RetentionRef]
 mfm.events.v1.retention_manifest_projected schema:mfm.events.v1.retention_manifest_projected:1:sha256-jcs-v1:269a96fc12c7c5004aa4592139f84cd0e4b617e04e494522ce639aeae0b9fed1 [RetentionManifest]"#
     );
 }
@@ -842,7 +842,7 @@ mfm_events::v1::StateAttemptInterrupted schema:mfm.events.v1.state_attempt_inter
 mfm_events::v1::StateAttemptFailed schema:mfm.events.v1.state_attempt_failed:1:sha256-jcs-v1:a4377ac2f1d80a225ee915796e69afe13f23f3f5b4eb5a7ea513e17caa487d1b
 mfm_events::v1::ManualResolutionRecorded schema:mfm.events.v1.manual_resolution_recorded:1:sha256-jcs-v1:b2b4122abfda77f0a8d087ea929189cd7735ea3e2ffa963e2f600e4ae74c0293
 mfm_events::v1::RunCompleted schema:mfm.events.v1.run_completed:1:sha256-jcs-v1:cda37495cb3c733164ce1a91f58ff6d27bdcfbf9b1f9efe5a7fd48ae68eba479
-mfm_events::v1::RetentionRefsAppended schema:mfm.events.v1.retention_refs_appended:1:sha256-jcs-v1:6aa88032678cc64b14e4854ba28d15e95fd78246f9a4a1028d3781a55fb2987e
+mfm_events::v1::RetentionRefsAppended schema:mfm.events.v1.retention_refs_appended:1:sha256-jcs-v1:663bf5ae092bdd865cac27fa22de22186cf13a7de88d6db60a1139519faa187e
 mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manifest_projected:1:sha256-jcs-v1:269a96fc12c7c5004aa4592139f84cd0e4b617e04e494522ce639aeae0b9fed1"#
     );
 }
@@ -1340,6 +1340,7 @@ fn artifact_requirement_accessor_covers_artifact_bearing_variants() {
                 refs: vec![RetentionRef {
                     artifact_id: artifact_id(171),
                     role: ArtifactRole::FactResponse,
+                    evidence_hash: content_digest(172),
                     content_digest: content_digest(172),
                 }],
                 reason: RetentionReason::RuntimeEvidence,

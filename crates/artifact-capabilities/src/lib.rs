@@ -390,6 +390,7 @@ pub fn fact_response_artifact_requirement(
     store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::FactResponse,
         artifact_id: fact_ref.artifact_id().clone(),
+        evidence_hash: Some(fact_ref.artifact_evidence_hash().clone()),
         digest: Some(fact_ref.response_hash().clone()),
         byte_len: None,
         media_type: None,

@@ -173,20 +173,24 @@ fn apply_run_admitted_base(
         .retentions
         .entry(payload.run_id.clone())
         .or_default();
-    insert_run_admission_retention(retention, &payload.spec_artifact);
-    insert_run_admission_retention(retention, &payload.certificate_artifact);
+    insert_run_admission_retention(retention, &payload.spec_artifact)?;
+    insert_run_admission_retention(retention, &payload.certificate_artifact)?;
     for artifact in &payload.config_artifacts {
-        insert_run_admission_retention(retention, artifact);
+        insert_run_admission_retention(retention, artifact)?;
     }
     for seed in &payload.seed_cells {
-        retention.refs.insert(
-            seed.seed_artifact.artifact_id.clone(),
-            events::RetentionRef {
-                artifact_id: seed.seed_artifact.artifact_id.clone(),
-                role: seed.seed_artifact.role,
-                content_digest: seed.seed_artifact.content_digest.clone(),
-            },
-        );
+        let evidence = ArtifactEvidenceRef {
+            artifact_id: seed.seed_artifact.artifact_id.clone(),
+            digest: seed.seed_artifact.content_digest.clone(),
+            byte_len: seed.seed_artifact.byte_len,
+            media_type: seed.seed_artifact.media_type.clone(),
+            schema_id: Some(seed.seed_artifact.schema_id.clone()),
+            semantic_type_id: seed.seed_artifact.semantic_type_id.clone(),
+            producer_node_id: None,
+            producer_seed_id: Some(seed.seed_id.clone()),
+            artifact_role: seed.seed_artifact.role,
+        };
+        insert_retention_evidence(retention, evidence)?;
     }
     Ok(())
 }
@@ -225,15 +229,21 @@ fn validate_run_admitted_identity(run_id: &RunId, payload: &events::RunAdmitted)
 fn insert_run_admission_retention(
     retention: &mut RetentionProjection,
     artifact: &events::RunArtifactEvidenceRef,
-) {
-    retention.refs.insert(
-        artifact.artifact_id.clone(),
-        events::RetentionRef {
-            artifact_id: artifact.artifact_id.clone(),
-            role: artifact.role,
-            content_digest: artifact.content_digest.clone(),
-        },
+) -> Result<()> {
+    insert_retention_evidence(retention, ArtifactEvidenceRef::from_run_artifact(artifact))
+}
+
+fn insert_retention_evidence(
+    retention: &mut RetentionProjection,
+    evidence: ArtifactEvidenceRef,
+) -> Result<()> {
+    let retention_ref = evidence.retention_ref()?;
+    let key = (
+        retention_ref.artifact_id.clone(),
+        retention_ref.evidence_hash.clone(),
     );
+    retention.refs.insert(key, retention_ref);
+    Ok(())
 }
 
 fn apply_run_completed(
@@ -1122,9 +1132,13 @@ fn apply_retention_refs_appended(
         .entry(payload.run_id.clone())
         .or_default();
     for retention_ref in &payload.refs {
-        retention
-            .refs
-            .insert(retention_ref.artifact_id.clone(), retention_ref.clone());
+        retention.refs.insert(
+            (
+                retention_ref.artifact_id.clone(),
+                retention_ref.evidence_hash.clone(),
+            ),
+            retention_ref.clone(),
+        );
     }
     Ok(())
 }

@@ -695,12 +695,13 @@ impl ArtifactEvidenceRef {
     }
 
     /// Converts this exact artifact evidence into a retention reference.
-    pub fn retention_ref(&self) -> events::RetentionRef {
-        events::RetentionRef {
+    pub fn retention_ref(&self) -> Result<events::RetentionRef> {
+        Ok(events::RetentionRef {
             artifact_id: self.artifact_id.clone(),
             role: self.artifact_role,
+            evidence_hash: self.evidence_hash()?,
             content_digest: self.digest.clone(),
-        }
+        })
     }
 }
 
@@ -4454,8 +4455,8 @@ pub enum PublicOutputProjection {
 /// Retention projection derived from committed run events.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RetentionProjection {
-    /// Retained artifact refs by artifact id.
-    pub refs: BTreeMap<ArtifactId, events::RetentionRef>,
+    /// Retained artifact refs by exact `(artifact_id, evidence_hash)` authority.
+    pub refs: BTreeMap<ArtifactAuthorityKey, events::RetentionRef>,
     /// Projected retention manifests by manifest sequence.
     pub manifests: BTreeMap<u64, RetentionManifestProjection>,
     /// Last retention manifest projected for this run.
@@ -6950,8 +6951,9 @@ impl AsyncInMemoryRunStore {
         store.projections = projection;
         for artifact in retained_artifacts {
             let evidence = artifact.evidence().clone();
+            let evidence_hash = evidence.evidence_hash()?;
             store.artifact_bytes.insert(
-                (evidence.artifact_id.clone(), evidence.digest.clone()),
+                (evidence.artifact_id.clone(), evidence_hash),
                 (artifact.into_bytes(), evidence),
             );
         }
@@ -7305,6 +7307,15 @@ impl RetainedArtifactReadProvider for AsyncInMemoryRunStore {
         requirement: &'a EventArtifactRequirement,
     ) -> RetainedArtifactReadFuture<'a> {
         let result = self.lock_inner().and_then(|store| {
+            if let Some(evidence_hash) = &requirement.evidence_hash {
+                let key = (requirement.artifact_id.clone(), evidence_hash.clone());
+                let Some((bytes, evidence)) = store.artifact_bytes.get(&key) else {
+                    return Err(StoreError::MissingArtifact {
+                        artifact_id: requirement.artifact_id.clone(),
+                    });
+                };
+                return VerifiedRunArtifactBytes::new(bytes.clone(), evidence.clone(), requirement);
+            }
             let mut saw_mismatch = false;
             for ((artifact_id, _), (bytes, evidence)) in &store.artifact_bytes {
                 if artifact_id != &requirement.artifact_id {
@@ -7953,6 +7964,14 @@ pub fn validate_artifact_requirement_against_evidence(
         evidence.artifact_id.as_str(),
         requirement.artifact_id.as_str(),
     )?;
+    if let Some(expected_evidence_hash) = &requirement.evidence_hash {
+        compare_artifact_field(
+            &requirement.artifact_id,
+            "evidence_hash",
+            evidence.evidence_hash()?.as_str(),
+            expected_evidence_hash.as_str(),
+        )?;
+    }
     if let Some(digest) = &requirement.digest {
         compare_artifact_field(
             &requirement.artifact_id,
@@ -11023,6 +11042,7 @@ fn parse_retention_ref(json: &serde_json::Value) -> Result<events::RetentionRef>
     Ok(events::RetentionRef {
         artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
         role: decode_artifact_role_tag(required_str(json, "role")?)?,
+        evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
         content_digest: parse_identity(required_str(json, "content_digest")?)?,
     })
 }
@@ -12324,6 +12344,7 @@ pub fn retention_ref_json(retention_ref: &events::RetentionRef) -> serde_json::V
     serde_json::json!({
         "artifact_id": retention_ref.artifact_id.as_str(),
         "content_digest": retention_ref.content_digest.as_str(),
+        "evidence_hash": retention_ref.evidence_hash.as_str(),
         "role": retention_ref.role.as_str(),
     })
 }
