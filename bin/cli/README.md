@@ -610,10 +610,10 @@ each entry has `node_id`, `attempt_id`, `disposition` (`started`, `completed`, `
 `interrupted`), and status-specific fields such as `attempt_no`, `retryable`, `error_code`, or
 `output_cell_id`. Failed portfolio SelectHoldings / assembly attempts surface domain codes in the
 failed attempt disposition and the stream event reference (`error_code`), not soft snapshot fields.
-Cutover domain codes include
-`missing_fact`, `no_common_network_anchor`, `unsupported_requirement`, `ambiguous_facts`, and
-`inconsistent_network_anchors`. Generic runtime classes such as `runner_output_invalid` remain for
-non-domain runner failures. `scheduler_status` is read-only `observed` for `run status`;
+Product cutover domain codes are the closed set
+`missing_fact`, `no_common_network_anchor`, `unsupported_requirement`, and `ambiguous_facts`.
+`inconsistent_network_anchors` is a residual hard-fail guard (not a product soft path). Generic
+runtime classes such as `runner_output_invalid` remain for non-domain runner failures. `scheduler_status` is read-only `observed` for `run status`;
 start/resume responses set it to `observed` when an already-terminal run needs no scheduler
 dispatch, otherwise `advanced`, `blocked`, `public_output_projected`, `execution_claim_busy`, or
 `execution_claim_lost` according to the app dispatch loop and claim-coordination outcome. Manual

@@ -371,8 +371,13 @@ they are read models, not authority.
 Production deployments must give the Postgres run store a dedicated MFM database tenancy. List/watch
 cursors order committed `commits` rows by the durable store-owned `store_commit_order` coordinate;
 the coordinate is assigned within the append transaction and advances only with a successful commit.
-Cursor epochs and artifact cleanup have no public v1 maintenance entry points; any future maintenance
-role must first specify Postgres roles, ownership, credentials, and restore/clone runbooks.
+Run-local validation, artifact verification, and projection rebuild complete before the process
+acquires the global `store_commit_order` row lock (`SELECT … FOR UPDATE`). That lock is then held
+until commit so order assignment and durable append materialization stay atomic. Cross-run contention
+on the remainder of the transaction is accepted for correctness; multi-transaction order allocation
+is not used. Cursor epochs and artifact cleanup have no public v1 maintenance entry points; any
+future maintenance role must first specify Postgres roles, ownership, credentials, and restore/clone
+runbooks.
 
 v1 has two operational lane uses:
 

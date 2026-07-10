@@ -248,7 +248,7 @@ Normative sequence for report fact selection:
 ```text
 compile canonical fact query plan (from certified report config + subject projection + policy)
   -> FactIndexRead (Platform audience) over the requirement set
-  -> authenticated receipt + trust root + selection evidence
+  -> authenticated receipt + selection evidence (trust root is process/store authority, not response payload)
   -> hydrate retained FactResponse artifact(s)
   -> validate selection cardinality and acceptability
   -> SelectHoldings (network-coherent policy over full acceptable candidate sets)
