@@ -60,6 +60,89 @@ pub async fn start_portfolio_rpc_mock(expected_chain_id: u64) -> String {
     format!("http://{addr}")
 }
 
+/// Starts one JSON-RPC mock serving the EVM and Bitcoin calls used by the production collector
+/// registry integration test.
+pub async fn start_collectors_rpc_mock() -> String {
+    let app = axum::Router::new().route("/", axum::routing::post(collectors_rpc_handler));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind collector rpc mock");
+    let addr = listener.local_addr().expect("collector rpc mock addr");
+    listener
+        .set_nonblocking(true)
+        .expect("set collector rpc mock nonblocking");
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("collector rpc mock runtime");
+        runtime.block_on(async move {
+            let listener =
+                tokio::net::TcpListener::from_std(listener).expect("tokio collector rpc listener");
+            axum::serve(listener, app)
+                .await
+                .expect("collector rpc mock serve");
+        });
+    });
+    format!("http://{addr}")
+}
+
+async fn collectors_rpc_handler(
+    axum::Json(request): axum::Json<serde_json::Value>,
+) -> axum::Json<serde_json::Value> {
+    let id = request
+        .get("id")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!(1));
+    let method = request
+        .get("method")
+        .and_then(|value| value.as_str())
+        .expect("collector json-rpc method");
+    let result = match method {
+        "eth_chainId" => serde_json::json!("0x1"),
+        "web3_clientVersion" => serde_json::json!("mfm-test-rpc"),
+        "eth_getBlockByNumber" => serde_json::json!({
+            "number": format!("0x{:x}", 21_000_000u64),
+            "hash": format!("0x{}", "cd".repeat(32))
+        }),
+        "eth_getBlockByHash" => serde_json::json!({
+            "number": format!("0x{:x}", 21_000_000u64),
+            "hash": format!("0x{}", "cd".repeat(32))
+        }),
+        "eth_getBalance" => serde_json::json!("0xde0b6b3a7640000"),
+        "getblockchaininfo" => serde_json::json!({
+            "blocks": 850_100u64,
+            "bestblockhash": "abababababababababababababababababababababababababababababababab",
+            "chain": "main",
+            "initialblockdownload": false
+        }),
+        "getblockhash" => {
+            serde_json::json!("abababababababababababababababababababababababababababababababab")
+        }
+        "getblockheader" => serde_json::json!({
+            "hash": "abababababababababababababababababababababababababababababababab",
+            "height": 850_100u64,
+            "time": 1_720_000_000u64
+        }),
+        "scantxoutset" => serde_json::json!({
+            "success": true,
+            "height": 850_100u64,
+            "bestblock": "abababababababababababababababababababababababababababababababab",
+            "total_amount": 0.001
+        }),
+        other => {
+            return axum::Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": -32601, "message": format!("unsupported test method {other}") }
+            }));
+        }
+    };
+    axum::Json(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result
+    }))
+}
+
 async fn portfolio_rpc_handler(
     axum::extract::State(expected_chain_id): axum::extract::State<u64>,
     axum::Json(request): axum::Json<serde_json::Value>,
@@ -126,6 +209,26 @@ entry_id = {entry_id}
         ));
     }
     std::fs::write(&config_path, config).expect("write runtime config");
+    config_path
+}
+
+/// Writes a runtime config containing both collector routes for the production registry test.
+pub fn write_collectors_runtime_config_for_test(dir: &Path, rpc_url: &str) -> std::path::PathBuf {
+    let config_path = dir.join("runtime.toml");
+    let config = format!(
+        r#"
+[evm.sources.ethereum-mainnet]
+rpc_url = {rpc_url}
+
+[evm.routes.ethereum-mainnet]
+source_ref = "ethereum-mainnet"
+
+[btc.routes.public-bitcoin-core]
+rpc_url = {rpc_url}
+"#,
+        rpc_url = toml_string(rpc_url),
+    );
+    std::fs::write(&config_path, config).expect("write collector runtime config");
     config_path
 }
 

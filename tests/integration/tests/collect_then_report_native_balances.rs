@@ -28,7 +28,8 @@ use mfm_facts::FactAudience;
 use mfm_ids::RunId;
 use mfm_integration_tests::test_support::{
     prepare_entry_point_launch_for_store, prepare_portfolio_launch_for_store,
-    register_process_fact_capabilities, ProjectionFactIndexProvider,
+    register_process_fact_capabilities, start_collectors_rpc_mock,
+    write_collectors_runtime_config_for_test, ProjectionFactIndexProvider,
 };
 use mfm_store::v1::{
     AsyncInMemoryRunStore, ProjectionSnapshot, RetainedArtifactReadProvider, RunEventStore,
@@ -80,15 +81,16 @@ async fn evm_native_balance_collector_admits_platform_holding_fact() {
 async fn collect_then_report_completes_from_collector_written_platform_holdings() {
     let store = AsyncInMemoryRunStore::default();
     let fact_index = Arc::new(ProjectionFactIndexProvider::new(store.clone()));
-    let btc = Arc::new(MockBtcBalanceProvider::new());
-    let evm = Arc::new(MockEvmBalanceProvider::new());
+    let rpc_url = start_collectors_rpc_mock().await;
+    let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
+    let runtime_config_path =
+        write_collectors_runtime_config_for_test(runtime_config_dir.path(), &rpc_url);
 
-    // 1) Collect BTC then EVM natives through one production-equivalent registry.
-    let services = unified_collect_then_report_services(
+    // 1) Collect BTC then EVM natives through the actual production registry.
+    let services = production_collect_then_report_services(
         store.clone(),
-        btc.clone(),
-        evm.clone(),
         fact_index.clone(),
+        &runtime_config_path,
     );
     let btc_run = launch_btc_balance_collector(&services, &store, "collect-btc").await;
     assert_eq!(btc_run.run_mode, mfm_app::RunModeStatus::Completed);
@@ -107,8 +109,6 @@ async fn collect_then_report_completes_from_collector_written_platform_holdings(
     let projection = store.projection_snapshot().expect("after collect");
     assert_platform_holding_kind(&projection, "bitcoin.address_balance_snapshot", 1);
     assert_platform_holding_kind(&projection, "evm.address_native_balance_snapshot", 1);
-    assert!(btc.chain_head_calls() >= 1 && btc.balance_calls() >= 1);
-    assert!(evm.block_calls() >= 1 && evm.balance_calls() >= 1);
 
     // 2) Report-only portfolio_snapshot over admitted facts (no live chain in report).
     let prepared =
@@ -237,36 +237,18 @@ fn evm_collector_services(
     )
 }
 
-fn unified_collect_then_report_services(
+fn production_collect_then_report_services(
     store: AsyncInMemoryRunStore,
-    btc: Arc<MockBtcBalanceProvider>,
-    evm: Arc<MockEvmBalanceProvider>,
     fact_index: Arc<ProjectionFactIndexProvider>,
+    runtime_config_path: &std::path::Path,
 ) -> mfm_app::RunServices<AsyncInMemoryRunStore, AsyncInMemoryRunStore> {
     let receipt_trust_root = fact_index.receipt_trust_root();
-    let artifacts: Arc<dyn RetainedArtifactReadProvider> = Arc::new(store.clone());
-    let mut runners = mfm_runtime::ErasedRunnerRegistry::new();
-    register_process_fact_capabilities(&mut runners, fact_index.as_ref())
-        .expect("process fact capabilities");
-    mfm_adapters_btc_jsonrpc::register_btc_jsonrpc_runners(
-        &mut runners,
-        mfm_adapters_btc_jsonrpc::BtcJsonRpcRunnerCapabilities::new(
-            artifacts.clone(),
-            btc,
-            fact_index.clone(),
-        ),
+    let runners = mfm_app::production_runner_registry(
+        Arc::new(store.clone()),
+        fact_index,
+        Some(runtime_config_path),
     )
-    .expect("btc runners");
-    mfm_adapters_evm::register_evm_collectors_runners(
-        &mut runners,
-        mfm_adapters_evm::EvmRunnerCapabilities::new(artifacts.clone(), evm),
-    )
-    .expect("evm runners");
-    mfm_adapters_portfolio::register_portfolio_runners(
-        &mut runners,
-        mfm_adapters_portfolio::PortfolioRunnerCapabilities::new(artifacts, fact_index),
-    )
-    .expect("portfolio runners");
+    .expect("production runner registry");
     mfm_app::RunServices::new_with_certification_registry_and_fact_query_authority(
         mfm_runtime::SerialTypedScheduler::new(runners, Arc::new(store.clone())),
         store.clone(),

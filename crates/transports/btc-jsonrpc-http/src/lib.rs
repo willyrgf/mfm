@@ -42,7 +42,6 @@ use mfm_capabilities::{
 use mfm_ids::LocalPublicId;
 use reqwest::header::CONTENT_TYPE;
 use serde::{de, Deserialize, Deserializer, Serialize};
-use serde_json::value::RawValue;
 use tracing::debug;
 
 const SATOSHIS_PER_BTC: u64 = 100_000_000;
@@ -507,14 +506,13 @@ struct ScanTxOutSetResult {
 }
 
 #[derive(Deserialize)]
-struct ScanTxOutSetResultWire<'a> {
+struct ScanTxOutSetResultWire {
     success: bool,
     #[serde(default)]
     height: u64,
     #[serde(default)]
     bestblock: String,
-    #[serde(borrow)]
-    total_amount: &'a RawValue,
+    total_amount: serde_json::Value,
 }
 
 impl<'de> Deserialize<'de> for ScanTxOutSetResult {
@@ -524,7 +522,7 @@ impl<'de> Deserialize<'de> for ScanTxOutSetResult {
     {
         let wire = ScanTxOutSetResultWire::deserialize(deserializer)?;
         let total_amount_sats =
-            btc_amount_json_to_sats(wire.total_amount.get()).map_err(de::Error::custom)?;
+            btc_amount_json_to_sats(&wire.total_amount.to_string()).map_err(de::Error::custom)?;
         Ok(Self {
             success: wire.success,
             height: wire.height,
