@@ -6,6 +6,7 @@
 //! this crate owns request mapping, runner registration, fact recording, and recorded provider
 //! backends over replay evidence.
 
+use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -17,6 +18,7 @@ use mfm_btc_capabilities::{
     BtcChainHeadResponse, BtcFinality, BtcHeadKind, BtcNetworkId, BtcSourceBinding,
     BtcSourceIdentity, BtcSourceStatus, RedactedBtcSourceEvidence,
 };
+use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1 as events;
 use mfm_fact_capabilities::{
     FactIndexReadEvidence, FactIndexReadProvider, FactIndexReadResponse,
@@ -34,9 +36,10 @@ use mfm_runtime::{
 use mfm_states_btc::{
     address_balance_record_visibility, assemble_btc_address_balance_batch,
     btc_jsonrpc_adapter_kind, btc_jsonrpc_adapter_version, chain_head_fact_visibility,
-    collector_checkpoint_fact_visibility, AssembleBtcAddressBalanceBatchConfig,
-    AssembleBtcAddressBalanceBatchInput, AssembleBtcAddressBalanceBatchState,
-    BtcAddressBalanceObservation, BtcChainHeadObservation, BtcJointTip, CollectorCheckpointFact,
+    collector_checkpoint_fact_visibility, normalize_btc_address_balance_observation,
+    AssembleBtcAddressBalanceBatchConfig, AssembleBtcAddressBalanceBatchInput,
+    AssembleBtcAddressBalanceBatchState, BtcAddressBalanceObservation,
+    BtcAddressBalanceSnapshotFact, BtcChainHeadObservation, BtcJointTip, CollectorCheckpointFact,
     CollectorCheckpointResponse, LoadedCollectorCheckpoint, ObserveBtcAddressBalanceConfig,
     ObserveBtcAddressBalanceInput, ObserveBtcAddressBalanceState, ObserveBtcChainHeadConfig,
     ObserveBtcChainHeadInput, ObserveBtcChainHeadState, QueryCollectorCheckpointConfig,
@@ -45,7 +48,7 @@ use mfm_states_btc::{
     ResolveBtcJointTipInput, ResolveBtcJointTipState,
 };
 use mfm_store::v1 as store;
-use mfm_values::{MfmConfig, MfmValue};
+use mfm_values::{MfmConfig, MfmValue, NonEmpty};
 use serde::de::DeserializeOwned;
 
 const PURE_FACTORY: &str = "pure";
@@ -718,6 +721,7 @@ pub fn replay_loaded_checkpoint_from_evidence(
 /// Covers chain-head and address-balance observe states. A broker for another workflow is a
 /// valid no-op because the application replay registry invokes every domain verifier.
 pub fn verify_btc_jsonrpc_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
+    verify_btc_joint_tip_replay(broker)?;
     let chain_head_kind = ObserveBtcChainHeadState::kind().map_err(replay_adapter_error)?;
     let chain_head_version = ObserveBtcChainHeadState::version().map_err(replay_adapter_error)?;
     let chain_head_frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
@@ -735,7 +739,64 @@ pub fn verify_btc_jsonrpc_replay(broker: &replay::ReplayBroker) -> replay::Resul
     for frame in &balance_frames {
         verify_btc_address_balance_observation_replay(broker, frame)?;
     }
+    verify_btc_shared_joint_tips(broker, &balance_frames)?;
+    verify_btc_address_balance_batch_replay(broker)?;
+    Ok(())
+}
 
+fn verify_btc_shared_joint_tips(
+    broker: &replay::ReplayBroker,
+    frames: &[replay::ProducedCellReplayFrame],
+) -> replay::Result<()> {
+    let mut anchors = BTreeMap::<String, (u64, String)>::new();
+    for frame in frames {
+        let config: ObserveBtcAddressBalanceConfig = replay_node_config(broker, &frame.node)?;
+        let tip = replay_joint_tip_input(broker, &frame.node)?;
+        let anchor = (tip.block_height(), tip.block_hash().to_owned());
+        if anchors
+            .insert(config.network.clone(), anchor.clone())
+            .is_some_and(|existing| existing != anchor)
+        {
+            return Err(replay_btc_mismatch(
+                "Bitcoin same-network observations did not share one joint tip",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_btc_joint_tip_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
+    let state_kind = ResolveBtcJointTipState::kind().map_err(replay_adapter_error)?;
+    let state_version = ResolveBtcJointTipState::version().map_err(replay_adapter_error)?;
+    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
+        Ok(node.state_kind == state_kind && node.state_version == state_version)
+    })?;
+    for frame in &frames {
+        let config: ResolveBtcJointTipConfig = replay_node_config(broker, &frame.node)?;
+        let tip: BtcJointTip = decode_replay_value(frame)?;
+        if tip.network() != config.network
+            || tip.bitcoin_network() != config.bitcoin_network
+            || tip.semantic_source_identity() != config.semantic_source_identity
+            || tip.observed_bitcoin_network() != config.bitcoin_network
+            || tip.observed_source_status() != BtcSourceStatus::Synced.as_str()
+            || !tip.is_admissible_for_balance_write()
+        {
+            return Err(replay_btc_mismatch(
+                "Bitcoin joint-tip output did not match certified source binding",
+            ));
+        }
+        let expected = BtcJointTip::new(
+            config.network,
+            config.bitcoin_network,
+            config.semantic_source_identity,
+            tip.block_height(),
+            tip.block_hash(),
+            tip.observed_source_status(),
+            tip.observed_bitcoin_network(),
+        )
+        .map_err(replay_adapter_error)?;
+        ensure_canonical_value_matches(&expected, &frame.artifact_bytes)?;
+    }
     Ok(())
 }
 
@@ -758,40 +819,185 @@ fn verify_btc_address_balance_observation_replay(
     frame: &replay::ProducedCellReplayFrame,
 ) -> replay::Result<()> {
     let config: ObserveBtcAddressBalanceConfig = replay_node_config(broker, &frame.node)?;
+    let input_tip = replay_joint_tip_input(broker, &frame.node)?;
     let binding = address_balance_binding(&config).map_err(replay_adapter_error)?;
-    let output: BtcAddressBalanceObservation =
-        serde_json::from_slice(&frame.artifact_bytes).map_err(replay_json_error)?;
-    let subject = output.subject();
-    let response = output.response();
-    if subject.network() != config.network.as_str()
-        || subject.bitcoin_network() != config.bitcoin_network.as_str()
-        || subject.semantic_source_identity() != config.semantic_source_identity.as_str()
-        || subject.address() != config.address.as_str()
-        || output.source_read_count() == 0
-        || output.source_read_count() > config.max_source_reads.get()
+    let output: BtcAddressBalanceObservation = decode_replay_value(frame)?;
+    if output.source_read_count() == 0 || output.source_read_count() > config.max_source_reads.get()
     {
         return Err(replay_btc_mismatch(
-            "Bitcoin address-balance observation did not match certified config binding",
+            "Bitcoin address-balance observation exceeded its certified read budget",
         ));
     }
-    let address = BtcAddress::new(subject.address()).map_err(replay_adapter_error)?;
-    let block_hash = BtcBlockHash::new(response.anchor_hash()).map_err(replay_adapter_error)?;
-    let request = BtcBalanceReadRequest::new(address.clone(), response.anchor_height(), block_hash);
-    let evidence = RedactedBtcSourceEvidence::from_binding(
-        &binding,
-        subject.bitcoin_network(),
-        BtcSourceStatus::Synced,
-    )
-    .map_err(replay_adapter_error)?;
     let capability_response = BtcBalanceReadResponse {
-        evidence,
-        address,
-        balance_sats: response.balance_sats(),
-        block_height: response.anchor_height(),
-        block_hash: BtcBlockHash::new(response.anchor_hash()).map_err(replay_adapter_error)?,
+        evidence: RedactedBtcSourceEvidence::from_binding(
+            &binding,
+            config.bitcoin_network.clone(),
+            BtcSourceStatus::Synced,
+        )
+        .map_err(replay_adapter_error)?,
+        address: BtcAddress::new(output.subject().address()).map_err(replay_adapter_error)?,
+        balance_sats: output.response().balance_sats(),
+        block_height: output.response().anchor_height(),
+        block_hash: BtcBlockHash::new(output.response().anchor_hash())
+            .map_err(replay_adapter_error)?,
     };
-    recorded_balance_response(&binding, &request, &capability_response)
-        .map_err(replay_adapter_error)?;
+    let expected =
+        normalize_btc_address_balance_observation(&config, &input_tip, &capability_response)
+            .map_err(replay_adapter_error)?;
+    ensure_canonical_value_matches(&expected, &frame.artifact_bytes)
+}
+
+fn verify_btc_address_balance_batch_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
+    let state_kind = AssembleBtcAddressBalanceBatchState::kind().map_err(replay_adapter_error)?;
+    let state_version =
+        AssembleBtcAddressBalanceBatchState::version().map_err(replay_adapter_error)?;
+    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
+        Ok(node.state_kind == state_kind && node.state_version == state_version)
+    })?;
+    for frame in &frames {
+        let _config: AssembleBtcAddressBalanceBatchConfig =
+            replay_node_config(broker, &frame.node)?;
+        let joint_tip_frames = replay_input_frames(
+            broker,
+            &frame.node,
+            &BtcJointTip::semantic_id().map_err(replay_adapter_error)?,
+            &BtcJointTip::schema_id().map_err(replay_adapter_error)?,
+        )?;
+        let fact_frames = replay_input_frames(
+            broker,
+            &frame.node,
+            &BtcAddressBalanceSnapshotFact::semantic_id().map_err(replay_adapter_error)?,
+            &BtcAddressBalanceSnapshotFact::schema_id().map_err(replay_adapter_error)?,
+        )?;
+        if joint_tip_frames.len() != 1 || fact_frames.is_empty() {
+            return Err(replay_btc_mismatch(
+                "Bitcoin balance batch inputs were incomplete",
+            ));
+        }
+        let joint_tip: BtcJointTip = decode_replay_value(&joint_tip_frames[0])?;
+        let facts = fact_frames
+            .iter()
+            .map(decode_replay_value)
+            .collect::<replay::Result<Vec<BtcAddressBalanceSnapshotFact>>>()?;
+        let input = AssembleBtcAddressBalanceBatchInput {
+            joint_tip,
+            balance_facts: NonEmpty::try_from_vec(facts).map_err(replay_adapter_error)?,
+        };
+        let expected = assemble_btc_address_balance_batch(input).map_err(replay_adapter_error)?;
+        ensure_canonical_value_matches(&expected, &frame.artifact_bytes)?;
+    }
+    Ok(())
+}
+
+fn replay_joint_tip_input(
+    broker: &replay::ReplayBroker,
+    node: &mfm_spec::v1::NodeSpec,
+) -> replay::Result<BtcJointTip> {
+    let frames = replay_input_frames(
+        broker,
+        node,
+        &BtcJointTip::semantic_id().map_err(replay_adapter_error)?,
+        &BtcJointTip::schema_id().map_err(replay_adapter_error)?,
+    )?;
+    if frames.len() != 1 {
+        return Err(replay_btc_mismatch(
+            "Bitcoin balance observation did not consume exactly one joint tip",
+        ));
+    }
+    let resolve_kind = ResolveBtcJointTipState::kind().map_err(replay_adapter_error)?;
+    let resolve_version = ResolveBtcJointTipState::version().map_err(replay_adapter_error)?;
+    if frames[0].node.state_kind != resolve_kind || frames[0].node.state_version != resolve_version
+    {
+        return Err(replay_btc_mismatch(
+            "Bitcoin balance observation input was not produced by joint-tip resolution",
+        ));
+    }
+    decode_replay_value(&frames[0])
+}
+
+fn replay_input_frames(
+    broker: &replay::ReplayBroker,
+    node: &mfm_spec::v1::NodeSpec,
+    semantic_type_id: &mfm_ids::SemanticTypeId,
+    schema_id: &mfm_ids::SchemaId,
+) -> replay::Result<Vec<replay::ProducedCellReplayFrame>> {
+    let mut cells = Vec::new();
+    collect_input_cells(
+        &node.input_bindings.root,
+        semantic_type_id,
+        schema_id,
+        &mut cells,
+    );
+    let mut frames = Vec::with_capacity(cells.len());
+    for input_cell in cells {
+        let matches = broker.produced_cell_frames_matching(|_node, cell, _produced| {
+            Ok(cell.cell_id == input_cell.cell_id)
+        })?;
+        if matches.len() != 1 {
+            return Err(replay_btc_mismatch(
+                "certified collector input cell did not have exactly one produced value",
+            ));
+        }
+        let frame = matches.into_iter().next().expect("one frame");
+        if frame.cell.semantic_type_id != input_cell.semantic_type_id
+            || frame.cell.schema_id != input_cell.schema_id
+            || frame.cell.value_lineage != input_cell.value_lineage
+        {
+            return Err(replay_btc_mismatch(
+                "collector input cell metadata did not match its produced value",
+            ));
+        }
+        frames.push(frame);
+    }
+    Ok(frames)
+}
+
+fn collect_input_cells<'a>(
+    input: &'a mfm_spec::v1::InputBindingNodeSpec,
+    semantic_type_id: &mfm_ids::SemanticTypeId,
+    schema_id: &mfm_ids::SchemaId,
+    cells: &mut Vec<&'a mfm_spec::v1::InputBindingCellSpec>,
+) {
+    match input {
+        mfm_spec::v1::InputBindingNodeSpec::Unit => {}
+        mfm_spec::v1::InputBindingNodeSpec::Cell(cell) => {
+            if &cell.semantic_type_id == semantic_type_id && &cell.schema_id == schema_id {
+                cells.push(cell);
+            }
+        }
+        mfm_spec::v1::InputBindingNodeSpec::Tuple(elements)
+        | mfm_spec::v1::InputBindingNodeSpec::Vec { elements, .. }
+        | mfm_spec::v1::InputBindingNodeSpec::NonEmptyVec { elements, .. } => {
+            for element in elements {
+                collect_input_cells(element, semantic_type_id, schema_id, cells);
+            }
+        }
+        mfm_spec::v1::InputBindingNodeSpec::Struct(fields) => {
+            for field in fields {
+                collect_input_cells(&field.node, semantic_type_id, schema_id, cells);
+            }
+        }
+    }
+}
+
+fn decode_replay_value<T>(frame: &replay::ProducedCellReplayFrame) -> replay::Result<T>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_slice(&frame.artifact_bytes).map_err(replay_json_error)
+}
+
+fn ensure_canonical_value_matches<T: serde::Serialize>(
+    expected: &T,
+    actual: &[u8],
+) -> replay::Result<()> {
+    let json = serde_json::to_string(expected).map_err(replay_json_error)?;
+    let canonical = PlainCanonicalJsonBytes::from_json_str(&json).map_err(replay_adapter_error)?;
+    if canonical.as_bytes() != actual {
+        return Err(replay_btc_mismatch(
+            "Bitcoin collector output did not match recomputed state output",
+        ));
+    }
     Ok(())
 }
 

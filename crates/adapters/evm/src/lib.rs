@@ -5,11 +5,13 @@
 //! Protocol IO stays in the transport crate; this crate owns request mapping, runner
 //! registration, and managed fact recording.
 
+use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use alloy_primitives::{Address, B256};
+use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
     EvmBalanceReadCapability, EvmBalanceReadProvider, EvmBalanceReadRequest,
@@ -29,14 +31,15 @@ use mfm_runtime::{
 use mfm_states_evm::{
     assemble_evm_native_balance_batch, evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version,
     materialize_evm_joint_tip, native_balance_record_visibility,
-    AssembleEvmNativeBalanceBatchConfig, AssembleEvmNativeBalanceBatchInput,
-    AssembleEvmNativeBalanceBatchState, EvmAddressNativeBalanceObservation,
+    normalize_evm_native_balance_observation, AssembleEvmNativeBalanceBatchConfig,
+    AssembleEvmNativeBalanceBatchInput, AssembleEvmNativeBalanceBatchState,
+    EvmAddressNativeBalanceObservation, EvmAddressNativeBalanceSnapshotFact, EvmJointTip,
     ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput, ObserveEvmNativeBalanceState,
     RecordEvmNativeBalanceFactState, ResolveEvmJointTipConfig, ResolveEvmJointTipInput,
     ResolveEvmJointTipState,
 };
 use mfm_store::v1 as store;
-use mfm_values::{MfmConfig, MfmValue};
+use mfm_values::{MfmConfig, MfmValue, NonEmpty};
 use serde::de::DeserializeOwned;
 
 const PURE_FACTORY: &str = "pure";
@@ -409,6 +412,7 @@ fn adapter_identity_error(error: mfm_ids::IdentityError) -> mfm_runtime::Runtime
 /// A broker for another workflow is a valid no-op because the application replay registry invokes
 /// every domain verifier.
 pub fn verify_evm_native_balance_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
+    verify_evm_joint_tip_replay(broker)?;
     let state_kind = ObserveEvmNativeBalanceState::kind().map_err(replay_adapter_error)?;
     let state_version = ObserveEvmNativeBalanceState::version().map_err(replay_adapter_error)?;
     let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
@@ -416,6 +420,59 @@ pub fn verify_evm_native_balance_replay(broker: &replay::ReplayBroker) -> replay
     })?;
     for frame in &frames {
         verify_evm_native_balance_observation_replay(broker, frame)?;
+    }
+    verify_evm_shared_joint_tips(broker, &frames)?;
+    verify_evm_native_balance_batch_replay(broker)?;
+    Ok(())
+}
+
+fn verify_evm_shared_joint_tips(
+    broker: &replay::ReplayBroker,
+    frames: &[replay::ProducedCellReplayFrame],
+) -> replay::Result<()> {
+    let mut anchors = BTreeMap::<String, (u64, String)>::new();
+    for frame in frames {
+        let config: ObserveEvmNativeBalanceConfig = replay_node_config(broker, &frame.node)?;
+        let tip = replay_joint_tip_input(broker, &frame.node)?;
+        let anchor = (tip.block_number(), tip.block_hash().to_owned());
+        if anchors
+            .insert(config.network.clone(), anchor.clone())
+            .is_some_and(|existing| existing != anchor)
+        {
+            return Err(replay_evm_mismatch(
+                "EVM same-network observations did not share one joint tip",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_evm_joint_tip_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
+    let state_kind = ResolveEvmJointTipState::kind().map_err(replay_adapter_error)?;
+    let state_version = ResolveEvmJointTipState::version().map_err(replay_adapter_error)?;
+    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
+        Ok(node.state_kind == state_kind && node.state_version == state_version)
+    })?;
+    for frame in &frames {
+        let config: ResolveEvmJointTipConfig = replay_node_config(broker, &frame.node)?;
+        let tip: EvmJointTip = decode_replay_value(frame)?;
+        if tip.network() != config.network
+            || tip.chain_id() != config.chain_id
+            || !tip.is_admissible_for_balance_write()
+        {
+            return Err(replay_evm_mismatch(
+                "EVM joint-tip output did not match certified network binding",
+            ));
+        }
+        parse_block_hash(tip.block_hash()).map_err(replay_adapter_error)?;
+        let expected = EvmJointTip::new(
+            config.network,
+            config.chain_id,
+            tip.block_number(),
+            tip.block_hash(),
+        )
+        .map_err(replay_adapter_error)?;
+        ensure_canonical_value_matches(&expected, &frame.artifact_bytes)?;
     }
     Ok(())
 }
@@ -425,33 +482,173 @@ fn verify_evm_native_balance_observation_replay(
     frame: &replay::ProducedCellReplayFrame,
 ) -> replay::Result<()> {
     let config: ObserveEvmNativeBalanceConfig = replay_node_config(broker, &frame.node)?;
-    let binding = balance_binding(&config).map_err(replay_adapter_error)?;
-    let output: EvmAddressNativeBalanceObservation =
-        serde_json::from_slice(&frame.artifact_bytes).map_err(replay_json_error)?;
-    let subject = output.subject();
-    let response = output.response();
-    if subject.network() != config.network.as_str()
-        || subject.chain_id() != config.chain_id
-        || subject.account() != config.account.as_str()
-        || output.source_read_count() != config.max_source_reads.get()
-    {
+    let input_tip = replay_joint_tip_input(broker, &frame.node)?;
+    let output: EvmAddressNativeBalanceObservation = decode_replay_value(frame)?;
+    if output.source_read_count() != config.max_source_reads.get() {
         return Err(replay_evm_mismatch(
-            "EVM native-balance observation did not match certified config binding",
+            "EVM native-balance observation did not use its certified read budget",
         ));
     }
-    if binding.network_id().as_str() != config.network.as_str()
-        || binding.expected_chain_id() != config.chain_id
-    {
+    let expected = normalize_evm_native_balance_observation(
+        &config,
+        &input_tip,
+        &input_tip,
+        output.response().raw_wei(),
+        config.chain_id,
+        config.network.as_str(),
+    )
+    .map_err(replay_adapter_error)?;
+    ensure_canonical_value_matches(&expected, &frame.artifact_bytes)
+}
+
+fn verify_evm_native_balance_batch_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
+    let state_kind = AssembleEvmNativeBalanceBatchState::kind().map_err(replay_adapter_error)?;
+    let state_version =
+        AssembleEvmNativeBalanceBatchState::version().map_err(replay_adapter_error)?;
+    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
+        Ok(node.state_kind == state_kind && node.state_version == state_version)
+    })?;
+    for frame in &frames {
+        let _config: AssembleEvmNativeBalanceBatchConfig = replay_node_config(broker, &frame.node)?;
+        let joint_tip_frames = replay_input_frames(
+            broker,
+            &frame.node,
+            &EvmJointTip::semantic_id().map_err(replay_adapter_error)?,
+            &EvmJointTip::schema_id().map_err(replay_adapter_error)?,
+        )?;
+        let fact_frames = replay_input_frames(
+            broker,
+            &frame.node,
+            &EvmAddressNativeBalanceSnapshotFact::semantic_id().map_err(replay_adapter_error)?,
+            &EvmAddressNativeBalanceSnapshotFact::schema_id().map_err(replay_adapter_error)?,
+        )?;
+        if joint_tip_frames.len() != 1 || fact_frames.is_empty() {
+            return Err(replay_evm_mismatch(
+                "EVM native-balance batch inputs were incomplete",
+            ));
+        }
+        let joint_tip: EvmJointTip = decode_replay_value(&joint_tip_frames[0])?;
+        let facts = fact_frames
+            .iter()
+            .map(decode_replay_value)
+            .collect::<replay::Result<Vec<EvmAddressNativeBalanceSnapshotFact>>>()?;
+        let input = AssembleEvmNativeBalanceBatchInput {
+            joint_tip,
+            balance_facts: NonEmpty::try_from_vec(facts).map_err(replay_adapter_error)?,
+        };
+        let expected = assemble_evm_native_balance_batch(input).map_err(replay_adapter_error)?;
+        ensure_canonical_value_matches(&expected, &frame.artifact_bytes)?;
+    }
+    Ok(())
+}
+
+fn replay_joint_tip_input(
+    broker: &replay::ReplayBroker,
+    node: &mfm_spec::v1::NodeSpec,
+) -> replay::Result<EvmJointTip> {
+    let frames = replay_input_frames(
+        broker,
+        node,
+        &EvmJointTip::semantic_id().map_err(replay_adapter_error)?,
+        &EvmJointTip::schema_id().map_err(replay_adapter_error)?,
+    )?;
+    if frames.len() != 1 {
         return Err(replay_evm_mismatch(
-            "EVM native-balance observation binding did not match certified network",
+            "EVM native-balance observation did not consume exactly one joint tip",
         ));
     }
-    // Response constructor already enforces 32-byte hex; re-check for decoded cell bytes.
-    parse_block_hash(response.block_hash()).map_err(replay_adapter_error)?;
-    parse_account(subject.account()).map_err(replay_adapter_error)?;
-    if response.raw_wei().is_empty() || !response.raw_wei().chars().all(|c| c.is_ascii_digit()) {
+    let resolve_kind = ResolveEvmJointTipState::kind().map_err(replay_adapter_error)?;
+    let resolve_version = ResolveEvmJointTipState::version().map_err(replay_adapter_error)?;
+    if frames[0].node.state_kind != resolve_kind || frames[0].node.state_version != resolve_version
+    {
         return Err(replay_evm_mismatch(
-            "EVM native-balance observation raw_wei was invalid",
+            "EVM native-balance observation input was not produced by joint-tip resolution",
+        ));
+    }
+    decode_replay_value(&frames[0])
+}
+
+fn replay_input_frames(
+    broker: &replay::ReplayBroker,
+    node: &mfm_spec::v1::NodeSpec,
+    semantic_type_id: &mfm_ids::SemanticTypeId,
+    schema_id: &mfm_ids::SchemaId,
+) -> replay::Result<Vec<replay::ProducedCellReplayFrame>> {
+    let mut cells = Vec::new();
+    collect_input_cells(
+        &node.input_bindings.root,
+        semantic_type_id,
+        schema_id,
+        &mut cells,
+    );
+    let mut frames = Vec::with_capacity(cells.len());
+    for input_cell in cells {
+        let matches = broker.produced_cell_frames_matching(|_node, cell, _produced| {
+            Ok(cell.cell_id == input_cell.cell_id)
+        })?;
+        if matches.len() != 1 {
+            return Err(replay_evm_mismatch(
+                "certified EVM collector input cell did not have exactly one produced value",
+            ));
+        }
+        let frame = matches.into_iter().next().expect("one frame");
+        if frame.cell.semantic_type_id != input_cell.semantic_type_id
+            || frame.cell.schema_id != input_cell.schema_id
+            || frame.cell.value_lineage != input_cell.value_lineage
+        {
+            return Err(replay_evm_mismatch(
+                "EVM collector input cell metadata did not match its produced value",
+            ));
+        }
+        frames.push(frame);
+    }
+    Ok(frames)
+}
+
+fn collect_input_cells<'a>(
+    input: &'a mfm_spec::v1::InputBindingNodeSpec,
+    semantic_type_id: &mfm_ids::SemanticTypeId,
+    schema_id: &mfm_ids::SchemaId,
+    cells: &mut Vec<&'a mfm_spec::v1::InputBindingCellSpec>,
+) {
+    match input {
+        mfm_spec::v1::InputBindingNodeSpec::Unit => {}
+        mfm_spec::v1::InputBindingNodeSpec::Cell(cell) => {
+            if &cell.semantic_type_id == semantic_type_id && &cell.schema_id == schema_id {
+                cells.push(cell);
+            }
+        }
+        mfm_spec::v1::InputBindingNodeSpec::Tuple(elements)
+        | mfm_spec::v1::InputBindingNodeSpec::Vec { elements, .. }
+        | mfm_spec::v1::InputBindingNodeSpec::NonEmptyVec { elements, .. } => {
+            for element in elements {
+                collect_input_cells(element, semantic_type_id, schema_id, cells);
+            }
+        }
+        mfm_spec::v1::InputBindingNodeSpec::Struct(fields) => {
+            for field in fields {
+                collect_input_cells(&field.node, semantic_type_id, schema_id, cells);
+            }
+        }
+    }
+}
+
+fn decode_replay_value<T>(frame: &replay::ProducedCellReplayFrame) -> replay::Result<T>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_slice(&frame.artifact_bytes).map_err(replay_json_error)
+}
+
+fn ensure_canonical_value_matches<T: serde::Serialize>(
+    expected: &T,
+    actual: &[u8],
+) -> replay::Result<()> {
+    let json = serde_json::to_string(expected).map_err(replay_json_error)?;
+    let canonical = PlainCanonicalJsonBytes::from_json_str(&json).map_err(replay_adapter_error)?;
+    if canonical.as_bytes() != actual {
+        return Err(replay_evm_mismatch(
+            "EVM collector output did not match recomputed state output",
         ));
     }
     Ok(())

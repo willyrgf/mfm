@@ -91,9 +91,17 @@ async fn collect_then_report_completes_from_collector_written_platform_holdings(
     );
     let btc_run = launch_btc_balance_collector(&services, &store, "collect-btc").await;
     assert_eq!(btc_run.run_mode, mfm_app::RunModeStatus::Completed);
+    services
+        .verify_replay_for_run(&btc_run.run_id.parse().expect("BTC run id"))
+        .await
+        .expect("replay BTC collector");
 
     let evm_run = launch_evm_balance_collector(&services, &store, "collect-evm").await;
     assert_eq!(evm_run.run_mode, mfm_app::RunModeStatus::Completed);
+    services
+        .verify_replay_for_run(&evm_run.run_id.parse().expect("EVM run id"))
+        .await
+        .expect("replay EVM collector");
 
     let projection = store.projection_snapshot().expect("after collect");
     assert_platform_holding_kind(&projection, "bitcoin.address_balance_snapshot", 1);
@@ -141,6 +149,10 @@ async fn collect_then_report_completes_from_collector_written_platform_holdings(
         json.contains_key("snapshot") || json.values().any(|v| v.get("network_pins").is_some()),
         "public output should carry snapshot material: {json:?}"
     );
+    services
+        .verify_replay_for_run(&launch.run_id.parse().expect("report run id"))
+        .await
+        .expect("replay portfolio report");
 }
 
 // --- services / launch -------------------------------------------------------
