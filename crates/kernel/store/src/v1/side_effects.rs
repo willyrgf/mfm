@@ -249,18 +249,22 @@ pub(super) fn require_active_attempt_for_side_effect(
 pub(super) fn prepared_invocation_projection(
     artifact_id: &Option<ArtifactId>,
     content_digest: &Option<ContentDigest>,
+    evidence_hash: &Option<ContentDigest>,
     ledger_key: &events::SideEffectLedgerKey,
 ) -> Result<Option<SideEffectArtifactProjection>> {
-    match (artifact_id, content_digest) {
-        (Some(artifact_id), Some(content_digest)) => Ok(Some(SideEffectArtifactProjection {
-            artifact_id: artifact_id.clone(),
-            content_digest: content_digest.clone(),
-            schema_id: None,
-        })),
-        (None, None) => Ok(None),
+    match (artifact_id, content_digest, evidence_hash) {
+        (Some(artifact_id), Some(content_digest), Some(evidence_hash)) => {
+            Ok(Some(SideEffectArtifactProjection {
+                artifact_id: artifact_id.clone(),
+                content_digest: content_digest.clone(),
+                evidence_hash: evidence_hash.clone(),
+                schema_id: None,
+            }))
+        }
+        (None, None, None) => Ok(None),
         _ => Err(side_effect_projection_error(
             ledger_key,
-            "prepared invocation artifact id and hash must be recorded together",
+            "prepared invocation artifact id, content hash, and evidence hash must be recorded together",
         )),
     }
 }

@@ -1154,7 +1154,7 @@ where
     let requirement = store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::ArtifactReferenced,
         artifact_id: reference.artifact_ref.artifact_id.clone(),
-        evidence_hash: None,
+        evidence_hash: reference.artifact_ref.evidence_hash.clone(),
         digest: Some(reference.artifact_ref.content_digest.clone()),
         byte_len: Some(reference.artifact_ref.byte_len),
         media_type: Some(reference.artifact_ref.media_type.clone()),
@@ -1196,10 +1196,23 @@ fn replay_node_config<T>(
 where
     T: MfmConfig + DeserializeOwned,
 {
+    let config_evidence = store::ArtifactEvidenceRef {
+        artifact_id: node.config_ref.artifact_id.clone(),
+        digest: node.config_ref.digest.clone(),
+        byte_len: node.config_ref.byte_len,
+        media_type: node.config_ref.media_type.clone(),
+        schema_id: Some(node.config_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::TypedConfig,
+    };
     let requirement = store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::RunConfig,
         artifact_id: node.config_ref.artifact_id.clone(),
-        evidence_hash: None,
+        evidence_hash: config_evidence
+            .evidence_hash()
+            .map_err(replay_adapter_error)?,
         digest: Some(node.config_ref.digest.clone()),
         byte_len: Some(node.config_ref.byte_len),
         media_type: Some(node.config_ref.media_type.clone()),

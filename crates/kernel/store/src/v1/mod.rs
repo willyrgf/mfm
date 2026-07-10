@@ -2436,6 +2436,8 @@ pub enum CellTerminalProjection {
         artifact_id: ArtifactId,
         /// Canonical content digest.
         content_digest: ContentDigest,
+        /// Exact retained-artifact evidence identity.
+        evidence_hash: ContentDigest,
     },
     /// Skipped cell projection.
     Skipped {
@@ -3273,6 +3275,7 @@ impl OwnedSideEffectLedgerState {
         self.retained.submission = Some(SideEffectArtifactProjection {
             artifact_id: payload.submission_artifact_id.clone(),
             content_digest: payload.submission_hash.clone(),
+            evidence_hash: payload.submission_artifact_evidence_hash.clone(),
             schema_id: Some(payload.submission_schema_id.clone()),
         });
         Ok(self)
@@ -3322,6 +3325,7 @@ impl OwnedSideEffectLedgerState {
         self.retained.receipt = Some(SideEffectArtifactProjection {
             artifact_id: payload.receipt_artifact_id.clone(),
             content_digest: payload.receipt_hash.clone(),
+            evidence_hash: payload.receipt_artifact_evidence_hash.clone(),
             schema_id: Some(payload.receipt_schema_id.clone()),
         });
         if let Some(touched_set) = payload.resource_touched_set.clone() {
@@ -3354,6 +3358,7 @@ impl OwnedSideEffectLedgerState {
         self.retained.confirmation = Some(SideEffectArtifactProjection {
             artifact_id: payload.confirmation_artifact_id.clone(),
             content_digest: payload.confirmation_hash.clone(),
+            evidence_hash: payload.confirmation_artifact_evidence_hash.clone(),
             schema_id: Some(payload.confirmation_schema_id.clone()),
         });
         if let Some(touched_set) = payload.resource_touched_set.clone() {
@@ -3901,6 +3906,8 @@ pub struct SideEffectArtifactProjection {
     pub artifact_id: ArtifactId,
     /// Canonical content digest.
     pub content_digest: ContentDigest,
+    /// Exact retained-artifact evidence identity.
+    pub evidence_hash: ContentDigest,
     /// Schema id, when the artifact is a typed value.
     pub schema_id: Option<SchemaId>,
 }
@@ -5410,9 +5417,14 @@ impl VerifiedRunArtifactStore {
         &self,
         requirement: &EventArtifactRequirement,
     ) -> Option<&VerifiedRunArtifactBytes> {
-        self.artifacts.values().find(|artifact| {
-            validate_artifact_requirement_against_evidence(requirement, artifact.evidence()).is_ok()
-        })
+        let key = (
+            requirement.artifact_id.clone(),
+            requirement.evidence_hash.clone(),
+        );
+        let artifact = self.artifacts.get(&key)?;
+        validate_artifact_requirement_against_evidence(requirement, artifact.evidence())
+            .ok()
+            .map(|()| artifact)
     }
 
     /// Iterates verified retained artifacts by exact artifact authority key.
@@ -5459,15 +5471,16 @@ impl VerifiedRunArtifactStore {
 
     fn validate_requirements(&self, requirements: &[EventArtifactRequirement]) -> Result<()> {
         for requirement in requirements {
-            if !self.artifacts.values().any(|artifact| {
-                validate_artifact_requirement_against_evidence(requirement, artifact.evidence())
-                    .is_ok()
-            }) {
-                return Err(StoreError::ArtifactEvidenceMismatch {
+            let key = (
+                requirement.artifact_id.clone(),
+                requirement.evidence_hash.clone(),
+            );
+            let Some(artifact) = self.artifacts.get(&key) else {
+                return Err(StoreError::MissingArtifact {
                     artifact_id: requirement.artifact_id.clone(),
-                    field: "artifact",
                 });
-            }
+            };
+            validate_artifact_requirement_against_evidence(requirement, artifact.evidence())?;
         }
         Ok(())
     }
@@ -5945,14 +5958,7 @@ struct CommitStagingVerifier<'a> {
 impl CommitStagingVerifier<'_> {
     fn validate_artifact_evidence(&self, evidence: &ArtifactEvidenceRef) -> Result<()> {
         let key = artifact_authority_key(evidence)?;
-        let stored = self.artifacts.get(&key).or_else(|| {
-            self.artifacts
-                .iter()
-                .find_map(|((artifact_id, _), stored)| {
-                    (artifact_id == &evidence.artifact_id).then_some(stored)
-                })
-        });
-        let Some(stored) = stored else {
+        let Some(stored) = self.artifacts.get(&key) else {
             return Err(StoreError::MissingArtifact {
                 artifact_id: evidence.artifact_id.clone(),
             });
@@ -6011,25 +6017,16 @@ impl CommitStagingVerifier<'_> {
     }
 
     fn validate_artifact_requirement(&self, requirement: &EventArtifactRequirement) -> Result<()> {
-        let mut saw_artifact_id = false;
-        for ((artifact_id, _), evidence) in self.artifacts {
-            if artifact_id != &requirement.artifact_id {
-                continue;
-            }
-            saw_artifact_id = true;
-            if validate_artifact_requirement_against_evidence(requirement, evidence).is_ok() {
-                return Ok(());
-            }
-        }
-        if !saw_artifact_id {
+        let key = (
+            requirement.artifact_id.clone(),
+            requirement.evidence_hash.clone(),
+        );
+        let Some(evidence) = self.artifacts.get(&key) else {
             return Err(StoreError::MissingArtifact {
                 artifact_id: requirement.artifact_id.clone(),
             });
-        }
-        Err(StoreError::ArtifactEvidenceMismatch {
-            artifact_id: requirement.artifact_id.clone(),
-            field: "artifact",
-        })
+        };
+        validate_artifact_requirement_against_evidence(requirement, evidence)
     }
 
     fn validate_preconditions(&self, request: &CommitRequest) -> Result<()> {
@@ -7308,38 +7305,16 @@ impl RetainedArtifactReadProvider for AsyncInMemoryRunStore {
         requirement: &'a EventArtifactRequirement,
     ) -> RetainedArtifactReadFuture<'a> {
         let result = self.lock_inner().and_then(|store| {
-            if let Some(evidence_hash) = &requirement.evidence_hash {
-                let key = (requirement.artifact_id.clone(), evidence_hash.clone());
-                let Some((bytes, evidence)) = store.artifact_bytes.get(&key) else {
-                    return Err(StoreError::MissingArtifact {
-                        artifact_id: requirement.artifact_id.clone(),
-                    });
-                };
-                return VerifiedRunArtifactBytes::new(bytes.clone(), evidence.clone(), requirement);
-            }
-            let mut saw_mismatch = false;
-            for ((artifact_id, _), (bytes, evidence)) in &store.artifact_bytes {
-                if artifact_id != &requirement.artifact_id {
-                    continue;
-                }
-                match VerifiedRunArtifactBytes::new(bytes.clone(), evidence.clone(), requirement) {
-                    Ok(artifact) => return Ok(artifact),
-                    Err(StoreError::ArtifactEvidenceMismatch { .. }) => {
-                        saw_mismatch = true;
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            if saw_mismatch {
-                Err(StoreError::ArtifactEvidenceMismatch {
+            let key = (
+                requirement.artifact_id.clone(),
+                requirement.evidence_hash.clone(),
+            );
+            let Some((bytes, evidence)) = store.artifact_bytes.get(&key) else {
+                return Err(StoreError::MissingArtifact {
                     artifact_id: requirement.artifact_id.clone(),
-                    field: "artifact",
-                })
-            } else {
-                Err(StoreError::MissingArtifact {
-                    artifact_id: requirement.artifact_id.clone(),
-                })
-            }
+                });
+            };
+            VerifiedRunArtifactBytes::new(bytes.clone(), evidence.clone(), requirement)
         });
         Box::pin(std::future::ready(result))
     }
@@ -7563,32 +7538,14 @@ fn validate_required_artifacts_cover_payload_references(
 ) -> Result<()> {
     for payload in &request.payloads {
         for requirement in event_artifact_requirements(payload) {
-            let mut same_artifact_evidence = None;
-            let mut same_digest_evidence = None;
-            let mut covering_evidence = None;
-            for evidence in &request.required_artifacts {
-                match validate_artifact_requirement_against_evidence(&requirement, evidence) {
-                    Ok(()) => {
-                        covering_evidence = Some(evidence);
-                        break;
-                    }
-                    Err(_) if evidence.artifact_id == requirement.artifact_id => {
-                        same_artifact_evidence.get_or_insert(evidence);
-                        let digest_matches = match &requirement.digest {
-                            Some(digest) => &evidence.digest == digest,
-                            None => true,
-                        };
-                        if digest_matches {
-                            same_digest_evidence.get_or_insert(evidence);
-                        }
-                    }
-                    Err(_) => {}
-                }
-            }
-            let Some(evidence) = covering_evidence else {
-                if let Some(evidence) = same_digest_evidence.or(same_artifact_evidence) {
-                    validate_required_artifact_requirement(purpose, &requirement, evidence)?;
-                }
+            let Some(evidence) = request.required_artifacts.iter().find(|evidence| {
+                evidence.artifact_id == requirement.artifact_id
+                    && evidence
+                        .evidence_hash()
+                        .ok()
+                        .as_ref()
+                        == Some(&requirement.evidence_hash)
+            }) else {
                 return Err(invalid_prepared_commit_purpose(
                     purpose,
                     format!(
@@ -7965,14 +7922,12 @@ pub fn validate_artifact_requirement_against_evidence(
         evidence.artifact_id.as_str(),
         requirement.artifact_id.as_str(),
     )?;
-    if let Some(expected_evidence_hash) = &requirement.evidence_hash {
-        compare_artifact_field(
-            &requirement.artifact_id,
-            "evidence_hash",
-            evidence.evidence_hash()?.as_str(),
-            expected_evidence_hash.as_str(),
-        )?;
-    }
+    compare_artifact_field(
+        &requirement.artifact_id,
+        "evidence_hash",
+        evidence.evidence_hash()?.as_str(),
+        requirement.evidence_hash.as_str(),
+    )?;
     if let Some(digest) = &requirement.digest {
         compare_artifact_field(
             &requirement.artifact_id,
@@ -9623,6 +9578,7 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "cell_id": payload.cell_id.as_str(),
             "context": cell_context_json(&payload.context),
             "content_digest": payload.content_digest.as_str(),
+            "evidence_hash": payload.evidence_hash.as_str(),
             "node_id": payload.node_id.as_str(),
             "producer_state_kind": payload.producer_state_kind.as_ref().map(|value| value.as_str()),
             "producer_state_version": payload.producer_state_version.as_ref().map(|value| value.as_str()),
@@ -9655,6 +9611,7 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "idempotency_input_hash": payload.idempotency_input_hash.as_str(),
             "idempotency_input_schema_id": payload.idempotency_input_schema_id.as_str(),
             "idempotency_key": payload.idempotency_key.as_str(),
+            "intent_artifact_evidence_hash": payload.intent_artifact_evidence_hash.as_str(),
             "intent_artifact_id": payload.intent_artifact_id.as_str(),
             "intent_hash": payload.intent_hash.as_str(),
             "intent_schema_id": payload.intent_schema_id.as_str(),
@@ -9740,6 +9697,10 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "pair_id": payload.pair_id.as_str(),
             "pair_role": payload.pair_role.as_str(),
             "resource_key": payload.resource_key.as_ref().map(resource_key_evidence_json),
+            "prepared_artifact_evidence_hash": payload
+                .prepared_artifact_evidence_hash
+                .as_ref()
+                .map(ContentDigest::as_str),
             "prepared_artifact_id": payload.prepared_artifact_id.as_ref().map(ArtifactId::as_str),
             "prepared_hash": payload.prepared_hash.as_ref().map(ContentDigest::as_str),
             "spec_hash": payload.spec_hash.as_str(),
@@ -9767,6 +9728,7 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "node_id": payload.node_id.as_str(),
             "pair_id": payload.pair_id.as_str(),
             "pair_role": payload.pair_role.as_str(),
+            "proof_artifact_evidence_hash": payload.proof_artifact_evidence_hash.as_str(),
             "proof_artifact_id": payload.proof_artifact_id.as_str(),
             "proof_hash": payload.proof_hash.as_str(),
             "proof_schema_id": payload.proof_schema_id.as_str(),
@@ -9782,6 +9744,7 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "pair_id": payload.pair_id.as_str(),
             "pair_role": payload.pair_role.as_str(),
             "spec_hash": payload.spec_hash.as_str(),
+            "submission_artifact_evidence_hash": payload.submission_artifact_evidence_hash.as_str(),
             "submission_artifact_id": payload.submission_artifact_id.as_str(),
             "submission_hash": payload.submission_hash.as_str(),
             "submission_schema_id": payload.submission_schema_id.as_str(),
@@ -9789,6 +9752,7 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
         }),
         KernelEventPayload::SideEffectSubmissionUnknown(payload) => serde_json::json!({
             "attempt_id": payload.attempt_id.as_str(),
+            "evidence_artifact_evidence_hash": payload.evidence_artifact_evidence_hash.as_str(),
             "evidence_artifact_id": payload.evidence_artifact_id.as_str(),
             "evidence_hash": payload.evidence_hash.as_str(),
             "evidence_schema_id": payload.evidence_schema_id.as_str(),
@@ -9809,6 +9773,7 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "node_id": payload.node_id.as_str(),
             "pair_id": payload.pair_id.as_str(),
             "pair_role": payload.pair_role.as_str(),
+            "receipt_artifact_evidence_hash": payload.receipt_artifact_evidence_hash.as_str(),
             "receipt_artifact_id": payload.receipt_artifact_id.as_str(),
             "receipt_hash": payload.receipt_hash.as_str(),
             "receipt_schema_id": payload.receipt_schema_id.as_str(),
@@ -9819,6 +9784,9 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
         }),
         KernelEventPayload::SideEffectConfirmationObserved(payload) => serde_json::json!({
             "attempt_id": payload.attempt_id.as_str(),
+            "confirmation_artifact_evidence_hash": payload
+                .confirmation_artifact_evidence_hash
+                .as_str(),
             "confirmation_artifact_id": payload.confirmation_artifact_id.as_str(),
             "confirmation_hash": payload.confirmation_hash.as_str(),
             "confirmation_schema_id": payload.confirmation_schema_id.as_str(),
@@ -9836,6 +9804,7 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
         KernelEventPayload::SideEffectAmbiguous(payload) => serde_json::json!({
             "ambiguity_code": payload.ambiguity_code.as_str(),
             "attempt_id": payload.attempt_id.as_str(),
+            "evidence_artifact_evidence_hash": payload.evidence_artifact_evidence_hash.as_str(),
             "evidence_artifact_id": payload.evidence_artifact_id.as_str(),
             "evidence_hash": payload.evidence_hash.as_str(),
             "evidence_schema_id": payload.evidence_schema_id.as_str(),
@@ -9896,6 +9865,10 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "output_spec_digest": payload.output_spec_digest.as_str(),
             "public_schema_id": payload.public_schema_id.as_str(),
             "receipt_cell_id": payload.receipt_cell_id.as_str(),
+            "rendered_artifact_evidence_hash": payload
+                .rendered_artifact_evidence_hash
+                .as_ref()
+                .map(ContentDigest::as_str),
             "rendered_artifact_id": payload.rendered_artifact_id.as_ref().map(ArtifactId::as_str),
             "rendered_digest": payload.rendered_digest.as_str(),
             "renderer_descriptor_id": payload.renderer_descriptor_id.as_str(),
@@ -9933,9 +9906,13 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "variant": "StateAttemptFailed",
         }),
         KernelEventPayload::ManualResolutionRecorded(payload) => serde_json::json!({
+            "authorization_artifact_evidence_hash": payload
+                .authorization_artifact_evidence_hash
+                .as_str(),
             "authorization_artifact_id": payload.authorization_artifact_id.as_str(),
             "authorization_hash": payload.authorization_hash.as_str(),
             "authorization_schema_id": payload.authorization_schema_id.as_str(),
+            "evidence_artifact_evidence_hash": payload.evidence_artifact_evidence_hash.as_str(),
             "evidence_artifact_id": payload.evidence_artifact_id.as_str(),
             "evidence_hash": payload.evidence_hash.as_str(),
             "evidence_schema_id": payload.evidence_schema_id.as_str(),
@@ -9959,6 +9936,7 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "variant": "RetentionRefsAppended",
         }),
         KernelEventPayload::RetentionManifestProjected(payload) => serde_json::json!({
+            "manifest_artifact_evidence_hash": payload.manifest_artifact_evidence_hash.as_str(),
             "manifest_artifact_id": payload.manifest_artifact_id.as_str(),
             "manifest_digest": payload.manifest_digest.as_str(),
             "manifest_seq": payload.manifest_seq,
@@ -10057,6 +10035,7 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
             context: parse_cell_context(required_obj(json, "context")?)?,
             artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
             content_digest: parse_identity(required_str(json, "content_digest")?)?,
+            evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
             producer_state_kind: optional_str(json, "producer_state_kind")?
                 .map(parse_identity)
                 .transpose()?,
@@ -10093,6 +10072,10 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                 intent_schema_id: parse_identity(required_str(json, "intent_schema_id")?)?,
                 intent_hash: parse_identity(required_str(json, "intent_hash")?)?,
                 intent_artifact_id: parse_identity(required_str(json, "intent_artifact_id")?)?,
+                intent_artifact_evidence_hash: parse_identity(required_str(
+                    json,
+                    "intent_artifact_evidence_hash",
+                )?)?,
                 idempotency_input_schema_id: parse_identity(required_str(
                     json,
                     "idempotency_input_schema_id",
@@ -10212,6 +10195,12 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                 prepared_hash: optional_str(json, "prepared_hash")?
                     .map(parse_identity)
                     .transpose()?,
+                prepared_artifact_evidence_hash: optional_str(
+                    json,
+                    "prepared_artifact_evidence_hash",
+                )?
+                .map(parse_identity)
+                .transpose()?,
             },
         )),
         "SideEffectInvocationStarted" => Ok(KernelEventPayload::SideEffectInvocationStarted(
@@ -10251,6 +10240,10 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                 proof_schema_id: parse_identity(required_str(json, "proof_schema_id")?)?,
                 proof_hash: parse_identity(required_str(json, "proof_hash")?)?,
                 proof_artifact_id: parse_identity(required_str(json, "proof_artifact_id")?)?,
+                proof_artifact_evidence_hash: parse_identity(required_str(
+                    json,
+                    "proof_artifact_evidence_hash",
+                )?)?,
             },
         )),
         "SideEffectSubmissionObserved" => Ok(KernelEventPayload::SideEffectSubmissionObserved(
@@ -10272,6 +10265,10 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                     json,
                     "submission_artifact_id",
                 )?)?,
+                submission_artifact_evidence_hash: parse_identity(required_str(
+                    json,
+                    "submission_artifact_evidence_hash",
+                )?)?,
             },
         )),
         "SideEffectSubmissionUnknown" => Ok(KernelEventPayload::SideEffectSubmissionUnknown(
@@ -10290,6 +10287,10 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                 evidence_schema_id: parse_identity(required_str(json, "evidence_schema_id")?)?,
                 evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
                 evidence_artifact_id: parse_identity(required_str(json, "evidence_artifact_id")?)?,
+                evidence_artifact_evidence_hash: parse_identity(required_str(
+                    json,
+                    "evidence_artifact_evidence_hash",
+                )?)?,
             },
         )),
         "SideEffectReceiptObserved" => Ok(KernelEventPayload::SideEffectReceiptObserved(
@@ -10308,6 +10309,10 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                 receipt_schema_id: parse_identity(required_str(json, "receipt_schema_id")?)?,
                 receipt_hash: parse_identity(required_str(json, "receipt_hash")?)?,
                 receipt_artifact_id: parse_identity(required_str(json, "receipt_artifact_id")?)?,
+                receipt_artifact_evidence_hash: parse_identity(required_str(
+                    json,
+                    "receipt_artifact_evidence_hash",
+                )?)?,
                 replay_verifier_id: events::ReplayVerifierId::new(required_str(
                     json,
                     "replay_verifier_id",
@@ -10339,6 +10344,10 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                     json,
                     "confirmation_artifact_id",
                 )?)?,
+                confirmation_artifact_evidence_hash: parse_identity(required_str(
+                    json,
+                    "confirmation_artifact_evidence_hash",
+                )?)?,
                 replay_verifier_id: events::ReplayVerifierId::new(required_str(
                     json,
                     "replay_verifier_id",
@@ -10365,6 +10374,10 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                 evidence_schema_id: parse_identity(required_str(json, "evidence_schema_id")?)?,
                 evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
                 evidence_artifact_id: parse_identity(required_str(json, "evidence_artifact_id")?)?,
+                evidence_artifact_evidence_hash: parse_identity(required_str(
+                    json,
+                    "evidence_artifact_evidence_hash",
+                )?)?,
             },
         )),
         "SideEffectFailed" => Ok(KernelEventPayload::SideEffectFailed(side_effect::Failed {
@@ -10421,6 +10434,12 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                 rendered_artifact_id: optional_str(json, "rendered_artifact_id")?
                     .map(parse_identity)
                     .transpose()?,
+                rendered_artifact_evidence_hash: optional_str(
+                    json,
+                    "rendered_artifact_evidence_hash",
+                )?
+                .map(parse_identity)
+                .transpose()?,
                 renderer_descriptor_id: parse_identity(required_str(
                     json,
                     "renderer_descriptor_id",
@@ -10472,6 +10491,10 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                 evidence_schema_id: parse_identity(required_str(json, "evidence_schema_id")?)?,
                 evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
                 evidence_artifact_id: parse_identity(required_str(json, "evidence_artifact_id")?)?,
+                evidence_artifact_evidence_hash: parse_identity(required_str(
+                    json,
+                    "evidence_artifact_evidence_hash",
+                )?)?,
                 authorization_schema_id: parse_identity(required_str(
                     json,
                     "authorization_schema_id",
@@ -10480,6 +10503,10 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                 authorization_artifact_id: parse_identity(required_str(
                     json,
                     "authorization_artifact_id",
+                )?)?,
+                authorization_artifact_evidence_hash: parse_identity(required_str(
+                    json,
+                    "authorization_artifact_evidence_hash",
                 )?)?,
                 note: optional_obj(json, "note")?
                     .map(parse_manual_resolution_note)
@@ -10509,6 +10536,10 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                     .map(parse_identity)
                     .transpose()?,
                 manifest_artifact_id: parse_identity(required_str(json, "manifest_artifact_id")?)?,
+                manifest_artifact_evidence_hash: parse_identity(required_str(
+                    json,
+                    "manifest_artifact_evidence_hash",
+                )?)?,
             },
         )),
         other => Err(StoreError::Event(format!(
@@ -10738,6 +10769,7 @@ fn parse_named_cell_ref(json: &serde_json::Value) -> Result<events::NamedTypedCe
         value_lineage: parse_value_lineage(required_obj(json, "value_lineage")?)?,
         content_digest: parse_identity(required_str(json, "content_digest")?)?,
         artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
+        evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
     })
 }
 
@@ -10771,6 +10803,7 @@ pub fn parse_event_artifact(json: &serde_json::Value) -> CodecResult<events::Art
             .map(parse_identity)
             .transpose()?,
         content_digest: parse_identity(required_str(json, "content_digest")?)?,
+        evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
         byte_len: required_u64(json, "byte_len")?,
         media_type: MediaType::new(required_str(json, "media_type")?)
             .map_err(|error| CodecError::Identity(error.to_string()))?,
@@ -10872,6 +10905,7 @@ fn parse_run_artifact(json: &serde_json::Value) -> Result<events::RunArtifactEvi
             .map(parse_identity)
             .transpose()?,
         content_digest: parse_identity(required_str(json, "content_digest")?)?,
+        evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
         byte_len: required_u64(json, "byte_len")?,
         media_type: MediaType::new(required_str(json, "media_type")?)
             .map_err(|error| StoreError::Identity(error.to_string()))?,
@@ -10952,6 +10986,10 @@ pub fn parse_resource_touched_set_evidence(
         evidence_schema_id: parse_identity(required_str(json, "evidence_schema_id")?)?,
         evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
         evidence_artifact_id: parse_identity(required_str(json, "evidence_artifact_id")?)?,
+        evidence_artifact_evidence_hash: parse_identity(required_str(
+            json,
+            "evidence_artifact_evidence_hash",
+        )?)?,
     })
 }
 
@@ -11204,6 +11242,7 @@ pub fn event_artifact_json(evidence: &events::ArtifactEvidenceRef) -> serde_json
         "artifact_id": evidence.artifact_id.as_str(),
         "byte_len": evidence.byte_len,
         "content_digest": evidence.content_digest.as_str(),
+        "evidence_hash": evidence.evidence_hash.as_str(),
         "media_type": evidence.media_type.as_str(),
         "role": evidence.role.as_str(),
         "schema_id": evidence.schema_id.as_str(),
@@ -11278,6 +11317,7 @@ fn run_artifact_json(evidence: &events::RunArtifactEvidenceRef) -> serde_json::V
         "artifact_id": evidence.artifact_id.as_str(),
         "byte_len": evidence.byte_len,
         "content_digest": evidence.content_digest.as_str(),
+        "evidence_hash": evidence.evidence_hash.as_str(),
         "media_type": evidence.media_type.as_str(),
         "role": evidence.role.as_str(),
         "schema_id": evidence.schema_id.as_ref().map(SchemaId::as_str),
@@ -11498,6 +11538,7 @@ fn named_cell_ref_json(cell: &events::NamedTypedCellRef) -> serde_json::Value {
         "artifact_id": cell.artifact_id.as_str(),
         "cell_id": cell.cell_id.as_str(),
         "content_digest": cell.content_digest.as_str(),
+        "evidence_hash": cell.evidence_hash.as_str(),
         "producer": cell_producer_json(&cell.producer),
         "public_field_path": cell.public_field_path.as_str(),
         "schema_id": cell.schema_id.as_str(),
@@ -11565,6 +11606,7 @@ pub fn resource_touched_set_evidence_json(
     evidence: &events::ResourceTouchedSetEvidence,
 ) -> serde_json::Value {
     serde_json::json!({
+        "evidence_artifact_evidence_hash": evidence.evidence_artifact_evidence_hash.as_str(),
         "evidence_artifact_id": evidence.evidence_artifact_id.as_str(),
         "evidence_hash": evidence.evidence_hash.as_str(),
         "evidence_schema_id": evidence.evidence_schema_id.as_str(),
@@ -11850,6 +11892,7 @@ pub fn cell_projection_json(
             semantic_type_id,
             artifact_id,
             content_digest,
+            evidence_hash,
         } => serde_json::json!({
             "variant": "produced",
             "run_id": run_id.as_str(),
@@ -11861,6 +11904,7 @@ pub fn cell_projection_json(
             "semantic_type_id": semantic_type_id.as_str(),
             "artifact_id": artifact_id.as_str(),
             "content_digest": content_digest.as_str(),
+            "evidence_hash": evidence_hash.as_str(),
         }),
         CellTerminalProjection::Skipped {
             event_id,
@@ -11898,6 +11942,7 @@ pub fn parse_cell_projection(
             semantic_type_id: parse_identity(required_str(json, "semantic_type_id")?)?,
             artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
             content_digest: parse_identity(required_str(json, "content_digest")?)?,
+            evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
         },
         "skipped" => CellTerminalProjection::Skipped {
             event_id: parse_identity(required_str(json, "event_id")?)?,
@@ -11974,6 +12019,7 @@ fn side_effect_artifact_json(artifact: &SideEffectArtifactProjection) -> serde_j
     serde_json::json!({
         "artifact_id": artifact.artifact_id.as_str(),
         "content_digest": artifact.content_digest.as_str(),
+        "evidence_hash": artifact.evidence_hash.as_str(),
         "schema_id": artifact.schema_id.as_ref().map(SchemaId::as_str),
     })
 }
@@ -11984,6 +12030,7 @@ fn parse_side_effect_artifact(
     Ok(SideEffectArtifactProjection {
         artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
         content_digest: parse_identity(required_str(json, "content_digest")?)?,
+        evidence_hash: parse_identity(required_str(json, "evidence_hash")?)?,
         schema_id: optional_str(json, "schema_id")?
             .map(parse_identity)
             .transpose()?,

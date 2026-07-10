@@ -186,6 +186,7 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
         let Some(store::CellTerminalProjection::Produced {
             artifact_id,
             content_digest,
+            evidence_hash,
             ..
         }) = ctx
             .projections()
@@ -207,10 +208,12 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
             value_lineage: required.value_lineage.clone(),
             content_digest: content_digest.clone(),
             artifact_id: artifact_id.clone(),
+            evidence_hash: evidence_hash.clone(),
         });
     }
     let rendered_digest = public_output_rendered_digest(render, &cells)?;
     let rendered_artifact_id = None;
+    let rendered_artifact_evidence_hash = None;
     let receipt_bytes = public_output_receipt_json(
         render,
         &cells,
@@ -237,6 +240,7 @@ fn render_public_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
                 cells,
                 rendered_digest,
                 rendered_artifact_id,
+                rendered_artifact_evidence_hash,
                 renderer_descriptor_id: render.renderer_descriptor.descriptor_id.clone(),
             }),
         ],
@@ -332,6 +336,7 @@ fn stage_framework_state_output(
         producer_seed_id: None,
         artifact_role: events::ArtifactRole::StateOutput,
     };
+    let evidence_hash = receipt_artifact.evidence_hash()?;
     let receipt_artifact =
         StagedArtifact::inline_attempt_artifact(ctx, receipt_bytes.to_vec(), receipt_artifact)?;
     Ok((
@@ -348,6 +353,7 @@ fn stage_framework_state_output(
             context: ctx.output_cell().context.clone(),
             artifact_id: receipt_artifact_id,
             content_digest: receipt_digest,
+            evidence_hash,
             producer_state_kind: Some(ctx.node().state_kind.clone()),
             producer_state_version: Some(ctx.node().state_version.clone()),
         }),

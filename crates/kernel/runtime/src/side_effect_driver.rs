@@ -172,6 +172,7 @@ where
             })?,
             intent_hash: intent.evidence.digest.clone(),
             intent_artifact_id: intent.evidence.artifact_id.clone(),
+            intent_artifact_evidence_hash: intent.evidence.evidence_hash()?,
             idempotency_input_schema_id: Idempotency::schema_id()
                 .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?,
             idempotency_input_hash: canonical_mfm_value(idempotency)?.content_digest(),

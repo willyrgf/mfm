@@ -186,82 +186,30 @@ pub(super) async fn read_retained_artifact_from_pool(
     pool: &PgPool,
     requirement: &EventArtifactRequirement,
 ) -> mfm_store::v1::Result<VerifiedRunArtifactBytes> {
-    if let Some(evidence_hash) = &requirement.evidence_hash {
-        let row = sqlx::query(
-            "SELECT a.artifact_id, a.evidence_hash, a.digest, a.byte_len, a.media_type, a.schema_id, \
-             a.semantic_type_id, a.producer_node_id, a.producer_seed_id, a.artifact_role, b.bytes \
-             FROM artifact_admissions a \
-             INNER JOIN artifact_blobs b \
-               ON b.artifact_id = a.artifact_id AND b.digest = a.digest AND b.byte_len = a.byte_len \
-             WHERE a.artifact_id = $1 AND a.evidence_hash = $2",
-        )
-        .bind(requirement.artifact_id.as_str())
-        .bind(evidence_hash.as_str())
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| StoreError::ArtifactReadFailed {
-            artifact_id: requirement.artifact_id.clone(),
-        })?;
-        let Some(row) = row else {
-            return Err(StoreError::MissingArtifact {
-                artifact_id: requirement.artifact_id.clone(),
-            });
-        };
-        let record = artifact_record_from_row(row).map_err(|_| StoreError::ArtifactReadFailed {
-            artifact_id: requirement.artifact_id.clone(),
-        })?;
-        return VerifiedRunArtifactBytes::new(record.artifact_bytes, record.evidence, requirement);
-    }
-    if requirement.source.is_retention() {
-        return Err(StoreError::ArtifactEvidenceMismatch {
-            artifact_id: requirement.artifact_id.clone(),
-            field: "evidence_hash",
-        });
-    }
-    let rows = sqlx::query(
+    let row = sqlx::query(
         "SELECT a.artifact_id, a.evidence_hash, a.digest, a.byte_len, a.media_type, a.schema_id, \
          a.semantic_type_id, a.producer_node_id, a.producer_seed_id, a.artifact_role, b.bytes \
          FROM artifact_admissions a \
          INNER JOIN artifact_blobs b \
            ON b.artifact_id = a.artifact_id AND b.digest = a.digest AND b.byte_len = a.byte_len \
-         WHERE a.artifact_id = $1 ORDER BY a.evidence_hash",
+         WHERE a.artifact_id = $1 AND a.evidence_hash = $2",
     )
     .bind(requirement.artifact_id.as_str())
-    .fetch_all(pool)
+    .bind(requirement.evidence_hash.as_str())
+    .fetch_optional(pool)
     .await
     .map_err(|_| StoreError::ArtifactReadFailed {
         artifact_id: requirement.artifact_id.clone(),
     })?;
-    if rows.is_empty() {
+    let Some(row) = row else {
         return Err(StoreError::MissingArtifact {
             artifact_id: requirement.artifact_id.clone(),
         });
-    }
-
-    let mut saw_mismatch = false;
-    for row in rows {
-        let record = artifact_record_from_row(row).map_err(|_| StoreError::ArtifactReadFailed {
-            artifact_id: requirement.artifact_id.clone(),
-        })?;
-        match VerifiedRunArtifactBytes::new(record.artifact_bytes, record.evidence, requirement) {
-            Ok(verified) => return Ok(verified),
-            Err(StoreError::ArtifactEvidenceMismatch { .. }) => {
-                saw_mismatch = true;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-
-    if saw_mismatch {
-        Err(StoreError::ArtifactEvidenceMismatch {
-            artifact_id: requirement.artifact_id.clone(),
-            field: "artifact",
-        })
-    } else {
-        Err(StoreError::MissingArtifact {
-            artifact_id: requirement.artifact_id.clone(),
-        })
-    }
+    };
+    let record = artifact_record_from_row(row).map_err(|_| StoreError::ArtifactReadFailed {
+        artifact_id: requirement.artifact_id.clone(),
+    })?;
+    VerifiedRunArtifactBytes::new(record.artifact_bytes, record.evidence, requirement)
 }
 
 pub(super) struct ArtifactEvidenceParts {

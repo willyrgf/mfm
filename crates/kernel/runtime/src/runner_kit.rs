@@ -213,7 +213,7 @@ pub async fn load_runner_config_for_node<T>(
 where
     T: MfmConfig + DeserializeOwned,
 {
-    let requirement = certified_config_requirement(node);
+    let requirement = certified_config_requirement(node)?;
     let verified = read_retained_artifact(artifacts, &requirement).await?;
     let config = decode_verified_json::<T>(&verified)?;
     ValidatedConfig::new(config)
@@ -439,10 +439,11 @@ async fn load_materialized_cell_artifact(
             producer_node_id,
             artifact_id,
             content_digest,
+            evidence_hash,
         } => store::EventArtifactRequirement {
             source: store::EventArtifactReferenceSource::StateOutput,
             artifact_id: artifact_id.clone(),
-            evidence_hash: None,
+            evidence_hash: evidence_hash.clone(),
             digest: Some(content_digest.clone()),
             byte_len: None,
             media_type: None,
@@ -456,10 +457,11 @@ async fn load_materialized_cell_artifact(
             seed_id,
             artifact_id,
             content_digest,
+            evidence_hash,
         } => store::EventArtifactRequirement {
             source: store::EventArtifactReferenceSource::SeedCell,
             artifact_id: artifact_id.clone(),
-            evidence_hash: None,
+            evidence_hash: evidence_hash.clone(),
             digest: Some(content_digest.clone()),
             byte_len: None,
             media_type: None,
@@ -503,11 +505,22 @@ where
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
-fn certified_config_requirement(node: &spec::NodeSpec) -> store::EventArtifactRequirement {
-    store::EventArtifactRequirement {
+fn certified_config_requirement(node: &spec::NodeSpec) -> Result<store::EventArtifactRequirement> {
+    let evidence = store::ArtifactEvidenceRef {
+        artifact_id: node.config_ref.artifact_id.clone(),
+        digest: node.config_ref.digest.clone(),
+        byte_len: node.config_ref.byte_len,
+        media_type: node.config_ref.media_type.clone(),
+        schema_id: Some(node.config_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::TypedConfig,
+    };
+    Ok(store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::RunConfig,
         artifact_id: node.config_ref.artifact_id.clone(),
-        evidence_hash: None,
+        evidence_hash: evidence.evidence_hash()?,
         digest: Some(node.config_ref.digest.clone()),
         byte_len: Some(node.config_ref.byte_len),
         media_type: Some(node.config_ref.media_type.clone()),
@@ -516,7 +529,7 @@ fn certified_config_requirement(node: &spec::NodeSpec) -> store::EventArtifactRe
         producer_node_id: None,
         producer_seed_id: None,
         artifact_role: Some(events::ArtifactRole::TypedConfig),
-    }
+    })
 }
 
 fn side_effect_artifact_requirement(
@@ -527,7 +540,7 @@ fn side_effect_artifact_requirement(
     Ok(store::EventArtifactRequirement {
         source: side_effect_artifact_source(role)?,
         artifact_id: artifact.artifact_id.clone(),
-        evidence_hash: None,
+        evidence_hash: artifact.evidence_hash.clone(),
         digest: Some(artifact.content_digest.clone()),
         byte_len: None,
         media_type: None,
@@ -936,6 +949,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
             context: self.ctx.output_cell().context.clone(),
             artifact_id: artifact.evidence.artifact_id.clone(),
             content_digest: artifact.evidence.digest.clone(),
+            evidence_hash: artifact.evidence.evidence_hash()?,
             producer_state_kind: Some(self.ctx.node().state_kind.clone()),
             producer_state_version: Some(self.ctx.node().state_version.clone()),
         }))
@@ -980,6 +994,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
                     intent_schema_id: artifact_schema_id(intent)?,
                     intent_hash: intent.evidence.digest.clone(),
                     intent_artifact_id: intent.evidence.artifact_id.clone(),
+                    intent_artifact_evidence_hash: intent.evidence.evidence_hash()?,
                     idempotency_input_schema_id: Idempotency::schema_id()
                         .map_err(runtime_value_error)?,
                     idempotency_input_hash: canonical_json(idempotency)?.content_digest(),
@@ -1053,6 +1068,9 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
                     prepared_artifact_id: prepared
                         .map(|artifact| artifact.evidence.artifact_id.clone()),
                     prepared_hash: prepared.map(|artifact| artifact.evidence.digest.clone()),
+                    prepared_artifact_evidence_hash: prepared
+                        .map(|artifact| artifact.evidence.evidence_hash())
+                        .transpose()?,
                 }
             ),
         ))
@@ -1093,6 +1111,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
                     proof_schema_id: artifact_schema_id(proof)?,
                     proof_hash: proof.evidence.digest.clone(),
                     proof_artifact_id: proof.evidence.artifact_id.clone(),
+                    proof_artifact_evidence_hash: proof.evidence.evidence_hash()?,
                 }
             ),
         ))
@@ -1115,6 +1134,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
                     submission_schema_id: artifact_schema_id(submission)?,
                     submission_hash: submission.evidence.digest.clone(),
                     submission_artifact_id: submission.evidence.artifact_id.clone(),
+                    submission_artifact_evidence_hash: submission.evidence.evidence_hash()?,
                 }
             ),
         ))
@@ -1136,6 +1156,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
                     evidence_schema_id: artifact_schema_id(evidence)?,
                     evidence_hash: evidence.evidence.digest.clone(),
                     evidence_artifact_id: evidence.evidence.artifact_id.clone(),
+                    evidence_artifact_evidence_hash: evidence.evidence.evidence_hash()?,
                 }
             ),
         ))
@@ -1159,6 +1180,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
                     receipt_schema_id: artifact_schema_id(receipt)?,
                     receipt_hash: receipt.evidence.digest.clone(),
                     receipt_artifact_id: receipt.evidence.artifact_id.clone(),
+                    receipt_artifact_evidence_hash: receipt.evidence.evidence_hash()?,
                     replay_verifier_id: replay_verifier_id,
                     resource_touched_set: resource_touched_set,
                 }
@@ -1184,6 +1206,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
                     confirmation_schema_id: artifact_schema_id(confirmation)?,
                     confirmation_hash: confirmation.evidence.digest.clone(),
                     confirmation_artifact_id: confirmation.evidence.artifact_id.clone(),
+                    confirmation_artifact_evidence_hash: confirmation.evidence.evidence_hash()?,
                     replay_verifier_id: replay_verifier_id,
                     resource_touched_set: resource_touched_set,
                 }
@@ -1210,6 +1233,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
                     evidence_schema_id: artifact_schema_id(evidence)?,
                     evidence_hash: evidence.evidence.digest.clone(),
                     evidence_artifact_id: evidence.evidence.artifact_id.clone(),
+                    evidence_artifact_evidence_hash: evidence.evidence.evidence_hash()?,
                 }
             ),
         ))

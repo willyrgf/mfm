@@ -600,6 +600,7 @@ fn apply_side_effect_invocation_prepared(
     let prepared_invocation = prepared_invocation_projection(
         &payload.prepared_artifact_id,
         &payload.prepared_hash,
+        &payload.prepared_artifact_evidence_hash,
         &payload.ledger_key,
     )?
     .or_else(|| previous.prepared_invocation.clone());
@@ -1002,6 +1003,7 @@ fn apply_cell_produced(
             semantic_type_id: payload.semantic_type_id.clone(),
             artifact_id: payload.artifact_id.clone(),
             content_digest: payload.content_digest.clone(),
+            evidence_hash: payload.evidence_hash.clone(),
         },
     );
     Ok(())

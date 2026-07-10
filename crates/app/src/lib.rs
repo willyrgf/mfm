@@ -752,7 +752,7 @@ where
             let requirement = store::EventArtifactRequirement {
                 source: store::EventArtifactReferenceSource::ArtifactReferenced,
                 artifact_id: request.artifact_id().clone(),
-                evidence_hash: None,
+                evidence_hash: request.evidence_hash().clone(),
                 digest: request.digest().cloned(),
                 byte_len: request.byte_len(),
                 media_type: request.media_type().cloned(),
@@ -2714,7 +2714,7 @@ fn diagnostic_artifact_requirement(
     store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::ArtifactReferenced,
         artifact_id: reference.artifact_id.clone(),
-        evidence_hash: None,
+        evidence_hash: reference.evidence_hash.clone(),
         digest: Some(reference.content_digest.clone()),
         byte_len: Some(reference.byte_len),
         media_type: Some(reference.media_type.clone()),
@@ -3056,22 +3056,34 @@ fn evm_contract_profile_artifact_requirement(
     {
         return Err(certified_evm_context_artifact_error());
     }
+    let artifact_id = reference
+        .artifact_id()
+        .map_err(|_| certified_evm_context_artifact_error())?;
+    let digest = reference
+        .content_digest()
+        .map_err(|_| certified_evm_context_artifact_error())?;
+    let media_type = spec::MediaType::new("application/json")
+        .map_err(|_| certified_evm_context_artifact_error())?;
+    let evidence = store::ArtifactEvidenceRef {
+        artifact_id: artifact_id.clone(),
+        digest: digest.clone(),
+        byte_len: reference.byte_len(),
+        media_type: media_type.clone(),
+        schema_id: Some(schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::TypedConfig,
+    };
     Ok(store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::ArtifactReferenced,
-        artifact_id: reference
-            .artifact_id()
+        artifact_id,
+        evidence_hash: evidence
+            .evidence_hash()
             .map_err(|_| certified_evm_context_artifact_error())?,
-        evidence_hash: None,
-        digest: Some(
-            reference
-                .content_digest()
-                .map_err(|_| certified_evm_context_artifact_error())?,
-        ),
+        digest: Some(digest),
         byte_len: Some(reference.byte_len()),
-        media_type: Some(
-            spec::MediaType::new("application/json")
-                .map_err(|_| certified_evm_context_artifact_error())?,
-        ),
+        media_type: Some(media_type),
         schema_id: Some(schema_id),
         semantic_type_id: None,
         producer_node_id: None,
@@ -3260,7 +3272,7 @@ fn config_launch_artifacts_for_spec(
             )
         })?;
         validate_artifact_requirement_for_app(
-            config_ref_artifact_requirement(config_ref),
+            config_ref_artifact_requirement(config_ref)?,
             &artifact.evidence,
             ErrorClass::BadRequest,
             "LaunchConfigArtifactMismatch",
@@ -3438,7 +3450,7 @@ fn seed_launch_cells_for_spec(
             events::ArtifactRole::SeedInput,
         );
         validate_artifact_requirement_for_app(
-            seed_artifact_requirement(seed_spec, &artifact.evidence),
+            seed_artifact_requirement(seed_spec, &artifact.evidence)?,
             &artifact.evidence,
             ErrorClass::BadRequest,
             "LaunchSeedArtifactMismatch",
@@ -3467,9 +3479,10 @@ fn seed_launch_cells_for_spec(
                     role: artifact.evidence.artifact_role,
                     schema_id: seed_spec.schema_id.clone(),
                     semantic_type_id: artifact.evidence.semantic_type_id.clone(),
-                    content_digest: artifact.evidence.digest,
+                    content_digest: artifact.evidence.digest.clone(),
+                    evidence_hash: artifact.evidence.evidence_hash()?,
                     byte_len: artifact.evidence.byte_len,
-                    media_type: artifact.evidence.media_type,
+                    media_type: artifact.evidence.media_type.clone(),
                 },
             },
         });
@@ -3547,7 +3560,7 @@ fn run_artifact_requirement(
     store::EventArtifactRequirement {
         source,
         artifact_id: expected.artifact_id.clone(),
-        evidence_hash: None,
+        evidence_hash: expected.evidence_hash.clone(),
         digest: Some(expected.content_digest.clone()),
         byte_len: Some(expected.byte_len),
         media_type: Some(expected.media_type.clone()),
@@ -3565,7 +3578,7 @@ fn artifact_referenced_artifact_requirement(
     store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::ArtifactReferenced,
         artifact_id: payload.artifact_ref.artifact_id.clone(),
-        evidence_hash: None,
+        evidence_hash: payload.artifact_ref.evidence_hash.clone(),
         digest: Some(payload.artifact_ref.content_digest.clone()),
         byte_len: Some(payload.artifact_ref.byte_len),
         media_type: Some(payload.artifact_ref.media_type.clone()),
@@ -3579,11 +3592,22 @@ fn artifact_referenced_artifact_requirement(
 
 fn config_ref_artifact_requirement(
     config_ref: &spec::ConfigRef,
-) -> store::EventArtifactRequirement {
-    store::EventArtifactRequirement {
+) -> Result<store::EventArtifactRequirement, AppError> {
+    let evidence = store::ArtifactEvidenceRef {
+        artifact_id: config_ref.artifact_id.clone(),
+        digest: config_ref.digest.clone(),
+        byte_len: config_ref.byte_len,
+        media_type: config_ref.media_type.clone(),
+        schema_id: Some(config_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::TypedConfig,
+    };
+    Ok(store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::RunConfig,
         artifact_id: config_ref.artifact_id.clone(),
-        evidence_hash: None,
+        evidence_hash: evidence.evidence_hash()?,
         digest: Some(config_ref.digest.clone()),
         byte_len: Some(config_ref.byte_len),
         media_type: Some(config_ref.media_type.clone()),
@@ -3592,17 +3616,17 @@ fn config_ref_artifact_requirement(
         producer_node_id: None,
         producer_seed_id: None,
         artifact_role: Some(events::ArtifactRole::TypedConfig),
-    }
+    })
 }
 
 fn seed_artifact_requirement(
     seed_spec: &spec::SeedSpec,
     evidence: &store::ArtifactEvidenceRef,
-) -> store::EventArtifactRequirement {
-    store::EventArtifactRequirement {
+) -> Result<store::EventArtifactRequirement, AppError> {
+    Ok(store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::SeedCell,
         artifact_id: evidence.artifact_id.clone(),
-        evidence_hash: None,
+        evidence_hash: evidence.evidence_hash()?,
         digest: Some(evidence.digest.clone()),
         byte_len: Some(evidence.byte_len),
         media_type: Some(evidence.media_type.clone()),
@@ -3611,14 +3635,14 @@ fn seed_artifact_requirement(
         producer_node_id: None,
         producer_seed_id: Some(seed_spec.seed_id.clone()),
         artifact_role: Some(events::ArtifactRole::SeedInput),
-    }
+    })
 }
 
 fn seed_cell_artifact_requirement(cell: &events::SeedCellRef) -> store::EventArtifactRequirement {
     store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::SeedCell,
         artifact_id: cell.seed_artifact.artifact_id.clone(),
-        evidence_hash: None,
+        evidence_hash: cell.seed_artifact.evidence_hash.clone(),
         digest: Some(cell.seed_artifact.content_digest.clone()),
         byte_len: Some(cell.seed_artifact.byte_len),
         media_type: Some(cell.seed_artifact.media_type.clone()),
@@ -3646,7 +3670,7 @@ fn public_output_cell_artifact_requirement(
     store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::PublicOutputCell,
         artifact_id: cell.artifact_id.clone(),
-        evidence_hash: None,
+        evidence_hash: cell.evidence_hash.clone(),
         digest: Some(cell.content_digest.clone()),
         byte_len: None,
         media_type: None,
@@ -3663,11 +3687,21 @@ fn public_output_rendered_artifact_requirement(
     artifact_id: &ArtifactId,
     rendered_digest: &ContentDigest,
     media_type: spec::MediaType,
-) -> store::EventArtifactRequirement {
-    store::EventArtifactRequirement {
+) -> Result<store::EventArtifactRequirement, AppError> {
+    let evidence_hash = payload
+        .rendered_artifact_evidence_hash
+        .clone()
+        .ok_or_else(|| {
+            AppError::new(
+                ErrorClass::Internal,
+                "RenderedArtifactEvidenceHashMissing",
+                "public output rendered artifact is missing evidence hash",
+            )
+        })?;
+    Ok(store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::PublicOutputRendered,
         artifact_id: artifact_id.clone(),
-        evidence_hash: None,
+        evidence_hash,
         digest: Some(rendered_digest.clone()),
         byte_len: None,
         media_type: Some(media_type),
@@ -3676,7 +3710,7 @@ fn public_output_rendered_artifact_requirement(
         producer_node_id: Some(payload.node_id.clone()),
         producer_seed_id: None,
         artifact_role: Some(events::ArtifactRole::PublicOutput),
-    }
+    })
 }
 
 /// Returns the default JSON media type used by typed CLI seed inputs.
@@ -4130,14 +4164,13 @@ async fn verify_public_output_authority_artifacts(
                 "Public-output JSON media type is invalid",
             )
         })?;
-        let artifact = artifacts
-            .read_retained_artifact(&public_output_rendered_artifact_requirement(
-                payload,
-                artifact_id,
-                rendered_digest,
-                json_media_type,
-            ))
-            .await?;
+        let requirement = public_output_rendered_artifact_requirement(
+            payload,
+            artifact_id,
+            rendered_digest,
+            json_media_type,
+        )?;
+        let artifact = artifacts.read_retained_artifact(&requirement).await?;
         let evidence = artifact.evidence().clone();
         verify_public_output_rendered_artifact_evidence(
             &evidence,
@@ -4299,14 +4332,13 @@ async fn load_public_output_json(
             "Public-output JSON media type is invalid",
         )
     })?;
-    let artifact = artifacts
-        .read_retained_artifact(&public_output_rendered_artifact_requirement(
-            payload,
-            artifact_id,
-            rendered_digest,
-            json_media_type,
-        ))
-        .await?;
+    let requirement = public_output_rendered_artifact_requirement(
+        payload,
+        artifact_id,
+        rendered_digest,
+        json_media_type,
+    )?;
+    let artifact = artifacts.read_retained_artifact(&requirement).await?;
     let evidence = artifact.evidence().clone();
     verify_public_output_rendered_artifact_evidence(
         &evidence,
@@ -4345,7 +4377,7 @@ fn verify_public_output_rendered_artifact_evidence(
             artifact_id,
             rendered_digest,
             json_media_type,
-        ),
+        )?,
         evidence,
         ErrorClass::Internal,
         "PublicOutputArtifactMismatch",

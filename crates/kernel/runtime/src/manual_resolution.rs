@@ -196,9 +196,11 @@ pub(crate) fn prepare_manual_resolution_commit(
             evidence_schema_id: claim.evidence.schema_id.clone(),
             evidence_hash: claim.evidence.content_hash.clone(),
             evidence_artifact_id: claim.evidence.artifact_id.clone(),
+            evidence_artifact_evidence_hash: evidence_ref.evidence_hash()?,
             authorization_schema_id: authorization.schema_id.clone(),
             authorization_hash: authorization.content_hash.clone(),
             authorization_artifact_id: authorization.artifact_id.clone(),
+            authorization_artifact_evidence_hash: authorization_ref.evidence_hash()?,
             note,
         },
     ));

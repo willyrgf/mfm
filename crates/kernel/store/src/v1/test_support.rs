@@ -65,7 +65,7 @@ pub fn fact_descriptor_projection_fixture_for_test(
     let descriptor_requirement = events::EventArtifactRequirement {
         source: events::EventArtifactReferenceSource::FactDescriptor,
         artifact_id: descriptor_artifact_id.clone(),
-        evidence_hash: Some(descriptor_evidence.evidence_hash()?),
+        evidence_hash: descriptor_evidence.evidence_hash()?,
         digest: Some(descriptor_hash.clone()),
         byte_len: Some(descriptor_bytes.len() as u64),
         media_type: Some(media_type),
@@ -1406,6 +1406,9 @@ pub fn run_artifact_ref_from_store_artifact_for_test(
         schema_id: artifact.schema_id.clone(),
         semantic_type_id: artifact.semantic_type_id.clone(),
         content_digest: artifact.digest.clone(),
+        evidence_hash: artifact
+            .evidence_hash()
+            .expect("test store artifact evidence hash"),
         byte_len: artifact.byte_len,
         media_type: artifact.media_type.clone(),
     }

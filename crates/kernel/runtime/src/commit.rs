@@ -274,16 +274,16 @@ impl CommitPlanner {
             identity_material,
             entry_point: evidence.entry_point,
             spec_hash: runtime_spec.spec_hash().clone(),
-            spec_artifact: run_artifact_ref_from_store(&spec_artifact),
-            certificate_artifact: run_artifact_ref_from_store(&certificate_artifact),
+            spec_artifact: run_artifact_ref_from_store(&spec_artifact)?,
+            certificate_artifact: run_artifact_ref_from_store(&certificate_artifact)?,
             config_artifacts: config_artifacts
                 .iter()
                 .map(run_artifact_ref_from_store)
-                .collect(),
+                .collect::<Result<_>>()?,
             fact_descriptor_artifacts: fact_descriptor_evidence
                 .iter()
                 .map(run_artifact_ref_from_store)
-                .collect(),
+                .collect::<Result<_>>()?,
             spec_version: runtime_spec.spec().spec_version.clone(),
             lowering_version: runtime_spec.spec().lowering_version.clone(),
             public_output_schema_id: runtime_spec.spec().public_outputs.public_schema_id.clone(),
@@ -476,7 +476,7 @@ impl CommitPlanner {
             input.attempt_id,
             &payloads,
             &payload_bound_artifacts,
-        ));
+        )?);
         let artifact_admissions = staged_artifacts
             .iter()
             .map(|artifact| {
@@ -940,12 +940,10 @@ fn retained_fact_artifact_evidence_for_requirement(
                 .fact_descriptor(descriptor_hash)
                 .filter(|descriptor| descriptor.descriptor_artifact_id == requirement.artifact_id)
                 .filter(|descriptor| {
-                    requirement.evidence_hash.as_ref().is_some_and(|expected| {
-                        descriptor
-                            .descriptor_artifact_evidence
-                            .evidence_hash()
-                            .is_ok_and(|actual| &actual == expected)
-                    })
+                    descriptor
+                        .descriptor_artifact_evidence
+                        .evidence_hash()
+                        .is_ok_and(|actual| actual == requirement.evidence_hash)
                 })
             else {
                 return Ok(None);
@@ -961,17 +959,13 @@ fn retained_fact_artifact_evidence_for_requirement(
                         .digest
                         .as_ref()
                         .is_some_and(|digest| index.response_hash == *digest)
-                    && requirement
-                        .evidence_hash
-                        .as_ref()
-                        .is_some_and(|evidence_hash| index.artifact_evidence_hash == *evidence_hash)
+                    && index.artifact_evidence_hash == requirement.evidence_hash
             })
             .and_then(|(claim_id, _index)| {
                 let record = view.projections.fact_record(claim_id)?;
                 let evidence = record.response_artifact_evidence.as_ref()?;
                 let evidence_hash = evidence.evidence_hash().ok()?;
-                (requirement.evidence_hash.as_ref() == Some(&evidence_hash))
-                    .then(|| evidence.clone())
+                (evidence_hash == requirement.evidence_hash).then(|| evidence.clone())
             })),
         _ => Ok(None),
     }
@@ -1418,6 +1412,7 @@ pub(crate) fn retention_manifest_payloads(
                 manifest_digest: manifest.evidence.digest.clone(),
                 previous_manifest_digest: manifest.previous_manifest_digest,
                 manifest_artifact_id: manifest.evidence.artifact_id.clone(),
+                manifest_artifact_evidence_hash: manifest.evidence.evidence_hash()?,
             },
         ),
         events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
@@ -1779,7 +1774,7 @@ fn staged_artifact_reference_payloads(
     attempt_id: &AttemptId,
     payloads: &[events::KernelEventPayload],
     staged_artifacts: &[ValidatedStagedArtifact],
-) -> Vec<events::KernelEventPayload> {
+) -> Result<Vec<events::KernelEventPayload>> {
     let existing_refs = payloads
         .iter()
         .filter_map(|payload| match payload {
@@ -1814,13 +1809,14 @@ fn staged_artifact_reference_payloads(
                     schema_id,
                     semantic_type_id: artifact.evidence.semantic_type_id.clone(),
                     content_digest: artifact.evidence.digest.clone(),
+                    evidence_hash: artifact.evidence.evidence_hash()?,
                     byte_len: artifact.evidence.byte_len,
                     media_type: artifact.evidence.media_type.clone(),
                 },
             },
         ));
     }
-    refs
+    Ok(refs)
 }
 
 fn bind_staged_retention_refs(

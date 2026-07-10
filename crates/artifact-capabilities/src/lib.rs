@@ -131,6 +131,7 @@ impl From<ArtifactEvidenceRef> for store::ArtifactEvidenceRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ArtifactEvidenceExpectation {
     artifact_id: ArtifactId,
+    evidence_hash: ContentDigest,
     digest: Option<ContentDigest>,
     byte_len: Option<u64>,
     media_type: Option<MediaType>,
@@ -142,9 +143,10 @@ struct ArtifactEvidenceExpectation {
 }
 
 impl ArtifactEvidenceExpectation {
-    fn exact(evidence: &ArtifactEvidenceRef) -> Self {
-        Self {
+    fn exact(evidence: &ArtifactEvidenceRef) -> Result<Self> {
+        Ok(Self {
             artifact_id: evidence.artifact_id.clone(),
+            evidence_hash: evidence.clone().into_store().evidence_hash()?,
             digest: Some(evidence.digest.clone()),
             byte_len: Some(evidence.byte_len),
             media_type: Some(evidence.media_type.clone()),
@@ -153,7 +155,7 @@ impl ArtifactEvidenceExpectation {
             producer_node_id: optional_exact(evidence.producer_node_id.clone()),
             producer_seed_id: optional_exact(evidence.producer_seed_id.clone()),
             artifact_role: Some(evidence.artifact_role),
-        }
+        })
     }
 }
 
@@ -189,8 +191,10 @@ impl ArtifactReadRequest {
     }
 
     /// Creates a request from full replay-authorized artifact evidence.
-    pub fn from_replay_authorized_evidence(evidence: ArtifactEvidenceRef) -> Self {
-        Self::from_expectation(ArtifactEvidenceExpectation::exact(&evidence))
+    pub fn from_replay_authorized_evidence(evidence: ArtifactEvidenceRef) -> Result<Self> {
+        Ok(Self::from_expectation(ArtifactEvidenceExpectation::exact(
+            &evidence,
+        )?))
     }
 
     /// Creates a request for a fact response artifact pinned by an internal fact ref.
@@ -199,9 +203,21 @@ impl ArtifactReadRequest {
     }
 
     /// Creates a request for a certified config artifact reference.
-    pub fn from_certified_config_ref(config_ref: &spec::ConfigRef) -> Self {
-        Self::from_expectation(ArtifactEvidenceExpectation {
+    pub fn from_certified_config_ref(config_ref: &spec::ConfigRef) -> Result<Self> {
+        let evidence = store::ArtifactEvidenceRef {
             artifact_id: config_ref.artifact_id.clone(),
+            digest: config_ref.digest.clone(),
+            byte_len: config_ref.byte_len,
+            media_type: config_ref.media_type.clone(),
+            schema_id: Some(config_ref.schema_id.clone()),
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: ArtifactRole::TypedConfig,
+        };
+        Ok(Self::from_expectation(ArtifactEvidenceExpectation {
+            artifact_id: config_ref.artifact_id.clone(),
+            evidence_hash: evidence.evidence_hash()?,
             digest: Some(config_ref.digest.clone()),
             byte_len: Some(config_ref.byte_len),
             media_type: Some(config_ref.media_type.clone()),
@@ -210,7 +226,7 @@ impl ArtifactReadRequest {
             producer_node_id: OptionalEvidence::Absent,
             producer_seed_id: OptionalEvidence::Absent,
             artifact_role: Some(ArtifactRole::TypedConfig),
-        })
+        }))
     }
 
     /// Creates a request from a materialized state-output cell projection.
@@ -222,9 +238,11 @@ impl ArtifactReadRequest {
                 semantic_type_id,
                 artifact_id,
                 content_digest,
+                evidence_hash,
                 ..
             } => Ok(Self::from_expectation(ArtifactEvidenceExpectation {
                 artifact_id: artifact_id.clone(),
+                evidence_hash: evidence_hash.clone(),
                 digest: Some(content_digest.clone()),
                 byte_len: None,
                 media_type: None,
@@ -246,12 +264,14 @@ impl ArtifactReadRequest {
     pub fn from_materialized_seed_cell(
         artifact_id: ArtifactId,
         digest: ContentDigest,
+        evidence_hash: ContentDigest,
         schema_id: SchemaId,
         semantic_type_id: SemanticTypeId,
         seed_id: SeedId,
     ) -> Self {
         Self::from_expectation(ArtifactEvidenceExpectation {
             artifact_id,
+            evidence_hash,
             digest: Some(digest),
             byte_len: None,
             media_type: None,
@@ -267,12 +287,14 @@ impl ArtifactReadRequest {
     pub fn from_materialized_produced_cell(
         artifact_id: ArtifactId,
         digest: ContentDigest,
+        evidence_hash: ContentDigest,
         schema_id: SchemaId,
         semantic_type_id: SemanticTypeId,
         producer_node_id: NodeId,
     ) -> Self {
         Self::from_expectation(ArtifactEvidenceExpectation {
             artifact_id,
+            evidence_hash,
             digest: Some(digest),
             byte_len: None,
             media_type: None,
@@ -292,6 +314,7 @@ impl ArtifactReadRequest {
     ) -> Self {
         Self::from_expectation(ArtifactEvidenceExpectation {
             artifact_id: artifact.artifact_id.clone(),
+            evidence_hash: artifact.evidence_hash.clone(),
             digest: Some(artifact.content_digest.clone()),
             byte_len: None,
             media_type: None,
@@ -309,6 +332,11 @@ impl ArtifactReadRequest {
     /// Returns the artifact id to read.
     pub fn artifact_id(&self) -> &ArtifactId {
         &self.expectation.artifact_id
+    }
+
+    /// Returns the exact retained-artifact evidence identity.
+    pub fn evidence_hash(&self) -> &ContentDigest {
+        &self.expectation.evidence_hash
     }
 
     /// Returns the expected content digest, when the request constrains it.
@@ -367,6 +395,7 @@ fn optional_present_ref<T>(value: &OptionalEvidence<T>) -> Option<&T> {
 fn fact_response_evidence_expectation(fact_ref: &InternalFactRef) -> ArtifactEvidenceExpectation {
     ArtifactEvidenceExpectation {
         artifact_id: fact_ref.artifact_id().clone(),
+        evidence_hash: fact_ref.artifact_evidence_hash().clone(),
         digest: Some(fact_ref.response_hash().clone()),
         byte_len: None,
         media_type: None,
@@ -390,7 +419,7 @@ pub fn fact_response_artifact_requirement(
     store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::FactResponse,
         artifact_id: fact_ref.artifact_id().clone(),
-        evidence_hash: Some(fact_ref.artifact_evidence_hash().clone()),
+        evidence_hash: fact_ref.artifact_evidence_hash().clone(),
         digest: Some(fact_ref.response_hash().clone()),
         byte_len: None,
         media_type: None,
@@ -420,6 +449,10 @@ impl ArtifactEvidenceExpectation {
     fn verify(&self, evidence: &ArtifactEvidenceRef) -> Result<()> {
         if self.artifact_id != evidence.artifact_id {
             return mismatch(&self.artifact_id, "artifact_id");
+        }
+        let actual_evidence_hash = evidence.clone().into_store().evidence_hash()?;
+        if self.evidence_hash != actual_evidence_hash {
+            return mismatch(&self.artifact_id, "evidence_hash");
         }
         if let Some(expected) = &self.digest {
             if expected != &evidence.digest {
@@ -569,6 +602,12 @@ impl ArtifactReadError {
         Self::Backend {
             reason: ArtifactReadBackendError::Failed,
         }
+    }
+}
+
+impl From<store::StoreError> for ArtifactReadError {
+    fn from(error: store::StoreError) -> Self {
+        Self::redacted_backend_failure(error)
     }
 }
 

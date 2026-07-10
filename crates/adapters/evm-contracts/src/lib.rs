@@ -1729,25 +1729,42 @@ async fn read_lifecycle_evidence_artifact(
 fn lifecycle_artifact_requirement(
     evidence: &LifecycleArtifactEvidenceRef,
 ) -> Result<events::EventArtifactRequirement> {
+    let artifact_id = evidence
+        .artifact_id()
+        .map_err(EvmContractAdapterError::Model)?;
+    let digest = evidence
+        .content_digest()
+        .map_err(EvmContractAdapterError::Model)?;
+    let schema_id = evidence
+        .schema_id()
+        .map_err(EvmContractAdapterError::Model)?;
+    let semantic_type_id = evidence
+        .semantic_type_id()
+        .map_err(EvmContractAdapterError::Model)?;
+    let media_type = mfm_spec::v1::MediaType::new("application/json")
+        .map_err(|error| EvmContractAdapterError::Model(error.to_string()))?;
+    let store_evidence = store::ArtifactEvidenceRef {
+        artifact_id: artifact_id.clone(),
+        digest: digest.clone(),
+        byte_len: evidence.byte_len(),
+        media_type,
+        schema_id: schema_id.clone(),
+        semantic_type_id: semantic_type_id.clone(),
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::TypedConfig,
+    };
     Ok(events::EventArtifactRequirement {
         source: events::EventArtifactReferenceSource::ArtifactReferenced,
-        artifact_id: evidence
-            .artifact_id()
-            .map_err(EvmContractAdapterError::Model)?,
-        evidence_hash: None,
-        digest: Some(
-            evidence
-                .content_digest()
-                .map_err(EvmContractAdapterError::Model)?,
-        ),
+        artifact_id,
+        evidence_hash: store_evidence
+            .evidence_hash()
+            .map_err(|error| EvmContractAdapterError::Model(error.to_string()))?,
+        digest: Some(digest),
         byte_len: Some(evidence.byte_len()),
         media_type: None,
-        schema_id: evidence
-            .schema_id()
-            .map_err(EvmContractAdapterError::Model)?,
-        semantic_type_id: evidence
-            .semantic_type_id()
-            .map_err(EvmContractAdapterError::Model)?,
+        schema_id,
+        semantic_type_id,
         producer_node_id: None,
         producer_seed_id: None,
         artifact_role: None,
@@ -1761,7 +1778,7 @@ fn run_artifact_requirement(
     events::EventArtifactRequirement {
         source,
         artifact_id: artifact.artifact_id.clone(),
-        evidence_hash: None,
+        evidence_hash: artifact.evidence_hash.clone(),
         digest: Some(artifact.content_digest.clone()),
         byte_len: Some(artifact.byte_len),
         media_type: Some(artifact.media_type.clone()),
@@ -2868,7 +2885,7 @@ fn replay_side_effect_intent(
     let artifact = broker.retained_artifact(&store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::SideEffectIntent,
         artifact_id: intent.intent_artifact_id.clone(),
-        evidence_hash: None,
+        evidence_hash: intent.intent_artifact_evidence_hash.clone(),
         digest: Some(intent.intent_hash.clone()),
         byte_len: None,
         media_type: None,
@@ -3622,10 +3639,23 @@ fn replay_node_config<T>(broker: &replay::ReplayBroker, node: &spec::NodeSpec) -
 where
     T: MfmConfig + DeserializeOwned,
 {
+    let config_evidence = store::ArtifactEvidenceRef {
+        artifact_id: node.config_ref.artifact_id.clone(),
+        digest: node.config_ref.digest.clone(),
+        byte_len: node.config_ref.byte_len,
+        media_type: node.config_ref.media_type.clone(),
+        schema_id: Some(node.config_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::TypedConfig,
+    };
     let requirement = store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::RunConfig,
         artifact_id: node.config_ref.artifact_id.clone(),
-        evidence_hash: None,
+        evidence_hash: config_evidence
+            .evidence_hash()
+            .map_err(replay_adapter_error)?,
         digest: Some(node.config_ref.digest.clone()),
         byte_len: Some(node.config_ref.byte_len),
         media_type: Some(node.config_ref.media_type.clone()),
@@ -6300,22 +6330,34 @@ fn contract_profile_artifact_requirement(
     {
         return Err(EvmContractAdapterError::MissingContractArtifact);
     }
+    let artifact_id = reference
+        .artifact_id()
+        .map_err(EvmContractAdapterError::Model)?;
+    let digest = reference
+        .content_digest()
+        .map_err(EvmContractAdapterError::Model)?;
+    let media_type = spec::MediaType::new("application/json")
+        .map_err(|error| EvmContractAdapterError::Model(error.to_string()))?;
+    let store_evidence = store::ArtifactEvidenceRef {
+        artifact_id: artifact_id.clone(),
+        digest: digest.clone(),
+        byte_len: reference.byte_len(),
+        media_type: media_type.clone(),
+        schema_id: Some(schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::TypedConfig,
+    };
     Ok(store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::ArtifactReferenced,
-        artifact_id: reference
-            .artifact_id()
-            .map_err(EvmContractAdapterError::Model)?,
-        evidence_hash: None,
-        digest: Some(
-            reference
-                .content_digest()
-                .map_err(EvmContractAdapterError::Model)?,
-        ),
+        artifact_id,
+        evidence_hash: store_evidence
+            .evidence_hash()
+            .map_err(|error| EvmContractAdapterError::Model(error.to_string()))?,
+        digest: Some(digest),
         byte_len: Some(reference.byte_len()),
-        media_type: Some(
-            spec::MediaType::new("application/json")
-                .map_err(|error| EvmContractAdapterError::Model(error.to_string()))?,
-        ),
+        media_type: Some(media_type),
         schema_id: Some(schema_id),
         semantic_type_id: None,
         producer_node_id: None,

@@ -928,19 +928,6 @@ async fn retained_artifact_adapter_preserves_read_request_expectations() {
         byte_len: bytes.len() as u64,
         media_type: spec::MediaType::new("application/json").expect("media"),
     };
-    let expected = store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::ArtifactReferenced,
-        artifact_id: config_ref.artifact_id.clone(),
-        evidence_hash: None,
-        digest: Some(config_ref.digest.clone()),
-        byte_len: Some(config_ref.byte_len),
-        media_type: Some(config_ref.media_type.clone()),
-        schema_id: Some(config_ref.schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: Some(events::ArtifactRole::TypedConfig),
-    };
     let evidence = store::ArtifactEvidenceRef {
         artifact_id: config_ref.artifact_id.clone(),
         digest,
@@ -951,6 +938,19 @@ async fn retained_artifact_adapter_preserves_read_request_expectations() {
         producer_node_id: None,
         producer_seed_id: None,
         artifact_role: events::ArtifactRole::TypedConfig,
+    };
+    let expected = store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::ArtifactReferenced,
+        artifact_id: config_ref.artifact_id.clone(),
+        evidence_hash: evidence.evidence_hash().expect("config evidence hash"),
+        digest: Some(config_ref.digest.clone()),
+        byte_len: Some(config_ref.byte_len),
+        media_type: Some(config_ref.media_type.clone()),
+        schema_id: Some(config_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: Some(events::ArtifactRole::TypedConfig),
     };
     let artifact = store::VerifiedRunArtifactBytes::new(bytes, evidence, &expected)
         .expect("verified artifact");
@@ -963,7 +963,8 @@ async fn retained_artifact_adapter_preserves_read_request_expectations() {
 
     provider
         .read_artifact(
-            &mfm_artifact_capabilities::ArtifactReadRequest::from_certified_config_ref(&config_ref),
+            &mfm_artifact_capabilities::ArtifactReadRequest::from_certified_config_ref(&config_ref)
+                .expect("config request"),
         )
         .await
         .expect("adapter preserves exact config expectation");

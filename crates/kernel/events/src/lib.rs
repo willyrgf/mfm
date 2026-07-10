@@ -373,10 +373,12 @@ pub mod v1 {
         pub namespace: ResourceNamespace,
         /// Schema id for the typed touched-set evidence.
         pub evidence_schema_id: SchemaId,
-        /// Canonical touched-set evidence hash.
+        /// Canonical touched-set content hash.
         pub evidence_hash: ContentDigest,
         /// Touched-set evidence artifact id.
         pub evidence_artifact_id: ArtifactId,
+        /// Exact retained-artifact evidence identity for the touched-set artifact.
+        pub evidence_artifact_evidence_hash: ContentDigest,
     }
 
     /// Persisted purpose for a side-effect ledger.
@@ -1176,6 +1178,8 @@ pub mod v1 {
         pub artifact_id: ArtifactId,
         /// Canonical value content digest.
         pub content_digest: ContentDigest,
+        /// Exact retained-artifact evidence identity for the value artifact.
+        pub evidence_hash: ContentDigest,
         /// Producer state kind.
         pub producer_state_kind: Option<StateKind>,
         /// Producer state version.
@@ -1228,6 +1232,8 @@ pub mod v1 {
         pub rendered_digest: ContentDigest,
         /// Optional rendered output artifact id.
         pub rendered_artifact_id: Option<ArtifactId>,
+        /// Exact retained-artifact evidence identity for the rendered output artifact, when any.
+        pub rendered_artifact_evidence_hash: Option<ContentDigest>,
         /// Renderer descriptor id.
         pub renderer_descriptor_id: DescriptorId,
     }
@@ -1310,16 +1316,20 @@ pub mod v1 {
         pub outcome: ManualResolutionOutcome,
         /// Evidence schema id.
         pub evidence_schema_id: SchemaId,
-        /// Evidence hash.
+        /// Evidence content hash.
         pub evidence_hash: ContentDigest,
         /// Evidence artifact id.
         pub evidence_artifact_id: ArtifactId,
+        /// Exact retained-artifact evidence identity for the evidence artifact.
+        pub evidence_artifact_evidence_hash: ContentDigest,
         /// Authorization proof schema id.
         pub authorization_schema_id: SchemaId,
-        /// Authorization proof hash.
+        /// Authorization proof content hash.
         pub authorization_hash: ContentDigest,
         /// Authorization proof artifact id.
         pub authorization_artifact_id: ArtifactId,
+        /// Exact retained-artifact evidence identity for the authorization artifact.
+        pub authorization_artifact_evidence_hash: ContentDigest,
         /// Optional redaction-safe operator note.
         pub note: Option<ManualResolutionNote>,
     }
@@ -1386,6 +1396,8 @@ pub mod v1 {
         pub previous_manifest_digest: Option<ContentDigest>,
         /// Manifest artifact id.
         pub manifest_artifact_id: ArtifactId,
+        /// Exact retained-artifact evidence identity for the manifest artifact.
+        pub manifest_artifact_evidence_hash: ContentDigest,
     }
 
     /// Executable identity for state runners, adapters, and framework executables.
@@ -1416,6 +1428,8 @@ pub mod v1 {
         pub semantic_type_id: Option<SemanticTypeId>,
         /// Artifact content digest.
         pub content_digest: ContentDigest,
+        /// Exact retained-artifact evidence identity.
+        pub evidence_hash: ContentDigest,
         /// Artifact byte length.
         pub byte_len: u64,
         /// Artifact media type.
@@ -1435,6 +1449,8 @@ pub mod v1 {
         pub semantic_type_id: Option<SemanticTypeId>,
         /// Artifact content digest.
         pub content_digest: ContentDigest,
+        /// Exact retained-artifact evidence identity.
+        pub evidence_hash: ContentDigest,
         /// Artifact byte length.
         pub byte_len: u64,
         /// Artifact media type.
@@ -2085,8 +2101,8 @@ pub mod v1 {
         pub source: EventArtifactReferenceSource,
         /// Referenced artifact id.
         pub artifact_id: ArtifactId,
-        /// Expected canonical evidence identity, when the event carries an exact authority key.
-        pub evidence_hash: Option<ContentDigest>,
+        /// Expected exact retained-artifact evidence identity.
+        pub evidence_hash: ContentDigest,
         /// Expected content digest, when the event carries one.
         pub digest: Option<ContentDigest>,
         /// Expected byte length, when the event carries one.
@@ -2148,7 +2164,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::FactResponse,
                     artifact_id: response.artifact_id().clone(),
-                    evidence_hash: Some(response.artifact_evidence_hash().clone()),
+                    evidence_hash: response.artifact_evidence_hash().clone(),
                     digest: Some(response.response_hash().clone()),
                     byte_len: None,
                     media_type: None,
@@ -2172,7 +2188,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::StateOutput,
                     artifact_id: payload.artifact_id.clone(),
-                    evidence_hash: None,
+                    evidence_hash: payload.evidence_hash.clone(),
                     digest: Some(payload.content_digest.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2190,7 +2206,7 @@ pub mod v1 {
                     requirements.push(EventArtifactRequirement {
                         source: EventArtifactReferenceSource::PublicOutputCell,
                         artifact_id: cell.artifact_id.clone(),
-                        evidence_hash: None,
+                        evidence_hash: cell.evidence_hash.clone(),
                         digest: Some(cell.content_digest.clone()),
                         byte_len: None,
                         media_type: None,
@@ -2201,11 +2217,14 @@ pub mod v1 {
                         artifact_role: None,
                     });
                 }
-                if let Some(artifact_id) = &payload.rendered_artifact_id {
+                if let (Some(artifact_id), Some(evidence_hash)) = (
+                    &payload.rendered_artifact_id,
+                    &payload.rendered_artifact_evidence_hash,
+                ) {
                     requirements.push(EventArtifactRequirement {
                         source: EventArtifactReferenceSource::PublicOutputRendered,
                         artifact_id: artifact_id.clone(),
-                        evidence_hash: None,
+                        evidence_hash: evidence_hash.clone(),
                         digest: Some(payload.rendered_digest.clone()),
                         byte_len: None,
                         media_type: None,
@@ -2243,7 +2262,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::ManualResolutionEvidence,
                     artifact_id: payload.evidence_artifact_id.clone(),
-                    evidence_hash: None,
+                    evidence_hash: payload.evidence_artifact_evidence_hash.clone(),
                     digest: Some(payload.evidence_hash.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2256,7 +2275,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::ManualResolutionAuthorization,
                     artifact_id: payload.authorization_artifact_id.clone(),
-                    evidence_hash: None,
+                    evidence_hash: payload.authorization_artifact_evidence_hash.clone(),
                     digest: Some(payload.authorization_hash.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2277,7 +2296,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::SideEffectIntent,
                     artifact_id: payload.intent_artifact_id.clone(),
-                    evidence_hash: None,
+                    evidence_hash: payload.intent_artifact_evidence_hash.clone(),
                     digest: Some(payload.intent_hash.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2289,13 +2308,15 @@ pub mod v1 {
                 });
             }
             KernelEventPayload::SideEffectInvocationPrepared(payload) => {
-                if let (Some(artifact_id), Some(hash)) =
-                    (&payload.prepared_artifact_id, &payload.prepared_hash)
-                {
+                if let (Some(artifact_id), Some(hash), Some(evidence_hash)) = (
+                    &payload.prepared_artifact_id,
+                    &payload.prepared_hash,
+                    &payload.prepared_artifact_evidence_hash,
+                ) {
                     requirements.push(EventArtifactRequirement {
                         source: EventArtifactReferenceSource::PreparedInvocation,
                         artifact_id: artifact_id.clone(),
-                        evidence_hash: None,
+                        evidence_hash: evidence_hash.clone(),
                         digest: Some(hash.clone()),
                         byte_len: None,
                         media_type: None,
@@ -2311,7 +2332,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::NotSubmittedProof,
                     artifact_id: payload.proof_artifact_id.clone(),
-                    evidence_hash: None,
+                    evidence_hash: payload.proof_artifact_evidence_hash.clone(),
                     digest: Some(payload.proof_hash.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2326,7 +2347,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::Submission,
                     artifact_id: payload.submission_artifact_id.clone(),
-                    evidence_hash: None,
+                    evidence_hash: payload.submission_artifact_evidence_hash.clone(),
                     digest: Some(payload.submission_hash.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2341,7 +2362,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::SubmissionUnknownEvidence,
                     artifact_id: payload.evidence_artifact_id.clone(),
-                    evidence_hash: None,
+                    evidence_hash: payload.evidence_artifact_evidence_hash.clone(),
                     digest: Some(payload.evidence_hash.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2356,7 +2377,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::Receipt,
                     artifact_id: payload.receipt_artifact_id.clone(),
-                    evidence_hash: None,
+                    evidence_hash: payload.receipt_artifact_evidence_hash.clone(),
                     digest: Some(payload.receipt_hash.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2374,7 +2395,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::Confirmation,
                     artifact_id: payload.confirmation_artifact_id.clone(),
-                    evidence_hash: None,
+                    evidence_hash: payload.confirmation_artifact_evidence_hash.clone(),
                     digest: Some(payload.confirmation_hash.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2392,7 +2413,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::AmbiguityEvidence,
                     artifact_id: payload.evidence_artifact_id.clone(),
-                    evidence_hash: None,
+                    evidence_hash: payload.evidence_artifact_evidence_hash.clone(),
                     digest: Some(payload.evidence_hash.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2419,7 +2440,7 @@ pub mod v1 {
                     requirements.push(EventArtifactRequirement {
                         source: EventArtifactReferenceSource::RetentionRef,
                         artifact_id: retention_ref.artifact_id.clone(),
-                        evidence_hash: Some(retention_ref.evidence_hash.clone()),
+                        evidence_hash: retention_ref.evidence_hash.clone(),
                         digest: Some(retention_ref.content_digest.clone()),
                         byte_len: None,
                         media_type: None,
@@ -2435,7 +2456,7 @@ pub mod v1 {
                 requirements.push(EventArtifactRequirement {
                     source: EventArtifactReferenceSource::RetentionManifest,
                     artifact_id: payload.manifest_artifact_id.clone(),
-                    evidence_hash: None,
+                    evidence_hash: payload.manifest_artifact_evidence_hash.clone(),
                     digest: Some(payload.manifest_digest.clone()),
                     byte_len: None,
                     media_type: None,
@@ -2469,7 +2490,7 @@ pub mod v1 {
         requirements.push(EventArtifactRequirement {
             source,
             artifact_id: evidence.artifact_id.clone(),
-            evidence_hash: None,
+            evidence_hash: evidence.evidence_hash.clone(),
             digest: Some(evidence.content_digest.clone()),
             byte_len: Some(evidence.byte_len),
             media_type: Some(evidence.media_type.clone()),
@@ -2491,7 +2512,7 @@ pub mod v1 {
         requirements.push(EventArtifactRequirement {
             source,
             artifact_id: evidence.artifact_id.clone(),
-            evidence_hash: None,
+            evidence_hash: evidence.evidence_hash.clone(),
             digest: Some(evidence.content_digest.clone()),
             byte_len: Some(evidence.byte_len),
             media_type: Some(evidence.media_type.clone()),
@@ -2510,7 +2531,7 @@ pub mod v1 {
         requirements.push(EventArtifactRequirement {
             source: EventArtifactReferenceSource::ResourceTouchedSet,
             artifact_id: evidence.evidence_artifact_id.clone(),
-            evidence_hash: None,
+            evidence_hash: evidence.evidence_artifact_evidence_hash.clone(),
             digest: Some(evidence.evidence_hash.clone()),
             byte_len: None,
             media_type: None,
@@ -2550,6 +2571,8 @@ pub mod v1 {
         pub content_digest: ContentDigest,
         /// Cell value artifact id.
         pub artifact_id: ArtifactId,
+        /// Exact retained-artifact evidence identity for the cell value artifact.
+        pub evidence_hash: ContentDigest,
     }
 
     /// Redaction-safe error information.
@@ -2826,10 +2849,12 @@ pub mod v1 {
             pub invocation_epoch: u32,
             /// Intent schema id.
             pub intent_schema_id: SchemaId,
-            /// Intent hash.
+            /// Intent content hash.
             pub intent_hash: ContentDigest,
             /// Intent artifact id.
             pub intent_artifact_id: ArtifactId,
+            /// Exact retained-artifact evidence identity for the intent artifact.
+            pub intent_artifact_evidence_hash: ContentDigest,
             /// Idempotency input schema id.
             pub idempotency_input_schema_id: SchemaId,
             /// Idempotency input hash.
@@ -2931,8 +2956,10 @@ pub mod v1 {
             pub resource_key: Option<ResourceKeyEvidence>,
             /// Optional prepared artifact id.
             pub prepared_artifact_id: Option<ArtifactId>,
-            /// Optional prepared artifact hash.
+            /// Optional prepared artifact content hash.
             pub prepared_hash: Option<ContentDigest>,
+            /// Exact retained-artifact evidence identity for the prepared artifact, when any.
+            pub prepared_artifact_evidence_hash: Option<ContentDigest>,
         }
 
         /// Side-effect invocation started event payload.
@@ -2983,10 +3010,12 @@ pub mod v1 {
             pub invocation_epoch: u32,
             /// Proof schema id.
             pub proof_schema_id: SchemaId,
-            /// Proof hash.
+            /// Proof content hash.
             pub proof_hash: ContentDigest,
             /// Proof artifact id.
             pub proof_artifact_id: ArtifactId,
+            /// Exact retained-artifact evidence identity for the proof artifact.
+            pub proof_artifact_evidence_hash: ContentDigest,
         }
 
         /// Side-effect submission observed event payload.
@@ -3010,10 +3039,12 @@ pub mod v1 {
             pub invocation_epoch: u32,
             /// Submission schema id.
             pub submission_schema_id: SchemaId,
-            /// Submission hash.
+            /// Submission content hash.
             pub submission_hash: ContentDigest,
             /// Submission artifact id.
             pub submission_artifact_id: ArtifactId,
+            /// Exact retained-artifact evidence identity for the submission artifact.
+            pub submission_artifact_evidence_hash: ContentDigest,
         }
 
         /// Side-effect submission unknown event payload.
@@ -3037,10 +3068,12 @@ pub mod v1 {
             pub invocation_epoch: u32,
             /// Evidence schema id.
             pub evidence_schema_id: SchemaId,
-            /// Evidence hash.
+            /// Evidence content hash.
             pub evidence_hash: ContentDigest,
             /// Evidence artifact id.
             pub evidence_artifact_id: ArtifactId,
+            /// Exact retained-artifact evidence identity for the evidence artifact.
+            pub evidence_artifact_evidence_hash: ContentDigest,
         }
 
         /// Side-effect receipt observed event payload.
@@ -3064,10 +3097,12 @@ pub mod v1 {
             pub invocation_epoch: u32,
             /// Receipt schema id.
             pub receipt_schema_id: SchemaId,
-            /// Receipt hash.
+            /// Receipt content hash.
             pub receipt_hash: ContentDigest,
             /// Receipt artifact id.
             pub receipt_artifact_id: ArtifactId,
+            /// Exact retained-artifact evidence identity for the receipt artifact.
+            pub receipt_artifact_evidence_hash: ContentDigest,
             /// Replay verifier id.
             pub replay_verifier_id: ReplayVerifierId,
             /// Optional exact touched-set evidence.
@@ -3095,10 +3130,12 @@ pub mod v1 {
             pub invocation_epoch: u32,
             /// Confirmation schema id.
             pub confirmation_schema_id: SchemaId,
-            /// Confirmation hash.
+            /// Confirmation content hash.
             pub confirmation_hash: ContentDigest,
             /// Confirmation artifact id.
             pub confirmation_artifact_id: ArtifactId,
+            /// Exact retained-artifact evidence identity for the confirmation artifact.
+            pub confirmation_artifact_evidence_hash: ContentDigest,
             /// Replay verifier id.
             pub replay_verifier_id: ReplayVerifierId,
             /// Optional exact touched-set evidence.
@@ -3128,10 +3165,12 @@ pub mod v1 {
             pub ambiguity_code: AmbiguityCode,
             /// Evidence schema id.
             pub evidence_schema_id: SchemaId,
-            /// Evidence hash.
+            /// Evidence content hash.
             pub evidence_hash: ContentDigest,
             /// Evidence artifact id.
             pub evidence_artifact_id: ArtifactId,
+            /// Exact retained-artifact evidence identity for the evidence artifact.
+            pub evidence_artifact_evidence_hash: ContentDigest,
         }
 
         /// Side-effect failed event payload.
@@ -3746,6 +3785,11 @@ pub mod v1 {
                         "ContentDigest",
                         EventFieldCardinality::Required,
                     ),
+                    schema_field(
+                        "evidence_hash",
+                        "ContentDigest",
+                        EventFieldCardinality::Required,
+                    ),
                     schema_field("byte_len", "u64", EventFieldCardinality::Required),
                     schema_field("media_type", "MediaType", EventFieldCardinality::Required),
                 ],
@@ -3796,6 +3840,11 @@ pub mod v1 {
                         "ContentDigest",
                         EventFieldCardinality::Required,
                     ),
+                    schema_field(
+                        "evidence_hash",
+                        "ContentDigest",
+                        EventFieldCardinality::Required,
+                    ),
                     schema_field("byte_len", "u64", EventFieldCardinality::Required),
                     schema_field("media_type", "MediaType", EventFieldCardinality::Required),
                 ],
@@ -3836,6 +3885,11 @@ pub mod v1 {
                         "ArtifactId",
                         EventFieldCardinality::Required,
                     ),
+                    schema_field(
+                        "evidence_artifact_evidence_hash",
+                        "ContentDigest",
+                        EventFieldCardinality::Required,
+                    ),
                 ],
             ),
             "NamedTypedCellRef" => struct_type(
@@ -3866,6 +3920,11 @@ pub mod v1 {
                         EventFieldCardinality::Required,
                     ),
                     schema_field("artifact_id", "ArtifactId", EventFieldCardinality::Required),
+                    schema_field(
+                        "evidence_hash",
+                        "ContentDigest",
+                        EventFieldCardinality::Required,
+                    ),
                 ],
             ),
             "CellProducer" => enum_type(
@@ -4276,6 +4335,7 @@ pub mod v1 {
             EventFieldDescriptor::required("context", "CellContextSpec"),
             EventFieldDescriptor::required("artifact_id", "ArtifactId"),
             EventFieldDescriptor::required("content_digest", "ContentDigest"),
+            EventFieldDescriptor::required("evidence_hash", "ContentDigest"),
             EventFieldDescriptor::optional("producer_state_kind", "StateKind"),
             EventFieldDescriptor::optional("producer_state_version", "StateVersion"),
         ],
@@ -4316,6 +4376,7 @@ pub mod v1 {
             EventFieldDescriptor::required("intent_schema_id", "SchemaId"),
             EventFieldDescriptor::required("intent_hash", "ContentDigest"),
             EventFieldDescriptor::required("intent_artifact_id", "ArtifactId"),
+            EventFieldDescriptor::required("intent_artifact_evidence_hash", "ContentDigest"),
             EventFieldDescriptor::required("idempotency_input_schema_id", "SchemaId"),
             EventFieldDescriptor::required("idempotency_input_hash", "ContentDigest"),
             EventFieldDescriptor::required("idempotency_key", "IdempotencyKeyRef"),
@@ -4425,6 +4486,7 @@ pub mod v1 {
             EventFieldDescriptor::optional("resource_key", "ResourceKeyEvidence"),
             EventFieldDescriptor::optional("prepared_artifact_id", "ArtifactId"),
             EventFieldDescriptor::optional("prepared_hash", "ContentDigest"),
+            EventFieldDescriptor::optional("prepared_artifact_evidence_hash", "ContentDigest"),
         ],
     };
 
@@ -4463,6 +4525,7 @@ pub mod v1 {
             EventFieldDescriptor::required("proof_schema_id", "SchemaId"),
             EventFieldDescriptor::required("proof_hash", "ContentDigest"),
             EventFieldDescriptor::required("proof_artifact_id", "ArtifactId"),
+            EventFieldDescriptor::required("proof_artifact_evidence_hash", "ContentDigest"),
         ],
     };
 
@@ -4482,6 +4545,7 @@ pub mod v1 {
             EventFieldDescriptor::required("submission_schema_id", "SchemaId"),
             EventFieldDescriptor::required("submission_hash", "ContentDigest"),
             EventFieldDescriptor::required("submission_artifact_id", "ArtifactId"),
+            EventFieldDescriptor::required("submission_artifact_evidence_hash", "ContentDigest"),
         ],
     };
 
@@ -4501,6 +4565,7 @@ pub mod v1 {
             EventFieldDescriptor::required("evidence_schema_id", "SchemaId"),
             EventFieldDescriptor::required("evidence_hash", "ContentDigest"),
             EventFieldDescriptor::required("evidence_artifact_id", "ArtifactId"),
+            EventFieldDescriptor::required("evidence_artifact_evidence_hash", "ContentDigest"),
         ],
     };
 
@@ -4520,6 +4585,7 @@ pub mod v1 {
             EventFieldDescriptor::required("receipt_schema_id", "SchemaId"),
             EventFieldDescriptor::required("receipt_hash", "ContentDigest"),
             EventFieldDescriptor::required("receipt_artifact_id", "ArtifactId"),
+            EventFieldDescriptor::required("receipt_artifact_evidence_hash", "ContentDigest"),
             EventFieldDescriptor::required("replay_verifier_id", "ReplayVerifierId"),
             EventFieldDescriptor::optional("resource_touched_set", "ResourceTouchedSetEvidence",),
         ],
@@ -4541,6 +4607,7 @@ pub mod v1 {
             EventFieldDescriptor::required("confirmation_schema_id", "SchemaId"),
             EventFieldDescriptor::required("confirmation_hash", "ContentDigest"),
             EventFieldDescriptor::required("confirmation_artifact_id", "ArtifactId"),
+            EventFieldDescriptor::required("confirmation_artifact_evidence_hash", "ContentDigest"),
             EventFieldDescriptor::required("replay_verifier_id", "ReplayVerifierId"),
             EventFieldDescriptor::optional("resource_touched_set", "ResourceTouchedSetEvidence",),
         ],
@@ -4563,6 +4630,7 @@ pub mod v1 {
             EventFieldDescriptor::required("evidence_schema_id", "SchemaId"),
             EventFieldDescriptor::required("evidence_hash", "ContentDigest"),
             EventFieldDescriptor::required("evidence_artifact_id", "ArtifactId"),
+            EventFieldDescriptor::required("evidence_artifact_evidence_hash", "ContentDigest"),
         ],
     };
 
@@ -4636,6 +4704,7 @@ pub mod v1 {
             EventFieldDescriptor::repeated("cells", "NamedTypedCellRef"),
             EventFieldDescriptor::required("rendered_digest", "ContentDigest"),
             EventFieldDescriptor::optional("rendered_artifact_id", "ArtifactId"),
+            EventFieldDescriptor::optional("rendered_artifact_evidence_hash", "ContentDigest"),
             EventFieldDescriptor::required("renderer_descriptor_id", "DescriptorId"),
         ],
     };
@@ -4701,9 +4770,14 @@ pub mod v1 {
             EventFieldDescriptor::required("evidence_schema_id", "SchemaId"),
             EventFieldDescriptor::required("evidence_hash", "ContentDigest"),
             EventFieldDescriptor::required("evidence_artifact_id", "ArtifactId"),
+            EventFieldDescriptor::required("evidence_artifact_evidence_hash", "ContentDigest"),
             EventFieldDescriptor::required("authorization_schema_id", "SchemaId"),
             EventFieldDescriptor::required("authorization_hash", "ContentDigest"),
             EventFieldDescriptor::required("authorization_artifact_id", "ArtifactId"),
+            EventFieldDescriptor::required(
+                "authorization_artifact_evidence_hash",
+                "ContentDigest",
+            ),
             EventFieldDescriptor::optional("note", "ManualResolutionNote"),
         ],
     };
@@ -4742,6 +4816,7 @@ pub mod v1 {
             EventFieldDescriptor::required("manifest_digest", "ContentDigest"),
             EventFieldDescriptor::optional("previous_manifest_digest", "ContentDigest"),
             EventFieldDescriptor::required("manifest_artifact_id", "ArtifactId"),
+            EventFieldDescriptor::required("manifest_artifact_evidence_hash", "ContentDigest"),
         ],
     };
 

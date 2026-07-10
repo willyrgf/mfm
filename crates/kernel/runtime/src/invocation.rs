@@ -656,6 +656,8 @@ pub enum MaterializedCellTerminal {
         artifact_id: ArtifactId,
         /// Content digest.
         content_digest: ContentDigest,
+        /// Exact retained-artifact evidence identity.
+        evidence_hash: ContentDigest,
     },
     /// Produced node output.
     Produced {
@@ -665,6 +667,8 @@ pub enum MaterializedCellTerminal {
         artifact_id: ArtifactId,
         /// Content digest.
         content_digest: ContentDigest,
+        /// Exact retained-artifact evidence identity.
+        evidence_hash: ContentDigest,
     },
     /// Skipped node output.
     Skipped {

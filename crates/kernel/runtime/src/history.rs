@@ -534,6 +534,7 @@ fn materialize_cell(
                 seed_id: seed_id.clone(),
                 artifact_id: seed.seed_artifact.artifact_id.clone(),
                 content_digest: seed.digest.clone(),
+                evidence_hash: seed.seed_artifact.evidence_hash.clone(),
             }
         }
         spec::CellProducer::Node(_) => {
@@ -554,6 +555,7 @@ fn materialize_cell(
                     semantic_type_id,
                     artifact_id,
                     content_digest,
+                    evidence_hash,
                     ..
                 } => {
                     if certified.producer != spec::CellProducer::Node(node_id.clone())
@@ -579,6 +581,7 @@ fn materialize_cell(
                     }
                     let artifact = committed_input_artifact(view, &cell.cell_id, artifact_id)?;
                     if artifact.evidence.digest != *content_digest
+                        || artifact.evidence.evidence_hash()? != *evidence_hash
                         || artifact.evidence.schema_id.as_ref() != Some(schema_id)
                         || artifact.evidence.semantic_type_id.as_ref() != Some(semantic_type_id)
                         || artifact.evidence.producer_node_id.as_ref() != Some(node_id)
@@ -595,6 +598,7 @@ fn materialize_cell(
                         producer_node_id: node_id.clone(),
                         artifact_id: artifact_id.clone(),
                         content_digest: content_digest.clone(),
+                        evidence_hash: evidence_hash.clone(),
                     }
                 }
                 store::CellTerminalProjection::Skipped {
@@ -2362,15 +2366,18 @@ fn validate_historical_complete_run_batch(
                 completion_node.node_id, completion_node.output_cell
             ))
         })?;
-    let expected_receipt_ref = events::ArtifactEvidenceRef {
+    let expected_receipt_store = store::ArtifactEvidenceRef {
         artifact_id: receipt_artifact_id.clone(),
-        role: events::ArtifactRole::StateOutput,
-        schema_id: completion_cell.schema_id.clone(),
-        semantic_type_id: Some(completion_cell.semantic_type_id.clone()),
-        content_digest: receipt_digest.clone(),
+        digest: receipt_digest.clone(),
         byte_len: receipt_bytes.as_bytes().len() as u64,
         media_type: spec::MediaType::new("application/json")?,
+        schema_id: Some(completion_cell.schema_id.clone()),
+        semantic_type_id: Some(completion_cell.semantic_type_id.clone()),
+        producer_node_id: Some(completion_node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::StateOutput,
     };
+    let expected_receipt_ref = event_artifact_ref_from_store(&expected_receipt_store)?;
 
     let completed_outcome = events::RunCompletionOutcome::Completed(Box::new(completion.clone()));
     validate_sealed_terminal_commit_batch(
@@ -2473,15 +2480,18 @@ fn validate_historical_resolve_saga_terminal_batch(
                 resolve_node.node_id, resolve_node.output_cell
             ))
         })?;
-    let expected_receipt_ref = events::ArtifactEvidenceRef {
+    let expected_receipt_store = store::ArtifactEvidenceRef {
         artifact_id: receipt_artifact_id.clone(),
-        role: events::ArtifactRole::StateOutput,
-        schema_id: resolve_cell.schema_id.clone(),
-        semantic_type_id: Some(resolve_cell.semantic_type_id.clone()),
-        content_digest: receipt_digest.clone(),
+        digest: receipt_digest.clone(),
         byte_len: receipt_bytes.as_bytes().len() as u64,
         media_type: spec::MediaType::new("application/json")?,
+        schema_id: Some(resolve_cell.schema_id.clone()),
+        semantic_type_id: Some(resolve_cell.semantic_type_id.clone()),
+        producer_node_id: Some(resolve_node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::StateOutput,
     };
+    let expected_receipt_ref = event_artifact_ref_from_store(&expected_receipt_store)?;
 
     validate_sealed_terminal_commit_batch(
         commit,
@@ -2608,13 +2618,15 @@ fn validate_historical_produced_cell(
             semantic_type_id,
             artifact_id,
             content_digest,
+            evidence_hash,
         }) if event_id == event.event_id()
             && node_id == &payload.node_id
             && attempt_id == &payload.attempt_id
             && schema_id == &payload.schema_id
             && semantic_type_id == &payload.semantic_type_id
             && artifact_id == &payload.artifact_id
-            && content_digest == &payload.content_digest =>
+            && content_digest == &payload.content_digest
+            && evidence_hash == &payload.evidence_hash =>
         {
             Ok(())
         }
@@ -3356,16 +3368,17 @@ fn store_artifact_from_run_ref(
 
 pub(crate) fn run_artifact_ref_from_store(
     artifact: &store::ArtifactEvidenceRef,
-) -> events::RunArtifactEvidenceRef {
-    events::RunArtifactEvidenceRef {
+) -> Result<events::RunArtifactEvidenceRef> {
+    Ok(events::RunArtifactEvidenceRef {
         artifact_id: artifact.artifact_id.clone(),
         role: artifact.artifact_role,
         schema_id: artifact.schema_id.clone(),
         semantic_type_id: artifact.semantic_type_id.clone(),
         content_digest: artifact.digest.clone(),
+        evidence_hash: artifact.evidence_hash()?,
         byte_len: artifact.byte_len,
         media_type: artifact.media_type.clone(),
-    }
+    })
 }
 
 pub(crate) fn event_artifact_ref_from_store(
@@ -3383,6 +3396,7 @@ pub(crate) fn event_artifact_ref_from_store(
         schema_id,
         semantic_type_id: artifact.semantic_type_id.clone(),
         content_digest: artifact.digest.clone(),
+        evidence_hash: artifact.evidence_hash()?,
         byte_len: artifact.byte_len,
         media_type: artifact.media_type.clone(),
     })

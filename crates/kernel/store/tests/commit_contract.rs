@@ -762,6 +762,7 @@ fn state_attempt_interrupted_for(node_id: NodeId, attempt_id: AttemptId) -> Kern
 }
 
 fn cell_produced(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
+    let evidence = store_artifact_ref(artifact_id.clone(), digest.clone());
     KernelEventPayload::CellProduced(events::CellProduced {
         spec_hash: spec_hash(1),
         node_id: node_id(20),
@@ -776,6 +777,7 @@ fn cell_produced(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventP
         context: spec::CellContextSpec::no_context(),
         artifact_id,
         content_digest: digest,
+        evidence_hash: evidence.evidence_hash().expect("cell evidence hash"),
         producer_state_kind: None,
         producer_state_version: None,
     })
@@ -792,6 +794,7 @@ fn terminal_cell_commit_payloads(
 }
 
 fn public_output_produced(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
+    let evidence = store_artifact_ref(artifact_id.clone(), digest.clone());
     KernelEventPayload::PublicOutputProduced(events::PublicOutputProduced {
         spec_hash: spec_hash(1),
         node_id: node_id(20),
@@ -811,9 +814,11 @@ fn public_output_produced(artifact_id: ArtifactId, digest: ContentDigest) -> Ker
             },
             content_digest: digest,
             artifact_id,
+            evidence_hash: evidence.evidence_hash().expect("public cell evidence hash"),
         }],
         rendered_digest: content_digest(28),
         rendered_artifact_id: None,
+        rendered_artifact_evidence_hash: None,
         renderer_descriptor_id: descriptor_id(29),
     })
 }
@@ -828,8 +833,11 @@ fn public_output_produced_with_rendered_artifact(
     let KernelEventPayload::PublicOutputProduced(public_output) = &mut payload else {
         unreachable!("helper returns public-output payload");
     };
+    let rendered = public_output_artifact_ref(rendered_artifact_id.clone(), rendered_digest.clone());
     public_output.rendered_digest = rendered_digest;
     public_output.rendered_artifact_id = Some(rendered_artifact_id);
+    public_output.rendered_artifact_evidence_hash =
+        Some(rendered.evidence_hash().expect("rendered evidence hash"));
     payload
 }
 
@@ -837,12 +845,14 @@ fn event_artifact_ref(
     artifact_id: ArtifactId,
     digest: ContentDigest,
 ) -> events::ArtifactEvidenceRef {
+    let store = store_artifact_ref(artifact_id.clone(), digest.clone());
     events::ArtifactEvidenceRef {
         artifact_id,
         role: ArtifactRole::StateOutput,
         schema_id: schema_id("mfm.test.position", 25),
         semantic_type_id: Some(semantic_id("position", 24)),
         content_digest: digest,
+        evidence_hash: store.evidence_hash().expect("event artifact evidence hash"),
         byte_len: 128,
         media_type: media_type("application/json"),
     }
@@ -1132,11 +1142,25 @@ fn in_memory_execution_claims_are_token_matched() {
 }
 
 fn resource_touched_set(byte: u8) -> events::ResourceTouchedSetEvidence {
+    let store = ArtifactEvidenceRef {
+        artifact_id: artifact_id(byte),
+        digest: content_digest(byte),
+        byte_len: 128,
+        media_type: media_type("application/json"),
+        schema_id: Some(schema_id("mfm.test.touched_set", byte)),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None::<SeedId>,
+        artifact_role: ArtifactRole::StateOutput,
+    };
     events::ResourceTouchedSetEvidence {
         namespace: resource_namespace(),
         evidence_schema_id: schema_id("mfm.test.touched_set", byte),
         evidence_hash: content_digest(byte),
         evidence_artifact_id: artifact_id(byte),
+        evidence_artifact_evidence_hash: store
+            .evidence_hash()
+            .expect("touched set evidence hash"),
     }
 }
 
@@ -1242,6 +1266,7 @@ fn side_effect_attempt_started_for(node_id: NodeId, attempt_id: AttemptId) -> Ke
 
 fn side_effect_intent(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
     let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Submit);
+    let evidence = intent_artifact_ref(artifact_id.clone(), digest.clone());
     KernelEventPayload::SideEffectIntentPersisted(side_effect::IntentPersisted {
         spec_hash: spec_hash(1),
         node_id: submit_node_id(),
@@ -1255,6 +1280,7 @@ fn side_effect_intent(artifact_id: ArtifactId, digest: ContentDigest) -> KernelE
         intent_schema_id: schema_id("mfm.test.side_effect_intent", 70),
         intent_hash: digest,
         intent_artifact_id: artifact_id,
+        intent_artifact_evidence_hash: evidence.evidence_hash().expect("intent evidence hash"),
         idempotency_input_schema_id: schema_id("mfm.test.idempotency_input", 73),
         idempotency_input_hash: content_digest(74),
         idempotency_key: events::IdempotencyKeyRef::new("idem-key-1").expect("idempotency key"),
@@ -1383,6 +1409,7 @@ fn side_effect_prepared_with_resource_key_for_epoch(
         resource_key,
         prepared_artifact_id: None,
         prepared_hash: None,
+        prepared_artifact_evidence_hash: None,
     })
 }
 
@@ -1491,6 +1518,12 @@ fn not_submitted_schema() -> SchemaId {
 
 fn side_effect_not_submitted(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
     let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Submit);
+    let evidence = side_effect_artifact_ref(
+        artifact_id.clone(),
+        digest.clone(),
+        not_submitted_schema(),
+        ArtifactRole::NotSubmittedProof,
+    );
     KernelEventPayload::SideEffectNotSubmittedProven(side_effect::NotSubmittedProven {
         spec_hash: spec_hash(1),
         node_id: submit_node_id(),
@@ -1503,6 +1536,7 @@ fn side_effect_not_submitted(artifact_id: ArtifactId, digest: ContentDigest) -> 
         proof_schema_id: not_submitted_schema(),
         proof_hash: digest,
         proof_artifact_id: artifact_id,
+        proof_artifact_evidence_hash: evidence.evidence_hash().expect("proof evidence hash"),
     })
 }
 
@@ -1511,6 +1545,12 @@ fn side_effect_submission_observed(
     digest: ContentDigest,
 ) -> KernelEventPayload {
     let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Submit);
+    let evidence = side_effect_artifact_ref(
+        artifact_id.clone(),
+        digest.clone(),
+        submission_schema(),
+        ArtifactRole::Submission,
+    );
     KernelEventPayload::SideEffectSubmissionObserved(side_effect::SubmissionObserved {
         spec_hash: spec_hash(1),
         node_id: submit_node_id(),
@@ -1523,11 +1563,20 @@ fn side_effect_submission_observed(
         submission_schema_id: submission_schema(),
         submission_hash: digest,
         submission_artifact_id: artifact_id,
+        submission_artifact_evidence_hash: evidence
+            .evidence_hash()
+            .expect("submission evidence hash"),
     })
 }
 
 fn side_effect_ambiguous(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
     let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Verify);
+    let evidence = side_effect_artifact_ref(
+        artifact_id.clone(),
+        digest.clone(),
+        schema_id("mfm.test.ambiguity", 76),
+        ArtifactRole::AmbiguityEvidence,
+    );
     KernelEventPayload::SideEffectAmbiguous(side_effect::Ambiguous {
         spec_hash: spec_hash(1),
         node_id: verify_node_id(),
@@ -1541,6 +1590,9 @@ fn side_effect_ambiguous(artifact_id: ArtifactId, digest: ContentDigest) -> Kern
         evidence_schema_id: schema_id("mfm.test.ambiguity", 76),
         evidence_hash: digest,
         evidence_artifact_id: artifact_id,
+        evidence_artifact_evidence_hash: evidence
+            .evidence_hash()
+            .expect("ambiguity evidence hash"),
     })
 }
 
@@ -1549,6 +1601,12 @@ fn side_effect_submission_unknown(
     digest: ContentDigest,
 ) -> KernelEventPayload {
     let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Submit);
+    let evidence = side_effect_artifact_ref(
+        artifact_id.clone(),
+        digest.clone(),
+        unknown_schema(),
+        ArtifactRole::SubmissionUnknownEvidence,
+    );
     KernelEventPayload::SideEffectSubmissionUnknown(side_effect::SubmissionUnknown {
         spec_hash: spec_hash(1),
         node_id: node_id(70),
@@ -1561,11 +1619,20 @@ fn side_effect_submission_unknown(
         evidence_schema_id: unknown_schema(),
         evidence_hash: digest,
         evidence_artifact_id: artifact_id,
+        evidence_artifact_evidence_hash: evidence
+            .evidence_hash()
+            .expect("unknown submission evidence hash"),
     })
 }
 
 fn side_effect_receipt(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
     let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Verify);
+    let evidence = side_effect_artifact_ref(
+        artifact_id.clone(),
+        digest.clone(),
+        receipt_schema(),
+        ArtifactRole::Receipt,
+    );
     KernelEventPayload::SideEffectReceiptObserved(side_effect::ReceiptObserved {
         spec_hash: spec_hash(1),
         node_id: verify_node_id(),
@@ -1578,6 +1645,7 @@ fn side_effect_receipt(artifact_id: ArtifactId, digest: ContentDigest) -> Kernel
         receipt_schema_id: receipt_schema(),
         receipt_hash: digest,
         receipt_artifact_id: artifact_id,
+        receipt_artifact_evidence_hash: evidence.evidence_hash().expect("receipt evidence hash"),
         replay_verifier_id: events::ReplayVerifierId::new("verifier-1").expect("verifier"),
         resource_touched_set: None,
     })
@@ -1585,6 +1653,12 @@ fn side_effect_receipt(artifact_id: ArtifactId, digest: ContentDigest) -> Kernel
 
 fn side_effect_confirmation(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
     let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Verify);
+    let evidence = side_effect_artifact_ref(
+        artifact_id.clone(),
+        digest.clone(),
+        confirmation_schema(),
+        ArtifactRole::Confirmation,
+    );
     KernelEventPayload::SideEffectConfirmationObserved(side_effect::ConfirmationObserved {
         spec_hash: spec_hash(1),
         node_id: verify_node_id(),
@@ -1597,6 +1671,9 @@ fn side_effect_confirmation(artifact_id: ArtifactId, digest: ContentDigest) -> K
         confirmation_schema_id: confirmation_schema(),
         confirmation_hash: digest,
         confirmation_artifact_id: artifact_id,
+        confirmation_artifact_evidence_hash: evidence
+            .evidence_hash()
+            .expect("confirmation evidence hash"),
         replay_verifier_id: events::ReplayVerifierId::new("verifier-1").expect("verifier"),
         resource_touched_set: None,
     })
@@ -1695,6 +1772,28 @@ fn completed_outcome(byte: u8) -> events::RunCompletionOutcome {
 }
 
 fn manual_resolution_recorded_for_run(run_id: RunId, byte: u8) -> KernelEventPayload {
+    let evidence = ArtifactEvidenceRef {
+        artifact_id: artifact_id(byte + 1),
+        digest: content_digest(byte + 1),
+        byte_len: 128,
+        media_type: media_type("application/json"),
+        schema_id: Some(schema_id("mfm.test.manual_evidence", byte + 1)),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None::<SeedId>,
+        artifact_role: ArtifactRole::ManualResolutionEvidence,
+    };
+    let authorization = ArtifactEvidenceRef {
+        artifact_id: artifact_id(byte + 2),
+        digest: content_digest(byte + 2),
+        byte_len: 128,
+        media_type: media_type("application/json"),
+        schema_id: Some(schema_id("mfm.test.manual_authorization", byte + 2)),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None::<SeedId>,
+        artifact_role: ArtifactRole::ManualResolutionAuthorization,
+    };
     KernelEventPayload::ManualResolutionRecorded(events::ManualResolutionRecorded {
         run_id,
         spec_hash: spec_hash(1),
@@ -1702,9 +1801,15 @@ fn manual_resolution_recorded_for_run(run_id: RunId, byte: u8) -> KernelEventPay
         evidence_schema_id: schema_id("mfm.test.manual_evidence", byte + 1),
         evidence_hash: content_digest(byte + 1),
         evidence_artifact_id: artifact_id(byte + 1),
+        evidence_artifact_evidence_hash: evidence
+            .evidence_hash()
+            .expect("manual evidence hash"),
         authorization_schema_id: schema_id("mfm.test.manual_authorization", byte + 2),
         authorization_hash: content_digest(byte + 2),
         authorization_artifact_id: artifact_id(byte + 2),
+        authorization_artifact_evidence_hash: authorization
+            .evidence_hash()
+            .expect("manual authorization evidence hash"),
         note: Some(events::ManualResolutionNote::new("reviewed evidence").expect("note")),
     })
 }
@@ -1991,6 +2096,7 @@ fn manual_resolution_payload_from_verified(
 ) -> KernelEventPayload {
     let claim = verified.claim();
     let authorization = verified.authorization();
+    let artifacts = manual_resolution_artifacts_from_verified(verified);
     KernelEventPayload::ManualResolutionRecorded(events::ManualResolutionRecorded {
         run_id: claim.run_id.clone(),
         spec_hash: claim.spec_hash.clone(),
@@ -1998,9 +2104,15 @@ fn manual_resolution_payload_from_verified(
         evidence_schema_id: claim.evidence.schema_id.clone(),
         evidence_hash: claim.evidence.content_hash.clone(),
         evidence_artifact_id: claim.evidence.artifact_id.clone(),
+        evidence_artifact_evidence_hash: artifacts[0]
+            .evidence_hash()
+            .expect("manual evidence hash"),
         authorization_schema_id: authorization.schema_id.clone(),
         authorization_hash: authorization.content_hash.clone(),
         authorization_artifact_id: authorization.artifact_id.clone(),
+        authorization_artifact_evidence_hash: artifacts[1]
+            .evidence_hash()
+            .expect("manual authorization evidence hash"),
         note: None,
     })
 }
@@ -2124,6 +2236,13 @@ fn set_remediation_purpose(
         KernelEventPayload::SideEffectIntentPersisted(inner) => {
             set_remediation_emitter!(inner);
             inner.scope_id = scope_id(181);
+            inner.intent_artifact_evidence_hash = intent_artifact_ref_for_node(
+                inner.intent_artifact_id.clone(),
+                inner.intent_hash.clone(),
+                inner.node_id.clone(),
+            )
+            .evidence_hash()
+            .expect("remediation intent evidence hash");
         }
         KernelEventPayload::SideEffectClaimed(inner) => set_remediation_emitter!(inner),
         KernelEventPayload::SideEffectClaimTakenOver(inner) => set_remediation_emitter!(inner),
@@ -2131,14 +2250,72 @@ fn set_remediation_purpose(
         KernelEventPayload::ResourceLaneClaimIntent(inner) => set_remediation_emitter!(inner),
         KernelEventPayload::SideEffectInvocationPrepared(inner) => set_remediation_emitter!(inner),
         KernelEventPayload::SideEffectInvocationStarted(inner) => set_remediation_emitter!(inner),
-        KernelEventPayload::SideEffectNotSubmittedProven(inner) => set_remediation_emitter!(inner),
-        KernelEventPayload::SideEffectSubmissionObserved(inner) => set_remediation_emitter!(inner),
-        KernelEventPayload::SideEffectSubmissionUnknown(inner) => set_remediation_emitter!(inner),
-        KernelEventPayload::SideEffectReceiptObserved(inner) => set_remediation_emitter!(inner),
-        KernelEventPayload::SideEffectConfirmationObserved(inner) => {
-            set_remediation_emitter!(inner)
+        KernelEventPayload::SideEffectNotSubmittedProven(inner) => {
+            set_remediation_emitter!(inner);
+            inner.proof_artifact_evidence_hash = remediation_side_effect_evidence(
+                inner.proof_artifact_id.clone(),
+                inner.proof_hash.clone(),
+                inner.proof_schema_id.clone(),
+                ArtifactRole::NotSubmittedProof,
+            )
+            .evidence_hash()
+            .expect("remediation proof evidence hash");
         }
-        KernelEventPayload::SideEffectAmbiguous(inner) => set_remediation_emitter!(inner),
+        KernelEventPayload::SideEffectSubmissionObserved(inner) => {
+            set_remediation_emitter!(inner);
+            inner.submission_artifact_evidence_hash = remediation_side_effect_evidence(
+                inner.submission_artifact_id.clone(),
+                inner.submission_hash.clone(),
+                inner.submission_schema_id.clone(),
+                ArtifactRole::Submission,
+            )
+            .evidence_hash()
+            .expect("remediation submission evidence hash");
+        }
+        KernelEventPayload::SideEffectSubmissionUnknown(inner) => {
+            set_remediation_emitter!(inner);
+            inner.evidence_artifact_evidence_hash = remediation_side_effect_evidence(
+                inner.evidence_artifact_id.clone(),
+                inner.evidence_hash.clone(),
+                inner.evidence_schema_id.clone(),
+                ArtifactRole::SubmissionUnknownEvidence,
+            )
+            .evidence_hash()
+            .expect("remediation submission-unknown evidence hash");
+        }
+        KernelEventPayload::SideEffectReceiptObserved(inner) => {
+            set_remediation_emitter!(inner);
+            inner.receipt_artifact_evidence_hash = remediation_side_effect_evidence(
+                inner.receipt_artifact_id.clone(),
+                inner.receipt_hash.clone(),
+                inner.receipt_schema_id.clone(),
+                ArtifactRole::Receipt,
+            )
+            .evidence_hash()
+            .expect("remediation receipt evidence hash");
+        }
+        KernelEventPayload::SideEffectConfirmationObserved(inner) => {
+            set_remediation_emitter!(inner);
+            inner.confirmation_artifact_evidence_hash = remediation_side_effect_evidence(
+                inner.confirmation_artifact_id.clone(),
+                inner.confirmation_hash.clone(),
+                inner.confirmation_schema_id.clone(),
+                ArtifactRole::Confirmation,
+            )
+            .evidence_hash()
+            .expect("remediation confirmation evidence hash");
+        }
+        KernelEventPayload::SideEffectAmbiguous(inner) => {
+            set_remediation_emitter!(inner);
+            inner.evidence_artifact_evidence_hash = remediation_side_effect_evidence(
+                inner.evidence_artifact_id.clone(),
+                inner.evidence_hash.clone(),
+                inner.evidence_schema_id.clone(),
+                ArtifactRole::AmbiguityEvidence,
+            )
+            .evidence_hash()
+            .expect("remediation ambiguity evidence hash");
+        }
         KernelEventPayload::SideEffectFailed(inner) => set_remediation_emitter!(inner),
         KernelEventPayload::ResourceLaneReleased(_)
         | KernelEventPayload::ResourceLaneReleaseIntent(_) => {}
@@ -2249,8 +2426,16 @@ fn set_side_effect_node_attempt(
 ) {
     match payload {
         KernelEventPayload::SideEffectIntentPersisted(inner) => {
-            inner.node_id = node_id;
+            inner.node_id = node_id.clone();
             inner.attempt_id = attempt_id;
+            // Keep the event's exact evidence key aligned with store producer identity.
+            inner.intent_artifact_evidence_hash = intent_artifact_ref_for_node(
+                inner.intent_artifact_id.clone(),
+                inner.intent_hash.clone(),
+                node_id,
+            )
+            .evidence_hash()
+            .expect("intent evidence hash after node assignment");
         }
         KernelEventPayload::SideEffectClaimed(inner) => {
             inner.node_id = node_id;
@@ -2520,6 +2705,7 @@ fn retention_manifest_projected(
     previous: Option<ContentDigest>,
     artifact_id: ArtifactId,
 ) -> KernelEventPayload {
+    let evidence = retention_manifest_artifact_ref(artifact_id.clone(), digest.clone());
     KernelEventPayload::RetentionManifestProjected(events::RetentionManifestProjected {
         run_id: run_id(120),
         spec_hash: spec_hash(1),
@@ -2527,6 +2713,9 @@ fn retention_manifest_projected(
         manifest_digest: digest,
         previous_manifest_digest: previous,
         manifest_artifact_id: artifact_id,
+        manifest_artifact_evidence_hash: evidence
+            .evidence_hash()
+            .expect("manifest evidence hash"),
     })
 }
 
@@ -3241,25 +3430,28 @@ fn commit_rejects_non_redacted_diagnostic_artifact_ref() {
     let artifact_id = artifact_id(154);
     let digest = content_digest(155);
     let schema_id = schema_id("mfm.test.diagnostic", 156);
-    let diagnostic_ref = events::ArtifactEvidenceRef {
-        artifact_id: artifact_id.clone(),
-        role: ArtifactRole::SideEffectIntent,
-        schema_id: schema_id.clone(),
-        semantic_type_id: None,
-        content_digest: digest.clone(),
-        byte_len: 64,
-        media_type: media_type("application/json"),
-    };
     let required_artifact = ArtifactEvidenceRef {
-        artifact_id,
-        digest,
+        artifact_id: artifact_id.clone(),
+        digest: digest.clone(),
         byte_len: 64,
         media_type: media_type("application/json"),
-        schema_id: Some(schema_id),
+        schema_id: Some(schema_id.clone()),
         semantic_type_id: None,
         producer_node_id: Some(node_id(90)),
         producer_seed_id: None::<SeedId>,
         artifact_role: ArtifactRole::SideEffectIntent,
+    };
+    let diagnostic_ref = events::ArtifactEvidenceRef {
+        artifact_id,
+        role: ArtifactRole::SideEffectIntent,
+        schema_id,
+        semantic_type_id: None,
+        content_digest: digest,
+        evidence_hash: required_artifact
+            .evidence_hash()
+            .expect("diagnostic evidence hash"),
+        byte_len: 64,
+        media_type: media_type("application/json"),
     };
     let mut failure = fact_attempt_failed(false);
     let KernelEventPayload::StateAttemptFailed(payload) = &mut failure else {
@@ -3322,6 +3514,7 @@ fn run_artifact_ref(artifact: &ArtifactEvidenceRef) -> events::RunArtifactEviden
         schema_id: artifact.schema_id.clone(),
         semantic_type_id: artifact.semantic_type_id.clone(),
         content_digest: artifact.digest.clone(),
+        evidence_hash: artifact.evidence_hash().expect("run artifact evidence hash"),
         byte_len: artifact.byte_len,
         media_type: artifact.media_type.clone(),
     }
@@ -3401,6 +3594,11 @@ fn side_effect_prepare_fixture_for_ledger(
     for payload in [&mut intent, &mut claim, &mut lane, &mut prepared] {
         set_side_effect_ledger(payload, ledger_key.clone(), purpose.clone());
         set_side_effect_node_attempt(payload, node_id.clone(), attempt_id.clone());
+    }
+    if let KernelEventPayload::SideEffectIntentPersisted(payload) = &mut intent {
+        payload.intent_artifact_evidence_hash = intent_evidence
+            .evidence_hash()
+            .expect("intent evidence hash for prepare fixture");
     }
     SideEffectPrepareFixture {
         payloads: vec![intent, claim, lane, prepared],
@@ -4461,16 +4659,76 @@ fn artifact_authority_accepts_distinct_evidence_for_same_artifact_id() {
             .count(),
         2
     );
-    assert!(retention.refs.contains_key(&(
-        artifact_id.clone(),
-        first_evidence.evidence_hash().expect("first evidence hash"),
-    )));
-    assert!(retention.refs.contains_key(&(
-        artifact_id,
-        second_evidence
-            .evidence_hash()
-            .expect("second evidence hash"),
-    )));
+    let first_hash = first_evidence.evidence_hash().expect("first evidence hash");
+    let second_hash = second_evidence
+        .evidence_hash()
+        .expect("second evidence hash");
+    assert!(retention
+        .refs
+        .contains_key(&(artifact_id.clone(), first_hash.clone())));
+    assert!(retention
+        .refs
+        .contains_key(&(artifact_id.clone(), second_hash.clone())));
+
+    let first_requirement = events::EventArtifactRequirement {
+        source: EventArtifactReferenceSource::RetentionRef,
+        artifact_id: artifact_id.clone(),
+        evidence_hash: first_hash.clone(),
+        digest: Some(first_evidence.digest.clone()),
+        byte_len: None,
+        media_type: None,
+        schema_id: None,
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: Some(ArtifactRole::StateOutput),
+    };
+    let second_requirement = events::EventArtifactRequirement {
+        source: EventArtifactReferenceSource::RetentionRef,
+        artifact_id: artifact_id.clone(),
+        evidence_hash: second_hash.clone(),
+        digest: Some(second_evidence.digest.clone()),
+        byte_len: None,
+        media_type: None,
+        schema_id: None,
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: Some(ArtifactRole::StateOutput),
+    };
+    let swapped_requirement = events::EventArtifactRequirement {
+        source: EventArtifactReferenceSource::RetentionRef,
+        artifact_id: artifact_id.clone(),
+        evidence_hash: second_hash,
+        digest: Some(first_evidence.digest.clone()),
+        byte_len: None,
+        media_type: None,
+        schema_id: None,
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: Some(ArtifactRole::StateOutput),
+    };
+
+    mfm_store::v1::validate_artifact_requirement_against_evidence(
+        &first_requirement,
+        &first_evidence,
+    )
+    .expect("exact first evidence key validates");
+    mfm_store::v1::validate_artifact_requirement_against_evidence(
+        &second_requirement,
+        &second_evidence,
+    )
+    .expect("exact second evidence key validates");
+    let mismatch = mfm_store::v1::validate_artifact_requirement_against_evidence(
+        &swapped_requirement,
+        &first_evidence,
+    )
+    .expect_err("wrong evidence hash must not validate against another variant");
+    assert!(matches!(
+        mismatch,
+        StoreError::ArtifactEvidenceMismatch { .. }
+    ));
 }
 
 #[test]
@@ -4555,17 +4813,37 @@ fn payload_artifact_byte_len_media_type_and_producer_mismatches_are_rejected() {
             }
             Case::Producer => stored_evidence.producer_node_id = Some(node_id(99)),
         }
+        let evidence_hash = stored_evidence
+            .evidence_hash()
+            .expect("mutated evidence hash");
         let payloads = match case {
-            Case::ByteLen | Case::MediaType => vec![KernelEventPayload::ArtifactReferenced(
-                events::ArtifactReferenced {
-                    spec_hash: spec_hash(1),
-                    node_id: Some(node_id(20)),
-                    attempt_id: Some(attempt_id(23)),
-                    artifact_ref: event_artifact_ref(artifact_id.clone(), artifact_digest.clone()),
-                },
-            )],
+            Case::ByteLen | Case::MediaType => {
+                let mut artifact_ref =
+                    event_artifact_ref(artifact_id.clone(), artifact_digest.clone());
+                // Pin the exact admitted evidence key while keeping payload field values
+                // unmutated so validation fails on the mismatched field.
+                artifact_ref.evidence_hash = evidence_hash;
+                vec![KernelEventPayload::ArtifactReferenced(
+                    events::ArtifactReferenced {
+                        spec_hash: spec_hash(1),
+                        node_id: Some(node_id(20)),
+                        attempt_id: Some(attempt_id(23)),
+                        artifact_ref,
+                    },
+                )]
+            }
             Case::Producer => {
-                terminal_cell_commit_payloads(artifact_id.clone(), artifact_digest.clone())
+                let mut payloads =
+                    terminal_cell_commit_payloads(artifact_id.clone(), artifact_digest.clone());
+                for payload in &mut payloads {
+                    if let KernelEventPayload::CellProduced(cell) = payload {
+                        cell.evidence_hash = evidence_hash.clone();
+                    }
+                    if let KernelEventPayload::ArtifactReferenced(reference) = payload {
+                        reference.artifact_ref.evidence_hash = evidence_hash.clone();
+                    }
+                }
+                payloads
             }
         };
         let request = default_commit_request(
@@ -4573,19 +4851,13 @@ fn payload_artifact_byte_len_media_type_and_producer_mismatches_are_rejected() {
             StreamSeq::FIRST,
             commit_key,
             payloads,
-            vec![store_artifact_ref(
-                artifact_id.clone(),
-                artifact_digest.clone(),
-            )],
+            vec![stored_evidence.clone()],
         );
         let mut store = StoreContractRunStore::new();
         let error = store
             .append_prepared_commit_with_artifacts(request, vec![stored_evidence])
             .expect_err("artifact evidence mismatch rejects commit");
-        assert!(
-            matches!(error, StoreError::ArtifactEvidenceMismatch { field, .. } if field == expected_field),
-            "{case:?} should reject {expected_field} mismatch"
-        );
+        assert_invalid_prepared_commit_contains(error, expected_field);
         assert!(store.load_run_stream(&run_id).is_empty(), "{case:?}");
     }
 }
@@ -5736,6 +6008,14 @@ fn resource_touched_set_evidence_is_schema_checked_at_admission() {
     payload.resource_touched_set = Some(touched.clone());
     let mut wrong_touched_artifact = resource_touched_set_artifact_ref(&touched);
     wrong_touched_artifact.schema_id = Some(schema_id("mfm.test.wrong_touched_set", 53));
+    let wrong_touched_hash = wrong_touched_artifact
+        .evidence_hash()
+        .expect("wrong touched evidence hash");
+    if let Some(touched_set) = payload.resource_touched_set.as_mut() {
+        // Pin the exact admitted (wrong) evidence key; schema mismatch is validated separately.
+        touched_set.evidence_artifact_evidence_hash = wrong_touched_hash;
+        touched_set.evidence_schema_id = schema_id("mfm.test.touched_set", 53);
+    }
     let mut wrong_payloads = vec![receipt.clone()];
     store.certify_payloads_for_run(&run, &mut wrong_payloads);
     let error = store
@@ -5752,7 +6032,7 @@ fn resource_touched_set_evidence_is_schema_checked_at_admission() {
                         receipt_schema(),
                         ArtifactRole::Receipt,
                     ),
-                    resource_touched_set_artifact_ref(&touched),
+                    wrong_touched_artifact.clone(),
                 ],
                 preconditions: store.certified_preconditions(&run),
             },
@@ -5767,14 +6047,14 @@ fn resource_touched_set_evidence_is_schema_checked_at_admission() {
             ],
         )
         .expect_err("touched-set schema mismatch rejects");
-    assert!(matches!(
-        error,
-        StoreError::ArtifactEvidenceMismatch {
-            field: "schema_id",
-            ..
-        }
-    ));
+    assert_invalid_prepared_commit_contains(error, "schema_id");
 
+    // Rebuild a clean receipt for the valid admission path (wrong-schema attempt mutated it).
+    let mut receipt = side_effect_receipt(artifact_id(56), content_digest(57));
+    let KernelEventPayload::SideEffectReceiptObserved(payload) = &mut receipt else {
+        unreachable!("helper returns receipt");
+    };
+    payload.resource_touched_set = Some(touched.clone());
     let mut valid_payloads = vec![receipt];
     store.certify_payloads_for_run(&run, &mut valid_payloads);
     store
@@ -5908,18 +6188,7 @@ fn unknown_run_completion_outcome_tag_is_rejected() {
 
 #[test]
 fn manual_resolution_outcome_is_closed() {
-    let payload = KernelEventPayload::ManualResolutionRecorded(events::ManualResolutionRecorded {
-        run_id: run_id(96),
-        spec_hash: spec_hash(1),
-        outcome: events::ManualResolutionOutcome::ConfirmRemediated,
-        evidence_schema_id: schema_id("mfm.test.manual_evidence", 97),
-        evidence_hash: content_digest(97),
-        evidence_artifact_id: artifact_id(97),
-        authorization_schema_id: schema_id("mfm.test.manual_authorization", 98),
-        authorization_hash: content_digest(98),
-        authorization_artifact_id: artifact_id(98),
-        note: Some(events::ManualResolutionNote::new("reviewed evidence").expect("note")),
-    });
+    let payload = manual_resolution_recorded_for_run(run_id(96), 96);
     assert!(matches!(
         payload_from_json_value(&payload_json_value(&payload)),
         Ok(KernelEventPayload::ManualResolutionRecorded(_))
@@ -6371,6 +6640,9 @@ fn manual_resolution_prepared_commit_requires_matching_verified_proof() {
     payload.evidence_hash = content_digest(202);
     let mut mismatched_artifacts = manual_resolution_artifacts_from_verified(&verified);
     mismatched_artifacts[0].digest = content_digest(202);
+    payload.evidence_artifact_evidence_hash = mismatched_artifacts[0]
+        .evidence_hash()
+        .expect("mismatched manual evidence hash");
     let mismatched_request = CommitRequest::from_payloads(
         verified.claim().run_id.clone(),
         expected_next_seq,
@@ -6615,23 +6887,44 @@ fn manual_resolution_artifacts_require_dedicated_roles() {
             commit_key,
             policy,
         );
-        let required_artifacts = manual_resolution_artifacts_from_verified(&verified);
-        let mut admitted_artifacts = required_artifacts.clone();
-        mutate(&mut admitted_artifacts);
-        let prepared = PreparedCommit::<ManualResolution>::new(
+        let mut required_artifacts = manual_resolution_artifacts_from_verified(&verified);
+        mutate(&mut required_artifacts);
+        let admitted_artifacts = required_artifacts.clone();
+        // Pin exact evidence keys to the mutated admitted variants so coverage succeeds and
+        // field/role validation is what fails closed. Payload schema/digest remain as built
+        // from the verified claim unless the mutation itself changed digest.
+        let mut payloads = request.payloads().to_vec();
+        if let Some(KernelEventPayload::ManualResolutionRecorded(payload)) = payloads.first_mut() {
+            // Only re-pin exact evidence keys. Content digests stay proof-aligned; field/role
+            // mismatches are reported against the admitted evidence variant.
+            payload.evidence_artifact_evidence_hash = required_artifacts[0]
+                .evidence_hash()
+                .expect("mutated manual evidence hash");
+            payload.authorization_artifact_evidence_hash = required_artifacts[1]
+                .evidence_hash()
+                .expect("mutated manual authorization hash");
+        }
+        let request = CommitRequest::from_payloads(
+            request.run_id().clone(),
+            request.expected_next_seq(),
+            request.commit_key().clone(),
+            payloads,
+            required_artifacts.clone(),
+            request.preconditions().clone(),
+        )
+        .expect("manual request with mutated evidence keys");
+        let error = match PreparedCommit::<ManualResolution>::new(
             request,
             CommitArtifactEvidenceSet::new(required_artifacts, admitted_artifacts)
                 .expect("manual artifact evidence set"),
             &verified,
-        )
-        .expect("proof-backed manual resolution prepared commit");
-        let error = store
-            .append_test_commit_plan(prepared.into())
-            .expect_err("manual artifact mismatch rejects");
-        assert!(matches!(
-            error,
-            StoreError::ArtifactEvidenceMismatch { field, .. } if field == expected_field
-        ));
+        ) {
+            Ok(prepared) => store
+                .append_test_commit_plan(prepared.into())
+                .expect_err("manual artifact mismatch rejects"),
+            Err(error) => error,
+        };
+        assert_invalid_prepared_commit_contains(error, expected_field);
     }
 
     reject_with(
@@ -8177,11 +8470,25 @@ fn retention_refs_validate_role_contract_shape_without_repeating_exact_fields() 
         let run_start_key = format!("{commit_key}-run-start");
         let mut store = admitted_store(&run_id, &run_start_key);
 
+        let mut payloads = retention_manifest_commit_payloads(1, digest, None, artifact_id);
+        let evidence_hash = evidence.evidence_hash().expect("manifest evidence hash");
+        for payload in &mut payloads {
+            match payload {
+                KernelEventPayload::RetentionManifestProjected(projected) => {
+                    projected.manifest_artifact_evidence_hash = evidence_hash.clone();
+                }
+                KernelEventPayload::RetentionRefsAppended(refs) => {
+                    refs.refs[0].evidence_hash = evidence_hash.clone();
+                }
+                _ => {}
+            }
+        }
+
         let error = append_run_state_commit(
             &mut store,
             &run_id,
             commit_key,
-            retention_manifest_commit_payloads(1, digest, None, artifact_id),
+            payloads,
             vec![evidence],
             RequiredRunState::Started,
         )
