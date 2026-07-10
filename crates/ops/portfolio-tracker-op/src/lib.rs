@@ -48,7 +48,7 @@ pub const PORTFOLIO_SNAPSHOT_ENTRY_POINT: EntryPointDescriptor = EntryPointDescr
     namespace: "mfm.portfolio",
     name: "portfolio_snapshot",
     public_name: "portfolio_snapshot",
-    version: 1,
+    version: 2,
     accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
 };
 
@@ -289,7 +289,7 @@ mod tests {
             PORTFOLIO_SNAPSHOT_ENTRY_POINT.public_name,
             "portfolio_snapshot"
         );
-        assert_eq!(PORTFOLIO_SNAPSHOT_ENTRY_POINT.version, 1);
+        assert_eq!(PORTFOLIO_SNAPSHOT_ENTRY_POINT.version, 2);
         assert_eq!(
             PORTFOLIO_SNAPSHOT_ENTRY_POINT.accepted_config_formats,
             TOML_JSON_AUTHORED_CONFIG_FORMATS

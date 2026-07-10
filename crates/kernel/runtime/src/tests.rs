@@ -9848,7 +9848,7 @@ fn run_start_evidence(
 
 fn entry_point_launch_evidence() -> events::EntryPointLaunchEvidence {
     events::EntryPointLaunchEvidence {
-        resolved_op_id: events::EntryPointOpId::new("mfm.test:portfolio_snapshot:1")
+        resolved_op_id: events::EntryPointOpId::new("mfm.test:portfolio_snapshot:2")
             .expect("entry-point op id"),
         entry_point_registry_digest: digest_for_bytes(b"entry-point-registry"),
     }

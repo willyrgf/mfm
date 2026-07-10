@@ -469,6 +469,8 @@ are not mixed into the report graph. See
 `portfolio_snapshot` is **report-only**: it selects Platform holding facts (BTC/EVM native at
 cutover) under the network-coherent policy
 `mfm.portfolio.holding.latest-network-coherent.v1` and hard-fails when required facts are missing.
+It is published only as public entry-point version `2`; an explicit version `1` returns
+`EntryPointOpVersionNotFound`.
 It does not crawl live chain balances. Collect balances into Platform facts first, then run the
 report. Soft partial success (`error_count`) is not part of the public report surface. Public
 observations include selected holding `coverage` for configured-mode honesty.

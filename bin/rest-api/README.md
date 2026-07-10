@@ -225,7 +225,7 @@ Request shape:
 ```json
 {
   "op": "portfolio_snapshot",
-  "op_version": 1,
+  "op_version": 2,
   "config_format": "json",
   "config": {
     "...": "entry-point config"
@@ -238,6 +238,8 @@ Request notes:
 
 - `op` is required and selects a public entry-point operation.
 - `op_version` is optional. When omitted, the latest registered version for `op` is used.
+- `portfolio_snapshot` is published only as version `2`; an explicit version `1` is rejected as
+  `EntryPointOpVersionNotFound`.
 - `config_format` is `toml` or `json`; it defaults to `toml`.
 - `config` is required. With `config_format: "toml"`, it must be a string. With
   `config_format: "json"`, it may be a JSON object/array/value accepted by the selected op.
