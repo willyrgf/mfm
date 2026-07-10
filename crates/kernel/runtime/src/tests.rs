@@ -37,7 +37,7 @@ use mfm_store::v1::{
         signed_fact_query_receipt_for_test as test_signed_fact_query_receipt,
         SignedFactQueryReceiptFixtureInputForTest,
     },
-    RunEventStore,
+    RetainedArtifactReadProvider, RunEventStore,
 };
 use mfm_values::ContextBoundOutput;
 use serde::ser::SerializeStruct;
@@ -714,7 +714,7 @@ fn block_on_ready<F: Future>(future: F) -> F::Output {
 
 #[derive(Clone, Default)]
 struct RunnerKitArtifactProvider {
-    artifacts: BTreeMap<ArtifactId, (Vec<u8>, store::ArtifactEvidenceRef)>,
+    artifacts: BTreeMap<store::ArtifactAuthorityKey, (Vec<u8>, store::ArtifactEvidenceRef)>,
 }
 
 impl RunnerKitArtifactProvider {
@@ -722,7 +722,13 @@ impl RunnerKitArtifactProvider {
         Self {
             artifacts: artifacts
                 .into_iter()
-                .map(|(bytes, evidence)| (evidence.artifact_id.clone(), (bytes, evidence)))
+                .map(|(bytes, evidence)| {
+                    (
+                        test_artifact_authority_key(&evidence)
+                            .expect("test artifact evidence hash"),
+                        (bytes, evidence),
+                    )
+                })
                 .collect(),
         }
     }
@@ -734,7 +740,11 @@ impl store::RetainedArtifactReadProvider for RunnerKitArtifactProvider {
         requirement: &'a store::EventArtifactRequirement,
     ) -> store::RetainedArtifactReadFuture<'a> {
         Box::pin(async move {
-            let Some((bytes, evidence)) = self.artifacts.get(&requirement.artifact_id) else {
+            let key = (
+                requirement.artifact_id.clone(),
+                requirement.evidence_hash.clone(),
+            );
+            let Some((bytes, evidence)) = self.artifacts.get(&key) else {
                 return Err(store::StoreError::MissingArtifact {
                     artifact_id: requirement.artifact_id.clone(),
                 });
@@ -742,6 +752,12 @@ impl store::RetainedArtifactReadProvider for RunnerKitArtifactProvider {
             store::VerifiedRunArtifactBytes::new(bytes.clone(), evidence.clone(), requirement)
         })
     }
+}
+
+fn test_artifact_authority_key(
+    evidence: &store::ArtifactEvidenceRef,
+) -> store::Result<store::ArtifactAuthorityKey> {
+    Ok((evidence.artifact_id.clone(), evidence.evidence_hash()?))
 }
 
 #[derive(Clone, Default)]
@@ -1069,7 +1085,7 @@ impl store::RunEventStore for StaleOnceTypedRunStore {
 
 delegate_execution_claim_store_to_inner!(StaleOnceTypedRunStore);
 
-type TestArtifactMap = BTreeMap<ArtifactId, (Vec<u8>, store::ArtifactEvidenceRef)>;
+type TestArtifactMap = BTreeMap<store::ArtifactAuthorityKey, (Vec<u8>, store::ArtifactEvidenceRef)>;
 
 #[derive(Clone, Default)]
 struct TestRuntimeArtifactStore {
@@ -1082,13 +1098,17 @@ impl store::RetainedArtifactReadProvider for TestRuntimeArtifactStore {
         requirement: &'a store::EventArtifactRequirement,
     ) -> store::RetainedArtifactReadFuture<'a> {
         Box::pin(async move {
+            let key = (
+                requirement.artifact_id.clone(),
+                requirement.evidence_hash.clone(),
+            );
             let (bytes, evidence) = self
                 .artifacts
                 .lock()
                 .map_err(|_| store::StoreError::ArtifactReadFailed {
                     artifact_id: requirement.artifact_id.clone(),
                 })?
-                .get(&requirement.artifact_id)
+                .get(&key)
                 .cloned()
                 .ok_or_else(|| store::StoreError::MissingArtifact {
                     artifact_id: requirement.artifact_id.clone(),
@@ -2333,6 +2353,60 @@ fn runner_kit_skipped_cell() -> MaterializedInputNode {
             },
         },
     }))
+}
+
+#[test]
+fn runner_kit_artifact_lookup_uses_exact_evidence_identity() {
+    let fixture = fixture();
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let bytes = br#"{"amount":4}"#;
+    let matching = runner_kit_value_artifact(
+        bytes,
+        events::ArtifactRole::StateOutput,
+        Some(node.node_id.clone()),
+        None,
+    );
+    let other_producer = NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, D8);
+    let mismatched_producer = runner_kit_value_artifact(
+        bytes,
+        events::ArtifactRole::StateOutput,
+        Some(other_producer),
+        None,
+    );
+    assert_eq!(matching.artifact_id, mismatched_producer.artifact_id);
+    let matching_hash = matching.evidence_hash().expect("matching evidence hash");
+    let mismatched_hash = mismatched_producer
+        .evidence_hash()
+        .expect("mismatched evidence hash");
+    assert_ne!(matching_hash, mismatched_hash);
+
+    let artifacts = RunnerKitArtifactProvider::new(vec![(bytes.to_vec(), matching.clone())]);
+    let hit = test_event_artifact_requirement(&matching, matching_hash);
+    block_on_ready(artifacts.read_retained_artifact(&hit)).expect("exact evidence hit");
+
+    let miss = test_event_artifact_requirement(&matching, mismatched_hash);
+    let error =
+        block_on_ready(artifacts.read_retained_artifact(&miss)).expect_err("wrong evidence");
+    assert!(matches!(error, store::StoreError::MissingArtifact { .. }));
+}
+
+fn test_event_artifact_requirement(
+    evidence: &store::ArtifactEvidenceRef,
+    evidence_hash: ContentDigest,
+) -> store::EventArtifactRequirement {
+    store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::ArtifactReferenced,
+        artifact_id: evidence.artifact_id.clone(),
+        evidence_hash,
+        digest: Some(evidence.digest.clone()),
+        byte_len: Some(evidence.byte_len),
+        media_type: Some(evidence.media_type.clone()),
+        schema_id: evidence.schema_id.clone(),
+        semantic_type_id: evidence.semantic_type_id.clone(),
+        producer_node_id: evidence.producer_node_id.clone(),
+        producer_seed_id: evidence.producer_seed_id.clone(),
+        artifact_role: Some(evidence.artifact_role),
+    }
 }
 
 #[test]
