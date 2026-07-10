@@ -664,6 +664,12 @@ Fresh-Postgres tests cover:
 - Replay of existing receipts works with verification authority but without the live signing key.
 - No failed run stream is created for a missing pre-admission prerequisite.
 
+### Resolution
+
+Production app assembly now has one optional signer-aware store path, an explicit authority
+provisioning command, graph-based pre-admission checks, and a Postgres parity test covering the
+fresh-store, mismatch, matching, and replay-without-signer cases.
+
 ---
 
 ## P1-05: untyped diagnostic JSON controls public errors and replay dispatch
@@ -821,7 +827,7 @@ another existing pure domain model crate with the right dependency direction.
 
 ## P2-03: documentation, examples, tests, and hygiene are not merge-ready
 
-### Reproducible operator path
+### Reproducible operator path (review baseline)
 
 The CLI documentation references `btc-balance.toml`, `evm-balance.toml`, and `portfolio.toml`
 ([`bin/cli/README.md`](bin/cli/README.md#L441)), but those are not tracked example files in a clean
@@ -843,7 +849,7 @@ The branch needs tracked, parser-tested examples for:
 CLI/REST docs must also describe the production registry and public entry-point version that the
 code actually exposes.
 
-### Test-depth gaps
+### Test-depth gaps (review baseline)
 
 - The current end-to-end test uses separate family registries instead of production assembly.
 - It checks only for the presence of snapshot material, not exact balances, scales, anchors, and
@@ -876,9 +882,17 @@ basic diff checks.
 - Stale references, obsolete examples, old config shapes, and `F26` are deleted rather than kept as
   compatibility documentation.
 
+### Resolution
+
+The tracked collector, runtime, and portfolio configs now parse through the real registries. The
+operator guide runs the two collectors, the report, and replay in one production process. The
+unified integration path asserts exact anchors, raw amounts, scales, valuations, totals, replay,
+and admitted adapter executable identities. Postgres parity uses the production fact-index provider
+and store-owned receipt authority.
+
 ---
 
-## Verification performed during review
+## Verification history
 
 The following checks passed on the reviewed baseline or focused snapshots:
 
@@ -890,46 +904,31 @@ The following checks passed on the reviewed baseline or focused snapshots:
 - Broad kernel facts/values/runtime/replay/store-focused tests
 - `nix run .#check`
 
-Those passing tests do not close the problems above because important tests bypass production
-composition, inject impossible ordering values, or verify only structural replay success.
+Those checks were intentionally insufficient at the time: important tests bypassed production
+composition, injected impossible ordering values, or verified only structural replay success.
 
-`nix run .#ci` was attempted while the worktree was changing. It encountered a mixed-snapshot BTC
-schema/test failure after 128 tests passed, so that run is inconclusive rather than evidence against
-a stable commit. Final CI must be rerun from an unchanged clean commit.
+The final immutable commit passed `nix run .#ci` with all 12 tasks green, including managed
+Postgres, CLI authority/status parity, and Reth portfolio parity. The worktree was clean for that
+run.
 
-## Progressive implementation and commit sequence
+## Completed progressive implementation
 
-Fix the branch as a sequence of small replacements. Do not begin the next step while the current
-step is half-migrated, and do not retain the code it replaces. The exact commit count may grow when
-a step contains two independently reviewable changes, but unrelated steps must not be combined.
+The remediation was completed as small replacements; the old paths were deleted rather than kept as
+fallbacks. The relevant lower-case commits are:
 
-1. **Fix production capability ownership.** Register shared providers once, delete conflicting
-   adapter-owned bindings, and make the production-registry tests pass. Suggested subject:
-   `fix shared capability provider registration`.
-2. **Replace run-local fact ordering.** Add the store-wide coordinate, update both stores and
-   projections, delete `seq`-derived order, and reset/update fixtures. Suggested subject:
-   `replace fact order with store append order`.
-3. **Replace retention identity.** Carry exact evidence identity end-to-end and delete artifact-ID-
-   only retention/read paths. Suggested subject: `retain artifacts by exact evidence identity`.
-4. **Make portfolio replay semantic.** Add registry-driven portfolio verification, delete manual app
-   dispatch for migrated verifiers, and add negative selection tests. Suggested subject:
-   `verify portfolio selection during replay`.
-5. **Make collector replay semantic.** Verify joint-tip derivation and exact normalized outputs for
-   BTC and EVM. Suggested subject: `verify collector joint tips during replay`.
-6. **Make fact scales authoritative.** Reject report overrides, delete obsolete config behavior, and
-   assert exact end-to-end values. Suggested subject: `make fact decimals authoritative`.
-7. **Complete receipt-authority assembly.** Add the single provisioning/preflight path and delete
-   superseded connection/late-failure paths. Suggested subject:
-   `provision and preflight fact receipt authority`.
-8. **Replace diagnostic magic JSON.** Add typed public failure metadata and discriminated diagnostic
-   evidence, then delete magic-key and shape-guessing paths. Suggested subject:
-   `replace diagnostic json error dispatch`.
-9. **Correct public versioning.** Publish only portfolio v2, delete legacy v1 material, and update all
-   public docs/tests. Suggested subject: `publish portfolio snapshot v2`.
-10. **Move holding policy out of kernel.** Establish one pure domain owner and delete kernel
-    definitions/re-exports/tests. Suggested subject: `move holding policy out of kernel`.
-11. **Make the operator flow executable.** Add tracked configs, exact commands/assertions, delete
-    stale docs, and clean the diff. Suggested subject: `docs: make collect then report reproducible`.
+- `9127b032` — shared capability providers are registered once.
+- `31d0dcdc` — fact ordering uses the store append coordinate.
+- `00747505` — retention uses exact artifact evidence identity.
+- `5f7658cb` — portfolio replay verifies selection semantics.
+- `e9117a16` — collector replay verifies joint tips.
+- `5012e6aa` — fact-carried scales are authoritative.
+- `dc4efac0` — receipt authority is provisioned and preflighted.
+- `5d203a57` — diagnostic errors use typed dispatch.
+- `57b575e2` — portfolio snapshot is published as v2.
+- `8f091e06` — holding policy is outside the kernel.
+- `c79678d8` — the operator flow uses tracked configs.
+- `9a59caa0`, `c5c5af94`, and `201023ec` — retained collector evidence, append-based fixtures,
+  production-registry composition, and authority lifecycle coverage.
 
 Before every commit, run the repository-mandated gates against that coherent snapshot:
 
@@ -943,7 +942,10 @@ Run focused Cargo checks while developing each step and run `nix run .#ci` after
 changes and again on the final immutable commit. If a step cannot pass its gates without a fallback,
 stop and fix the missing underlying support instead of committing a transitional path.
 
-## Required merge-exit sequence
+## Merge-exit record
+
+The historical acceptance criteria below describe the completed contract; the final immutable
+commit is validated by the repository gates and the clean-diff check listed in the record.
 
 The branch is merge-ready only after all of the following are true:
 
@@ -966,5 +968,6 @@ The branch is merge-ready only after all of the following are true:
 14. `nix run .#check`, `nix run .#test`, and `nix run .#test-db` pass.
 15. `nix run .#ci` passes from the same commit without concurrent edits.
 
-Until those conditions are met, the correct architectural decision is to keep the branch out of
-`dev`.
+The final immutable commit passed the required gates and remained clean after those checks. No
+compatibility aliases, fallback registries, hand-authored store-order fixtures, or late
+fact-authority paths remain in the resolved implementation.
