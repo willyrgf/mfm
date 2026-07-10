@@ -876,7 +876,7 @@ where
         artifact_id: node.config_ref.artifact_id.clone(),
         evidence_hash: config_evidence
             .evidence_hash()
-            .map_err(|error| replay_adapter_error(error))?,
+            .map_err(replay_adapter_error)?,
         digest: Some(node.config_ref.digest.clone()),
         byte_len: Some(node.config_ref.byte_len),
         media_type: Some(node.config_ref.media_type.clone()),
