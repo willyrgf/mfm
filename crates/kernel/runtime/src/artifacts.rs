@@ -17,6 +17,8 @@ pub(crate) enum StagedArtifactBindingKind {
     StateOutput,
     /// Artifact is an external read fact response.
     FactResponse,
+    /// Artifact is retained request/response evidence for an external capability read.
+    ExternalReadEvidence,
     /// Artifact is private replay evidence for a fact query.
     FactQueryEvidence,
     /// Artifact is side-effect evidence bound to one ledger phase.
@@ -341,6 +343,9 @@ pub(crate) fn staged_artifact_binding_kind(
         events::ArtifactStagingClass::AttemptFactResponse => {
             Some(StagedArtifactBindingKind::FactResponse)
         }
+        events::ArtifactStagingClass::AttemptExternalReadEvidence => {
+            Some(StagedArtifactBindingKind::ExternalReadEvidence)
+        }
         events::ArtifactStagingClass::AttemptFactQueryEvidence => {
             Some(StagedArtifactBindingKind::FactQueryEvidence)
         }
@@ -395,6 +400,7 @@ pub(crate) fn staged_side_effect_artifact_phase(
         events::ArtifactStagingClass::RunAdmission
         | events::ArtifactStagingClass::AttemptStateOutput
         | events::ArtifactStagingClass::AttemptFactResponse
+        | events::ArtifactStagingClass::AttemptExternalReadEvidence
         | events::ArtifactStagingClass::AttemptFactQueryEvidence
         | events::ArtifactStagingClass::ManualResolution
         | events::ArtifactStagingClass::AttemptPublicOutput
@@ -409,6 +415,9 @@ pub(crate) fn staged_artifact_binding_role(
     match binding {
         StagedArtifactBindingKind::StateOutput => events::ArtifactRole::StateOutput,
         StagedArtifactBindingKind::FactResponse => events::ArtifactRole::FactResponse,
+        StagedArtifactBindingKind::ExternalReadEvidence => {
+            events::ArtifactRole::ExternalReadEvidence
+        }
         StagedArtifactBindingKind::FactQueryEvidence => events::ArtifactRole::FactQueryEvidence,
         StagedArtifactBindingKind::SideEffectEvidence { phase, .. } => match phase {
             StagedSideEffectArtifactPhase::Intent => events::ArtifactRole::SideEffectIntent,

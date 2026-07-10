@@ -1456,7 +1456,11 @@ fn validate_staged_artifact_payload_bindings(
 ) -> Result<()> {
     let requirements = staged_payload_artifact_requirements(node, attempt_id, payloads)?;
     for staged in staged_artifacts {
-        if staged.binding == StagedArtifactBindingKind::FactQueryEvidence {
+        if matches!(
+            staged.binding,
+            StagedArtifactBindingKind::FactQueryEvidence
+                | StagedArtifactBindingKind::ExternalReadEvidence
+        ) {
             continue;
         }
         if !requirements
@@ -1656,6 +1660,25 @@ fn staged_payload_artifact_binding(
         ) => {
             require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
             Ok(Some(StagedArtifactBindingKind::RedactedDiagnostic))
+        }
+        (
+            events::KernelEventPayload::ArtifactReferenced(payload),
+            store::EventArtifactReferenceSource::ArtifactReferenced,
+        ) if payload.artifact_ref.role == events::ArtifactRole::ExternalReadEvidence => {
+            let node_id = payload.node_id.as_ref().ok_or_else(|| {
+                RuntimeError::InvalidRunnerOutput(format!(
+                    "node {} external read evidence reference lacks a producer node",
+                    node.node_id
+                ))
+            })?;
+            let referenced_attempt_id = payload.attempt_id.as_ref().ok_or_else(|| {
+                RuntimeError::InvalidRunnerOutput(format!(
+                    "node {} external read evidence reference lacks an attempt",
+                    node.node_id
+                ))
+            })?;
+            require_attempt(node, attempt_id, node_id, referenced_attempt_id)?;
+            Ok(Some(StagedArtifactBindingKind::ExternalReadEvidence))
         }
         _ => Ok(None),
     }

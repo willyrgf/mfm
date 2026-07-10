@@ -20,6 +20,7 @@ use mfm_evm_capabilities::{
 };
 use mfm_fact_capabilities::FactRecordCapability;
 use mfm_program::{ManagedWriteState, MfmFactType, StateSpec, ValidatedConfig};
+use mfm_program_derive::MfmValue;
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
     load_launch_config, load_materialized_struct_input, load_runner_config,
@@ -33,20 +34,125 @@ use mfm_states_evm::{
     materialize_evm_joint_tip, native_balance_record_visibility,
     normalize_evm_native_balance_observation, AssembleEvmNativeBalanceBatchConfig,
     AssembleEvmNativeBalanceBatchInput, AssembleEvmNativeBalanceBatchState,
-    EvmAddressNativeBalanceObservation, EvmAddressNativeBalanceSnapshotFact, EvmJointTip,
-    ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput, ObserveEvmNativeBalanceState,
-    RecordEvmNativeBalanceFactState, ResolveEvmJointTipConfig, ResolveEvmJointTipInput,
-    ResolveEvmJointTipState,
+    EvmAddressNativeBalanceSnapshotFact, EvmJointTip, ObserveEvmNativeBalanceConfig,
+    ObserveEvmNativeBalanceInput, ObserveEvmNativeBalanceState, RecordEvmNativeBalanceFactState,
+    ResolveEvmJointTipConfig, ResolveEvmJointTipInput, ResolveEvmJointTipState,
 };
 use mfm_store::v1 as store;
 use mfm_values::{MfmConfig, MfmValue, NonEmpty};
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 const PURE_FACTORY: &str = "pure";
 const READ_FACTORY: &str = "read_external";
 const MANAGED_WRITE_FACTORY: &str = "managed_platform_write";
 const ADAPTER_FACTORY: &str = "evm_jsonrpc_adapter";
 const CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.evm.jsonrpc.runtime.v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.jsonrpc",
+    name = "source_read_evidence",
+    version = "1",
+    schema = "mfm.evm.jsonrpc.external_read.source"
+)]
+struct EvmSourceReadEvidence {
+    network_id: String,
+    expected_chain_id: u64,
+    observed_chain_id: u64,
+    source_ref: String,
+    policy_id: String,
+}
+
+impl EvmSourceReadEvidence {
+    fn from_capability(evidence: &mfm_evm_capabilities::RedactedEvmSourceEvidence) -> Self {
+        Self {
+            network_id: evidence.network_id.as_str().to_owned(),
+            expected_chain_id: evidence.expected_chain_id,
+            observed_chain_id: evidence.observed_chain_id,
+            source_ref: evidence.source_ref.as_str().to_owned(),
+            policy_id: evidence.policy_id.as_str().to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.jsonrpc",
+    name = "joint_tip_read_evidence",
+    version = "1",
+    schema = "mfm.evm.jsonrpc.external_read.joint_tip"
+)]
+struct EvmJointTipReadEvidence {
+    request_block_selector: String,
+    response_block_number: u64,
+    response_block_hash: String,
+    source: EvmSourceReadEvidence,
+}
+
+impl EvmJointTipReadEvidence {
+    fn from_capability(
+        request: &EvmBlockReadRequest,
+        response: &mfm_evm_capabilities::EvmBlockReadResponse,
+    ) -> Self {
+        Self {
+            request_block_selector: evm_block_selector_text(request.block()),
+            response_block_number: response.block_number,
+            response_block_hash: format!("{:#x}", response.block_hash),
+            source: EvmSourceReadEvidence::from_capability(&response.evidence),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.jsonrpc",
+    name = "native_balance_read_evidence",
+    version = "1",
+    schema = "mfm.evm.jsonrpc.external_read.native_balance"
+)]
+struct EvmNativeBalanceReadEvidence {
+    balance_request_account: String,
+    balance_request_block_selector: String,
+    balance_response_wei: String,
+    balance_source: EvmSourceReadEvidence,
+    verification_request_block_selector: String,
+    verification_response_block_number: u64,
+    verification_response_block_hash: String,
+    verification_source: EvmSourceReadEvidence,
+}
+
+impl EvmNativeBalanceReadEvidence {
+    fn from_capability(
+        balance_request: &EvmBalanceReadRequest,
+        balance_response: &mfm_evm_capabilities::EvmBalanceReadResponse,
+        verification_request: &EvmBlockReadRequest,
+        verification_response: &mfm_evm_capabilities::EvmBlockReadResponse,
+    ) -> Self {
+        Self {
+            balance_request_account: format!("{:#x}", balance_request.account()),
+            balance_request_block_selector: evm_block_selector_text(balance_request.block()),
+            balance_response_wei: balance_response.balance_wei.to_string(),
+            balance_source: EvmSourceReadEvidence::from_capability(&balance_response.evidence),
+            verification_request_block_selector: evm_block_selector_text(
+                verification_request.block(),
+            ),
+            verification_response_block_number: verification_response.block_number,
+            verification_response_block_hash: format!("{:#x}", verification_response.block_hash),
+            verification_source: EvmSourceReadEvidence::from_capability(
+                &verification_response.evidence,
+            ),
+        }
+    }
+}
+
+fn evm_block_selector_text(selector: &EvmBlockSelector) -> String {
+    match selector {
+        EvmBlockSelector::Latest => "latest".to_owned(),
+        EvmBlockSelector::Pending => "pending".to_owned(),
+        EvmBlockSelector::Number(number) => format!("number:{number}"),
+        EvmBlockSelector::Hash(hash) => format!("hash:{hash:#x}"),
+    }
+}
 
 /// Result type for EVM adapter operations.
 pub type Result<T> = std::result::Result<T, EvmAdapterError>;
@@ -229,7 +335,13 @@ impl ErasedNodeRunner for ResolveJointTipRunner {
             let tip = state
                 .materialize_response(&response)
                 .map_err(evm_state_runtime_error)?;
-            ErasedRunnerOutput::state_output(&ctx, &tip)
+            let request = EvmBlockReadRequest::new(EvmBlockSelector::Latest);
+            let mut output = RunnerOutputBuilder::new(&ctx);
+            output.record_external_read_evidence(&EvmJointTipReadEvidence::from_capability(
+                &request, &response,
+            ))?;
+            output.state_output(&tip)?;
+            Ok(output.finish())
         })
     }
 }
@@ -303,7 +415,20 @@ impl ErasedNodeRunner for ObserveNativeBalanceRunner {
             let observation = state
                 .materialize_response(&input, &verified_tip, &balance)
                 .map_err(evm_state_runtime_error)?;
-            ErasedRunnerOutput::state_output(&ctx, &observation)
+            let balance_request =
+                EvmBalanceReadRequest::new(account, EvmBlockSelector::Hash(tip_hash));
+            let verification_request = EvmBlockReadRequest::new(EvmBlockSelector::Hash(tip_hash));
+            let mut output = RunnerOutputBuilder::new(&ctx);
+            output.record_external_read_evidence(
+                &EvmNativeBalanceReadEvidence::from_capability(
+                    &balance_request,
+                    &balance,
+                    &verification_request,
+                    &verified_block,
+                ),
+            )?;
+            output.state_output(&observation)?;
+            Ok(output.finish())
         })
     }
 }
@@ -407,10 +532,7 @@ fn adapter_identity_error(error: mfm_ids::IdentityError) -> mfm_runtime::Runtime
     mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
 }
 
-/// Verifies EVM native-balance observation cell outputs when present in a broker stream.
-///
-/// A broker for another workflow is a valid no-op because the application replay registry invokes
-/// every domain verifier.
+/// Verifies EVM native-balance observation cell outputs from retained capability read evidence.
 pub fn verify_evm_native_balance_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
     verify_evm_joint_tip_replay(broker)?;
     let state_kind = ObserveEvmNativeBalanceState::kind().map_err(replay_adapter_error)?;
@@ -455,21 +577,21 @@ fn verify_evm_joint_tip_replay(broker: &replay::ReplayBroker) -> replay::Result<
     })?;
     for frame in &frames {
         let config: ResolveEvmJointTipConfig = replay_node_config(broker, &frame.node)?;
-        let tip: EvmJointTip = decode_replay_value(frame)?;
-        if tip.network() != config.network
-            || tip.chain_id() != config.chain_id
-            || !tip.is_admissible_for_balance_write()
+        let evidence: EvmJointTipReadEvidence = replay_external_read_evidence(broker, frame)?;
+        if evidence.request_block_selector != "latest"
+            || !evm_source_matches(&evidence.source, &config.network, config.chain_id)
         {
             return Err(replay_evm_mismatch(
-                "EVM joint-tip output did not match certified network binding",
+                "EVM joint-tip read evidence did not match certified request or source binding",
             ));
         }
-        parse_block_hash(tip.block_hash()).map_err(replay_adapter_error)?;
+        let block_hash =
+            parse_block_hash(&evidence.response_block_hash).map_err(replay_adapter_error)?;
         let expected = EvmJointTip::new(
             config.network,
             config.chain_id,
-            tip.block_number(),
-            tip.block_hash(),
+            evidence.response_block_number,
+            format!("{block_hash:#x}"),
         )
         .map_err(replay_adapter_error)?;
         ensure_canonical_value_matches(&expected, &frame.artifact_bytes)?;
@@ -483,19 +605,42 @@ fn verify_evm_native_balance_observation_replay(
 ) -> replay::Result<()> {
     let config: ObserveEvmNativeBalanceConfig = replay_node_config(broker, &frame.node)?;
     let input_tip = replay_joint_tip_input(broker, &frame.node)?;
-    let output: EvmAddressNativeBalanceObservation = decode_replay_value(frame)?;
-    if output.source_read_count() != config.max_source_reads.get() {
+    let evidence: EvmNativeBalanceReadEvidence = replay_external_read_evidence(broker, frame)?;
+    let account = parse_account(&config.account).map_err(replay_adapter_error)?;
+    let expected_selector = format!(
+        "hash:{:#x}",
+        parse_block_hash(input_tip.block_hash()).map_err(replay_adapter_error)?
+    );
+    let verified_tip = EvmJointTip::new(
+        config.network.clone(),
+        config.chain_id,
+        evidence.verification_response_block_number,
+        &evidence.verification_response_block_hash,
+    )
+    .map_err(replay_adapter_error)?;
+    if evidence.balance_request_account != format!("{account:#x}")
+        || evidence.balance_request_block_selector != expected_selector
+        || evidence.verification_request_block_selector != expected_selector
+        || evidence.verification_response_block_number != input_tip.block_number()
+        || evidence.verification_response_block_hash != input_tip.block_hash()
+        || !evm_source_matches(&evidence.balance_source, &config.network, config.chain_id)
+        || !evm_source_matches(
+            &evidence.verification_source,
+            &config.network,
+            config.chain_id,
+        )
+    {
         return Err(replay_evm_mismatch(
-            "EVM native-balance observation did not use its certified read budget",
+            "EVM native-balance read evidence did not match certified requests or source binding",
         ));
     }
     let expected = normalize_evm_native_balance_observation(
         &config,
         &input_tip,
-        &input_tip,
-        output.response().raw_wei(),
-        config.chain_id,
-        config.network.as_str(),
+        &verified_tip,
+        &evidence.balance_response_wei,
+        evidence.balance_source.observed_chain_id,
+        &evidence.balance_source.network_id,
     )
     .map_err(replay_adapter_error)?;
     ensure_canonical_value_matches(&expected, &frame.artifact_bytes)
@@ -638,6 +783,60 @@ where
     T: DeserializeOwned,
 {
     serde_json::from_slice(&frame.artifact_bytes).map_err(replay_json_error)
+}
+
+fn replay_external_read_evidence<T>(
+    broker: &replay::ReplayBroker,
+    frame: &replay::ProducedCellReplayFrame,
+) -> replay::Result<T>
+where
+    T: MfmValue + DeserializeOwned,
+{
+    let references = broker
+        .events()
+        .iter()
+        .filter_map(|event| match event.payload() {
+            events::KernelEventPayload::ArtifactReferenced(reference)
+                if reference.node_id.as_ref() == Some(&frame.produced.node_id)
+                    && reference.attempt_id.as_ref() == Some(&frame.produced.attempt_id)
+                    && reference.artifact_ref.role
+                        == events::ArtifactRole::ExternalReadEvidence
+                    && reference.artifact_ref.schema_id == T::schema_id().ok()? =>
+            {
+                Some(reference)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if references.len() != 1 {
+        return Err(replay_evm_mismatch(
+            "EVM external read did not have exactly one retained evidence artifact",
+        ));
+    }
+    let reference = references[0];
+    let requirement = store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::ArtifactReferenced,
+        artifact_id: reference.artifact_ref.artifact_id.clone(),
+        evidence_hash: None,
+        digest: Some(reference.artifact_ref.content_digest.clone()),
+        byte_len: Some(reference.artifact_ref.byte_len),
+        media_type: Some(reference.artifact_ref.media_type.clone()),
+        schema_id: Some(reference.artifact_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: Some(frame.produced.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: Some(events::ArtifactRole::ExternalReadEvidence),
+    };
+    let artifact = broker.retained_artifact(&requirement)?;
+    serde_json::from_slice(&artifact.artifact_bytes).map_err(replay_json_error)
+}
+
+fn evm_source_matches(source: &EvmSourceReadEvidence, network: &str, chain_id: u64) -> bool {
+    source.network_id == network
+        && source.expected_chain_id == chain_id
+        && source.observed_chain_id == chain_id
+        && !source.source_ref.trim().is_empty()
+        && !source.policy_id.trim().is_empty()
 }
 
 fn ensure_canonical_value_matches<T: serde::Serialize>(

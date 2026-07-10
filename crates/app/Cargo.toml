@@ -49,6 +49,9 @@ mfm-program = { path = "../kernel/program" }
 mfm-replay = { path = "../kernel/replay" }
 mfm-runtime = { path = "../kernel/runtime" }
 mfm-runtime-config = { path = "../runtime-config" }
+mfm-state-portfolio = { path = "../states/portfolio" }
+mfm-states-btc = { path = "../states/btc" }
+mfm-states-evm = { path = "../states/evm" }
 mfm-signers-keystore = { path = "../signers/keystore" }
 mfm-signing = { path = "../signing" }
 mfm-spec = { path = "../kernel/spec" }

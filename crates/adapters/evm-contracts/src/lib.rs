@@ -2781,15 +2781,12 @@ fn contract_side_effect_replay_evidence() -> mfm_runtime::Result<SideEffectRepla
     Ok(SideEffectReplayEvidence::new(replay_verifier_id()?, None))
 }
 
-/// Verifies contract lifecycle replay evidence when present in a broker stream.
-///
-/// A broker for another workflow is a valid no-op because the application replay registry invokes
-/// every domain verifier.
+/// Verifies contract lifecycle replay evidence for a dispatched lifecycle stream.
 pub fn verify_contract_lifecycle_replay(
     broker: &replay::ReplayBroker,
     source_run_registry: &mfm_certify::CertificationRegistry,
 ) -> replay::Result<()> {
-    let frames = broker.side_effect_replay_frames_matching(is_contract_lifecycle_intent)?;
+    let frames = broker.side_effect_replay_frames_matching(is_contract_lifecycle_replay_intent)?;
     let verifier = EvmContractLifecycleReplayVerifier::new()?;
     let mut verified_frames = Vec::with_capacity(frames.len());
     for frame in &frames {
@@ -4093,7 +4090,10 @@ fn parse_b256_hex(value: &str) -> Result<B256> {
         .map_err(|_| EvmContractAdapterError::InvalidPreparedInvocation)
 }
 
-fn is_contract_lifecycle_intent(intent: &side_effect::IntentPersisted) -> replay::Result<bool> {
+/// Identifies side-effect intents owned by this adapter's replay verifier.
+pub fn is_contract_lifecycle_replay_intent(
+    intent: &side_effect::IntentPersisted,
+) -> replay::Result<bool> {
     let binding = evm_contract_lifecycle_adapter_binding().map_err(replay_adapter_error)?;
     Ok(intent.adapter_kind == *binding.adapter_kind()
         && intent.adapter_version == *binding.adapter_version())

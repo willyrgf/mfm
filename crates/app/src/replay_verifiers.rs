@@ -1,25 +1,75 @@
 use mfm_certify::CertificationRegistry;
+use mfm_events::v1 as events;
+use mfm_ids::{StateKind, StateVersion};
+use mfm_program::StateSpec;
 use mfm_replay::v1::{ReplayBroker, Result};
 
 type ReplayVerifier = fn(&ReplayBroker, &CertificationRegistry) -> Result<()>;
+type ReplayStateKeyFactory = fn() -> Result<ReplayStateKey>;
+type ReplayIntentMatcher = fn(&events::side_effect::IntentPersisted) -> Result<bool>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReplayStateKey {
+    kind: StateKind,
+    version: StateVersion,
+}
+
+struct ReplayVerifierRegistration {
+    state_keys: &'static [ReplayStateKeyFactory],
+    intent_matcher: Option<ReplayIntentMatcher>,
+    verifier: ReplayVerifier,
+}
 
 /// The one production replay verifier registry compiled into the application.
 ///
 /// Verifiers are evidence-only domain functions. The certification registry is passed through
 /// because some domain contracts validate imported certified runs in addition to this run.
 pub(crate) struct ReplayVerifierRegistry {
-    verifiers: &'static [ReplayVerifier],
+    registrations: &'static [ReplayVerifierRegistration],
 }
 
 impl ReplayVerifierRegistry {
     pub(crate) const fn production() -> Self {
         Self {
-            verifiers: &[
-                verify_portfolio,
-                verify_btc,
-                verify_evm,
-                verify_contracts,
-                verify_proof,
+            registrations: &[
+                ReplayVerifierRegistration {
+                    state_keys: &[state_key::<mfm_state_portfolio::SelectHoldingsState>],
+                    intent_matcher: None,
+                    verifier: verify_portfolio,
+                },
+                ReplayVerifierRegistration {
+                    state_keys: &[
+                        state_key::<mfm_states_btc::ResolveBtcJointTipState>,
+                        state_key::<mfm_states_btc::ObserveBtcChainHeadState>,
+                        state_key::<mfm_states_btc::ObserveBtcAddressBalanceState>,
+                        state_key::<mfm_states_btc::AssembleBtcAddressBalanceBatchState>,
+                    ],
+                    intent_matcher: None,
+                    verifier: verify_btc,
+                },
+                ReplayVerifierRegistration {
+                    state_keys: &[
+                        state_key::<mfm_states_evm::ResolveEvmJointTipState>,
+                        state_key::<mfm_states_evm::ObserveEvmNativeBalanceState>,
+                        state_key::<mfm_states_evm::AssembleEvmNativeBalanceBatchState>,
+                    ],
+                    intent_matcher: None,
+                    verifier: verify_evm,
+                },
+                ReplayVerifierRegistration {
+                    state_keys: &[],
+                    intent_matcher: Some(
+                        mfm_adapters_evm_contracts::is_contract_lifecycle_replay_intent,
+                    ),
+                    verifier: verify_contracts,
+                },
+                ReplayVerifierRegistration {
+                    state_keys: &[],
+                    intent_matcher: Some(
+                        mfm_transports_proof::is_deterministic_proof_replay_intent,
+                    ),
+                    verifier: verify_proof,
+                },
             ],
         }
     }
@@ -29,11 +79,47 @@ impl ReplayVerifierRegistry {
         broker: &ReplayBroker,
         certification_registry: &CertificationRegistry,
     ) -> Result<()> {
-        for verifier in self.verifiers {
-            verifier(broker, certification_registry)?;
+        for registration in self.registrations {
+            if registration.applies(broker)? {
+                (registration.verifier)(broker, certification_registry)?;
+            }
         }
         Ok(())
     }
+}
+
+impl ReplayVerifierRegistration {
+    fn applies(&self, broker: &ReplayBroker) -> Result<bool> {
+        for state_key_factory in self.state_keys {
+            let expected = state_key_factory()?;
+            let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
+                Ok(node.state_kind == expected.kind && node.state_version == expected.version)
+            })?;
+            if !frames.is_empty() {
+                return Ok(true);
+            }
+        }
+        if let Some(intent_matcher) = self.intent_matcher {
+            return Ok(!broker
+                .side_effect_replay_frames_matching(intent_matcher)?
+                .is_empty());
+        }
+        Ok(false)
+    }
+}
+
+fn state_key<S: StateSpec>() -> Result<ReplayStateKey> {
+    Ok(ReplayStateKey {
+        kind: S::kind().map_err(replay_registration_error)?,
+        version: S::version().map_err(replay_registration_error)?,
+    })
+}
+
+fn replay_registration_error(error: impl std::fmt::Display) -> mfm_replay::v1::ReplayError {
+    mfm_replay::v1::ReplayError::new(
+        mfm_replay::v1::ReplayErrorKind::CertifiedEvidenceMismatch,
+        error.to_string(),
+    )
 }
 
 fn verify_portfolio(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
@@ -54,4 +140,23 @@ fn verify_contracts(broker: &ReplayBroker, registry: &CertificationRegistry) -> 
 
 fn verify_proof(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
     mfm_transports_proof::verify_deterministic_proof_replay(broker)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn production_dispatch_scopes_are_explicit_and_unique() {
+        let registry = ReplayVerifierRegistry::production();
+        let mut state_keys = BTreeSet::new();
+        for registration in registry.registrations {
+            assert!(!registration.state_keys.is_empty() || registration.intent_matcher.is_some());
+            for state_key_factory in registration.state_keys {
+                let key = state_key_factory().expect("certified state key");
+                assert!(state_keys.insert((key.kind, key.version)));
+            }
+        }
+    }
 }

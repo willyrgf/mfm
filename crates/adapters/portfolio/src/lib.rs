@@ -339,7 +339,9 @@ pub fn verify_portfolio_replay(broker: &replay::ReplayBroker) -> replay::Result<
         Ok(node.state_kind == select_kind && node.state_version == select_version)
     })?;
     if select_frames.is_empty() {
-        return Ok(());
+        return Err(replay_portfolio_mismatch(
+            "portfolio replay is not dispatched without a SelectHoldings output",
+        ));
     }
     if select_frames.len() != 1 {
         return Err(replay_portfolio_mismatch(

@@ -739,10 +739,9 @@ impl replay::SideEffectReplayVerifier for DeterministicProofReplayVerifier {
 /// Verifies deterministic proof side-effect replay evidence when a run stream contains proof
 /// events.
 ///
-/// A broker for another workflow is a valid no-op because the application replay registry invokes
-/// every domain verifier.
+/// The application dispatches this verifier only for proof-owned side-effect intents.
 pub fn verify_deterministic_proof_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
-    let frames = broker.side_effect_replay_frames_matching(is_deterministic_proof_intent)?;
+    let frames = broker.side_effect_replay_frames_matching(is_deterministic_proof_replay_intent)?;
     if frames.is_empty() {
         return Ok(());
     }
@@ -830,7 +829,10 @@ fn verify_manual_resolution_proof_replay(
     Ok(())
 }
 
-fn is_deterministic_proof_intent(intent: &side_effect::IntentPersisted) -> replay::Result<bool> {
+/// Identifies side-effect intents owned by the deterministic proof replay verifier.
+pub fn is_deterministic_proof_replay_intent(
+    intent: &side_effect::IntentPersisted,
+) -> replay::Result<bool> {
     let expected_capability = ProofMutationCapability::kind().map_err(replay_capability_error)?;
     let expected_adapter = proof_adapter_kind().map_err(replay_identity_error)?;
     Ok(intent.capability_kind == expected_capability && intent.adapter_kind == expected_adapter)

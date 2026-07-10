@@ -371,9 +371,10 @@ fn raw_stream_requires_artifact_byte_authority(stream: &[store::KernelEventEnvel
             !payload.fact_descriptor_artifacts.is_empty()
         }
         events::KernelEventPayload::FactRecorded(_) => true,
-        events::KernelEventPayload::ArtifactReferenced(payload) => {
-            payload.artifact_ref.role == events::ArtifactRole::FactDescriptor
-        }
+        events::KernelEventPayload::ArtifactReferenced(payload) => matches!(
+            payload.artifact_ref.role,
+            events::ArtifactRole::FactDescriptor | events::ArtifactRole::ExternalReadEvidence
+        ),
         _ => false,
     })
 }
@@ -1777,7 +1778,13 @@ fn same_commit_typed_artifact_keys(
         .filter(|requirement| {
             requirement.source.is_same_commit_payload_evidence()
                 || (requirement.source == store::EventArtifactReferenceSource::ArtifactReferenced
-                    && requirement.artifact_role == Some(events::ArtifactRole::FactQueryEvidence))
+                    && matches!(
+                        requirement.artifact_role,
+                        Some(
+                            events::ArtifactRole::FactQueryEvidence
+                                | events::ArtifactRole::ExternalReadEvidence
+                        )
+                    ))
         })
         .filter_map(|requirement| {
             Some((
@@ -3218,8 +3225,11 @@ fn artifact_reference_matches_same_commit_payload(
                     .is_some_and(|diagnostic| event_artifact_refs_match(diagnostic, reference))
         }
         events::KernelEventPayload::ArtifactReferenced(payload) => {
-            reference.artifact_ref.role == events::ArtifactRole::FactQueryEvidence
-                && payload.artifact_ref.role == events::ArtifactRole::FactQueryEvidence
+            matches!(
+                reference.artifact_ref.role,
+                events::ArtifactRole::FactQueryEvidence
+                    | events::ArtifactRole::ExternalReadEvidence
+            ) && payload.artifact_ref.role == reference.artifact_ref.role
                 && payload.node_id.as_ref() == Some(reference_node_id)
                 && payload.attempt_id.as_ref() == Some(reference_attempt_id)
                 && event_artifact_refs_match(&payload.artifact_ref, reference)

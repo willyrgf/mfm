@@ -10084,6 +10084,7 @@ fn runtime_staging_class(role: events::ArtifactRole) -> &'static str {
     match role.contract().staging {
         events::ArtifactStagingClass::AttemptStateOutput
         | events::ArtifactStagingClass::AttemptFactResponse
+        | events::ArtifactStagingClass::AttemptExternalReadEvidence
         | events::ArtifactStagingClass::AttemptFactQueryEvidence
         | events::ArtifactStagingClass::AttemptPublicOutput
         | events::ArtifactStagingClass::AttemptRedactedDiagnostic => {
@@ -10129,6 +10130,7 @@ FactDescriptor -> run_admission\n\
 SeedInput -> run_admission\n\
 StateOutput -> attempt_state_output\n\
 FactResponse -> attempt_fact_response\n\
+ExternalReadEvidence -> attempt_external_read_evidence\n\
 FactQueryEvidence -> attempt_fact_query_evidence\n\
 SideEffectIntent -> side_effect_intent\n\
 PreparedInvocation -> side_effect_prepared_invocation\n\

@@ -1458,6 +1458,8 @@ pub mod v1 {
         StateOutput,
         /// Read fact response artifact.
         FactResponse,
+        /// Retained request/response evidence for an external capability read.
+        ExternalReadEvidence,
         /// Private fact query replay evidence artifact.
         FactQueryEvidence,
         /// Side-effect intent artifact.
@@ -1587,6 +1589,8 @@ pub mod v1 {
         AttemptStateOutput,
         /// Attempt-produced fact response artifact.
         AttemptFactResponse,
+        /// Attempt-produced external capability read evidence artifact.
+        AttemptExternalReadEvidence,
         /// Attempt-produced private fact query replay evidence artifact.
         AttemptFactQueryEvidence,
         /// Side-effect intent artifact.
@@ -1622,6 +1626,7 @@ pub mod v1 {
                 Self::RunAdmission => "run_admission",
                 Self::AttemptStateOutput => "attempt_state_output",
                 Self::AttemptFactResponse => "attempt_fact_response",
+                Self::AttemptExternalReadEvidence => "attempt_external_read_evidence",
                 Self::AttemptFactQueryEvidence => "attempt_fact_query_evidence",
                 Self::SideEffectIntent => "side_effect_intent",
                 Self::SideEffectPreparedInvocation => "side_effect_prepared_invocation",
@@ -1723,6 +1728,7 @@ pub mod v1 {
             Self::SeedInput,
             Self::StateOutput,
             Self::FactResponse,
+            Self::ExternalReadEvidence,
             Self::FactQueryEvidence,
             Self::SideEffectIntent,
             Self::PreparedInvocation,
@@ -1809,6 +1815,16 @@ pub mod v1 {
                     semantic: ArtifactSemanticPolicy::Absent,
                     producer: ArtifactProducerScope::NodeRequired,
                     staging: ArtifactStagingClass::AttemptFactResponse,
+                    retention: ArtifactRetentionClass::ValueArtifacts,
+                    same_commit: ArtifactSameCommitPolicy::PayloadRequiredArtifact,
+                },
+                Self::ExternalReadEvidence => ArtifactRoleContract {
+                    role: self,
+                    tag: "external_read_evidence",
+                    schema: ArtifactSchemaPolicy::ExactEvidenceSchema,
+                    semantic: ArtifactSemanticPolicy::Absent,
+                    producer: ArtifactProducerScope::NodeRequired,
+                    staging: ArtifactStagingClass::AttemptExternalReadEvidence,
                     retention: ArtifactRetentionClass::ValueArtifacts,
                     same_commit: ArtifactSameCommitPolicy::PayloadRequiredArtifact,
                 },

@@ -23,6 +23,7 @@ mfm-fact-capabilities = { path = "../../fact-capabilities" }
 mfm-facts = { path = "../../kernel/facts" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
+mfm-program-derive = { path = "../../kernel/program-derive" }
 mfm-replay = { path = "../../kernel/replay" }
 mfm-runtime = { path = "../../kernel/runtime" }
 mfm-spec = { path = "../../kernel/spec" }

@@ -15,8 +15,8 @@ use mfm_btc_capabilities::{
     BitcoinNetworkTag, BtcAddress, BtcBalanceReadCapability, BtcBalanceReadProvider,
     BtcBalanceReadRequest, BtcBalanceReadResponse, BtcBlockHash, BtcCapabilityError,
     BtcCapabilityFuture, BtcChainHeadReadCapability, BtcChainHeadReadProvider, BtcChainHeadRequest,
-    BtcChainHeadResponse, BtcFinality, BtcHeadKind, BtcNetworkId, BtcSourceBinding,
-    BtcSourceIdentity, BtcSourceStatus, RedactedBtcSourceEvidence,
+    BtcChainHeadResponse, BtcNetworkId, BtcSourceBinding, BtcSourceIdentity, BtcSourceStatus,
+    RedactedBtcSourceEvidence,
 };
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1 as events;
@@ -25,6 +25,7 @@ use mfm_fact_capabilities::{
     FactQueryReceiptTrustRootMaterial, FactRecordCapability,
 };
 use mfm_program::{ManagedWriteState, MfmFactType, StateSpec, ValidatedConfig};
+use mfm_program_derive::MfmValue;
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
     load_launch_config, load_materialized_struct_input, load_runner_config,
@@ -38,24 +39,110 @@ use mfm_states_btc::{
     btc_jsonrpc_adapter_kind, btc_jsonrpc_adapter_version, chain_head_fact_visibility,
     collector_checkpoint_fact_visibility, normalize_btc_address_balance_observation,
     AssembleBtcAddressBalanceBatchConfig, AssembleBtcAddressBalanceBatchInput,
-    AssembleBtcAddressBalanceBatchState, BtcAddressBalanceObservation,
-    BtcAddressBalanceSnapshotFact, BtcChainHeadObservation, BtcJointTip, CollectorCheckpointFact,
-    CollectorCheckpointResponse, LoadedCollectorCheckpoint, ObserveBtcAddressBalanceConfig,
-    ObserveBtcAddressBalanceInput, ObserveBtcAddressBalanceState, ObserveBtcChainHeadConfig,
-    ObserveBtcChainHeadInput, ObserveBtcChainHeadState, QueryCollectorCheckpointConfig,
-    QueryCollectorCheckpointInput, QueryCollectorCheckpointState, RecordBtcAddressBalanceFactState,
-    RecordBtcChainHeadFactState, RecordCollectorCheckpointState, ResolveBtcJointTipConfig,
-    ResolveBtcJointTipInput, ResolveBtcJointTipState,
+    AssembleBtcAddressBalanceBatchState, BtcAddressBalanceSnapshotFact, BtcChainHeadObservation,
+    BtcJointTip, CollectorCheckpointFact, CollectorCheckpointResponse, LoadedCollectorCheckpoint,
+    ObserveBtcAddressBalanceConfig, ObserveBtcAddressBalanceInput, ObserveBtcAddressBalanceState,
+    ObserveBtcChainHeadConfig, ObserveBtcChainHeadInput, ObserveBtcChainHeadState,
+    QueryCollectorCheckpointConfig, QueryCollectorCheckpointInput, QueryCollectorCheckpointState,
+    RecordBtcAddressBalanceFactState, RecordBtcChainHeadFactState, RecordCollectorCheckpointState,
+    ResolveBtcJointTipConfig, ResolveBtcJointTipInput, ResolveBtcJointTipState,
 };
 use mfm_store::v1 as store;
 use mfm_values::{MfmConfig, MfmValue, NonEmpty};
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 const PURE_FACTORY: &str = "pure";
 const READ_FACTORY: &str = "read_external";
 const MANAGED_WRITE_FACTORY: &str = "managed_platform_write";
 const ADAPTER_FACTORY: &str = "btc_jsonrpc_adapter";
 const CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.bitcoin.jsonrpc.runtime.v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.bitcoin.jsonrpc",
+    name = "chain_head_read_evidence",
+    version = "1",
+    schema = "mfm.bitcoin.jsonrpc.external_read.chain_head"
+)]
+struct BtcChainHeadReadEvidence {
+    request_head_kind: String,
+    request_finality: String,
+    request_confirmation_depth: Option<u64>,
+    response_head_kind: String,
+    response_finality: String,
+    response_confirmation_depth: Option<u64>,
+    block_height: u64,
+    block_hash: String,
+    provider_time_unix_ms: Option<u64>,
+    network_id: String,
+    source_identity: String,
+    bitcoin_network: String,
+    observed_bitcoin_network: String,
+    source_status: String,
+}
+
+impl BtcChainHeadReadEvidence {
+    fn from_capability(request: &BtcChainHeadRequest, response: &BtcChainHeadResponse) -> Self {
+        let request_selection = request.selection();
+        Self {
+            request_head_kind: request_selection.head_kind().as_str().to_owned(),
+            request_finality: request_selection.finality().as_str().to_owned(),
+            request_confirmation_depth: request_selection.finality().confirmation_depth(),
+            response_head_kind: response.head_kind.as_str().to_owned(),
+            response_finality: response.finality.as_str().to_owned(),
+            response_confirmation_depth: response.finality.confirmation_depth(),
+            block_height: response.block_height,
+            block_hash: response.block_hash.as_str().to_owned(),
+            provider_time_unix_ms: response.provider_time_unix_ms,
+            network_id: response.evidence.network_id.as_str().to_owned(),
+            source_identity: response.evidence.source_identity.as_str().to_owned(),
+            bitcoin_network: response.evidence.bitcoin_network.clone(),
+            observed_bitcoin_network: response.evidence.observed_bitcoin_network.clone(),
+            source_status: response.evidence.source_status.as_str().to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.bitcoin.jsonrpc",
+    name = "balance_read_evidence",
+    version = "1",
+    schema = "mfm.bitcoin.jsonrpc.external_read.balance"
+)]
+struct BtcBalanceReadEvidence {
+    request_address: String,
+    request_block_height: u64,
+    request_block_hash: String,
+    response_address: String,
+    response_balance_sats: u64,
+    response_block_height: u64,
+    response_block_hash: String,
+    network_id: String,
+    source_identity: String,
+    bitcoin_network: String,
+    observed_bitcoin_network: String,
+    source_status: String,
+}
+
+impl BtcBalanceReadEvidence {
+    fn from_capability(request: &BtcBalanceReadRequest, response: &BtcBalanceReadResponse) -> Self {
+        Self {
+            request_address: request.address().as_str().to_owned(),
+            request_block_height: request.block_height(),
+            request_block_hash: request.block_hash().as_str().to_owned(),
+            response_address: response.address.as_str().to_owned(),
+            response_balance_sats: response.balance_sats,
+            response_block_height: response.block_height,
+            response_block_hash: response.block_hash.as_str().to_owned(),
+            network_id: response.evidence.network_id.as_str().to_owned(),
+            source_identity: response.evidence.source_identity.as_str().to_owned(),
+            bitcoin_network: response.evidence.bitcoin_network.clone(),
+            observed_bitcoin_network: response.evidence.observed_bitcoin_network.clone(),
+            source_status: response.evidence.source_status.as_str().to_owned(),
+        }
+    }
+}
 
 /// Result type for Bitcoin JSON-RPC adapter operations.
 pub type Result<T> = std::result::Result<T, BtcJsonRpcAdapterError>;
@@ -444,7 +531,12 @@ impl ErasedNodeRunner for ObserveChainHeadRunner {
             let fact = state
                 .materialize_response(&input, &response)
                 .map_err(btc_state_runtime_error)?;
-            ErasedRunnerOutput::state_output(&ctx, &fact)
+            let mut output = RunnerOutputBuilder::new(&ctx);
+            output.record_external_read_evidence(&BtcChainHeadReadEvidence::from_capability(
+                &request, &response,
+            ))?;
+            output.state_output(&fact)?;
+            Ok(output.finish())
         })
     }
 }
@@ -489,7 +581,12 @@ impl ErasedNodeRunner for ResolveJointTipRunner {
             let tip = state
                 .materialize_response(&response)
                 .map_err(btc_state_runtime_error)?;
-            ErasedRunnerOutput::state_output(&ctx, &tip)
+            let mut output = RunnerOutputBuilder::new(&ctx);
+            output.record_external_read_evidence(&BtcChainHeadReadEvidence::from_capability(
+                &request, &response,
+            ))?;
+            output.state_output(&tip)?;
+            Ok(output.finish())
         })
     }
 }
@@ -537,7 +634,12 @@ impl ErasedNodeRunner for ObserveAddressBalanceRunner {
             let observation = state
                 .materialize_response(&input, &response)
                 .map_err(btc_state_runtime_error)?;
-            ErasedRunnerOutput::state_output(&ctx, &observation)
+            let mut output = RunnerOutputBuilder::new(&ctx);
+            output.record_external_read_evidence(&BtcBalanceReadEvidence::from_capability(
+                &request, &response,
+            ))?;
+            output.state_output(&observation)?;
+            Ok(output.finish())
         })
     }
 }
@@ -716,10 +818,7 @@ pub fn replay_loaded_checkpoint_from_evidence(
         .map_err(|_| BtcJsonRpcAdapterError::ReplayEvidenceMismatch)
 }
 
-/// Verifies Bitcoin JSON-RPC observation cell outputs when present in a broker stream.
-///
-/// Covers chain-head and address-balance observe states. A broker for another workflow is a
-/// valid no-op because the application replay registry invokes every domain verifier.
+/// Verifies Bitcoin JSON-RPC observation cell outputs from retained capability read evidence.
 pub fn verify_btc_jsonrpc_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
     verify_btc_joint_tip_replay(broker)?;
     let chain_head_kind = ObserveBtcChainHeadState::kind().map_err(replay_adapter_error)?;
@@ -773,26 +872,32 @@ fn verify_btc_joint_tip_replay(broker: &replay::ReplayBroker) -> replay::Result<
     })?;
     for frame in &frames {
         let config: ResolveBtcJointTipConfig = replay_node_config(broker, &frame.node)?;
-        let tip: BtcJointTip = decode_replay_value(frame)?;
-        if tip.network() != config.network
-            || tip.bitcoin_network() != config.bitcoin_network
-            || tip.semantic_source_identity() != config.semantic_source_identity
-            || tip.observed_bitcoin_network() != config.bitcoin_network
-            || tip.observed_source_status() != BtcSourceStatus::Synced.as_str()
-            || !tip.is_admissible_for_balance_write()
+        let evidence: BtcChainHeadReadEvidence = replay_external_read_evidence(broker, frame)?;
+        let selection = config.selection();
+        if evidence.request_head_kind != selection.head_kind().as_str()
+            || evidence.request_finality != selection.finality().as_str()
+            || evidence.request_confirmation_depth != selection.finality().confirmation_depth()
+            || evidence.response_head_kind != evidence.request_head_kind
+            || evidence.response_finality != evidence.request_finality
+            || evidence.response_confirmation_depth != evidence.request_confirmation_depth
+            || evidence.network_id != config.network
+            || evidence.source_identity != config.semantic_source_identity
+            || evidence.bitcoin_network != config.bitcoin_network
+            || evidence.observed_bitcoin_network != config.bitcoin_network
+            || evidence.source_status != BtcSourceStatus::Synced.as_str()
         {
             return Err(replay_btc_mismatch(
-                "Bitcoin joint-tip output did not match certified source binding",
+                "Bitcoin joint-tip read evidence did not match certified request or source binding",
             ));
         }
         let expected = BtcJointTip::new(
             config.network,
             config.bitcoin_network,
             config.semantic_source_identity,
-            tip.block_height(),
-            tip.block_hash(),
-            tip.observed_source_status(),
-            tip.observed_bitcoin_network(),
+            evidence.block_height,
+            evidence.block_hash,
+            evidence.source_status,
+            evidence.observed_bitcoin_network,
         )
         .map_err(replay_adapter_error)?;
         ensure_canonical_value_matches(&expected, &frame.artifact_bytes)?;
@@ -805,12 +910,38 @@ fn verify_btc_chain_head_observation_replay(
     frame: &replay::ProducedCellReplayFrame,
 ) -> replay::Result<()> {
     let config: ObserveBtcChainHeadConfig = replay_node_config(broker, &frame.node)?;
-    let binding = chain_head_binding(&config).map_err(replay_adapter_error)?;
     let request = chain_head_request(&config).map_err(replay_adapter_error)?;
+    let evidence: BtcChainHeadReadEvidence = replay_external_read_evidence(broker, frame)?;
     let output: BtcChainHeadObservation =
         serde_json::from_slice(&frame.artifact_bytes).map_err(replay_json_error)?;
-    let response = replay_capability_response_from_observation(&binding, &output)?;
-    recorded_chain_head_response(&binding, &request, &response).map_err(replay_adapter_error)?;
+    let selection = request.selection();
+    if evidence.request_head_kind != selection.head_kind().as_str()
+        || evidence.request_finality != selection.finality().as_str()
+        || evidence.request_confirmation_depth != selection.finality().confirmation_depth()
+        || evidence.response_head_kind != evidence.request_head_kind
+        || evidence.response_finality != evidence.request_finality
+        || evidence.response_confirmation_depth != evidence.request_confirmation_depth
+        || evidence.network_id != config.network
+        || evidence.source_identity != config.semantic_source_identity
+        || evidence.bitcoin_network != config.bitcoin_network
+        || evidence.observed_bitcoin_network != config.bitcoin_network
+        || evidence.source_status != output.response().observed_source_status()
+        || output.source_read_count() != 1
+        || output.subject().network() != evidence.network_id
+        || output.subject().bitcoin_network() != evidence.bitcoin_network
+        || output.subject().semantic_source_identity() != evidence.source_identity
+        || output.subject().head_kind() != evidence.response_head_kind
+        || output.response().block_height() != evidence.block_height
+        || output.response().block_hash() != evidence.block_hash
+        || output.response().observed_bitcoin_network() != evidence.observed_bitcoin_network
+        || output.response().finality_policy() != evidence.response_finality
+        || output.response().confirmation_depth() != evidence.response_confirmation_depth
+        || output.response().provider_time_unix_ms() != evidence.provider_time_unix_ms
+    {
+        return Err(replay_btc_mismatch(
+            "Bitcoin chain-head output did not match retained capability read evidence",
+        ));
+    }
     Ok(())
 }
 
@@ -821,11 +952,22 @@ fn verify_btc_address_balance_observation_replay(
     let config: ObserveBtcAddressBalanceConfig = replay_node_config(broker, &frame.node)?;
     let input_tip = replay_joint_tip_input(broker, &frame.node)?;
     let binding = address_balance_binding(&config).map_err(replay_adapter_error)?;
-    let output: BtcAddressBalanceObservation = decode_replay_value(frame)?;
-    if output.source_read_count() == 0 || output.source_read_count() > config.max_source_reads.get()
+    let evidence: BtcBalanceReadEvidence = replay_external_read_evidence(broker, frame)?;
+    let request = address_balance_request(&config, &input_tip).map_err(replay_adapter_error)?;
+    if evidence.request_address != request.address().as_str()
+        || evidence.request_block_height != request.block_height()
+        || evidence.request_block_hash != request.block_hash().as_str()
+        || evidence.response_address != evidence.request_address
+        || evidence.response_block_height != evidence.request_block_height
+        || evidence.response_block_hash != evidence.request_block_hash
+        || evidence.network_id != config.network
+        || evidence.source_identity != config.semantic_source_identity
+        || evidence.bitcoin_network != config.bitcoin_network
+        || evidence.observed_bitcoin_network != config.bitcoin_network
+        || evidence.source_status != BtcSourceStatus::Synced.as_str()
     {
         return Err(replay_btc_mismatch(
-            "Bitcoin address-balance observation exceeded its certified read budget",
+            "Bitcoin address-balance read evidence did not match certified request or source binding",
         ));
     }
     let capability_response = BtcBalanceReadResponse {
@@ -835,10 +977,10 @@ fn verify_btc_address_balance_observation_replay(
             BtcSourceStatus::Synced,
         )
         .map_err(replay_adapter_error)?,
-        address: BtcAddress::new(output.subject().address()).map_err(replay_adapter_error)?,
-        balance_sats: output.response().balance_sats(),
-        block_height: output.response().anchor_height(),
-        block_hash: BtcBlockHash::new(output.response().anchor_hash())
+        address: BtcAddress::new(&evidence.response_address).map_err(replay_adapter_error)?,
+        balance_sats: evidence.response_balance_sats,
+        block_height: evidence.response_block_height,
+        block_hash: BtcBlockHash::new(&evidence.response_block_hash)
             .map_err(replay_adapter_error)?,
     };
     let expected =
@@ -980,6 +1122,52 @@ fn collect_input_cells<'a>(
     }
 }
 
+fn replay_external_read_evidence<T>(
+    broker: &replay::ReplayBroker,
+    frame: &replay::ProducedCellReplayFrame,
+) -> replay::Result<T>
+where
+    T: MfmValue + DeserializeOwned,
+{
+    let references = broker
+        .events()
+        .iter()
+        .filter_map(|event| match event.payload() {
+            events::KernelEventPayload::ArtifactReferenced(reference)
+                if reference.node_id.as_ref() == Some(&frame.produced.node_id)
+                    && reference.attempt_id.as_ref() == Some(&frame.produced.attempt_id)
+                    && reference.artifact_ref.role
+                        == events::ArtifactRole::ExternalReadEvidence
+                    && reference.artifact_ref.schema_id == T::schema_id().ok()? =>
+            {
+                Some(reference)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if references.len() != 1 {
+        return Err(replay_btc_mismatch(
+            "Bitcoin external read did not have exactly one retained evidence artifact",
+        ));
+    }
+    let reference = references[0];
+    let requirement = store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::ArtifactReferenced,
+        artifact_id: reference.artifact_ref.artifact_id.clone(),
+        evidence_hash: None,
+        digest: Some(reference.artifact_ref.content_digest.clone()),
+        byte_len: Some(reference.artifact_ref.byte_len),
+        media_type: Some(reference.artifact_ref.media_type.clone()),
+        schema_id: Some(reference.artifact_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: Some(frame.produced.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: Some(events::ArtifactRole::ExternalReadEvidence),
+    };
+    let artifact = broker.retained_artifact(&requirement)?;
+    serde_json::from_slice(&artifact.artifact_bytes).map_err(replay_json_error)
+}
+
 fn decode_replay_value<T>(frame: &replay::ProducedCellReplayFrame) -> replay::Result<T>
 where
     T: DeserializeOwned,
@@ -999,69 +1187,6 @@ fn ensure_canonical_value_matches<T: serde::Serialize>(
         ));
     }
     Ok(())
-}
-
-fn replay_capability_response_from_observation(
-    binding: &BtcSourceBinding,
-    output: &BtcChainHeadObservation,
-) -> replay::Result<BtcChainHeadResponse> {
-    let subject = output.subject();
-    let response = output.response();
-    if subject.network() != binding.network_id().as_str()
-        || subject.bitcoin_network() != binding.bitcoin_network().as_str()
-        || subject.semantic_source_identity() != binding.source_identity().as_str()
-        || output.source_read_count() != 1
-    {
-        return Err(replay_btc_mismatch(
-            "Bitcoin observation output did not match certified source binding",
-        ));
-    }
-    let head_kind = replay_head_kind(subject.head_kind())?;
-    let finality = replay_finality(response.finality_policy(), response.confirmation_depth())?;
-    let source_status = replay_source_status(response.observed_source_status())?;
-    let evidence = RedactedBtcSourceEvidence::from_binding(
-        binding,
-        response.observed_bitcoin_network(),
-        source_status,
-    )
-    .map_err(replay_adapter_error)?;
-    Ok(BtcChainHeadResponse {
-        evidence,
-        head_kind,
-        finality,
-        block_height: response.block_height(),
-        block_hash: BtcBlockHash::new(response.block_hash()).map_err(replay_adapter_error)?,
-        provider_time_unix_ms: response.provider_time_unix_ms(),
-    })
-}
-
-fn replay_head_kind(value: &str) -> replay::Result<BtcHeadKind> {
-    match value {
-        "best" => Ok(BtcHeadKind::Best),
-        "confirmed" => Ok(BtcHeadKind::Confirmed),
-        _ => Err(replay_btc_mismatch("Bitcoin replay head kind was invalid")),
-    }
-}
-
-fn replay_finality(value: &str, confirmation_depth: Option<u64>) -> replay::Result<BtcFinality> {
-    match (value, confirmation_depth) {
-        ("best_available", None) => Ok(BtcFinality::BestAvailable),
-        ("confirmations", Some(depth)) => {
-            BtcFinality::confirmations(depth).map_err(replay_adapter_error)
-        }
-        _ => Err(replay_btc_mismatch("Bitcoin replay finality was invalid")),
-    }
-}
-
-fn replay_source_status(value: &str) -> replay::Result<BtcSourceStatus> {
-    match value {
-        "synced" => Ok(BtcSourceStatus::Synced),
-        "initial_block_download" => Ok(BtcSourceStatus::InitialBlockDownload),
-        "unknown" => Ok(BtcSourceStatus::Unknown),
-        _ => Err(replay_btc_mismatch(
-            "Bitcoin replay source status was invalid",
-        )),
-    }
 }
 
 fn replay_node_config<T>(

@@ -618,6 +618,14 @@ impl<'a, 'ctx> RunnerArtifactBuilder<'a, 'ctx> {
         self.evidence_artifact(value, events::ArtifactRole::FactResponse)
     }
 
+    /// Builds retained request/response evidence for an external capability read.
+    pub fn external_read_evidence<T>(&self, value: &T) -> Result<RunnerJsonArtifact>
+    where
+        T: MfmValue,
+    {
+        self.evidence_artifact(value, events::ArtifactRole::ExternalReadEvidence)
+    }
+
     /// Builds a private fact query replay evidence artifact from canonical facts-kernel bytes.
     pub fn fact_query_evidence(
         &self,
@@ -1292,6 +1300,17 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
                 artifact.retention_ref()?
             ]));
         Ok(self)
+    }
+
+    /// Stages and retains request/response evidence for an external capability read.
+    pub fn record_external_read_evidence<T>(&mut self, value: &T) -> Result<RunnerJsonArtifact>
+    where
+        T: MfmValue,
+    {
+        let artifact = self.artifacts.external_read_evidence(value)?;
+        self.stage_attempt_artifact(&artifact)?;
+        self.retain_runtime_evidence(&artifact)?;
+        Ok(artifact)
     }
 
     /// Stages a state-output artifact, retains it as runtime evidence, and emits its cell payload.
