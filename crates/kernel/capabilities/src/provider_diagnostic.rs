@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use mfm_ids::LocalPublicId;
+use serde_json::Value;
 
 /// Stable redaction-safe provider diagnostic.
 ///
@@ -61,10 +62,7 @@ impl RedactedProviderDiagnostic {
 
     /// Returns the generic diagnostic kind used in retained runtime public details.
     pub const fn diagnostic_kind(&self) -> &'static str {
-        match self.code {
-            ProviderDiagnosticCode::SourceMismatch => "provider_source_mismatch",
-            _ => "provider_failure",
-        }
+        diagnostic_kind_for(self.code)
     }
 
     /// Returns a stable machine-readable error code for public output envelopes.
@@ -96,6 +94,49 @@ impl RedactedProviderDiagnostic {
             "code": self.code.as_str(),
             "operation": self.operation.as_ref().map(ToString::to_string),
             "fields": fields,
+        })
+    }
+
+    /// Parses the closed public-details representation of a provider diagnostic.
+    pub fn from_public_details_json(value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        const FIELDS: [&str; 5] = [
+            "code",
+            "diagnostic_kind",
+            "fields",
+            "operation",
+            "provider_family",
+        ];
+        if object.len() != FIELDS.len() || FIELDS.iter().any(|field| !object.contains_key(*field)) {
+            return None;
+        }
+
+        let provider_family = LocalPublicId::new(object.get("provider_family")?.as_str()?).ok()?;
+        let code = ProviderDiagnosticCode::from_str(object.get("code")?.as_str()?)?;
+        let diagnostic_kind = object.get("diagnostic_kind")?.as_str()?;
+        if diagnostic_kind != diagnostic_kind_for(code) {
+            return None;
+        }
+        let operation = match object.get("operation")? {
+            Value::Null => None,
+            Value::String(value) => Some(LocalPublicId::new(value).ok()?),
+            _ => return None,
+        };
+        let fields = object.get("fields")?.as_object()?;
+        let fields = fields
+            .iter()
+            .map(|(key, value)| {
+                Some((
+                    LocalPublicId::new(key).ok()?,
+                    ProviderDiagnosticValue::from_json(value)?,
+                ))
+            })
+            .collect::<Option<BTreeMap<_, _>>>()?;
+        Some(Self {
+            provider_family,
+            code,
+            operation,
+            fields,
         })
     }
 }
@@ -153,6 +194,24 @@ impl ProviderDiagnosticCode {
             Self::OperationIncomplete => "operation_incomplete",
         }
     }
+
+    fn from_str(value: &str) -> Option<Self> {
+        Some(match value {
+            "provider_configuration_invalid" => Self::ProviderConfigurationInvalid,
+            "route_unavailable" => Self::RouteUnavailable,
+            "source_unavailable" => Self::SourceUnavailable,
+            "source_not_allowed" => Self::SourceNotAllowed,
+            "transport_failed" => Self::TransportFailed,
+            "rpc_http_status" => Self::RpcHttpStatus,
+            "rpc_json_error" => Self::RpcJsonError,
+            "response_invalid" => Self::ResponseInvalid,
+            "response_missing_result" => Self::ResponseMissingResult,
+            "source_mismatch" => Self::SourceMismatch,
+            "unsupported_operation" => Self::UnsupportedOperation,
+            "operation_incomplete" => Self::OperationIncomplete,
+            _ => return None,
+        })
+    }
 }
 
 impl fmt::Display for ProviderDiagnosticCode {
@@ -175,6 +234,18 @@ pub enum ProviderDiagnosticValue {
 }
 
 impl ProviderDiagnosticValue {
+    fn from_json(value: &Value) -> Option<Self> {
+        match value {
+            Value::String(value) => Some(Self::Id(LocalPublicId::new(value).ok()?)),
+            Value::Number(value) => value
+                .as_u64()
+                .map(Self::U64)
+                .or_else(|| value.as_i64().map(Self::I64)),
+            Value::Bool(value) => Some(Self::Bool(*value)),
+            Value::Null | Value::Array(_) | Value::Object(_) => None,
+        }
+    }
+
     fn to_json(&self) -> serde_json::Value {
         match self {
             Self::Id(value) => serde_json::Value::String(value.to_string()),
@@ -182,6 +253,13 @@ impl ProviderDiagnosticValue {
             Self::I64(value) => serde_json::json!(value),
             Self::Bool(value) => serde_json::json!(value),
         }
+    }
+}
+
+const fn diagnostic_kind_for(code: ProviderDiagnosticCode) -> &'static str {
+    match code {
+        ProviderDiagnosticCode::SourceMismatch => "provider_source_mismatch",
+        _ => "provider_failure",
     }
 }
 
@@ -239,6 +317,43 @@ mod tests {
             diagnostic.to_public_details_json()["diagnostic_kind"],
             "provider_source_mismatch"
         );
+    }
+
+    #[test]
+    fn public_details_round_trip_through_closed_parser() {
+        let diagnostic =
+            RedactedProviderDiagnostic::new(id("evm"), ProviderDiagnosticCode::SourceMismatch)
+                .with_operation(id("chain_id"))
+                .with_field(id("expected_chain_id"), ProviderDiagnosticValue::U64(1));
+
+        assert_eq!(
+            RedactedProviderDiagnostic::from_public_details_json(
+                &diagnostic.to_public_details_json()
+            ),
+            Some(diagnostic)
+        );
+    }
+
+    #[test]
+    fn public_details_parser_rejects_unknown_or_untyped_fields() {
+        let unknown_field = serde_json::json!({
+            "diagnostic_kind": "provider_failure",
+            "provider_family": "evm",
+            "code": "response_invalid",
+            "operation": null,
+            "fields": {},
+            "unexpected": true,
+        });
+        assert!(RedactedProviderDiagnostic::from_public_details_json(&unknown_field).is_none());
+
+        let untyped_field = serde_json::json!({
+            "diagnostic_kind": "provider_failure",
+            "provider_family": "evm",
+            "code": "response_invalid",
+            "operation": null,
+            "fields": {"body": {"secret": "value"}},
+        });
+        assert!(RedactedProviderDiagnostic::from_public_details_json(&untyped_field).is_none());
     }
 
     #[test]

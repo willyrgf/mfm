@@ -1,5 +1,6 @@
 use super::*;
 use mfm_capabilities::CapabilitySetDescriptor;
+use mfm_events::v1 as events;
 use mfm_ids::{
     ArtifactId, CellId, ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, EffectKind,
     NodeId, SchemaId, ScopeId, StateKind, StateVersion,
@@ -163,13 +164,16 @@ fn observed_failure_retryability_follows_policy_and_failure_class() {
 }
 
 #[test]
-fn invalid_runner_output_diagnostic_surfaces_domain_code_on_attempt_failure() {
-    let error = RuntimeError::InvalidRunnerOutputDiagnostic {
-        message: "missing_fact: no acceptable Platform fact".to_owned(),
-        details: RuntimeDiagnosticDetails::from_json(serde_json::json!({
-            "domain_code": "missing_fact",
-            "domain_message": "missing_fact: no acceptable Platform fact",
-        })),
+fn typed_runner_failure_metadata_controls_attempt_error() {
+    let failure = crate::RuntimeFailure::new(
+        events::ErrorCode::new("missing_fact").expect("code"),
+        events::ErrorCategory::Validation,
+        "missing_fact: no acceptable Platform fact",
+    )
+    .expect("typed failure");
+    let error = RuntimeError::InvalidRunnerOutputFailure {
+        failure,
+        diagnostic: None,
     };
     let info = observed_attempt_failure_info(
         &error,
@@ -181,6 +185,37 @@ fn invalid_runner_output_diagnostic_surfaces_domain_code_on_attempt_failure() {
     .expect("observed failure");
     assert_eq!(info.error.code.as_str(), "missing_fact");
     assert!(info.error.safe_message.contains("missing_fact"));
+
+    let arbitrary_diagnostic = RuntimeDiagnostic::provider(
+        mfm_capabilities::RedactedProviderDiagnostic::new(
+            mfm_ids::LocalPublicId::new("portfolio").expect("provider"),
+            mfm_capabilities::ProviderDiagnosticCode::ResponseInvalid,
+        )
+        .with_field(
+            mfm_ids::LocalPublicId::new("domain_code").expect("field"),
+            mfm_capabilities::ProviderDiagnosticValue::Id(
+                mfm_ids::LocalPublicId::new("different_code").expect("value"),
+            ),
+        ),
+    );
+    let failure = crate::RuntimeFailure::new(
+        events::ErrorCode::new("missing_fact").expect("code"),
+        events::ErrorCategory::Validation,
+        "missing_fact: no acceptable Platform fact",
+    )
+    .expect("typed failure");
+    let info = observed_attempt_failure_info(
+        &RuntimeError::InvalidRunnerOutputFailure {
+            failure,
+            diagnostic: Some(Box::new(arbitrary_diagnostic)),
+        },
+        ObservedFailureRetryabilityPolicy {
+            input_materialization_retryable: false,
+        },
+    )
+    .expect("map failure")
+    .expect("observed failure");
+    assert_eq!(info.error.code.as_str(), "missing_fact");
 
     let generic = RuntimeError::InvalidRunnerOutput("not a domain error".to_owned());
     let info = observed_attempt_failure_info(

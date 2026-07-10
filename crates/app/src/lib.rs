@@ -19,7 +19,7 @@ use std::time::Duration;
 use mfm_artifact_capabilities::ArtifactReadProvider;
 use mfm_authored_config::AuthoredConfig;
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
-use mfm_capabilities::CapabilitySpec;
+use mfm_capabilities::{CapabilitySpec, ProviderDiagnosticCode, ProviderDiagnosticValue};
 use mfm_certify::{CertificationRegistry, CertifiedTypedSpec};
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{EvmNetworkId, EvmSourcePolicyId, EvmSourceRef};
@@ -35,8 +35,8 @@ use mfm_replay::v1::{
 };
 use mfm_runtime::{
     CertifiedRuntimeSpec, ManualResolutionEvidenceArtifact, ManualResolutionRequest,
-    RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell, SchedulerStatus, SerialTypedScheduler,
-    VerifiedRunHistoryView,
+    RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell, RuntimeDiagnostic, SchedulerStatus,
+    SerialTypedScheduler, VerifiedRunHistoryView,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -212,7 +212,7 @@ impl From<mfm_runtime::RuntimeError> for AppError {
             | mfm_runtime::RuntimeError::ExecutionClaim(_)
             | mfm_runtime::RuntimeError::InputMaterialization(_)
             | mfm_runtime::RuntimeError::InvalidRunnerOutput(_)
-            | mfm_runtime::RuntimeError::InvalidRunnerOutputDiagnostic { .. }
+            | mfm_runtime::RuntimeError::InvalidRunnerOutputFailure { .. }
             | mfm_runtime::RuntimeError::RuntimeValidation(_)
             | mfm_runtime::RuntimeError::Identity(_)
             | mfm_runtime::RuntimeError::Canonical(_) => Self::backend(
@@ -2657,34 +2657,55 @@ async fn verify_replay_diagnostics_from_recorded_artifacts(
             .read_retained_artifact(&requirement)
             .await
             .map_err(async_app_store_error)?;
-        let diagnostic = serde_json::from_slice::<serde_json::Value>(artifact.bytes())
+        let diagnostic_artifact = serde_json::from_slice::<serde_json::Value>(artifact.bytes())
             .map_err(|_| replay_diagnostic_error())?;
-        let null_details = serde_json::Value::Null;
-        let details = diagnostic.get("public_details").unwrap_or(&null_details);
-        verify_replay_public_details(payload.error.public_details.as_ref(), details)?;
+        let diagnostic = RuntimeDiagnostic::from_attempt_artifact_json(&diagnostic_artifact)
+            .map_err(|_| replay_diagnostic_error())?;
+        verify_replay_diagnostic(payload.error.public_details.as_ref(), diagnostic.as_ref())?;
     }
     Ok(())
 }
 
-fn verify_replay_public_details(
+fn verify_replay_diagnostic(
     expected: Option<&events::RedactedJson>,
-    details: &serde_json::Value,
+    diagnostic: Option<&RuntimeDiagnostic>,
 ) -> Result<(), AppError> {
-    match (expected, details) {
-        (Some(_), serde_json::Value::Null) => Err(replay_diagnostic_error()),
-        (Some(expected), details) => {
-            let digest = canonical_value_digest(details)?;
+    match (expected, diagnostic) {
+        (Some(_), None) => Err(replay_diagnostic_error()),
+        (Some(expected), diagnostic) => {
+            let diagnostic = diagnostic.ok_or_else(replay_diagnostic_error)?;
+            let digest = canonical_value_digest(&diagnostic.public_details_json())?;
             if digest != expected.content_digest {
                 return Err(replay_diagnostic_error());
             }
-            if is_evm_chain_mismatch_details(details) {
-                validate_evm_chain_mismatch_details(details)?;
-            }
+            validate_replay_diagnostic(diagnostic)?;
             Ok(())
         }
-        (None, serde_json::Value::Null) => Ok(()),
-        (None, _) => Err(replay_diagnostic_error()),
+        (None, None) => Ok(()),
+        (None, Some(_)) => Err(replay_diagnostic_error()),
     }
+}
+
+#[cfg(test)]
+fn verify_replay_diagnostic_json(
+    expected: Option<&events::RedactedJson>,
+    value: &Value,
+) -> Result<(), AppError> {
+    let diagnostic = match value {
+        Value::Null => None,
+        value => Some(RuntimeDiagnostic::from_json(value).map_err(|_| replay_diagnostic_error())?),
+    };
+    verify_replay_diagnostic(expected, diagnostic.as_ref())
+}
+
+fn validate_replay_diagnostic(diagnostic: &RuntimeDiagnostic) -> Result<(), AppError> {
+    let RuntimeDiagnostic::Provider(diagnostic) = diagnostic;
+    if diagnostic.provider_family().as_str() == "evm"
+        && diagnostic.code() == ProviderDiagnosticCode::SourceMismatch
+    {
+        validate_evm_source_mismatch_diagnostic(diagnostic)?;
+    }
+    Ok(())
 }
 
 fn diagnostic_artifact_requirement(
@@ -2705,18 +2726,9 @@ fn diagnostic_artifact_requirement(
     }
 }
 
-fn is_evm_chain_mismatch_details(value: &serde_json::Value) -> bool {
-    let Some(object) = value.as_object() else {
-        return false;
-    };
-    object.contains_key("expected_chain_id")
-        || object.contains_key("observed_chain_id")
-        || object.contains_key("source_ref")
-        || object.contains_key("policy_id")
-}
-
-fn validate_evm_chain_mismatch_details(value: &serde_json::Value) -> Result<(), AppError> {
-    let object = value.as_object().ok_or_else(replay_diagnostic_error)?;
+fn validate_evm_source_mismatch_diagnostic(
+    diagnostic: &mfm_capabilities::RedactedProviderDiagnostic,
+) -> Result<(), AppError> {
     const FIELDS: [&str; 5] = [
         "network_id",
         "expected_chain_id",
@@ -2724,29 +2736,41 @@ fn validate_evm_chain_mismatch_details(value: &serde_json::Value) -> Result<(), 
         "source_ref",
         "policy_id",
     ];
-    if object.len() != FIELDS.len() || FIELDS.iter().any(|field| !object.contains_key(*field)) {
+    if diagnostic.fields().len() != FIELDS.len()
+        || FIELDS
+            .iter()
+            .any(|field| !diagnostic.fields().keys().any(|key| key.as_str() == *field))
+    {
         return Err(replay_diagnostic_error());
     }
-    let network_id = object
-        .get("network_id")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(replay_diagnostic_error)?;
-    let expected_chain_id = object
-        .get("expected_chain_id")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(replay_diagnostic_error)?;
-    let observed_chain_id = object
-        .get("observed_chain_id")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(replay_diagnostic_error)?;
-    let source_ref = object
-        .get("source_ref")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(replay_diagnostic_error)?;
-    let policy_id = object
-        .get("policy_id")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(replay_diagnostic_error)?;
+    let field = |name: &str| {
+        diagnostic
+            .fields()
+            .iter()
+            .find(|(key, _)| key.as_str() == name)
+            .map(|(_, value)| value)
+            .ok_or_else(replay_diagnostic_error)
+    };
+    let network_id = match field("network_id")? {
+        ProviderDiagnosticValue::Id(value) => value.as_str(),
+        _ => return Err(replay_diagnostic_error()),
+    };
+    let expected_chain_id = match field("expected_chain_id")? {
+        ProviderDiagnosticValue::U64(value) => *value,
+        _ => return Err(replay_diagnostic_error()),
+    };
+    let observed_chain_id = match field("observed_chain_id")? {
+        ProviderDiagnosticValue::U64(value) => *value,
+        _ => return Err(replay_diagnostic_error()),
+    };
+    let source_ref = match field("source_ref")? {
+        ProviderDiagnosticValue::Id(value) => value.as_str(),
+        _ => return Err(replay_diagnostic_error()),
+    };
+    let policy_id = match field("policy_id")? {
+        ProviderDiagnosticValue::Id(value) => value.as_str(),
+        _ => return Err(replay_diagnostic_error()),
+    };
     EvmNetworkId::new(network_id).map_err(|_| replay_diagnostic_error())?;
     EvmSourceRef::new(source_ref).map_err(|_| replay_diagnostic_error())?;
     EvmSourcePolicyId::new(policy_id).map_err(|_| replay_diagnostic_error())?;

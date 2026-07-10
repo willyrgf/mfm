@@ -1411,10 +1411,31 @@ fn replay_diagnostic_rejects_digest_matched_malformed_evm_chain_mismatch_details
             "policy_id": "primary",
         }),
     ] {
-        let digest = canonical_value_digest(&details).expect("details digest");
-        let expected = events::RedactedJson::new(digest);
-        let error = verify_replay_public_details(Some(&expected), &details)
-            .expect_err("digest-matched malformed public details must fail replay");
+        let envelope = serde_json::json!({
+            "kind": "provider",
+            "version": 1,
+            "details": {
+                "diagnostic_kind": "provider_source_mismatch",
+                "provider_family": "evm",
+                "code": "source_mismatch",
+                "operation": null,
+                "fields": details,
+            },
+        });
+        let expected = RuntimeDiagnostic::from_json(&envelope)
+            .map(|diagnostic| {
+                events::RedactedJson::new(
+                    canonical_value_digest(&diagnostic.public_details_json())
+                        .expect("diagnostic digest"),
+                )
+            })
+            .unwrap_or_else(|_| {
+                events::RedactedJson::new(
+                    canonical_value_digest(&serde_json::Value::Null).expect("null digest"),
+                )
+            });
+        let error = verify_replay_diagnostic_json(Some(&expected), &envelope)
+            .expect_err("malformed typed diagnostic must fail replay");
 
         assert_eq!(error.code, "ReplayDiagnosticInvalid");
     }
@@ -1422,16 +1443,26 @@ fn replay_diagnostic_rejects_digest_matched_malformed_evm_chain_mismatch_details
 
 #[test]
 fn replay_diagnostic_accepts_generic_details_with_network_id() {
-    let details = serde_json::json!({
-        "domain_code": "missing_fact",
-        "domain_message": "missing_fact: no acceptable Platform fact",
-        "holding_key": "wallet_main/eth.native/ethereum-mainnet/ethereum-mainnet",
-        "network_id": "ethereum-mainnet",
+    let envelope = serde_json::json!({
+        "kind": "provider",
+        "version": 1,
+        "details": {
+            "diagnostic_kind": "provider_failure",
+            "provider_family": "portfolio",
+            "code": "response_invalid",
+            "operation": null,
+            "fields": {
+                "domain_code": "missing_fact",
+                "network_id": "ethereum-mainnet",
+            },
+        },
     });
-    let digest = canonical_value_digest(&details).expect("details digest");
-    let expected = events::RedactedJson::new(digest);
+    let diagnostic = RuntimeDiagnostic::from_json(&envelope).expect("typed diagnostic");
+    let expected = events::RedactedJson::new(
+        canonical_value_digest(&diagnostic.public_details_json()).expect("details digest"),
+    );
 
-    verify_replay_public_details(Some(&expected), &details)
+    verify_replay_diagnostic_json(Some(&expected), &envelope)
         .expect("generic diagnostic details must not be classified as EVM mismatch evidence");
 }
 

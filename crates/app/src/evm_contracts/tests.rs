@@ -749,16 +749,29 @@ async fn replay_diagnostic_accepts_side_effect_submit_node_public_details() {
         "verifier framework config must not be used as EVM route authority"
     );
 
-    let details = json!({
-        "network_id": "reth-dev",
-        "expected_chain_id": 31337,
-        "observed_chain_id": 31338,
-        "source_ref": "reth-dev",
-        "policy_id": "reth-dev",
+    let diagnostic = json!({
+        "kind": "provider",
+        "version": 1,
+        "details": {
+            "diagnostic_kind": "provider_source_mismatch",
+            "provider_family": "evm",
+            "code": "source_mismatch",
+            "operation": null,
+            "fields": {
+                "network_id": "reth-dev",
+                "expected_chain_id": 31337,
+                "observed_chain_id": 31338,
+                "source_ref": "reth-dev",
+                "policy_id": "reth-dev",
+            },
+        },
     });
-    let expected =
-        events::RedactedJson::new(crate::canonical_value_digest(&details).expect("details digest"));
-    crate::verify_replay_public_details(Some(&expected), &details)
+    let parsed =
+        mfm_runtime::RuntimeDiagnostic::from_json(&diagnostic).expect("typed provider diagnostic");
+    let expected = events::RedactedJson::new(
+        crate::canonical_value_digest(&parsed.public_details_json()).expect("details digest"),
+    );
+    crate::verify_replay_diagnostic_json(Some(&expected), &diagnostic)
         .expect("verifier diagnostic details are valid public chain-mismatch details");
 }
 

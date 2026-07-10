@@ -13,8 +13,8 @@ use crate::invocation::{ErasedRunCtx, InvocationBuilder, InvocationBuilderInput}
 use crate::side_effect_lifecycle::side_effect_projection_for_attempt;
 use crate::transition::TransitionAttempt;
 use crate::{
-    attempt_id, canonical_json, CertifiedRuntimeSpec, Result, RuntimeDiagnosticDetails,
-    RuntimeError,
+    attempt_id, canonical_json, CertifiedRuntimeSpec, Result, RuntimeDiagnostic, RuntimeError,
+    REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA, REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_VERSION,
 };
 
 /// Result of running one ordinary attempt lifecycle.
@@ -399,8 +399,7 @@ pub(crate) async fn terminalize_observed_failure<S: store::RunEventStore + ?Size
         run_id,
         node,
         attempt_id,
-        &failure_info.error,
-        failure_info.details.as_ref(),
+        failure_info.diagnostic.as_ref(),
     )?;
     let failure = CommitPlanner::prepare_attempt_failure(AttemptFailureCommitInput {
         runtime_spec,
@@ -495,7 +494,7 @@ fn can_terminalize_observed_failure(
 
 struct ObservedAttemptFailureInfo {
     error: events::MfmErrorInfo,
-    details: Option<RuntimeDiagnosticDetails>,
+    diagnostic: Option<RuntimeDiagnostic>,
 }
 
 fn observed_attempt_failure_info(
@@ -506,8 +505,7 @@ fn observed_attempt_failure_info(
         return Ok(None);
     };
     let retryable = retryability.retryable_for(failure_class);
-    let details = observed_failure_diagnostic_details(error).cloned();
-    let domain = domain_failure_from_diagnostic(details.as_ref());
+    let diagnostic = observed_failure_diagnostic(error).cloned();
     let failure = match failure_class {
         ObservedFailureClass::InputMaterialization => events::MfmErrorInfo::new(
             events::ErrorCode::new("input_materialization_failed")?,
@@ -515,21 +513,18 @@ fn observed_attempt_failure_info(
             retryable,
             "attempt input materialization failed",
         )?,
-        ObservedFailureClass::InvalidRunnerOutput => {
-            let (code, safe_message) = match domain {
-                Some((code, message)) => (code, message),
-                None => (
-                    events::ErrorCode::new("runner_output_invalid")?,
-                    "runner output failed validation".to_owned(),
-                ),
-            };
-            events::MfmErrorInfo::new(
-                code,
+        ObservedFailureClass::InvalidRunnerOutput => match error {
+            RuntimeError::InvalidRunnerOutputFailure { failure, .. } => {
+                failure.public_error(retryable)?
+            }
+            RuntimeError::InvalidRunnerOutput(_) => events::MfmErrorInfo::new(
+                events::ErrorCode::new("runner_output_invalid")?,
                 events::ErrorCategory::Validation,
                 retryable,
-                safe_message,
-            )?
-        }
+                "runner output failed validation",
+            )?,
+            _ => unreachable!("failure class must match runtime error"),
+        },
         ObservedFailureClass::RuntimeValidation => events::MfmErrorInfo::new(
             events::ErrorCode::new("runtime_validation_failed")?,
             events::ErrorCategory::Validation,
@@ -537,39 +532,19 @@ fn observed_attempt_failure_info(
             "runtime validation failed while handling attempt",
         )?,
     };
-    let error = if let Some(details) = &details {
-        let details_digest = canonical_json(details.value().clone())?.content_digest();
+    let error = if let Some(diagnostic) = &diagnostic {
+        let details_digest = canonical_json(diagnostic.public_details_json())?.content_digest();
         failure.with_public_details(events::RedactedJson::new(details_digest))?
     } else {
         failure
     };
-    Ok(Some(ObservedAttemptFailureInfo { error, details }))
-}
-
-/// When diagnostic details carry a valid `domain_code`, surface it as the public attempt error code.
-fn domain_failure_from_diagnostic(
-    details: Option<&RuntimeDiagnosticDetails>,
-) -> Option<(events::ErrorCode, String)> {
-    let value = details?.value();
-    let domain_code = value.get("domain_code")?.as_str()?;
-    if domain_code.is_empty() {
-        return None;
-    }
-    let code = events::ErrorCode::new(domain_code).ok()?;
-    let safe_message = value
-        .get("domain_message")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| domain_code.to_owned());
-    Some((code, safe_message))
+    Ok(Some(ObservedAttemptFailureInfo { error, diagnostic }))
 }
 
 fn observed_failure_class(error: &RuntimeError) -> Option<ObservedFailureClass> {
     match error {
         RuntimeError::InputMaterialization(_) => Some(ObservedFailureClass::InputMaterialization),
-        RuntimeError::InvalidRunnerOutput(_)
-        | RuntimeError::InvalidRunnerOutputDiagnostic { .. } => {
+        RuntimeError::InvalidRunnerOutput(_) | RuntimeError::InvalidRunnerOutputFailure { .. } => {
             Some(ObservedFailureClass::InvalidRunnerOutput)
         }
         RuntimeError::RuntimeValidation(_) => Some(ObservedFailureClass::RuntimeValidation),
@@ -577,9 +552,9 @@ fn observed_failure_class(error: &RuntimeError) -> Option<ObservedFailureClass> 
     }
 }
 
-fn observed_failure_diagnostic_details(error: &RuntimeError) -> Option<&RuntimeDiagnosticDetails> {
+fn observed_failure_diagnostic(error: &RuntimeError) -> Option<&RuntimeDiagnostic> {
     match error {
-        RuntimeError::InvalidRunnerOutputDiagnostic { details, .. } => Some(details),
+        RuntimeError::InvalidRunnerOutputFailure { diagnostic, .. } => diagnostic.as_deref(),
         _ => None,
     }
 }
@@ -589,20 +564,15 @@ fn redacted_attempt_failure_diagnostic_artifact(
     run_id: &RunId,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
-    error: &events::MfmErrorInfo,
-    details: Option<&RuntimeDiagnosticDetails>,
+    diagnostic: Option<&RuntimeDiagnostic>,
 ) -> Result<PreparedStagedArtifact> {
     let bytes = canonical_json(serde_json::json!({
         "attempt_id": attempt_id.as_str(),
-        "category": store::error_category_str(error.category),
-        "code": error.code.as_str(),
-        "diagnostic_schema": "mfm.runtime.redacted_attempt_failure_diagnostic",
-        "diagnostic_schema_version": "1",
+        "diagnostic": diagnostic.map(RuntimeDiagnostic::to_json),
+        "diagnostic_schema": REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA,
+        "diagnostic_schema_version": REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_VERSION,
         "node_id": node.node_id.as_str(),
-        "public_details": details.map(RuntimeDiagnosticDetails::value),
-        "retryable": error.retryable,
         "run_id": run_id.as_str(),
-        "safe_message": &error.safe_message,
         "spec_hash": runtime_spec.spec_hash().as_str(),
     }))?;
     let digest = bytes.content_digest();
@@ -627,24 +597,20 @@ fn redacted_attempt_failure_diagnostic_schema_id() -> Result<SchemaId> {
     let digest = canonical_json(serde_json::json!({
         "fields": [
             "attempt_id",
-            "category",
-            "code",
+            "diagnostic",
             "diagnostic_schema",
             "diagnostic_schema_version",
             "node_id",
-            "public_details",
-            "retryable",
             "run_id",
-            "safe_message",
             "spec_hash"
         ],
-        "name": "mfm.runtime.redacted_attempt_failure_diagnostic",
-        "version": "1",
+        "name": REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA,
+        "version": REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_VERSION,
     }))?
     .content_digest();
     Ok(SchemaId::new(
-        "mfm.runtime.redacted_attempt_failure_diagnostic",
-        "1",
+        REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA,
+        REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_VERSION,
         DigestAlgorithm::Sha256JcsV1,
         *digest.digest(),
     )?)

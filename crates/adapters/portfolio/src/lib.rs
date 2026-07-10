@@ -931,20 +931,15 @@ fn fact_query_trust_root(
 
 fn holding_runtime_error(error: PortfolioHoldingSelectionError) -> mfm_runtime::RuntimeError {
     let code = error.code.as_str();
-    let message = error.message.clone();
-    let mut details = serde_json::json!({
-        "domain_code": code,
-        "domain_message": format!("{code}: {message}"),
-    });
-    if let Some(holding_key) = &error.holding_key {
-        details["holding_key"] = serde_json::json!(holding_key);
-    }
-    if let Some(network_id) = &error.network_id {
-        details["network_id"] = serde_json::json!(network_id);
-    }
-    mfm_runtime::RuntimeError::InvalidRunnerOutputDiagnostic {
-        message: format!("{code}: {message}"),
-        details: mfm_runtime::RuntimeDiagnosticDetails::from_json(details),
+    let failure = mfm_runtime::RuntimeFailure::new(
+        events::ErrorCode::new(code).expect("portfolio error code is a checked public code"),
+        events::ErrorCategory::Validation,
+        format!("{code}: portfolio holding selection failed"),
+    )
+    .expect("portfolio failure metadata is a checked public contract");
+    mfm_runtime::RuntimeError::InvalidRunnerOutputFailure {
+        failure,
+        diagnostic: None,
     }
 }
 

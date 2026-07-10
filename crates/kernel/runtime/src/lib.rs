@@ -45,7 +45,10 @@ pub use binding::{
     BoundRuntimeContext, BoundRuntimeContextLoader,
 };
 pub use commit::{PreparedRunLaunch, RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell};
-pub use error::{RuntimeDiagnosticDetails, RuntimeError};
+pub use error::{
+    RuntimeDiagnostic, RuntimeError, RuntimeFailure, REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_SCHEMA,
+    REDACTED_ATTEMPT_FAILURE_DIAGNOSTIC_VERSION,
+};
 pub use history::{VerifiedRunContext, VerifiedRunContextLoader, VerifiedRunHistoryView};
 pub use invocation::{
     CertifiedInvocationContext, CertifiedRuntimeCapabilities, ErasedRunCtx, MaterializedCell,
