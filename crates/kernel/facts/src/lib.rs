@@ -1,12 +1,13 @@
 #![warn(missing_docs)]
 //! Fact descriptor and query evidence contracts for the MFM typed kernel.
 //!
-//! This crate owns the domain-free facts kernel surface described by
-//! `docs/RFC_COLLECTORS.md`: descriptor identity, field extraction contracts,
-//! fact visibility, fact keys, claim identity, internal refs, and canonical
-//! query evidence. The initial crate exists so later commits can add those
-//! contracts behind the kernel dependency boundary without mixing them into
-//! event, runtime, store, app, or collector code.
+//! This crate owns the domain-free facts kernel surface: descriptor identity,
+//! field extraction contracts, fact visibility, fact keys, claim identity,
+//! internal refs, and canonical query evidence. See `docs/design.md` for the
+//! typed-core authority contract and `docs/portfolio-collect-then-report.md`
+//! for portfolio fact-backed reporting. The crate stays behind the kernel
+//! dependency boundary without mixing domain logic into event, runtime, store,
+//! app, or collector code.
 //!
 //! ```
 //! assert_eq!(mfm_facts::FACTS_KERNEL_CONTRACT_VERSION, "mfm.facts.v1");

@@ -241,6 +241,11 @@ Replay and resume semantics follow the effect class:
   mutations or infer mutation status from unstored state.
 - Replay never constructs live transports or signer providers.
 
+Portfolio reporting is fact-backed and report-only after collectors cutover: pure report states
+recompute from certified config; SelectHoldings recomputes from recorded Platform fact-query
+evidence and retained response artifacts only. Public-facts CLI/REST is not report selection
+authority. See `docs/portfolio-collect-then-report.md`.
+
 ## Certified Saga Semantics
 
 Certified saga behavior is part of the typed runtime contract. The detailed saga and scoped AC/DC
