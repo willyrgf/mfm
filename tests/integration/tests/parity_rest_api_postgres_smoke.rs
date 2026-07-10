@@ -272,6 +272,18 @@ async fn postgres_fact_receipt_authority_covers_provisioning_and_admission() {
                 if payload.error.code.as_str() == "FactReceiptAuthorityUnavailable"
         )
     }));
+    matching_services
+        .verify_replay_for_run(&run_id)
+        .await
+        .expect("matching signer replays the retained receipt");
+    _signing_key_env.remove();
+    let read_services = mfm_app::connect_production_run_read_services(Some(&scoped_database_url))
+        .await
+        .expect("replay authority does not need the live signer");
+    read_services
+        .verify_replay_for_run(&run_id)
+        .await
+        .expect("persisted receipt replays with the trust root only");
 
     drop_schema(&database_url, &schema).await;
 }

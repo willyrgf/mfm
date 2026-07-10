@@ -94,6 +94,12 @@ async fn collect_then_report_completes_from_collector_written_platform_holdings(
     );
     let btc_run = launch_btc_balance_collector(&services, &store, "collect-btc").await;
     assert_eq!(btc_run.run_mode, mfm_app::RunModeStatus::Completed);
+    assert_admitted_adapter_factory(
+        &store,
+        &btc_run.run_id.parse().expect("BTC run id"),
+        "btc_jsonrpc_adapter",
+    )
+    .await;
     services
         .verify_replay_for_run(&btc_run.run_id.parse().expect("BTC run id"))
         .await
@@ -101,6 +107,12 @@ async fn collect_then_report_completes_from_collector_written_platform_holdings(
 
     let evm_run = launch_evm_balance_collector(&services, &store, "collect-evm").await;
     assert_eq!(evm_run.run_mode, mfm_app::RunModeStatus::Completed);
+    assert_admitted_adapter_factory(
+        &store,
+        &evm_run.run_id.parse().expect("EVM run id"),
+        "evm_jsonrpc_adapter",
+    )
+    .await;
     services
         .verify_replay_for_run(&evm_run.run_id.parse().expect("EVM run id"))
         .await
@@ -179,6 +191,12 @@ async fn collect_then_report_completes_from_collector_written_platform_holdings(
         .verify_replay_for_run(&launch.run_id.parse().expect("report run id"))
         .await
         .expect("replay portfolio report");
+    assert_admitted_adapter_factory(
+        &store,
+        &launch.run_id.parse().expect("report run id"),
+        "portfolio_adapter",
+    )
+    .await;
 }
 
 // --- services / launch -------------------------------------------------------
@@ -335,6 +353,29 @@ fn assert_platform_holding_kind(projection: &ProjectionSnapshot, fact_kind: &str
     assert_eq!(
         count, expected,
         "expected {expected} platform facts of kind {fact_kind}"
+    );
+}
+
+async fn assert_admitted_adapter_factory(
+    store: &AsyncInMemoryRunStore,
+    run_id: &RunId,
+    expected_factory: &str,
+) {
+    let stream = store.load_run_stream(run_id).await.expect("run stream");
+    let admitted = stream
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::RunAdmitted(payload) => Some(payload),
+            _ => None,
+        })
+        .expect("RunAdmitted");
+    assert!(
+        admitted
+            .adapter_executables
+            .iter()
+            .any(|executable| executable.factory_id.as_str() == expected_factory),
+        "admitted adapter executables did not include {expected_factory}: {:?}",
+        admitted.adapter_executables
     );
 }
 
