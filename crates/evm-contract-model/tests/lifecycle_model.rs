@@ -405,6 +405,7 @@ fn lifecycle_artifact_evidence_refs_round_trip_typed_ids() {
     let evidence = LifecycleArtifactEvidenceRef::new(
         ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, digest()),
         ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, digest()),
+        ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, digest()),
         128,
         Some(
             SchemaId::new(
@@ -439,6 +440,10 @@ fn lifecycle_artifact_evidence_refs_reject_invalid_identity_fields() {
     let invalid_artifact_id = serde_json::json!({
         "artifact_id": "not-an-artifact-id",
         "content_digest": ContentDigest::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            digest()
+        ).to_string(),
+        "evidence_hash": ContentDigest::from_digest(
             DigestAlgorithm::Sha256JcsV1,
             digest()
         ).to_string(),

@@ -404,13 +404,6 @@ fn contract_artifact_material() -> ContractArtifactMaterial {
         ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(&bytes));
     let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
     let schema_id = <ContractArtifactConfig as MfmConfig>::schema_id().expect("artifact schema");
-    let reference = LifecycleArtifactEvidenceRef::new(
-        artifact_id.clone(),
-        digest.clone(),
-        bytes.len() as u64,
-        Some(schema_id.clone()),
-        None,
-    );
     let evidence = store::ArtifactEvidenceRef {
         artifact_id,
         digest,
@@ -422,6 +415,16 @@ fn contract_artifact_material() -> ContractArtifactMaterial {
         producer_seed_id: None,
         artifact_role: events::ArtifactRole::TypedConfig,
     };
+    let reference = LifecycleArtifactEvidenceRef::new(
+        evidence.artifact_id.clone(),
+        evidence.digest.clone(),
+        evidence
+            .evidence_hash()
+            .expect("contract artifact evidence hash"),
+        evidence.byte_len,
+        evidence.schema_id.clone(),
+        evidence.semantic_type_id.clone(),
+    );
     ContractArtifactMaterial {
         reference,
         bytes,

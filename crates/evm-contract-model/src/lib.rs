@@ -469,6 +469,15 @@ evidence_identity_scalar!(
 );
 
 evidence_identity_scalar!(
+    ArtifactEvidenceEvidenceHash,
+    ContentDigest,
+    "evidence_hash",
+    "artifact-evidence-evidence-hash",
+    "mfm.evm.contract.id.artifact_evidence_evidence_hash",
+    "Checked exact retained-artifact evidence hash carried by lifecycle evidence."
+);
+
+evidence_identity_scalar!(
     ContractProfileDigestRef,
     ContentDigest,
     "contract_profile_digest",
@@ -972,6 +981,8 @@ impl_json_text_value!(ExpectedValue);
 pub struct LifecycleArtifactEvidenceRef {
     artifact_id: ArtifactEvidenceArtifactId,
     content_digest: ArtifactEvidenceContentDigest,
+    /// Exact retained-artifact evidence identity used by store/read authority.
+    evidence_hash: ArtifactEvidenceEvidenceHash,
     byte_len: u64,
     schema_id: Option<ArtifactEvidenceSchemaId>,
     semantic_type_id: Option<ArtifactEvidenceSemanticTypeId>,
@@ -982,6 +993,7 @@ impl LifecycleArtifactEvidenceRef {
     pub fn new(
         artifact_id: ArtifactId,
         content_digest: ContentDigest,
+        evidence_hash: ContentDigest,
         byte_len: u64,
         schema_id: Option<SchemaId>,
         semantic_type_id: Option<SemanticTypeId>,
@@ -989,6 +1001,7 @@ impl LifecycleArtifactEvidenceRef {
         Self {
             artifact_id: artifact_id.into(),
             content_digest: content_digest.into(),
+            evidence_hash: evidence_hash.into(),
             byte_len,
             schema_id: schema_id.map(Into::into),
             semantic_type_id: semantic_type_id.map(Into::into),
@@ -1013,6 +1026,16 @@ impl LifecycleArtifactEvidenceRef {
     /// Parses and returns the typed content digest.
     pub fn content_digest(&self) -> Result<ContentDigest, String> {
         self.content_digest.typed()
+    }
+
+    /// Returns the exact retained-artifact evidence hash string.
+    pub fn evidence_hash_str(&self) -> &str {
+        self.evidence_hash.as_str()
+    }
+
+    /// Parses and returns the typed exact retained-artifact evidence hash.
+    pub fn evidence_hash(&self) -> Result<ContentDigest, String> {
+        self.evidence_hash.typed()
     }
 
     /// Returns the artifact byte length.

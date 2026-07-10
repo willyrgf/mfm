@@ -1735,31 +1735,19 @@ fn lifecycle_artifact_requirement(
     let digest = evidence
         .content_digest()
         .map_err(EvmContractAdapterError::Model)?;
+    let evidence_hash = evidence
+        .evidence_hash()
+        .map_err(EvmContractAdapterError::Model)?;
     let schema_id = evidence
         .schema_id()
         .map_err(EvmContractAdapterError::Model)?;
     let semantic_type_id = evidence
         .semantic_type_id()
         .map_err(EvmContractAdapterError::Model)?;
-    let media_type = mfm_spec::v1::MediaType::new("application/json")
-        .map_err(|error| EvmContractAdapterError::Model(error.to_string()))?;
-    let store_evidence = store::ArtifactEvidenceRef {
-        artifact_id: artifact_id.clone(),
-        digest: digest.clone(),
-        byte_len: evidence.byte_len(),
-        media_type,
-        schema_id: schema_id.clone(),
-        semantic_type_id: semantic_type_id.clone(),
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::TypedConfig,
-    };
     Ok(events::EventArtifactRequirement {
         source: events::EventArtifactReferenceSource::ArtifactReferenced,
         artifact_id,
-        evidence_hash: store_evidence
-            .evidence_hash()
-            .map_err(|error| EvmContractAdapterError::Model(error.to_string()))?,
+        evidence_hash,
         digest: Some(digest),
         byte_len: Some(evidence.byte_len()),
         media_type: None,
@@ -3990,9 +3978,15 @@ fn verify_external_source_evidence(
 fn lifecycle_evidence_ref(
     evidence: &CapabilityArtifactEvidenceRef,
 ) -> LifecycleArtifactEvidenceRef {
+    let store_evidence = evidence.clone().into_store();
+    // Store evidence already carries typed identity fields; hashing is total for this shape.
+    let evidence_hash = store_evidence
+        .evidence_hash()
+        .expect("capability artifact evidence hash");
     LifecycleArtifactEvidenceRef::new(
         evidence.artifact_id.clone(),
         evidence.digest.clone(),
+        evidence_hash,
         evidence.byte_len,
         evidence.schema_id.clone(),
         evidence.semantic_type_id.clone(),
@@ -6336,6 +6330,9 @@ fn contract_profile_artifact_requirement(
     let digest = reference
         .content_digest()
         .map_err(EvmContractAdapterError::Model)?;
+    let evidence_hash = reference
+        .evidence_hash()
+        .map_err(EvmContractAdapterError::Model)?;
     let media_type = spec::MediaType::new("application/json")
         .map_err(|error| EvmContractAdapterError::Model(error.to_string()))?;
     let store_evidence = store::ArtifactEvidenceRef {
@@ -6349,12 +6346,16 @@ fn contract_profile_artifact_requirement(
         producer_seed_id: None,
         artifact_role: events::ArtifactRole::TypedConfig,
     };
+    let expected_evidence_hash = store_evidence
+        .evidence_hash()
+        .map_err(|error| EvmContractAdapterError::Model(error.to_string()))?;
+    if evidence_hash != expected_evidence_hash {
+        return Err(EvmContractAdapterError::MissingContractArtifact);
+    }
     Ok(store::EventArtifactRequirement {
         source: store::EventArtifactReferenceSource::ArtifactReferenced,
         artifact_id,
-        evidence_hash: store_evidence
-            .evidence_hash()
-            .map_err(|error| EvmContractAdapterError::Model(error.to_string()))?,
+        evidence_hash,
         digest: Some(digest),
         byte_len: Some(reference.byte_len()),
         media_type: Some(media_type),

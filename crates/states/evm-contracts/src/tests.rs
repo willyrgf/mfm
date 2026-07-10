@@ -24,9 +24,14 @@ fn artifact_id_str(byte: u8) -> String {
 
 fn lifecycle_artifact_ref(byte: u8) -> LifecycleArtifactEvidenceRef {
     let digest = ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, digest_with(byte));
+    let evidence_hash = ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        digest_with(byte.wrapping_add(1)),
+    );
     LifecycleArtifactEvidenceRef::new(
         ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
         digest,
+        evidence_hash,
         32,
         None,
         None,
@@ -404,6 +409,11 @@ fn artifact_ref_json(
     serde_json::json!({
         "artifact_id": artifact_id_str(byte),
         "content_digest": content_digest,
+        "evidence_hash": ContentDigest::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            digest_with(byte.wrapping_add(0x80))
+        )
+        .to_string(),
         "byte_len": 128,
         "schema_id": schema_id,
         "semantic_type_id": semantic_type_id,

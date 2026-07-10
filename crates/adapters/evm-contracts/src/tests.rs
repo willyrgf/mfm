@@ -128,13 +128,19 @@ fn node_id(byte: u8) -> NodeId {
 
 fn artifact_evidence_ref(byte: u8, byte_len: u64) -> LifecycleArtifactEvidenceRef {
     let digest = content_digest(byte);
-    LifecycleArtifactEvidenceRef::new(
-        ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
-        digest,
+    let schema_id = <ContractArtifactConfig as MfmConfig>::schema_id().expect("artifact schema");
+    let store_evidence = store::ArtifactEvidenceRef {
+        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
+        digest: digest.clone(),
         byte_len,
-        Some(<ContractArtifactConfig as MfmConfig>::schema_id().expect("artifact schema")),
-        None,
-    )
+        media_type: spec::MediaType::new("application/json").expect("media type"),
+        schema_id: Some(schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::TypedConfig,
+    };
+    lifecycle_ref_from_store_artifact(&store_evidence)
 }
 
 fn source_artifact_ref_json(
@@ -146,6 +152,7 @@ fn source_artifact_ref_json(
     json!({
         "artifact_id": artifact_id_str(byte),
         "content_digest": content_digest,
+        "evidence_hash": content_digest_str(byte.wrapping_add(0x80)),
         "byte_len": 128,
         "schema_id": schema_id,
         "semantic_type_id": semantic_type_id,
@@ -332,7 +339,7 @@ impl store::RetainedArtifactReadProvider for MissingRetainedArtifacts {
 }
 
 struct StaticRetainedArtifacts {
-    artifacts: Vec<(LifecycleArtifactEvidenceRef, Vec<u8>)>,
+    artifacts: Vec<(store::ArtifactEvidenceRef, Vec<u8>)>,
 }
 
 impl store::RetainedArtifactReadProvider for StaticRetainedArtifacts {
@@ -345,34 +352,17 @@ impl store::RetainedArtifactReadProvider for StaticRetainedArtifacts {
                 .artifacts
                 .iter()
                 .find(|(evidence, _)| {
-                    evidence
-                        .artifact_id()
-                        .map(|artifact_id| artifact_id == requirement.artifact_id)
-                        .unwrap_or(false)
+                    evidence.artifact_id == requirement.artifact_id
+                        && evidence
+                            .evidence_hash()
+                            .map(|hash| hash == requirement.evidence_hash)
+                            .unwrap_or(false)
                 })
                 .ok_or_else(|| store::StoreError::MissingArtifact {
                     artifact_id: requirement.artifact_id.clone(),
                 })?;
-            store::VerifiedRunArtifactBytes::new(
-                bytes.clone(),
-                store_artifact_evidence(evidence),
-                requirement,
-            )
+            store::VerifiedRunArtifactBytes::new(bytes.clone(), evidence.clone(), requirement)
         })
-    }
-}
-
-fn store_artifact_evidence(evidence: &LifecycleArtifactEvidenceRef) -> store::ArtifactEvidenceRef {
-    store::ArtifactEvidenceRef {
-        artifact_id: evidence.artifact_id().expect("artifact id"),
-        digest: evidence.content_digest().expect("content digest"),
-        byte_len: evidence.byte_len(),
-        media_type: spec::MediaType::new("application/json").expect("media type"),
-        schema_id: evidence.schema_id().expect("schema id"),
-        semantic_type_id: evidence.semantic_type_id().expect("semantic type id"),
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::StateOutput,
     }
 }
 
@@ -384,27 +374,20 @@ fn canonical_value_bytes<T: Serialize>(value: &T) -> Vec<u8> {
         .to_vec()
 }
 
-fn artifact_ref_for_bytes<T: MfmValue>(bytes: &[u8]) -> LifecycleArtifactEvidenceRef {
-    let digest =
-        ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes));
-    LifecycleArtifactEvidenceRef::new(
-        ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, *digest.digest()),
-        digest,
-        bytes.len() as u64,
-        Some(T::schema_id().expect("schema id")),
-        Some(T::semantic_id().expect("semantic type id")),
-    )
-}
-
-fn artifact_ref_for_raw_bytes(bytes: &[u8]) -> LifecycleArtifactEvidenceRef {
-    let digest =
-        ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes));
-    LifecycleArtifactEvidenceRef::new(
-        ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, *digest.digest()),
-        digest,
-        bytes.len() as u64,
+fn artifact_ref_for_raw_bytes(
+    bytes: &[u8],
+) -> (LifecycleArtifactEvidenceRef, store::ArtifactEvidenceRef) {
+    let store_evidence = store_artifact_evidence_for_bytes(
+        bytes,
+        events::ArtifactRole::StateOutput,
+        spec::MediaType::new("application/json").expect("media type"),
         None,
         None,
+        None,
+    );
+    (
+        lifecycle_ref_from_store_artifact(&store_evidence),
+        store_evidence,
     )
 }
 
@@ -714,6 +697,9 @@ fn lifecycle_ref_from_store_artifact(
     LifecycleArtifactEvidenceRef::new(
         evidence.artifact_id.clone(),
         evidence.digest.clone(),
+        evidence
+            .evidence_hash()
+            .expect("lifecycle artifact evidence hash"),
         evidence.byte_len,
         evidence.schema_id.clone(),
         evidence.semantic_type_id.clone(),
@@ -922,7 +908,8 @@ where
     let bytes = store::committed_run_stream_canonical_json(&committed)
         .expect("committed stream json")
         .to_vec();
-    (artifact_ref_for_raw_bytes(&bytes), bytes, terminal_event_id)
+    let (lifecycle_ref, _) = artifact_ref_for_raw_bytes(&bytes);
+    (lifecycle_ref, bytes, terminal_event_id)
 }
 
 struct SourceRunCommitAppend<'a> {
@@ -1026,14 +1013,25 @@ where
         serde_json::from_value(evidence_json).expect("evidence");
     evidence.source_producer_descriptor_id = authority.source_producer_descriptor_id.clone();
     let value_bytes = canonical_value_bytes(source_value);
-    let value_ref = artifact_ref_for_bytes::<T>(&value_bytes);
     let source_value_store_artifact = source_value_artifact_evidence::<T>(
         &value_bytes,
         authority.source_producer_node.node_id.clone(),
     );
-    let (stream_ref, stream_bytes, terminal_event_id) =
-        source_run_stream_artifact::<T>(&authority, &value_bytes, source_value_store_artifact)
-            .await;
+    let value_ref = lifecycle_ref_from_store_artifact(&source_value_store_artifact);
+    let (stream_ref, stream_bytes, terminal_event_id) = source_run_stream_artifact::<T>(
+        &authority,
+        &value_bytes,
+        source_value_store_artifact.clone(),
+    )
+    .await;
+    let stream_store_artifact = store_artifact_evidence_for_bytes(
+        &stream_bytes,
+        events::ArtifactRole::StateOutput,
+        spec::MediaType::new("application/json").expect("media type"),
+        None,
+        None,
+        None,
+    );
     evidence.source_terminal_cell_or_output_event_ref =
         mfm_evm_contract_model::LifecycleEventIdRef::from(terminal_event_id);
     mutate_evidence(&mut evidence);
@@ -1042,10 +1040,10 @@ where
     let import = ImportDeployedSpec::FromMfmRun {
         source,
         evidence: ImportFromMfmRunEvidence {
-            source_spec_artifact_ref: source_spec_ref.clone(),
-            source_spec_certificate_ref: certificate_ref.clone(),
-            source_run_stream_ref: stream_ref.clone(),
-            source_value_artifact_ref_or_inline_canonical_value: value_ref.clone(),
+            source_spec_artifact_ref: source_spec_ref,
+            source_spec_certificate_ref: certificate_ref,
+            source_run_stream_ref: stream_ref,
+            source_value_artifact_ref_or_inline_canonical_value: value_ref,
             ..evidence
         },
     };
@@ -1053,10 +1051,16 @@ where
         import,
         StaticRetainedArtifacts {
             artifacts: vec![
-                (source_spec_ref, authority.source_spec_bytes),
-                (certificate_ref, authority.certificate_bytes),
-                (stream_ref, stream_bytes),
-                (value_ref, value_bytes),
+                (
+                    authority.source_spec_artifact.clone(),
+                    authority.source_spec_bytes,
+                ),
+                (
+                    authority.certificate_artifact.clone(),
+                    authority.certificate_bytes,
+                ),
+                (stream_store_artifact, stream_bytes),
+                (source_value_store_artifact, value_bytes),
             ],
         },
     )
@@ -1071,7 +1075,7 @@ fn source_run_import_with_retargeted_source_value_payload(
     let raw_bytes = PlainCanonicalJsonBytes::from_json_str(&raw_json)
         .expect("payload canonical json")
         .to_vec();
-    let raw_ref = artifact_ref_for_raw_bytes(&raw_bytes);
+    let (raw_ref, raw_store_evidence) = artifact_ref_for_raw_bytes(&raw_bytes);
     let raw_digest = ContractProfileDigestRef::from(
         raw_ref
             .content_digest()
@@ -1086,10 +1090,10 @@ fn source_run_import_with_retargeted_source_value_payload(
     };
     source.source_value_digest = raw_digest.clone();
     evidence.source_value_digest = raw_digest.clone();
-    evidence.source_value_artifact_ref_or_inline_canonical_value = raw_ref.clone();
+    evidence.source_value_artifact_ref_or_inline_canonical_value = raw_ref;
     evidence.import_policy_digest = digest_for_value(&source).expect("import policy digest");
 
-    artifacts.artifacts[3] = (raw_ref, raw_bytes);
+    artifacts.artifacts[3] = (raw_store_evidence, raw_bytes);
     (
         ImportDeployedSpec::FromMfmRun { source, evidence },
         artifacts,
@@ -2076,8 +2080,9 @@ async fn source_run_import_rejects_domain_local_export_certificate() {
     )
     .expect("old certificate canonical")
     .to_vec();
-    let old_certificate_ref = artifact_ref_for_raw_bytes(&old_certificate_bytes);
-    artifacts.artifacts[1] = (old_certificate_ref.clone(), old_certificate_bytes);
+    let (old_certificate_ref, old_certificate_store) =
+        artifact_ref_for_raw_bytes(&old_certificate_bytes);
+    artifacts.artifacts[1] = (old_certificate_store, old_certificate_bytes);
     evidence.source_spec_certificate_ref = old_certificate_ref;
     let import = ImportDeployedSpec::FromMfmRun { source, evidence };
     let evm: Arc<dyn EvmContractReadProvider> = Arc::new(TestEvmProviders::preparation());

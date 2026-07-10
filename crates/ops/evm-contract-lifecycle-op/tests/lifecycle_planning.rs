@@ -103,6 +103,7 @@ fn artifact_ref_json(
     serde_json::json!({
         "artifact_id": artifact_id_str(byte),
         "content_digest": content_digest_str(digest_byte),
+        "evidence_hash": content_digest_str(byte.wrapping_add(0x80)),
         "byte_len": 128,
         "schema_id": schema_id,
         "semantic_type_id": semantic_type_id,
