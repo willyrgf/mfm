@@ -20,7 +20,7 @@ not load this file.
 Example TOML:
 
 ```toml
-[btc.routes.bitcoin-mainnet]
+[btc.routes.public-bitcoin-core]
 rpc_url_env = "MFM_BITCOIN_RPC_URL"
 rpc_user_env = "MFM_BITCOIN_RPC_USER"
 rpc_password_env = "MFM_BITCOIN_RPC_PASSWORD"

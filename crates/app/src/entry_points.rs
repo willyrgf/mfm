@@ -996,7 +996,7 @@ source_ref = "ethereum-mainnet"
                         "network_id": "bitcoin-mainnet",
                         "family": "bitcoin",
                         "bitcoin_network": "main",
-                        "source_identity": "bitcoin-mainnet",
+                        "source_identity": "public-bitcoin-core",
                         "metadata": {}
                     }
                 ],
