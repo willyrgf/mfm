@@ -2418,6 +2418,10 @@ pub enum CommitOutcome {
 }
 
 /// Cell terminal projection derived from committed run events.
+///
+/// Both variants already carry many identity/digest fields; boxing a single digest would not
+/// meaningfully shrink the type and would complicate exact-evidence authority fields.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CellTerminalProjection {
     /// Produced cell projection.

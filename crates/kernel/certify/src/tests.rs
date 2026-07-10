@@ -2071,6 +2071,10 @@ fn certified_side_effect_contract_validates_resource_evidence() {
             DigestAlgorithm::Sha256JcsV1,
             digest_byte(0xc3),
         ),
+        evidence_artifact_evidence_hash: ContentDigest::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            digest_byte(0xc4),
+        ),
     };
     assert!(contract.validate_touched_set(Some(&touched_set)).is_err());
 }
