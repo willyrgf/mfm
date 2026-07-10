@@ -873,11 +873,9 @@ fn verify_btc_collector_checkpoint_frame(
     }
     let evidence = &evidences[0];
     let response = checkpoint_response_from_query_evidence(broker, evidence)?;
-    let expected = replay_loaded_checkpoint_from_evidence(&config, evidence, response)
-        .map_err(|_| {
-            replay_btc_mismatch(
-                "Bitcoin collector checkpoint replay evidence was rejected",
-            )
+    let expected =
+        replay_loaded_checkpoint_from_evidence(&config, evidence, response).map_err(|_| {
+            replay_btc_mismatch("Bitcoin collector checkpoint replay evidence was rejected")
         })?;
     ensure_canonical_value_matches(&expected, &frame.artifact_bytes)
 }
@@ -903,12 +901,15 @@ fn checkpoint_response_from_query_evidence(
     let fact_ref = row.fact_ref();
     let requirement = fact_response_artifact_requirement(fact_ref);
     let artifact = broker.retained_artifact(&requirement)?;
-    let response: CollectorCheckpointResponse =
-        hydrate_fact_response_json(fact_ref, &artifact.artifact_bytes).map_err(|_| {
-            replay_btc_mismatch(
-                "Bitcoin collector checkpoint response could not be hydrated from retained evidence",
-            )
-        })?;
+    let response: CollectorCheckpointResponse = hydrate_fact_response_json(
+        fact_ref,
+        &artifact.artifact_bytes,
+    )
+    .map_err(|_| {
+        replay_btc_mismatch(
+            "Bitcoin collector checkpoint response could not be hydrated from retained evidence",
+        )
+    })?;
     Ok(Some(response))
 }
 

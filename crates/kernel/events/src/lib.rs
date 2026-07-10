@@ -4774,10 +4774,7 @@ pub mod v1 {
             EventFieldDescriptor::required("authorization_schema_id", "SchemaId"),
             EventFieldDescriptor::required("authorization_hash", "ContentDigest"),
             EventFieldDescriptor::required("authorization_artifact_id", "ArtifactId"),
-            EventFieldDescriptor::required(
-                "authorization_artifact_evidence_hash",
-                "ContentDigest",
-            ),
+            EventFieldDescriptor::required("authorization_artifact_evidence_hash", "ContentDigest",),
             EventFieldDescriptor::optional("note", "ManualResolutionNote"),
         ],
     };

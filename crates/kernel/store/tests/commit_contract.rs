@@ -833,7 +833,8 @@ fn public_output_produced_with_rendered_artifact(
     let KernelEventPayload::PublicOutputProduced(public_output) = &mut payload else {
         unreachable!("helper returns public-output payload");
     };
-    let rendered = public_output_artifact_ref(rendered_artifact_id.clone(), rendered_digest.clone());
+    let rendered =
+        public_output_artifact_ref(rendered_artifact_id.clone(), rendered_digest.clone());
     public_output.rendered_digest = rendered_digest;
     public_output.rendered_artifact_id = Some(rendered_artifact_id);
     public_output.rendered_artifact_evidence_hash =
@@ -1158,9 +1159,7 @@ fn resource_touched_set(byte: u8) -> events::ResourceTouchedSetEvidence {
         evidence_schema_id: schema_id("mfm.test.touched_set", byte),
         evidence_hash: content_digest(byte),
         evidence_artifact_id: artifact_id(byte),
-        evidence_artifact_evidence_hash: store
-            .evidence_hash()
-            .expect("touched set evidence hash"),
+        evidence_artifact_evidence_hash: store.evidence_hash().expect("touched set evidence hash"),
     }
 }
 
@@ -1590,9 +1589,7 @@ fn side_effect_ambiguous(artifact_id: ArtifactId, digest: ContentDigest) -> Kern
         evidence_schema_id: schema_id("mfm.test.ambiguity", 76),
         evidence_hash: digest,
         evidence_artifact_id: artifact_id,
-        evidence_artifact_evidence_hash: evidence
-            .evidence_hash()
-            .expect("ambiguity evidence hash"),
+        evidence_artifact_evidence_hash: evidence.evidence_hash().expect("ambiguity evidence hash"),
     })
 }
 
@@ -1801,9 +1798,7 @@ fn manual_resolution_recorded_for_run(run_id: RunId, byte: u8) -> KernelEventPay
         evidence_schema_id: schema_id("mfm.test.manual_evidence", byte + 1),
         evidence_hash: content_digest(byte + 1),
         evidence_artifact_id: artifact_id(byte + 1),
-        evidence_artifact_evidence_hash: evidence
-            .evidence_hash()
-            .expect("manual evidence hash"),
+        evidence_artifact_evidence_hash: evidence.evidence_hash().expect("manual evidence hash"),
         authorization_schema_id: schema_id("mfm.test.manual_authorization", byte + 2),
         authorization_hash: content_digest(byte + 2),
         authorization_artifact_id: artifact_id(byte + 2),
@@ -2713,9 +2708,7 @@ fn retention_manifest_projected(
         manifest_digest: digest,
         previous_manifest_digest: previous,
         manifest_artifact_id: artifact_id,
-        manifest_artifact_evidence_hash: evidence
-            .evidence_hash()
-            .expect("manifest evidence hash"),
+        manifest_artifact_evidence_hash: evidence.evidence_hash().expect("manifest evidence hash"),
     })
 }
 
@@ -3514,7 +3507,9 @@ fn run_artifact_ref(artifact: &ArtifactEvidenceRef) -> events::RunArtifactEviden
         schema_id: artifact.schema_id.clone(),
         semantic_type_id: artifact.semantic_type_id.clone(),
         content_digest: artifact.digest.clone(),
-        evidence_hash: artifact.evidence_hash().expect("run artifact evidence hash"),
+        evidence_hash: artifact
+            .evidence_hash()
+            .expect("run artifact evidence hash"),
         byte_len: artifact.byte_len,
         media_type: artifact.media_type.clone(),
     }

@@ -7540,11 +7540,7 @@ fn validate_required_artifacts_cover_payload_references(
         for requirement in event_artifact_requirements(payload) {
             let Some(evidence) = request.required_artifacts.iter().find(|evidence| {
                 evidence.artifact_id == requirement.artifact_id
-                    && evidence
-                        .evidence_hash()
-                        .ok()
-                        .as_ref()
-                        == Some(&requirement.evidence_hash)
+                    && evidence.evidence_hash().ok().as_ref() == Some(&requirement.evidence_hash)
             }) else {
                 return Err(invalid_prepared_commit_purpose(
                     purpose,

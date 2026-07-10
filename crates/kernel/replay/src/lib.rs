@@ -3558,9 +3558,9 @@ pub mod v1 {
         let requirement = store::EventArtifactRequirement {
             source: store::EventArtifactReferenceSource::ArtifactReferenced,
             artifact_id: evidence.artifact_id.clone(),
-            evidence_hash: evidence
-                .evidence_hash()
-                .map_err(|error| artifact_requirement_replay_error(error, "artifact evidence hash"))?,
+            evidence_hash: evidence.evidence_hash().map_err(|error| {
+                artifact_requirement_replay_error(error, "artifact evidence hash")
+            })?,
             digest: Some(digest.clone()),
             byte_len: None,
             media_type: None,
