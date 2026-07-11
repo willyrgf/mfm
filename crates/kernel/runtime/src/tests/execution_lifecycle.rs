@@ -620,7 +620,7 @@ async fn run_launch_commits_single_admission_root_and_admits_launch_artifacts() 
 
 #[tokio::test]
 async fn scheduler_binds_staged_retention_refs_and_projects_manifest() {
-    let fixture = fixture_with_retention_lifecycle_node();
+    let fixture = fixture();
     let (scheduler, mut store) = started_fixture_run(&fixture).await;
 
     let projection_snapshot = store.projection_snapshot();
@@ -729,7 +729,7 @@ async fn scheduler_binds_staged_retention_refs_and_projects_manifest() {
 
 #[tokio::test]
 async fn retention_manifest_projection_retry_is_idempotent_after_current_store_advanced() {
-    let fixture = fixture_with_retention_lifecycle_node();
+    let fixture = fixture();
     let (scheduler, mut store) = started_fixture_run(&fixture).await;
 
     drive_until_public_output_produced(&scheduler, &mut store, &fixture).await;
@@ -766,7 +766,7 @@ async fn retention_manifest_projection_retry_is_idempotent_after_current_store_a
 
 #[tokio::test]
 async fn runtime_rejects_standalone_retention_manifest_projection_history() {
-    let fixture = fixture_with_retention_lifecycle_node();
+    let fixture = fixture();
     let (scheduler, mut store) = started_fixture_run(&fixture).await;
     drive_until_public_output_produced(&scheduler, &mut store, &fixture).await;
 

@@ -6440,10 +6440,6 @@ fn fixture_with_node_fact_descriptor(
     (fixture, descriptor, descriptor_ref)
 }
 
-fn fixture_with_retention_lifecycle_node() -> Fixture {
-    fixture()
-}
-
 #[derive(Clone, Copy)]
 enum RuntimeSideEffectClaim {
     ManualOnly,
