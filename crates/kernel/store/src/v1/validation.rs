@@ -160,48 +160,53 @@ fn validate_artifact_requirement_exact_fields(
     Ok(())
 }
 
+fn validate_artifact_option_policy(
+    requirement: &EventArtifactRequirement,
+    field: &'static str,
+    expected: Option<&str>,
+    actual: Option<&str>,
+    requires_value: bool,
+    mode: ArtifactRequirementValidationMode,
+) -> Result<()> {
+    if requires_value {
+        if let Some(expected) = expected {
+            compare_artifact_option(&requirement.artifact_id, field, actual, Some(expected))
+        } else if mode == ArtifactRequirementValidationMode::RetentionMetadata {
+            require_artifact_option_present(&requirement.artifact_id, field, actual)
+        } else {
+            Err(artifact_evidence_mismatch(&requirement.artifact_id, field))
+        }
+    } else {
+        if expected.is_some() {
+            return Err(artifact_evidence_mismatch(&requirement.artifact_id, field));
+        }
+        require_artifact_option_absent(&requirement.artifact_id, field, actual)
+    }
+}
+
 fn validate_artifact_schema_policy(
     requirement: &EventArtifactRequirement,
     evidence: &ArtifactEvidenceRef,
     policy: events::ArtifactSchemaPolicy,
     mode: ArtifactRequirementValidationMode,
 ) -> Result<()> {
-    let actual = evidence.schema_id.as_ref().map(SchemaId::as_str);
-    match policy {
-        events::ArtifactSchemaPolicy::ExactSeedSchema
-        | events::ArtifactSchemaPolicy::ExactValueSchema
-        | events::ArtifactSchemaPolicy::ExactEvidenceSchema
-        | events::ArtifactSchemaPolicy::ExactFactDescriptorSchema
-        | events::ArtifactSchemaPolicy::ExactFactQueryEvidenceSchema
-        | events::ArtifactSchemaPolicy::ExactPublicSchema
-        | events::ArtifactSchemaPolicy::ExactDiagnosticSchema => {
-            if let Some(schema_id) = &requirement.schema_id {
-                compare_artifact_option(
-                    &requirement.artifact_id,
-                    "schema_id",
-                    actual,
-                    Some(schema_id.as_str()),
-                )?;
-            } else if mode == ArtifactRequirementValidationMode::RetentionMetadata {
-                require_artifact_option_present(&requirement.artifact_id, "schema_id", actual)?;
-            } else {
-                return Err(artifact_evidence_mismatch(
-                    &requirement.artifact_id,
-                    "schema_id",
-                ));
-            }
-        }
-        events::ArtifactSchemaPolicy::Absent => {
-            if requirement.schema_id.is_some() {
-                return Err(artifact_evidence_mismatch(
-                    &requirement.artifact_id,
-                    "schema_id",
-                ));
-            }
-            require_artifact_option_absent(&requirement.artifact_id, "schema_id", actual)?;
-        }
-    }
-    Ok(())
+    validate_artifact_option_policy(
+        requirement,
+        "schema_id",
+        requirement.schema_id.as_ref().map(SchemaId::as_str),
+        evidence.schema_id.as_ref().map(SchemaId::as_str),
+        match policy {
+            events::ArtifactSchemaPolicy::ExactSeedSchema
+            | events::ArtifactSchemaPolicy::ExactValueSchema
+            | events::ArtifactSchemaPolicy::ExactEvidenceSchema
+            | events::ArtifactSchemaPolicy::ExactFactDescriptorSchema
+            | events::ArtifactSchemaPolicy::ExactFactQueryEvidenceSchema
+            | events::ArtifactSchemaPolicy::ExactPublicSchema
+            | events::ArtifactSchemaPolicy::ExactDiagnosticSchema => true,
+            events::ArtifactSchemaPolicy::Absent => false,
+        },
+        mode,
+    )
 }
 
 fn validate_artifact_semantic_policy(
@@ -210,44 +215,24 @@ fn validate_artifact_semantic_policy(
     policy: events::ArtifactSemanticPolicy,
     mode: ArtifactRequirementValidationMode,
 ) -> Result<()> {
-    let actual = evidence
-        .semantic_type_id
-        .as_ref()
-        .map(SemanticTypeId::as_str);
-    match policy {
-        events::ArtifactSemanticPolicy::ExactSeedSemantic
-        | events::ArtifactSemanticPolicy::ExactValueSemantic => {
-            if let Some(semantic_type_id) = &requirement.semantic_type_id {
-                compare_artifact_option(
-                    &requirement.artifact_id,
-                    "semantic_type_id",
-                    actual,
-                    Some(semantic_type_id.as_str()),
-                )?;
-            } else if mode == ArtifactRequirementValidationMode::RetentionMetadata {
-                require_artifact_option_present(
-                    &requirement.artifact_id,
-                    "semantic_type_id",
-                    actual,
-                )?;
-            } else {
-                return Err(artifact_evidence_mismatch(
-                    &requirement.artifact_id,
-                    "semantic_type_id",
-                ));
-            }
-        }
-        events::ArtifactSemanticPolicy::Absent => {
-            if requirement.semantic_type_id.is_some() {
-                return Err(artifact_evidence_mismatch(
-                    &requirement.artifact_id,
-                    "semantic_type_id",
-                ));
-            }
-            require_artifact_option_absent(&requirement.artifact_id, "semantic_type_id", actual)?;
-        }
-    }
-    Ok(())
+    validate_artifact_option_policy(
+        requirement,
+        "semantic_type_id",
+        requirement
+            .semantic_type_id
+            .as_ref()
+            .map(SemanticTypeId::as_str),
+        evidence
+            .semantic_type_id
+            .as_ref()
+            .map(SemanticTypeId::as_str),
+        match policy {
+            events::ArtifactSemanticPolicy::ExactSeedSemantic
+            | events::ArtifactSemanticPolicy::ExactValueSemantic => true,
+            events::ArtifactSemanticPolicy::Absent => false,
+        },
+        mode,
+    )
 }
 
 fn require_producer_node_absent(
