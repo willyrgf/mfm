@@ -25,8 +25,6 @@ Environment variables:
 - `MFM_REST_ROLE`: process role (`live` or `read`; default `live`)
 - `MFM_SOURCE_REVISION`: optional source revision evidence for typed run starts
 - `MFM_RUNTIME_CONFIG_FILE`: optional runtime config file path for live capability-backed runs
-- `MFM_FACT_RECEIPT_SIGNING_KEY_FILE`: optional Ed25519 signing-key file for authenticated fact
-  queries (**live role only**)
 
 The REST API validates the PostgreSQL schema on startup and does not create or
 alter tables. Apply the `mfm-stream-store-postgres` migrations before starting
@@ -44,35 +42,19 @@ outside the typed run store are not read or migrated by the REST API.
 
 ### Process roles
 
-| Role | Store connector | Loads signing key? | Serves |
-| --- | --- | --- | --- |
-| `live` (default) | live store connect | only when `MFM_FACT_RECEIPT_SIGNING_KEY_FILE` is set | start/resume, status/stream/replay, signed public fact queries when authority is ready |
-| `read` | evidence-only read store connect | **never** | status, stream, list, replay, public-output only |
+| Role | Store connector | Serves |
+| --- | --- | --- |
+| `live` (default) | live store connect | start/resume, status/stream/replay, public fact queries |
+| `read` | evidence-only read store connect | status, stream, list, replay, public-output, public fact queries |
 
-`MFM_REST_ROLE=read` never consults `MFM_FACT_RECEIPT_SIGNING_KEY_FILE`. A malformed signing key
-therefore cannot block evidence-only REST processes. Live start/resume and authenticated public fact
-queries (`GET /v1/facts/:kind`, `GET /v1/facts/:kind/latest`) require `MFM_REST_ROLE=live`.
+Only live start/resume requires `MFM_REST_ROLE=live`. Public fact queries are deterministic evidence
+reads and are available from either role.
 
-Public fact queries are **signed-query** surfaces, not pure evidence reads: they require a matching
-store trust root and fact-receipt signer under the live role.
+Public fact queries return descriptor-filtered Platform facts with deterministic evidence metadata;
+they do not depend on process-local signing material.
 
 REST startup does not load or validate `MFM_RUNTIME_CONFIG_FILE`; malformed or missing runtime
 config is reported only when a live start/resume request needs the affected capability family.
-When the live role sets `MFM_FACT_RECEIPT_SIGNING_KEY_FILE`, connect validates that the key matches
-the store-owned `fact_receipt_trust_root`. The signer file may contain raw 32-byte Ed25519 key
-material or 64 hex characters.
-
-Provision a fresh migrated store before starting fact-reading runs by using the CLI once:
-
-```bash
-export MFM_FACT_RECEIPT_SIGNING_KEY_FILE=/run/mfm/fact-receipt-signing-key
-mfm_cli facts provision-authority --database-url "$DATABASE_URL"
-```
-
-Provisioning inserts only the public verifying key into the immutable `fact_receipt_trust_root`
-table. A live run that requires fact-index reads is rejected before `RunAdmitted` unless the
-matching signer is configured. There is no in-place key rotation: replace/reset the store and
-provision a new authority; old receipts remain bound to the old trust root.
 
 ## API
 

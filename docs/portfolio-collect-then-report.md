@@ -31,7 +31,7 @@ Forbidden:
 |---|---|---|
 | Fact anchor (height + block hash on holding responses) | Source-near claim content | **Yes** |
 | Certified selection policy | Hash-defining rule choosing acceptable facts | **Yes** |
-| Store read frontier on fact-query receipt | Authenticates which store watermark the query bound | Query evidence only |
+| Store read frontier on fact-query receipt | Records which store watermark the query read | Query evidence only |
 | Public `network_pins` | Projection of selected required holding anchors | **No** — descriptive output only |
 | Progressive chain-head / Control cursor facts | Collector ops | **Not** report pin authority |
 
@@ -59,8 +59,7 @@ replay:     recorded fact-query evidence only
 ```text
 compile canonical fact query plan (certified report config + subject projection + policy)
   → FactIndexRead (Platform audience) over the requirement set
-  → authenticated receipt + selection evidence
-     (trust root is process/store authority, not a response field)
+  → deterministic unsigned receipt + selection evidence
   → hydrate retained FactResponse artifact(s)
   → SelectHoldings (network-coherent policy over full acceptable candidate sets)
   → normalize into Observation (including fact anchor)
@@ -127,14 +126,10 @@ Operators run collectors, then report, as separate certified runs. The tracked c
 
 The following Bash sequence is the copy/pasteable operator path. It assumes `DATABASE_URL` points
 at a migrated Postgres store, the RPC environment variables referenced by the runtime config are
-set, `MFM_FACT_RECEIPT_SIGNING_KEY_FILE` points at the operator-only signing key, and `jq` is
-installed. The signing key is never placed in a tracked config.
+set, and `jq` is installed.
 
 ```bash
 export MFM_RUNTIME_CONFIG_FILE="$PWD/examples/configs/runtime-dual-mainnet.toml"
-export MFM_FACT_RECEIPT_SIGNING_KEY_FILE=/run/mfm/fact-receipt-signing-key
-
-mfm_cli --output-format json facts provision-authority --database-url "$DATABASE_URL"
 
 btc_response="$(mfm_cli --output-format json run start \
     --op btc_address_balance \
