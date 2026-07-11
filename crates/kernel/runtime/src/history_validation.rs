@@ -1,0 +1,2314 @@
+use super::*;
+
+pub(super) fn validate_historical_run_stream(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    stream: &[store::KernelEventEnvelope],
+    projections: &store::ProjectionSnapshot,
+    history: &RuntimeCommittedHistory,
+    artifact_bytes: &store::ArtifactByteAuthorityMap,
+) -> Result<()> {
+    let mut available_cells = BTreeSet::<CellId>::new();
+    let mut active_attempts = BTreeSet::<(NodeId, AttemptId)>::new();
+    let mut side_effect_ledgers = BTreeMap::<SideEffectPairId, HistoricalSideEffectLedger>::new();
+    let mut seen_run_admitted = false;
+    let mut produced_public_output = None::<events::PublicOutputCompletionEvidence>;
+    let mut retention_manifest_projected_seq = None::<store::StreamSeq>;
+    let mut completed = false;
+    for (event_index, event) in stream.iter().enumerate() {
+        if completed {
+            return Err(RuntimeError::InvalidRunStream(
+                "run stream contains events after RunCompleted".to_owned(),
+            ));
+        }
+        if !seen_run_admitted
+            && !matches!(event.payload(), events::KernelEventPayload::RunAdmitted(_))
+        {
+            return Err(RuntimeError::InvalidRunStream(
+                "run stream events appeared before RunAdmitted".to_owned(),
+            ));
+        }
+        match event.payload() {
+            events::KernelEventPayload::RunAdmitted(payload) => {
+                if seen_run_admitted {
+                    return Err(RuntimeError::InvalidRunStream(
+                        "run stream contains multiple RunAdmitted events".to_owned(),
+                    ));
+                }
+                seen_run_admitted = true;
+                for cell_id in validate_seed_cells(runtime_spec, &payload.seed_cells)?.into_keys() {
+                    available_cells.insert(cell_id);
+                }
+            }
+            events::KernelEventPayload::RunCompleted(payload) => {
+                if !active_attempts.is_empty() {
+                    return Err(RuntimeError::InvalidRunStream(
+                        "RunCompleted cannot finalize while state attempts are active".to_owned(),
+                    ));
+                }
+                validate_historical_run_completed(
+                    runtime_spec,
+                    run_id,
+                    event,
+                    payload,
+                    produced_public_output.as_ref(),
+                    retention_manifest_projected_seq,
+                )?;
+                completed = true;
+            }
+            events::KernelEventPayload::ManualResolutionRecorded(payload) => {
+                validate_historical_manual_resolution(
+                    runtime_spec,
+                    event_index,
+                    event,
+                    payload,
+                    stream,
+                    artifact_bytes,
+                )?;
+            }
+            events::KernelEventPayload::RetentionRefsAppended(_) => {}
+            events::KernelEventPayload::RetentionManifestProjected(payload) => {
+                if &payload.run_id == run_id && payload.spec_hash == *runtime_spec.spec_hash() {
+                    retention_manifest_projected_seq = Some(event.seq());
+                }
+            }
+            events::KernelEventPayload::StateAttemptStarted(payload) => {
+                let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "attempt started for uncertified node {}",
+                        payload.node_id
+                    ))
+                })?;
+                if payload.state_kind != node.state_kind
+                    || payload.state_version != node.state_version
+                {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "attempt {} for node {} carries state identity outside the certified spec",
+                        payload.attempt_id, payload.node_id
+                    )));
+                }
+                validate_attempt_start_boundary(runtime_spec, node, payload, &available_cells)?;
+                if !active_attempts.insert((payload.node_id.clone(), payload.attempt_id.clone())) {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "attempt {} for node {} was started more than once",
+                        payload.attempt_id, payload.node_id
+                    )));
+                }
+            }
+            events::KernelEventPayload::StateAttemptCompleted(payload) => {
+                let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "attempt completed for uncertified node {}",
+                        payload.node_id
+                    ))
+                })?;
+                if payload.output_cell_id != node.output_cell {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "attempt {} for node {} completed uncertified output cell {}",
+                        payload.attempt_id, payload.node_id, payload.output_cell_id
+                    )));
+                }
+                if node_uses_side_effect_terminal_validation(node) {
+                    validate_historical_side_effect_terminal(
+                        runtime_spec,
+                        &side_effect_ledgers,
+                        node,
+                        &payload.attempt_id,
+                        stream_output_cell_is_skipped(stream, node, &payload.attempt_id),
+                    )?;
+                }
+                if !active_attempts.remove(&(payload.node_id.clone(), payload.attempt_id.clone())) {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "attempt completion for node {} attempt {} was not preceded by an active attempt",
+                        payload.node_id, payload.attempt_id
+                    )));
+                }
+            }
+            events::KernelEventPayload::StateAttemptInterrupted(payload) => {
+                runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "attempt interrupted for uncertified node {}",
+                        payload.node_id
+                    ))
+                })?;
+                if !active_attempts.remove(&(payload.node_id.clone(), payload.attempt_id.clone())) {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "attempt interruption for node {} attempt {} was not preceded by an active attempt",
+                        payload.node_id, payload.attempt_id
+                    )));
+                }
+            }
+            events::KernelEventPayload::StateAttemptFailed(payload) => {
+                let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "attempt failed for uncertified node {}",
+                        payload.node_id
+                    ))
+                })?;
+                if node_uses_side_effect_terminal_validation(node) {
+                    validate_historical_side_effect_failure(
+                        runtime_spec,
+                        &side_effect_ledgers,
+                        node,
+                        &payload.attempt_id,
+                    )?;
+                }
+                if !active_attempts.remove(&(payload.node_id.clone(), payload.attempt_id.clone())) {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "attempt failure for node {} attempt {} was not preceded by an active attempt",
+                        payload.node_id, payload.attempt_id
+                    )));
+                }
+            }
+            events::KernelEventPayload::CellProduced(payload) => {
+                validate_historical_produced_cell(runtime_spec, projections, event, payload)?;
+                let node = runtime_spec
+                    .node(&payload.node_id)
+                    .expect("validated cell node");
+                if node_uses_side_effect_terminal_validation(node) {
+                    validate_historical_side_effect_terminal(
+                        runtime_spec,
+                        &side_effect_ledgers,
+                        node,
+                        &payload.attempt_id,
+                        false,
+                    )?;
+                }
+                available_cells.insert(payload.cell_id.clone());
+            }
+            events::KernelEventPayload::CellSkipped(payload) => {
+                validate_historical_skipped_cell(runtime_spec, projections, event, payload)?;
+                let node = runtime_spec
+                    .node(&payload.node_id)
+                    .expect("validated cell node");
+                if node_uses_side_effect_terminal_validation(node) {
+                    validate_historical_side_effect_terminal(
+                        runtime_spec,
+                        &side_effect_ledgers,
+                        node,
+                        &payload.attempt_id,
+                        true,
+                    )?;
+                }
+                available_cells.insert(payload.cell_id.clone());
+            }
+            events::KernelEventPayload::FactRecorded(payload) => {
+                let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "fact recorded for uncertified node {}",
+                        payload.node_id
+                    ))
+                })?;
+                if !node.fact_descriptor_allowlist.iter().any(|reference| {
+                    &reference.descriptor_hash == payload.claim.fact_descriptor_hash()
+                }) {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "fact descriptor {} is not certified for producing node {}",
+                        payload.claim.fact_descriptor_hash(),
+                        payload.node_id
+                    )));
+                }
+                let caps = CertifiedRuntimeCapabilities::for_node(node);
+                let producer = payload.claim.producer();
+                require_capability(
+                    &caps,
+                    producer.capability_kind(),
+                    producer.capability_version(),
+                    &node.node_id,
+                )
+                .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+                require_adapter(node, producer.adapter_kind(), producer.adapter_version())
+                    .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+                require_projected_attempt(
+                    projections,
+                    &payload.node_id,
+                    &payload.attempt_id,
+                    "fact",
+                )?;
+                if !active_attempts.contains(&(payload.node_id.clone(), payload.attempt_id.clone()))
+                {
+                    let fact_key = payload.claim.subject().fact_key();
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "fact {} for node {} attempt {} was recorded outside an active started attempt",
+                        fact_key, payload.node_id, payload.attempt_id
+                    )));
+                }
+                let claim_id = mfm_facts::derive_fact_claim_id(
+                    event.run_id().clone(),
+                    event.seq().as_u64(),
+                    event.ordinal().as_u32(),
+                )
+                .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+                let fact_key = payload.claim.subject().fact_key();
+                let record = projections.fact_record(&claim_id).ok_or_else(|| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "fact {} for node {} attempt {} is not projected",
+                        fact_key, payload.node_id, payload.attempt_id
+                    ))
+                })?;
+                if record.source_event_id != *event.event_id()
+                    || record.node_id != payload.node_id
+                    || record.attempt_id != payload.attempt_id
+                    || record.claim != payload.claim
+                {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "fact {} projection does not match authoritative event",
+                        fact_key
+                    )));
+                }
+                match payload.claim.visibility() {
+                    mfm_facts::FactVisibility::Indexed { .. } => {
+                        let index = projections.fact_index_entry(&claim_id).ok_or_else(|| {
+                            RuntimeError::InvalidRunStream(format!(
+                                "indexed fact {} for node {} attempt {} is not projected",
+                                fact_key, payload.node_id, payload.attempt_id
+                            ))
+                        })?;
+                        if index.source_event_id != *event.event_id()
+                            || index.fact_key != *fact_key
+                            || index.fact_descriptor_hash != *payload.claim.fact_descriptor_hash()
+                            || index.response_hash != *payload.claim.response().response_hash()
+                            || index.artifact_id != *payload.claim.response().artifact_id()
+                        {
+                            return Err(RuntimeError::InvalidRunStream(format!(
+                                "indexed fact {} projection does not match authoritative event",
+                                fact_key
+                            )));
+                        }
+                    }
+                    mfm_facts::FactVisibility::RunPrivate => {
+                        if projections.fact_index_entry(&claim_id).is_some() {
+                            return Err(RuntimeError::InvalidRunStream(format!(
+                                "private fact {} has an index projection",
+                                fact_key
+                            )));
+                        }
+                    }
+                }
+            }
+            events::KernelEventPayload::ArtifactReferenced(payload) => {
+                if let Some(node_id) = &payload.node_id {
+                    runtime_spec.node(node_id).ok_or_else(|| {
+                        RuntimeError::InvalidRunStream(format!(
+                            "artifact referenced for uncertified node {node_id}"
+                        ))
+                    })?;
+                }
+            }
+            events::KernelEventPayload::PublicOutputProduced(payload) => {
+                let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "public output produced by uncertified node {}",
+                        payload.node_id
+                    ))
+                })?;
+                validate_public_output(runtime_spec, node, payload)
+                    .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+                validate_historical_public_output_produced(
+                    runtime_spec,
+                    projections,
+                    event,
+                    node,
+                    payload,
+                )?;
+                produced_public_output = Some(events::PublicOutputCompletionEvidence {
+                    public_output_schema_id: payload.public_schema_id.clone(),
+                    public_output_event_id: event.event_id().clone(),
+                });
+            }
+            events::KernelEventPayload::PublicOutputRenderFailed(payload) => {
+                let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "public output failure by uncertified node {}",
+                        payload.node_id
+                    ))
+                })?;
+                validate_public_output_render_node(
+                    runtime_spec,
+                    node,
+                    payload.public_schema_id.clone(),
+                    &payload.renderer_descriptor_id,
+                )
+                .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+                validate_historical_public_output_failed(projections, event.run_id(), payload)?;
+            }
+            events::KernelEventPayload::ResourceLaneClaimIntent(_)
+            | events::KernelEventPayload::ResourceLaneReleaseIntent(_) => {
+                return Err(RuntimeError::InvalidRunStream(
+                    "run stream contains unmaterialized resource-lane intent".to_owned(),
+                ));
+            }
+            events::KernelEventPayload::SideEffectIntentPersisted(_)
+            | events::KernelEventPayload::SideEffectClaimed(_)
+            | events::KernelEventPayload::SideEffectClaimTakenOver(_)
+            | events::KernelEventPayload::ResourceLaneClaimed(_)
+            | events::KernelEventPayload::SideEffectInvocationPrepared(_)
+            | events::KernelEventPayload::SideEffectInvocationStarted(_)
+            | events::KernelEventPayload::SideEffectNotSubmittedProven(_)
+            | events::KernelEventPayload::SideEffectSubmissionObserved(_)
+            | events::KernelEventPayload::SideEffectSubmissionUnknown(_)
+            | events::KernelEventPayload::SideEffectReceiptObserved(_)
+            | events::KernelEventPayload::SideEffectConfirmationObserved(_)
+            | events::KernelEventPayload::SideEffectAmbiguous(_)
+            | events::KernelEventPayload::SideEffectFailed(_)
+            | events::KernelEventPayload::ResourceLaneReleased(_) => {
+                validate_historical_side_effect_payload(
+                    runtime_spec,
+                    event.run_id(),
+                    &active_attempts,
+                    &mut side_effect_ledgers,
+                    projections,
+                    event.payload(),
+                )?;
+            }
+        }
+    }
+    validate_atomic_terminal_pairs(runtime_spec, stream)?;
+    validate_historical_run_admission_batch(runtime_spec, run_id, stream, history)?;
+    validate_historical_retention_ref_batches(runtime_spec, stream, history)?;
+    validate_historical_retention_manifest_batches(runtime_spec, stream, history, artifact_bytes)?;
+    validate_historical_terminal_tail(runtime_spec, run_id, stream, history, artifact_bytes)?;
+    validate_atomic_side_effect_failure_pairs(runtime_spec, stream)?;
+    AttemptRecoveryLifecycle::validate_frontier(runtime_spec, run_id, projections)?;
+    Ok(())
+}
+
+fn validate_historical_manual_resolution(
+    runtime_spec: &CertifiedRuntimeSpec,
+    event_index: usize,
+    event: &store::KernelEventEnvelope,
+    payload: &events::ManualResolutionRecorded,
+    stream: &[store::KernelEventEnvelope],
+    artifact_bytes: &store::ArtifactByteAuthorityMap,
+) -> Result<()> {
+    if event.run_id() != &payload.run_id || payload.spec_hash != *runtime_spec.spec_hash() {
+        return Err(RuntimeError::InvalidRunStream(
+            "manual resolution event identity does not match certified run".to_owned(),
+        ));
+    }
+    let manual = certified_manual_resolution_spec(&runtime_spec.spec().saga)?;
+    if payload.evidence_schema_id != manual.evidence_schema {
+        return Err(RuntimeError::InvalidRunStream(
+            "manual resolution evidence schema does not match certified policy".to_owned(),
+        ));
+    }
+    let authorization_schema_id = manual_authorization_proof_schema_id()
+        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+    if payload.authorization_schema_id != authorization_schema_id {
+        return Err(RuntimeError::InvalidRunStream(
+            "manual resolution authorization schema does not match certified policy".to_owned(),
+        ));
+    }
+
+    let prefix_projection = store::ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
+        stream.get(..event_index).ok_or_else(|| {
+            RuntimeError::InvalidRunStream(
+                "manual resolution prefix index was outside the run stream".to_owned(),
+            )
+        })?,
+        artifact_bytes,
+    )?;
+    let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
+    prefix_projection
+        .require_manual_resolution_admissible(
+            &payload.run_id,
+            &runtime_spec.spec().saga,
+            &terminal_policies,
+        )
+        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+    let saga = prefix_projection.derive_saga_projection(
+        &payload.run_id,
+        &runtime_spec.spec().saga,
+        &terminal_policies,
+    )?;
+    if saga.manual_block_reason.is_none() {
+        return Err(RuntimeError::InvalidRunStream(
+            "manual resolution prefix lacks block reason".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_attempt_start_boundary(
+    runtime_spec: &CertifiedRuntimeSpec,
+    node: &spec::NodeSpec,
+    payload: &events::StateAttemptStarted,
+    available_cells: &BTreeSet<CellId>,
+) -> Result<()> {
+    for cell_id in runtime_spec.validate_input_binding(&node.input_bindings.root)? {
+        if !available_cells.contains(&cell_id) {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "attempt {} for node {} started before certified input cell {} was terminal",
+                payload.attempt_id, node.node_id, cell_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn stream_output_cell_is_skipped(
+    stream: &[store::KernelEventEnvelope],
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+) -> bool {
+    stream.iter().any(|event| {
+        matches!(
+            event.payload(),
+            events::KernelEventPayload::CellSkipped(payload)
+                if payload.node_id == node.node_id
+                    && payload.attempt_id == *attempt_id
+                    && payload.cell_id == node.output_cell
+        )
+    })
+}
+
+fn validate_atomic_terminal_pairs(
+    runtime_spec: &CertifiedRuntimeSpec,
+    stream: &[store::KernelEventEnvelope],
+) -> Result<()> {
+    let mut completions = BTreeSet::new();
+    let mut terminal_cells = BTreeSet::new();
+    let mut public_outputs = BTreeSet::new();
+    for event in stream {
+        match event.payload() {
+            events::KernelEventPayload::StateAttemptCompleted(payload) => {
+                let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "attempt completed for uncertified node {}",
+                        payload.node_id
+                    ))
+                })?;
+                let _ = node;
+                completions.insert((
+                    event.seq(),
+                    payload.node_id.clone(),
+                    payload.attempt_id.clone(),
+                    payload.output_cell_id.clone(),
+                ));
+            }
+            events::KernelEventPayload::CellProduced(payload) => {
+                let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "cell produced by uncertified node {}",
+                        payload.node_id
+                    ))
+                })?;
+                let _ = node;
+                terminal_cells.insert((
+                    event.seq(),
+                    payload.node_id.clone(),
+                    payload.attempt_id.clone(),
+                    payload.cell_id.clone(),
+                ));
+            }
+            events::KernelEventPayload::CellSkipped(payload) => {
+                let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "cell skipped by uncertified node {}",
+                        payload.node_id
+                    ))
+                })?;
+                let _ = node;
+                terminal_cells.insert((
+                    event.seq(),
+                    payload.node_id.clone(),
+                    payload.attempt_id.clone(),
+                    payload.cell_id.clone(),
+                ));
+            }
+            events::KernelEventPayload::PublicOutputProduced(payload) => {
+                let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "public output produced by uncertified node {}",
+                        payload.node_id
+                    ))
+                })?;
+                if !matches!(
+                    &node.framework,
+                    Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
+                ) {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "public output produced by non-render node {}",
+                        payload.node_id
+                    )));
+                }
+                public_outputs.insert((
+                    event.seq(),
+                    payload.node_id.clone(),
+                    payload.attempt_id.clone(),
+                    payload.receipt_cell_id.clone(),
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    for (seq, node_id, attempt_id, output_cell_id) in &completions {
+        if !terminal_cells.contains(&(
+            *seq,
+            node_id.clone(),
+            attempt_id.clone(),
+            output_cell_id.clone(),
+        )) {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "attempt {} for node {} completed without terminal cell {} in the same commit",
+                attempt_id, node_id, output_cell_id
+            )));
+        }
+    }
+    for (seq, node_id, attempt_id, cell_id) in &terminal_cells {
+        if !completions.contains(&(*seq, node_id.clone(), attempt_id.clone(), cell_id.clone())) {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "terminal cell {} for node {} lacks StateAttemptCompleted in the same commit",
+                cell_id, node_id
+            )));
+        }
+    }
+    for (seq, node_id, attempt_id, receipt_cell_id) in &public_outputs {
+        let terminal = (
+            *seq,
+            node_id.clone(),
+            attempt_id.clone(),
+            receipt_cell_id.clone(),
+        );
+        if !terminal_cells.contains(&terminal) || !completions.contains(&terminal) {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "public output for node {} attempt {} was split from receipt terminal cell {}",
+                node_id, attempt_id, receipt_cell_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_historical_retention_manifest_batches(
+    runtime_spec: &CertifiedRuntimeSpec,
+    stream: &[store::KernelEventEnvelope],
+    history: &RuntimeCommittedHistory,
+    artifact_bytes: &store::ArtifactByteAuthorityMap,
+) -> Result<()> {
+    for commit in history.commits() {
+        validate_historical_retention_manifest_batch(
+            runtime_spec,
+            commit.prefix(stream),
+            commit.events(stream),
+            artifact_bytes,
+        )?;
+    }
+    Ok(())
+}
+
+type RetentionRefKey = (ArtifactId, ContentDigest);
+type TypedPayloadKey = (ArtifactId, ContentDigest, events::ArtifactRole);
+
+fn validate_historical_retention_ref_batches(
+    runtime_spec: &CertifiedRuntimeSpec,
+    stream: &[store::KernelEventEnvelope],
+    history: &RuntimeCommittedHistory,
+) -> Result<()> {
+    for commit in history.commits() {
+        validate_historical_retention_ref_batch(runtime_spec, commit.events(stream))?;
+    }
+    Ok(())
+}
+
+fn validate_historical_run_admission_batch(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    stream: &[store::KernelEventEnvelope],
+    history: &RuntimeCommittedHistory,
+) -> Result<()> {
+    let Some(first) = stream.first() else {
+        return Err(RuntimeError::InvalidRunStream(
+            "run stream is missing RunAdmitted root event".to_owned(),
+        ));
+    };
+    if first.seq() != store::StreamSeq::FIRST || first.ordinal() != store::CommitOrdinal::new(0) {
+        return Err(RuntimeError::InvalidRunStream(
+            "RunAdmitted must be the first event in the run stream".to_owned(),
+        ));
+    }
+    let first_commit = history
+        .commits()
+        .first()
+        .map(|batch| batch.events(stream))
+        .ok_or_else(|| {
+            RuntimeError::InvalidRunStream(
+                "run stream is missing RunAdmitted root event".to_owned(),
+            )
+        })?;
+    if first_commit.len() != 1 {
+        return Err(RuntimeError::InvalidRunStream(
+            "RunAdmitted commit must contain exactly one root event".to_owned(),
+        ));
+    }
+    let events::KernelEventPayload::RunAdmitted(run_admitted) = first.payload() else {
+        return Err(RuntimeError::InvalidRunStream(
+            "run stream must start with RunAdmitted".to_owned(),
+        ));
+    };
+    validate_run_admitted_matches_certified_spec(runtime_spec, run_id, run_admitted)
+}
+
+fn validate_run_admitted_matches_certified_spec(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    run_admitted: &events::RunAdmitted,
+) -> Result<()> {
+    validate_run_identity_material(runtime_spec, run_id, run_admitted)?;
+    if run_admitted.run_id != *run_id
+        || run_admitted.spec_hash != *runtime_spec.spec_hash()
+        || run_admitted.spec_version != runtime_spec.spec().spec_version
+        || run_admitted.lowering_version != runtime_spec.spec().lowering_version
+        || run_admitted.public_output_schema_id
+            != runtime_spec.spec().public_outputs.public_schema_id
+        || run_admitted.saga_policy_digest != runtime_spec.spec().saga.saga_policy_digest()?
+        || run_admitted.canonicalizer_identity
+            != runtime_spec
+                .spec()
+                .public_outputs
+                .renderer_descriptor
+                .canonicalizer_identity
+        || run_admitted.descriptor_identities != runtime_spec.spec().descriptor_identities
+    {
+        return Err(RuntimeError::InvalidRunStream(
+            "RunAdmitted payload does not match the certified runtime spec".to_owned(),
+        ));
+    }
+    validate_spec_artifact(
+        runtime_spec,
+        store_artifact_from_run_ref(&run_admitted.spec_artifact),
+    )?;
+    validate_certificate_artifact(
+        runtime_spec,
+        store_artifact_from_run_ref(&run_admitted.certificate_artifact),
+    )?;
+    validate_config_artifacts(
+        runtime_spec,
+        run_admitted
+            .config_artifacts
+            .iter()
+            .map(store_artifact_from_run_ref)
+            .collect(),
+    )?;
+    validate_fact_descriptor_artifact_refs(runtime_spec, &run_admitted.fact_descriptor_artifacts)?;
+    validate_seed_cells(runtime_spec, &run_admitted.seed_cells)?;
+    Ok(())
+}
+
+pub(super) fn validate_run_identity_material(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    run_admitted: &events::RunAdmitted,
+) -> Result<()> {
+    if &run_admitted.run_id != run_id {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "run stream contains RunAdmitted for {} while executing {}",
+            run_admitted.run_id, run_id
+        )));
+    }
+    if &run_admitted.spec_hash != runtime_spec.spec_hash() {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "RunAdmitted spec hash {} does not match certified {}",
+            run_admitted.spec_hash,
+            runtime_spec.spec_hash()
+        )));
+    }
+    if run_admitted.identity_material.certified_spec_hash != run_admitted.spec_hash {
+        return Err(RuntimeError::InvalidRunStream(
+            "RunAdmitted identity material spec hash does not match event spec hash".to_owned(),
+        ));
+    }
+    let derived_run_id = run_admitted.identity_material.derive_run_id()?;
+    if derived_run_id != run_admitted.run_id {
+        return Err(RuntimeError::InvalidRunStream(
+            "RunAdmitted run id does not match identity material".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_historical_retention_ref_batch(
+    runtime_spec: &CertifiedRuntimeSpec,
+    commit: &[store::KernelEventEnvelope],
+) -> Result<()> {
+    let retention_refs = commit
+        .iter()
+        .filter_map(|event| match event.payload() {
+            events::KernelEventPayload::RetentionRefsAppended(payload) => Some((event, payload)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if retention_refs.is_empty() {
+        return Ok(());
+    }
+
+    let has_manifest_projection = commit.iter().any(|event| {
+        matches!(
+            event.payload(),
+            events::KernelEventPayload::RetentionManifestProjected(_)
+        )
+    });
+    let artifact_refs = same_commit_artifact_reference_keys(commit)?;
+    let typed_payload_refs = same_commit_typed_artifact_keys(commit)?;
+
+    for (event, payload) in retention_refs {
+        if event.run_id() != &payload.run_id {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "retention refs for run {} were appended to stream {}",
+                payload.run_id,
+                event.run_id()
+            )));
+        }
+        if payload.spec_hash != *runtime_spec.spec_hash() {
+            return Err(RuntimeError::InvalidRunStream(
+                "retention refs spec hash does not match certified runtime spec".to_owned(),
+            ));
+        }
+        if payload.refs.is_empty() {
+            return Err(RuntimeError::InvalidRunStream(
+                "retention refs append cannot be empty".to_owned(),
+            ));
+        }
+        match payload.reason {
+            events::RetentionReason::RunAdmitted => {
+                return Err(RuntimeError::InvalidRunStream(
+                    "RunAdmitted retention refs are projection-derived and must not be appended"
+                        .to_owned(),
+                ));
+            }
+            events::RetentionReason::ManifestProjection => {
+                if !has_manifest_projection {
+                    return Err(RuntimeError::InvalidRunStream(
+                        "manifest-projection retention refs must be appended with the manifest projection"
+                            .to_owned(),
+                    ));
+                }
+            }
+            events::RetentionReason::RuntimeEvidence => {
+                validate_same_commit_retention_ref_evidence(
+                    payload,
+                    &artifact_refs,
+                    &typed_payload_refs,
+                    true,
+                )?;
+            }
+            events::RetentionReason::PublicOutput => {
+                validate_same_commit_retention_ref_evidence(
+                    payload,
+                    &artifact_refs,
+                    &typed_payload_refs,
+                    false,
+                )?;
+                validate_public_output_retention_refs(runtime_spec, commit, payload)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_same_commit_retention_ref_evidence(
+    payload: &events::RetentionRefsAppended,
+    artifact_refs: &BTreeSet<RetentionRefKey>,
+    typed_payload_refs: &BTreeSet<TypedPayloadKey>,
+    allow_fact_query_returned_refs: bool,
+) -> Result<()> {
+    let has_same_commit_fact_query_evidence = payload.refs.iter().any(|retention_ref| {
+        retention_ref.role == events::ArtifactRole::FactQueryEvidence
+            && artifact_refs.contains(&retention_ref_key(retention_ref))
+            && typed_payload_refs.contains(&typed_payload_key(retention_ref))
+    });
+    for retention_ref in &payload.refs {
+        if allow_fact_query_returned_refs
+            && has_same_commit_fact_query_evidence
+            && matches!(
+                retention_ref.role,
+                events::ArtifactRole::FactDescriptor | events::ArtifactRole::FactResponse
+            )
+        {
+            continue;
+        }
+        let key = retention_ref_key(retention_ref);
+        if staged_artifact_binding_kind(retention_ref.role).is_some()
+            && !artifact_refs.contains(&key)
+        {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "retention ref for artifact {} lacks same-commit artifact reference evidence",
+                retention_ref.artifact_id
+            )));
+        }
+        if !typed_payload_refs.contains(&typed_payload_key(retention_ref)) {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "retention ref for artifact {} lacks same-commit typed payload evidence",
+                retention_ref.artifact_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_public_output_retention_refs(
+    runtime_spec: &CertifiedRuntimeSpec,
+    commit: &[store::KernelEventEnvelope],
+    payload: &events::RetentionRefsAppended,
+) -> Result<()> {
+    let public_outputs = commit
+        .iter()
+        .filter_map(|event| match event.payload() {
+            events::KernelEventPayload::PublicOutputProduced(payload) => Some(payload),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if public_outputs.len() != 1 {
+        return Err(RuntimeError::InvalidRunStream(
+            "public-output retention refs must be appended with exactly one framework public-output payload"
+                .to_owned(),
+        ));
+    }
+    let public_output = public_outputs[0];
+    let node = runtime_spec.node(&public_output.node_id).ok_or_else(|| {
+        RuntimeError::InvalidRunStream(format!(
+            "public-output retention refs reference uncertified node {}",
+            public_output.node_id
+        ))
+    })?;
+    if !matches!(
+        &node.framework,
+        Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
+    ) {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "public-output retention refs were appended by non-render node {}",
+            public_output.node_id
+        )));
+    }
+    let allowed = public_output_retention_ref_keys(commit, public_output)?;
+    for retention_ref in &payload.refs {
+        if !allowed.contains(&retention_ref_key(retention_ref)) {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "public-output retention ref for artifact {} is not sealed to framework public-output evidence",
+                retention_ref.artifact_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn public_output_retention_ref_keys(
+    commit: &[store::KernelEventEnvelope],
+    public_output: &events::PublicOutputProduced,
+) -> Result<BTreeSet<RetentionRefKey>> {
+    let mut allowed = BTreeSet::new();
+    for event in commit {
+        if let events::KernelEventPayload::CellProduced(payload) = event.payload() {
+            if payload.node_id == public_output.node_id
+                && payload.attempt_id == public_output.attempt_id
+                && payload.cell_id == public_output.receipt_cell_id
+            {
+                let key = commit
+                    .iter()
+                    .filter_map(|event| match event.payload() {
+                        events::KernelEventPayload::ArtifactReferenced(reference)
+                            if reference.node_id.as_ref() == Some(&payload.node_id)
+                                && reference.attempt_id.as_ref() == Some(&payload.attempt_id)
+                                && reference.artifact_ref.artifact_id == payload.artifact_id
+                                && reference.artifact_ref.content_digest
+                                    == payload.content_digest
+                                && reference.artifact_ref.evidence_hash
+                                    == payload.evidence_hash
+                                && reference.artifact_ref.role
+                                    == events::ArtifactRole::StateOutput =>
+                        {
+                            Some(event_artifact_ref_key(
+                                &reference.artifact_ref,
+                                reference.node_id.clone(),
+                                None,
+                            ))
+                        }
+                        _ => None,
+                    })
+                    .next()
+                    .transpose()?;
+                if let Some(key) = key {
+                    allowed.insert(key);
+                }
+            }
+        }
+    }
+    if let Some(artifact_id) = &public_output.rendered_artifact_id {
+        let key = commit
+            .iter()
+            .filter_map(|event| match event.payload() {
+                events::KernelEventPayload::ArtifactReferenced(reference)
+                    if reference.node_id.as_ref() == Some(&public_output.node_id)
+                        && reference.attempt_id.as_ref() == Some(&public_output.attempt_id)
+                        && reference.artifact_ref.artifact_id == *artifact_id
+                        && reference.artifact_ref.content_digest
+                            == public_output.rendered_digest
+                        && public_output.rendered_artifact_evidence_hash.as_ref()
+                            == Some(&reference.artifact_ref.evidence_hash)
+                        && reference.artifact_ref.role == events::ArtifactRole::PublicOutput =>
+                {
+                    Some(event_artifact_ref_key(
+                        &reference.artifact_ref,
+                        reference.node_id.clone(),
+                        None,
+                    ))
+                }
+                _ => None,
+            })
+            .next()
+            .transpose()?;
+        if let Some(key) = key {
+            allowed.insert(key);
+        }
+    }
+    if allowed.is_empty() {
+        return Err(RuntimeError::InvalidRunStream(
+            "public-output retention refs lack same-commit framework receipt/render evidence"
+                .to_owned(),
+        ));
+    }
+    Ok(allowed)
+}
+
+fn retention_ref_key(retention_ref: &events::RetentionRef) -> RetentionRefKey {
+    (
+        retention_ref.artifact_id.clone(),
+        retention_ref.evidence_hash.clone(),
+    )
+}
+
+fn event_artifact_ref_key(
+    artifact: &events::ArtifactEvidenceRef,
+    producer_node_id: Option<NodeId>,
+    producer_seed_id: Option<mfm_ids::SeedId>,
+) -> Result<RetentionRefKey> {
+    let evidence = store_artifact_from_event_ref(artifact, producer_node_id, producer_seed_id);
+    Ok((evidence.artifact_id.clone(), evidence.evidence_hash()?))
+}
+
+fn same_commit_artifact_reference_keys(
+    commit: &[store::KernelEventEnvelope],
+) -> Result<BTreeSet<RetentionRefKey>> {
+    commit
+        .iter()
+        .filter_map(|event| match event.payload() {
+            events::KernelEventPayload::ArtifactReferenced(payload) => {
+                Some((&payload.artifact_ref, payload.node_id.clone(), None))
+            }
+            _ => None,
+        })
+        .map(|(artifact, producer_node_id, producer_seed_id)| {
+            event_artifact_ref_key(artifact, producer_node_id, producer_seed_id)
+        })
+        .collect()
+}
+
+fn same_commit_typed_artifact_keys(
+    commit: &[store::KernelEventEnvelope],
+) -> Result<BTreeSet<TypedPayloadKey>> {
+    Ok(commit
+        .iter()
+        .flat_map(|event| store::event_artifact_requirements(event.payload()))
+        .filter(|requirement| {
+            requirement.source.is_same_commit_payload_evidence()
+                || (requirement.source == store::EventArtifactReferenceSource::ArtifactReferenced
+                    && matches!(
+                        requirement.artifact_role,
+                        Some(
+                            events::ArtifactRole::FactQueryEvidence
+                                | events::ArtifactRole::ExternalReadEvidence
+                        )
+                    ))
+        })
+        .filter_map(|requirement| {
+            Some((
+                requirement.artifact_id,
+                requirement.digest?,
+                requirement.artifact_role?,
+            ))
+        })
+        .collect())
+}
+
+fn typed_payload_key(retention_ref: &events::RetentionRef) -> TypedPayloadKey {
+    (
+        retention_ref.artifact_id.clone(),
+        retention_ref.content_digest.clone(),
+        retention_ref.role,
+    )
+}
+
+fn validate_historical_retention_manifest_batch(
+    runtime_spec: &CertifiedRuntimeSpec,
+    pre_projection_stream: &[store::KernelEventEnvelope],
+    commit: &[store::KernelEventEnvelope],
+    artifact_bytes: &store::ArtifactByteAuthorityMap,
+) -> Result<()> {
+    let projections = commit
+        .iter()
+        .filter_map(|event| match event.payload() {
+            events::KernelEventPayload::RetentionManifestProjected(payload) => Some(payload),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if projections.is_empty() {
+        return Ok(());
+    }
+    if projections.len() != 1 {
+        return Err(RuntimeError::InvalidRunStream(
+            "retention manifest projection commit contains multiple manifest projections"
+                .to_owned(),
+        ));
+    }
+    let projection = projections[0];
+    let retention_node = certified_retention_manifest_node(runtime_spec)?;
+    if projection.spec_hash != *runtime_spec.spec_hash() {
+        return Err(RuntimeError::InvalidRunStream(
+            "retention manifest projection spec hash does not match certified runtime spec"
+                .to_owned(),
+        ));
+    }
+    let expected = build_retention_manifest_artifact(
+        runtime_spec,
+        &projection.run_id,
+        pre_projection_stream,
+        artifact_bytes,
+    )?;
+    if projection.manifest_seq != expected.manifest_seq
+        || projection.manifest_digest != expected.evidence.digest
+        || projection.previous_manifest_digest != expected.previous_manifest_digest
+        || projection.manifest_artifact_id != expected.evidence.artifact_id
+    {
+        return Err(RuntimeError::InvalidRunStream(
+            "retention manifest projection does not match the authoritative pre-projection stream"
+                .to_owned(),
+        ));
+    }
+    let expected_manifest_evidence_hash = expected.evidence.evidence_hash()?;
+
+    let receipt_bytes = retention_manifest_receipt_json(&expected, pre_projection_stream)?;
+    let receipt_digest = receipt_bytes.content_digest();
+    let receipt_artifact_id =
+        ArtifactId::from_digest(receipt_digest.algorithm(), *receipt_digest.digest());
+    let produced = commit
+        .iter()
+        .filter_map(|event| match event.payload() {
+            events::KernelEventPayload::CellProduced(payload)
+                if payload.node_id == retention_node.node_id =>
+            {
+                Some(payload)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if produced.len() != 1 {
+        return Err(RuntimeError::InvalidRunStream(
+            "retention manifest projection was not produced by exactly one framework retention receipt cell"
+                .to_owned(),
+        ));
+    }
+    let produced = produced[0];
+    if produced.spec_hash != *runtime_spec.spec_hash()
+        || produced.cell_id != retention_node.output_cell
+        || produced.artifact_id != receipt_artifact_id
+        || produced.content_digest != receipt_digest
+    {
+        return Err(RuntimeError::InvalidRunStream(
+            "retention manifest receipt cell does not match the projected manifest".to_owned(),
+        ));
+    }
+
+    let pre_projection = store::ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
+        pre_projection_stream,
+        artifact_bytes,
+    )?;
+    if !matches!(
+        pre_projection
+            .attempt(&retention_node.node_id, &produced.attempt_id)
+            .map(|attempt| &attempt.status),
+        Some(store::AttemptStatus::Started { .. })
+    ) {
+        return Err(RuntimeError::InvalidRunStream(
+            "retention manifest projection lacks matching started framework attempt in the prefix"
+                .to_owned(),
+        ));
+    }
+
+    let completed_count = commit
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::StateAttemptCompleted(payload)
+                    if payload.node_id == retention_node.node_id
+                        && payload.attempt_id == produced.attempt_id
+                        && payload.output_cell_id == retention_node.output_cell
+            )
+        })
+        .count();
+    if completed_count != 1 {
+        return Err(RuntimeError::InvalidRunStream(
+            "retention manifest projection lacks matching framework StateAttemptCompleted in the same commit"
+                .to_owned(),
+        ));
+    }
+
+    let refs = commit
+        .iter()
+        .filter_map(|event| match event.payload() {
+            events::KernelEventPayload::RetentionRefsAppended(payload) => Some(payload),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let manifest_refs = refs
+        .iter()
+        .copied()
+        .filter(|payload| payload.reason == events::RetentionReason::ManifestProjection)
+        .collect::<Vec<_>>();
+    if manifest_refs.len() != 1 {
+        return Err(RuntimeError::InvalidRunStream(
+            "retention manifest projection commit must contain exactly one manifest retention refs append"
+                .to_owned(),
+        ));
+    }
+    let manifest_refs = manifest_refs[0];
+    if manifest_refs.run_id != projection.run_id
+        || manifest_refs.spec_hash != *runtime_spec.spec_hash()
+        || manifest_refs.refs.len() != 1
+    {
+        return Err(RuntimeError::InvalidRunStream(
+            "retention manifest projection retention refs are not sealed to manifest projection"
+                .to_owned(),
+        ));
+    }
+    let manifest_ref = &manifest_refs.refs[0];
+    if manifest_ref.artifact_id != expected.evidence.artifact_id
+        || manifest_ref.content_digest != expected.evidence.digest
+        || manifest_ref.evidence_hash != expected_manifest_evidence_hash
+        || manifest_ref.role != events::ArtifactRole::RetentionManifest
+    {
+        return Err(RuntimeError::InvalidRunStream(
+            "retention manifest projection retention ref does not match the manifest artifact"
+                .to_owned(),
+        ));
+    }
+
+    let receipt_refs = refs
+        .iter()
+        .copied()
+        .filter(|payload| payload.reason == events::RetentionReason::RuntimeEvidence)
+        .collect::<Vec<_>>();
+    if receipt_refs.len() != 1 {
+        return Err(RuntimeError::InvalidRunStream(
+            "retention manifest projection commit must retain its framework receipt artifact"
+                .to_owned(),
+        ));
+    }
+    let receipt_refs = receipt_refs[0];
+    if receipt_refs.run_id != projection.run_id
+        || receipt_refs.spec_hash != *runtime_spec.spec_hash()
+        || receipt_refs.refs.len() != 1
+    {
+        return Err(RuntimeError::InvalidRunStream(
+            "retention manifest receipt retention refs are not sealed to runtime evidence"
+                .to_owned(),
+        ));
+    }
+    let receipt_ref = &receipt_refs.refs[0];
+    if receipt_ref.artifact_id != receipt_artifact_id
+        || receipt_ref.content_digest != receipt_digest
+        || receipt_ref.evidence_hash != produced.evidence_hash
+        || receipt_ref.role != events::ArtifactRole::StateOutput
+    {
+        return Err(RuntimeError::InvalidRunStream(
+            "retention manifest receipt retention ref does not match the receipt artifact"
+                .to_owned(),
+        ));
+    }
+    if refs.len() != 2 {
+        return Err(RuntimeError::InvalidRunStream(
+            "retention manifest projection commit contains unsupported retention refs".to_owned(),
+        ));
+    }
+    validate_retention_projection_commit_payload_set(
+        commit,
+        &retention_node.node_id,
+        &produced.attempt_id,
+        &retention_node.output_cell,
+        &RetentionProjectionCommitEvidence {
+            receipt_artifact_id: &receipt_artifact_id,
+            receipt_digest: &receipt_digest,
+            receipt_evidence_hash: &produced.evidence_hash,
+            manifest_artifact_id: &expected.evidence.artifact_id,
+            manifest_evidence_hash: &expected_manifest_evidence_hash,
+        },
+    )?;
+    Ok(())
+}
+
+struct RetentionProjectionCommitEvidence<'a> {
+    receipt_artifact_id: &'a ArtifactId,
+    receipt_digest: &'a ContentDigest,
+    receipt_evidence_hash: &'a ContentDigest,
+    manifest_artifact_id: &'a ArtifactId,
+    manifest_evidence_hash: &'a ContentDigest,
+}
+
+fn validate_retention_projection_commit_payload_set(
+    commit: &[store::KernelEventEnvelope],
+    retention_node_id: &NodeId,
+    attempt_id: &AttemptId,
+    receipt_cell_id: &CellId,
+    evidence: &RetentionProjectionCommitEvidence<'_>,
+) -> Result<()> {
+    let mut produced = 0_usize;
+    let mut completed = 0_usize;
+    let mut artifact_referenced = 0_usize;
+    let mut manifest_projected = 0_usize;
+    let mut retention_refs = 0_usize;
+
+    for event in commit {
+        match event.payload() {
+            events::KernelEventPayload::CellProduced(payload)
+                if payload.node_id == *retention_node_id
+                    && payload.attempt_id == *attempt_id
+                    && payload.cell_id == *receipt_cell_id
+                    && payload.artifact_id == *evidence.receipt_artifact_id
+                    && payload.content_digest == *evidence.receipt_digest
+                    && payload.evidence_hash == *evidence.receipt_evidence_hash =>
+            {
+                produced += 1;
+            }
+            events::KernelEventPayload::StateAttemptCompleted(payload)
+                if payload.node_id == *retention_node_id
+                    && payload.attempt_id == *attempt_id
+                    && payload.output_cell_id == *receipt_cell_id =>
+            {
+                completed += 1;
+            }
+            events::KernelEventPayload::ArtifactReferenced(payload)
+                if payload.node_id.as_ref() == Some(retention_node_id)
+                    && payload.attempt_id.as_ref() == Some(attempt_id)
+                    && payload.artifact_ref.artifact_id == *evidence.receipt_artifact_id
+                    && payload.artifact_ref.content_digest == *evidence.receipt_digest
+                    && payload.artifact_ref.evidence_hash == *evidence.receipt_evidence_hash
+                    && payload.artifact_ref.role == events::ArtifactRole::StateOutput =>
+            {
+                artifact_referenced += 1;
+            }
+            events::KernelEventPayload::RetentionManifestProjected(payload)
+                if payload.manifest_artifact_id == *evidence.manifest_artifact_id =>
+            {
+                manifest_projected += 1;
+            }
+            events::KernelEventPayload::RetentionRefsAppended(payload) => match payload.reason {
+                events::RetentionReason::ManifestProjection
+                    if payload.refs.iter().all(|reference| {
+                        reference.artifact_id == *evidence.manifest_artifact_id
+                            && reference.evidence_hash == *evidence.manifest_evidence_hash
+                    }) =>
+                {
+                    retention_refs += 1;
+                }
+                events::RetentionReason::RuntimeEvidence
+                    if payload.refs.iter().all(|reference| {
+                        reference.artifact_id == *evidence.receipt_artifact_id
+                            && reference.evidence_hash == *evidence.receipt_evidence_hash
+                    }) =>
+                {
+                    retention_refs += 1;
+                }
+                _ => {
+                    return Err(RuntimeError::InvalidRunStream(
+                        "retention manifest projection commit contains unsupported payload"
+                            .to_owned(),
+                    ));
+                }
+            },
+            _ => {
+                return Err(RuntimeError::InvalidRunStream(
+                    "retention manifest projection commit contains unsupported payload".to_owned(),
+                ));
+            }
+        }
+    }
+
+    if produced == 1
+        && completed == 1
+        && artifact_referenced == 1
+        && manifest_projected == 1
+        && retention_refs == 2
+        && commit.len() == 6
+    {
+        Ok(())
+    } else {
+        Err(RuntimeError::InvalidRunStream(
+            "retention manifest projection commit does not match the sealed framework batch"
+                .to_owned(),
+        ))
+    }
+}
+
+fn validate_historical_terminal_tail(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    stream: &[store::KernelEventEnvelope],
+    history: &RuntimeCommittedHistory,
+    artifact_bytes: &store::ArtifactByteAuthorityMap,
+) -> Result<()> {
+    let completion_node = certified_complete_run_node(runtime_spec)?;
+    let resolve_node = certified_resolve_saga_terminal_node(runtime_spec)?;
+    let mut last_retention_commit_end = None::<usize>;
+    let mut terminal_commit = None::<(usize, usize, TerminalCommitKind)>;
+    for batch in history.commits() {
+        let commit = batch.events(stream);
+        let has_retention_projection = commit.iter().any(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::RetentionManifestProjected(_)
+            )
+        });
+        if has_retention_projection {
+            last_retention_commit_end = Some(batch.event_range.end);
+        }
+        let has_completion_node_payload = commit.iter().any(|event| {
+            payload_targets_node_after_start(event.payload(), &completion_node.node_id)
+        });
+        let has_resolve_node_payload = commit
+            .iter()
+            .any(|event| payload_targets_node_after_start(event.payload(), &resolve_node.node_id));
+        let run_completed_payloads = commit
+            .iter()
+            .filter_map(|event| match event.payload() {
+                events::KernelEventPayload::RunCompleted(payload) => Some(payload),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let completion_count = run_completed_payloads.len();
+        if has_completion_node_payload && has_resolve_node_payload {
+            return Err(RuntimeError::InvalidRunStream(
+                "terminal commit targets both CompleteRun and ResolveSagaTerminal".to_owned(),
+            ));
+        }
+        if has_completion_node_payload || has_resolve_node_payload || completion_count > 0 {
+            let kind = if has_resolve_node_payload
+                || run_completed_payloads
+                    .first()
+                    .map(|payload| {
+                        !matches!(payload.outcome, events::RunCompletionOutcome::Completed(_))
+                    })
+                    .unwrap_or(false)
+            {
+                TerminalCommitKind::ResolveSagaTerminal
+            } else {
+                TerminalCommitKind::CompleteRun
+            };
+            if terminal_commit
+                .replace((batch.event_range.start, batch.event_range.end, kind))
+                .is_some()
+            {
+                return Err(RuntimeError::InvalidRunStream(
+                    "run stream contains multiple terminal lifecycle commits".to_owned(),
+                ));
+            }
+            if completion_count == 0 {
+                return Err(RuntimeError::InvalidRunStream(
+                    "terminal lifecycle commit is missing RunCompleted payload".to_owned(),
+                ));
+            }
+            if completion_count != 1 {
+                return Err(RuntimeError::InvalidRunStream(
+                    "terminal lifecycle commit contains multiple RunCompleted payloads".to_owned(),
+                ));
+            }
+        }
+    }
+
+    match (last_retention_commit_end, terminal_commit) {
+        (Some(retention_end), Some((terminal_start, terminal_end, TerminalCommitKind::CompleteRun)))
+            if framework_start_gap_is_allowed(
+                &stream[retention_end..terminal_start],
+                &completion_node.node_id,
+            ) =>
+        {
+            validate_historical_complete_run_batch(
+                runtime_spec,
+                run_id,
+                &stream[..terminal_start],
+                &stream[terminal_start..terminal_end],
+                artifact_bytes,
+            )
+        }
+        (Some(_), Some((_, _, TerminalCommitKind::CompleteRun))) => {
+            Err(RuntimeError::InvalidRunStream(
+                "run stream contains events after retention manifest projection outside sealed CompleteRun commit"
+                    .to_owned(),
+            ))
+        }
+        (retention, Some((terminal_start, terminal_end, TerminalCommitKind::ResolveSagaTerminal))) => {
+            if retention.is_some() {
+                return Err(RuntimeError::InvalidRunStream(
+                    "sealed saga terminal appeared after retention manifest projection".to_owned(),
+                ));
+            }
+            validate_historical_resolve_saga_terminal_batch(
+                runtime_spec,
+                run_id,
+                &stream[..terminal_start],
+                &stream[terminal_start..terminal_end],
+                artifact_bytes,
+            )
+        }
+        (Some(retention_end), None)
+            if framework_start_gap_is_allowed(
+                &stream[retention_end..],
+                &completion_node.node_id,
+            ) =>
+        {
+            Ok(())
+        }
+        (Some(_), None) => Err(RuntimeError::InvalidRunStream(
+            "run stream contains events after retention manifest projection outside sealed CompleteRun commit"
+                .to_owned(),
+        )),
+        (None, Some((_, _, TerminalCommitKind::CompleteRun))) => Err(RuntimeError::InvalidRunStream(
+            "RunCompleted appeared before retention manifest projection".to_owned(),
+        )),
+        (None, None) => Ok(()),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TerminalCommitKind {
+    CompleteRun,
+    ResolveSagaTerminal,
+}
+
+fn payload_targets_node(payload: &events::KernelEventPayload, node_id: &NodeId) -> bool {
+    match payload {
+        events::KernelEventPayload::StateAttemptStarted(payload) => payload.node_id == *node_id,
+        events::KernelEventPayload::StateAttemptCompleted(payload) => payload.node_id == *node_id,
+        events::KernelEventPayload::StateAttemptInterrupted(payload) => payload.node_id == *node_id,
+        events::KernelEventPayload::StateAttemptFailed(payload) => payload.node_id == *node_id,
+        events::KernelEventPayload::CellProduced(payload) => payload.node_id == *node_id,
+        events::KernelEventPayload::CellSkipped(payload) => payload.node_id == *node_id,
+        events::KernelEventPayload::FactRecorded(payload) => payload.node_id == *node_id,
+        events::KernelEventPayload::ArtifactReferenced(payload) => {
+            payload.node_id.as_ref() == Some(node_id)
+        }
+        events::KernelEventPayload::PublicOutputProduced(payload) => payload.node_id == *node_id,
+        events::KernelEventPayload::PublicOutputRenderFailed(payload) => {
+            payload.node_id == *node_id
+        }
+        payload => side_effect_payload_ref(payload)
+            .map(|(payload_node_id, _, _, _, _)| payload_node_id == node_id)
+            .unwrap_or(false),
+    }
+}
+
+fn payload_targets_node_after_start(
+    payload: &events::KernelEventPayload,
+    node_id: &NodeId,
+) -> bool {
+    !matches!(
+        payload,
+        events::KernelEventPayload::StateAttemptStarted(started) if started.node_id == *node_id
+    ) && payload_targets_node(payload, node_id)
+}
+
+fn framework_start_gap_is_allowed(gap: &[store::KernelEventEnvelope], node_id: &NodeId) -> bool {
+    gap.is_empty()
+        || matches!(
+            gap,
+            [event]
+                if matches!(
+                    event.payload(),
+                    events::KernelEventPayload::StateAttemptStarted(payload)
+                        if payload.node_id == *node_id
+                )
+        )
+}
+
+fn validate_historical_complete_run_batch(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    pre_completion_stream: &[store::KernelEventEnvelope],
+    commit: &[store::KernelEventEnvelope],
+    artifact_bytes: &store::ArtifactByteAuthorityMap,
+) -> Result<()> {
+    let completion_payload = commit
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::RunCompleted(payload) => Some(payload),
+            _ => None,
+        })
+        .expect("caller checked completion count");
+    let completion_node = certified_complete_run_node(runtime_spec)?;
+    let pre_completion_projection =
+        store::ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
+            pre_completion_stream,
+            artifact_bytes,
+        )?;
+    let completion = run_completion_evidence(runtime_spec, run_id, &pre_completion_projection)?;
+    let retention_manifest = projected_retention_manifest(run_id, &pre_completion_projection)?;
+    if completion_payload.run_id != *run_id
+        || completion_payload.spec_hash != *runtime_spec.spec_hash()
+        || completion_payload.outcome
+            != events::RunCompletionOutcome::Completed(Box::new(completion.clone()))
+    {
+        return Err(RuntimeError::InvalidRunStream(
+            "RunCompleted payload does not match sealed CompleteRun evidence".to_owned(),
+        ));
+    }
+
+    let receipt_bytes =
+        complete_run_receipt_json(&completion, retention_manifest, pre_completion_stream)?;
+    let receipt_digest = receipt_bytes.content_digest();
+    let receipt_artifact_id =
+        ArtifactId::from_digest(receipt_digest.algorithm(), *receipt_digest.digest());
+    let produced = commit
+        .iter()
+        .filter_map(|event| match event.payload() {
+            events::KernelEventPayload::CellProduced(payload)
+                if payload.node_id == completion_node.node_id =>
+            {
+                Some(payload)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if produced.len() != 1 {
+        return Err(RuntimeError::InvalidRunStream(
+            "CompleteRun commit was not produced by exactly one framework completion receipt cell"
+                .to_owned(),
+        ));
+    }
+    let produced = produced[0];
+    if produced.spec_hash != *runtime_spec.spec_hash()
+        || produced.cell_id != completion_node.output_cell
+        || produced.artifact_id != receipt_artifact_id
+        || produced.content_digest != receipt_digest
+    {
+        return Err(RuntimeError::InvalidRunStream(
+            "CompleteRun receipt cell does not match the sealed completion evidence".to_owned(),
+        ));
+    }
+    if !matches!(
+        pre_completion_projection
+            .attempt(&completion_node.node_id, &produced.attempt_id)
+            .map(|attempt| &attempt.status),
+        Some(store::AttemptStatus::Started { .. })
+    ) {
+        return Err(RuntimeError::InvalidRunStream(
+            "CompleteRun commit lacks matching started framework attempt in the prefix".to_owned(),
+        ));
+    }
+    let completion_cell = runtime_spec
+        .cell(&completion_node.output_cell)
+        .ok_or_else(|| {
+            RuntimeError::InvalidSpec(format!(
+                "completion lifecycle node {} output cell {} is missing",
+                completion_node.node_id, completion_node.output_cell
+            ))
+        })?;
+    let expected_receipt_store = store::ArtifactEvidenceRef {
+        artifact_id: receipt_artifact_id.clone(),
+        digest: receipt_digest.clone(),
+        byte_len: receipt_bytes.as_bytes().len() as u64,
+        media_type: spec::MediaType::new("application/json")?,
+        schema_id: Some(completion_cell.schema_id.clone()),
+        semantic_type_id: Some(completion_cell.semantic_type_id.clone()),
+        producer_node_id: Some(completion_node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::StateOutput,
+    };
+    let expected_receipt_ref = event_artifact_ref_from_store(&expected_receipt_store)?;
+
+    let completed_outcome = events::RunCompletionOutcome::Completed(Box::new(completion.clone()));
+    validate_sealed_terminal_commit_batch(
+        commit,
+        SealedTerminalCommitValidation {
+            label: "CompleteRun",
+            run_id,
+            spec_hash: runtime_spec.spec_hash(),
+            outcome: &completed_outcome,
+            node_id: &completion_node.node_id,
+            attempt_id: &produced.attempt_id,
+            receipt_cell_id: &completion_node.output_cell,
+            receipt_artifact_id: &receipt_artifact_id,
+            receipt_digest: &receipt_digest,
+            expected_receipt_ref: &expected_receipt_ref,
+        },
+    )
+}
+
+fn validate_historical_resolve_saga_terminal_batch(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    pre_resolution_stream: &[store::KernelEventEnvelope],
+    commit: &[store::KernelEventEnvelope],
+    artifact_bytes: &store::ArtifactByteAuthorityMap,
+) -> Result<()> {
+    let completion_payload = commit
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::RunCompleted(payload) => Some(payload),
+            _ => None,
+        })
+        .expect("caller checked completion count");
+    let resolve_node = certified_resolve_saga_terminal_node(runtime_spec)?;
+    let pre_resolution_projection =
+        store::ProjectionSnapshot::rebuild_from_run_stream_with_artifact_bytes(
+            pre_resolution_stream,
+            artifact_bytes,
+        )?;
+    let outcome =
+        saga_terminal_completion_outcome(runtime_spec, run_id, &pre_resolution_projection)?;
+    if completion_payload.run_id != *run_id
+        || completion_payload.spec_hash != *runtime_spec.spec_hash()
+        || completion_payload.outcome != outcome
+    {
+        return Err(RuntimeError::InvalidRunStream(
+            "RunCompleted payload does not match sealed ResolveSagaTerminal evidence".to_owned(),
+        ));
+    }
+
+    let receipt_bytes =
+        resolve_saga_terminal_receipt_json(runtime_spec, &outcome, pre_resolution_stream)?;
+    let receipt_digest = receipt_bytes.content_digest();
+    let receipt_artifact_id =
+        ArtifactId::from_digest(receipt_digest.algorithm(), *receipt_digest.digest());
+    let produced = commit
+        .iter()
+        .filter_map(|event| match event.payload() {
+            events::KernelEventPayload::CellProduced(payload)
+                if payload.node_id == resolve_node.node_id =>
+            {
+                Some(payload)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if produced.len() != 1 {
+        return Err(RuntimeError::InvalidRunStream(
+            "ResolveSagaTerminal commit was not produced by exactly one framework receipt cell"
+                .to_owned(),
+        ));
+    }
+    let produced = produced[0];
+    if produced.spec_hash != *runtime_spec.spec_hash()
+        || produced.cell_id != resolve_node.output_cell
+        || produced.artifact_id != receipt_artifact_id
+        || produced.content_digest != receipt_digest
+    {
+        return Err(RuntimeError::InvalidRunStream(
+            "ResolveSagaTerminal receipt cell does not match the sealed terminal evidence"
+                .to_owned(),
+        ));
+    }
+    if !matches!(
+        pre_resolution_projection
+            .attempt(&resolve_node.node_id, &produced.attempt_id)
+            .map(|attempt| &attempt.status),
+        Some(store::AttemptStatus::Started { .. })
+    ) {
+        return Err(RuntimeError::InvalidRunStream(
+            "ResolveSagaTerminal commit lacks matching started framework attempt in the prefix"
+                .to_owned(),
+        ));
+    }
+    let resolve_cell = runtime_spec
+        .cell(&resolve_node.output_cell)
+        .ok_or_else(|| {
+            RuntimeError::InvalidSpec(format!(
+                "resolve-saga-terminal lifecycle node {} output cell {} is missing",
+                resolve_node.node_id, resolve_node.output_cell
+            ))
+        })?;
+    let expected_receipt_store = store::ArtifactEvidenceRef {
+        artifact_id: receipt_artifact_id.clone(),
+        digest: receipt_digest.clone(),
+        byte_len: receipt_bytes.as_bytes().len() as u64,
+        media_type: spec::MediaType::new("application/json")?,
+        schema_id: Some(resolve_cell.schema_id.clone()),
+        semantic_type_id: Some(resolve_cell.semantic_type_id.clone()),
+        producer_node_id: Some(resolve_node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::StateOutput,
+    };
+    let expected_receipt_ref = event_artifact_ref_from_store(&expected_receipt_store)?;
+
+    validate_sealed_terminal_commit_batch(
+        commit,
+        SealedTerminalCommitValidation {
+            label: "ResolveSagaTerminal",
+            run_id,
+            spec_hash: runtime_spec.spec_hash(),
+            outcome: &outcome,
+            node_id: &resolve_node.node_id,
+            attempt_id: &produced.attempt_id,
+            receipt_cell_id: &resolve_node.output_cell,
+            receipt_artifact_id: &receipt_artifact_id,
+            receipt_digest: &receipt_digest,
+            expected_receipt_ref: &expected_receipt_ref,
+        },
+    )
+}
+
+fn validate_sealed_terminal_commit_batch(
+    commit: &[store::KernelEventEnvelope],
+    expected: SealedTerminalCommitValidation<'_>,
+) -> Result<()> {
+    let SealedTerminalCommitValidation {
+        label,
+        run_id,
+        spec_hash,
+        outcome,
+        node_id,
+        attempt_id,
+        receipt_cell_id,
+        receipt_artifact_id,
+        receipt_digest,
+        expected_receipt_ref,
+    } = expected;
+    let mismatch = || {
+        RuntimeError::InvalidRunStream(format!(
+            "{label} commit does not match the sealed framework batch"
+        ))
+    };
+    if commit.len() != 4 {
+        return Err(mismatch());
+    }
+    match commit[0].payload() {
+        events::KernelEventPayload::CellProduced(payload)
+            if payload.node_id == *node_id
+                && payload.attempt_id == *attempt_id
+                && payload.cell_id == *receipt_cell_id
+                && payload.artifact_id == *receipt_artifact_id
+                && payload.content_digest == *receipt_digest => {}
+        _ => return Err(mismatch()),
+    }
+    match commit[1].payload() {
+        events::KernelEventPayload::StateAttemptCompleted(payload)
+            if payload.node_id == *node_id
+                && payload.attempt_id == *attempt_id
+                && payload.output_cell_id == *receipt_cell_id => {}
+        _ => return Err(mismatch()),
+    }
+    match commit[2].payload() {
+        events::KernelEventPayload::ArtifactReferenced(payload)
+            if payload.node_id.as_ref() == Some(node_id)
+                && payload.attempt_id.as_ref() == Some(attempt_id)
+                && payload.artifact_ref == *expected_receipt_ref => {}
+        _ => return Err(mismatch()),
+    }
+    match commit[3].payload() {
+        events::KernelEventPayload::RunCompleted(payload)
+            if payload.run_id == *run_id
+                && payload.spec_hash == *spec_hash
+                && payload.outcome == *outcome => {}
+        _ => return Err(mismatch()),
+    }
+    Ok(())
+}
+
+fn require_projected_attempt(
+    projections: &store::ProjectionSnapshot,
+    node_id: &NodeId,
+    attempt_id: &AttemptId,
+    event_kind: &'static str,
+) -> Result<store::AttemptStatus> {
+    let attempt = projections.attempt(node_id, attempt_id).ok_or_else(|| {
+        RuntimeError::InvalidRunStream(format!(
+            "{event_kind} event references missing attempt {attempt_id} for node {node_id}"
+        ))
+    })?;
+    Ok(attempt.status.clone())
+}
+
+fn validate_historical_produced_cell(
+    runtime_spec: &CertifiedRuntimeSpec,
+    projections: &store::ProjectionSnapshot,
+    event: &store::KernelEventEnvelope,
+    payload: &events::CellProduced,
+) -> Result<()> {
+    let cell = runtime_spec.cell(&payload.cell_id).ok_or_else(|| {
+        RuntimeError::InvalidRunStream(format!("produced uncertified cell {}", payload.cell_id))
+    })?;
+    let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+        RuntimeError::InvalidRunStream(format!(
+            "cell {} was produced by uncertified node {}",
+            payload.cell_id, payload.node_id
+        ))
+    })?;
+    if node.output_cell != payload.cell_id
+        || cell.producer != spec::CellProducer::Node(payload.node_id.clone())
+        || cell.scope_id != payload.scope_id
+        || cell.schema_id != payload.schema_id
+        || cell.semantic_type_id != payload.semantic_type_id
+        || cell.value_lineage != payload.value_lineage
+        || cell.context != payload.context
+    {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "produced cell {} does not match certified cell metadata",
+            payload.cell_id
+        )));
+    }
+    match projections.cell_terminal_for_run(event.run_id(), &payload.cell_id) {
+        Some(store::CellTerminalProjection::Produced {
+            event_id,
+            node_id,
+            attempt_id,
+            schema_id,
+            semantic_type_id,
+            artifact_id,
+            content_digest,
+            evidence_hash,
+        }) if event_id == event.event_id()
+            && node_id == &payload.node_id
+            && attempt_id == &payload.attempt_id
+            && schema_id == &payload.schema_id
+            && semantic_type_id == &payload.semantic_type_id
+            && artifact_id == &payload.artifact_id
+            && content_digest == &payload.content_digest
+            && evidence_hash == &payload.evidence_hash =>
+        {
+            Ok(())
+        }
+        _ => Err(RuntimeError::InvalidRunStream(format!(
+            "produced cell {} projection does not match authoritative event",
+            payload.cell_id
+        ))),
+    }
+}
+
+fn validate_historical_skipped_cell(
+    runtime_spec: &CertifiedRuntimeSpec,
+    projections: &store::ProjectionSnapshot,
+    event: &store::KernelEventEnvelope,
+    payload: &events::CellSkipped,
+) -> Result<()> {
+    let cell = runtime_spec.cell(&payload.cell_id).ok_or_else(|| {
+        RuntimeError::InvalidRunStream(format!("skipped uncertified cell {}", payload.cell_id))
+    })?;
+    let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+        RuntimeError::InvalidRunStream(format!(
+            "cell {} was skipped by uncertified node {}",
+            payload.cell_id, payload.node_id
+        ))
+    })?;
+    if node.output_cell != payload.cell_id
+        || cell.producer != spec::CellProducer::Node(payload.node_id.clone())
+        || cell.scope_id != payload.scope_id
+        || cell.schema_id != payload.schema_id
+        || cell.semantic_type_id != payload.semantic_type_id
+        || cell.value_lineage != payload.value_lineage
+        || cell.context != payload.context
+        || cell.terminal_policy == spec::CellTerminalPolicy::ProducedOnly
+    {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "skipped cell {} does not match certified cell metadata",
+            payload.cell_id
+        )));
+    }
+    match projections.cell_terminal_for_run(event.run_id(), &payload.cell_id) {
+        Some(store::CellTerminalProjection::Skipped {
+            event_id,
+            node_id,
+            attempt_id,
+            schema_id,
+            semantic_type_id,
+            skip_reason,
+        }) if event_id == event.event_id()
+            && node_id == &payload.node_id
+            && attempt_id == &payload.attempt_id
+            && schema_id == &payload.schema_id
+            && semantic_type_id == &payload.semantic_type_id
+            && skip_reason == &payload.skip_reason =>
+        {
+            Ok(())
+        }
+        _ => Err(RuntimeError::InvalidRunStream(format!(
+            "skipped cell {} projection does not match authoritative event",
+            payload.cell_id
+        ))),
+    }
+}
+
+fn validate_historical_public_output_produced(
+    runtime_spec: &CertifiedRuntimeSpec,
+    projections: &store::ProjectionSnapshot,
+    event: &store::KernelEventEnvelope,
+    node: &spec::NodeSpec,
+    payload: &events::PublicOutputProduced,
+) -> Result<()> {
+    match require_projected_attempt(
+        projections,
+        &payload.node_id,
+        &payload.attempt_id,
+        "public output",
+    )? {
+        store::AttemptStatus::Completed { output_cell_id }
+            if output_cell_id == node.output_cell => {}
+        _ => {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "public output for node {} attempt {} is not backed by a completed render attempt",
+                payload.node_id, payload.attempt_id
+            )));
+        }
+    }
+    if projections
+        .cell_terminal_for_run(event.run_id(), &node.output_cell)
+        .is_none()
+    {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "public output for node {} has no terminal render receipt cell",
+            payload.node_id
+        )));
+    }
+    for cell in &payload.cells {
+        let certified = runtime_spec.cell(&cell.cell_id).ok_or_else(|| {
+            RuntimeError::InvalidRunStream(format!(
+                "public output references uncertified cell {}",
+                cell.cell_id
+            ))
+        })?;
+        match projections.cell_terminal_for_run(event.run_id(), &cell.cell_id) {
+            Some(store::CellTerminalProjection::Produced {
+                schema_id,
+                semantic_type_id,
+                artifact_id,
+                content_digest,
+                evidence_hash,
+                ..
+            }) if schema_id == &cell.schema_id
+                && semantic_type_id == &cell.semantic_type_id
+                && artifact_id == &cell.artifact_id
+                && content_digest == &cell.content_digest
+                && evidence_hash == &cell.evidence_hash
+                && certified.producer == cell.producer
+                && certified.scope_id == cell.scope_id
+                && certified.value_lineage == cell.value_lineage => {}
+            _ => {
+                return Err(RuntimeError::InvalidRunStream(format!(
+                    "public output source cell {} is not backed by matching terminal evidence",
+                    cell.cell_id
+                )));
+            }
+        }
+    }
+    let Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) = &node.framework else {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "public output for node {} is not backed by a render node",
+            node.node_id
+        )));
+    };
+    let expected_rendered_digest = public_output_rendered_digest(render, &payload.cells)?;
+    if payload.rendered_digest != expected_rendered_digest {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "public output for node {} carries a rendered digest that does not match certified cells",
+            node.node_id
+        )));
+    }
+    let expected_receipt_digest = public_output_receipt_digest(
+        render,
+        &payload.cells,
+        &expected_rendered_digest,
+        payload.rendered_artifact_id.as_ref(),
+    )?;
+    let expected_receipt_artifact_id = ArtifactId::from_digest(
+        expected_receipt_digest.algorithm(),
+        *expected_receipt_digest.digest(),
+    );
+    let output_cell = runtime_spec.cell(&node.output_cell).ok_or_else(|| {
+        RuntimeError::InvalidRunStream(format!(
+            "public output render node {} output cell {} is missing",
+            node.node_id, node.output_cell
+        ))
+    })?;
+    let receipt_schema_id = spec::public_output_receipt_schema_id()?;
+    match projections.cell_terminal_for_run(event.run_id(), &node.output_cell) {
+        Some(store::CellTerminalProjection::Produced {
+            schema_id,
+            semantic_type_id,
+            artifact_id,
+            content_digest,
+            ..
+        }) if schema_id == &receipt_schema_id
+            && semantic_type_id == &output_cell.semantic_type_id
+            && artifact_id == &expected_receipt_artifact_id
+            && content_digest == &expected_receipt_digest => {}
+        _ => {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "public output for node {} has no matching terminal receipt cell",
+                node.node_id
+            )));
+        }
+    }
+    match projections.public_output(event.run_id(), &payload.public_schema_id) {
+        Some(store::PublicOutputProjection::Produced {
+            event_id,
+            rendered_digest,
+            rendered_artifact_id,
+        }) if event_id == event.event_id()
+            && rendered_digest == &payload.rendered_digest
+            && rendered_artifact_id == &payload.rendered_artifact_id =>
+        {
+            Ok(())
+        }
+        _ => Err(RuntimeError::InvalidRunStream(format!(
+            "public output projection for schema {} does not match authoritative event",
+            payload.public_schema_id
+        ))),
+    }
+}
+
+fn validate_historical_run_completed(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    event: &store::KernelEventEnvelope,
+    payload: &events::RunCompleted,
+    produced_public_output: Option<&events::PublicOutputCompletionEvidence>,
+    retention_manifest_projected_seq: Option<store::StreamSeq>,
+) -> Result<()> {
+    if &payload.run_id != run_id {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "RunCompleted references run {} while validating {}",
+            payload.run_id, run_id
+        )));
+    }
+    if payload.spec_hash != *runtime_spec.spec_hash() {
+        return Err(RuntimeError::InvalidRunStream(
+            "RunCompleted carries a spec hash outside the certified run".to_owned(),
+        ));
+    }
+    let events::RunCompletionOutcome::Completed(completion) = &payload.outcome else {
+        return Ok(());
+    };
+    if completion.public_output_schema_id != runtime_spec.spec().public_outputs.public_schema_id {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "RunCompleted references public schema {} outside certified public outputs",
+            completion.public_output_schema_id
+        )));
+    }
+    match produced_public_output {
+        Some(produced) if produced == completion.as_ref() => Ok(()),
+        Some(_) => Err(RuntimeError::InvalidRunStream(
+            "RunCompleted public-output evidence does not match preceding PublicOutputProduced"
+                .to_owned(),
+        )),
+        None => Err(RuntimeError::InvalidRunStream(
+            "RunCompleted appeared before PublicOutputProduced".to_owned(),
+        )),
+    }?;
+    match retention_manifest_projected_seq {
+        Some(seq) if seq < event.seq() => Ok(()),
+        Some(_) => Err(RuntimeError::InvalidRunStream(
+            "RunCompleted must follow a prior retention manifest projection commit".to_owned(),
+        )),
+        None => Err(RuntimeError::InvalidRunStream(
+            "RunCompleted appeared before retention manifest projection".to_owned(),
+        )),
+    }
+}
+
+fn validate_historical_public_output_failed(
+    projections: &store::ProjectionSnapshot,
+    run_id: &RunId,
+    payload: &events::PublicOutputRenderFailed,
+) -> Result<()> {
+    match require_projected_attempt(
+        projections,
+        &payload.node_id,
+        &payload.attempt_id,
+        "public output failure",
+    )? {
+        store::AttemptStatus::Failed { .. } => {}
+        _ => {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "public output failure for node {} attempt {} is not backed by a failed render attempt",
+                payload.node_id, payload.attempt_id
+            )));
+        }
+    }
+    match projections.public_output(run_id, &payload.public_schema_id) {
+        Some(store::PublicOutputProjection::Produced { .. })
+        | Some(store::PublicOutputProjection::RenderFailed { .. }) => Ok(()),
+        _ => Err(RuntimeError::InvalidRunStream(format!(
+            "public output failure for schema {} is not reflected in public-output projection",
+            payload.public_schema_id
+        ))),
+    }
+}
+
+pub(crate) fn validate_spec_artifact(
+    runtime_spec: &CertifiedRuntimeSpec,
+    evidence: store::ArtifactEvidenceRef,
+) -> Result<store::ArtifactEvidenceRef> {
+    let canonical = runtime_spec
+        .spec()
+        .canonical_json()
+        .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
+    let digest = canonical.content_digest();
+    let expected_artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
+    if evidence.artifact_id != expected_artifact_id
+        || evidence.digest != digest
+        || evidence.byte_len != canonical.as_bytes().len() as u64
+        || evidence.media_type != runtime_spec.spec().media_type
+        || evidence.schema_id.as_ref()
+            != Some(
+                &spec::typed_execution_spec_schema_id()
+                    .map_err(|error| RuntimeError::Identity(error.to_string()))?,
+            )
+        || evidence.semantic_type_id.is_some()
+        || evidence.producer_node_id.is_some()
+        || evidence.producer_seed_id.is_some()
+        || evidence.artifact_role != events::ArtifactRole::TypedExecutionSpec
+    {
+        return Err(RuntimeError::InvalidRunStream(
+            "typed execution spec artifact evidence does not match the certified spec".to_owned(),
+        ));
+    }
+    Ok(evidence)
+}
+
+pub(crate) fn validate_certificate_artifact(
+    runtime_spec: &CertifiedRuntimeSpec,
+    evidence: store::ArtifactEvidenceRef,
+) -> Result<store::ArtifactEvidenceRef> {
+    let canonical = runtime_spec
+        .certificate()
+        .canonical_json()
+        .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
+    let digest = canonical.content_digest();
+    let expected_artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
+    let media_type = spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)
+        .map_err(|error| RuntimeError::Identity(error.to_string()))?;
+    if evidence.artifact_id != expected_artifact_id
+        || evidence.digest != digest
+        || evidence.byte_len != canonical.as_bytes().len() as u64
+        || evidence.media_type != media_type
+        || evidence.schema_id.as_ref()
+            != Some(
+                &mfm_certify::typed_spec_certificate_schema_id()
+                    .map_err(|error| RuntimeError::Identity(error.to_string()))?,
+            )
+        || evidence.semantic_type_id.is_some()
+        || evidence.producer_node_id.is_some()
+        || evidence.producer_seed_id.is_some()
+        || evidence.artifact_role != events::ArtifactRole::TypedSpecCertificate
+    {
+        return Err(RuntimeError::InvalidRunStream(
+            "typed spec certificate artifact evidence does not match the certified spec".to_owned(),
+        ));
+    }
+    Ok(evidence)
+}
+
+pub(crate) fn validate_config_artifacts(
+    runtime_spec: &CertifiedRuntimeSpec,
+    evidence: Vec<store::ArtifactEvidenceRef>,
+) -> Result<Vec<store::ArtifactEvidenceRef>> {
+    let mut by_key = BTreeMap::new();
+    for artifact in evidence {
+        let Some(schema_id) = artifact.schema_id.clone() else {
+            return Err(RuntimeError::InvalidRunStream(
+                "typed config artifact evidence must carry schema_id".to_owned(),
+            ));
+        };
+        if artifact.artifact_role != events::ArtifactRole::TypedConfig
+            || artifact.semantic_type_id.is_some()
+            || artifact.producer_node_id.is_some()
+            || artifact.producer_seed_id.is_some()
+        {
+            return Err(RuntimeError::InvalidRunStream(
+                "typed config artifact evidence has invalid role or producer metadata".to_owned(),
+            ));
+        }
+        let key = format!("{}:{}", schema_id, artifact.digest);
+        if by_key.insert(key, artifact).is_some() {
+            return Err(RuntimeError::InvalidRunStream(
+                "duplicate typed config artifact evidence".to_owned(),
+            ));
+        }
+    }
+
+    let mut validated = Vec::with_capacity(runtime_spec.spec().config_refs.len());
+    for config in &runtime_spec.spec().config_refs {
+        let key = config_ref_key(config);
+        let artifact = by_key.remove(&key).ok_or_else(|| {
+            RuntimeError::InvalidRunStream(format!(
+                "missing typed config artifact evidence for schema {} digest {}",
+                config.schema_id, config.digest
+            ))
+        })?;
+        if artifact.artifact_id != config.artifact_id
+            || artifact.digest != config.digest
+            || artifact.byte_len != config.byte_len
+            || artifact.media_type != config.media_type
+            || artifact.schema_id.as_ref() != Some(&config.schema_id)
+        {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "typed config artifact evidence for schema {} digest {} does not match certified config ref",
+                config.schema_id, config.digest
+            )));
+        }
+        validated.push(artifact);
+    }
+    if !by_key.is_empty() {
+        return Err(RuntimeError::InvalidRunStream(
+            "typed config artifact evidence contains entries not certified by the spec".to_owned(),
+        ));
+    }
+    Ok(validated)
+}
+
+fn validate_fact_descriptor_artifact_refs(
+    runtime_spec: &CertifiedRuntimeSpec,
+    artifacts: &[events::RunArtifactEvidenceRef],
+) -> Result<()> {
+    let required = runtime_spec.fact_descriptor_hashes();
+    let schema_id = mfm_facts::fact_descriptor_schema_id()
+        .map_err(|error| RuntimeError::Identity(error.to_string()))?;
+    let media_type = spec::MediaType::new("application/json")?;
+    let mut admitted = BTreeSet::new();
+
+    for artifact in artifacts {
+        if artifact.role != events::ArtifactRole::FactDescriptor
+            || artifact.content_digest.algorithm() != mfm_ids::DigestAlgorithm::Sha256JcsV1
+            || artifact.media_type != media_type
+            || artifact.schema_id.as_ref() != Some(&schema_id)
+            || artifact.semantic_type_id.is_some()
+        {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "fact descriptor artifact {} has invalid metadata",
+                artifact.artifact_id
+            )));
+        }
+        let expected_artifact_id = ArtifactId::from_digest(
+            artifact.content_digest.algorithm(),
+            *artifact.content_digest.digest(),
+        );
+        if artifact.artifact_id != expected_artifact_id {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "fact descriptor artifact {} does not match descriptor digest {}",
+                artifact.artifact_id, artifact.content_digest
+            )));
+        }
+        if !admitted.insert(artifact.content_digest.clone()) {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "duplicate fact descriptor artifact {}",
+                artifact.content_digest
+            )));
+        }
+    }
+
+    if admitted != required {
+        return Err(RuntimeError::InvalidRunStream(
+            "RunAdmitted fact descriptor artifacts do not match certified descriptor allow-lists"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
