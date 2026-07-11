@@ -173,24 +173,6 @@ impl ActiveResourceLaneReleaseView for ResourceLaneProjection {
     }
 }
 
-impl ActiveResourceLaneReleaseView for MaterializedActiveLane {
-    fn holder(&self) -> &SideEffectPairLedgerRef {
-        &self.holder
-    }
-
-    fn ledger_purpose(&self) -> &events::SideEffectLedgerPurpose {
-        &self.ledger_purpose
-    }
-
-    fn invocation_epoch(&self) -> u32 {
-        self.invocation_epoch
-    }
-
-    fn claim_id(&self) -> &events::ResourceLaneClaimId {
-        &self.claim_id
-    }
-}
-
 #[derive(Clone, Copy)]
 pub(super) struct ResourceLaneReleaseMatch<'a> {
     pub(super) run_id: &'a RunId,
