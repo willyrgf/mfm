@@ -16,7 +16,7 @@ help: the trait `PureState` is implemented for `TryPureState`
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = note: required for `mfm_capabilities::Pure` to implement `EffectRunner<StateWithoutRunner>`
 note: required by a bound in `StateRegistryBuilder::register`
-  --> src/lib.rs
+  --> src/registry.rs
    |
    |     pub fn register<S>(&mut self) -> std::result::Result<(), RegistryError>
    |            -------- required by a bound in this associated function
