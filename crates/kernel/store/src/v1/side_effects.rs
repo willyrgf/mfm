@@ -122,7 +122,7 @@ pub(super) fn require_remediation_intent_admissible(
                 events::SideEffectLedgerPurpose::Remediation {
                     forward_pair_id: linked,
                     ..
-                } if linked == forward_pair_id
+                } if *linked == *forward_pair_id
             )
     }) {
         return Err(StoreError::ProjectionConflict {

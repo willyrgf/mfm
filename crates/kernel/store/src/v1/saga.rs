@@ -108,7 +108,7 @@ fn remediation_for_forward(
                     events::SideEffectLedgerPurpose::Remediation {
                         forward_pair_id: linked,
                         ..
-                    } if linked == forward_pair_id
+                    } if *linked == *forward_pair_id
                 )
         })
         .map(|projection| {
