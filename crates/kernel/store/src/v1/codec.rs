@@ -4,7 +4,7 @@ use super::*;
 ///
 /// Defined at the `v1` root (where the surrounding store internals live) and re-exported
 /// here so the Postgres adapter consumes one implementation through this module.
-pub use super::{
+pub use super::event_codec::{
     error_info_json, event_artifact_json, manual_resolution_note_json,
     manual_resolution_outcome_str, parse_error_category, parse_error_info, parse_event_artifact,
     parse_failure_phase, parse_manual_resolution_note, parse_manual_resolution_outcome,
