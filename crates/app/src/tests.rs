@@ -1499,7 +1499,7 @@ async fn run_read_services_are_evidence_only() {
     assert!(!production_read_constructor.contains("std::env"));
     assert!(production_read_constructor.contains("connect_production_run_read_store"));
 
-    let read_services_impl = source
+    let read_services_impl = include_str!("services.rs")
         .split("pub struct RunReadServices")
         .nth(1)
         .expect("read services are present")

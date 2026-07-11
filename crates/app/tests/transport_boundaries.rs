@@ -216,7 +216,7 @@ fn transport_provider_boundaries_reject_old_source_binding_surfaces() {
     }
     assert_btc_operation_io_requires_verified_call(btc_transport);
 
-    let app = include_str!("../src/lib.rs");
+    let app = include_str!("../src/services.rs");
     assert!(
         app.contains("ReplayVerifierRegistry::production().verify(&broker"),
         "app replay must use the compiled recorded-evidence verifier registry"
