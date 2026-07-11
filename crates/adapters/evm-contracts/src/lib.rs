@@ -69,16 +69,16 @@ use mfm_program_derive::MfmValue;
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
     load_launch_config_for_node, load_materialized_struct_field_value, load_runner_config,
-    load_runner_config_for_node, load_side_effect_artifact, load_side_effect_value,
-    load_side_effect_value_for_node, preclaim_side_effect_resource_lane,
-    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
-    ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedInputs, PreInvocationRunCtx,
-    PreInvocationRunnerFuture, RunnerCapabilityBinding, RunnerExecutableIdentityTemplate,
-    RunnerIngressContext, RunnerRegistrationBuilder, RuntimeDiagnostic, RuntimeFailure,
-    SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
-    SideEffectObservedEvidence, SideEffectProtocolAction, SideEffectReplayEvidence,
-    SideEffectSubmissionDecision, SideEffectUnknownSubmissionDecision, SideEffectVerifyCallbacks,
-    SideEffectVerifyDriver, TypedContextOutputExtractor,
+    load_runner_config_for_node, load_side_effect_artifact, load_side_effect_artifact_for_node,
+    preclaim_side_effect_resource_lane, CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx,
+    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedInputs,
+    PreInvocationRunCtx, PreInvocationRunnerFuture, RunnerCapabilityBinding,
+    RunnerExecutableIdentityTemplate, RunnerIngressContext, RunnerRegistrationBuilder,
+    RuntimeDiagnostic, RuntimeFailure, SideEffectDriver, SideEffectDriverCallbacks,
+    SideEffectDriverFuture, SideEffectIntentPlan, SideEffectObservedEvidence,
+    SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
+    SideEffectUnknownSubmissionDecision, SideEffectVerifyCallbacks, SideEffectVerifyDriver,
+    TypedContextOutputExtractor,
 };
 use mfm_signing::{PublicKeyBytes, SignerRef, SigningProvider};
 use mfm_spec::v1 as spec;
@@ -5802,13 +5802,14 @@ where
                     &prepared_projection,
                 )
                 .await?;
-            let submissions = load_side_effect_value_for_node::<ContractTransactionSubmissions>(
-                submission,
-                events::ArtifactRole::Submission,
-                &submit_node.node_id,
-                self.factory.artifacts(),
-            )
-            .await?;
+            let (submissions, _) =
+                load_side_effect_artifact_for_node::<ContractTransactionSubmissions>(
+                    submission,
+                    events::ArtifactRole::Submission,
+                    &submit_node.node_id,
+                    self.factory.artifacts(),
+                )
+                .await?;
             let receipts =
                 read_receipts_with_poll(&runtime, prepared.evidence(), &submissions).await?;
             Ok(SideEffectObservedEvidence::new(
@@ -5861,7 +5862,7 @@ where
     ) -> SideEffectDriverFuture<'a, Self::Output> {
         Box::pin(async {
             let plan = self.load_plan(ctx, submit_node, submit_inputs).await?;
-            let receipt = load_side_effect_value::<P::Receipt>(
+            let (receipt, _) = load_side_effect_artifact::<P::Receipt>(
                 receipt,
                 events::ArtifactRole::Receipt,
                 ctx,
@@ -5881,7 +5882,7 @@ where
     ) -> SideEffectDriverFuture<'a, Self::Output> {
         Box::pin(async {
             let plan = self.load_plan(ctx, submit_node, submit_inputs).await?;
-            let confirmation = load_side_effect_value::<P::Confirmation>(
+            let (confirmation, _) = load_side_effect_artifact::<P::Confirmation>(
                 confirmation,
                 events::ArtifactRole::Confirmation,
                 ctx,
@@ -6382,7 +6383,7 @@ async fn load_prepared_invocation_for_node(
     artifacts: &dyn store::RetainedArtifactReadProvider,
     producer_node_id: &NodeId,
 ) -> mfm_runtime::Result<PreparedContractInvocation> {
-    let prepared = load_side_effect_value_for_node::<PreparedContractInvocation>(
+    let (prepared, _) = load_side_effect_artifact_for_node::<PreparedContractInvocation>(
         artifact,
         role,
         producer_node_id,

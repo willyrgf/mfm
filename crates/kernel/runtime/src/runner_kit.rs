@@ -333,35 +333,6 @@ where
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
-/// Loads a side-effect artifact value produced by the current runner node.
-pub async fn load_side_effect_value<T>(
-    artifact: &store::SideEffectArtifactProjection,
-    role: events::ArtifactRole,
-    ctx: &ErasedRunCtx<'_>,
-    artifacts: &dyn store::RetainedArtifactReadProvider,
-) -> Result<T>
-where
-    T: MfmValue + DeserializeOwned,
-{
-    let (value, _) = load_side_effect_artifact(artifact, role, ctx, artifacts).await?;
-    Ok(value)
-}
-
-/// Loads a side-effect artifact value produced by an explicit certified node.
-pub async fn load_side_effect_value_for_node<T>(
-    artifact: &store::SideEffectArtifactProjection,
-    role: events::ArtifactRole,
-    producer_node_id: &NodeId,
-    artifacts: &dyn store::RetainedArtifactReadProvider,
-) -> Result<T>
-where
-    T: MfmValue + DeserializeOwned,
-{
-    let (value, _) =
-        load_side_effect_artifact_for_node(artifact, role, producer_node_id, artifacts).await?;
-    Ok(value)
-}
-
 /// Loads a side-effect artifact and returned evidence produced by the current runner node.
 pub async fn load_side_effect_artifact<T>(
     artifact: &store::SideEffectArtifactProjection,
