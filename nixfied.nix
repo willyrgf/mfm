@@ -19,7 +19,9 @@ let
   ]
   ++ [ "cc" ]
   ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.libiconv ];
-  sqlxCli = assert pkgs.sqlx-cli.version == "0.9.0"; pkgs.sqlx-cli;
+  sqlxCli =
+    assert pkgs.sqlx-cli.version == "0.9.0";
+    pkgs.sqlx-cli;
   sqlxTools = cargoTools ++ [
     pkgs.bash
     "pg-psql"
@@ -30,7 +32,6 @@ let
   # Hermetic environment values; no append-to-inherited behavior because the child env starts empty.
   cargoEnv = {
     CARGO_TARGET_DIR = "\${stateDir}/cargo-target";
-    CARGO_INCREMENTAL = "0";
     RUST_BACKTRACE = "1";
     TMPDIR = "\${stateDir}";
   }
@@ -405,7 +406,10 @@ in
         };
         parity-collect-then-report = {
           task = "parity-collect-then-report";
-          dependsOn = [ "mfm-cli-build" "parity-postgres-state-events" ];
+          dependsOn = [
+            "mfm-cli-build"
+            "parity-postgres-state-events"
+          ];
         };
         parity-postgres-rest-api = {
           task = "parity-postgres-rest-api";
