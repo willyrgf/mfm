@@ -1,3 +1,4 @@
+use super::parse::{OrderingTermWire, OrderingWire, QueryScopeWire, ScopeDecisionEvidenceWire};
 use super::*;
 
 pub(super) fn canonical_descriptor_value(descriptor: &FactDescriptor) -> Result<CanonicalValue> {
