@@ -121,7 +121,7 @@ impl PublicFactQueryExecutor for ProductionRunStore {
             let result = self
                 .execute_fact_query(plan)
                 .await
-                .map_err(crate::fact_query_execution_store_error)?;
+                .map_err(AppError::from)?;
             Ok(result.rows().to_vec())
         })
     }

@@ -57,11 +57,6 @@ fn unique_schema() -> String {
     format!("run_store_{}_{}_{}", std::process::id(), nanos, counter)
 }
 
-fn schema_database_url(database_url: &str, schema: &str) -> String {
-    let separator = if database_url.contains('?') { '&' } else { '?' };
-    format!("{database_url}{separator}options=-csearch_path%3D{schema}")
-}
-
 fn artifact_id(byte: u8) -> ArtifactId {
     let digest = content_digest(byte);
     ArtifactId::from_digest(digest.algorithm(), *digest.digest())
@@ -80,12 +75,6 @@ fn test_prepared_artifact_bytes(
 }
 
 async fn test_store() -> (PostgresRunStore, String) {
-    test_store_with_fact_receipt_root(true).await
-}
-
-async fn test_store_with_fact_receipt_root(
-    with_fact_receipt_root: bool,
-) -> (PostgresRunStore, String) {
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
     let admin_pool = PgPool::connect(&database_url)
@@ -110,43 +99,11 @@ async fn test_store_with_fact_receipt_root(
     crate::schema::migrate_pool(&pool)
         .await
         .expect("migrate schema");
-    let fact_receipt_signer = with_fact_receipt_root.then(test_fact_receipt_signer);
-    if let Some(signer) = &fact_receipt_signer {
-        insert_fact_receipt_trust_root(&pool, signer).await;
-    }
     let authority = crate::schema::validate_pool(&pool)
         .await
         .expect("validate schema");
-    let store = PostgresRunStore {
-        pool,
-        authority,
-        fact_receipt_signer,
-    };
+    let store = PostgresRunStore { pool, authority };
     (store, schema)
-}
-
-fn test_fact_receipt_signer() -> PostgresFactReceiptSigner {
-    PostgresFactReceiptSigner::from_ed25519_signing_key_bytes(
-        mfm_facts::StoreIdentity::new("store.test").expect("store identity"),
-        mfm_facts::StoreKeyId::new("key.test").expect("key id"),
-        [17; 32],
-    )
-}
-
-async fn insert_fact_receipt_trust_root(pool: &PgPool, signer: &PostgresFactReceiptSigner) {
-    let trust_root = signer.trust_root().expect("trust root");
-    sqlx::query(
-        "INSERT INTO fact_receipt_trust_root \
-         (store_identity, authentication_scheme, key_id, verifying_key) \
-         VALUES ($1, $2, $3, $4)",
-    )
-    .bind(trust_root.store_identity().as_str())
-    .bind(trust_root.scheme().as_str())
-    .bind(trust_root.key_id().as_str())
-    .bind(trust_root.verifying_key().to_vec())
-    .execute(pool)
-    .await
-    .expect("insert fact receipt trust root");
 }
 
 async fn drop_schema(store: &PostgresRunStore, schema: &str) {
@@ -229,21 +186,11 @@ async fn global_fact_descriptor_catalog_count(store: &PostgresRunStore) -> i64 {
 }
 
 fn assert_fact_query_receipt(
-    store: &PostgresRunStore,
-    plan: &mfm_facts::CanonicalFactQueryPlan,
+    _store: &PostgresRunStore,
+    _plan: &mfm_facts::CanonicalFactQueryPlan,
     result: &mfm_facts::FactQueryResult,
     expected_cardinality: mfm_facts::QueryResultCardinality,
 ) {
-    let plan_hash = mfm_facts::fact_query_plan_hash(plan).expect("fact query plan hash");
-    mfm_store::v1::verify_fact_query_receipt_authentication(
-        &plan_hash,
-        result.receipt(),
-        store
-            .store_authority()
-            .fact_receipt_trust_root()
-            .expect("receipt trust root"),
-    )
-    .expect("fact query receipt signature verifies");
     assert_eq!(result.receipt().result_cardinality(), expected_cardinality);
 }
 
@@ -288,42 +235,6 @@ async fn schema_validation_accepts_store_commit_order_authority() {
         .await
         .expect("schema validation still passes");
 
-    drop_schema(&store, &schema).await;
-}
-
-#[tokio::test]
-async fn schema_provisions_fact_receipt_authority_once_and_only_publicly() {
-    let (store, schema) = test_store_with_fact_receipt_root(false).await;
-    assert!(!store.fact_receipt_queries_ready());
-    let database_url =
-        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
-    let scoped_database_url = schema_database_url(&database_url, &schema);
-    let expected_verifying_key = test_fact_receipt_signer().verifying_key();
-    let root = crate::PostgresSchema::provision_fact_receipt_trust_root(
-        &scoped_database_url,
-        mfm_facts::StoreIdentity::new("store.test").expect("store identity"),
-        mfm_facts::StoreKeyId::new("key.test").expect("key id"),
-        [17; 32],
-    )
-    .await
-    .expect("provision trust root");
-    assert_eq!(root.verifying_key(), &expected_verifying_key);
-
-    let same_root = crate::PostgresSchema::provision_fact_receipt_trust_root(
-        &scoped_database_url,
-        mfm_facts::StoreIdentity::new("different.identity").expect("store identity"),
-        mfm_facts::StoreKeyId::new("different.key").expect("key id"),
-        [17; 32],
-    )
-    .await
-    .expect("idempotent provisioning");
-    assert_eq!(same_root, root);
-    let persisted: Vec<u8> =
-        sqlx::query_scalar("SELECT verifying_key FROM fact_receipt_trust_root WHERE singleton")
-            .fetch_one(&store.pool)
-            .await
-            .expect("persisted public key");
-    assert_eq!(persisted, expected_verifying_key.to_vec());
     drop_schema(&store, &schema).await;
 }
 
@@ -455,7 +366,6 @@ async fn store_scope_survives_reconnects_and_rejects_mutation() {
     let restarted = PostgresRunStore {
         pool: store.pool.clone(),
         authority: store.store_authority().clone(),
-        fact_receipt_signer: store.fact_receipt_signer.clone(),
     };
     let restarted_store_scope = restarted
         .load_store_scope_id()
@@ -3103,7 +3013,6 @@ async fn observation_cursor_uses_durable_metadata_across_store_restarts() {
     let restarted = PostgresRunStore {
         pool: store.pool.clone(),
         authority: store.store_authority().clone(),
-        fact_receipt_signer: store.fact_receipt_signer.clone(),
     };
     let page = restarted
         .read_run_observations(RunObservationQuery::new(Some(cursor), 10, 0))
@@ -4379,31 +4288,6 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
         query_result.rows(),
         "fact projection terms must not be semantic query authority"
     );
-    let unsigned_store = PostgresRunStore {
-        pool: store.pool.clone(),
-        authority: store.store_authority().clone(),
-        fact_receipt_signer: None,
-    };
-    let missing_signer = unsigned_store
-        .execute_fact_query(&query_plan)
-        .await
-        .expect_err("missing signer rejects fact query");
-    assert!(matches!(
-        missing_signer,
-        PostgresStoreError::Store(StoreError::ReceiptAuthentication { .. })
-    ));
-    let mismatched_signer = PostgresFactReceiptSigner::from_ed25519_signing_key_bytes(
-        mfm_facts::StoreIdentity::new("store.test").expect("store identity"),
-        mfm_facts::StoreKeyId::new("key.test").expect("key id"),
-        [18; 32],
-    );
-    assert!(require_fact_receipt_signer_matches_authority(
-        store.store_authority(),
-        &mismatched_signer
-    )
-    .is_err());
-    assert!(!format!("{:?}", mismatched_signer).contains("signing_key"));
-
     sqlx::query("DELETE FROM fact_index_terms WHERE source_run_id = $1")
         .bind(run.as_str())
         .execute(&store.pool)

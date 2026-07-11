@@ -99,7 +99,6 @@ async fn bitcoin_chain_head_collector_two_cycles_record_checkpoint_and_public_fa
         store.clone(),
         store.clone(),
         mfm_app::production_certification_registry().expect("certification registry"),
-        Some(fact_index.receipt_trust_root()),
     );
     assert_eq!(
         read_services.fact_kinds().await.expect("fact kinds"),
@@ -275,7 +274,6 @@ fn collector_services(
     btc: Arc<dyn mfm_adapters_btc_jsonrpc::BtcChainHeadProviderFactory>,
     fact_index: Arc<ProjectionFactIndexProvider>,
 ) -> mfm_app::RunServices<AsyncInMemoryRunStore, AsyncInMemoryRunStore> {
-    let receipt_trust_root = fact_index.receipt_trust_root();
     let capabilities = mfm_adapters_btc_jsonrpc::BtcJsonRpcRunnerCapabilities::new(
         artifacts,
         btc,
@@ -290,13 +288,11 @@ fn collector_services(
     mfm_adapters_btc_jsonrpc::register_btc_jsonrpc_runners(&mut runners, capabilities)
         .expect("btc runners");
     let runtime_artifacts = Arc::new(store.clone());
-    mfm_app::RunServices::new_with_certification_registry_and_fact_query_authority(
+    mfm_app::RunServices::new_with_certification_registry(
         mfm_runtime::SerialTypedScheduler::new(runners, runtime_artifacts),
         store.clone(),
         store,
         mfm_app::production_certification_registry().expect("certification registry"),
-        Some(receipt_trust_root),
-        true,
     )
 }
 

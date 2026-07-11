@@ -219,12 +219,6 @@ pub enum StoreError {
         /// Stable diagnostic.
         message: String,
     },
-    /// Fact query receipt authentication failed.
-    #[error("fact query receipt authentication failed: {message}")]
-    ReceiptAuthentication {
-        /// Stable diagnostic.
-        message: String,
-    },
     /// Identity construction failed.
     #[error("identity error: {0}")]
     Identity(String),
@@ -319,12 +313,6 @@ pub use admission_lanes::{
     NowaitSkip, NowaitSkipAdmissionBusy, NowaitSkipAdmissionResult, ResourceAdmissionLane,
     WaitFifo, WaitFifoAdmissionBlock, EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS,
     EXECUTION_CLAIM_LEASE_TTL_SECS,
-};
-
-mod receipt_authentication;
-pub use receipt_authentication::{
-    fact_query_receipt_authentication_message, validate_fact_query_evidence_recording,
-    verify_fact_query_receipt_authentication, FactQueryReceiptTrustRoot,
 };
 
 /// Shared canonical-JSON codec for kernel events, projections, and saga types.

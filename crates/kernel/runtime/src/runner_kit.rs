@@ -1450,17 +1450,7 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
         &mut self,
         evidence: mfm_facts::FactQueryEvidence,
     ) -> Result<()> {
-        let trust_root = self
-            .artifacts
-            .ctx
-            .fact_query_receipt_trust_root()
-            .ok_or_else(|| {
-                RuntimeError::InvalidRunnerOutput(
-                    "fact-query receipt authority is not configured".to_owned(),
-                )
-            })?;
-        store::validate_fact_query_evidence_recording(&evidence, trust_root)
-            .map_err(RuntimeError::from)?;
+        mfm_facts::validate_fact_query_evidence(&evidence).map_err(runtime_fact_error)?;
         let artifact = self.artifacts.fact_query_evidence(&evidence)?;
         let staged = self.artifacts.staged_attempt(&artifact)?;
         let retention_refs = fact_query_evidence_retention_refs(
@@ -1734,12 +1724,11 @@ fn runtime_fact_error(error: mfm_facts::FactError) -> RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::SigningKey;
     use mfm_canonical::CanonicalValue;
     use mfm_store::v1::test_support::{
         fact_descriptor_projection_fixture_for_test, fact_projection_fixture_for_test,
-        signed_fact_query_receipt_for_test, FactProjectionFixtureInputForTest,
-        SignedFactQueryReceiptFixtureInputForTest,
+        fact_query_receipt_for_test, FactProjectionFixtureInputForTest,
+        FactQueryReceiptFixtureInputForTest,
     };
 
     fn digest(byte: u8) -> ContentDigest {
@@ -2025,20 +2014,13 @@ mod tests {
             mfm_facts::DescriptorCatalogWatermark::new(1),
             mfm_facts::StoreCommitOrder::new(1),
         );
-        let plan_hash = mfm_facts::fact_query_plan_hash(&plan).expect("plan hash");
         let rows = [mfm_facts::FactQueryResultRow::new(fact_ref, Vec::new())];
-        let key = SigningKey::from_bytes(&[0x52; 32]);
-        let receipt =
-            signed_fact_query_receipt_for_test(SignedFactQueryReceiptFixtureInputForTest {
-                plan_hash: &plan_hash,
-                key: &key,
-                store_identity: mfm_facts::StoreIdentity::new("store.default").expect("store"),
-                key_id: mfm_facts::StoreKeyId::new("key.default").expect("key"),
-                read_frontier: frontier,
-                rows: &rows,
-                include_returned_field_summaries: false,
-                limit: None,
-            });
+        let receipt = fact_query_receipt_for_test(FactQueryReceiptFixtureInputForTest {
+            read_frontier: frontier,
+            rows: &rows,
+            include_returned_field_summaries: false,
+            limit: None,
+        });
         mfm_facts::FactQueryEvidence::new(
             plan,
             receipt,

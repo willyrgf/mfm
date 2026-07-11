@@ -111,77 +111,6 @@ impl StoreReadFrontier {
     }
 }
 
-/// Store receipt authentication scheme.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum StoreReceiptAuthenticationScheme {
-    /// Local Ed25519 signature over a SHA-256 JCS receipt hash.
-    LocalEd25519Sha256JcsV1,
-}
-
-impl_fact_tag!(StoreReceiptAuthenticationScheme, "store receipt authentication scheme", pub, "Returns the canonical authentication scheme tag.", {
-    Self::LocalEd25519Sha256JcsV1 => "local_ed25519_sha256_jcs_v1",
-});
-
-/// Store-owned receipt authentication metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoreReceiptAuthentication {
-    pub(crate) store_identity: StoreIdentity,
-    pub(crate) scheme: StoreReceiptAuthenticationScheme,
-    pub(crate) key_id: Option<StoreKeyId>,
-    pub(crate) signature_or_mac: Vec<u8>,
-}
-
-impl StoreReceiptAuthentication {
-    /// Creates receipt authentication metadata.
-    pub fn new(
-        store_identity: StoreIdentity,
-        scheme: StoreReceiptAuthenticationScheme,
-        key_id: Option<StoreKeyId>,
-        signature_or_mac: Vec<u8>,
-    ) -> Result<Self> {
-        match scheme {
-            StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1 => {
-                if key_id.is_none() {
-                    return Err(FactError::descriptor(
-                        "local Ed25519 receipt authentication requires a key id",
-                    ));
-                }
-                if signature_or_mac.len() != 64 {
-                    return Err(FactError::descriptor(
-                        "local Ed25519 receipt authentication requires a 64-byte signature",
-                    ));
-                }
-            }
-        }
-        Ok(Self {
-            store_identity,
-            scheme,
-            key_id,
-            signature_or_mac,
-        })
-    }
-
-    /// Returns the store identity.
-    pub const fn store_identity(&self) -> &StoreIdentity {
-        &self.store_identity
-    }
-
-    /// Returns the authentication scheme.
-    pub const fn scheme(&self) -> StoreReceiptAuthenticationScheme {
-        self.scheme
-    }
-
-    /// Returns the optional key id.
-    pub const fn key_id(&self) -> Option<&StoreKeyId> {
-        self.key_id.as_ref()
-    }
-
-    /// Returns signature or MAC bytes.
-    pub fn signature_or_mac(&self) -> &[u8] {
-        &self.signature_or_mac
-    }
-}
-
 /// Returned summaries for one fact ref.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReturnedFactFieldSummary {
@@ -236,7 +165,7 @@ pub enum QueryResultCardinality {
     AtLeast(u64),
 }
 
-/// Store-owned receipt for a canonical fact query.
+/// Deterministic evidence for a canonical fact query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactQueryReceipt {
     pub(crate) read_frontier: StoreReadFrontier,
@@ -245,12 +174,33 @@ pub struct FactQueryReceipt {
     pub(crate) returned_field_summaries: Option<ReturnedFieldSummaries>,
     pub(crate) result_set_digest: ContentDigest,
     pub(crate) result_cardinality: QueryResultCardinality,
-    pub(crate) store_receipt_hash: ContentDigest,
-    pub(crate) store_receipt_authentication: StoreReceiptAuthentication,
 }
 
 impl FactQueryReceipt {
-    #[allow(clippy::too_many_arguments)]
+    /// Builds deterministic query evidence from returned rows.
+    pub fn from_rows(
+        read_frontier: StoreReadFrontier,
+        frontier_type: StoreReadFrontierType,
+        rows: &[FactQueryResultRow],
+        include_returned_field_summaries: bool,
+        limit: Option<u64>,
+    ) -> Result<Self> {
+        let returned_refs = returned_refs_for_rows(rows);
+        let returned_field_summaries =
+            returned_field_summaries_for_rows(rows, include_returned_field_summaries);
+        let result_set_digest =
+            fact_query_result_set_digest(&returned_refs, returned_field_summaries.as_ref())?;
+        let result_cardinality = cardinality_for_rows(rows.len(), limit)?;
+        Ok(Self {
+            read_frontier,
+            frontier_type,
+            returned_refs,
+            returned_field_summaries,
+            result_set_digest,
+            result_cardinality,
+        })
+    }
+
     pub(crate) fn from_parts(
         read_frontier: StoreReadFrontier,
         frontier_type: StoreReadFrontierType,
@@ -258,8 +208,6 @@ impl FactQueryReceipt {
         returned_field_summaries: Option<ReturnedFieldSummaries>,
         result_set_digest: ContentDigest,
         result_cardinality: QueryResultCardinality,
-        store_receipt_hash: ContentDigest,
-        store_receipt_authentication: StoreReceiptAuthentication,
     ) -> Self {
         Self {
             read_frontier,
@@ -268,8 +216,6 @@ impl FactQueryReceipt {
             returned_field_summaries,
             result_set_digest,
             result_cardinality,
-            store_receipt_hash,
-            store_receipt_authentication,
         }
     }
 
@@ -302,16 +248,6 @@ impl FactQueryReceipt {
     pub const fn result_cardinality(&self) -> QueryResultCardinality {
         self.result_cardinality
     }
-
-    /// Returns the store receipt hash.
-    pub const fn store_receipt_hash(&self) -> &ContentDigest {
-        &self.store_receipt_hash
-    }
-
-    /// Returns store receipt authentication.
-    pub const fn store_receipt_authentication(&self) -> &StoreReceiptAuthentication {
-        &self.store_receipt_authentication
-    }
 }
 
 /// One row returned by a canonical fact query.
@@ -338,95 +274,6 @@ impl FactQueryResultRow {
     /// Returns requested returned field summaries present on this row.
     pub fn returned_fields(&self) -> &[FactFieldValue] {
         &self.returned_fields
-    }
-}
-
-/// Unsigned material for a fact-query receipt body.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FactQueryReceiptMaterial {
-    pub(crate) read_frontier: StoreReadFrontier,
-    pub(crate) frontier_type: StoreReadFrontierType,
-    pub(crate) returned_refs: Vec<InternalFactRef>,
-    pub(crate) returned_field_summaries: Option<ReturnedFieldSummaries>,
-    pub(crate) result_set_digest: ContentDigest,
-    pub(crate) result_cardinality: QueryResultCardinality,
-    pub(crate) store_receipt_hash: ContentDigest,
-}
-
-impl FactQueryReceiptMaterial {
-    fn from_result_parts(
-        plan_hash: &ContentDigest,
-        read_frontier: StoreReadFrontier,
-        frontier_type: StoreReadFrontierType,
-        returned_refs: Vec<InternalFactRef>,
-        returned_field_summaries: Option<ReturnedFieldSummaries>,
-        result_cardinality: QueryResultCardinality,
-    ) -> Result<Self> {
-        let result_set_digest =
-            fact_query_result_set_digest(&returned_refs, returned_field_summaries.as_ref())?;
-        let store_receipt_hash = fact_query_receipt_body_hash_from_parts(
-            plan_hash,
-            &read_frontier,
-            frontier_type,
-            &returned_refs,
-            returned_field_summaries.as_ref(),
-            &result_set_digest,
-            result_cardinality,
-        )?;
-        Ok(Self {
-            read_frontier,
-            frontier_type,
-            returned_refs,
-            returned_field_summaries,
-            result_set_digest,
-            result_cardinality,
-            store_receipt_hash,
-        })
-    }
-
-    /// Builds unsigned receipt material from query result rows.
-    pub fn from_rows(
-        plan_hash: &ContentDigest,
-        read_frontier: StoreReadFrontier,
-        frontier_type: StoreReadFrontierType,
-        rows: &[FactQueryResultRow],
-        include_returned_field_summaries: bool,
-        limit: Option<u64>,
-    ) -> Result<Self> {
-        let returned_refs = returned_refs_for_rows(rows);
-        let returned_field_summaries =
-            returned_field_summaries_for_rows(rows, include_returned_field_summaries);
-        let result_cardinality = cardinality_for_rows(rows.len(), limit)?;
-        Self::from_result_parts(
-            plan_hash,
-            read_frontier,
-            frontier_type,
-            returned_refs,
-            returned_field_summaries,
-            result_cardinality,
-        )
-    }
-
-    /// Returns the receipt body hash that should be authenticated by the store.
-    pub const fn store_receipt_hash(&self) -> &ContentDigest {
-        &self.store_receipt_hash
-    }
-
-    /// Converts unsigned material into an authenticated receipt.
-    pub fn into_receipt(
-        self,
-        store_receipt_authentication: StoreReceiptAuthentication,
-    ) -> FactQueryReceipt {
-        FactQueryReceipt::from_parts(
-            self.read_frontier,
-            self.frontier_type,
-            self.returned_refs,
-            self.returned_field_summaries,
-            self.result_set_digest,
-            self.result_cardinality,
-            self.store_receipt_hash,
-            store_receipt_authentication,
-        )
     }
 }
 
@@ -461,7 +308,7 @@ fn cardinality_for_rows(row_count: usize, limit: Option<u64>) -> Result<QueryRes
     }
 }
 
-/// Result of a canonical fact query, paired with its authenticated receipt.
+/// Result of a canonical fact query, paired with its deterministic evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactQueryResult {
     pub(crate) rows: Vec<FactQueryResultRow>,
@@ -481,13 +328,13 @@ impl FactQueryResult {
         &self.rows
     }
 
-    /// Returns the authenticated store receipt for this query result.
+    /// Returns the deterministic query evidence for this result.
     pub const fn receipt(&self) -> &FactQueryReceipt {
         &self.receipt
     }
 }
 
-/// Closed mismatch reason when query result rows do not match their authenticated receipt.
+/// Closed mismatch reason when query result rows do not match their query evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactQueryResultMismatch {
     /// Row count differed from the returned refs in the receipt.
@@ -521,7 +368,7 @@ pub fn fact_query_result_rows_from_receipt(receipt: &FactQueryReceipt) -> Vec<Fa
         .collect()
 }
 
-/// Validates that query result rows align with the authenticated receipt shape.
+/// Validates that query result rows align with the query evidence shape.
 pub fn validate_fact_query_result_rows(
     rows: &[FactQueryResultRow],
     receipt: &FactQueryReceipt,
@@ -624,7 +471,7 @@ impl FactSelectionEvidence {
     }
 }
 
-/// Replay evidence for a live fact query performed by a run.
+/// Replay evidence for a fact query performed by a run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactQueryEvidence {
     pub(crate) plan: CanonicalFactQueryPlan,
@@ -651,7 +498,7 @@ impl FactQueryEvidence {
         &self.plan
     }
 
-    /// Returns the store query receipt.
+    /// Returns the deterministic query evidence.
     pub const fn receipt(&self) -> &FactQueryReceipt {
         &self.receipt
     }

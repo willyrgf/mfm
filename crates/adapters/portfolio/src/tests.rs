@@ -7,14 +7,12 @@ use super::*;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use ed25519_dalek::SigningKey;
 use mfm_canonical::sha256_digest_bytes;
 use mfm_facts::{
     fact_descriptor_hash, DescriptorCatalogWatermark, FactAudience, FactClaimId,
     FactFieldValueType, FactProducerProvenance, FactQueryReceipt, FactQueryResultRow,
     FactQueryScope, FactResponseEvidence, FactSubjectRef, FactVisibility, FactVisibilityScope,
-    InternalFactRef, InternalFactRefParts, StoreCommitOrder, StoreIdentity, StoreKeyId,
-    StoreReadFrontier, StoreScopeRef,
+    InternalFactRef, InternalFactRefParts, StoreCommitOrder, StoreReadFrontier, StoreScopeRef,
 };
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
@@ -40,7 +38,7 @@ use mfm_state_portfolio::{
 use mfm_states_btc::{BtcAddressBalanceResponse, BtcAddressBalanceSnapshotFact};
 use mfm_states_evm::{EvmAddressNativeBalanceResponse, EvmAddressNativeBalanceSnapshotFact};
 use mfm_store::v1::test_support::{
-    signed_fact_query_receipt_for_test, SignedFactQueryReceiptFixtureInputForTest,
+    fact_query_receipt_for_test, FactQueryReceiptFixtureInputForTest,
 };
 
 #[test]
@@ -844,25 +842,17 @@ fn signed_receipt_for_plan(
 }
 
 fn signed_receipt_for_plan_with_order(
-    plan: &mfm_facts::CanonicalFactQueryPlan,
+    _plan: &mfm_facts::CanonicalFactQueryPlan,
     rows: &[FactQueryResultRow],
     store_commit_order: StoreCommitOrder,
 ) -> FactQueryReceipt {
-    let key = SigningKey::from_bytes(&[7; 32]);
-    let store_identity = StoreIdentity::new("store.default").expect("store identity");
-    let key_id = StoreKeyId::new("fact.read.key").expect("key id");
     let read_frontier = StoreReadFrontier::new(
         StoreScopeRef::new("mfm.store.default").expect("store scope"),
         FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
         DescriptorCatalogWatermark::new(1),
         store_commit_order,
     );
-    let plan_hash = mfm_facts::fact_query_plan_hash(plan).expect("plan hash");
-    signed_fact_query_receipt_for_test(SignedFactQueryReceiptFixtureInputForTest {
-        plan_hash: &plan_hash,
-        key: &key,
-        store_identity,
-        key_id,
+    fact_query_receipt_for_test(FactQueryReceiptFixtureInputForTest {
         read_frontier,
         rows,
         include_returned_field_summaries: true,

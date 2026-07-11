@@ -4,6 +4,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::Request;
@@ -12,6 +13,7 @@ use mfm_events::v1::{ArtifactRole, KernelEventPayload};
 use mfm_fact_capabilities::{FactIndexReadCapability, FactIndexReadProvider, FactRecordCapability};
 use mfm_store::v1 as store;
 use mfm_store::v1::RetainedArtifactReadProvider;
+use sqlx::{AssertSqlSafe, PgPool};
 
 #[path = "run_control_support.rs"]
 mod run_control_support;
@@ -37,6 +39,76 @@ pub type InMemoryRestAppState = mfm_rest_api::AppState<store::AsyncInMemoryRunSt
 /// Store-backed projection fact-index (shared with app process assembly tests).
 pub use mfm_app::ProjectionFactIndexProvider;
 
+/// Creates a unique schema name for an isolated Postgres parity test.
+pub fn unique_postgres_schema(prefix: &str) -> String {
+    format!("{prefix}_{}", uuid::Uuid::new_v4().simple())
+}
+
+/// Creates an isolated Postgres schema for a parity test.
+pub async fn create_postgres_schema(database_url: &str, schema: &str) {
+    let pool = PgPool::connect(database_url)
+        .await
+        .expect("connect postgres");
+    // Schema names are generated from UUIDs and never come from user input; dynamic DDL is
+    // required because PostgreSQL does not parameterize identifiers.
+    sqlx::raw_sql(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .execute(&pool)
+        .await
+        .expect("create schema");
+    pool.close().await;
+}
+
+/// Drops an isolated Postgres schema after a parity test.
+pub async fn drop_postgres_schema(database_url: &str, schema: &str) {
+    let pool = PgPool::connect(database_url)
+        .await
+        .expect("connect postgres");
+    sqlx::raw_sql(AssertSqlSafe(format!(
+        "DROP SCHEMA IF EXISTS {schema} CASCADE"
+    )))
+    .execute(&pool)
+    .await
+    .expect("drop schema");
+    pool.close().await;
+}
+
+/// Adds a Postgres search-path option to an isolated parity-test database URL.
+pub fn schema_scoped_database_url(database_url: &str, schema: &str) -> String {
+    let separator = if database_url.contains('?') { '&' } else { '?' };
+    format!("{database_url}{separator}options=-csearch_path%3D{schema}")
+}
+
+/// Migrates and connects a Postgres run store, retrying while the managed service becomes ready.
+pub async fn connect_postgres_with_retry(
+    database_url: &str,
+    max_attempts: u32,
+    delay_ms: u64,
+) -> mfm_stream_store_postgres::PostgresRunStore {
+    let mut last_err: Option<mfm_stream_store_postgres::PostgresStoreError> = None;
+    for _ in 0..max_attempts {
+        match mfm_stream_store_postgres::PostgresSchema::migrate(database_url).await {
+            Ok(()) => {
+                match mfm_stream_store_postgres::PostgresRunStore::connect(database_url).await {
+                    Ok(store) => return store,
+                    Err(err) => {
+                        last_err = Some(err);
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    }
+                }
+            }
+            Err(err) => {
+                last_err = Some(err);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+
+    panic!(
+        "typed postgres config after retries (DATABASE_URL redacted): {:?}",
+        last_err
+    );
+}
+
 /// Binds the shared fact capabilities owned by an integration-test process.
 pub fn register_process_fact_capabilities(
     registry: &mut mfm_runtime::ErasedRunnerRegistry,
@@ -54,13 +126,10 @@ pub fn register_process_fact_capabilities(
 pub fn in_memory_rest_app_state() -> InMemoryRestAppState {
     let store = store::AsyncInMemoryRunStore::default();
     let fact_index = Arc::new(ProjectionFactIndexProvider::new(store.clone()));
-    let fact_query_receipt_trust_root = Some(fact_index.receipt_trust_root());
     mfm_rest_api::AppState {
         role: mfm_rest_api::RestProcessRole::Live,
         store,
         runtime_config_path: None,
-        fact_query_receipt_trust_root,
-        fact_query_authority_ready: true,
         fact_index,
     }
 }

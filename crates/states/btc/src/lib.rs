@@ -1105,7 +1105,7 @@ impl QueryCollectorCheckpointState {
         self.config.request()
     }
 
-    /// Materializes a loaded checkpoint from an authenticated fact-index response.
+    /// Materializes a loaded checkpoint from an evidence-backed fact-index response.
     pub fn materialize_response(
         &self,
         response: &mfm_facts::FactQueryResult,
@@ -1582,12 +1582,10 @@ mod tests {
     use mfm_capabilities::CapabilitySpec;
     use mfm_effects::EffectSpec;
     use mfm_facts::{
-        fact_descriptor_hash, fact_query_plan_hash, CanonicalFactQueryPlan,
-        DescriptorCatalogWatermark, FactClaimId, FactFieldExposure, FactFieldExtraction,
-        FactFieldValueType, FactProducerProvenance, FactQueryReceipt, FactQueryReceiptMaterial,
-        FactResponseEvidence, FactSubjectRef, InternalFactRef, InternalFactRefParts,
-        StoreCommitOrder, StoreIdentity, StoreKeyId, StoreReadFrontier, StoreReadFrontierType,
-        StoreReceiptAuthentication, StoreReceiptAuthenticationScheme,
+        fact_descriptor_hash, CanonicalFactQueryPlan, DescriptorCatalogWatermark, FactClaimId,
+        FactFieldExposure, FactFieldExtraction, FactFieldValueType, FactProducerProvenance,
+        FactQueryReceipt, FactResponseEvidence, FactSubjectRef, InternalFactRef,
+        InternalFactRefParts, StoreCommitOrder, StoreReadFrontier, StoreReadFrontierType,
     };
     use mfm_ids::{
         ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest, DigestBytes, EventId, RunId,
@@ -2172,7 +2170,7 @@ mod tests {
     }
 
     fn fact_query_receipt(
-        plan: &CanonicalFactQueryPlan,
+        _plan: &CanonicalFactQueryPlan,
         returned_refs: Vec<InternalFactRef>,
     ) -> FactQueryReceipt {
         let rows = returned_refs
@@ -2185,25 +2183,14 @@ mod tests {
             DescriptorCatalogWatermark::new(1),
             StoreCommitOrder::new(11),
         );
-        let plan_hash = fact_query_plan_hash(plan).expect("plan hash");
-        let material = FactQueryReceiptMaterial::from_rows(
-            &plan_hash,
+        FactQueryReceipt::from_rows(
             read_frontier,
             StoreReadFrontierType::Snapshot,
             &rows,
             false,
             None,
         )
-        .expect("receipt material");
-        material.into_receipt(
-            StoreReceiptAuthentication::new(
-                StoreIdentity::new("store.default").expect("store identity"),
-                StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
-                Some(StoreKeyId::new("fact.read.key").expect("key id")),
-                vec![0x11; 64],
-            )
-            .expect("auth"),
-        )
+        .expect("receipt")
     }
 
     fn fact_query_result(receipt: FactQueryReceipt) -> mfm_facts::FactQueryResult {

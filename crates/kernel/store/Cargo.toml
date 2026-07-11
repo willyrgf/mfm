@@ -18,7 +18,6 @@ path = "src/lib.rs"
 test-support = []
 
 [dependencies]
-ed25519-dalek = { workspace = true }
 mfm-canonical = { path = "../canonical" }
 mfm-capabilities = { path = "../capabilities" }
 mfm-events = { path = "../events" }

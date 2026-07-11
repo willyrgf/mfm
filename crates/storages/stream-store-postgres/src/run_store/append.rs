@@ -55,7 +55,7 @@ impl PostgresRunStore {
         }
 
         verify_prepared_artifact_bundle_tx(&mut tx, &bundle).await?;
-        let mut artifacts = load_artifacts(&mut tx, request.run_id()).await?;
+        let mut artifacts = load_artifacts(&mut tx).await?;
         mfm_store::v1::backend::admit_artifact_evidence(
             &mut artifacts,
             bundle.admitted_artifacts(),
@@ -79,13 +79,7 @@ impl PostgresRunStore {
             &mfm_store::v1::ArtifactByteAuthorityMap::new(),
             &bundle,
         )?;
-        load_fact_descriptor_artifact_bytes_tx(
-            &mut tx,
-            request.run_id(),
-            &projections,
-            &mut artifact_bytes,
-        )
-        .await?;
+        load_fact_descriptor_artifact_bytes_tx(&mut tx, &projections, &mut artifact_bytes).await?;
         let claim_admission = single_lane_claim_admission(request)?;
         let mut base = CommitBase {
             artifacts,

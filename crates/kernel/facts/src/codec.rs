@@ -3,8 +3,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use mfm_canonical::{
-    sha256_digest_bytes, CanonicalBytes, CanonicalJsonBytes, CanonicalValue,
-    PlainCanonicalJsonBytes,
+    sha256_digest_bytes, CanonicalJsonBytes, CanonicalValue, PlainCanonicalJsonBytes,
 };
 use mfm_ids::{ContentDigest, DigestAlgorithm, RunId, SchemaId};
 
@@ -63,20 +62,23 @@ pub fn validate_descriptor(descriptor: &FactDescriptor) -> Result<()> {
 
 /// Returns the schema id for fact descriptor artifacts.
 pub fn fact_descriptor_schema_id() -> Result<SchemaId> {
-    facts_schema_id("mfm.fact_descriptor")
+    facts_schema_id("mfm.fact_descriptor", FACTS_KERNEL_CONTRACT_VERSION)
 }
 
 /// Returns the schema id for canonical fact query evidence artifacts.
 pub fn fact_query_evidence_schema_id() -> Result<SchemaId> {
-    facts_schema_id("mfm.fact_query_evidence")
+    facts_schema_id(
+        "mfm.fact_query_evidence",
+        FACT_QUERY_EVIDENCE_CONTRACT_VERSION,
+    )
 }
 
-fn facts_schema_id(name: &'static str) -> Result<SchemaId> {
+fn facts_schema_id(name: &'static str, version: &'static str) -> Result<SchemaId> {
     SchemaId::new(
         name,
-        FACTS_KERNEL_CONTRACT_VERSION,
+        version,
         DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(format!("schema:{name}:{FACTS_KERNEL_CONTRACT_VERSION}").as_bytes()),
+        sha256_digest_bytes(format!("schema:{name}:{version}").as_bytes()),
     )
     .map_err(|error| FactError::descriptor(error.to_string()))
 }
@@ -335,20 +337,18 @@ pub fn parse_canonical_fact_query_evidence_bytes(bytes: &[u8]) -> Result<FactQue
     let value = serde_json::from_slice::<serde_json::Value>(bytes)
         .map_err(|error| FactError::canonical(error.to_string()))?;
     let object = json_object(&value, "fact query evidence")?;
-    require_version(object, "mfm.fact-query-evidence.v1", "fact query evidence")?;
+    require_version(
+        object,
+        FACT_QUERY_EVIDENCE_CONTRACT_VERSION,
+        "fact query evidence",
+    )?;
     let plan = parse_canonical_fact_query_plan(json_required(object, "plan")?)?;
     let plan_hash = fact_query_plan_hash(&plan)?;
     let receipt = parse_fact_query_receipt(json_required(object, "receipt")?, &plan_hash)?;
     let selection = parse_fact_selection_evidence(json_required(object, "selection")?)?;
-    Ok(FactQueryEvidence::new(plan, receipt, selection))
-}
-
-/// Returns canonical receipt body bytes, excluding receipt hash and authentication fields.
-pub fn canonical_fact_query_receipt_body_bytes(
-    plan_hash: &ContentDigest,
-    receipt: &FactQueryReceipt,
-) -> Result<CanonicalJsonBytes> {
-    FactQueryReceiptBodyParts::from_receipt(plan_hash, receipt).canonical_bytes()
+    let evidence = FactQueryEvidence::new(plan, receipt, selection);
+    validate_fact_query_evidence(&evidence)?;
+    Ok(evidence)
 }
 
 /// Derives the result-set digest for the rows and summaries pinned in a receipt.
@@ -358,37 +358,6 @@ pub fn fact_query_result_set_digest(
 ) -> Result<ContentDigest> {
     canonical_fact_query_result_set_value(returned_refs, returned_field_summaries)
         .map(|value| CanonicalJsonBytes::from_value(&value).content_digest())
-}
-
-/// Derives the receipt body hash, excluding receipt hash and authentication fields.
-pub fn fact_query_receipt_body_hash(
-    plan_hash: &ContentDigest,
-    receipt: &FactQueryReceipt,
-) -> Result<ContentDigest> {
-    Ok(canonical_fact_query_receipt_body_bytes(plan_hash, receipt)?.content_digest())
-}
-
-/// Derives the receipt body hash from unsigned receipt parts.
-#[allow(clippy::too_many_arguments)]
-pub fn fact_query_receipt_body_hash_from_parts(
-    plan_hash: &ContentDigest,
-    read_frontier: &StoreReadFrontier,
-    frontier_type: StoreReadFrontierType,
-    returned_refs: &[InternalFactRef],
-    returned_field_summaries: Option<&ReturnedFieldSummaries>,
-    result_set_digest: &ContentDigest,
-    result_cardinality: QueryResultCardinality,
-) -> Result<ContentDigest> {
-    FactQueryReceiptBodyParts::new(
-        plan_hash,
-        read_frontier,
-        frontier_type,
-        returned_refs,
-        returned_field_summaries,
-        result_set_digest,
-        result_cardinality,
-    )
-    .hash()
 }
 
 /// Returns canonical query evidence bytes.
@@ -405,10 +374,9 @@ pub fn fact_query_evidence_hash(evidence: &FactQueryEvidence) -> Result<ContentD
 
 /// Validates fact-query replay evidence before it can be recorded or replayed.
 ///
-/// This is facts-kernel structural validation only. Store-owned receipt
-/// authentication still needs a store trust root and is verified by `mfm-store`.
+/// This is facts-kernel structural validation only; the evidence artifact's content digest and
+/// retained authority bindings provide its integrity.
 pub fn validate_fact_query_evidence(evidence: &FactQueryEvidence) -> Result<()> {
-    let plan_hash = fact_query_plan_hash(evidence.plan())?;
     let receipt = evidence.receipt();
 
     if receipt.read_frontier().store_scope() != evidence.plan().store_scope() {
@@ -427,13 +395,6 @@ pub fn validate_fact_query_evidence(evidence: &FactQueryEvidence) -> Result<()> 
     if &expected_result_set_digest != receipt.result_set_digest() {
         return Err(FactError::descriptor(
             "fact query receipt result-set digest does not match returned refs and summaries",
-        ));
-    }
-
-    let expected_receipt_hash = fact_query_receipt_body_hash(&plan_hash, receipt)?;
-    if &expected_receipt_hash != receipt.store_receipt_hash() {
-        return Err(FactError::descriptor(
-            "fact query receipt body hash does not match store receipt hash",
         ));
     }
 
@@ -923,48 +884,29 @@ fn parse_fact_query_receipt(
     expected_plan_hash: &ContentDigest,
 ) -> Result<FactQueryReceipt> {
     let object = json_object(value, "fact query receipt")?;
-    let body = json_object(json_required(object, "body")?, "fact query receipt body")?;
-    require_version(
-        body,
-        "mfm.fact-query-receipt-body.v1",
-        "fact query receipt body",
-    )?;
-    let plan_hash = parse_json_str(body, "plan_hash")?;
+    require_version(object, "mfm.fact-query-receipt.v2", "fact query receipt")?;
+    let plan_hash: ContentDigest = parse_json_str(object, "plan_hash")?;
     if &plan_hash != expected_plan_hash {
         return Err(FactError::descriptor(
-            "fact query receipt body plan hash does not match plan",
+            "fact query receipt plan hash does not match plan",
         ));
     }
-    let read_frontier = parse_store_read_frontier(json_required(body, "read_frontier")?)?;
-    let frontier_type = parse_tag(json_str(body, "frontier_type")?, "store read frontier type")?;
-    let returned_refs = json_array(body, "returned_refs")?
+    let read_frontier = parse_store_read_frontier(json_required(object, "read_frontier")?)?;
+    let frontier_type = parse_tag(
+        json_str(object, "frontier_type")?,
+        "store read frontier type",
+    )?;
+    let returned_refs = json_array(object, "returned_refs")?
         .iter()
         .map(parse_internal_fact_ref)
         .collect::<Result<Vec<_>>>()?;
-    let returned_field_summaries =
-        parse_optional_returned_field_summaries(json_required(body, "returned_field_summaries")?)?;
-    let result_set_digest = parse_json_str(body, "result_set_digest")?;
+    let returned_field_summaries = parse_optional_returned_field_summaries(json_required(
+        object,
+        "returned_field_summaries",
+    )?)?;
+    let result_set_digest = parse_json_str(object, "result_set_digest")?;
     let result_cardinality =
-        parse_query_result_cardinality(json_required(body, "result_cardinality")?)?;
-
-    let store_receipt_hash = parse_json_str(object, "store_receipt_hash")?;
-    let expected_hash = FactQueryReceiptBodyParts::new(
-        &plan_hash,
-        &read_frontier,
-        frontier_type,
-        &returned_refs,
-        returned_field_summaries.as_ref(),
-        &result_set_digest,
-        result_cardinality,
-    )
-    .hash()?;
-    if expected_hash != store_receipt_hash {
-        return Err(FactError::descriptor(
-            "fact query receipt body hash does not match store receipt hash",
-        ));
-    }
-    let authentication =
-        parse_store_receipt_authentication(json_required(object, "store_receipt_authentication")?)?;
+        parse_query_result_cardinality(json_required(object, "result_cardinality")?)?;
     Ok(FactQueryReceipt::from_parts(
         read_frontier,
         frontier_type,
@@ -972,8 +914,6 @@ fn parse_fact_query_receipt(
         returned_field_summaries,
         result_set_digest,
         result_cardinality,
-        store_receipt_hash,
-        authentication,
     ))
 }
 
@@ -1111,25 +1051,6 @@ fn parse_query_result_cardinality(value: &serde_json::Value) -> Result<QueryResu
             "unknown query result cardinality kind {value:?}"
         ))),
     }
-}
-
-fn parse_store_receipt_authentication(
-    value: &serde_json::Value,
-) -> Result<StoreReceiptAuthentication> {
-    let object = json_object(value, "store receipt authentication")?;
-    let scheme = parse_tag(
-        json_str(object, "scheme")?,
-        "store receipt authentication scheme",
-    )?;
-    let key_id = parse_optional_checked_string::<StoreKeyId>(json_required(object, "key_id")?)?;
-    let signature = CanonicalBytes::from_base64url_no_pad(json_str(object, "signature_or_mac")?)
-        .map_err(|error| FactError::canonical(error.to_string()))?;
-    StoreReceiptAuthentication::new(
-        StoreIdentity::new(json_str(object, "store_identity")?)?,
-        scheme,
-        key_id,
-        signature.as_bytes().to_vec(),
-    )
 }
 
 fn canonical_json_bytes_from_canonical_json_str(value: &str) -> Result<CanonicalJsonBytes> {
@@ -1300,19 +1221,6 @@ where
         .parse::<T>()
         .map(Some)
         .map_err(|error| FactError::descriptor(format!("identity failed validation: {error}")))
-}
-
-fn parse_optional_checked_string<T>(value: &serde_json::Value) -> Result<Option<T>>
-where
-    T: TryFrom<String, Error = FactError>,
-{
-    if value.is_null() {
-        return Ok(None);
-    }
-    let raw = value
-        .as_str()
-        .ok_or_else(|| FactError::descriptor("optional checked string must be null or string"))?;
-    T::try_from(raw.to_owned()).map(Some)
 }
 
 fn parse_optional_digest(value: &serde_json::Value) -> Result<Option<ContentDigest>> {
@@ -1671,74 +1579,11 @@ fn canonical_query_plan_value(plan: &CanonicalFactQueryPlan) -> Result<Canonical
     ])
 }
 
-fn canonical_query_receipt_body_value(
+fn canonical_query_receipt_value(
     plan_hash: &ContentDigest,
     receipt: &FactQueryReceipt,
 ) -> Result<CanonicalValue> {
-    FactQueryReceiptBodyParts::from_receipt(plan_hash, receipt).canonical_value()
-}
-
-struct FactQueryReceiptBodyParts<'a> {
-    plan_hash: &'a ContentDigest,
-    read_frontier: &'a StoreReadFrontier,
-    frontier_type: StoreReadFrontierType,
-    returned_refs: &'a [InternalFactRef],
-    returned_field_summaries: Option<&'a ReturnedFieldSummaries>,
-    result_set_digest: &'a ContentDigest,
-    result_cardinality: QueryResultCardinality,
-}
-
-impl<'a> FactQueryReceiptBodyParts<'a> {
-    fn new(
-        plan_hash: &'a ContentDigest,
-        read_frontier: &'a StoreReadFrontier,
-        frontier_type: StoreReadFrontierType,
-        returned_refs: &'a [InternalFactRef],
-        returned_field_summaries: Option<&'a ReturnedFieldSummaries>,
-        result_set_digest: &'a ContentDigest,
-        result_cardinality: QueryResultCardinality,
-    ) -> Self {
-        Self {
-            plan_hash,
-            read_frontier,
-            frontier_type,
-            returned_refs,
-            returned_field_summaries,
-            result_set_digest,
-            result_cardinality,
-        }
-    }
-
-    fn from_receipt(plan_hash: &'a ContentDigest, receipt: &'a FactQueryReceipt) -> Self {
-        Self::new(
-            plan_hash,
-            &receipt.read_frontier,
-            receipt.frontier_type,
-            &receipt.returned_refs,
-            receipt.returned_field_summaries.as_ref(),
-            &receipt.result_set_digest,
-            receipt.result_cardinality,
-        )
-    }
-
-    fn canonical_value(&self) -> Result<CanonicalValue> {
-        canonical_query_receipt_body_parts_value(self)
-    }
-
-    fn canonical_bytes(&self) -> Result<CanonicalJsonBytes> {
-        self.canonical_value()
-            .map(|value| CanonicalJsonBytes::from_value(&value))
-    }
-
-    fn hash(&self) -> Result<ContentDigest> {
-        Ok(self.canonical_bytes()?.content_digest())
-    }
-}
-
-fn canonical_query_receipt_body_parts_value(
-    parts: &FactQueryReceiptBodyParts<'_>,
-) -> Result<CanonicalValue> {
-    let returned_refs = parts
+    let returned_refs = receipt
         .returned_refs
         .iter()
         .map(canonical_internal_fact_ref_value)
@@ -1746,32 +1591,32 @@ fn canonical_query_receipt_body_parts_value(
     canonical_object([
         (
             "version",
-            CanonicalValue::String("mfm.fact-query-receipt-body.v1".to_owned()),
+            CanonicalValue::String("mfm.fact-query-receipt.v2".to_owned()),
         ),
         (
             "plan_hash",
-            CanonicalValue::String(parts.plan_hash.as_str().to_owned()),
+            CanonicalValue::String(plan_hash.as_str().to_owned()),
         ),
         (
             "read_frontier",
-            canonical_store_read_frontier_value(parts.read_frontier)?,
+            canonical_store_read_frontier_value(&receipt.read_frontier)?,
         ),
         (
             "frontier_type",
-            CanonicalValue::String(parts.frontier_type.as_str().to_owned()),
+            CanonicalValue::String(receipt.frontier_type.as_str().to_owned()),
         ),
         ("returned_refs", CanonicalValue::Array(returned_refs)),
         (
             "returned_field_summaries",
-            optional_returned_field_summaries_value(parts.returned_field_summaries)?,
+            optional_returned_field_summaries_value(receipt.returned_field_summaries.as_ref())?,
         ),
         (
             "result_set_digest",
-            CanonicalValue::String(parts.result_set_digest.as_str().to_owned()),
+            CanonicalValue::String(receipt.result_set_digest.as_str().to_owned()),
         ),
         (
             "result_cardinality",
-            canonical_query_result_cardinality_value(parts.result_cardinality)?,
+            canonical_query_result_cardinality_value(receipt.result_cardinality)?,
         ),
     ])
 }
@@ -1797,32 +1642,12 @@ fn canonical_fact_query_result_set_value(
     ])
 }
 
-fn canonical_query_receipt_value(
-    plan_hash: &ContentDigest,
-    receipt: &FactQueryReceipt,
-) -> Result<CanonicalValue> {
-    canonical_object([
-        (
-            "body",
-            canonical_query_receipt_body_value(plan_hash, receipt)?,
-        ),
-        (
-            "store_receipt_hash",
-            CanonicalValue::String(receipt.store_receipt_hash.as_str().to_owned()),
-        ),
-        (
-            "store_receipt_authentication",
-            canonical_store_receipt_authentication_value(&receipt.store_receipt_authentication)?,
-        ),
-    ])
-}
-
 fn canonical_query_evidence_value(evidence: &FactQueryEvidence) -> Result<CanonicalValue> {
     let plan_hash = fact_query_plan_hash(&evidence.plan)?;
     canonical_object([
         (
             "version",
-            CanonicalValue::String("mfm.fact-query-evidence.v1".to_owned()),
+            CanonicalValue::String(FACT_QUERY_EVIDENCE_CONTRACT_VERSION.to_owned()),
         ),
         ("plan", canonical_query_plan_value(&evidence.plan)?),
         (
@@ -2046,26 +1871,6 @@ fn canonical_query_result_cardinality_value(
             ("value", CanonicalValue::Unsigned(value)),
         ]),
     }
-}
-
-fn canonical_store_receipt_authentication_value(
-    auth: &StoreReceiptAuthentication,
-) -> Result<CanonicalValue> {
-    canonical_object([
-        (
-            "store_identity",
-            CanonicalValue::String(auth.store_identity.as_str().to_owned()),
-        ),
-        (
-            "scheme",
-            CanonicalValue::String(auth.scheme.as_str().to_owned()),
-        ),
-        ("key_id", optional_display_value(auth.key_id.as_ref())),
-        (
-            "signature_or_mac",
-            CanonicalValue::Bytes(CanonicalBytes::new(auth.signature_or_mac.clone())),
-        ),
-    ])
 }
 
 fn canonical_fact_selection_evidence_value(

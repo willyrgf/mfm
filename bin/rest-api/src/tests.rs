@@ -59,13 +59,12 @@ async fn run_start_accepts_entry_point_shape() {
 }
 
 #[tokio::test]
-async fn read_role_refuses_live_start_and_signed_fact_queries() {
+async fn read_role_refuses_live_start_and_serves_public_fact_queries() {
+    let fixture = mfm_app::PublicFactVisibilityFixtureForTest::new();
     let app = make_app(AppState {
         role: RestProcessRole::Read,
-        store: store::AsyncInMemoryRunStore::default(),
+        store: fixture.store.clone(),
         runtime_config_path: None,
-        fact_query_receipt_trust_root: None,
-        fact_query_authority_ready: false,
         fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     });
 
@@ -91,15 +90,16 @@ async fn read_role_refuses_live_start_and_signed_fact_queries() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/v1/facts/chain.head")
+                .uri("/v1/facts/kinds")
                 .body(Body::empty())
                 .expect("request"),
         )
         .await
         .expect("facts response");
-    assert_eq!(facts.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(facts.status(), StatusCode::OK);
     let facts_body = response_json(facts).await;
-    assert_eq!(facts_body["error"]["code"], "RestRoleReadOnly");
+    assert_eq!(facts_body["status"], "success");
+    assert_eq!(facts_body["data"][0]["fact_kind"], fixture.fact_kind);
 }
 
 #[tokio::test]
@@ -111,8 +111,6 @@ async fn live_routes_reuse_cached_services_after_first_construction() {
         role: RestProcessRole::Live,
         store: store::AsyncInMemoryRunStore::default(),
         runtime_config_path: Some(config_path.clone()),
-        fact_query_receipt_trust_root: None,
-        fact_query_authority_ready: false,
         fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     });
 
@@ -246,8 +244,6 @@ async fn facts_routes_expose_only_public_platform_projection_data() {
         role: RestProcessRole::Live,
         store: fixture.store.clone(),
         runtime_config_path: None,
-        fact_query_receipt_trust_root: None,
-        fact_query_authority_ready: false,
         fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     });
 
@@ -388,8 +384,6 @@ fn test_app() -> axum::Router {
         role: RestProcessRole::Live,
         store: store::AsyncInMemoryRunStore::default(),
         runtime_config_path: None,
-        fact_query_receipt_trust_root: None,
-        fact_query_authority_ready: false,
         fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     })
 }

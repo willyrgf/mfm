@@ -273,14 +273,7 @@ fn contract_lifecycle_services(
     runners: ErasedRunnerRegistry,
     certification: CertificationRegistry,
 ) -> ContractRunServices {
-    make_run_services(
-        runners,
-        store.clone(),
-        artifacts,
-        certification,
-        None,
-        false,
-    )
+    make_run_services(runners, store.clone(), artifacts, certification)
 }
 
 fn contract_services(
@@ -499,7 +492,6 @@ async fn app_replay_rejects_missing_validation_report_retained_artifact() {
         missing.clone(),
         missing,
         contract_lifecycle_certification_registry(),
-        None,
     );
 
     let error = replay_services

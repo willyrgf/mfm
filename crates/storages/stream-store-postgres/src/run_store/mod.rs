@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::time::Duration;
 
+use crate::schema::{connect_pool, validate_pool};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1 as events;
 use mfm_ids::{
@@ -28,9 +29,6 @@ use sqlx::{
     postgres::{PgListener, PgPoolOptions, PgRow},
     PgPool, Postgres, QueryBuilder, Row, Transaction,
 };
-use zeroize::{Zeroize, Zeroizing};
-
-use crate::schema::{connect_pool, validate_pool};
 
 /// Error returned by the PostgreSQL run store.
 #[derive(Debug, thiserror::Error)]
@@ -103,37 +101,22 @@ pub enum PostgresStoreAuthorityError {
     /// The store-owned deployment scope binding was missing or invalid.
     #[error("store scope validation failed")]
     StoreScope,
-    /// The store-owned fact-query receipt trust root was invalid.
-    #[error("fact receipt trust-root validation failed")]
-    FactReceiptTrustRoot,
 }
 
 /// Validated Postgres run-store authority loaded during store construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostgresStoreAuthority {
     store_scope_id: StoreScopeId,
-    fact_receipt_trust_root: Option<mfm_store::v1::FactQueryReceiptTrustRoot>,
 }
 
 impl PostgresStoreAuthority {
-    pub(crate) fn new(
-        store_scope_id: StoreScopeId,
-        fact_receipt_trust_root: Option<mfm_store::v1::FactQueryReceiptTrustRoot>,
-    ) -> Self {
-        Self {
-            store_scope_id,
-            fact_receipt_trust_root,
-        }
+    pub(crate) fn new(store_scope_id: StoreScopeId) -> Self {
+        Self { store_scope_id }
     }
 
     /// Returns the store-owned deployment scope id validated at construction.
     pub fn store_scope_id(&self) -> &StoreScopeId {
         &self.store_scope_id
-    }
-
-    /// Returns the configured fact-query receipt trust root, when the store has one.
-    pub fn fact_receipt_trust_root(&self) -> Option<&mfm_store::v1::FactQueryReceiptTrustRoot> {
-        self.fact_receipt_trust_root.as_ref()
     }
 }
 
@@ -162,7 +145,6 @@ mod fact_projections;
 mod fact_queries;
 mod observations;
 mod projections;
-mod receipt_authentication;
 mod resource_lanes;
 #[cfg(all(test, feature = "parity-tests"))]
 mod tests;
@@ -171,12 +153,11 @@ mod unit_tests;
 mod util;
 
 pub use fact_queries::{PostgresFactQueryResult, PostgresFactQueryRow};
-pub use receipt_authentication::PostgresFactReceiptSigner;
 
 use self::{
     admission_lanes::*, artifact_admission::*, artifact_writes::*, artifacts::*, authority::*,
     commits::*, event_rows::*, fact_projections::*, observations::*, projections::*,
-    receipt_authentication::*, resource_lanes::*, util::*,
+    resource_lanes::*, util::*,
 };
 
 /// PostgreSQL-backed typed run event store.
@@ -187,7 +168,6 @@ use self::{
 pub struct PostgresRunStore {
     pub(crate) pool: PgPool,
     authority: PostgresStoreAuthority,
-    fact_receipt_signer: Option<PostgresFactReceiptSigner>,
 }
 
 impl PostgresRunStore {
@@ -197,68 +177,12 @@ impl PostgresRunStore {
             .await
             .map_err(|_| PostgresStoreError::Authority(PostgresStoreAuthorityError::Connection))?;
         let authority = validate_pool(&pool).await?;
-        Ok(Self {
-            pool,
-            authority,
-            fact_receipt_signer: None,
-        })
-    }
-
-    /// Connects and validates that the supplied in-memory fact receipt signer matches the store trust root.
-    pub async fn connect_with_fact_receipt_signer(
-        database_url: &str,
-        fact_receipt_signer: PostgresFactReceiptSigner,
-    ) -> Result<Self> {
-        let pool = connect_pool(database_url)
-            .await
-            .map_err(|_| PostgresStoreError::Authority(PostgresStoreAuthorityError::Connection))?;
-        let authority = validate_pool(&pool).await?;
-        require_fact_receipt_signer_matches_authority(&authority, &fact_receipt_signer)?;
-        Ok(Self {
-            pool,
-            authority,
-            fact_receipt_signer: Some(fact_receipt_signer),
-        })
-    }
-
-    /// Connects with an Ed25519 fact-receipt signing key bound to the store trust root.
-    ///
-    /// The store's persisted authority supplies the public store identity and key id. The supplied
-    /// secret signing key must produce the exact verifying key recorded in that authority.
-    pub async fn connect_with_fact_receipt_signing_key_bytes(
-        database_url: &str,
-        signing_key: [u8; 32],
-    ) -> Result<Self> {
-        let mut signing_key = Zeroizing::new(signing_key);
-        let pool = connect_pool(database_url)
-            .await
-            .map_err(|_| PostgresStoreError::Authority(PostgresStoreAuthorityError::Connection))?;
-        let authority = validate_pool(&pool).await?;
-        let trust_root = authority
-            .fact_receipt_trust_root()
-            .ok_or_else(|| receipt_authentication_store_error("missing fact receipt trust root"))?;
-        let fact_receipt_signer = PostgresFactReceiptSigner::from_ed25519_signing_key_bytes(
-            trust_root.store_identity().clone(),
-            trust_root.key_id().clone(),
-            *signing_key,
-        );
-        signing_key.zeroize();
-        require_fact_receipt_signer_matches_authority(&authority, &fact_receipt_signer)?;
-        Ok(Self {
-            pool,
-            authority,
-            fact_receipt_signer: Some(fact_receipt_signer),
-        })
+        Ok(Self { pool, authority })
     }
 
     /// Returns the store authority validated during construction.
     pub fn store_authority(&self) -> &PostgresStoreAuthority {
         &self.authority
-    }
-
-    /// Returns whether authenticated fact-query execution has both store authority and a signer.
-    pub fn fact_receipt_queries_ready(&self) -> bool {
-        self.authority.fact_receipt_trust_root().is_some() && self.fact_receipt_signer.is_some()
     }
 }
 

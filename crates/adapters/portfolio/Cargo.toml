@@ -31,7 +31,6 @@ mfm-spec = { path = "../../kernel/spec" }
 mfm-values = { path = "../../kernel/values" }
 
 [dev-dependencies]
-ed25519-dalek = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 mfm-store = { path = "../../kernel/store", features = ["test-support"] }

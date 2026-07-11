@@ -1,11 +1,8 @@
 use super::*;
-use ed25519_dalek::SigningKey;
 use mfm_store::v1::test_support::{
-    fact_query_receipt_trust_root_for_test,
     persisted_kernel_event_envelope_for_test as store_persisted_kernel_event_envelope_for_test,
     persisted_kernel_event_envelope_with_ordinal_for_test as store_persisted_kernel_event_envelope_with_ordinal_for_test,
-    run_artifact_ref_from_store_artifact_for_test, signed_fact_query_receipt_for_test,
-    SignedFactQueryReceiptFixtureInputForTest,
+    run_artifact_ref_from_store_artifact_for_test,
 };
 
 #[test]
@@ -218,7 +215,7 @@ fn replay_verifies_fact_query_evidence_from_retained_authority() {
     let fixture = replay_fact_stream_fixture();
     let query = fact_query_evidence_artifact(&fixture, |fact_ref| fact_ref);
     let mut authority = fixture.authority();
-    append_trusted_fact_query_evidence(&mut authority, &fixture.run_id, 4, &query);
+    append_fact_query_evidence(&mut authority, &fixture.run_id, 4, &query);
 
     ReplayBroker::from_read_authority(authority).expect("query evidence verifies");
 }
@@ -246,67 +243,27 @@ fn replay_verifies_fact_query_evidence_with_retained_cross_run_source_fact() {
         .expect("retained source fact event");
     let mut authority = fixture.authority();
     authority.stream = fixture.stream[..2].to_vec();
-    append_trusted_fact_query_evidence(&mut authority, &fixture.run_id, 3, &query);
+    append_fact_query_evidence(&mut authority, &fixture.run_id, 3, &query);
     authority.source_fact_events.push(source_event);
 
     ReplayBroker::from_read_authority(authority).expect("cross-run source fact verifies");
 }
 
 #[test]
-fn replay_rejects_fact_query_evidence_with_missing_or_mismatched_authority() {
-    enum Case {
-        MissingTrustRoot,
-        MissingSourceFact,
-        WrongTrustRoot,
-    }
+fn replay_rejects_fact_query_evidence_with_missing_source_fact() {
+    let fixture = replay_fact_stream_fixture();
+    let query = fact_query_evidence_artifact(&fixture, |fact_ref| {
+        let mut parts = internal_fact_ref_parts_from_ref(&fact_ref);
+        parts.fact_claim_id =
+            mfm_facts::FactClaimId::new(fixture.run_id.clone(), 9, 0).expect("claim id");
+        mfm_facts::InternalFactRef::new(parts).expect("missing source ref")
+    });
+    let mut authority = fixture.authority();
+    append_fact_query_evidence(&mut authority, &fixture.run_id, 4, &query);
 
-    for case in [
-        Case::MissingTrustRoot,
-        Case::MissingSourceFact,
-        Case::WrongTrustRoot,
-    ] {
-        let fixture = replay_fact_stream_fixture();
-        let query = match case {
-            Case::MissingSourceFact => fact_query_evidence_artifact(&fixture, |fact_ref| {
-                let mut parts = internal_fact_ref_parts_from_ref(&fact_ref);
-                parts.fact_claim_id =
-                    mfm_facts::FactClaimId::new(fixture.run_id.clone(), 9, 0).expect("claim id");
-                mfm_facts::InternalFactRef::new(parts).expect("missing source ref")
-            }),
-            Case::MissingTrustRoot | Case::WrongTrustRoot => {
-                fact_query_evidence_artifact(&fixture, |fact_ref| fact_ref)
-            }
-        };
-        let mut authority = fixture.authority();
-        append_fact_query_evidence(&mut authority, &fixture.run_id, 4, &query);
-        match case {
-            Case::MissingTrustRoot => {}
-            Case::MissingSourceFact => {
-                authority.fact_query_receipt_trust_root = Some(query.trust_root);
-            }
-            Case::WrongTrustRoot => {
-                authority.fact_query_receipt_trust_root = Some(test_fact_query_trust_root(
-                    &SigningKey::from_bytes(&[8; 32]),
-                ));
-            }
-        }
-
-        let error = ReplayBroker::from_read_authority(authority)
-            .expect_err("invalid fact query authority rejects");
-        match case {
-            Case::MissingTrustRoot => {
-                assert_eq!(error.kind, ReplayErrorKind::CertifiedEvidenceMismatch);
-                assert!(error.message.contains("receipt trust root"));
-            }
-            Case::MissingSourceFact => {
-                assert_eq!(error.kind, ReplayErrorKind::FactMissing);
-            }
-            Case::WrongTrustRoot => {
-                assert_eq!(error.kind, ReplayErrorKind::CertifiedEvidenceMismatch);
-                assert!(error.message.contains("receipt authentication"));
-            }
-        }
-    }
+    let error =
+        ReplayBroker::from_read_authority(authority).expect_err("missing source fact rejects");
+    assert_eq!(error.kind, ReplayErrorKind::FactMissing);
 }
 
 #[test]
@@ -369,7 +326,7 @@ fn replay_rejects_fact_query_evidence_with_mismatched_returned_refs() {
             }),
         };
         let mut authority = fixture.authority();
-        append_trusted_fact_query_evidence(&mut authority, &fixture.run_id, 4, &query);
+        append_fact_query_evidence(&mut authority, &fixture.run_id, 4, &query);
 
         let error = ReplayBroker::from_read_authority(authority).expect_err(name);
         assert_eq!(error.kind, ReplayErrorKind::FactMismatch, "{name}");
@@ -478,7 +435,6 @@ fn replay_rejects_fact_descriptor_allowed_only_for_other_node() {
             (response_artifact_key, response_bytes),
         ]),
         additional_artifact_evidence: Vec::new(),
-        fact_query_receipt_trust_root: None,
         source_fact_events: Vec::new(),
     };
 
@@ -963,7 +919,6 @@ fn replay_broker_with_facts(
         retained_artifacts: artifact_map.clone(),
         artifact_bytes: BTreeMap::new(),
         artifact_byte_authority: BTreeMap::new(),
-        fact_query_receipt_trust_root: None,
         artifacts: artifact_map,
         facts: fact_map,
         fact_events: BTreeMap::new(),
@@ -1250,7 +1205,6 @@ impl ReplayFactStreamFixture {
             artifact_evidence: self.artifact_evidence.clone(),
             artifact_bytes: self.artifact_bytes.clone(),
             additional_artifact_evidence: Vec::new(),
-            fact_query_receipt_trust_root: None,
             source_fact_events: Vec::new(),
         }
     }
@@ -1387,7 +1341,6 @@ fn cell_replay_authority(
         artifact_evidence,
         artifact_bytes: BTreeMap::from([(descriptor_artifact_key, descriptor_bytes.to_vec())]),
         additional_artifact_evidence: Vec::new(),
-        fact_query_receipt_trust_root: None,
         source_fact_events: Vec::new(),
     }
 }
@@ -1544,17 +1497,13 @@ struct ReplayFactQueryEvidenceArtifact {
     artifact: StoredArtifactEvidenceRef,
     bytes: Vec<u8>,
     event: events::ArtifactReferenced,
-    trust_root: store::FactQueryReceiptTrustRoot,
 }
 
 fn fact_query_evidence_artifact(
     fixture: &ReplayFactStreamFixture,
     mutate_ref: impl FnOnce(mfm_facts::InternalFactRef) -> mfm_facts::InternalFactRef,
 ) -> ReplayFactQueryEvidenceArtifact {
-    let key = SigningKey::from_bytes(&[7; 32]);
-    let trust_root = test_fact_query_trust_root(&key);
     let plan = replay_fact_query_plan();
-    let plan_hash = mfm_facts::fact_query_plan_hash(&plan).expect("plan hash");
     let returned_ref = mutate_ref(internal_fact_ref_for_fixture(fixture));
     let rows = [mfm_facts::FactQueryResultRow::new(
         returned_ref,
@@ -1574,16 +1523,14 @@ fn fact_query_evidence_artifact(
         mfm_facts::DescriptorCatalogWatermark::new(1),
         mfm_facts::StoreCommitOrder::new(3),
     );
-    let receipt = signed_fact_query_receipt_for_test(SignedFactQueryReceiptFixtureInputForTest {
-        plan_hash: &plan_hash,
-        key: &key,
-        store_identity: trust_root.store_identity().clone(),
-        key_id: trust_root.key_id().clone(),
-        read_frontier: frontier,
-        rows: &rows,
-        include_returned_field_summaries: true,
-        limit: None,
-    });
+    let receipt = mfm_facts::FactQueryReceipt::from_rows(
+        frontier,
+        mfm_facts::StoreReadFrontierType::Snapshot,
+        &rows,
+        true,
+        None,
+    )
+    .expect("receipt");
     let selected_summaries_digest = mfm_facts::selected_returned_field_summaries_digest(
         receipt.returned_field_summaries().expect("summaries"),
         &[0],
@@ -1624,7 +1571,6 @@ fn fact_query_evidence_artifact(
         artifact,
         bytes: bytes.to_vec(),
         event,
-        trust_root,
     }
 }
 
@@ -1644,16 +1590,6 @@ fn append_fact_query_evidence(
         replay_artifact_authority_key(&query.artifact).expect("query artifact key"),
         query.bytes.clone(),
     );
-}
-
-fn append_trusted_fact_query_evidence(
-    authority: &mut ReplayReadAuthority,
-    run_id: &RunId,
-    seq: u64,
-    query: &ReplayFactQueryEvidenceArtifact,
-) {
-    append_fact_query_evidence(authority, run_id, seq, query);
-    authority.fact_query_receipt_trust_root = Some(query.trust_root.clone());
 }
 
 fn replay_fact_query_plan() -> mfm_facts::CanonicalFactQueryPlan {
@@ -1731,14 +1667,6 @@ fn internal_fact_ref_parts_from_ref(
             fact_ref.adapter_version().clone(),
         ),
     }
-}
-
-fn test_fact_query_trust_root(key: &SigningKey) -> store::FactQueryReceiptTrustRoot {
-    fact_query_receipt_trust_root_for_test(
-        key,
-        mfm_facts::StoreIdentity::new("store.default").expect("store identity"),
-        mfm_facts::StoreKeyId::new("key.default").expect("key id"),
-    )
 }
 
 fn replay_stream_fact_descriptor() -> mfm_facts::FactDescriptor {

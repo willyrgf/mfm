@@ -5,7 +5,6 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
-use ed25519_dalek::SigningKey;
 use mfm_canonical::{sha256_digest_bytes, CanonicalValue};
 use mfm_capabilities::{
     CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor, CapabilitySpec, EffectSpec,
@@ -31,11 +30,10 @@ use mfm_store::v1::{
     self as store,
     test_support::{
         event_id_for_envelope_inputs_for_test as test_event_id_for_envelope_inputs,
-        fact_query_receipt_trust_root_for_test as test_store_fact_query_receipt_trust_root,
+        fact_query_receipt_for_test as test_fact_query_receipt,
         prepared_commit_bundle_from_plan as test_bundle_from_plan,
         prepared_commit_plan_for_test as test_prepared_commit_plan,
-        signed_fact_query_receipt_for_test as test_signed_fact_query_receipt,
-        SignedFactQueryReceiptFixtureInputForTest,
+        FactQueryReceiptFixtureInputForTest,
     },
     RetainedArtifactReadProvider, RunEventStore,
 };
@@ -107,19 +105,6 @@ fn test_fact_key(subject_amount: u64) -> mfm_facts::FactKey {
         .clone()
 }
 
-fn test_fact_query_signing_key() -> SigningKey {
-    SigningKey::from_bytes(&[0x52; 32])
-}
-
-fn test_fact_query_trust_root() -> store::FactQueryReceiptTrustRoot {
-    let key = test_fact_query_signing_key();
-    test_store_fact_query_receipt_trust_root(
-        &key,
-        mfm_facts::StoreIdentity::new("store.default").expect("store identity"),
-        mfm_facts::StoreKeyId::new("key.default").expect("store key id"),
-    )
-}
-
 fn test_fact_query_evidence() -> mfm_facts::FactQueryEvidence {
     test_fact_query_evidence_with_returned_refs(Vec::new())
 }
@@ -158,13 +143,7 @@ fn test_fact_query_evidence_with_returned_refs(
         .into_iter()
         .map(|fact_ref| mfm_facts::FactQueryResultRow::new(fact_ref, Vec::new()))
         .collect::<Vec<_>>();
-    let plan_hash = mfm_facts::fact_query_plan_hash(&plan).expect("plan hash");
-    let key = test_fact_query_signing_key();
-    let receipt = test_signed_fact_query_receipt(SignedFactQueryReceiptFixtureInputForTest {
-        plan_hash: &plan_hash,
-        key: &key,
-        store_identity: mfm_facts::StoreIdentity::new("store.default").expect("store identity"),
-        key_id: mfm_facts::StoreKeyId::new("key.default").expect("store key id"),
+    let receipt = test_fact_query_receipt(FactQueryReceiptFixtureInputForTest {
         read_frontier: frontier,
         rows: &rows,
         include_returned_field_summaries: false,
@@ -2852,8 +2831,7 @@ async fn fact_query_evidence_retains_non_empty_returned_fact_authority() {
         run_stream: &run_stream,
         view: &view,
     };
-    let fact_query_receipt_trust_root = test_fact_query_trust_root();
-    let ctx = ErasedRunCtx::from_prepared(&invocation, Some(&fact_query_receipt_trust_root));
+    let ctx = ErasedRunCtx::from_prepared(&invocation);
     let output_bytes = br#"{"amount":11}"#.to_vec();
     let state_evidence =
         state_output_artifact_for_bytes(ctx.node(), ctx.descriptor(), &output_bytes);
@@ -3898,8 +3876,7 @@ macro_rules! with_prepared_runner_ctx {
             run_stream: &run_stream,
             view: &view,
         };
-        let fact_query_receipt_trust_root = test_fact_query_trust_root();
-        let $ctx = ErasedRunCtx::from_prepared(&invocation, Some(&fact_query_receipt_trust_root));
+        let $ctx = ErasedRunCtx::from_prepared(&invocation);
         $body
     }};
 }

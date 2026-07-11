@@ -10,16 +10,15 @@
 //! this crate, while tests can use explicit test-support stores.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::env;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use mfm_artifact_capabilities::ArtifactReadProvider;
 use mfm_authored_config::AuthoredConfig;
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
-use mfm_capabilities::{CapabilitySpec, ProviderDiagnosticCode, ProviderDiagnosticValue};
+use mfm_capabilities::{ProviderDiagnosticCode, ProviderDiagnosticValue};
 use mfm_certify::{CertificationRegistry, CertifiedTypedSpec};
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{EvmNetworkId, EvmSourcePolicyId, EvmSourceRef};
@@ -45,7 +44,6 @@ use mfm_values::MfmConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::map::Entry;
 use serde_json::{Map, Value};
-use zeroize::{Zeroize, Zeroizing};
 
 pub use mfm_runtime::ErasedRunnerRegistry;
 pub use mfm_stream_store_postgres::PostgresRunStore as ProductionRunStore;
@@ -90,15 +88,6 @@ pub use entry_point::{
 
 /// Environment variable that selects the live runtime config file.
 pub const MFM_RUNTIME_CONFIG_FILE: &str = "MFM_RUNTIME_CONFIG_FILE";
-
-/// Environment variable that selects the Ed25519 fact-query receipt signing-key file.
-pub const MFM_FACT_RECEIPT_SIGNING_KEY_FILE: &str = "MFM_FACT_RECEIPT_SIGNING_KEY_FILE";
-
-/// Store identity used when provisioning the first production fact-receipt trust root.
-pub const PRODUCTION_FACT_RECEIPT_STORE_IDENTITY: &str = "mfm.postgres.fact_receipt";
-
-/// Key identity used when provisioning the first production fact-receipt trust root.
-pub const PRODUCTION_FACT_RECEIPT_KEY_ID: &str = "mfm.postgres.fact_receipt.v1";
 
 const MANAGED_FACT_RECORD_CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.runtime.managed-fact-record.v1";
 
@@ -338,54 +327,37 @@ impl From<OpLaunchError> for AppError {
     }
 }
 
-/// Builds live typed async app services with explicit certification and fact-query authority.
-///
-/// Pass `fact_query_receipt_trust_root = None` and `fact_query_authority_ready = false` when the
-/// process does not verify or sign fact-query receipts.
+/// Builds live typed async app services with explicit certification.
 pub fn make_run_services<S, A>(
     runners: ErasedRunnerRegistry,
     store: S,
     artifacts: A,
     certification_registry: CertificationRegistry,
-    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
-    fact_query_authority_ready: bool,
 ) -> RunServices<S, A>
 where
     S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     let runtime_artifacts = Arc::new(artifacts.clone());
-    RunServices::new_with_certification_registry_and_fact_query_authority(
+    RunServices::new_with_certification_registry(
         SerialTypedScheduler::new(runners, runtime_artifacts),
         store,
         artifacts,
         certification_registry,
-        fact_query_receipt_trust_root,
-        fact_query_authority_ready,
     )
 }
 
-/// Builds evidence-only async app services with explicit certification and optional fact-query
-/// trust root for replay verification.
-///
-/// Pass `fact_query_receipt_trust_root = None` when the process will not verify fact-query
-/// receipts.
+/// Builds evidence-only async app services with explicit certification.
 pub fn make_run_read_services<S, A>(
     store: S,
     artifacts: A,
     certification_registry: CertificationRegistry,
-    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
 ) -> RunReadServices<S, A>
 where
     S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
-    RunReadServices::new_with_certification_registry_and_fact_query_authority(
-        store,
-        artifacts,
-        certification_registry,
-        fact_query_receipt_trust_root,
-    )
+    RunReadServices::new_with_certification_registry(store, artifacts, certification_registry)
 }
 
 /// Production typed run services backed by the Postgres run store.
@@ -397,31 +369,15 @@ pub type ProductionRunReadServices = RunReadServices<ProductionRunStore, Product
 /// Production public fact query service backed by the Postgres fact query executor.
 pub type ProductionFactPublicQueryService = FactPublicQueryService<ProductionRunStore>;
 
-/// Connects the production Postgres run store with its optional fact-query signer.
-///
-/// The signer is loaded only when [`MFM_FACT_RECEIPT_SIGNING_KEY_FILE`] is configured. Runs that
-/// do not use the fact-index capability remain usable without it; a fact-reading graph is
-/// rejected before admission when the signer/root pair is unavailable.
+/// Connects and validates the production Postgres run store.
 pub async fn connect_production_run_store(
     database_url: Option<&str>,
 ) -> Result<ProductionRunStore, AppError> {
     let database_url = production_database_url(database_url)?;
-    if configured_fact_receipt_signing_key_file().is_none() {
-        return Ok(ProductionRunStore::connect(&database_url).await?);
-    } else {
-        let mut signing_key = load_fact_receipt_signing_key_from_env()?;
-        let store = ProductionRunStore::connect_with_fact_receipt_signing_key_bytes(
-            &database_url,
-            *signing_key,
-        )
-        .await
-        .map_err(fact_receipt_signer_store_error)?;
-        signing_key.zeroize();
-        Ok(store)
-    }
+    Ok(ProductionRunStore::connect(&database_url).await?)
 }
 
-/// Connects production evidence-only services without loading a fact-receipt signing key.
+/// Connects production evidence-only services without loading live capability configuration.
 pub async fn connect_production_run_read_store(
     database_url: Option<&str>,
 ) -> Result<ProductionRunStore, AppError> {
@@ -429,7 +385,7 @@ pub async fn connect_production_run_read_store(
     Ok(ProductionRunStore::connect(&database_url).await?)
 }
 
-/// Connects the production authenticated public-fact query service.
+/// Connects the production store-backed public-fact query service.
 pub async fn connect_production_fact_public_query_service(
     database_url: Option<&str>,
 ) -> Result<ProductionFactPublicQueryService, AppError> {
@@ -440,31 +396,6 @@ pub async fn connect_production_fact_public_query_service(
         .map_err(async_app_store_error)?;
     let catalog = FactCatalogService::from_retained_public_projection(&store, &projection).await?;
     FactPublicQueryService::new(catalog, store)
-}
-
-/// Provisions the immutable production fact-receipt trust root from the configured signing key.
-///
-/// Only the public verifying key is inserted into Postgres. If a root already exists, the
-/// supplied key must match it exactly; the authority table is never updated or replaced.
-pub async fn provision_production_fact_receipt_authority(
-    database_url: Option<&str>,
-) -> Result<(), AppError> {
-    let database_url = production_database_url(database_url)?;
-    let mut signing_key = load_fact_receipt_signing_key_from_env()?;
-    let store_identity = mfm_facts::StoreIdentity::new(PRODUCTION_FACT_RECEIPT_STORE_IDENTITY)
-        .map_err(|_| fact_receipt_authority_provisioning_error())?;
-    let key_id = mfm_facts::StoreKeyId::new(PRODUCTION_FACT_RECEIPT_KEY_ID)
-        .map_err(|_| fact_receipt_authority_provisioning_error())?;
-    ProductionPostgresSchema::provision_fact_receipt_trust_root(
-        &database_url,
-        store_identity,
-        key_id,
-        *signing_key,
-    )
-    .await
-    .map_err(|_| fact_receipt_authority_provisioning_error())?;
-    signing_key.zeroize();
-    Ok(())
 }
 
 fn production_database_url(database_url: Option<&str>) -> Result<String, AppError> {
@@ -480,147 +411,6 @@ fn production_database_url(database_url: Option<&str>) -> Result<String, AppErro
     }
 }
 
-fn configured_fact_receipt_signing_key_file() -> Option<PathBuf> {
-    env::var_os(MFM_FACT_RECEIPT_SIGNING_KEY_FILE)
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-}
-
-fn load_fact_receipt_signing_key_from_env() -> Result<Zeroizing<[u8; 32]>, AppError> {
-    let path = configured_fact_receipt_signing_key_file().ok_or_else(|| {
-        AppError::new(
-            ErrorClass::BadRequest,
-            "MissingFactReceiptSigningKey",
-            format!("Missing {MFM_FACT_RECEIPT_SIGNING_KEY_FILE}"),
-        )
-    })?;
-    load_fact_receipt_signing_key_file(&path)
-}
-
-fn load_fact_receipt_signing_key_file(path: &Path) -> Result<Zeroizing<[u8; 32]>, AppError> {
-    let bytes = Zeroizing::new(std::fs::read(path).map_err(|_| {
-        AppError::backend(
-            ErrorClass::BadRequest,
-            "FactReceiptSigningKeyReadFailed",
-            "Failed to read fact receipt signing key",
-        )
-    })?);
-    decode_fact_receipt_signing_key_bytes(&bytes)
-}
-
-fn decode_fact_receipt_signing_key_bytes(bytes: &[u8]) -> Result<Zeroizing<[u8; 32]>, AppError> {
-    if bytes.len() == 32 {
-        let mut signing_key = [0_u8; 32];
-        signing_key.copy_from_slice(bytes);
-        return Ok(Zeroizing::new(signing_key));
-    }
-    let text = std::str::from_utf8(bytes).map_err(|_| invalid_fact_receipt_signing_key())?;
-    let hex = text
-        .trim()
-        .strip_prefix("0x")
-        .unwrap_or_else(|| text.trim());
-    if hex.len() != 64 {
-        return Err(invalid_fact_receipt_signing_key());
-    }
-    let mut signing_key = Zeroizing::new([0_u8; 32]);
-    for (index, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
-        let high = fact_receipt_hex_nibble(chunk[0])?;
-        let low = fact_receipt_hex_nibble(chunk[1])?;
-        signing_key[index] = (high << 4) | low;
-    }
-    Ok(signing_key)
-}
-
-fn fact_receipt_hex_nibble(byte: u8) -> Result<u8, AppError> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(invalid_fact_receipt_signing_key()),
-    }
-}
-
-fn invalid_fact_receipt_signing_key() -> AppError {
-    AppError::new(
-        ErrorClass::BadRequest,
-        "FactReceiptSigningKeyInvalid",
-        "Fact receipt signing key must be raw 32-byte Ed25519 material or 64 hex characters",
-    )
-}
-
-fn fact_receipt_signer_store_error(
-    error: mfm_stream_store_postgres::PostgresStoreError,
-) -> AppError {
-    match error {
-        mfm_stream_store_postgres::PostgresStoreError::Store(
-            store::StoreError::ReceiptAuthentication { .. },
-        ) => AppError::backend(
-            ErrorClass::BadRequest,
-            "FactReceiptSignerInvalid",
-            "Fact receipt signer does not match the run store trust root",
-        ),
-        error => AppError::from(error),
-    }
-}
-
-fn fact_receipt_authority_provisioning_error() -> AppError {
-    AppError::backend(
-        ErrorClass::BadRequest,
-        "FactReceiptAuthorityProvisioningFailed",
-        "Fact receipt authority could not be provisioned",
-    )
-}
-
-pub(crate) fn fact_query_execution_store_error(
-    error: mfm_stream_store_postgres::PostgresStoreError,
-) -> AppError {
-    match error {
-        mfm_stream_store_postgres::PostgresStoreError::Store(
-            store::StoreError::ReceiptAuthentication { .. },
-        ) => fact_receipt_authority_unavailable_error(),
-        error => AppError::from(error),
-    }
-}
-
-fn fact_receipt_authority_unavailable_error() -> AppError {
-    AppError::backend(
-        ErrorClass::BadRequest,
-        "FactReceiptAuthorityUnavailable",
-        "Fact receipt authority is required for this fact-reading workflow",
-    )
-}
-
-fn runtime_spec_requires_fact_index(runtime_spec: &CertifiedRuntimeSpec) -> Result<bool, AppError> {
-    let capability_kind = mfm_fact_capabilities::FactIndexReadCapability::kind().map_err(|_| {
-        AppError::backend(
-            ErrorClass::Internal,
-            "CapabilityIdentityInvalid",
-            "Fact-index capability identity is invalid",
-        )
-    })?;
-    let capability_version =
-        mfm_fact_capabilities::FactIndexReadCapability::version().map_err(|_| {
-            AppError::backend(
-                ErrorClass::Internal,
-                "CapabilityIdentityInvalid",
-                "Fact-index capability version is invalid",
-            )
-        })?;
-    Ok(runtime_spec
-        .spec()
-        .nodes
-        .iter()
-        .chain(runtime_spec.spec().remediations.values())
-        .any(|node| {
-            node.capability_bindings
-                .capabilities
-                .iter()
-                .any(|capability| {
-                    capability.kind == capability_kind && capability.version == capability_version
-                })
-        }))
-}
-
 /// Builds production typed run services backed by the Postgres run store.
 pub async fn connect_production_run_services(
     database_url: Option<&str>,
@@ -632,15 +422,11 @@ pub async fn connect_production_run_services(
     let runners =
         production_runner_registry(Arc::new(store.clone()), fact_index, runtime_config_path)?;
     let certification_registry = production_certification_registry()?;
-    let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
-    let fact_query_authority_ready = store.fact_receipt_queries_ready();
     Ok(make_run_services(
         runners,
         store.clone(),
         store,
         certification_registry,
-        fact_query_receipt_trust_root,
-        fact_query_authority_ready,
     ))
 }
 
@@ -650,12 +436,10 @@ pub async fn connect_production_run_read_services(
 ) -> Result<ProductionRunReadServices, AppError> {
     let store = connect_production_run_read_store(database_url).await?;
     let certification_registry = production_certification_registry()?;
-    let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
     Ok(make_run_read_services(
         store.clone(),
         store.clone(),
         certification_registry,
-        fact_query_receipt_trust_root,
     ))
 }
 
@@ -1515,7 +1299,6 @@ pub struct RunReadServices<S, A> {
     store: S,
     artifacts: A,
     certification_registry: CertificationRegistry,
-    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
 }
 
 impl<S, A> RunReadServices<S, A>
@@ -1529,26 +1312,10 @@ where
         artifacts: A,
         certification_registry: CertificationRegistry,
     ) -> Self {
-        Self::new_with_certification_registry_and_fact_query_authority(
-            store,
-            artifacts,
-            certification_registry,
-            None,
-        )
-    }
-
-    /// Creates evidence-only app services with explicit fact-query receipt authority.
-    pub fn new_with_certification_registry_and_fact_query_authority(
-        store: S,
-        artifacts: A,
-        certification_registry: CertificationRegistry,
-        fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
-    ) -> Self {
         Self {
             store,
             artifacts,
             certification_registry,
-            fact_query_receipt_trust_root,
         }
     }
 
@@ -1597,9 +1364,7 @@ where
 
     /// Verifies replay authority for a run using retained typed artifact evidence only.
     pub async fn verify_replay_for_run(&self, run_id: &RunId) -> Result<ReplayResponse, AppError> {
-        self.trusted_run_reader()
-            .verify_replay(self.fact_query_receipt_trust_root.clone(), run_id)
-            .await
+        self.trusted_run_reader().verify_replay(run_id).await
     }
 
     /// Renders typed public output from store-owned projection and typed artifact bytes.
@@ -1689,8 +1454,6 @@ pub struct RunServices<S, A> {
     store: S,
     artifacts: A,
     certification_registry: CertificationRegistry,
-    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
-    fact_query_authority_ready: bool,
     execution_claim_heartbeat_interval: Duration,
 }
 
@@ -1706,33 +1469,11 @@ where
         artifacts: A,
         certification_registry: CertificationRegistry,
     ) -> Self {
-        Self::new_with_certification_registry_and_fact_query_authority(
+        Self {
             scheduler,
             store,
             artifacts,
             certification_registry,
-            None,
-            false,
-        )
-    }
-
-    /// Creates typed async app services with explicit fact-query receipt authority.
-    pub fn new_with_certification_registry_and_fact_query_authority(
-        scheduler: SerialTypedScheduler,
-        store: S,
-        artifacts: A,
-        certification_registry: CertificationRegistry,
-        fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
-        fact_query_authority_ready: bool,
-    ) -> Self {
-        Self {
-            scheduler: scheduler
-                .with_fact_query_receipt_trust_root(fact_query_receipt_trust_root.clone()),
-            store,
-            artifacts,
-            certification_registry,
-            fact_query_receipt_trust_root,
-            fact_query_authority_ready,
             execution_claim_heartbeat_interval: default_execution_claim_heartbeat_interval(),
         }
     }
@@ -1797,9 +1538,7 @@ where
 
     /// Verifies replay authority for a run using retained typed artifact evidence only.
     pub async fn verify_replay_for_run(&self, run_id: &RunId) -> Result<ReplayResponse, AppError> {
-        self.trusted_run_reader()
-            .verify_replay(self.fact_query_receipt_trust_root.clone(), run_id)
-            .await
+        self.trusted_run_reader().verify_replay(run_id).await
     }
 
     /// Renders typed public output from store-owned projection and typed artifact bytes.
@@ -1853,9 +1592,6 @@ where
             .await?
             .runtime_spec()
             .clone();
-        if runtime_spec_requires_fact_index(&runtime_spec)? && !self.fact_query_authority_ready {
-            return Err(fact_receipt_authority_unavailable_error());
-        }
         let status = self.drive_until_blocked(&runtime_spec, run_id).await?;
         self.run_response_from_verified_status(run_id, status).await
     }
@@ -1871,9 +1607,6 @@ where
             .await?
             .runtime_spec()
             .clone();
-        if runtime_spec_requires_fact_index(&runtime_spec)? && !self.fact_query_authority_ready {
-            return Err(fact_receipt_authority_unavailable_error());
-        }
         let manual_request = manual_resolution_runtime_request(req)?;
         self.scheduler
             .record_manual_resolution(&self.store, &runtime_spec, &run_id, manual_request)
@@ -1904,10 +1637,6 @@ where
         let execution_scope =
             store::ExecutionClaimScope::from_run_identity_material(&identity_material);
         let runtime_spec = CertifiedRuntimeSpec::new(req.certified_spec)?;
-        if runtime_spec_requires_fact_index(&runtime_spec)? && !self.fact_query_authority_ready {
-            return Err(fact_receipt_authority_unavailable_error());
-        }
-
         loop {
             let stream = self
                 .store
@@ -2497,11 +2226,7 @@ where
             .map_err(observation_app_store_error)
     }
 
-    async fn verify_replay(
-        &self,
-        fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
-        run_id: &RunId,
-    ) -> Result<ReplayResponse, AppError> {
+    async fn verify_replay(&self, run_id: &RunId) -> Result<ReplayResponse, AppError> {
         let context = self.load_run_context(run_id).await?;
         verify_replay_diagnostics_from_recorded_artifacts(self.artifacts, run_id, context.events())
             .await?;
@@ -2510,7 +2235,6 @@ where
             self.artifacts,
             context.runtime_spec(),
             context.view(),
-            fact_query_receipt_trust_root,
         )
         .await?;
         let broker = ReplayBroker::from_read_authority(authority)?;
@@ -2949,27 +2673,11 @@ pub fn replay_read_authority_for_run(
     )?)
 }
 
-/// Builds sealed replay read authority with explicit fact-query receipt trust authority.
-pub fn replay_read_authority_for_run_with_fact_query_trust_root(
-    runtime_spec: &CertifiedRuntimeSpec,
-    verified_view: &VerifiedRunHistoryView,
-    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
-) -> Result<ReplayReadAuthority, AppError> {
-    Ok(
-        ReplayReadAuthority::from_verified_run_history_view_with_fact_query_receipt_trust_root(
-            runtime_spec,
-            verified_view,
-            fact_query_receipt_trust_root,
-        )?,
-    )
-}
-
 async fn replay_read_authority_for_run_with_retained_source_facts<S, A>(
     store: &S,
     artifacts: &A,
     runtime_spec: &CertifiedRuntimeSpec,
     verified_view: &VerifiedRunHistoryView,
-    fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
 ) -> Result<ReplayReadAuthority, AppError>
 where
     S: store::RunEventStore + Send + Sync,
@@ -2980,13 +2688,14 @@ where
             .await?;
     let context_artifacts =
         certified_evm_context_artifacts_for_replay(artifacts, runtime_spec).await?;
-    Ok(ReplayReadAuthority::from_verified_run_history_view_with_fact_query_receipt_trust_root_source_facts_and_artifacts(
-        runtime_spec,
-        verified_view,
-        fact_query_receipt_trust_root,
-        source_fact_events,
-        context_artifacts,
-    )?)
+    Ok(
+        ReplayReadAuthority::from_verified_run_history_view_with_source_facts_and_artifacts(
+            runtime_spec,
+            verified_view,
+            source_fact_events,
+            context_artifacts,
+        )?,
+    )
 }
 
 async fn certified_evm_context_artifacts_for_replay(

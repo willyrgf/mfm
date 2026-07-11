@@ -23,7 +23,7 @@ INSERT INTO store_metadata (store_epoch, store_scope_id, schema_contract_version
 VALUES (
   'mfm.store.epoch.v1:' || encode(public.gen_random_bytes(16), 'hex'),
   'mfm.store_scope.v1:' || encode(public.gen_random_bytes(16), 'hex'),
-  'mfm.postgres.run_store.v1'
+  'mfm.postgres.run_store.v2'
 );
 
 CREATE TABLE store_commit_order (
@@ -34,27 +34,6 @@ CREATE TABLE store_commit_order (
 );
 
 INSERT INTO store_commit_order (current_order) VALUES (0);
-
-CREATE TABLE fact_receipt_trust_root (
-  singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
-  store_identity TEXT NOT NULL,
-  authentication_scheme TEXT NOT NULL,
-  key_id TEXT NOT NULL,
-  verifying_key BYTEA NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
-  CONSTRAINT fact_receipt_trust_root_store_identity_v1 CHECK (
-    store_identity ~ '^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$'
-  ),
-  CONSTRAINT fact_receipt_trust_root_scheme_v1 CHECK (
-    authentication_scheme = 'local_ed25519_sha256_jcs_v1'
-  ),
-  CONSTRAINT fact_receipt_trust_root_key_id_v1 CHECK (
-    key_id ~ '^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$'
-  ),
-  CONSTRAINT fact_receipt_trust_root_key_len CHECK (
-    octet_length(verifying_key) = 32
-  )
-);
 
 CREATE TABLE commits (
   commit_id TEXT NOT NULL,
@@ -431,10 +410,6 @@ CREATE TABLE run_observation_cursors (
 
 CREATE TRIGGER store_metadata_no_update
 BEFORE UPDATE OR DELETE OR TRUNCATE ON store_metadata
-FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
-
-CREATE TRIGGER fact_receipt_trust_root_no_update
-BEFORE UPDATE OR DELETE OR TRUNCATE ON fact_receipt_trust_root
 FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
 
 CREATE TRIGGER commits_no_update

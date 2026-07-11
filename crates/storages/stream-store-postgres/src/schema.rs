@@ -1,14 +1,11 @@
 use std::collections::BTreeSet;
 
-use mfm_facts::{StoreIdentity, StoreKeyId, StoreReceiptAuthenticationScheme};
-use mfm_store::v1::{FactQueryReceiptTrustRoot, StoreScopeId};
+use mfm_store::v1::StoreScopeId;
 use sqlx::{PgPool, Row};
 
 use crate::run_store::{
-    PostgresFactReceiptSigner, PostgresStoreAuthority, PostgresStoreAuthorityError,
-    PostgresStoreError, Result,
+    PostgresStoreAuthority, PostgresStoreAuthorityError, PostgresStoreError, Result,
 };
-use zeroize::{Zeroize, Zeroizing};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -30,60 +27,6 @@ impl PostgresSchema {
             .map_err(|_| PostgresStoreError::Authority(PostgresStoreAuthorityError::Connection))?;
         validate_pool(&pool).await
     }
-
-    /// Provisions the immutable fact-receipt trust root from secret signing-key bytes.
-    ///
-    /// The secret is held only in memory. Existing authority is never replaced: the supplied
-    /// key must produce the already-persisted public root when one exists.
-    pub async fn provision_fact_receipt_trust_root(
-        database_url: &str,
-        store_identity: StoreIdentity,
-        key_id: StoreKeyId,
-        signing_key: [u8; 32],
-    ) -> Result<FactQueryReceiptTrustRoot> {
-        let pool = connect_pool(database_url).await?;
-        let authority = validate_pool(&pool).await?;
-        let mut signing_key = Zeroizing::new(signing_key);
-        let (store_identity, key_id) = authority
-            .fact_receipt_trust_root()
-            .map(|root| (root.store_identity().clone(), root.key_id().clone()))
-            .unwrap_or((store_identity, key_id));
-        let signer = PostgresFactReceiptSigner::from_ed25519_signing_key_bytes(
-            store_identity,
-            key_id,
-            *signing_key,
-        );
-        signing_key.zeroize();
-        let expected = signer.trust_root()?;
-
-        if authority.fact_receipt_trust_root().is_none() {
-            sqlx::query(
-                "INSERT INTO fact_receipt_trust_root \
-                 (store_identity, authentication_scheme, key_id, verifying_key) \
-                 VALUES ($1, $2, $3, $4) \
-                 ON CONFLICT (singleton) DO NOTHING",
-            )
-            .bind(expected.store_identity().as_str())
-            .bind(expected.scheme().as_str())
-            .bind(expected.key_id().as_str())
-            .bind(expected.verifying_key().to_vec())
-            .execute(&pool)
-            .await
-            .map_err(|_| {
-                store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot)
-            })?;
-        }
-
-        let actual = load_fact_receipt_trust_root(&pool).await?.ok_or_else(|| {
-            store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot)
-        })?;
-        if actual != expected {
-            return Err(store_authority_error(
-                PostgresStoreAuthorityError::FactReceiptTrustRoot,
-            ));
-        }
-        Ok(actual)
-    }
 }
 
 pub(crate) async fn migrate_pool(pool: &PgPool) -> Result<()> {
@@ -103,8 +46,7 @@ pub(crate) async fn connect_pool(database_url: &str) -> Result<PgPool> {
 pub(crate) async fn validate_pool(pool: &PgPool) -> Result<PostgresStoreAuthority> {
     validate_migrations(pool).await?;
     validate_catalog(pool).await?;
-    let trust_root = load_fact_receipt_trust_root(pool).await?;
-    validate_store_metadata(pool, trust_root).await
+    validate_store_metadata(pool).await
 }
 
 async fn validate_migrations(pool: &PgPool) -> Result<()> {
@@ -405,10 +347,7 @@ fn trigger_type_has(trigger_type: i32, bit: i32) -> bool {
     trigger_type & bit == bit
 }
 
-async fn validate_store_metadata(
-    pool: &PgPool,
-    fact_receipt_trust_root: Option<FactQueryReceiptTrustRoot>,
-) -> Result<PostgresStoreAuthority> {
+async fn validate_store_metadata(pool: &PgPool) -> Result<PostgresStoreAuthority> {
     let row = sqlx::query(
         "SELECT COUNT(*)::bigint AS row_count, \
           MIN(store_epoch) AS store_epoch, \
@@ -432,7 +371,7 @@ async fn validate_store_metadata(
         .try_get("store_scope_id")
         .map_err(|_| store_authority_error(PostgresStoreAuthorityError::Metadata))?;
     if row_count != 1
-        || schema_contract_version.as_deref() != Some("mfm.postgres.run_store.v1")
+        || schema_contract_version.as_deref() != Some("mfm.postgres.run_store.v2")
         || !valid_store_epoch(store_epoch.as_deref())
     {
         return Err(store_authority_error(PostgresStoreAuthorityError::Metadata));
@@ -443,58 +382,7 @@ async fn validate_store_metadata(
             StoreScopeId::new(value)
                 .map_err(|_| store_authority_error(PostgresStoreAuthorityError::StoreScope))
         })?;
-    Ok(PostgresStoreAuthority::new(
-        store_scope_id,
-        fact_receipt_trust_root,
-    ))
-}
-
-async fn load_fact_receipt_trust_root(pool: &PgPool) -> Result<Option<FactQueryReceiptTrustRoot>> {
-    let row = sqlx::query(
-        "SELECT store_identity, authentication_scheme, key_id, verifying_key \
-         FROM fact_receipt_trust_root WHERE singleton",
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot))?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let store_identity = row
-        .try_get::<String, _>("store_identity")
-        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot))
-        .and_then(|value| {
-            StoreIdentity::new(value).map_err(|_| {
-                store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot)
-            })
-        })?;
-    let scheme = row
-        .try_get::<String, _>("authentication_scheme")
-        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot))
-        .and_then(|value| match value.as_str() {
-            "local_ed25519_sha256_jcs_v1" => {
-                Ok(StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1)
-            }
-            _ => Err(store_authority_error(
-                PostgresStoreAuthorityError::FactReceiptTrustRoot,
-            )),
-        })?;
-    let key_id = row
-        .try_get::<String, _>("key_id")
-        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot))
-        .and_then(|value| {
-            StoreKeyId::new(value).map_err(|_| {
-                store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot)
-            })
-        })?;
-    let verifying_key: [u8; 32] = row
-        .try_get::<Vec<u8>, _>("verifying_key")
-        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot))?
-        .try_into()
-        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot))?;
-    FactQueryReceiptTrustRoot::new(store_identity, scheme, key_id, verifying_key)
-        .map(Some)
-        .map_err(|_| store_authority_error(PostgresStoreAuthorityError::FactReceiptTrustRoot))
+    Ok(PostgresStoreAuthority::new(store_scope_id))
 }
 
 fn valid_store_epoch(value: Option<&str>) -> bool {
@@ -516,7 +404,6 @@ const REQUIRED_TABLES: &[&str] = &[
     "_sqlx_migrations",
     "store_metadata",
     "store_commit_order",
-    "fact_receipt_trust_root",
     "commits",
     "run_events",
     "artifact_blobs",
@@ -556,7 +443,6 @@ const REQUIRED_FUNCTIONS: &[&str] = &["mfm_reject_authority_mutation"];
 
 const REQUIRED_TRIGGERS: &[&str] = &[
     "store_metadata_no_update",
-    "fact_receipt_trust_root_no_update",
     "commits_no_update",
     "run_events_no_update",
     "artifact_blobs_no_update",
@@ -572,10 +458,6 @@ const REQUIRED_CONSTRAINTS: &[&str] = &[
     "commits_store_commit_order_key",
     "store_commit_order_nonnegative",
     "store_metadata_store_scope_id_v1",
-    "fact_receipt_trust_root_store_identity_v1",
-    "fact_receipt_trust_root_scheme_v1",
-    "fact_receipt_trust_root_key_id_v1",
-    "fact_receipt_trust_root_key_len",
     "admission_lane_id_len",
     "admission_lane_class_v1",
     "admission_lane_mode_v1",
@@ -636,7 +518,6 @@ const REQUIRED_CURSOR_COLUMNS: &[&str] = &[
 
 const IMMUTABLE_TABLES: &[&str] = &[
     "store_metadata",
-    "fact_receipt_trust_root",
     "commits",
     "run_events",
     "artifact_blobs",

@@ -11,9 +11,9 @@ parity-tests = []
 
 [dependencies]
 axum = "0.7"
-ed25519-dalek = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-none", "postgres"] }
 uuid = { version = "1.0", features = ["v4"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 tempfile = "3.0"
@@ -51,9 +51,9 @@ mfm_core = { path = "../../crates/core" }
 mfm-rest-api = { path = "../../bin/rest-api" }
 
 [dev-dependencies]
+assert_cmd = "2.0"
 alloy-primitives = { workspace = true }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-evm-contract-config = { path = "../../crates/evm-contract-config" }
 mfm-evm-contract-model = { path = "../../crates/evm-contract-model" }
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-none", "postgres"] }
 tower = "0.5"

@@ -17,8 +17,7 @@ use crate::ProductionRunStore;
 
 /// Builds the production Platform/Control fact-index provider from a Postgres run store.
 ///
-/// The fact-receipt trust root is loaded only for a nonempty read batch, so process assembly does
-/// not depend on unrelated receipt authority state.
+/// Fact queries are evaluated against the validated Postgres store authority.
 pub fn production_fact_index_read_provider(
     store: ProductionRunStore,
 ) -> Arc<dyn FactIndexReadProvider> {
@@ -58,14 +57,10 @@ impl FactIndexReadProvider for PostgresFactIndexReadProvider {
 /// Projection-backed fact-index over an in-memory store snapshot.
 ///
 /// Single store-backed test/process-assembly provider (not production Postgres). Freezes one
-/// projection for the whole batch (shared selection frontier), signs receipts with a fixed test
-/// key, and verifies authentication before returning rows.
+/// projection for the whole batch (shared selection frontier).
 #[cfg(any(test, feature = "test-support"))]
 pub struct ProjectionFactIndexProvider {
     store: store::AsyncInMemoryRunStore,
-    signing_key: ed25519_dalek::SigningKey,
-    store_identity: mfm_facts::StoreIdentity,
-    key_id: mfm_facts::StoreKeyId,
     returned_row_counts: Mutex<Vec<usize>>,
 }
 
@@ -75,10 +70,6 @@ impl ProjectionFactIndexProvider {
     pub fn new(store: store::AsyncInMemoryRunStore) -> Self {
         Self {
             store,
-            signing_key: ed25519_dalek::SigningKey::from_bytes(&[0x43; 32]),
-            store_identity: mfm_facts::StoreIdentity::new("mfm.app.projection.fact_index")
-                .expect("store identity"),
-            key_id: mfm_facts::StoreKeyId::new("app.projection.fact.read").expect("store key id"),
             returned_row_counts: Mutex::new(Vec::new()),
         }
     }
@@ -102,15 +93,6 @@ impl ProjectionFactIndexProvider {
     pub fn returned_row_counts(&self) -> Vec<usize> {
         self.returned_row_counts.lock().expect("row counts").clone()
     }
-
-    /// Store trust root matching this provider's signed receipts.
-    pub fn receipt_trust_root(&self) -> store::FactQueryReceiptTrustRoot {
-        store::test_support::fact_query_receipt_trust_root_for_test(
-            &self.signing_key,
-            self.store_identity.clone(),
-            self.key_id.clone(),
-        )
-    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -130,7 +112,6 @@ impl FactIndexReadProvider for ProjectionFactIndexProvider {
             let projection = self.store.projection_snapshot().map_err(|error| {
                 mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(error)
             })?;
-            let trust_root = self.receipt_trust_root();
             let mut responses = Vec::with_capacity(requests.len());
             for request in requests {
                 let rows = store::test_support::execute_fact_query_projection_for_test(
@@ -144,23 +125,34 @@ impl FactIndexReadProvider for ProjectionFactIndexProvider {
                     .lock()
                     .expect("row counts")
                     .push(rows.len());
-                let receipt =
-                    store::test_support::signed_fact_query_receipt_for_projection_for_test(
-                        request.plan(),
-                        &projection,
-                        &self.signing_key,
-                        self.store_identity.clone(),
-                        self.key_id.clone(),
-                        &rows,
-                    );
-                let plan_hash =
-                    mfm_facts::fact_query_plan_hash(request.plan()).map_err(|error| {
+                let shape = mfm_facts::parse_canonical_fact_query_shape(request.plan()).map_err(
+                    |error| {
                         mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(error)
-                    })?;
-                store::verify_fact_query_receipt_authentication(&plan_hash, &receipt, &trust_root)
-                    .map_err(|error| {
-                        mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(error)
-                    })?;
+                    },
+                )?;
+                let receipt = mfm_facts::FactQueryReceipt::from_rows(
+                    mfm_facts::StoreReadFrontier::new(
+                        request.plan().store_scope().clone(),
+                        request.plan().query_scope().clone(),
+                        mfm_facts::DescriptorCatalogWatermark::new(
+                            projection.fact_descriptors().count() as u64,
+                        ),
+                        mfm_facts::StoreCommitOrder::new(
+                            projection
+                                .fact_index_entries()
+                                .map(|(_, entry)| entry.store_commit_order)
+                                .max()
+                                .unwrap_or_default(),
+                        ),
+                    ),
+                    mfm_facts::StoreReadFrontierType::Snapshot,
+                    &rows,
+                    !shape.return_fields().is_empty(),
+                    request.plan().limit(),
+                )
+                .map_err(|error| {
+                    mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(error)
+                })?;
                 let result = mfm_facts::FactQueryResult::new(rows, receipt).map_err(|error| {
                     mfm_fact_capabilities::FactIndexReadError::redacted_provider_failure(error)
                 })?;

@@ -367,7 +367,6 @@ fn portfolio_services(
     store: AsyncInMemoryRunStore,
     fact_index: Arc<ProjectionFactIndexProvider>,
 ) -> mfm_app::RunServices<AsyncInMemoryRunStore, AsyncInMemoryRunStore> {
-    let receipt_trust_root = fact_index.receipt_trust_root();
     let artifacts: Arc<dyn RetainedArtifactReadProvider> = Arc::new(store.clone());
     let portfolio_capabilities =
         mfm_adapters_portfolio::PortfolioRunnerCapabilities::new(artifacts, fact_index.clone());
@@ -377,13 +376,11 @@ fn portfolio_services(
     mfm_adapters_portfolio::register_portfolio_runners(&mut runners, portfolio_capabilities)
         .expect("portfolio runners");
     let runtime_artifacts = Arc::new(store.clone());
-    mfm_app::RunServices::new_with_certification_registry_and_fact_query_authority(
+    mfm_app::RunServices::new_with_certification_registry(
         mfm_runtime::SerialTypedScheduler::new(runners, runtime_artifacts),
         store.clone(),
         store,
         mfm_app::production_certification_registry().expect("certification registry"),
-        Some(receipt_trust_root),
-        true,
     )
 }
 

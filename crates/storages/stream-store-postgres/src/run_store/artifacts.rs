@@ -2,17 +2,15 @@ use super::*;
 
 pub(super) async fn load_artifacts(
     tx: &mut Transaction<'_, Postgres>,
-    run_id: &RunId,
 ) -> Result<ArtifactAuthorityMap> {
+    // Artifact identity is store-wide. Cross-run fact-query evidence retains descriptor and
+    // response artifacts written by collector runs, so append validation must see all admitted
+    // evidence rather than only artifacts linked to the run being appended.
     let rows = sqlx::query(
         "SELECT a.artifact_id, a.evidence_hash, a.digest, a.byte_len, a.media_type, a.schema_id, \
          a.semantic_type_id, a.producer_node_id, a.producer_seed_id, a.artifact_role \
-         FROM artifact_admissions a \
-         INNER JOIN run_artifact_admissions ra \
-           ON ra.artifact_id = a.artifact_id AND ra.evidence_hash = a.evidence_hash \
-         WHERE ra.run_id = $1",
+         FROM artifact_admissions a",
     )
-    .bind(run_id.as_str())
     .fetch_all(&mut **tx)
     .await
     .map_err(|error| database_error("failed to load artifact evidence", error))?;

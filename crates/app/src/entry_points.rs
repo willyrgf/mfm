@@ -444,7 +444,6 @@ mod tests {
         let fixture = EntryPointRunFixture::in_memory().await;
         let prepared = fixture.prepare_sample_portfolio(None);
         let fact_index = crate::ProjectionFactIndexProvider::new(fixture.store.clone());
-        let fact_query_receipt_trust_root = fact_index.receipt_trust_root();
         let runners = crate::production_runner_registry(
             Arc::new(fixture.store.clone()),
             Arc::new(fact_index),
@@ -456,8 +455,6 @@ mod tests {
             fixture.store.clone(),
             fixture.store.clone(),
             fixture.prep.certification_registry.clone(),
-            Some(fact_query_receipt_trust_root),
-            true,
         );
 
         let outcome = services
@@ -484,7 +481,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn portfolio_fact_authority_is_required_before_admission() {
+    async fn missing_platform_facts_follow_normal_report_failure_after_admission() {
         let fixture = EntryPointRunFixture::in_memory().await;
         let prepared = fixture.prepare_sample_portfolio(None);
         let runners = crate::production_runner_registry(
@@ -498,23 +495,31 @@ mod tests {
             fixture.store.clone(),
             fixture.store.clone(),
             fixture.prep.certification_registry.clone(),
-            None,
-            false,
         );
 
         let run_id = prepared.request.run_id.clone();
-        let error = services
+        let outcome = services
             .launch_run(prepared.request)
             .await
-            .expect_err("missing fact authority must fail before admission");
+            .expect("missing Platform facts must produce a failed admitted run");
 
-        assert_eq!(error.code, "FactReceiptAuthorityUnavailable");
-        assert!(fixture
-            .store
-            .load_run_stream(&run_id)
-            .await
-            .expect("run stream")
-            .is_empty());
+        let run = outcome
+            .run()
+            .expect("report failure still returns the admitted run");
+        assert_eq!(run.run_mode, crate::RunModeStatus::FailedWithoutAcdcClaim);
+        assert!(run
+            .attempt_dispositions
+            .iter()
+            .any(|attempt| attempt.error_code.as_deref() == Some("missing_fact")));
+        assert!(
+            fixture
+                .store
+                .load_run_stream(&run_id)
+                .await
+                .expect("run stream")
+                .len()
+                > 1
+        );
     }
 
     #[tokio::test]
@@ -654,8 +659,6 @@ mod tests {
             fixture.store.clone(),
             fixture.store.clone(),
             fixture.prep.certification_registry.clone(),
-            Some(crate::ProjectionFactIndexProvider::empty().receipt_trust_root()),
-            true,
         );
 
         let error = incompatible_services
@@ -685,8 +688,6 @@ mod tests {
             fixture.store.clone(),
             fixture.store.clone(),
             fixture.prep.certification_registry.clone(),
-            Some(crate::ProjectionFactIndexProvider::empty().receipt_trust_root()),
-            true,
         );
 
         let err = services
@@ -849,7 +850,6 @@ mod tests {
             mfm_store::v1::AsyncInMemoryRunStore,
         > {
             let fact_index = crate::ProjectionFactIndexProvider::new(self.store.clone());
-            let fact_query_receipt_trust_root = fact_index.receipt_trust_root();
             let runners = crate::production_runner_registry(
                 Arc::new(self.store.clone()),
                 Arc::new(fact_index),
@@ -861,8 +861,6 @@ mod tests {
                 self.store.clone(),
                 self.store.clone(),
                 self.prep.certification_registry.clone(),
-                Some(fact_query_receipt_trust_root),
-                true,
             )
         }
 

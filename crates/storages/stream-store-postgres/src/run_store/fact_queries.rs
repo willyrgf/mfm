@@ -34,20 +34,13 @@ impl PostgresRunStore {
         if plans.is_empty() {
             return Ok(Vec::new());
         }
-        let signer = require_fact_receipt_signer(self.fact_receipt_signer.as_ref())?;
-        let trust_root = self
-            .authority
-            .fact_receipt_trust_root()
-            .ok_or_else(|| receipt_authentication_store_error("missing fact receipt trust root"))?;
-        execute_fact_queries_client(&self.pool, plans, signer, trust_root).await
+        execute_fact_queries_client(&self.pool, plans).await
     }
 }
 
 async fn execute_fact_queries_client(
     pool: &PgPool,
     plans: &[mfm_facts::CanonicalFactQueryPlan],
-    signer: &PostgresFactReceiptSigner,
-    trust_root: &mfm_store::v1::FactQueryReceiptTrustRoot,
 ) -> Result<Vec<PostgresFactQueryResult>> {
     let mut tx = pool
         .begin()
@@ -59,7 +52,7 @@ async fn execute_fact_queries_client(
         .map_err(|error| database_error("failed to set fact query transaction mode", error))?;
     let mut results = Vec::with_capacity(plans.len());
     for plan in plans {
-        results.push(execute_fact_query_tx(&mut tx, plan, signer, trust_root).await?);
+        results.push(execute_fact_query_tx(&mut tx, plan).await?);
     }
     tx.commit()
         .await
@@ -70,19 +63,13 @@ async fn execute_fact_queries_client(
 async fn execute_fact_query_tx(
     tx: &mut Transaction<'_, Postgres>,
     plan: &mfm_facts::CanonicalFactQueryPlan,
-    signer: &PostgresFactReceiptSigner,
-    trust_root: &mfm_store::v1::FactQueryReceiptTrustRoot,
 ) -> Result<PostgresFactQueryResult> {
     let shape = mfm_facts::parse_canonical_fact_query_shape(plan).map_err(fact_error)?;
     let authority_events = load_fact_authority_events_tx(tx).await?;
     let result_rows =
         load_authoritative_fact_query_rows_tx(tx, plan, &shape, &authority_events).await?;
     let receipt =
-        build_fact_query_receipt_tx(tx, plan, &shape, signer, &result_rows, &authority_events)
-            .await?;
-    let plan_hash = mfm_facts::fact_query_plan_hash(plan).map_err(fact_error)?;
-    mfm_store::v1::verify_fact_query_receipt_authentication(&plan_hash, &receipt, trust_root)
-        .map_err(PostgresStoreError::Store)?;
+        build_fact_query_receipt_tx(tx, plan, &shape, &result_rows, &authority_events).await?;
     PostgresFactQueryResult::new(result_rows, receipt).map_err(fact_error)
 }
 
@@ -90,23 +77,18 @@ async fn build_fact_query_receipt_tx(
     tx: &mut Transaction<'_, Postgres>,
     plan: &mfm_facts::CanonicalFactQueryPlan,
     shape: &mfm_facts::CompiledFactQueryShape,
-    signer: &PostgresFactReceiptSigner,
     rows: &[PostgresFactQueryRow],
     authority_events: &[KernelEventEnvelope],
 ) -> Result<mfm_facts::FactQueryReceipt> {
-    let plan_hash = mfm_facts::fact_query_plan_hash(plan).map_err(fact_error)?;
     let read_frontier = load_store_read_frontier_tx(tx, plan, authority_events).await?;
-    let material = mfm_facts::FactQueryReceiptMaterial::from_rows(
-        &plan_hash,
+    mfm_facts::FactQueryReceipt::from_rows(
         read_frontier,
         mfm_facts::StoreReadFrontierType::Snapshot,
         rows,
         !shape.return_fields().is_empty(),
         plan.limit(),
     )
-    .map_err(fact_error)?;
-    let auth = signer.sign_receipt_hash(material.store_receipt_hash())?;
-    Ok(material.into_receipt(auth))
+    .map_err(fact_error)
 }
 
 async fn load_store_read_frontier_tx(

@@ -17,8 +17,6 @@ toml = "0.8"
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"] }
 uuid = { version = "1.0", features = ["v4"] }
 thiserror = { workspace = true }
-zeroize = "1.7"
-ed25519-dalek = { workspace = true }
 
 mfm-adapters-btc-jsonrpc = { path = "../adapters/btc-jsonrpc" }
 mfm-adapters-evm = { path = "../adapters/evm" }

@@ -176,13 +176,13 @@ pub const MFM_REST_ROLE: &str = "MFM_REST_ROLE";
 
 /// Process role for REST bootstrap and route admission.
 ///
-/// Read processes never load fact-receipt signing material and refuse live mutation routes
-/// plus signed public fact queries. Live processes may load the signing key when configured.
+/// Read processes serve evidence-only routes and refuse live mutation routes. Live processes
+/// additionally serve start, resume, and manual-resolution routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestProcessRole {
     /// Evidence-only status, stream, list, replay, and public-output routes.
     Read,
-    /// Live start/resume plus optional authenticated fact-query execution.
+    /// Live start/resume plus public fact-query execution.
     Live,
 }
 
@@ -229,10 +229,6 @@ pub struct AppState<S = ProductionRunStore> {
     pub store: S,
     /// Optional runtime configuration file path for live capability-backed runs.
     pub runtime_config_path: Option<PathBuf>,
-    /// Optional fact-query receipt trust root used for replay verification.
-    pub fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
-    /// Whether live authenticated fact queries are ready in this process.
-    pub fact_query_authority_ready: bool,
     /// Platform/Control fact-index used by portfolio report and collector runners.
     pub fact_index: Arc<dyn mfm_app::FactIndexReadProvider>,
 }
@@ -293,17 +289,6 @@ where
         Ok(())
     }
 
-    fn require_signed_query_role(&self) -> Result<(), ApiError> {
-        if self.app.role != RestProcessRole::Live {
-            return Err(ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "RestRoleReadOnly",
-                "authenticated fact queries require MFM_REST_ROLE=live with a fact-receipt signer",
-            ));
-        }
-        Ok(())
-    }
-
     fn live_services(&self) -> Result<RunServices<S, S>, ApiError> {
         self.require_live_role()?;
         self.live_services
@@ -314,14 +299,11 @@ where
                     self.app.runtime_config_path.as_deref(),
                 )?;
                 let certification_registry = mfm_app::production_certification_registry()?;
-                let fact_query_receipt_trust_root = self.app.fact_query_receipt_trust_root.clone();
                 Ok(mfm_app::make_run_services(
                     runners,
                     self.app.store.clone(),
                     self.app.store.clone(),
                     certification_registry,
-                    fact_query_receipt_trust_root,
-                    self.app.fact_query_authority_ready,
                 ))
             })
             .clone()
@@ -331,12 +313,10 @@ where
         self.read_services
             .get_or_init(|| {
                 let certification_registry = mfm_app::production_certification_registry()?;
-                let fact_query_receipt_trust_root = self.app.fact_query_receipt_trust_root.clone();
                 Ok(mfm_app::make_run_read_services(
                     self.app.store.clone(),
                     self.app.store.clone(),
                     certification_registry,
-                    fact_query_receipt_trust_root,
                 ))
             })
             .clone()
@@ -345,8 +325,7 @@ where
 
 /// Connects the production run store for an explicit REST process role.
 ///
-/// Read role never loads a fact-receipt signing key. Live role loads the key only when
-/// `MFM_FACT_RECEIPT_SIGNING_KEY_FILE` is configured.
+/// Both roles use the validated store connection; the read role only changes route admission.
 pub async fn connect_rest_run_store(role: RestProcessRole) -> Result<ProductionRunStore, ApiError> {
     match role {
         RestProcessRole::Read => Ok(mfm_app::connect_production_run_read_store(None).await?),
@@ -358,15 +337,10 @@ pub async fn connect_rest_run_store(role: RestProcessRole) -> Result<ProductionR
 pub async fn make_app_state_for_role(role: RestProcessRole) -> Result<DefaultAppState, ApiError> {
     let store = connect_rest_run_store(role).await?;
     let fact_index = mfm_app::production_fact_index_read_provider(store.clone());
-    let fact_query_receipt_trust_root = store.store_authority().fact_receipt_trust_root().cloned();
-    let fact_query_authority_ready =
-        role == RestProcessRole::Live && store.fact_receipt_queries_ready();
     Ok(AppState {
         role,
         store,
         runtime_config_path: std::env::var_os(mfm_app::MFM_RUNTIME_CONFIG_FILE).map(PathBuf::from),
-        fact_query_receipt_trust_root,
-        fact_query_authority_ready,
         fact_index,
     })
 }
@@ -672,7 +646,6 @@ async fn facts_query_response<S>(
 where
     S: RunCommandStore + mfm_app::PublicFactQueryExecutor,
 {
-    state.require_signed_query_role()?;
     let request = public_fact_query_request(kind, query, forced_limit)?;
     json_ok(state.read_services()?.query_public_facts(request).await?)
 }

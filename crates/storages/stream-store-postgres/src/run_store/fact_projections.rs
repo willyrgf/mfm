@@ -329,25 +329,18 @@ pub(super) async fn load_fact_rebuild_artifact_bytes_tx(
 
 pub(super) async fn load_fact_descriptor_artifact_bytes_tx(
     tx: &mut Transaction<'_, Postgres>,
-    run_id: &RunId,
     projections: &ProjectionSnapshot,
     artifact_bytes: &mut ArtifactByteAuthorityMap,
 ) -> Result<()> {
     for (_, projection) in projections.fact_descriptors() {
-        load_fact_descriptor_artifact_bytes_for_projection_tx(
-            tx,
-            run_id,
-            projection,
-            artifact_bytes,
-        )
-        .await?;
+        load_fact_descriptor_artifact_bytes_for_projection_tx(tx, projection, artifact_bytes)
+            .await?;
     }
     Ok(())
 }
 
 async fn load_fact_descriptor_artifact_bytes_for_projection_tx(
     tx: &mut Transaction<'_, Postgres>,
-    run_id: &RunId,
     projection: &mfm_store::v1::FactDescriptorProjection,
     artifact_bytes: &mut ArtifactByteAuthorityMap,
 ) -> Result<()> {
@@ -359,21 +352,12 @@ async fn load_fact_descriptor_artifact_bytes_for_projection_tx(
          INNER JOIN artifact_admissions a \
            ON a.artifact_id = f.descriptor_artifact_id \
           AND a.evidence_hash = f.descriptor_artifact_evidence_hash \
-         INNER JOIN run_fact_descriptor_admissions r \
-           ON r.descriptor_hash = f.descriptor_hash \
-          AND r.descriptor_artifact_id = f.descriptor_artifact_id \
-          AND r.descriptor_artifact_evidence_hash = f.descriptor_artifact_evidence_hash \
-         INNER JOIN run_artifact_admissions ra \
-           ON ra.run_id = r.run_id \
-          AND ra.artifact_id = a.artifact_id \
-          AND ra.evidence_hash = a.evidence_hash \
          INNER JOIN artifact_blobs b \
            ON b.artifact_id = a.artifact_id \
           AND b.digest = a.digest \
           AND b.byte_len = a.byte_len \
-         WHERE r.run_id = $1 AND f.descriptor_hash = $2",
+         WHERE f.descriptor_hash = $1",
     )
-    .bind(run_id.as_str())
     .bind(projection.descriptor_hash.as_str())
     .fetch_optional(&mut **tx)
     .await

@@ -131,6 +131,9 @@ pub(super) async fn rebuild_projection_snapshot_with_head(
 ) -> Result<(ProjectionSnapshot, u64)> {
     let stream = load_run_stream_tx(tx, run_id).await?;
     let head = stream.last().map(|event| event.seq().as_u64()).unwrap_or(0);
-    let snapshot = projection_snapshot_from_physical_fact_tables_tx(tx, run_id, &stream).await?;
+    // Fact-query evidence may return Platform claims written by earlier collector runs. The
+    // append validator therefore needs the same store-wide authoritative fact projection used by
+    // read queries, in addition to this run's stream-local projection.
+    let snapshot = load_stream_authoritative_projection_snapshot_tx(tx, run_id).await?;
     Ok((snapshot, head))
 }

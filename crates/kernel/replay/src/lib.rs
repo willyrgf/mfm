@@ -160,7 +160,6 @@ pub mod v1 {
         artifact_evidence: Vec<StoredArtifactEvidenceRef>,
         artifact_bytes: BTreeMap<ReplayArtifactAuthorityKey, Vec<u8>>,
         additional_artifact_evidence: Vec<StoredArtifactEvidenceRef>,
-        fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
         source_fact_events: Vec<RetainedSourceFactReplayEvent>,
     }
 
@@ -171,51 +170,18 @@ pub mod v1 {
             runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
             verified_view: &mfm_runtime::VerifiedRunHistoryView,
         ) -> Result<Self> {
-            Self::from_verified_run_history_view_with_fact_query_receipt_trust_root(
+            Self::from_verified_run_history_view_with_source_facts_and_artifacts(
                 runtime_spec,
                 verified_view,
-                None,
-            )
-        }
-
-        /// Mints replay read authority with an explicit fact-query receipt trust root.
-        pub fn from_verified_run_history_view_with_fact_query_receipt_trust_root(
-            runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
-            verified_view: &mfm_runtime::VerifiedRunHistoryView,
-            fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
-        ) -> Result<Self> {
-            Self::from_verified_run_history_view_with_fact_query_receipt_trust_root_source_facts_and_artifacts(
-                runtime_spec,
-                verified_view,
-                fact_query_receipt_trust_root,
                 Vec::new(),
                 Vec::new(),
             )
         }
 
-        /// Mints replay read authority with explicit fact-query receipt trust root and retained
-        /// source fact events referenced by pinned fact-query evidence.
-        pub fn from_verified_run_history_view_with_fact_query_receipt_trust_root_and_source_facts(
+        /// Mints replay read authority with retained source facts and additional certified artifacts.
+        pub fn from_verified_run_history_view_with_source_facts_and_artifacts(
             runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
             verified_view: &mfm_runtime::VerifiedRunHistoryView,
-            fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
-            source_fact_events: Vec<RetainedSourceFactReplayEvent>,
-        ) -> Result<Self> {
-            Self::from_verified_run_history_view_with_fact_query_receipt_trust_root_source_facts_and_artifacts(
-                runtime_spec,
-                verified_view,
-                fact_query_receipt_trust_root,
-                source_fact_events,
-                Vec::new(),
-            )
-        }
-
-        /// Mints replay read authority with explicit fact-query receipt trust root, retained
-        /// source fact events, and additional artifacts certified outside the run-event stream.
-        pub fn from_verified_run_history_view_with_fact_query_receipt_trust_root_source_facts_and_artifacts(
-            runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
-            verified_view: &mfm_runtime::VerifiedRunHistoryView,
-            fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
             source_fact_events: Vec<RetainedSourceFactReplayEvent>,
             additional_artifacts: Vec<store::VerifiedRunArtifactBytes>,
         ) -> Result<Self> {
@@ -272,7 +238,6 @@ pub mod v1 {
                 artifact_evidence,
                 artifact_bytes,
                 additional_artifact_evidence,
-                fact_query_receipt_trust_root,
                 source_fact_events,
             })
         }
@@ -884,7 +849,6 @@ pub mod v1 {
         retained_artifacts: BTreeMap<ReplayArtifactAuthorityKey, StoredArtifactEvidenceRef>,
         artifact_bytes: BTreeMap<ReplayArtifactAuthorityKey, Vec<u8>>,
         artifact_byte_authority: store::ArtifactByteAuthorityMap,
-        fact_query_receipt_trust_root: Option<store::FactQueryReceiptTrustRoot>,
         artifacts: BTreeMap<ReplayArtifactAuthorityKey, StoredArtifactEvidenceRef>,
         facts: BTreeMap<FactReplayKey, events::FactRecorded>,
         fact_events: BTreeMap<FactReplayKey, KernelEventEnvelope>,
@@ -950,7 +914,6 @@ pub mod v1 {
                 retained_artifacts,
                 artifact_bytes: authority.artifact_bytes.clone(),
                 artifact_byte_authority,
-                fact_query_receipt_trust_root: authority.fact_query_receipt_trust_root.clone(),
                 artifacts: BTreeMap::new(),
                 facts: BTreeMap::new(),
                 fact_events: BTreeMap::new(),
@@ -2521,12 +2484,6 @@ pub mod v1 {
             &mut self,
             payload: &events::ArtifactReferenced,
         ) -> Result<()> {
-            let trust_root = self.fact_query_receipt_trust_root.clone().ok_or_else(|| {
-                ReplayError::new(
-                    ReplayErrorKind::CertifiedEvidenceMismatch,
-                    "fact query evidence replay requires a receipt trust root",
-                )
-            })?;
             let bytes = self.artifact_bytes_by_key(&(
                 payload.artifact_ref.artifact_id.clone(),
                 payload.artifact_ref.evidence_hash.clone(),
@@ -2538,14 +2495,12 @@ pub mod v1 {
                         format!("fact query evidence artifact is invalid: {error}"),
                     )
                 })?;
-            store::validate_fact_query_evidence_recording(&evidence, &trust_root).map_err(
-                |error| {
-                    ReplayError::new(
-                        ReplayErrorKind::CertifiedEvidenceMismatch,
-                        format!("fact query evidence receipt authentication failed: {error}"),
-                    )
-                },
-            )?;
+            mfm_facts::validate_fact_query_evidence(&evidence).map_err(|error| {
+                ReplayError::new(
+                    ReplayErrorKind::CertifiedEvidenceMismatch,
+                    format!("fact query evidence is structurally invalid: {error}"),
+                )
+            })?;
             let plan = evidence.plan();
             self.verify_fact_query_descriptor_resolution(plan.resolved_descriptor())?;
             for fact_ref in evidence.receipt().returned_refs() {

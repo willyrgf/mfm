@@ -13,6 +13,8 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use alloy_primitives::{Address, B256, U256};
+#[cfg(feature = "parity-tests")]
+use assert_cmd::Command;
 use mfm_btc_capabilities::{
     BtcBalanceReadProvider, BtcBalanceReadRequest, BtcBalanceReadResponse, BtcBlockHash,
     BtcCapabilityFuture, BtcChainHeadReadProvider, BtcChainHeadRequest, BtcChainHeadResponse,
@@ -25,16 +27,25 @@ use mfm_evm_capabilities::{
     EvmNetworkBinding, EvmSourcePolicyId, EvmSourceRef, RedactedEvmSourceEvidence,
 };
 use mfm_facts::FactAudience;
-use mfm_ids::RunId;
+#[cfg(feature = "parity-tests")]
 use mfm_integration_tests::test_support::{
-    prepare_entry_point_launch_for_store, prepare_portfolio_launch_for_store,
-    register_process_fact_capabilities, start_collectors_rpc_mock,
-    write_collectors_runtime_config_for_test, ProjectionFactIndexProvider,
+    connect_postgres_with_retry, create_postgres_schema, drop_postgres_schema,
+    schema_scoped_database_url, start_collectors_rpc_mock, unique_postgres_schema,
+    write_collectors_runtime_config_for_test,
+};
+use mfm_integration_tests::test_support::{
+    prepare_entry_point_launch_for_store, register_process_fact_capabilities,
+    ProjectionFactIndexProvider,
 };
 use mfm_store::v1::{
     AsyncInMemoryRunStore, ProjectionSnapshot, RetainedArtifactReadProvider, RunEventStore,
 };
+#[cfg(feature = "parity-tests")]
 use serde_json::Value;
+#[cfg(feature = "parity-tests")]
+use std::path::Path;
+#[cfg(feature = "parity-tests")]
+use std::process::Output;
 
 const BTC_ADDRESS: &str = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
 const ETH_ACCOUNT: &str = "0x000000000000000000000000000000000000dead";
@@ -78,82 +89,99 @@ async fn evm_native_balance_collector_admits_platform_holding_fact() {
 }
 
 #[tokio::test]
+#[cfg(feature = "parity-tests")]
 async fn collect_then_report_completes_from_collector_written_platform_holdings() {
-    let store = AsyncInMemoryRunStore::default();
-    let fact_index = Arc::new(ProjectionFactIndexProvider::new(store.clone()));
+    let database_url =
+        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
+    let schema = unique_postgres_schema("collect_report");
+    create_postgres_schema(&database_url, &schema).await;
+    let scoped_database_url = schema_scoped_database_url(&database_url, &schema);
+    let store = connect_postgres_with_retry(&scoped_database_url, 20, 250).await;
+    drop(store);
+
     let rpc_url = start_collectors_rpc_mock().await;
     let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
     let runtime_config_path =
         write_collectors_runtime_config_for_test(runtime_config_dir.path(), &rpc_url);
-
-    // 1) Collect BTC then EVM natives through the actual production registry.
-    let services = production_collect_then_report_services(
-        store.clone(),
-        fact_index.clone(),
-        &runtime_config_path,
+    let config_dir = tempfile::tempdir().expect("collector config tempdir");
+    let btc_config_path =
+        write_json_config(config_dir.path(), "btc.json", btc_balance_config_json());
+    let evm_config_path =
+        write_json_config(config_dir.path(), "evm.json", evm_balance_config_json());
+    let portfolio_config_path = write_json_config(
+        config_dir.path(),
+        "portfolio.json",
+        dual_mainnet_portfolio_json(),
     );
-    let btc_run = launch_btc_balance_collector(&services, &store, "collect-btc").await;
-    assert_eq!(btc_run.run_mode, mfm_app::RunModeStatus::Completed);
-    assert_admitted_adapter_factory(
-        &store,
-        &btc_run.run_id.parse().expect("BTC run id"),
-        "btc_jsonrpc_adapter",
-    )
-    .await;
-    services
-        .verify_replay_for_run(&btc_run.run_id.parse().expect("BTC run id"))
-        .await
-        .expect("replay BTC collector");
 
-    let evm_run = launch_evm_balance_collector(&services, &store, "collect-evm").await;
-    assert_eq!(evm_run.run_mode, mfm_app::RunModeStatus::Completed);
-    assert_admitted_adapter_factory(
-        &store,
-        &evm_run.run_id.parse().expect("EVM run id"),
-        "evm_jsonrpc_adapter",
-    )
-    .await;
-    services
-        .verify_replay_for_run(&evm_run.run_id.parse().expect("EVM run id"))
-        .await
-        .expect("replay EVM collector");
+    // 1) Collect BTC then EVM natives through the actual CLI and production Postgres assembly.
+    let btc = run_cli(&[
+        "--output-format".to_owned(),
+        "json".to_owned(),
+        "run".to_owned(),
+        "start".to_owned(),
+        "--op".to_owned(),
+        "btc_address_balance".to_owned(),
+        "--config".to_owned(),
+        path_arg(&btc_config_path),
+        "--config-format".to_owned(),
+        "json".to_owned(),
+        "--runtime-config".to_owned(),
+        path_arg(&runtime_config_path),
+        "--database-url".to_owned(),
+        scoped_database_url.clone(),
+    ]);
+    assert_success(&btc);
+    let btc_data = parse_success_json(&btc.stdout);
+    assert_eq!(btc_data["outcome"], "admitted");
+    assert_eq!(btc_data["run"]["run_mode"], "completed");
+    let btc_run_id = run_id_from_start(&btc_data);
 
-    let projection = store.projection_snapshot().expect("after collect");
-    assert_platform_holding_kind(&projection, "bitcoin.address_balance_snapshot", 1);
-    assert_platform_holding_kind(&projection, "evm.address_native_balance_snapshot", 1);
+    let evm = run_cli(&[
+        "--output-format".to_owned(),
+        "json".to_owned(),
+        "run".to_owned(),
+        "start".to_owned(),
+        "--op".to_owned(),
+        "evm_native_balance".to_owned(),
+        "--config".to_owned(),
+        path_arg(&evm_config_path),
+        "--config-format".to_owned(),
+        "json".to_owned(),
+        "--runtime-config".to_owned(),
+        path_arg(&runtime_config_path),
+        "--database-url".to_owned(),
+        scoped_database_url.clone(),
+    ]);
+    assert_success(&evm);
+    let evm_data = parse_success_json(&evm.stdout);
+    assert_eq!(evm_data["outcome"], "admitted");
+    assert_eq!(evm_data["run"]["run_mode"], "completed");
+    let evm_run_id = run_id_from_start(&evm_data);
 
-    // 2) Report-only portfolio_snapshot over admitted facts (no live chain in report).
-    let prepared =
-        prepare_portfolio_launch_for_store(&store, &dual_mainnet_portfolio_json(), None).await;
-    let report = services
-        .launch_prepared_entry_point_run(prepared)
-        .await
-        .unwrap_or_else(|error| panic!("portfolio launch: {error:?}"));
-    let launch = report.run.expect("run body");
-    if launch.run_mode != mfm_app::RunModeStatus::Completed {
-        let run_id = launch.run_id.parse::<RunId>().expect("run id");
-        let stream = store.load_run_stream(&run_id).await.expect("stream");
-        let failures = stream
-            .iter()
-            .filter_map(|event| match event.payload() {
-                events::KernelEventPayload::StateAttemptFailed(payload) => Some(format!(
-                    "{} {} {}",
-                    payload.node_id, payload.error.code, payload.error.safe_message
-                )),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        panic!(
-            "report must complete after collectors; mode={:?}; failures={failures:?}",
-            launch.run_mode
-        );
-    }
-
-    let public_output = report
-        .public_output
-        .expect("completed report returns public output");
-    let json = public_output.json.expect("public output json");
-    let snapshot = find_public_object(&json, is_snapshot_public_object)
+    // 2) Report only over the collector-written Platform facts. The process receives no runtime
+    // config, so a successful report proves it did not perform a live chain crawl.
+    let report = run_cli(&[
+        "--output-format".to_owned(),
+        "json".to_owned(),
+        "run".to_owned(),
+        "start".to_owned(),
+        "--op".to_owned(),
+        "portfolio_snapshot".to_owned(),
+        "--config".to_owned(),
+        path_arg(&portfolio_config_path),
+        "--config-format".to_owned(),
+        "json".to_owned(),
+        "--database-url".to_owned(),
+        scoped_database_url.clone(),
+    ]);
+    assert_success(&report);
+    let report_data = parse_success_json(&report.stdout);
+    assert_eq!(report_data["outcome"], "admitted");
+    assert_eq!(report_data["run"]["run_mode"], "completed");
+    let report_run_id = run_id_from_start(&report_data);
+    let json = &report_data["public_output"]["json"];
+    let snapshot = find_public_object(json, is_snapshot_public_object)
         .expect("public output should carry snapshot material");
     assert_observation(
         snapshot,
@@ -171,7 +199,7 @@ async fn collect_then_report_completes_from_collector_written_platform_holdings(
         "1.000000000000000000",
         "1800.000000000000000000",
     );
-    let report = find_public_object(&json, is_report_public_object)
+    let report = find_public_object(json, is_report_public_object)
         .expect("public output should carry report material");
     let usd_total = report["totals_by_quote"]
         .as_array()
@@ -187,16 +215,25 @@ async fn collect_then_report_completes_from_collector_written_platform_holdings(
         usd_total.get("net_value_dec").and_then(Value::as_str),
         Some("1850.000000000000000000")
     );
-    services
-        .verify_replay_for_run(&launch.run_id.parse().expect("report run id"))
-        .await
-        .expect("replay portfolio report");
-    assert_admitted_adapter_factory(
-        &store,
-        &launch.run_id.parse().expect("report run id"),
-        "portfolio_adapter",
-    )
-    .await;
+    // 3) Replay all three persisted runs through the read-only CLI path.
+    for run_id in [btc_run_id, evm_run_id, report_run_id] {
+        let replay = run_cli(&[
+            "--output-format".to_owned(),
+            "json".to_owned(),
+            "run".to_owned(),
+            "replay".to_owned(),
+            run_id.clone(),
+            "--database-url".to_owned(),
+            scoped_database_url.clone(),
+        ]);
+        assert_success(&replay);
+        let replay_data = parse_success_json(&replay.stdout);
+        assert_eq!(replay_data["run_id"].as_str(), Some(run_id.as_str()));
+        assert_eq!(replay_data["run_mode"], "completed");
+        assert!(replay_data["retained_artifacts"].as_u64().unwrap_or(0) > 0);
+    }
+
+    drop_postgres_schema(&database_url, &schema).await;
 }
 
 // --- services / launch -------------------------------------------------------
@@ -206,7 +243,6 @@ fn btc_collector_services(
     btc: Arc<MockBtcBalanceProvider>,
     fact_index: Arc<ProjectionFactIndexProvider>,
 ) -> mfm_app::RunServices<AsyncInMemoryRunStore, AsyncInMemoryRunStore> {
-    let receipt_trust_root = fact_index.receipt_trust_root();
     let artifacts: Arc<dyn RetainedArtifactReadProvider> = Arc::new(store.clone());
     let mut runners = mfm_runtime::ErasedRunnerRegistry::new();
     register_process_fact_capabilities(&mut runners, fact_index.as_ref())
@@ -220,13 +256,11 @@ fn btc_collector_services(
         ),
     )
     .expect("btc runners");
-    mfm_app::RunServices::new_with_certification_registry_and_fact_query_authority(
+    mfm_app::RunServices::new_with_certification_registry(
         mfm_runtime::SerialTypedScheduler::new(runners, Arc::new(store.clone())),
         store.clone(),
         store,
         mfm_app::production_certification_registry().expect("cert"),
-        Some(receipt_trust_root),
-        true,
     )
 }
 
@@ -235,7 +269,6 @@ fn evm_collector_services(
     evm: Arc<MockEvmBalanceProvider>,
     fact_index: Arc<ProjectionFactIndexProvider>,
 ) -> mfm_app::RunServices<AsyncInMemoryRunStore, AsyncInMemoryRunStore> {
-    let receipt_trust_root = fact_index.receipt_trust_root();
     let artifacts: Arc<dyn RetainedArtifactReadProvider> = Arc::new(store.clone());
     let mut runners = mfm_runtime::ErasedRunnerRegistry::new();
     register_process_fact_capabilities(&mut runners, fact_index.as_ref())
@@ -245,35 +278,11 @@ fn evm_collector_services(
         mfm_adapters_evm::EvmRunnerCapabilities::new(artifacts, evm),
     )
     .expect("evm runners");
-    mfm_app::RunServices::new_with_certification_registry_and_fact_query_authority(
+    mfm_app::RunServices::new_with_certification_registry(
         mfm_runtime::SerialTypedScheduler::new(runners, Arc::new(store.clone())),
         store.clone(),
         store,
         mfm_app::production_certification_registry().expect("cert"),
-        Some(receipt_trust_root),
-        true,
-    )
-}
-
-fn production_collect_then_report_services(
-    store: AsyncInMemoryRunStore,
-    fact_index: Arc<ProjectionFactIndexProvider>,
-    runtime_config_path: &std::path::Path,
-) -> mfm_app::RunServices<AsyncInMemoryRunStore, AsyncInMemoryRunStore> {
-    let receipt_trust_root = fact_index.receipt_trust_root();
-    let runners = mfm_app::production_runner_registry(
-        Arc::new(store.clone()),
-        fact_index,
-        Some(runtime_config_path),
-    )
-    .expect("production runner registry");
-    mfm_app::RunServices::new_with_certification_registry_and_fact_query_authority(
-        mfm_runtime::SerialTypedScheduler::new(runners, Arc::new(store.clone())),
-        store.clone(),
-        store,
-        mfm_app::production_certification_registry().expect("cert"),
-        Some(receipt_trust_root),
-        true,
     )
 }
 
@@ -356,29 +365,61 @@ fn assert_platform_holding_kind(projection: &ProjectionSnapshot, fact_kind: &str
     );
 }
 
-async fn assert_admitted_adapter_factory(
-    store: &AsyncInMemoryRunStore,
-    run_id: &RunId,
-    expected_factory: &str,
-) {
-    let stream = store.load_run_stream(run_id).await.expect("run stream");
-    let admitted = stream
-        .iter()
-        .find_map(|event| match event.payload() {
-            events::KernelEventPayload::RunAdmitted(payload) => Some(payload),
-            _ => None,
-        })
-        .expect("RunAdmitted");
+#[cfg(feature = "parity-tests")]
+fn write_json_config(dir: &Path, name: &str, value: Value) -> std::path::PathBuf {
+    let path = dir.join(name);
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&value).expect("config json"),
+    )
+    .expect("write config");
+    path
+}
+
+#[cfg(feature = "parity-tests")]
+fn path_arg(path: &Path) -> String {
+    path.to_str().expect("utf-8 test path").to_owned()
+}
+
+#[cfg(feature = "parity-tests")]
+fn run_cli(args: &[String]) -> Output {
+    let mut command = Command::cargo_bin("mfm_cli").expect("mfm_cli binary");
+    command
+        .env_remove("MFM_RUNTIME_CONFIG_FILE")
+        .env_remove("LOG_LEVEL")
+        .env_remove("RUST_LOG")
+        .env_remove("LOG_FORMAT")
+        .env_remove("LOG_SPAN_EVENTS")
+        .args(args)
+        .output()
+        .expect("execute mfm_cli")
+}
+
+#[cfg(feature = "parity-tests")]
+fn assert_success(output: &Output) {
     assert!(
-        admitted
-            .adapter_executables
-            .iter()
-            .any(|executable| executable.factory_id.as_str() == expected_factory),
-        "admitted adapter executables did not include {expected_factory}: {:?}",
-        admitted.adapter_executables
+        output.status.success(),
+        "mfm_cli failed: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
+#[cfg(feature = "parity-tests")]
+fn parse_success_json(stdout: &[u8]) -> Value {
+    let response: Value = serde_json::from_slice(stdout).expect("CLI stdout must be JSON");
+    assert_eq!(response["status"], "success", "CLI response: {response}");
+    response["data"].clone()
+}
+
+#[cfg(feature = "parity-tests")]
+fn run_id_from_start(data: &Value) -> String {
+    data["run"]["run_id"]
+        .as_str()
+        .expect("start response run id")
+        .to_owned()
+}
+
+#[cfg(feature = "parity-tests")]
 fn find_public_object(
     value: &Value,
     predicate: fn(&serde_json::Map<String, Value>) -> bool,
@@ -399,14 +440,17 @@ fn find_public_object(
     }
 }
 
+#[cfg(feature = "parity-tests")]
 fn is_snapshot_public_object(object: &serde_json::Map<String, Value>) -> bool {
     object.contains_key("wallets") && object.contains_key("symbol_configs")
 }
 
+#[cfg(feature = "parity-tests")]
 fn is_report_public_object(object: &serde_json::Map<String, Value>) -> bool {
     object.contains_key("wallet_summaries") && object.contains_key("totals_by_quote")
 }
 
+#[cfg(feature = "parity-tests")]
 fn assert_observation(
     snapshot: &serde_json::Map<String, Value>,
     symbol_id: &str,
@@ -469,6 +513,7 @@ fn evm_balance_config_json() -> serde_json::Value {
     })
 }
 
+#[cfg(feature = "parity-tests")]
 fn dual_mainnet_portfolio_json() -> serde_json::Value {
     serde_json::json!({
         "portfolio": {

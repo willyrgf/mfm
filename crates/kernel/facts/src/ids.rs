@@ -234,20 +234,6 @@ checked_fact_string!(
     "Version of the canonicalizer that produced fact query evidence."
 );
 
-checked_fact_string!(
-    StoreIdentity,
-    "store identity",
-    validate_dot_path,
-    "Non-secret store identity used by receipt authentication."
-);
-
-checked_fact_string!(
-    StoreKeyId,
-    "store key id",
-    validate_dot_path,
-    "Non-secret store receipt authentication key identifier."
-);
-
 fn validate_dot_path(kind: &'static str, value: &str) -> Result<()> {
     validate_len(kind, value, 256)?;
     let mut saw_segment = false;

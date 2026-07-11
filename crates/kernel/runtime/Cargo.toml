@@ -31,7 +31,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-ed25519-dalek = { workspace = true }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-effects = { path = "../effects" }
 mfm-program-derive = { path = "../program-derive" }

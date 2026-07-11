@@ -69,17 +69,16 @@ pub use claim::{
 pub use codec::{
     canonical_fact_claim_id_bytes, canonical_fact_descriptor_bytes,
     canonical_fact_query_evidence_bytes, canonical_fact_query_plan_bytes,
-    canonical_fact_query_receipt_body_bytes, canonical_fact_subject_material_bytes,
-    compile_fact_query_plan, derive_fact_claim_id, derive_fact_key, extract_subject_material,
-    extract_terms, extract_terms_from_material, fact_descriptor_hash, fact_descriptor_schema_id,
-    fact_query_evidence_hash, fact_query_evidence_schema_id, fact_query_plan_hash,
-    fact_query_receipt_body_hash, fact_query_receipt_body_hash_from_parts,
-    fact_query_result_set_digest, fact_subject_evidence, fact_subject_evidence_from_material,
-    fact_subject_namespace_hash, parse_canonical_fact_descriptor_bytes,
-    parse_canonical_fact_query_evidence_bytes, parse_canonical_fact_query_shape,
-    parse_canonical_fact_response_bytes, parse_canonical_fact_subject_material_bytes,
-    selected_returned_field_summaries_digest, subject_material_hash, typed_fact_subject_evidence,
-    typed_fact_subject_value, validate_descriptor, validate_fact_query_evidence,
+    canonical_fact_subject_material_bytes, compile_fact_query_plan, derive_fact_claim_id,
+    derive_fact_key, extract_subject_material, extract_terms, extract_terms_from_material,
+    fact_descriptor_hash, fact_descriptor_schema_id, fact_query_evidence_hash,
+    fact_query_evidence_schema_id, fact_query_plan_hash, fact_query_result_set_digest,
+    fact_subject_evidence, fact_subject_evidence_from_material, fact_subject_namespace_hash,
+    parse_canonical_fact_descriptor_bytes, parse_canonical_fact_query_evidence_bytes,
+    parse_canonical_fact_query_shape, parse_canonical_fact_response_bytes,
+    parse_canonical_fact_subject_material_bytes, selected_returned_field_summaries_digest,
+    subject_material_hash, typed_fact_subject_evidence, typed_fact_subject_value,
+    validate_descriptor, validate_fact_query_evidence,
 };
 pub use descriptor::{
     FactDescriptor, FactFieldDescriptor, FactFieldPolicy, FactOrderingPolicy, FactOrderingTerm,
@@ -87,8 +86,7 @@ pub use descriptor::{
 pub use extraction::{FactExtractionMetadata, FactIndexTerm};
 pub use ids::{
     CanonicalValuePath, FactCanonicalizerVersion, FactError, FactFieldId, FactKind,
-    FactOrderingName, FactQueryCompilerVersion, FactUnit, Result, StoreIdentity, StoreKeyId,
-    StoreScopeRef,
+    FactOrderingName, FactQueryCompilerVersion, FactUnit, Result, StoreScopeRef,
 };
 pub use query::{
     CanonicalFactQueryPlan, CompiledFactQueryShape, FactQueryInput, FactQueryPredicate,
@@ -96,11 +94,10 @@ pub use query::{
 };
 pub use receipt::{
     fact_query_result_rows_from_receipt, validate_fact_query_result_rows,
-    DescriptorCatalogWatermark, FactQueryEvidence, FactQueryReceipt, FactQueryReceiptMaterial,
-    FactQueryResult, FactQueryResultMismatch, FactQueryResultRow, FactSelectionEvidence,
-    QueryResultCardinality, ReturnedFactFieldSummary, ReturnedFieldSummaries, StoreCommitOrder,
-    StoreReadFrontier, StoreReadFrontierType, StoreReceiptAuthentication,
-    StoreReceiptAuthenticationScheme,
+    DescriptorCatalogWatermark, FactQueryEvidence, FactQueryReceipt, FactQueryResult,
+    FactQueryResultMismatch, FactQueryResultRow, FactSelectionEvidence, QueryResultCardinality,
+    ReturnedFactFieldSummary, ReturnedFieldSummaries, StoreCommitOrder, StoreReadFrontier,
+    StoreReadFrontierType,
 };
 pub use scalar::FactCanonicalScalar;
 pub use subject::{FactFieldValue, FactKey, FactSubjectMaterialV1};
@@ -117,6 +114,9 @@ pub(crate) use extraction::json_to_typed_fact_scalar;
 
 /// Stable facts-kernel contract version for the initial collectors RFC surface.
 pub const FACTS_KERNEL_CONTRACT_VERSION: &str = "mfm.facts.v1";
+
+/// V2 fact-query evidence wire contract with deterministic unsigned receipt metadata.
+pub const FACT_QUERY_EVIDENCE_CONTRACT_VERSION: &str = "mfm.fact-query-evidence.v2";
 
 /// V1 fact query compiler version recorded in canonical query plans.
 pub const FACT_QUERY_COMPILER_VERSION: &str = "mfm.facts.query.v1";

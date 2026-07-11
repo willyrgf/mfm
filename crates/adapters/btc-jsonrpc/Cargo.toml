@@ -32,6 +32,5 @@ mfm-states-btc = { path = "../../states/btc" }
 mfm-values = { path = "../../kernel/values" }
 
 [dev-dependencies]
-ed25519-dalek = { workspace = true }
 mfm-store = { path = "../../kernel/store", features = ["test-support"] }
 tokio = { workspace = true }

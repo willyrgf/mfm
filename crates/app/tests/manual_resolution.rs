@@ -37,14 +37,8 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
     )
     .expect("runners");
     let registry = mfm_app::production_certification_registry().expect("cert registry");
-    let services = mfm_app::make_run_services(
-        runners,
-        store.clone(),
-        store.clone(),
-        registry.clone(),
-        None,
-        false,
-    );
+    let services =
+        mfm_app::make_run_services(runners, store.clone(), store.clone(), registry.clone());
 
     let mut entry_points = EntryPointOpRegistry::new();
     entry_points

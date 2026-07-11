@@ -5,7 +5,6 @@ use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
 use super::*;
-use ed25519_dalek::{Signer, SigningKey};
 use mfm_canonical::{sha256_digest_bytes, CanonicalJsonBytes, CanonicalValue};
 use mfm_events::v1 as events;
 use mfm_ids::{
@@ -1518,13 +1517,10 @@ pub fn execute_fact_query_projection_for_test(
     Ok(rows)
 }
 
-/// Builds a signed fact-query receipt for projection-backed query rows.
-pub fn signed_fact_query_receipt_for_projection_for_test(
+/// Builds deterministic fact-query evidence for projection-backed query rows.
+pub fn fact_query_receipt_for_projection_for_test(
     plan: &mfm_facts::CanonicalFactQueryPlan,
     projection: &ProjectionSnapshot,
-    key: &SigningKey,
-    store_identity: mfm_facts::StoreIdentity,
-    key_id: mfm_facts::StoreKeyId,
     rows: &[mfm_facts::FactQueryResultRow],
 ) -> mfm_facts::FactQueryReceipt {
     let shape = mfm_facts::parse_canonical_fact_query_shape(plan).expect("query shape");
@@ -1543,17 +1539,14 @@ pub fn signed_fact_query_receipt_for_projection_for_test(
         mfm_facts::DescriptorCatalogWatermark::new(projection.fact_descriptors().count() as u64),
         mfm_facts::StoreCommitOrder::new(max_order),
     );
-    let plan_hash = mfm_facts::fact_query_plan_hash(plan).expect("fact query plan hash");
-    let material = mfm_facts::FactQueryReceiptMaterial::from_rows(
-        &plan_hash,
+    mfm_facts::FactQueryReceipt::from_rows(
         read_frontier,
         mfm_facts::StoreReadFrontierType::Snapshot,
         rows,
         !shape.return_fields().is_empty(),
         plan.limit(),
     )
-    .expect("fact query receipt material");
-    signed_fact_query_receipt_material_for_test(material, key, store_identity, key_id)
+    .expect("fact query receipt")
 }
 
 fn fact_entry_matches_predicates(
@@ -1627,31 +1620,8 @@ fn fact_ordering_value<'a>(
         .map(|term| &term.value)
 }
 
-/// Builds a fact-query receipt trust root for a deterministic test signing key.
-pub fn fact_query_receipt_trust_root_for_test(
-    key: &SigningKey,
-    store_identity: mfm_facts::StoreIdentity,
-    key_id: mfm_facts::StoreKeyId,
-) -> FactQueryReceiptTrustRoot {
-    FactQueryReceiptTrustRoot::new(
-        store_identity,
-        mfm_facts::StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
-        key_id,
-        key.verifying_key().to_bytes(),
-    )
-    .expect("fact query receipt trust root")
-}
-
-/// Input for signing a fact-query receipt fixture.
-pub struct SignedFactQueryReceiptFixtureInputForTest<'a> {
-    /// Canonical query plan hash.
-    pub plan_hash: &'a ContentDigest,
-    /// Signing key used for the local receipt authentication signature.
-    pub key: &'a SigningKey,
-    /// Store identity to bind into the signed receipt.
-    pub store_identity: mfm_facts::StoreIdentity,
-    /// Store key id to bind into the signed receipt.
-    pub key_id: mfm_facts::StoreKeyId,
+/// Input for a deterministic fact-query receipt fixture.
+pub struct FactQueryReceiptFixtureInputForTest<'a> {
     /// Read frontier reported by the receipt.
     pub read_frontier: mfm_facts::StoreReadFrontier,
     /// Returned fact rows covered by the receipt.
@@ -1662,46 +1632,16 @@ pub struct SignedFactQueryReceiptFixtureInputForTest<'a> {
     pub limit: Option<u64>,
 }
 
-/// Builds a signed fact-query receipt fixture using the production receipt authentication message.
-pub fn signed_fact_query_receipt_for_test(
-    input: SignedFactQueryReceiptFixtureInputForTest<'_>,
+/// Builds a deterministic fact-query receipt fixture.
+pub fn fact_query_receipt_for_test(
+    input: FactQueryReceiptFixtureInputForTest<'_>,
 ) -> mfm_facts::FactQueryReceipt {
-    let material = mfm_facts::FactQueryReceiptMaterial::from_rows(
-        input.plan_hash,
+    mfm_facts::FactQueryReceipt::from_rows(
         input.read_frontier,
         mfm_facts::StoreReadFrontierType::Snapshot,
         input.rows,
         input.include_returned_field_summaries,
         input.limit,
     )
-    .expect("fact query receipt material");
-    signed_fact_query_receipt_material_for_test(
-        material,
-        input.key,
-        input.store_identity,
-        input.key_id,
-    )
-}
-
-fn signed_fact_query_receipt_material_for_test(
-    material: mfm_facts::FactQueryReceiptMaterial,
-    key: &SigningKey,
-    store_identity: mfm_facts::StoreIdentity,
-    key_id: mfm_facts::StoreKeyId,
-) -> mfm_facts::FactQueryReceipt {
-    let message = fact_query_receipt_authentication_message(
-        &store_identity,
-        mfm_facts::StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
-        &key_id,
-        material.store_receipt_hash(),
-    )
-    .expect("fact query receipt authentication message");
-    let auth = mfm_facts::StoreReceiptAuthentication::new(
-        store_identity,
-        mfm_facts::StoreReceiptAuthenticationScheme::LocalEd25519Sha256JcsV1,
-        Some(key_id),
-        key.sign(message.as_bytes()).to_bytes().to_vec(),
-    )
-    .expect("fact query receipt authentication");
-    material.into_receipt(auth)
+    .expect("fact query receipt")
 }

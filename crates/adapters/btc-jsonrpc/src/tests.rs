@@ -1,5 +1,4 @@
 use super::*;
-use ed25519_dalek::SigningKey;
 use mfm_artifact_capabilities::ArtifactEvidenceRef;
 use mfm_btc_capabilities::{
     BitcoinNetworkTag, BtcBlockHash, BtcFinality, BtcHeadSelection, BtcNetworkId, BtcSourceBinding,
@@ -10,8 +9,7 @@ use mfm_facts::{
     fact_descriptor_hash, DescriptorCatalogWatermark, FactAudience, FactClaimId,
     FactProducerProvenance, FactQueryReceipt, FactQueryScope, FactResponseEvidence,
     FactSelectionEvidence, FactSubjectRef, FactVisibility, FactVisibilityScope, InternalFactRef,
-    InternalFactRefParts, StoreCommitOrder, StoreIdentity, StoreKeyId, StoreReadFrontier,
-    StoreScopeRef,
+    InternalFactRefParts, StoreCommitOrder, StoreReadFrontier, StoreScopeRef,
 };
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
@@ -24,7 +22,7 @@ use mfm_states_btc::{
 };
 use mfm_store::v1::{
     self as store,
-    test_support::{signed_fact_query_receipt_for_test, SignedFactQueryReceiptFixtureInputForTest},
+    test_support::{fact_query_receipt_for_test, FactQueryReceiptFixtureInputForTest},
 };
 use std::sync::Mutex;
 
@@ -442,37 +440,25 @@ fn checkpoint_replay_helper_rejects_evidence_for_different_query_plan() {
 }
 
 fn fact_query_receipt(
-    plan: &mfm_facts::CanonicalFactQueryPlan,
+    _plan: &mfm_facts::CanonicalFactQueryPlan,
     returned_refs: Vec<InternalFactRef>,
 ) -> FactQueryReceipt {
-    let key = signing_key();
-    let store_identity = StoreIdentity::new("store.default").expect("store identity");
-    let key_id = StoreKeyId::new("fact.read.key").expect("key id");
     let read_frontier = StoreReadFrontier::new(
         StoreScopeRef::new("mfm.store.default").expect("store scope"),
         FactQueryScope::new(FactAudience::Control, FactVisibilityScope::Default),
         DescriptorCatalogWatermark::new(1),
         StoreCommitOrder::new(11),
     );
-    let plan_hash = mfm_facts::fact_query_plan_hash(plan).expect("plan hash");
     let rows = returned_refs
         .into_iter()
         .map(|fact_ref| mfm_facts::FactQueryResultRow::new(fact_ref, Vec::new()))
         .collect::<Vec<_>>();
-    signed_fact_query_receipt_for_test(SignedFactQueryReceiptFixtureInputForTest {
-        plan_hash: &plan_hash,
-        key: &key,
-        store_identity,
-        key_id,
+    fact_query_receipt_for_test(FactQueryReceiptFixtureInputForTest {
         read_frontier,
         rows: &rows,
         include_returned_field_summaries: false,
         limit: None,
     })
-}
-
-fn signing_key() -> SigningKey {
-    SigningKey::from_bytes(&[7; 32])
 }
 
 fn internal_fact_ref(
