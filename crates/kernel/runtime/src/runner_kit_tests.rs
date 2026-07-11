@@ -179,19 +179,12 @@ fn fact_projection_fixture(
     )
 }
 
-fn fact_ref() -> mfm_facts::InternalFactRef {
-    fact_projection_fixture(17).0
-}
-
-fn fact_authority_projections(fact_ref: &mfm_facts::InternalFactRef) -> store::ProjectionSnapshot {
-    let (_built_ref, descriptor_projection, record_projection, index_projection) =
-        fact_projection_fixture(17);
-    assert_eq!(index_projection.fact_claim_id, *fact_ref.fact_claim_id());
-    assert_eq!(
-        index_projection.source_event_id,
-        *fact_ref.source_event_id()
-    );
-    store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
+fn fact_authority_fixture(
+    subject_height: u64,
+) -> (mfm_facts::InternalFactRef, store::ProjectionSnapshot) {
+    let (fact_ref, descriptor_projection, record_projection, index_projection) =
+        fact_projection_fixture(subject_height);
+    let projections = store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
         fact_descriptors: BTreeMap::from([(
             descriptor_projection.descriptor_hash.clone(),
             descriptor_projection,
@@ -206,17 +199,17 @@ fn fact_authority_projections(fact_ref: &mfm_facts::InternalFactRef) -> store::P
         )]),
         ..store::ProjectionSnapshotParts::default()
     })
-    .expect("projection snapshot")
+    .expect("projection snapshot");
+    (fact_ref, projections)
 }
 
 fn fact_authority_projections_without(
-    fact_ref: &mfm_facts::InternalFactRef,
+    full: &store::ProjectionSnapshot,
     descriptor: bool,
     record: bool,
     index: bool,
 ) -> store::ProjectionSnapshot {
-    let full = fact_authority_projections(fact_ref);
-    let mut parts = store::ProjectionSnapshotParts::from_snapshot(&full);
+    let mut parts = store::ProjectionSnapshotParts::from_snapshot(full);
     if !descriptor {
         parts.fact_descriptors.clear();
     }
@@ -230,10 +223,10 @@ fn fact_authority_projections_without(
 }
 
 fn fact_authority_projections_with_tampered_subject(
+    full: &store::ProjectionSnapshot,
     fact_ref: &mfm_facts::InternalFactRef,
 ) -> store::ProjectionSnapshot {
-    let full = fact_authority_projections(fact_ref);
-    let mut parts = store::ProjectionSnapshotParts::from_snapshot(&full);
+    let mut parts = store::ProjectionSnapshotParts::from_snapshot(full);
     parts
         .fact_records
         .get_mut(fact_ref.fact_claim_id())
@@ -302,9 +295,8 @@ fn query_evidence(fact_ref: mfm_facts::InternalFactRef) -> mfm_facts::FactQueryE
 
 #[test]
 fn fact_query_evidence_retention_refs_include_returned_fact_authority_artifacts() {
-    let fact_ref = fact_ref();
+    let (fact_ref, projections) = fact_authority_fixture(17);
     let evidence_artifact = query_evidence_artifact();
-    let projections = fact_authority_projections(&fact_ref);
     let descriptor_projection = projections
         .fact_descriptor(fact_ref.fact_descriptor_hash())
         .expect("descriptor projection");
@@ -375,12 +367,12 @@ fn fact_query_evidence_retention_refs_reject_invalid_returned_fact_authority() {
             "source fact authority does not match",
         ),
     ] {
-        let fact_ref = fact_ref();
+        let (fact_ref, full) = fact_authority_fixture(17);
         let evidence_artifact = query_evidence_artifact();
         let projections = if tampered {
-            fact_authority_projections_with_tampered_subject(&fact_ref)
+            fact_authority_projections_with_tampered_subject(&full, &fact_ref)
         } else {
-            fact_authority_projections_without(&fact_ref, descriptor, record, index)
+            fact_authority_projections_without(&full, descriptor, record, index)
         };
         let evidence = query_evidence(fact_ref);
 
