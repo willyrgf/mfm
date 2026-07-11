@@ -35,50 +35,13 @@ pub const MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;vers
 /// v1 lowering-version string.
 pub const LOWERING_VERSION: &str = "mfm.typed.lowering.v2";
 
-/// Returns the schema id for canonical persisted v1 typed execution specs.
-pub fn typed_execution_spec_schema_id() -> Result<SchemaId> {
-    super::typed_execution_spec_schema_id()
-}
-
-/// Returns the v1 framework-owned schema id for public-output render receipts.
-pub fn public_output_receipt_schema_id() -> Result<SchemaId> {
-    super::public_output_receipt_schema_id()
-}
-
-/// Returns the v1 framework-owned semantic type id for public-output render receipts.
-pub fn public_output_receipt_semantic_type_id() -> Result<SemanticTypeId> {
-    super::public_output_receipt_semantic_type_id()
-}
-
-/// Returns the v1 framework-owned schema id for retention-manifest projection receipts.
-pub fn retention_manifest_receipt_schema_id() -> Result<SchemaId> {
-    super::retention_manifest_receipt_schema_id()
-}
-
-/// Returns the v1 framework-owned semantic type id for retention-manifest projection receipts.
-pub fn retention_manifest_receipt_semantic_type_id() -> Result<SemanticTypeId> {
-    super::retention_manifest_receipt_semantic_type_id()
-}
-
-/// Returns the v1 framework-owned schema id for complete-run receipts.
-pub fn complete_run_receipt_schema_id() -> Result<SchemaId> {
-    super::complete_run_receipt_schema_id()
-}
-
-/// Returns the v1 framework-owned semantic type id for complete-run receipts.
-pub fn complete_run_receipt_semantic_type_id() -> Result<SemanticTypeId> {
-    super::complete_run_receipt_semantic_type_id()
-}
-
-/// Returns the v1 framework-owned schema id for saga-terminal resolution receipts.
-pub fn resolve_saga_terminal_receipt_schema_id() -> Result<SchemaId> {
-    super::resolve_saga_terminal_receipt_schema_id()
-}
-
-/// Returns the v1 framework-owned semantic type id for saga-terminal resolution receipts.
-pub fn resolve_saga_terminal_receipt_semantic_type_id() -> Result<SemanticTypeId> {
-    super::resolve_saga_terminal_receipt_semantic_type_id()
-}
+pub use super::{
+    complete_run_receipt_schema_id, complete_run_receipt_semantic_type_id,
+    public_output_receipt_schema_id, public_output_receipt_semantic_type_id,
+    resolve_saga_terminal_receipt_schema_id, resolve_saga_terminal_receipt_semantic_type_id,
+    retention_manifest_receipt_schema_id, retention_manifest_receipt_semantic_type_id,
+    typed_execution_spec_schema_id,
+};
 
 /// Returns canonical JSON bytes for a framework-owned config artifact.
 pub fn framework_config_canonical_json(
