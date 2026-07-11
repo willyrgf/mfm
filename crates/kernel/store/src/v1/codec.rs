@@ -6,12 +6,15 @@ use super::*;
 /// here so the Postgres adapter consumes one implementation through this module.
 pub use super::event_codec::{
     error_info_json, event_artifact_json, manual_resolution_note_json,
-    manual_resolution_outcome_str, parse_error_category, parse_error_info, parse_event_artifact,
-    parse_failure_phase, parse_manual_resolution_note, parse_manual_resolution_outcome,
-    parse_resource_key_evidence, parse_resource_touched_set_evidence, parse_run_completion_outcome,
-    parse_side_effect_ledger_purpose, parse_skip_reason, resource_key_evidence_json,
-    resource_touched_set_evidence_json, run_completion_claim_str, run_completion_outcome_json,
-    run_completion_outcome_str, side_effect_ledger_purpose_json, skip_reason_json,
+    manual_resolution_outcome_str, resource_key_evidence_json, resource_touched_set_evidence_json,
+    run_completion_claim_str, run_completion_outcome_json, run_completion_outcome_str,
+    side_effect_ledger_purpose_json, skip_reason_json,
+};
+pub use super::event_codec_decode::{
+    parse_error_category, parse_error_info, parse_event_artifact, parse_failure_phase,
+    parse_manual_resolution_note, parse_manual_resolution_outcome, parse_resource_key_evidence,
+    parse_resource_touched_set_evidence, parse_run_completion_outcome,
+    parse_side_effect_ledger_purpose, parse_skip_reason,
 };
 
 /// Codec result over the backend-neutral [`CodecError`].

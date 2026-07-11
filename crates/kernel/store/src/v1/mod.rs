@@ -318,6 +318,7 @@ pub use admission_lanes::{
 /// store maps into its own error type via `From`.
 pub mod codec;
 mod event_codec;
+mod event_codec_decode;
 mod staging;
 mod stream;
 mod validation;
@@ -363,16 +364,20 @@ use self::stream::{committed_run_stream_commits, validate_run_stream_order};
 
 pub use self::event_codec::{
     error_info_json, event_artifact_json, manual_resolution_note_json,
-    manual_resolution_outcome_str, parse_error_category, parse_error_info, parse_event_artifact,
-    parse_failure_phase, parse_manual_resolution_note, parse_manual_resolution_outcome,
-    parse_resource_key_evidence, parse_resource_touched_set_evidence, parse_run_completion_outcome,
-    parse_side_effect_ledger_purpose, parse_skip_reason, payload_canonical_json,
-    payload_from_json_value, prepared_commit_plan_fingerprint, resource_key_evidence_json,
-    resource_touched_set_evidence_json, run_completion_claim_str, run_completion_outcome_json,
-    run_completion_outcome_str, side_effect_ledger_purpose_json, skip_reason_json,
+    manual_resolution_outcome_str, payload_canonical_json, prepared_commit_plan_fingerprint,
+    resource_key_evidence_json, resource_touched_set_evidence_json, run_completion_claim_str,
+    run_completion_outcome_json, run_completion_outcome_str, side_effect_ledger_purpose_json,
+    skip_reason_json,
 };
 use self::event_codec::{
-    kernel_event_envelope_json, parse_kernel_event_envelope, parse_vec, store_artifact_json,
+    kernel_event_envelope_json, parse_kernel_event_envelope, store_artifact_json,
+};
+use self::event_codec_decode::parse_vec;
+pub use self::event_codec_decode::{
+    parse_error_category, parse_error_info, parse_event_artifact, parse_failure_phase,
+    parse_manual_resolution_note, parse_manual_resolution_outcome, parse_resource_key_evidence,
+    parse_resource_touched_set_evidence, parse_run_completion_outcome,
+    parse_side_effect_ledger_purpose, parse_skip_reason, payload_from_json_value,
 };
 
 pub use self::codec::{
