@@ -7,7 +7,7 @@ error[E0308]: mismatched types
   = note: expected struct `CanonicalSeed<_>`
              found struct `Handle<'_, '_, TryValue>`
 note: method defined here
- --> src/lib.rs
+ --> src/builder.rs
   |
   |     pub fn seed<T: MfmValue>(
   |            ^^^^
