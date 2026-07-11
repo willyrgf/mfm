@@ -20,7 +20,7 @@ help: the trait `mfm_program::private::OperationInputSealed` is not implemented 
             (Handle<'program, 'scope, A>, Handle<'program, 'scope, B>, Handle<'program, 'scope, C>, Handle<'program, 'scope, D>, Handle<'program, 'scope, E>, Handle<'program, 'scope, F>, Handle<'program, 'scope, G>, Handle<'program, 'scope, H>)
           and $N others
 note: required by a bound in `OperationInput`
- --> src/lib.rs
+ --> src/input_binding.rs
   |
   | pub trait OperationInput<'program, 'scope>: private::OperationInputSealed {
   |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `OperationInput`

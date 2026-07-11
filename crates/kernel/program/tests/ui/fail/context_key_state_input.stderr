@@ -44,7 +44,7 @@ help: the following other types implement trait `mfm_values::MfmValue`
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::ArtifactRef<T>`
   = note: required for `ContextKey` to implement `mfm_values::StateInput`
 note: required by a bound in `into_binding`
- --> src/lib.rs
+ --> src/input_binding.rs
   |
   | pub trait IntoStateInput<'program, 'scope, I: StateInput> {
   |                                               ^^^^^^^^^^ required by this bound in `IntoStateInput::into_binding`
@@ -79,7 +79,7 @@ help: the following other types implement trait `mfm_values::MfmValue`
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::ArtifactRef<T>`
   = note: required for `ContextKey` to implement `mfm_values::StateInput`
 note: required by a bound in `InputBinding`
- --> src/lib.rs
+ --> src/input_binding.rs
   |
   | pub struct InputBinding<I: StateInput> {
   |                            ^^^^^^^^^^ required by this bound in `InputBinding`
