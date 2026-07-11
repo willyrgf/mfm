@@ -2436,65 +2436,6 @@ pub enum CommitOutcome {
     AdmissionBlocked(Box<WaitFifoAdmissionBlock>),
 }
 
-/// Cross-run resource lane key derived from resource key evidence.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ResourceLaneKey {
-    /// Resource namespace.
-    pub namespace: ResourceNamespace,
-    /// Schema id for the typed resource-key evidence.
-    pub key_schema_id: SchemaId,
-    /// Store-comparable resource key.
-    pub key: events::ResourceKey,
-}
-
-impl ResourceLaneKey {
-    /// Creates a lane key from typed resource key evidence.
-    pub fn from_evidence(evidence: &events::ResourceKeyEvidence) -> Self {
-        Self {
-            namespace: evidence.namespace.clone(),
-            key_schema_id: evidence.key_schema_id.clone(),
-            key: evidence.key.clone(),
-        }
-    }
-}
-
-/// Active holder for an exclusive resource lane.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResourceLaneProjection {
-    /// Store event id that acquired or refreshed the lane.
-    pub event_id: EventId,
-    /// Run-scoped side-effect pair holding the lane.
-    pub holder: SideEffectPairLedgerRef,
-    /// Diagnostic side-effect ledger key that claimed the lane.
-    pub ledger_key: events::SideEffectLedgerKey,
-    /// Ledger purpose.
-    pub ledger_purpose: events::SideEffectLedgerPurpose,
-    /// Node id that prepared the invocation.
-    pub node_id: NodeId,
-    /// Attempt id that prepared the invocation.
-    pub attempt_id: AttemptId,
-    /// Invocation epoch that prepared the invocation.
-    pub invocation_epoch: u32,
-    /// Store-visible claim id for the active lane claim.
-    pub claim_id: events::ResourceLaneClaimId,
-    /// Lane-local fencing token for the active claim.
-    pub claim_fencing_token: u64,
-    /// Lane-local transition sequence that acquired the active claim.
-    pub lane_transition_seq: u64,
-}
-
-/// Durable lane-local authority folded from committed resource-lane transitions.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ResourceLaneAuthority {
-    /// Highest committed lane-local transition sequence for this lane.
-    pub last_transition_seq: u64,
-    /// Highest committed lane-local fencing token assigned to a claim for this lane.
-    pub last_claim_fencing_token: u64,
-}
-
-/// Resource-lane authority rows keyed by lane identity.
-pub type ResourceLaneAuthoritySet = BTreeMap<ResourceLaneKey, ResourceLaneAuthority>;
-
 /// One atomically committed run-stream batch reconstructed from persisted envelopes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommittedRunStreamCommit {
@@ -6114,11 +6055,14 @@ pub use self::projection::{
     RetentionProjection,
 };
 
-pub use self::resource_lanes::resource_lane_release_intent_resolution;
 use self::resource_lanes::{
     acquire_resource_lane, release_resource_lane, require_no_resource_lane_for_holder,
     require_no_resource_lanes_for_run, resolve_active_resource_lane_release,
     ResourceLaneReleaseMatch,
+};
+pub use self::resource_lanes::{
+    resource_lane_release_intent_resolution, ResourceLaneAuthority, ResourceLaneAuthoritySet,
+    ResourceLaneKey, ResourceLaneProjection,
 };
 use self::side_effects::{
     note_saga_engagement, prepared_invocation_projection, require_active_attempt_for_side_effect,
