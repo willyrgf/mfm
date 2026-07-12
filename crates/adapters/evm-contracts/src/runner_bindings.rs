@@ -976,10 +976,10 @@ where
                 .load_plan_and_runtime(ctx, submit_node, submit_inputs)
                 .await?;
             let required_depth = finalized_depth_for_submit_node(submit_node)?;
-            let (receipt, receipt_evidence) = load_side_effect_artifact::<P::Receipt>(
+            let (receipt, receipt_evidence) = load_side_effect_artifact_for_node::<P::Receipt>(
                 receipt,
                 events::ArtifactRole::Receipt,
-                ctx,
+                &ctx.node().node_id,
                 self.factory.artifacts(),
             )
             .await?;
@@ -1007,10 +1007,10 @@ where
     ) -> SideEffectDriverFuture<'a, Self::Output> {
         Box::pin(async {
             let plan = self.load_plan(ctx, submit_node, submit_inputs).await?;
-            let (receipt, _) = load_side_effect_artifact::<P::Receipt>(
+            let (receipt, _) = load_side_effect_artifact_for_node::<P::Receipt>(
                 receipt,
                 events::ArtifactRole::Receipt,
-                ctx,
+                &ctx.node().node_id,
                 self.factory.artifacts(),
             )
             .await?;
@@ -1027,10 +1027,10 @@ where
     ) -> SideEffectDriverFuture<'a, Self::Output> {
         Box::pin(async {
             let plan = self.load_plan(ctx, submit_node, submit_inputs).await?;
-            let (confirmation, _) = load_side_effect_artifact::<P::Confirmation>(
+            let (confirmation, _) = load_side_effect_artifact_for_node::<P::Confirmation>(
                 confirmation,
                 events::ArtifactRole::Confirmation,
-                ctx,
+                &ctx.node().node_id,
                 self.factory.artifacts(),
             )
             .await?;
@@ -1269,7 +1269,8 @@ async fn run_context_validate(
     ctx: ErasedRunCtx<'_>,
     factory: &dyn EvmContractRuntimeFactory,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let action = load_runner_config::<ValidateAction>(&ctx, factory.artifacts()).await?;
+    let action =
+        load_runner_config_for_node::<ValidateAction>(ctx.node(), factory.artifacts()).await?;
     let input = load_context_validate_input(ctx.inputs(), factory.artifacts()).await?;
     let context = ctx.certified_context::<EvmContractContext>()?;
     ensure_configured_input_context(&input, &context).map_err(mfm_runtime::RuntimeError::from)?;
@@ -1300,7 +1301,8 @@ async fn run_import_deployed(
     ctx: ErasedRunCtx<'_>,
     factory: &dyn EvmContractRuntimeFactory,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let import = load_runner_config::<ImportDeployedSpec>(&ctx, factory.artifacts()).await?;
+    let import =
+        load_runner_config_for_node::<ImportDeployedSpec>(ctx.node(), factory.artifacts()).await?;
     let context = ctx.certified_context::<EvmContractContext>()?;
     let runtime = factory.read_runtime_for(runtime_evm_network_binding_for_context(&context)?)?;
     let deployed = runtime
@@ -1313,7 +1315,9 @@ async fn run_import_configured(
     ctx: ErasedRunCtx<'_>,
     factory: &dyn EvmContractRuntimeFactory,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let import = load_runner_config::<ImportConfiguredSpec>(&ctx, factory.artifacts()).await?;
+    let import =
+        load_runner_config_for_node::<ImportConfiguredSpec>(ctx.node(), factory.artifacts())
+            .await?;
     let context = ctx.certified_context::<EvmContractContext>()?;
     let artifact = if import_configured_requires_artifact(import.as_ref()) {
         Some(load_context_profile_artifact(&context, factory.artifacts()).await?)

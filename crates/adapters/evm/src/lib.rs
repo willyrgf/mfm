@@ -23,7 +23,7 @@ use mfm_program::{ManagedWriteState, MfmFactType, StateSpec, ValidatedConfig};
 use mfm_program_derive::MfmValue;
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
-    load_launch_config, load_materialized_struct_input, load_runner_config,
+    load_launch_config_for_node, load_materialized_struct_input, load_runner_config_for_node,
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, RunnerCapabilityBinding,
     RunnerExecutableIdentityTemplate, RunnerIngressContext, RunnerOutputBuilder,
@@ -307,7 +307,7 @@ struct ResolveJointTipRunner {
 
 impl ErasedNodeRunner for ResolveJointTipRunner {
     fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
-        let config = load_launch_config::<ResolveEvmJointTipConfig>(&ctx)?;
+        let config = load_launch_config_for_node::<ResolveEvmJointTipConfig>(&ctx, ctx.node())?;
         let binding = joint_tip_binding(config.as_ref()).map_err(evm_adapter_runtime_error)?;
         self.evm
             .validate_network_binding(&binding)
@@ -316,9 +316,11 @@ impl ErasedNodeRunner for ResolveJointTipRunner {
 
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config =
-                load_runner_config::<ResolveEvmJointTipConfig>(&ctx, self.artifacts.as_ref())
-                    .await?;
+            let config = load_runner_config_for_node::<ResolveEvmJointTipConfig>(
+                ctx.node(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
             let binding = joint_tip_binding(config.as_ref()).map_err(evm_adapter_runtime_error)?;
             let state = ResolveEvmJointTipState::new(config).map_err(|error| {
                 mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
@@ -357,7 +359,8 @@ struct ObserveNativeBalanceRunner {
 
 impl ErasedNodeRunner for ObserveNativeBalanceRunner {
     fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
-        let config = load_launch_config::<ObserveEvmNativeBalanceConfig>(&ctx)?;
+        let config =
+            load_launch_config_for_node::<ObserveEvmNativeBalanceConfig>(&ctx, ctx.node())?;
         let binding = balance_binding(config.as_ref()).map_err(evm_adapter_runtime_error)?;
         self.evm
             .validate_network_binding(&binding)
@@ -366,9 +369,11 @@ impl ErasedNodeRunner for ObserveNativeBalanceRunner {
 
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config =
-                load_runner_config::<ObserveEvmNativeBalanceConfig>(&ctx, self.artifacts.as_ref())
-                    .await?;
+            let config = load_runner_config_for_node::<ObserveEvmNativeBalanceConfig>(
+                ctx.node(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
             let binding = balance_binding(config.as_ref()).map_err(evm_adapter_runtime_error)?;
             let state = ObserveEvmNativeBalanceState::new(config).map_err(|error| {
                 mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
@@ -444,8 +449,8 @@ struct AssembleNativeBalanceBatchRunner {
 impl ErasedNodeRunner for AssembleNativeBalanceBatchRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let _config = load_runner_config::<AssembleEvmNativeBalanceBatchConfig>(
-                &ctx,
+            let _config = load_runner_config_for_node::<AssembleEvmNativeBalanceBatchConfig>(
+                ctx.node(),
                 self.artifacts.as_ref(),
             )
             .await?;
@@ -489,7 +494,9 @@ where
 {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config = load_runner_config::<S::Config>(&ctx, self.artifacts.as_ref()).await?;
+            let config =
+                load_runner_config_for_node::<S::Config>(ctx.node(), self.artifacts.as_ref())
+                    .await?;
             let state = S::new(config).map_err(|error| {
                 mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
             })?;

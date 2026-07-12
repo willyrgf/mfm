@@ -21,7 +21,7 @@ use mfm_portfolio_model::symbol::ObservationAnchor;
 use mfm_program::{StateSpec, ValidatedConfig};
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
-    load_materialized_input_value, load_materialized_struct_input, load_runner_config,
+    load_materialized_node_value, load_materialized_struct_input, load_runner_config_for_node,
     ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
     RunnerExecutableIdentityTemplate, RunnerOutputBuilder, RunnerRegistrationBuilder,
 };
@@ -145,8 +145,11 @@ struct ResolveSubjectsRunner {
 impl ErasedNodeRunner for ResolveSubjectsRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config =
-                load_runner_config::<ResolveSubjectsConfig>(&ctx, self.artifacts.as_ref()).await?;
+            let config = load_runner_config_for_node::<ResolveSubjectsConfig>(
+                ctx.node(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
             let output = resolve_subjects_from_config(config.as_ref());
             state_output(ctx, &output)
         })
@@ -161,10 +164,13 @@ struct SelectHoldingsRunner {
 impl ErasedNodeRunner for SelectHoldingsRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config =
-                load_runner_config::<SelectHoldingsConfig>(&ctx, self.artifacts.as_ref()).await?;
-            let subjects = load_materialized_input_value::<mfm_state_portfolio::ResolvedSubjects>(
-                ctx.inputs(),
+            let config = load_runner_config_for_node::<SelectHoldingsConfig>(
+                ctx.node(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
+            let subjects = load_materialized_node_value::<mfm_state_portfolio::ResolvedSubjects>(
+                &ctx.inputs().root,
                 self.artifacts.as_ref(),
             )
             .await?;
@@ -187,9 +193,11 @@ struct ResolveValuationsRunner {
 impl ErasedNodeRunner for ResolveValuationsRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config =
-                load_runner_config::<ResolveValuationsConfig>(&ctx, self.artifacts.as_ref())
-                    .await?;
+            let config = load_runner_config_for_node::<ResolveValuationsConfig>(
+                ctx.node(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
             let output = resolve_valuations_from_config(config.as_ref()).map_err(|error| {
                 mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
             })?;
@@ -205,8 +213,11 @@ struct AssembleSnapshotRunner {
 impl ErasedNodeRunner for AssembleSnapshotRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config =
-                load_runner_config::<AssembleSnapshotConfig>(&ctx, self.artifacts.as_ref()).await?;
+            let config = load_runner_config_for_node::<AssembleSnapshotConfig>(
+                ctx.node(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
             let input = load_materialized_struct_input::<AssembleSnapshotInput>(
                 ctx.inputs(),
                 self.artifacts.as_ref(),
@@ -227,8 +238,11 @@ struct ProjectReportRunner {
 impl ErasedNodeRunner for ProjectReportRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config =
-                load_runner_config::<ProjectReportConfig>(&ctx, self.artifacts.as_ref()).await?;
+            let config = load_runner_config_for_node::<ProjectReportConfig>(
+                ctx.node(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
             let input = load_materialized_struct_input::<ProjectReportInput>(
                 ctx.inputs(),
                 self.artifacts.as_ref(),

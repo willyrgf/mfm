@@ -194,17 +194,6 @@ impl RunnerFactoryBinding {
     }
 }
 
-/// Loads and validates the certified config artifact for the current runner node.
-pub async fn load_runner_config<T>(
-    ctx: &ErasedRunCtx<'_>,
-    artifacts: &dyn store::RetainedArtifactReadProvider,
-) -> Result<ValidatedConfig<T>>
-where
-    T: MfmConfig + DeserializeOwned,
-{
-    load_runner_config_for_node(ctx.node(), artifacts).await
-}
-
 /// Loads and validates the certified config artifact for a specific certified node.
 pub async fn load_runner_config_for_node<T>(
     node: &spec::NodeSpec,
@@ -218,14 +207,6 @@ where
     let config = decode_verified_json::<T>(&verified)?;
     ValidatedConfig::new(config)
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
-}
-
-/// Loads and validates the launch config artifact for the runner ingress node.
-pub fn load_launch_config<T>(ctx: &RunnerIngressContext<'_>) -> Result<ValidatedConfig<T>>
-where
-    T: MfmConfig + DeserializeOwned,
-{
-    load_launch_config_for_node(ctx, ctx.node())
 }
 
 /// Loads and validates the launch config artifact for a specific ingress node.
@@ -244,17 +225,6 @@ where
         ))
     })?;
     ValidatedConfig::new(config).map_err(|error| RuntimeError::RunnerBinding(error.to_string()))
-}
-
-/// Loads the root materialized input as a typed value from a state-output or seed cell.
-pub async fn load_materialized_input_value<T>(
-    inputs: &MaterializedInputs,
-    artifacts: &dyn store::RetainedArtifactReadProvider,
-) -> Result<T>
-where
-    T: MfmValue + DeserializeOwned,
-{
-    load_materialized_node_value(&inputs.root, artifacts).await
 }
 
 /// Loads one materialized input node as a typed value from a state-output or seed cell.
@@ -331,19 +301,6 @@ where
     }
     NonEmpty::try_from_vec(values)
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
-}
-
-/// Loads a side-effect artifact and returned evidence produced by the current runner node.
-pub async fn load_side_effect_artifact<T>(
-    artifact: &store::SideEffectArtifactProjection,
-    role: events::ArtifactRole,
-    ctx: &ErasedRunCtx<'_>,
-    artifacts: &dyn store::RetainedArtifactReadProvider,
-) -> Result<(T, store::ArtifactEvidenceRef)>
-where
-    T: MfmValue + DeserializeOwned,
-{
-    load_side_effect_artifact_for_node(artifact, role, &ctx.node().node_id, artifacts).await
 }
 
 /// Loads a side-effect artifact and returned evidence produced by an explicit certified node.

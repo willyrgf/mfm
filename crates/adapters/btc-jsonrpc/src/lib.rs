@@ -25,7 +25,7 @@ use mfm_program::{ManagedWriteState, MfmFactType, StateSpec, ValidatedConfig};
 use mfm_program_derive::MfmValue;
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
-    load_launch_config, load_materialized_struct_input, load_runner_config,
+    load_launch_config_for_node, load_materialized_struct_input, load_runner_config_for_node,
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, RunnerCapabilityBinding,
     RunnerExecutableIdentityTemplate, RunnerIngressContext, RunnerOutputBuilder,
@@ -302,8 +302,8 @@ struct AssembleAddressBalanceBatchRunner {
 impl ErasedNodeRunner for AssembleAddressBalanceBatchRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let _config = load_runner_config::<AssembleBtcAddressBalanceBatchConfig>(
-                &ctx,
+            let _config = load_runner_config_for_node::<AssembleBtcAddressBalanceBatchConfig>(
+                ctx.node(),
                 self.artifacts.as_ref(),
             )
             .await?;
@@ -497,7 +497,7 @@ struct ObserveChainHeadRunner {
 
 impl ErasedNodeRunner for ObserveChainHeadRunner {
     fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
-        let config = load_launch_config::<ObserveBtcChainHeadConfig>(&ctx)?;
+        let config = load_launch_config_for_node::<ObserveBtcChainHeadConfig>(&ctx, ctx.node())?;
         let binding = chain_head_binding(config.as_ref()).map_err(btc_adapter_runtime_error)?;
         self.btc
             .validate_source_binding(&binding)
@@ -506,9 +506,11 @@ impl ErasedNodeRunner for ObserveChainHeadRunner {
 
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config =
-                load_runner_config::<ObserveBtcChainHeadConfig>(&ctx, self.artifacts.as_ref())
-                    .await?;
+            let config = load_runner_config_for_node::<ObserveBtcChainHeadConfig>(
+                ctx.node(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
             let binding = chain_head_binding(config.as_ref()).map_err(btc_adapter_runtime_error)?;
             let request = chain_head_request(config.as_ref()).map_err(btc_adapter_runtime_error)?;
             let state = ObserveBtcChainHeadState::new(config).map_err(|error| {
@@ -547,7 +549,7 @@ struct ResolveJointTipRunner {
 
 impl ErasedNodeRunner for ResolveJointTipRunner {
     fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
-        let config = load_launch_config::<ResolveBtcJointTipConfig>(&ctx)?;
+        let config = load_launch_config_for_node::<ResolveBtcJointTipConfig>(&ctx, ctx.node())?;
         let binding = joint_tip_binding(config.as_ref()).map_err(btc_adapter_runtime_error)?;
         self.btc
             .validate_source_binding(&binding)
@@ -556,9 +558,11 @@ impl ErasedNodeRunner for ResolveJointTipRunner {
 
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config =
-                load_runner_config::<ResolveBtcJointTipConfig>(&ctx, self.artifacts.as_ref())
-                    .await?;
+            let config = load_runner_config_for_node::<ResolveBtcJointTipConfig>(
+                ctx.node(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
             let binding = joint_tip_binding(config.as_ref()).map_err(btc_adapter_runtime_error)?;
             let request = joint_tip_request(config.as_ref());
             let state = ResolveBtcJointTipState::new(config).map_err(|error| {
@@ -597,7 +601,8 @@ struct ObserveAddressBalanceRunner {
 
 impl ErasedNodeRunner for ObserveAddressBalanceRunner {
     fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
-        let config = load_launch_config::<ObserveBtcAddressBalanceConfig>(&ctx)?;
+        let config =
+            load_launch_config_for_node::<ObserveBtcAddressBalanceConfig>(&ctx, ctx.node())?;
         let binding =
             address_balance_binding(config.as_ref()).map_err(btc_adapter_runtime_error)?;
         self.btc
@@ -607,9 +612,11 @@ impl ErasedNodeRunner for ObserveAddressBalanceRunner {
 
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config =
-                load_runner_config::<ObserveBtcAddressBalanceConfig>(&ctx, self.artifacts.as_ref())
-                    .await?;
+            let config = load_runner_config_for_node::<ObserveBtcAddressBalanceConfig>(
+                ctx.node(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
             let binding =
                 address_balance_binding(config.as_ref()).map_err(btc_adapter_runtime_error)?;
             let state = ObserveBtcAddressBalanceState::new(config).map_err(|error| {
@@ -670,9 +677,11 @@ struct QueryCheckpointRunner {
 impl ErasedNodeRunner for QueryCheckpointRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let config =
-                load_runner_config::<QueryCollectorCheckpointConfig>(&ctx, self.artifacts.as_ref())
-                    .await?;
+            let config = load_runner_config_for_node::<QueryCollectorCheckpointConfig>(
+                ctx.node(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
             let input = load_materialized_struct_input::<QueryCollectorCheckpointInput>(
                 ctx.inputs(),
                 self.artifacts.as_ref(),
@@ -714,7 +723,7 @@ where
     S::Input: serde::de::DeserializeOwned,
     S::Output: MfmFactType + MfmValue,
 {
-    let config = load_runner_config::<S::Config>(&ctx, artifacts).await?;
+    let config = load_runner_config_for_node::<S::Config>(ctx.node(), artifacts).await?;
     let state = S::new(config)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
     let input = load_materialized_struct_input::<S::Input>(ctx.inputs(), artifacts).await?;
