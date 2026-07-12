@@ -58,19 +58,7 @@ impl EvmSigningRequest {
         tx: LegacyTxToSign,
         expected_from: Address,
     ) -> Result<Self> {
-        let signing_hash = legacy_signing_hash(&tx);
-        let signing_request = signing_request(
-            signer_ref,
-            legacy_transaction_purpose_id()?,
-            signing_hash,
-            expected_from,
-        )?;
-        Ok(Self {
-            transaction: EvmSigningTransaction::Legacy(tx),
-            signing_request,
-            signing_hash,
-            expected_from,
-        })
+        Self::new(signer_ref, EvmSigningTransaction::Legacy(tx), expected_from)
     }
 
     /// Creates an EIP-1559 transaction signing request.
@@ -79,15 +67,29 @@ impl EvmSigningRequest {
         tx: Eip1559TxToSign,
         expected_from: Address,
     ) -> Result<Self> {
-        let signing_hash = eip1559_signing_hash(&tx);
-        let signing_request = signing_request(
+        Self::new(
             signer_ref,
-            eip1559_transaction_purpose_id()?,
-            signing_hash,
+            EvmSigningTransaction::Eip1559(tx),
             expected_from,
-        )?;
+        )
+    }
+
+    fn new(
+        signer_ref: SignerRef,
+        transaction: EvmSigningTransaction,
+        expected_from: Address,
+    ) -> Result<Self> {
+        let (signing_hash, purpose) = match &transaction {
+            EvmSigningTransaction::Legacy(tx) => {
+                (legacy_signing_hash(tx), legacy_transaction_purpose_id()?)
+            }
+            EvmSigningTransaction::Eip1559(tx) => {
+                (eip1559_signing_hash(tx), eip1559_transaction_purpose_id()?)
+            }
+        };
+        let signing_request = signing_request(signer_ref, purpose, signing_hash, expected_from)?;
         Ok(Self {
-            transaction: EvmSigningTransaction::Eip1559(tx),
+            transaction,
             signing_request,
             signing_hash,
             expected_from,
