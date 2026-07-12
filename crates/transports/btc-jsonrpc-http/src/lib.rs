@@ -673,6 +673,18 @@ impl BtcJsonRpcClient {
         rpc_resp.result.ok_or(BtcRpcError::MissingResult)
     }
 
+    async fn rpc_call_typed<T>(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T, BtcRpcError>
+    where
+        T: de::DeserializeOwned,
+    {
+        let result = self.rpc_call(method, params).await?;
+        serde_json::from_value(result).map_err(|error| BtcRpcError::InvalidJson(error.to_string()))
+    }
+
     async fn rpc_call_text(
         &self,
         method: &str,
@@ -716,10 +728,8 @@ impl BtcJsonRpcClient {
     }
 
     async fn get_blockchain_info(&self) -> Result<BlockchainInfo, BtcRpcError> {
-        let result = self
-            .rpc_call("getblockchaininfo", serde_json::json!([]))
-            .await?;
-        serde_json::from_value(result).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))
+        self.rpc_call_typed("getblockchaininfo", serde_json::json!([]))
+            .await
     }
 
     async fn get_block_hash(
@@ -727,10 +737,8 @@ impl BtcJsonRpcClient {
         _verified: &VerifiedBtcCall,
         height: u64,
     ) -> Result<String, BtcRpcError> {
-        let result = self
-            .rpc_call("getblockhash", serde_json::json!([height]))
-            .await?;
-        serde_json::from_value(result).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))
+        self.rpc_call_typed("getblockhash", serde_json::json!([height]))
+            .await
     }
 
     async fn get_block_header(
@@ -738,10 +746,8 @@ impl BtcJsonRpcClient {
         _verified: &VerifiedBtcCall,
         block_hash: &str,
     ) -> Result<BlockHeaderInfo, BtcRpcError> {
-        let result = self
-            .rpc_call("getblockheader", serde_json::json!([block_hash, true]))
-            .await?;
-        serde_json::from_value(result).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))
+        self.rpc_call_typed("getblockheader", serde_json::json!([block_hash, true]))
+            .await
     }
 
     async fn scan_tx_out_set(
@@ -749,13 +755,11 @@ impl BtcJsonRpcClient {
         _verified: &VerifiedBtcCall,
         address: &str,
     ) -> Result<ScanTxOutSetResult, BtcRpcError> {
-        let result = self
-            .rpc_call(
-                "scantxoutset",
-                serde_json::json!(["start", [{"desc": format!("addr({address})")}]]),
-            )
-            .await?;
-        serde_json::from_value(result).map_err(|e| BtcRpcError::InvalidJson(e.to_string()))
+        self.rpc_call_typed(
+            "scantxoutset",
+            serde_json::json!(["start", [{"desc": format!("addr({address})")}]]),
+        )
+        .await
     }
 }
 
@@ -826,20 +830,12 @@ fn verify_current_tip_matches_balance_request(
     request: &BtcBalanceReadRequest,
 ) -> mfm_btc_capabilities::Result<()> {
     let best_hash = provider_block_hash("getblockchaininfo", &verified.info.bestblockhash)?;
-    if verified.info.blocks == request.block_height()
-        && best_hash
-            .as_str()
-            .eq_ignore_ascii_case(request.block_hash().as_str())
-    {
-        Ok(())
-    } else {
-        Err(balance_anchor_unavailable_diagnostic(
-            "getblockchaininfo",
-            request,
-            verified.info.blocks,
-            best_hash.as_str(),
-        ))
-    }
+    verify_balance_anchor(
+        "getblockchaininfo",
+        verified.info.blocks,
+        best_hash.as_str(),
+        request,
+    )
 }
 
 fn verify_scan_matches_balance_request(
@@ -856,18 +852,25 @@ fn verify_scan_matches_balance_request(
         ));
     }
     let scan_hash = provider_block_hash("scantxoutset", &scan.bestblock)?;
-    if scan.height == request.block_height()
-        && scan_hash
-            .as_str()
-            .eq_ignore_ascii_case(request.block_hash().as_str())
+    verify_balance_anchor("scantxoutset", scan.height, scan_hash.as_str(), request)
+}
+
+fn verify_balance_anchor(
+    operation: &'static str,
+    observed_height: u64,
+    observed_hash: &str,
+    request: &BtcBalanceReadRequest,
+) -> mfm_btc_capabilities::Result<()> {
+    if observed_height == request.block_height()
+        && observed_hash.eq_ignore_ascii_case(request.block_hash().as_str())
     {
         Ok(())
     } else {
         Err(balance_anchor_unavailable_diagnostic(
-            "scantxoutset",
+            operation,
             request,
-            scan.height,
-            scan_hash.as_str(),
+            observed_height,
+            observed_hash,
         ))
     }
 }
