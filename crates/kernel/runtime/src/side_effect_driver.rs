@@ -575,11 +575,8 @@ impl SideEffectDriver {
             SideEffectProtocolAction::PrepareAndStartClaimed { invocation_epoch } => {
                 Self::prepare_and_start_claimed(&ctx, callbacks, &view, invocation_epoch).await
             }
-            SideEffectProtocolAction::SubmitOrRecoverSubmission { invocation_epoch } => {
-                Self::submit_or_recover_submission(&ctx, callbacks, &view, action, invocation_epoch)
-                    .await
-            }
-            SideEffectProtocolAction::StartPreparedAndSubmitOrRecoverSubmission {
+            SideEffectProtocolAction::SubmitOrRecoverSubmission { invocation_epoch }
+            | SideEffectProtocolAction::StartPreparedAndSubmitOrRecoverSubmission {
                 invocation_epoch,
             } => {
                 Self::submit_or_recover_submission(&ctx, callbacks, &view, action, invocation_epoch)
@@ -680,16 +677,11 @@ impl SideEffectDriver {
             }
             _ => return Err(missing_driver_projection("claimed authority")),
         };
-        let builder = SideEffectEvidenceBuilder::new(ctx);
-        if let Some(prepared) = prepared {
-            builder.prepare_claimed_invocation_and_start(side_effect, claim, Some(&prepared))
-        } else {
-            builder.prepare_claimed_invocation_and_start::<serde_json::Value>(
-                side_effect,
-                claim,
-                None,
-            )
-        }
+        SideEffectEvidenceBuilder::new(ctx).prepare_claimed_invocation_and_start(
+            side_effect,
+            claim,
+            prepared.as_ref(),
+        )
     }
 
     async fn submit_or_recover_submission<C>(
@@ -1372,11 +1364,11 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     {
         let artifacts = RunnerArtifactBuilder::new(self.ctx);
         let artifact = artifacts.not_submitted_proof(proof)?;
-        self.terminal_single_artifact_output(
+        self.single_artifact_output(
             side_effect,
             start_claim,
             &artifact,
-            "side_effect.not_submitted",
+            Some("side_effect.not_submitted"),
             |payloads, side_effect, artifact| {
                 payloads.side_effect_not_submitted_proven_with_role(
                     side_effect,
@@ -1400,7 +1392,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     {
         let artifacts = RunnerArtifactBuilder::new(self.ctx);
         let artifact = artifacts.submission(submission)?;
-        self.single_artifact_output_with_optional_start(
+        self.single_artifact_output(
             side_effect,
             start_claim,
             &artifact,
@@ -1423,7 +1415,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     {
         let artifacts = RunnerArtifactBuilder::new(self.ctx);
         let artifact = artifacts.submission_unknown(evidence)?;
-        self.single_artifact_output_with_optional_start(
+        self.single_artifact_output(
             side_effect,
             start_claim,
             &artifact,
@@ -1446,7 +1438,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     {
         let artifacts = RunnerArtifactBuilder::new(self.ctx);
         let artifact = artifacts.receipt(receipt)?;
-        self.single_artifact_output_with_optional_start(
+        self.single_artifact_output(
             side_effect,
             None,
             &artifact,
@@ -1474,11 +1466,11 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     {
         let artifacts = RunnerArtifactBuilder::new(self.ctx);
         let artifact = artifacts.receipt(receipt)?;
-        self.terminal_single_artifact_output(
+        self.single_artifact_output(
             side_effect,
             None,
             &artifact,
-            "side_effect.receipt_observed",
+            Some("side_effect.receipt_observed"),
             |payloads, side_effect, artifact| {
                 payloads.side_effect_receipt_observed(
                     side_effect,
@@ -1502,11 +1494,11 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     {
         let artifacts = RunnerArtifactBuilder::new(self.ctx);
         let artifact = artifacts.confirmation(confirmation)?;
-        self.terminal_single_artifact_output(
+        self.single_artifact_output(
             side_effect,
             None,
             &artifact,
-            "side_effect.confirmed",
+            Some("side_effect.confirmed"),
             |payloads, side_effect, artifact| {
                 payloads.side_effect_confirmation_observed(
                     side_effect,
@@ -1532,7 +1524,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     {
         let artifacts = RunnerArtifactBuilder::new(self.ctx);
         let artifact = artifacts.ambiguity_evidence(evidence)?;
-        self.single_artifact_output_with_optional_start(
+        self.single_artifact_output(
             side_effect,
             start_claim,
             &artifact,
@@ -1580,31 +1572,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
         Ok(output.finish())
     }
 
-    fn terminal_single_artifact_output<F>(
-        &self,
-        side_effect: RunnerSideEffectBinding,
-        start_claim: Option<RunnerClaimBinding>,
-        artifact: &RunnerJsonArtifact,
-        release_reason: &'static str,
-        payload: F,
-    ) -> Result<ErasedRunnerOutput>
-    where
-        F: FnOnce(
-            &RunnerPayloadBuilder<'_, '_>,
-            RunnerSideEffectBinding,
-            &RunnerJsonArtifact,
-        ) -> Result<crate::RunnerEventPayload>,
-    {
-        self.single_artifact_output_with_optional_start(
-            side_effect,
-            start_claim,
-            artifact,
-            Some(release_reason),
-            payload,
-        )
-    }
-
-    fn single_artifact_output_with_optional_start<F>(
+    fn single_artifact_output<F>(
         &self,
         side_effect: RunnerSideEffectBinding,
         start_claim: Option<RunnerClaimBinding>,
