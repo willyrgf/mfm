@@ -402,6 +402,10 @@ fn test_secure_key_methods() {
     let sig1_again = secure_key.sign_hash(&test_hash1).unwrap();
     assert_eq!(sig1.to_bytes(), sig1_again.to_bytes());
 
+    let recoverable = secure_key.sign_hash_recoverable(&test_hash1).unwrap();
+    let recoverable_again = secure_key.sign_hash_recoverable(&test_hash1).unwrap();
+    assert_eq!(recoverable, recoverable_again);
+
     // Test ethereum_address
     let address1 = secure_key.ethereum_address().unwrap();
     let address2 = secure_key.ethereum_address().unwrap();
