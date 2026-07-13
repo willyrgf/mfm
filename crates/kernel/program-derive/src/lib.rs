@@ -274,11 +274,12 @@ fn expand_program_public_outputs_derive_result(
 
     let attrs = ContainerAttrs::parse(&input.attrs, &input.ident)?;
     let fields = named_struct_fields(&input.data)?;
-    let field_output = program_public_output_field_tokens(
+    let field_output = program_output_field_tokens(
         fields,
         attrs.rename_all.as_deref(),
         program_lifetime,
         scope_lifetime,
+        ProgramOutputKind::Public,
     )?;
     let field_descriptors = field_output.descriptors;
     let output_cells = field_output.output_cells;
@@ -348,11 +349,12 @@ fn expand_program_operation_output_derive_result(
 
     let attrs = ContainerAttrs::parse(&input.attrs, &input.ident)?;
     let fields = named_struct_fields(&input.data)?;
-    let field_output = program_operation_output_field_tokens(
+    let field_output = program_output_field_tokens(
         fields,
         attrs.rename_all.as_deref(),
         program_lifetime,
         scope_lifetime,
+        ProgramOutputKind::Operation,
     )?;
     let field_descriptors = field_output.descriptors;
     let output_handles = field_output.output_cells;
@@ -542,6 +544,21 @@ struct SchemaShapeOutput {
 struct ProgramPublicOutputFieldOutput {
     descriptors: Vec<proc_macro2::TokenStream>,
     output_cells: Vec<proc_macro2::TokenStream>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProgramOutputKind {
+    Public,
+    Operation,
+}
+
+impl ProgramOutputKind {
+    fn default_field_error(self) -> &'static str {
+        match self {
+            Self::Public => "program public output handle fields cannot use serde(default)",
+            Self::Operation => "program operation output handle fields cannot use serde(default)",
+        }
+    }
 }
 
 fn schema_shape_tokens(
@@ -818,11 +835,12 @@ fn field_descriptor_tokens(
     })
 }
 
-fn program_public_output_field_tokens(
+fn program_output_field_tokens(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::Token![,]>,
     rename_all: Option<&str>,
     program_lifetime: &syn::Lifetime,
     scope_lifetime: &syn::Lifetime,
+    kind: ProgramOutputKind,
 ) -> syn::Result<ProgramPublicOutputFieldOutput> {
     let mut descriptors = Vec::new();
     let mut output_cells = Vec::new();
@@ -835,10 +853,7 @@ fn program_public_output_field_tokens(
             .ok_or_else(|| syn::Error::new(field.span(), "MFM derives require named fields"))?;
         let attrs = FieldAttrs::parse(&field.attrs)?;
         if attrs.default {
-            return Err(syn::Error::new(
-                ident.span(),
-                "program public output handle fields cannot use serde(default)",
-            ));
+            return Err(syn::Error::new(ident.span(), kind.default_field_error()));
         }
         let wire_name = attrs
             .rename
@@ -860,64 +875,14 @@ fn program_public_output_field_tokens(
                 },
             )
         });
-        output_cells.push(quote! {
-            ::mfm_program::PublicOutputCellSpec::from_handle(
-                ::mfm_program::PublicFieldPath::new(#wire_name)?,
-                &self.#ident,
-            )
-        });
-    }
-
-    Ok(ProgramPublicOutputFieldOutput {
-        descriptors,
-        output_cells,
-    })
-}
-
-fn program_operation_output_field_tokens(
-    fields: &syn::punctuated::Punctuated<syn::Field, syn::Token![,]>,
-    rename_all: Option<&str>,
-    program_lifetime: &syn::Lifetime,
-    scope_lifetime: &syn::Lifetime,
-) -> syn::Result<ProgramPublicOutputFieldOutput> {
-    let mut descriptors = Vec::new();
-    let mut output_cells = Vec::new();
-    let mut names = Vec::new();
-
-    for field in fields {
-        let ident = field
-            .ident
-            .as_ref()
-            .ok_or_else(|| syn::Error::new(field.span(), "MFM derives require named fields"))?;
-        let attrs = FieldAttrs::parse(&field.attrs)?;
-        if attrs.default {
-            return Err(syn::Error::new(
-                ident.span(),
-                "program operation output handle fields cannot use serde(default)",
-            ));
-        }
-        let wire_name = attrs
-            .rename
-            .unwrap_or_else(|| apply_rename_all(&ident.to_string(), rename_all));
-        if names.iter().any(|name: &String| name == &wire_name) {
-            return Err(syn::Error::new(
-                ident.span(),
-                format!("duplicate MFM field wire name '{wire_name}'"),
-            ));
-        }
-        names.push(wire_name.clone());
-        let value_ty = handle_value_type(&field.ty, program_lifetime, scope_lifetime)?;
-        descriptors.push(quote! {
-            ::mfm_values::FieldDescriptor::required(
-                #wire_name,
-                ::mfm_values::SchemaShape::ValueRef {
-                    schema_id: <#value_ty as ::mfm_values::MfmValue>::schema_id()?,
-                    semantic_type_id: <#value_ty as ::mfm_values::MfmValue>::semantic_id()?,
-                },
-            )
-        });
-        output_cells.push(quote! {
-            self.#ident.typed_ref()
+        output_cells.push(match kind {
+            ProgramOutputKind::Public => quote! {
+                ::mfm_program::PublicOutputCellSpec::from_handle(
+                    ::mfm_program::PublicFieldPath::new(#wire_name)?,
+                    &self.#ident,
+                )
+            },
+            ProgramOutputKind::Operation => quote!(self.#ident.typed_ref()),
         });
     }
 
