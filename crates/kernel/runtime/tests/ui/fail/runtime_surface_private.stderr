@@ -188,7 +188,7 @@ error[E0624]: method `side_effect_intent` is private
 25 |       let _ = mfm_runtime::RunnerArtifactBuilder::side_effect_intent;
    |                                                   ^^^^^^^^^^^^^^^^^^ private method
    |
-  ::: src/runner_kit/builders.rs
+  ::: src/runner_kit/artifact_builder.rs
    |
    | /     pub(crate) fn side_effect_intent<T>(&self, value: &T) -> Result<RunnerJsonArtifact>
    | |     where
@@ -201,7 +201,7 @@ error[E0624]: method `prepared_invocation` is private
 26 |       let _ = mfm_runtime::RunnerArtifactBuilder::prepared_invocation;
    |                                                   ^^^^^^^^^^^^^^^^^^^ private method
    |
-  ::: src/runner_kit/builders.rs
+  ::: src/runner_kit/artifact_builder.rs
    |
    | /     pub(crate) fn prepared_invocation<T>(&self, value: &T) -> Result<RunnerJsonArtifact>
    | |     where
@@ -214,7 +214,7 @@ error[E0624]: method `staged_side_effect` is private
 27 |       let _ = mfm_runtime::RunnerArtifactBuilder::staged_side_effect;
    |                                                   ^^^^^^^^^^^^^^^^^^ private method
    |
-  ::: src/runner_kit/builders.rs
+  ::: src/runner_kit/artifact_builder.rs
    |
    | /     pub(crate) fn staged_side_effect(
    | |         &self,
@@ -230,7 +230,7 @@ error[E0624]: method `side_effect_failed` is private
 31 |       let _ = mfm_runtime::RunnerPayloadBuilder::side_effect_failed;
    |                                                  ^^^^^^^^^^^^^^^^^^ private method
    |
-  ::: src/runner_kit/builders.rs
+  ::: src/runner_kit/payload_builder.rs
    |
    | /     pub(crate) fn side_effect_failed(
    | |         &self,
