@@ -64,6 +64,9 @@ pub use self::draft::*;
 #[path = "builder.rs"]
 mod builder;
 pub use self::builder::*;
+#[path = "operation_expansion.rs"]
+mod operation_expansion;
+pub use self::operation_expansion::*;
 #[path = "registry.rs"]
 mod registry;
 pub use self::registry::*;
