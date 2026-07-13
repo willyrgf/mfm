@@ -123,7 +123,7 @@ help: the following other types implement trait `MfmValue`
  5 | #[derive(Clone, Serialize, Deserialize, MfmValue)]
    |                                         ^^^^^^^^ `BadSignedPayloadValue`
    |
-  ::: $WORKSPACE/crates/kernel/values/src/lib.rs
+  ::: $WORKSPACE/crates/kernel/values/src/generic_values.rs
    |
    | impl MfmValue for ContextRefValue {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ContextRefValue`
