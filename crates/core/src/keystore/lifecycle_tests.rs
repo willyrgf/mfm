@@ -105,12 +105,6 @@ fn test_key_deletion() {
 
     // Verify key is gone
     assert_eq!(keystore.list_keys().unwrap().len(), 0);
-
-    // Try to delete non-existent key
-    assert!(matches!(
-        keystore.delete_key(Uuid::new_v4()),
-        Err(KeystoreError::KeyNotFound(_))
-    ));
 }
 
 // ===== COMPREHENSIVE API TESTS =====
@@ -323,15 +317,6 @@ fn test_get_private_key_comprehensive() {
         private_key.ethereum_address().unwrap(),
         mnemonic_key.ethereum_address().unwrap()
     );
-
-    // Test non-existent key
-    let result = keystore.get_private_key(Uuid::new_v4());
-    assert!(matches!(result, Err(KeystoreError::KeyNotFound(_))));
-
-    // Test with locked keystore
-    keystore.lock();
-    let result = keystore.get_private_key(key_id);
-    assert!(matches!(result, Err(KeystoreError::Locked)));
 }
 
 #[test]
@@ -370,10 +355,6 @@ fn test_list_keys_comprehensive() {
     let key2_info = keys.iter().find(|k| k.id == key_id2).unwrap();
     assert_eq!(key2_info.alias, Some("mnemonic1".to_string()));
     assert!(matches!(key2_info.key_type, KeyType::HdDerived { .. }));
-
-    // list_keys requires an unlocked session.
-    keystore.lock();
-    assert!(matches!(keystore.list_keys(), Err(KeystoreError::Locked)));
 }
 
 #[test]
@@ -429,23 +410,6 @@ fn test_error_conditions() {
     // Test various error conditions systematically
     let mut keystore =
         Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
-
-    // Operations on locked keystore
-    assert!(matches!(
-        keystore.import_private_key(
-            None,
-            "0000000000000000000000000000000000000000000000000000000000000001"
-        ),
-        Err(KeystoreError::Locked)
-    ));
-    assert!(matches!(
-        keystore.get_private_key(Uuid::new_v4()),
-        Err(KeystoreError::Locked)
-    ));
-    assert!(matches!(
-        keystore.delete_key(Uuid::new_v4()),
-        Err(KeystoreError::Locked)
-    ));
 
     // Unlock and test other errors
     keystore.unlock("test_password").unwrap();

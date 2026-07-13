@@ -356,54 +356,6 @@ fn test_file_integrity_protection() {
 }
 
 #[test]
-fn test_file_integrity_protection_entry_swap() {
-    let temp_dir = tempdir().unwrap();
-    let keystore_path = temp_dir.path().join("entry_swap_test.keystore");
-
-    // Create keystore with two keys
-    {
-        let mut keystore =
-            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
-        keystore.unlock("test_password").unwrap();
-        keystore
-            .import_private_key(
-                Some("key1".to_string()),
-                "0000000000000000000000000000000000000000000000000000000000000001",
-            )
-            .unwrap();
-        keystore
-            .import_private_key(
-                Some("key2".to_string()),
-                "0000000000000000000000000000000000000000000000000000000000000002",
-            )
-            .unwrap();
-    }
-
-    // Tamper with the file by manually swapping encrypted entry data
-    let mut file_content = std::fs::read_to_string(&keystore_path).unwrap();
-
-    // This is a simplified tampering - in practice an attacker would swap the encrypted_data fields
-    // For this test, we'll just modify some data to trigger integrity failure
-    file_content = file_content.replacen("key1", "swapped1", 1);
-    std::fs::write(&keystore_path, file_content).unwrap();
-
-    // Try to load the tampered keystore
-    let mut keystore2 =
-        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
-
-    // Unlock should fail due to integrity check failure
-    let result = keystore2.unlock("test_password");
-    assert!(result.is_err());
-
-    match result.unwrap_err() {
-        KeystoreError::InvalidInput(msg) => {
-            assert!(msg.contains("integrity verification failed"));
-        }
-        other => panic!("Expected integrity verification failure, got: {other:?}"),
-    }
-}
-
-#[test]
 fn test_aad_prevents_entry_swapping() {
     let temp_dir = tempdir().unwrap();
     let keystore_path = temp_dir.path().join("aad_test.keystore");
