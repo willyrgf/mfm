@@ -98,10 +98,7 @@ pub(super) fn resolve_required_path(
     file_env: &Option<String>,
 ) -> Result<RuntimeSecretPath> {
     let value = resolve_required_value(location, field, direct, env_name, file_path, file_env)?;
-    Ok(RuntimeSecretPath {
-        path: PathBuf::from(value.value),
-        source_kind: value.source_kind,
-    })
+    Ok(RuntimeSecretPath::from_value(value))
 }
 
 enum SelectedValueSource<'a> {
@@ -190,7 +187,7 @@ fn resolve_selected_value(
             RuntimeConfigErrorKind::EmptyResolvedValue,
         ));
     }
-    Ok(RuntimeSecretValue { value, source_kind })
+    Ok(RuntimeSecretValue::from_parts(value, source_kind))
 }
 
 fn parse_env_name(name: &str, location: RuntimeConfigLocation) -> Result<RuntimeEnvName> {
