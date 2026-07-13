@@ -14,8 +14,11 @@ use syn::{
     GenericArgument, GenericParam, Ident, LitStr, Path, PathArguments, Type, TypePath, Variant,
 };
 
+#[path = "attributes.rs"]
+mod attributes;
 #[path = "fact.rs"]
 mod fact;
+use self::attributes::{ContainerAttrs, FieldAttrs, VariantAttrs};
 
 #[proc_macro_derive(MfmValue, attributes(mfm, serde))]
 /// Derives `mfm_values::MfmValue` for a named struct.
@@ -399,113 +402,6 @@ fn expand_program_operation_output_derive_result(
             }
         }
     })
-}
-
-#[derive(Debug)]
-struct ContainerAttrs {
-    namespace: String,
-    name: String,
-    version: String,
-    schema_name: String,
-    rename_all: Option<String>,
-    enum_tag: Option<String>,
-    enum_content: Option<String>,
-    validate: Option<Path>,
-    transparent_string: bool,
-    transparent_map: bool,
-}
-
-impl ContainerAttrs {
-    fn parse(attrs: &[Attribute], ident: &Ident) -> syn::Result<Self> {
-        let type_name = snake_case(&ident.to_string());
-        let mut output = Self {
-            namespace: "mfm.derived".to_owned(),
-            name: type_name.clone(),
-            version: "1".to_owned(),
-            schema_name: format!("mfm.derived.{type_name}"),
-            rename_all: None,
-            enum_tag: None,
-            enum_content: None,
-            validate: None,
-            transparent_string: false,
-            transparent_map: false,
-        };
-
-        for attr in attrs {
-            if attr.path().is_ident("mfm") {
-                attr.parse_nested_meta(|meta| {
-                    if meta.path.is_ident("namespace") {
-                        output.namespace = meta.value()?.parse::<LitStr>()?.value();
-                    } else if meta.path.is_ident("name") {
-                        output.name = meta.value()?.parse::<LitStr>()?.value();
-                    } else if meta.path.is_ident("version") {
-                        output.version = meta.value()?.parse::<LitStr>()?.value();
-                    } else if meta.path.is_ident("schema") {
-                        output.schema_name = meta.value()?.parse::<LitStr>()?.value();
-                    } else if meta.path.is_ident("validate") {
-                        let value = meta.value()?.parse::<LitStr>()?.value();
-                        output.validate =
-                            Some(syn::parse_str::<Path>(&value).map_err(|error| {
-                                syn::Error::new(
-                                    meta.path.span(),
-                                    format!("invalid config validator path: {error}"),
-                                )
-                            })?);
-                    } else if meta.path.is_ident("transparent_string") {
-                        output.transparent_string = true;
-                    } else if meta.path.is_ident("transparent_map") {
-                        output.transparent_map = true;
-                    } else {
-                        return Err(meta.error("unsupported #[mfm(...)] container attribute"));
-                    }
-                    Ok(())
-                })?;
-            } else if attr.path().is_ident("serde") {
-                attr.parse_nested_meta(|meta| {
-                    if meta.path.is_ident("rename_all") {
-                        let rename_all = meta.value()?.parse::<LitStr>()?.value();
-                        match rename_all.as_str() {
-                            "snake_case" | "kebab-case" | "camelCase" => {
-                                output.rename_all = Some(rename_all);
-                                Ok(())
-                            }
-                            _ => {
-                                Err(meta
-                                    .error("unsupported serde(rename_all) value for MFM derive"))
-                            }
-                        }
-                    } else if meta.path.is_ident("tag") {
-                        output.enum_tag = Some(meta.value()?.parse::<LitStr>()?.value());
-                        Ok(())
-                    } else if meta.path.is_ident("content") {
-                        output.enum_content = Some(meta.value()?.parse::<LitStr>()?.value());
-                        Ok(())
-                    } else if meta.path.is_ident("try_from") || meta.path.is_ident("into") {
-                        let _ = meta.value()?.parse::<LitStr>()?;
-                        Ok(())
-                    } else if meta.path.is_ident("transparent")
-                        || meta.path.is_ident("deny_unknown_fields")
-                    {
-                        Ok(())
-                    } else if meta.path.is_ident("untagged") {
-                        Err(meta.error("serde(untagged) is not supported by MFM derives"))
-                    } else {
-                        Err(meta
-                            .error("unsupported #[serde(...)] container attribute for MFM derive"))
-                    }
-                })?;
-            }
-        }
-
-        if output.transparent_string && output.transparent_map {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                "MFM derives accept only one transparent container mode",
-            ));
-        }
-
-        Ok(output)
-    }
 }
 
 fn named_struct_fields(
@@ -998,87 +894,6 @@ fn generated_state_input_handles_tokens(
             }
         }
     })
-}
-
-#[derive(Default)]
-struct FieldAttrs {
-    rename: Option<String>,
-    default: bool,
-}
-
-impl FieldAttrs {
-    fn parse(attrs: &[Attribute]) -> syn::Result<Self> {
-        let mut output = Self::default();
-        for attr in attrs {
-            if attr.path().is_ident("mfm") {
-                attr.parse_nested_meta(|meta| {
-                    if meta.path.is_ident("rename") {
-                        output.rename = Some(meta.value()?.parse::<LitStr>()?.value());
-                        Ok(())
-                    } else {
-                        Err(meta.error("unsupported #[mfm(...)] field attribute"))
-                    }
-                })?;
-            } else if attr.path().is_ident("serde") {
-                attr.parse_nested_meta(|meta| {
-                    if meta.path.is_ident("rename") {
-                        output.rename = Some(meta.value()?.parse::<LitStr>()?.value());
-                        Ok(())
-                    } else if meta.path.is_ident("default") {
-                        if meta.input.peek(syn::Token![=]) {
-                            return Err(
-                                meta.error("custom serde default functions are not supported")
-                            );
-                        }
-                        output.default = true;
-                        Ok(())
-                    } else if meta.path.is_ident("skip")
-                        || meta.path.is_ident("skip_serializing")
-                        || meta.path.is_ident("skip_deserializing")
-                    {
-                        Err(meta.error("skipped fields are not supported by MFM derives"))
-                    } else if meta.path.is_ident("flatten") {
-                        Err(meta.error("serde(flatten) is not supported by MFM derives"))
-                    } else if meta.path.is_ident("serialize_with")
-                        || meta.path.is_ident("deserialize_with")
-                        || meta.path.is_ident("with")
-                    {
-                        Err(meta.error("custom serde serializers are not supported by MFM derives"))
-                    } else {
-                        Err(meta.error("unsupported #[serde(...)] field attribute for MFM derive"))
-                    }
-                })?;
-            }
-        }
-        Ok(output)
-    }
-}
-
-#[derive(Debug, Default)]
-struct VariantAttrs {
-    rename: Option<String>,
-}
-
-impl VariantAttrs {
-    fn parse(attrs: &[Attribute]) -> syn::Result<Self> {
-        let mut output = Self::default();
-        for attr in attrs {
-            if attr.path().is_ident("serde") {
-                attr.parse_nested_meta(|meta| {
-                    if meta.path.is_ident("rename") {
-                        output.rename = Some(meta.value()?.parse::<LitStr>()?.value());
-                        Ok(())
-                    } else if meta.path.is_ident("alias") {
-                        Err(meta.error("serde(alias) is not supported by MFM derives"))
-                    } else {
-                        Err(meta
-                            .error("unsupported #[serde(...)] variant attribute for MFM derive"))
-                    }
-                })?;
-            }
-        }
-        Ok(output)
-    }
 }
 
 fn shape_tokens(ty: &Type, kind: DeriveKind) -> syn::Result<proc_macro2::TokenStream> {
