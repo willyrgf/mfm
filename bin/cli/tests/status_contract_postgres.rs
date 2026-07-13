@@ -14,6 +14,9 @@ use std::process::Output;
 #[path = "../../../tests/integration/src/run_control_support.rs"]
 mod run_control_support;
 
+#[path = "support/mod.rs"]
+mod support;
+
 #[tokio::test]
 async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_history() {
     // Report-only cutover: no live RPC required to admit/resume. Without Platform
@@ -62,7 +65,7 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         scoped_database_url.clone(),
     ]);
     assert_success(&resume);
-    let resume_json = parse_success_json(&resume.stdout);
+    let resume_json = support::parse_success_json(&resume.stdout);
     // Without Platform holding facts the report path hard-fails after cutover.
     assert_ne!(resume_json["run_mode"], "completed");
     assert_eq!(resume_json["run_mode"], "failed_without_acdc_claim");
@@ -77,7 +80,7 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         scoped_database_url.clone(),
     ]);
     assert_success(&status);
-    let status_json = parse_success_json(&status.stdout);
+    let status_json = support::parse_success_json(&status.stdout);
     assert_ne!(status_json["run_mode"], "interrupted");
     let attempts = status_json["attempt_dispositions"]
         .as_array()
@@ -112,7 +115,7 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         scoped_database_url,
     ]);
     assert_success(&stream);
-    let stream_json = parse_success_json(&stream.stdout);
+    let stream_json = support::parse_success_json(&stream.stdout);
     let stream_events = stream_json["events"].as_array().expect("stream events");
     assert!(
         !stream_events.is_empty(),
@@ -223,12 +226,6 @@ fn assert_success(output: &Output) {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-}
-
-fn parse_success_json(stdout: &[u8]) -> Value {
-    let parsed: Value = serde_json::from_slice(stdout).expect("stdout must be valid json");
-    assert_eq!(parsed["status"], "success");
-    parsed["data"].clone()
 }
 
 fn sanitize_machine_readable_cli_env(cmd: &mut Command) -> &mut Command {

@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 use tempfile::TempDir;
 
+#[path = "support/mod.rs"]
+mod support;
+
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -33,7 +36,7 @@ fn parity_keystore_cli_tx_sign_writes_eip1559_payload() {
         "{}",
         stderr_string(&import_output)
     );
-    let import_json = parse_success_json(&import_output.stdout);
+    let import_json = support::parse_success_json(&import_output.stdout);
     let key_id = import_json["id"].as_str().expect("import id").to_string();
     let sender = import_json["address"]
         .as_str()
@@ -59,7 +62,7 @@ fn parity_keystore_cli_tx_sign_writes_eip1559_payload() {
         "{}",
         stderr_string(&sign_output)
     );
-    let sign_json = parse_success_json(&sign_output.stdout);
+    let sign_json = support::parse_success_json(&sign_output.stdout);
     assert_eq!(
         normalize_address(sign_json["from"].as_str().expect("from")),
         sender
@@ -350,12 +353,6 @@ fn random_private_key_hex() -> String {
         bytes[31] = 1;
     }
     hex::encode(bytes)
-}
-
-fn parse_success_json(stdout: &[u8]) -> Value {
-    let parsed: Value = serde_json::from_slice(stdout).expect("stdout must be valid json");
-    assert_eq!(parsed["status"], "success");
-    parsed["data"].clone()
 }
 
 fn parse_error_json(stderr: &[u8]) -> Value {
