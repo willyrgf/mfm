@@ -340,10 +340,13 @@ impl SecureKey {
         }
     }
 
+    fn secret_key(&self) -> Result<SecretKey, KeystoreError> {
+        SecretKey::from_slice(self.key_bytes.as_ref()).map_err(|_| KeystoreError::InvalidPrivateKey)
+    }
+
     /// Sign a 32-byte hash (returns k256::Signature)
     pub fn sign_hash(&self, hash: &[u8; 32]) -> Result<k256::ecdsa::Signature, KeystoreError> {
-        let secret_key = SecretKey::from_slice(self.key_bytes.as_ref())
-            .map_err(|_| KeystoreError::InvalidPrivateKey)?;
+        let secret_key = self.secret_key()?;
         let signing_key = SigningKey::from(&secret_key);
 
         use k256::ecdsa::signature::hazmat::PrehashSigner;
@@ -376,8 +379,7 @@ impl SecureKey {
 
     /// Get public key
     pub fn public_key(&self) -> Result<k256::PublicKey, KeystoreError> {
-        let secret_key = SecretKey::from_slice(self.key_bytes.as_ref())
-            .map_err(|_| KeystoreError::InvalidPrivateKey)?;
+        let secret_key = self.secret_key()?;
         // Note: SecretKey implements ZeroizeOnDrop and will be zeroized when dropped
         Ok(secret_key.public_key())
     }
