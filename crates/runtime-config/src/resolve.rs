@@ -47,6 +47,25 @@ pub(super) fn resolve_required_value(
     resolve_selected_value(location, source)
 }
 
+pub(super) fn resolve_rpc_url(
+    location: RuntimeConfigLocation,
+    direct: &Option<String>,
+    env_name: &Option<String>,
+    file_path: &Option<String>,
+    file_env: &Option<String>,
+) -> Result<RuntimeSecretValue> {
+    let rpc_url = resolve_required_value(
+        location.clone(),
+        "rpc_url",
+        direct,
+        env_name,
+        file_path,
+        file_env,
+    )?;
+    validate_rpc_url(&rpc_url, location.with_field("rpc_url"))?;
+    Ok(rpc_url)
+}
+
 pub(super) fn resolve_optional_value(
     location: RuntimeConfigLocation,
     field: &'static str,

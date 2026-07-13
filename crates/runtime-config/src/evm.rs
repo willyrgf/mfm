@@ -4,10 +4,7 @@ use std::fmt;
 use mfm_evm_capabilities::{EvmNetworkId, EvmSourcePolicyId, EvmSourceRef};
 
 use super::raw::{RawEvmConfig, RawEvmPolicy, RawEvmRoute, RawEvmSource};
-use super::resolve::{
-    parse_policy_id, parse_source_ref, resolve_optional_value, resolve_required_value,
-    validate_rpc_url,
-};
+use super::resolve::{parse_policy_id, parse_source_ref, resolve_optional_value, resolve_rpc_url};
 use super::{
     reject_extra_fields, Result, RuntimeConfigError, RuntimeConfigErrorKind,
     RuntimeConfigIdentifierKind, RuntimeConfigLocation, RuntimeSecretValue,
@@ -129,15 +126,13 @@ impl EvmRpcSource {
     fn from_raw(raw: RawEvmSource, location: RuntimeConfigLocation) -> Result<Self> {
         reject_extra_fields(&raw.extra, location.clone())?;
 
-        let rpc_url = resolve_required_value(
+        let rpc_url = resolve_rpc_url(
             location.clone(),
-            "rpc_url",
             &raw.rpc_url,
             &raw.rpc_url_env,
             &raw.rpc_url_file,
             &raw.rpc_url_file_env,
         )?;
-        validate_rpc_url(&rpc_url, location.clone().with_field("rpc_url"))?;
 
         let auth_header = resolve_optional_value(
             location,

@@ -675,15 +675,13 @@ impl BtcJsonRpcRuntimeConfig {
 
     fn from_raw(raw: RawBtcJsonRpcConfig, location: RuntimeConfigLocation) -> Result<Self> {
         reject_extra_fields(&raw.extra, location.clone())?;
-        let rpc_url = resolve_required_value(
+        let rpc_url = resolve_rpc_url(
             location.clone(),
-            "rpc_url",
             &raw.rpc_url,
             &raw.rpc_url_env,
             &raw.rpc_url_file,
             &raw.rpc_url_file_env,
         )?;
-        validate_rpc_url(&rpc_url, location.clone().with_field("rpc_url"))?;
         let rpc_user = resolve_optional_value(
             location.clone(),
             "rpc_user",
@@ -816,6 +814,4 @@ use self::raw::{
 
 #[path = "resolve.rs"]
 mod resolve;
-use self::resolve::{
-    resolve_optional_value, resolve_required_path, resolve_required_value, validate_rpc_url,
-};
+use self::resolve::{resolve_optional_value, resolve_required_path, resolve_rpc_url};
