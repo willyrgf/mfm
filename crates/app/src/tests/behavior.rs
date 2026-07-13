@@ -633,13 +633,7 @@ async fn run_read_services_are_evidence_only() {
     assert!(!production_read_constructor.contains("std::env"));
     assert!(production_read_constructor.contains("connect_production_run_read_store"));
 
-    let read_services_impl = include_str!("../services.rs")
-        .split("pub struct RunReadServices")
-        .nth(1)
-        .expect("read services are present")
-        .split("/// Application facade for certified typed runtime dispatch.")
-        .next()
-        .expect("read services implementation is bounded");
+    let read_services_impl = include_str!("../services_read.rs");
     assert!(!read_services_impl.contains("production_runner_registry"));
     assert!(!read_services_impl.contains("std::env"));
 
