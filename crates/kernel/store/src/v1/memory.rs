@@ -302,7 +302,7 @@ impl RunMemoryCore {
         };
         batches
             .last()
-            .map(|batch| batch.seq.checked_next().unwrap_or(StreamSeq(u64::MAX)))
+            .map(|batch| batch.seq.checked_next().unwrap_or(StreamSeq::MAX))
             .unwrap_or(StreamSeq::FIRST)
     }
 }
@@ -380,7 +380,7 @@ impl AsyncInMemoryRunStore {
             };
             let seq = first.seq();
             let commit_key = first.commit_key().clone();
-            let fingerprint = CommitFingerprint(first.payload_hash().clone());
+            let fingerprint = CommitFingerprint::from_digest(first.payload_hash().clone());
             let batch = CommittedBatch::from_persisted_events(
                 run_id.clone(),
                 commit_key,

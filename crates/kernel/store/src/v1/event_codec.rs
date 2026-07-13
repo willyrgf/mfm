@@ -57,7 +57,7 @@ pub fn prepared_commit_plan_fingerprint(plan: &PreparedCommitPlan) -> Result<Com
         "required_artifacts": sorted_store_artifacts_json(&request.required_artifacts),
         "run_id": request.run_id.as_str(),
     }))?;
-    Ok(CommitFingerprint(canonical.content_digest()))
+    Ok(CommitFingerprint::from_digest(canonical.content_digest()))
 }
 
 fn sorted_store_artifacts_json(artifacts: &[ArtifactEvidenceRef]) -> Vec<serde_json::Value> {
