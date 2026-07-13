@@ -1,4 +1,5 @@
 use super::*;
+use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct RawRuntimeConfig {
