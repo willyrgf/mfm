@@ -67,6 +67,9 @@ pub use self::builder::*;
 #[path = "operation_expansion.rs"]
 mod operation_expansion;
 pub use self::operation_expansion::*;
+#[path = "child_scope.rs"]
+mod child_scope;
+pub use self::child_scope::*;
 #[path = "registry.rs"]
 mod registry;
 pub use self::registry::*;
