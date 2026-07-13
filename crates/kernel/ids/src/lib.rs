@@ -347,101 +347,112 @@ checked_string_type!(
     "Checked certified transition-context resource stage."
 );
 
-/// Checked visible ASCII token with a caller-selected maximum byte length.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct VisibleAscii<const MAX: usize> {
-    raw: String,
+macro_rules! checked_ascii_type {
+    ($ty:ident, $validator:ident, $grammar:literal, $doc:literal) => {
+        #[doc = $doc]
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $ty<const MAX: usize> {
+            raw: String,
+        }
+
+        impl<const MAX: usize> $ty<MAX> {
+            #[doc = concat!("Creates a checked `", stringify!($ty), "`.")]
+            pub fn new(value: impl AsRef<str>) -> CheckedStringResult<Self> {
+                let value = value.as_ref();
+                $validator($grammar, value, MAX)?;
+                Ok(Self {
+                    raw: value.to_owned(),
+                })
+            }
+
+            #[doc = concat!("Returns this `", stringify!($ty), "` as a string slice.")]
+            pub fn as_str(&self) -> &str {
+                &self.raw
+            }
+
+            #[doc = concat!("Consumes this `", stringify!($ty), "` into its string.")]
+            pub fn into_string(self) -> String {
+                self.raw
+            }
+        }
+
+        impl<const MAX: usize> AsRef<str> for $ty<MAX> {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl<const MAX: usize> Deref for $ty<MAX> {
+            type Target = str;
+
+            fn deref(&self) -> &Self::Target {
+                self.as_str()
+            }
+        }
+
+        impl<const MAX: usize> fmt::Display for $ty<MAX> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl<const MAX: usize> FromStr for $ty<MAX> {
+            type Err = CheckedStringError;
+
+            fn from_str(value: &str) -> CheckedStringResult<Self> {
+                Self::new(value)
+            }
+        }
+
+        impl<const MAX: usize> TryFrom<String> for $ty<MAX> {
+            type Error = CheckedStringError;
+
+            fn try_from(value: String) -> CheckedStringResult<Self> {
+                Self::new(value)
+            }
+        }
+
+        impl<const MAX: usize> TryFrom<&str> for $ty<MAX> {
+            type Error = CheckedStringError;
+
+            fn try_from(value: &str) -> CheckedStringResult<Self> {
+                Self::new(value)
+            }
+        }
+
+        impl<const MAX: usize> From<$ty<MAX>> for String {
+            fn from(value: $ty<MAX>) -> Self {
+                value.raw
+            }
+        }
+
+        impl<const MAX: usize> Serialize for $ty<MAX> {
+            fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de, const MAX: usize> Deserialize<'de> for $ty<MAX> {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::new(&value).map_err(serde::de::Error::custom)
+            }
+        }
+    };
 }
 
-impl<const MAX: usize> VisibleAscii<MAX> {
-    /// Creates a checked visible ASCII token.
-    pub fn new(value: impl AsRef<str>) -> CheckedStringResult<Self> {
-        let value = value.as_ref();
-        validate_visible_ascii("visible ascii", value, MAX)?;
-        Ok(Self {
-            raw: value.to_owned(),
-        })
-    }
-
-    /// Returns this token as a string slice.
-    pub fn as_str(&self) -> &str {
-        &self.raw
-    }
-
-    /// Consumes this token into its string.
-    pub fn into_string(self) -> String {
-        self.raw
-    }
-}
-
-impl<const MAX: usize> AsRef<str> for VisibleAscii<MAX> {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl<const MAX: usize> Deref for VisibleAscii<MAX> {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.as_str()
-    }
-}
-
-impl<const MAX: usize> fmt::Display for VisibleAscii<MAX> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl<const MAX: usize> FromStr for VisibleAscii<MAX> {
-    type Err = CheckedStringError;
-
-    fn from_str(value: &str) -> CheckedStringResult<Self> {
-        Self::new(value)
-    }
-}
-
-impl<const MAX: usize> TryFrom<String> for VisibleAscii<MAX> {
-    type Error = CheckedStringError;
-
-    fn try_from(value: String) -> CheckedStringResult<Self> {
-        Self::new(value)
-    }
-}
-
-impl<const MAX: usize> TryFrom<&str> for VisibleAscii<MAX> {
-    type Error = CheckedStringError;
-
-    fn try_from(value: &str) -> CheckedStringResult<Self> {
-        Self::new(value)
-    }
-}
-
-impl<const MAX: usize> From<VisibleAscii<MAX>> for String {
-    fn from(value: VisibleAscii<MAX>) -> Self {
-        value.raw
-    }
-}
-
-impl<const MAX: usize> Serialize for VisibleAscii<MAX> {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de, const MAX: usize> Deserialize<'de> for VisibleAscii<MAX> {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(&value).map_err(serde::de::Error::custom)
-    }
-}
+checked_ascii_type!(
+    VisibleAscii,
+    validate_visible_ascii,
+    "visible ascii",
+    "Checked visible ASCII token with a caller-selected maximum byte length."
+);
 
 /// Visible ASCII token capped at 256 bytes.
 pub type VisibleAscii256 = VisibleAscii<256>;
@@ -449,101 +460,12 @@ pub type VisibleAscii256 = VisibleAscii<256>;
 /// Visible ASCII token capped at 512 bytes.
 pub type VisibleAscii512 = VisibleAscii<512>;
 
-/// Checked printable ASCII text with a caller-selected maximum byte length.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PrintableAscii<const MAX: usize> {
-    raw: String,
-}
-
-impl<const MAX: usize> PrintableAscii<MAX> {
-    /// Creates checked printable ASCII text.
-    pub fn new(value: impl AsRef<str>) -> CheckedStringResult<Self> {
-        let value = value.as_ref();
-        validate_printable_ascii("printable ascii", value, MAX)?;
-        Ok(Self {
-            raw: value.to_owned(),
-        })
-    }
-
-    /// Returns this text as a string slice.
-    pub fn as_str(&self) -> &str {
-        &self.raw
-    }
-
-    /// Consumes this text into its string.
-    pub fn into_string(self) -> String {
-        self.raw
-    }
-}
-
-impl<const MAX: usize> AsRef<str> for PrintableAscii<MAX> {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl<const MAX: usize> Deref for PrintableAscii<MAX> {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.as_str()
-    }
-}
-
-impl<const MAX: usize> fmt::Display for PrintableAscii<MAX> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl<const MAX: usize> FromStr for PrintableAscii<MAX> {
-    type Err = CheckedStringError;
-
-    fn from_str(value: &str) -> CheckedStringResult<Self> {
-        Self::new(value)
-    }
-}
-
-impl<const MAX: usize> TryFrom<String> for PrintableAscii<MAX> {
-    type Error = CheckedStringError;
-
-    fn try_from(value: String) -> CheckedStringResult<Self> {
-        Self::new(value)
-    }
-}
-
-impl<const MAX: usize> TryFrom<&str> for PrintableAscii<MAX> {
-    type Error = CheckedStringError;
-
-    fn try_from(value: &str) -> CheckedStringResult<Self> {
-        Self::new(value)
-    }
-}
-
-impl<const MAX: usize> From<PrintableAscii<MAX>> for String {
-    fn from(value: PrintableAscii<MAX>) -> Self {
-        value.raw
-    }
-}
-
-impl<const MAX: usize> Serialize for PrintableAscii<MAX> {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de, const MAX: usize> Deserialize<'de> for PrintableAscii<MAX> {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(&value).map_err(serde::de::Error::custom)
-    }
-}
+checked_ascii_type!(
+    PrintableAscii,
+    validate_printable_ascii,
+    "printable ascii",
+    "Checked printable ASCII text with a caller-selected maximum byte length."
+);
 
 /// Printable ASCII text capped at 1024 bytes.
 pub type PrintableAscii1024 = PrintableAscii<1024>;
