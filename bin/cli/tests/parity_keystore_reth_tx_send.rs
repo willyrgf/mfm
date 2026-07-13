@@ -223,7 +223,7 @@ fn run_import_private_key(
     ensure_fast_keystore_exists(keystore_path, password_file);
     let runtime_config = write_runtime_config(keystore_path, password_file);
     let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
-    sanitize_machine_readable_cli_env(&mut cmd)
+    support::sanitize_machine_readable_cli_env(&mut cmd)
         .env("MFM_RUNTIME_CONFIG_FILE", &runtime_config)
         .env("MFM_ARTIFACT_ROOT", artifact_root)
         .args([
@@ -276,7 +276,7 @@ fn run_tx_sign(keystore_path: &Path, password_file: &Path, args: TxSignArgs<'_>)
     let artifact_root = test_artifact_root(keystore_path);
     let runtime_config = write_runtime_config(keystore_path, password_file);
     let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
-    sanitize_machine_readable_cli_env(&mut cmd)
+    support::sanitize_machine_readable_cli_env(&mut cmd)
         .env("MFM_RUNTIME_CONFIG_FILE", &runtime_config)
         .env("MFM_ARTIFACT_ROOT", artifact_root)
         .args([
@@ -402,13 +402,4 @@ fn test_artifact_root(path: &Path) -> PathBuf {
     path.parent()
         .unwrap_or_else(|| Path::new("."))
         .join("run-artifacts")
-}
-
-fn sanitize_machine_readable_cli_env(cmd: &mut Command) -> &mut Command {
-    // Keep JSON response channels deterministic for parity tests even when the parent
-    // environment enables tracing (e.g. LOG_LEVEL/RUST_LOG in CI debug runs).
-    cmd.env_remove("LOG_LEVEL")
-        .env_remove("RUST_LOG")
-        .env_remove("LOG_FORMAT")
-        .env_remove("LOG_SPAN_EVENTS")
 }

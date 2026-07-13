@@ -215,7 +215,7 @@ fn sample_portfolio_config() -> Value {
 
 fn run_cli(args: &[String]) -> Output {
     let mut cmd = Command::cargo_bin("mfm_cli").expect("binary exists");
-    sanitize_machine_readable_cli_env(&mut cmd);
+    support::sanitize_machine_readable_cli_env(&mut cmd);
     cmd.env_remove("MFM_RUNTIME_CONFIG_FILE");
     cmd.args(args).output().expect("execute mfm_cli")
 }
@@ -226,11 +226,4 @@ fn assert_success(output: &Output) {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-}
-
-fn sanitize_machine_readable_cli_env(cmd: &mut Command) -> &mut Command {
-    cmd.env_remove("LOG_LEVEL")
-        .env_remove("RUST_LOG")
-        .env_remove("LOG_FORMAT")
-        .env_remove("LOG_SPAN_EVENTS")
 }
