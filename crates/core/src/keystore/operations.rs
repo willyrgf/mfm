@@ -1,6 +1,5 @@
-use k256::SecretKey;
 use std::str::FromStr;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use super::secure_key::ethereum_address_from_key_bytes;
 use super::*;
@@ -13,69 +12,29 @@ impl Keystore {
         private_key_hex: &str,
     ) -> Result<Uuid, KeystoreError> {
         let id = Uuid::new_v4();
-        let result: Result<Uuid, KeystoreError> = (|| {
-            self.ensure_master_key_available()?;
-            let master_key = self.master_key.as_ref().ok_or(KeystoreError::Locked)?;
+        self.ensure_master_key_available()?;
 
-            let private_key_hex = private_key_hex.trim_start_matches("0x");
-            if private_key_hex.len() != 64 {
-                return Err(KeystoreError::InvalidPrivateKey);
-            }
+        let private_key_hex = private_key_hex.trim_start_matches("0x");
+        if private_key_hex.len() != 64 {
+            return Err(KeystoreError::InvalidPrivateKey);
+        }
 
-            let mut private_key_bytes =
-                hex::decode(private_key_hex).map_err(|_| KeystoreError::InvalidPrivateKey)?;
+        let private_key_bytes = Zeroizing::new(
+            hex::decode(private_key_hex).map_err(|_| KeystoreError::InvalidPrivateKey)?,
+        );
+        if private_key_bytes.len() != 32 {
+            return Err(KeystoreError::InvalidPrivateKey);
+        }
 
-            if private_key_bytes.len() != 32 {
-                private_key_bytes.zeroize();
-                return Err(KeystoreError::InvalidPrivateKey);
-            }
-
-            let mut key_array = [0u8; 32];
-            key_array.copy_from_slice(&private_key_bytes);
-            private_key_bytes.zeroize();
-
-            if key_array == [0u8; 32] {
-                return Err(KeystoreError::InvalidPrivateKey);
-            }
-
-            SecretKey::from_slice(&key_array).map_err(|_| KeystoreError::InvalidPrivateKey)?;
-
-            let secure_key = SecureKey::new(key_array);
-            let address = secure_key.ethereum_address()?;
-
-            let mut nonce = [0u8; 12];
-            OsRng.try_fill_bytes(&mut nonce).map_err(|_| {
-                KeystoreError::CryptoError("Failed to generate random nonce".to_string())
-            })?;
-
-            let encrypted_data =
-                self.encrypt_data(master_key, &nonce, &key_array, id.as_bytes())?;
-
-            let entry = KeyEntry {
-                id,
-                alias,
-                address,
-                key_type: KeyType::PrivateKey,
-                encrypted_data,
-                nonce,
-                created_at: Utc::now(),
-            };
-
-            let previous_entry_len = self.entries.len();
-            let previous_audit_log = self.audit_log.clone();
-            self.entries.push(entry);
-            self.append_audit_event(AuditEvent::ImportPrivateKey { id }, true);
-            if let Err(err) = self.save_to_disk() {
-                self.entries.truncate(previous_entry_len);
-                self.audit_log = previous_audit_log;
-                key_array.zeroize();
-                return Err(err);
-            }
-
-            key_array.zeroize();
-            Ok(id)
-        })();
-        result
+        let mut key_array = [0u8; 32];
+        key_array.copy_from_slice(private_key_bytes.as_slice());
+        self.import_key_material(
+            id,
+            alias,
+            Zeroizing::new(key_array),
+            KeyType::PrivateKey,
+            AuditEvent::ImportPrivateKey { id },
+        )
     }
 
     /// Import mnemonic with derivation path.
@@ -87,56 +46,68 @@ impl Keystore {
         passphrase: Option<&str>,
     ) -> Result<Uuid, KeystoreError> {
         let id = Uuid::new_v4();
+        self.ensure_master_key_available()?;
 
-        let result: Result<Uuid, KeystoreError> = (|| {
-            self.ensure_master_key_available()?;
-            let master_key = self.master_key.as_ref().ok_or(KeystoreError::Locked)?;
+        let mnemonic = Mnemonic::from_str(mnemonic)?;
+        let derivation_path_obj = DerivationPath::from_str(derivation_path)?;
 
-            let mnemonic = Mnemonic::from_str(mnemonic)?;
-            let derivation_path_obj = DerivationPath::from_str(derivation_path)?;
+        // The mnemonic and passphrase are import inputs, not persisted wallet material.
+        let seed = Zeroizing::new(mnemonic.to_seed(passphrase.unwrap_or("")));
+        let derived_key: Zeroizing<[u8; 32]> = {
+            let derived_xprv = XPrv::derive_from_path(*seed, &derivation_path_obj)?;
+            Zeroizing::new(derived_xprv.private_key().to_bytes().into())
+        };
 
-            // The mnemonic and passphrase are import inputs, not persisted wallet material.
-            let seed = Zeroizing::new(mnemonic.to_seed(passphrase.unwrap_or("")));
-            let derived_key: Zeroizing<[u8; 32]> = {
-                let derived_xprv = XPrv::derive_from_path(*seed, &derivation_path_obj)?;
-                Zeroizing::new(derived_xprv.private_key().to_bytes().into())
-            };
+        self.import_key_material(
+            id,
+            alias,
+            derived_key,
+            KeyType::HdDerived {
+                derivation_path: derivation_path.to_string(),
+            },
+            AuditEvent::ImportMnemonic { id },
+        )
+    }
 
-            let address = ethereum_address_from_key_bytes(derived_key.as_ref())?;
+    fn import_key_material(
+        &mut self,
+        id: Uuid,
+        alias: Option<String>,
+        key_bytes: Zeroizing<[u8; 32]>,
+        key_type: KeyType,
+        audit_event: AuditEvent,
+    ) -> Result<Uuid, KeystoreError> {
+        let master_key = self.master_key.as_ref().ok_or(KeystoreError::Locked)?;
+        let address = ethereum_address_from_key_bytes(key_bytes.as_ref())?;
 
-            let mut nonce = [0u8; 12];
-            OsRng.try_fill_bytes(&mut nonce).map_err(|_| {
-                KeystoreError::CryptoError("Failed to generate random nonce".to_string())
-            })?;
+        let mut nonce = [0u8; 12];
+        OsRng.try_fill_bytes(&mut nonce).map_err(|_| {
+            KeystoreError::CryptoError("Failed to generate random nonce".to_string())
+        })?;
 
-            let encrypted_data =
-                self.encrypt_data(master_key, &nonce, &*derived_key, id.as_bytes())?;
+        let encrypted_data =
+            self.encrypt_data(master_key, &nonce, key_bytes.as_ref(), id.as_bytes())?;
+        let entry = KeyEntry {
+            id,
+            alias,
+            address,
+            key_type,
+            encrypted_data,
+            nonce,
+            created_at: Utc::now(),
+        };
 
-            let entry = KeyEntry {
-                id,
-                alias,
-                address,
-                key_type: KeyType::HdDerived {
-                    derivation_path: derivation_path.to_string(),
-                },
-                encrypted_data,
-                nonce,
-                created_at: Utc::now(),
-            };
+        let previous_entry_len = self.entries.len();
+        let previous_audit_log = self.audit_log.clone();
+        self.entries.push(entry);
+        self.append_audit_event(audit_event, true);
+        if let Err(err) = self.save_to_disk() {
+            self.entries.truncate(previous_entry_len);
+            self.audit_log = previous_audit_log;
+            return Err(err);
+        }
 
-            let previous_entry_len = self.entries.len();
-            let previous_audit_log = self.audit_log.clone();
-            self.entries.push(entry);
-            self.append_audit_event(AuditEvent::ImportMnemonic { id }, true);
-            if let Err(err) = self.save_to_disk() {
-                self.entries.truncate(previous_entry_len);
-                self.audit_log = previous_audit_log;
-                return Err(err);
-            }
-
-            Ok(id)
-        })();
-        result
+        Ok(id)
     }
 
     /// Get private key for signing.
