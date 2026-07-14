@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
-use super::validation::is_side_effect_terminal_payload;
 use super::*;
 use mfm_canonical::{sha256_digest_bytes, CanonicalJsonBytes, CanonicalValue};
 use mfm_events::v1 as events;
@@ -98,7 +97,7 @@ pub fn prepared_commit_plan_for_test(
     if request
         .payloads()
         .iter()
-        .any(is_side_effect_terminal_payload)
+        .any(events::KernelEventPayload::is_side_effect_terminal)
     {
         return PreparedCommit::<SideEffectTerminal>::new(request, artifacts)
             .map(PreparedCommitPlan::from);

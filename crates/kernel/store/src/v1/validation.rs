@@ -15,13 +15,10 @@ pub(super) use self::event_keys::{
 
 #[path = "terminal_payloads.rs"]
 mod terminal_payloads;
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) use self::terminal_payloads::is_side_effect_terminal_payload;
 use self::terminal_payloads::{
-    is_attempt_terminal_commit_payload, is_attempt_terminal_payload, is_retention_commit_payload,
-    is_retention_payload, is_run_completed_payload, is_saga_terminal_commit_payload,
-    is_side_effect_payload, is_side_effect_progress_commit_payload,
-    is_side_effect_terminal_commit_payload, is_side_effect_terminal_disposition_payload,
+    is_attempt_terminal_commit_payload, is_retention_commit_payload, is_retention_payload,
+    is_run_completed_payload, is_saga_terminal_commit_payload, is_side_effect_payload,
+    is_side_effect_progress_commit_payload, is_side_effect_terminal_commit_payload,
     validate_attempt_terminal_resource_lane_release_batch,
     validate_side_effect_terminal_resource_lane_release_batch,
 };
@@ -206,7 +203,7 @@ pub(super) fn validate_attempt_terminal_commit(request: &CommitRequest) -> Resul
     require_purpose_payload(
         AttemptTerminal::NAME,
         request,
-        is_attempt_terminal_payload,
+        KernelEventPayload::is_attempt_terminal,
         "missing attempt-terminal payload",
     )?;
     validate_attempt_terminal_resource_lane_release_batch(request)?;
@@ -223,7 +220,7 @@ pub(super) fn validate_side_effect_terminal_commit(request: &CommitRequest) -> R
     require_purpose_payload(
         SideEffectTerminal::NAME,
         request,
-        is_side_effect_terminal_disposition_payload,
+        KernelEventPayload::is_side_effect_terminal_disposition,
         "missing side-effect terminal payload",
     )?;
     if request.preconditions.certified_run_authority.is_none() {

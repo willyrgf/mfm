@@ -490,7 +490,7 @@ fn validate_side_effect_verify_runner_output(
         });
         let has_side_effect_terminal_disposition = payloads
             .iter()
-            .any(is_side_effect_terminal_disposition_payload);
+            .any(events::KernelEventPayload::is_side_effect_terminal_disposition);
         if has_resource_lane_release && !has_side_effect_terminal_disposition {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
                 "side-effect verify node {} returned a resource-lane release without terminal evidence",

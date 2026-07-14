@@ -151,7 +151,7 @@ fn side_effect_terminal_payload_matches_release(
     if release.release_authority != Some(events::ResourceLaneReleaseAuthority::VerifyTerminal) {
         return false;
     }
-    if !is_side_effect_terminal_disposition_payload(terminal) {
+    if !terminal.is_side_effect_terminal_disposition() {
         return false;
     }
     let Some(terminal) = terminal.side_effect_ledger_ref() else {
@@ -216,24 +216,8 @@ fn side_effect_terminal_release_role_allowed(
     }
 }
 
-pub(super) fn is_attempt_terminal_payload(payload: &KernelEventPayload) -> bool {
-    matches!(
-        payload,
-        KernelEventPayload::StateAttemptCompleted(_)
-            | KernelEventPayload::StateAttemptInterrupted(_)
-            | KernelEventPayload::StateAttemptFailed(_)
-            | KernelEventPayload::CellProduced(_)
-            | KernelEventPayload::CellSkipped(_)
-            | KernelEventPayload::FactRecorded(_)
-            | KernelEventPayload::ArtifactReferenced(_)
-            | KernelEventPayload::PublicOutputProduced(_)
-            | KernelEventPayload::PublicOutputRenderFailed(_)
-            | KernelEventPayload::RunCompleted(_)
-    )
-}
-
 pub(super) fn is_attempt_terminal_commit_payload(payload: &KernelEventPayload) -> bool {
-    is_attempt_terminal_payload(payload)
+    payload.is_attempt_terminal()
         || matches!(
             payload,
             KernelEventPayload::ResourceLaneReleased(_)
@@ -242,33 +226,14 @@ pub(super) fn is_attempt_terminal_commit_payload(payload: &KernelEventPayload) -
         || is_retention_ref_payload(payload)
 }
 
-pub(crate) fn is_side_effect_terminal_payload(payload: &KernelEventPayload) -> bool {
-    matches!(
-        payload,
-        KernelEventPayload::SideEffectNotSubmittedProven(_)
-            | KernelEventPayload::SideEffectSubmissionObserved(_)
-            | KernelEventPayload::SideEffectSubmissionUnknown(_)
-            | KernelEventPayload::SideEffectReceiptObserved(_)
-            | KernelEventPayload::SideEffectConfirmationObserved(_)
-            | KernelEventPayload::SideEffectAmbiguous(_)
-            | KernelEventPayload::SideEffectFailed(_)
-            | KernelEventPayload::ResourceLaneReleased(_)
-            | KernelEventPayload::ResourceLaneReleaseIntent(_)
-    )
-}
-
-pub(super) fn is_side_effect_terminal_disposition_payload(payload: &KernelEventPayload) -> bool {
-    is_side_effect_terminal_payload(payload) && !is_resource_lane_release_payload(payload)
-}
-
 pub(super) fn is_side_effect_terminal_commit_payload(payload: &KernelEventPayload) -> bool {
     is_side_effect_payload(payload)
-        || is_attempt_terminal_payload(payload)
+        || payload.is_attempt_terminal()
         || is_retention_ref_payload(payload)
 }
 
 pub(super) fn is_side_effect_progress_commit_payload(payload: &KernelEventPayload) -> bool {
-    (is_side_effect_payload(payload) && !is_side_effect_terminal_payload(payload))
+    (is_side_effect_payload(payload) && !payload.is_side_effect_terminal())
         || is_retention_ref_payload(payload)
 }
 
@@ -318,7 +283,7 @@ fn is_completed_run_payload(payload: &KernelEventPayload) -> bool {
 }
 
 fn is_non_run_completed_attempt_terminal_payload(payload: &KernelEventPayload) -> bool {
-    is_attempt_terminal_payload(payload) && !is_run_completed_payload(payload)
+    payload.is_attempt_terminal() && !is_run_completed_payload(payload)
 }
 
 pub(super) fn is_retention_commit_payload(payload: &KernelEventPayload) -> bool {

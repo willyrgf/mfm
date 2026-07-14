@@ -687,7 +687,10 @@ impl CommitPlanner {
             };
         let mut preconditions =
             attempt_commit_preconditions(input.runtime_spec, input.node, Some(input.attempt_id))?;
-        if payloads.iter().any(is_side_effect_terminal_payload) {
+        if payloads
+            .iter()
+            .any(events::KernelEventPayload::is_side_effect_terminal)
+        {
             preconditions.certified_run_authority =
                 Some(certified_run_authority(input.runtime_spec, input.run_id)?);
         }
@@ -846,12 +849,18 @@ fn prepare_runner_output_commit_plan(
     if has_retention_manifest_projection {
         return Ok(store::PreparedCommit::<store::Retention>::new(request, artifacts)?.into());
     }
-    if payloads.iter().any(is_side_effect_terminal_payload) {
+    if payloads
+        .iter()
+        .any(events::KernelEventPayload::is_side_effect_terminal)
+    {
         return Ok(
             store::PreparedCommit::<store::SideEffectTerminal>::new(request, artifacts)?.into(),
         );
     }
-    if payloads.iter().any(is_attempt_terminal_payload) {
+    if payloads
+        .iter()
+        .any(events::KernelEventPayload::is_attempt_terminal)
+    {
         return Ok(
             store::PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)?.into(),
         );
@@ -873,44 +882,4 @@ fn prepare_runner_output_commit_plan(
         return Ok(store::PreparedCommit::<store::Retention>::new(request, artifacts)?.into());
     }
     Ok(store::PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)?.into())
-}
-
-fn is_attempt_terminal_payload(payload: &events::KernelEventPayload) -> bool {
-    matches!(
-        payload,
-        events::KernelEventPayload::StateAttemptCompleted(_)
-            | events::KernelEventPayload::StateAttemptInterrupted(_)
-            | events::KernelEventPayload::StateAttemptFailed(_)
-            | events::KernelEventPayload::CellProduced(_)
-            | events::KernelEventPayload::CellSkipped(_)
-            | events::KernelEventPayload::FactRecorded(_)
-            | events::KernelEventPayload::ArtifactReferenced(_)
-            | events::KernelEventPayload::PublicOutputProduced(_)
-            | events::KernelEventPayload::PublicOutputRenderFailed(_)
-            | events::KernelEventPayload::RunCompleted(_)
-    )
-}
-
-fn is_side_effect_terminal_payload(payload: &events::KernelEventPayload) -> bool {
-    matches!(
-        payload,
-        events::KernelEventPayload::SideEffectNotSubmittedProven(_)
-            | events::KernelEventPayload::SideEffectSubmissionObserved(_)
-            | events::KernelEventPayload::SideEffectSubmissionUnknown(_)
-            | events::KernelEventPayload::SideEffectReceiptObserved(_)
-            | events::KernelEventPayload::SideEffectConfirmationObserved(_)
-            | events::KernelEventPayload::SideEffectAmbiguous(_)
-            | events::KernelEventPayload::SideEffectFailed(_)
-            | events::KernelEventPayload::ResourceLaneReleased(_)
-            | events::KernelEventPayload::ResourceLaneReleaseIntent(_)
-    )
-}
-
-fn is_side_effect_terminal_disposition_payload(payload: &events::KernelEventPayload) -> bool {
-    is_side_effect_terminal_payload(payload)
-        && !matches!(
-            payload,
-            events::KernelEventPayload::ResourceLaneReleased(_)
-                | events::KernelEventPayload::ResourceLaneReleaseIntent(_)
-        )
 }

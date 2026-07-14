@@ -166,6 +166,48 @@ impl KernelEventPayload {
         }
     }
 
+    /// Returns whether this payload is terminal evidence for a state attempt.
+    pub fn is_attempt_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::StateAttemptCompleted(_)
+                | Self::StateAttemptInterrupted(_)
+                | Self::StateAttemptFailed(_)
+                | Self::CellProduced(_)
+                | Self::CellSkipped(_)
+                | Self::FactRecorded(_)
+                | Self::ArtifactReferenced(_)
+                | Self::PublicOutputProduced(_)
+                | Self::PublicOutputRenderFailed(_)
+                | Self::RunCompleted(_)
+        )
+    }
+
+    /// Returns whether this payload is terminal evidence for a side-effect attempt.
+    pub fn is_side_effect_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::SideEffectNotSubmittedProven(_)
+                | Self::SideEffectSubmissionObserved(_)
+                | Self::SideEffectSubmissionUnknown(_)
+                | Self::SideEffectReceiptObserved(_)
+                | Self::SideEffectConfirmationObserved(_)
+                | Self::SideEffectAmbiguous(_)
+                | Self::SideEffectFailed(_)
+                | Self::ResourceLaneReleased(_)
+                | Self::ResourceLaneReleaseIntent(_)
+        )
+    }
+
+    /// Returns whether this payload is side-effect terminal evidence excluding lane releases.
+    pub fn is_side_effect_terminal_disposition(&self) -> bool {
+        self.is_side_effect_terminal()
+            && !matches!(
+                self,
+                Self::ResourceLaneReleased(_) | Self::ResourceLaneReleaseIntent(_)
+            )
+    }
+
     /// Returns pair-ledger authority fields for payloads in the side-effect ledger family.
     pub fn side_effect_ledger_ref(&self) -> Option<SideEffectPairLedgerEventRef<'_>> {
         macro_rules! side_effect_ledger_ref {
