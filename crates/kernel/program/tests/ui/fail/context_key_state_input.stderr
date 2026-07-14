@@ -32,19 +32,19 @@ help: the trait `mfm_values::MfmValue` is not implemented for `ContextKey`
 1 | struct ContextKey(String);
   | ^^^^^^^^^^^^^^^^^
 help: the following other types implement trait `mfm_values::MfmValue`
- --> $WORKSPACE/crates/kernel/values/src/lib.rs
+ --> $WORKSPACE/crates/kernel/values/src/generic_values.rs
   |
   | impl MfmValue for ContextRefValue {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::ContextRefValue`
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ContextRefValue`
 ...
   | impl<T: MfmValue> MfmValue for MaybeValue<T> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::MaybeValue<T>`
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::MaybeValue<T>`
 ...
   | impl<T: MfmValue> MfmValue for ArtifactRef<T> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::ArtifactRef<T>`
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ArtifactRef<T>`
   = note: required for `ContextKey` to implement `mfm_values::StateInput`
 note: required by a bound in `into_binding`
- --> src/lib.rs
+ --> src/input_binding.rs
   |
   | pub trait IntoStateInput<'program, 'scope, I: StateInput> {
   |                                               ^^^^^^^^^^ required by this bound in `IntoStateInput::into_binding`
@@ -67,19 +67,19 @@ help: the trait `mfm_values::MfmValue` is not implemented for `ContextKey`
 1 | struct ContextKey(String);
   | ^^^^^^^^^^^^^^^^^
 help: the following other types implement trait `mfm_values::MfmValue`
- --> $WORKSPACE/crates/kernel/values/src/lib.rs
+ --> $WORKSPACE/crates/kernel/values/src/generic_values.rs
   |
   | impl MfmValue for ContextRefValue {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::ContextRefValue`
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ContextRefValue`
 ...
   | impl<T: MfmValue> MfmValue for MaybeValue<T> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::MaybeValue<T>`
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::MaybeValue<T>`
 ...
   | impl<T: MfmValue> MfmValue for ArtifactRef<T> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::ArtifactRef<T>`
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ArtifactRef<T>`
   = note: required for `ContextKey` to implement `mfm_values::StateInput`
 note: required by a bound in `InputBinding`
- --> src/lib.rs
+ --> src/input_binding.rs
   |
   | pub struct InputBinding<I: StateInput> {
   |                            ^^^^^^^^^^ required by this bound in `InputBinding`

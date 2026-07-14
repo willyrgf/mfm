@@ -78,14 +78,5 @@ impl mfm_program::StableDomainKey for HoldingsDomainKey {}
 impl mfm_program::StableDomainKey for ReportDomainKey {}
 
 #[cfg(test)]
-mod tests {
-    use super::SubjectDomainKey;
-    use serde_json::json;
-
-    #[test]
-    fn stable_domain_keys_validate_deserialized_values() {
-        let key: SubjectDomainKey =
-            serde_json::from_value(json!({"subject_key": "wallet_main"})).expect("valid key");
-        assert_eq!(key.as_str(), "wallet_main");
-    }
-}
+#[path = "domain_key_tests.rs"]
+mod tests;

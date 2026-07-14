@@ -24,7 +24,6 @@ const EXPECTED_KERNEL_MANIFESTS: &[&str] = &[
 
 const APPROVED_CATEGORY_DEPENDENCY_OVERRIDES: &[(&str, &str)] = &[
     ("mfm", "mfm_core"),
-    ("mfm-rest-api", "mfm-state-portfolio"),
     ("mfm-transports-proof", "mfm-collectors-proof"),
 ];
 

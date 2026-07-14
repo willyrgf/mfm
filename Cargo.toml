@@ -91,5 +91,4 @@ split-debuginfo = "unpacked"
 # Canonical Rust compilation profile for nix run .#ci workflows.
 [profile.ci]
 inherits = "test"
-incremental = false
 codegen-units = 256

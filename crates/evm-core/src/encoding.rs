@@ -150,22 +150,9 @@ pub fn normalize_address(raw: &str) -> Result<String, UtilError> {
             "address must be 20 bytes",
         ));
     }
-    Ok(format!("0x{}", rest.to_ascii_lowercase()))
+    Ok(normalized)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn normalize_address_lowercases() {
-        let got = normalize_address("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").expect("ok");
-        assert_eq!(got, "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    }
-
-    #[test]
-    fn encode_word_has_big_endian_value() {
-        let word = encode_u64_word(7);
-        assert_eq!(word[31], 7u8);
-    }
-}
+#[path = "encoding_tests.rs"]
+mod tests;

@@ -11,11 +11,9 @@ parity-tests = []
 
 [dependencies]
 axum = "0.7"
-serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-none", "postgres"] }
 uuid = { version = "1.0", features = ["v4"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 tempfile = "3.0"
 tokio = { workspace = true }
 mfm-app = { path = "../../crates/app", features = ["test-support"] }
@@ -24,30 +22,21 @@ mfm-events = { path = "../../crates/kernel/events" }
 mfm-ids = { path = "../../crates/kernel/ids" }
 mfm-canonical = { path = "../../crates/kernel/canonical" }
 mfm-facts = { path = "../../crates/kernel/facts" }
-mfm-spec = { path = "../../crates/kernel/spec" }
 mfm-certify = { path = "../../crates/kernel/certify" }
 mfm-program = { path = "../../crates/kernel/program" }
-mfm-manual-auth = { path = "../../crates/kernel/manual-auth" }
 mfm-store = { path = "../../crates/kernel/store", features = ["test-support"] }
 mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
 mfm-adapters-btc-jsonrpc = { path = "../../crates/adapters/btc-jsonrpc" }
 mfm-adapters-evm = { path = "../../crates/adapters/evm" }
 mfm-adapters-portfolio = { path = "../../crates/adapters/portfolio" }
-mfm-artifact-capabilities = { path = "../../crates/artifact-capabilities" }
 mfm-btc-capabilities = { path = "../../crates/btc-capabilities" }
 mfm-evm-capabilities = { path = "../../crates/evm-capabilities" }
 mfm-fact-capabilities = { path = "../../crates/fact-capabilities" }
-mfm-op-proof = { path = "../../crates/ops/proof-op" }
 mfm-op-btc-collectors = { path = "../../crates/ops/btc-collectors-op" }
-mfm-op-evm-collectors = { path = "../../crates/ops/evm-collectors-op" }
-mfm-op-evm-contract-lifecycle = { path = "../../crates/ops/evm-contract-lifecycle-op" }
 mfm-states-btc = { path = "../../crates/states/btc" }
 mfm-states-evm = { path = "../../crates/states/evm" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
-mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
-mfm-portfolio-config = { path = "../../crates/portfolio-config" }
 mfm-portfolio-model = { path = "../../crates/portfolio/model" }
-mfm_core = { path = "../../crates/core" }
 mfm-rest-api = { path = "../../bin/rest-api" }
 
 [dev-dependencies]

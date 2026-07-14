@@ -1,5 +1,15 @@
 use super::*;
 
+#[path = "side_effect_projection.rs"]
+mod side_effect_projection;
+pub use self::side_effect_projection::{
+    SideEffectLedgerPhase, SideEffectLedgerState, SideEffectProjection, SideEffectSubmissionState,
+};
+
+#[path = "side_effect_ledger.rs"]
+mod side_effect_ledger;
+pub(super) use self::side_effect_ledger::OwnedSideEffectLedgerState;
+
 pub(super) fn note_saga_engagement(
     projections: &mut ProjectionSnapshot,
     run_id: &RunId,
@@ -122,7 +132,7 @@ pub(super) fn require_remediation_intent_admissible(
                 events::SideEffectLedgerPurpose::Remediation {
                     forward_pair_id: linked,
                     ..
-                } if linked == forward_pair_id
+                } if *linked == *forward_pair_id
             )
     }) {
         return Err(StoreError::ProjectionConflict {
@@ -433,4 +443,315 @@ pub(super) fn transition_side_effect_failure(
         projection,
     );
     Ok(())
+}
+
+fn required_owned_claim(
+    claim: Option<SideEffectClaimProjection>,
+) -> Result<SideEffectClaimProjection> {
+    claim.ok_or_else(|| StoreError::ProjectionConflict {
+        key: "sidefx:owned".to_owned(),
+        message: "phase requires active claim".to_owned(),
+    })
+}
+
+fn side_effect_claim_projection(
+    node_id: &NodeId,
+    attempt_id: &AttemptId,
+    claim_owner: &events::RunnerInvocationId,
+    invocation_epoch: u32,
+    claim_generation: u32,
+    claim_fencing_token: &side_effect::ClaimFencingToken,
+) -> SideEffectClaimProjection {
+    SideEffectClaimProjection {
+        node_id: node_id.clone(),
+        attempt_id: attempt_id.clone(),
+        claim_owner: claim_owner.clone(),
+        invocation_epoch,
+        claim_generation,
+        claim_fencing_token: claim_fencing_token.clone(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn require_claim_context_for_payload(
+    ledger_key: &events::SideEffectLedgerKey,
+    claim: &SideEffectClaimProjection,
+    node_id: &NodeId,
+    attempt_id: &AttemptId,
+    invocation_epoch: u32,
+    claim_generation: u32,
+    claim_fencing_token: &side_effect::ClaimFencingToken,
+    claim_owner: Option<&events::RunnerInvocationId>,
+) -> Result<()> {
+    require_claim_identity(ledger_key, claim, node_id, attempt_id, invocation_epoch)?;
+    if claim.claim_generation != claim_generation {
+        return Err(side_effect_key_conflict(
+            ledger_key,
+            "claim generation does not match active claim",
+        ));
+    }
+    if claim.claim_fencing_token != *claim_fencing_token {
+        return Err(side_effect_key_conflict(
+            ledger_key,
+            "claim fencing token does not match active claim",
+        ));
+    }
+    if claim_owner.is_some_and(|owner| &claim.claim_owner != owner) {
+        return Err(side_effect_key_conflict(
+            ledger_key,
+            "claim owner does not match active claim",
+        ));
+    }
+    Ok(())
+}
+
+struct ObservationClaimContext<'a> {
+    ledger_pair_id: &'a SideEffectPairId,
+    payload_pair_id: &'a SideEffectPairId,
+    payload_pair_role: events::SideEffectPairRole,
+    node_id: &'a NodeId,
+    attempt_id: &'a AttemptId,
+    invocation_epoch: u32,
+}
+
+fn require_claim_or_verify_context_for_observation(
+    ledger_key: &events::SideEffectLedgerKey,
+    claim: &SideEffectClaimProjection,
+    context: ObservationClaimContext<'_>,
+) -> Result<()> {
+    if context.payload_pair_role == events::SideEffectPairRole::Verify
+        && context.ledger_pair_id == context.payload_pair_id
+    {
+        if claim.invocation_epoch != context.invocation_epoch {
+            return Err(side_effect_key_conflict(
+                ledger_key,
+                "invocation epoch does not match active claim",
+            ));
+        }
+        return Ok(());
+    }
+    require_claim_context_for_payload(
+        ledger_key,
+        claim,
+        context.node_id,
+        context.attempt_id,
+        context.invocation_epoch,
+        claim.claim_generation,
+        &claim.claim_fencing_token,
+        Some(&claim.claim_owner),
+    )
+}
+
+fn require_claim_identity(
+    ledger_key: &events::SideEffectLedgerKey,
+    claim: &SideEffectClaimProjection,
+    node_id: &NodeId,
+    attempt_id: &AttemptId,
+    invocation_epoch: u32,
+) -> Result<()> {
+    if claim.node_id != *node_id {
+        return Err(side_effect_key_conflict(
+            ledger_key,
+            "node id does not match active claim",
+        ));
+    }
+    if claim.attempt_id != *attempt_id {
+        return Err(side_effect_key_conflict(
+            ledger_key,
+            "attempt id does not match active claim",
+        ));
+    }
+    if claim.invocation_epoch != invocation_epoch {
+        return Err(side_effect_key_conflict(
+            ledger_key,
+            "invocation epoch does not match active claim",
+        ));
+    }
+    Ok(())
+}
+
+fn side_effect_key_conflict(
+    ledger_key: &events::SideEffectLedgerKey,
+    message: impl Into<String>,
+) -> StoreError {
+    StoreError::ProjectionConflict {
+        key: format!("sidefx:{ledger_key}"),
+        message: message.into(),
+    }
+}
+
+/// Durable identity for one certified side-effect pair within a run.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SideEffectPairLedgerRef {
+    /// Run id that owns the pair.
+    pub run_id: RunId,
+    /// Certified side-effect pair id.
+    pub pair_id: SideEffectPairId,
+}
+
+impl SideEffectPairLedgerRef {
+    /// Creates a side-effect pair ledger reference.
+    pub fn new(run_id: RunId, pair_id: SideEffectPairId) -> Self {
+        Self { run_id, pair_id }
+    }
+}
+
+/// Side-effect artifact evidence retained by the projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SideEffectArtifactProjection {
+    /// Artifact id.
+    pub artifact_id: ArtifactId,
+    /// Canonical content digest.
+    pub content_digest: ContentDigest,
+    /// Exact retained-artifact evidence identity.
+    pub evidence_hash: ContentDigest,
+    /// Schema id, when the artifact is a typed value.
+    pub schema_id: Option<SchemaId>,
+}
+
+/// Side-effect intent evidence projected from the authoritative run stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SideEffectIntentProjection {
+    /// Node id.
+    pub node_id: NodeId,
+    /// Attempt id.
+    pub attempt_id: AttemptId,
+    /// Scope id.
+    pub scope_id: ScopeId,
+    /// Invocation epoch.
+    pub invocation_epoch: u32,
+    /// Intent schema id.
+    pub intent_schema_id: SchemaId,
+    /// Intent hash.
+    pub intent_hash: ContentDigest,
+    /// Intent artifact id.
+    pub intent_artifact_id: ArtifactId,
+    /// Idempotency input schema id.
+    pub idempotency_input_schema_id: SchemaId,
+    /// Idempotency input hash.
+    pub idempotency_input_hash: ContentDigest,
+    /// Idempotency key.
+    pub idempotency_key: events::IdempotencyKeyRef,
+    /// Capability kind.
+    pub capability_kind: CapabilityKind,
+    /// Capability version.
+    pub capability_version: CapabilityVersion,
+    /// Adapter kind.
+    pub adapter_kind: AdapterKind,
+    /// Adapter version.
+    pub adapter_version: AdapterVersion,
+}
+
+/// Active side-effect claim evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SideEffectClaimProjection {
+    /// Node id.
+    pub node_id: NodeId,
+    /// Attempt id.
+    pub attempt_id: AttemptId,
+    /// Claim owner.
+    pub claim_owner: events::RunnerInvocationId,
+    /// Invocation epoch.
+    pub invocation_epoch: u32,
+    /// Claim generation.
+    pub claim_generation: u32,
+    /// Claim fencing token.
+    pub claim_fencing_token: side_effect::ClaimFencingToken,
+}
+
+/// Side-effect projected phase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SideEffectPhase {
+    /// Intent persisted.
+    IntentPersisted {
+        /// Invocation epoch.
+        invocation_epoch: u32,
+    },
+    /// Claim acquired.
+    Claimed {
+        /// Claim owner.
+        claim_owner: events::RunnerInvocationId,
+        /// Invocation epoch.
+        invocation_epoch: u32,
+        /// Claim generation.
+        claim_generation: u32,
+        /// Fencing token.
+        claim_fencing_token: side_effect::ClaimFencingToken,
+    },
+    /// Invocation prepared.
+    InvocationPrepared {
+        /// Invocation epoch.
+        invocation_epoch: u32,
+        /// Claim generation.
+        claim_generation: u32,
+        /// Fencing token.
+        claim_fencing_token: side_effect::ClaimFencingToken,
+    },
+    /// Invocation started.
+    InvocationStarted {
+        /// Claim owner.
+        claim_owner: events::RunnerInvocationId,
+        /// Invocation epoch.
+        invocation_epoch: u32,
+        /// Claim generation.
+        claim_generation: u32,
+        /// Fencing token.
+        claim_fencing_token: side_effect::ClaimFencingToken,
+    },
+    /// Submission was observed.
+    SubmissionObserved {
+        /// Invocation epoch.
+        invocation_epoch: u32,
+    },
+    /// Not-submitted proof was persisted.
+    NotSubmittedProven {
+        /// Invocation epoch.
+        invocation_epoch: u32,
+    },
+    /// Submission status is unknown.
+    SubmissionUnknown {
+        /// Invocation epoch.
+        invocation_epoch: u32,
+    },
+    /// Receipt was observed.
+    ReceiptObserved {
+        /// Invocation epoch.
+        invocation_epoch: u32,
+    },
+    /// Confirmation was observed.
+    ConfirmationObserved {
+        /// Invocation epoch.
+        invocation_epoch: u32,
+    },
+    /// Side effect is ambiguous.
+    Ambiguous {
+        /// Invocation epoch.
+        invocation_epoch: u32,
+    },
+    /// Side effect failed.
+    Failed {
+        /// Invocation epoch.
+        invocation_epoch: u32,
+        /// Failure phase.
+        failure_phase: side_effect::FailurePhase,
+    },
+}
+
+impl SideEffectPhase {
+    /// Returns the canonical snake-case tag for this side-effect phase.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::IntentPersisted { .. } => "intent_persisted",
+            Self::Claimed { .. } => "claimed",
+            Self::InvocationPrepared { .. } => "invocation_prepared",
+            Self::InvocationStarted { .. } => "invocation_started",
+            Self::SubmissionObserved { .. } => "submission_observed",
+            Self::NotSubmittedProven { .. } => "not_submitted_proven",
+            Self::SubmissionUnknown { .. } => "submission_unknown",
+            Self::ReceiptObserved { .. } => "receipt_observed",
+            Self::ConfirmationObserved { .. } => "confirmation_observed",
+            Self::Ambiguous { .. } => "ambiguous",
+            Self::Failed { .. } => "failed",
+        }
+    }
 }

@@ -10,9 +10,6 @@ license = "MIT"
 category = "operation"
 
 [dependencies]
-serde = { workspace = true }
-thiserror = { workspace = true }
-
 mfm-authored-config = { path = "../../authored-config" }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-certify = { path = "../../kernel/certify" }

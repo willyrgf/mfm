@@ -13,7 +13,6 @@ test-support = ["mfm-store/test-support"]
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-toml = "0.8"
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"] }
 uuid = { version = "1.0", features = ["v4"] }
 thiserror = { workspace = true }
@@ -31,7 +30,6 @@ mfm-certify = { path = "../kernel/certify" }
 mfm-transports-btc-jsonrpc-http = { path = "../transports/btc-jsonrpc-http" }
 mfm-events = { path = "../kernel/events" }
 mfm-evm-capabilities = { path = "../evm-capabilities" }
-mfm-evm-contract-config = { path = "../evm-contract-config" }
 mfm-evm-contract-model = { path = "../evm-contract-model" }
 mfm-fact-capabilities = { path = "../fact-capabilities" }
 mfm-facts = { path = "../kernel/facts" }
@@ -41,8 +39,6 @@ mfm-op-evm-collectors = { path = "../ops/evm-collectors-op" }
 mfm-op-evm-contract-lifecycle = { path = "../ops/evm-contract-lifecycle-op" }
 mfm-op-portfolio-tracker = { path = "../ops/portfolio-tracker-op" }
 mfm-op-proof = { path = "../ops/proof-op" }
-mfm-portfolio-config = { path = "../portfolio-config" }
-mfm-portfolio-model = { path = "../portfolio/model" }
 mfm-program = { path = "../kernel/program" }
 mfm-replay = { path = "../kernel/replay" }
 mfm-runtime = { path = "../kernel/runtime" }

@@ -93,10 +93,14 @@ impl EthereumPrivateKey {
         })
     }
 
+    fn secret_key(&self) -> Result<SecretKey, EthereumKeyError> {
+        SecretKey::from_slice(self.key_bytes.as_ref())
+            .map_err(|_| EthereumKeyError::InvalidPrivateKey)
+    }
+
     /// Derives the Ethereum address for this private key.
     pub fn address(&self) -> Result<Address, EthereumKeyError> {
-        let secret_key = SecretKey::from_slice(self.key_bytes.as_ref())
-            .map_err(|_| EthereumKeyError::InvalidPrivateKey)?;
+        let secret_key = self.secret_key()?;
         let public_key = secret_key.public_key();
 
         use k256::elliptic_curve::sec1::ToEncodedPoint;
@@ -114,8 +118,7 @@ impl EthereumPrivateKey {
         &self,
         hash: &[u8; 32],
     ) -> Result<PrimitiveSignature, EthereumKeyError> {
-        let secret_key = SecretKey::from_slice(self.key_bytes.as_ref())
-            .map_err(|_| EthereumKeyError::InvalidPrivateKey)?;
+        let secret_key = self.secret_key()?;
         let signing_key = SigningKey::from(&secret_key);
         let (signature, recovery_id) = signing_key
             .sign_prehash_recoverable(hash)
@@ -136,56 +139,5 @@ impl EthereumPrivateKey {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const TEST_KEY: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
-
-    #[test]
-    fn private_key_derives_expected_ethereum_address() {
-        let key = EthereumPrivateKey::from_hex_secret(TEST_KEY).expect("valid key");
-        assert_eq!(
-            format!("{:?}", key.address().expect("address")),
-            "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"
-        );
-    }
-
-    #[test]
-    fn private_key_rejects_invalid_inputs_without_echoing_secrets() {
-        for (case, raw, expected) in [
-            (
-                "invalid hex",
-                "not-a-valid-private-key-secret",
-                EthereumKeyError::InvalidHex,
-            ),
-            ("short key", "0x1234", EthereumKeyError::InvalidLength),
-            (
-                "invalid curve key",
-                "0x0000000000000000000000000000000000000000000000000000000000000000",
-                EthereumKeyError::InvalidPrivateKey,
-            ),
-        ] {
-            let err = EthereumPrivateKey::from_hex_secret(raw).expect_err(case);
-
-            assert_eq!(err, expected, "{case}");
-            assert!(!err.to_string().contains(raw), "{case}");
-        }
-    }
-
-    #[test]
-    fn recoverable_signature_recovers_expected_address() {
-        let key = EthereumPrivateKey::from_hex_secret(TEST_KEY).expect("valid key");
-        let hash_bytes = [0x42; 32];
-        let hash = B256::from(hash_bytes);
-        let signature = key
-            .sign_hash_recoverable(&hash_bytes)
-            .expect("recoverable signature");
-
-        assert_eq!(
-            signature
-                .recover_address_from_prehash(&hash)
-                .expect("recover address"),
-            key.address().expect("address")
-        );
-    }
-}
+#[path = "crypto_tests.rs"]
+mod tests;

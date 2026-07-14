@@ -397,8 +397,7 @@ fn invalid_set(effect: &'static str, message: &'static str) -> CapabilityError {
 
 mod private {
     use super::{
-        CapabilityRoleSpec, ExternalMutationAuthorityRole, ManagedPlatformWriteRole,
-        ReadExternalRole, SupportRole,
+        ExternalMutationAuthorityRole, ManagedPlatformWriteRole, ReadExternalRole, SupportRole,
     };
     use mfm_effects::EffectSpec;
 
@@ -682,7 +681,4 @@ mod private {
     {
         type Count = count8!(A, B, C, D, E, F, G, H);
     }
-
-    #[allow(dead_code)]
-    fn _role_spec_is_closed<R: CapabilityRoleSpec>() {}
 }

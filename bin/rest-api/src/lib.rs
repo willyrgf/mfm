@@ -129,18 +129,8 @@ impl From<AppError> for ApiError {
     }
 }
 
-impl From<mfm_app::EntryPointOpResolveError> for ApiError {
-    fn from(error: mfm_app::EntryPointOpResolveError) -> Self {
-        Self::new(
-            StatusCode::BAD_REQUEST,
-            error.code().to_owned(),
-            PublicSafeMessage::new(error.message().to_owned()),
-        )
-    }
-}
-
-impl From<mfm_app::OpLaunchError> for ApiError {
-    fn from(error: mfm_app::OpLaunchError) -> Self {
+impl From<mfm_app::EntryPointOpError> for ApiError {
+    fn from(error: mfm_app::EntryPointOpError) -> Self {
         Self::new(
             StatusCode::BAD_REQUEST,
             error.code().to_owned(),
@@ -323,19 +313,9 @@ where
     }
 }
 
-/// Connects the production run store for an explicit REST process role.
-///
-/// Both roles use the validated store connection; the read role only changes route admission.
-pub async fn connect_rest_run_store(role: RestProcessRole) -> Result<ProductionRunStore, ApiError> {
-    match role {
-        RestProcessRole::Read => Ok(mfm_app::connect_production_run_read_store(None).await?),
-        RestProcessRole::Live => Ok(mfm_app::connect_production_run_store(None).await?),
-    }
-}
-
 /// Builds production REST API state for an explicit process role.
 pub async fn make_app_state_for_role(role: RestProcessRole) -> Result<DefaultAppState, ApiError> {
-    let store = connect_rest_run_store(role).await?;
+    let store = mfm_app::connect_production_run_store(None).await?;
     let fact_index = mfm_app::production_fact_index_read_provider(store.clone());
     Ok(AppState {
         role,

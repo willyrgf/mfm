@@ -94,7 +94,6 @@ Useful focused parity examples:
 
 ```bash
 DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/mfm_test cargo test -p mfm-integration-tests --features parity-tests --test parity_rest_api_postgres_smoke
-RETH_HTTP_PORT=8565 cargo test -p mfm-integration-tests --features parity-tests --test parity_portfolio_tracker_reth_snapshot
 ```
 
 Nixfied v2 gates are available when changing Nixfied behavior or running the repository CI
@@ -114,7 +113,7 @@ nix run .#ci
 `cargo test --workspace --doc`, without managed external services.
 `nix run .#test-db` starts managed Postgres, checks crate-local SQLx metadata
 against a migrated schema, and runs Postgres-backed parity tests.
-`.#ci` is full by definition: it starts managed Postgres and Reth and runs all feature-gated parity
+`.#ci` is full by definition: it starts the managed services required by feature-gated parity
 tests. There is no `--mode` or `--full` alias flag.
 
 Run binaries locally:

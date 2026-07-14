@@ -7,9 +7,7 @@ use std::sync::Arc;
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigError, EntryPointDescriptor};
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{ContentDigest, NameToken, ResourceNamespace};
-use mfm_program::{
-    TypedProgramConfigMaterial, TypedProgramDraft, TypedProgramLaunchPlan, TypedProgramSeedMaterial,
-};
+use mfm_program::TypedProgramLaunchPlan;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -20,10 +18,10 @@ pub struct PublicOpName(NameToken);
 
 impl PublicOpName {
     /// Creates a checked public operation name.
-    pub fn new(value: impl AsRef<str>) -> Result<Self, EntryPointOpResolveError> {
+    pub fn new(value: impl AsRef<str>) -> Result<Self, EntryPointOpError> {
         let value = value.as_ref();
         NameToken::new(value).map(Self).map_err(|error| {
-            EntryPointOpResolveError::new(
+            EntryPointOpError::new(
                 "InvalidPublicOpName",
                 format!("public op name is invalid: {error}"),
             )
@@ -43,7 +41,7 @@ impl fmt::Display for PublicOpName {
 }
 
 impl FromStr for PublicOpName {
-    type Err = EntryPointOpResolveError;
+    type Err = EntryPointOpError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::new(value)
@@ -57,9 +55,9 @@ pub struct OpVersion(u32);
 
 impl OpVersion {
     /// Creates a checked non-zero public operation version.
-    pub fn new(value: u32) -> Result<Self, EntryPointOpResolveError> {
+    pub fn new(value: u32) -> Result<Self, EntryPointOpError> {
         if value == 0 {
-            return Err(EntryPointOpResolveError::new(
+            return Err(EntryPointOpError::new(
                 "InvalidOpVersion",
                 "entry-point op version must be greater than zero",
             ));
@@ -80,11 +78,11 @@ impl fmt::Display for OpVersion {
 }
 
 impl FromStr for OpVersion {
-    type Err = EntryPointOpResolveError;
+    type Err = EntryPointOpError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let parsed = value.parse::<u32>().map_err(|_| {
-            EntryPointOpResolveError::new(
+            EntryPointOpError::new(
                 "InvalidOpVersion",
                 "entry-point op version must be an unsigned integer",
             )
@@ -110,17 +108,17 @@ impl EntryPointOpId {
         namespace: impl AsRef<str>,
         name: impl AsRef<str>,
         version: OpVersion,
-    ) -> Result<Self, EntryPointOpResolveError> {
+    ) -> Result<Self, EntryPointOpError> {
         let namespace = namespace.as_ref();
         let name = name.as_ref();
         let namespace = ResourceNamespace::new(namespace).map_err(|error| {
-            EntryPointOpResolveError::new(
+            EntryPointOpError::new(
                 "InvalidEntryPointOpId",
                 format!("entry-point op namespace is invalid: {error}"),
             )
         })?;
         let name = NameToken::new(name).map_err(|error| {
-            EntryPointOpResolveError::new(
+            EntryPointOpError::new(
                 "InvalidEntryPointOpId",
                 format!("entry-point op name is invalid: {error}"),
             )
@@ -145,27 +143,6 @@ impl fmt::Display for EntryPointOpId {
     }
 }
 
-/// Deterministic plan returned by a launchable entry-point operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EntryPointOpPlan {
-    /// Typed program draft to certify before runtime launch.
-    pub draft: TypedProgramDraft,
-    /// Canonical config artifacts required by the draft.
-    pub config_material: Vec<TypedProgramConfigMaterial>,
-    /// Canonical seed artifacts required by the draft.
-    pub seed_material: Vec<TypedProgramSeedMaterial>,
-}
-
-impl From<TypedProgramLaunchPlan> for EntryPointOpPlan {
-    fn from(plan: TypedProgramLaunchPlan) -> Self {
-        Self {
-            draft: plan.draft,
-            config_material: plan.config_material,
-            seed_material: plan.seed_material,
-        }
-    }
-}
-
 /// Operation that can plan a public entry-point run from authored config.
 pub trait LaunchableOp: Send + Sync {
     /// Returns the static public entry-point metadata for this operation.
@@ -175,7 +152,10 @@ pub trait LaunchableOp: Send + Sync {
     fn op_id(&self) -> EntryPointOpId;
 
     /// Deterministically plans the typed program draft and launch material.
-    fn plan(&self, authored_config: AuthoredConfig) -> Result<EntryPointOpPlan, OpLaunchError>;
+    fn plan(
+        &self,
+        authored_config: AuthoredConfig,
+    ) -> Result<TypedProgramLaunchPlan, EntryPointOpError>;
 }
 
 /// Generic app adapter from a typed op-crate planner to [`LaunchableOp`].
@@ -183,7 +163,7 @@ pub struct EntryPointPlannerAdapter<TConfig, E> {
     descriptor: EntryPointDescriptor,
     op_id: EntryPointOpId,
     planner: fn(TConfig) -> Result<TypedProgramLaunchPlan, E>,
-    map_error: fn(E) -> OpLaunchError,
+    map_error: fn(E) -> EntryPointOpError,
     _config: PhantomData<fn() -> TConfig>,
 }
 
@@ -192,10 +172,10 @@ impl<TConfig, E> EntryPointPlannerAdapter<TConfig, E> {
     pub fn new(
         descriptor: EntryPointDescriptor,
         planner: fn(TConfig) -> Result<TypedProgramLaunchPlan, E>,
-        map_error: fn(E) -> OpLaunchError,
-    ) -> Result<Self, EntryPointOpResolveError> {
+        map_error: fn(E) -> EntryPointOpError,
+    ) -> Result<Self, EntryPointOpError> {
         if descriptor.accepted_config_formats.is_empty() {
-            return Err(EntryPointOpResolveError::new(
+            return Err(EntryPointOpError::new(
                 "EntryPointOpConfigFormatsEmpty",
                 "entry-point op must accept at least one config format",
             ));
@@ -224,13 +204,16 @@ where
         self.op_id.clone()
     }
 
-    fn plan(&self, authored_config: AuthoredConfig) -> Result<EntryPointOpPlan, OpLaunchError> {
+    fn plan(
+        &self,
+        authored_config: AuthoredConfig,
+    ) -> Result<TypedProgramLaunchPlan, EntryPointOpError> {
         if !self
             .descriptor
             .accepted_config_formats
             .contains(&authored_config.format())
         {
-            return Err(OpLaunchError::new(
+            return Err(EntryPointOpError::new(
                 "EntryPointOpConfigFormatUnsupported",
                 "entry-point op does not accept the supplied config format",
             ));
@@ -238,7 +221,7 @@ where
 
         let normalized = authored_config.normalize::<TConfig>()?;
         let planned = (self.planner)(normalized.value).map_err(self.map_error)?;
-        Ok(planned.into())
+        Ok(planned)
     }
 }
 
@@ -255,21 +238,15 @@ impl EntryPointOpRegistry {
     }
 
     /// Registers a launchable operation.
-    pub fn register(
-        &mut self,
-        op: impl LaunchableOp + 'static,
-    ) -> Result<(), EntryPointOpResolveError> {
+    pub fn register(&mut self, op: impl LaunchableOp + 'static) -> Result<(), EntryPointOpError> {
         self.register_arc(Arc::new(op))
     }
 
     /// Registers an already shared launchable operation.
-    pub fn register_arc(
-        &mut self,
-        op: Arc<dyn LaunchableOp>,
-    ) -> Result<(), EntryPointOpResolveError> {
+    pub fn register_arc(&mut self, op: Arc<dyn LaunchableOp>) -> Result<(), EntryPointOpError> {
         let descriptor = op.descriptor();
         if descriptor.accepted_config_formats.is_empty() {
-            return Err(EntryPointOpResolveError::new(
+            return Err(EntryPointOpError::new(
                 "EntryPointOpConfigFormatsEmpty",
                 "entry-point op must accept at least one config format",
             ));
@@ -278,7 +255,7 @@ impl EntryPointOpRegistry {
         let version = OpVersion::new(descriptor.version)?;
         let op_id = op.op_id();
         if op_id.version != version {
-            return Err(EntryPointOpResolveError::new(
+            return Err(EntryPointOpError::new(
                 "EntryPointOpVersionMismatch",
                 "entry-point op id version must match registered version",
             ));
@@ -286,7 +263,7 @@ impl EntryPointOpRegistry {
 
         let versions = self.ops.entry(public_name).or_default();
         if versions.contains_key(&version) {
-            return Err(EntryPointOpResolveError::new(
+            return Err(EntryPointOpError::new(
                 "DuplicateEntryPointOp",
                 "entry-point op public name and version are already registered",
             ));
@@ -299,21 +276,15 @@ impl EntryPointOpRegistry {
     pub fn resolve_latest(
         &self,
         public_name: &PublicOpName,
-    ) -> Result<Arc<dyn LaunchableOp>, EntryPointOpResolveError> {
+    ) -> Result<Arc<dyn LaunchableOp>, EntryPointOpError> {
         let versions = self.ops.get(public_name).ok_or_else(|| {
-            EntryPointOpResolveError::new(
-                "EntryPointOpNotFound",
-                "entry-point op is not registered",
-            )
+            EntryPointOpError::new("EntryPointOpNotFound", "entry-point op is not registered")
         })?;
         versions
             .last_key_value()
             .map(|(_version, op)| Arc::clone(op))
             .ok_or_else(|| {
-                EntryPointOpResolveError::new(
-                    "EntryPointOpNotFound",
-                    "entry-point op is not registered",
-                )
+                EntryPointOpError::new("EntryPointOpNotFound", "entry-point op is not registered")
             })
     }
 
@@ -322,7 +293,7 @@ impl EntryPointOpRegistry {
         &self,
         public_name: &PublicOpName,
         version: Option<OpVersion>,
-    ) -> Result<Arc<dyn LaunchableOp>, EntryPointOpResolveError> {
+    ) -> Result<Arc<dyn LaunchableOp>, EntryPointOpError> {
         match version {
             Some(version) => self.resolve_version(public_name, version),
             None => self.resolve_latest(public_name),
@@ -343,15 +314,12 @@ impl EntryPointOpRegistry {
         &self,
         public_name: &PublicOpName,
         version: OpVersion,
-    ) -> Result<Arc<dyn LaunchableOp>, EntryPointOpResolveError> {
+    ) -> Result<Arc<dyn LaunchableOp>, EntryPointOpError> {
         let versions = self.ops.get(public_name).ok_or_else(|| {
-            EntryPointOpResolveError::new(
-                "EntryPointOpNotFound",
-                "entry-point op is not registered",
-            )
+            EntryPointOpError::new("EntryPointOpNotFound", "entry-point op is not registered")
         })?;
         versions.get(&version).map(Arc::clone).ok_or_else(|| {
-            EntryPointOpResolveError::new(
+            EntryPointOpError::new(
                 "EntryPointOpVersionNotFound",
                 "entry-point op version is not registered",
             )
@@ -369,7 +337,7 @@ impl EntryPointOpRegistry {
     }
 
     /// Returns the canonical digest of the registered public entry-point surface.
-    pub fn registry_digest(&self) -> Result<ContentDigest, EntryPointOpResolveError> {
+    pub fn registry_digest(&self) -> Result<ContentDigest, EntryPointOpError> {
         let mut entries = Vec::new();
         for (public_name, versions) in &self.ops {
             for (version, op) in versions {
@@ -398,7 +366,7 @@ impl EntryPointOpRegistry {
             "kind": "mfm.entry_point_op_registry.v1",
         });
         let json = serde_json::to_string(&value).map_err(|_| {
-            EntryPointOpResolveError::new(
+            EntryPointOpError::new(
                 "EntryPointOpRegistryDigestFailed",
                 "entry-point registry digest could not be serialized",
             )
@@ -406,7 +374,7 @@ impl EntryPointOpRegistry {
         PlainCanonicalJsonBytes::from_json_str(&json)
             .map(|canonical| canonical.content_digest())
             .map_err(|_| {
-                EntryPointOpResolveError::new(
+                EntryPointOpError::new(
                     "EntryPointOpRegistryDigestFailed",
                     "entry-point registry digest could not be canonicalized",
                 )
@@ -414,16 +382,16 @@ impl EntryPointOpRegistry {
     }
 }
 
-/// Error returned while resolving or registering entry-point operations.
+/// Error returned while resolving, registering, or planning entry-point operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{code}: {message}")]
-pub struct EntryPointOpResolveError {
+pub struct EntryPointOpError {
     code: String,
     message: String,
 }
 
-impl EntryPointOpResolveError {
-    /// Creates a public-safe entry-point op resolution error.
+impl EntryPointOpError {
+    /// Creates a public-safe entry-point operation error.
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
@@ -442,305 +410,12 @@ impl EntryPointOpResolveError {
     }
 }
 
-/// Error returned while planning an entry-point operation.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{code}: {message}")]
-pub struct OpLaunchError {
-    code: String,
-    message: String,
-}
-
-impl OpLaunchError {
-    /// Creates a public-safe entry-point operation planning error.
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-        }
-    }
-
-    /// Returns the stable error code.
-    pub fn code(&self) -> &str {
-        &self.code
-    }
-
-    /// Returns the public-safe error message.
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-}
-
-impl From<AuthoredConfigError> for OpLaunchError {
+impl From<AuthoredConfigError> for EntryPointOpError {
     fn from(error: AuthoredConfigError) -> Self {
         Self::new(error.code().to_owned(), error.message().to_owned())
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use mfm_authored_config::AuthoredConfigFormat;
-
-    static FORMATS: &[AuthoredConfigFormat] =
-        &[AuthoredConfigFormat::Toml, AuthoredConfigFormat::Json];
-
-    #[derive(Clone)]
-    struct FakeOp {
-        descriptor: EntryPointDescriptor,
-    }
-
-    impl FakeOp {
-        fn new(public_name: &'static str, version: u32) -> Self {
-            Self {
-                descriptor: EntryPointDescriptor {
-                    namespace: "mfm.test",
-                    name: "fake_op",
-                    public_name,
-                    version,
-                    accepted_config_formats: FORMATS,
-                },
-            }
-        }
-    }
-
-    impl LaunchableOp for FakeOp {
-        fn descriptor(&self) -> EntryPointDescriptor {
-            self.descriptor
-        }
-
-        fn op_id(&self) -> EntryPointOpId {
-            let version = OpVersion::new(self.descriptor.version).expect("version");
-            EntryPointOpId::new("mfm.test", self.descriptor.name, version).expect("op id")
-        }
-
-        fn plan(
-            &self,
-            _authored_config: AuthoredConfig,
-        ) -> Result<EntryPointOpPlan, OpLaunchError> {
-            let draft =
-                mfm_op_proof::proof_program_draft(mfm_op_proof::ProofWorkflowConfig::default())
-                    .map_err(|error| {
-                        OpLaunchError::new("EntryPointOpPlanFailed", error.to_string())
-                    })?;
-            Ok(EntryPointOpPlan {
-                draft,
-                config_material: Vec::new(),
-                seed_material: Vec::new(),
-            })
-        }
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-    struct AdapterConfig {
-        value: u64,
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    struct AdapterPlanError;
-
-    static JSON_FORMAT: &[AuthoredConfigFormat] = &[AuthoredConfigFormat::Json];
-
-    fn adapter_descriptor() -> EntryPointDescriptor {
-        EntryPointDescriptor {
-            namespace: "mfm.test",
-            name: "planner_adapter",
-            public_name: "planner_adapter",
-            version: 1,
-            accepted_config_formats: FORMATS,
-        }
-    }
-
-    fn json_only_adapter_descriptor() -> EntryPointDescriptor {
-        EntryPointDescriptor {
-            namespace: "mfm.test",
-            name: "planner_adapter",
-            public_name: "planner_adapter",
-            version: 1,
-            accepted_config_formats: JSON_FORMAT,
-        }
-    }
-
-    fn adapter_plan(config: AdapterConfig) -> Result<TypedProgramLaunchPlan, AdapterPlanError> {
-        if config.value == 0 {
-            return Err(AdapterPlanError);
-        }
-        let draft = mfm_op_proof::proof_program_draft(mfm_op_proof::ProofWorkflowConfig::default())
-            .map_err(|_| AdapterPlanError)?;
-        Ok(TypedProgramLaunchPlan {
-            draft,
-            config_material: Vec::new(),
-            seed_material: Vec::new(),
-        })
-    }
-
-    fn adapter_plan_error(_error: AdapterPlanError) -> OpLaunchError {
-        OpLaunchError::new("AdapterPlanFailed", "adapter test plan failed")
-    }
-
-    #[test]
-    fn entry_point_registry_resolves_latest_and_explicit_versions() {
-        enum Case {
-            Latest,
-            Explicit,
-        }
-
-        let name = PublicOpName::new("portfolio_snapshot").expect("public name");
-        let mut registry = EntryPointOpRegistry::new();
-        registry
-            .register(FakeOp::new("portfolio_snapshot", 1))
-            .unwrap();
-        registry
-            .register(FakeOp::new("portfolio_snapshot", 2))
-            .unwrap();
-
-        for (case, expected_version) in [(Case::Latest, 2), (Case::Explicit, 1)] {
-            let op = match case {
-                Case::Latest => registry.resolve_latest(&name).expect("latest op"),
-                Case::Explicit => registry
-                    .resolve(&name, Some(OpVersion::new(1).unwrap()))
-                    .expect("versioned op"),
-            };
-
-            assert_eq!(op.descriptor().version, expected_version);
-        }
-    }
-
-    #[test]
-    fn entry_point_registry_lists_registered_descriptors_in_name_version_order() {
-        let mut registry = EntryPointOpRegistry::new();
-        registry
-            .register(FakeOp::new("portfolio_snapshot", 2))
-            .unwrap();
-        registry
-            .register(FakeOp::new("portfolio_snapshot", 1))
-            .unwrap();
-        registry
-            .register(FakeOp::new("evm_native_balance", 1))
-            .unwrap();
-
-        let descriptors = registry.registered_entry_points();
-
-        assert_eq!(
-            descriptors
-                .iter()
-                .map(|descriptor| (descriptor.public_name, descriptor.version))
-                .collect::<Vec<_>>(),
-            vec![
-                ("evm_native_balance", 1),
-                ("portfolio_snapshot", 1),
-                ("portfolio_snapshot", 2),
-            ]
-        );
-    }
-
-    #[test]
-    fn entry_point_registry_rejects_duplicate_public_name_and_version() {
-        let mut registry = EntryPointOpRegistry::new();
-        registry
-            .register(FakeOp::new("portfolio_snapshot", 1))
-            .unwrap();
-
-        let err = registry
-            .register(FakeOp::new("portfolio_snapshot", 1))
-            .expect_err("duplicate rejects");
-
-        assert_eq!(err.code(), "DuplicateEntryPointOp");
-    }
-
-    #[test]
-    fn entry_point_registry_reports_unknown_name_and_version() {
-        let mut registry = EntryPointOpRegistry::new();
-        registry
-            .register(FakeOp::new("portfolio_snapshot", 1))
-            .unwrap();
-        let missing_name = PublicOpName::new("evm_contract_lifecycle").unwrap();
-        let portfolio = PublicOpName::new("portfolio_snapshot").unwrap();
-
-        let missing = match registry.resolve_latest(&missing_name) {
-            Ok(_) => panic!("missing op must reject"),
-            Err(error) => error,
-        };
-        let missing_version = match registry.resolve_version(&portfolio, OpVersion::new(2).unwrap())
-        {
-            Ok(_) => panic!("missing version must reject"),
-            Err(error) => error,
-        };
-
-        assert_eq!(missing.code(), "EntryPointOpNotFound");
-        assert_eq!(missing_version.code(), "EntryPointOpVersionNotFound");
-    }
-
-    #[test]
-    fn entry_point_registry_digest_is_deterministic_and_surface_bound() {
-        let mut first = EntryPointOpRegistry::new();
-        first
-            .register(FakeOp::new("portfolio_snapshot", 1))
-            .unwrap();
-        first
-            .register(FakeOp::new("portfolio_snapshot", 2))
-            .unwrap();
-        let mut same = EntryPointOpRegistry::new();
-        same.register(FakeOp::new("portfolio_snapshot", 2)).unwrap();
-        same.register(FakeOp::new("portfolio_snapshot", 1)).unwrap();
-        let mut different = EntryPointOpRegistry::new();
-        different
-            .register(FakeOp::new("portfolio_snapshot", 1))
-            .unwrap();
-
-        assert_eq!(
-            first.registry_digest().unwrap(),
-            same.registry_digest().unwrap()
-        );
-        assert_ne!(
-            first.registry_digest().unwrap(),
-            different.registry_digest().unwrap()
-        );
-    }
-
-    #[test]
-    fn launchable_op_plan_returns_draft_without_certification() {
-        let op = FakeOp::new("portfolio_snapshot", 1);
-        let plan = op
-            .plan(
-                AuthoredConfig::new(AuthoredConfigFormat::Toml, "portfolio_id = \"main\"\n")
-                    .expect("authored config"),
-            )
-            .expect("plan");
-
-        assert!(!plan.draft.state_nodes().is_empty());
-        assert!(plan.config_material.is_empty());
-    }
-
-    #[test]
-    fn entry_point_planner_adapter_plans_from_authored_config() {
-        let op =
-            EntryPointPlannerAdapter::new(adapter_descriptor(), adapter_plan, adapter_plan_error)
-                .expect("adapter op");
-        let authored =
-            AuthoredConfig::new(AuthoredConfigFormat::Json, r#"{"value":1}"#).expect("authored");
-
-        let plan = op.plan(authored).expect("plan");
-
-        assert_eq!(op.op_id().to_string(), "mfm.test:planner_adapter:1");
-        assert_eq!(op.descriptor().public_name, "planner_adapter");
-        assert!(!plan.draft.state_nodes().is_empty());
-        assert!(plan.config_material.is_empty());
-        assert!(plan.seed_material.is_empty());
-    }
-
-    #[test]
-    fn entry_point_planner_adapter_rejects_unsupported_format_before_planning() {
-        let op = EntryPointPlannerAdapter::new(
-            json_only_adapter_descriptor(),
-            adapter_plan,
-            adapter_plan_error,
-        )
-        .expect("adapter op");
-        let authored =
-            AuthoredConfig::new(AuthoredConfigFormat::Toml, "value = 1").expect("authored");
-
-        let err = op.plan(authored).expect_err("unsupported format");
-
-        assert_eq!(err.code(), "EntryPointOpConfigFormatUnsupported");
-    }
-}
+#[path = "entry_point_tests.rs"]
+mod tests;

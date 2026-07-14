@@ -331,7 +331,7 @@ pub(crate) fn list_keys(req: ListKeysRequest) -> Result<ListedKeys, CommandError
 /// Deletes a key directly through `mfm_core::keystore`.
 pub(crate) fn delete_key(req: DeleteKeyRequest) -> Result<DeletedKey, CommandError> {
     let mut keystore = load_unlocked_keystore(&req.access)?;
-    let key_id = resolve_delete_key_id(&keystore, req.id.as_deref(), req.by_label.as_deref())?;
+    let key_id = resolve_key_id(&keystore, req.id.as_deref(), req.by_label.as_deref())?;
     let key_to_delete = keystore
         .list_keys()?
         .into_iter()
@@ -651,7 +651,7 @@ fn confirm(prompt: &str) -> Result<bool, CommandError> {
     }
 }
 
-fn resolve_delete_key_id(
+fn resolve_key_id(
     keystore: &Keystore,
     id: Option<&str>,
     by_label: Option<&str>,
@@ -668,43 +668,6 @@ fn resolve_delete_key_id(
         (Some(raw), None) => Uuid::parse_str(raw)
             .map_err(|_| CommandError::new("invalid_uuid", "Invalid UUID format")),
         (None, Some(label)) => {
-            let keys = keystore.list_keys()?;
-            let matching: Vec<_> = keys
-                .iter()
-                .filter(|key| key.alias.as_deref() == Some(label))
-                .collect();
-            match matching.len() {
-                0 => Err(CommandError::new(
-                    "key_not_found",
-                    "No key found with requested label",
-                )),
-                1 => Ok(matching[0].id),
-                _ => Err(CommandError::new(
-                    "ambiguous_label",
-                    "Multiple keys found with requested label",
-                )),
-            }
-        }
-    }
-}
-
-fn resolve_key_id(
-    keystore: &Keystore,
-    id: Option<&str>,
-    by_label: Option<&str>,
-) -> Result<Uuid, CommandError> {
-    match (id, by_label) {
-        (Some(_), Some(_)) => Err(CommandError::new(
-            "missing_argument",
-            "Specify exactly one key selector: --id or --by-label",
-        )),
-        (None, None) => Err(CommandError::new(
-            "missing_argument",
-            "Must specify one key selector: --id or --by-label",
-        )),
-        (Some(raw), None) => Uuid::parse_str(raw)
-            .map_err(|_| CommandError::new("invalid_uuid", "Invalid UUID format")),
-        (None, Some(label)) => {
             let keys = keystore
                 .list_keys()
                 .map_err(|_| CommandError::backend("keystore_error", "Failed to list keys"))?;
@@ -716,12 +679,12 @@ fn resolve_key_id(
             match matching.len() {
                 0 => Err(CommandError::new(
                     "key_not_found",
-                    format!("No key found with label: {label}"),
+                    "No key found with requested label",
                 )),
                 1 => Ok(matching[0].id),
                 _ => Err(CommandError::new(
                     "ambiguous_label",
-                    format!("Multiple keys found with label: {label}"),
+                    "Multiple keys found with requested label",
                 )),
             }
         }

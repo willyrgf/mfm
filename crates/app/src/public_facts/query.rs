@@ -46,38 +46,16 @@ impl PublicFactQueryRequest {
     /// Validates transport-independent public fact query invariants.
     pub fn validate(&self) -> Result<(), AppError> {
         if self.return_fields.is_empty() {
-            return Err(fact_return_field_missing());
+            return Err(AppError::new(
+                ErrorClass::BadRequest,
+                "FactReturnFieldMissing",
+                "Fact queries must request at least one return field",
+            ));
         }
         Ok(())
     }
 }
 
-fn fact_return_field_missing() -> AppError {
-    AppError::new(
-        ErrorClass::BadRequest,
-        "FactReturnFieldMissing",
-        "Fact queries must request at least one return field",
-    )
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn query_request_validation_rejects_empty_return_fields() {
-        let request = PublicFactQueryRequest {
-            fact_kind: mfm_facts::FactKind::new("mfm.app.test.launch").expect("fact kind"),
-            shape: None,
-            predicates: Vec::new(),
-            return_fields: Vec::new(),
-            ordering: mfm_facts::FactOrderingName::new("result.amount.asc").expect("ordering"),
-            limit: None,
-        };
-
-        assert_eq!(
-            request.validate().expect_err("missing return field").code,
-            "FactReturnFieldMissing"
-        );
-    }
-}
+#[path = "query_tests.rs"]
+mod tests;

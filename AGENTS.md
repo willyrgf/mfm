@@ -56,9 +56,8 @@ Use Cargo and focused checks while developing:
 - `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
 - targeted schema, metadata, and parity checks for touched surfaces
 
-For parity tests that need Postgres, Reth, or other live services, start those services manually and
-run the focused Cargo test with explicit environment variables such as `DATABASE_URL`,
-`RETH_HTTP_PORT`, or `MFM_RUNTIME_CONFIG_FILE`.
+For parity tests that need live services, start those services manually and run the focused Cargo
+test with explicit environment variables such as `DATABASE_URL` or `MFM_RUNTIME_CONFIG_FILE`.
 
 Before each commit, run the Nixfied managed gates:
 
@@ -128,7 +127,7 @@ Current Nixfied command contract:
 - `nix run .#check`: rustfmt, clippy, and architecture/cargo metadata contracts.
 - `nix run .#test`: `cargo nextest run --workspace` plus `cargo test --workspace --doc` without managed external services.
 - `nix run .#test-db`: managed Postgres plus SQLx schema drift checks and Postgres parity tests.
-- `nix run .#ci`: full CI by definition; starts managed Postgres and Reth and runs all parity tests.
+- `nix run .#ci`: full CI by definition; starts the managed services required by parity tests.
 - `nix run .#mfm -- <ARGS>`: runs the packaged MFM CLI built with the Nixfied-pinned Rust toolchain.
 
 Environment variables you should expect:
