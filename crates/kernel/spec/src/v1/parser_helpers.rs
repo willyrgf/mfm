@@ -2,13 +2,6 @@ use super::*;
 
 pub(super) fn parse_vec<T>(
     value: &serde_json::Value,
-    parser: fn(&serde_json::Value) -> Result<T>,
-) -> Result<Vec<T>> {
-    array(value, "array")?.iter().map(parser).collect()
-}
-
-pub(super) fn parse_vec_with<T>(
-    value: &serde_json::Value,
     parser: impl Fn(&serde_json::Value) -> Result<T>,
 ) -> Result<Vec<T>> {
     array(value, "array")?.iter().map(parser).collect()
@@ -26,17 +19,6 @@ where
 }
 
 pub(super) fn optional_parse<T>(
-    object: &serde_json::Map<String, serde_json::Value>,
-    field: &'static str,
-    parser: fn(&serde_json::Value) -> Result<T>,
-) -> Result<Option<T>> {
-    match object.get(field) {
-        Some(serde_json::Value::Null) | None => Ok(None),
-        Some(value) => parser(value).map(Some),
-    }
-}
-
-pub(super) fn optional_parse_with<T>(
     object: &serde_json::Map<String, serde_json::Value>,
     field: &'static str,
     parser: impl Fn(&serde_json::Value) -> Result<T>,

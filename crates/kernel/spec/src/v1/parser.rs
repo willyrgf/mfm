@@ -67,11 +67,11 @@ pub(super) fn parse_typed_execution_spec(value: &serde_json::Value) -> Result<Ty
         parse_descriptor_identity,
     )?;
     let descriptors = DescriptorParseIndex::new(&descriptor_identities)?;
-    let nodes = parse_vec_with(required(object, "nodes")?, |node| {
+    let nodes = parse_vec(required(object, "nodes")?, |node| {
         parse_node_spec(node, &descriptors)
     })?;
     let remediations = parse_remediations(required(object, "remediations")?, &descriptors)?;
-    let planning_lineage = parse_vec_with(required(object, "planning_lineage")?, |frame| {
+    let planning_lineage = parse_vec(required(object, "planning_lineage")?, |frame| {
         parse_operation_lineage_frame(frame, &descriptors)
     })?;
     let public_outputs =
@@ -617,7 +617,7 @@ fn parse_node_spec(
             "fact_descriptor_allowlist",
         )?)?,
         side_effect: optional_parse(object, "side_effect", parse_side_effect_contract)?,
-        framework: optional_parse_with(object, "framework", |framework| {
+        framework: optional_parse(object, "framework", |framework| {
             parse_framework_node(framework, descriptors)
         })?,
         planning_lineage: parse_planning_lineage(required(object, "planning_lineage")?)?,
