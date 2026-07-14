@@ -2,7 +2,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use mfm_ids::RunId;
-use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
 /// Environment variable carrying the runtime config file path.
@@ -232,11 +231,6 @@ rpc_url = {rpc_url}
     config_path
 }
 
-/// Sets the runtime config env var for one test EVM route and restores it on drop.
-pub fn set_evm_runtime_config_env_for_test(network_id: &str, rpc_url: &str) -> EnvVarRestore {
-    set_evm_runtime_config_env_with_signer_for_test(network_id, rpc_url, None)
-}
-
 /// Sets the runtime config env var for one EVM route plus optional signer binding.
 pub fn set_evm_runtime_config_env_with_signer_for_test(
     network_id: &str,
@@ -353,129 +347,4 @@ where
         .await
         .expect("start fixture run");
     (run_id, certified)
-}
-
-/// Asserts framework attempts start before their terminal evidence appears in stream JSON.
-pub fn assert_framework_started_before_terminal_evidence(
-    stream_events: &[serde_json::Value],
-    attempts: &[serde_json::Value],
-    nodes: &[spec::NodeSpec],
-    run_id: &RunId,
-) {
-    for node in nodes.iter().filter(|node| node.framework.is_some()) {
-        let required_kind = match &node.framework {
-            Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => "public_output_render",
-            Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_)) => {
-                "project_retention_manifest"
-            }
-            Some(spec::FrameworkNodeSpec::CompleteRun(_)) => "complete_run",
-            _ => continue,
-        };
-        let attempt = attempts
-            .iter()
-            .find(|attempt| {
-                attempt["node_id"].as_str() == Some(node.node_id.as_str())
-                    && attempt["disposition"].as_str() == Some("completed")
-            })
-            .unwrap_or_else(|| {
-                panic!(
-                    "missing completed {required_kind} framework attempt for {}",
-                    node.node_id
-                )
-            });
-        let attempt_id = attempt["attempt_id"].as_str().expect("attempt id");
-        let attempt_key = format!("attempt:{}:{}", node.node_id, attempt_id);
-        let start_index = stream_event_position(
-            stream_events,
-            |event| {
-                event["logical_key"].as_str() == Some(attempt_key.as_str())
-                    && event["event_schema_id"]
-                        .as_str()
-                        .is_some_and(|schema| schema.contains("state_attempt_started"))
-            },
-            &format!("framework start {attempt_key}"),
-        );
-        let completed_index = stream_event_position(
-            stream_events,
-            |event| {
-                event["logical_key"].as_str() == Some(attempt_key.as_str())
-                    && event["event_schema_id"]
-                        .as_str()
-                        .is_some_and(|schema| schema.contains("state_attempt_completed"))
-            },
-            &format!("framework completion {attempt_key}"),
-        );
-        assert!(
-            start_index < completed_index,
-            "framework StateAttemptStarted must precede StateAttemptCompleted for {attempt_key}"
-        );
-
-        match &node.framework {
-            Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => {
-                let public_output_index = stream_event_position(
-                    stream_events,
-                    |event| {
-                        event["logical_key"]
-                            .as_str()
-                            .is_some_and(|key| key.starts_with("public_output:"))
-                            && event["event_schema_id"]
-                                .as_str()
-                                .is_some_and(|schema| schema.contains("public_output_produced"))
-                    },
-                    "public-output terminal evidence",
-                );
-                assert!(
-                    start_index < public_output_index,
-                    "public-output framework start must precede public output evidence"
-                );
-            }
-            Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_)) => {
-                let retention_prefix = format!("retention:{}:manifest:", run_id);
-                let retention_index = stream_event_position(
-                    stream_events,
-                    |event| {
-                        event["logical_key"]
-                            .as_str()
-                            .is_some_and(|key| key.starts_with(&retention_prefix))
-                            && event["event_schema_id"].as_str().is_some_and(|schema| {
-                                schema.contains("retention_manifest_projected")
-                            })
-                    },
-                    "retention manifest terminal evidence",
-                );
-                assert!(
-                    start_index < retention_index,
-                    "retention framework start must precede retention manifest evidence"
-                );
-            }
-            Some(spec::FrameworkNodeSpec::CompleteRun(_)) => {
-                let completed_run_index = stream_event_position(
-                    stream_events,
-                    |event| {
-                        event["logical_key"].as_str() == Some("run:complete")
-                            && event["event_schema_id"]
-                                .as_str()
-                                .is_some_and(|schema| schema.contains("run_completed"))
-                    },
-                    "run completion terminal evidence",
-                );
-                assert!(
-                    start_index < completed_run_index,
-                    "complete-run framework start must precede run completion evidence"
-                );
-            }
-            _ => {}
-        }
-    }
-}
-
-fn stream_event_position(
-    events: &[serde_json::Value],
-    predicate: impl Fn(&serde_json::Value) -> bool,
-    label: &str,
-) -> usize {
-    events
-        .iter()
-        .position(predicate)
-        .unwrap_or_else(|| panic!("missing stream event for {label}"))
 }
