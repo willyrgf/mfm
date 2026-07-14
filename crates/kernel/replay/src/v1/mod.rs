@@ -171,20 +171,6 @@ pub struct ReplayReadAuthority {
 }
 
 impl ReplayReadAuthority {
-    /// Mints replay read authority from certifier-backed runtime authority and a shared
-    /// verified run-history view.
-    pub fn from_verified_run_history_view(
-        runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
-        verified_view: &mfm_runtime::VerifiedRunHistoryView,
-    ) -> Result<Self> {
-        Self::from_verified_run_history_view_with_source_facts_and_artifacts(
-            runtime_spec,
-            verified_view,
-            Vec::new(),
-            Vec::new(),
-        )
-    }
-
     /// Mints replay read authority with retained source facts and additional certified artifacts.
     pub fn from_verified_run_history_view_with_source_facts_and_artifacts(
         runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,

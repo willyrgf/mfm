@@ -79,11 +79,6 @@ impl ProjectionFactIndexProvider {
         Self::new(store::AsyncInMemoryRunStore::default())
     }
 
-    /// Dyn provider over the given store (shared by integration and app unit tests).
-    pub fn arc(store: store::AsyncInMemoryRunStore) -> Arc<dyn FactIndexReadProvider> {
-        Arc::new(Self::new(store))
-    }
-
     /// Dyn provider over an empty in-memory store.
     pub fn empty_arc() -> Arc<dyn FactIndexReadProvider> {
         Arc::new(Self::empty())

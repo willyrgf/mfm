@@ -156,11 +156,6 @@ impl ProofApplyConfig {
     pub fn action(&self) -> &str {
         self.action.as_str()
     }
-
-    /// Consumes this config into the stable proof action.
-    pub fn into_action(self) -> String {
-        self.action.into_string()
-    }
 }
 
 impl<'de> Deserialize<'de> for ProofApplyConfig {

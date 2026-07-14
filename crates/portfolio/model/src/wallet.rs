@@ -288,58 +288,6 @@ pub enum WalletImplementationConfig {
     },
 }
 
-/// Wallet signer details selected by runtime planning.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "wallet-signer-config",
-    schema = "mfm.portfolio.wallet_signer_config"
-)]
-pub struct WalletSignerConfig {
-    /// Canonical signer kind.
-    pub signer_kind: String,
-    /// Opaque runtime signer reference.
-    pub signer_ref: String,
-}
-
-/// Runtime wallet capabilities.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "wallet-capabilities",
-    schema = "mfm.portfolio.wallet_capabilities"
-)]
-pub struct WalletCapabilities {
-    /// Whether the implementation can resolve an address.
-    pub can_resolve_address: bool,
-    /// Whether the implementation can sign payloads.
-    pub can_sign: bool,
-    /// Whether the implementation can submit transactions.
-    pub can_submit: bool,
-}
-
-/// Resolved wallet after runtime planning.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "resolved-wallet",
-    schema = "mfm.portfolio.resolved_wallet"
-)]
-pub struct ResolvedWallet {
-    /// Stable wallet identifier.
-    pub wallet_id: String,
-    /// Canonical resolved address.
-    pub address: String,
-    /// Stable network identifier.
-    pub network_id: String,
-    /// Canonical implementation kind string.
-    pub implementation_kind: String,
-    /// Runtime capabilities.
-    pub capabilities: WalletCapabilities,
-    /// Optional signer details.
-    pub signer: Option<WalletSignerConfig>,
-}
-
 /// Validation errors for canonical wallet configs.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum WalletConfigError {

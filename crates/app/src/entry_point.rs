@@ -326,16 +326,6 @@ impl EntryPointOpRegistry {
         })
     }
 
-    /// Returns the number of registered public name/version pairs.
-    pub fn len(&self) -> usize {
-        self.ops.values().map(BTreeMap::len).sum()
-    }
-
-    /// Returns whether the registry has no launchable operations.
-    pub fn is_empty(&self) -> bool {
-        self.ops.is_empty()
-    }
-
     /// Returns the canonical digest of the registered public entry-point surface.
     pub fn registry_digest(&self) -> Result<ContentDigest, EntryPointOpError> {
         let mut entries = Vec::new();
