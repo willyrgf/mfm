@@ -845,7 +845,9 @@ fn verify_validation_report_replay_output(
             "validation report evidence refs do not match certified configured input",
         ));
     }
-    verify_lifecycle_evidence_refs_retained(broker, &output.evidence_refs)?;
+    for evidence in &output.evidence_refs {
+        replay_lifecycle_artifact(broker, evidence)?;
+    }
     let action: ValidateAction = replay_node_config(broker, &frame.node)?;
     verify_validation_results_match_action(output, &action)?;
     verify_validation_source_evidence(
@@ -1080,23 +1082,6 @@ fn replay_source_run_artifact(
     artifact: &events::RunArtifactEvidenceRef,
 ) -> replay::Result<replay::ArtifactReplayEvidence> {
     broker.retained_artifact(&run_artifact_requirement(source, artifact))
-}
-
-fn verify_lifecycle_evidence_refs_retained(
-    broker: &replay::ReplayBroker,
-    refs: &[LifecycleArtifactEvidenceRef],
-) -> replay::Result<()> {
-    for evidence in refs {
-        verify_lifecycle_evidence_ref_retained(broker, evidence)?;
-    }
-    Ok(())
-}
-
-fn verify_lifecycle_evidence_ref_retained(
-    broker: &replay::ReplayBroker,
-    evidence: &LifecycleArtifactEvidenceRef,
-) -> replay::Result<()> {
-    replay_lifecycle_artifact(broker, evidence).map(|_| ())
 }
 
 fn source_run_import_evidence_refs(
