@@ -528,7 +528,7 @@ release or snapshot table.
 The existing PostgreSQL storage crate, pool, migrator, and schema authority are reused. Because the
 crate will no longer store only streams, the implementation should rename it and its concrete store
 type to general PostgreSQL storage names and delete the old names. It must not introduce a second
-PostgreSQL crate, pool, migration authority, or compatibility aliases.
+PostgreSQL crate, pool, migration authority, app-level storage alias, or compatibility alias.
 
 PostgreSQL is the first persistence implementation, not part of catalog value identity. An exact
 reference and its canonical bytes are sufficient to verify a value without later database access.
@@ -543,13 +543,13 @@ is no `CatalogValue` marker trait or second schema and validation framework. Set
 closed list of concrete resource document types; it is not a public generic "persist any JSON"
 surface.
 
-Initial value families are expected to include:
-
-- EVM and Bitcoin semantic network definitions;
-- EVM account sets and Bitcoin address sets;
-- token and asset definitions and named token sets;
-- portfolio, organization, and wallet subject groupings;
-- non-secret signer intent and expected public signer identity.
+The first implementation stores existing complete `MfmConfig` types rather than inventing granular
+resource wrappers before they have multiple consumers. Its value set is `PortfolioConfig`, the BTC
+and EVM collector configs, `EvmContractContext` promoted to `MfmConfig`, and the existing contract
+action/import config types. The composed portfolio operation derives collector configs from one
+loaded `PortfolioConfig`, so the motivating workflow still has one source for networks, wallets,
+and symbols. Separate network, account-set, address-set, token-set, and signer-intent catalog types
+are deferred until a concrete second consumer justifies them.
 
 The only new typed primitive required by the core model is an exact reference:
 
@@ -575,9 +575,7 @@ An entry-point request uses typed references and operation-local policy:
 
 ```rust
 struct EvmBalanceRequest {
-    network: CatalogRef<EvmNetwork>,
-    accounts: CatalogRef<EvmAccountSet>,
-    policy: BalancePolicy,
+    config: CatalogRef<EvmNativeBalanceConfig>,
 }
 ```
 
@@ -627,9 +625,9 @@ networks/ethereum-mainnet
 ```
 
 `CatalogRef<EvmNetworkV1>` cannot load the `EvmNetworkV2` row because the generic loader verifies
-the exact schema id before decoding. Durable language-neutral references and launch provenance
-retain `name`, `schema_id`, and `digest`, even though Rust can derive the expected schema id
-from `T`.
+the exact schema id before decoding. A typed request carries `name` and `digest`; its exact request
+schema supplies `T` and therefore the expected schema id. Catalog listing, exact export, and launch
+provenance retain `name`, `schema_id`, and `digest` for language-neutral inspection.
 
 Schema migration is an explicit pure transformation from one exact typed value to another:
 
@@ -656,13 +654,15 @@ catalog value by itself.
 
 ### Config construction stays operation-owned
 
-Each catalog-backed entry point has two distinct inputs:
+Each catalog-backed entry point distinguishes:
 
 1. A small authored request containing typed catalog references and operation-local policy.
 2. The complete canonical `MfmConfig` produced after resolution.
 
-Each operation owns an ordinary pure function rather than implementing a new universal builder
-trait:
+When a request references one already-complete `MfmConfig`, exact loading is the entire construction
+step; the implementation must not add an identity builder. When multiple values or operation-local
+policy must be joined, the operation owns an ordinary pure function rather than implementing a new
+universal builder trait:
 
 ```rust
 fn build_config(
@@ -676,14 +676,15 @@ The application flow is:
 
 1. Parse an entry-point request that already contains exact digests.
 2. Load each `CatalogRef<T>` through the generic typed loader.
-3. Pass the ordinary typed values to the operation-owned `build_config` function.
+3. Use a loaded complete config directly, or pass multiple typed values to the operation-owned
+   `build_config` function when assembly is required.
 4. Validate the resulting complete `MfmConfig` through its existing operation contract.
 5. Expand, lower, certify, and admit through the existing path.
 
 The builder is deterministic over its request and resolved values. It performs relational semantic
-checks that an individual catalog resource cannot perform, such as ensuring that a token set and an
-account set belong to the selected EVM network. The operation's existing config validation remains
-the final planning check.
+checks that an individual catalog resource cannot perform, such as ensuring contract imports match
+the selected context or deriving collector configs consistently from one portfolio. The operation's
+existing config validation remains the final planning check.
 
 No kernel trait changes are required. Catalog resolution is pre-planning application behavior;
 `Operation::expand` continues to accept only complete typed config. The entry-point operation
@@ -768,10 +769,11 @@ mfm setup import organization.toml
   -> append all rows in one transaction
 ```
 
-The initial CLI can then add or revise networks, public wallet identities, token sets, portfolio
-groupings, and non-secret signer intents without creating one handwritten TOML file per operation.
-TOML is the setup import encoding and canonical JSON is the exact export encoding. Future REST or UI
-onboarding may reuse the same typed publication boundary after its authorization model is designed.
+The initial CLI imports complete typed values, including a `PortfolioConfig` aggregate that owns its
+networks, public wallet identities, and symbols without one handwritten TOML file per collector and
+report operation. TOML is the setup import encoding and canonical JSON is the exact export encoding.
+Future REST or UI onboarding may edit those concepts separately and publish the resulting complete
+typed value through the same boundary after its authorization model is designed.
 
 Setup validation has three layers:
 
@@ -795,6 +797,10 @@ small source set:
 The generated canonical operation-config digest and certified-spec identity already exist in the
 normal planning/admission path. Together these values explain construction without creating another
 authority object.
+
+The exact entry-point id and catalog sources are `RunAdmitted` audit evidence. They do not enter
+`RunIdentityMaterialV1`; run identity remains defined only by certified spec hash, store scope, and
+invocation-key digest as required by `docs/design.md`.
 
 The failure boundary is intentional:
 
@@ -850,6 +856,11 @@ them with equivalent catalog wrappers.
   operation crates.
 - Delete `LaunchableOp`, `EntryPointPlannerAdapter`, and public adapter/registration variants that
   exist only to feed the old authored-config path.
+- Delete the app-level `EntryPointOpId`, `EntryPointOpError`, `EntryPointRunLaunchInput`,
+  `PreparedEntryPointRunLaunch`, duplicate `EntryPointLaunchEvidence`,
+  `production_entry_point_op_registry`, and registration helpers.
+- Delete `ProductionRunStore` and `ProductionPostgresSchema` aliases rather than renaming them to
+  another app alias. Use the concrete `PostgresStore` name or a narrow app service constructor.
 - Keep a private application dispatch table from exact entry-point id to one typed request
   preparation function. Do not introduce a public dynamic builder trait or service-locator API.
 - Preserve operation-owned `build_config` functions and ordinary operation-specific errors. Collapse
@@ -873,8 +884,8 @@ An incompatible request or builder change creates another exact entry-point id. 
 
 - Replace `resolved_op_id` plus `entry_point_registry_digest` launch evidence with the exact
   entry-point id and the sorted exact catalog source identities used by that launch.
-- Overwrite the current event schema, codec, fixtures, and runtime identity representation. Do not
-  add a legacy event variant, compatibility decoder, migration shim, or dual-write period.
+- Overwrite the current event schema, codec, fixtures, and runtime rendering of launch evidence. Do
+  not add a legacy event variant, compatibility decoder, migration shim, or dual-write period.
 - Continue to use the generated operation-config digest and certified-spec identity as the
   authority for what executes. Catalog sources explain where reusable inputs came from; they do not
   become another runtime authority.
@@ -912,6 +923,8 @@ The initial design does not include:
 - separate catalog-entry and revision tables or numeric revisions;
 - mutable alias/current-version tables;
 - catalog releases, snapshots, lock manifests, or environment promotion;
+- granular network, account-set, address-set, token-set, and signer-intent wrappers without a
+  demonstrated second consumer;
 - nested catalog references, recursive closure, or cycle detection;
 - a generic config-builder trait or dynamic resource codec registry;
 - a separate `Resolved<T>` abstraction;
@@ -972,6 +985,8 @@ The simplified design preserves the essential properties:
 - Store/database scope is the catalog authorization and isolation boundary for the first
   implementation. Resource-level RBAC, retention, and audit are deferred rather than approximated.
 - Launch evidence stores exact entry-point id plus sorted `(name, schema_id, digest)` sources.
+- Kernel, runtime, replay, states, certified configs, and event payload types do not depend on
+  `mfm-config` or contain `CatalogRef<T>`; event evidence stores checked scalar source identities.
 - Explicit typed schema migrations append new values and are setup-time tools. They are not generic
   launch-time registration or fallback machinery.
 - The first higher-level workflow is collect-then-report, proving that shared catalog resources can
