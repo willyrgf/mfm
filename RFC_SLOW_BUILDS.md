@@ -540,34 +540,575 @@ After build-policy changes have a controlled baseline, separate changes may:
 These changes must not be mixed into the build-policy rollout. Raw lockfile
 duplication and package count are not sufficient justification.
 
-## Implementation sequence
+## Gated implementation and commit protocol
 
-Implementation will use small changes with one logical outcome each:
+This RFC is not authorization to execute the whole sequence in one work
+session or pull request. A request to begin implementation authorizes only the
+next approved phase.
 
-1. **Baseline:** capture controlled cold, warm, and one-leaf-edit measurements
-   without changing behavior.
-2. **Test deduplication:** make the workspace feature selection explicit and
-   remove the duplicate app test invocation.
-3. **SQLx invalidation:** remove the explicit package clean and add the schema
-   mutation regression check.
-4. **Developer lane:** expose the pinned development environment and non-gating
-   quick entry point.
-5. **Verification artifacts:** apply the central nonincremental/line-table
-   policy and the isolated Nixfied cache identity.
-6. **Profile experiment:** compare codegen-unit and test optimization variants.
-7. **Nix derivation pilot:** build dependency and final verification artifacts
-   as immutable derivations, then execute the supported artifacts through
-   Nixfied without copying a Cargo target.
-8. **Compiler-cache experiment:** compare bounded Linux `sccache` against the
-   improved target baseline and the Nix-native pilot, including a cache-bypass
-   run.
-9. **Architecture decision:** compare target-only, Nix-native, `sccache`, and
-   any justified hybrid using the common acceptance criteria, then document
-   the selected long-term design and rejected measured alternatives.
-10. **Independent follow-ups:** investigate dependency features, unused
-   dependencies, transitive duplication, and safe task parallelism.
+### Mandatory stop rule
 
-The existing comprehensive gates remain authoritative throughout the rollout.
+Each successful phase produces at most one logical commit. After evaluating
+that clean commit, the engineer must stop, deliver the phase report below, and
+wait for explicit owner approval before preparing or implementing the next
+phase.
+
+The stop applies even when:
+
+- every test and performance threshold passes;
+- the next change appears mechanical;
+- the remaining token, time, or CI budget is available; or
+- multiple later phases could be implemented together conveniently.
+
+Do not start background measurements, edit files, add dependencies, or prepare
+the next phase while awaiting approval. Approval for one phase does not imply
+approval for another.
+
+One phase/one commit is a success-path maximum, not a requirement to commit
+broken or unjustified work:
+
+- if a correctness or coverage check fails before commit, do not commit;
+- if required underlying Nixfied support is missing, do not add a shell
+  workaround; stop and report the capability gap;
+- if post-commit evaluation finds a regression, stop and recommend keep,
+  revert, or redesign without taking that action automatically;
+- if an experiment has no qualifying implementation, record a report-only
+  conclusion rather than manufacturing an empty or knowingly inferior code
+  commit.
+
+### Per-phase workflow
+
+For every phase, in order:
+
+1. Confirm explicit approval for that phase and its stated scope.
+2. Confirm the worktree has no unrelated changes. Preserve all user-owned
+   changes and stop if they overlap the phase.
+3. Record the parent commit, toolchain, host, cache state, task graph, relevant
+   baseline measurements, and test inventory.
+4. Implement only the phase outcome. Experimental alternatives use isolated
+   targets or worktrees and are not accumulated in the main worktree.
+5. Run focused checks while developing and compare the relevant inventories
+   before and after the change.
+6. Before committing, run the repository-required gates:
+
+   ```text
+   nix run .#check
+   nix run .#test
+   nix run .#test-db
+   ```
+
+7. Run `nix run .#ci` for any phase that changes build tasks, test selection,
+   SQLx behavior, profiles, cache behavior, Nix derivations, GitHub workflows,
+   or the selected default architecture.
+8. Create one commit with a lower-case subject and only the phase's logical
+   change.
+9. Evaluate the clean committed tree using the phase-specific matrix. Record
+   exact commands, Nixfied run ids, timings, storage, coverage, and any
+   unverified surface. Never report a dirty-worktree Nix result as an
+   exact-derivation cache result.
+10. Deliver the phase report and stop. Do not proceed until the owner explicitly
+    selects proceed, hold, revert, or redesign.
+
+Documentation-only commits remain subject to the repository's current
+pre-commit gate policy. If that policy changes independently, this workflow
+follows the new authoritative policy.
+
+### Required phase report
+
+Every stop report must be self-contained and use this shape:
+
+```text
+Phase:
+Commit: <hash and lower-case subject, or "not committed">
+Outcome: passed | failed | mixed | blocked
+
+Changed:
+- files and behavior changed
+- explicit non-changes
+
+Verification:
+- focused checks and results
+- check/test/test-db/ci results and durations
+- test, doctest, trybuild, schema, and parity inventory comparison
+
+Measurements:
+- parent versus candidate timings under named cache states
+- compile/link versus execution time
+- Cargo target, Nix closure/store, inode, and cache statistics
+
+Acceptance:
+- each applicable threshold: pass | fail | not yet applicable
+
+Risks and limitations:
+- failures, variance, missing platforms, operational cost, and uncertainty
+
+Recommendation:
+- proceed | hold | revert | redesign
+- exact scope requested for the next phase
+```
+
+Never include database credentials, private paths containing secrets, private
+keys, mnemonics, or secret-bearing environment values in a report. Report
+sanitized command shapes and Nixfied run identifiers instead.
+
+### Phase and commit plan
+
+#### Phase 00: land the accepted RFC
+
+Change:
+
+- commit this RFC as the sole documentation change;
+- establish the gated execution and measurement contract; and
+- make no build, workflow, or runtime behavior change.
+
+Evaluate:
+
+- validate Markdown whitespace and every local link;
+- confirm the RFC distinguishes observations from controlled baselines; and
+- run the repository-required pre-commit gates.
+
+Expected commit subject:
+
+```text
+docs: define gated slow-build evaluation
+```
+
+Stop report decision: approve or revise the execution contract before any
+performance implementation begins.
+
+#### Phase 01: record the controlled baseline
+
+Change:
+
+- add one repository-owned baseline report under `docs/` containing the
+  measurement context, commands, run ids, test inventory, and results;
+- measure the clean Phase 00 commit, not the later report commit; and
+- make no build configuration change.
+
+Evaluate:
+
+- three isolated clean runs and five warm runs where feasible;
+- focused leaf, broad quick-equivalent check, each public Nixfied gate, and full
+  CI;
+- Linux and macOS, explicitly marking any platform not yet available; and
+- compilation, linking, execution, service, target-size, `.dwo`, inode, and
+  variance measurements separately.
+
+Expected commit subject:
+
+```text
+docs: record controlled build baseline
+```
+
+Stop report decision: accept the baseline as decision-quality or repeat it
+before changing behavior.
+
+#### Phase 02: remove duplicate app test execution
+
+Change:
+
+- make `mfm-app/test-support` explicit in workspace Nextest;
+- remove the separate app Nextest task and composite edge; and
+- change no other test selection or ordering.
+
+Evaluate:
+
+- compare exact Nextest test identifiers before and after;
+- prove the app tests and manual-resolution coverage remain present;
+- run all nine trybuild harnesses and all discovered doctests; and
+- measure removed execution and any compile/fingerprint difference.
+
+Expected commit subject:
+
+```text
+remove duplicate mfm app test run
+```
+
+Stop report decision: keep, revert, or redesign the consolidation.
+
+#### Phase 03: remove redundant SQLx invalidation
+
+Change:
+
+- remove MFM's explicit package clean from online SQLx preparation;
+- add or strengthen a disposable-schema mutation check; and
+- leave online SQLx uncached.
+
+Evaluate:
+
+- prove unchanged schema and checked metadata pass;
+- prove a schema mutation with unchanged Rust sources fails;
+- restore the disposable schema and prove the gate passes again; and
+- measure which Cargo units rebuild before and after the change.
+
+Expected commit subject:
+
+```text
+stop precleaning postgres sqlx artifacts
+```
+
+Stop report decision: keep only if drift detection and cleanup semantics remain
+fail-closed.
+
+#### Phase 04: add the developer lane
+
+Change:
+
+- expose the repository-pinned development environment;
+- add the non-gating `quick` entry point; and
+- keep all comprehensive gate commands and semantics unchanged.
+
+Evaluate:
+
+- focused package check/test latency;
+- the quick command's exact target surface;
+- toolchain equality with Nixfied verification; and
+- proof that `quick` is neither called by nor substituted for a full gate.
+
+Expected commit subject:
+
+```text
+add pinned quick development lane
+```
+
+Stop report decision: accept the inner-loop contract before changing
+verification artifacts.
+
+#### Phase 05: compact verification artifacts
+
+Change:
+
+- centrally disable verification incremental compilation;
+- select line-table debug information and disable split-debug artifacts;
+- remove or replace the ineffective `[profile.ci]`; and
+- leave direct developer Cargo profiles unchanged.
+
+Evaluate:
+
+- clean and warm gate time;
+- backtrace file/line quality on Linux and macOS;
+- target, incremental, `.dwo`, inode, and trybuild sizes after two full runs;
+- complete test and feature inventory; and
+- rollback behavior when the policy version changes.
+
+Expected commit subject:
+
+```text
+use compact verification build artifacts
+```
+
+Stop report decision: keep, revert, or adjust the verification artifact policy.
+
+#### Phase 06: isolate mutable verification targets
+
+Change:
+
+- replace the undifferentiated target path with a Nixfied cache environment
+  identity scoped by platform, toolchain, slot/worktree boundary, and policy;
+- add only safe, build-cache-scoped lifecycle behavior; and
+- do not alter Postgres, run-record, or diagnostic state cleanup.
+
+Evaluate:
+
+- reuse in repeated runs from one worktree;
+- isolation between two concurrent worktrees and slots;
+- compiler/toolchain and policy-version invalidation;
+- cleanup protection for service and diagnostic state; and
+- disk growth across repeated and changed-input runs.
+
+Expected commit subject:
+
+```text
+scope verification cargo artifacts by slot
+```
+
+Stop report decision: if Nixfied lacks correct cache-family lifecycle support,
+report the upstream capability needed instead of continuing locally.
+
+#### Phase 07: select measured profile tuning
+
+Change:
+
+- compare codegen-unit defaults with `256` and `opt-level=0` with
+  `opt-level=1` using isolated variants;
+- commit only a qualifying winner plus its documented rationale; or
+- commit a report-only rejection when the baseline remains best.
+
+Evaluate:
+
+- total compile, link, test, doctest, trybuild, and parity time;
+- debug assertions, overflow checks, diagnostics, and backtraces;
+- clean, warm, and one-leaf-edit behavior; and
+- Linux/macOS consistency.
+
+Expected commit subject, selected according to the result:
+
+```text
+tune verification profile from measurements
+```
+
+or:
+
+```text
+docs: record verification profile experiment
+```
+
+Stop report decision: freeze the winning baseline used by both cache pilots.
+
+#### Phase 08: add an opt-in Nix dependency-artifact pilot
+
+Change:
+
+- add a non-default derivation that separates compiled third-party dependencies
+  from final MFM artifacts;
+- declare and regression-test compile-relevant inputs; and
+- avoid changing public Nixfied gates.
+
+Evaluate:
+
+- exact source, documentation-only, leaf-crate, shared-crate, manifest/lock,
+  feature/profile, and cross-worktree changes;
+- derivations rebuilt versus reused;
+- evaluation/build time and output/closure size; and
+- source-filter false-hit and conservative-rebuild tests.
+
+Expected commit subject:
+
+```text
+add nix dependency artifact pilot
+```
+
+Stop report decision: if a new Nix Rust framework or flake input is required,
+report its justification and alternatives before adding it in a separately
+approved phase.
+
+#### Phase 09: add opt-in Nix verification artifacts
+
+Change:
+
+- build a declared feature/profile bundle containing the feasible final test
+  binaries, Nextest archive or equivalent, and CLI artifact;
+- keep the bundle opt-in; and
+- do not copy a Cargo target from the Nix store.
+
+Evaluate:
+
+- binary and test inventory against the mutable-target baseline;
+- runtime closure completeness and backtrace quality;
+- exact-hit and source-change rebuild behavior;
+- doctest and trybuild surfaces not represented by the bundle; and
+- artifact and closure size.
+
+Expected commit subject:
+
+```text
+add nix verification artifact bundle
+```
+
+Stop report decision: approve direct Nixfied consumption only after artifact
+coverage and purity are understood.
+
+#### Phase 10: execute Nix artifacts through shadow verification
+
+Change:
+
+- add an opt-in, non-public-gating Nixfied task that executes immutable test
+  artifacts directly from declared closures;
+- retain runtime Cargo tasks as the authoritative comparison; and
+- leave live-service parity and online SQLx unchanged.
+
+Evaluate:
+
+- result and test-identifier equality with authoritative workspace tests;
+- execution without writable target copying or undeclared host tools;
+- task evidence and failure diagnostics; and
+- exact-source and changed-source end-to-end wall time.
+
+Expected commit subject:
+
+```text
+run nix artifacts through shadow verification
+```
+
+Stop report decision: approve or reject expansion into live-service parity.
+
+#### Phase 11: execute Nix artifacts through shadow parity
+
+Change:
+
+- extend only the opt-in shadow path to parity tests whose binaries can be
+  built purely;
+- keep Postgres lifecycle and test execution under Nixfied; and
+- keep online SQLx preparation live and uncached.
+
+Evaluate:
+
+- parity result, output, schema, and service-lifecycle equality;
+- ambient-input isolation and SQLx drift behavior;
+- compile versus service/test execution time; and
+- closure portability on Linux and macOS.
+
+Expected commit subject:
+
+```text
+run nix artifacts through shadow parity
+```
+
+Stop report decision: determine whether the Nix pilot has enough coverage for
+a formal candidate assessment.
+
+#### Phase 12: record the Nix-native pilot conclusion
+
+Change:
+
+- add a decision-quality Nix pilot report under `docs/`;
+- classify each acceptance criterion and unresolved surface; and
+- keep all pilot tasks opt-in.
+
+Evaluate:
+
+- persistent local store versus fresh runner behavior;
+- binary-cache transfer and trust costs if tested;
+- full source-change matrix and Linux/macOS results;
+- storage, garbage-collection, evaluation, and maintenance cost; and
+- whether finer per-crate derivations are justified by measured residual work.
+
+Expected commit subject:
+
+```text
+docs: record nix artifact pilot results
+```
+
+Stop report decision: proceed to `sccache`, request a narrower Nix refinement,
+or hold because compilation is no longer material.
+
+#### Phase 13: add an opt-in local `sccache` pilot
+
+Change:
+
+- add the Nix-pinned compiler cache to an opt-in verification path;
+- enforce its size bound and nonincremental profile; and
+- explicitly disable it for online SQLx preparation.
+
+Evaluate:
+
+- cold, warm, one-leaf-edit, shared-crate, and cache-bypass results;
+- cacheable requests, hits, misses, evictions, and lookup overhead;
+- linking, rustdoc, trybuild, and execution time left uncached;
+- target plus cache disk consumption; and
+- result equality with both the target-only and Nix-native candidates.
+
+Expected commit subject:
+
+```text
+add bounded local rust compiler cache pilot
+```
+
+Stop report decision: approve CI persistence only if local results meet the
+pilot thresholds.
+
+#### Phase 14: pilot `sccache` persistence in CI
+
+This phase is conditional and requires separate approval after Phase 13.
+
+Change:
+
+- persist only the bounded compiler-object cache on Linux CI;
+- key it by the declared platform, toolchain, lock, and policy inputs;
+- restrict writes to trusted workflows; and
+- retain a cache-bypass comparison.
+
+Evaluate:
+
+- fresh, restored, and bypass CI runs;
+- upload/download time, hit rate, archive size, retention, and failure behavior;
+- untrusted pull-request read/write boundaries and secret exclusion; and
+- whether macOS deserves a separate later pilot.
+
+Expected commit subject:
+
+```text
+pilot bounded rust compiler cache in ci
+```
+
+Stop report decision: classify `sccache` as eligible, rejected, or requiring a
+bounded follow-up.
+
+#### Phase 15: select the long-term architecture
+
+Change:
+
+- update this RFC or add an ADR with the comparable target-only, Nix-native,
+  `sccache`, and hybrid results;
+- select the least complex qualifying design, which may differ between
+  persistent workstations and ephemeral CI; and
+- define the rollout and rollback plan without enabling it yet.
+
+Evaluate:
+
+- every common correctness, performance, storage, security, diagnostic, and
+  lifecycle criterion;
+- operational dependencies and maintenance burden;
+- sensitivity to cacheless and changed-input scenarios; and
+- whether a hybrid's incremental gain justifies two cache models.
+
+Expected commit subject:
+
+```text
+docs: select long-term build cache architecture
+```
+
+Stop report decision: explicit owner approval is required before changing the
+authoritative verification path.
+
+#### Phase 16: enable the selected architecture
+
+Change:
+
+- make only the approved candidate authoritative for the agreed environment;
+- retain a documented bypass/rollback path; and
+- preserve public gate names, coverage, and output contracts.
+
+Evaluate:
+
+- the full clean/warm/change matrix on Linux and macOS;
+- cacheless and rollback runs;
+- all comprehensive Nixfied gates and CI; and
+- repeated-run storage and lifecycle behavior.
+
+Expected commit subject:
+
+```text
+enable selected verification cache architecture
+```
+
+Stop report decision: accept the rollout, roll it back, or hold before cleanup.
+
+#### Phase 17: remove rejected pilot surfaces and finalize the record
+
+Change:
+
+- remove opt-in tasks, packages, workflow branches, and dependencies belonging
+  only to rejected candidates;
+- retain reusable measurement support only when justified; and
+- mark the RFC implemented with final measured results and operating guidance.
+
+Evaluate:
+
+- absence of dead tasks, flake inputs, cache directories, and workflow paths;
+- model/schema, Cargo metadata, full gate, and CI correctness;
+- documentation and command-contract consistency; and
+- final disk, timing, and test-inventory comparison against Phase 01.
+
+Expected commit subject:
+
+```text
+remove rejected build cache pilots
+```
+
+Stop report decision: final merge-readiness review. Dependency-feature,
+unused-dependency, transitive-version, and scheduling optimizations are new
+work streams and require their own approved phase/commit plans.
 
 ## Measurement protocol
 
