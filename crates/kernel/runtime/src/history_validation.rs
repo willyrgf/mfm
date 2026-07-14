@@ -481,13 +481,12 @@ fn validate_atomic_terminal_pairs(
     for event in stream {
         match event.payload() {
             events::KernelEventPayload::StateAttemptCompleted(payload) => {
-                let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                runtime_spec.node(&payload.node_id).ok_or_else(|| {
                     RuntimeError::InvalidRunStream(format!(
                         "attempt completed for uncertified node {}",
                         payload.node_id
                     ))
                 })?;
-                let _ = node;
                 completions.insert((
                     event.seq(),
                     payload.node_id.clone(),
@@ -496,13 +495,12 @@ fn validate_atomic_terminal_pairs(
                 ));
             }
             events::KernelEventPayload::CellProduced(payload) => {
-                let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                runtime_spec.node(&payload.node_id).ok_or_else(|| {
                     RuntimeError::InvalidRunStream(format!(
                         "cell produced by uncertified node {}",
                         payload.node_id
                     ))
                 })?;
-                let _ = node;
                 terminal_cells.insert((
                     event.seq(),
                     payload.node_id.clone(),
@@ -511,13 +509,12 @@ fn validate_atomic_terminal_pairs(
                 ));
             }
             events::KernelEventPayload::CellSkipped(payload) => {
-                let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                runtime_spec.node(&payload.node_id).ok_or_else(|| {
                     RuntimeError::InvalidRunStream(format!(
                         "cell skipped by uncertified node {}",
                         payload.node_id
                     ))
                 })?;
-                let _ = node;
                 terminal_cells.insert((
                     event.seq(),
                     payload.node_id.clone(),
