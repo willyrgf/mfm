@@ -131,14 +131,7 @@ pub(super) async fn verify_public_output_authority_artifacts(
         verify_public_output_cell_evidence(cell, &evidence)?;
     }
     if let Some(artifact_id) = rendered_artifact_id {
-        let json_media_type = spec::MediaType::new("application/json").map_err(|error| {
-            let _ = error;
-            AppError::backend(
-                ErrorClass::Internal,
-                "PublicOutputMediaTypeInvalid",
-                "Public-output JSON media type is invalid",
-            )
-        })?;
+        let json_media_type = public_output_json_media_type()?;
         let requirement = public_output_rendered_artifact_requirement(
             payload,
             artifact_id,
@@ -299,14 +292,7 @@ pub(super) async fn load_public_output_json(
     rendered_digest: &mfm_ids::ContentDigest,
     payload: &events::PublicOutputProduced,
 ) -> Result<serde_json::Value, AppError> {
-    let json_media_type = spec::MediaType::new("application/json").map_err(|error| {
-        let _ = error;
-        AppError::backend(
-            ErrorClass::Internal,
-            "PublicOutputMediaTypeInvalid",
-            "Public-output JSON media type is invalid",
-        )
-    })?;
+    let json_media_type = public_output_json_media_type()?;
     let requirement = public_output_rendered_artifact_requirement(
         payload,
         artifact_id,
@@ -338,14 +324,7 @@ pub(super) fn verify_public_output_rendered_artifact_evidence(
     rendered_digest: &ContentDigest,
     payload: &events::PublicOutputProduced,
 ) -> Result<(), AppError> {
-    let json_media_type = spec::MediaType::new("application/json").map_err(|error| {
-        let _ = error;
-        AppError::backend(
-            ErrorClass::Internal,
-            "PublicOutputMediaTypeInvalid",
-            "Public-output JSON media type is invalid",
-        )
-    })?;
+    let json_media_type = public_output_json_media_type()?;
     validate_artifact_requirement_for_app(
         public_output_rendered_artifact_requirement(
             payload,
@@ -358,6 +337,16 @@ pub(super) fn verify_public_output_rendered_artifact_evidence(
         "PublicOutputArtifactMismatch",
         "typed public-output cache artifact evidence does not match the produced event",
     )
+}
+
+fn public_output_json_media_type() -> Result<spec::MediaType, AppError> {
+    spec::MediaType::new("application/json").map_err(|_| {
+        AppError::backend(
+            ErrorClass::Internal,
+            "PublicOutputMediaTypeInvalid",
+            "Public-output JSON media type is invalid",
+        )
+    })
 }
 
 pub(super) fn public_output_artifact_mismatch(message: &'static str) -> AppError {
