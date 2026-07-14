@@ -160,14 +160,6 @@ pub async fn connect_production_run_store(
     Ok(ProductionRunStore::connect(&database_url).await?)
 }
 
-/// Connects production evidence-only services without loading live capability configuration.
-pub async fn connect_production_run_read_store(
-    database_url: Option<&str>,
-) -> Result<ProductionRunStore, AppError> {
-    let database_url = production_database_url(database_url)?;
-    Ok(ProductionRunStore::connect(&database_url).await?)
-}
-
 /// Connects the production store-backed public-fact query service.
 pub async fn connect_production_fact_public_query_service(
     database_url: Option<&str>,
@@ -217,7 +209,7 @@ pub async fn connect_production_run_services(
 pub async fn connect_production_run_read_services(
     database_url: Option<&str>,
 ) -> Result<ProductionRunReadServices, AppError> {
-    let store = connect_production_run_read_store(database_url).await?;
+    let store = connect_production_run_store(database_url).await?;
     let certification_registry = production_certification_registry()?;
     Ok(make_run_read_services(
         store.clone(),

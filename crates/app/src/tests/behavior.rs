@@ -631,7 +631,7 @@ async fn run_read_services_are_evidence_only() {
         .expect("production read constructor is bounded");
     assert!(!production_read_constructor.contains("production_runner_registry"));
     assert!(!production_read_constructor.contains("std::env"));
-    assert!(production_read_constructor.contains("connect_production_run_read_store"));
+    assert!(production_read_constructor.contains("connect_production_run_store"));
 
     let read_services_impl = include_str!("../services_read.rs");
     assert!(!read_services_impl.contains("production_runner_registry"));
