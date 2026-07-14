@@ -7,9 +7,7 @@ use std::sync::Arc;
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigError, EntryPointDescriptor};
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{ContentDigest, NameToken, ResourceNamespace};
-use mfm_program::{
-    TypedProgramConfigMaterial, TypedProgramDraft, TypedProgramLaunchPlan, TypedProgramSeedMaterial,
-};
+use mfm_program::TypedProgramLaunchPlan;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -145,27 +143,6 @@ impl fmt::Display for EntryPointOpId {
     }
 }
 
-/// Deterministic plan returned by a launchable entry-point operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EntryPointOpPlan {
-    /// Typed program draft to certify before runtime launch.
-    pub draft: TypedProgramDraft,
-    /// Canonical config artifacts required by the draft.
-    pub config_material: Vec<TypedProgramConfigMaterial>,
-    /// Canonical seed artifacts required by the draft.
-    pub seed_material: Vec<TypedProgramSeedMaterial>,
-}
-
-impl From<TypedProgramLaunchPlan> for EntryPointOpPlan {
-    fn from(plan: TypedProgramLaunchPlan) -> Self {
-        Self {
-            draft: plan.draft,
-            config_material: plan.config_material,
-            seed_material: plan.seed_material,
-        }
-    }
-}
-
 /// Operation that can plan a public entry-point run from authored config.
 pub trait LaunchableOp: Send + Sync {
     /// Returns the static public entry-point metadata for this operation.
@@ -175,7 +152,10 @@ pub trait LaunchableOp: Send + Sync {
     fn op_id(&self) -> EntryPointOpId;
 
     /// Deterministically plans the typed program draft and launch material.
-    fn plan(&self, authored_config: AuthoredConfig) -> Result<EntryPointOpPlan, OpLaunchError>;
+    fn plan(
+        &self,
+        authored_config: AuthoredConfig,
+    ) -> Result<TypedProgramLaunchPlan, OpLaunchError>;
 }
 
 /// Generic app adapter from a typed op-crate planner to [`LaunchableOp`].
@@ -224,7 +204,10 @@ where
         self.op_id.clone()
     }
 
-    fn plan(&self, authored_config: AuthoredConfig) -> Result<EntryPointOpPlan, OpLaunchError> {
+    fn plan(
+        &self,
+        authored_config: AuthoredConfig,
+    ) -> Result<TypedProgramLaunchPlan, OpLaunchError> {
         if !self
             .descriptor
             .accepted_config_formats
@@ -238,7 +221,7 @@ where
 
         let normalized = authored_config.normalize::<TConfig>()?;
         let planned = (self.planner)(normalized.value).map_err(self.map_error)?;
-        Ok(planned.into())
+        Ok(planned)
     }
 }
 

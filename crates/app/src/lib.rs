@@ -94,8 +94,8 @@ pub use self::services::{RunReadServices, RunServices};
 use live_transports::{LiveTransportRuntime, RuntimeConfigLoader};
 
 pub use entry_point::{
-    EntryPointOpId, EntryPointOpPlan, EntryPointOpRegistry, EntryPointOpResolveError,
-    EntryPointPlannerAdapter, LaunchableOp, OpLaunchError, OpVersion, PublicOpName,
+    EntryPointOpId, EntryPointOpRegistry, EntryPointOpResolveError, EntryPointPlannerAdapter,
+    LaunchableOp, OpLaunchError, OpVersion, PublicOpName,
 };
 
 #[path = "errors.rs"]
@@ -913,36 +913,8 @@ pub fn prepare_entry_point_run_launch(
         .resolve(&input.public_op_name, input.op_version)?;
     let resolved_op_id = op.op_id();
     let plan = op.plan(input.authored_config)?;
-
-    let mut config_inputs = plan
-        .config_material
-        .iter()
-        .map(|artifact| RunLaunchConfigArtifact {
-            schema_id: artifact.schema_id.clone(),
-            bytes: artifact.bytes.to_vec(),
-            media_type: artifact.media_type.clone(),
-        })
-        .collect::<Vec<_>>();
-    let seed_inputs = plan
-        .seed_material
-        .iter()
-        .map(|artifact| RunLaunchSeedArtifact {
-            seed_id: artifact.seed_id.clone(),
-            bytes: artifact.bytes.to_vec(),
-            media_type: artifact.media_type.clone(),
-        })
-        .collect::<Vec<_>>();
-    let lowered =
-        mfm_certify::lower_program_draft(&plan.draft).map_err(entry_point_certification_error)?;
-    let scoped_registry = input
-        .certification_registry
-        .scoped_for_spec(lowered.spec())
-        .map_err(entry_point_certification_error)?;
-    let certified_spec = mfm_certify::certify_typed_spec(lowered, &scoped_registry)
-        .map_err(entry_point_certification_error)?;
-    config_inputs.extend(framework_config_launch_artifacts_for_spec(
-        &certified_spec.envelope().spec,
-    )?);
+    let (certified_spec, scoped_registry, config_inputs, seed_inputs) =
+        certify_launch_plan(&plan, input.certification_registry)?;
 
     let evidence = EntryPointLaunchEvidence {
         resolved_op_id,
@@ -996,6 +968,45 @@ pub fn prepare_typed_program_run_launch_for_test(
                     "typed program launch material is invalid",
                 )
             })?;
+    let (certified_spec, scoped_registry, config_inputs, seed_inputs) =
+        certify_launch_plan(&plan, certification_registry)?;
+    let invocation_key_digest = invocation_key_digest_or_mint(invocation_key.as_ref())?;
+    prepare_certified_run_launch(
+        CertifiedRunLaunchInput {
+            certified_spec,
+            registry: &scoped_registry,
+            store_scope_id,
+            invocation_key_digest,
+            entry_point_evidence: events::EntryPointLaunchEvidence {
+                resolved_op_id: events::EntryPointOpId::new("mfm.test.typed_program_internal_test")
+                    .map_err(|_| {
+                        entry_point_launch_internal_error(
+                            "EntryPointLaunchEvidenceInvalid",
+                            "entry-point launch evidence is invalid",
+                        )
+                    })?,
+                entry_point_registry_digest: content_digest_for_bytes(
+                    b"mfm.app.test-support.typed-program-launch.v1",
+                ),
+            },
+        },
+        config_inputs,
+        seed_inputs,
+    )
+}
+
+fn certify_launch_plan(
+    plan: &mfm_program::TypedProgramLaunchPlan,
+    certification_registry: &CertificationRegistry,
+) -> Result<
+    (
+        CertifiedTypedSpec,
+        CertificationRegistry,
+        Vec<RunLaunchConfigArtifact>,
+        Vec<RunLaunchSeedArtifact>,
+    ),
+    AppError,
+> {
     let mut config_inputs = plan
         .config_material
         .iter()
@@ -1024,29 +1035,7 @@ pub fn prepare_typed_program_run_launch_for_test(
     config_inputs.extend(framework_config_launch_artifacts_for_spec(
         &certified_spec.envelope().spec,
     )?);
-    let invocation_key_digest = invocation_key_digest_or_mint(invocation_key.as_ref())?;
-    prepare_certified_run_launch(
-        CertifiedRunLaunchInput {
-            certified_spec,
-            registry: &scoped_registry,
-            store_scope_id,
-            invocation_key_digest,
-            entry_point_evidence: events::EntryPointLaunchEvidence {
-                resolved_op_id: events::EntryPointOpId::new("mfm.test.typed_program_internal_test")
-                    .map_err(|_| {
-                        entry_point_launch_internal_error(
-                            "EntryPointLaunchEvidenceInvalid",
-                            "entry-point launch evidence is invalid",
-                        )
-                    })?,
-                entry_point_registry_digest: content_digest_for_bytes(
-                    b"mfm.app.test-support.typed-program-launch.v1",
-                ),
-            },
-        },
-        config_inputs,
-        seed_inputs,
-    )
+    Ok((certified_spec, scoped_registry, config_inputs, seed_inputs))
 }
 
 fn entry_point_certification_error(_error: mfm_certify::CertifyError) -> AppError {

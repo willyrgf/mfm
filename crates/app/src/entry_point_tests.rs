@@ -32,10 +32,13 @@ impl LaunchableOp for FakeOp {
         EntryPointOpId::new("mfm.test", self.descriptor.name, version).expect("op id")
     }
 
-    fn plan(&self, _authored_config: AuthoredConfig) -> Result<EntryPointOpPlan, OpLaunchError> {
+    fn plan(
+        &self,
+        _authored_config: AuthoredConfig,
+    ) -> Result<TypedProgramLaunchPlan, OpLaunchError> {
         let draft = mfm_op_proof::proof_program_draft(mfm_op_proof::ProofWorkflowConfig::default())
-            .map_err(|error| OpLaunchError::new("EntryPointOpPlanFailed", error.to_string()))?;
-        Ok(EntryPointOpPlan {
+            .map_err(|error| OpLaunchError::new("EntryPointPlanFailed", error.to_string()))?;
+        Ok(TypedProgramLaunchPlan {
             draft,
             config_material: Vec::new(),
             seed_material: Vec::new(),
