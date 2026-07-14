@@ -292,17 +292,10 @@ fn side_effect_pair_fields_for_ctx(
 }
 
 fn run_identity_material(runtime_spec: &CertifiedRuntimeSpec) -> events::RunIdentityMaterialV1 {
-    run_identity_material_with_invocation(runtime_spec, content(0x10))
-}
-
-fn run_identity_material_with_invocation(
-    runtime_spec: &CertifiedRuntimeSpec,
-    invocation_key_digest: ContentDigest,
-) -> events::RunIdentityMaterialV1 {
     run_identity_material_with_scope_and_invocation(
         runtime_spec,
         fixture_store_scope_id(),
-        invocation_key_digest,
+        content(0x10),
     )
 }
 
@@ -328,13 +321,6 @@ fn fixture_run_identity_material(fixture: &Fixture) -> events::RunIdentityMateri
 
 fn refresh_fixture_run_id(fixture: &mut Fixture) {
     let invocation_key_digest = fixture.invocation_key_digest.clone();
-    refresh_fixture_run_id_with_invocation(fixture, invocation_key_digest);
-}
-
-fn refresh_fixture_run_id_with_invocation(
-    fixture: &mut Fixture,
-    invocation_key_digest: ContentDigest,
-) {
     let store_scope_id = fixture.store_scope_id.clone();
     refresh_fixture_run_id_with_identity(fixture, store_scope_id, invocation_key_digest);
 }
