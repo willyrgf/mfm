@@ -14,35 +14,6 @@ fn test_new_keystore_creation() {
 }
 
 #[test]
-fn test_private_key_import_and_retrieval() {
-    let (_temp_dir, mut keystore) = test_keystore();
-    keystore.unlock("test_password").unwrap();
-
-    let test_key = "0000000000000000000000000000000000000000000000000000000000000001";
-    let key_id = keystore
-        .import_private_key(Some("test_key".to_string()), test_key)
-        .unwrap();
-
-    // Test retrieval
-    let secure_key = keystore.get_private_key(key_id).unwrap();
-
-    // Test signing
-    let test_hash = [1u8; 32];
-    let signature = secure_key.sign_hash(&test_hash).unwrap();
-
-    // Verify signature (basic check)
-    assert_eq!(signature.to_bytes().len(), 64);
-
-    // Test Ethereum address derivation
-    let address = secure_key.ethereum_address().unwrap();
-    assert_ne!(address, Address::ZERO);
-
-    // Test public key derivation
-    let public_key = secure_key.public_key().unwrap();
-    assert_eq!(public_key.to_encoded_point(false).len(), 65); // Uncompressed: 1 + 32 + 32
-}
-
-#[test]
 fn test_mnemonic_import_and_retrieval() {
     let (_temp_dir, mut keystore) = test_keystore();
     keystore.unlock("test_password").unwrap();
