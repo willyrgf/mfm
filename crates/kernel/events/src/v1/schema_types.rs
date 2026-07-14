@@ -159,20 +159,29 @@ fn event_type_schema(type_name: &'static str) -> serde_json::Value {
         | "AmbiguityCode"
         | "ErrorCode"
         | "ClaimFencingToken"
-        | "EntryPointOpId" => visible_ascii_256_type(type_name),
+        | "EntryPointId"
+        | "CatalogSourceName" => visible_ascii_256_type(type_name),
         "EntryPointLaunchEvidence" => struct_type(
             "EntryPointLaunchEvidence",
             vec![
                 schema_field(
-                    "resolved_op_id",
-                    "EntryPointOpId",
+                    "entry_point_id",
+                    "EntryPointId",
                     EventFieldCardinality::Required,
                 ),
                 schema_field(
-                    "entry_point_registry_digest",
-                    "ContentDigest",
-                    EventFieldCardinality::Required,
+                    "catalog_sources",
+                    "CatalogSourceEvidence",
+                    EventFieldCardinality::Repeated,
                 ),
+            ],
+        ),
+        "CatalogSourceEvidence" => struct_type(
+            "CatalogSourceEvidence",
+            vec![
+                schema_field("name", "CatalogSourceName", EventFieldCardinality::Required),
+                schema_field("schema_id", "SchemaId", EventFieldCardinality::Required),
+                schema_field("digest", "ContentDigest", EventFieldCardinality::Required),
             ],
         ),
         "FactKind" | "FactKey" => visible_ascii_256_type(type_name),

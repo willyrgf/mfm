@@ -29,12 +29,11 @@ use axum::Json;
 use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
-    AppError, EntryPointRunLaunchInput, ErrorClass, InvocationKey, ManualResolutionDecision,
-    ManualResolutionRecordRequest, ProductionRunStore, PublicFactQueryRequest, PublicFactRefId,
-    PublicOpName, PublicOutputResponse, PublicSafeMessage, RunLaunchOutcomeStatus, RunReadServices,
-    RunResponse, RunServices, RunStreamResponse,
+    AppError, ErrorClass, InvocationKey, ManualResolutionDecision, ManualResolutionRecordRequest,
+    PostgresStore, PublicFactQueryRequest, PublicFactRefId, PublicOutputResponse,
+    PublicSafeMessage, RunLaunchOutcomeStatus, RunReadServices, RunResponse, RunServices,
+    RunStreamResponse,
 };
-use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{RunId, SchemaId};
 use mfm_store::v1 as store;
@@ -129,26 +128,6 @@ impl From<AppError> for ApiError {
     }
 }
 
-impl From<mfm_app::EntryPointOpError> for ApiError {
-    fn from(error: mfm_app::EntryPointOpError) -> Self {
-        Self::new(
-            StatusCode::BAD_REQUEST,
-            error.code().to_owned(),
-            PublicSafeMessage::new(error.message().to_owned()),
-        )
-    }
-}
-
-impl From<mfm_authored_config::AuthoredConfigError> for ApiError {
-    fn from(error: mfm_authored_config::AuthoredConfigError) -> Self {
-        Self::new(
-            StatusCode::BAD_REQUEST,
-            error.code().to_owned(),
-            PublicSafeMessage::new(error.message().to_owned()),
-        )
-    }
-}
-
 impl From<JsonRejection> for ApiError {
     fn from(_error: JsonRejection) -> Self {
         Self::invalid_json()
@@ -208,15 +187,17 @@ impl RestProcessRole {
 }
 
 /// Default production REST API state.
-pub type DefaultAppState = AppState<ProductionRunStore>;
+pub type DefaultAppState = AppState<PostgresStore>;
 
 /// Shared router state injected into request handlers.
 #[derive(Clone)]
-pub struct AppState<S = ProductionRunStore> {
+pub struct AppState<S = PostgresStore> {
     /// Process role that selected the store connector and route admission policy.
     pub role: RestProcessRole,
     /// Certified typed run-event and artifact authority store.
     pub store: S,
+    /// Catalog authority used only during exact run-start preparation.
+    pub catalog_store: Option<PostgresStore>,
     /// Optional runtime configuration file path for live capability-backed runs.
     pub runtime_config_path: Option<PathBuf>,
     /// Platform/Control fact-index used by portfolio report and collector runners.
@@ -226,6 +207,7 @@ pub struct AppState<S = ProductionRunStore> {
 #[derive(Clone)]
 struct RouterState<S> {
     app: AppState<S>,
+    catalog_store: Option<PostgresStore>,
     live_services: Arc<OnceLock<Result<RunServices<S, S>, ApiError>>>,
     read_services: Arc<OnceLock<Result<RunReadServices<S, S>, ApiError>>>,
 }
@@ -315,10 +297,11 @@ where
 
 /// Builds production REST API state for an explicit process role.
 pub async fn make_app_state_for_role(role: RestProcessRole) -> Result<DefaultAppState, ApiError> {
-    let store = mfm_app::connect_production_run_store(None).await?;
+    let store = mfm_app::connect_production_store(None).await?;
     let fact_index = mfm_app::production_fact_index_read_provider(store.clone());
     Ok(AppState {
         role,
+        catalog_store: Some(store.clone()),
         store,
         runtime_config_path: std::env::var_os(mfm_app::MFM_RUNTIME_CONFIG_FILE).map(PathBuf::from),
         fact_index,
@@ -347,6 +330,7 @@ where
     let request_id_header = HeaderName::from_static("x-request-id");
     let make_span_header = request_id_header.clone();
     let state = RouterState {
+        catalog_store: state.catalog_store.clone(),
         app: state,
         live_services: Arc::new(OnceLock::new()),
         read_services: Arc::new(OnceLock::new()),
@@ -453,12 +437,8 @@ enum ManualResolutionKind {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RunStartBody {
-    op: String,
-    #[serde(default)]
-    op_version: Option<u32>,
-    #[serde(default)]
-    config_format: Option<RestConfigFormat>,
-    config: serde_json::Value,
+    entry_point: String,
+    request: serde_json::Value,
     #[serde(default)]
     invocation_key: Option<String>,
 }
@@ -472,22 +452,6 @@ struct RunStartResponse {
     active_run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     public_output: Option<PublicOutputResponse>,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RestConfigFormat {
-    Toml,
-    Json,
-}
-
-impl From<RestConfigFormat> for AuthoredConfigFormat {
-    fn from(value: RestConfigFormat) -> Self {
-        match value {
-            RestConfigFormat::Toml => Self::Toml,
-            RestConfigFormat::Json => Self::Json,
-        }
-    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -719,24 +683,25 @@ where
     let Json(req) = body?;
     let services = state.live_services()?;
     let store_scope_id = services.load_store_scope_id().await?;
-    let entry_point_registry = mfm_app::production_entry_point_op_registry()?;
-    let public_op_name = PublicOpName::new(&req.op)?;
-    let op_version = req.op_version.map(mfm_app::OpVersion::new).transpose()?;
     let invocation_key = req.invocation_key.map(InvocationKey::new).transpose()?;
-    let authored_config = AuthoredConfig::from_json_transport_value(
-        req.config_format.map(AuthoredConfigFormat::from),
-        &req.config,
-    )?;
-    let prepared = mfm_app::prepare_entry_point_run_launch(EntryPointRunLaunchInput {
-        entry_point_registry: &entry_point_registry,
-        public_op_name,
-        op_version,
-        authored_config,
-        certification_registry: services.certification_registry(),
+    mfm_app::validate_entry_point_id(&req.entry_point)?;
+    let catalog_store = state.catalog_store.as_ref().ok_or_else(|| {
+        ApiError::backend(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "CatalogStoreUnavailable",
+            "Catalog authority is unavailable for run preparation",
+        )
+    })?;
+    let request = mfm_app::prepare_entry_point_run_launch(
+        catalog_store,
+        &req.entry_point,
+        &req.request,
+        services.certification_registry(),
         store_scope_id,
         invocation_key,
-    })?;
-    let report = services.launch_prepared_entry_point_run(prepared).await?;
+    )
+    .await?;
+    let report = services.launch_run_and_render(request).await?;
 
     json_ok(RunStartResponse {
         outcome: report.outcome,

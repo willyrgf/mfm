@@ -1,8 +1,8 @@
 #![warn(missing_docs)]
 //! Typed application assembly for certified MFM runs.
 //!
-//! `mfm-app` is the typed boundary used by binaries and process adapters. Callers select a
-//! registered entry-point operation and authored config; this crate resolves,
+//! `mfm-app` is the typed boundary used by binaries and process adapters. Callers select an
+//! exact entry-point id and catalog-backed request; this crate resolves,
 //! plans, certifies, stages launch material, and wires typed services for start, resume, replay,
 //! and public-output rendering.
 //!
@@ -16,7 +16,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mfm_artifact_capabilities::ArtifactReadProvider;
-use mfm_authored_config::AuthoredConfig;
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::{ProviderDiagnosticCode, ProviderDiagnosticValue};
 use mfm_certify::{CertificationRegistry, CertifiedTypedSpec};
@@ -44,8 +43,7 @@ use serde_json::map::Entry;
 use serde_json::{Map, Value};
 
 pub use mfm_runtime::ErasedRunnerRegistry;
-pub use mfm_storage_postgres::PostgresSchema as ProductionPostgresSchema;
-pub use mfm_storage_postgres::PostgresStore as ProductionRunStore;
+pub use mfm_storage_postgres::{PostgresSchema, PostgresStore};
 
 pub use public_facts::{
     is_public_fact_query_parameter_error, parse_public_fact_predicates, FactCatalogService,
@@ -66,11 +64,9 @@ pub use public_facts::{
 pub(crate) use public_facts::{public_ref_id, query_public_facts, AppFactQueryRow};
 
 mod btc_collector;
-mod catalog_resolver;
 mod composition;
 mod config_setup;
 mod entry_point;
-mod entry_points;
 mod evm_collector;
 mod evm_contracts;
 mod fact_index;
@@ -94,15 +90,13 @@ pub use self::services::{RunReadServices, RunServices};
 
 use live_transports::{LiveTransportRuntime, RuntimeConfigLoader};
 
-pub use catalog_resolver::resolve_catalog_value;
 pub use config_setup::{
     export_catalog_value, import_setup_toml, list_catalog_values, CatalogListCursor,
     CatalogValueIdentity,
 };
-
 pub use entry_point::{
-    EntryPointOpError, EntryPointOpId, EntryPointOpRegistry, EntryPointPlannerAdapter,
-    LaunchableOp, OpVersion, PublicOpName,
+    entry_point_summaries, prepare_entry_point_run_launch, validate_entry_point_id,
+    EntryPointSummary,
 };
 
 #[path = "errors.rs"]
@@ -151,27 +145,27 @@ where
 }
 
 /// Production typed run services backed by the Postgres run store.
-pub type ProductionRunServices = RunServices<ProductionRunStore, ProductionRunStore>;
+pub type ProductionRunServices = RunServices<PostgresStore, PostgresStore>;
 
 /// Production evidence-only run services backed by the Postgres run store.
-pub type ProductionRunReadServices = RunReadServices<ProductionRunStore, ProductionRunStore>;
+pub type ProductionRunReadServices = RunReadServices<PostgresStore, PostgresStore>;
 
 /// Production public fact query service backed by the Postgres fact query executor.
-pub type ProductionFactPublicQueryService = FactPublicQueryService<ProductionRunStore>;
+pub type ProductionFactPublicQueryService = FactPublicQueryService<PostgresStore>;
 
 /// Connects and validates the production Postgres run store.
-pub async fn connect_production_run_store(
+pub async fn connect_production_store(
     database_url: Option<&str>,
-) -> Result<ProductionRunStore, AppError> {
+) -> Result<PostgresStore, AppError> {
     let database_url = production_database_url(database_url)?;
-    Ok(ProductionRunStore::connect(&database_url).await?)
+    Ok(PostgresStore::connect(&database_url).await?)
 }
 
 /// Connects the production store-backed public-fact query service.
 pub async fn connect_production_fact_public_query_service(
     database_url: Option<&str>,
 ) -> Result<ProductionFactPublicQueryService, AppError> {
-    let store = connect_production_run_store(database_url).await?;
+    let store = connect_production_store(database_url).await?;
     let projection = store
         .fact_projection_snapshot()
         .await
@@ -198,7 +192,7 @@ pub async fn connect_production_run_services(
     database_url: Option<&str>,
     runtime_config_path: Option<&Path>,
 ) -> Result<ProductionRunServices, AppError> {
-    let store = connect_production_run_store(database_url).await?;
+    let store = connect_production_store(database_url).await?;
     // Portfolio SelectHoldings and BTC collectors require the Postgres fact-index provider.
     let fact_index = production_fact_index_read_provider(store.clone());
     let runners =
@@ -216,7 +210,7 @@ pub async fn connect_production_run_services(
 pub async fn connect_production_run_read_services(
     database_url: Option<&str>,
 ) -> Result<ProductionRunReadServices, AppError> {
-    let store = connect_production_run_store(database_url).await?;
+    let store = connect_production_store(database_url).await?;
     let certification_registry = production_certification_registry()?;
     Ok(make_run_read_services(
         store.clone(),
@@ -371,11 +365,6 @@ pub fn production_certification_registry() -> Result<CertificationRegistry, AppE
     Ok(registry)
 }
 
-/// Builds the production entry-point operation registry for this process.
-pub fn production_entry_point_op_registry() -> Result<EntryPointOpRegistry, AppError> {
-    entry_points::production_entry_point_op_registry()
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DriveStatus {
     Observed,
@@ -478,42 +467,6 @@ pub struct RunLaunchRequest {
     pub identity_material: events::RunIdentityMaterialV1,
     /// Launch material that runtime middleware stages and admits with the admission commit.
     pub evidence: RunLaunchEvidence,
-}
-
-/// Request to prepare an entry-point op launch.
-pub struct EntryPointRunLaunchInput<'a> {
-    /// Registry containing public entry-point operation registrations.
-    pub entry_point_registry: &'a EntryPointOpRegistry,
-    /// Public operation name submitted by the caller.
-    pub public_op_name: PublicOpName,
-    /// Optional explicit public operation version.
-    pub op_version: Option<OpVersion>,
-    /// Authored operation config submitted by the caller.
-    pub authored_config: AuthoredConfig,
-    /// Trusted certification registry used to certify the planned typed spec.
-    pub certification_registry: &'a CertificationRegistry,
-    /// Store-owned deployment scope.
-    pub store_scope_id: StoreScopeId,
-    /// Optional caller material identifying one intended invocation.
-    pub invocation_key: Option<InvocationKey>,
-}
-
-/// App-level evidence for a prepared entry-point op launch.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EntryPointLaunchEvidence {
-    /// Typed entry-point op id resolved from the registry.
-    pub resolved_op_id: EntryPointOpId,
-    /// Canonical digest of the entry-point registry used for resolution.
-    pub entry_point_registry_digest: ContentDigest,
-}
-
-/// Prepared entry-point op launch material accepted by app runtime services.
-#[derive(Debug, Clone)]
-pub struct PreparedEntryPointRunLaunch {
-    /// Runtime run launch request.
-    pub request: RunLaunchRequest,
-    /// Entry-point launch evidence produced by app assembly.
-    pub evidence: EntryPointLaunchEvidence,
 }
 
 /// Request to append a signed manual resolution for a manually blocked typed run.
@@ -914,55 +867,12 @@ pub fn json_media_type() -> Result<spec::MediaType, AppError> {
     })
 }
 
-/// Resolves, plans, certifies, and prepares an entry-point op run launch.
-pub fn prepare_entry_point_run_launch(
-    input: EntryPointRunLaunchInput<'_>,
-) -> Result<PreparedEntryPointRunLaunch, AppError> {
-    let registry_digest = input.entry_point_registry.registry_digest()?;
-    let op = input
-        .entry_point_registry
-        .resolve(&input.public_op_name, input.op_version)?;
-    let resolved_op_id = op.op_id();
-    let plan = op.plan(input.authored_config)?;
-    let (certified_spec, scoped_registry, config_inputs, seed_inputs) =
-        certify_launch_plan(&plan, input.certification_registry)?;
-
-    let evidence = EntryPointLaunchEvidence {
-        resolved_op_id,
-        entry_point_registry_digest: registry_digest,
-    };
-    let invocation_key_digest = invocation_key_digest_or_mint(input.invocation_key.as_ref())?;
-    let runtime_entry_point_evidence = events::EntryPointLaunchEvidence {
-        resolved_op_id: events::EntryPointOpId::new(evidence.resolved_op_id.to_string()).map_err(
-            |_| {
-                entry_point_launch_internal_error(
-                    "EntryPointLaunchEvidenceInvalid",
-                    "entry-point launch evidence is invalid",
-                )
-            },
-        )?,
-        entry_point_registry_digest: evidence.entry_point_registry_digest.clone(),
-    };
-    let request = prepare_certified_run_launch(
-        CertifiedRunLaunchInput {
-            certified_spec,
-            registry: &scoped_registry,
-            store_scope_id: input.store_scope_id,
-            invocation_key_digest,
-            entry_point_evidence: runtime_entry_point_evidence,
-        },
-        config_inputs,
-        seed_inputs,
-    )?;
-    Ok(PreparedEntryPointRunLaunch { request, evidence })
-}
-
 /// Prepares a certified typed run launch from a program draft for integration tests.
 ///
 /// This helper is compiled only with `test-support`. It uses the same launch-material preparation
 /// path as production app services after the caller has supplied an already-built typed program
 /// draft and matching root seed material.
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub fn prepare_typed_program_run_launch_for_test(
     draft: mfm_program::TypedProgramDraft,
     seed_material: BTreeMap<SeedId, PlainCanonicalJsonBytes>,
@@ -988,18 +898,16 @@ pub fn prepare_typed_program_run_launch_for_test(
             registry: &scoped_registry,
             store_scope_id,
             invocation_key_digest,
-            entry_point_evidence: events::EntryPointLaunchEvidence {
-                resolved_op_id: events::EntryPointOpId::new("mfm.test.typed_program_internal_test")
-                    .map_err(|_| {
-                        entry_point_launch_internal_error(
-                            "EntryPointLaunchEvidenceInvalid",
-                            "entry-point launch evidence is invalid",
-                        )
-                    })?,
-                entry_point_registry_digest: content_digest_for_bytes(
-                    b"mfm.app.test-support.typed-program-launch.v1",
-                ),
-            },
+            entry_point_evidence: events::EntryPointLaunchEvidence::new(
+                "mfm.test/typed_program_internal_test@1",
+                Vec::new(),
+            )
+            .map_err(|_| {
+                entry_point_launch_internal_error(
+                    "EntryPointLaunchEvidenceInvalid",
+                    "entry-point launch evidence is invalid",
+                )
+            })?,
         },
         config_inputs,
         seed_inputs,
@@ -1052,8 +960,8 @@ fn certify_launch_plan(
 fn entry_point_certification_error(_error: mfm_certify::CertifyError) -> AppError {
     AppError::backend(
         ErrorClass::BadRequest,
-        "EntryPointOpCertificationFailed",
-        "Entry-point op planned spec failed certification",
+        "EntryPointCertificationFailed",
+        "Entry-point planned spec failed certification",
     )
 }
 

@@ -337,6 +337,131 @@ fn kernel_dependency_boundary_rejects_non_kernel_path_dependency_fixture() {
     );
 }
 
+#[test]
+fn config_catalog_ownership_and_dependency_boundaries_are_explicit() {
+    let root = repo_root();
+    let metadata = workspace_metadata(&root);
+    let packages = workspace_packages(&metadata, &root).expect("workspace package categories");
+    assert_eq!(
+        packages.len(),
+        52,
+        "the reviewed catalog cutover has 52 packages"
+    );
+
+    for removed in [
+        "mfm-authored-config",
+        "mfm-portfolio-config",
+        "mfm-evm-contract-config",
+        "mfm-stream-store-postgres",
+    ] {
+        assert!(
+            packages.iter().all(|package| package.name != removed),
+            "removed package remains in workspace metadata: {removed}"
+        );
+    }
+
+    let by_name = packages
+        .iter()
+        .map(|package| (package.name.as_str(), package))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        by_name
+            .get("mfm-catalog-model")
+            .map(|package| package.category),
+        Some(CrateCategory::DomainModel)
+    );
+    assert_eq!(
+        by_name
+            .get("mfm-runtime-config")
+            .map(|package| package.category),
+        Some(CrateCategory::RuntimeConfig)
+    );
+
+    let storage = by_name
+        .get("mfm-storage-postgres")
+        .expect("renamed PostgreSQL storage package");
+    for dependency in path_dependencies(&metadata, storage.name.as_str(), &by_name) {
+        assert_ne!(
+            dependency.name, "mfm-catalog-model",
+            "storage must remain independent from typed catalog request identities"
+        );
+        assert!(!matches!(
+            dependency.category,
+            CrateCategory::DomainModel | CrateCategory::DomainConfig
+        ));
+    }
+
+    for package in packages.iter().filter(|package| {
+        matches!(
+            package.category,
+            CrateCategory::Operation | CrateCategory::State
+        )
+    }) {
+        for dependency in path_dependencies(&metadata, package.name.as_str(), &by_name) {
+            assert!(
+                !matches!(
+                    dependency.name,
+                    "mfm-app" | "mfm-storage-postgres" | "mfm-runtime-config"
+                ) && dependency.name != "sqlx",
+                "{} may not depend on app, PostgreSQL, runtime config, or SQLx: {}",
+                package.name,
+                dependency.name
+            );
+        }
+    }
+
+    for package in packages
+        .iter()
+        .filter(|package| package.category == CrateCategory::Binary)
+    {
+        for dependency in path_dependencies(&metadata, package.name.as_str(), &by_name)
+            .into_iter()
+            .filter(|dependency| dependency.kind.is_none())
+        {
+            assert!(
+                !matches!(
+                    dependency.category,
+                    CrateCategory::DomainConfig | CrateCategory::Operation
+                ),
+                "production binary {} must not own domain config or operation ingress: {}",
+                package.name,
+                dependency.name
+            );
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PathDependency<'a> {
+    name: &'a str,
+    category: CrateCategory,
+    kind: Option<&'a str>,
+}
+
+fn path_dependencies<'a>(
+    metadata: &'a Value,
+    source_name: &str,
+    by_name: &'a BTreeMap<&'a str, &'a WorkspacePackage>,
+) -> Vec<PathDependency<'a>> {
+    metadata_packages(metadata)
+        .expect("metadata packages")
+        .iter()
+        .find(|package| package.get("name").and_then(Value::as_str) == Some(source_name))
+        .and_then(|package| package.get("dependencies").and_then(Value::as_array))
+        .into_iter()
+        .flatten()
+        .filter_map(|dependency| {
+            let name = dependency.get("name").and_then(Value::as_str)?;
+            let package = by_name.get(name)?;
+            Some(PathDependency {
+                name,
+                category: package.category,
+                kind: dependency.get("kind").and_then(Value::as_str),
+            })
+        })
+        .collect()
+}
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

@@ -61,24 +61,39 @@ where
     S: store::RunEventStore + store::StoreScopeStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
-    let entry_point_registry =
-        crate::entry_points::production_entry_point_op_registry().expect("entry points");
-    let public_op_name = crate::PublicOpName::new(op).expect("public op name");
-    let authored_config =
-        AuthoredConfig::from_json_transport_value(Some(AuthoredConfigFormat::Json), &config)
-            .expect("authored config");
-
-    prepare_entry_point_run_launch(EntryPointRunLaunchInput {
-        entry_point_registry: &entry_point_registry,
-        public_op_name,
-        op_version: None,
-        authored_config,
-        certification_registry: services.certification_registry(),
-        store_scope_id: services.load_store_scope_id().await.expect("store scope"),
-        invocation_key: None,
-    })
+    let draft = match op {
+        "evm_contract_deploy" => {
+            let config = serde_json::from_value::<
+                mfm_op_evm_contract_lifecycle::EvmContractDeployEntryConfig,
+            >(config)
+            .expect("deploy config");
+            mfm_op_evm_contract_lifecycle::deploy_contract_program_draft(config)
+        }
+        "evm_contract_validate" => {
+            let config = serde_json::from_value::<
+                mfm_op_evm_contract_lifecycle::EvmContractValidateEntryConfig,
+            >(config)
+            .expect("validate config");
+            mfm_op_evm_contract_lifecycle::validate_contract_program_draft(config)
+        }
+        "evm_contract_lifecycle" => {
+            let config = serde_json::from_value::<
+                mfm_op_evm_contract_lifecycle::EvmContractLifecycleEntryConfig,
+            >(config)
+            .expect("lifecycle config");
+            mfm_op_evm_contract_lifecycle::contract_lifecycle_program_draft(config)
+        }
+        _ => panic!("unknown internal EVM test program {op}"),
+    }
+    .expect("EVM test draft");
+    crate::prepare_typed_program_run_launch_for_test(
+        draft,
+        std::collections::BTreeMap::new(),
+        services.certification_registry(),
+        services.load_store_scope_id().await.expect("store scope"),
+        None,
+    )
     .expect("entry-point launch request")
-    .request
 }
 
 pub(super) fn public_schema_id(request: &RunLaunchRequest) -> mfm_ids::SchemaId {

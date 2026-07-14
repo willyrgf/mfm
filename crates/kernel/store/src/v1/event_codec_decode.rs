@@ -967,13 +967,17 @@ fn parse_run_artifact(json: &serde_json::Value) -> Result<events::RunArtifactEvi
 fn parse_entry_point_launch_evidence(
     json: &serde_json::Value,
 ) -> Result<events::EntryPointLaunchEvidence> {
-    Ok(events::EntryPointLaunchEvidence {
-        resolved_op_id: events::EntryPointOpId::new(required_str(json, "resolved_op_id")?)?,
-        entry_point_registry_digest: parse_identity(required_str(
-            json,
-            "entry_point_registry_digest",
-        )?)?,
-    })
+    let catalog_sources = parse_vec(json, "catalog_sources", |source| {
+        Ok(events::CatalogSourceEvidence::new(
+            required_str(source, "name")?,
+            parse_identity(required_str(source, "schema_id")?)?,
+            parse_identity(required_str(source, "digest")?)?,
+        )?)
+    })?;
+    Ok(events::EntryPointLaunchEvidence::new(
+        required_str(json, "entry_point_id")?,
+        catalog_sources,
+    )?)
 }
 
 fn parse_run_identity_material(json: &serde_json::Value) -> Result<events::RunIdentityMaterialV1> {

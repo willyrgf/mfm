@@ -6,10 +6,11 @@ pub(super) fn run_admitted_payload() -> KernelEventPayload {
     KernelEventPayload::RunAdmitted(Box::new(RunAdmitted {
         run_id,
         identity_material,
-        entry_point: EntryPointLaunchEvidence {
-            resolved_op_id: EntryPointOpId::new("mfm.portfolio/snapshot@1").expect("op id"),
-            entry_point_registry_digest: content_digest(18),
-        },
+        entry_point: EntryPointLaunchEvidence::new(
+            "mfm.portfolio/portfolio_snapshot@1",
+            Vec::new(),
+        )
+        .expect("entry point evidence"),
         spec_hash: spec_hash(2),
         spec_artifact: run_artifact_ref(
             artifact_id(3),
@@ -476,7 +477,7 @@ pub(super) fn event_schema_descriptor_requirement_sources_golden() {
 
     assert_eq!(
         rows,
-        r#"mfm.events.v1.run_admitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:9da01b57ef30318cc98621ddeef1092fe3b6fd8b1fce3b49b739af4278a83ba4 [RunSpec,RunCertificate,RunConfig,SeedCell,FactDescriptor]
+        r#"mfm.events.v1.run_admitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:59b7f25a359ef90fd4f7cf2f80f3077234f2b374d674aa944d2e6831de5db059 [RunSpec,RunCertificate,RunConfig,SeedCell,FactDescriptor]
 mfm.events.v1.state_attempt_started schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b []
 mfm.events.v1.fact_recorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:f66fc733963d3564fe94bcd8c5d80c489405ddc63c34002a9c6af381cf8f1734 [FactResponse]
 mfm.events.v1.artifact_referenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:b60ebe4bc262799c154a596362ae57672801f54e1b18d703572848626ccef3f0 [ArtifactReferenced]

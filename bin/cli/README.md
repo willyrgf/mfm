@@ -381,23 +381,31 @@ mfm_cli --output-format json keystore tx-sign \
   --out /tmp/signed.tx
 ```
 
-## Public Operation Commands
+## Public Entry-Point Commands
 
 ### `ops list`
 
-Lists the public entry-point operations registered in the compiled CLI/app registry. It does not
+Lists the exact public entry-point ids and request schema ids compiled into the binary. It does not
 connect to PostgreSQL or load runtime configuration.
 
 ```sh
 mfm_cli ops list
+mfm_cli --output-format json ops list
 ```
 
-Text output includes the public name, version, and accepted authored-config formats. JSON output
-uses the standard success envelope and returns the registry descriptors under `operations`.
+JSON output returns the descriptors under `entry_points`. The production surface is:
 
-The current production surface contains `btc_address_balance`, `evm_native_balance`,
-`evm_contract_deploy`, `evm_contract_configure`, `evm_contract_validate`,
-`evm_contract_lifecycle`, and `portfolio_snapshot`, all at public version `1`.
+- `mfm.portfolio/portfolio_snapshot@1`
+- `mfm.bitcoin/btc_address_balance@1`
+- `mfm.evm/evm_native_balance@1`
+- `mfm.evm.contract/deploy@1`
+- `mfm.evm.contract/configure@1`
+- `mfm.evm.contract/validate@1`
+- `mfm.evm.contract/lifecycle@1`
+- `mfm.portfolio/collect_then_report@1`
+
+There is no latest-version selection. The internal BTC chain-head checkpoint operation is not a
+public entry point.
 
 ## Run Commands (Experimental)
 
@@ -427,37 +435,54 @@ or resume certified typed runs.
 
 ### `run start`
 
-Starts a common workflow through a registered entry-point op. The CLI reads authored config,
-passes the public op name, optional version, config format, and config bytes to app assembly, and
-then starts the certified typed run prepared by the app layer. Config format defaults to TOML.
+Starts a run from an exact entry-point id and a strict JSON request file. The request contains
+exact catalog references (`name` plus `digest`) and any operation-local policy. Catalog values are
+resolved and validated by app assembly before planning; the resulting typed spec is then certified
+and admitted.
 
 **Usage:**
 ```sh
-mfm_cli run start --op <NAME> --config <PATH> [OPTIONS]
+mfm_cli run start --entry-point <ID> --request <PATH> [OPTIONS]
 ```
 
 **Key Options:**
-- `--op <NAME>`: Public entry-point operation name.
-- `--config <PATH>`: Authored op config file.
-- `--op-version <VERSION>`: Optional public op version. If omitted, the latest registered version is selected.
-- `--config-format <toml|json>`: Authored config format. Defaults to `toml`.
+- `--entry-point <ID>`: Exact public entry-point id, including namespace and version.
+- `--request <PATH>`: Strict JSON request file containing exact catalog references.
 - `--invocation-key <KEY>`: Uses caller-provided invocation identity for retry-stable starts. When
   omitted, the app mints a fresh opaque invocation key. The raw key is not persisted; only a
   domain-separated digest enters run identity material.
-- `--framework-version <VALUE>`: Framework version evidence recorded in `RunAdmitted`.
-- `--source-revision <VALUE>`: Source revision evidence recorded in `RunAdmitted` (or `MFM_SOURCE_REVISION`).
 - `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
 - `--runtime-config <PATH>`: Runtime config file for live capabilities (default:
   `$MFM_RUNTIME_CONFIG_FILE`). Read-only commands do not use this option.
 
-Examples:
+Publish values once through setup, then submit a request such as:
 
 ```sh
-mfm_cli run start --op btc_address_balance --config examples/configs/btc-address-balance.toml
-mfm_cli run start --op evm_native_balance --config examples/configs/evm-native-balance.toml
-mfm_cli run start --op portfolio_snapshot --config examples/configs/portfolio-dual-mainnet.toml
-mfm_cli run start --op evm_contract_lifecycle --config lifecycle.toml
+mfm_cli setup import --file setup.local.toml
+mfm_cli run start \
+  --entry-point mfm.portfolio/portfolio_snapshot@1 \
+  --request portfolio-request.json
 ```
+
+For a portfolio request, `portfolio-request.json` has the exact shape:
+
+```json
+{
+  "portfolio": {
+    "name": "acme/portfolio",
+    "digest": "content:sha256-jcs-v1:..."
+  }
+}
+```
+
+The repository includes a complete strict-import fixture at
+`examples/setup/organization.toml`; copy it to a local setup file before importing.
+
+Collector entry points write Platform holding facts from live chain reads. The composed
+`mfm.portfolio/collect_then_report@1` entry point accepts one exact portfolio reference plus
+explicit BTC/EVM coverage and read policies, derives child collector configs, proves readiness,
+and calls the report graph. `portfolio_snapshot` remains report-only and selects admitted facts.
+See [`../../docs/portfolio-collect-then-report.md`](../../docs/portfolio-collect-then-report.md).
 
 Collector entry points (`btc_address_balance`, `evm_native_balance`) write Platform holding facts
 from live chain reads (joint tip once per same-network batch). They are external multi-run only and
@@ -478,7 +503,7 @@ EVM contract entry-point config shapes and import authority rules are documented
 For local development against a managed persistent run-store database, use:
 
 ```sh
-nix run .#mfm-start -- --op portfolio_snapshot --config examples/configs/portfolio-dual-mainnet.toml
+nix run .#mfm-start -- --entry-point mfm.portfolio/portfolio_snapshot@1 --request portfolio-request.json
 ```
 
 `.#mfm-start` starts a Nixfied-managed PostgreSQL process in slot 9 for the
@@ -500,11 +525,15 @@ execution lane for the same base work identity, start reports `already_active` w
 
 Stable launch errors include:
 
-- `EntryPointOpNotFound`: no registered op matches `--op`.
-- `EntryPointOpVersionNotFound`: `--op-version` selects no registered version for the public op.
-- `AuthoredConfigReadFailed`: the authored config file could not be read.
-- `AuthoredConfigDecodeFailed`: the authored config does not match the selected op schema.
-- `EntryPointOpCertificationFailed`: app assembly could not certify the planned typed spec.
+- `EntryPointRequestReadFailed`: the JSON request file could not be read.
+- `EntryPointRequestInvalid`: the request file is not valid JSON.
+- `EntryPointNotFound`: the exact entry-point id is not registered.
+- `EntryPointRequestInvalid`: the request does not match the selected strict schema.
+- `CatalogValueNotFound`: an exact referenced catalog value is missing.
+- `CatalogValueTypeInvalid`: a catalog row does not decode as the referenced type.
+- `CatalogValueCanonicalMismatch`: a catalog row fails canonical byte/digest verification.
+- `CollectThenReportConfigInvalid`: composed portfolio joins or policy are invalid.
+- `EntryPointCertificationFailed`: app assembly could not certify the planned typed spec.
 - `LaunchRunnerUnavailable`: the certified spec references a state descriptor with no production
   runner binding.
 

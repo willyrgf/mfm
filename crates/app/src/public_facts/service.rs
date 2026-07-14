@@ -12,7 +12,7 @@ use super::dto::PublicFactQueryPage;
 use super::query::PublicFactQueryRequest;
 #[cfg(any(test, feature = "test-support"))]
 use crate::async_app_store_error;
-use crate::{content_digest_for_bytes, AppError, ErrorClass, ProductionRunStore};
+use crate::{content_digest_for_bytes, AppError, ErrorClass, PostgresStore};
 
 /// App public fact query service.
 #[derive(Debug, Clone)]
@@ -110,7 +110,7 @@ pub type PublicFactQueryExecution = Vec<mfm_facts::FactQueryResultRow>;
 
 pub(crate) type AppFactQueryRow = mfm_facts::FactQueryResultRow;
 
-impl PublicFactQueryExecutor for ProductionRunStore {
+impl PublicFactQueryExecutor for PostgresStore {
     fn execute_public_fact_query_plan<'a>(
         &'a self,
         plan: &'a mfm_facts::CanonicalFactQueryPlan,

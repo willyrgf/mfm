@@ -19,7 +19,6 @@ http = "1"
 url = "2"
 
 mfm-app = { path = "../../crates/app" }
-mfm-authored-config = { path = "../../crates/authored-config" }
 mfm-canonical = { path = "../../crates/kernel/canonical" }
 mfm-ids = { path = "../../crates/kernel/ids" }
 mfm-store = { path = "../../crates/kernel/store" }

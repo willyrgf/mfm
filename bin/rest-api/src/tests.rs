@@ -45,8 +45,8 @@ async fn run_start_accepts_entry_point_shape() {
         .oneshot(json_post(
             "/v1/runs/start",
             json!({
-                "op": "missing_entry_point_op",
-                "config": "portfolio_id = \"main\"\n"
+                "entry_point": "mfm.unknown/missing@1",
+                "request": {}
             }),
         ))
         .await
@@ -55,7 +55,7 @@ async fn run_start_accepts_entry_point_shape() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let value = response_json(response).await;
     assert_eq!(value["status"], "error");
-    assert_eq!(value["error"]["code"], "EntryPointOpNotFound");
+    assert_eq!(value["error"]["code"], "EntryPointNotFound");
 }
 
 #[tokio::test]
@@ -64,6 +64,7 @@ async fn read_role_refuses_live_start_and_serves_public_fact_queries() {
     let app = make_app(AppState {
         role: RestProcessRole::Read,
         store: fixture.store.clone(),
+        catalog_store: None,
         runtime_config_path: None,
         fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     });
@@ -76,7 +77,7 @@ async fn read_role_refuses_live_start_and_serves_public_fact_queries() {
                 .uri("/v1/runs/start")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"op":"portfolio_snapshot","op_version":1,"config":{}}"#,
+                    r#"{"entry_point":"mfm.portfolio/portfolio_snapshot@1","request":{}}"#,
                 ))
                 .expect("request"),
         )
@@ -110,6 +111,7 @@ async fn live_routes_reuse_cached_services_after_first_construction() {
     let app = make_app(AppState {
         role: RestProcessRole::Live,
         store: store::AsyncInMemoryRunStore::default(),
+        catalog_store: None,
         runtime_config_path: Some(config_path.clone()),
         fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     });
@@ -243,6 +245,7 @@ async fn facts_routes_expose_only_public_platform_projection_data() {
     let app = make_app(AppState {
         role: RestProcessRole::Live,
         store: fixture.store.clone(),
+        catalog_store: None,
         runtime_config_path: None,
         fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     });
@@ -297,15 +300,15 @@ async fn assert_entry_point_not_found(app: &axum::Router) {
         .oneshot(json_post(
             "/v1/runs/start",
             json!({
-                "op": "missing_entry_point_op",
-                "config": "portfolio_id = \"main\"\n"
+                "entry_point": "mfm.unknown/missing@1",
+                "request": {}
             }),
         ))
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let value = response_json(response).await;
-    assert_eq!(value["error"]["code"], "EntryPointOpNotFound");
+    assert_eq!(value["error"]["code"], "EntryPointNotFound");
 }
 
 async fn locked_env<const N: usize>(pairs: [(&'static str, &str); N]) -> EnvGuard {
@@ -383,6 +386,7 @@ fn test_app() -> axum::Router {
     make_app(AppState {
         role: RestProcessRole::Live,
         store: store::AsyncInMemoryRunStore::default(),
+        catalog_store: None,
         runtime_config_path: None,
         fact_index: mfm_app::ProjectionFactIndexProvider::empty_arc(),
     })

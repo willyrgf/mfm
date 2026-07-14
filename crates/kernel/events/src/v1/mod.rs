@@ -492,32 +492,120 @@ pub struct RunAdmitted {
 /// Public entry-point operation evidence bound into `RunAdmitted`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryPointLaunchEvidence {
-    /// Fully resolved app entry-point op id.
-    pub resolved_op_id: EntryPointOpId,
-    /// Digest of the registered entry-point operation set.
-    pub entry_point_registry_digest: ContentDigest,
+    /// Exact public entry-point id selected by application assembly.
+    pub entry_point_id: EntryPointId,
+    /// Immutable catalog identities resolved while preparing the launch.
+    pub catalog_sources: Vec<CatalogSourceEvidence>,
 }
 
-/// Fully qualified app entry-point operation id.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EntryPointOpId(CheckedVisibleAscii256);
+impl EntryPointLaunchEvidence {
+    /// Creates launch evidence and canonicalizes its catalog-source ordering.
+    pub fn new(
+        entry_point_id: impl AsRef<str>,
+        mut catalog_sources: Vec<CatalogSourceEvidence>,
+    ) -> Result<Self> {
+        let entry_point_id = EntryPointId::new(entry_point_id)?;
+        catalog_sources.sort();
+        catalog_sources.dedup();
+        Ok(Self {
+            entry_point_id,
+            catalog_sources,
+        })
+    }
+}
 
-impl EntryPointOpId {
-    /// Creates a checked entry-point op id.
+/// Exact public entry-point id bound into `RunAdmitted`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EntryPointId(CheckedVisibleAscii256);
+
+impl EntryPointId {
+    /// Creates a checked exact entry-point id.
     pub fn new(value: impl AsRef<str>) -> Result<Self> {
         let value = value.as_ref();
         CheckedVisibleAscii256::new(value)
             .map(Self)
             .map_err(|_| EventError::InvalidString {
-                field: "entry point op id",
+                field: "entry point id",
                 value: value.to_owned(),
             })
     }
 
-    /// Returns the entry-point op id string.
+    /// Returns the entry-point id string.
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
+}
+
+/// Checked catalog name stored in launch evidence.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CatalogSourceName(CheckedVisibleAscii256);
+
+impl CatalogSourceName {
+    /// Creates a checked catalog name using the catalog grammar.
+    pub fn new(value: impl AsRef<str>) -> Result<Self> {
+        let value = value.as_ref();
+        validate_catalog_name(value).map_err(|_| EventError::InvalidString {
+            field: "catalog source name",
+            value: value.to_owned(),
+        })?;
+        CheckedVisibleAscii256::new(value)
+            .map(Self)
+            .map_err(|_| EventError::InvalidString {
+                field: "catalog source name",
+                value: value.to_owned(),
+            })
+    }
+
+    /// Returns the catalog name string.
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+/// One exact catalog value identity resolved during launch preparation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CatalogSourceEvidence {
+    /// Catalog name.
+    pub name: CatalogSourceName,
+    /// Expected typed config schema id.
+    pub schema_id: SchemaId,
+    /// Content digest of the resolved canonical value.
+    pub digest: ContentDigest,
+}
+
+impl CatalogSourceEvidence {
+    /// Creates checked catalog source evidence.
+    pub fn new(name: impl AsRef<str>, schema_id: SchemaId, digest: ContentDigest) -> Result<Self> {
+        Ok(Self {
+            name: CatalogSourceName::new(name)?,
+            schema_id,
+            digest,
+        })
+    }
+}
+
+fn validate_catalog_name(value: &str) -> std::result::Result<(), ()> {
+    if value.is_empty() || value.len() > 256 || !value.is_ascii() {
+        return Err(());
+    }
+    for segment in value.split('/') {
+        let mut chars = segment.chars();
+        let Some(first) = chars.next() else {
+            return Err(());
+        };
+        if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+            return Err(());
+        }
+        if segment == "."
+            || segment == ".."
+            || chars.any(|ch| {
+                !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-'))
+            })
+        {
+            return Err(());
+        }
+    }
+    Ok(())
 }
 
 /// Seed cell evidence bound by `RunAdmitted`.

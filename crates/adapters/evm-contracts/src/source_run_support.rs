@@ -715,11 +715,8 @@ where
                 .typed()
                 .expect("source spec hash"),
         ),
-        entry_point: events::EntryPointLaunchEvidence {
-            resolved_op_id: events::EntryPointOpId::new("mfm.test:source_run")
-                .expect("entry point"),
-            entry_point_registry_digest: content_digest(0x61),
-        },
+        entry_point: events::EntryPointLaunchEvidence::new("mfm.test/source_run@1", Vec::new())
+            .expect("entry point evidence"),
         spec_hash: authority
             .source_spec_hash
             .typed()

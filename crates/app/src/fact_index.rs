@@ -13,19 +13,17 @@ use mfm_fact_capabilities::{FactIndexReadProvider, FactIndexReadRequest};
 #[cfg(any(test, feature = "test-support"))]
 use mfm_store::v1 as store;
 
-use crate::ProductionRunStore;
+use crate::PostgresStore;
 
 /// Builds the production Platform/Control fact-index provider from a Postgres run store.
 ///
 /// Fact queries are evaluated against the validated Postgres store authority.
-pub fn production_fact_index_read_provider(
-    store: ProductionRunStore,
-) -> Arc<dyn FactIndexReadProvider> {
+pub fn production_fact_index_read_provider(store: PostgresStore) -> Arc<dyn FactIndexReadProvider> {
     Arc::new(PostgresFactIndexReadProvider { store })
 }
 
 struct PostgresFactIndexReadProvider {
-    store: ProductionRunStore,
+    store: PostgresStore,
 }
 
 impl FactIndexReadProvider for PostgresFactIndexReadProvider {

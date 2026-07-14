@@ -352,15 +352,11 @@ pub(super) fn prepare_btc_collector_internal_test_launch() -> Result<RunLaunchRe
             )
             .expect("store scope"),
             invocation_key_digest: default_invocation_key_digest(),
-            entry_point_evidence: events::EntryPointLaunchEvidence {
-                resolved_op_id: events::EntryPointOpId::new(
-                    "mfm.bitcoin.btc_chain_head_collector_internal_test",
-                )
-                .expect("entry point"),
-                entry_point_registry_digest: content_digest_for_bytes(
-                    b"mfm.app.test.btc-collector-internal-registry",
-                ),
-            },
+            entry_point_evidence: events::EntryPointLaunchEvidence::new(
+                "mfm.bitcoin/btc_chain_head_internal_test@1",
+                Vec::new(),
+            )
+            .expect("entry point evidence"),
         },
         config_inputs,
         seed_inputs,
@@ -398,11 +394,11 @@ pub(super) fn prepare_app_fact_launch_with_invocation_key_and_state_key(
             .expect("store scope"),
             invocation_key_digest: invocation_key_digest
                 .unwrap_or_else(default_invocation_key_digest),
-            entry_point_evidence: events::EntryPointLaunchEvidence {
-                resolved_op_id: events::EntryPointOpId::new("mfm.app.test.fact-launch")
-                    .expect("entry point"),
-                entry_point_registry_digest: content_digest_for_bytes(b"mfm.app.test.registry"),
-            },
+            entry_point_evidence: events::EntryPointLaunchEvidence::new(
+                "mfm.app.test/fact_launch@1",
+                Vec::new(),
+            )
+            .expect("entry point evidence"),
         },
         config_inputs,
         seed_inputs,

@@ -389,14 +389,11 @@ pub async fn append_platform_holding_facts_for_test(
         let run_admitted = events::KernelEventPayload::RunAdmitted(Box::new(events::RunAdmitted {
             run_id: source_run_id.clone(),
             identity_material,
-            entry_point: events::EntryPointLaunchEvidence {
-                resolved_op_id: events::EntryPointOpId::new("mfm.test.fact_fixture.record.v1")
-                    .map_err(|error| StoreError::Identity(error.to_string()))?,
-                entry_point_registry_digest: ContentDigest::from_digest(
-                    DigestAlgorithm::Sha256JcsV1,
-                    sha256_digest_bytes(b"mfm.test.fact_fixture.registry.v1"),
-                ),
-            },
+            entry_point: events::EntryPointLaunchEvidence::new(
+                "mfm.test/fact_fixture_record@1",
+                Vec::new(),
+            )
+            .map_err(|error| StoreError::Identity(error.to_string()))?,
             spec_hash: source_spec_hash.clone(),
             spec_artifact: run_artifact_ref_from_store_artifact_for_test(&spec_evidence),
             certificate_artifact: run_artifact_ref_from_store_artifact_for_test(

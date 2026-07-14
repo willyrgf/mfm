@@ -171,21 +171,20 @@ where
         }
     }
 
-    /// Starts a prepared entry-point run and renders public output if the launch completes.
-    pub async fn launch_prepared_entry_point_run(
+    /// Starts a prepared run and renders public output if the launch completes.
+    pub async fn launch_run_and_render(
         &self,
-        prepared: PreparedEntryPointRunLaunch,
+        request: RunLaunchRequest,
     ) -> Result<RunStartReport, AppError> {
-        let run_id = prepared.request.run_id.clone();
-        let public_output_schema_id = prepared
-            .request
+        let run_id = request.run_id.clone();
+        let public_output_schema_id = request
             .certified_spec
             .envelope()
             .spec
             .public_outputs
             .public_schema_id
             .clone();
-        let launch = self.launch_run(prepared.request).await?;
+        let launch = self.launch_run(request).await?;
         let (outcome, run, active_run_id) = launch.into_response_parts();
         let public_output = if matches!(
             run.as_ref().map(|run| run.run_mode),

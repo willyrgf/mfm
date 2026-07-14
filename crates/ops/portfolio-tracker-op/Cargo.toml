@@ -11,13 +11,11 @@ category = "operation"
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
-mfm-authored-config = { path = "../../authored-config" }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-certify = { path = "../../kernel/certify" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
 mfm-portfolio-model = { path = "../../portfolio/model" }
-mfm-portfolio-config = { path = "../../portfolio-config" }
 mfm-state-portfolio = { path = "../../states/portfolio" }
 
 [dev-dependencies]

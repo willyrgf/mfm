@@ -52,7 +52,7 @@ async fn portfolio_snapshot_completes_from_seeded_platform_holdings_without_live
     let prepared =
         prepare_portfolio_launch_for_store(&store, &dual_mainnet_portfolio_json(), None).await;
     let report = services
-        .launch_prepared_entry_point_run(prepared)
+        .launch_run_and_render(prepared)
         .await
         .unwrap_or_else(|error| panic!("portfolio launch: {error:?}"));
     let launch = report.run.expect("run body");
@@ -249,7 +249,7 @@ async fn portfolio_selection_prefers_later_store_append_across_runs() {
     let prepared =
         prepare_portfolio_launch_for_store(&store, &dual_mainnet_portfolio_json(), None).await;
     let report = services
-        .launch_prepared_entry_point_run(prepared)
+        .launch_run_and_render(prepared)
         .await
         .expect("portfolio launch");
     let launch = report.run.expect("run body");

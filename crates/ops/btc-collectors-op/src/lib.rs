@@ -24,7 +24,6 @@
 
 use std::num::NonZeroU64;
 
-use mfm_authored_config::{EntryPointDescriptor, TOML_JSON_AUTHORED_CONFIG_FORMATS};
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, Handle, NoContext, NonEmptyHandles, Operation,
@@ -295,15 +294,6 @@ const BALANCE_OP_KEY: &str = "btc_address_balance";
 const BALANCE_PUBLIC_OUTPUT_KEY: &str = "balance_batch";
 const BALANCE_CONTEXT_SEED_KEY: &str = "balance_observation_context";
 
-/// Public Bitcoin address-balance descriptor retained until the direct ingress cutover.
-pub const BTC_ADDRESS_BALANCE_ENTRY_POINT: EntryPointDescriptor = EntryPointDescriptor {
-    namespace: OP_NAMESPACE,
-    name: BALANCE_OP_KEY,
-    public_name: "btc_address_balance",
-    version: 1,
-    accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
-};
-
 /// Planning config for a multi-address Bitcoin native balance collector batch.
 ///
 /// Multi-subject same-network batches **must** share one joint tip resolved once
@@ -518,13 +508,6 @@ pub fn btc_address_balance_program_launch_plan(
     let draft = btc_address_balance_program_draft(config)?;
     let seed_material = btc_address_balance_seed_material(&draft)?;
     TypedProgramLaunchPlan::from_draft_and_seed_material(draft, seed_material)
-}
-
-/// Plans a Bitcoin address-balance entry point for the pre-cutover app.
-pub fn plan_btc_address_balance_entry_point(
-    config: BtcAddressBalanceConfig,
-) -> mfm_program::Result<TypedProgramLaunchPlan> {
-    btc_address_balance_program_launch_plan(config)
 }
 
 fn btc_address_balance_seed_material(

@@ -17,7 +17,6 @@ uuid = { version = "1.0", features = ["v4"] }
 tempfile = "3.0"
 tokio = { workspace = true }
 mfm-app = { path = "../../crates/app", features = ["test-support"] }
-mfm-authored-config = { path = "../../crates/authored-config" }
 mfm-events = { path = "../../crates/kernel/events" }
 mfm-ids = { path = "../../crates/kernel/ids" }
 mfm-canonical = { path = "../../crates/kernel/canonical" }

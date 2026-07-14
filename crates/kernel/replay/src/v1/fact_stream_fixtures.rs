@@ -470,11 +470,8 @@ pub(super) fn fact_run_admitted_for_stream_with_descriptors(
     events::RunAdmitted {
         run_id,
         identity_material,
-        entry_point: events::EntryPointLaunchEvidence {
-            resolved_op_id: events::EntryPointOpId::new("mfm.replay.test.fact")
-                .expect("entry point"),
-            entry_point_registry_digest: content_digest(0xc2),
-        },
+        entry_point: events::EntryPointLaunchEvidence::new("mfm.replay.test/fact@1", Vec::new())
+            .expect("entry point evidence"),
         spec_hash,
         spec_artifact: stream_run_admitted_spec_artifact_for_hash(&certified_spec.spec_hash),
         certificate_artifact: stream_run_admitted_certificate_artifact(),

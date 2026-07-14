@@ -1,8 +1,6 @@
 use mfm_replay::v1::ReplayError;
 use mfm_store::v1 as store;
 
-use super::EntryPointOpError;
-
 /// High-level error classes used by typed application-facing APIs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorClass {
@@ -212,16 +210,6 @@ impl From<mfm_facts::FactError> for AppError {
             ErrorClass::BadRequest,
             "FactQueryInvalid",
             "Fact query input is invalid",
-        )
-    }
-}
-
-impl From<EntryPointOpError> for AppError {
-    fn from(error: EntryPointOpError) -> Self {
-        Self::new(
-            ErrorClass::BadRequest,
-            error.code().to_owned(),
-            error.message().to_owned(),
         )
     }
 }

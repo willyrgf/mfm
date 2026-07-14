@@ -183,8 +183,8 @@ compare phase.network_id with typestate.network_id at each call site
 
 ## Code Map
 
-- Reusable action/import config shapes: `crates/states/evm-contracts/src/config.rs`; complete
-  entry configs: `crates/ops/evm-contract-lifecycle-op`
+- Entry config ownership: `crates/ops/evm-contract-lifecycle-op`; reusable state config types:
+  `crates/states/evm-contracts`
 - Domain model and evidence types: `crates/evm-contract-model`
 - Operation topology: `crates/ops/evm-contract-lifecycle-op`
 - State contracts: `crates/states/evm-contracts`

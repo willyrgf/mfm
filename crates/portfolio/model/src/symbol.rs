@@ -197,6 +197,7 @@ impl SymbolConfig {
 /// Canonical balance reader selection.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.portfolio",
     name = "balance-reader-config",
@@ -223,6 +224,7 @@ pub enum BalanceReaderConfig {
 
 /// Quote valuation routes configured for a symbol.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.portfolio",
     name = "symbol-valuation-config",
@@ -242,6 +244,7 @@ impl SymbolValuationConfig {
 
 /// Valuation route for one requested quote code.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.portfolio",
     name = "quote-valuation-config",

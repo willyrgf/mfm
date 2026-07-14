@@ -1,421 +1,511 @@
-use std::collections::BTreeMap;
-use std::fmt;
-use std::marker::PhantomData;
-use std::str::FromStr;
-use std::sync::Arc;
-
-use mfm_authored_config::{AuthoredConfig, AuthoredConfigError, EntryPointDescriptor};
-use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_ids::{ContentDigest, NameToken, ResourceNamespace};
+use mfm_canonical::sha256_digest_bytes;
+use mfm_catalog_model::CatalogRef;
+use mfm_certify::CertificationRegistry;
+use mfm_evm_contract_model::EvmContractContext;
+use mfm_ids::{DigestAlgorithm, SchemaId, StoreScopeId};
+use mfm_op_btc_collectors::BtcAddressBalanceConfig;
+use mfm_op_evm_collectors::EvmNativeBalanceConfig;
+use mfm_op_evm_contract_lifecycle::{
+    EvmContractConfigureEntryConfig, EvmContractDeployEntryConfig, EvmContractLifecycleEntryConfig,
+    EvmContractValidateEntryConfig,
+};
+use mfm_op_portfolio_collect_report::{build_collect_then_report_config, CollectThenReportRequest};
+use mfm_op_portfolio_tracker::PortfolioConfig;
 use mfm_program::TypedProgramLaunchPlan;
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use mfm_state_evm_contracts::{
+    ConfigureAction, DeployAction, ImportConfiguredSpec, ImportDeployedSpec, ValidateAction,
+};
+use mfm_storage_postgres::{CatalogValueKey, PostgresStore};
+use mfm_values::{MfmConfig, ValidatedConfig};
+use serde::Deserialize;
+use serde_json::Value;
 
-/// Public entry-point operation name accepted by CLI and REST transports.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct PublicOpName(NameToken);
+use crate::{
+    certify_launch_plan, entry_point_launch_internal_error, invocation_key_digest_or_mint,
+    prepare_certified_run_launch, AppError, CertifiedRunLaunchInput, ErrorClass, InvocationKey,
+    RunLaunchRequest,
+};
 
-impl PublicOpName {
-    /// Creates a checked public operation name.
-    pub fn new(value: impl AsRef<str>) -> Result<Self, EntryPointOpError> {
-        let value = value.as_ref();
-        NameToken::new(value).map(Self).map_err(|error| {
-            EntryPointOpError::new(
-                "InvalidPublicOpName",
-                format!("public op name is invalid: {error}"),
-            )
-        })
-    }
+const PORTFOLIO_SNAPSHOT_ID: &str = "mfm.portfolio/portfolio_snapshot@1";
+const BTC_ADDRESS_BALANCE_ID: &str = "mfm.bitcoin/btc_address_balance@1";
+const EVM_NATIVE_BALANCE_ID: &str = "mfm.evm/evm_native_balance@1";
+const CONTRACT_DEPLOY_ID: &str = "mfm.evm.contract/deploy@1";
+const CONTRACT_CONFIGURE_ID: &str = "mfm.evm.contract/configure@1";
+const CONTRACT_VALIDATE_ID: &str = "mfm.evm.contract/validate@1";
+const CONTRACT_LIFECYCLE_ID: &str = "mfm.evm.contract/lifecycle@1";
+const COLLECT_THEN_REPORT_ID: &str = "mfm.portfolio/collect_then_report@1";
 
-    /// Returns the public name as transport text.
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
+const PORTFOLIO_REQUEST_SCHEMA: (&str, &[u8]) = (
+    "mfm.app.request.portfolio_snapshot",
+    b"mfm.app.request:portfolio_snapshot:v1",
+);
+const BTC_REQUEST_SCHEMA: (&str, &[u8]) = (
+    "mfm.app.request.btc_address_balance",
+    b"mfm.app.request:btc_address_balance:v1",
+);
+const EVM_REQUEST_SCHEMA: (&str, &[u8]) = (
+    "mfm.app.request.evm_native_balance",
+    b"mfm.app.request:evm_native_balance:v1",
+);
+const CONTRACT_DEPLOY_REQUEST_SCHEMA: (&str, &[u8]) = (
+    "mfm.app.request.evm_contract_deploy",
+    b"mfm.app.request:evm_contract_deploy:v1",
+);
+const CONTRACT_CONFIGURE_REQUEST_SCHEMA: (&str, &[u8]) = (
+    "mfm.app.request.evm_contract_configure",
+    b"mfm.app.request:evm_contract_configure:v1",
+);
+const CONTRACT_VALIDATE_REQUEST_SCHEMA: (&str, &[u8]) = (
+    "mfm.app.request.evm_contract_validate",
+    b"mfm.app.request:evm_contract_validate:v1",
+);
+const CONTRACT_LIFECYCLE_REQUEST_SCHEMA: (&str, &[u8]) = (
+    "mfm.app.request.evm_contract_lifecycle",
+    b"mfm.app.request:evm_contract_lifecycle:v1",
+);
+const COLLECT_THEN_REPORT_REQUEST_SCHEMA: (&str, &[u8]) = (
+    "mfm.app.request.collect_then_report",
+    b"mfm.app.request:collect_then_report:v1",
+);
+
+/// One exact public entry point and the request schema accepted by it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct EntryPointSummary {
+    /// Exact entry-point id, including namespace and version.
+    pub entry_point_id: &'static str,
+    /// Stable schema id for the strict JSON request object.
+    #[serde(serialize_with = "serialize_schema_id")]
+    pub request_schema_id: SchemaId,
 }
 
-impl fmt::Display for PublicOpName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PortfolioSnapshotRequest {
+    portfolio: CatalogRef<PortfolioConfig>,
 }
 
-impl FromStr for PublicOpName {
-    type Err = EntryPointOpError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::new(value)
-    }
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BtcAddressBalanceRequest {
+    config: CatalogRef<BtcAddressBalanceConfig>,
 }
 
-/// Integer public version selector for an entry-point operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct OpVersion(u32);
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvmNativeBalanceRequest {
+    config: CatalogRef<EvmNativeBalanceConfig>,
+}
 
-impl OpVersion {
-    /// Creates a checked non-zero public operation version.
-    pub fn new(value: u32) -> Result<Self, EntryPointOpError> {
-        if value == 0 {
-            return Err(EntryPointOpError::new(
-                "InvalidOpVersion",
-                "entry-point op version must be greater than zero",
-            ));
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContractDeployRequest {
+    context: CatalogRef<EvmContractContext>,
+    deploy_action: CatalogRef<DeployAction>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContractConfigureRequest {
+    context: CatalogRef<EvmContractContext>,
+    import_deployed: CatalogRef<ImportDeployedSpec>,
+    configure_action: CatalogRef<ConfigureAction>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContractValidateRequest {
+    context: CatalogRef<EvmContractContext>,
+    import_configured: CatalogRef<ImportConfiguredSpec>,
+    validate_action: CatalogRef<ValidateAction>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContractLifecycleRequest {
+    context: CatalogRef<EvmContractContext>,
+    deploy_action: CatalogRef<DeployAction>,
+    configure_action: CatalogRef<ConfigureAction>,
+    validate_action: CatalogRef<ValidateAction>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EntryPoint {
+    PortfolioSnapshot,
+    BtcAddressBalance,
+    EvmNativeBalance,
+    ContractDeploy,
+    ContractConfigure,
+    ContractValidate,
+    ContractLifecycle,
+    CollectThenReport,
+}
+
+impl EntryPoint {
+    fn parse(value: &str) -> Result<Self, AppError> {
+        match value {
+            PORTFOLIO_SNAPSHOT_ID => Ok(Self::PortfolioSnapshot),
+            BTC_ADDRESS_BALANCE_ID => Ok(Self::BtcAddressBalance),
+            EVM_NATIVE_BALANCE_ID => Ok(Self::EvmNativeBalance),
+            CONTRACT_DEPLOY_ID => Ok(Self::ContractDeploy),
+            CONTRACT_CONFIGURE_ID => Ok(Self::ContractConfigure),
+            CONTRACT_VALIDATE_ID => Ok(Self::ContractValidate),
+            CONTRACT_LIFECYCLE_ID => Ok(Self::ContractLifecycle),
+            COLLECT_THEN_REPORT_ID => Ok(Self::CollectThenReport),
+            _ => Err(AppError::new(
+                ErrorClass::BadRequest,
+                "EntryPointNotFound",
+                "The exact entry-point id is not registered",
+            )),
         }
-        Ok(Self(value))
     }
 
-    /// Returns the numeric public operation version.
-    pub const fn get(self) -> u32 {
-        self.0
+    fn id(self) -> &'static str {
+        match self {
+            Self::PortfolioSnapshot => PORTFOLIO_SNAPSHOT_ID,
+            Self::BtcAddressBalance => BTC_ADDRESS_BALANCE_ID,
+            Self::EvmNativeBalance => EVM_NATIVE_BALANCE_ID,
+            Self::ContractDeploy => CONTRACT_DEPLOY_ID,
+            Self::ContractConfigure => CONTRACT_CONFIGURE_ID,
+            Self::ContractValidate => CONTRACT_VALIDATE_ID,
+            Self::ContractLifecycle => CONTRACT_LIFECYCLE_ID,
+            Self::CollectThenReport => COLLECT_THEN_REPORT_ID,
+        }
     }
-}
 
-impl fmt::Display for OpVersion {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl FromStr for OpVersion {
-    type Err = EntryPointOpError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let parsed = value.parse::<u32>().map_err(|_| {
-            EntryPointOpError::new(
-                "InvalidOpVersion",
-                "entry-point op version must be an unsigned integer",
-            )
-        })?;
-        Self::new(parsed)
-    }
-}
-
-/// Stable typed identity for a launchable entry-point operation.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct EntryPointOpId {
-    /// Domain namespace for the entry-point operation.
-    pub namespace: ResourceNamespace,
-    /// Stable domain operation name within the namespace.
-    pub name: NameToken,
-    /// Public operation version.
-    pub version: OpVersion,
-}
-
-impl EntryPointOpId {
-    /// Creates a checked entry-point operation id.
-    pub fn new(
-        namespace: impl AsRef<str>,
-        name: impl AsRef<str>,
-        version: OpVersion,
-    ) -> Result<Self, EntryPointOpError> {
-        let namespace = namespace.as_ref();
-        let name = name.as_ref();
-        let namespace = ResourceNamespace::new(namespace).map_err(|error| {
-            EntryPointOpError::new(
-                "InvalidEntryPointOpId",
-                format!("entry-point op namespace is invalid: {error}"),
-            )
-        })?;
-        let name = NameToken::new(name).map_err(|error| {
-            EntryPointOpError::new(
-                "InvalidEntryPointOpId",
-                format!("entry-point op name is invalid: {error}"),
-            )
-        })?;
-        Ok(Self {
-            namespace,
+    fn request_schema_id(self) -> Result<SchemaId, AppError> {
+        let (name, seed) = match self {
+            Self::PortfolioSnapshot => PORTFOLIO_REQUEST_SCHEMA,
+            Self::BtcAddressBalance => BTC_REQUEST_SCHEMA,
+            Self::EvmNativeBalance => EVM_REQUEST_SCHEMA,
+            Self::ContractDeploy => CONTRACT_DEPLOY_REQUEST_SCHEMA,
+            Self::ContractConfigure => CONTRACT_CONFIGURE_REQUEST_SCHEMA,
+            Self::ContractValidate => CONTRACT_VALIDATE_REQUEST_SCHEMA,
+            Self::ContractLifecycle => CONTRACT_LIFECYCLE_REQUEST_SCHEMA,
+            Self::CollectThenReport => COLLECT_THEN_REPORT_REQUEST_SCHEMA,
+        };
+        SchemaId::new(
             name,
-            version,
-        })
-    }
-}
-
-impl fmt::Display for EntryPointOpId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}:{}:{}",
-            self.namespace.as_str(),
-            self.name.as_str(),
-            self.version
+            "1",
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(seed),
         )
-    }
-}
-
-/// Operation that can plan a public entry-point run from authored config.
-pub trait LaunchableOp: Send + Sync {
-    /// Returns the static public entry-point metadata for this operation.
-    fn descriptor(&self) -> EntryPointDescriptor;
-
-    /// Returns the stable entry-point operation id.
-    fn op_id(&self) -> EntryPointOpId;
-
-    /// Deterministically plans the typed program draft and launch material.
-    fn plan(
-        &self,
-        authored_config: AuthoredConfig,
-    ) -> Result<TypedProgramLaunchPlan, EntryPointOpError>;
-}
-
-/// Generic app adapter from a typed op-crate planner to [`LaunchableOp`].
-pub struct EntryPointPlannerAdapter<TConfig, E> {
-    descriptor: EntryPointDescriptor,
-    op_id: EntryPointOpId,
-    planner: fn(TConfig) -> Result<TypedProgramLaunchPlan, E>,
-    map_error: fn(E) -> EntryPointOpError,
-    _config: PhantomData<fn() -> TConfig>,
-}
-
-impl<TConfig, E> EntryPointPlannerAdapter<TConfig, E> {
-    /// Builds a launchable adapter from app-neutral descriptor and planner exports.
-    pub fn new(
-        descriptor: EntryPointDescriptor,
-        planner: fn(TConfig) -> Result<TypedProgramLaunchPlan, E>,
-        map_error: fn(E) -> EntryPointOpError,
-    ) -> Result<Self, EntryPointOpError> {
-        if descriptor.accepted_config_formats.is_empty() {
-            return Err(EntryPointOpError::new(
-                "EntryPointOpConfigFormatsEmpty",
-                "entry-point op must accept at least one config format",
-            ));
-        }
-        let version = OpVersion::new(descriptor.version)?;
-        Ok(Self {
-            descriptor,
-            op_id: EntryPointOpId::new(descriptor.namespace, descriptor.name, version)?,
-            planner,
-            map_error,
-            _config: PhantomData,
-        })
-    }
-}
-
-impl<TConfig, E> LaunchableOp for EntryPointPlannerAdapter<TConfig, E>
-where
-    TConfig: DeserializeOwned + Serialize + Send + Sync + 'static,
-    E: Send + Sync + 'static,
-{
-    fn descriptor(&self) -> EntryPointDescriptor {
-        self.descriptor
-    }
-
-    fn op_id(&self) -> EntryPointOpId {
-        self.op_id.clone()
-    }
-
-    fn plan(
-        &self,
-        authored_config: AuthoredConfig,
-    ) -> Result<TypedProgramLaunchPlan, EntryPointOpError> {
-        if !self
-            .descriptor
-            .accepted_config_formats
-            .contains(&authored_config.format())
-        {
-            return Err(EntryPointOpError::new(
-                "EntryPointOpConfigFormatUnsupported",
-                "entry-point op does not accept the supplied config format",
-            ));
-        }
-
-        let normalized = authored_config.normalize::<TConfig>()?;
-        let planned = (self.planner)(normalized.value).map_err(self.map_error)?;
-        Ok(planned)
-    }
-}
-
-/// Registry that resolves public operation names and versions to launchable ops.
-#[derive(Clone, Default)]
-pub struct EntryPointOpRegistry {
-    ops: BTreeMap<PublicOpName, BTreeMap<OpVersion, Arc<dyn LaunchableOp>>>,
-}
-
-impl EntryPointOpRegistry {
-    /// Creates an empty entry-point operation registry.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Registers a launchable operation.
-    pub fn register(&mut self, op: impl LaunchableOp + 'static) -> Result<(), EntryPointOpError> {
-        self.register_arc(Arc::new(op))
-    }
-
-    /// Registers an already shared launchable operation.
-    pub fn register_arc(&mut self, op: Arc<dyn LaunchableOp>) -> Result<(), EntryPointOpError> {
-        let descriptor = op.descriptor();
-        if descriptor.accepted_config_formats.is_empty() {
-            return Err(EntryPointOpError::new(
-                "EntryPointOpConfigFormatsEmpty",
-                "entry-point op must accept at least one config format",
-            ));
-        }
-        let public_name = PublicOpName::new(descriptor.public_name)?;
-        let version = OpVersion::new(descriptor.version)?;
-        let op_id = op.op_id();
-        if op_id.version != version {
-            return Err(EntryPointOpError::new(
-                "EntryPointOpVersionMismatch",
-                "entry-point op id version must match registered version",
-            ));
-        }
-
-        let versions = self.ops.entry(public_name).or_default();
-        if versions.contains_key(&version) {
-            return Err(EntryPointOpError::new(
-                "DuplicateEntryPointOp",
-                "entry-point op public name and version are already registered",
-            ));
-        }
-        versions.insert(version, op);
-        Ok(())
-    }
-
-    /// Resolves a public name to the latest registered version.
-    pub fn resolve_latest(
-        &self,
-        public_name: &PublicOpName,
-    ) -> Result<Arc<dyn LaunchableOp>, EntryPointOpError> {
-        let versions = self.ops.get(public_name).ok_or_else(|| {
-            EntryPointOpError::new("EntryPointOpNotFound", "entry-point op is not registered")
-        })?;
-        versions
-            .last_key_value()
-            .map(|(_version, op)| Arc::clone(op))
-            .ok_or_else(|| {
-                EntryPointOpError::new("EntryPointOpNotFound", "entry-point op is not registered")
-            })
-    }
-
-    /// Resolves a public name and optional explicit version.
-    pub fn resolve(
-        &self,
-        public_name: &PublicOpName,
-        version: Option<OpVersion>,
-    ) -> Result<Arc<dyn LaunchableOp>, EntryPointOpError> {
-        match version {
-            Some(version) => self.resolve_version(public_name, version),
-            None => self.resolve_latest(public_name),
-        }
-    }
-
-    /// Returns every registered public entry-point descriptor in deterministic order.
-    pub fn registered_entry_points(&self) -> Vec<EntryPointDescriptor> {
-        self.ops
-            .values()
-            .flat_map(BTreeMap::values)
-            .map(|op| op.descriptor())
-            .collect()
-    }
-
-    /// Resolves a public name to a specific registered version.
-    pub fn resolve_version(
-        &self,
-        public_name: &PublicOpName,
-        version: OpVersion,
-    ) -> Result<Arc<dyn LaunchableOp>, EntryPointOpError> {
-        let versions = self.ops.get(public_name).ok_or_else(|| {
-            EntryPointOpError::new("EntryPointOpNotFound", "entry-point op is not registered")
-        })?;
-        versions.get(&version).map(Arc::clone).ok_or_else(|| {
-            EntryPointOpError::new(
-                "EntryPointOpVersionNotFound",
-                "entry-point op version is not registered",
+        .map_err(|_| {
+            AppError::backend(
+                ErrorClass::Internal,
+                "EntryPointRequestSchemaInvalid",
+                "An entry-point request schema is invalid",
             )
         })
     }
 
-    /// Returns the number of registered public name/version pairs.
-    pub fn len(&self) -> usize {
-        self.ops.values().map(BTreeMap::len).sum()
-    }
-
-    /// Returns whether the registry has no launchable operations.
-    pub fn is_empty(&self) -> bool {
-        self.ops.is_empty()
-    }
-
-    /// Returns the canonical digest of the registered public entry-point surface.
-    pub fn registry_digest(&self) -> Result<ContentDigest, EntryPointOpError> {
-        let mut entries = Vec::new();
-        for (public_name, versions) in &self.ops {
-            for (version, op) in versions {
-                let descriptor = op.descriptor();
-                let op_id = op.op_id();
-                let mut formats = descriptor
-                    .accepted_config_formats
-                    .iter()
-                    .map(|format| format.as_str())
-                    .collect::<Vec<_>>();
-                formats.sort_unstable();
-                entries.push(serde_json::json!({
-                    "accepted_config_formats": formats,
-                    "op_id": {
-                        "name": op_id.name.as_str(),
-                        "namespace": op_id.namespace.as_str(),
-                        "version": op_id.version.get(),
-                    },
-                    "public_name": public_name.as_str(),
-                    "version": version.get(),
-                }));
+    async fn prepare(
+        self,
+        store: &PostgresStore,
+        request: &Value,
+    ) -> Result<PreparedEntryPoint, AppError> {
+        match self {
+            Self::PortfolioSnapshot => {
+                let request: PortfolioSnapshotRequest = decode_request(request)?;
+                let (portfolio, source) = resolve_catalog(store, &request.portfolio).await?;
+                let plan = TypedProgramLaunchPlan::from_draft(
+                    mfm_op_portfolio_tracker::portfolio_program_draft(portfolio)
+                        .map_err(|_| plan_error("PortfolioSnapshotPlanFailed"))?,
+                )
+                .map_err(|_| plan_error("PortfolioSnapshotPlanFailed"))?;
+                Ok(PreparedEntryPoint::new(plan, [source]))
+            }
+            Self::BtcAddressBalance => {
+                let request: BtcAddressBalanceRequest = decode_request(request)?;
+                let (config, source) = resolve_catalog(store, &request.config).await?;
+                let plan = mfm_op_btc_collectors::btc_address_balance_program_launch_plan(config)
+                    .map_err(|_| plan_error("BtcAddressBalancePlanFailed"))?;
+                Ok(PreparedEntryPoint::new(plan, [source]))
+            }
+            Self::EvmNativeBalance => {
+                let request: EvmNativeBalanceRequest = decode_request(request)?;
+                let (config, source) = resolve_catalog(store, &request.config).await?;
+                let plan = mfm_op_evm_collectors::evm_native_balance_program_launch_plan(config)
+                    .map_err(|_| plan_error("EvmNativeBalancePlanFailed"))?;
+                Ok(PreparedEntryPoint::new(plan, [source]))
+            }
+            Self::ContractDeploy => {
+                let request: ContractDeployRequest = decode_request(request)?;
+                let (context, context_source) = resolve_catalog(store, &request.context).await?;
+                let (deploy, deploy_source) =
+                    resolve_catalog(store, &request.deploy_action).await?;
+                let config = EvmContractDeployEntryConfig::new(context, deploy);
+                let plan = TypedProgramLaunchPlan::from_draft(
+                    mfm_op_evm_contract_lifecycle::deploy_contract_program_draft(config)
+                        .map_err(|_| plan_error("EvmContractPlanFailed"))?,
+                )
+                .map_err(|_| plan_error("EvmContractPlanFailed"))?;
+                Ok(PreparedEntryPoint::new(
+                    plan,
+                    [context_source, deploy_source],
+                ))
+            }
+            Self::ContractConfigure => {
+                let request: ContractConfigureRequest = decode_request(request)?;
+                let (context, context_source) = resolve_catalog(store, &request.context).await?;
+                let (import_deployed, import_source) =
+                    resolve_catalog(store, &request.import_deployed).await?;
+                let (configure, configure_source) =
+                    resolve_catalog(store, &request.configure_action).await?;
+                let config =
+                    EvmContractConfigureEntryConfig::new(context, import_deployed, configure);
+                let plan = TypedProgramLaunchPlan::from_draft(
+                    mfm_op_evm_contract_lifecycle::configure_contract_program_draft(config)
+                        .map_err(|_| plan_error("EvmContractPlanFailed"))?,
+                )
+                .map_err(|_| plan_error("EvmContractPlanFailed"))?;
+                Ok(PreparedEntryPoint::new(
+                    plan,
+                    [context_source, import_source, configure_source],
+                ))
+            }
+            Self::ContractValidate => {
+                let request: ContractValidateRequest = decode_request(request)?;
+                let (context, context_source) = resolve_catalog(store, &request.context).await?;
+                let (import_configured, import_source) =
+                    resolve_catalog(store, &request.import_configured).await?;
+                let (validate, validate_source) =
+                    resolve_catalog(store, &request.validate_action).await?;
+                let config =
+                    EvmContractValidateEntryConfig::new(context, import_configured, validate);
+                let plan = TypedProgramLaunchPlan::from_draft(
+                    mfm_op_evm_contract_lifecycle::validate_contract_program_draft(config)
+                        .map_err(|_| plan_error("EvmContractPlanFailed"))?,
+                )
+                .map_err(|_| plan_error("EvmContractPlanFailed"))?;
+                Ok(PreparedEntryPoint::new(
+                    plan,
+                    [context_source, import_source, validate_source],
+                ))
+            }
+            Self::ContractLifecycle => {
+                let request: ContractLifecycleRequest = decode_request(request)?;
+                let (context, context_source) = resolve_catalog(store, &request.context).await?;
+                let (deploy, deploy_source) =
+                    resolve_catalog(store, &request.deploy_action).await?;
+                let (configure, configure_source) =
+                    resolve_catalog(store, &request.configure_action).await?;
+                let (validate, validate_source) =
+                    resolve_catalog(store, &request.validate_action).await?;
+                let config =
+                    EvmContractLifecycleEntryConfig::new(context, deploy, configure, validate);
+                let plan = TypedProgramLaunchPlan::from_draft(
+                    mfm_op_evm_contract_lifecycle::contract_lifecycle_program_draft(config)
+                        .map_err(|_| plan_error("EvmContractPlanFailed"))?,
+                )
+                .map_err(|_| plan_error("EvmContractPlanFailed"))?;
+                Ok(PreparedEntryPoint::new(
+                    plan,
+                    [
+                        context_source,
+                        deploy_source,
+                        configure_source,
+                        validate_source,
+                    ],
+                ))
+            }
+            Self::CollectThenReport => {
+                let request: CollectThenReportRequest = decode_request(request)?;
+                let (portfolio, portfolio_source) =
+                    resolve_catalog(store, request.portfolio()).await?;
+                let config = build_collect_then_report_config(
+                    portfolio,
+                    request.bitcoin_policy().clone(),
+                    request.evm_policy().clone(),
+                )
+                .map_err(|_| plan_error("CollectThenReportConfigInvalid"))?;
+                let plan =
+                    mfm_op_portfolio_collect_report::collect_then_report_program_launch_plan(
+                        config,
+                    )
+                    .map_err(|_| plan_error("CollectThenReportPlanFailed"))?;
+                Ok(PreparedEntryPoint::new(plan, [portfolio_source]))
             }
         }
-        let value = serde_json::json!({
-            "entries": entries,
-            "kind": "mfm.entry_point_op_registry.v1",
-        });
-        let json = serde_json::to_string(&value).map_err(|_| {
-            EntryPointOpError::new(
-                "EntryPointOpRegistryDigestFailed",
-                "entry-point registry digest could not be serialized",
-            )
-        })?;
-        PlainCanonicalJsonBytes::from_json_str(&json)
-            .map(|canonical| canonical.content_digest())
-            .map_err(|_| {
-                EntryPointOpError::new(
-                    "EntryPointOpRegistryDigestFailed",
-                    "entry-point registry digest could not be canonicalized",
-                )
-            })
     }
 }
 
-/// Error returned while resolving, registering, or planning entry-point operations.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{code}: {message}")]
-pub struct EntryPointOpError {
-    code: String,
-    message: String,
+struct PreparedEntryPoint {
+    plan: TypedProgramLaunchPlan,
+    sources: Vec<mfm_events::v1::CatalogSourceEvidence>,
 }
 
-impl EntryPointOpError {
-    /// Creates a public-safe entry-point operation error.
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+impl PreparedEntryPoint {
+    fn new<const N: usize>(
+        plan: TypedProgramLaunchPlan,
+        sources: [mfm_events::v1::CatalogSourceEvidence; N],
+    ) -> Self {
         Self {
-            code: code.into(),
-            message: message.into(),
+            plan,
+            sources: sources.into_iter().collect(),
         }
     }
-
-    /// Returns the stable error code.
-    pub fn code(&self) -> &str {
-        &self.code
-    }
-
-    /// Returns the public-safe error message.
-    pub fn message(&self) -> &str {
-        &self.message
-    }
 }
 
-impl From<AuthoredConfigError> for EntryPointOpError {
-    fn from(error: AuthoredConfigError) -> Self {
-        Self::new(error.code().to_owned(), error.message().to_owned())
-    }
+/// Returns the exact compiled entry-point discovery surface.
+pub fn entry_point_summaries() -> Result<Vec<EntryPointSummary>, AppError> {
+    let mut summaries: Vec<EntryPointSummary> = [
+        EntryPoint::PortfolioSnapshot,
+        EntryPoint::BtcAddressBalance,
+        EntryPoint::EvmNativeBalance,
+        EntryPoint::ContractDeploy,
+        EntryPoint::ContractConfigure,
+        EntryPoint::ContractValidate,
+        EntryPoint::ContractLifecycle,
+        EntryPoint::CollectThenReport,
+    ]
+    .into_iter()
+    .map(|entry_point| {
+        Ok::<EntryPointSummary, AppError>(EntryPointSummary {
+            entry_point_id: entry_point.id(),
+            request_schema_id: entry_point.request_schema_id()?,
+        })
+    })
+    .collect::<Result<Vec<_>, AppError>>()?;
+    summaries.sort_by_key(|summary| summary.entry_point_id);
+    Ok(summaries)
 }
 
-#[cfg(test)]
-#[path = "entry_point_tests.rs"]
-mod tests;
+/// Validates an exact public entry-point id without resolving catalog values.
+pub fn validate_entry_point_id(entry_point_id: &str) -> Result<(), AppError> {
+    EntryPoint::parse(entry_point_id).map(|_| ())
+}
+
+/// Prepares an exact catalog-backed entry-point launch.
+pub async fn prepare_entry_point_run_launch(
+    store: &PostgresStore,
+    entry_point_id: &str,
+    request: &Value,
+    certification_registry: &CertificationRegistry,
+    store_scope_id: StoreScopeId,
+    invocation_key: Option<InvocationKey>,
+) -> Result<RunLaunchRequest, AppError> {
+    let entry_point = EntryPoint::parse(entry_point_id)?;
+    let prepared = entry_point.prepare(store, request).await?;
+    let (certified_spec, scoped_registry, config_inputs, seed_inputs) =
+        certify_launch_plan(&prepared.plan, certification_registry)?;
+    let invocation_key_digest = invocation_key_digest_or_mint(invocation_key.as_ref())?;
+    let entry_point_evidence =
+        mfm_events::v1::EntryPointLaunchEvidence::new(entry_point.id(), prepared.sources).map_err(
+            |_| {
+                entry_point_launch_internal_error(
+                    "EntryPointLaunchEvidenceInvalid",
+                    "entry-point launch evidence is invalid",
+                )
+            },
+        )?;
+    prepare_certified_run_launch(
+        CertifiedRunLaunchInput {
+            certified_spec,
+            registry: &scoped_registry,
+            store_scope_id,
+            invocation_key_digest,
+            entry_point_evidence,
+        },
+        config_inputs,
+        seed_inputs,
+    )
+}
+
+async fn resolve_catalog<T: MfmConfig>(
+    store: &PostgresStore,
+    reference: &CatalogRef<T>,
+) -> Result<(T, mfm_events::v1::CatalogSourceEvidence), AppError> {
+    let schema_id = T::schema_id().map_err(|_| {
+        AppError::backend(
+            ErrorClass::Internal,
+            "CatalogSchemaInvalid",
+            "The catalog value schema is invalid",
+        )
+    })?;
+    let key = CatalogValueKey::new(
+        reference.name().as_str(),
+        schema_id.clone(),
+        reference.digest().clone(),
+    )
+    .map_err(|_| {
+        AppError::backend(
+            ErrorClass::BadRequest,
+            "CatalogReferenceInvalid",
+            "The catalog reference is invalid",
+        )
+    })?;
+    let row = store
+        .load_catalog_value(&key)
+        .await
+        .map_err(AppError::from)?
+        .ok_or_else(|| {
+            AppError::not_found(
+                "CatalogValueNotFound",
+                "The exact catalog value was not found",
+            )
+        })?;
+    let config: T = serde_json::from_slice(&row.canonical_json).map_err(|_| {
+        AppError::backend(
+            ErrorClass::BadRequest,
+            "CatalogValueTypeInvalid",
+            "The catalog value does not match the requested type",
+        )
+    })?;
+    let validated = ValidatedConfig::new(config).map_err(|_| {
+        AppError::backend(
+            ErrorClass::BadRequest,
+            "CatalogValueValidationFailed",
+            "The catalog value failed semantic validation",
+        )
+    })?;
+    let canonical = validated.canonical_json().map_err(|_| {
+        AppError::backend(
+            ErrorClass::Internal,
+            "CatalogValueCanonicalizationFailed",
+            "The catalog value could not be canonicalized",
+        )
+    })?;
+    if canonical.as_bytes() != row.canonical_json.as_slice()
+        || canonical.content_digest() != *reference.digest()
+    {
+        return Err(AppError::backend(
+            ErrorClass::Internal,
+            "CatalogValueCanonicalMismatch",
+            "The catalog value failed canonical integrity verification",
+        ));
+    }
+    let source = mfm_events::v1::CatalogSourceEvidence::new(
+        reference.name().as_str(),
+        schema_id,
+        reference.digest().clone(),
+    )
+    .map_err(|_| {
+        AppError::backend(
+            ErrorClass::Internal,
+            "CatalogSourceInvalid",
+            "Catalog launch evidence is invalid",
+        )
+    })?;
+    Ok((validated.into_inner(), source))
+}
+
+fn decode_request<T: serde::de::DeserializeOwned>(request: &Value) -> Result<T, AppError> {
+    serde_json::from_value(request.clone()).map_err(|_| {
+        AppError::new(
+            ErrorClass::BadRequest,
+            "EntryPointRequestInvalid",
+            "The entry-point request JSON is invalid",
+        )
+    })
+}
+
+fn plan_error(code: &'static str) -> AppError {
+    AppError::backend(ErrorClass::BadRequest, code, "Entry-point planning failed")
+}
+
+fn serialize_schema_id<S>(value: &SchemaId, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(value.as_str())
+}

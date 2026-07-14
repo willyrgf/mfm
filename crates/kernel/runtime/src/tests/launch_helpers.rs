@@ -333,11 +333,8 @@ pub(super) fn run_start_evidence(
 }
 
 pub(super) fn entry_point_launch_evidence() -> events::EntryPointLaunchEvidence {
-    events::EntryPointLaunchEvidence {
-        resolved_op_id: events::EntryPointOpId::new("mfm.test:portfolio_snapshot:1")
-            .expect("entry-point op id"),
-        entry_point_registry_digest: digest_for_bytes(b"entry-point-registry"),
-    }
+    events::EntryPointLaunchEvidence::new("mfm.test/portfolio_snapshot@1", Vec::new())
+        .expect("entry-point evidence")
 }
 
 pub(super) fn spec_artifact(runtime_spec: &CertifiedRuntimeSpec) -> RunLaunchArtifact {

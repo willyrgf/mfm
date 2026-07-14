@@ -12,7 +12,6 @@ category = "operation"
 [dependencies]
 serde = { workspace = true }
 
-mfm-authored-config = { path = "../../authored-config", version = "0.1.0" }
 mfm-canonical = { path = "../../kernel/canonical", version = "0.1.0" }
 mfm-certify = { path = "../../kernel/certify", version = "0.1.0" }
 mfm-ids = { path = "../../kernel/ids", version = "0.1.0" }

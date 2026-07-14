@@ -631,7 +631,7 @@ async fn run_read_services_are_evidence_only() {
         .expect("production read constructor is bounded");
     assert!(!production_read_constructor.contains("production_runner_registry"));
     assert!(!production_read_constructor.contains("std::env"));
-    assert!(production_read_constructor.contains("connect_production_run_store"));
+    assert!(production_read_constructor.contains("connect_production_store"));
 
     let read_services_impl = include_str!("../services_read.rs");
     assert!(!read_services_impl.contains("production_runner_registry"));
@@ -667,8 +667,8 @@ fn production_registry_certifies_btc_collector_descriptors() {
         prepare_btc_collector_internal_test_launch().expect("btc collector certifies and prepares");
 
     assert_eq!(
-        request.evidence.entry_point.resolved_op_id.as_str(),
-        "mfm.bitcoin.btc_chain_head_collector_internal_test"
+        request.evidence.entry_point.entry_point_id.as_str(),
+        "mfm.bitcoin/btc_chain_head_internal_test@1"
     );
     assert!(!request.evidence.config_artifacts.is_empty());
     assert!(!request.evidence.seed_cells.is_empty());
@@ -765,7 +765,7 @@ async fn launch_run_reaps_expired_execution_claim_and_retries_admission() {
 #[tokio::test]
 async fn postgres_store_authority_error_is_redacted_for_public_app_surface() {
     let database_url = "postgres://mfm_user:super-secret@127.0.0.1:notaport/mfm";
-    let error = match connect_production_run_store(Some(database_url)).await {
+    let error = match connect_production_store(Some(database_url)).await {
         Ok(_) => panic!("invalid postgres URL should not connect"),
         Err(error) => error,
     };

@@ -23,6 +23,7 @@ async fn parity_rest_postgres_smoke() {
     let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
         role: mfm_rest_api::RestProcessRole::Live,
         fact_index: mfm_app::production_fact_index_read_provider(store.clone()),
+        catalog_store: Some(store.clone()),
         store,
         runtime_config_path: None,
     });

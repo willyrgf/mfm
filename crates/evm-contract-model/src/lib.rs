@@ -271,6 +271,7 @@ impl_json_text_value!(ExpectedValue);
 
 /// Typed artifact evidence reference used by contract lifecycle values.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "artifact-evidence-ref",
@@ -388,6 +389,7 @@ pub struct ContractArtifactConfig {
 
 /// Runtime configuration for a single on-chain function call.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmConfig)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "call-config",
@@ -447,6 +449,7 @@ impl BlockTag {
 /// Block selector used by validation reads and event queries.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "block-selector",
@@ -471,7 +474,7 @@ impl<'de> Deserialize<'de> for BlockSelector {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        #[serde(tag = "kind", rename_all = "snake_case")]
+        #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
         enum RawBlockSelector {
             Number { number: u64 },
             Tag { tag: BlockTag },
@@ -486,6 +489,7 @@ impl<'de> Deserialize<'de> for BlockSelector {
 
 /// Read assertion to evaluate through an EVM call.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmConfig)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "read-assertion-config",
@@ -505,6 +509,7 @@ pub struct ReadAssertionConfig {
 
 /// Event assertion to evaluate with an EVM log query.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "event-assertion-config",
@@ -530,6 +535,7 @@ impl<'de> Deserialize<'de> for EventAssertionConfig {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct RawEventAssertionConfig {
             event: EventName,
             #[serde(default = "default_min_count")]

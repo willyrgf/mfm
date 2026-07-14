@@ -50,6 +50,7 @@ fn test_ops_help_and_list() {
         "evm_contract_lifecycle",
         "evm_contract_validate",
         "evm_native_balance",
+        "collect_then_report",
         "portfolio_snapshot",
     ] {
         assert!(
@@ -60,7 +61,7 @@ fn test_ops_help_and_list() {
     assert!(rendered
         .lines()
         .filter(|line| !line.is_empty())
-        .all(|line| line.contains("version=1")));
+        .all(|line| line.contains("request_schema_id=schema:")));
 }
 
 #[test]

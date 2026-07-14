@@ -59,24 +59,6 @@ impl From<Box<dyn std::error::Error>> for CommandError {
     }
 }
 
-impl From<mfm_app::EntryPointOpError> for CommandError {
-    fn from(error: mfm_app::EntryPointOpError) -> Self {
-        Self::new(
-            error.code().to_owned(),
-            PublicSafeMessage::new(error.message().to_owned()),
-        )
-    }
-}
-
-impl From<mfm_authored_config::AuthoredConfigError> for CommandError {
-    fn from(error: mfm_authored_config::AuthoredConfigError) -> Self {
-        Self::new(
-            error.code().to_owned(),
-            PublicSafeMessage::new(error.message().to_owned()),
-        )
-    }
-}
-
 impl From<mfm_app::AppError> for CommandError {
     fn from(error: mfm_app::AppError) -> Self {
         Self::new(error.code, error.message)

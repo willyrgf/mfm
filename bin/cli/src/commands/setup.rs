@@ -109,7 +109,7 @@ async fn import(args: &ImportArgs) -> CommandResult<SetupOutput> {
     let bytes = tokio::fs::read(&args.file)
         .await
         .map_err(|_| CommandError::backend("SetupFileReadFailed", "Failed to read setup file"))?;
-    let store = mfm_app::connect_production_run_store(args.stores.database_url.as_deref()).await?;
+    let store = mfm_app::connect_production_store(args.stores.database_url.as_deref()).await?;
     let values = mfm_app::import_setup_toml(&store, &bytes).await?;
     Ok(CommandOutput::new(SetupOutput { values }))
 }
@@ -132,7 +132,7 @@ async fn list(args: &ListArgs) -> CommandResult<SetupOutput> {
             ));
         }
     };
-    let store = mfm_app::connect_production_run_store(args.stores.database_url.as_deref()).await?;
+    let store = mfm_app::connect_production_store(args.stores.database_url.as_deref()).await?;
     let values = mfm_app::list_catalog_values(&store, cursor.as_ref(), args.limit).await?;
     Ok(CommandOutput::new(SetupOutput { values }))
 }
@@ -147,7 +147,7 @@ async fn export(args: &ExportArgs) -> CommandResult<SetupOutput> {
         schema_id,
         digest,
     };
-    let store = mfm_app::connect_production_run_store(args.stores.database_url.as_deref()).await?;
+    let store = mfm_app::connect_production_store(args.stores.database_url.as_deref()).await?;
     let bytes = mfm_app::export_catalog_value(&store, &identity).await?;
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)

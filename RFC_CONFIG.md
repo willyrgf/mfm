@@ -46,10 +46,11 @@ configuration. Nixfied is relevant only where it generates or supplies MFM runti
 
 ## Terms
 
-### Authored config
+### Setup document and launch request
 
-User-supplied TOML or JSON for one public entry-point operation. It is semantic input and must not
-contain secrets or process-local resource paths.
+Setup TOML publishes complete typed semantic `MfmConfig` values to the append-only catalog. A run
+launch request is strict JSON containing exact `CatalogRef<T>` values and operation-local policy.
+Neither surface may contain secrets or process-local resource paths.
 
 ### Canonical typed config
 
@@ -91,86 +92,84 @@ The problem is therefore not that semantic and runtime configuration are separat
 is intentional. The problem is that users must manually assemble and synchronize both sides, and
 multiple operation inputs, without an aggregate authoring contract.
 
-## Current configuration pipeline
+## Implemented configuration pipeline
 
 ```text
-CLI file or REST config value
-  -> mfm-authored-config parses declared TOML/JSON
-  -> app entry-point registry resolves public op name + version
-  -> EntryPointPlannerAdapter deserializes the op-specific Rust config type
-  -> operation crate validates/normalizes and plans a typed program draft
+setup TOML
+  -> app setup decoder validates, canonicalizes, scans, and appends raw catalog rows
+exact entry-point id + JSON typed-reference request
+  -> private app dispatch parses the selected request
+  -> app resolves exact typed catalog rows and verifies schema, bytes, and digest
+  -> operation-owned builder validates/derives the complete typed config
+  -> operation crate plans a typed program draft
   -> program lowering emits operation/state config material
   -> certifier validates and hashes the typed execution spec
   -> app admits content-addressed config artifacts with RunAdmitted
   -> runtime binds certified semantic refs to process-local runtime config when live IO is needed
 ```
 
-### Authored ingress
+The catalog is consulted only before admission. Resume, replay, stream/status inspection, and
+public-output rendering use the admitted spec and retained evidence and do not load catalog rows.
 
-`crates/authored-config` owns the shared ingress envelope:
+### Setup and catalog ingress
 
-- TOML and JSON are supported.
-- Payloads are limited to 256 KiB by default.
-- Invalid UTF-8, invalid syntax, duplicate JSON keys, floats, and unknown submitted fields are
-  rejected.
-- Parsed values are round-tripped through the selected Rust config type and canonical JSON.
-- Original authored bytes and canonical normalized bytes are both digested.
+`crates/app/src/config_setup.rs` owns the closed setup document and publication preparation:
 
-There is an important provenance gap after normalization. `EntryPointPlannerAdapter::plan` passes
-only the typed `normalized.value` to the operation planner. The authored-byte digest and normalized
-canonical digest are not carried in `EntryPointOpPlan` or `EntryPointLaunchEvidence`. The certified
-spec retains the semantic operation/state config material, but it does not retain the identity of
-the source document as authored.
+- setup input is TOML with a strict `values` array and private typed variants;
+- complete `MfmConfig` values are validated and canonicalized through `ValidatedConfig<T>`;
+- canonical payloads are bounded, scanned for secret-shaped fields and credential-bearing URLs, and
+  appended atomically through the concrete `PostgresStore`;
+- list returns only `(name, schema_id, digest)` identities; export returns exact canonical JSON.
 
-### Entry-point registry
+Catalog rows are raw storage values. PostgreSQL verifies name grammar, canonical JSON bytes, digest,
+size bounds, exact-key idempotence, and append-only behavior; it does not decode domain types.
 
-`crates/app/src/entry_points.rs` manually registers each public op by connecting:
+### Exact entry-point dispatch
 
-- an `EntryPointDescriptor`;
-- a concrete Rust config type inferred through the planner function;
-- a planner function;
-- an app-level error mapper.
+`crates/app/src/entry_point.rs` keeps a private exhaustive enum connecting:
 
-`EntryPointDescriptor` currently exposes only:
+- one exact id containing namespace, name, and version;
+- one strict request type;
+- exact catalog resolution and any operation-owned builder;
+- a typed launch plan and catalog source evidence.
 
-- namespace and internal name;
-- public name;
-- integer public version;
-- accepted config formats.
+The public discovery surface exposes only exact ids and request schema ids. It does not expose or
+implement latest selection, accepted encodings, a registry digest, a dynamic builder trait, or
+public registration helpers.
 
-It does not expose the authored config schema id, a machine-readable schema, a human description,
-defaults, examples, runtime capability requirements, output schemas, related operations, or a
-config migration contract. Consequently, `mfm ops list` is discovery of names, not discovery of how
-to configure or operate them.
+The eight implemented ids are:
+
+- `mfm.portfolio/portfolio_snapshot@1`
+- `mfm.bitcoin/btc_address_balance@1`
+- `mfm.evm/evm_native_balance@1`
+- `mfm.evm.contract/deploy@1`
+- `mfm.evm.contract/configure@1`
+- `mfm.evm.contract/validate@1`
+- `mfm.evm.contract/lifecycle@1`
+- `mfm.portfolio/collect_then_report@1`
 
 ### Operation-owned config
 
-Config ownership follows more than one pattern:
+Config ownership follows the semantic boundaries:
 
-- Portfolio has a dedicated authored/canonical pipeline in `crates/portfolio-config`, then lowers
-  into `PortfolioWorkflowConfig` in the portfolio state crate.
-- BTC and EVM balance collectors use their operation config types directly from their op crates.
-- EVM contract entry configs live in `crates/evm-contract-config` and compose context, action, import,
-  transaction, receipt, assertion, and signer-intent types from the contract model/config crates.
+- Portfolio uses `mfm_portfolio_model::PortfolioConfig` directly in the tracker operation.
+- BTC and EVM balance collector configs remain owned by their operation crates.
+- EVM state config/support types are owned by `mfm-state-evm-contracts`; the four lifecycle entry
+  configs are owned by `mfm-op-evm-contract-lifecycle`.
+- `mfm-op-portfolio-collect-report` owns relational derivation and the explicit composed graph.
 
-All paths eventually become typed program config and are certified, but there is no uniform
-authored-to-canonical lifecycle shared by every public op. The portfolio config crate also exposes a
-path-hint parser that can infer TOML or JSON; the public CLI start path does not use it.
-
-The workspace currently has 53 packages and four config-named packages:
+The implemented workspace has 52 packages. The relevant configuration boundaries are:
 
 | Package | Implementation lines | Direct dependents | Architectural role |
 |---|---:|---:|---|
-| `mfm-authored-config` | 448 | 9 | Shared representation and normalization layer between input and semantic owners |
-| `mfm-portfolio-config` | 280 | 2 | Portfolio-specific authored/canonical wrapper around `PortfolioConfig` |
-| `mfm-evm-contract-config` | 751 | 4 including integration tests | Mixed state configs and operation configs |
-| `mfm-runtime-config` | 1,872 | 2 | Runtime-only environment/file indirection and redacted live capability descriptors |
+| `mfm-catalog-model` | small | app/operation request users | `CatalogName` and typed `CatalogRef<T>` only |
+| `mfm-storage-postgres` | storage | app and runtime | raw run/artifact/fact/catalog persistence and integrity |
+| `mfm-runtime-config` | runtime-only | app/live transports | process-local routing and redacted live capability descriptors |
 
 Config types living in several state, operation, and model crates are not themselves the problem.
-Those types should remain with their semantic owners. The unhealthy scattering comes from standalone
-config crates that add another representation or intermediate dependency without establishing a
-distinct architectural boundary. `mfm-runtime-config` is the exception: it is a real runtime and
-security boundary and must remain separate from persisted semantic config and catalog resolution.
+Those types remain with their semantic owners. The deleted standalone authored, portfolio, and mixed
+EVM config crates added representations without a distinct boundary. `mfm-runtime-config` remains
+separate because runtime and secret-provider indirection is a real security boundary.
 
 ### Certification and persistence
 
@@ -179,30 +178,32 @@ material. App assembly lowers and certifies the draft, then admits the required 
 the same run-start authority path. This correctly makes the effective semantic config replayable
 and content-addressed.
 
-The persisted config artifacts are the configs used by operation/state nodes, not a durable project
-or workspace document that relates several entry-point runs. There is no persisted aggregate saying
-that particular collector runs were authored as inputs for a particular portfolio intent.
+The persisted config artifacts are the configs used by operation/state nodes. Catalog source names,
+schema ids, and digests are retained in launch evidence, but the catalog is not a run dependency
+after admission. The composed collect-then-report graph is one certified run; deliberately separate
+collector/report runs remain an external workflow.
 
 ## Public entry-point inventory
 
-The production registry currently publishes seven version-1 operations. Every operation accepts
-TOML and JSON.
+The private app dispatch publishes eight exact version-1 entry points. Run start accepts strict JSON
+requests only; setup TOML publishes the referenced values.
 
-| Public op | Authored Rust type and owner | Main semantic content | Live runtime config | Tracked complete TOML example |
-|---|---|---|---|---|
-| `portfolio_snapshot` | `PortfolioSnapshotAuthoredConfig` in `crates/portfolio-config` | Portfolio id, quote codes, networks, wallets, symbols, valuation config | None for chain access; reads admitted Platform facts through the store | `examples/configs/portfolio-dual-mainnet.toml` |
-| `btc_address_balance` | `BtcAddressBalanceConfig` in `crates/ops/btc-collectors-op` | Network id, Bitcoin network tag, semantic source identity, addresses, coverage, read bound | BTC route keyed by semantic source identity | `examples/configs/btc-address-balance.toml` |
-| `evm_native_balance` | `EvmNativeBalanceConfig` in `crates/ops/evm-collectors-op` | Network id, expected chain id, accounts, coverage, decimals, read bound | EVM route keyed by semantic network id | `examples/configs/evm-native-balance.toml` |
-| `evm_contract_deploy` | `EvmContractDeployEntryConfig` in `crates/evm-contract-config` | Lifecycle context and deploy action | EVM route plus signer/keystore binding | None |
-| `evm_contract_configure` | `EvmContractConfigureEntryConfig` in `crates/evm-contract-config` | Lifecycle context, deployed-stage import, configure action | EVM route plus signer/keystore binding | None |
-| `evm_contract_validate` | `EvmContractValidateEntryConfig` in `crates/evm-contract-config` | Lifecycle context, configured-stage import, validation action | EVM route; no signer is semantically required | None |
-| `evm_contract_lifecycle` | `EvmContractLifecycleEntryConfig` in `crates/evm-contract-config` | Lifecycle context and deploy/configure/validate actions | EVM route plus signer/keystore binding | None |
+| Exact entry point | Request references | Main semantic content | Live runtime config |
+|---|---|---|---|
+| `mfm.portfolio/portfolio_snapshot@1` | `portfolio: CatalogRef<PortfolioConfig>` | Report-only portfolio selection and valuation | Store facts; no balance crawl |
+| `mfm.bitcoin/btc_address_balance@1` | `config: CatalogRef<BtcAddressBalanceConfig>` | BTC addresses, coverage, and read bound | BTC route by semantic source |
+| `mfm.evm/evm_native_balance@1` | `config: CatalogRef<EvmNativeBalanceConfig>` | EVM accounts, chain id, decimals, coverage | EVM route by semantic network |
+| `mfm.evm.contract/deploy@1` | context + deploy action refs | Lifecycle context and deploy action | EVM route plus signer binding |
+| `mfm.evm.contract/configure@1` | context + import + configure refs | Deployed import and configure action | EVM route plus signer binding |
+| `mfm.evm.contract/validate@1` | context + import + validate refs | Configured import and validation action | EVM route; signer only when required by state |
+| `mfm.evm.contract/lifecycle@1` | context + deploy/configure/validate refs | Complete lifecycle composition | EVM route plus signer binding |
+| `mfm.portfolio/collect_then_report@1` | portfolio ref + BTC/EVM policies | Derived collectors, readiness, and report graph | BTC/EVM routes |
 
 The internal BTC chain-head checkpoint operation is intentionally not a public entry point.
 
-The tracked EVM contract documentation provides schematic JSON shapes, while the CLI example refers
-to a local `lifecycle.toml` that is not present as a complete tracked example. Users must consult
-domain documentation, Rust types, or test fixtures to construct these configs.
+`mfm setup import`, `mfm setup list`, and `mfm setup export` are the publication/discovery tools.
+The complete v1 setup-import fixture is `examples/setup/organization.toml`.
+The CLI and REST request documents use the same exact reference shapes.
 
 ## Runtime config today
 
@@ -236,58 +237,44 @@ runtime TOML file under the Nixfied state directory and export `MFM_RUNTIME_CONF
 safe deployment convenience, but it is separate from entry-point authored config and from the
 tracked examples used by operators.
 
-## CLI and REST behavior
+## Implemented CLI and REST behavior
 
 ### CLI
 
-The start contract is:
+The CLI start contract is:
 
 ```text
-mfm run start --op <NAME> --config <PATH> [--op-version <N>]
-              [--config-format <toml|json>] [--runtime-config <PATH>]
+mfm run start --entry-point <ID> --request <PATH> [--runtime-config <PATH>]
 ```
 
-Current characteristics:
-
-- `--op` and `--config` are both required.
-- The config document does not identify its own op or version; that association exists only in the
-  command line.
-- Omitted `--op-version` selects the latest registered version.
-- `--config-format` defaults to TOML without consulting the file extension. A JSON file requires an
-  explicit flag even though shared authored-config code has path-format helpers.
-- Authored config cannot be supplied through stdin or an inline value.
-- CLI connects to the run store and loads its store scope before app planning validates the selected
-  op config. Invalid config therefore cannot be checked through `run start` without a configured,
-  reachable store.
-- `ops list` works offline, but reports only name, version, and accepted formats.
-- There is no `ops describe`, config schema export, template generation, aggregate validation, or
-  dry-run planning command.
+The request file is JSON and contains the exact typed refs. `ops list` works offline and reports
+the eight exact ids plus request schema ids. There is no latest selection, format flag, or direct
+per-operation TOML launch path.
 
 ### REST
 
-REST accepts `op`, optional `op_version`, optional `config_format`, `config`, and optional
-`invocation_key` in one JSON request.
+REST accepts `entry_point`, strict JSON `request`, and optional `invocation_key`.
 
-- A structured JSON object or array implies JSON when `config_format` is omitted.
-- A string config defaults to TOML when `config_format` is omitted.
-- TOML must be embedded as a JSON string; JSON may be structured.
-- REST obtains live services and the store scope before preparing and validating the entry-point
-  launch, so it also lacks a store-independent validation surface.
+- Unknown envelope fields and unknown fields inside each selected request are rejected.
+- The exact entry-point id is validated before catalog access; exact refs are resolved only during
+  new-run preparation.
+- Missing catalog authority can block a new run, but catalog access is not needed for resume, replay,
+  status, stream inspection, or public-output rendering.
 - Runtime config is server process state rather than request data, as required by the security and
   replay model.
 
-The CLI and REST ultimately share `AuthoredConfig` and app planning, but their format detection and
-document transport behavior differ.
-
 ## The representative failure: collect then report
 
-The dual-mainnet portfolio recipe is the clearest expression of the problem. It requires:
+The dual-mainnet portfolio recipe motivated the catalog and now has two explicit paths. The
+catalog-backed composed path requires:
 
-1. a BTC collector config;
-2. an EVM collector config;
-3. a portfolio report config;
-4. a runtime routing config;
-5. three separately issued start commands in the correct order.
+1. one setup import containing a complete portfolio value;
+2. one exact portfolio reference and explicit BTC/EVM policies in a JSON request;
+3. one runtime routing config for live collector capabilities;
+4. one composed certified start.
+
+The independent path still permits separate BTC, EVM, and report runs, but each request pins an
+exact catalog value and the ordering remains an explicit workflow decision.
 
 The repeated data is not incidental:
 
@@ -301,18 +288,18 @@ The repeated data is not incidental:
 | Native asset decimals | no | yes | no; consumed from selected fact evidence | no |
 | Coverage/read policy | yes | yes | selection expects acceptable coverage | no |
 
-The architecture correctly keeps the collector and report runs separate. However, the operator is
-acting as the compiler between one portfolio intent and three per-op configs. The repository's
-operator recipe literally describes the collector files as separate tracked inputs and instructs
-the user to rerun collectors before the report.
+The architecture keeps `portfolio_snapshot` report-only while the dedicated composition operation
+acts as the compiler from one portfolio intent to child collector configs and typed readiness. The
+repository no longer uses per-operation semantic TOML files as the run-start contract.
 
-The local repository convention reinforces the scattered workflow: root-level `*.toml` files are
-ignored, while tracked examples live under `examples/configs`. A normal operator working set can
-therefore accumulate independent portfolio, collector, and runtime files at the repository root
-without a checked manifest that explains their relationship. The present working copy exhibits
-exactly that shape.
+Setup and runtime files are now distinct: setup TOML is published explicitly, request JSON pins
+catalog identities, and only named local setup/runtime files are ignored by the repository.
 
-## Problem statement
+## Pre-cutover problem statement (historical baseline)
+
+The following subsections document the problem that motivated this RFC. References to the former
+authored-config registry and per-operation files describe the pre-cutover repository state, not a
+supported compatibility path.
 
 ### 1. The configuration unit does not match the user intent unit
 
@@ -811,7 +798,7 @@ surface is a separate security-sensitive design decision; it is not part of this
 The same typed append API supports an initial TOML import and future interactive onboarding:
 
 ```text
-mfm setup import organization.toml
+mfm setup import --file organization.toml
   -> parse typed resource documents
   -> validate and canonicalize each value
   -> show names, schemas, and resulting digests
@@ -859,7 +846,7 @@ The failure boundary is intentional:
 - config construction fails closed on missing, incompatible, oversized, or ambiguous references;
 - no successful resolution can leave the operation with a partially populated config.
 
-### Required breaking cutover and deletion
+### Implemented breaking cutover and deletion
 
 The catalog replaces the current direct-authoring path in one cutover. The repository must not
 retain both models, add fallback decoding, preserve old public names through aliases, or add legacy
@@ -876,7 +863,8 @@ exact entry-point id + JSON typed-reference request
 TOML remains an import encoding for setup and an encoding for process-local runtime configuration.
 It is no longer a per-operation run-start encoding.
 
-The implementation is expected to make the following hard deletions.
+The implementation made the following hard deletions; the repository must not reintroduce them as
+facades or compatibility readers.
 
 #### Remove duplicate config crates and canonicalization
 
@@ -963,14 +951,71 @@ An incompatible request or builder change creates another exact entry-point id. 
   file. Remove `mfm-evm-contract-config` in the same manner. Do not keep facade crates or deprecated
   re-exports.
 
-The current baseline is 53 workspace packages and 411 unique direct workspace dependency pairs.
-The planned additions are `mfm-catalog-model` and one collect-then-report operation; the planned
-deletions are the three intermediary config crates above, for an expected final package count of 52.
+The pre-cutover baseline was 53 workspace packages and 411 unique direct workspace dependency
+pairs. The implemented additions are `mfm-catalog-model` and one collect-then-report operation; the
+implemented deletions are the three intermediary config crates above, for a final package count of
+52.
 Most EVM config implementation moves rather than disappears, so LOC reduction must not be claimed
 for that ownership correction. The authored/portfolio representations, registry/format/latest
-resolution, duplicate evidence paths, and compatibility-only tests should produce a meaningful net
-reduction. The implementation must report measured before/after packages, dependency pairs, Rust
-LOC, and public declarations, and explain any dependency-edge increase.
+resolution, duplicate evidence paths, and compatibility-only tests produced a meaningful net
+reduction.
+
+#### Verified implementation metrics
+
+Measured from the planning baseline commit `bacbb530` and the final cutover tree, using the same
+package, dependency-pair, tracked-Rust-line, and top-level-public-declaration commands:
+
+| Metric | Baseline | Final | Delta |
+|---|---:|---:|---:|
+| Workspace packages | 53 | 52 | -1 |
+| Unique direct workspace dependency pairs | 411 | 410 | -1 |
+| Tracked Rust lines | 214,392 | 212,999 | -1,393 |
+| Top-level public declarations under `crates` and `bin` | 1,754 | 1,744 | -10 |
+
+The 38 direct workspace dependency pairs present only in the final tree are intentional ownership
+edges, grouped by their reason:
+
+- CLI test fixtures retain operation-owned planning dependencies: `mfm -> mfm-op-btc-collectors`,
+  `mfm -> mfm-op-evm-collectors`, and `mfm -> mfm-op-portfolio-tracker`.
+- App launch assembly owns catalog requests, composed planning, and the concrete store:
+  `mfm-app -> mfm-catalog-model`, `mfm-app -> mfm-op-portfolio-collect-report`, and
+  `mfm-app -> mfm-storage-postgres`.
+- The catalog identity crate uses kernel identities, the typed config contract, and its canonical
+  serialization test: `mfm-catalog-model -> mfm-canonical`, `mfm-catalog-model -> mfm-ids`, and
+  `mfm-catalog-model -> mfm-values`.
+- Integration fixtures use the operation/state/store/value owners directly for catalog-seeded
+  parity: `mfm-integration-tests -> mfm-op-evm-collectors`,
+  `mfm-integration-tests -> mfm-op-portfolio-tracker`,
+  `mfm-integration-tests -> mfm-state-evm-contracts`,
+  `mfm-integration-tests -> mfm-storage-postgres`, and `mfm-integration-tests -> mfm-values`.
+- The composed operation owns its typed graph and request/config boundary:
+  `mfm-op-portfolio-collect-report -> mfm-canonical`,
+  `mfm-op-portfolio-collect-report -> mfm-capabilities`,
+  `mfm-op-portfolio-collect-report -> mfm-catalog-model`,
+  `mfm-op-portfolio-collect-report -> mfm-certify`,
+  `mfm-op-portfolio-collect-report -> mfm-effects`,
+  `mfm-op-portfolio-collect-report -> mfm-ids`,
+  `mfm-op-portfolio-collect-report -> mfm-op-btc-collectors`,
+  `mfm-op-portfolio-collect-report -> mfm-op-evm-collectors`,
+  `mfm-op-portfolio-collect-report -> mfm-op-portfolio-tracker`,
+  `mfm-op-portfolio-collect-report -> mfm-portfolio-model`,
+  `mfm-op-portfolio-collect-report -> mfm-program`,
+  `mfm-op-portfolio-collect-report -> mfm-program-derive`,
+  `mfm-op-portfolio-collect-report -> mfm-state-portfolio`, and
+  `mfm-op-portfolio-collect-report -> mfm-values`.
+- The moved EVM action/state owner uses the EVM core scalar and transaction primitives:
+  `mfm-state-evm-contracts -> mfm-evm-core`.
+- The renamed PostgreSQL package preserves the existing store implementation's kernel and test
+  support edges under its new owner: `mfm-storage-postgres -> mfm-canonical`,
+  `mfm-storage-postgres -> mfm-capabilities`, `mfm-storage-postgres -> mfm-certify`,
+  `mfm-storage-postgres -> mfm-events`, `mfm-storage-postgres -> mfm-facts`,
+  `mfm-storage-postgres -> mfm-ids`, `mfm-storage-postgres -> mfm-manual-auth`,
+  `mfm-storage-postgres -> mfm-spec`, and `mfm-storage-postgres -> mfm-store`.
+
+The final measured pair count is lower because the deleted config crates and their consumers remove
+more pairs than these additions introduce. `registry_digest` occurrences that remain belong to the
+kernel certification registry certificate; launch evidence itself contains only the exact entry-point
+id and catalog sources required by this RFC.
 
 The crate budget is strict: no new crate per catalog resource family; concrete resource and complete
 config types remain in their existing model, state, or operation owners; the closed setup-import
@@ -1076,25 +1121,28 @@ the implementation described here.
 
 ## Evidence map
 
-The current-state findings above are grounded in these repository surfaces:
+The implemented state above is grounded in these repository surfaces:
 
-- `crates/authored-config/src/lib.rs`: shared TOML/JSON ingress and normalization;
-- `crates/app/src/entry_point.rs`: entry-point descriptor, adapter, and registry;
-- `crates/app/src/entry_points.rs`: production registration of seven public ops;
-- `crates/app/src/lib.rs`: entry-point planning, certification, and launch material;
+- `crates/catalog-model/src/lib.rs`: checked catalog names and typed exact references;
+- `crates/storages/postgres/src/catalog.rs`: raw catalog append/load/list/export and integrity;
+- `crates/storages/postgres/migrations/0001_store.sql`: baseline catalog table and append-only trigger;
+- `crates/app/src/config_setup.rs`: strict setup import, secret scan, list, and export;
+- `crates/app/src/entry_point.rs`: private exact dispatch, typed resolution, and launch evidence;
+- `crates/app/src/lib.rs`: app planning, certification, and launch material;
 - `crates/runtime-config/src/lib.rs`: runtime config schema, indirection, and validation;
 - `crates/app/src/live_transports.rs`: lazy shared runtime-config loading and provider assembly;
 - `crates/kernel/program/README.md` and `crates/kernel/program/src/lib.rs`: typed nested-operation
   composition through framework-minted `OperationExpansion`;
 - `docs/architecture.md`: operation/state/adapter/transport placement and dependency boundaries;
-- `bin/cli/src/commands/run/start.rs`: CLI file and format behavior;
+- `bin/cli/src/commands/run/start.rs`: exact JSON request launch behavior;
 - `bin/cli/src/commands/ops.rs`: current public discovery surface;
-- `bin/rest-api/src/lib.rs`: REST config envelope and launch flow;
-- `crates/portfolio-config` and `crates/portfolio/model`: portfolio authored/canonical config;
+- `bin/cli/src/commands/setup.rs`: setup import/list/export commands;
+- `bin/rest-api/src/lib.rs`: strict REST request envelope and launch flow;
+- `crates/portfolio/model` and `crates/ops/portfolio-tracker-op`: direct portfolio config ownership;
 - `crates/ops/btc-collectors-op`: BTC collector config;
 - `crates/ops/evm-collectors-op`: EVM collector config;
-- `crates/evm-contract-config`: current mixed EVM state/operation config ownership to be dissolved;
-- `docs/portfolio-collect-then-report.md`: current multi-run operator recipe;
+- `crates/states/evm-contracts` and `crates/ops/evm-contract-lifecycle-op`: EVM config ownership;
+- `crates/ops/portfolio-collect-report-op`: composed collector/report graph and relational builder;
+- `docs/portfolio-collect-then-report.md`: catalog-backed composed and independent recipes;
 - `docs/evm-rpc-routing.md` and `docs/btc-rpc-routing.md`: runtime routing contracts;
-- `examples/configs`: the tracked authored/runtime examples;
-- `.gitignore` and `nixfied.nix`: local root-TOML convention and generated runtime config path.
+- `.gitignore` and `nixfied.nix`: explicit local setup/runtime ignores and generated runtime path.

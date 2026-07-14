@@ -4,49 +4,37 @@ use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
 use clap::Subcommand;
-use mfm_authored_config::EntryPointDescriptor;
+use mfm_app::EntryPointSummary;
 use serde::Serialize;
 
-/// Public entry-point operation discovery commands.
+/// Public entry-point discovery commands.
 #[derive(Subcommand)]
 pub(crate) enum OpsCommand {
-    /// List the public entry-point operations registered in this binary.
+    /// List the exact entry-point ids and request schemas in this binary.
     List,
 }
 
 impl OpsCommand {
-    /// Dispatches the selected operation discovery command.
+    /// Dispatches the selected discovery command.
     pub(crate) async fn execute(&self, ctx: &CommandContext) -> ! {
         match self {
-            Self::List => {
-                handle_command_result(execute_list().await, &ctx.output_format);
-            }
+            Self::List => handle_command_result(execute_list().await, &ctx.output_format),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct OpsOutput {
-    operations: Vec<EntryPointDescriptor>,
+    entry_points: Vec<EntryPointSummary>,
 }
 
 impl fmt::Display for OpsOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.operations.is_empty() {
-            return writeln!(f, "operations 0");
-        }
-
-        for operation in &self.operations {
-            let formats = operation
-                .accepted_config_formats
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(",");
+        for entry_point in &self.entry_points {
             writeln!(
                 f,
-                "{} version={} formats={formats}",
-                operation.public_name, operation.version
+                "{} request_schema_id={}",
+                entry_point.entry_point_id, entry_point.request_schema_id
             )?;
         }
         Ok(())
@@ -54,8 +42,7 @@ impl fmt::Display for OpsOutput {
 }
 
 async fn execute_list() -> CommandResult<OpsOutput> {
-    let registry = mfm_app::production_entry_point_op_registry()?;
     Ok(CommandOutput::new(OpsOutput {
-        operations: registry.registered_entry_points(),
+        entry_points: mfm_app::entry_point_summaries()?,
     }))
 }

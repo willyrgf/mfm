@@ -10,7 +10,6 @@ license = "MIT"
 category = "operation"
 
 [dependencies]
-mfm-authored-config = { path = "../../authored-config" }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-certify = { path = "../../kernel/certify" }
 mfm-evm-contract-model = { path = "../../evm-contract-model" }

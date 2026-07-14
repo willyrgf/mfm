@@ -34,12 +34,16 @@ use mfm_integration_tests::test_support::{
     write_collectors_runtime_config_for_test,
 };
 use mfm_integration_tests::test_support::{
-    prepare_entry_point_launch_for_store, register_process_fact_capabilities,
-    ProjectionFactIndexProvider,
+    prepare_btc_balance_launch_for_store, prepare_evm_balance_launch_for_store,
+    register_process_fact_capabilities, ProjectionFactIndexProvider,
 };
+#[cfg(feature = "parity-tests")]
+use mfm_storage_postgres::{CatalogValueKey, CatalogValueRow, PostgresStore};
 use mfm_store::v1::{
     AsyncInMemoryRunStore, ProjectionSnapshot, RetainedArtifactReadProvider, RunEventStore,
 };
+#[cfg(feature = "parity-tests")]
+use mfm_values::{MfmConfig, ValidatedConfig};
 #[cfg(feature = "parity-tests")]
 use serde_json::Value;
 #[cfg(feature = "parity-tests")]
@@ -97,21 +101,57 @@ async fn collect_then_report_completes_from_collector_written_platform_holdings(
     create_postgres_schema(&database_url, &schema).await;
     let scoped_database_url = schema_scoped_database_url(&database_url, &schema);
     let store = connect_postgres_with_retry(&scoped_database_url, 20, 250).await;
-    drop(store);
 
     let rpc_url = start_collectors_rpc_mock().await;
     let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
     let runtime_config_path =
         write_collectors_runtime_config_for_test(runtime_config_dir.path(), &rpc_url);
     let config_dir = tempfile::tempdir().expect("collector config tempdir");
-    let btc_config_path =
-        write_json_config(config_dir.path(), "btc.json", btc_balance_config_json());
-    let evm_config_path =
-        write_json_config(config_dir.path(), "evm.json", evm_balance_config_json());
-    let portfolio_config_path = write_json_config(
+    let btc_ref = publish_catalog_value(
+        &store,
+        "integration/btc-address-balance",
+        serde_json::from_value::<mfm_op_btc_collectors::BtcAddressBalanceConfig>(
+            btc_balance_config_json(),
+        )
+        .expect("btc catalog config"),
+    )
+    .await;
+    let evm_ref = publish_catalog_value(
+        &store,
+        "integration/evm-native-balance",
+        serde_json::from_value::<mfm_op_evm_collectors::EvmNativeBalanceConfig>(
+            evm_balance_config_json(),
+        )
+        .expect("evm catalog config"),
+    )
+    .await;
+    let portfolio = dual_mainnet_portfolio_json();
+    let portfolio_ref = publish_catalog_value(
+        &store,
+        "integration/dual-mainnet-portfolio",
+        serde_json::from_value::<mfm_op_portfolio_tracker::PortfolioConfig>(
+            portfolio
+                .get("portfolio")
+                .cloned()
+                .expect("portfolio catalog value"),
+        )
+        .expect("portfolio catalog config"),
+    )
+    .await;
+    let btc_request_path = write_json_config(
         config_dir.path(),
-        "portfolio.json",
-        dual_mainnet_portfolio_json(),
+        "btc-request.json",
+        serde_json::json!({"config": btc_ref}),
+    );
+    let evm_request_path = write_json_config(
+        config_dir.path(),
+        "evm-request.json",
+        serde_json::json!({"config": evm_ref}),
+    );
+    let portfolio_request_path = write_json_config(
+        config_dir.path(),
+        "portfolio-request.json",
+        serde_json::json!({"portfolio": portfolio_ref}),
     );
 
     // 1) Collect BTC then EVM natives through the actual CLI and production Postgres assembly.
@@ -120,12 +160,10 @@ async fn collect_then_report_completes_from_collector_written_platform_holdings(
         "json".to_owned(),
         "run".to_owned(),
         "start".to_owned(),
-        "--op".to_owned(),
-        "btc_address_balance".to_owned(),
-        "--config".to_owned(),
-        path_arg(&btc_config_path),
-        "--config-format".to_owned(),
-        "json".to_owned(),
+        "--entry-point".to_owned(),
+        "mfm.bitcoin/btc_address_balance@1".to_owned(),
+        "--request".to_owned(),
+        path_arg(&btc_request_path),
         "--runtime-config".to_owned(),
         path_arg(&runtime_config_path),
         "--database-url".to_owned(),
@@ -142,12 +180,10 @@ async fn collect_then_report_completes_from_collector_written_platform_holdings(
         "json".to_owned(),
         "run".to_owned(),
         "start".to_owned(),
-        "--op".to_owned(),
-        "evm_native_balance".to_owned(),
-        "--config".to_owned(),
-        path_arg(&evm_config_path),
-        "--config-format".to_owned(),
-        "json".to_owned(),
+        "--entry-point".to_owned(),
+        "mfm.evm/evm_native_balance@1".to_owned(),
+        "--request".to_owned(),
+        path_arg(&evm_request_path),
         "--runtime-config".to_owned(),
         path_arg(&runtime_config_path),
         "--database-url".to_owned(),
@@ -166,12 +202,10 @@ async fn collect_then_report_completes_from_collector_written_platform_holdings(
         "json".to_owned(),
         "run".to_owned(),
         "start".to_owned(),
-        "--op".to_owned(),
-        "portfolio_snapshot".to_owned(),
-        "--config".to_owned(),
-        path_arg(&portfolio_config_path),
-        "--config-format".to_owned(),
-        "json".to_owned(),
+        "--entry-point".to_owned(),
+        "mfm.portfolio/portfolio_snapshot@1".to_owned(),
+        "--request".to_owned(),
+        path_arg(&portfolio_request_path),
         "--database-url".to_owned(),
         scoped_database_url.clone(),
     ]);
@@ -291,10 +325,8 @@ async fn launch_btc_balance_collector(
     store: &AsyncInMemoryRunStore,
     invocation_key: &str,
 ) -> mfm_app::RunResponse {
-    let prepared = prepare_entry_point_launch_for_store(
+    let prepared = prepare_btc_balance_launch_for_store(
         store,
-        "btc_address_balance",
-        None,
         &btc_balance_config_json(),
         Some(invocation_key),
     )
@@ -307,10 +339,8 @@ async fn launch_evm_balance_collector(
     store: &AsyncInMemoryRunStore,
     invocation_key: &str,
 ) -> mfm_app::RunResponse {
-    let prepared = prepare_entry_point_launch_for_store(
+    let prepared = prepare_evm_balance_launch_for_store(
         store,
-        "evm_native_balance",
-        None,
         &evm_balance_config_json(),
         Some(invocation_key),
     )
@@ -322,10 +352,10 @@ async fn launch_prepared(
     services: &mfm_app::RunServices<AsyncInMemoryRunStore, AsyncInMemoryRunStore>,
     store: &AsyncInMemoryRunStore,
     invocation_key: &str,
-    prepared: mfm_app::PreparedEntryPointRunLaunch,
+    prepared: mfm_app::RunLaunchRequest,
 ) -> mfm_app::RunResponse {
     let response = services
-        .launch_prepared_entry_point_run(prepared)
+        .launch_run_and_render(prepared)
         .await
         .unwrap_or_else(|error| panic!("{invocation_key} launch: {error:?}"));
     let run = response
@@ -374,6 +404,29 @@ fn write_json_config(dir: &Path, name: &str, value: Value) -> std::path::PathBuf
     )
     .expect("write config");
     path
+}
+
+#[cfg(feature = "parity-tests")]
+async fn publish_catalog_value<T: MfmConfig>(store: &PostgresStore, name: &str, value: T) -> Value {
+    let validated = ValidatedConfig::new(value).expect("catalog value validation");
+    let canonical = validated
+        .canonical_json()
+        .expect("catalog value canonicalization");
+    let schema_id = T::schema_id().expect("catalog value schema");
+    let digest = canonical.content_digest();
+    let key = CatalogValueKey::new(name, schema_id, digest).expect("catalog value key");
+    let row = CatalogValueRow::new(
+        key.name.clone(),
+        key.schema_id.clone(),
+        key.digest.clone(),
+        canonical.as_bytes().to_vec(),
+    )
+    .expect("catalog value row");
+    store
+        .append_catalog_values(&[row])
+        .await
+        .expect("publish catalog value");
+    serde_json::json!({"name": key.name, "digest": key.digest.as_str()})
 }
 
 #[cfg(feature = "parity-tests")]

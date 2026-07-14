@@ -17,7 +17,6 @@
 //! # }
 //! ```
 
-use mfm_authored_config::{EntryPointDescriptor, TOML_JSON_AUTHORED_CONFIG_FORMATS};
 use mfm_evm_contract_model::{
     ConfiguredContractInstance, ContextBoundValidationReport, DeployedContractInstance,
     EvmContractContext,
@@ -45,42 +44,6 @@ const CONTEXT_CONFIGURE_OP_KEY: &str = "contract_context_configure";
 const CONTEXT_VALIDATE_OP_KEY: &str = "contract_context_validate";
 const CONTEXT_LIFECYCLE_OP_KEY: &str = "contract_context_lifecycle";
 const PUBLIC_OUTPUT_KEY: &str = "contract";
-
-/// Public deploy-only EVM contract entry-point descriptor retained for the pre-cutover app.
-pub const CONTRACT_DEPLOY_ENTRY_POINT: EntryPointDescriptor = EntryPointDescriptor {
-    namespace: OP_NAMESPACE,
-    name: CONTEXT_DEPLOY_OP_KEY,
-    public_name: "evm_contract_deploy",
-    version: 1,
-    accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
-};
-
-/// Public configure-only EVM contract entry-point descriptor retained for the pre-cutover app.
-pub const CONTRACT_CONFIGURE_ENTRY_POINT: EntryPointDescriptor = EntryPointDescriptor {
-    namespace: OP_NAMESPACE,
-    name: CONTEXT_CONFIGURE_OP_KEY,
-    public_name: "evm_contract_configure",
-    version: 1,
-    accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
-};
-
-/// Public validate-only EVM contract entry-point descriptor retained for the pre-cutover app.
-pub const CONTRACT_VALIDATE_ENTRY_POINT: EntryPointDescriptor = EntryPointDescriptor {
-    namespace: OP_NAMESPACE,
-    name: CONTEXT_VALIDATE_OP_KEY,
-    public_name: "evm_contract_validate",
-    version: 1,
-    accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
-};
-
-/// Public full-lifecycle EVM contract entry-point descriptor retained for the pre-cutover app.
-pub const CONTRACT_LIFECYCLE_ENTRY_POINT: EntryPointDescriptor = EntryPointDescriptor {
-    namespace: OP_NAMESPACE,
-    name: CONTEXT_LIFECYCLE_OP_KEY,
-    public_name: "evm_contract_lifecycle",
-    version: 1,
-    accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
-};
 
 /// Complete config for deploy-only EVM contract planning.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmConfig)]
@@ -660,34 +623,6 @@ pub fn contract_lifecycle_program_launch_plan(
     config: EvmContractLifecycleEntryConfig,
 ) -> mfm_program::Result<TypedProgramLaunchPlan> {
     TypedProgramLaunchPlan::from_draft(contract_lifecycle_program_draft(config)?)
-}
-
-/// Plans a deploy-only EVM contract entry-point program for the pre-cutover app.
-pub fn plan_contract_deploy_entry_point(
-    config: EvmContractDeployEntryConfig,
-) -> mfm_program::Result<TypedProgramLaunchPlan> {
-    deploy_contract_program_launch_plan(config)
-}
-
-/// Plans a configure-only EVM contract entry-point program for the pre-cutover app.
-pub fn plan_contract_configure_entry_point(
-    config: EvmContractConfigureEntryConfig,
-) -> mfm_program::Result<TypedProgramLaunchPlan> {
-    configure_contract_program_launch_plan(config)
-}
-
-/// Plans a validate-only EVM contract entry-point program for the pre-cutover app.
-pub fn plan_contract_validate_entry_point(
-    config: EvmContractValidateEntryConfig,
-) -> mfm_program::Result<TypedProgramLaunchPlan> {
-    validate_contract_program_launch_plan(config)
-}
-
-/// Plans a full lifecycle EVM contract entry-point program for the pre-cutover app.
-pub fn plan_contract_lifecycle_entry_point(
-    config: EvmContractLifecycleEntryConfig,
-) -> mfm_program::Result<TypedProgramLaunchPlan> {
-    contract_lifecycle_program_launch_plan(config)
 }
 
 fn build_program(

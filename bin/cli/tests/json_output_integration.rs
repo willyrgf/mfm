@@ -44,22 +44,22 @@ fn test_ops_list_json_output() {
 
     assert!(output.status.success());
     let data = verify_success_response(&String::from_utf8(output.stdout).expect("UTF-8 output"));
-    let operations = data["operations"].as_array().expect("operations array");
-    assert_eq!(operations.len(), 7);
-    assert!(operations.iter().all(|operation| operation["version"] == 1));
+    let entry_points = data["entry_points"].as_array().expect("entry-points array");
+    assert_eq!(entry_points.len(), 8);
     assert_eq!(
-        operations
+        entry_points
             .iter()
-            .map(|operation| operation["public_name"].as_str().unwrap())
+            .map(|entry_point| entry_point["entry_point_id"].as_str().unwrap())
             .collect::<Vec<_>>(),
         vec![
-            "btc_address_balance",
-            "evm_contract_configure",
-            "evm_contract_deploy",
-            "evm_contract_lifecycle",
-            "evm_contract_validate",
-            "evm_native_balance",
-            "portfolio_snapshot",
+            "mfm.bitcoin/btc_address_balance@1",
+            "mfm.evm.contract/configure@1",
+            "mfm.evm.contract/deploy@1",
+            "mfm.evm.contract/lifecycle@1",
+            "mfm.evm.contract/validate@1",
+            "mfm.evm/evm_native_balance@1",
+            "mfm.portfolio/collect_then_report@1",
+            "mfm.portfolio/portfolio_snapshot@1",
         ]
     );
 }
@@ -320,7 +320,7 @@ fn test_environment_variable_precedence() {
 }
 
 #[test]
-fn test_run_start_requires_entry_point_op_and_config_path() {
+fn test_run_start_requires_entry_point_and_request_path() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd
         .env_remove("DATABASE_URL")
@@ -332,15 +332,15 @@ fn test_run_start_requires_entry_point_op_and_config_path() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     let parsed = verify_error_response(&stderr);
     assert_eq!(parsed.error.code, "CliParseError");
-    assert!(parsed.error.message.contains("--op"));
-    assert!(parsed.error.message.contains("--config"));
+    assert!(parsed.error.message.contains("--entry-point"));
+    assert!(parsed.error.message.contains("--request"));
 }
 
 #[test]
 fn test_run_start_run_id_flag_is_not_a_start_option() {
     let temp_dir = TempDir::new().unwrap();
-    let config_path = temp_dir.path().join("portfolio.toml");
-    std::fs::write(&config_path, sample_portfolio_config_toml()).expect("config fixture");
+    let request_path = temp_dir.path().join("request.json");
+    std::fs::write(&request_path, "{}").expect("request fixture");
 
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd
@@ -350,10 +350,10 @@ fn test_run_start_run_id_flag_is_not_a_start_option() {
             "json",
             "run",
             "start",
-            "--op",
-            "portfolio_snapshot",
-            "--config",
-            config_path.to_str().unwrap(),
+            "--entry-point",
+            "mfm.portfolio/portfolio_snapshot@1",
+            "--request",
+            request_path.to_str().unwrap(),
             "--run-id",
             "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000001",
         ])
@@ -371,9 +371,9 @@ fn test_run_start_run_id_flag_is_not_a_start_option() {
 #[test]
 fn test_json_commands_reach_store_connection_after_local_validation() {
     let temp_dir = TempDir::new().unwrap();
-    let config_path = temp_dir.path().join("portfolio.toml");
-    std::fs::write(&config_path, sample_portfolio_config_toml()).expect("config fixture");
-    let config_path = config_path.to_str().unwrap();
+    let request_path = temp_dir.path().join("request.json");
+    std::fs::write(&request_path, "{}").expect("request fixture");
+    let request_path = request_path.to_str().unwrap();
 
     struct Case<'a> {
         name: &'static str,
@@ -388,10 +388,10 @@ fn test_json_commands_reach_store_connection_after_local_validation() {
                 "json",
                 "run",
                 "start",
-                "--op",
-                "portfolio_snapshot",
-                "--config",
-                config_path,
+                "--entry-point",
+                "mfm.portfolio/portfolio_snapshot@1",
+                "--request",
+                request_path,
             ],
         },
         Case {
@@ -549,56 +549,4 @@ fn test_json_response_structure_consistency() {
     assert_eq!(error_json["status"], expected_error_structure["status"]);
     assert_eq!(error_json["error"]["code"], "ErrorCode");
     assert_eq!(error_json["error"]["message"], "Error message");
-}
-
-fn sample_portfolio_config_toml() -> String {
-    r#"[portfolio]
-portfolio_id = "portfolio_main"
-quote_codes = ["USD"]
-
-[portfolio.metadata]
-
-[[portfolio.networks]]
-network_id = "ethereum-mainnet"
-family = "evm"
-chain_id = 1
-
-[portfolio.networks.metadata]
-
-[[portfolio.wallets]]
-wallet_id = "wallet_main"
-network_id = "ethereum-mainnet"
-symbol_ids = ["eth.native.ethereum-mainnet"]
-
-[portfolio.wallets.subject]
-kind = "evm_address"
-address = "0x000000000000000000000000000000000000dead"
-
-[portfolio.wallets.implementation]
-kind = "address_only"
-
-[portfolio.wallets.metadata]
-
-[[portfolio.symbol_configs]]
-symbol_id = "eth.native.ethereum-mainnet"
-display_symbol = "ETH"
-kind = "native_balance"
-role = "native"
-network_id = "ethereum-mainnet"
-
-[portfolio.symbol_configs.balance_reader]
-kind = "native_balance"
-
-[portfolio.symbol_configs.valuation]
-
-[[portfolio.symbol_configs.valuation.quotes]]
-quote = "USD"
-priced_symbol_id = "eth.native.ethereum-mainnet"
-
-unit_price_dec = "1800.00"
-
-[portfolio.symbol_configs.metadata]
-
-"#
-    .to_owned()
 }

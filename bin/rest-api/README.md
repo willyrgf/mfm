@@ -211,19 +211,20 @@ Response shape:
 
 ## Start A Run
 
-`POST /v1/runs/start` accepts only entry-point operation requests. The REST layer decodes HTTP
-input and delegates registry resolution, planning, certification, launch preparation, run
-admission, and verified public-output rendering to app assembly.
+`POST /v1/runs/start` accepts one exact entry-point id and a strict JSON request. The request uses
+the same catalog-reference contract as the CLI; the REST layer delegates exact resolution,
+planning, certification, admission, and verified rendering to app assembly.
 
 Request shape:
 
 ```json
 {
-  "op": "portfolio_snapshot",
-  "op_version": 1,
-  "config_format": "json",
-  "config": {
-    "...": "entry-point config"
+  "entry_point": "mfm.portfolio/portfolio_snapshot@1",
+  "request": {
+    "portfolio": {
+      "name": "acme/portfolio",
+      "digest": "content:sha256-jcs-v1:..."
+    }
   },
   "invocation_key": "optional-key"
 }
@@ -231,20 +232,18 @@ Request shape:
 
 Request notes:
 
-- `op` is required and selects a public entry-point operation.
-- `op_version` is optional. When omitted, the latest registered version for `op` is used.
-- All currently registered public entry-point operations are published as version `1`.
-- `config_format` is `toml` or `json`; it defaults to `toml`.
-- `config` is required. With `config_format: "toml"`, it must be a string. With
-  `config_format: "json"`, it may be a JSON object/array/value accepted by the selected op.
-- The production registry exposes all public entry-point operations at version `1`. It does not
-  register the internal BTC chain-head checkpoint op.
+- `entry_point` is required and must be one exact id, including namespace and version.
+- `request` is required, must be a JSON object, and is rejected when it contains unknown fields.
+- Requests contain exact catalog references (`name` and `digest`); name-only selection and latest
+  resolution do not exist.
+- The production surface contains eight version-1 ids, including
+  `mfm.portfolio/collect_then_report@1`; the internal BTC chain-head checkpoint op is not public.
 - Normal start derives the typed run id from certified run identity material: certified spec hash,
   store scope, and a required invocation key digest.
 - `invocation_key` is optional at the API boundary. Supplying it makes retries target the same run.
   When omitted, the app mints a fresh opaque invocation key before deriving `run_id`. The raw key is
   not persisted; only a domain-separated digest enters run identity material.
-- `run_id` is not a normal start field.
+- `run_id` is not a start field.
 
 The response is `{"outcome": "...", "run": ..., "active_run_id": "...", "public_output": ...}`
 inside the standard success envelope. Fresh admissions report `admitted`. Duplicate starts for the
@@ -254,14 +253,13 @@ execution lane for the same base work identity, start reports `already_active` w
 `public_output` is present when the run completes while driving and the op exposes a public output
 schema id.
 
-Portfolio snapshot:
+Portfolio snapshot request:
 
 ```json
 {
-  "op": "portfolio_snapshot",
-  "config_format": "json",
-  "config": {
-    "portfolio": { "...": "PortfolioConfig JSON" }
+  "entry_point": "mfm.portfolio/portfolio_snapshot@1",
+  "request": {
+    "portfolio": {"name": "acme/portfolio", "digest": "content:sha256-jcs-v1:..."}
   }
 }
 ```
@@ -270,11 +268,10 @@ EVM contract deploy:
 
 ```json
 {
-  "op": "evm_contract_deploy",
-  "config_format": "json",
-  "config": {
-    "context": { "...": "EvmContractContext JSON" },
-    "deploy": { "...": "DeployAction JSON" }
+  "entry_point": "mfm.evm.contract/deploy@1",
+  "request": {
+    "context": {"name": "acme/context", "digest": "content:sha256-jcs-v1:..."},
+    "deploy_action": {"name": "acme/deploy", "digest": "content:sha256-jcs-v1:..."}
   }
 }
 ```
@@ -283,12 +280,11 @@ EVM contract configure:
 
 ```json
 {
-  "op": "evm_contract_configure",
-  "config_format": "json",
-  "config": {
-    "context": { "...": "EvmContractContext JSON" },
-    "import_deployed": { "...": "ImportDeployedSpec JSON" },
-    "configure": { "...": "ConfigureAction JSON" }
+  "entry_point": "mfm.evm.contract/configure@1",
+  "request": {
+    "context": {"name": "acme/context", "digest": "content:sha256-jcs-v1:..."},
+    "import_deployed": {"name": "acme/import-deployed", "digest": "content:sha256-jcs-v1:..."},
+    "configure_action": {"name": "acme/configure", "digest": "content:sha256-jcs-v1:..."}
   }
 }
 ```
@@ -297,12 +293,11 @@ EVM contract validate:
 
 ```json
 {
-  "op": "evm_contract_validate",
-  "config_format": "json",
-  "config": {
-    "context": { "...": "EvmContractContext JSON" },
-    "import_configured": { "...": "ImportConfiguredSpec JSON" },
-    "validate": { "...": "ValidateAction JSON" }
+  "entry_point": "mfm.evm.contract/validate@1",
+  "request": {
+    "context": {"name": "acme/context", "digest": "content:sha256-jcs-v1:..."},
+    "import_configured": {"name": "acme/import-configured", "digest": "content:sha256-jcs-v1:..."},
+    "validate_action": {"name": "acme/validate", "digest": "content:sha256-jcs-v1:..."}
   }
 }
 ```
@@ -311,13 +306,12 @@ EVM contract lifecycle:
 
 ```json
 {
-  "op": "evm_contract_lifecycle",
-  "config_format": "json",
-  "config": {
-    "context": { "...": "EvmContractContext JSON" },
-    "deploy": { "...": "DeployAction JSON" },
-    "configure": { "...": "ConfigureAction JSON" },
-    "validate": { "...": "ValidateAction JSON" }
+  "entry_point": "mfm.evm.contract/lifecycle@1",
+  "request": {
+    "context": {"name": "acme/context", "digest": "content:sha256-jcs-v1:..."},
+    "deploy_action": {"name": "acme/deploy", "digest": "content:sha256-jcs-v1:..."},
+    "configure_action": {"name": "acme/configure", "digest": "content:sha256-jcs-v1:..."},
+    "validate_action": {"name": "acme/validate", "digest": "content:sha256-jcs-v1:..."}
   }
 }
 ```
@@ -335,15 +329,16 @@ The full lifecycle contract is documented in
 Stable launch error codes:
 
 - `InvalidJson`: the request envelope is not accepted by the route schema.
-- `InvalidPublicOpName`: `op` is not a valid public entry-point name.
-- `InvalidOpVersion`: `op_version` is zero.
-- `EntryPointOpNotFound`: no op is registered for the supplied public name.
-- `EntryPointOpVersionNotFound`: the requested explicit version is not registered.
-- `AuthoredConfigDecodeFailed`: the supplied config cannot be decoded for the selected op.
-- `AuthoredConfigFormatShapeMismatch`: `config_format` and `config` shape do not match.
-- `PortfolioSnapshotConfigInvalid`: portfolio snapshot config validation failed.
+- `EntryPointNotFound`: the exact entry-point id is not registered.
+- `EntryPointRequestInvalid`: the request does not match the selected strict schema.
+- `CatalogStoreUnavailable`: catalog authority is unavailable during new-run preparation.
+- `CatalogValueNotFound`: an exact referenced catalog value is missing.
+- `CatalogValueTypeInvalid`: a catalog row does not decode as the referenced type.
+- `CatalogValueCanonicalMismatch`: a catalog row fails canonical byte/digest verification.
+- `CatalogValueValidationFailed`: a catalog value fails semantic validation.
+- `CollectThenReportConfigInvalid`: composed portfolio joins or policy are invalid.
 - `EvmContractPlanFailed`: EVM contract entry-point planning failed.
-- `EntryPointOpCertificationFailed`: the planned spec failed app-owned certification.
+- `EntryPointCertificationFailed`: the planned spec failed app-owned certification.
 - `LaunchRunnerUnavailable`: the verified spec references a state descriptor without a production
   runner binding.
 

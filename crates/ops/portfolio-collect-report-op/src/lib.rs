@@ -739,6 +739,63 @@ mod tests {
     }
 
     #[test]
+    fn rejects_empty_collections_duplicate_subjects_and_incompatible_joins() {
+        let mut empty_json =
+            serde_json::to_value(portfolio_config(false, true)).expect("portfolio json");
+        empty_json["wallets"] = json!([]);
+        let empty = serde_json::from_value(empty_json).expect("empty wallet portfolio");
+        assert_eq!(
+            build_collect_then_report_config(empty, bitcoin_policy(), evm_policy(Some(18)))
+                .expect_err("empty collection"),
+            CollectThenReportConfigError::EmptyCollection
+        );
+
+        let mut duplicate_json =
+            serde_json::to_value(portfolio_config(false, true)).expect("portfolio json");
+        let duplicate_wallet = duplicate_json["wallets"][0].clone();
+        duplicate_json["wallets"]
+            .as_array_mut()
+            .expect("wallet array")
+            .push(json!({
+                "wallet_id": "wallet_eth_duplicate",
+                "network_id": duplicate_wallet["network_id"],
+                "symbol_ids": duplicate_wallet["symbol_ids"],
+                "subject": duplicate_wallet["subject"],
+                "implementation": duplicate_wallet["implementation"],
+                "metadata": {}
+            }));
+        let duplicate =
+            serde_json::from_value(duplicate_json).expect("duplicate subject portfolio");
+        assert_eq!(
+            build_collect_then_report_config(duplicate, bitcoin_policy(), evm_policy(Some(18)))
+                .expect_err("duplicate collector subject"),
+            CollectThenReportConfigError::DuplicateSubject
+        );
+
+        let mut mismatch_json =
+            serde_json::to_value(portfolio_config(true, true)).expect("portfolio json");
+        mismatch_json["wallets"][0]["symbol_ids"] = json!(["btc.native.bitcoin-mainnet"]);
+        let mismatch = serde_json::from_value(mismatch_json).expect("mismatched join portfolio");
+        assert!(matches!(
+            build_collect_then_report_config(mismatch, bitcoin_policy(), evm_policy(Some(18)))
+                .expect_err("mismatched wallet and symbol join"),
+            CollectThenReportConfigError::InvalidPortfolio
+                | CollectThenReportConfigError::UnsupportedWalletSymbolJoin
+        ));
+    }
+
+    #[test]
+    fn rejects_empty_explicit_collector_policy() {
+        let error = build_collect_then_report_config(
+            portfolio_config(false, true),
+            BitcoinCollectorPolicy::new("", NonZeroU64::new(1).expect("non-zero")),
+            evm_policy(Some(18)),
+        )
+        .expect_err("empty coverage policy");
+        assert_eq!(error, CollectThenReportConfigError::InvalidPolicy);
+    }
+
+    #[test]
     fn composed_draft_records_parent_child_and_tracker_lineage() {
         let config = build_collect_then_report_config(
             portfolio_config(true, true),

@@ -18,6 +18,7 @@ pub const AAVE_V3_READER_DEBT_POSITION: &str = "debt_position";
 
 /// Typed Aave V3 market config embedded inside a canonical `protocol_position` reader blob.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.portfolio",
     name = "aave-market-config",
@@ -62,6 +63,7 @@ impl AaveMarketConfig {
 
 /// Typed reserve entry inside an Aave market config.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.portfolio",
     name = "aave-reserve-config",
@@ -89,6 +91,7 @@ pub struct AaveReserveConfig {
 
 /// Typed reader config for an Aave reserve position.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.portfolio",
     name = "aave-reserve-position-config",
@@ -106,6 +109,7 @@ pub struct AaveReservePositionConfig {
 
 /// Typed reader config for an Aave debt position.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.portfolio",
     name = "aave-debt-position-config",
@@ -158,6 +162,7 @@ impl fmt::Display for AaveDebtKind {
 /// Typed Aave protocol-position config resolved from the generic symbol reader envelope.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.portfolio",
     name = "aave-protocol-position-config",

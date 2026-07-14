@@ -2,7 +2,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use assert_cmd::Command;
-use mfm_app::{ProductionPostgresSchema, ProductionRunStore};
+use mfm_app::{PostgresSchema, PostgresStore};
 use mfm_store::v1 as store;
 use serde_json::Value;
 use sqlx::{AssertSqlSafe, PgPool};
@@ -28,10 +28,10 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
     create_schema(&database_url, &schema).await;
     let scoped_database_url = schema_scoped_database_url(&database_url, &schema);
 
-    ProductionPostgresSchema::migrate(&scoped_database_url)
+    PostgresSchema::migrate(&scoped_database_url)
         .await
         .expect("migrate typed postgres schema");
-    let store = ProductionRunStore::connect(&scoped_database_url)
+    let store = PostgresStore::connect(&scoped_database_url)
         .await
         .expect("connect typed postgres store");
     let config = sample_portfolio_config();

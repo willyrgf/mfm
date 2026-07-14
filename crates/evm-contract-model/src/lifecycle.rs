@@ -18,6 +18,7 @@ pub enum ContractLifecycleStage {
 /// Source cell or public output selected for an MFM-run import.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "source-cell-or-output-ref",
@@ -39,6 +40,7 @@ pub enum SourceCellOrOutputRef {
 /// Certified policy for accepting a source-run context during import.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "accepted-context-policy",
@@ -62,6 +64,7 @@ impl Default for AcceptedContextPolicy {
 
 /// Import request for a lifecycle value produced by another verified MFM run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "import-from-mfm-run",
@@ -117,6 +120,7 @@ impl<'de> Deserialize<'de> for ImportFromMfmRun {
 
 /// Replayable evidence for importing a lifecycle value from another MFM run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "import-from-mfm-run-evidence",

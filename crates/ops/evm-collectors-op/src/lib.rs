@@ -28,7 +28,6 @@
 
 use std::num::NonZeroU64;
 
-use mfm_authored_config::{EntryPointDescriptor, TOML_JSON_AUTHORED_CONFIG_FORMATS};
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_program::{
     build_root_with_registries, NoContext, NonEmptyHandles, Operation, OperationExpansion,
@@ -55,15 +54,6 @@ const BALANCE_OP_VERSION: &str = "mfm.evm.operation.evm_native_balance.v1";
 const BALANCE_ROOT_SCOPE: &str = "evm_native_balance";
 const BALANCE_OP_KEY: &str = "evm_native_balance";
 const BALANCE_PUBLIC_OUTPUT_KEY: &str = "balance_batch";
-
-/// Public EVM native-balance descriptor retained until the direct ingress cutover.
-pub const EVM_NATIVE_BALANCE_ENTRY_POINT: EntryPointDescriptor = EntryPointDescriptor {
-    namespace: OP_NAMESPACE,
-    name: BALANCE_OP_KEY,
-    public_name: "evm_native_balance",
-    version: 1,
-    accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
-};
 
 /// Planning config for a multi-account EVM native balance collector batch.
 ///
@@ -265,13 +255,6 @@ pub fn evm_native_balance_program_launch_plan(
     config: EvmNativeBalanceConfig,
 ) -> mfm_program::Result<TypedProgramLaunchPlan> {
     TypedProgramLaunchPlan::from_draft(evm_native_balance_program_draft(config)?)
-}
-
-/// Plans an EVM native-balance entry point for the pre-cutover app.
-pub fn plan_evm_native_balance_entry_point(
-    config: EvmNativeBalanceConfig,
-) -> mfm_program::Result<TypedProgramLaunchPlan> {
-    evm_native_balance_program_launch_plan(config)
 }
 
 mfm_certify::define_program_descriptor_registry! {

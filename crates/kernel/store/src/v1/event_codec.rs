@@ -664,8 +664,18 @@ fn entry_point_launch_evidence_json(
     evidence: &events::EntryPointLaunchEvidence,
 ) -> serde_json::Value {
     serde_json::json!({
-        "entry_point_registry_digest": evidence.entry_point_registry_digest.as_str(),
-        "resolved_op_id": evidence.resolved_op_id.as_str(),
+        "catalog_sources": evidence
+            .catalog_sources
+            .iter()
+            .map(|source| {
+                serde_json::json!({
+                    "digest": source.digest.as_str(),
+                    "name": source.name.as_str(),
+                    "schema_id": source.schema_id.as_str(),
+                })
+            })
+            .collect::<Vec<_>>(),
+        "entry_point_id": evidence.entry_point_id.as_str(),
     })
 }
 

@@ -5,7 +5,7 @@ use mfm_evm_contract_model::EvmContractContext;
 use mfm_ids::{ContentDigest, SchemaId};
 use mfm_op_btc_collectors::BtcAddressBalanceConfig;
 use mfm_op_evm_collectors::EvmNativeBalanceConfig;
-use mfm_portfolio_model::portfolio::PortfolioConfig;
+use mfm_op_portfolio_tracker::PortfolioConfig;
 use mfm_state_evm_contracts::{
     ConfigureAction, DeployAction, ImportConfiguredSpec, ImportDeployedSpec, ValidateAction,
 };
@@ -385,6 +385,105 @@ mod tests {
         )
         .expect_err("unknown setup field");
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn registered_nested_setup_types_reject_unknown_fields() {
+        for document in [
+            r#"
+                [[values]]
+                name = "acme/portfolio"
+                kind = "portfolio"
+
+                [values.value]
+                portfolio_id = "portfolio"
+                quote_codes = ["USD"]
+                networks = []
+                symbol_configs = []
+                metadata = {}
+
+                [[values.value.wallets]]
+                wallet_id = "wallet"
+                network_id = "network"
+                symbol_ids = []
+                metadata = {}
+
+                [values.value.wallets.subject]
+                kind = "evm_address"
+                address = "0x0000000000000000000000000000000000000001"
+
+                [values.value.wallets.implementation]
+                kind = "address_only"
+                unexpected = true
+            "#,
+            r#"
+                [[values]]
+                name = "acme/context"
+                kind = "evm_contract_context"
+
+                [values.value]
+                lifecycle_key = "lifecycle"
+
+                [values.value.network]
+                network_id = "ethereum-mainnet"
+                expected_chain_id = 1
+                unexpected = true
+
+                [values.value.contract_profile]
+                profile_id = "profile"
+            "#,
+            r#"
+                [[values]]
+                name = "acme/deploy"
+                kind = "evm_deploy_action"
+
+                [values.value.signer]
+                signer_ref = "deployer"
+                expected_signer_address = "0x0000000000000000000000000000000000000001"
+
+                [values.value.transaction]
+                style = "eip1559"
+                unexpected = true
+            "#,
+            r#"
+                [[values]]
+                name = "acme/import"
+                kind = "evm_import_deployed"
+
+                [values.value]
+                kind = "adopt_external_address"
+
+                [values.value.adoption]
+                address = "0x0000000000000000000000000000000000000001"
+                provenance_label = "audited"
+                unexpected = true
+            "#,
+        ] {
+            let error = toml::from_str::<SetupDocument>(document)
+                .expect_err("nested setup fields must be rejected");
+            assert!(error.to_string().contains("unknown field"), "{error}");
+        }
+    }
+
+    #[test]
+    fn setup_rejects_float_values_in_typed_configs() {
+        let error = toml::from_str::<SetupDocument>(
+            r#"
+                [[values]]
+                name = "acme/bitcoin"
+                kind = "btc_address_balance"
+
+                [values.value]
+                network = "bitcoin-mainnet"
+                bitcoin_network = "main"
+                semantic_source_identity = "public-bitcoin-core"
+                addresses = ["bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"]
+                coverage = "configured_only"
+                max_source_reads = 1.5
+            "#,
+        )
+        .expect_err("float values must not enter hashed configuration");
+        assert!(error.to_string().contains("invalid") || error.to_string().contains("float"));
     }
 
     #[test]

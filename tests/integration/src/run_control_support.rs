@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use mfm_ids::RunId;
+use mfm_program::{CanonicalSeed, TypedProgramDraft};
 use mfm_store::v1 as store;
 
 /// Environment variable carrying the runtime config file path.
@@ -255,54 +257,95 @@ fn toml_string(value: &str) -> String {
     serde_json::to_string(value).expect("toml-compatible string")
 }
 
-/// Prepares a portfolio snapshot entry-point launch against the supplied store scope.
+/// Prepares a typed portfolio report launch against the supplied store scope.
 pub async fn prepare_portfolio_launch_for_store<S>(
     store: &S,
     config: &serde_json::Value,
     invocation_key: Option<&str>,
-) -> mfm_app::PreparedEntryPointRunLaunch
+) -> mfm_app::RunLaunchRequest
 where
     S: store::StoreScopeStore,
 {
-    prepare_entry_point_launch_for_store(store, "portfolio_snapshot", None, config, invocation_key)
-        .await
+    let portfolio = config
+        .get("portfolio")
+        .cloned()
+        .unwrap_or_else(|| config.clone());
+    let portfolio = serde_json::from_value(portfolio).expect("portfolio config");
+    let draft = mfm_op_portfolio_tracker::portfolio_program_draft(portfolio)
+        .expect("portfolio program draft");
+    prepare_typed_launch_for_store(store, draft, BTreeMap::new(), invocation_key).await
 }
 
-/// Prepares an entry-point launch against the supplied store scope.
-pub async fn prepare_entry_point_launch_for_store<S>(
+/// Prepares a typed Bitcoin collector launch against the supplied store scope.
+pub async fn prepare_btc_balance_launch_for_store<S>(
     store: &S,
-    op_name: &str,
-    op_version: Option<mfm_app::OpVersion>,
     config: &serde_json::Value,
     invocation_key: Option<&str>,
-) -> mfm_app::PreparedEntryPointRunLaunch
+) -> mfm_app::RunLaunchRequest
 where
     S: store::StoreScopeStore,
 {
-    let entry_point_registry = mfm_app::production_entry_point_op_registry().expect("entrypoints");
+    let config = serde_json::from_value(config.clone()).expect("Bitcoin collector config");
+    let draft = mfm_op_btc_collectors::btc_address_balance_program_draft(config)
+        .expect("Bitcoin collector program draft");
+    let seed_material = draft
+        .seeds()
+        .iter()
+        .map(|seed| {
+            let bytes = CanonicalSeed::from_value(
+                &mfm_op_btc_collectors::BtcAddressBalanceObservationContext {
+                    observed_at_unix_ms: None,
+                },
+            )
+            .expect("Bitcoin observation seed")
+            .canonical_json()
+            .clone();
+            (seed.seed_id.clone(), bytes)
+        })
+        .collect();
+    prepare_typed_launch_for_store(store, draft, seed_material, invocation_key).await
+}
+
+/// Prepares a typed EVM collector launch against the supplied store scope.
+pub async fn prepare_evm_balance_launch_for_store<S>(
+    store: &S,
+    config: &serde_json::Value,
+    invocation_key: Option<&str>,
+) -> mfm_app::RunLaunchRequest
+where
+    S: store::StoreScopeStore,
+{
+    let config = serde_json::from_value(config.clone()).expect("EVM collector config");
+    let draft = mfm_op_evm_collectors::evm_native_balance_program_draft(config)
+        .expect("EVM collector program draft");
+    prepare_typed_launch_for_store(store, draft, BTreeMap::new(), invocation_key).await
+}
+
+async fn prepare_typed_launch_for_store<S>(
+    store: &S,
+    draft: TypedProgramDraft,
+    seed_material: BTreeMap<mfm_ids::SeedId, mfm_canonical::PlainCanonicalJsonBytes>,
+    invocation_key: Option<&str>,
+) -> mfm_app::RunLaunchRequest
+where
+    S: store::StoreScopeStore,
+{
     let certification_registry = mfm_app::production_certification_registry().expect("cert");
     let store_scope_id = store
         .load_store_scope_id()
         .await
         .unwrap_or_else(|error| panic!("store scope: {error}"));
-    let authored_config = mfm_authored_config::AuthoredConfig::new(
-        mfm_authored_config::AuthoredConfigFormat::Json,
-        serde_json::to_vec(config).expect("entry-point config json"),
-    )
-    .expect("authored config");
-    mfm_app::prepare_entry_point_run_launch(mfm_app::EntryPointRunLaunchInput {
-        entry_point_registry: &entry_point_registry,
-        public_op_name: mfm_app::PublicOpName::new(op_name).expect("op name"),
-        op_version,
-        authored_config,
-        certification_registry: &certification_registry,
+    mfm_app::prepare_typed_program_run_launch_for_test(
+        draft,
+        seed_material,
+        &certification_registry,
         store_scope_id,
-        invocation_key: invocation_key
+        invocation_key
             .map(mfm_app::InvocationKey::new)
             .transpose()
             .expect("invocation key"),
-    })
-    .expect("prepared entry-point launch")
+    )
+    .expect("prepared typed launch")
 }
 
 /// Admits a portfolio run without driving it so tests can append history before resume.
@@ -320,8 +363,8 @@ where
         + 'static,
 {
     let prepared = prepare_portfolio_launch_for_store(store, config, None).await;
-    let run_id = prepared.request.run_id.clone();
-    let certified = prepared.request.certified_spec.clone();
+    let run_id = prepared.run_id.clone();
+    let certified = prepared.certified_spec.clone();
     let runners = mfm_app::production_runner_registry(
         Arc::new(store.clone()),
         mfm_app::ProjectionFactIndexProvider::empty_arc(),
@@ -329,13 +372,13 @@ where
     )
     .expect("production runners");
     let scheduler = mfm_runtime::SerialTypedScheduler::new(runners, Arc::new(store.clone()));
-    let runtime_spec = mfm_runtime::CertifiedRuntimeSpec::new(prepared.request.certified_spec)
-        .expect("runtime spec");
+    let runtime_spec =
+        mfm_runtime::CertifiedRuntimeSpec::new(prepared.certified_spec).expect("runtime spec");
     let launch = scheduler
         .prepare_run_launch(
             &runtime_spec,
-            prepared.request.identity_material,
-            prepared.request.evidence,
+            prepared.identity_material,
+            prepared.evidence,
             store
                 .expected_next_seq(&run_id)
                 .await

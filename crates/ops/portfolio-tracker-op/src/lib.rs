@@ -15,12 +15,7 @@
 //! # }
 //! ```
 
-use mfm_authored_config::{EntryPointDescriptor, TOML_JSON_AUTHORED_CONFIG_FORMATS};
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
-use mfm_portfolio_config::{
-    canonicalize_portfolio_snapshot_authored_config, PortfolioSnapshotAuthoredConfig,
-    PortfolioSnapshotConfigError,
-};
 use mfm_portfolio_model::domain_key::{
     HoldingsDomainKey, ReportDomainKey, SubjectDomainKey, ValuationDomainKey,
 };
@@ -44,15 +39,6 @@ const PORTFOLIO_OPERATION_VERSION: &str = "mfm.portfolio.operation.tracker_workf
 const ROOT_SCOPE: &str = "portfolio";
 const OP_KEY: &str = "portfolio_tracker";
 const PUBLIC_OUTPUT_KEY: &str = "portfolio";
-
-/// Public portfolio snapshot descriptor retained until the direct ingress cutover.
-pub const PORTFOLIO_SNAPSHOT_ENTRY_POINT: EntryPointDescriptor = EntryPointDescriptor {
-    namespace: "mfm.portfolio",
-    name: "portfolio_snapshot",
-    public_name: "portfolio_snapshot",
-    version: 1,
-    accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
-};
 
 /// Typed portfolio tracker workflow operation.
 pub struct PortfolioTrackerWorkflowOperation;
@@ -203,27 +189,6 @@ pub fn portfolio_program_draft(
             )
         },
     )
-}
-
-/// Plans the old authored portfolio entry point while the direct ingress is still present.
-pub fn plan_portfolio_snapshot_entry_point(
-    authored: PortfolioSnapshotAuthoredConfig,
-) -> Result<mfm_program::TypedProgramLaunchPlan, PortfolioSnapshotPlanError> {
-    let canonical = canonicalize_portfolio_snapshot_authored_config(authored)?;
-    Ok(mfm_program::TypedProgramLaunchPlan::from_draft(
-        portfolio_program_draft(canonical.portfolio)?,
-    )?)
-}
-
-/// Error returned while preparing the pre-cutover authored portfolio entry point.
-#[derive(Debug, thiserror::Error)]
-pub enum PortfolioSnapshotPlanError {
-    /// Authored portfolio configuration failed canonical validation.
-    #[error("portfolio snapshot config validation failed: {0}")]
-    Config(#[from] PortfolioSnapshotConfigError),
-    /// Typed portfolio graph planning failed.
-    #[error("portfolio snapshot planning failed: {0}")]
-    Plan(#[from] mfm_program::PlanError),
 }
 
 #[cfg(test)]

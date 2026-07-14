@@ -175,11 +175,8 @@ pub(super) fn fact_run_admitted() -> events::RunAdmitted {
             .expect("store scope"),
             invocation_key_digest: content_digest(0xc2),
         },
-        entry_point: events::EntryPointLaunchEvidence {
-            resolved_op_id: events::EntryPointOpId::new("mfm.replay.test.fact")
-                .expect("entry point"),
-            entry_point_registry_digest: content_digest(0xc2),
-        },
+        entry_point: events::EntryPointLaunchEvidence::new("mfm.replay.test/fact@1", Vec::new())
+            .expect("entry point evidence"),
         spec_hash,
         spec_artifact: run_artifact_ref(
             ArtifactRole::TypedExecutionSpec,

@@ -120,7 +120,8 @@ Run binaries locally:
 
 ```bash
 nix run .#mfm -- --help
-nix run .#mfm-start -- --op portfolio_snapshot --config examples/configs/portfolio-dual-mainnet.toml
+nix run .#mfm -- setup import --file examples/setup/organization.toml
+nix run .#mfm-start -- --entry-point mfm.portfolio/portfolio_snapshot@1 --request portfolio-request.json
 cargo run -p mfm -- --help
 cargo run -p mfm-rest-api
 ```

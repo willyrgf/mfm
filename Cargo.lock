@@ -2076,13 +2076,15 @@ dependencies = [
  "hex",
  "k256",
  "mfm-app",
- "mfm-authored-config",
  "mfm-canonical",
  "mfm-certify",
  "mfm-events",
  "mfm-evm-core",
  "mfm-ids",
  "mfm-manual-auth",
+ "mfm-op-btc-collectors",
+ "mfm-op-evm-collectors",
+ "mfm-op-portfolio-tracker",
  "mfm-op-proof",
  "mfm-program",
  "mfm-runtime",
@@ -2231,7 +2233,6 @@ dependencies = [
  "mfm-adapters-evm-contracts",
  "mfm-adapters-portfolio",
  "mfm-artifact-capabilities",
- "mfm-authored-config",
  "mfm-btc-capabilities",
  "mfm-canonical",
  "mfm-capabilities",
@@ -2251,7 +2252,6 @@ dependencies = [
  "mfm-op-portfolio-collect-report",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
- "mfm-portfolio-model",
  "mfm-program",
  "mfm-program-derive",
  "mfm-replay",
@@ -2297,18 +2297,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
-]
-
-[[package]]
-name = "mfm-authored-config"
-version = "0.1.0"
-dependencies = [
- "mfm-canonical",
- "mfm-ids",
- "serde",
- "serde_json",
- "thiserror",
- "toml 0.8.23",
 ]
 
 [[package]]
@@ -2508,7 +2496,6 @@ dependencies = [
  "mfm-adapters-evm",
  "mfm-adapters-portfolio",
  "mfm-app",
- "mfm-authored-config",
  "mfm-btc-capabilities",
  "mfm-canonical",
  "mfm-certify",
@@ -2558,7 +2545,6 @@ dependencies = [
 name = "mfm-op-btc-collectors"
 version = "0.1.0"
 dependencies = [
- "mfm-authored-config",
  "mfm-canonical",
  "mfm-certify",
  "mfm-ids",
@@ -2574,7 +2560,6 @@ dependencies = [
 name = "mfm-op-evm-collectors"
 version = "0.1.0"
 dependencies = [
- "mfm-authored-config",
  "mfm-canonical",
  "mfm-certify",
  "mfm-ids",
@@ -2589,7 +2574,6 @@ dependencies = [
 name = "mfm-op-evm-contract-lifecycle"
 version = "0.1.0"
 dependencies = [
- "mfm-authored-config",
  "mfm-canonical",
  "mfm-certify",
  "mfm-evm-contract-model",
@@ -2631,11 +2615,9 @@ dependencies = [
 name = "mfm-op-portfolio-tracker"
 version = "0.1.0"
 dependencies = [
- "mfm-authored-config",
  "mfm-canonical",
  "mfm-certify",
  "mfm-ids",
- "mfm-portfolio-config",
  "mfm-portfolio-model",
  "mfm-program",
  "mfm-state-portfolio",
@@ -2653,22 +2635,6 @@ dependencies = [
  "mfm-ids",
  "mfm-program",
  "mfm-spec",
-]
-
-[[package]]
-name = "mfm-portfolio-config"
-version = "0.1.0"
-dependencies = [
- "mfm-authored-config",
- "mfm-canonical",
- "mfm-ids",
- "mfm-portfolio-model",
- "mfm-program-derive",
- "mfm-values",
- "serde",
- "serde_json",
- "thiserror",
- "toml 0.8.23",
 ]
 
 [[package]]
@@ -2748,7 +2714,6 @@ dependencies = [
  "axum",
  "http",
  "mfm-app",
- "mfm-authored-config",
  "mfm-canonical",
  "mfm-facts",
  "mfm-ids",
