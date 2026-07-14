@@ -1,4 +1,5 @@
 use super::*;
+use std::ops::Deref;
 
 #[path = "services_read.rs"]
 mod services_read;
@@ -14,10 +15,16 @@ pub(super) use self::services_read::{
 #[derive(Clone)]
 pub struct RunServices<S, A> {
     pub(super) scheduler: SerialTypedScheduler,
-    store: S,
-    artifacts: A,
-    certification_registry: CertificationRegistry,
+    read: RunReadServices<S, A>,
     pub(super) execution_claim_heartbeat_interval: Duration,
+}
+
+impl<S, A> Deref for RunServices<S, A> {
+    type Target = RunReadServices<S, A>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.read
+    }
 }
 
 impl<S, A> RunServices<S, A>
@@ -34,36 +41,13 @@ where
     ) -> Self {
         Self {
             scheduler,
-            store,
-            artifacts,
-            certification_registry,
+            read: RunReadServices::new_with_certification_registry(
+                store,
+                artifacts,
+                certification_registry,
+            ),
             execution_claim_heartbeat_interval: default_execution_claim_heartbeat_interval(),
         }
-    }
-
-    /// Returns the typed artifact store.
-    pub fn artifacts(&self) -> &A {
-        &self.artifacts
-    }
-
-    /// Returns the async typed run store.
-    pub fn store(&self) -> &S {
-        &self.store
-    }
-
-    /// Returns the trusted certification registry used for stored spec verification.
-    pub fn certification_registry(&self) -> &CertificationRegistry {
-        &self.certification_registry
-    }
-
-    /// Loads the store-owned deployment scope used to derive run identities.
-    pub async fn load_store_scope_id(&self) -> Result<StoreScopeId, AppError> {
-        self.trusted_run_reader().load_store_scope_id().await
-    }
-
-    /// Returns typed run status by rebuilding projection from the authoritative run stream.
-    pub async fn run_status(&self, run_id: &RunId) -> Result<RunResponse, AppError> {
-        self.trusted_run_reader().run_status(run_id).await
     }
 
     async fn run_response_from_verified_status(
@@ -79,40 +63,6 @@ where
             context.projection(),
             status,
         )
-    }
-
-    /// Returns the authoritative typed run stream.
-    pub async fn run_stream(&self, run_id: &RunId) -> Result<RunStreamResponse, AppError> {
-        self.trusted_run_reader().run_stream(run_id).await
-    }
-
-    /// Reads one observation-only run list/watch page.
-    pub async fn read_run_observations(
-        &self,
-        query: store::RunObservationQuery,
-    ) -> Result<store::RunObservationPage, AppError>
-    where
-        S: store::RunObservationStore,
-        <S as store::RunObservationStore>::Error:
-            store::StoreErrorInspection + fmt::Display + Send + Sync + 'static,
-    {
-        self.trusted_run_reader().read_run_observations(query).await
-    }
-
-    /// Verifies replay authority for a run using retained typed artifact evidence only.
-    pub async fn verify_replay_for_run(&self, run_id: &RunId) -> Result<ReplayResponse, AppError> {
-        self.trusted_run_reader().verify_replay(run_id).await
-    }
-
-    /// Renders typed public output from store-owned projection and typed artifact bytes.
-    pub async fn public_output(
-        &self,
-        run_id: &RunId,
-        public_schema_id: &SchemaId,
-    ) -> Result<PublicOutputResponse, AppError> {
-        self.trusted_run_reader()
-            .public_output(run_id, public_schema_id)
-            .await
     }
 
     async fn load_verified_run_read_context(
@@ -139,6 +89,10 @@ where
     }
 
     fn trusted_run_reader(&self) -> TrustedRunReader<'_, S, A> {
-        TrustedRunReader::new(&self.store, &self.artifacts, &self.certification_registry)
+        TrustedRunReader::new(
+            self.read.store(),
+            self.read.artifacts(),
+            self.read.certification_registry(),
+        )
     }
 }

@@ -29,7 +29,7 @@ where
             .clone();
         let manual_request = manual_resolution_runtime_request(req)?;
         self.scheduler
-            .record_manual_resolution(&self.store, &runtime_spec, &run_id, manual_request)
+            .record_manual_resolution(self.read.store(), &runtime_spec, &run_id, manual_request)
             .await?;
         let status = self.drive_until_blocked(&runtime_spec, &run_id).await?;
         self.run_response_from_verified_status(&run_id, status)
@@ -59,7 +59,8 @@ where
         let runtime_spec = CertifiedRuntimeSpec::new(req.certified_spec)?;
         loop {
             let stream = self
-                .store
+                .read
+                .store()
                 .load_run_stream(&run_id)
                 .await
                 .map_err(async_app_store_error)?;
@@ -69,7 +70,8 @@ where
                     .await;
             }
             let expected_next_seq = self
-                .store
+                .read
+                .store()
                 .expected_next_seq(&run_id)
                 .await
                 .map_err(async_app_store_error)?;
@@ -92,7 +94,7 @@ where
             );
             match self
                 .scheduler
-                .start_run_with_execution_claim(&self.store, launch, execution_claim)
+                .start_run_with_execution_claim(self.read.store(), launch, execution_claim)
                 .await
             {
                 Ok(store::CommitOutcome::Appended(_)) => {
@@ -116,7 +118,8 @@ where
                 }
                 Ok(store::CommitOutcome::ExecutionClaimBusy(_)) => {
                     match self
-                        .store
+                        .read
+                        .store()
                         .execution_claim_status(&execution_scope)
                         .await
                         .map_err(async_app_store_error)?
@@ -127,7 +130,8 @@ where
                             });
                         }
                         store::ExecutionClaimStatus::Expired(lease) => {
-                            self.store
+                            self.read
+                                .store()
                                 .reap_expired_execution_claim(
                                     &execution_scope,
                                     &lease.holder_run_id,
@@ -148,7 +152,8 @@ where
                 }
                 Err(error) => {
                     let stream = self
-                        .store
+                        .read
+                        .store()
                         .load_run_stream(&run_id)
                         .await
                         .map_err(async_app_store_error)?;
@@ -217,7 +222,8 @@ where
             context.projection(),
         )?;
         match self
-            .store
+            .read
+            .store()
             .execution_claim_status(&store::ExecutionClaimScope::from_run_identity_material(
                 identity_material,
             ))
@@ -254,7 +260,7 @@ where
         self.scheduler
             .validate_admitted_run_binding(runtime_spec, context.read.view().run_admitted())?;
         let launch_evidence = stored_launch_evidence_from_run_admitted(
-            &self.artifacts,
+            self.read.artifacts(),
             context.read.view().run_admitted(),
         )
         .await?;
@@ -279,7 +285,8 @@ where
         token: &store::AdmissionToken,
     ) -> Result<DriveStatus, AppError> {
         let mut lease = match self
-            .store
+            .read
+            .store()
             .execution_claim_status(execution_scope)
             .await
             .map_err(async_app_store_error)?
@@ -343,14 +350,16 @@ where
     ) -> Result<ExecutionClaimAcquire, AppError> {
         loop {
             match self
-                .store
+                .read
+                .store()
                 .execution_claim_status(execution_scope)
                 .await
                 .map_err(async_app_store_error)?
             {
                 store::ExecutionClaimStatus::Live(_) => return Ok(ExecutionClaimAcquire::Busy),
                 store::ExecutionClaimStatus::Expired(lease) => {
-                    self.store
+                    self.read
+                        .store()
                         .reap_expired_execution_claim(
                             execution_scope,
                             &lease.holder_run_id,
@@ -362,7 +371,8 @@ where
                 store::ExecutionClaimStatus::Unclaimed => {
                     let token = new_execution_claim_token()?;
                     match self
-                        .store
+                        .read
+                        .store()
                         .acquire_execution_claim(execution_scope, run_id, token)
                         .await
                         .map_err(async_app_store_error)?
@@ -383,12 +393,14 @@ where
         _run_id: &RunId,
     ) -> Result<(), AppError> {
         if let store::ExecutionClaimStatus::Expired(lease) = self
-            .store
+            .read
+            .store()
             .execution_claim_status(execution_scope)
             .await
             .map_err(async_app_store_error)?
         {
-            self.store
+            self.read
+                .store()
                 .reap_expired_execution_claim(execution_scope, &lease.holder_run_id, &lease.token)
                 .await
                 .map_err(async_app_store_error)?;
@@ -405,7 +417,7 @@ where
     ) -> Result<ClaimedDriveStep, AppError> {
         let scheduler = self.scheduler.clone();
         let step = scheduler.drive_once(
-            &self.store,
+            self.read.store(),
             runtime_spec,
             run_id,
             execution_scope,
@@ -450,7 +462,8 @@ where
         lease: &mut store::AdmissionLease,
     ) -> Result<bool, AppError> {
         match self
-            .store
+            .read
+            .store()
             .renew_execution_claim(execution_scope, run_id, &lease.token)
             .await
             .map_err(async_app_store_error)?
@@ -469,7 +482,8 @@ where
         run_id: &RunId,
         lease: &store::AdmissionLease,
     ) -> Result<(), AppError> {
-        self.store
+        self.read
+            .store()
             .release_execution_claim(execution_scope, run_id, &lease.token)
             .await
             .map_err(async_app_store_error)?;
