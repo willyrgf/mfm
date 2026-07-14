@@ -670,6 +670,7 @@ fn category_dependency_allowed(source: CrateCategory, dependency: CrateCategory)
                 | DomainModel
                 | DomainConfig
                 | State
+                | Operation
                 | SignerContract
         ),
         AdapterContract => matches!(dependency, Kernel | CapabilityContract | DomainModel),

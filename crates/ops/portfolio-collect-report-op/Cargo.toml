@@ -1,0 +1,32 @@
+[package]
+name = "mfm-op-portfolio-collect-report"
+version = "0.1.0"
+edition = "2021"
+description = "Typed portfolio collector composition and fact-backed report operation"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+
+[package.metadata.mfm]
+category = "operation"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+mfm-canonical = { path = "../../kernel/canonical", version = "0.1.0" }
+mfm-capabilities = { path = "../../kernel/capabilities", version = "0.1.0" }
+mfm-catalog-model = { path = "../../catalog-model", version = "0.1.0" }
+mfm-certify = { path = "../../kernel/certify", version = "0.1.0" }
+mfm-effects = { path = "../../kernel/effects", version = "0.1.0" }
+mfm-ids = { path = "../../kernel/ids", version = "0.1.0" }
+mfm-op-btc-collectors = { path = "../btc-collectors-op", version = "0.1.0" }
+mfm-op-evm-collectors = { path = "../evm-collectors-op", version = "0.1.0" }
+mfm-op-portfolio-tracker = { path = "../portfolio-tracker-op", version = "0.1.0" }
+mfm-portfolio-model = { path = "../../portfolio/model", version = "0.1.0" }
+mfm-program = { path = "../../kernel/program", version = "0.1.0" }
+mfm-program-derive = { path = "../../kernel/program-derive", version = "0.1.0" }
+mfm-state-portfolio = { path = "../../states/portfolio", version = "0.1.0" }
+mfm-values = { path = "../../kernel/values", version = "0.1.0" }
+
+[dev-dependencies]
+serde_json = { workspace = true }

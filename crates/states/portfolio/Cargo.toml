@@ -25,5 +25,4 @@ mfm-ids = { path = "../../kernel/ids", version = "0.1.0" }
 mfm-program = { path = "../../kernel/program", version = "0.1.0" }
 mfm-program-derive = { path = "../../kernel/program-derive", version = "0.1.0" }
 mfm-values = { path = "../../kernel/values", version = "0.1.0" }
-mfm-portfolio-config = { path = "../../portfolio-config", version = "0.1.0" }
 mfm-portfolio-model = { path = "../../portfolio/model", version = "0.1.0" }

@@ -82,9 +82,9 @@ fn sample_portfolio() -> PortfolioConfig {
 
 #[test]
 fn unknown_portfolio_config_fields_are_rejected_on_decode() {
-    assert_unknown_field_rejected::<PortfolioWorkflowConfig>(
+    assert_unknown_field_rejected::<PortfolioConfig>(
         r#"{"unexpected_field":1}"#,
-        "workflow config",
+        "portfolio config",
     );
 }
 

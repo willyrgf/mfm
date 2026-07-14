@@ -1,8 +1,9 @@
 # Portfolio collect-then-report
 
 Collectors write Platform data facts. `portfolio_snapshot` is **report-only** (SelectHoldings over
-admitted facts). There is **no** dual live path and **no** mixed certified draft that expands
-collectors inside the report op.
+admitted facts). The separate `mfm.portfolio/collect_then_report@1` entry point is the explicit
+composed path: it derives collector configs from one catalog-backed portfolio and calls the report
+graph after typed readiness.
 
 This document is the permanent authority contract and operator recipe for fact-backed portfolio
 collection and reporting.
@@ -17,7 +18,8 @@ collection and reporting.
 
 Forbidden:
 
-- Mixed certified draft: collectors + report in one `portfolio_snapshot` expand
+- Implicit mixed behavior in `portfolio_snapshot`; composition is available only through the exact
+  `mfm.portfolio/collect_then_report@1` entry point
 - Report constructing live BTC/EVM balance providers
 - Collectors Platform-querying prior portfolio holdings for observe
 - Optional shared tip for multi-subject same-network batches (shared tip is **required**)
@@ -117,40 +119,67 @@ Before any Platform write, collectors fail closed when:
 Multi-subject same-network batches **must** share one joint tip resolved once so all written facts
 carry the same anchor.
 
-## External multi-run recipe (dual mainnet natives)
+## Catalog-backed launch recipes
 
-Operators run collectors, then report, as separate certified runs. The tracked configs are
-`examples/configs/btc-address-balance.toml`, `examples/configs/evm-native-balance.toml`,
-`examples/configs/portfolio-dual-mainnet.toml`, and
-`examples/configs/runtime-dual-mainnet.toml`.
-
-The following Bash sequence is the copy/pasteable operator path. It assumes `DATABASE_URL` points
-at a migrated Postgres store, the RPC environment variables referenced by the runtime config are
-set, and `jq` is installed.
+Setup import is the only TOML semantic configuration surface. It publishes complete typed values
+under explicit names and returns their exact content digests. Run requests are JSON and contain
+those exact references. Runtime TOML remains process-local routing and signer configuration.
 
 ```bash
-export MFM_RUNTIME_CONFIG_FILE="$PWD/examples/configs/runtime-dual-mainnet.toml"
+mfm setup import --file setup.local.toml
+```
+
+For the one-run workflow, create `collect-request.json` from the returned portfolio identity:
+
+```json
+{
+  "portfolio": {
+    "name": "acme/dual-mainnet",
+    "digest": "content:sha256-jcs-v1:..."
+  },
+  "bitcoin_policy": {"coverage": "configured_only", "max_source_reads": 1},
+  "evm_policy": {"coverage": "configured_only", "decimals": 18, "max_source_reads": 1}
+}
+```
+
+The composed entry point derives child collector configs from the selected portfolio, proves that
+all child summaries are present, and then runs the report graph:
+
+```bash
+export MFM_RUNTIME_CONFIG_FILE="$PWD/runtime.local.toml"
+mfm_cli --output-format json run start \
+  --entry-point mfm.portfolio/collect_then_report@1 \
+  --request collect-request.json \
+  --runtime-config "$MFM_RUNTIME_CONFIG_FILE" \
+  --database-url "$DATABASE_URL"
+```
+
+If operators intentionally keep the collectors and report as separate certified runs, publish or
+select the complete BTC, EVM, and portfolio values and use one exact request per run. The following
+sequence assumes `DATABASE_URL` points at a migrated Postgres store and `jq` is installed.
+
+```bash
+export MFM_RUNTIME_CONFIG_FILE="$PWD/runtime.local.toml"
 
 btc_response="$(mfm_cli --output-format json run start \
-    --op btc_address_balance \
-    --config examples/configs/btc-address-balance.toml \
+    --entry-point mfm.bitcoin/btc_address_balance@1 \
+    --request btc-request.json \
     --runtime-config "$MFM_RUNTIME_CONFIG_FILE" \
     --database-url "$DATABASE_URL")"
 btc_run_id="$(printf '%s\n' "$btc_response" | jq -er '.data.run.run_id')"
 printf '%s\n' "$btc_response" | jq -e '.data.run.run_mode == "completed"'
 
 evm_response="$(mfm_cli --output-format json run start \
-    --op evm_native_balance \
-    --config examples/configs/evm-native-balance.toml \
+    --entry-point mfm.evm/evm_native_balance@1 \
+    --request evm-request.json \
     --runtime-config "$MFM_RUNTIME_CONFIG_FILE" \
     --database-url "$DATABASE_URL")"
 evm_run_id="$(printf '%s\n' "$evm_response" | jq -er '.data.run.run_id')"
 printf '%s\n' "$evm_response" | jq -e '.data.run.run_mode == "completed"'
 
 report_response="$(mfm_cli --output-format json run start \
-    --op portfolio_snapshot \
-    --op-version 1 \
-    --config examples/configs/portfolio-dual-mainnet.toml \
+    --entry-point mfm.portfolio/portfolio_snapshot@1 \
+    --request portfolio-request.json \
     --database-url "$DATABASE_URL")"
 report_run_id="$(printf '%s\n' "$report_response" | jq -er '.data.run.run_id')"
 printf '%s\n' "$report_response" | jq -e '.data.run.run_mode == "completed"'

@@ -2248,6 +2248,7 @@ dependencies = [
  "mfm-op-btc-collectors",
  "mfm-op-evm-collectors",
  "mfm-op-evm-contract-lifecycle",
+ "mfm-op-portfolio-collect-report",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
  "mfm-portfolio-model",
@@ -2518,14 +2519,18 @@ dependencies = [
  "mfm-facts",
  "mfm-ids",
  "mfm-op-btc-collectors",
+ "mfm-op-evm-collectors",
+ "mfm-op-portfolio-tracker",
  "mfm-portfolio-model",
  "mfm-program",
  "mfm-rest-api",
  "mfm-runtime",
+ "mfm-state-evm-contracts",
  "mfm-states-btc",
  "mfm-states-evm",
  "mfm-storage-postgres",
  "mfm-store",
+ "mfm-values",
  "serde_json",
  "sqlx",
  "tempfile",
@@ -2597,6 +2602,29 @@ dependencies = [
  "serde",
  "serde_json",
  "trybuild",
+]
+
+[[package]]
+name = "mfm-op-portfolio-collect-report"
+version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-catalog-model",
+ "mfm-certify",
+ "mfm-effects",
+ "mfm-ids",
+ "mfm-op-btc-collectors",
+ "mfm-op-evm-collectors",
+ "mfm-op-portfolio-tracker",
+ "mfm-portfolio-model",
+ "mfm-program",
+ "mfm-program-derive",
+ "mfm-state-portfolio",
+ "mfm-values",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -2849,7 +2877,6 @@ dependencies = [
  "mfm-fact-capabilities",
  "mfm-facts",
  "mfm-ids",
- "mfm-portfolio-config",
  "mfm-portfolio-model",
  "mfm-program",
  "mfm-program-derive",

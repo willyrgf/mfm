@@ -485,7 +485,8 @@ Additional dependency rules:
   implementations, signer implementations, or operation crates
 - states may depend on capability contract crates, because those crates define typed authority
   contracts rather than live IO implementations
-- operations may depend on typed states and domain config/model crates, but not on transports,
+- operations may depend on typed states, domain config/model crates, and lower-level operations
+  when a deterministic parent operation composes their certified graphs, but not on transports,
   signer implementations, app, binaries, runtime scheduling, or storage implementations
 - adapters may depend on runtime runner contracts, states, capability contract crates, transport
   contracts, and signer contracts as needed for runner binding, but not on workflow operation

@@ -67,6 +67,7 @@ pub(crate) use public_facts::{public_ref_id, query_public_facts, AppFactQueryRow
 
 mod btc_collector;
 mod catalog_resolver;
+mod composition;
 mod config_setup;
 mod entry_point;
 mod entry_points;
@@ -252,6 +253,7 @@ pub fn production_runner_registry(
         fact_index.clone(),
     );
     mfm_adapters_portfolio::register_portfolio_runners(&mut registry, portfolio_capabilities)?;
+    composition::register_collect_then_report_runners(&mut registry, artifacts.clone())?;
     let source_run_registry = production_certification_registry()?;
     evm_contracts::register_contract_lifecycle_runners(
         &mut registry,
@@ -362,6 +364,9 @@ pub fn production_certification_registry() -> Result<CertificationRegistry, AppE
         &mut registry,
     )?;
     mfm_op_portfolio_tracker::register_portfolio_certification_descriptors(&mut registry)?;
+    mfm_op_portfolio_collect_report::register_collect_then_report_certification_descriptors(
+        &mut registry,
+    )?;
     mfm_op_proof::register_proof_certification_descriptors(&mut registry)?;
     Ok(registry)
 }

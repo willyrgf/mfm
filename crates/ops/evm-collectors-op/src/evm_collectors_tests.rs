@@ -1,8 +1,19 @@
 use super::*;
 
+fn fixture() -> EvmNativeBalanceConfig {
+    EvmNativeBalanceConfig {
+        network: "ethereum-mainnet".to_owned(),
+        chain_id: 1,
+        accounts: vec!["0x0000000000000000000000000000000000000001".to_owned()],
+        coverage: "configured_only".to_owned(),
+        decimals: 18,
+        max_source_reads: NonZeroU64::new(1).expect("non-zero"),
+    }
+}
+
 #[test]
-fn default_config_is_valid() {
-    validate_evm_native_balance_config(&EvmNativeBalanceConfig::default()).expect("default");
+fn fixture_config_is_valid() {
+    validate_evm_native_balance_config(&fixture()).expect("fixture");
 }
 
 #[test]
@@ -12,7 +23,7 @@ fn multi_account_draft_shares_one_joint_tip_node() {
             "0x0000000000000000000000000000000000000001".to_owned(),
             "0x0000000000000000000000000000000000000002".to_owned(),
         ],
-        ..EvmNativeBalanceConfig::default()
+        ..fixture()
     };
     let draft = evm_native_balance_program_draft(config).expect("draft");
     let nodes = draft.state_nodes();
@@ -45,7 +56,7 @@ fn multi_account_draft_shares_one_joint_tip_node() {
 fn native_balance_config_rejects_noncanonical_accounts() {
     let config = EvmNativeBalanceConfig {
         accounts: vec!["0x00000000000000000000000000000000000000AA".to_owned()],
-        ..EvmNativeBalanceConfig::default()
+        ..fixture()
     };
 
     assert!(validate_evm_native_balance_config(&config)

@@ -1,6 +1,17 @@
 use super::*;
 use mfm_program::StateSpec;
 
+fn balance_fixture() -> BtcAddressBalanceConfig {
+    BtcAddressBalanceConfig {
+        network: "bitcoin-mainnet".to_owned(),
+        bitcoin_network: "main".to_owned(),
+        semantic_source_identity: "public-bitcoin-core".to_owned(),
+        addresses: vec!["bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh".to_owned()],
+        coverage: "configured_only".to_owned(),
+        max_source_reads: NonZeroU64::new(1).expect("non-zero"),
+    }
+}
+
 #[test]
 fn default_chain_head_config_is_valid() {
     validate_btc_chain_head_collector_config(&BtcChainHeadCollectorConfig::default())
@@ -8,9 +19,8 @@ fn default_chain_head_config_is_valid() {
 }
 
 #[test]
-fn default_balance_config_is_valid() {
-    validate_btc_address_balance_config(&BtcAddressBalanceConfig::default())
-        .expect("default balance config");
+fn fixture_balance_config_is_valid() {
+    validate_btc_address_balance_config(&balance_fixture()).expect("fixture balance config");
 }
 
 #[test]
@@ -20,7 +30,7 @@ fn multi_address_draft_shares_one_joint_tip_node() {
             "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh".to_owned(),
             "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4".to_owned(),
         ],
-        ..BtcAddressBalanceConfig::default()
+        ..balance_fixture()
     };
     let draft = btc_address_balance_program_draft(config).expect("draft");
     let nodes = draft.state_nodes();

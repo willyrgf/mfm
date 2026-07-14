@@ -7,11 +7,10 @@
 //! # Examples
 //!
 //! ```rust
-//! use mfm_portfolio_config::PortfolioSnapshotCanonicalConfig;
-//! use mfm_state_portfolio::PortfolioWorkflowConfig;
+//! use mfm_portfolio_model::portfolio::PortfolioConfig;
 //!
-//! fn workflow_config(canonical: PortfolioSnapshotCanonicalConfig) -> PortfolioWorkflowConfig {
-//!     PortfolioWorkflowConfig::from(canonical)
+//! fn workflow_config(config: PortfolioConfig) -> PortfolioConfig {
+//!     config.normalized()
 //! }
 //! ```
 
@@ -41,7 +40,6 @@ use mfm_effects::{Pure, ReadExternal};
 use mfm_fact_capabilities::FactIndexReadCapability;
 use mfm_facts::{FactSelectionEvidence, StoreScopeRef};
 use mfm_ids::{AdapterKind, AdapterVersion, DigestAlgorithm, StateKind, StateVersion};
-use mfm_portfolio_config::PortfolioSnapshotCanonicalConfig;
 use mfm_portfolio_model::aave::AAVE_V3_PROTOCOL_ID;
 use mfm_portfolio_model::portfolio::{
     NetworkConfig, NetworkFamilyConfig, PortfolioConfig, PortfolioQuoteTotal, PortfolioReport,
@@ -135,6 +133,34 @@ pub struct ResolvedSubject {
     pub network_id: String,
     /// Stable wallet implementation kind.
     pub implementation_kind: String,
+}
+
+/// Typed readiness evidence consumed before report fact selection.
+///
+/// Standalone reports use zero collector counts. Composed reports carry the number of
+/// successfully summarized collector networks so the report graph cannot be detached from its
+/// collector fan-in.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "portfolio-inputs-ready",
+    schema = "mfm.portfolio.portfolio_inputs_ready"
+)]
+pub struct PortfolioInputsReady {
+    /// Number of Bitcoin collector summaries consumed by readiness.
+    pub bitcoin_network_count: u32,
+    /// Number of EVM collector summaries consumed by readiness.
+    pub evm_network_count: u32,
+}
+
+impl PortfolioInputsReady {
+    /// Creates readiness evidence from validated summary counts.
+    pub const fn new(bitcoin_network_count: u32, evm_network_count: u32) -> Self {
+        Self {
+            bitcoin_network_count,
+            evm_network_count,
+        }
+    }
 }
 
 /// Resolved subject collection.

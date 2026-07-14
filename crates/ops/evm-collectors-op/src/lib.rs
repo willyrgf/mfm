@@ -8,13 +8,20 @@
 //! # Examples
 //!
 //! ```rust
+//! use std::num::NonZeroU64;
+//!
 //! use mfm_op_evm_collectors::{
 //!     evm_native_balance_program_draft, EvmNativeBalanceConfig,
 //! };
 //!
-//! let draft = evm_native_balance_program_draft(
-//!     EvmNativeBalanceConfig::default(),
-//! )
+//! let draft = evm_native_balance_program_draft(EvmNativeBalanceConfig {
+//!     network: "ethereum-mainnet".to_owned(),
+//!     chain_id: 1,
+//!     accounts: vec!["0x0000000000000000000000000000000000000001".to_owned()],
+//!     coverage: "configured_only".to_owned(),
+//!     decimals: 18,
+//!     max_source_reads: NonZeroU64::new(1).expect("non-zero"),
+//! })
 //! .unwrap();
 //! assert!(draft.state_nodes().len() >= 3);
 //! ```
@@ -27,7 +34,7 @@ use mfm_program::{
     build_root_with_registries, NoContext, NonEmptyHandles, Operation, OperationExpansion,
     OperationKey, PublicOutputKey, RootBuilder, ScopeKey, StateKey, TypedProgramLaunchPlan,
 };
-use mfm_program_derive::{MfmConfig, OperationOutput, PublicOutputs};
+use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs};
 pub use mfm_states_evm::{
     default_native_decimals, AssembleEvmNativeBalanceBatchConfig,
     AssembleEvmNativeBalanceBatchInput, AssembleEvmNativeBalanceBatchInputHandles,
@@ -49,13 +56,10 @@ const BALANCE_ROOT_SCOPE: &str = "evm_native_balance";
 const BALANCE_OP_KEY: &str = "evm_native_balance";
 const BALANCE_PUBLIC_OUTPUT_KEY: &str = "balance_batch";
 
-/// Public EVM native-balance collector entry-point descriptor.
-///
-/// External multi-run only: writes Platform holding facts. Not report pin authority
-/// and not mixed into `portfolio_snapshot` expand.
+/// Public EVM native-balance descriptor retained until the direct ingress cutover.
 pub const EVM_NATIVE_BALANCE_ENTRY_POINT: EntryPointDescriptor = EntryPointDescriptor {
-    namespace: "mfm.evm",
-    name: "evm_native_balance",
+    namespace: OP_NAMESPACE,
+    name: BALANCE_OP_KEY,
     public_name: "evm_native_balance",
     version: 1,
     accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
@@ -65,12 +69,14 @@ pub const EVM_NATIVE_BALANCE_ENTRY_POINT: EntryPointDescriptor = EntryPointDescr
 ///
 /// Multi-subject same-network batches **must** share one joint tip resolved once
 /// in expand.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig, MfmValue)]
+#[serde(deny_unknown_fields)]
 #[mfm(
+    namespace = "mfm.evm",
+    name = "evm-native-balance-config",
     schema = "mfm.evm.operation.config.evm_native_balance",
     validate = "validate_evm_native_balance_config"
 )]
-#[serde(deny_unknown_fields)]
 pub struct EvmNativeBalanceConfig {
     /// Semantic network id.
     pub network: String,
@@ -84,19 +90,6 @@ pub struct EvmNativeBalanceConfig {
     pub decimals: u8,
     /// Maximum source reads for joint-tip resolution.
     pub max_source_reads: NonZeroU64,
-}
-
-impl Default for EvmNativeBalanceConfig {
-    fn default() -> Self {
-        Self {
-            network: "ethereum-mainnet".to_owned(),
-            chain_id: 1,
-            accounts: vec!["0x0000000000000000000000000000000000000001".to_owned()],
-            coverage: "configured_only".to_owned(),
-            decimals: default_native_decimals(),
-            max_source_reads: NonZeroU64::new(1).expect("non-zero static value"),
-        }
-    }
 }
 
 impl EvmNativeBalanceConfig {
@@ -267,11 +260,18 @@ pub fn evm_native_balance_program_draft(
     )
 }
 
-/// Plans an EVM native-balance collector entry-point program.
-pub fn plan_evm_native_balance_entry_point(
+/// Builds a launch plan for an EVM native-balance collector program.
+pub fn evm_native_balance_program_launch_plan(
     config: EvmNativeBalanceConfig,
 ) -> mfm_program::Result<TypedProgramLaunchPlan> {
     TypedProgramLaunchPlan::from_draft(evm_native_balance_program_draft(config)?)
+}
+
+/// Plans an EVM native-balance entry point for the pre-cutover app.
+pub fn plan_evm_native_balance_entry_point(
+    config: EvmNativeBalanceConfig,
+) -> mfm_program::Result<TypedProgramLaunchPlan> {
+    evm_native_balance_program_launch_plan(config)
 }
 
 mfm_certify::define_program_descriptor_registry! {

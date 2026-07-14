@@ -32,8 +32,9 @@ use mfm_state_portfolio::{
     resolve_subjects_from_config, resolve_valuations_from_config, select_network_coherent,
     symbols_by_id_map, AssembleSnapshotConfig, AssembleSnapshotInput, AssembleSnapshotState,
     HoldingCandidate, HoldingFactProjection, NormalizedHoldingFields, PortfolioHoldingErrorCode,
-    PortfolioHoldingSelectionError, ProjectReportConfig, ProjectReportInput, ProjectReportState,
-    RequiredHoldingKey, RequiredHoldingRequirement, ResolveSubjectsConfig, ResolveSubjectsState,
+    PortfolioHoldingSelectionError, PortfolioInputsReadyConfig, PortfolioInputsReadyState,
+    ProjectReportConfig, ProjectReportInput, ProjectReportState, RequiredHoldingKey,
+    RequiredHoldingRequirement, ResolveSubjectsConfig, ResolveSubjectsState,
     ResolveValuationsConfig, ResolveValuationsState, SelectHoldingsConfig, SelectHoldingsState,
     SelectedHoldings,
 };
@@ -115,6 +116,12 @@ pub fn register_portfolio_runners(
         portfolio_adapter_version()?,
         &adapter_factory,
     )?;
+    registrations.register_state_runner_with_factory::<PortfolioInputsReadyState>(
+        &pure_factory,
+        Arc::new(PortfolioInputsReadyRunner {
+            artifacts: artifacts.clone(),
+        }),
+    )?;
     registrations.register_state_runner_with_factory::<ResolveSubjectsState>(
         &pure_factory,
         Arc::new(ResolveSubjectsRunner {
@@ -145,6 +152,28 @@ pub fn register_portfolio_runners(
         Arc::new(ProjectReportRunner { artifacts }),
     )?;
     Ok(())
+}
+
+struct PortfolioInputsReadyRunner {
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
+}
+
+impl ErasedNodeRunner for PortfolioInputsReadyRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            let config = load_runner_config_for_node::<PortfolioInputsReadyConfig>(
+                ctx.node(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
+            let config = config.into_inner();
+            let output = mfm_state_portfolio::PortfolioInputsReady::new(
+                config.bitcoin_network_count(),
+                config.evm_network_count(),
+            );
+            state_output(ctx, &output)
+        })
+    }
 }
 
 struct ResolveSubjectsRunner {

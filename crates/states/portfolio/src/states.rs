@@ -1,5 +1,50 @@
 use super::*;
 
+/// Pure state that creates the typed report-readiness value.
+pub struct PortfolioInputsReadyState {
+    config: PortfolioInputsReadyConfig,
+}
+
+impl StateSpec for PortfolioInputsReadyState {
+    type Config = PortfolioInputsReadyConfig;
+    type Context = NoContext;
+    type Input = ();
+    type Output = PortfolioInputsReady;
+    type Effect = Pure;
+    type Caps = NoCaps;
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        state_kind("portfolio_inputs_ready")
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        state_version("portfolio_inputs_ready")
+    }
+
+    fn name() -> &'static str {
+        "mfm.portfolio.portfolio_inputs_ready"
+    }
+
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
+    }
+}
+
+impl PureState for PortfolioInputsReadyState {
+    fn run(
+        &self,
+        _input: Self::Input,
+        _context: &mfm_program::CertifiedContext<Self::Context>,
+    ) -> StateResult<Self::Output> {
+        Ok(PortfolioInputsReady::new(
+            self.config.bitcoin_network_count(),
+            self.config.evm_network_count(),
+        ))
+    }
+}
+
 /// State that resolves configured wallet subjects.
 pub struct ResolveSubjectsState {
     config: ResolveSubjectsConfig,
@@ -8,7 +53,7 @@ pub struct ResolveSubjectsState {
 impl StateSpec for ResolveSubjectsState {
     type Config = ResolveSubjectsConfig;
     type Context = NoContext;
-    type Input = ();
+    type Input = PortfolioInputsReady;
     type Output = ResolvedSubjects;
     type Effect = Pure;
     type Caps = NoCaps;

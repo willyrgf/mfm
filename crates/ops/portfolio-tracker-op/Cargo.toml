@@ -15,9 +15,9 @@ mfm-authored-config = { path = "../../authored-config" }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-certify = { path = "../../kernel/certify" }
 mfm-ids = { path = "../../kernel/ids" }
-mfm-portfolio-config = { path = "../../portfolio-config" }
 mfm-program = { path = "../../kernel/program" }
 mfm-portfolio-model = { path = "../../portfolio/model" }
+mfm-portfolio-config = { path = "../../portfolio-config" }
 mfm-state-portfolio = { path = "../../states/portfolio" }
 
 [dev-dependencies]

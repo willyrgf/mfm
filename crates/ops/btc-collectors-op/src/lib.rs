@@ -31,7 +31,7 @@ use mfm_program::{
     OperationExpansion, OperationKey, PublicOutputKey, RootBuilder, ScopeKey, SeedKey, StateKey,
     TypedProgramLaunchPlan,
 };
-use mfm_program_derive::{MfmConfig, OperationOutput, PublicOutputs};
+use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs};
 pub use mfm_states_btc::{
     AssembleBtcAddressBalanceBatchConfig, AssembleBtcAddressBalanceBatchInput,
     AssembleBtcAddressBalanceBatchInputHandles, AssembleBtcAddressBalanceBatchState,
@@ -295,13 +295,10 @@ const BALANCE_OP_KEY: &str = "btc_address_balance";
 const BALANCE_PUBLIC_OUTPUT_KEY: &str = "balance_batch";
 const BALANCE_CONTEXT_SEED_KEY: &str = "balance_observation_context";
 
-/// Public Bitcoin address-balance collector entry-point descriptor.
-///
-/// External multi-run only: writes Platform holding facts. Not report pin authority
-/// and not mixed into `portfolio_snapshot` expand.
+/// Public Bitcoin address-balance descriptor retained until the direct ingress cutover.
 pub const BTC_ADDRESS_BALANCE_ENTRY_POINT: EntryPointDescriptor = EntryPointDescriptor {
-    namespace: "mfm.bitcoin",
-    name: "btc_address_balance",
+    namespace: OP_NAMESPACE,
+    name: BALANCE_OP_KEY,
     public_name: "btc_address_balance",
     version: 1,
     accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
@@ -311,12 +308,14 @@ pub const BTC_ADDRESS_BALANCE_ENTRY_POINT: EntryPointDescriptor = EntryPointDesc
 ///
 /// Multi-subject same-network batches **must** share one joint tip resolved once
 /// in expand.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig, MfmValue)]
+#[serde(deny_unknown_fields)]
 #[mfm(
+    namespace = "mfm.bitcoin",
+    name = "btc-address-balance-config",
     schema = "mfm.bitcoin.operation.config.btc_address_balance",
     validate = "validate_btc_address_balance_config"
 )]
-#[serde(deny_unknown_fields)]
 pub struct BtcAddressBalanceConfig {
     /// Semantic Bitcoin network id.
     pub network: String,
@@ -330,19 +329,6 @@ pub struct BtcAddressBalanceConfig {
     pub coverage: String,
     /// Maximum source reads for joint-tip resolution.
     pub max_source_reads: NonZeroU64,
-}
-
-impl Default for BtcAddressBalanceConfig {
-    fn default() -> Self {
-        Self {
-            network: "bitcoin-mainnet".to_owned(),
-            bitcoin_network: "main".to_owned(),
-            semantic_source_identity: "public-bitcoin-core".to_owned(),
-            addresses: vec!["bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh".to_owned()],
-            coverage: "configured_only".to_owned(),
-            max_source_reads: NonZeroU64::new(1).expect("non-zero static value"),
-        }
-    }
 }
 
 impl BtcAddressBalanceConfig {
@@ -525,16 +511,23 @@ pub fn btc_address_balance_program_draft(
     )
 }
 
-/// Plans a Bitcoin address-balance collector entry-point program.
-pub fn plan_btc_address_balance_entry_point(
+/// Builds a launch plan for a Bitcoin address-balance collector program.
+pub fn btc_address_balance_program_launch_plan(
     config: BtcAddressBalanceConfig,
 ) -> mfm_program::Result<TypedProgramLaunchPlan> {
     let draft = btc_address_balance_program_draft(config)?;
-    let seed_material = btc_address_balance_entry_point_seed_material(&draft)?;
+    let seed_material = btc_address_balance_seed_material(&draft)?;
     TypedProgramLaunchPlan::from_draft_and_seed_material(draft, seed_material)
 }
 
-fn btc_address_balance_entry_point_seed_material(
+/// Plans a Bitcoin address-balance entry point for the pre-cutover app.
+pub fn plan_btc_address_balance_entry_point(
+    config: BtcAddressBalanceConfig,
+) -> mfm_program::Result<TypedProgramLaunchPlan> {
+    btc_address_balance_program_launch_plan(config)
+}
+
+fn btc_address_balance_seed_material(
     draft: &mfm_program::TypedProgramDraft,
 ) -> mfm_program::Result<
     std::collections::BTreeMap<mfm_ids::SeedId, mfm_canonical::PlainCanonicalJsonBytes>,

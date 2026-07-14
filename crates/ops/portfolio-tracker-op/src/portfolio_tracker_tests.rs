@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 #[test]
 fn portfolio_program_lowers_to_select_centric_graph() {
     let draft = portfolio_program_draft(sample_workflow_config()).expect("draft");
-    assert_eq!(draft.state_nodes().len(), 5);
+    assert_eq!(draft.state_nodes().len(), 6);
     let state_keys = draft
         .state_nodes()
         .iter()
@@ -24,6 +24,7 @@ fn portfolio_program_lowers_to_select_centric_graph() {
     assert_eq!(
         state_keys,
         [
+            "portfolio_inputs_ready",
             "resolve_subjects",
             "select_holdings",
             "resolve_valuations",
@@ -55,36 +56,8 @@ fn portfolio_program_lowers_to_select_centric_graph() {
     assert!(!as_text.contains("merge_observations"));
 }
 
-#[test]
-fn portfolio_snapshot_entry_point_plan_is_draft_only() {
-    let authored = mfm_portfolio_config::PortfolioSnapshotAuthoredConfig {
-        portfolio: sample_portfolio_config(),
-    };
-
-    let planned = plan_portfolio_snapshot_entry_point(authored).expect("entry-point plan");
-
-    assert!(!planned.draft.state_nodes().is_empty());
-    assert!(!planned.config_material.is_empty());
-    assert!(planned.seed_material.is_empty());
-}
-
-#[test]
-fn portfolio_snapshot_entry_point_descriptor_is_public_launch_surface() {
-    assert_eq!(PORTFOLIO_SNAPSHOT_ENTRY_POINT.namespace, "mfm.portfolio");
-    assert_eq!(PORTFOLIO_SNAPSHOT_ENTRY_POINT.name, "portfolio_snapshot");
-    assert_eq!(
-        PORTFOLIO_SNAPSHOT_ENTRY_POINT.public_name,
-        "portfolio_snapshot"
-    );
-    assert_eq!(PORTFOLIO_SNAPSHOT_ENTRY_POINT.version, 1);
-    assert_eq!(
-        PORTFOLIO_SNAPSHOT_ENTRY_POINT.accepted_config_formats,
-        TOML_JSON_AUTHORED_CONFIG_FORMATS
-    );
-}
-
-fn sample_workflow_config() -> PortfolioWorkflowConfig {
-    PortfolioWorkflowConfig::new(sample_portfolio_config()).expect("workflow config")
+fn sample_workflow_config() -> PortfolioConfig {
+    sample_portfolio_config()
 }
 
 fn sample_portfolio_config() -> PortfolioConfig {

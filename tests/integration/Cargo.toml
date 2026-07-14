@@ -26,6 +26,7 @@ mfm-certify = { path = "../../crates/kernel/certify" }
 mfm-program = { path = "../../crates/kernel/program" }
 mfm-store = { path = "../../crates/kernel/store", features = ["test-support"] }
 mfm-storage-postgres = { path = "../../crates/storages/postgres" }
+mfm-values = { path = "../../crates/kernel/values" }
 mfm-adapters-btc-jsonrpc = { path = "../../crates/adapters/btc-jsonrpc" }
 mfm-adapters-evm = { path = "../../crates/adapters/evm" }
 mfm-adapters-portfolio = { path = "../../crates/adapters/portfolio" }
@@ -33,6 +34,8 @@ mfm-btc-capabilities = { path = "../../crates/btc-capabilities" }
 mfm-evm-capabilities = { path = "../../crates/evm-capabilities" }
 mfm-fact-capabilities = { path = "../../crates/fact-capabilities" }
 mfm-op-btc-collectors = { path = "../../crates/ops/btc-collectors-op" }
+mfm-op-evm-collectors = { path = "../../crates/ops/evm-collectors-op" }
+mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
 mfm-states-btc = { path = "../../crates/states/btc" }
 mfm-states-evm = { path = "../../crates/states/evm" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
@@ -43,5 +46,6 @@ mfm-rest-api = { path = "../../bin/rest-api" }
 assert_cmd = "2.0"
 alloy-primitives = { workspace = true }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
+mfm-state-evm-contracts = { path = "../../crates/states/evm-contracts" }
 mfm-evm-contract-model = { path = "../../crates/evm-contract-model" }
 tower = "0.5"

@@ -1,51 +1,32 @@
 use super::*;
 
-/// Root workflow config for the portfolio snapshot operation.
-#[derive(Debug, Clone, Serialize, PartialEq, MfmConfig)]
-#[mfm(
-    schema = "mfm.portfolio.config.workflow",
-    validate = "validate_portfolio_workflow_config"
-)]
-pub struct PortfolioWorkflowConfig {
-    /// Canonical portfolio config.
-    pub(super) portfolio: PortfolioConfig,
+/// Config for the pure standalone report-readiness state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[mfm(schema = "mfm.portfolio.config.inputs_ready")]
+pub struct PortfolioInputsReadyConfig {
+    /// Number of Bitcoin collector summaries expected by the readiness state.
+    pub(super) bitcoin_network_count: u32,
+    /// Number of EVM collector summaries expected by the readiness state.
+    pub(super) evm_network_count: u32,
 }
 
-impl PortfolioWorkflowConfig {
-    /// Creates a validated root portfolio workflow config.
-    pub fn new(portfolio: PortfolioConfig) -> Result<Self, ConfigError> {
-        let config = Self { portfolio };
-        validate_portfolio_workflow_config(&config).map_err(ConfigError::new)?;
-        Ok(config)
-    }
-
-    /// Returns the canonical portfolio config.
-    pub const fn portfolio(&self) -> &PortfolioConfig {
-        &self.portfolio
-    }
-}
-
-impl<'de> Deserialize<'de> for PortfolioWorkflowConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawPortfolioWorkflowConfig {
-            portfolio: PortfolioConfig,
+impl PortfolioInputsReadyConfig {
+    /// Creates a readiness config with explicit collector-summary counts.
+    pub const fn new(bitcoin_network_count: u32, evm_network_count: u32) -> Self {
+        Self {
+            bitcoin_network_count,
+            evm_network_count,
         }
-
-        let raw = RawPortfolioWorkflowConfig::deserialize(deserializer)?;
-        Ok(Self {
-            portfolio: raw.portfolio,
-        })
     }
-}
 
-impl From<PortfolioSnapshotCanonicalConfig> for PortfolioWorkflowConfig {
-    fn from(canonical: PortfolioSnapshotCanonicalConfig) -> Self {
-        Self::new(canonical.portfolio).expect("canonical portfolio snapshot config must validate")
+    /// Returns the expected Bitcoin summary count.
+    pub const fn bitcoin_network_count(&self) -> u32 {
+        self.bitcoin_network_count
+    }
+
+    /// Returns the expected EVM summary count.
+    pub const fn evm_network_count(&self) -> u32 {
+        self.evm_network_count
     }
 }
 
@@ -207,10 +188,6 @@ impl ProjectReportConfig {
     pub const fn report_version(&self) -> u64 {
         self.report_version.get()
     }
-}
-
-fn validate_portfolio_workflow_config(config: &PortfolioWorkflowConfig) -> Result<(), String> {
-    validate_with(config.portfolio.clone(), ValidatedPortfolioConfig::new)
 }
 
 fn validate_resolve_subjects_config(config: &ResolveSubjectsConfig) -> Result<(), String> {
