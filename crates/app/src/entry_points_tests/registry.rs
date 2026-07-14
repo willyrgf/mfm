@@ -114,7 +114,7 @@ fn btc_address_balance_entry_point_rejects_removed_head_selection_fields() {
 
     let error = op.plan(authored).expect_err("removed field must reject");
 
-    assert_eq!(error.code(), "AuthoredConfigUnknownField");
+    assert_eq!(error.code(), "AuthoredConfigDecodeFailed");
 }
 
 #[test]

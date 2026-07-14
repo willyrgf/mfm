@@ -2176,7 +2176,6 @@ dependencies = [
  "mfm-certify",
  "mfm-events",
  "mfm-evm-capabilities",
- "mfm-evm-contract-config",
  "mfm-evm-contract-model",
  "mfm-evm-core",
  "mfm-evm-signing",
@@ -2236,6 +2235,7 @@ dependencies = [
  "mfm-btc-capabilities",
  "mfm-canonical",
  "mfm-capabilities",
+ "mfm-catalog-model",
  "mfm-certify",
  "mfm-effects",
  "mfm-events",
@@ -2250,6 +2250,7 @@ dependencies = [
  "mfm-op-evm-contract-lifecycle",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
+ "mfm-portfolio-model",
  "mfm-program",
  "mfm-program-derive",
  "mfm-replay",
@@ -2274,8 +2275,10 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "toml 0.8.23",
  "tracing-subscriber",
  "trybuild",
+ "url",
  "uuid",
 ]
 
@@ -2419,21 +2422,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-evm-contract-config"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "mfm-evm-contract-model",
- "mfm-evm-core",
- "mfm-ids",
- "mfm-program-derive",
- "mfm-signing",
- "mfm-values",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "mfm-evm-contract-model"
 version = "0.1.0"
 dependencies = [
@@ -2525,7 +2513,6 @@ dependencies = [
  "mfm-certify",
  "mfm-events",
  "mfm-evm-capabilities",
- "mfm-evm-contract-config",
  "mfm-evm-contract-model",
  "mfm-fact-capabilities",
  "mfm-facts",
@@ -2600,7 +2587,6 @@ dependencies = [
  "mfm-authored-config",
  "mfm-canonical",
  "mfm-certify",
- "mfm-evm-contract-config",
  "mfm-evm-contract-model",
  "mfm-ids",
  "mfm-program",
@@ -2608,6 +2594,7 @@ dependencies = [
  "mfm-spec",
  "mfm-state-evm-contracts",
  "mfm-values",
+ "serde",
  "serde_json",
  "trybuild",
 ]
@@ -2834,13 +2821,14 @@ dependencies = [
 name = "mfm-state-evm-contracts"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "mfm-adapter-contracts",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-effects",
  "mfm-evm-capabilities",
- "mfm-evm-contract-config",
  "mfm-evm-contract-model",
+ "mfm-evm-core",
  "mfm-ids",
  "mfm-program",
  "mfm-program-derive",

@@ -27,7 +27,6 @@ members = [
 	"crates/kernel/values",
 	"crates/catalog-model",
 	"crates/evm-contract-model",
-	"crates/evm-contract-config",
 	"crates/evm-core",
 	"crates/btc-capabilities",
 	"crates/evm-capabilities",

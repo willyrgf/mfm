@@ -70,6 +70,7 @@ pub const EVM_NATIVE_BALANCE_ENTRY_POINT: EntryPointDescriptor = EntryPointDescr
     schema = "mfm.evm.operation.config.evm_native_balance",
     validate = "validate_evm_native_balance_config"
 )]
+#[serde(deny_unknown_fields)]
 pub struct EvmNativeBalanceConfig {
     /// Semantic network id.
     pub network: String,

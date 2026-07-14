@@ -36,11 +36,6 @@ use mfm_evm_capabilities::{
     EvmTransactionSubmitCapability, EvmTransactionSubmitProvider, EvmTransactionSubmitRequest,
     RedactedEvmSourceEvidence, SignedEvmPayload,
 };
-use mfm_evm_contract_config::{
-    ConfigureAction, DeployAction, EvmSignerIntent, EvmTransactionPolicy,
-    EvmTransactionStyle as ConfigTransactionStyle, ImportConfiguredSpec, ImportDeployedSpec,
-    ReceiptRetryPolicy, ValidateAction,
-};
 use mfm_evm_contract_model::{
     configured_contract_stage, constructor_data, contract_instance_resource_kind,
     decode_single_output_to_json, deployed_contract_stage, expected_matches, parse_artifact,
@@ -93,6 +88,11 @@ use mfm_state_evm_contracts::{
     ContractDeployReceipt, ContractTransactionIdempotency, ContractTransactionReceipt,
     ContractTransactionSubmission, ContractTransactionSubmissions, ContractValidationReadResponse,
     ImportConfiguredContractState, ImportDeployedContractState,
+};
+use mfm_state_evm_contracts::{
+    ConfigureAction, DeployAction, EvmSignerIntent, EvmTransactionPolicy,
+    EvmTransactionStyle as ConfigTransactionStyle, ImportConfiguredSpec, ImportDeployedSpec,
+    ReceiptRetryPolicy, ValidateAction,
 };
 use mfm_store::v1 as store;
 use mfm_values::{ContextBoundOutput, MfmConfig, MfmValue};

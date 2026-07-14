@@ -164,7 +164,7 @@ impl<'de> Deserialize<'de> for ContractProfile {
 }
 
 /// Certified EVM contract lifecycle context.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "contract-context",

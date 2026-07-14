@@ -25,12 +25,14 @@ mfm-authored-config = { path = "../authored-config" }
 mfm-artifact-capabilities = { path = "../artifact-capabilities" }
 mfm-btc-capabilities = { path = "../btc-capabilities" }
 mfm-canonical = { path = "../kernel/canonical" }
+mfm-catalog-model = { path = "../catalog-model" }
 mfm-capabilities = { path = "../kernel/capabilities" }
 mfm-certify = { path = "../kernel/certify" }
 mfm-transports-btc-jsonrpc-http = { path = "../transports/btc-jsonrpc-http" }
 mfm-events = { path = "../kernel/events" }
 mfm-evm-capabilities = { path = "../evm-capabilities" }
 mfm-evm-contract-model = { path = "../evm-contract-model" }
+mfm-portfolio-model = { path = "../portfolio/model" }
 mfm-fact-capabilities = { path = "../fact-capabilities" }
 mfm-facts = { path = "../kernel/facts" }
 mfm-ids = { path = "../kernel/ids" }
@@ -55,6 +57,8 @@ mfm-storage-postgres = { path = "../storages/postgres" }
 mfm-transports-evm = { path = "../transports/evm" }
 mfm-transports-proof = { path = "../transports/proof" }
 mfm-values = { path = "../kernel/values" }
+toml = "0.8"
+url = { workspace = true }
 
 [dev-dependencies]
 alloy-primitives = { workspace = true }

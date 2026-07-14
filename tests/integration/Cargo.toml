@@ -43,6 +43,5 @@ mfm-rest-api = { path = "../../bin/rest-api" }
 assert_cmd = "2.0"
 alloy-primitives = { workspace = true }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
-mfm-evm-contract-config = { path = "../../crates/evm-contract-config" }
 mfm-evm-contract-model = { path = "../../crates/evm-contract-model" }
 tower = "0.5"

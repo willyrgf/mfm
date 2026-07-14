@@ -316,6 +316,7 @@ pub const BTC_ADDRESS_BALANCE_ENTRY_POINT: EntryPointDescriptor = EntryPointDesc
     schema = "mfm.bitcoin.operation.config.btc_address_balance",
     validate = "validate_btc_address_balance_config"
 )]
+#[serde(deny_unknown_fields)]
 pub struct BtcAddressBalanceConfig {
     /// Semantic Bitcoin network id.
     pub network: String,

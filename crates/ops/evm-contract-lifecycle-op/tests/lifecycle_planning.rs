@@ -1,9 +1,4 @@
-use mfm_authored_config::TOML_JSON_AUTHORED_CONFIG_FORMATS;
 use mfm_certify::certify_program_draft;
-use mfm_evm_contract_config::{
-    EvmContractConfigureEntryConfig, EvmContractDeployEntryConfig, EvmContractLifecycleEntryConfig,
-    EvmContractValidateEntryConfig,
-};
 use mfm_evm_contract_model::{ConfiguredContractInstance, DeployedContractInstance};
 use mfm_ids::{
     ArtifactId, CellId, ContentDigest, ContextDescriptorId, ContextRef, DescriptorId,
@@ -377,23 +372,24 @@ fn entry_plan_helpers_do_not_emit_seed_material() {
     for (label, plan, expected_nodes) in [
         (
             "deploy",
-            plan_contract_deploy_entry_point(context_deploy_entry_config()).expect("deploy"),
+            deploy_contract_program_launch_plan(context_deploy_entry_config()).expect("deploy"),
             1,
         ),
         (
             "configure",
-            plan_contract_configure_entry_point(context_configure_entry_config())
+            configure_contract_program_launch_plan(context_configure_entry_config())
                 .expect("configure"),
             2,
         ),
         (
             "validate",
-            plan_contract_validate_entry_point(context_validate_entry_config()).expect("validate"),
+            validate_contract_program_launch_plan(context_validate_entry_config())
+                .expect("validate"),
             2,
         ),
         (
             "lifecycle",
-            plan_contract_lifecycle_entry_point(context_lifecycle_entry_config())
+            contract_lifecycle_program_launch_plan(context_lifecycle_entry_config())
                 .expect("lifecycle"),
             3,
         ),
@@ -403,27 +399,6 @@ fn entry_plan_helpers_do_not_emit_seed_material() {
         assert!(plan.seed_material.is_empty(), "{label}");
         assert!(!plan.config_material.is_empty(), "{label}");
     }
-}
-
-#[test]
-fn entry_point_descriptors_are_public_launch_surface() {
-    assert_eq!(
-        CONTRACT_ENTRY_POINTS
-            .iter()
-            .map(|descriptor| descriptor.public_name)
-            .collect::<Vec<_>>(),
-        vec![
-            "evm_contract_deploy",
-            "evm_contract_configure",
-            "evm_contract_validate",
-            "evm_contract_lifecycle"
-        ]
-    );
-    assert!(CONTRACT_ENTRY_POINTS
-        .iter()
-        .all(|descriptor| descriptor.namespace == "mfm.evm.contract"
-            && descriptor.version == 1
-            && descriptor.accepted_config_formats == TOML_JSON_AUTHORED_CONFIG_FORMATS));
 }
 
 #[test]

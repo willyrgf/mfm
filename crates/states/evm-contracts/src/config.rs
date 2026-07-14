@@ -1,13 +1,13 @@
 #![warn(missing_docs)]
-//! Reusable EVM contract lifecycle action and entry configs.
+//! Reusable EVM contract lifecycle action and import configs.
 //!
-//! This crate owns deterministic, non-secret action and entry config types for
+//! This module owns deterministic, non-secret action and import config types for
 //! context-bound deploy, configure, validate, and import workflows. It does not
 //! carry runtime endpoints, provider lookup details, signer material locations,
 //! artifact store handles, machine ids, or workflow topology.
 //!
 //! ```rust
-//! use mfm_evm_contract_config::{DeployAction, EvmTransactionStyle};
+//! use mfm_state_evm_contracts::{DeployAction, EvmTransactionStyle};
 //!
 //! let deploy: DeployAction = serde_json::from_value(serde_json::json!({
 //!     "signer": {
@@ -23,8 +23,8 @@
 use alloy_primitives::Address;
 use mfm_evm_contract_model::{
     AbiArgumentValue, AdoptExternalAddress, ContractCallConfig, EventAssertionConfig,
-    EvmContractContext, EvmContractScalarError, ImportFromMfmRun, ImportFromMfmRunEvidence,
-    ReadAssertionConfig, WeiAmount,
+    EvmContractScalarError, ImportFromMfmRun, ImportFromMfmRunEvidence, ReadAssertionConfig,
+    WeiAmount,
 };
 use mfm_evm_core::encoding::address_hex_lower;
 use mfm_evm_core::tx::parse_address;
@@ -624,128 +624,4 @@ pub enum ImportConfiguredSpec {
         /// External address adoption request.
         adoption: AdoptExternalAddress,
     },
-}
-
-/// New deploy-only entry-point config shape.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmConfig)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.evm.contract",
-    name = "deploy-entry-config",
-    schema = "mfm.evm.contract.config.deploy_entry"
-)]
-pub struct EvmContractDeployEntryConfig {
-    context: EvmContractContext,
-    deploy: DeployAction,
-}
-
-impl EvmContractDeployEntryConfig {
-    /// Returns the certified lifecycle context.
-    pub const fn context(&self) -> &EvmContractContext {
-        &self.context
-    }
-
-    /// Returns the deploy action.
-    pub const fn deploy(&self) -> &DeployAction {
-        &self.deploy
-    }
-}
-
-/// New configure-only entry-point config shape.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmConfig)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.evm.contract",
-    name = "configure-entry-config",
-    schema = "mfm.evm.contract.config.configure_entry"
-)]
-pub struct EvmContractConfigureEntryConfig {
-    context: EvmContractContext,
-    import_deployed: ImportDeployedSpec,
-    configure: ConfigureAction,
-}
-
-impl EvmContractConfigureEntryConfig {
-    /// Returns the certified lifecycle context.
-    pub const fn context(&self) -> &EvmContractContext {
-        &self.context
-    }
-
-    /// Returns the deployed-stage import spec.
-    pub const fn import_deployed(&self) -> &ImportDeployedSpec {
-        &self.import_deployed
-    }
-
-    /// Returns the configure action.
-    pub const fn configure(&self) -> &ConfigureAction {
-        &self.configure
-    }
-}
-
-/// New validate-only entry-point config shape.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmConfig)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.evm.contract",
-    name = "validate-entry-config",
-    schema = "mfm.evm.contract.config.validate_entry"
-)]
-pub struct EvmContractValidateEntryConfig {
-    context: EvmContractContext,
-    import_configured: ImportConfiguredSpec,
-    validate: ValidateAction,
-}
-
-impl EvmContractValidateEntryConfig {
-    /// Returns the certified lifecycle context.
-    pub const fn context(&self) -> &EvmContractContext {
-        &self.context
-    }
-
-    /// Returns the configured-stage import spec.
-    pub const fn import_configured(&self) -> &ImportConfiguredSpec {
-        &self.import_configured
-    }
-
-    /// Returns the validate action.
-    pub const fn validate(&self) -> &ValidateAction {
-        &self.validate
-    }
-}
-
-/// New full lifecycle entry-point config shape.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmConfig)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.evm.contract",
-    name = "lifecycle-entry-config",
-    schema = "mfm.evm.contract.config.lifecycle_entry"
-)]
-pub struct EvmContractLifecycleEntryConfig {
-    context: EvmContractContext,
-    deploy: DeployAction,
-    configure: ConfigureAction,
-    validate: ValidateAction,
-}
-
-impl EvmContractLifecycleEntryConfig {
-    /// Returns the certified lifecycle context.
-    pub const fn context(&self) -> &EvmContractContext {
-        &self.context
-    }
-
-    /// Returns the deploy action.
-    pub const fn deploy(&self) -> &DeployAction {
-        &self.deploy
-    }
-
-    /// Returns the configure action.
-    pub const fn configure(&self) -> &ConfigureAction {
-        &self.configure
-    }
-
-    /// Returns the validate action.
-    pub const fn validate(&self) -> &ValidateAction {
-        &self.validate
-    }
 }

@@ -39,6 +39,7 @@ impl mfm_values::MfmDefault for NetworkFamilyConfig {}
 
 /// Canonical top-level portfolio configuration.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue, MfmConfig)]
+#[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.portfolio",
     name = "portfolio-config",

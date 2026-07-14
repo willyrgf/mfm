@@ -13,7 +13,6 @@ category = "operation"
 mfm-authored-config = { path = "../../authored-config" }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-certify = { path = "../../kernel/certify" }
-mfm-evm-contract-config = { path = "../../evm-contract-config" }
 mfm-evm-contract-model = { path = "../../evm-contract-model" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
@@ -21,6 +20,7 @@ mfm-program-derive = { path = "../../kernel/program-derive" }
 mfm-spec = { path = "../../kernel/spec" }
 mfm-state-evm-contracts = { path = "../../states/evm-contracts" }
 mfm-values = { path = "../../kernel/values" }
+serde = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

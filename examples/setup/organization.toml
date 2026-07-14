@@ -1,0 +1,168 @@
+# Complete typed setup-import fixture. Runtime routes and signer providers belong in a
+# separate runtime TOML file and are intentionally absent here.
+
+[[values]]
+name = "acme/dual-mainnet"
+kind = "portfolio"
+
+[values.value]
+portfolio_id = "portfolio_dual_mainnet"
+quote_codes = ["USD"]
+metadata = {}
+
+[[values.value.networks]]
+family = "evm"
+network_id = "ethereum-mainnet"
+chain_id = 1
+metadata = {}
+
+[[values.value.networks]]
+family = "bitcoin"
+network_id = "bitcoin-mainnet"
+bitcoin_network = "main"
+source_identity = "public-bitcoin-core"
+metadata = {}
+
+[[values.value.wallets]]
+wallet_id = "wallet_eth_mainnet"
+network_id = "ethereum-mainnet"
+symbol_ids = ["eth.native.ethereum-mainnet"]
+metadata = {}
+
+[values.value.wallets.subject]
+kind = "evm_address"
+address = "0xabdbbd00fad79b257e7313b398a1ea10d9eef8d6"
+
+[values.value.wallets.implementation]
+kind = "address_only"
+
+[[values.value.wallets]]
+wallet_id = "wallet_btc_mainnet"
+network_id = "bitcoin-mainnet"
+symbol_ids = ["btc.native.bitcoin-mainnet"]
+metadata = {}
+
+[values.value.wallets.subject]
+kind = "bitcoin_address"
+address = "bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw"
+
+[values.value.wallets.implementation]
+kind = "address_only"
+
+[[values.value.symbol_configs]]
+symbol_id = "eth.native.ethereum-mainnet"
+display_symbol = "ETH"
+kind = "native_balance"
+role = "native"
+network_id = "ethereum-mainnet"
+metadata = {}
+
+[values.value.symbol_configs.balance_reader]
+kind = "native_balance"
+
+[values.value.symbol_configs.valuation]
+quotes = [
+  { quote = "USD", priced_symbol_id = "eth.native.ethereum-mainnet", unit_price_dec = "1800.00" },
+]
+
+[[values.value.symbol_configs]]
+symbol_id = "btc.native.bitcoin-mainnet"
+display_symbol = "BTC"
+kind = "native_balance"
+role = "native"
+network_id = "bitcoin-mainnet"
+metadata = {}
+
+[values.value.symbol_configs.balance_reader]
+kind = "native_balance"
+
+[values.value.symbol_configs.valuation]
+quotes = [
+  { quote = "USD", priced_symbol_id = "btc.native.bitcoin-mainnet", unit_price_dec = "50000.00" },
+]
+
+[[values]]
+name = "acme/bitcoin-balance"
+kind = "btc_address_balance"
+
+[values.value]
+network = "bitcoin-mainnet"
+bitcoin_network = "main"
+semantic_source_identity = "public-bitcoin-core"
+addresses = ["bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw"]
+coverage = "configured_only"
+max_source_reads = 1
+
+[[values]]
+name = "acme/ethereum-balance"
+kind = "evm_native_balance"
+
+[values.value]
+network = "ethereum-mainnet"
+chain_id = 1
+accounts = ["0xabdbbd00fad79b257e7313b398a1ea10d9eef8d6"]
+coverage = "configured_only"
+decimals = 18
+max_source_reads = 1
+
+[[values]]
+name = "acme/contract-context"
+kind = "evm_contract_context"
+
+[values.value]
+lifecycle_key = "example-lifecycle"
+
+[values.value.network]
+network_id = "ethereum-mainnet"
+expected_chain_id = 1
+
+[values.value.contract_profile]
+profile_id = "example-profile"
+
+[[values]]
+name = "acme/deploy-action"
+kind = "evm_deploy_action"
+
+[values.value]
+
+[values.value.signer]
+signer_ref = "deployer"
+expected_signer_address = "0x000000000000000000000000000000000000dead"
+
+[[values]]
+name = "acme/configure-action"
+kind = "evm_configure_action"
+
+[values.value]
+
+[values.value.signer]
+signer_ref = "deployer"
+expected_signer_address = "0x000000000000000000000000000000000000dead"
+
+[[values]]
+name = "acme/validate-action"
+kind = "evm_validate_action"
+
+[values.value]
+
+[[values]]
+name = "acme/import-deployed"
+kind = "evm_import_deployed"
+
+[values.value]
+kind = "adopt_external_address"
+
+[values.value.adoption]
+address = "0x000000000000000000000000000000000000beef"
+provenance_label = "audited-external"
+
+[[values]]
+name = "acme/import-configured"
+kind = "evm_import_configured"
+
+[values.value]
+kind = "adopt_external_address"
+
+[values.value.adoption]
+address = "0x000000000000000000000000000000000000beef"
+provenance_label = "audited-external"

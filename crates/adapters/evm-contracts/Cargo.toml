@@ -23,7 +23,6 @@ mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-certify = { path = "../../kernel/certify" }
 mfm-events = { path = "../../kernel/events" }
 mfm-evm-capabilities = { path = "../../evm-capabilities" }
-mfm-evm-contract-config = { path = "../../evm-contract-config" }
 mfm-evm-contract-model = { path = "../../evm-contract-model" }
 mfm-evm-core = { path = "../../evm-core" }
 mfm-evm-signing = { path = "../../evm-signing" }

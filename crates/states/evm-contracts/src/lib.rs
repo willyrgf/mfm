@@ -27,9 +27,11 @@ use mfm_evm_capabilities::{
     EvmGasEstimateCapability, EvmLogsReadCapability, EvmNonceOccupancyReadCapability,
     EvmNonceReadCapability, EvmReceiptReadCapability, EvmTransactionSubmitCapability,
 };
-use mfm_evm_contract_config::{
-    ConfigureAction, DeployAction, EvmTransactionPolicy, ImportConfiguredSpec, ImportDeployedSpec,
-    ValidateAction,
+pub mod config;
+pub use config::{
+    ConfigureAction, DeployAction, EvmSignerIntent, EvmTransactionPolicy, EvmTransactionStyle,
+    ImportConfiguredSpec, ImportDeployedSpec, ReceiptRetryPolicy, ValidateAction,
+    MAX_RECEIPT_POLLS, MAX_RECEIPT_POLL_INTERVAL_MS, MAX_RECEIPT_TOTAL_WAIT_MS,
 };
 use mfm_evm_contract_model::{
     configured_contract_stage, contract_instance_resource_kind, deployed_contract_stage,

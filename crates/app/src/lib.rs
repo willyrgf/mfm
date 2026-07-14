@@ -66,6 +66,8 @@ pub use public_facts::{
 pub(crate) use public_facts::{public_ref_id, query_public_facts, AppFactQueryRow};
 
 mod btc_collector;
+mod catalog_resolver;
+mod config_setup;
 mod entry_point;
 mod entry_points;
 mod evm_collector;
@@ -90,6 +92,12 @@ use self::services::VerifiedRunReadContext;
 pub use self::services::{RunReadServices, RunServices};
 
 use live_transports::{LiveTransportRuntime, RuntimeConfigLoader};
+
+pub use catalog_resolver::resolve_catalog_value;
+pub use config_setup::{
+    export_catalog_value, import_setup_toml, list_catalog_values, CatalogListCursor,
+    CatalogValueIdentity,
+};
 
 pub use entry_point::{
     EntryPointOpError, EntryPointOpId, EntryPointOpRegistry, EntryPointPlannerAdapter,
