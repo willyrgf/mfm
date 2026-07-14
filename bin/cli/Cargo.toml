@@ -17,11 +17,6 @@ mfm-authored-config = { path = "../../crates/authored-config" }
 mfm-canonical = { path = "../../crates/kernel/canonical" }
 mfm-ids = { path = "../../crates/kernel/ids" }
 mfm-store = { path = "../../crates/kernel/store" }
-mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
-mfm-portfolio-config = { path = "../../crates/portfolio-config" }
-mfm-op-evm-contract-lifecycle = { path = "../../crates/ops/evm-contract-lifecycle-op" }
-mfm-evm-contract-config = { path = "../../crates/evm-contract-config" }
-mfm-evm-contract-model = { path = "../../crates/evm-contract-model" }
 mfm-evm-core = { path = "../../crates/evm-core" }
 mfm-runtime-config = { path = "../../crates/runtime-config" }
 mfm_core = { path = "../../crates/core" }

@@ -17,7 +17,6 @@ mfm-certify = { path = "../../kernel/certify" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-portfolio-config = { path = "../../portfolio-config" }
 mfm-program = { path = "../../kernel/program" }
-mfm-spec = { path = "../../kernel/spec" }
 mfm-portfolio-model = { path = "../../portfolio/model" }
 mfm-state-portfolio = { path = "../../states/portfolio" }
 
