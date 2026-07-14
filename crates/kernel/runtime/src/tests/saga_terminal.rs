@@ -501,7 +501,7 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
             DriverSideEffectRunner::new(&fixture),
         ))
         .expect("binding side effect");
-    register_read_external_fixture_runner(&mut registry, &fixture);
+    register_fixture_read_runner(&mut registry, &fixture, READ_EXTERNAL_RUNNER);
     let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
 
     let (forward_attempt, ledger) = append_synthetic_exclusive_started(

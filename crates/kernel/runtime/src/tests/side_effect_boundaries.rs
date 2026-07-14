@@ -308,7 +308,7 @@ async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
             },
         ))
         .expect("binding a");
-    register_read_external_fixture_runner(&mut registry, &fixture);
+    register_fixture_read_runner(&mut registry, &fixture, READ_EXTERNAL_RUNNER);
     let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
 
     assert_first_node_invalid_after_drive!(
@@ -411,7 +411,7 @@ async fn side_effect_output_before_terminal_evidence_is_rejected() {
             },
         ))
         .expect("binding a");
-    register_read_external_fixture_runner(&mut registry, &fixture);
+    register_fixture_read_runner(&mut registry, &fixture, READ_EXTERNAL_RUNNER);
     let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
 
     assert_first_node_invalid_after_drive!(

@@ -402,11 +402,15 @@ fn fixture_scheduler(registry: ErasedRunnerRegistry, fixture: &Fixture) -> Seria
     test_scheduler(register_fixture_capabilities(registry, fixture))
 }
 
-fn register_read_external_fixture_runner(registry: &mut ErasedRunnerRegistry, fixture: &Fixture) {
+fn register_fixture_read_runner(
+    registry: &mut ErasedRunnerRegistry,
+    fixture: &Fixture,
+    runner_name: &'static str,
+) {
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
-            READ_EXTERNAL_RUNNER,
+            runner_name,
             RecordingRunner {
                 expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
                 output_artifact: artifact(0xb1),
@@ -414,20 +418,6 @@ fn register_read_external_fixture_runner(registry: &mut ErasedRunnerRegistry, fi
             },
         ))
         .expect("binding read");
-}
-
-fn register_default_fixture_read_runner(registry: &mut ErasedRunnerRegistry, fixture: &Fixture) {
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            "read",
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
 }
 
 fn register_default_fixture_pure_runner(registry: &mut ErasedRunnerRegistry, fixture: &Fixture) {
@@ -453,7 +443,7 @@ fn fixture_registry_with_first_runner<R: ErasedNodeRunner + 'static>(
     registry
         .register(binding(fixture.descriptor_a.clone(), runner_name, runner))
         .expect("binding a");
-    register_default_fixture_read_runner(&mut registry, fixture);
+    register_fixture_read_runner(&mut registry, fixture, "read");
     registry
 }
 
@@ -469,7 +459,7 @@ fn side_effect_driver_registry_with_submission_decision(
             DriverSideEffectRunner::new(fixture).with_submission_decision(decision),
         ))
         .expect("binding side effect");
-    register_read_external_fixture_runner(&mut registry, fixture);
+    register_fixture_read_runner(&mut registry, fixture, READ_EXTERNAL_RUNNER);
     registry
 }
 

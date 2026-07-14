@@ -238,7 +238,7 @@ async fn runtime_rejects_forward_node_emitting_remediation_ledger_purpose() {
             ForwardEmitsRemediationPurposeRunner,
         ))
         .expect("binding a");
-    register_read_external_fixture_runner(&mut registry, &fixture);
+    register_fixture_read_runner(&mut registry, &fixture, READ_EXTERNAL_RUNNER);
     let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
 
     assert_first_node_invalid_after_drive!(

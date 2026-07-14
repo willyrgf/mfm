@@ -352,7 +352,7 @@ pub(super) fn registered_fixture_runners_with_adapter_executable(
         adapter_executable,
     );
     register_default_fixture_pure_runner(&mut registry, fixture);
-    register_default_fixture_read_runner(&mut registry, fixture);
+    register_fixture_read_runner(&mut registry, fixture, "read");
     registry
 }
 
@@ -386,7 +386,7 @@ pub(super) fn registered_side_effect_fixture_runners(fixture: &Fixture) -> Erase
             DriverSideEffectRunner::new(fixture),
         ))
         .expect("binding a");
-    register_read_external_fixture_runner(&mut registry, fixture);
+    register_fixture_read_runner(&mut registry, fixture, READ_EXTERNAL_RUNNER);
     registry
 }
 
@@ -404,7 +404,7 @@ pub(super) fn registered_first_side_effect_runners_with<R: ErasedNodeRunner + 's
             runner,
         ))
         .expect("binding a");
-    register_read_external_fixture_runner(&mut registry, fixture);
+    register_fixture_read_runner(&mut registry, fixture, READ_EXTERNAL_RUNNER);
     registry
 }
 
@@ -430,7 +430,7 @@ pub(super) fn registered_first_side_effect_and_verify_runners_with<
             runner,
         ))
         .expect("binding a");
-    register_read_external_fixture_runner(&mut registry, fixture);
+    register_fixture_read_runner(&mut registry, fixture, READ_EXTERNAL_RUNNER);
     registry
 }
 

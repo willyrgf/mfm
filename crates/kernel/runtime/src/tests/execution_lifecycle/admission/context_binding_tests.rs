@@ -122,7 +122,7 @@ fn run_start_rejects_invalid_capability_implementation_bindings() {
                     ))
                     .expect("capability implementation");
                 register_default_fixture_pure_runner(&mut registry, &fixture);
-                register_default_fixture_read_runner(&mut registry, &fixture);
+                register_fixture_read_runner(&mut registry, &fixture, "read");
                 registry
             }
         };
@@ -188,7 +188,7 @@ async fn resume_rejects_binding_changes_before_attempt_start() {
                 );
                 changed_a.executable.binary_digest = content(0xee);
                 changed_registry.register(changed_a).expect("binding a");
-                register_default_fixture_read_runner(&mut changed_registry, &fixture);
+                register_fixture_read_runner(&mut changed_registry, &fixture, "read");
                 fixture_scheduler(changed_registry, &fixture)
             }
             Case::AdapterExecutableMismatch => {
