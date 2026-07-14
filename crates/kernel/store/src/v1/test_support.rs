@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
+use super::validation::is_side_effect_terminal_payload;
 use super::*;
 use mfm_canonical::{sha256_digest_bytes, CanonicalJsonBytes, CanonicalValue};
 use mfm_events::v1 as events;
@@ -137,21 +138,6 @@ fn is_saga_terminal_payload(payload: &events::KernelEventPayload) -> bool {
 
 fn is_run_completed_payload(payload: &events::KernelEventPayload) -> bool {
     matches!(payload, events::KernelEventPayload::RunCompleted(_))
-}
-
-fn is_side_effect_terminal_payload(payload: &events::KernelEventPayload) -> bool {
-    matches!(
-        payload,
-        events::KernelEventPayload::SideEffectNotSubmittedProven(_)
-            | events::KernelEventPayload::SideEffectSubmissionObserved(_)
-            | events::KernelEventPayload::SideEffectSubmissionUnknown(_)
-            | events::KernelEventPayload::SideEffectReceiptObserved(_)
-            | events::KernelEventPayload::SideEffectConfirmationObserved(_)
-            | events::KernelEventPayload::SideEffectAmbiguous(_)
-            | events::KernelEventPayload::SideEffectFailed(_)
-            | events::KernelEventPayload::ResourceLaneReleaseIntent(_)
-            | events::KernelEventPayload::ResourceLaneReleased(_)
-    )
 }
 
 fn is_retention_payload(payload: &events::KernelEventPayload) -> bool {

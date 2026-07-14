@@ -242,7 +242,7 @@ pub(super) fn is_attempt_terminal_commit_payload(payload: &KernelEventPayload) -
         || is_retention_ref_payload(payload)
 }
 
-fn is_side_effect_terminal_payload(payload: &KernelEventPayload) -> bool {
+pub(crate) fn is_side_effect_terminal_payload(payload: &KernelEventPayload) -> bool {
     matches!(
         payload,
         KernelEventPayload::SideEffectNotSubmittedProven(_)

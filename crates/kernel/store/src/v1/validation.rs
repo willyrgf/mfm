@@ -15,6 +15,8 @@ pub(super) use self::event_keys::{
 
 #[path = "terminal_payloads.rs"]
 mod terminal_payloads;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use self::terminal_payloads::is_side_effect_terminal_payload;
 use self::terminal_payloads::{
     is_attempt_terminal_commit_payload, is_attempt_terminal_payload, is_retention_commit_payload,
     is_retention_payload, is_run_completed_payload, is_saga_terminal_commit_payload,
