@@ -256,7 +256,7 @@ fn is_resource_lane_release_payload(payload: &KernelEventPayload) -> bool {
     )
 }
 
-pub(super) fn is_retention_payload(payload: &KernelEventPayload) -> bool {
+pub(crate) fn is_retention_payload(payload: &KernelEventPayload) -> bool {
     matches!(
         payload,
         KernelEventPayload::RetentionRefsAppended(_)
@@ -268,7 +268,7 @@ fn is_retention_ref_payload(payload: &KernelEventPayload) -> bool {
     matches!(payload, KernelEventPayload::RetentionRefsAppended(_))
 }
 
-pub(super) fn is_run_completed_payload(payload: &KernelEventPayload) -> bool {
+pub(crate) fn is_run_completed_payload(payload: &KernelEventPayload) -> bool {
     matches!(payload, KernelEventPayload::RunCompleted(_))
 }
 

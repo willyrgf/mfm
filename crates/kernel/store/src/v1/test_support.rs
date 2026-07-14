@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
+use super::validation::{is_retention_payload, is_run_completed_payload};
 use super::*;
 use mfm_canonical::{sha256_digest_bytes, CanonicalJsonBytes, CanonicalValue};
 use mfm_events::v1 as events;
@@ -132,18 +133,6 @@ fn is_saga_terminal_payload(payload: &events::KernelEventPayload) -> bool {
                 | events::RunCompletionOutcome::FailedWithoutAcdcClaim,
             ..
         })
-    )
-}
-
-fn is_run_completed_payload(payload: &events::KernelEventPayload) -> bool {
-    matches!(payload, events::KernelEventPayload::RunCompleted(_))
-}
-
-fn is_retention_payload(payload: &events::KernelEventPayload) -> bool {
-    matches!(
-        payload,
-        events::KernelEventPayload::RetentionRefsAppended(_)
-            | events::KernelEventPayload::RetentionManifestProjected(_)
     )
 }
 

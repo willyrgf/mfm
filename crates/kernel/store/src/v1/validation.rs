@@ -16,12 +16,13 @@ pub(super) use self::event_keys::{
 #[path = "terminal_payloads.rs"]
 mod terminal_payloads;
 use self::terminal_payloads::{
-    is_attempt_terminal_commit_payload, is_retention_commit_payload, is_retention_payload,
-    is_run_completed_payload, is_saga_terminal_commit_payload, is_side_effect_payload,
+    is_attempt_terminal_commit_payload, is_retention_commit_payload,
+    is_saga_terminal_commit_payload, is_side_effect_payload,
     is_side_effect_progress_commit_payload, is_side_effect_terminal_commit_payload,
     validate_attempt_terminal_resource_lane_release_batch,
     validate_side_effect_terminal_resource_lane_release_batch,
 };
+pub(super) use self::terminal_payloads::{is_retention_payload, is_run_completed_payload};
 pub(super) use self::terminal_payloads::{
     request_contains_manual_resolution, request_contains_saga_terminal_outcome,
 };
