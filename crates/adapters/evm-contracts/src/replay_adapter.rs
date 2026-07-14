@@ -412,7 +412,6 @@ fn verify_deployed_replay_output(
                 source_run_registry,
                 source,
                 evidence,
-                &context,
                 ContractLifecycleStage::Deployed,
             )?;
             let expected = ImportDeployedContractState::admit_verified_mfm_run_import(
@@ -528,7 +527,6 @@ fn verify_configured_replay_output(
                 source_run_registry,
                 source,
                 evidence,
-                &context,
                 ContractLifecycleStage::Configured,
             )?;
             let expected = ImportConfiguredContractState::admit_verified_mfm_run_import(
@@ -996,16 +994,11 @@ fn verify_replayed_source_run_import<T>(
     source_run_registry: &mfm_certify::CertificationRegistry,
     source: &ImportFromMfmRun,
     evidence: &ImportFromMfmRunEvidence,
-    context: &mfm_program::CertifiedContext<EvmContractContext>,
     required_stage: ContractLifecycleStage,
 ) -> replay::Result<T>
 where
     T: ContextBoundOutput + DeserializeOwned + Serialize,
 {
-    validate_source_run_import_policy(source, context, required_stage)
-        .map_err(replay_adapter_error)?;
-    validate_source_run_import_evidence::<T>(source, evidence, context, required_stage)
-        .map_err(replay_adapter_error)?;
     let certificate = replay_lifecycle_artifact(broker, &evidence.source_spec_certificate_ref)?;
     let bundle_artifact = replay_lifecycle_artifact(broker, &evidence.source_run_stream_ref)?;
     let source_value_artifact = replay_lifecycle_artifact(

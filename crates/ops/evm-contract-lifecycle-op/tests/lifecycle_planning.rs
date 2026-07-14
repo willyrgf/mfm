@@ -1,5 +1,8 @@
+use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_certify::certify_program_draft;
-use mfm_evm_contract_model::{ConfiguredContractInstance, DeployedContractInstance};
+use mfm_evm_contract_model::{
+    ConfiguredContractInstance, DeployedContractInstance, EvmContractContext,
+};
 use mfm_ids::{
     ArtifactId, CellId, ContentDigest, ContextDescriptorId, ContextRef, DescriptorId,
     DigestAlgorithm, DigestBytes, EventId, RunId, SpecHash,
@@ -7,6 +10,7 @@ use mfm_ids::{
 use mfm_op_evm_contract_lifecycle::*;
 use mfm_program::{InputBindingNodeRef, Operation};
 use mfm_spec::v1::{CellContextSpec, InputContextSpec, NodeContextSpec};
+use mfm_state_evm_contracts::{ConfigureAction, ImportDeployedSpec};
 
 fn digest_with(byte: u8) -> DigestBytes {
     DigestBytes::from_array([byte; 32])
@@ -86,6 +90,10 @@ fn import_from_mfm_run_json(required_stage: &str, context_byte: u8) -> serde_jso
         "source_value_digest": content_digest_str(0x33),
         "source_context_ref": context_ref_str(context_byte),
         "required_stage": required_stage,
+        "accepted_context_policy": {
+            "kind": "accepted_context_refs",
+            "context_refs": [context_ref_str(context_byte)],
+        },
     })
 }
 
@@ -106,6 +114,11 @@ fn artifact_ref_json(
 }
 
 fn import_from_mfm_run_evidence_json(required_stage: &str, context_byte: u8) -> serde_json::Value {
+    let source = import_from_mfm_run_json(required_stage, context_byte);
+    let source_digest = PlainCanonicalJsonBytes::from_json_str(&source.to_string())
+        .expect("canonical source import")
+        .content_digest()
+        .to_string();
     let (schema_id, semantic_type_id) = match required_stage {
         "deployed" => (
             <DeployedContractInstance as mfm_values::MfmValue>::schema_id()
@@ -148,62 +161,123 @@ fn import_from_mfm_run_evidence_json(required_stage: &str, context_byte: u8) -> 
             Some(semantic_type_id),
         ),
         "source_terminal_cell_or_output_event_ref": event_id_str(0x57),
-        "import_policy_digest": content_digest_str(0x58),
+        "import_policy_digest": source_digest,
     })
 }
 
 fn context_deploy_entry_config() -> EvmContractDeployEntryConfig {
-    serde_json::from_value(serde_json::json!({
-        "context": context_json(),
-        "deploy": {
-            "signer": signer_json(),
-        },
+    let context = serde_json::from_value(context_json()).expect("context");
+    let deploy = serde_json::from_value(serde_json::json!({
+        "signer": signer_json(),
     }))
-    .expect("context deploy entry")
+    .expect("deploy action");
+    build_deploy_entry_config(context, deploy).expect("context deploy entry")
 }
 
 fn context_configure_entry_config() -> EvmContractConfigureEntryConfig {
-    serde_json::from_value(serde_json::json!({
-        "context": context_json(),
-        "import_deployed": {
-            "kind": "from_mfm_run",
-            "source": import_from_mfm_run_json("deployed", 0x34),
-            "evidence": import_from_mfm_run_evidence_json("deployed", 0x34),
-        },
-        "configure": {
-            "signer": signer_json(),
-            "calls": [],
-        },
+    let context = serde_json::from_value(context_json()).expect("context");
+    let import_deployed = serde_json::from_value(serde_json::json!({
+        "kind": "from_mfm_run",
+        "source": import_from_mfm_run_json("deployed", 0x34),
+        "evidence": import_from_mfm_run_evidence_json("deployed", 0x34),
     }))
-    .expect("context configure entry")
+    .expect("deployed import");
+    let configure: ConfigureAction = serde_json::from_value(serde_json::json!({
+        "signer": signer_json(),
+        "calls": [],
+    }))
+    .expect("configure action");
+    build_configure_entry_config(context, import_deployed, configure)
+        .expect("context configure entry")
 }
 
 fn context_validate_entry_config() -> EvmContractValidateEntryConfig {
-    serde_json::from_value(serde_json::json!({
-        "context": context_json(),
-        "import_configured": {
-            "kind": "from_mfm_run",
-            "source": import_from_mfm_run_json("configured", 0x35),
-            "evidence": import_from_mfm_run_evidence_json("configured", 0x35),
-        },
-        "validate": {},
+    let context = serde_json::from_value(context_json()).expect("context");
+    let import_configured = serde_json::from_value(serde_json::json!({
+        "kind": "from_mfm_run",
+        "source": import_from_mfm_run_json("configured", 0x35),
+        "evidence": import_from_mfm_run_evidence_json("configured", 0x35),
     }))
-    .expect("context validate entry")
+    .expect("configured import");
+    let validate = serde_json::from_value(serde_json::json!({})).expect("validate action");
+    build_validate_entry_config(context, import_configured, validate)
+        .expect("context validate entry")
 }
 
 fn context_lifecycle_entry_config() -> EvmContractLifecycleEntryConfig {
-    serde_json::from_value(serde_json::json!({
-        "context": context_json(),
-        "deploy": {
-            "signer": signer_json(),
-        },
-        "configure": {
-            "signer": signer_json(),
-            "calls": [],
-        },
-        "validate": {},
+    let context = serde_json::from_value(context_json()).expect("context");
+    let deploy = serde_json::from_value(serde_json::json!({
+        "signer": signer_json(),
     }))
-    .expect("context lifecycle entry")
+    .expect("deploy action");
+    let configure = serde_json::from_value(serde_json::json!({
+        "signer": signer_json(),
+        "calls": [],
+    }))
+    .expect("configure action");
+    let validate = serde_json::from_value(serde_json::json!({})).expect("validate action");
+    build_lifecycle_entry_config(context, deploy, configure, validate)
+        .expect("context lifecycle entry")
+}
+
+fn configure_import_json(required_stage: &str, context_byte: u8) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "from_mfm_run",
+        "source": import_from_mfm_run_json(required_stage, context_byte),
+        "evidence": import_from_mfm_run_evidence_json(required_stage, context_byte),
+    })
+}
+
+#[test]
+fn entry_builders_reject_static_import_joins() {
+    let context: EvmContractContext = serde_json::from_value(context_json()).expect("context");
+    let configure: ConfigureAction = serde_json::from_value(serde_json::json!({
+        "signer": signer_json(),
+        "calls": [],
+    }))
+    .expect("configure action");
+
+    let mut wrong_stage = configure_import_json("configured", 0x34);
+    let wrong_stage_import: ImportDeployedSpec =
+        serde_json::from_value(wrong_stage.take()).expect("wrong-stage import");
+    assert_eq!(
+        build_configure_entry_config(context.clone(), wrong_stage_import, configure.clone())
+            .expect_err("wrong stage must fail"),
+        EvmContractPlanError::ImportStageMismatch
+    );
+
+    let mut exact_context = configure_import_json("deployed", 0x34);
+    exact_context["source"]["accepted_context_policy"] = serde_json::json!({
+        "kind": "exact_context",
+    });
+    let exact_context_import: ImportDeployedSpec =
+        serde_json::from_value(exact_context).expect("exact-context import");
+    assert_eq!(
+        build_configure_entry_config(context.clone(), exact_context_import, configure.clone())
+            .expect_err("exact context mismatch must fail"),
+        EvmContractPlanError::ImportContextMismatch
+    );
+
+    let mut rejected_context = configure_import_json("deployed", 0x34);
+    rejected_context["source"]["accepted_context_policy"]["context_refs"] =
+        serde_json::json!([context_ref_str(0x99)]);
+    let rejected_context_import: ImportDeployedSpec =
+        serde_json::from_value(rejected_context).expect("accepted-context import");
+    assert_eq!(
+        build_configure_entry_config(context.clone(), rejected_context_import, configure.clone(),)
+            .expect_err("rejected context must fail"),
+        EvmContractPlanError::ImportContextMismatch
+    );
+
+    let mut inconsistent_evidence = configure_import_json("deployed", 0x34);
+    inconsistent_evidence["evidence"]["source_spec_hash"] = serde_json::json!(spec_hash_str(0x99));
+    let inconsistent_import: ImportDeployedSpec =
+        serde_json::from_value(inconsistent_evidence).expect("inconsistent import");
+    assert_eq!(
+        build_configure_entry_config(context, inconsistent_import, configure)
+            .expect_err("inconsistent evidence must fail"),
+        EvmContractPlanError::ImportEvidenceMismatch
+    );
 }
 
 fn assert_node_requires_draft_context(draft: &mfm_program::TypedProgramDraft, key: &str) {

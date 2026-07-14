@@ -20,6 +20,8 @@ mfm-spec = { path = "../../kernel/spec" }
 mfm-state-evm-contracts = { path = "../../states/evm-contracts" }
 mfm-values = { path = "../../kernel/values" }
 serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

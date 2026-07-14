@@ -17,9 +17,12 @@
 //! # }
 //! ```
 
+use std::collections::BTreeSet;
+
 use mfm_evm_contract_model::{
-    ConfiguredContractInstance, ContextBoundValidationReport, DeployedContractInstance,
-    EvmContractContext,
+    AcceptedContextPolicy, AdoptExternalAddress, ConfiguredContractInstance,
+    ContextBoundValidationReport, ContractLifecycleStage, ContractProfileDigestRef,
+    DeployedContractInstance, EvmContractContext, ImportFromMfmRun, ImportFromMfmRunEvidence,
 };
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_program::{
@@ -45,13 +48,97 @@ const CONTEXT_VALIDATE_OP_KEY: &str = "contract_context_validate";
 const CONTEXT_LIFECYCLE_OP_KEY: &str = "contract_context_lifecycle";
 const PUBLIC_OUTPUT_KEY: &str = "contract";
 
+/// Typed planning failures for complete EVM lifecycle entry configs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum EvmContractPlanError {
+    /// The authored context could not be certified by the program context authority.
+    #[error("EVM contract context is invalid")]
+    InvalidContext,
+    /// An import requested a lifecycle stage different from the entry operation.
+    #[error("EVM contract import stage does not match the entry operation")]
+    ImportStageMismatch,
+    /// An import source context is not admitted by its explicit context policy.
+    #[error("EVM contract import context is not accepted")]
+    ImportContextMismatch,
+    /// An accepted-context policy is empty or repeats a context reference.
+    #[error("EVM contract accepted-context policy is invalid")]
+    InvalidAcceptedContextPolicy,
+    /// Source-run import evidence does not match its typed import request.
+    #[error("EVM contract source-run import evidence does not match its request")]
+    ImportEvidenceMismatch,
+    /// Source-run import evidence does not describe the required lifecycle value type.
+    #[error("EVM contract source-run import evidence type is invalid")]
+    ImportEvidenceTypeMismatch,
+    /// External adoption assertions contain a runtime-incompatible block range.
+    #[error("EVM contract external adoption event assertions cannot set block ranges")]
+    InvalidExternalAdoptionPolicy,
+}
+
+/// Builds and validates a deploy-only EVM contract entry config.
+pub fn build_deploy_entry_config(
+    context: EvmContractContext,
+    deploy: DeployAction,
+) -> Result<EvmContractDeployEntryConfig, EvmContractPlanError> {
+    let config = EvmContractDeployEntryConfig { context, deploy };
+    validate_deploy_entry_config(&config)?;
+    Ok(config)
+}
+
+/// Builds and validates a configure-only EVM contract entry config.
+pub fn build_configure_entry_config(
+    context: EvmContractContext,
+    import_deployed: ImportDeployedSpec,
+    configure: ConfigureAction,
+) -> Result<EvmContractConfigureEntryConfig, EvmContractPlanError> {
+    let config = EvmContractConfigureEntryConfig {
+        context,
+        import_deployed,
+        configure,
+    };
+    validate_configure_entry_config(&config)?;
+    Ok(config)
+}
+
+/// Builds and validates a validate-only EVM contract entry config.
+pub fn build_validate_entry_config(
+    context: EvmContractContext,
+    import_configured: ImportConfiguredSpec,
+    validate: ValidateAction,
+) -> Result<EvmContractValidateEntryConfig, EvmContractPlanError> {
+    let config = EvmContractValidateEntryConfig {
+        context,
+        import_configured,
+        validate,
+    };
+    validate_validate_entry_config(&config)?;
+    Ok(config)
+}
+
+/// Builds and validates a full EVM contract lifecycle entry config.
+pub fn build_lifecycle_entry_config(
+    context: EvmContractContext,
+    deploy: DeployAction,
+    configure: ConfigureAction,
+    validate: ValidateAction,
+) -> Result<EvmContractLifecycleEntryConfig, EvmContractPlanError> {
+    let config = EvmContractLifecycleEntryConfig {
+        context,
+        deploy,
+        configure,
+        validate,
+    };
+    validate_lifecycle_entry_config(&config)?;
+    Ok(config)
+}
+
 /// Complete config for deploy-only EVM contract planning.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmConfig)]
 #[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "deploy-entry-config",
-    schema = "mfm.evm.contract.config.deploy_entry"
+    schema = "mfm.evm.contract.config.deploy_entry",
+    validate = "validate_deploy_entry_config"
 )]
 pub struct EvmContractDeployEntryConfig {
     context: EvmContractContext,
@@ -59,11 +146,6 @@ pub struct EvmContractDeployEntryConfig {
 }
 
 impl EvmContractDeployEntryConfig {
-    /// Creates a deploy config from its complete typed pieces.
-    pub fn new(context: EvmContractContext, deploy: DeployAction) -> Self {
-        Self { context, deploy }
-    }
-
     /// Returns the certified lifecycle context.
     pub const fn context(&self) -> &EvmContractContext {
         &self.context
@@ -81,7 +163,8 @@ impl EvmContractDeployEntryConfig {
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "configure-entry-config",
-    schema = "mfm.evm.contract.config.configure_entry"
+    schema = "mfm.evm.contract.config.configure_entry",
+    validate = "validate_configure_entry_config"
 )]
 pub struct EvmContractConfigureEntryConfig {
     context: EvmContractContext,
@@ -90,19 +173,6 @@ pub struct EvmContractConfigureEntryConfig {
 }
 
 impl EvmContractConfigureEntryConfig {
-    /// Creates a configure config from its complete typed pieces.
-    pub fn new(
-        context: EvmContractContext,
-        import_deployed: ImportDeployedSpec,
-        configure: ConfigureAction,
-    ) -> Self {
-        Self {
-            context,
-            import_deployed,
-            configure,
-        }
-    }
-
     /// Returns the certified lifecycle context.
     pub const fn context(&self) -> &EvmContractContext {
         &self.context
@@ -125,7 +195,8 @@ impl EvmContractConfigureEntryConfig {
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "validate-entry-config",
-    schema = "mfm.evm.contract.config.validate_entry"
+    schema = "mfm.evm.contract.config.validate_entry",
+    validate = "validate_validate_entry_config"
 )]
 pub struct EvmContractValidateEntryConfig {
     context: EvmContractContext,
@@ -134,19 +205,6 @@ pub struct EvmContractValidateEntryConfig {
 }
 
 impl EvmContractValidateEntryConfig {
-    /// Creates a validate config from its complete typed pieces.
-    pub fn new(
-        context: EvmContractContext,
-        import_configured: ImportConfiguredSpec,
-        validate: ValidateAction,
-    ) -> Self {
-        Self {
-            context,
-            import_configured,
-            validate,
-        }
-    }
-
     /// Returns the certified lifecycle context.
     pub const fn context(&self) -> &EvmContractContext {
         &self.context
@@ -169,7 +227,8 @@ impl EvmContractValidateEntryConfig {
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "lifecycle-entry-config",
-    schema = "mfm.evm.contract.config.lifecycle_entry"
+    schema = "mfm.evm.contract.config.lifecycle_entry",
+    validate = "validate_lifecycle_entry_config"
 )]
 pub struct EvmContractLifecycleEntryConfig {
     context: EvmContractContext,
@@ -179,21 +238,6 @@ pub struct EvmContractLifecycleEntryConfig {
 }
 
 impl EvmContractLifecycleEntryConfig {
-    /// Creates a full lifecycle config from its complete typed pieces.
-    pub fn new(
-        context: EvmContractContext,
-        deploy: DeployAction,
-        configure: ConfigureAction,
-        validate: ValidateAction,
-    ) -> Self {
-        Self {
-            context,
-            deploy,
-            configure,
-            validate,
-        }
-    }
-
     /// Returns the certified lifecycle context.
     pub const fn context(&self) -> &EvmContractContext {
         &self.context
@@ -213,6 +257,188 @@ impl EvmContractLifecycleEntryConfig {
     pub const fn validate(&self) -> &ValidateAction {
         &self.validate
     }
+}
+
+fn validate_deploy_entry_config(
+    config: &EvmContractDeployEntryConfig,
+) -> Result<(), EvmContractPlanError> {
+    validate_context(&config.context)
+}
+
+fn validate_configure_entry_config(
+    config: &EvmContractConfigureEntryConfig,
+) -> Result<(), EvmContractPlanError> {
+    validate_context(&config.context)?;
+    validate_import_deployed(&config.context, &config.import_deployed)
+}
+
+fn validate_validate_entry_config(
+    config: &EvmContractValidateEntryConfig,
+) -> Result<(), EvmContractPlanError> {
+    validate_context(&config.context)?;
+    validate_import_configured(&config.context, &config.import_configured)
+}
+
+fn validate_lifecycle_entry_config(
+    config: &EvmContractLifecycleEntryConfig,
+) -> Result<(), EvmContractPlanError> {
+    validate_context(&config.context)
+}
+
+fn validate_context(context: &EvmContractContext) -> Result<(), EvmContractPlanError> {
+    mfm_program::context_ref_for(context)
+        .map(|_| ())
+        .map_err(|_| EvmContractPlanError::InvalidContext)
+}
+
+fn validate_import_deployed(
+    context: &EvmContractContext,
+    import: &ImportDeployedSpec,
+) -> Result<(), EvmContractPlanError> {
+    match import {
+        ImportDeployedSpec::FromMfmRun { source, evidence } => {
+            validate_mfm_run_import::<DeployedContractInstance>(
+                context,
+                source,
+                evidence,
+                ContractLifecycleStage::Deployed,
+            )
+        }
+        ImportDeployedSpec::AdoptExternalAddress { adoption } => {
+            validate_external_adoption(adoption)
+        }
+    }
+}
+
+fn validate_import_configured(
+    context: &EvmContractContext,
+    import: &ImportConfiguredSpec,
+) -> Result<(), EvmContractPlanError> {
+    match import {
+        ImportConfiguredSpec::FromMfmRun { source, evidence } => {
+            validate_mfm_run_import::<ConfiguredContractInstance>(
+                context,
+                source,
+                evidence,
+                ContractLifecycleStage::Configured,
+            )
+        }
+        ImportConfiguredSpec::AdoptExternalAddress { adoption } => {
+            validate_external_adoption(adoption)
+        }
+    }
+}
+
+fn validate_external_adoption(adoption: &AdoptExternalAddress) -> Result<(), EvmContractPlanError> {
+    if adoption
+        .evidence_policy
+        .initial_event_assertions
+        .iter()
+        .any(|assertion| assertion.from_block.is_some() || assertion.to_block.is_some())
+    {
+        return Err(EvmContractPlanError::InvalidExternalAdoptionPolicy);
+    }
+    Ok(())
+}
+
+fn validate_mfm_run_import<T>(
+    context: &EvmContractContext,
+    source: &ImportFromMfmRun,
+    evidence: &ImportFromMfmRunEvidence,
+    expected_stage: ContractLifecycleStage,
+) -> Result<(), EvmContractPlanError>
+where
+    T: mfm_values::MfmValue,
+{
+    if source.required_stage != expected_stage {
+        return Err(EvmContractPlanError::ImportStageMismatch);
+    }
+
+    let context_ref =
+        mfm_program::context_ref_for(context).map_err(|_| EvmContractPlanError::InvalidContext)?;
+    match &source.accepted_context_policy {
+        AcceptedContextPolicy::ExactContext {} => {
+            if source.source_context_ref.as_context_ref() != &context_ref {
+                return Err(EvmContractPlanError::ImportContextMismatch);
+            }
+        }
+        AcceptedContextPolicy::AcceptedContextRefs { context_refs } => {
+            let unique = context_refs.iter().cloned().collect::<BTreeSet<_>>();
+            if context_refs.is_empty() || unique.len() != context_refs.len() {
+                return Err(EvmContractPlanError::InvalidAcceptedContextPolicy);
+            }
+            if !unique.contains(&source.source_context_ref) {
+                return Err(EvmContractPlanError::ImportContextMismatch);
+            }
+        }
+    }
+
+    if evidence.source_spec_hash != source.source_spec_hash
+        || evidence.source_cell_or_output_id != source.source_cell_or_output_id
+        || evidence.source_stage != expected_stage
+        || evidence.source_context_ref != source.source_context_ref
+        || evidence.source_value_digest != source.source_value_digest
+        || evidence.import_policy_digest != canonical_digest(source)?
+    {
+        return Err(EvmContractPlanError::ImportEvidenceMismatch);
+    }
+
+    if evidence
+        .source_value_artifact_ref_or_inline_canonical_value
+        .content_digest()
+        .map_err(|_| EvmContractPlanError::ImportEvidenceMismatch)?
+        != source
+            .source_value_digest
+            .typed()
+            .map_err(|_| EvmContractPlanError::ImportEvidenceMismatch)?
+    {
+        return Err(EvmContractPlanError::ImportEvidenceMismatch);
+    }
+
+    let schema_id = T::schema_id().map_err(|_| EvmContractPlanError::ImportEvidenceTypeMismatch)?;
+    let semantic_type_id =
+        T::semantic_id().map_err(|_| EvmContractPlanError::ImportEvidenceTypeMismatch)?;
+    if evidence
+        .source_cell_schema_id
+        .typed()
+        .map_err(|_| EvmContractPlanError::ImportEvidenceTypeMismatch)?
+        != schema_id
+        || evidence
+            .source_cell_semantic_type_id
+            .typed()
+            .map_err(|_| EvmContractPlanError::ImportEvidenceTypeMismatch)?
+            != semantic_type_id
+    {
+        return Err(EvmContractPlanError::ImportEvidenceTypeMismatch);
+    }
+
+    if source.source_context_ref.as_context_ref() == &context_ref {
+        let descriptor = <EvmContractContext as mfm_program::StateContext>::descriptor()
+            .map_err(|_| EvmContractPlanError::InvalidContext)?;
+        let mfm_program::StateContextDescriptorSpec::Required(requirement) = descriptor else {
+            return Err(EvmContractPlanError::InvalidContext);
+        };
+        if evidence
+            .source_context_descriptor_id
+            .typed()
+            .map_err(|_| EvmContractPlanError::ImportEvidenceMismatch)?
+            != requirement.context_descriptor_id
+        {
+            return Err(EvmContractPlanError::ImportEvidenceMismatch);
+        }
+    }
+
+    Ok(())
+}
+
+fn canonical_digest<T: Serialize>(
+    value: &T,
+) -> Result<ContractProfileDigestRef, EvmContractPlanError> {
+    let json =
+        serde_json::to_string(value).map_err(|_| EvmContractPlanError::ImportEvidenceMismatch)?;
+    let canonical = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&json)
+        .map_err(|_| EvmContractPlanError::ImportEvidenceMismatch)?;
+    Ok(ContractProfileDigestRef::from(canonical.content_digest()))
 }
 
 /// Output handles produced by context-bound deploy-only operation planning.

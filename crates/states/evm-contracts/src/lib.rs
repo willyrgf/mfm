@@ -41,7 +41,7 @@ use mfm_evm_contract_model::{
     ContractCallConfig, ContractLifecycleStage, ContractProfileDigestRef, DeployProvenance,
     DeployedContractInstance, EventAssertionConfig, EvmContractContext, ExternalAdoptionEvidence,
     ExternalEventAssertionEvidence, ExternalEvmSourceEvidence, ExternalReadAssertionEvidence,
-    ImportFromMfmRun, ImportFromMfmRunEvidence, LifecycleArtifactEvidenceRef, LifecycleNodeIdRef,
+    ImportFromMfmRunEvidence, LifecycleArtifactEvidenceRef, LifecycleNodeIdRef,
     ReadAssertionConfig, ValidationEventResult, ValidationReadResult,
 };
 use mfm_ids::{
@@ -701,87 +701,19 @@ where
 }
 
 fn ensure_verified_source_run_import<T>(
-    source: &ImportFromMfmRun,
     evidence: &ImportFromMfmRunEvidence,
     value: &T,
-    context: &mfm_program::CertifiedContext<EvmContractContext>,
     required_stage: ContractLifecycleStage,
 ) -> StateResult<()>
 where
     T: ContextBoundOutput + mfm_values::MfmValue + Serialize,
 {
-    validate_source_run_import_policy(source, context, required_stage)?;
-    if evidence.source_spec_hash != source.source_spec_hash
-        || evidence.source_cell_or_output_id != source.source_cell_or_output_id
-        || evidence.source_stage != required_stage
-        || evidence.source_context_ref != source.source_context_ref
-        || evidence.source_value_digest != source.source_value_digest
-        || evidence.import_policy_digest != digest_for_config(source)?
-    {
-        return Err(import_admission_error("source-run import"));
-    }
     if value.context_ref() != evidence.source_context_ref.as_context_ref()
         || value.context_resource_kind() != contract_instance_resource_kind()
         || value.context_stage() != context_stage_for_lifecycle_stage(required_stage)
         || digest_for_config(value)? != evidence.source_value_digest
     {
         return Err(import_admission_error("source-run import"));
-    }
-    if evidence.source_context_ref.as_context_ref() == context.context_ref()
-        && evidence
-            .source_context_descriptor_id
-            .typed()
-            .map_err(StateError::Message)?
-            != *context.context_descriptor_id()
-    {
-        return Err(import_admission_error("source-run import"));
-    }
-    if evidence
-        .source_value_artifact_ref_or_inline_canonical_value
-        .content_digest()
-        .map_err(StateError::Message)?
-        != evidence
-            .source_value_digest
-            .typed()
-            .map_err(StateError::Message)?
-        || evidence
-            .source_cell_schema_id
-            .typed()
-            .map_err(StateError::Message)?
-            != T::schema_id().map_err(|error| StateError::Message(error.to_string()))?
-        || evidence
-            .source_cell_semantic_type_id
-            .typed()
-            .map_err(StateError::Message)?
-            != T::semantic_id().map_err(|error| StateError::Message(error.to_string()))?
-    {
-        return Err(import_admission_error("source-run import"));
-    }
-    Ok(())
-}
-
-fn validate_source_run_import_policy(
-    source: &ImportFromMfmRun,
-    context: &mfm_program::CertifiedContext<EvmContractContext>,
-    required_stage: ContractLifecycleStage,
-) -> StateResult<()> {
-    if source.required_stage != required_stage {
-        return Err(import_admission_error("source-run import"));
-    }
-    match &source.accepted_context_policy {
-        mfm_evm_contract_model::AcceptedContextPolicy::ExactContext {} => {
-            if source.source_context_ref.as_context_ref() != context.context_ref() {
-                return Err(import_admission_error("source-run import"));
-            }
-        }
-        mfm_evm_contract_model::AcceptedContextPolicy::AcceptedContextRefs { context_refs } => {
-            if !context_refs
-                .iter()
-                .any(|context_ref| context_ref == &source.source_context_ref)
-            {
-                return Err(import_admission_error("source-run import"));
-            }
-        }
     }
     Ok(())
 }

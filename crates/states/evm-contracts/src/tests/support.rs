@@ -1,4 +1,5 @@
 use super::*;
+use mfm_evm_contract_model::ImportFromMfmRun;
 pub(super) fn digest_with(byte: u8) -> DigestBytes {
     DigestBytes::from_array([byte; 32])
 }

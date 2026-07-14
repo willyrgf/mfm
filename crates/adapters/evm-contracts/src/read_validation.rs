@@ -68,12 +68,10 @@ pub(super) async fn import_deployed_with_reads(
 ) -> Result<DeployedContractInstance> {
     match import {
         ImportDeployedSpec::FromMfmRun { source, evidence } => {
-            validate_source_run_import_policy(source, context, ContractLifecycleStage::Deployed)?;
             let imported = import_source_run_value::<DeployedContractInstance>(
                 artifacts,
                 source,
                 evidence,
-                context,
                 ContractLifecycleStage::Deployed,
                 source_run_registry,
             )
@@ -110,12 +108,10 @@ pub(super) async fn import_configured_with_reads(
 ) -> Result<ConfiguredContractInstance> {
     match import {
         ImportConfiguredSpec::FromMfmRun { source, evidence } => {
-            validate_source_run_import_policy(source, context, ContractLifecycleStage::Configured)?;
             let imported = import_source_run_value::<ConfiguredContractInstance>(
                 artifacts,
                 source,
                 evidence,
-                context,
                 ContractLifecycleStage::Configured,
                 source_run_registry,
             )
@@ -262,7 +258,6 @@ async fn import_source_run_value<T>(
     artifacts: &dyn store::RetainedArtifactReadProvider,
     source: &ImportFromMfmRun,
     evidence: &ImportFromMfmRunEvidence,
-    context: &mfm_program::CertifiedContext<EvmContractContext>,
     required_stage: ContractLifecycleStage,
     source_run_registry: Option<&mfm_certify::CertificationRegistry>,
 ) -> Result<T>
@@ -274,7 +269,6 @@ where
             "source-run import requires trusted certification registry authority".to_owned(),
         )
     })?;
-    validate_source_run_import_evidence::<T>(source, evidence, context, required_stage)?;
     let source_spec =
         read_lifecycle_evidence_artifact(artifacts, &evidence.source_spec_artifact_ref).await?;
     let certificate =
@@ -313,68 +307,6 @@ where
         source_run_registry,
     })?;
     Ok(value)
-}
-
-pub(super) fn validate_source_run_import_evidence<T>(
-    source: &ImportFromMfmRun,
-    evidence: &ImportFromMfmRunEvidence,
-    context: &mfm_program::CertifiedContext<EvmContractContext>,
-    required_stage: ContractLifecycleStage,
-) -> Result<()>
-where
-    T: ContextBoundOutput,
-{
-    if evidence.source_spec_hash != source.source_spec_hash
-        || evidence.source_cell_or_output_id != source.source_cell_or_output_id
-        || evidence.source_stage != required_stage
-        || evidence.source_context_ref != source.source_context_ref
-        || evidence.source_value_digest != source.source_value_digest
-        || evidence.import_policy_digest != digest_for_value(source)?
-    {
-        return Err(EvmContractAdapterError::SourceRunImportEvidence(
-            "source-run import evidence does not match certified import policy".to_owned(),
-        ));
-    }
-    if evidence.source_context_ref.as_context_ref() == context.context_ref()
-        && evidence
-            .source_context_descriptor_id
-            .typed()
-            .map_err(EvmContractAdapterError::Model)?
-            != *context.context_descriptor_id()
-    {
-        return Err(EvmContractAdapterError::ContextMismatch);
-    }
-    let value_ref = &evidence.source_value_artifact_ref_or_inline_canonical_value;
-    if value_ref
-        .content_digest()
-        .map_err(EvmContractAdapterError::Model)?
-        != evidence
-            .source_value_digest
-            .typed()
-            .map_err(EvmContractAdapterError::Model)?
-    {
-        return Err(EvmContractAdapterError::SourceRunImportEvidence(
-            "source value artifact digest does not match import evidence".to_owned(),
-        ));
-    }
-    if evidence
-        .source_cell_schema_id
-        .typed()
-        .map_err(EvmContractAdapterError::Model)?
-        != T::schema_id().map_err(|error| EvmContractAdapterError::Model(error.to_string()))?
-        || evidence
-            .source_cell_semantic_type_id
-            .typed()
-            .map_err(EvmContractAdapterError::Model)?
-            != T::semantic_id()
-                .map_err(|error| EvmContractAdapterError::Model(error.to_string()))?
-    {
-        return Err(EvmContractAdapterError::SourceRunImportEvidence(
-            "source-run import evidence value type does not match requested lifecycle stage"
-                .to_owned(),
-        ));
-    }
-    Ok(())
 }
 
 pub(super) struct SourceRunAuthorityEvidence<'a> {
@@ -894,32 +826,6 @@ pub(super) fn context_stage_for_lifecycle_stage(
         ContractLifecycleStage::Deployed => deployed_contract_stage(),
         ContractLifecycleStage::Configured => configured_contract_stage(),
     }
-}
-
-pub(super) fn validate_source_run_import_policy(
-    source: &ImportFromMfmRun,
-    context: &mfm_program::CertifiedContext<EvmContractContext>,
-    required_stage: ContractLifecycleStage,
-) -> Result<()> {
-    if source.required_stage != required_stage {
-        return Err(EvmContractAdapterError::ImportStageMismatch);
-    }
-    match &source.accepted_context_policy {
-        AcceptedContextPolicy::ExactContext {} => {
-            if source.source_context_ref.as_context_ref() != context.context_ref() {
-                return Err(EvmContractAdapterError::ContextMismatch);
-            }
-        }
-        AcceptedContextPolicy::AcceptedContextRefs { context_refs } => {
-            if !context_refs
-                .iter()
-                .any(|context_ref| context_ref == &source.source_context_ref)
-            {
-                return Err(EvmContractAdapterError::ContextMismatch);
-            }
-        }
-    }
-    Ok(())
 }
 
 pub(super) fn digest_for_value<T>(value: &T) -> Result<ContractProfileDigestRef>

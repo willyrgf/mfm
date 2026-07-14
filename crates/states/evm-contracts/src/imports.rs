@@ -10,16 +10,14 @@ impl ImportDeployedContractState {
         imported: DeployedContractInstance,
         context: &mfm_program::CertifiedContext<EvmContractContext>,
     ) -> StateResult<DeployedContractInstance> {
-        let ImportDeployedSpec::FromMfmRun { source, evidence } = import else {
+        let ImportDeployedSpec::FromMfmRun {
+            source: _,
+            evidence,
+        } = import
+        else {
             return Err(import_admission_error(Self::name()));
         };
-        ensure_verified_source_run_import(
-            source,
-            evidence,
-            &imported,
-            context,
-            ContractLifecycleStage::Deployed,
-        )?;
+        ensure_verified_source_run_import(evidence, &imported, ContractLifecycleStage::Deployed)?;
         Ok(DeployedContractInstance {
             lifecycle_version: 1,
             context_ref: ContextRefValue::from(context.context_ref().clone()),
@@ -114,13 +112,7 @@ impl ImportConfiguredContractState {
         let ImportConfiguredSpec::FromMfmRun { source, evidence } = import else {
             return Err(import_admission_error(Self::name()));
         };
-        ensure_verified_source_run_import(
-            source,
-            evidence,
-            &imported,
-            context,
-            ContractLifecycleStage::Configured,
-        )?;
+        ensure_verified_source_run_import(evidence, &imported, ContractLifecycleStage::Configured)?;
         Ok(ConfiguredContractInstance {
             lifecycle_version: 1,
             context_ref: ContextRefValue::from(context.context_ref().clone()),

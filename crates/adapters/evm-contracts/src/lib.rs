@@ -40,16 +40,16 @@ use mfm_evm_contract_model::{
     configured_contract_stage, constructor_data, contract_instance_resource_kind,
     decode_single_output_to_json, deployed_contract_stage, expected_matches, parse_artifact,
     prepare_validate_assertions, resolve_function_call, validation_report_resource_kind,
-    validation_report_stage, AcceptedContextPolicy, BlockSelector as ModelBlockSelector, BlockTag,
-    ConfigurationClaim, ConfigurationSnapshot, ConfiguredContractInstance,
-    ConfiguredContractInstanceRef, ContextBoundValidationReport, ContractArtifactConfig,
-    ContractCallConfig, ContractLifecycleStage, ContractProfileDigestRef, DeployProvenance,
-    DeployedContractInstance, EventAssertionConfig, EvmCodeHash, EvmContractContext,
-    EvmNetworkContext, ExpectedValue, ExternalAdoptionEvidence, ExternalCodeReadEvidence,
-    ExternalEventAssertionEvidence, ExternalEvmSourceEvidence, ExternalReadAssertionEvidence,
-    ImportFromMfmRun, ImportFromMfmRunEvidence, LifecycleArtifactEvidenceRef, LifecycleNodeIdRef,
-    ParsedAbi, ReadAssertionConfig, SourceCellOrOutputRef, SourceRunTerminalEvent,
-    ValidationEventResult, ValidationReadResult,
+    validation_report_stage, BlockSelector as ModelBlockSelector, BlockTag, ConfigurationClaim,
+    ConfigurationSnapshot, ConfiguredContractInstance, ConfiguredContractInstanceRef,
+    ContextBoundValidationReport, ContractArtifactConfig, ContractCallConfig,
+    ContractLifecycleStage, ContractProfileDigestRef, DeployProvenance, DeployedContractInstance,
+    EventAssertionConfig, EvmCodeHash, EvmContractContext, EvmNetworkContext, ExpectedValue,
+    ExternalAdoptionEvidence, ExternalCodeReadEvidence, ExternalEventAssertionEvidence,
+    ExternalEvmSourceEvidence, ExternalReadAssertionEvidence, ImportFromMfmRun,
+    ImportFromMfmRunEvidence, LifecycleArtifactEvidenceRef, LifecycleNodeIdRef, ParsedAbi,
+    ReadAssertionConfig, SourceCellOrOutputRef, SourceRunTerminalEvent, ValidationEventResult,
+    ValidationReadResult,
 };
 use mfm_evm_core::encoding::normalize_address;
 use mfm_evm_core::hex::{bytes_to_hex_prefixed, hex_to_bytes};
@@ -131,7 +131,6 @@ use self::read_validation::{
     import_configured_requires_artifact, import_configured_with_reads, import_deployed_with_reads,
     lifecycle_artifact_requirement, run_artifact_requirement, source_run_admitted,
     validate_context_contract_with_reads, validate_source_run_authority,
-    validate_source_run_import_evidence, validate_source_run_import_policy,
     validation_assertions_required, SourceRunAuthorityEvidence,
 };
 use self::replay_adapter::contract_side_effect_replay_evidence;
@@ -1179,9 +1178,6 @@ pub enum EvmContractAdapterError {
     /// Source-run import evidence was missing, unreadable, or mismatched.
     #[error("source-run import evidence failed validation: {0}")]
     SourceRunImportEvidence(String),
-    /// Import evidence targeted a different lifecycle stage.
-    #[error("contract import stage mismatch")]
-    ImportStageMismatch,
     /// External adoption required bytecode but none was observed.
     #[error("external contract code was missing")]
     ExternalCodeMissing,

@@ -6,8 +6,8 @@ use mfm_ids::{DigestAlgorithm, SchemaId, StoreScopeId};
 use mfm_op_btc_collectors::BtcAddressBalanceConfig;
 use mfm_op_evm_collectors::EvmNativeBalanceConfig;
 use mfm_op_evm_contract_lifecycle::{
-    EvmContractConfigureEntryConfig, EvmContractDeployEntryConfig, EvmContractLifecycleEntryConfig,
-    EvmContractValidateEntryConfig,
+    build_configure_entry_config, build_deploy_entry_config, build_lifecycle_entry_config,
+    build_validate_entry_config,
 };
 use mfm_op_portfolio_collect_report::{build_collect_then_report_config, CollectThenReportRequest};
 use mfm_op_portfolio_tracker::PortfolioConfig;
@@ -233,7 +233,8 @@ impl EntryPoint {
                 let (context, context_source) = resolve_catalog(store, &request.context).await?;
                 let (deploy, deploy_source) =
                     resolve_catalog(store, &request.deploy_action).await?;
-                let config = EvmContractDeployEntryConfig::new(context, deploy);
+                let config = build_deploy_entry_config(context, deploy)
+                    .map_err(|_| plan_error("EvmContractPlanFailed"))?;
                 let plan = TypedProgramLaunchPlan::from_draft(
                     mfm_op_evm_contract_lifecycle::deploy_contract_program_draft(config)
                         .map_err(|_| plan_error("EvmContractPlanFailed"))?,
@@ -251,8 +252,8 @@ impl EntryPoint {
                     resolve_catalog(store, &request.import_deployed).await?;
                 let (configure, configure_source) =
                     resolve_catalog(store, &request.configure_action).await?;
-                let config =
-                    EvmContractConfigureEntryConfig::new(context, import_deployed, configure);
+                let config = build_configure_entry_config(context, import_deployed, configure)
+                    .map_err(|_| plan_error("EvmContractPlanFailed"))?;
                 let plan = TypedProgramLaunchPlan::from_draft(
                     mfm_op_evm_contract_lifecycle::configure_contract_program_draft(config)
                         .map_err(|_| plan_error("EvmContractPlanFailed"))?,
@@ -270,8 +271,8 @@ impl EntryPoint {
                     resolve_catalog(store, &request.import_configured).await?;
                 let (validate, validate_source) =
                     resolve_catalog(store, &request.validate_action).await?;
-                let config =
-                    EvmContractValidateEntryConfig::new(context, import_configured, validate);
+                let config = build_validate_entry_config(context, import_configured, validate)
+                    .map_err(|_| plan_error("EvmContractPlanFailed"))?;
                 let plan = TypedProgramLaunchPlan::from_draft(
                     mfm_op_evm_contract_lifecycle::validate_contract_program_draft(config)
                         .map_err(|_| plan_error("EvmContractPlanFailed"))?,
@@ -291,8 +292,8 @@ impl EntryPoint {
                     resolve_catalog(store, &request.configure_action).await?;
                 let (validate, validate_source) =
                     resolve_catalog(store, &request.validate_action).await?;
-                let config =
-                    EvmContractLifecycleEntryConfig::new(context, deploy, configure, validate);
+                let config = build_lifecycle_entry_config(context, deploy, configure, validate)
+                    .map_err(|_| plan_error("EvmContractPlanFailed"))?;
                 let plan = TypedProgramLaunchPlan::from_draft(
                     mfm_op_evm_contract_lifecycle::contract_lifecycle_program_draft(config)
                         .map_err(|_| plan_error("EvmContractPlanFailed"))?,

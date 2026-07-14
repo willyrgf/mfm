@@ -20,8 +20,8 @@ use mfm_effects::{
 };
 pub use mfm_facts as facts;
 use mfm_ids::{
-    AdapterKind, AdapterVersion, CellId, ContentDigest, ContextDescriptorId, DescriptorId,
-    DigestAlgorithm, DigestBytes, EffectKind, FieldPath as CheckedFieldPath,
+    AdapterKind, AdapterVersion, CellId, ContentDigest, ContextDescriptorId, ContextRef,
+    DescriptorId, DigestAlgorithm, DigestBytes, EffectKind, FieldPath as CheckedFieldPath,
     FieldSegment as CheckedFieldSegment, NodeId, OperationInstanceId, OperationKind,
     OperationVersion, SchemaId, ScopeId, SeedId, SemanticTypeId, SideEffectPairId,
     StableAuthorKey as CheckedStableAuthorKey, StateKind, StateVersion,
@@ -122,6 +122,15 @@ pub fn fact_descriptor_ref_for_descriptor(
         descriptor_hash: facts::fact_descriptor_hash(descriptor)
             .map_err(|error| PlanError::Registry(error.to_string()))?,
     })
+}
+
+/// Derives the certified context reference for an authored context value.
+///
+/// This is the same context authority used by [`RootBuilder::declare_context`].
+/// Planning code may use it to validate static context joins before operation
+/// expansion; it does not mint a persisted context outside a typed program.
+pub fn context_ref_for<C: MfmContext>(value: &C) -> Result<ContextRef> {
+    Ok(certified_context_spec(value.clone())?.context_ref)
 }
 
 /// Error returned by typed program authoring operations.
