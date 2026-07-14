@@ -32,7 +32,7 @@ pub(super) fn remediations_json(
 
 pub(super) fn parse_typed_execution_spec(value: &serde_json::Value) -> Result<TypedExecutionSpec> {
     let object = object(value, "typed execution spec")?;
-    let spec_version = version::<SpecVersion>(required_str(object, "spec_version")?)?;
+    let spec_version = parse_string::<SpecVersion>(required_str(object, "spec_version")?)?;
     if spec_version.as_str() != SPEC_VERSION {
         return Err(json_error(format!(
             "unsupported spec_version {}",
@@ -54,7 +54,8 @@ pub(super) fn parse_typed_execution_spec(value: &serde_json::Value) -> Result<Ty
             canonicalization.as_str()
         )));
     }
-    let lowering_version = version::<LoweringVersion>(required_str(object, "lowering_version")?)?;
+    let lowering_version =
+        parse_string::<LoweringVersion>(required_str(object, "lowering_version")?)?;
     if lowering_version.as_str() != LOWERING_VERSION {
         return Err(json_error(format!(
             "unsupported lowering_version {}",
@@ -133,7 +134,7 @@ fn parse_manual_resolution_evidence(
 ) -> Result<ManualResolutionEvidenceSpec> {
     let object = object(value, "manual-resolution evidence")?;
     Ok(ManualResolutionEvidenceSpec {
-        evidence_schema: identity(required_str(object, "evidence_schema")?)?,
+        evidence_schema: parse_string(required_str(object, "evidence_schema")?)?,
         authorization: parse_manual_resolution_authorization(required(object, "authorization")?)?,
     })
 }
@@ -200,7 +201,7 @@ fn parse_remediations(
         .iter()
         .map(|(forward_node_id, node)| {
             Ok((
-                identity(forward_node_id.as_str())?,
+                parse_string(forward_node_id.as_str())?,
                 parse_node_spec(node, descriptors)?,
             ))
         })
@@ -211,16 +212,19 @@ fn parse_authoring(value: &serde_json::Value) -> Result<AuthoringProvenance> {
     let object = object(value, "authoring")?;
     match required_str(object, "kind")? {
         "operation_expansion" => Ok(AuthoringProvenance::OperationExpansion {
-            operation_descriptor_id: identity(required_str(object, "operation_descriptor_id")?)?,
-            config_hash: identity(required_str(object, "config_hash")?)?,
+            operation_descriptor_id: parse_string(required_str(
+                object,
+                "operation_descriptor_id",
+            )?)?,
+            config_hash: parse_string(required_str(object, "config_hash")?)?,
         }),
         "state_composition" => Ok(AuthoringProvenance::StateComposition {
             descriptor: parse_composition_descriptor(required(object, "descriptor")?)?,
-            config_hash: identity(required_str(object, "config_hash")?)?,
+            config_hash: parse_string(required_str(object, "config_hash")?)?,
         }),
         "mixed_composition" => Ok(AuthoringProvenance::MixedComposition {
             descriptor: parse_composition_descriptor(required(object, "descriptor")?)?,
-            config_hash: identity(required_str(object, "config_hash")?)?,
+            config_hash: parse_string(required_str(object, "config_hash")?)?,
         }),
         kind => Err(json_error(format!("unsupported authoring kind {kind:?}"))),
     }
@@ -229,7 +233,7 @@ fn parse_authoring(value: &serde_json::Value) -> Result<AuthoringProvenance> {
 fn parse_composition_descriptor(value: &serde_json::Value) -> Result<CompositionDescriptor> {
     let object = object(value, "composition descriptor")?;
     Ok(CompositionDescriptor {
-        descriptor_id: identity(required_str(object, "descriptor_id")?)?,
+        descriptor_id: parse_string(required_str(object, "descriptor_id")?)?,
         name: required_str(object, "name")?.to_owned(),
         version: required_str(object, "version")?.to_owned(),
     })
@@ -238,9 +242,9 @@ fn parse_composition_descriptor(value: &serde_json::Value) -> Result<Composition
 fn parse_config_ref(value: &serde_json::Value) -> Result<ConfigRef> {
     let object = object(value, "config ref")?;
     Ok(ConfigRef {
-        schema_id: identity(required_str(object, "schema_id")?)?,
-        artifact_id: identity(required_str(object, "artifact_id")?)?,
-        digest: identity(required_str(object, "digest")?)?,
+        schema_id: parse_string(required_str(object, "schema_id")?)?,
+        artifact_id: parse_string(required_str(object, "artifact_id")?)?,
+        digest: parse_string(required_str(object, "digest")?)?,
         byte_len: required_u64(object, "byte_len")?,
         media_type: MediaType::new(required_str(object, "media_type")?)?,
     })
@@ -250,16 +254,16 @@ fn parse_certified_context_spec(value: &serde_json::Value) -> Result<CertifiedCo
     let object = object(value, "certified context")?;
     let canonical_context = canonical_json(required(object, "canonical_context")?.clone())?;
     let context = CertifiedContextSpec {
-        context_ref: identity(required_str(object, "context_ref")?)?,
-        context_descriptor_id: identity(required_str(object, "context_descriptor_id")?)?,
-        schema_id: identity(required_str(object, "schema_id")?)?,
-        semantic_type_id: identity(required_str(object, "semantic_type_id")?)?,
+        context_ref: parse_string(required_str(object, "context_ref")?)?,
+        context_descriptor_id: parse_string(required_str(object, "context_descriptor_id")?)?,
+        schema_id: parse_string(required_str(object, "schema_id")?)?,
+        semantic_type_id: parse_string(required_str(object, "semantic_type_id")?)?,
         canonicalizer_identity: CanonicalizerIdentity::new(required_str(
             object,
             "canonicalizer_identity",
         )?)?,
         canonical_context,
-        canonical_context_digest: identity(required_str(object, "canonical_context_digest")?)?,
+        canonical_context_digest: parse_string(required_str(object, "canonical_context_digest")?)?,
         canonical_context_byte_len: required_u64(object, "canonical_context_byte_len")?,
     };
     context.validate_digest_and_ref()?;
@@ -271,7 +275,7 @@ fn parse_node_context(value: &serde_json::Value) -> Result<NodeContextSpec> {
     match required_str(object, "kind")? {
         "no_context" => Ok(NodeContextSpec::NoContext),
         "required" => Ok(NodeContextSpec::Required {
-            context_ref: identity(required_str(object, "context_ref")?)?,
+            context_ref: parse_string(required_str(object, "context_ref")?)?,
         }),
         kind => Err(json_error(format!(
             "unsupported node context kind {kind:?}"
@@ -285,9 +289,12 @@ fn parse_state_context_descriptor(value: &serde_json::Value) -> Result<StateCont
         "no_context" => Ok(StateContextDescriptorSpec::NoContext),
         "required" => Ok(StateContextDescriptorSpec::Required(Box::new(
             StateContextDescriptorRequirementSpec {
-                context_descriptor_id: identity(required_str(object, "context_descriptor_id")?)?,
-                schema_id: identity(required_str(object, "schema_id")?)?,
-                semantic_type_id: identity(required_str(object, "semantic_type_id")?)?,
+                context_descriptor_id: parse_string(required_str(
+                    object,
+                    "context_descriptor_id",
+                )?)?,
+                schema_id: parse_string(required_str(object, "schema_id")?)?,
+                semantic_type_id: parse_string(required_str(object, "semantic_type_id")?)?,
                 canonicalizer_identity: CanonicalizerIdentity::new(required_str(
                     object,
                     "canonicalizer_identity",
@@ -350,7 +357,7 @@ fn parse_cell_context(value: &serde_json::Value) -> Result<CellContextSpec> {
     match required_str(object, "kind")? {
         "no_context" => Ok(CellContextSpec::NoContext),
         "bound" => Ok(CellContextSpec::Bound {
-            context_ref: identity(required_str(object, "context_ref")?)?,
+            context_ref: parse_string(required_str(object, "context_ref")?)?,
             resource_kind: ContextResourceKind::new(required_str(object, "resource_kind")?)
                 .map_err(|error| SpecError::Identity(error.to_string()))?,
             stage: ContextStage::new(required_str(object, "stage")?)
@@ -368,7 +375,7 @@ fn parse_input_context(value: &serde_json::Value) -> Result<InputContextSpec> {
     match required_str(object, "kind")? {
         "no_context" => Ok(InputContextSpec::NoContext),
         "required" => Ok(InputContextSpec::Required {
-            context_ref: identity(required_str(object, "context_ref")?)?,
+            context_ref: parse_string(required_str(object, "context_ref")?)?,
             resource_kind: ContextResourceKind::new(required_str(object, "resource_kind")?)
                 .map_err(|error| SpecError::Identity(error.to_string()))?,
             stage: ContextStage::new(required_str(object, "stage")?)
@@ -384,7 +391,7 @@ fn parse_input_context(value: &serde_json::Value) -> Result<InputContextSpec> {
 fn parse_scope_spec(value: &serde_json::Value) -> Result<ScopeSpec> {
     let object = object(value, "scope")?;
     Ok(ScopeSpec {
-        scope_id: identity(required_str(object, "scope_id")?)?,
+        scope_id: parse_string(required_str(object, "scope_id")?)?,
         parent_scope_id: optional_identity(object, "parent_scope_id")?,
         stable_key: StableAuthorKey::new(required_str(object, "stable_key")?)?,
         planning_lineage: parse_planning_lineage(required(object, "planning_lineage")?)?,
@@ -394,12 +401,12 @@ fn parse_scope_spec(value: &serde_json::Value) -> Result<ScopeSpec> {
 fn parse_seed_spec(value: &serde_json::Value) -> Result<SeedSpec> {
     let object = object(value, "seed")?;
     Ok(SeedSpec {
-        seed_id: identity(required_str(object, "seed_id")?)?,
+        seed_id: parse_string(required_str(object, "seed_id")?)?,
         seed_key: StableAuthorKey::new(required_str(object, "seed_key")?)?,
-        cell_id: identity(required_str(object, "cell_id")?)?,
-        scope_id: identity(required_str(object, "scope_id")?)?,
-        semantic_type_id: identity(required_str(object, "semantic_type_id")?)?,
-        schema_id: identity(required_str(object, "schema_id")?)?,
+        cell_id: parse_string(required_str(object, "cell_id")?)?,
+        scope_id: parse_string(required_str(object, "scope_id")?)?,
+        semantic_type_id: parse_string(required_str(object, "semantic_type_id")?)?,
+        schema_id: parse_string(required_str(object, "schema_id")?)?,
         required_digest: optional_identity(object, "required_digest")?,
     })
 }
@@ -526,29 +533,29 @@ fn parse_descriptor_ref(value: &serde_json::Value) -> Result<DescriptorRef> {
     let object = object(value, "descriptor ref")?;
     Ok(DescriptorRef {
         family: DescriptorFamily::parse(required_str(object, "descriptor_family")?)?,
-        descriptor_id: identity(required_str(object, "descriptor_id")?)?,
-        descriptor_digest: identity(required_str(object, "descriptor_digest")?)?,
+        descriptor_id: parse_string(required_str(object, "descriptor_id")?)?,
+        descriptor_digest: parse_string(required_str(object, "descriptor_digest")?)?,
     })
 }
 
 fn parse_state_descriptor_identity(value: &serde_json::Value) -> Result<StateDescriptorIdentity> {
     let object = object(value, "state descriptor identity")?;
     Ok(StateDescriptorIdentity {
-        descriptor_id: identity(required_str(object, "descriptor_id")?)?,
+        descriptor_id: parse_string(required_str(object, "descriptor_id")?)?,
         name: required_str(object, "name")?.to_owned(),
-        state_kind: identity(required_str(object, "state_kind")?)?,
-        state_version: version(required_str(object, "state_version")?)?,
+        state_kind: parse_string(required_str(object, "state_kind")?)?,
+        state_version: parse_string(required_str(object, "state_version")?)?,
         context: parse_state_context_descriptor(required(object, "context")?)?,
         input_context: parse_state_input_context_contract(required(object, "input_context")?)?,
         output_context: parse_state_output_context_contract(required(object, "output_context")?)?,
-        config_schema_id: identity(required_str(object, "config_schema_id")?)?,
-        input_schema_id: identity(required_str(object, "input_schema_id")?)?,
-        output_schema_id: identity(required_str(object, "output_schema_id")?)?,
-        output_semantic_type_id: identity(required_str(object, "output_semantic_type_id")?)?,
-        effect_kind: identity(required_str(object, "effect_kind")?)?,
+        config_schema_id: parse_string(required_str(object, "config_schema_id")?)?,
+        input_schema_id: parse_string(required_str(object, "input_schema_id")?)?,
+        output_schema_id: parse_string(required_str(object, "output_schema_id")?)?,
+        output_semantic_type_id: parse_string(required_str(object, "output_semantic_type_id")?)?,
+        effect_kind: parse_string(required_str(object, "effect_kind")?)?,
         effect_class: required_str(object, "effect_class")?.to_owned(),
         effect_name: required_str(object, "effect_name")?.to_owned(),
-        effect_version: version(required_str(object, "effect_version")?)?,
+        effect_version: parse_string(required_str(object, "effect_version")?)?,
         capabilities: parse_capability_set(required(object, "capabilities")?)?,
         emitted_fact_descriptors: parse_fact_descriptor_refs(required(
             object,
@@ -564,13 +571,13 @@ fn parse_operation_descriptor_identity(
 ) -> Result<OperationDescriptorIdentity> {
     let object = object(value, "operation descriptor identity")?;
     Ok(OperationDescriptorIdentity {
-        descriptor_id: identity(required_str(object, "descriptor_id")?)?,
+        descriptor_id: parse_string(required_str(object, "descriptor_id")?)?,
         name: required_str(object, "name")?.to_owned(),
-        operation_kind: identity(required_str(object, "operation_kind")?)?,
-        operation_version: version(required_str(object, "operation_version")?)?,
-        config_schema_id: identity(required_str(object, "config_schema_id")?)?,
-        input_schema_id: identity(required_str(object, "input_schema_id")?)?,
-        output_schema_id: identity(required_str(object, "output_schema_id")?)?,
+        operation_kind: parse_string(required_str(object, "operation_kind")?)?,
+        operation_version: parse_string(required_str(object, "operation_version")?)?,
+        config_schema_id: parse_string(required_str(object, "config_schema_id")?)?,
+        input_schema_id: parse_string(required_str(object, "input_schema_id")?)?,
+        output_schema_id: parse_string(required_str(object, "output_schema_id")?)?,
         expansion_abi: required_str(object, "expansion_abi")?.to_owned(),
     })
 }
@@ -580,10 +587,10 @@ fn parse_renderer_descriptor_identity(
 ) -> Result<RendererDescriptorIdentity> {
     let object = object(value, "renderer descriptor identity")?;
     Ok(RendererDescriptorIdentity {
-        descriptor_id: identity(required_str(object, "descriptor_id")?)?,
+        descriptor_id: parse_string(required_str(object, "descriptor_id")?)?,
         renderer_kind: RendererKind::new(required_str(object, "renderer_kind")?)?,
         renderer_version: RendererVersion::new(required_str(object, "renderer_version")?)?,
-        public_schema_id: identity(required_str(object, "public_schema_id")?)?,
+        public_schema_id: parse_string(required_str(object, "public_schema_id")?)?,
         canonicalizer_identity: CanonicalizerIdentity::new(required_str(
             object,
             "canonicalizer_identity",
@@ -599,16 +606,16 @@ fn parse_node_spec(
     let descriptor_ref = parse_descriptor_ref(required(object, "descriptor_ref")?)?;
     let descriptor = descriptors.state(&descriptor_ref)?;
     Ok(NodeSpec {
-        node_id: identity(required_str(object, "node_id")?)?,
+        node_id: parse_string(required_str(object, "node_id")?)?,
         stable_key: StableAuthorKey::new(required_str(object, "stable_key")?)?,
-        scope_id: identity(required_str(object, "scope_id")?)?,
+        scope_id: parse_string(required_str(object, "scope_id")?)?,
         state_kind: descriptor.state_kind.clone(),
         state_version: descriptor.state_version.clone(),
         descriptor_id: descriptor.descriptor_id.clone(),
         context: parse_node_context(required(object, "context")?)?,
         config_ref: parse_config_ref(required(object, "config_ref")?)?,
         input_bindings: parse_input_binding_spec(required(object, "input_bindings")?)?,
-        output_cell: identity(required_str(object, "output_cell")?)?,
+        output_cell: parse_string(required_str(object, "output_cell")?)?,
         effect_kind: descriptor.effect_kind.clone(),
         capability_bindings: descriptor.capabilities.clone(),
         adapter_bindings: parse_vec(required(object, "adapter_bindings")?, parse_adapter_binding)?,
@@ -635,15 +642,15 @@ fn parse_fact_descriptor_refs(value: &serde_json::Value) -> Result<Vec<FactDescr
 fn parse_fact_descriptor_ref(value: &serde_json::Value) -> Result<FactDescriptorRef> {
     let object = object(value, "fact descriptor ref")?;
     Ok(FactDescriptorRef {
-        descriptor_hash: identity(required_str(object, "descriptor_hash")?)?,
+        descriptor_hash: parse_string(required_str(object, "descriptor_hash")?)?,
     })
 }
 
 fn parse_adapter_binding(value: &serde_json::Value) -> Result<AdapterBinding> {
     let object = object(value, "adapter binding")?;
     Ok(AdapterBinding {
-        adapter_kind: identity(required_str(object, "adapter_kind")?)?,
-        adapter_version: version(required_str(object, "adapter_version")?)?,
+        adapter_kind: parse_string(required_str(object, "adapter_kind")?)?,
+        adapter_version: parse_string(required_str(object, "adapter_version")?)?,
         binding_digest: optional_identity(object, "binding_digest")?,
     })
 }
@@ -651,7 +658,7 @@ fn parse_adapter_binding(value: &serde_json::Value) -> Result<AdapterBinding> {
 fn parse_side_effect_contract(value: &serde_json::Value) -> Result<SideEffectContractSpec> {
     let object = object(value, "side-effect contract")?;
     Ok(SideEffectContractSpec {
-        contract_digest: identity(required_str(object, "contract_digest")?)?,
+        contract_digest: parse_string(required_str(object, "contract_digest")?)?,
         resource_claim: parse_resource_claim(required(object, "resource_claim")?)?,
         verification: parse_side_effect_verification(required(object, "verification")?)?,
     })
@@ -687,7 +694,7 @@ fn parse_resource_claim(value: &serde_json::Value) -> Result<ResourceClaimSpec> 
             let exclusive = object(required(claim, "exclusive")?, "exclusive resource claim")?;
             Ok(ResourceClaimSpec::Exclusive {
                 namespace: ResourceNamespace::new(required_str(exclusive, "namespace")?)?,
-                key_schema: identity(required_str(exclusive, "key_schema")?)?,
+                key_schema: parse_string(required_str(exclusive, "key_schema")?)?,
             })
         }
         "exact_touched_set" => {
@@ -697,7 +704,7 @@ fn parse_resource_claim(value: &serde_json::Value) -> Result<ResourceClaimSpec> 
             )?;
             Ok(ResourceClaimSpec::ExactTouchedSet {
                 namespace: ResourceNamespace::new(required_str(touched_set, "namespace")?)?,
-                evidence_schema: identity(required_str(touched_set, "evidence_schema")?)?,
+                evidence_schema: parse_string(required_str(touched_set, "evidence_schema")?)?,
             })
         }
         "manual_only" => Ok(ResourceClaimSpec::ManualOnly),
@@ -741,8 +748,8 @@ fn parse_framework_node(
 fn parse_side_effect_verify_node(value: &serde_json::Value) -> Result<SideEffectVerifyNodeSpec> {
     let object = object(value, "side-effect verify node")?;
     Ok(SideEffectVerifyNodeSpec {
-        pair_id: identity(required_str(object, "pair_id")?)?,
-        submit_node_id: identity(required_str(object, "submit_node_id")?)?,
+        pair_id: parse_string(required_str(object, "pair_id")?)?,
+        submit_node_id: parse_string(required_str(object, "submit_node_id")?)?,
     })
 }
 
@@ -750,12 +757,12 @@ fn parse_bridge_node(value: &serde_json::Value) -> Result<BridgeNodeSpec> {
     let object = object(value, "bridge node")?;
     Ok(BridgeNodeSpec {
         bridge_kind: parse_bridge_kind(required_str(object, "bridge_kind")?)?,
-        source_scope_id: identity(required_str(object, "source_scope_id")?)?,
-        target_scope_id: identity(required_str(object, "target_scope_id")?)?,
-        source_cell_id: identity(required_str(object, "source_cell_id")?)?,
-        target_cell_id: identity(required_str(object, "target_cell_id")?)?,
-        semantic_type_id: identity(required_str(object, "semantic_type_id")?)?,
-        schema_id: identity(required_str(object, "schema_id")?)?,
+        source_scope_id: parse_string(required_str(object, "source_scope_id")?)?,
+        target_scope_id: parse_string(required_str(object, "target_scope_id")?)?,
+        source_cell_id: parse_string(required_str(object, "source_cell_id")?)?,
+        target_cell_id: parse_string(required_str(object, "target_cell_id")?)?,
+        semantic_type_id: parse_string(required_str(object, "semantic_type_id")?)?,
+        schema_id: parse_string(required_str(object, "schema_id")?)?,
         policy: parse_bridge_policy(required_str(object, "policy")?)?,
         provenance: parse_bridge_provenance(required_str(object, "provenance")?)?,
     })
@@ -769,8 +776,8 @@ fn parse_public_output_render_node(
     let renderer_ref = parse_descriptor_ref(required(object, "renderer_descriptor_ref")?)?;
     let renderer_descriptor = descriptors.renderer(&renderer_ref)?.clone();
     Ok(PublicOutputRenderNodeSpec {
-        public_schema_id: identity(required_str(object, "public_schema_id")?)?,
-        output_spec_digest: identity(required_str(object, "output_spec_digest")?)?,
+        public_schema_id: parse_string(required_str(object, "public_schema_id")?)?,
+        output_spec_digest: parse_string(required_str(object, "output_spec_digest")?)?,
         renderer_descriptor,
         required_cells: parse_vec(required(object, "required_cells")?, parse_public_cell)?,
     })
@@ -781,16 +788,19 @@ fn parse_project_retention_manifest_node(
 ) -> Result<ProjectRetentionManifestNodeSpec> {
     let object = object(value, "project-retention-manifest node")?;
     Ok(ProjectRetentionManifestNodeSpec {
-        public_schema_id: identity(required_str(object, "public_schema_id")?)?,
-        public_output_receipt_cell: identity(required_str(object, "public_output_receipt_cell")?)?,
+        public_schema_id: parse_string(required_str(object, "public_schema_id")?)?,
+        public_output_receipt_cell: parse_string(required_str(
+            object,
+            "public_output_receipt_cell",
+        )?)?,
     })
 }
 
 fn parse_complete_run_node(value: &serde_json::Value) -> Result<CompleteRunNodeSpec> {
     let object = object(value, "complete-run node")?;
     Ok(CompleteRunNodeSpec {
-        public_schema_id: identity(required_str(object, "public_schema_id")?)?,
-        retention_manifest_receipt_cell: identity(required_str(
+        public_schema_id: parse_string(required_str(object, "public_schema_id")?)?,
+        retention_manifest_receipt_cell: parse_string(required_str(
             object,
             "retention_manifest_receipt_cell",
         )?)?,
@@ -802,17 +812,17 @@ fn parse_resolve_saga_terminal_node(
 ) -> Result<ResolveSagaTerminalNodeSpec> {
     let object = object(value, "resolve-saga-terminal node")?;
     Ok(ResolveSagaTerminalNodeSpec {
-        public_schema_id: identity(required_str(object, "public_schema_id")?)?,
+        public_schema_id: parse_string(required_str(object, "public_schema_id")?)?,
     })
 }
 
 fn parse_input_binding_spec(value: &serde_json::Value) -> Result<InputBindingSpec> {
     let object = object(value, "input binding")?;
     Ok(InputBindingSpec {
-        input_schema_id: identity(required_str(object, "input_schema_id")?)?,
-        input_descriptor_id: identity(required_str(object, "input_descriptor_id")?)?,
+        input_schema_id: parse_string(required_str(object, "input_schema_id")?)?,
+        input_descriptor_id: parse_string(required_str(object, "input_descriptor_id")?)?,
         root: parse_input_binding_node(required(object, "root")?)?,
-        digest: identity(required_str(object, "digest")?)?,
+        digest: parse_string(required_str(object, "digest")?)?,
     })
 }
 
@@ -891,9 +901,9 @@ fn parse_input_binding_cell(value: &serde_json::Value) -> Result<InputBindingCel
     let object = object(value, "input binding cell")?;
     Ok(InputBindingCellSpec {
         field_path: PublicFieldPath::new(required_str(object, "field_path")?)?,
-        cell_id: identity(required_str(object, "cell_id")?)?,
-        semantic_type_id: identity(required_str(object, "semantic_type_id")?)?,
-        schema_id: identity(required_str(object, "schema_id")?)?,
+        cell_id: parse_string(required_str(object, "cell_id")?)?,
+        semantic_type_id: parse_string(required_str(object, "semantic_type_id")?)?,
+        schema_id: parse_string(required_str(object, "schema_id")?)?,
         required_terminal: parse_required_terminal(required_str(object, "required_terminal")?)?,
         value_lineage: parse_value_lineage_ref(required(object, "value_lineage")?)?,
         context: parse_input_context(required(object, "context")?)?,
@@ -911,18 +921,18 @@ fn parse_named_input_binding(value: &serde_json::Value) -> Result<NamedInputBind
 fn parse_domain_key_ref(value: &serde_json::Value) -> Result<StableDomainKeyRef> {
     let object = object(value, "stable domain key")?;
     Ok(StableDomainKeyRef {
-        schema_id: identity(required_str(object, "schema_id")?)?,
-        content_digest: identity(required_str(object, "content_digest")?)?,
+        schema_id: parse_string(required_str(object, "schema_id")?)?,
+        content_digest: parse_string(required_str(object, "content_digest")?)?,
     })
 }
 
 fn parse_cell_producer(value: &serde_json::Value) -> Result<CellProducer> {
     let object = object(value, "cell producer")?;
     match required_str(object, "kind")? {
-        "node" => Ok(CellProducer::Node(identity(required_str(
+        "node" => Ok(CellProducer::Node(parse_string(required_str(
             object, "node_id",
         )?)?)),
-        "seed" => Ok(CellProducer::Seed(identity(required_str(
+        "seed" => Ok(CellProducer::Seed(parse_string(required_str(
             object, "seed_id",
         )?)?)),
         kind => Err(json_error(format!(
@@ -934,11 +944,11 @@ fn parse_cell_producer(value: &serde_json::Value) -> Result<CellProducer> {
 fn parse_cell_spec(value: &serde_json::Value) -> Result<CellSpec> {
     let object = object(value, "cell")?;
     Ok(CellSpec {
-        cell_id: identity(required_str(object, "cell_id")?)?,
+        cell_id: parse_string(required_str(object, "cell_id")?)?,
         producer: parse_cell_producer(required(object, "producer")?)?,
-        scope_id: identity(required_str(object, "scope_id")?)?,
-        semantic_type_id: identity(required_str(object, "semantic_type_id")?)?,
-        schema_id: identity(required_str(object, "schema_id")?)?,
+        scope_id: parse_string(required_str(object, "scope_id")?)?,
+        semantic_type_id: parse_string(required_str(object, "semantic_type_id")?)?,
+        schema_id: parse_string(required_str(object, "schema_id")?)?,
         value_lineage: parse_value_lineage_ref(required(object, "value_lineage")?)?,
         terminal_policy: parse_cell_terminal_policy(required_str(object, "terminal_policy")?)?,
         storage_policy: parse_storage_policy(required_str(object, "storage_policy")?)?,
@@ -950,7 +960,7 @@ fn parse_cell_spec(value: &serde_json::Value) -> Result<CellSpec> {
 fn parse_value_lineage_ref(value: &serde_json::Value) -> Result<ValueLineageRef> {
     let object = object(value, "value lineage ref")?;
     Ok(ValueLineageRef {
-        lineage_digest: identity(required_str(object, "lineage_digest")?)?,
+        lineage_digest: parse_string(required_str(object, "lineage_digest")?)?,
     })
 }
 
@@ -958,7 +968,7 @@ fn parse_value_lineage(value: &serde_json::Value) -> Result<ValueLineage> {
     let object = object(value, "value lineage")?;
     Ok(ValueLineage {
         lineage_ref: parse_value_lineage_ref(required(object, "lineage_ref")?)?,
-        scope_id: identity(required_str(object, "scope_id")?)?,
+        scope_id: parse_string(required_str(object, "scope_id")?)?,
         producer: parse_cell_producer(required(object, "producer")?)?,
         input_cells: parse_identity_vec(required(object, "input_cells")?)?,
         config_ref_digest: optional_identity(object, "config_ref_digest")?,
@@ -979,7 +989,7 @@ fn parse_planning_lineage(value: &serde_json::Value) -> Result<PlanningLineage> 
             object,
             "completed_operation_frames",
         )?)?,
-        lineage_digest: identity(required_str(object, "lineage_digest")?)?,
+        lineage_digest: parse_string(required_str(object, "lineage_digest")?)?,
     })
 }
 
@@ -991,19 +1001,19 @@ fn parse_operation_lineage_frame(
     let descriptor_ref = parse_descriptor_ref(required(object, "operation_descriptor_ref")?)?;
     let descriptor = descriptors.operation(&descriptor_ref)?;
     Ok(OperationLineageFrameSpec {
-        operation_instance_id: identity(required_str(object, "operation_instance_id")?)?,
+        operation_instance_id: parse_string(required_str(object, "operation_instance_id")?)?,
         operation_key: StableAuthorKey::new(required_str(object, "operation_key")?)?,
-        scope_id: identity(required_str(object, "scope_id")?)?,
+        scope_id: parse_string(required_str(object, "scope_id")?)?,
         operation_descriptor_id: descriptor.descriptor_id.clone(),
-        config_ref_digest: identity(required_str(object, "config_ref_digest")?)?,
+        config_ref_digest: parse_string(required_str(object, "config_ref_digest")?)?,
         input_bindings: parse_input_binding_spec(required(object, "input_bindings")?)?,
-        input_binding_digest: identity(required_str(object, "input_binding_digest")?)?,
+        input_binding_digest: parse_string(required_str(object, "input_binding_digest")?)?,
         parent_planning_lineage: parse_planning_lineage(required(
             object,
             "parent_planning_lineage",
         )?)?,
         output_cells: parse_identity_vec(required(object, "output_cells")?)?,
-        lineage_digest: identity(required_str(object, "lineage_digest")?)?,
+        lineage_digest: parse_string(required_str(object, "lineage_digest")?)?,
     })
 }
 
@@ -1015,7 +1025,7 @@ fn parse_public_output_spec(
     let renderer_ref = parse_descriptor_ref(required(object, "renderer_descriptor_ref")?)?;
     let renderer_descriptor = descriptors.renderer(&renderer_ref)?.clone();
     Ok(PublicOutputSpec {
-        public_schema_id: identity(required_str(object, "public_schema_id")?)?,
+        public_schema_id: parse_string(required_str(object, "public_schema_id")?)?,
         outputs: parse_vec(required(object, "outputs")?, parse_public_cell)?,
         renderer_descriptor,
     })
@@ -1025,11 +1035,11 @@ fn parse_public_cell(value: &serde_json::Value) -> Result<PublicOutputCell> {
     let object = object(value, "public output cell")?;
     Ok(PublicOutputCell {
         public_field_path: PublicFieldPath::new(required_str(object, "public_field_path")?)?,
-        cell_id: identity(required_str(object, "cell_id")?)?,
+        cell_id: parse_string(required_str(object, "cell_id")?)?,
         producer: parse_cell_producer(required(object, "producer")?)?,
-        scope_id: identity(required_str(object, "scope_id")?)?,
-        semantic_type_id: identity(required_str(object, "semantic_type_id")?)?,
-        schema_id: identity(required_str(object, "schema_id")?)?,
+        scope_id: parse_string(required_str(object, "scope_id")?)?,
+        semantic_type_id: parse_string(required_str(object, "semantic_type_id")?)?,
+        schema_id: parse_string(required_str(object, "schema_id")?)?,
         value_lineage: parse_value_lineage_ref(required(object, "value_lineage")?)?,
         required_terminal: parse_required_terminal(required_str(object, "required_terminal")?)?,
     })
@@ -1046,8 +1056,8 @@ fn parse_capability_set(value: &serde_json::Value) -> Result<CapabilitySetDescri
 fn parse_capability_descriptor(value: &serde_json::Value) -> Result<CapabilityDescriptor> {
     let object = object(value, "capability descriptor")?;
     Ok(CapabilityDescriptor::new(
-        identity(required_str(object, "kind")?)?,
-        version(required_str(object, "version")?)?,
+        parse_string(required_str(object, "kind")?)?,
+        parse_string(required_str(object, "version")?)?,
         parse_capability_role(required_str(object, "role")?)?,
         required_str(object, "name")?,
     )?)

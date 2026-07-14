@@ -14,7 +14,7 @@ where
 {
     array(value, "identity array")?
         .iter()
-        .map(|value| identity(string(value, "identity")?))
+        .map(|value| parse_string(string(value, "identity")?))
         .collect()
 }
 
@@ -39,24 +39,8 @@ where
 {
     match object.get(field) {
         Some(serde_json::Value::Null) | None => Ok(None),
-        Some(value) => identity(string(value, field)?).map(Some),
+        Some(value) => parse_string(string(value, field)?).map(Some),
     }
-}
-
-pub(super) fn identity<T>(value: &str) -> Result<T>
-where
-    T: std::str::FromStr,
-    T::Err: std::fmt::Display,
-{
-    parse_string(value)
-}
-
-pub(super) fn version<T>(value: &str) -> Result<T>
-where
-    T: std::str::FromStr,
-    T::Err: std::fmt::Display,
-{
-    parse_string(value)
 }
 
 pub(super) fn parse_string<T>(value: &str) -> Result<T>
