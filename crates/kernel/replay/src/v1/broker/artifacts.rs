@@ -2,7 +2,7 @@ use super::*;
 
 impl ReplayBroker {
     pub(super) fn authorize_event_artifacts(&mut self, payload: &KernelEventPayload) -> Result<()> {
-        for requirement in store::event_artifact_requirements(payload) {
+        for requirement in payload.artifact_requirements() {
             if self.should_skip_event_artifact_requirement(&requirement)? {
                 self.authorize_skipped_event_artifact_requirement(&requirement)?;
                 continue;

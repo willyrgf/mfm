@@ -71,7 +71,7 @@ impl CommittedRunStream {
         let next_seq = next_seq_after_committed_stream(&events)?;
         let artifact_requirements = events
             .iter()
-            .flat_map(|event| event_artifact_requirements(event.payload()))
+            .flat_map(|event| event.payload().artifact_requirements())
             .collect();
         Ok(Self {
             run_id,

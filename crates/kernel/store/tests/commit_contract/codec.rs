@@ -45,7 +45,7 @@ retention_manifest -> RetentionManifest"
 #[test]
 fn event_artifact_requirements_mark_filterable_sources() {
     let cell_requirements =
-        event_artifact_requirements(&cell_produced(artifact_id(31), content_digest(32)));
+        cell_produced(artifact_id(31), content_digest(32)).artifact_requirements();
     assert_eq!(cell_requirements.len(), 1);
     assert_eq!(
         cell_requirements[0].source,
@@ -60,7 +60,7 @@ fn event_artifact_requirements_mark_filterable_sources() {
     );
 
     let public_requirements =
-        event_artifact_requirements(&public_output_produced(artifact_id(33), content_digest(34)));
+        public_output_produced(artifact_id(33), content_digest(34)).artifact_requirements();
     assert_eq!(public_requirements.len(), 1);
     assert_eq!(
         public_requirements[0].source,
@@ -70,11 +70,12 @@ fn event_artifact_requirements_mark_filterable_sources() {
         .source
         .is_terminal_lifecycle_receipt_candidate());
 
-    let retention_requirements = event_artifact_requirements(&retention_refs_appended(
+    let retention_requirements = retention_refs_appended(
         artifact_id(35),
         content_digest(36),
         ArtifactRole::FactResponse,
-    ));
+    )
+    .artifact_requirements();
     assert_eq!(retention_requirements.len(), 1);
     assert_eq!(
         retention_requirements[0].source,
@@ -87,7 +88,7 @@ fn event_artifact_requirements_mark_filterable_sources() {
         panic!("side-effect failure payload");
     };
     payload.error.diagnostic_ref = Some(event_artifact_ref(artifact_id(37), content_digest(38)));
-    let failure_requirements = event_artifact_requirements(&failure);
+    let failure_requirements = failure.artifact_requirements();
     assert_eq!(failure_requirements.len(), 1);
     assert_eq!(
         failure_requirements[0].source,
@@ -112,7 +113,7 @@ fn fact_recorded_protocol_baselines_cover_codec_requirements_and_projection() {
         payload
     );
 
-    let requirements = event_artifact_requirements(&payload);
+    let requirements = payload.artifact_requirements();
     assert_eq!(requirements.len(), 1);
     let requirement = &requirements[0];
     assert_eq!(

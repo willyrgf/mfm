@@ -146,7 +146,9 @@ pub async fn fact_query_evidences(
         if payload.artifact_ref.role != ArtifactRole::FactQueryEvidence {
             continue;
         }
-        let requirement = store::event_artifact_requirements(event.payload())
+        let requirement = event
+            .payload()
+            .artifact_requirements()
             .into_iter()
             .next()
             .expect("query evidence artifact requirement");

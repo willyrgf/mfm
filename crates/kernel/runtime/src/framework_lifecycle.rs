@@ -274,9 +274,9 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
         )
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
 
-        let requirements = store::event_artifact_requirements(
-            &events::KernelEventPayload::ManualResolutionRecorded(manual_payload.clone()),
-        );
+        let requirements =
+            events::KernelEventPayload::ManualResolutionRecorded(manual_payload.clone())
+                .artifact_requirements();
         let evidence_requirement = requirements
             .iter()
             .find(|requirement| requirement.artifact_id == manual_payload.evidence_artifact_id)

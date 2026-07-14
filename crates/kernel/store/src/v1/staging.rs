@@ -345,7 +345,7 @@ fn stage_run_commit_with_fingerprint(
         verifier.validate_artifact_evidence(evidence)?;
     }
     for payload in &request.payloads {
-        for requirement in event_artifact_requirements(payload) {
+        for requirement in payload.artifact_requirements() {
             verifier.validate_artifact_requirement(&requirement)?;
         }
     }

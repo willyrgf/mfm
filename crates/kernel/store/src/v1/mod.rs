@@ -887,7 +887,6 @@ mod private {
 
 pub use mfm_events::v1::{EventArtifactReferenceSource, EventArtifactRequirement};
 
-pub use self::artifact_refs::event_artifact_requirements;
 use self::artifact_refs::referenced_artifact_ids;
 
 mod artifact_refs;
