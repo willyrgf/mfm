@@ -148,6 +148,13 @@ fn validate_context_runtime(
     factory.validate_runtime_for(&binding, None).map(|_| ())
 }
 
+fn read_context_runtime(
+    factory: &dyn EvmContractRuntimeFactory,
+    context: &mfm_program::CertifiedContext<EvmContractContext>,
+) -> mfm_runtime::Result<EvmContractReadRuntime> {
+    factory.read_runtime_for(runtime_evm_network_binding_for_context(context)?)
+}
+
 fn side_effect_verify_submit_node<'a>(
     ctx: &'a ErasedRunCtx<'a>,
 ) -> mfm_runtime::Result<&'a spec::NodeSpec> {
@@ -332,7 +339,7 @@ async fn run_context_validate(
     } else {
         None
     };
-    let runtime = factory.read_runtime_for(runtime_evm_network_binding_for_context(&context)?)?;
+    let runtime = read_context_runtime(factory, &context)?;
     let response = runtime
         .validate_context_contract(&action, &input, &context, artifact.as_ref(), &request)
         .await?;
@@ -349,7 +356,7 @@ async fn run_import_deployed(
     let import =
         load_runner_config_for_node::<ImportDeployedSpec>(ctx.node(), factory.artifacts()).await?;
     let context = ctx.certified_context::<EvmContractContext>()?;
-    let runtime = factory.read_runtime_for(runtime_evm_network_binding_for_context(&context)?)?;
+    let runtime = read_context_runtime(factory, &context)?;
     let deployed = runtime
         .import_deployed(import.as_ref(), &context, factory.artifacts())
         .await?;
@@ -369,7 +376,7 @@ async fn run_import_configured(
     } else {
         None
     };
-    let runtime = factory.read_runtime_for(runtime_evm_network_binding_for_context(&context)?)?;
+    let runtime = read_context_runtime(factory, &context)?;
     let configured = runtime
         .import_configured(
             import.as_ref(),
