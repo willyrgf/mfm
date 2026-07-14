@@ -585,6 +585,64 @@ history, and the exact digest identifies the selected value. Recurring fleet wor
 need mutable environment pointers may add them as authoring convenience, but such pointers must
 always resolve to exact refs before planning.
 
+### Versioning and explicit migration
+
+Configuration versioning has four independent dimensions:
+
+| Dimension | Durable identity |
+|---|---|
+| Catalog value content | Canonical content digest |
+| Catalog value schema | `MfmConfig` schema id |
+| Request and builder semantics | Public entry-point operation version |
+| PostgreSQL representation | Ordinary database schema migration |
+
+Changing only a value, such as adding an account to an account set, keeps the same typed schema but
+produces new canonical bytes and therefore a new digest. Both rows remain available:
+
+```text
+wallets/treasury-evm
+  schema EvmAccountSetV1, digest sha256:A
+  schema EvmAccountSetV1, digest sha256:B
+```
+
+The digest is the authoritative content revision. A future numeric revision may improve display or
+sorting, but it must not replace the digest in a durable reference.
+
+A breaking structural or semantic change introduces a new Rust type and schema identity:
+
+```text
+networks/ethereum-mainnet
+  schema EvmNetworkV1, digest sha256:C
+  schema EvmNetworkV2, digest sha256:D
+```
+
+`CatalogRef<EvmNetworkV1>` cannot load the `EvmNetworkV2` row because the generic loader verifies
+the exact schema id before decoding. Durable language-neutral references and launch provenance
+retain `scope`, `name`, `schema_id`, and `digest`, even though Rust can derive the expected schema id
+from `T`.
+
+Schema migration is an explicit pure transformation from one exact typed value to another:
+
+```text
+CatalogRef<EvmNetworkV1> @ sha256:C
+  -> migrate_v1_to_v2
+  -> validate EvmNetworkV2
+  -> append CatalogRef<EvmNetworkV2> @ sha256:D
+```
+
+A migration never updates or deletes the source row, never runs implicitly inside `load`, and never
+runs during operation launch. Setup tooling may expose migration commands, but the result is always
+a reviewable newly appended value with a new exact reference.
+
+The public entry-point operation version declares the request and catalog schemas its builder
+accepts. A new operation version may require a new catalog schema or may explicitly support more
+than one version through typed variants. Similar field shapes never imply compatibility, and the
+loader never guesses or silently upgrades a value.
+
+Changing PostgreSQL columns, indexes, or storage encodings is an independent database migration. It
+must preserve the stored canonical bytes, schema ids, and digests and does not create a new semantic
+catalog value by itself.
+
 ### Config construction stays operation-owned
 
 Each catalog-backed entry point has two distinct inputs:
@@ -794,8 +852,8 @@ The simplified design preserves the essential properties:
   approvals, and delayed launches?
 - How does the entry-point adapter register an ordinary typed resolver/builder function while direct
   complete per-op config authoring remains available during migration?
-- What are the explicit compatibility and migration rules for catalog value schemas, authored
-  requests, and generated operation configs?
+- What concrete CLI/REST migration surface and typed migration registration mechanism should expose
+  the explicit schema-migration rules above?
 - Where do exact source names, schema ids, and digests fit in existing launch evidence?
 - How are catalog authorization, tenant/namespace isolation, retention, and audit enforced?
 - Which non-secret runtime-profile declarations, if any, may be managed by the onboarding surface
