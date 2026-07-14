@@ -12,4 +12,4 @@ Use these documents together:
 Project-owned Nixfied v2 wiring lives in:
 
 - [`flake.nix`](../flake.nix) for the Nixfied input pin and exposed app wrappers.
-- [`nixfied.nix`](../nixfied.nix) for modeled tasks, composites, managed Postgres/Reth services, slots, and ports.
+- [`nixfied.nix`](../nixfied.nix) for modeled tasks, composites, managed services, slots, and ports.

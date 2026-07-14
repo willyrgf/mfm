@@ -2460,8 +2460,6 @@ dependencies = [
  "mfm-states-evm",
  "mfm-store",
  "mfm-stream-store-postgres",
- "mfm_core",
- "reqwest",
  "serde",
  "serde_json",
  "sqlx",

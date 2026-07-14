@@ -15,7 +15,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-none", "postgres"] }
 uuid = { version = "1.0", features = ["v4"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 tempfile = "3.0"
 tokio = { workspace = true }
 mfm-app = { path = "../../crates/app", features = ["test-support"] }
@@ -47,7 +46,6 @@ mfm-runtime = { path = "../../crates/kernel/runtime" }
 mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
 mfm-portfolio-config = { path = "../../crates/portfolio-config" }
 mfm-portfolio-model = { path = "../../crates/portfolio/model" }
-mfm_core = { path = "../../crates/core" }
 mfm-rest-api = { path = "../../bin/rest-api" }
 
 [dev-dependencies]
