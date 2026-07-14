@@ -218,6 +218,23 @@ fn test_operation_kind(name: &str, digest: &[u8]) -> Result<OperationKind> {
     .map_err(|error| PlanError::Key(error.to_string()))
 }
 
+macro_rules! impl_multiplying_pure_state {
+    ($state:ty) => {
+        impl PureState for $state {
+            fn run(
+                &self,
+                input: Self::Input,
+                _context: &CertifiedContext<Self::Context>,
+            ) -> StateResult<Self::Output> {
+                Ok(LaunchValue {
+                    amount: input.amount * self.config.multiplier,
+                    label: input.label,
+                })
+            }
+        }
+    };
+}
+
 #[derive(Debug, Clone)]
 struct MultiplyState {
     config: LaunchConfig,
@@ -251,18 +268,7 @@ impl StateSpec for MultiplyState {
     }
 }
 
-impl PureState for MultiplyState {
-    fn run(
-        &self,
-        input: Self::Input,
-        _context: &CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Output> {
-        Ok(LaunchValue {
-            amount: input.amount * self.config.multiplier,
-            label: input.label,
-        })
-    }
-}
+impl_multiplying_pure_state!(MultiplyState);
 
 fn context_resource_kind() -> ContextResourceKind {
     ContextResourceKind::new("mfm.program.test.balance").expect("context resource kind")
@@ -329,18 +335,7 @@ impl StateSpec for ContextualMultiplyState {
     }
 }
 
-impl PureState for ContextualMultiplyState {
-    fn run(
-        &self,
-        input: Self::Input,
-        _context: &CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Output> {
-        Ok(LaunchValue {
-            amount: input.amount * self.config.multiplier,
-            label: input.label,
-        })
-    }
-}
+impl_multiplying_pure_state!(ContextualMultiplyState);
 
 struct TestMutationCap;
 
