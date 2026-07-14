@@ -98,12 +98,9 @@ impl Keystore {
         };
 
         let previous_entry_len = self.entries.len();
-        let previous_audit_log = self.audit_log.clone();
         self.entries.push(entry);
-        self.append_audit_event(audit_event, true);
-        if let Err(err) = self.save_to_disk() {
+        if let Err(err) = self.record_successful_audit(audit_event) {
             self.entries.truncate(previous_entry_len);
-            self.audit_log = previous_audit_log;
             return Err(err);
         }
 
@@ -112,25 +109,10 @@ impl Keystore {
 
     /// Get private key for signing.
     pub fn get_private_key(&mut self, id: Uuid) -> Result<SecureKey, KeystoreError> {
-        let result: Result<SecureKey, KeystoreError> = (|| {
-            self.ensure_master_key_available()?;
-            let key_bytes = self.decrypt_entry_key(id)?;
-            Ok(SecureKey::new(*key_bytes))
-        })();
-
-        match result {
-            Ok(secure_key) => {
-                let previous_audit_log = self.audit_log.clone();
-                self.append_audit_event(AuditEvent::GetPrivateKey { id }, true);
-                if let Err(err) = self.save_to_disk() {
-                    self.audit_log = previous_audit_log;
-                    return Err(err);
-                }
-
-                Ok(secure_key)
-            }
-            Err(err) => Err(err),
-        }
+        self.ensure_master_key_available()?;
+        let key_bytes = self.decrypt_entry_key(id)?;
+        self.record_successful_audit(AuditEvent::GetPrivateKey { id })?;
+        Ok(SecureKey::new(*key_bytes))
     }
 
     /// Export the private key as a hex string (0x-prefixed).
@@ -151,23 +133,11 @@ impl Keystore {
 
         match result {
             Ok(private_key_hex) => {
-                let previous_audit_log = self.audit_log.clone();
-                self.append_audit_event(AuditEvent::ExportPrivateKey { id }, true);
-                if let Err(err) = self.save_to_disk() {
-                    self.audit_log = previous_audit_log;
-                    return Err(err);
-                }
-
+                self.record_successful_audit(AuditEvent::ExportPrivateKey { id })?;
                 Ok(private_key_hex)
             }
             Err(err) => {
-                if self.master_key.is_some() && !self.has_unlock_expired() {
-                    let previous_audit_log = self.audit_log.clone();
-                    self.append_audit_event(AuditEvent::ExportPrivateKey { id }, false);
-                    if self.save_to_disk().is_err() {
-                        self.audit_log = previous_audit_log;
-                    }
-                }
+                self.record_failed_audit_if_unlocked(AuditEvent::ExportPrivateKey { id });
                 Err(err)
             }
         }
@@ -185,7 +155,6 @@ impl Keystore {
             self.ensure_master_key_available()?;
 
             let previous_entries = self.entries.clone();
-            let previous_audit_log = self.audit_log.clone();
             let initial_len = previous_entries.len();
             self.entries.retain(|entry| entry.id != id);
 
@@ -193,10 +162,8 @@ impl Keystore {
                 return Err(KeystoreError::KeyNotFound(id));
             }
 
-            self.append_audit_event(AuditEvent::DeleteKey { id }, true);
-            if let Err(err) = self.save_to_disk() {
+            if let Err(err) = self.record_successful_audit(AuditEvent::DeleteKey { id }) {
                 self.entries = previous_entries;
-                self.audit_log = previous_audit_log;
                 return Err(err);
             }
             Ok(())
@@ -315,5 +282,28 @@ impl Keystore {
         let mut key_bytes = [0u8; 32];
         key_bytes.copy_from_slice(&decrypted_data);
         Ok(Zeroizing::new(key_bytes))
+    }
+
+    fn record_successful_audit(&mut self, event: AuditEvent) -> Result<(), KeystoreError> {
+        let previous_audit_log = self.audit_log.clone();
+        self.append_audit_event(event, true);
+        if let Err(err) = self.save_to_disk() {
+            self.audit_log = previous_audit_log;
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "dangerous-secret-export")]
+    fn record_failed_audit_if_unlocked(&mut self, event: AuditEvent) {
+        if self.master_key.is_none() || self.has_unlock_expired() {
+            return;
+        }
+
+        let previous_audit_log = self.audit_log.clone();
+        self.append_audit_event(event, false);
+        if self.save_to_disk().is_err() {
+            self.audit_log = previous_audit_log;
+        }
     }
 }
