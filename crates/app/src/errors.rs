@@ -1,7 +1,7 @@
 use mfm_replay::v1::ReplayError;
 use mfm_store::v1 as store;
 
-use super::{EntryPointOpResolveError, OpLaunchError};
+use super::EntryPointOpError;
 
 /// High-level error classes used by typed application-facing APIs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,18 +216,8 @@ impl From<mfm_facts::FactError> for AppError {
     }
 }
 
-impl From<EntryPointOpResolveError> for AppError {
-    fn from(error: EntryPointOpResolveError) -> Self {
-        Self::new(
-            ErrorClass::BadRequest,
-            error.code().to_owned(),
-            error.message().to_owned(),
-        )
-    }
-}
-
-impl From<OpLaunchError> for AppError {
-    fn from(error: OpLaunchError) -> Self {
+impl From<EntryPointOpError> for AppError {
+    fn from(error: EntryPointOpError) -> Self {
         Self::new(
             ErrorClass::BadRequest,
             error.code().to_owned(),

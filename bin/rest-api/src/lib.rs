@@ -129,18 +129,8 @@ impl From<AppError> for ApiError {
     }
 }
 
-impl From<mfm_app::EntryPointOpResolveError> for ApiError {
-    fn from(error: mfm_app::EntryPointOpResolveError) -> Self {
-        Self::new(
-            StatusCode::BAD_REQUEST,
-            error.code().to_owned(),
-            PublicSafeMessage::new(error.message().to_owned()),
-        )
-    }
-}
-
-impl From<mfm_app::OpLaunchError> for ApiError {
-    fn from(error: mfm_app::OpLaunchError) -> Self {
+impl From<mfm_app::EntryPointOpError> for ApiError {
+    fn from(error: mfm_app::EntryPointOpError) -> Self {
         Self::new(
             StatusCode::BAD_REQUEST,
             error.code().to_owned(),

@@ -1,4 +1,4 @@
-use crate::{EntryPointOpRegistry, EntryPointPlannerAdapter, OpLaunchError};
+use crate::{EntryPointOpError, EntryPointOpRegistry, EntryPointPlannerAdapter};
 
 /// Builds the production entry-point operation registry for this process.
 pub(crate) fn production_entry_point_op_registry() -> Result<EntryPointOpRegistry, crate::AppError>
@@ -46,35 +46,35 @@ pub(crate) fn production_entry_point_op_registry() -> Result<EntryPointOpRegistr
 
 fn portfolio_snapshot_plan_error(
     error: mfm_op_portfolio_tracker::PortfolioSnapshotPlanError,
-) -> OpLaunchError {
+) -> EntryPointOpError {
     match error {
-        mfm_op_portfolio_tracker::PortfolioSnapshotPlanError::Config(_) => OpLaunchError::new(
+        mfm_op_portfolio_tracker::PortfolioSnapshotPlanError::Config(_) => EntryPointOpError::new(
             "PortfolioSnapshotConfigInvalid",
             "portfolio snapshot config validation failed",
         ),
-        mfm_op_portfolio_tracker::PortfolioSnapshotPlanError::Plan(_) => OpLaunchError::new(
+        mfm_op_portfolio_tracker::PortfolioSnapshotPlanError::Plan(_) => EntryPointOpError::new(
             "PortfolioSnapshotPlanFailed",
             "portfolio snapshot entry-point planning failed",
         ),
     }
 }
 
-fn evm_contract_plan_error(_error: mfm_program::PlanError) -> OpLaunchError {
-    OpLaunchError::new(
+fn evm_contract_plan_error(_error: mfm_program::PlanError) -> EntryPointOpError {
+    EntryPointOpError::new(
         "EvmContractPlanFailed",
         "EVM contract entry-point planning failed",
     )
 }
 
-fn btc_collector_plan_error(_error: mfm_program::PlanError) -> OpLaunchError {
-    OpLaunchError::new(
+fn btc_collector_plan_error(_error: mfm_program::PlanError) -> EntryPointOpError {
+    EntryPointOpError::new(
         "BtcAddressBalancePlanFailed",
         "Bitcoin address-balance collector entry-point planning failed",
     )
 }
 
-fn evm_collector_plan_error(_error: mfm_program::PlanError) -> OpLaunchError {
-    OpLaunchError::new(
+fn evm_collector_plan_error(_error: mfm_program::PlanError) -> EntryPointOpError {
+    EntryPointOpError::new(
         "EvmNativeBalancePlanFailed",
         "EVM native-balance collector entry-point planning failed",
     )

@@ -18,10 +18,10 @@ pub struct PublicOpName(NameToken);
 
 impl PublicOpName {
     /// Creates a checked public operation name.
-    pub fn new(value: impl AsRef<str>) -> Result<Self, EntryPointOpResolveError> {
+    pub fn new(value: impl AsRef<str>) -> Result<Self, EntryPointOpError> {
         let value = value.as_ref();
         NameToken::new(value).map(Self).map_err(|error| {
-            EntryPointOpResolveError::new(
+            EntryPointOpError::new(
                 "InvalidPublicOpName",
                 format!("public op name is invalid: {error}"),
             )
@@ -41,7 +41,7 @@ impl fmt::Display for PublicOpName {
 }
 
 impl FromStr for PublicOpName {
-    type Err = EntryPointOpResolveError;
+    type Err = EntryPointOpError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::new(value)
@@ -55,9 +55,9 @@ pub struct OpVersion(u32);
 
 impl OpVersion {
     /// Creates a checked non-zero public operation version.
-    pub fn new(value: u32) -> Result<Self, EntryPointOpResolveError> {
+    pub fn new(value: u32) -> Result<Self, EntryPointOpError> {
         if value == 0 {
-            return Err(EntryPointOpResolveError::new(
+            return Err(EntryPointOpError::new(
                 "InvalidOpVersion",
                 "entry-point op version must be greater than zero",
             ));
@@ -78,11 +78,11 @@ impl fmt::Display for OpVersion {
 }
 
 impl FromStr for OpVersion {
-    type Err = EntryPointOpResolveError;
+    type Err = EntryPointOpError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let parsed = value.parse::<u32>().map_err(|_| {
-            EntryPointOpResolveError::new(
+            EntryPointOpError::new(
                 "InvalidOpVersion",
                 "entry-point op version must be an unsigned integer",
             )
@@ -108,17 +108,17 @@ impl EntryPointOpId {
         namespace: impl AsRef<str>,
         name: impl AsRef<str>,
         version: OpVersion,
-    ) -> Result<Self, EntryPointOpResolveError> {
+    ) -> Result<Self, EntryPointOpError> {
         let namespace = namespace.as_ref();
         let name = name.as_ref();
         let namespace = ResourceNamespace::new(namespace).map_err(|error| {
-            EntryPointOpResolveError::new(
+            EntryPointOpError::new(
                 "InvalidEntryPointOpId",
                 format!("entry-point op namespace is invalid: {error}"),
             )
         })?;
         let name = NameToken::new(name).map_err(|error| {
-            EntryPointOpResolveError::new(
+            EntryPointOpError::new(
                 "InvalidEntryPointOpId",
                 format!("entry-point op name is invalid: {error}"),
             )
@@ -155,7 +155,7 @@ pub trait LaunchableOp: Send + Sync {
     fn plan(
         &self,
         authored_config: AuthoredConfig,
-    ) -> Result<TypedProgramLaunchPlan, OpLaunchError>;
+    ) -> Result<TypedProgramLaunchPlan, EntryPointOpError>;
 }
 
 /// Generic app adapter from a typed op-crate planner to [`LaunchableOp`].
@@ -163,7 +163,7 @@ pub struct EntryPointPlannerAdapter<TConfig, E> {
     descriptor: EntryPointDescriptor,
     op_id: EntryPointOpId,
     planner: fn(TConfig) -> Result<TypedProgramLaunchPlan, E>,
-    map_error: fn(E) -> OpLaunchError,
+    map_error: fn(E) -> EntryPointOpError,
     _config: PhantomData<fn() -> TConfig>,
 }
 
@@ -172,10 +172,10 @@ impl<TConfig, E> EntryPointPlannerAdapter<TConfig, E> {
     pub fn new(
         descriptor: EntryPointDescriptor,
         planner: fn(TConfig) -> Result<TypedProgramLaunchPlan, E>,
-        map_error: fn(E) -> OpLaunchError,
-    ) -> Result<Self, EntryPointOpResolveError> {
+        map_error: fn(E) -> EntryPointOpError,
+    ) -> Result<Self, EntryPointOpError> {
         if descriptor.accepted_config_formats.is_empty() {
-            return Err(EntryPointOpResolveError::new(
+            return Err(EntryPointOpError::new(
                 "EntryPointOpConfigFormatsEmpty",
                 "entry-point op must accept at least one config format",
             ));
@@ -207,13 +207,13 @@ where
     fn plan(
         &self,
         authored_config: AuthoredConfig,
-    ) -> Result<TypedProgramLaunchPlan, OpLaunchError> {
+    ) -> Result<TypedProgramLaunchPlan, EntryPointOpError> {
         if !self
             .descriptor
             .accepted_config_formats
             .contains(&authored_config.format())
         {
-            return Err(OpLaunchError::new(
+            return Err(EntryPointOpError::new(
                 "EntryPointOpConfigFormatUnsupported",
                 "entry-point op does not accept the supplied config format",
             ));
@@ -238,21 +238,15 @@ impl EntryPointOpRegistry {
     }
 
     /// Registers a launchable operation.
-    pub fn register(
-        &mut self,
-        op: impl LaunchableOp + 'static,
-    ) -> Result<(), EntryPointOpResolveError> {
+    pub fn register(&mut self, op: impl LaunchableOp + 'static) -> Result<(), EntryPointOpError> {
         self.register_arc(Arc::new(op))
     }
 
     /// Registers an already shared launchable operation.
-    pub fn register_arc(
-        &mut self,
-        op: Arc<dyn LaunchableOp>,
-    ) -> Result<(), EntryPointOpResolveError> {
+    pub fn register_arc(&mut self, op: Arc<dyn LaunchableOp>) -> Result<(), EntryPointOpError> {
         let descriptor = op.descriptor();
         if descriptor.accepted_config_formats.is_empty() {
-            return Err(EntryPointOpResolveError::new(
+            return Err(EntryPointOpError::new(
                 "EntryPointOpConfigFormatsEmpty",
                 "entry-point op must accept at least one config format",
             ));
@@ -261,7 +255,7 @@ impl EntryPointOpRegistry {
         let version = OpVersion::new(descriptor.version)?;
         let op_id = op.op_id();
         if op_id.version != version {
-            return Err(EntryPointOpResolveError::new(
+            return Err(EntryPointOpError::new(
                 "EntryPointOpVersionMismatch",
                 "entry-point op id version must match registered version",
             ));
@@ -269,7 +263,7 @@ impl EntryPointOpRegistry {
 
         let versions = self.ops.entry(public_name).or_default();
         if versions.contains_key(&version) {
-            return Err(EntryPointOpResolveError::new(
+            return Err(EntryPointOpError::new(
                 "DuplicateEntryPointOp",
                 "entry-point op public name and version are already registered",
             ));
@@ -282,21 +276,15 @@ impl EntryPointOpRegistry {
     pub fn resolve_latest(
         &self,
         public_name: &PublicOpName,
-    ) -> Result<Arc<dyn LaunchableOp>, EntryPointOpResolveError> {
+    ) -> Result<Arc<dyn LaunchableOp>, EntryPointOpError> {
         let versions = self.ops.get(public_name).ok_or_else(|| {
-            EntryPointOpResolveError::new(
-                "EntryPointOpNotFound",
-                "entry-point op is not registered",
-            )
+            EntryPointOpError::new("EntryPointOpNotFound", "entry-point op is not registered")
         })?;
         versions
             .last_key_value()
             .map(|(_version, op)| Arc::clone(op))
             .ok_or_else(|| {
-                EntryPointOpResolveError::new(
-                    "EntryPointOpNotFound",
-                    "entry-point op is not registered",
-                )
+                EntryPointOpError::new("EntryPointOpNotFound", "entry-point op is not registered")
             })
     }
 
@@ -305,7 +293,7 @@ impl EntryPointOpRegistry {
         &self,
         public_name: &PublicOpName,
         version: Option<OpVersion>,
-    ) -> Result<Arc<dyn LaunchableOp>, EntryPointOpResolveError> {
+    ) -> Result<Arc<dyn LaunchableOp>, EntryPointOpError> {
         match version {
             Some(version) => self.resolve_version(public_name, version),
             None => self.resolve_latest(public_name),
@@ -326,15 +314,12 @@ impl EntryPointOpRegistry {
         &self,
         public_name: &PublicOpName,
         version: OpVersion,
-    ) -> Result<Arc<dyn LaunchableOp>, EntryPointOpResolveError> {
+    ) -> Result<Arc<dyn LaunchableOp>, EntryPointOpError> {
         let versions = self.ops.get(public_name).ok_or_else(|| {
-            EntryPointOpResolveError::new(
-                "EntryPointOpNotFound",
-                "entry-point op is not registered",
-            )
+            EntryPointOpError::new("EntryPointOpNotFound", "entry-point op is not registered")
         })?;
         versions.get(&version).map(Arc::clone).ok_or_else(|| {
-            EntryPointOpResolveError::new(
+            EntryPointOpError::new(
                 "EntryPointOpVersionNotFound",
                 "entry-point op version is not registered",
             )
@@ -352,7 +337,7 @@ impl EntryPointOpRegistry {
     }
 
     /// Returns the canonical digest of the registered public entry-point surface.
-    pub fn registry_digest(&self) -> Result<ContentDigest, EntryPointOpResolveError> {
+    pub fn registry_digest(&self) -> Result<ContentDigest, EntryPointOpError> {
         let mut entries = Vec::new();
         for (public_name, versions) in &self.ops {
             for (version, op) in versions {
@@ -381,7 +366,7 @@ impl EntryPointOpRegistry {
             "kind": "mfm.entry_point_op_registry.v1",
         });
         let json = serde_json::to_string(&value).map_err(|_| {
-            EntryPointOpResolveError::new(
+            EntryPointOpError::new(
                 "EntryPointOpRegistryDigestFailed",
                 "entry-point registry digest could not be serialized",
             )
@@ -389,7 +374,7 @@ impl EntryPointOpRegistry {
         PlainCanonicalJsonBytes::from_json_str(&json)
             .map(|canonical| canonical.content_digest())
             .map_err(|_| {
-                EntryPointOpResolveError::new(
+                EntryPointOpError::new(
                     "EntryPointOpRegistryDigestFailed",
                     "entry-point registry digest could not be canonicalized",
                 )
@@ -397,16 +382,16 @@ impl EntryPointOpRegistry {
     }
 }
 
-/// Error returned while resolving or registering entry-point operations.
+/// Error returned while resolving, registering, or planning entry-point operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{code}: {message}")]
-pub struct EntryPointOpResolveError {
+pub struct EntryPointOpError {
     code: String,
     message: String,
 }
 
-impl EntryPointOpResolveError {
-    /// Creates a public-safe entry-point op resolution error.
+impl EntryPointOpError {
+    /// Creates a public-safe entry-point operation error.
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
@@ -425,35 +410,7 @@ impl EntryPointOpResolveError {
     }
 }
 
-/// Error returned while planning an entry-point operation.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{code}: {message}")]
-pub struct OpLaunchError {
-    code: String,
-    message: String,
-}
-
-impl OpLaunchError {
-    /// Creates a public-safe entry-point operation planning error.
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-        }
-    }
-
-    /// Returns the stable error code.
-    pub fn code(&self) -> &str {
-        &self.code
-    }
-
-    /// Returns the public-safe error message.
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-}
-
-impl From<AuthoredConfigError> for OpLaunchError {
+impl From<AuthoredConfigError> for EntryPointOpError {
     fn from(error: AuthoredConfigError) -> Self {
         Self::new(error.code().to_owned(), error.message().to_owned())
     }

@@ -94,8 +94,8 @@ pub use self::services::{RunReadServices, RunServices};
 use live_transports::{LiveTransportRuntime, RuntimeConfigLoader};
 
 pub use entry_point::{
-    EntryPointOpId, EntryPointOpRegistry, EntryPointOpResolveError, EntryPointPlannerAdapter,
-    LaunchableOp, OpLaunchError, OpVersion, PublicOpName,
+    EntryPointOpError, EntryPointOpId, EntryPointOpRegistry, EntryPointPlannerAdapter,
+    LaunchableOp, OpVersion, PublicOpName,
 };
 
 #[path = "errors.rs"]

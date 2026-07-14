@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use k256::ecdsa::SigningKey;
 use mfm_app::{
-    EntryPointOpId, EntryPointOpRegistry, EntryPointRunLaunchInput, LaunchableOp,
-    ManualResolutionDecision, ManualResolutionRecordRequest, OpLaunchError, OpVersion,
-    PublicOpName, RunModeStatus,
+    EntryPointOpError, EntryPointOpId, EntryPointOpRegistry, EntryPointRunLaunchInput,
+    LaunchableOp, ManualResolutionDecision, ManualResolutionRecordRequest, OpVersion, PublicOpName,
+    RunModeStatus,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat, EntryPointDescriptor};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
@@ -219,16 +219,16 @@ impl LaunchableOp for ManualResolutionProofEntryPointOp {
     fn plan(
         &self,
         authored_config: AuthoredConfig,
-    ) -> Result<mfm_program::TypedProgramLaunchPlan, OpLaunchError> {
+    ) -> Result<mfm_program::TypedProgramLaunchPlan, EntryPointOpError> {
         let _normalized = authored_config.normalize::<Value>()?;
         let draft = mfm_op_proof::manual_resolution_proof_program_draft(
             mfm_op_proof::ProofWorkflowConfig::default(),
         )
         .map_err(|error| {
-            OpLaunchError::new("ManualResolutionProofPlanFailed", error.to_string())
+            EntryPointOpError::new("ManualResolutionProofPlanFailed", error.to_string())
         })?;
         mfm_program::TypedProgramLaunchPlan::from_draft(draft).map_err(|error| {
-            OpLaunchError::new("ManualResolutionProofPlanFailed", error.to_string())
+            EntryPointOpError::new("ManualResolutionProofPlanFailed", error.to_string())
         })
     }
 }

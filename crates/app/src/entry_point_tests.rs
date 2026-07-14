@@ -35,9 +35,9 @@ impl LaunchableOp for FakeOp {
     fn plan(
         &self,
         _authored_config: AuthoredConfig,
-    ) -> Result<TypedProgramLaunchPlan, OpLaunchError> {
+    ) -> Result<TypedProgramLaunchPlan, EntryPointOpError> {
         let draft = mfm_op_proof::proof_program_draft(mfm_op_proof::ProofWorkflowConfig::default())
-            .map_err(|error| OpLaunchError::new("EntryPointPlanFailed", error.to_string()))?;
+            .map_err(|error| EntryPointOpError::new("EntryPointPlanFailed", error.to_string()))?;
         Ok(TypedProgramLaunchPlan {
             draft,
             config_material: Vec::new(),
@@ -89,8 +89,8 @@ fn adapter_plan(config: AdapterConfig) -> Result<TypedProgramLaunchPlan, Adapter
     })
 }
 
-fn adapter_plan_error(_error: AdapterPlanError) -> OpLaunchError {
-    OpLaunchError::new("AdapterPlanFailed", "adapter test plan failed")
+fn adapter_plan_error(_error: AdapterPlanError) -> EntryPointOpError {
+    EntryPointOpError::new("AdapterPlanFailed", "adapter test plan failed")
 }
 
 #[test]
