@@ -8,7 +8,8 @@ where
     /// Resumes a certified typed run from its stored spec artifact.
     pub async fn resume_stored_run(&self, run_id: &RunId) -> Result<RunResponse, AppError> {
         let runtime_spec = self
-            .load_verified_run_read_context(run_id)
+            .trusted_run_reader()
+            .load_run_context(run_id)
             .await?
             .runtime_spec()
             .clone();
@@ -23,7 +24,8 @@ where
     ) -> Result<RunResponse, AppError> {
         let run_id = req.run_id.clone();
         let runtime_spec = self
-            .load_verified_run_read_context(&run_id)
+            .trusted_run_reader()
+            .load_run_context(&run_id)
             .await?
             .runtime_spec()
             .clone();
@@ -38,7 +40,8 @@ where
 
     /// Starts a certified typed run against a durable async typed store.
     pub async fn launch_run(&self, req: RunLaunchRequest) -> Result<RunLaunchOutcome, AppError> {
-        self.validate_identity_material_store_scope(&req.identity_material)
+        self.trusted_run_reader()
+            .validate_identity_material_store_scope(&req.identity_material)
             .await?;
         if req.identity_material.certified_spec_hash != *req.certified_spec.spec_hash() {
             return Err(run_identity_material_mismatch());
@@ -208,7 +211,10 @@ where
         run_id: &RunId,
         identity_material: &events::RunIdentityMaterialV1,
     ) -> Result<RunLaunchOutcome, AppError> {
-        let context = self.load_verified_status_read_context(run_id).await?;
+        let context = self
+            .trusted_run_reader()
+            .load_status_context(run_id)
+            .await?;
         let run_admitted = context.read.view().run_admitted();
         if &run_admitted.identity_material != identity_material {
             return Err(run_identity_material_mismatch());
@@ -244,7 +250,10 @@ where
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
     ) -> Result<DriveStatus, AppError> {
-        let context = self.load_verified_status_read_context(run_id).await?;
+        let context = self
+            .trusted_run_reader()
+            .load_status_context(run_id)
+            .await?;
         let execution_scope = store::ExecutionClaimScope::from_run_identity_material(
             &context.read.view().run_admitted().identity_material,
         );
@@ -324,7 +333,10 @@ where
             if step.claim_lost {
                 return Ok(DriveStatus::ExecutionClaimLost);
             }
-            let context = self.load_verified_status_read_context(run_id).await?;
+            let context = self
+                .trusted_run_reader()
+                .load_status_context(run_id)
+                .await?;
             if run_projection_has_terminal_completion(
                 run_id,
                 context.runtime_spec(),

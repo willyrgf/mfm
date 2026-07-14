@@ -7,9 +7,7 @@ mod services_read;
 mod services_run;
 
 pub use self::services_read::RunReadServices;
-pub(super) use self::services_read::{
-    TrustedRunReader, VerifiedRunReadContext, VerifiedStatusReadContext,
-};
+pub(super) use self::services_read::{TrustedRunReader, VerifiedRunReadContext};
 
 /// Application facade for certified typed runtime dispatch.
 #[derive(Clone)]
@@ -55,7 +53,10 @@ where
         run_id: &RunId,
         status: DriveStatus,
     ) -> Result<RunResponse, AppError> {
-        let context = self.load_verified_status_read_context(run_id).await?;
+        let context = self
+            .trusted_run_reader()
+            .load_status_context(run_id)
+            .await?;
         run_response_from_projection(
             run_id,
             context.runtime_spec(),
@@ -63,29 +64,6 @@ where
             context.projection(),
             status,
         )
-    }
-
-    async fn load_verified_run_read_context(
-        &self,
-        run_id: &RunId,
-    ) -> Result<VerifiedRunReadContext, AppError> {
-        self.trusted_run_reader().load_run_context(run_id).await
-    }
-
-    async fn load_verified_status_read_context(
-        &self,
-        run_id: &RunId,
-    ) -> Result<VerifiedStatusReadContext, AppError> {
-        self.trusted_run_reader().load_status_context(run_id).await
-    }
-
-    async fn validate_identity_material_store_scope(
-        &self,
-        identity_material: &events::RunIdentityMaterialV1,
-    ) -> Result<(), AppError> {
-        self.trusted_run_reader()
-            .validate_identity_material_store_scope(identity_material)
-            .await
     }
 
     fn trusted_run_reader(&self) -> TrustedRunReader<'_, S, A> {
