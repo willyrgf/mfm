@@ -116,19 +116,9 @@ impl<'a> DraftLowerer<'a> {
     fn lower_state_nodes(&mut self) -> Result<()> {
         for node in self.draft.state_nodes() {
             let lowered = self.lower_state_node(node)?;
-            let side_effect = lowered.side_effect.is_some();
+            let verify = self.lower_side_effect_verify_if_present(node, &lowered, "forward")?;
             self.nodes.push(lowered.clone());
-            if side_effect {
-                let verify = node.side_effect_verify.as_ref().ok_or_else(|| {
-                    problem(
-                        ProblemClass::InvalidTopology,
-                        format!(
-                            "forward side-effect node {} is missing verify pair",
-                            node.node_id
-                        ),
-                    )
-                })?;
-                let verify = self.lower_side_effect_verify_node(node, &lowered, verify)?;
+            if let Some(verify) = verify {
                 self.nodes.push(verify);
             }
         }
@@ -139,20 +129,37 @@ impl<'a> DraftLowerer<'a> {
         let mut remediations = BTreeMap::new();
         for (forward_node_id, node) in self.draft.remediation_nodes() {
             let lowered = self.lower_state_node(node)?;
-            if lowered.side_effect.is_some() {
-                let verify = node.side_effect_verify.as_ref().ok_or_else(|| {
-                    problem(
-                        ProblemClass::InvalidTopology,
-                        format!("remediation node {} is missing verify pair", node.node_id),
-                    )
-                })?;
-                let mut verify = self.lower_side_effect_verify_node(node, &lowered, verify)?;
+            if let Some(mut verify) =
+                self.lower_side_effect_verify_if_present(node, &lowered, "remediation")?
+            {
                 verify.deterministic_predecessors.clear();
                 self.nodes.push(verify);
             }
             remediations.insert(forward_node_id.clone(), lowered);
         }
         Ok(remediations)
+    }
+
+    fn lower_side_effect_verify_if_present(
+        &mut self,
+        node: &program::StateNodeSpec,
+        lowered: &spec::NodeSpec,
+        node_kind: &str,
+    ) -> Result<Option<spec::NodeSpec>> {
+        if lowered.side_effect.is_none() {
+            return Ok(None);
+        }
+        let verify = node.side_effect_verify.as_ref().ok_or_else(|| {
+            problem(
+                ProblemClass::InvalidTopology,
+                format!(
+                    "{node_kind} side-effect node {} is missing verify pair",
+                    node.node_id
+                ),
+            )
+        })?;
+        self.lower_side_effect_verify_node(node, lowered, verify)
+            .map(Some)
     }
 
     fn lower_state_node(&mut self, node: &program::StateNodeSpec) -> Result<spec::NodeSpec> {
