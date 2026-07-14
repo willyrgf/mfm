@@ -210,21 +210,15 @@ impl ProjectReportConfig {
 }
 
 fn validate_portfolio_workflow_config(config: &PortfolioWorkflowConfig) -> Result<(), String> {
-    ValidatedPortfolioConfig::new(config.portfolio.clone())
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    validate_with(config.portfolio.clone(), ValidatedPortfolioConfig::new)
 }
 
 fn validate_resolve_subjects_config(config: &ResolveSubjectsConfig) -> Result<(), String> {
-    ValidatedWalletConfigs::new(config.wallets.clone())
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    validate_with(config.wallets.clone(), ValidatedWalletConfigs::new)
 }
 
 fn validate_select_holdings_config(config: &SelectHoldingsConfig) -> Result<(), String> {
-    ValidatedPortfolioConfig::new(config.portfolio.clone())
-        .map(|_| ())
-        .map_err(|error| error.to_string())?;
+    validate_with(config.portfolio.clone(), ValidatedPortfolioConfig::new)?;
     StoreScopeRef::new(&config.store_scope).map_err(|error| error.to_string())?;
     if config.selection_policy_id != PORTFOLIO_HOLDING_LATEST_NETWORK_COHERENT_POLICY_ID {
         return Err(format!(
@@ -236,13 +230,18 @@ fn validate_select_holdings_config(config: &SelectHoldingsConfig) -> Result<(), 
 }
 
 fn validate_resolve_valuations_config(config: &ResolveValuationsConfig) -> Result<(), String> {
-    ValidatedSymbolConfigs::new(config.symbol_configs.clone())
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    validate_with(config.symbol_configs.clone(), ValidatedSymbolConfigs::new)
 }
 
 fn validate_assemble_snapshot_config(config: &AssembleSnapshotConfig) -> Result<(), String> {
-    ValidatedPortfolioConfig::new(config.portfolio.clone())
+    validate_with(config.portfolio.clone(), ValidatedPortfolioConfig::new)
+}
+
+fn validate_with<T, U, E>(value: T, validator: impl FnOnce(T) -> Result<U, E>) -> Result<(), String>
+where
+    E: std::fmt::Display,
+{
+    validator(value)
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
