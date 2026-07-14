@@ -11,8 +11,6 @@ use super::catalog::{
 use super::dto::PublicFactQueryPage;
 use super::query::PublicFactQueryRequest;
 #[cfg(any(test, feature = "test-support"))]
-use super::ref_id::{public_ref_id, PublicFactRefId};
-#[cfg(any(test, feature = "test-support"))]
 use crate::async_app_store_error;
 use crate::{content_digest_for_bytes, AppError, ErrorClass, ProductionRunStore};
 
@@ -154,12 +152,4 @@ fn execute_projection_app_fact_query(
     Ok(store::test_support::execute_fact_query_projection_for_test(
         projection, plan,
     )?)
-}
-
-/// Builds the public ref id for a projected indexed fact row using app-owned ref derivation.
-#[cfg(any(test, feature = "test-support"))]
-pub fn public_fact_ref_id_from_projection_entry_for_test(
-    entry: &store::FactIndexProjection,
-) -> Result<PublicFactRefId, AppError> {
-    public_ref_id(&entry.internal_ref()?)
 }

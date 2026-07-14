@@ -4,7 +4,7 @@ use mfm_canonical::{sha256_digest_bytes, CanonicalValue};
 use mfm_ids::{ContentDigest, DigestAlgorithm, EventId, RunId, SchemaId};
 use mfm_store::v1 as store;
 
-use super::service::public_fact_ref_id_from_projection_entry_for_test;
+use super::ref_id::public_ref_id;
 
 const PUBLIC_FACT_PRIVATE_JSON_TOKENS_FOR_TEST: &[&str] = &[
     "artifact_id",
@@ -63,15 +63,19 @@ impl PublicFactVisibilityFixtureForTest {
 
         let platform_index = platform.index.clone().expect("platform index");
         let control_index = control.index.clone().expect("control index");
-        let platform_public_ref =
-            public_fact_ref_id_from_projection_entry_for_test(&platform_index)
-                .expect("platform public ref")
+        let platform_public_ref = public_ref_id(
+            &platform_index
+                .internal_ref()
+                .expect("platform internal ref"),
+        )
+        .expect("platform public ref")
+        .as_str()
+        .to_owned();
+        let control_public_ref =
+            public_ref_id(&control_index.internal_ref().expect("control internal ref"))
+                .expect("control public ref")
                 .as_str()
                 .to_owned();
-        let control_public_ref = public_fact_ref_id_from_projection_entry_for_test(&control_index)
-            .expect("control public ref")
-            .as_str()
-            .to_owned();
         let private_tokens = vec![
             platform_index.source_run_id.as_str().to_owned(),
             platform_index.source_event_id.as_str().to_owned(),

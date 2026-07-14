@@ -58,8 +58,6 @@ pub use public_facts::{
 };
 
 #[cfg(any(test, feature = "test-support"))]
-pub use public_facts::public_fact_ref_id_from_projection_entry_for_test;
-#[cfg(any(test, feature = "test-support"))]
 pub use public_facts::{
     assert_public_fact_json_redacts_private_tokens_for_test, PublicFactVisibilityFixtureForTest,
 };
