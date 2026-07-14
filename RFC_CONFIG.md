@@ -157,6 +157,21 @@ All paths eventually become typed program config and are certified, but there is
 authored-to-canonical lifecycle shared by every public op. The portfolio config crate also exposes a
 path-hint parser that can infer TOML or JSON; the public CLI start path does not use it.
 
+The workspace currently has 53 packages and four config-named packages:
+
+| Package | Implementation lines | Direct dependents | Architectural role |
+|---|---:|---:|---|
+| `mfm-authored-config` | 448 | 9 | Shared representation and normalization layer between input and semantic owners |
+| `mfm-portfolio-config` | 280 | 2 | Portfolio-specific authored/canonical wrapper around `PortfolioConfig` |
+| `mfm-evm-contract-config` | 751 | 4 including integration tests | Mixed state configs and operation configs |
+| `mfm-runtime-config` | 1,872 | 2 | Runtime-only environment/file indirection and redacted live capability descriptors |
+
+Config types living in several state, operation, and model crates are not themselves the problem.
+Those types should remain with their semantic owners. The unhealthy scattering comes from standalone
+config crates that add another representation or intermediate dependency without establishing a
+distinct architectural boundary. `mfm-runtime-config` is the exception: it is a real runtime and
+security boundary and must remain separate from persisted semantic config and catalog resolution.
+
 ### Certification and persistence
 
 Operation planning produces a `TypedProgramLaunchPlan` containing a draft plus config and seed
@@ -466,10 +481,10 @@ This section defines outcomes, not an implementation.
 
 ### Decision summary
 
-Introduce a small configuration module backed by one append-only PostgreSQL table. It stores
-reusable typed canonical values created during setup or onboarding. The content digest is the value's
-revision identity; the initial design has no separate entry, revision, alias, release, dependency,
-or lock model.
+Introduce a small typed catalog facility backed by one append-only PostgreSQL table. It stores
+reusable typed canonical values created during setup or onboarding. The content digest is the
+value's revision identity; the initial design has no separate entry, revision, alias, release,
+dependency, or lock model.
 
 Before operation planning, an application-layer resolver loads the exact typed values referenced by
 an entry-point request. An ordinary operation-owned pure function then produces the operation's
@@ -482,7 +497,9 @@ setup TOML import
   -> validate, canonicalize, and append typed catalog values
 
 entry-point request with exact CatalogRef<T> values
-  -> application-layer typed loader performs PostgreSQL reads
+  -> application resolver derives T's schema id and requests one exact raw row
+  -> PostgreSQL storage verifies raw canonical bytes and digest integrity
+  -> application resolver strict-decodes, validates, and recanonicalizes T
   -> ordinary operation-owned build_config function produces complete MfmConfig
   -> Operation::expand composes states and nested operations
   -> certify and admit the typed graph
@@ -551,25 +568,56 @@ loaded `PortfolioConfig`, so the motivating workflow still has one source for ne
 and symbols. Separate network, account-set, address-set, token-set, and signer-intent catalog types
 are deferred until a concrete second consumer justifies them.
 
-The only new typed primitive required by the core model is an exact reference:
+The only new typed primitives required by the catalog input model are a checked name and exact
+reference. A narrowly named `mfm-catalog-model` crate owns them; it is not a central home for domain
+configuration:
 
 ```rust
 struct CatalogRef<T: MfmConfig> {
-    name: ConfigName,
+    name: CatalogName,
     digest: ContentDigest,
     _type: PhantomData<fn() -> T>,
 }
 ```
 
-The generic PostgreSQL loader conceptually exposes:
+`mfm-catalog-model` is a `domain-model` crate with only `CatalogName`, `CatalogRef<T>`, and at most
+one focused construction error. It owns no format parser, setup document, domain resource type,
+builder registry, canonicalization, database API, service trait, or runtime configuration. An erased
+catalog identity is not introduced until a concrete second consumer requires it.
+
+Typed resolution belongs to application assembly, not PostgreSQL storage. Conceptually, app owns:
 
 ```rust
-async fn load<T: MfmConfig>(reference: &CatalogRef<T>) -> Result<T>;
+async fn resolve<T: MfmConfig>(reference: &CatalogRef<T>) -> Result<T>;
 ```
 
-`load` verifies the exact row, expected `T::schema_id()`, canonical bytes, content digest, strict
-decode, and `T::validate()` before returning `T`. There is no public generic
-`get("some.path") -> JSON` interface and no catalog handle reaches an operation or state.
+The resolver derives `T::schema_id()`, asks the concrete PostgreSQL store for the exact raw row,
+strict-decodes `T`, runs `ValidatedConfig::new`, recanonicalizes through the shared config path, and
+requires byte equality before returning the ordinary `T`. There is no public generic
+`get("some.path") -> JSON` interface, `Resolved<T>` wrapper, or catalog handle reaching an operation
+or state.
+
+The PostgreSQL crate owns only raw persistence integrity. It accepts and returns storage-owned row
+data expressed with checked kernel identities and canonical bytes, and provides concrete operations
+equivalent to:
+
+```text
+append_catalog_rows(rows)
+load_catalog_row_exact(name, schema_id, digest)
+list_catalog_keys(after, limit)
+export_catalog_row_exact(name, schema_id, digest)
+```
+
+It validates bounds and catalog-name grammar, verifies canonical bytes and content digests, and
+enforces append atomicity and exact-key idempotence. It does not import `mfm-catalog-model`,
+`CatalogRef<T>`, `MfmConfig`, `ValidatedConfig<T>`, operation types, or domain config types. This
+split preserves the enforced rule that storage crates depend only on kernel and capability-contract
+crates and know no domain semantics.
+
+Setup publication preparation is also application behavior. App strict-decodes a closed setup
+variant, performs semantic validation, canonicalization, payload bounds, and the defense-in-depth
+secret-field scan, then hands an already prepared raw row to storage. Storage independently verifies
+canonical and digest integrity because persisted input remains untrusted.
 
 An entry-point request uses typed references and operation-local policy:
 
@@ -624,10 +672,11 @@ networks/ethereum-mainnet
   schema EvmNetworkV2, digest sha256:D
 ```
 
-`CatalogRef<EvmNetworkV1>` cannot load the `EvmNetworkV2` row because the generic loader verifies
-the exact schema id before decoding. A typed request carries `name` and `digest`; its exact request
-schema supplies `T` and therefore the expected schema id. Catalog listing, exact export, and launch
-provenance retain `name`, `schema_id`, and `digest` for language-neutral inspection.
+`CatalogRef<EvmNetworkV1>` cannot resolve the `EvmNetworkV2` row because the app resolver queries
+using the exact schema id derived from `T` before decoding. A typed request carries `name` and
+`digest`; its exact request schema supplies `T` and therefore the expected schema id. Catalog
+listing, exact export, and launch provenance retain `name`, `schema_id`, and `digest` for
+language-neutral inspection.
 
 Schema migration is an explicit pure transformation from one exact typed value to another:
 
@@ -638,15 +687,15 @@ CatalogRef<EvmNetworkV1> @ sha256:C
   -> append CatalogRef<EvmNetworkV2> @ sha256:D
 ```
 
-A migration never updates or deletes the source row, never runs implicitly inside `load`, and never
-runs during operation launch. Setup tooling may expose migration commands, but the result is always
-a reviewable newly appended value with a new exact reference.
+A migration never updates or deletes the source row, never runs implicitly inside resolution, and
+never runs during operation launch. Setup tooling may expose migration commands, but the result is
+always a reviewable newly appended value with a new exact reference.
 
 The exact public entry-point id includes the operation version and declares the request and catalog
 schemas its builder accepts. A new operation version may require a new catalog schema or may
 explicitly support more than one version through typed variants. Similar field shapes never imply
-compatibility, and the loader never guesses or silently upgrades a value. Public run ingress never
-selects a latest operation version.
+compatibility, and the resolver never guesses or silently upgrades a value. Public run ingress
+never selects a latest operation version.
 
 Changing PostgreSQL columns, indexes, or storage encodings is an independent database migration. It
 must preserve the stored canonical bytes, schema ids, and digests and does not create a new semantic
@@ -659,10 +708,10 @@ Each catalog-backed entry point distinguishes:
 1. A small authored request containing typed catalog references and operation-local policy.
 2. The complete canonical `MfmConfig` produced after resolution.
 
-When a request references one already-complete `MfmConfig`, exact loading is the entire construction
-step; the implementation must not add an identity builder. When multiple values or operation-local
-policy must be joined, the operation owns an ordinary pure function rather than implementing a new
-universal builder trait:
+When a request references one already-complete `MfmConfig`, exact resolution is the entire
+construction step; the implementation must not add an identity builder. When multiple values or
+operation-local policy must be joined, the operation owns an ordinary pure function rather than
+implementing a new universal builder trait:
 
 ```rust
 fn build_config(
@@ -675,7 +724,7 @@ fn build_config(
 The application flow is:
 
 1. Parse an entry-point request that already contains exact digests.
-2. Load each `CatalogRef<T>` through the generic typed loader.
+2. Resolve each `CatalogRef<T>` through the app-owned typed resolver over an exact raw storage read.
 3. Use a loaded complete config directly, or pass multiple typed values to the operation-owned
    `build_config` function when assembly is required.
 4. Validate the resulting complete `MfmConfig` through its existing operation contract.
@@ -818,7 +867,7 @@ event/schema readers. Once the catalog-backed start path is usable, the only sem
 
 ```text
 exact entry-point id + JSON typed-reference request
-  -> load exact typed catalog values
+  -> app resolves exact typed catalog values over raw storage reads
   -> operation-owned build_config
   -> complete MfmConfig
   -> existing planning, certification, admission, and runtime
@@ -836,6 +885,16 @@ The implementation is expected to make the following hard deletions.
   and TOML-to-JSON normalization paths.
 - Delete `crates/portfolio-config` and its authored, canonical, build-report, parse, and
   canonicalization types.
+- Delete `crates/evm-contract-config` atomically rather than preserving a facade or re-export crate.
+  Move `DeployAction`, `ConfigureAction`, `ValidateAction`, `ImportDeployedSpec`,
+  `ImportConfiguredSpec`, `EvmSignerIntent`, `EvmTransactionStyle`, `EvmTransactionPolicy`, and
+  `ReceiptRetryPolicy` to `mfm-state-evm-contracts`, where they are state configs or supporting state
+  policy. Move the four `EvmContract*EntryConfig` types to
+  `mfm-op-evm-contract-lifecycle`, where they are operation configs. Keep context, scalar,
+  assertion, lifecycle-value, provenance, and evidence types in `mfm-evm-contract-model`.
+- Preserve the EVM types' explicit schema and semantic identities during the ownership move. Move
+  their tests to the new owners, make receipt-limit constants private unless a public consumer
+  requires them, and add ordinary entry-config constructors rather than constructing through JSON.
 - Use `mfm_portfolio_model::PortfolioConfig` directly as the portfolio tracker operation config.
   Delete `PortfolioWorkflowConfig` and its authored/canonical conversions.
 - Retain one canonical config authority: `MfmConfig::validate`, `ValidatedConfig<T>`, canonical
@@ -844,8 +903,10 @@ The implementation is expected to make the following hard deletions.
 - Remove the hidden sample-network `Default` implementations from public BTC and EVM collector
   configs. Production builders and tests must provide explicit values.
 
-This removes two crates and three representations of portfolio semantic config without replacing
-them with equivalent catalog wrappers.
+This removes three intermediary config crates and three representations of portfolio semantic
+config without replacing them with equivalent catalog wrappers. `mfm-runtime-config` remains the
+one deliberately isolated config crate because resolving environment/file indirection and
+secret-bearing runtime material is a distinct security boundary.
 
 #### Collapse entry-point selection and preparation
 
@@ -899,15 +960,22 @@ An incompatible request or builder change creates another exact entry-point id. 
 - Delete the old per-operation config examples and the root-level ignored-TOML convention. Keep
   explicit ignores only for genuinely local setup/runtime files.
 - Remove `mfm-authored-config` and `mfm-portfolio-config` from every manifest and regenerate the lock
-  file. Do not keep facade crates or deprecated re-exports.
+  file. Remove `mfm-evm-contract-config` in the same manner. Do not keep facade crates or deprecated
+  re-exports.
 
-The deletion audit estimates roughly 1,000 lines removed with the two config crates, 300--500 lines
-from registry/format/latest-resolution and duplicate evidence paths, and 900--1,400 lines of tests
-and fixtures that exist only for those paths. Catalog storage, setup import, typed requests, and
-builders will add code, but the expected net result is a reduction of roughly 700--1,400 lines and,
-more importantly, two fewer crates, one canonicalization path, one launch path, no latest selector,
-and substantially fewer public authoring and registry types. These are directional estimates; the
-implementation should report measured before/after source and public-type counts.
+The current baseline is 53 workspace packages and 411 unique direct workspace dependency pairs.
+The planned additions are `mfm-catalog-model` and one collect-then-report operation; the planned
+deletions are the three intermediary config crates above, for an expected final package count of 52.
+Most EVM config implementation moves rather than disappears, so LOC reduction must not be claimed
+for that ownership correction. The authored/portfolio representations, registry/format/latest
+resolution, duplicate evidence paths, and compatibility-only tests should produce a meaningful net
+reduction. The implementation must report measured before/after packages, dependency pairs, Rust
+LOC, and public declarations, and explain any dependency-edge increase.
+
+The crate budget is strict: no new crate per catalog resource family; concrete resource and complete
+config types remain in their existing model, state, or operation owners; the closed setup-import
+enum remains private to app input assembly; and any additional config crate must identify a stable
+boundary that cannot live with its semantic owner.
 
 ### What remains intentionally unchanged
 
@@ -969,11 +1037,17 @@ The simplified design preserves the essential properties:
 
 ## Implementation decisions fixed by this RFC
 
-- A small `mfm-config` crate owns `CatalogRef<T>`. It has no PostgreSQL, app, runtime, or operation
-  dependency and introduces no catalog service trait.
-- The renamed general PostgreSQL storage crate owns the one table and its append, exact-load, list,
-  and export implementation. App assembly uses that concrete authority; there is no speculative
-  storage abstraction.
+- A small `mfm-catalog-model` domain-model crate owns only `CatalogName` and `CatalogRef<T>`. It has
+  no PostgreSQL, app, runtime, operation, transport, parsing, setup, or service responsibility and
+  introduces no catalog service trait or erased identity in the first implementation.
+- The renamed general PostgreSQL storage crate owns the one table and concrete raw append,
+  exact-row load, list, and export operations. It verifies raw persistence integrity but does not
+  depend on `mfm-catalog-model` or perform typed domain decoding or validation. App assembly uses
+  that concrete authority; there is no speculative storage abstraction.
+- App setup owns typed publication preparation and the secret-field guard. App launch preparation
+  owns the generic typed resolver: derive `T::schema_id()`, exact raw read, strict decode,
+  `T::validate()`, recanonicalization, and byte equality. Operation builders receive ordinary typed
+  values, never storage rows or catalog handles.
 - Catalog values use `MfmConfig` directly. A closed setup-import document enum determines which
   concrete resource types users may publish.
 - References are always exact. No name-only selector is accepted by setup export, CLI/REST run
@@ -986,7 +1060,10 @@ The simplified design preserves the essential properties:
   implementation. Resource-level RBAC, retention, and audit are deferred rather than approximated.
 - Launch evidence stores exact entry-point id plus sorted `(name, schema_id, digest)` sources.
 - Kernel, runtime, replay, states, certified configs, and event payload types do not depend on
-  `mfm-config` or contain `CatalogRef<T>`; event evidence stores checked scalar source identities.
+  `mfm-catalog-model` or contain `CatalogRef<T>`; event evidence stores checked scalar source
+  identities owned by the event model, not an erased catalog-model identity.
+- `mfm-authored-config`, `mfm-portfolio-config`, and `mfm-evm-contract-config` are deleted with no
+  facades. `mfm-runtime-config` remains as the process-local runtime/security boundary.
 - Explicit typed schema migrations append new values and are setup-time tools. They are not generic
   launch-time registration or fallback machinery.
 - The first higher-level workflow is collect-then-report, proving that shared catalog resources can
@@ -1016,7 +1093,7 @@ The current-state findings above are grounded in these repository surfaces:
 - `crates/portfolio-config` and `crates/portfolio/model`: portfolio authored/canonical config;
 - `crates/ops/btc-collectors-op`: BTC collector config;
 - `crates/ops/evm-collectors-op`: EVM collector config;
-- `crates/evm-contract-config`: EVM contract entry configs;
+- `crates/evm-contract-config`: current mixed EVM state/operation config ownership to be dissolved;
 - `docs/portfolio-collect-then-report.md`: current multi-run operator recipe;
 - `docs/evm-rpc-routing.md` and `docs/btc-rpc-routing.md`: runtime routing contracts;
 - `examples/configs`: the tracked authored/runtime examples;

@@ -4,9 +4,8 @@ Status: engineering-ready plan for `RFC_CONFIG.md`
 
 Date: 2026-07-14
 
-RFC baseline: `8e251383` (`docs: define config catalog cutover`)
-
-Implementation baseline: the commit containing this plan; record its exact SHA before commit 1.
+Planning baseline: the commit containing this revised plan and RFC; record its exact SHA before
+implementation commit 1.
 
 ## Objective
 
@@ -19,7 +18,9 @@ setup TOML
   -> append-only PostgreSQL catalog
 
 exact entry-point id + JSON request with exact CatalogRef<T> values
-  -> application loads exact typed values
+  -> application derives expected schemas and asks PostgreSQL for exact raw rows
+  -> PostgreSQL verifies canonical-byte and digest integrity
+  -> application strict-decodes, validates, and recanonicalizes typed values
   -> operation-owned pure assembly when more than one value is needed
   -> complete MfmConfig
   -> existing expansion, certification, admission, runtime, resume, and replay
@@ -71,10 +72,14 @@ The final tree must satisfy all of the following:
   registry digest.
 - `portfolio_snapshot` remains report-only and independently launchable.
 - A new collect-then-report operation composes collector and report operations in one certified run.
-- `crates/authored-config` and `crates/portfolio-config` do not exist.
+- `crates/authored-config`, `crates/portfolio-config`, and `crates/evm-contract-config` do not exist.
+- `mfm-runtime-config` remains the isolated runtime/security config boundary.
 - Old entry-point registry abstractions, accepted formats, latest resolution, direct config ingress,
   old examples, and compatibility tests do not exist.
-- Final `nix run .#ci` passes, and measured Rust/source LOC and public-type deltas are reported.
+- The final workspace has 52 packages unless an approved architecture decision changes the crate
+  budget.
+- Final `nix run .#ci` passes, and measured package, direct workspace dependency, Rust/source LOC,
+  and public-declaration deltas are reported.
 
 ## Target ownership and dependency shape
 
@@ -95,13 +100,15 @@ impl<T: MfmConfig> ValidatedConfig<T> {
 Update the program config-binding path to call this method. Catalog insertion must use the same
 method after `ValidatedConfig::new`.
 
-### New `mfm-config` crate
+### New `mfm-catalog-model` crate
 
-Create `crates/config` with category `domain-config`. It owns exact typed references only; it has no
-SQLx, app, runtime, operation, or transport dependency.
+Create `crates/catalog-model` as package `mfm-catalog-model` with category `domain-model`. It owns
+exact typed catalog input identity only; it has no SQLx, app, storage, runtime, operation, transport,
+format-parsing, setup-import, or service dependency.
 
 The public surface should be limited to:
 
+- `CatalogName`;
 - `CatalogRef<T: MfmConfig>`;
 - one typed construction/decoding error if an existing MFM id error cannot represent it cleanly.
 
@@ -115,8 +122,8 @@ wire form is exactly:
 }
 ```
 
-The request type supplies `T`, so the wire form does not repeat `schema_id`. The loader derives the
-expected schema id from `T`. Language-neutral evidence and catalog listing do include schema id.
+The request type supplies `T`, so the wire form does not repeat `schema_id`. The app resolver derives
+the expected schema id from `T`. Language-neutral evidence and catalog listing do include schema id.
 
 Catalog names use one grammar in Rust and PostgreSQL:
 
@@ -126,8 +133,10 @@ Catalog names use one grammar in Rust and PostgreSQL:
 - remaining characters are lower-case ASCII alphanumeric, `.`, `_`, or `-`;
 - no empty, `.` or `..` segments.
 
-Do not add `ConfigScope`, `Resolved<T>`, `CatalogValue`, catalog handles, aliases, releases, or a
-storage trait.
+Do not add `ConfigScope`, `Resolved<T>`, `CatalogValue`, an erased catalog identity, catalog handles,
+aliases, releases, format parsing, database records, a setup enum, a builder registry, or a storage
+trait. `CatalogSourceEvidence` remains an event-owned checked scalar structure rather than reusing
+an erased catalog-model type.
 
 ### Renamed PostgreSQL storage crate
 
@@ -145,10 +154,16 @@ Delete app aliases such as `ProductionRunStore` and `ProductionPostgresSchema` r
 them with `ProductionStore`. App may expose the concrete `PostgresStore` name or narrow constructors
 and service aliases that enforce an app-level invariant.
 
-The renamed crate owns catalog SQL and extends the existing `PostgresStoreError`. The only new
-cross-crate implementation type should be one opaque prepared insert used to carry an already
-validated canonical value into an all-or-nothing heterogeneous batch. Do not introduce repository,
-DAO, reader, writer, service, and transaction wrapper layers around the same table.
+The renamed crate owns catalog SQL and extends the existing `PostgresStoreError`. Its API is raw and
+concrete: exact row-key lookup, heterogeneous row append, bounded metadata listing, and exact raw
+export. Introduce at most the minimal storage-owned raw key/row types needed to carry `name`,
+`SchemaId`, `ContentDigest`, and canonical bytes across the app/storage boundary. Do not introduce
+repository, DAO, reader, writer, service, and transaction wrapper layers around the same table.
+
+The storage crate must not depend on `mfm-catalog-model`, import `CatalogRef<T>`, `MfmConfig`, or
+`ValidatedConfig<T>`, or decode domain types. It validates row bounds and catalog-name grammar,
+parses canonical JSON, recomputes digests, and compares exact bytes because those are raw persistence
+integrity responsibilities permitted by the storage dependency contract.
 
 ### Domain and operation crates
 
@@ -161,8 +176,20 @@ variables, or filesystem APIs.
 
 ### Application
 
-Application assembly owns exact entry-point selection, strict request decoding, catalog loads,
-calling pure builders, certification, and admission preparation.
+Application assembly owns exact entry-point selection, strict request decoding, typed publication
+preparation, typed catalog resolution, calling pure builders, certification, and admission
+preparation.
+
+The app resolver accepts `CatalogRef<T>`, derives `T::schema_id()`, asks `PostgresStore` for one exact
+raw row, strict-decodes `T`, validates it through `ValidatedConfig::new`, recanonicalizes it through
+the shared config path, and requires byte equality. It returns ordinary `T`; it does not introduce a
+public `Resolved<T>` or generic catalog service trait.
+
+Setup publication validates and canonicalizes every typed value, enforces payload bounds, performs
+the defense-in-depth secret-field scan, derives schema id and digest, creates the typed reference,
+and converts the result to the storage-owned raw row. All preparation finishes before app invokes
+batch append; storage then opens its transaction and independently rechecks raw canonical and digest
+integrity.
 
 Replace the dynamic public registry with one private `EntryPoint` enum and exhaustive methods for:
 
@@ -198,39 +225,42 @@ Add checks for the catalog-name grammar, valid bounded schema/digest text, and c
 length `1..=262144`. Use `BYTEA`, not `JSONB`, because exact canonical bytes are authoritative.
 
 Apply the existing append-only trigger contract to `catalog_values` so `UPDATE`, `DELETE`, and
-`TRUNCATE` fail. The implementation must provide only these operations:
+`TRUNCATE` fail. The storage implementation must provide only these raw operations:
 
-1. Prepare a typed value:
-   - validate with `ValidatedConfig::new`;
-   - produce canonical JSON through the shared method;
-   - reject payloads over 256 KiB;
-   - derive schema id and content digest;
-   - perform a defense-in-depth secret-key scan;
-   - produce an opaque insert and typed `CatalogRef<T>`.
-2. Append a heterogeneous batch in one `READ COMMITTED` transaction:
-   - validate and prepare every value before opening the transaction;
+1. Append a heterogeneous raw-row batch in one `READ COMMITTED` transaction:
+   - receive rows already prepared by app;
+   - reject invalid names, identities, bounds, non-canonical JSON, and digest mismatches before or
+     during the transaction without decoding a domain type;
    - `INSERT ... ON CONFLICT DO NOTHING`;
    - read every exact key back and compare bytes;
    - commit only if every row matches exactly.
-3. Load exact `CatalogRef<T>`:
-   - query by name, `T::schema_id()`, and digest;
+2. Load one exact raw row:
+   - query by name, caller-supplied schema id, and digest;
    - enforce the payload bound;
    - parse canonical JSON and recompute the digest;
-   - strict-decode `T`;
-   - run `T::validate()`;
-   - reserialize through the shared canonical path and require byte equality.
-4. List metadata only in `(name, schema_id, digest)` order with keyset pagination and a maximum page
+   - return verified canonical bytes without importing or decoding `T`.
+3. List metadata only in `(name, schema_id, digest)` order with keyset pagination and a maximum page
    size of 100.
-5. Export one exact row only after canonical/digest verification.
+4. Export one exact row only after canonical/digest verification.
+
+App setup performs typed publication preparation before operation 1: strict decode of the closed
+setup variant, `ValidatedConfig::new`, shared canonical serialization, the 256 KiB bound, schema-id
+and digest derivation, and the defense-in-depth secret-field scan. It returns the typed
+`CatalogRef<T>` to the caller and passes a raw row to storage.
+
+App launch preparation performs typed resolution after operation 2: derive `T::schema_id()` from
+the request type, strict-decode the verified bytes, run `T::validate()`, reserialize through the
+shared canonical path, and require byte equality. Wrong-type and semantic-validation failures are
+therefore app resolver errors, not storage errors.
 
 There is no insert/update timestamp, numeric revision, current flag, scope column, mutable alias,
 name-only read, latest query, soft delete, or garbage collection.
 
-The secret scan is not a second semantic validator. It is a publication-boundary guard against
-fields whose normalized names indicate passwords, private keys, mnemonics, secret material, unlock
-material, or credentials, and against URI-like string values containing user information. It must
-return only the rejected field path, not its value. Registered setup types and negative tests remain
-the primary defense.
+The app-owned secret scan is not a second semantic validator. It is a publication-boundary guard
+against fields whose normalized names indicate passwords, private keys, mnemonics, secret material,
+unlock material, or credentials, and against URI-like string values containing user information. It
+must return only the rejected field path, not its value. Registered setup types and negative tests
+remain the primary defense.
 
 ## Setup contract
 
@@ -295,18 +325,36 @@ The target inventory is:
 
 | Exact id | Request inputs | Complete operation config construction |
 |---|---|---|
-| `mfm.portfolio/portfolio_snapshot@1` | `CatalogRef<PortfolioConfig>` | Direct typed load |
-| `mfm.bitcoin/btc_address_balance@1` | `CatalogRef<BtcAddressBalanceConfig>` | Direct typed load |
-| `mfm.evm/evm_native_balance@1` | `CatalogRef<EvmNativeBalanceConfig>` | Direct typed load |
+| `mfm.portfolio/portfolio_snapshot@1` | `CatalogRef<PortfolioConfig>` | Direct typed resolution |
+| `mfm.bitcoin/btc_address_balance@1` | `CatalogRef<BtcAddressBalanceConfig>` | Direct typed resolution |
+| `mfm.evm/evm_native_balance@1` | `CatalogRef<EvmNativeBalanceConfig>` | Direct typed resolution |
 | `mfm.evm.contract/deploy@1` | context ref + deploy-action ref | Pure `build_deploy_config` |
 | `mfm.evm.contract/configure@1` | context ref + deployed-import ref + configure-action ref | Pure `build_configure_config` |
 | `mfm.evm.contract/validate@1` | context ref + configured-import ref + validate-action ref | Pure `build_validate_config` |
 | `mfm.evm.contract/lifecycle@1` | context ref + deploy/configure/validate action refs | Pure `build_lifecycle_config` |
 | `mfm.portfolio/collect_then_report@1` | portfolio ref + explicit collector policies | Pure composed-workflow config builder |
 
-Every request type is strict, typed, and has a stable request schema id. The contract entry-config
-crate should gain ordinary constructors from its existing pieces so builders do not deserialize
-through JSON or write private fields indirectly.
+Every request type is strict, typed, and has a stable request schema id. The four contract
+entry-config types move to `mfm-op-evm-contract-lifecycle` and gain ordinary constructors from their
+existing pieces so builders do not deserialize through JSON or write private fields indirectly.
+
+The state-owned contract action, import, signer-intent, transaction-policy, and receipt-policy types
+move to `mfm-state-evm-contracts`. Keep `EvmContractContext`, assertions, scalar types, lifecycle
+values, provenance, and evidence in `mfm-evm-contract-model`. Preserve explicit schema identities,
+move tests to the new owners, and delete `mfm-evm-contract-config` atomically with no re-exports.
+
+The ownership move is exact:
+
+| Target owner | Types |
+|---|---|
+| `mfm-state-evm-contracts` | `EvmSignerIntent`, `EvmTransactionStyle`, `EvmTransactionPolicy`, `ReceiptRetryPolicy`, `DeployAction`, `ConfigureAction`, `ValidateAction`, `ImportDeployedSpec`, `ImportConfiguredSpec` |
+| `mfm-op-evm-contract-lifecycle` | `EvmContractDeployEntryConfig`, `EvmContractConfigureEntryConfig`, `EvmContractValidateEntryConfig`, `EvmContractLifecycleEntryConfig` |
+
+Move the receipt-limit constants with `ReceiptRetryPolicy` and make them private unless a concrete
+public consumer requires them. The state crate gains direct `alloy-primitives` and `mfm-evm-core`
+dependencies; the operation crate gains direct `serde`. Adapter consumers switch to the state
+owner, and the unused integration-test dependency on the deleted crate is removed. No model-to-state,
+state-to-operation, operation-to-adapter, or storage-to-domain edge is introduced.
 
 Collector configs remain usable directly by their operation crates. The first catalog design does
 not invent separate network/account/address-set wrapper types merely to split those already-complete
@@ -381,6 +429,40 @@ snapshots, and fixtures. There is no old-field decoder and no second event versi
 
 Internal test-support launches use an exact internal test entry-point id and an empty source list.
 
+## Crate and dependency budget
+
+The reviewed baseline at `bacbb530` is:
+
+| Metric | Baseline |
+|---|---:|
+| Workspace packages | 53 |
+| Unique direct workspace dependency pairs | 411 |
+| Tracked Rust lines | 214,392 |
+| Top-level public declarations under `crates` and `bin` | 1,754 |
+
+Planned package changes are fixed:
+
+| Add | Delete |
+|---|---|
+| `mfm-catalog-model` | `mfm-authored-config` |
+| `mfm-op-portfolio-collect-report` | `mfm-portfolio-config` |
+|  | `mfm-evm-contract-config` |
+
+The expected final package count is therefore 52. Recompute every metric from the implementation
+baseline before commit 1 and after commit 4; do not rely on the reviewed numbers if intervening work
+changes the tree. Report every direct dependency-edge increase and the reason it is necessary.
+
+Apply this ownership budget throughout implementation:
+
+- no new crate per catalog resource family;
+- concrete resource and complete-config types remain with their model, state, or operation owner;
+- `mfm-runtime-config` remains the only deliberately config-named package because it enforces the
+  runtime secret/indirection boundary;
+- the closed setup-import enum remains private to app input assembly;
+- any proposed config crate must identify a stable abstraction that cannot live with its semantic
+  owner;
+- do not add wrappers, facades, or re-export crates to make moved types appear backward-compatible.
+
 ## Progressive commit plan
 
 ### Preparation before commit 1
@@ -395,16 +477,18 @@ rg -n '^pub (struct|enum|trait|type|fn|const) ' crates bin | wc -l
 cargo metadata --no-deps --format-version 1
 ```
 
+For the metadata baseline, record both package count and unique direct workspace dependency pairs.
+
 The working tree must be clean except for the implementation work. Do not absorb unrelated user
 changes.
 
-### Commit 1: `add typed postgres config catalog`
+### Commit 1: `add raw postgres config catalog`
 
 Owned surfaces:
 
 - `crates/kernel/values`;
 - `crates/kernel/program` canonical binding call site;
-- new `crates/config`;
+- new `crates/catalog-model`;
 - renamed `crates/storages/postgres`;
 - workspace manifests, SQLx metadata, architecture metadata tests, storage README references,
   `docs/architecture.md`, and the PostgreSQL storage section of `docs/design.md`.
@@ -412,69 +496,85 @@ Owned surfaces:
 Work:
 
 1. Add shared `ValidatedConfig::canonical_json` and move program config binding onto it.
-2. Add `CatalogRef<T>` with strict construction and serde tests.
+2. Add `CatalogName` and `CatalogRef<T>` with strict construction and serde tests in
+   `mfm-catalog-model`.
 3. Rename the PostgreSQL crate and concrete store names everywhere, with no aliases.
 4. Squash the development migrations into one baseline containing existing schema plus
    `catalog_values` and append-only protection.
-5. Implement prepare, transactional batch append, exact typed load, bounded metadata list, and
-   exact export.
+5. Implement raw transactional batch append, exact raw-row load, bounded metadata list, and exact
+   raw export. Use only minimal storage-owned key/row types and kernel identities/canonical bytes.
 6. Update schema validation and SQLx offline metadata.
 7. Add focused PostgreSQL parity tests.
+8. Extend metadata contracts to reject `mfm-storage-postgres -> mfm-catalog-model` and any storage
+   dependency on domain-model/domain-config crates.
 
 Required tests:
 
 - valid and invalid catalog names;
 - reference serde round trip and unknown-field rejection;
-- canonical bytes exactly match program config binding;
+- shared canonical serialization produces stable bytes for program binding and later app setup use;
 - same exact insert is idempotent;
 - same name/schema with changed content creates another digest;
 - conflicting exact key with different bytes fails closed;
-- batch validation/SQL failure leaves no partial rows;
+- invalid name/identity/bounds/canonical JSON/digest or SQL failure leaves no partial rows;
 - update, delete, and truncate are rejected;
-- wrong schema type, wrong digest, malformed canonical bytes, oversized bytes, and semantic
-  validation failure are rejected on load;
+- wrong exact schema key is absent; wrong digest, malformed or non-canonical bytes, and oversized
+  bytes are rejected on raw load;
 - list ordering, keyset pagination, and page-size cap;
 - exact export returns stored verified bytes;
 - errors never include canonical payloads.
 
 Commit only after all three mandatory gates pass.
 
-### Commit 2: `add catalog setup and operation config requests`
+### Commit 2: `add catalog resolution and setup`
 
 Owned surfaces:
 
 - `crates/app/src/config_setup.rs` and narrow app exports;
+- app-owned typed catalog resolver;
 - `bin/cli/src/commands/setup` and CLI output/error contracts;
-- `crates/evm-contract-model` and `crates/evm-contract-config`;
+- `crates/evm-contract-model`, `crates/states/evm-contracts`, and
+  `crates/ops/evm-contract-lifecycle-op`;
 - current public operation crates;
 - portfolio state/model/tracker config simplification;
+- workspace manifests, lockfile, metadata contracts, and dependency residue checks;
 - setup examples and directly relevant docs.
 
 Work:
 
-1. Add the strict private setup document enum and all-or-nothing import service.
-2. Add CLI import/list/export without domain logic in the binary.
-3. Add `MfmConfig` to `EvmContractContext` and constructors for contract entry configs from existing
-   typed pieces.
-4. Make every registered setup value and nested type reject unknown fields at its own serde boundary.
-5. Add strict operation-owned request types and pure contract config builders.
-6. Change `PortfolioTrackerWorkflowOperation::Config` to `PortfolioConfig` directly; delete
+1. Add the app-owned generic resolver over the concrete raw `PostgresStore` API. It derives the
+   expected schema id, strict-decodes, validates, recanonicalizes, and returns ordinary `T`.
+2. Add the strict private setup document enum and all-or-nothing import service. App performs typed
+   validation, canonicalization, bounds, digest derivation, and secret scanning before storage.
+3. Add CLI import/list/export without domain logic in the binary.
+4. Add `MfmConfig` to `EvmContractContext`.
+5. Move the nine state config/support types from `mfm-evm-contract-config` to
+   `mfm-state-evm-contracts`; move the four entry configs to
+   `mfm-op-evm-contract-lifecycle`; add ordinary entry-config constructors; split tests by owner;
+   delete the old crate, dependency edges, and manifest entry in the same commit.
+6. Make every registered setup value and nested type reject unknown fields at its own serde boundary.
+7. Add strict operation-owned request types and pure contract config builders.
+8. Change `PortfolioTrackerWorkflowOperation::Config` to `PortfolioConfig` directly; delete
    `PortfolioWorkflowConfig` and its conversions.
-7. Add the request types and planning functions needed by the future private app dispatch, but do
+9. Add the request types and planning functions needed by the future private app dispatch, but do
    not expose a second app, CLI, or REST launch path. Commit 4 switches public ingress once.
-8. Remove collector `Default` implementations and replace test use with explicit fixtures.
-9. Add one complete setup-import TOML fixture covering the initial resource kinds.
+10. Remove collector `Default` implementations and replace test use with explicit fixtures.
+11. Add one complete setup-import TOML fixture covering the initial resource kinds.
 
 Required tests:
 
 - setup unknown kind/field at every registered nested family, float, oversized file/value, duplicate
   conflict, and secret-like field rejection;
+- missing row, wrong schema type, semantic validation failure, and any recanonicalized byte mismatch
+  fail closed in the app resolver;
 - normalization gives stable portfolio digest for semantically reordered input;
 - dry preparation of the entire import occurs before any SQL write;
 - import output reports exact name/schema/digest only;
 - export refuses an existing output path and writes byte-identical canonical JSON;
 - every request rejects missing digest and unknown fields;
 - contract builders preserve all fields and reject incompatible context/import/action joins;
+- EVM action/import strict-serde and validation tests pass under the state owner; entry-config and
+  builder tests pass under the operation owner; no `mfm-evm-contract-config` reference remains;
 - operation crates retain no app, SQLx, runtime-config, or PostgreSQL dependency;
 - portfolio tracker certified topology remains report-only with direct `PortfolioConfig`.
 
@@ -511,7 +611,9 @@ Required tests:
   dispatcher;
 - no external shell/app orchestration is used by the composed test;
 - standalone report remains report-only and collector operations remain independently plannable;
-- no catalog or runtime-config dependency exists in the new op/state crates.
+- the state crate has no catalog/runtime-config dependency; the operation crate may depend on
+  `mfm-catalog-model` only for pre-planning request types, while its `Operation::Config`, expansion,
+  child configs, and certified graph contain no `CatalogRef<T>`.
 
 Commit only after all three mandatory gates pass.
 
@@ -537,7 +639,7 @@ Work:
 1. Replace public registry machinery with the private exact `EntryPoint` enum and exhaustive
    preparation.
 2. Make launch preparation async over the concrete `PostgresStore`; decode the selected request,
-   load exact refs, call only necessary builders, certify, and return the existing run launch
+   resolve exact refs, call only necessary builders, certify, and return the existing run launch
    request directly.
 3. Delete app-level duplicate launch evidence and wrapper types where `RunLaunchRequest` already
    carries the required material.
@@ -579,11 +681,12 @@ Required tests:
 
 Commit only after all three mandatory gates pass.
 
-## Mandatory deletion checklist for commit 4
+## Mandatory deletion checklist across commits 2 and 4
 
 Delete these directories:
 
 ```text
+crates/evm-contract-config       # commit 2
 crates/authored-config
 crates/portfolio-config
 ```
@@ -664,7 +767,7 @@ Run these residue searches before the commit and require no unexplained hits out
 current-state text and this plan:
 
 ```text
-rg -n 'mfm[-_]authored[-_]config|mfm[-_]portfolio[-_]config' .
+rg -n 'mfm[-_]authored[-_]config|mfm[-_]portfolio[-_]config|mfm[-_]evm[-_]contract[-_]config' .
 rg -n 'AuthoredConfig|NormalizedAuthoredConfig|EntryPointDescriptor' crates bin tests
 rg -n 'resolve_latest|registry_digest|accepted_config_formats' crates bin tests
 rg -n 'op_version|config_format|--op-version|--config-format' bin tests docs
@@ -680,7 +783,10 @@ pre-cutover state.
 ### Pure/unit verification
 
 - `mfm-values`: one canonical config implementation and stable digest behavior.
-- `mfm-config`: exact typed reference validation and serde.
+- `mfm-catalog-model`: exact typed name/reference validation and serde.
+- app: typed publication preparation and exact typed resolution over verified raw rows.
+- PostgreSQL storage: raw row identity, canonical/digest integrity, append atomicity, list, and
+  export without domain decoding.
 - domain/ops: strict request decoding, relation validation, deterministic builders.
 - portfolio state/op: typed readiness and shared report expansion.
 - kernel events/store: exact evidence schema and current-only codecs.
@@ -691,7 +797,7 @@ Run the smallest relevant commands after each edit group, for example:
 
 ```text
 cargo test -p mfm-values
-cargo test -p mfm-config
+cargo test -p mfm-catalog-model
 cargo test -p mfm-storage-postgres
 cargo test -p mfm-app
 cargo test -p mfm-op-portfolio-collect-report
@@ -716,14 +822,18 @@ basic compile errors.
 
 Extend cargo metadata/architecture tests to assert:
 
-- `mfm-config` has no app, storage, operation, runtime, or transport dependency;
+- `mfm-catalog-model` is a `domain-model` crate and depends only on kernel crates;
+- `mfm-storage-postgres` does not depend on `mfm-catalog-model`, domain-model, or domain-config
+  crates and does not import `CatalogRef<T>`, `MfmConfig`, or `ValidatedConfig<T>`;
 - operation/state crates have no app, PostgreSQL, SQLx, CLI, REST, or runtime-config dependency;
 - binaries do not depend directly on domain operation config crates for setup decoding/building;
-- only app/storage assembly can access catalog persistence;
+- only app calls catalog persistence operations on the concrete PostgreSQL store;
 - kernel, runtime, replay, states, certified operation/state configs, and event payloads do not
-  depend on `mfm-config` and do not contain `CatalogRef<T>`;
-- only setup/app resolution, PostgreSQL catalog storage, and operation-owned pre-planning request
-  types may depend on `mfm-config`.
+  depend on `mfm-catalog-model` and do not contain `CatalogRef<T>`;
+- only app setup/resolution and operation-owned pre-planning request types may depend on
+  `mfm-catalog-model`; storage must not;
+- no crate named `mfm-authored-config`, `mfm-portfolio-config`, or `mfm-evm-contract-config`
+  remains, and `mfm-runtime-config` retains category `runtime-config`.
 
 ### Security verification
 
@@ -742,8 +852,10 @@ After commit 4:
 
 1. Confirm `git status --short` is clean.
 2. Run all residue searches in the deletion checklist.
-3. Recount Rust LOC and public declarations with the same baseline commands.
-4. Inspect `cargo metadata` to confirm the two removed crates and old PostgreSQL package are absent.
+3. Recount packages, unique direct workspace dependency pairs, Rust LOC, and public declarations
+   with the same baseline commands.
+4. Inspect `cargo metadata` to confirm the three removed config crates and old PostgreSQL package
+   are absent and the final package count is 52.
 5. Run:
 
    ```text
@@ -753,7 +865,7 @@ After commit 4:
 6. Report:
    - the four implementation commits;
    - all gate results;
-   - baseline and final Rust LOC/public-declaration counts;
+   - baseline and final package/dependency-pair/Rust-LOC/public-declaration counts;
    - removed crates/public types/code paths;
    - any deliberate variance from this plan, with the approving architecture decision.
 
@@ -766,7 +878,8 @@ Storage, operation, and integration agents may work in parallel only on disjoint
 ownership is:
 
 - storage agent: commit 1 only;
-- setup/domain agent: setup importer and domain constructors in commit 2;
+- setup/domain agent: app resolver, setup importer, and app-owned publication checks in commit 2;
+- EVM ownership agent: atomic state/operation type move and old crate deletion in commit 2;
 - operation agent: operation requests/builders and portfolio simplification in commit 2;
 - composition agent: commit 3;
 - integration owner: all of commit 4 because app, event evidence, CLI, REST, deletion, and docs form
