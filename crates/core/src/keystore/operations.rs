@@ -19,19 +19,13 @@ impl Keystore {
             return Err(KeystoreError::InvalidPrivateKey);
         }
 
-        let private_key_bytes = Zeroizing::new(
-            hex::decode(private_key_hex).map_err(|_| KeystoreError::InvalidPrivateKey)?,
-        );
-        if private_key_bytes.len() != 32 {
-            return Err(KeystoreError::InvalidPrivateKey);
-        }
-
-        let mut key_array = [0u8; 32];
-        key_array.copy_from_slice(private_key_bytes.as_slice());
+        let mut key_array = Zeroizing::new([0u8; 32]);
+        hex::decode_to_slice(private_key_hex, key_array.as_mut())
+            .map_err(|_| KeystoreError::InvalidPrivateKey)?;
         self.import_key_material(
             id,
             alias,
-            Zeroizing::new(key_array),
+            key_array,
             KeyType::PrivateKey,
             AuditEvent::ImportPrivateKey { id },
         )

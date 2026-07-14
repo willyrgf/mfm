@@ -392,6 +392,11 @@ fn test_error_conditions() {
         keystore.import_private_key(None, "invalid"),
         Err(KeystoreError::InvalidPrivateKey)
     ));
+    let invalid_private_key_hex = "g".repeat(64);
+    assert!(matches!(
+        keystore.import_private_key(None, &invalid_private_key_hex),
+        Err(KeystoreError::InvalidPrivateKey)
+    ));
     assert!(matches!(
         keystore.import_private_key(
             None,
@@ -399,6 +404,7 @@ fn test_error_conditions() {
         ),
         Err(KeystoreError::InvalidPrivateKey)
     )); // Zero key
+    assert!(keystore.list_keys().unwrap().is_empty());
 
     // Invalid mnemonic
     assert!(matches!(
