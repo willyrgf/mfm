@@ -1,4 +1,6 @@
 use super::*;
+use mfm_canonical::PlainCanonicalJsonBytes;
+use mfm_ids::SchemaId;
 
 mod history_validation_retention;
 #[path = "history_validation_terminal.rs"]
@@ -1040,27 +1042,15 @@ pub(crate) fn validate_spec_artifact(
         .spec()
         .canonical_json()
         .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
-    let digest = canonical.content_digest();
-    let expected_artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
-    if evidence.artifact_id != expected_artifact_id
-        || evidence.digest != digest
-        || evidence.byte_len != canonical.as_bytes().len() as u64
-        || evidence.media_type != runtime_spec.spec().media_type
-        || evidence.schema_id.as_ref()
-            != Some(
-                &spec::typed_execution_spec_schema_id()
-                    .map_err(|error| RuntimeError::Identity(error.to_string()))?,
-            )
-        || evidence.semantic_type_id.is_some()
-        || evidence.producer_node_id.is_some()
-        || evidence.producer_seed_id.is_some()
-        || evidence.artifact_role != events::ArtifactRole::TypedExecutionSpec
-    {
-        return Err(RuntimeError::InvalidRunStream(
-            "typed execution spec artifact evidence does not match the certified spec".to_owned(),
-        ));
-    }
-    Ok(evidence)
+    validate_certified_artifact(
+        evidence,
+        &canonical,
+        runtime_spec.spec().media_type.clone(),
+        spec::typed_execution_spec_schema_id()
+            .map_err(|error| RuntimeError::Identity(error.to_string()))?,
+        events::ArtifactRole::TypedExecutionSpec,
+        "typed execution spec artifact evidence does not match the certified spec",
+    )
 }
 
 pub(crate) fn validate_certificate_artifact(
@@ -1071,27 +1061,40 @@ pub(crate) fn validate_certificate_artifact(
         .certificate()
         .canonical_json()
         .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
-    let digest = canonical.content_digest();
-    let expected_artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
     let media_type = spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)
         .map_err(|error| RuntimeError::Identity(error.to_string()))?;
+    validate_certified_artifact(
+        evidence,
+        &canonical,
+        media_type,
+        mfm_certify::typed_spec_certificate_schema_id()
+            .map_err(|error| RuntimeError::Identity(error.to_string()))?,
+        events::ArtifactRole::TypedSpecCertificate,
+        "typed spec certificate artifact evidence does not match the certified spec",
+    )
+}
+
+fn validate_certified_artifact(
+    evidence: store::ArtifactEvidenceRef,
+    canonical: &PlainCanonicalJsonBytes,
+    media_type: spec::MediaType,
+    schema_id: SchemaId,
+    artifact_role: events::ArtifactRole,
+    mismatch_message: &'static str,
+) -> Result<store::ArtifactEvidenceRef> {
+    let digest = canonical.content_digest();
+    let expected_artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
     if evidence.artifact_id != expected_artifact_id
         || evidence.digest != digest
         || evidence.byte_len != canonical.as_bytes().len() as u64
         || evidence.media_type != media_type
-        || evidence.schema_id.as_ref()
-            != Some(
-                &mfm_certify::typed_spec_certificate_schema_id()
-                    .map_err(|error| RuntimeError::Identity(error.to_string()))?,
-            )
+        || evidence.schema_id.as_ref() != Some(&schema_id)
         || evidence.semantic_type_id.is_some()
         || evidence.producer_node_id.is_some()
         || evidence.producer_seed_id.is_some()
-        || evidence.artifact_role != events::ArtifactRole::TypedSpecCertificate
+        || evidence.artifact_role != artifact_role
     {
-        return Err(RuntimeError::InvalidRunStream(
-            "typed spec certificate artifact evidence does not match the certified spec".to_owned(),
-        ));
+        return Err(RuntimeError::InvalidRunStream(mismatch_message.to_owned()));
     }
     Ok(evidence)
 }
