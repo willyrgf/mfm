@@ -162,7 +162,7 @@ impl store::RunEventStore for TestTypedRunStore {
     }
 }
 
-delegate_execution_claim_store_to_inner!(TestTypedRunStore);
+delegate_execution_claim_store!(TestTypedRunStore, delegate_execution_claim_direct);
 
 impl store::RetainedArtifactReadProvider for TestTypedRunStore {
     fn read_retained_artifact<'a>(
@@ -300,7 +300,7 @@ impl store::RunEventStore for RecordingTypedRunStore {
     }
 }
 
-delegate_execution_claim_store_to_inner!(RecordingTypedRunStore);
+delegate_execution_claim_store!(RecordingTypedRunStore, delegate_execution_claim_direct);
 
 impl store::RunEventStore for StaleOnceTypedRunStore {
     type Error = store::StoreError;
@@ -385,7 +385,7 @@ impl store::RunEventStore for StaleOnceTypedRunStore {
     }
 }
 
-delegate_execution_claim_store_to_inner!(StaleOnceTypedRunStore);
+delegate_execution_claim_store!(StaleOnceTypedRunStore, delegate_execution_claim_direct);
 pub(super) type TestArtifactMap =
     BTreeMap<store::ArtifactAuthorityKey, (Vec<u8>, store::ArtifactEvidenceRef)>;
 

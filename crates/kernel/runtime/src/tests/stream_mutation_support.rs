@@ -72,7 +72,7 @@ impl store::RunEventStore for StaleStreamStore<'_> {
     }
 }
 
-delegate_execution_claim_store_to_refcell_inner!(StaleStreamStore<'_>);
+delegate_execution_claim_store!(StaleStreamStore<'_>, delegate_execution_claim_refcell);
 
 pub(super) struct MissingInputArtifactRefStore<'a> {
     inner: RefCell<&'a mut TestTypedRunStore>,
@@ -164,7 +164,10 @@ impl store::RunEventStore for MissingInputArtifactRefStore<'_> {
     }
 }
 
-delegate_execution_claim_store_to_refcell_inner!(MissingInputArtifactRefStore<'_>);
+delegate_execution_claim_store!(
+    MissingInputArtifactRefStore<'_>,
+    delegate_execution_claim_refcell
+);
 
 pub(super) fn rewrite_envelope(
     event: &store::KernelEventEnvelope,

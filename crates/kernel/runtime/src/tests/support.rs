@@ -122,69 +122,28 @@ macro_rules! assert_side_effect_binding {
     }};
 }
 
-macro_rules! delegate_execution_claim_store_to_inner {
-    ($ty:ty) => {
-        impl store::ExecutionClaimStore for $ty {
-            type Error = store::StoreError;
-
-            fn acquire_execution_claim<'a>(
-                &'a self,
-                scope: &'a store::ExecutionClaimScope,
-                holder_run_id: &'a RunId,
-                token: store::AdmissionToken,
-            ) -> store::AsyncStoreFuture<'a, store::NowaitSkipAdmissionResult, Self::Error> {
-                self.inner
-                    .acquire_execution_claim(scope, holder_run_id, token)
-            }
-
-            fn execution_claim_status<'a>(
-                &'a self,
-                scope: &'a store::ExecutionClaimScope,
-            ) -> store::AsyncStoreFuture<'a, store::ExecutionClaimStatus, Self::Error> {
-                self.inner.execution_claim_status(scope)
-            }
-
-            fn renew_execution_claim<'a>(
-                &'a self,
-                scope: &'a store::ExecutionClaimScope,
-                holder_run_id: &'a RunId,
-                token: &'a store::AdmissionToken,
-            ) -> store::AsyncStoreFuture<'a, Option<store::AdmissionLease>, Self::Error> {
-                self.inner
-                    .renew_execution_claim(scope, holder_run_id, token)
-            }
-
-            fn release_execution_claim<'a>(
-                &'a self,
-                scope: &'a store::ExecutionClaimScope,
-                holder_run_id: &'a RunId,
-                token: &'a store::AdmissionToken,
-            ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
-                self.inner
-                    .release_execution_claim(scope, holder_run_id, token)
-            }
-
-            fn expired_execution_claims<'a>(
-                &'a self,
-            ) -> store::AsyncStoreFuture<'a, Vec<store::ExpiredExecutionClaim>, Self::Error> {
-                self.inner.expired_execution_claims()
-            }
-
-            fn reap_expired_execution_claim<'a>(
-                &'a self,
-                scope: &'a store::ExecutionClaimScope,
-                holder_run_id: &'a RunId,
-                token: &'a store::AdmissionToken,
-            ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
-                self.inner
-                    .reap_expired_execution_claim(scope, holder_run_id, token)
-            }
-        }
+macro_rules! delegate_execution_claim_direct {
+    ($inner:expr, $_borrow:ident, $method:ident, ()) => {
+        $inner.$method()
+    };
+    ($inner:expr, $_borrow:ident, $method:ident, ($($arg:expr),*)) => {
+        $inner.$method($($arg),*)
     };
 }
 
-macro_rules! delegate_execution_claim_store_to_refcell_inner {
-    ($ty:ty) => {
+macro_rules! delegate_execution_claim_refcell {
+    ($inner:expr, $borrow:ident, $method:ident, ()) => {{
+        let result = block_on_ready($inner.$borrow().$method());
+        Box::pin(std::future::ready(result))
+    }};
+    ($inner:expr, $borrow:ident, $method:ident, ($($arg:expr),*)) => {{
+        let result = block_on_ready($inner.$borrow().$method($($arg),*));
+        Box::pin(std::future::ready(result))
+    }};
+}
+
+macro_rules! delegate_execution_claim_store {
+    ($ty:ty, $delegate:ident) => {
         impl store::ExecutionClaimStore for $ty {
             type Error = store::StoreError;
 
@@ -194,20 +153,19 @@ macro_rules! delegate_execution_claim_store_to_refcell_inner {
                 holder_run_id: &'a RunId,
                 token: store::AdmissionToken,
             ) -> store::AsyncStoreFuture<'a, store::NowaitSkipAdmissionResult, Self::Error> {
-                let result = block_on_ready(self.inner.borrow_mut().acquire_execution_claim(
-                    scope,
-                    holder_run_id,
-                    token,
-                ));
-                Box::pin(std::future::ready(result))
+                $delegate!(
+                    self.inner,
+                    borrow_mut,
+                    acquire_execution_claim,
+                    (scope, holder_run_id, token)
+                )
             }
 
             fn execution_claim_status<'a>(
                 &'a self,
                 scope: &'a store::ExecutionClaimScope,
             ) -> store::AsyncStoreFuture<'a, store::ExecutionClaimStatus, Self::Error> {
-                let result = block_on_ready(self.inner.borrow().execution_claim_status(scope));
-                Box::pin(std::future::ready(result))
+                $delegate!(self.inner, borrow, execution_claim_status, (scope))
             }
 
             fn renew_execution_claim<'a>(
@@ -216,12 +174,12 @@ macro_rules! delegate_execution_claim_store_to_refcell_inner {
                 holder_run_id: &'a RunId,
                 token: &'a store::AdmissionToken,
             ) -> store::AsyncStoreFuture<'a, Option<store::AdmissionLease>, Self::Error> {
-                let result = block_on_ready(self.inner.borrow_mut().renew_execution_claim(
-                    scope,
-                    holder_run_id,
-                    token,
-                ));
-                Box::pin(std::future::ready(result))
+                $delegate!(
+                    self.inner,
+                    borrow_mut,
+                    renew_execution_claim,
+                    (scope, holder_run_id, token)
+                )
             }
 
             fn release_execution_claim<'a>(
@@ -230,19 +188,18 @@ macro_rules! delegate_execution_claim_store_to_refcell_inner {
                 holder_run_id: &'a RunId,
                 token: &'a store::AdmissionToken,
             ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
-                let result = block_on_ready(self.inner.borrow_mut().release_execution_claim(
-                    scope,
-                    holder_run_id,
-                    token,
-                ));
-                Box::pin(std::future::ready(result))
+                $delegate!(
+                    self.inner,
+                    borrow_mut,
+                    release_execution_claim,
+                    (scope, holder_run_id, token)
+                )
             }
 
             fn expired_execution_claims<'a>(
                 &'a self,
             ) -> store::AsyncStoreFuture<'a, Vec<store::ExpiredExecutionClaim>, Self::Error> {
-                let result = block_on_ready(self.inner.borrow().expired_execution_claims());
-                Box::pin(std::future::ready(result))
+                $delegate!(self.inner, borrow, expired_execution_claims, ())
             }
 
             fn reap_expired_execution_claim<'a>(
@@ -251,12 +208,12 @@ macro_rules! delegate_execution_claim_store_to_refcell_inner {
                 holder_run_id: &'a RunId,
                 token: &'a store::AdmissionToken,
             ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
-                let result = block_on_ready(self.inner.borrow_mut().reap_expired_execution_claim(
-                    scope,
-                    holder_run_id,
-                    token,
-                ));
-                Box::pin(std::future::ready(result))
+                $delegate!(
+                    self.inner,
+                    borrow_mut,
+                    reap_expired_execution_claim,
+                    (scope, holder_run_id, token)
+                )
             }
         }
     };
