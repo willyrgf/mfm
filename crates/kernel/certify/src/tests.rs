@@ -192,6 +192,22 @@ macro_rules! impl_test_state_spec {
     };
 }
 
+macro_rules! impl_multiplying_pure_state {
+    ($state:ty) => {
+        impl PureState for $state {
+            fn run(
+                &self,
+                input: Self::Input,
+                _context: &program::CertifiedContext<Self::Context>,
+            ) -> StateResult<Self::Output> {
+                Ok(TestValue {
+                    amount: input.amount * self.config.multiplier,
+                })
+            }
+        }
+    };
+}
+
 struct MultiplyState {
     config: TestConfig,
 }
@@ -206,17 +222,7 @@ impl_test_state_spec!(
     digest = 0x11,
 );
 
-impl PureState for MultiplyState {
-    fn run(
-        &self,
-        input: Self::Input,
-        _context: &program::CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Output> {
-        Ok(TestValue {
-            amount: input.amount * self.config.multiplier,
-        })
-    }
-}
+impl_multiplying_pure_state!(MultiplyState);
 
 struct ConflictingMultiplyState {
     config: TestConfig,
@@ -232,17 +238,7 @@ impl_test_state_spec!(
     digest = 0x11,
 );
 
-impl PureState for ConflictingMultiplyState {
-    fn run(
-        &self,
-        input: Self::Input,
-        _context: &program::CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Output> {
-        Ok(TestValue {
-            amount: input.amount * self.config.multiplier,
-        })
-    }
-}
+impl_multiplying_pure_state!(ConflictingMultiplyState);
 
 struct ContextSourceState {
     config: TestConfig,
@@ -289,17 +285,7 @@ impl StateSpec for ContextSourceState {
     }
 }
 
-impl PureState for ContextSourceState {
-    fn run(
-        &self,
-        input: Self::Input,
-        _context: &program::CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Output> {
-        Ok(TestValue {
-            amount: input.amount * self.config.multiplier,
-        })
-    }
-}
+impl_multiplying_pure_state!(ContextSourceState);
 
 struct ContextConsumerState {
     config: TestConfig,
@@ -350,17 +336,7 @@ impl StateSpec for ContextConsumerState {
     }
 }
 
-impl PureState for ContextConsumerState {
-    fn run(
-        &self,
-        input: Self::Input,
-        _context: &program::CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Output> {
-        Ok(TestValue {
-            amount: input.amount * self.config.multiplier,
-        })
-    }
-}
+impl_multiplying_pure_state!(ContextConsumerState);
 
 fn context_source_descriptor_id() -> program::Result<DescriptorId> {
     Ok(program::state_descriptor::<ContextSourceState>()?
@@ -410,17 +386,7 @@ impl StateSpec for FactEmittingState {
     }
 }
 
-impl PureState for FactEmittingState {
-    fn run(
-        &self,
-        input: Self::Input,
-        _context: &program::CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Output> {
-        Ok(TestValue {
-            amount: input.amount * self.config.multiplier,
-        })
-    }
-}
+impl_multiplying_pure_state!(FactEmittingState);
 
 struct MutationCap;
 
