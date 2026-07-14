@@ -32,6 +32,9 @@ let
   # Hermetic environment values; no append-to-inherited behavior because the child env starts empty.
   cargoEnv = {
     CARGO_TARGET_DIR = "\${stateDir}/cargo-target";
+    # Keep managed Rust checks within the memory envelope of the smallest
+    # supported CI runner; Cargo can otherwise link too many proc macros at once.
+    CARGO_BUILD_JOBS = "2";
     RUST_BACKTRACE = "1";
     TMPDIR = "\${stateDir}";
   }
@@ -149,7 +152,7 @@ in
         "cargo"
         "check"
         "-p"
-        "mfm-stream-store-postgres"
+        "mfm-storage-postgres"
         "--features"
         "parity-tests"
         "--all-targets"
@@ -222,9 +225,9 @@ in
           fi
           export DATABASE_URL="$admin_database_url''${separator}options=-csearch_path%3D$schema"
 
-          cd crates/storages/stream-store-postgres
+          cd crates/storages/postgres
           cargo sqlx migrate run --source migrations
-          cargo clean -p mfm-stream-store-postgres
+          cargo clean -p mfm-storage-postgres
           cargo sqlx prepare --check -- --all-targets --features parity-tests
         ''
       ];
@@ -250,7 +253,7 @@ in
           "migrate"
           "run"
           "--source"
-          "crates/storages/stream-store-postgres/migrations"
+          "crates/storages/postgres/migrations"
         ];
         env = postgresSqlxEnv;
         timeoutMs = 60000;
@@ -310,7 +313,7 @@ in
         "cargo"
         "test"
         "-p"
-        "mfm-stream-store-postgres"
+        "mfm-storage-postgres"
         "--features"
         "parity-tests"
         "--"

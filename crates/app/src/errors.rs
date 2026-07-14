@@ -149,25 +149,25 @@ impl From<store::StoreError> for AppError {
     }
 }
 
-impl From<mfm_stream_store_postgres::PostgresStoreError> for AppError {
-    fn from(error: mfm_stream_store_postgres::PostgresStoreError) -> Self {
+impl From<mfm_storage_postgres::PostgresStoreError> for AppError {
+    fn from(error: mfm_storage_postgres::PostgresStoreError) -> Self {
         match error {
-            mfm_stream_store_postgres::PostgresStoreError::Authority(_) => Self::backend(
+            mfm_storage_postgres::PostgresStoreError::Authority(_) => Self::backend(
                 ErrorClass::Internal,
                 "RunStoreAuthorityInvalid",
                 "Run store authority could not be validated",
             ),
-            mfm_stream_store_postgres::PostgresStoreError::Store(_) => Self::backend(
+            mfm_storage_postgres::PostgresStoreError::Store(_) => Self::backend(
                 ErrorClass::Conflict,
                 "RunStoreRejected",
                 "Run store rejected the requested operation",
             ),
-            mfm_stream_store_postgres::PostgresStoreError::Database(_) => Self::backend(
+            mfm_storage_postgres::PostgresStoreError::Database(_) => Self::backend(
                 ErrorClass::Internal,
                 "RunStoreUnavailable",
                 "Run store is unavailable",
             ),
-            mfm_stream_store_postgres::PostgresStoreError::Corruption(_) => Self::backend(
+            mfm_storage_postgres::PostgresStoreError::Corruption(_) => Self::backend(
                 ErrorClass::Internal,
                 "RunStoreCorruption",
                 "Run store returned invalid data",

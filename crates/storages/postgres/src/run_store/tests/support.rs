@@ -126,7 +126,7 @@ fn test_prepared_artifact_bytes(
     PreparedArtifactBytes::new(bytes, evidence.clone())
 }
 
-async fn test_store() -> (PostgresRunStore, String) {
+pub(super) async fn test_store() -> (PostgresStore, String) {
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
     let admin_pool = PgPool::connect(&database_url)
@@ -154,11 +154,11 @@ async fn test_store() -> (PostgresRunStore, String) {
     let authority = crate::schema::validate_pool(&pool)
         .await
         .expect("validate schema");
-    let store = PostgresRunStore { pool, authority };
+    let store = PostgresStore { pool, authority };
     (store, schema)
 }
 
-async fn drop_schema(store: &PostgresRunStore, schema: &str) {
+pub(super) async fn drop_schema(store: &PostgresStore, schema: &str) {
     store.pool.close().await;
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
@@ -187,7 +187,7 @@ fn assert_fact_projection_counts(
 }
 
 async fn assert_fact_projection_table_counts(
-    store: &PostgresRunStore,
+    store: &PostgresStore,
     run: &RunId,
     descriptors: usize,
     index_entries: usize,
@@ -230,7 +230,7 @@ async fn fact_projection_table_count(pool: &PgPool, run: &RunId, sql: &'static s
         .expect("fact projection table count")
 }
 
-async fn global_fact_descriptor_catalog_count(store: &PostgresRunStore) -> i64 {
+async fn global_fact_descriptor_catalog_count(store: &PostgresStore) -> i64 {
     sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM fact_descriptor_index")
         .fetch_one(&store.pool)
         .await
@@ -238,7 +238,7 @@ async fn global_fact_descriptor_catalog_count(store: &PostgresRunStore) -> i64 {
 }
 
 fn assert_fact_query_receipt(
-    _store: &PostgresRunStore,
+    _store: &PostgresStore,
     _plan: &mfm_facts::CanonicalFactQueryPlan,
     result: &mfm_facts::FactQueryResult,
     expected_cardinality: mfm_facts::QueryResultCardinality,

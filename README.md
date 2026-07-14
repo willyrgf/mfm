@@ -72,7 +72,7 @@ Crate docs:
 - Typed store contract: [`crates/kernel/store/README.md`](crates/kernel/store/README.md)
 - Typed replay: [`crates/kernel/replay/README.md`](crates/kernel/replay/README.md)
 - Ops (proof op): [`crates/ops/proof-op/README.md`](crates/ops/proof-op/README.md)
-- Storage (typed run events, Postgres): [`crates/storages/stream-store-postgres/README.md`](crates/storages/stream-store-postgres/README.md)
+- Storage (typed run events and catalog values, Postgres): [`crates/storages/postgres/README.md`](crates/storages/postgres/README.md)
 
 Design notes / planning:
 

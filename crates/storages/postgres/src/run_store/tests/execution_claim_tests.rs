@@ -119,7 +119,7 @@ async fn execution_claim_stale_token_cannot_reap_newer_holder() {
 }
 
 async fn acquire_execution_claim_lease(
-    store: &PostgresRunStore,
+    store: &PostgresStore,
     scope: &mfm_store::v1::ExecutionClaimScope,
     run_id: &RunId,
     token: AdmissionToken,
@@ -142,7 +142,7 @@ fn execution_claim_scope(byte: u8) -> mfm_store::v1::ExecutionClaimScope {
     mfm_store::v1::ExecutionClaimScope::from_run_identity_material(&identity)
 }
 
-async fn expire_execution_claim_row(store: &PostgresRunStore, run_id: &RunId) {
+async fn expire_execution_claim_row(store: &PostgresStore, run_id: &RunId) {
     sqlx::query(
         "UPDATE admission_lane \
          SET lease_expires_at = statement_timestamp() - make_interval(secs => 1), \

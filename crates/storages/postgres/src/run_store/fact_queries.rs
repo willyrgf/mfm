@@ -12,7 +12,7 @@ struct AuthoritativeFactQueryRow {
     row: PostgresFactQueryRow,
 }
 
-impl PostgresRunStore {
+impl PostgresStore {
     /// Executes a descriptor-scoped canonical fact query plan from authoritative run evidence.
     pub async fn execute_fact_query(
         &self,

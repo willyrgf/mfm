@@ -23,7 +23,7 @@ INSERT INTO store_metadata (store_epoch, store_scope_id, schema_contract_version
 VALUES (
   'mfm.store.epoch.v1:' || encode(public.gen_random_bytes(16), 'hex'),
   'mfm.store_scope.v1:' || encode(public.gen_random_bytes(16), 'hex'),
-  'mfm.postgres.run_store.v2'
+  'mfm.postgres.store.v3'
 );
 
 CREATE TABLE store_commit_order (
@@ -401,12 +401,37 @@ CREATE TABLE run_observation_cursors (
   token_hash TEXT PRIMARY KEY,
   cursor_version TEXT NOT NULL,
   store_epoch TEXT NOT NULL,
-  cursor_kind TEXT NOT NULL CHECK (cursor_kind IN ('frontier', 'row')),
   store_commit_order BIGINT NOT NULL,
   issued_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
-  CONSTRAINT run_observation_cursors_version_v2 CHECK (cursor_version = 'mfm.run_observation.cursor.v2'),
+  CONSTRAINT run_observation_cursors_version_v3 CHECK (cursor_version = 'mfm.run_observation.cursor.v3'),
   CONSTRAINT run_observation_cursors_store_commit_order_nonnegative CHECK (store_commit_order >= 0)
 );
+
+CREATE TABLE catalog_values (
+  name TEXT NOT NULL,
+  schema_id TEXT NOT NULL,
+  digest TEXT NOT NULL,
+  canonical_json BYTEA NOT NULL,
+  PRIMARY KEY (name, schema_id, digest),
+  CONSTRAINT catalog_values_name_grammar CHECK (
+    octet_length(name) BETWEEN 1 AND 256
+    AND name ~ '^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*$'
+    AND name !~ '(^|/)(\.|\.\.)(/|$)'
+  ),
+  CONSTRAINT catalog_values_schema_id_bounds CHECK (
+    octet_length(schema_id) BETWEEN 1 AND 1024
+    AND schema_id ~ '^schema:[^:]+:[^:]+:sha256-jcs-v1:[0-9a-f]{64}$'
+  ),
+  CONSTRAINT catalog_values_digest_bounds CHECK (
+    digest ~ '^content:sha256-jcs-v1:[0-9a-f]{64}$'
+  ),
+  CONSTRAINT catalog_values_canonical_json_bounds CHECK (
+    octet_length(canonical_json) BETWEEN 1 AND 262144
+  )
+);
+
+CREATE INDEX catalog_values_identity_idx
+ON catalog_values (name, schema_id, digest);
 
 CREATE TRIGGER store_metadata_no_update
 BEFORE UPDATE OR DELETE OR TRUNCATE ON store_metadata
@@ -438,4 +463,8 @@ FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
 
 CREATE TRIGGER run_observation_cursors_no_update
 BEFORE UPDATE OR DELETE OR TRUNCATE ON run_observation_cursors
+FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
+
+CREATE TRIGGER catalog_values_no_update
+BEFORE UPDATE OR DELETE OR TRUNCATE ON catalog_values
 FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();

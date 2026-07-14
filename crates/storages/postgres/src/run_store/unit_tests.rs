@@ -24,7 +24,7 @@ fn artifact_role_contract_postgres_tag_roundtrip_uses_events_contract() {
 #[tokio::test]
 async fn store_authority_connection_error_redacts_database_url() {
     let database_url = "postgres://mfm_user:super-secret@127.0.0.1:notaport/mfm";
-    let error = match PostgresRunStore::connect(database_url).await {
+    let error = match PostgresStore::connect(database_url).await {
         Ok(_) => panic!("invalid postgres URL should not connect"),
         Err(error) => error,
     };

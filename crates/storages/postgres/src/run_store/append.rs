@@ -1,6 +1,6 @@
 use super::*;
 
-impl PostgresRunStore {
+impl PostgresStore {
     /// Atomically admits artifact evidence and appends one typed run commit.
     pub async fn append_prepared_commit_bundle(
         &self,

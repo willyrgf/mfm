@@ -79,19 +79,17 @@ pub async fn connect_postgres_with_retry(
     database_url: &str,
     max_attempts: u32,
     delay_ms: u64,
-) -> mfm_stream_store_postgres::PostgresRunStore {
-    let mut last_err: Option<mfm_stream_store_postgres::PostgresStoreError> = None;
+) -> mfm_storage_postgres::PostgresStore {
+    let mut last_err: Option<mfm_storage_postgres::PostgresStoreError> = None;
     for _ in 0..max_attempts {
-        match mfm_stream_store_postgres::PostgresSchema::migrate(database_url).await {
-            Ok(()) => {
-                match mfm_stream_store_postgres::PostgresRunStore::connect(database_url).await {
-                    Ok(store) => return store,
-                    Err(err) => {
-                        last_err = Some(err);
-                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    }
+        match mfm_storage_postgres::PostgresSchema::migrate(database_url).await {
+            Ok(()) => match mfm_storage_postgres::PostgresStore::connect(database_url).await {
+                Ok(store) => return store,
+                Err(err) => {
+                    last_err = Some(err);
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 }
-            }
+            },
             Err(err) => {
                 last_err = Some(err);
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;

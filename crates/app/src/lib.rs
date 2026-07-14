@@ -44,8 +44,8 @@ use serde_json::map::Entry;
 use serde_json::{Map, Value};
 
 pub use mfm_runtime::ErasedRunnerRegistry;
-pub use mfm_stream_store_postgres::PostgresRunStore as ProductionRunStore;
-pub use mfm_stream_store_postgres::PostgresSchema as ProductionPostgresSchema;
+pub use mfm_storage_postgres::PostgresSchema as ProductionPostgresSchema;
+pub use mfm_storage_postgres::PostgresStore as ProductionRunStore;
 
 pub use public_facts::{
     is_public_fact_query_parameter_error, parse_public_fact_predicates, FactCatalogService,

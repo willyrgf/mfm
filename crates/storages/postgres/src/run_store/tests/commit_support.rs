@@ -53,7 +53,7 @@ pub(super) fn fact_run_start_request(run_id: RunId, key: &str) -> mfm_store::v1:
 }
 
 pub(super) async fn append_prepared(
-    store: &PostgresRunStore,
+    store: &PostgresStore,
     mut request: mfm_store::v1::CommitRequest,
     artifacts: Vec<ArtifactEvidenceRef>,
 ) -> Result<CommitOutcome> {
@@ -137,7 +137,7 @@ pub(super) fn test_prepared_commit_bundle_with_existing_artifact(
 }
 
 pub(super) async fn append_fact_run_start(
-    store: &PostgresRunStore,
+    store: &PostgresStore,
     run_id: RunId,
 ) -> Result<CommitOutcome> {
     let descriptor_ref = fact_descriptor_artifact_ref();
@@ -161,7 +161,7 @@ pub(super) async fn append_fact_run_start(
 }
 
 pub(super) async fn append_fact_attempt_start(
-    store: &PostgresRunStore,
+    store: &PostgresStore,
     run: RunId,
     commit_key: &str,
 ) -> Result<CommitOutcome> {
@@ -209,7 +209,7 @@ pub(super) fn fact_commit_request_with_visibility(
 }
 
 pub(super) async fn append_fact_commit(
-    store: &PostgresRunStore,
+    store: &PostgresStore,
     request: mfm_store::v1::CommitRequest,
     response: &ArtifactEvidenceRef,
 ) -> Result<CommitOutcome> {
@@ -217,7 +217,7 @@ pub(super) async fn append_fact_commit(
 }
 
 pub(super) async fn append_fact_commit_with_response_bytes(
-    store: &PostgresRunStore,
+    store: &PostgresStore,
     request: mfm_store::v1::CommitRequest,
     response: &ArtifactEvidenceRef,
     response_bytes: Vec<u8>,
@@ -233,7 +233,7 @@ pub(super) async fn append_fact_commit_with_response_bytes(
 }
 
 pub(super) async fn assert_empty_fact_query(
-    store: &PostgresRunStore,
+    store: &PostgresStore,
     plan: &mfm_facts::CanonicalFactQueryPlan,
 ) {
     let query_result = store
@@ -250,7 +250,7 @@ pub(super) async fn assert_empty_fact_query(
 }
 
 pub(super) async fn assert_single_public_fact_query(
-    store: &PostgresRunStore,
+    store: &PostgresStore,
     plan: &mfm_facts::CanonicalFactQueryPlan,
 ) -> mfm_facts::FactQueryResult {
     let query_result = store
@@ -281,7 +281,7 @@ pub(super) async fn assert_single_public_fact_query(
 }
 
 pub(super) async fn append_fact_commit_with_missing_existing_artifact(
-    store: &PostgresRunStore,
+    store: &PostgresStore,
     request: mfm_store::v1::CommitRequest,
     response: &ArtifactEvidenceRef,
 ) -> Result<CommitOutcome> {
@@ -294,7 +294,7 @@ pub(super) async fn append_fact_commit_with_missing_existing_artifact(
 }
 
 pub(super) async fn append_run_start(
-    store: &PostgresRunStore,
+    store: &PostgresStore,
     run_id: &RunId,
     commit_key: &str,
 ) -> Result<CommitOutcome> {

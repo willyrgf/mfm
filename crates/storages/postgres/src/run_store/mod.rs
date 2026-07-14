@@ -165,12 +165,12 @@ use self::{
 /// This is the certified typed storage surface for run events, commit keys, artifact evidence, and
 /// derived projections.
 #[derive(Clone)]
-pub struct PostgresRunStore {
+pub struct PostgresStore {
     pub(crate) pool: PgPool,
     authority: PostgresStoreAuthority,
 }
 
-impl PostgresRunStore {
+impl PostgresStore {
     /// Connects to PostgreSQL, validates the typed schema, and returns a postgres run store.
     pub async fn connect(database_url: &str) -> Result<Self> {
         let pool = connect_pool(database_url)
@@ -186,14 +186,14 @@ impl PostgresRunStore {
     }
 }
 
-impl RunEventStore for PostgresRunStore {
+impl RunEventStore for PostgresStore {
     type Error = PostgresStoreError;
 
     fn append_prepared_commit_bundle<'a>(
         &'a self,
         bundle: PreparedCommitBundle,
     ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error> {
-        Box::pin(async move { PostgresRunStore::append_prepared_commit_bundle(self, bundle).await })
+        Box::pin(async move { PostgresStore::append_prepared_commit_bundle(self, bundle).await })
     }
 
     fn load_run_stream<'a>(
@@ -250,7 +250,7 @@ impl RunEventStore for PostgresRunStore {
     }
 }
 
-impl ExecutionClaimStore for PostgresRunStore {
+impl ExecutionClaimStore for PostgresStore {
     type Error = PostgresStoreError;
 
     fn acquire_execution_claim<'a>(
@@ -311,7 +311,7 @@ impl ExecutionClaimStore for PostgresRunStore {
     }
 }
 
-impl StoreScopeStore for PostgresRunStore {
+impl StoreScopeStore for PostgresStore {
     type Error = PostgresStoreError;
 
     fn load_store_scope_id<'a>(&'a self) -> AsyncStoreFuture<'a, StoreScopeId, Self::Error> {
@@ -319,7 +319,7 @@ impl StoreScopeStore for PostgresRunStore {
     }
 }
 
-impl RetainedArtifactReadProvider for PostgresRunStore {
+impl RetainedArtifactReadProvider for PostgresStore {
     fn read_retained_artifact<'a>(
         &'a self,
         requirement: &'a EventArtifactRequirement,
@@ -328,7 +328,7 @@ impl RetainedArtifactReadProvider for PostgresRunStore {
     }
 }
 
-impl RunObservationStore for PostgresRunStore {
+impl RunObservationStore for PostgresStore {
     type Error = PostgresStoreError;
 
     fn read_run_observations<'a>(

@@ -1,9 +1,9 @@
-# mfm-stream-store-postgres
+# mfm-storage-postgres
 
 PostgreSQL run-store implementation. This crate is the only owner of the MFM
 run-store PostgreSQL schema.
 
-`PostgresRunStore` is the certified submit/resume surface for durable run
+`PostgresStore` is the certified submit/resume surface for durable run
 streams. It persists append-only commits, canonical event payload bytes,
 artifact blobs/evidence, resource-lane transition authority, and observation
 cursor rows through `mfm-store`.
@@ -17,17 +17,17 @@ the embedded migrations explicitly before starting CLI, REST, or library
 callers:
 
 ```rust
-# async fn example() -> Result<(), mfm_stream_store_postgres::PostgresStoreError> {
+# async fn example() -> Result<(), mfm_storage_postgres::PostgresStoreError> {
 let database_url = "postgres://postgres:postgres@localhost/mfm";
-mfm_stream_store_postgres::PostgresSchema::migrate(database_url).await?;
-let authority = mfm_stream_store_postgres::PostgresSchema::validate(database_url).await?;
-let store = mfm_stream_store_postgres::PostgresRunStore::connect(database_url).await?;
+mfm_storage_postgres::PostgresSchema::migrate(database_url).await?;
+let authority = mfm_storage_postgres::PostgresSchema::validate(database_url).await?;
+let store = mfm_storage_postgres::PostgresStore::connect(database_url).await?;
 assert_eq!(store.store_authority(), &authority);
 # Ok(())
 # }
 ```
 
-`PostgresRunStore::connect` performs the same authority validation before returning
+`PostgresStore::connect` performs the same authority validation before returning
 a store. Authority validation checks that PostgreSQL is reachable, the SQLx
 migration ledger matches the compiled migrations, required catalog objects are
 present with expected contracts, stale retired tables are absent, and the
@@ -57,9 +57,9 @@ crate's migrations and regenerate metadata from the crate directory:
 ```sh
 export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:5432/mfm_test"
 nix shell .#sqlx-cli --command \
-  sqlx migrate run --source crates/storages/stream-store-postgres/migrations
+  sqlx migrate run --source crates/storages/postgres/migrations
 nix shell .#sqlx-cli --command bash -lc \
-  'cd crates/storages/stream-store-postgres && cargo sqlx prepare -- --all-targets --features parity-tests'
+  'cd crates/storages/postgres && cargo sqlx prepare -- --all-targets --features parity-tests'
 ```
 
 After regenerating metadata, run `nix run .#test-db`.

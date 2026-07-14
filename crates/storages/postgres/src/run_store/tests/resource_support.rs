@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) async fn append_resource_lane_attempt_start(
-    store: &PostgresRunStore,
+    store: &PostgresStore,
     run_id: &RunId,
     commit_key: &str,
 ) -> Result<CommitOutcome> {
@@ -19,7 +19,7 @@ pub(super) async fn append_resource_lane_attempt_start(
 }
 
 pub(super) async fn append_resource_lane_prepare(
-    store: &PostgresRunStore,
+    store: &PostgresStore,
     run_id: &RunId,
     commit_key: &str,
     lane_value: &str,
@@ -50,7 +50,7 @@ pub(super) async fn append_resource_lane_prepare(
 }
 
 pub(super) async fn append_resource_lane_release(
-    store: &PostgresRunStore,
+    store: &PostgresStore,
     run_id: &RunId,
     commit_key: &str,
     lane_value: &str,
@@ -187,7 +187,7 @@ pub(super) async fn disable_observation_cursor_mutation_guard(pool: &PgPool) {
 }
 
 pub(super) async fn observation_row_cursor_for_commit(
-    store: &PostgresRunStore,
+    store: &PostgresStore,
     run: &RunId,
     seq: u64,
 ) -> String {
@@ -216,7 +216,7 @@ pub(super) async fn observation_row_cursor_for_commit(
 }
 
 pub(super) async fn append_retention_commit(
-    store: &PostgresRunStore,
+    store: &PostgresStore,
     run: &RunId,
     seq: u64,
     commit_key: &str,

@@ -354,7 +354,7 @@ be the sole authority for resume, replay, public output, retention, or side-effe
 The first certified persistent storage path is:
 
 ```text
-crates/storages/stream-store-postgres
+crates/storages/postgres
 ```
 
 Postgres is the only production persistence backend. It stores append-only `commits`, canonical
@@ -364,7 +364,7 @@ commit cursor authority, store metadata, and mutable operational admission-lane 
 trust boundary; callers cannot supply or update it. Observation list/watch rows are derived from
 strict authority at read time. Artifact bytes live in Postgres; production app, CLI, and REST paths
 do not stage, read, or migrate workflow artifacts through filesystem artifact roots. The schema and
-migrations are owned by `crates/storages/stream-store-postgres`; runtime callers validate schema
+migrations are owned by `crates/storages/postgres`; runtime callers validate schema
 contract shape and must not run startup auto-DDL. Because MFM is pre-production, replacing a
 persisted contract shape is a destructive schema change that updates the baseline directly.
 Existing-run detection folds authoritative `run_events`; there is no separate run-admission index.

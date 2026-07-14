@@ -147,7 +147,7 @@ fn op_crate_manifest_stays_inside_operation_boundaries() {
         "mfm-app",
         "mfm-runtime",
         "mfm-store",
-        "mfm-stream-store-postgres",
+        "mfm-storage-postgres",
         "mfm-adapters-btc-jsonrpc",
         "mfm-btc-jsonrpc-http",
         "bin/cli",

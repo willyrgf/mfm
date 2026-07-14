@@ -25,7 +25,7 @@ mfm-facts = { path = "../../crates/kernel/facts" }
 mfm-certify = { path = "../../crates/kernel/certify" }
 mfm-program = { path = "../../crates/kernel/program" }
 mfm-store = { path = "../../crates/kernel/store", features = ["test-support"] }
-mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
+mfm-storage-postgres = { path = "../../crates/storages/postgres" }
 mfm-adapters-btc-jsonrpc = { path = "../../crates/adapters/btc-jsonrpc" }
 mfm-adapters-evm = { path = "../../crates/adapters/evm" }
 mfm-adapters-portfolio = { path = "../../crates/adapters/portfolio" }

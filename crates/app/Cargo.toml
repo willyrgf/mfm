@@ -51,7 +51,7 @@ mfm-signers-keystore = { path = "../signers/keystore" }
 mfm-signing = { path = "../signing" }
 mfm-spec = { path = "../kernel/spec" }
 mfm-store = { path = "../kernel/store" }
-mfm-stream-store-postgres = { path = "../storages/stream-store-postgres" }
+mfm-storage-postgres = { path = "../storages/postgres" }
 mfm-transports-evm = { path = "../transports/evm" }
 mfm-transports-proof = { path = "../transports/proof" }
 mfm-values = { path = "../kernel/values" }

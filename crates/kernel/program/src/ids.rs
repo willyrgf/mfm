@@ -242,9 +242,8 @@ pub(super) fn bridge_ref_key(bridge_ref: &BridgeRef) -> String {
 pub(super) fn canonical_config_binding<C: MfmConfig>(
     config: &ValidatedConfig<C>,
 ) -> Result<ConfigBindingSpec> {
-    let json = serde_json::to_string(config.as_ref())
-        .map_err(|error| PlanError::Serialize(error.to_string()))?;
-    let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
+    let canonical = config
+        .canonical_json()
         .map_err(|error| PlanError::Canonical(error.to_string()))?;
     let schema_id = C::schema_id().map_err(|error| PlanError::Value(error.to_string()))?;
     let content_digest = canonical.content_digest();

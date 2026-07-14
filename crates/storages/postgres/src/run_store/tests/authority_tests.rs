@@ -169,7 +169,7 @@ async fn store_scope_survives_reconnects_and_rejects_mutation() {
     assert!(store_scope.as_str().starts_with(StoreScopeId::PREFIX));
     assert_eq!(store.store_authority().store_scope_id(), &store_scope);
 
-    let restarted = PostgresRunStore {
+    let restarted = PostgresStore {
         pool: store.pool.clone(),
         authority: store.store_authority().clone(),
     };

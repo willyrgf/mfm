@@ -543,7 +543,7 @@ fn state_crate_manifest_stays_inside_state_boundaries() {
         "mfm-app",
         "mfm-runtime",
         "mfm-store",
-        "mfm-stream-store-postgres",
+        "mfm-storage-postgres",
         "mfm-btc-jsonrpc-http",
         "mfm-adapters-btc-jsonrpc",
         "mfm-op-btc-collectors",

@@ -228,6 +228,19 @@ impl<C: MfmConfig> ValidatedConfig<C> {
     pub fn into_inner(self) -> C {
         self.config
     }
+
+    /// Serializes the validated config through the shared canonical JSON path.
+    ///
+    /// Program certification and catalog publication both use this method so a semantic config
+    /// has one canonical byte representation and one content digest implementation.
+    pub fn canonical_json(
+        &self,
+    ) -> std::result::Result<mfm_canonical::PlainCanonicalJsonBytes, ConfigError> {
+        let json = serde_json::to_string(&self.config)
+            .map_err(|error| ConfigError::new(format!("failed to serialize config: {error}")))?;
+        mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&json)
+            .map_err(|error| ConfigError::new(format!("failed to canonicalize config: {error}")))
+    }
 }
 
 /// Descriptor contract for public launch/render output surfaces.

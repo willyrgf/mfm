@@ -6,16 +6,16 @@
 //! # Examples
 //!
 //! ```no_run
-//! # async fn example() -> Result<(), mfm_stream_store_postgres::PostgresStoreError> {
-//! mfm_stream_store_postgres::PostgresSchema::migrate(
+//! # async fn example() -> Result<(), mfm_storage_postgres::PostgresStoreError> {
+//! mfm_storage_postgres::PostgresSchema::migrate(
 //!     "postgres://postgres:postgres@localhost/mfm",
 //! )
 //! .await?;
-//! let _authority = mfm_stream_store_postgres::PostgresSchema::validate(
+//! let _authority = mfm_storage_postgres::PostgresSchema::validate(
 //!     "postgres://postgres:postgres@localhost/mfm",
 //! )
 //! .await?;
-//! let _store = mfm_stream_store_postgres::PostgresRunStore::connect(
+//! let _store = mfm_storage_postgres::PostgresStore::connect(
 //!     "postgres://postgres:postgres@localhost/mfm",
 //! )
 //! .await?;
@@ -23,11 +23,13 @@
 //! # }
 //! ```
 
+mod catalog;
 mod run_store;
 mod schema;
 
+pub use catalog::{CatalogValueKey, CatalogValueRow, CatalogValueSource, MAX_CATALOG_VALUE_BYTES};
 pub use run_store::{
-    PostgresFactQueryResult, PostgresFactQueryRow, PostgresRunStore, PostgresStoreAuthority,
+    PostgresFactQueryResult, PostgresFactQueryRow, PostgresStore, PostgresStoreAuthority,
     PostgresStoreAuthorityError, PostgresStoreError,
 };
 pub use schema::PostgresSchema;

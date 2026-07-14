@@ -407,7 +407,7 @@ These commands use the certified PostgreSQL run store (requires `DATABASE_URL` o
 `--database-url`).
 
 The CLI validates the PostgreSQL schema on connect and does not create or alter
-tables. Apply the `mfm-stream-store-postgres` migrations against a fresh or
+tables. Apply the `mfm-storage-postgres` migrations against a fresh or
 explicitly reset local database before running typed run commands.
 There is no downgrade migration for the current typed Postgres baseline; rolling
 back to another branch requires resetting the database or schema to that
@@ -674,7 +674,7 @@ The CLI's process-level configuration is intentionally narrow.
 - **`DATABASE_URL`**: PostgreSQL connection string used by `run` commands (unless `--database-url` is provided).
   ```sh
   export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/mfm_test"
-  cargo sqlx migrate run --source crates/storages/stream-store-postgres/migrations
+  cargo sqlx migrate run --source crates/storages/postgres/migrations
   mfm_cli run status "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   ```
 

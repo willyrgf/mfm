@@ -27,12 +27,12 @@ Environment variables:
 - `MFM_RUNTIME_CONFIG_FILE`: optional runtime config file path for live capability-backed runs
 
 The REST API validates the PostgreSQL schema on startup and does not create or
-alter tables. Apply the `mfm-stream-store-postgres` migrations before starting
+alter tables. Apply the `mfm-storage-postgres` migrations before starting
 the server:
 
 ```bash
 export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/mfm_test"
-cargo sqlx migrate run --source crates/storages/stream-store-postgres/migrations
+cargo sqlx migrate run --source crates/storages/postgres/migrations
 ```
 
 Use a fresh or explicitly reset database for this typed Postgres baseline. There

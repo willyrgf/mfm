@@ -376,7 +376,7 @@ async fn observation_cursor_uses_durable_metadata_across_store_restarts() {
         .await
         .expect("run start");
     let cursor = observation_row_cursor_for_commit(&store, &run, 1).await;
-    let restarted = PostgresRunStore {
+    let restarted = PostgresStore {
         pool: store.pool.clone(),
         authority: store.store_authority().clone(),
     };

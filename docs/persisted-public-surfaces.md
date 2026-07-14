@@ -47,7 +47,7 @@ Authority roles:
 | Run observations | Derived from `commits` and `run_events` | No secrets allowed. | observation | List/watch materializes rows from strict authority at read time. Corruption cannot affect strict status/resume/replay/public-output reads. |
 | Cursor metadata | `run_observation_cursors` | No secrets. Contains the internal store commit coordinate, store epoch, and cursor version; these must not be exposed. | operational telemetry | Server-issued opaque tokens are epoch-bound and no-TTL in v3. Unknown, missing, or stale-format rows are invalid; epoch mismatch expires. |
 | Store metadata | `store_metadata` | No secrets. Fields are internal non-secret metadata. `store_scope_id` is non-secret deployment identity material. | operational telemetry | Defines store epoch, store-owned scope, and schema contract version. Runtime credentials must not mutate this table. |
-| SQLx metadata | `crates/storages/stream-store-postgres/.sqlx/*.json` | No secrets. | operational telemetry | Compile-time query metadata only; checked in and validated by Nix workflows. |
+| SQLx metadata | `crates/storages/postgres/.sqlx/*.json` | No secrets. | operational telemetry | Compile-time query metadata only; checked in and validated by Nix workflows. |
 
 ## CLI And REST
 

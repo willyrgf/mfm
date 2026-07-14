@@ -1,5 +1,5 @@
 [package]
-name = "mfm-stream-store-postgres"
+name = "mfm-storage-postgres"
 version = "0.1.0"
 edition = "2021"
 build = "build.rs"
