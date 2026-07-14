@@ -382,35 +382,8 @@ struct ContextualMutationState {
     config: LaunchConfig,
 }
 
-macro_rules! impl_side_effect_state_spec {
-    ($state:ty, $kind:literal, $version:literal, $name:literal, $digest:literal) => {
-        impl StateSpec for $state {
-            type Config = LaunchConfig;
-            type Context = NoContext;
-            type Input = LaunchValue;
-            type Output = LaunchValue;
-            type Effect = ApplySideEffect;
-            type Caps = (TestMutationCap,);
-
-            fn kind() -> Result<StateKind> {
-                test_state_kind($kind, $digest)
-            }
-
-            fn version() -> Result<StateVersion> {
-                StateVersion::new($version).map_err(|error| PlanError::Key(error.to_string()))
-            }
-
-            fn name() -> &'static str {
-                $name
-            }
-
-            fn new(config: ValidatedConfig<Self::Config>) -> Result<Self> {
-                Ok(Self {
-                    config: config.into_inner(),
-                })
-            }
-        }
-
+macro_rules! impl_side_effect_state {
+    ($state:ty) => {
         impl SideEffectState for $state {
             type Intent = LaunchValue;
             type IdempotencyInput = LaunchValue;
@@ -472,6 +445,39 @@ macro_rules! impl_side_effect_state_spec {
     };
 }
 
+macro_rules! impl_side_effect_state_spec {
+    ($state:ty, $kind:literal, $version:literal, $name:literal, $digest:literal) => {
+        impl StateSpec for $state {
+            type Config = LaunchConfig;
+            type Context = NoContext;
+            type Input = LaunchValue;
+            type Output = LaunchValue;
+            type Effect = ApplySideEffect;
+            type Caps = (TestMutationCap,);
+
+            fn kind() -> Result<StateKind> {
+                test_state_kind($kind, $digest)
+            }
+
+            fn version() -> Result<StateVersion> {
+                StateVersion::new($version).map_err(|error| PlanError::Key(error.to_string()))
+            }
+
+            fn name() -> &'static str {
+                $name
+            }
+
+            fn new(config: ValidatedConfig<Self::Config>) -> Result<Self> {
+                Ok(Self {
+                    config: config.into_inner(),
+                })
+            }
+        }
+
+        impl_side_effect_state!($state);
+    };
+}
+
 impl_side_effect_state_spec!(
     ForwardMutationState,
     "forward_mutation",
@@ -525,64 +531,7 @@ impl StateSpec for ContextualMutationState {
     }
 }
 
-impl SideEffectState for ContextualMutationState {
-    type Intent = LaunchValue;
-    type IdempotencyInput = LaunchValue;
-    type Submission = LaunchValue;
-    type Receipt = LaunchValue;
-    type Confirmation = LaunchValue;
-    type SubmitFuture<'a> = std::future::Ready<StateResult<Self::Submission>>;
-
-    fn prepare_intent(
-        &self,
-        input: &Self::Input,
-        _context: &CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Intent> {
-        Ok(LaunchValue {
-            amount: input.amount + self.config.multiplier,
-            label: input.label.clone(),
-        })
-    }
-
-    fn idempotency_input(
-        &self,
-        _input: &Self::Input,
-        intent: &Self::Intent,
-        _context: &CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::IdempotencyInput> {
-        Ok(intent.clone())
-    }
-
-    fn submit<'a>(
-        &'a self,
-        intent: &'a Self::Intent,
-        _key: &'a IdempotencyKey<Self::IdempotencyInput>,
-        _caps: &'a Self::Caps,
-        _context: &'a CertifiedContext<Self::Context>,
-    ) -> Self::SubmitFuture<'a> {
-        std::future::ready(Ok(intent.clone()))
-    }
-
-    fn output_from_receipt(
-        &self,
-        _input: &Self::Input,
-        _intent: &Self::Intent,
-        receipt: &Self::Receipt,
-        _context: &CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Output> {
-        Ok(receipt.clone())
-    }
-
-    fn output_from_confirmation(
-        &self,
-        _input: &Self::Input,
-        _intent: &Self::Intent,
-        confirmation: &Self::Confirmation,
-        _context: &CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Output> {
-        Ok(confirmation.clone())
-    }
-}
+impl_side_effect_state!(ContextualMutationState);
 
 #[derive(Debug, Clone)]
 struct MultiplyOperation;
