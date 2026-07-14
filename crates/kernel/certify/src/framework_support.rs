@@ -129,27 +129,15 @@ pub(super) fn framework_project_retention_manifest_descriptor(
     config_schema_id: &SchemaId,
     input_schema_id: &SchemaId,
 ) -> Result<spec::StateDescriptorIdentity> {
-    let state_kind = state_kind_json(
+    framework_lifecycle_descriptor(
         "project_retention_manifest",
-        serde_json::json!({ "framework": "project_retention_manifest" }),
-    )?;
-    let state_version = StateVersion::new("mfm.framework.state.project_retention_manifest.v1")
-        .map_err(|error| lower(error.to_string()))?;
-    framework_lifecycle_descriptor(FrameworkStateDescriptorParts {
-        name: "mfm.framework.project_retention_manifest",
-        state_kind,
-        state_version,
-        config_schema_id,
-        input_schema_id,
+        "mfm.framework.project_retention_manifest",
+        "mfm.framework.state.project_retention_manifest.v1",
         output_schema_id,
         output_semantic_type_id,
-        context: spec::StateContextDescriptorSpec::no_context(),
-        effect_kind: ManagedPlatformWrite::descriptor()
-            .map_err(|error| lower(error.to_string()))?
-            .kind,
-        runner: "managed_platform_write",
-        capabilities: NoCaps::descriptor().map_err(|error| lower(error.to_string()))?,
-    })
+        config_schema_id,
+        input_schema_id,
+    )
 }
 
 pub(super) fn framework_complete_run_descriptor(
@@ -158,27 +146,15 @@ pub(super) fn framework_complete_run_descriptor(
     config_schema_id: &SchemaId,
     input_schema_id: &SchemaId,
 ) -> Result<spec::StateDescriptorIdentity> {
-    let state_kind = state_kind_json(
+    framework_lifecycle_descriptor(
         "complete_run",
-        serde_json::json!({ "framework": "complete_run" }),
-    )?;
-    let state_version = StateVersion::new("mfm.framework.state.complete_run.v1")
-        .map_err(|error| lower(error.to_string()))?;
-    framework_lifecycle_descriptor(FrameworkStateDescriptorParts {
-        name: "mfm.framework.complete_run",
-        state_kind,
-        state_version,
-        config_schema_id,
-        input_schema_id,
+        "mfm.framework.complete_run",
+        "mfm.framework.state.complete_run.v1",
         output_schema_id,
         output_semantic_type_id,
-        context: spec::StateContextDescriptorSpec::no_context(),
-        effect_kind: ManagedPlatformWrite::descriptor()
-            .map_err(|error| lower(error.to_string()))?
-            .kind,
-        runner: "managed_platform_write",
-        capabilities: NoCaps::descriptor().map_err(|error| lower(error.to_string()))?,
-    })
+        config_schema_id,
+        input_schema_id,
+    )
 }
 
 pub(super) fn framework_resolve_saga_terminal_descriptor(
@@ -187,14 +163,30 @@ pub(super) fn framework_resolve_saga_terminal_descriptor(
     config_schema_id: &SchemaId,
     input_schema_id: &SchemaId,
 ) -> Result<spec::StateDescriptorIdentity> {
-    let state_kind = state_kind_json(
+    framework_lifecycle_descriptor(
         "resolve_saga_terminal",
-        serde_json::json!({ "framework": "resolve_saga_terminal" }),
-    )?;
-    let state_version = StateVersion::new("mfm.framework.state.resolve_saga_terminal.v1")
-        .map_err(|error| lower(error.to_string()))?;
-    framework_lifecycle_descriptor(FrameworkStateDescriptorParts {
-        name: "mfm.framework.resolve_saga_terminal",
+        "mfm.framework.resolve_saga_terminal",
+        "mfm.framework.state.resolve_saga_terminal.v1",
+        output_schema_id,
+        output_semantic_type_id,
+        config_schema_id,
+        input_schema_id,
+    )
+}
+
+fn framework_lifecycle_descriptor(
+    kind: &'static str,
+    name: &'static str,
+    version: &'static str,
+    output_schema_id: &SchemaId,
+    output_semantic_type_id: &SemanticTypeId,
+    config_schema_id: &SchemaId,
+    input_schema_id: &SchemaId,
+) -> Result<spec::StateDescriptorIdentity> {
+    let state_kind = state_kind_json(kind, serde_json::json!({ "framework": kind }))?;
+    let state_version = StateVersion::new(version).map_err(|error| lower(error.to_string()))?;
+    framework_state_descriptor(FrameworkStateDescriptorParts {
+        name,
         state_kind,
         state_version,
         config_schema_id,
@@ -208,12 +200,6 @@ pub(super) fn framework_resolve_saga_terminal_descriptor(
         runner: "managed_platform_write",
         capabilities: NoCaps::descriptor().map_err(|error| lower(error.to_string()))?,
     })
-}
-
-fn framework_lifecycle_descriptor(
-    parts: FrameworkStateDescriptorParts<'_>,
-) -> Result<spec::StateDescriptorIdentity> {
-    framework_state_descriptor(parts)
 }
 
 struct FrameworkStateDescriptorParts<'a> {
