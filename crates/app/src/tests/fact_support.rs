@@ -340,33 +340,8 @@ pub(super) fn prepare_btc_collector_internal_test_launch() -> Result<RunLaunchRe
     let plan = TypedProgramLaunchPlan::from_draft_and_seed_material(draft, seeds)
         .expect("btc collector launch plan");
     let registry = production_certification_registry().expect("production registry");
-    let lowered = mfm_certify::lower_program_draft(&plan.draft).expect("lowered btc collector");
-    let scoped = registry
-        .scoped_for_spec(lowered.spec())
-        .expect("scoped production registry");
-    let certified_spec =
-        mfm_certify::certify_typed_spec(lowered, &scoped).expect("certified btc collector");
-    let mut config_inputs = plan
-        .config_material
-        .into_iter()
-        .map(|artifact| RunLaunchConfigArtifact {
-            schema_id: artifact.schema_id,
-            bytes: artifact.bytes.to_vec(),
-            media_type: artifact.media_type,
-        })
-        .collect::<Vec<_>>();
-    config_inputs.extend(framework_config_launch_artifacts_for_spec(
-        &certified_spec.envelope().spec,
-    )?);
-    let seed_inputs = plan
-        .seed_material
-        .into_iter()
-        .map(|artifact| RunLaunchSeedArtifact {
-            seed_id: artifact.seed_id,
-            bytes: artifact.bytes.to_vec(),
-            media_type: artifact.media_type,
-        })
-        .collect();
+    let (certified_spec, scoped, config_inputs, seed_inputs) =
+        certify_launch_plan(&plan, &registry)?;
 
     prepare_certified_run_launch(
         CertifiedRunLaunchInput {
@@ -410,32 +385,8 @@ pub(super) fn prepare_app_fact_launch_with_invocation_key_and_state_key(
 ) -> Result<RunLaunchRequest, AppError> {
     let plan = app_fact_launch_plan_with_state_key(state_key);
     let registry = app_fact_certification_registry(include_fact_descriptor);
-    let lowered = mfm_certify::lower_program_draft(&plan.draft).expect("lowered");
-    let scoped = registry
-        .scoped_for_spec(lowered.spec())
-        .expect("scoped registry");
-    let certified_spec = mfm_certify::certify_typed_spec(lowered, &scoped).expect("certified spec");
-    let mut config_inputs = plan
-        .config_material
-        .into_iter()
-        .map(|artifact| RunLaunchConfigArtifact {
-            schema_id: artifact.schema_id,
-            bytes: artifact.bytes.to_vec(),
-            media_type: artifact.media_type,
-        })
-        .collect::<Vec<_>>();
-    config_inputs.extend(framework_config_launch_artifacts_for_spec(
-        &certified_spec.envelope().spec,
-    )?);
-    let seed_inputs = plan
-        .seed_material
-        .into_iter()
-        .map(|artifact| RunLaunchSeedArtifact {
-            seed_id: artifact.seed_id,
-            bytes: artifact.bytes.to_vec(),
-            media_type: artifact.media_type,
-        })
-        .collect();
+    let (certified_spec, scoped, config_inputs, seed_inputs) =
+        certify_launch_plan(&plan, &registry)?;
 
     prepare_certified_run_launch(
         CertifiedRunLaunchInput {
