@@ -193,8 +193,7 @@ fn test_lock_comprehensive() {
 }
 
 #[test]
-fn test_import_private_key_edge_cases() {
-    init_test_observability();
+fn test_import_private_key_accepts_valid_formats() {
     let (_temp_dir, mut keystore) = test_keystore();
     keystore.unlock("test_password").unwrap();
 
@@ -207,36 +206,17 @@ fn test_import_private_key_edge_cases() {
     ];
 
     for (i, key) in valid_keys.iter().enumerate() {
-        let result = keystore.import_private_key(Some(format!("key_{i}")), key);
-        match result {
-            Ok(_) => info!(test_case = i, "valid private key import accepted"),
-            Err(e) => panic!("Failed to import valid key {i}: {key} - Error: {e:?}"),
-        }
-    }
-
-    // Test invalid private key formats
-    let invalid_keys = [
-        "invalid_hex",
-        "0x",
-        "",
-        "0000000000000000000000000000000000000000000000000000000000000000", // Zero key
-        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", // Curve order (invalid)
-        "1234567890abcdef",                                                 // Too short
-        "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef00", // Too long
-    ];
-
-    for key in invalid_keys {
-        let result = keystore.import_private_key(None, key);
-        if result.is_ok() {
-            warn!("invalid format key accepted by parser; this may be acceptable");
-        }
-        // Note: We don't assert failure here since some edge cases might be acceptable
+        assert!(
+            keystore
+                .import_private_key(Some(format!("key_{i}")), key)
+                .is_ok(),
+            "valid private key import rejected at case {i}"
+        );
     }
 }
 
 #[test]
 fn test_import_mnemonic_edge_cases() {
-    init_test_observability();
     let (_temp_dir, mut keystore) = test_keystore();
     keystore.unlock("test_password").unwrap();
 
@@ -256,23 +236,6 @@ fn test_import_mnemonic_edge_cases() {
         assert!(result.is_ok(), "Failed to import with valid path: {path}");
     }
 
-    // Test invalid derivation paths
-    let invalid_paths = [
-        "invalid/path",
-        "m/44'/60'/0'/0/-1", // Negative index
-        "",
-        "m",
-        "m/44'/60'/0'/0/999999999999999999999", // Very large index
-    ];
-
-    for path in invalid_paths {
-        let result = keystore.import_mnemonic(None, valid_mnemonic, path, None);
-        if result.is_err() {
-            info!("invalid derivation path rejected by parser");
-        }
-        // Note: Some paths might be accepted by the underlying library
-    }
-
     // Test invalid mnemonics
     let invalid_mnemonics = [
         "invalid mnemonic phrase",
@@ -281,9 +244,9 @@ fn test_import_mnemonic_edge_cases() {
         "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon invalid", // Invalid word
     ];
 
-    for mnemonic in invalid_mnemonics {
+    for (i, mnemonic) in invalid_mnemonics.iter().enumerate() {
         let result = keystore.import_mnemonic(None, mnemonic, "m/44'/60'/0'/0/0", None);
-        assert!(result.is_err(), "Invalid mnemonic should fail: {mnemonic}");
+        assert!(result.is_err(), "invalid mnemonic accepted at case {i}");
     }
 }
 

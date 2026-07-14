@@ -6,9 +6,7 @@ use super::*;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use static_assertions::assert_not_impl_any;
 use std::path::Path;
-use std::sync::Once;
 use tempfile::tempdir;
-use tracing::{info, warn};
 
 #[path = "audit_tests.rs"]
 mod audit_tests;
@@ -22,19 +20,6 @@ mod integrity_tests;
 mod lifecycle_tests;
 #[path = "surface_tests.rs"]
 mod surface_tests;
-
-fn init_test_observability() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,mfm=debug")),
-            )
-            .with_test_writer()
-            .try_init();
-    });
-}
 
 /// Helper function to create a test keystore with development config
 fn test_keystore() -> (tempfile::TempDir, Keystore) {

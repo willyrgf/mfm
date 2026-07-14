@@ -2974,8 +2974,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tiny-keccak",
- "tracing",
- "tracing-subscriber",
  "uuid",
  "zeroize",
 ]
