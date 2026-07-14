@@ -7,15 +7,23 @@ pub(super) fn run_status_from_projection(
     projection: &store::ProjectionSnapshot,
 ) -> Result<RunResponse, AppError> {
     let spec_hash = run_admitted_spec_hash(stream)?;
-    run_status_from_projection_with_spec_hash(run_id, runtime_spec, stream, projection, &spec_hash)
+    run_response_from_projection_with_spec_hash(
+        run_id,
+        runtime_spec,
+        stream,
+        projection,
+        &spec_hash,
+        "observed",
+    )
 }
 
-pub(super) fn run_status_from_projection_with_spec_hash(
+fn run_response_from_projection_with_spec_hash(
     run_id: &RunId,
     runtime_spec: &CertifiedRuntimeSpec,
     stream: &[store::KernelEventEnvelope],
     projection: &store::ProjectionSnapshot,
     spec_hash: &SpecHash,
+    scheduler_status: &str,
 ) -> Result<RunResponse, AppError> {
     let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
     let saga =
@@ -26,7 +34,7 @@ pub(super) fn run_status_from_projection_with_spec_hash(
         run_mode: run_mode_status(saga.run_mode),
         saga: saga_status_with_resources(runtime_spec.spec(), projection, &saga),
         attempt_dispositions: attempt_dispositions(projection),
-        scheduler_status: "observed".to_owned(),
+        scheduler_status: scheduler_status.to_owned(),
         head_seq: stream_head(stream),
     })
 }
@@ -482,18 +490,14 @@ pub(super) fn run_response_from_projection(
     projection: &store::ProjectionSnapshot,
     status: DriveStatus,
 ) -> Result<RunResponse, AppError> {
-    let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
-    let saga =
-        projection.derive_saga_projection(run_id, &runtime_spec.spec().saga, &terminal_policies)?;
-    Ok(RunResponse {
-        run_id: run_id.as_str().to_owned(),
-        spec_hash: runtime_spec.spec_hash().as_str().to_owned(),
-        run_mode: run_mode_status(saga.run_mode),
-        saga: saga_status_with_resources(runtime_spec.spec(), projection, &saga),
-        attempt_dispositions: attempt_dispositions(projection),
-        scheduler_status: status.as_str().to_owned(),
-        head_seq: stream_head(stream),
-    })
+    run_response_from_projection_with_spec_hash(
+        run_id,
+        runtime_spec,
+        stream,
+        projection,
+        runtime_spec.spec_hash(),
+        status.as_str(),
+    )
 }
 
 pub(super) fn status_projection_from_verified_view_with_resource_lanes(
