@@ -19,6 +19,17 @@ pub(super) struct DraftLowerer<'a> {
     nodes: Vec<spec::NodeSpec>,
 }
 
+struct FrameworkLifecycleNode {
+    node_id: NodeId,
+    stable_key: spec::StableAuthorKey,
+    config_ref: spec::ConfigRef,
+    input_binding: spec::InputBindingSpec,
+    descriptor: spec::StateDescriptorIdentity,
+    input_cells: Vec<CellId>,
+    framework: spec::FrameworkNodeSpec,
+    planning_lineage: spec::PlanningLineage,
+}
+
 impl<'a> DraftLowerer<'a> {
     pub(super) fn new(draft: &'a program::TypedProgramDraft) -> Result<Self> {
         Ok(Self {
@@ -695,15 +706,8 @@ impl<'a> DraftLowerer<'a> {
             .map_err(|error| CertifyError::Spec(error.to_string()))?;
         let receipt_schema_id = spec::retention_manifest_receipt_schema_id()
             .map_err(|error| CertifyError::Spec(error.to_string()))?;
-        let output_cell = framework_cell_id(
-            self.draft.root_scope_id(),
-            &node_id,
-            &semantic_type_id,
-            &receipt_schema_id,
-        )?;
         let planning_lineage = final_planning_lineage(self.draft.operation_lineage())?;
         let config_ref = framework_config_ref("project_retention_manifest", &node_id)?;
-        let config_ref_digest = config_ref_digest(&config_ref)?;
         let input_cell = self
             .cells
             .iter()
@@ -729,61 +733,16 @@ impl<'a> DraftLowerer<'a> {
             &config_ref.schema_id,
             &input_binding.input_schema_id,
         )?;
-        let lineage_ref = render_value_lineage_ref(
-            self.draft.root_scope_id(),
-            &node_id,
-            std::slice::from_ref(&public_output_receipt_cell),
-            &planning_lineage,
-            &config_ref_digest,
-        )?;
-        self.insert_config_ref(config_ref.clone())?;
-        self.insert_descriptor(spec::DescriptorIdentity::State(Box::new(
-            descriptor.clone(),
-        )))?;
-        self.insert_value_lineage(spec::ValueLineage {
-            lineage_ref: lineage_ref.clone(),
-            scope_id: self.draft.root_scope_id().clone(),
-            producer: spec::CellProducer::Node(node_id.clone()),
-            input_cells: vec![public_output_receipt_cell.clone()],
-            config_ref_digest: Some(config_ref_digest),
-            planning_lineage: planning_lineage.clone(),
-            domain_keys: Vec::new(),
-            transform_policy: spec::LineageTransformPolicy::StateOutput,
-        })?;
-        self.insert_cell(spec::CellSpec {
-            cell_id: output_cell.clone(),
-            producer: spec::CellProducer::Node(node_id.clone()),
-            scope_id: self.draft.root_scope_id().clone(),
-            semantic_type_id,
-            schema_id: receipt_schema_id,
-            value_lineage: lineage_ref,
-            terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
-            storage_policy: spec::StoragePolicy::ContentAddressed,
-            redaction_policy: spec::RedactionPolicy::Public,
-            context: spec::CellContextSpec::no_context(),
-        })?;
-        self.nodes.push(spec::NodeSpec {
+        self.lower_framework_lifecycle_node(FrameworkLifecycleNode {
             node_id,
             stable_key,
-            scope_id: self.draft.root_scope_id().clone(),
-            state_kind: descriptor.state_kind,
-            state_version: descriptor.state_version,
-            descriptor_id: descriptor.descriptor_id,
-            context: spec::NodeContextSpec::no_context(),
             config_ref,
-            input_bindings: input_binding,
-            output_cell: output_cell.clone(),
-            effect_kind: descriptor.effect_kind,
-            capability_bindings: descriptor.capabilities,
-            adapter_bindings: Vec::new(),
-            fact_descriptor_allowlist: Vec::new(),
-            side_effect: None,
-            framework: Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(retention)),
+            input_binding,
+            descriptor,
+            input_cells: vec![public_output_receipt_cell],
+            framework: spec::FrameworkNodeSpec::ProjectRetentionManifest(retention),
             planning_lineage,
-            deterministic_predecessors: self
-                .predecessors_for_inputs(std::slice::from_ref(&public_output_receipt_cell))?,
-        });
-        Ok(output_cell)
+        })
     }
 
     fn lower_complete_run_node(
@@ -805,15 +764,8 @@ impl<'a> DraftLowerer<'a> {
             .map_err(|error| CertifyError::Spec(error.to_string()))?;
         let receipt_schema_id = spec::complete_run_receipt_schema_id()
             .map_err(|error| CertifyError::Spec(error.to_string()))?;
-        let output_cell = framework_cell_id(
-            self.draft.root_scope_id(),
-            &node_id,
-            &semantic_type_id,
-            &receipt_schema_id,
-        )?;
         let planning_lineage = final_planning_lineage(self.draft.operation_lineage())?;
         let config_ref = framework_config_ref("complete_run", &node_id)?;
-        let config_ref_digest = config_ref_digest(&config_ref)?;
         let input_cell = self
             .cells
             .iter()
@@ -839,61 +791,16 @@ impl<'a> DraftLowerer<'a> {
             &config_ref.schema_id,
             &input_binding.input_schema_id,
         )?;
-        let lineage_ref = render_value_lineage_ref(
-            self.draft.root_scope_id(),
-            &node_id,
-            std::slice::from_ref(&retention_manifest_receipt_cell),
-            &planning_lineage,
-            &config_ref_digest,
-        )?;
-        self.insert_config_ref(config_ref.clone())?;
-        self.insert_descriptor(spec::DescriptorIdentity::State(Box::new(
-            descriptor.clone(),
-        )))?;
-        self.insert_value_lineage(spec::ValueLineage {
-            lineage_ref: lineage_ref.clone(),
-            scope_id: self.draft.root_scope_id().clone(),
-            producer: spec::CellProducer::Node(node_id.clone()),
-            input_cells: vec![retention_manifest_receipt_cell.clone()],
-            config_ref_digest: Some(config_ref_digest),
-            planning_lineage: planning_lineage.clone(),
-            domain_keys: Vec::new(),
-            transform_policy: spec::LineageTransformPolicy::StateOutput,
-        })?;
-        self.insert_cell(spec::CellSpec {
-            cell_id: output_cell.clone(),
-            producer: spec::CellProducer::Node(node_id.clone()),
-            scope_id: self.draft.root_scope_id().clone(),
-            semantic_type_id,
-            schema_id: receipt_schema_id,
-            value_lineage: lineage_ref,
-            terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
-            storage_policy: spec::StoragePolicy::ContentAddressed,
-            redaction_policy: spec::RedactionPolicy::Public,
-            context: spec::CellContextSpec::no_context(),
-        })?;
-        self.nodes.push(spec::NodeSpec {
+        self.lower_framework_lifecycle_node(FrameworkLifecycleNode {
             node_id,
             stable_key,
-            scope_id: self.draft.root_scope_id().clone(),
-            state_kind: descriptor.state_kind,
-            state_version: descriptor.state_version,
-            descriptor_id: descriptor.descriptor_id,
-            context: spec::NodeContextSpec::no_context(),
             config_ref,
-            input_bindings: input_binding,
-            output_cell: output_cell.clone(),
-            effect_kind: descriptor.effect_kind,
-            capability_bindings: descriptor.capabilities,
-            adapter_bindings: Vec::new(),
-            fact_descriptor_allowlist: Vec::new(),
-            side_effect: None,
-            framework: Some(spec::FrameworkNodeSpec::CompleteRun(complete)),
+            input_binding,
+            descriptor,
+            input_cells: vec![retention_manifest_receipt_cell],
+            framework: spec::FrameworkNodeSpec::CompleteRun(complete),
             planning_lineage,
-            deterministic_predecessors: self
-                .predecessors_for_inputs(std::slice::from_ref(&retention_manifest_receipt_cell))?,
-        });
-        Ok(output_cell)
+        })
     }
 
     fn lower_resolve_saga_terminal_node(
@@ -913,15 +820,8 @@ impl<'a> DraftLowerer<'a> {
             .map_err(|error| CertifyError::Spec(error.to_string()))?;
         let receipt_schema_id = spec::resolve_saga_terminal_receipt_schema_id()
             .map_err(|error| CertifyError::Spec(error.to_string()))?;
-        let output_cell = framework_cell_id(
-            self.draft.root_scope_id(),
-            &node_id,
-            &semantic_type_id,
-            &receipt_schema_id,
-        )?;
         let planning_lineage = final_planning_lineage(self.draft.operation_lineage())?;
         let config_ref = framework_config_ref("resolve_saga_terminal", &node_id)?;
-        let config_ref_digest = config_ref_digest(&config_ref)?;
         let input_binding = spec::framework_lifecycle_unit_input_binding("resolve_saga_terminal")
             .map_err(|error| CertifyError::Spec(error.to_string()))?;
         let descriptor = framework_resolve_saga_terminal_descriptor(
@@ -930,10 +830,44 @@ impl<'a> DraftLowerer<'a> {
             &config_ref.schema_id,
             &input_binding.input_schema_id,
         )?;
-        let lineage_ref = render_value_lineage_ref(
-            self.draft.root_scope_id(),
+        self.lower_framework_lifecycle_node(FrameworkLifecycleNode {
+            node_id,
+            stable_key,
+            config_ref,
+            input_binding,
+            descriptor,
+            input_cells: Vec::new(),
+            framework: spec::FrameworkNodeSpec::ResolveSagaTerminal(resolve),
+            planning_lineage,
+        })
+    }
+
+    fn lower_framework_lifecycle_node(
+        &mut self,
+        lifecycle: FrameworkLifecycleNode,
+    ) -> Result<CellId> {
+        let FrameworkLifecycleNode {
+            node_id,
+            stable_key,
+            config_ref,
+            input_binding,
+            descriptor,
+            input_cells,
+            framework,
+            planning_lineage,
+        } = lifecycle;
+        let scope_id = self.draft.root_scope_id().clone();
+        let output_cell = framework_cell_id(
+            &scope_id,
             &node_id,
-            &[],
+            &descriptor.output_semantic_type_id,
+            &descriptor.output_schema_id,
+        )?;
+        let config_ref_digest = config_ref_digest(&config_ref)?;
+        let lineage_ref = render_value_lineage_ref(
+            &scope_id,
+            &node_id,
+            &input_cells,
             &planning_lineage,
             &config_ref_digest,
         )?;
@@ -943,9 +877,9 @@ impl<'a> DraftLowerer<'a> {
         )))?;
         self.insert_value_lineage(spec::ValueLineage {
             lineage_ref: lineage_ref.clone(),
-            scope_id: self.draft.root_scope_id().clone(),
+            scope_id: scope_id.clone(),
             producer: spec::CellProducer::Node(node_id.clone()),
-            input_cells: Vec::new(),
+            input_cells: input_cells.clone(),
             config_ref_digest: Some(config_ref_digest),
             planning_lineage: planning_lineage.clone(),
             domain_keys: Vec::new(),
@@ -954,9 +888,9 @@ impl<'a> DraftLowerer<'a> {
         self.insert_cell(spec::CellSpec {
             cell_id: output_cell.clone(),
             producer: spec::CellProducer::Node(node_id.clone()),
-            scope_id: self.draft.root_scope_id().clone(),
-            semantic_type_id,
-            schema_id: receipt_schema_id,
+            scope_id: scope_id.clone(),
+            semantic_type_id: descriptor.output_semantic_type_id.clone(),
+            schema_id: descriptor.output_schema_id.clone(),
             value_lineage: lineage_ref,
             terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
             storage_policy: spec::StoragePolicy::ContentAddressed,
@@ -966,7 +900,7 @@ impl<'a> DraftLowerer<'a> {
         self.nodes.push(spec::NodeSpec {
             node_id,
             stable_key,
-            scope_id: self.draft.root_scope_id().clone(),
+            scope_id,
             state_kind: descriptor.state_kind,
             state_version: descriptor.state_version,
             descriptor_id: descriptor.descriptor_id,
@@ -979,9 +913,9 @@ impl<'a> DraftLowerer<'a> {
             adapter_bindings: Vec::new(),
             fact_descriptor_allowlist: Vec::new(),
             side_effect: None,
-            framework: Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(resolve)),
+            framework: Some(framework),
             planning_lineage,
-            deterministic_predecessors: Vec::new(),
+            deterministic_predecessors: self.predecessors_for_inputs(&input_cells)?,
         });
         Ok(output_cell)
     }
