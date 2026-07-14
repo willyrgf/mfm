@@ -21,11 +21,7 @@ struct ContextContractValidateRunner {
 
 impl ErasedNodeRunner for ContextContractValidateRunner {
     fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
-        let context = ctx.context()?.certified_context::<EvmContractContext>()?;
-        let binding = runtime_evm_network_binding_for_context(&context)?;
-        self.factory
-            .validate_runtime_for(&binding, None)
-            .map(|_| ())
+        validate_context_runtime(&ctx, self.factory.as_ref())
     }
 
     fn context_output_extractor(&self) -> Option<&dyn mfm_runtime::ContextOutputExtractor> {
@@ -44,11 +40,7 @@ struct ImportDeployedRunner {
 
 impl ErasedNodeRunner for ImportDeployedRunner {
     fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
-        let context = ctx.context()?.certified_context::<EvmContractContext>()?;
-        let binding = runtime_evm_network_binding_for_context(&context)?;
-        self.factory
-            .validate_runtime_for(&binding, None)
-            .map(|_| ())
+        validate_context_runtime(&ctx, self.factory.as_ref())
     }
 
     fn context_output_extractor(&self) -> Option<&dyn mfm_runtime::ContextOutputExtractor> {
@@ -67,11 +59,7 @@ struct ImportConfiguredRunner {
 
 impl ErasedNodeRunner for ImportConfiguredRunner {
     fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
-        let context = ctx.context()?.certified_context::<EvmContractContext>()?;
-        let binding = runtime_evm_network_binding_for_context(&context)?;
-        self.factory
-            .validate_runtime_for(&binding, None)
-            .map(|_| ())
+        validate_context_runtime(&ctx, self.factory.as_ref())
     }
 
     fn context_output_extractor(&self) -> Option<&dyn mfm_runtime::ContextOutputExtractor> {
@@ -149,6 +137,15 @@ impl mfm_runtime::ContextOutputExtractor for ContractLifecycleContextOutputExtra
             stage
         )))
     }
+}
+
+fn validate_context_runtime(
+    ctx: &RunnerIngressContext<'_>,
+    factory: &dyn EvmContractRuntimeFactory,
+) -> mfm_runtime::Result<()> {
+    let context = ctx.context()?.certified_context::<EvmContractContext>()?;
+    let binding = runtime_evm_network_binding_for_context(&context)?;
+    factory.validate_runtime_for(&binding, None).map(|_| ())
 }
 
 fn side_effect_verify_submit_node<'a>(
