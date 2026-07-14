@@ -481,11 +481,7 @@ fn verify_configured_replay_output(
         ));
     }
     match &output.configuration_claim {
-        ConfigurationClaim::MfmConfigured {
-            call_evidence_refs,
-            confirmation_evidence_refs,
-            ..
-        } => {
+        ConfigurationClaim::MfmConfigured { .. } => {
             let expected = expected_configured_output_from_verified_side_effect(
                 broker,
                 frame,
@@ -496,20 +492,6 @@ fn verify_configured_replay_output(
                 return Err(replay_contract_mismatch(
                     "mfm configured output does not match replayed side-effect evidence",
                 ));
-            }
-            if let ConfigurationClaim::MfmConfigured {
-                call_evidence_refs: expected_call_refs,
-                confirmation_evidence_refs: expected_confirmation_refs,
-                ..
-            } = &expected.configuration_claim
-            {
-                if call_evidence_refs != expected_call_refs
-                    || confirmation_evidence_refs != expected_confirmation_refs
-                {
-                    return Err(replay_contract_mismatch(
-                        "configured output evidence refs do not match replayed side-effect evidence",
-                    ));
-                }
             }
             if output.external_adoption_evidence.is_some() {
                 return Err(replay_contract_mismatch(
