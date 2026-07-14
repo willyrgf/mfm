@@ -1,8 +1,8 @@
 # RFC: configuration authoring current state, problem statement, and proposed solution 1
 
-Status: problem definition with a preferred first proposal; design not yet accepted
+Status: preferred design accepted for implementation planning
 
-Date: 2026-07-13
+Date: 2026-07-14
 
 ## Summary
 
@@ -27,7 +27,8 @@ operations.
 This document records the current implementation and problem, then proposes a typed,
 PostgreSQL-backed configuration catalog as the preferred first solution. The catalog is limited to
 setup-time authoring and pre-planning resolution. Existing operation, state, capability, runtime,
-certification, and replay responsibilities remain authoritative after resolution.
+certification, and replay responsibilities remain authoritative after resolution. The proposal is
+a breaking replacement for direct per-operation authored config, not an additional path beside it.
 
 ## Scope
 
@@ -450,11 +451,12 @@ This section defines outcomes, not an implementation.
 4. Existing typed capability contracts and runtime binding checks remain responsible for runtime
    completeness; the catalog does not duplicate capability declarations or persist live resources
    into certified semantics.
-5. Public entry-point metadata is sufficient for machine discovery, validation, examples, and
-   version-aware tooling.
+5. Public entry-point metadata identifies each exact entry point and its request schema. Typed
+   request decoding remains the validation authority; generic schema generation and example
+   synthesis are not prerequisites for the first implementation.
 6. The effective config for every certified run remains explicit, canonical, content-addressed, and
    replayable.
-7. Authored source provenance and generated config provenance have an intentional contract.
+7. Exact catalog source identities and generated config provenance have an intentional contract.
 8. CLI and REST share equivalent config semantics even if their transport encodings differ.
 9. Partial config, stale fields, ambiguous precedence, and accidental secret promotion fail closed.
 10. Existing op/state/adapter/transport boundaries and the report-only, fact-backed authority split
@@ -476,7 +478,7 @@ complete `MfmConfig`.
 The catalog has no responsibility after that point:
 
 ```text
-TOML import, CLI, REST, or onboarding UI
+setup TOML import
   -> validate, canonicalize, and append typed catalog values
 
 entry-point request with exact CatalogRef<T> values
@@ -492,19 +494,17 @@ or a replacement for typed operation config.
 
 ### Minimal persistence model
 
-A single table is sufficient:
+A single table in the existing PostgreSQL store authority is sufficient:
 
 ```text
-catalog_value
-  scope_id
+catalog_values
   name
   schema_id
-  canonical_json_bytes
   digest
-  created_at
+  canonical_json
 
 primary key
-  (scope_id, name, schema_id, digest)
+  (name, schema_id, digest)
 ```
 
 `name` is a stable human-facing path such as `networks/ethereum-mainnet` or
@@ -512,9 +512,23 @@ primary key
 the canonical value and serves as its revision. Canonical JSON bytes, rather than PostgreSQL JSONB
 normalization, are the authoritative payload.
 
-Publishing a changed value inserts another row under the same name with a new digest. The
-application role does not update or delete published rows. A setup import may insert several rows in
-one ordinary PostgreSQL transaction, but there is no first-class catalog release or snapshot table.
+The table enforces conservative name, schema-id, digest, and 256 KiB payload bounds. The existing
+append-only database trigger contract rejects update, delete, and truncate. An insert that conflicts
+on the exact primary key is accepted only after the stored bytes are verified equal, so retries are
+idempotent but hash/key collisions fail closed. Listing returns identity metadata only with bounded
+keyset pagination; exact export returns canonical bytes after digest verification.
+
+Publishing a changed value inserts another row under the same name with a new digest. The database
+schema and existing store-scope authority provide isolation, so catalog identity does not duplicate
+`scope_id`. Creation time is not semantic identity and is unnecessary while there is no "latest"
+selector. The application role does not update, delete, or truncate published rows. A setup import
+may insert several rows in one ordinary PostgreSQL transaction, but there is no first-class catalog
+release or snapshot table.
+
+The existing PostgreSQL storage crate, pool, migrator, and schema authority are reused. Because the
+crate will no longer store only streams, the implementation should rename it and its concrete store
+type to general PostgreSQL storage names and delete the old names. It must not introduce a second
+PostgreSQL crate, pool, migration authority, or compatibility aliases.
 
 PostgreSQL is the first persistence implementation, not part of catalog value identity. An exact
 reference and its canonical bytes are sufficient to verify a value without later database access.
@@ -522,11 +536,12 @@ reference and its canonical bytes are sufficient to verify a value without later
 ### Reuse the existing typed config contract
 
 The catalog storage mechanism is general, but the values are not an untyped bag of JSON settings.
-Domain crates own concrete Rust types, schema descriptors, decoding, and validation. The initial
-design reuses `MfmConfig` for catalog values because it already describes deterministic config safe
-to persist, exposes a schema id, and has a semantic validation hook. If explicit catalog opt-in is
-needed later, a zero-behavior `CatalogValue: MfmConfig` marker is sufficient; it must not introduce a
-second schema or validation framework.
+Domain crates own concrete Rust types, schema descriptors, decoding, and validation. The design
+reuses `MfmConfig` directly for catalog values because it already describes deterministic config
+safe to persist, exposes a schema id, has a semantic validation hook, and prohibits secrets. There
+is no `CatalogValue` marker trait or second schema and validation framework. Setup import supports a
+closed list of concrete resource document types; it is not a public generic "persist any JSON"
+surface.
 
 Initial value families are expected to include:
 
@@ -540,7 +555,6 @@ The only new typed primitive required by the core model is an exact reference:
 
 ```rust
 struct CatalogRef<T: MfmConfig> {
-    scope: ConfigScope,
     name: ConfigName,
     digest: ContentDigest,
     _type: PhantomData<fn() -> T>,
@@ -570,20 +584,16 @@ struct EvmBalanceRequest {
 No `Resolved<T>` framework type is required. The application loads ordinary typed values, and the
 operation-owned builder accepts those values directly.
 
-### Names are authoring convenience; digests are durable identity
+### Names are labels; digests are durable identity
 
-Setup tools may list the newest value published under a human-facing name. A CLI, REST, or UI
-request may also accept a name-only selector for an immediate operation start. Name resolution must
-occur exactly once and produce an exact `CatalogRef<T>` before config construction.
+Every operation request contains exact references. There is no name-only, latest, current, alias,
+or implicit resolution path. Setup import returns the exact `(name, schema_id, digest)` identity,
+and catalog listing exposes those identities so a CLI, REST client, or UI can select one explicitly.
+Preview, approval, storage, delayed launch, and execution therefore use the same immutable value.
 
-Any preview, approval, stored request, or delayed launch must retain and reuse the pinned digest. It
-must not resolve the name again between review and execution. This prevents a name update from
-changing the approved operation config.
-
-No mutable alias or current-revision table is required initially. The append-only rows retain
-history, and the exact digest identifies the selected value. Recurring fleet workflows that later
-need mutable environment pointers may add them as authoring convenience, but such pointers must
-always resolve to exact refs before planning.
+This intentionally gives up the convenience of "whatever is newest". If a future recurring-fleet
+feature needs mutable environment pointers, that feature requires a separate design and must still
+pin exact references before operation preparation.
 
 ### Versioning and explicit migration
 
@@ -618,7 +628,7 @@ networks/ethereum-mainnet
 
 `CatalogRef<EvmNetworkV1>` cannot load the `EvmNetworkV2` row because the generic loader verifies
 the exact schema id before decoding. Durable language-neutral references and launch provenance
-retain `scope`, `name`, `schema_id`, and `digest`, even though Rust can derive the expected schema id
+retain `name`, `schema_id`, and `digest`, even though Rust can derive the expected schema id
 from `T`.
 
 Schema migration is an explicit pure transformation from one exact typed value to another:
@@ -634,10 +644,11 @@ A migration never updates or deletes the source row, never runs implicitly insid
 runs during operation launch. Setup tooling may expose migration commands, but the result is always
 a reviewable newly appended value with a new exact reference.
 
-The public entry-point operation version declares the request and catalog schemas its builder
-accepts. A new operation version may require a new catalog schema or may explicitly support more
-than one version through typed variants. Similar field shapes never imply compatibility, and the
-loader never guesses or silently upgrades a value.
+The exact public entry-point id includes the operation version and declares the request and catalog
+schemas its builder accepts. A new operation version may require a new catalog schema or may
+explicitly support more than one version through typed variants. Similar field shapes never imply
+compatibility, and the loader never guesses or silently upgrades a value. Public run ingress never
+selects a latest operation version.
 
 Changing PostgreSQL columns, indexes, or storage encodings is an independent database migration. It
 must preserve the stored canonical bytes, schema ids, and digests and does not create a new semantic
@@ -663,7 +674,7 @@ fn build_config(
 
 The application flow is:
 
-1. Parse the entry-point request and pin any name-only selectors to exact digests.
+1. Parse an entry-point request that already contains exact digests.
 2. Load each `CatalogRef<T>` through the generic typed loader.
 3. Pass the ordinary typed values to the operation-owned `build_config` function.
 4. Validate the resulting complete `MfmConfig` through its existing operation contract.
@@ -757,10 +768,10 @@ mfm setup import organization.toml
   -> append all rows in one transaction
 ```
 
-CLI, REST, and a UI can then add or revise networks, public wallet identities, token sets,
-portfolio groupings, and non-secret signer intents without creating one handwritten TOML file per
-operation. TOML and JSON become import/export encodings for typed catalog resources rather than the
-long-term source of operational composition.
+The initial CLI can then add or revise networks, public wallet identities, token sets, portfolio
+groupings, and non-secret signer intents without creating one handwritten TOML file per operation.
+TOML is the setup import encoding and canonical JSON is the exact export encoding. Future REST or UI
+onboarding may reuse the same typed publication boundary after its authorization model is designed.
 
 Setup validation has three layers:
 
@@ -778,7 +789,7 @@ reads.
 No separate derivation receipt is required initially. Existing launch evidence should retain the
 small source set:
 
-- catalog scope and name;
+- catalog name;
 - exact schema id and digest selected for each value.
 
 The generated canonical operation-config digest and certified-spec identity already exist in the
@@ -792,6 +803,107 @@ The failure boundary is intentional:
 - publishing under an existing name appends a new digest and cannot mutate an exact ref;
 - config construction fails closed on missing, incompatible, oversized, or ambiguous references;
 - no successful resolution can leave the operation with a partially populated config.
+
+### Required breaking cutover and deletion
+
+The catalog replaces the current direct-authoring path in one cutover. The repository must not
+retain both models, add fallback decoding, preserve old public names through aliases, or add legacy
+event/schema readers. Once the catalog-backed start path is usable, the only semantic start path is:
+
+```text
+exact entry-point id + JSON typed-reference request
+  -> load exact typed catalog values
+  -> operation-owned build_config
+  -> complete MfmConfig
+  -> existing planning, certification, admission, and runtime
+```
+
+TOML remains an import encoding for setup and an encoding for process-local runtime configuration.
+It is no longer a per-operation run-start encoding.
+
+The implementation is expected to make the following hard deletions.
+
+#### Remove duplicate config crates and canonicalization
+
+- Delete `crates/authored-config` and its `AuthoredConfig`, `AuthoredConfigFormat`,
+  `NormalizedAuthoredConfig<T>`, `EntryPointDescriptor`, format detection/fallback, source-digest,
+  and TOML-to-JSON normalization paths.
+- Delete `crates/portfolio-config` and its authored, canonical, build-report, parse, and
+  canonicalization types.
+- Use `mfm_portfolio_model::PortfolioConfig` directly as the portfolio tracker operation config.
+  Delete `PortfolioWorkflowConfig` and its authored/canonical conversions.
+- Retain one canonical config authority: `MfmConfig::validate`, `ValidatedConfig<T>`, canonical
+  config binding, certified config artifacts, and typed-program config material. Domain
+  normalization such as stable portfolio collection ordering remains because it defines semantics.
+- Remove the hidden sample-network `Default` implementations from public BTC and EVM collector
+  configs. Production builders and tests must provide explicit values.
+
+This removes two crates and three representations of portfolio semantic config without replacing
+them with equivalent catalog wrappers.
+
+#### Collapse entry-point selection and preparation
+
+- Replace the public name plus optional version contract with one exact entry-point id containing
+  its version, for example `mfm.portfolio/portfolio_snapshot@1`.
+- Delete latest-version resolution, accepted-format metadata, nested name/version maps, the global
+  registry digest, public registry construction, and format-bearing descriptor constants in
+  operation crates.
+- Delete `LaunchableOp`, `EntryPointPlannerAdapter`, and public adapter/registration variants that
+  exist only to feed the old authored-config path.
+- Keep a private application dispatch table from exact entry-point id to one typed request
+  preparation function. Do not introduce a public dynamic builder trait or service-locator API.
+- Preserve operation-owned `build_config` functions and ordinary operation-specific errors. Collapse
+  app error wrappers that merely translate another error without adding a stable boundary.
+
+An incompatible request or builder change creates another exact entry-point id. There is no public
+`latest`, compatibility range, or implicit selection rule.
+
+#### Replace CLI and REST run ingress
+
+- Replace CLI `--op`, `--op-version`, `--config`, and `--config-format` with `--entry-point` and a
+  JSON request containing exact typed catalog references and operation-local policy.
+- Replace REST `op`, optional `op_version`, optional `config_format`, and flexible TOML/JSON `config`
+  with `entry_point` and a JSON `request` object with the same semantics as CLI.
+- Change operation discovery to report exact entry-point ids and request schema ids. Do not retain
+  accepted-format output.
+- Delete direct per-operation TOML/JSON examples and replace them with one setup-import example and
+  small exact-reference request examples. Keep runtime-config examples separate.
+
+#### Make provenance local and exact
+
+- Replace `resolved_op_id` plus `entry_point_registry_digest` launch evidence with the exact
+  entry-point id and the sorted exact catalog source identities used by that launch.
+- Overwrite the current event schema, codec, fixtures, and runtime identity representation. Do not
+  add a legacy event variant, compatibility decoder, migration shim, or dual-write period.
+- Continue to use the generated operation-config digest and certified-spec identity as the
+  authority for what executes. Catalog sources explain where reusable inputs came from; they do not
+  become another runtime authority.
+
+#### Remove obsolete tests, examples, and dependencies
+
+- Delete tests whose only contract is authored-config parsing, format parity, accepted formats,
+  latest-version resolution, old request envelopes, or removed compatibility behavior.
+- Rewrite behaviorally valuable app, CLI, REST, operation, and integration tests to seed exact
+  catalog values and submit typed-reference requests.
+- Delete the old per-operation config examples and the root-level ignored-TOML convention. Keep
+  explicit ignores only for genuinely local setup/runtime files.
+- Remove `mfm-authored-config` and `mfm-portfolio-config` from every manifest and regenerate the lock
+  file. Do not keep facade crates or deprecated re-exports.
+
+The deletion audit estimates roughly 1,000 lines removed with the two config crates, 300--500 lines
+from registry/format/latest-resolution and duplicate evidence paths, and 900--1,400 lines of tests
+and fixtures that exist only for those paths. Catalog storage, setup import, typed requests, and
+builders will add code, but the expected net result is a reduction of roughly 700--1,400 lines and,
+more importantly, two fewer crates, one canonicalization path, one launch path, no latest selector,
+and substantially fewer public authoring and registry types. These are directional estimates; the
+implementation should report measured before/after source and public-type counts.
+
+### What remains intentionally unchanged
+
+The cutover does not move planning into the application or database. It does not move IO into
+operations or states. It does not replace certified config artifacts, typed state capabilities,
+adapter binding, runtime configuration, replay rules, or higher-level typed operation composition.
+Those existing contracts are reused precisely so the new catalog can remain small.
 
 ### Explicitly deferred
 
@@ -842,26 +954,33 @@ The simplified design preserves the essential properties:
 | Workflow composition | Higher-level typed operations compose child operations |
 | Minimal provenance | Exact source names, schema ids, and digests in launch evidence |
 
-## Questions to resolve next
+## Implementation decisions fixed by this RFC
 
-- Which crate owns `CatalogRef<T>` and the storage-neutral catalog contract without making kernel
-  crates depend on PostgreSQL or application assembly?
-- Should catalog values use `MfmConfig` directly or explicitly opt in through a zero-behavior
-  `CatalogValue: MfmConfig` marker?
-- What is the exact name-only selector-to-exact-ref ingress contract for immediate starts, previews,
-  approvals, and delayed launches?
-- How does the entry-point adapter register an ordinary typed resolver/builder function while direct
-  complete per-op config authoring remains available during migration?
-- What concrete CLI/REST migration surface and typed migration registration mechanism should expose
-  the explicit schema-migration rules above?
-- Where do exact source names, schema ids, and digests fit in existing launch evidence?
-- How are catalog authorization, tenant/namespace isolation, retention, and audit enforced?
-- Which non-secret runtime-profile declarations, if any, may be managed by the onboarding surface
-  while live bindings and secrets remain outside semantic config?
-- What import/export envelope permits exact offline revalidation of selected canonical values?
-- What measured need would justify nested catalog references rather than flat self-contained values?
-- Which higher-level operations should be introduced first to replace the current external
-  collect-then-report recipe?
+- A small `mfm-config` crate owns `CatalogRef<T>`. It has no PostgreSQL, app, runtime, or operation
+  dependency and introduces no catalog service trait.
+- The renamed general PostgreSQL storage crate owns the one table and its append, exact-load, list,
+  and export implementation. App assembly uses that concrete authority; there is no speculative
+  storage abstraction.
+- Catalog values use `MfmConfig` directly. A closed setup-import document enum determines which
+  concrete resource types users may publish.
+- References are always exact. No name-only selector is accepted by setup export, CLI/REST run
+  start, preview, or delayed launch.
+- The old complete per-operation authored config path is deleted during the run-ingress cutover.
+  There is no migration period in which both paths are available.
+- The first setup surface is CLI import/list/export. REST setup mutation and an onboarding UI wait
+  for an authentication and authorization design; REST run start still consumes exact refs.
+- Store/database scope is the catalog authorization and isolation boundary for the first
+  implementation. Resource-level RBAC, retention, and audit are deferred rather than approximated.
+- Launch evidence stores exact entry-point id plus sorted `(name, schema_id, digest)` sources.
+- Explicit typed schema migrations append new values and are setup-time tools. They are not generic
+  launch-time registration or fallback machinery.
+- The first higher-level workflow is collect-then-report, proving that shared catalog resources can
+  build one composed typed graph while the existing portfolio snapshot entry point remains
+  report-only.
+
+Future runtime-profile management, nested values, mutable environment pointers, generic schema
+export, REST onboarding, and fleet controls remain separate proposals. They are not blockers for
+the implementation described here.
 
 ## Evidence map
 
