@@ -73,6 +73,35 @@ pub enum HoldingSourceConfig {
     },
 }
 
+struct PresentOptional<T> {
+    value: Option<T>,
+    is_present: bool,
+}
+
+impl<T> Default for PresentOptional<T> {
+    fn default() -> Self {
+        Self {
+            value: None,
+            is_present: false,
+        }
+    }
+}
+
+impl<'de, T> Deserialize<'de> for PresentOptional<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Self {
+            value: Option::<T>::deserialize(deserializer)?,
+            is_present: true,
+        })
+    }
+}
+
 impl<'de> Deserialize<'de> for HoldingSourceConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -82,13 +111,14 @@ impl<'de> Deserialize<'de> for HoldingSourceConfig {
         #[serde(deny_unknown_fields)]
         struct HoldingSourceWire {
             kind: String,
-            contract_address: Option<NormalizedEvmAddress>,
+            #[serde(default)]
+            contract_address: PresentOptional<NormalizedEvmAddress>,
         }
 
         let wire = HoldingSourceWire::deserialize(deserializer)?;
         match wire.kind.as_str() {
             "native" => {
-                if wire.contract_address.is_some() {
+                if wire.contract_address.is_present {
                     return Err(serde::de::Error::custom(
                         "native holding sources do not accept contract_address",
                     ));
@@ -96,7 +126,7 @@ impl<'de> Deserialize<'de> for HoldingSourceConfig {
                 Ok(Self::Native)
             }
             "erc20" => {
-                let contract_address = wire.contract_address.ok_or_else(|| {
+                let contract_address = wire.contract_address.value.ok_or_else(|| {
                     serde::de::Error::custom("erc20 holding sources require contract_address")
                 })?;
                 Ok(Self::Erc20 { contract_address })

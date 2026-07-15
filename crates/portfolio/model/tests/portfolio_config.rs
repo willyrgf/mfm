@@ -119,6 +119,15 @@ fn token_address_and_source_aliases_fail_closed() {
         Err(PortfolioConfigError::Decode(_))
     ));
 
+    let mut native_null_contract = canonical_config();
+    native_null_contract["symbol_configs"]
+        .as_array_mut()
+        .expect("symbols")[1]["source"]["contract_address"] = Value::Null;
+    assert!(matches!(
+        decode_portfolio_config(&native_null_contract),
+        Err(PortfolioConfigError::Decode(_))
+    ));
+
     let mut alias = canonical_config();
     alias["symbol_configs"]
         .as_array_mut()

@@ -49,6 +49,13 @@ fn holding_source_rejects_legacy_or_extra_native_fields() {
         }))
         .is_err()
     );
+    assert!(
+        serde_json::from_value::<HoldingSourceConfig>(serde_json::json!({
+            "kind": "native",
+            "contract_address": null
+        }))
+        .is_err()
+    );
 }
 
 #[test]
