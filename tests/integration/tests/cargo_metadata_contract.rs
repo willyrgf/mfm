@@ -542,6 +542,22 @@ fn config_catalog_source_boundaries_are_enforced() {
         !composed_source[config_start..].contains("CatalogRef"),
         "complete composed config and its certified graph helpers must not retain CatalogRef"
     );
+    assert!(
+        composed_source.contains("struct CollectThenReportReadinessState"),
+        "composed readiness must remain the operation-local aggregation state"
+    );
+    let portfolio_state_root = root.join("crates/states/portfolio/src");
+    for path in sources
+        .iter()
+        .filter(|path| path.starts_with(&portfolio_state_root))
+    {
+        let source = fs::read_to_string(path).expect("read portfolio state source");
+        assert!(
+            !source.contains("CollectThenReportReadinessState"),
+            "portfolio state source must not duplicate operation-local readiness: {}",
+            path.display()
+        );
+    }
 }
 
 #[derive(Debug)]
