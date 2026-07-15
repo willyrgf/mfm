@@ -86,6 +86,20 @@ fn joint_tip_stores_canonical_block_hash() {
 }
 
 #[test]
+fn joint_tip_config_requires_exact_state_owned_read_budget() {
+    let mut excessive = tip_config();
+    excessive.max_source_reads =
+        NonZeroU64::new(EVM_JOINT_TIP_SOURCE_READS + 1).expect("non-zero source reads");
+    assert!(validate_resolve_evm_joint_tip_config(&excessive)
+        .expect_err("excessive read budget")
+        .contains("must equal 1"));
+
+    let error = materialize_evm_joint_tip(&excessive, &block_response(100, HASH_A))
+        .expect_err("materialization must reject an excessive read budget");
+    assert!(error.to_string().contains("must equal 1"));
+}
+
+#[test]
 fn prove_before_write_rejects_missing_hash_and_tip_drift() {
     let tip = materialize_evm_joint_tip(&tip_config(), &block_response(100, HASH_A)).expect("tip");
     let drifted = EvmJointTip::new("ethereum-mainnet", 1, 101, HASH_A).expect("drift tip");

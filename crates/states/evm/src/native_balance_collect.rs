@@ -232,7 +232,9 @@ pub struct ResolveEvmJointTipConfig {
     pub network: String,
     /// Expected EVM chain id.
     pub chain_id: u64,
-    /// Maximum number of source reads this bounded state may request.
+    /// Exact state-owned source-read budget for joint-tip resolution.
+    ///
+    /// This must equal [`EVM_JOINT_TIP_SOURCE_READS`].
     pub max_source_reads: NonZeroU64,
 }
 
@@ -243,6 +245,11 @@ pub fn validate_resolve_evm_joint_tip_config(
     EvmNetworkId::new(&config.network).map_err(|error| error.to_string())?;
     if config.chain_id == 0 {
         return Err("chain_id must be non-zero".to_owned());
+    }
+    if config.max_source_reads.get() != EVM_JOINT_TIP_SOURCE_READS {
+        return Err(format!(
+            "max_source_reads must equal {EVM_JOINT_TIP_SOURCE_READS} for EVM joint-tip resolution"
+        ));
     }
     Ok(())
 }
