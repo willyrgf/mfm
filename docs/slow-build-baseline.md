@@ -209,3 +209,77 @@ and CI changed from 14 tasks to 13. The post-change timings reused the
 verification target and are not a controlled Phase 02 performance matrix;
 they record removed execution and successful coverage. The Phase 01 artifact
 and Nix storage measurements remain the authoritative storage baseline.
+
+## Phase 03: stop precleaning postgres sqlx artifacts
+
+The Phase 03 implementation uses the expected subject `stop precleaning
+postgres sqlx artifacts`. Its parent is the Phase 02 commit
+`6caeb099022ac018a409d872434e7c3deb1266b4`. The only behavior change is in
+the online `postgres-sqlx-check` task in `nixfied.nix`: the explicit
+`cargo clean -p mfm-stream-store-postgres` was removed, and the task now
+performs three checks against a disposable schema. It first accepts the
+unchanged migrated schema, drops `_sqlx_migrations.checksum` and requires
+the unchanged Rust sources to reject preparation for that specific column
+mutation, then recreates and migrates the schema and requires preparation to
+pass again. The cleanup trap remains in place. No compiler-object cache or
+other online SQLx cache was added.
+
+The final-code verification was run on Linux `aarch64` with the pinned
+toolchain and slot 7:
+
+- `nix run .#model-check`: model hash
+  `6fbe540c52e997047a206a056c0b676198729c165a45e2720b07192000a5becf`.
+- `nix run .#check -- --slot 7`: 4/4, 6.16s, run
+  `3499517-1784108882040720536`.
+- `nix run .#test -- --slot 7`: 2/2, 158.81s, run
+  `3501086-1784108892168141880`.
+- `nix run .#test-db -- --slot 7`: 6/6, 101.12s, run
+  `3494206-1784108776818048520`.
+- `nix run .#ci -- --slot 7`: 13/13, 226.10s, run
+  `3528257-1784109052177922449`.
+
+The SQLx task log records `ALTER TABLE`, the expected mutation rejection,
+schema drop/recreation, both migrations, and restored-schema acceptance. The
+warm final-code SQLx leaf took 2.78s in the focused database run; its
+successful baseline and restored checks each recompiled only
+`mfm-stream-store-postgres` (0.60s and 0.43s). The expected failing mutation
+check's compiler output is held in shell memory and is not emitted. The
+earlier parent warm observation with the explicit clean, run
+`2398478-1784079349884666509`, removed 2,793 files / 556.3 MiB and rebuilt
+only `mfm-stream-store-postgres` in 3.63s; its SQLx task took 4.63s. These are
+named warm observations, not a controlled full performance matrix. The
+candidate therefore removes the redundant package-clean side effect while
+retaining package-level invalidation for the changed database environment.
+
+The test inventory is unchanged from Phase 02: workspace Nextest remains 974
+tests across 99 binaries; doctests remain 53 binaries and 42 doctests;
+trybuild remains 9 harnesses, 80 UI cases, and 71 checked stderr baselines;
+the SQLx package retains 2 query macro sites and 2 `.sqlx` metadata files;
+the database composite remains 6 leaves; and CI remains 13 tasks. No test,
+doctest, trybuild, parity, or feature-selection surface changed.
+
+At the end of the final candidate run, slot 7 contained an 18 GiB Cargo
+target/state tree: `debug` was 16 GiB, `debug/incremental` 7.7 GiB,
+trybuild artifacts 2.1 GiB, 120,917 files, and 69,015 `.dwo` files totaling
+4.31 GiB. The realized CI launcher output was 12 KiB; its 124-path Nix
+closure summed to 1,594,574,192 NAR bytes and occupied 1.6 GiB on disk. No
+compiler-object cache was enabled. These storage observations are not a
+Phase 03 acceptance threshold.
+
+All Phase 03 acceptance checks pass: unchanged schema and checked metadata
+pass; the checksum mutation with unchanged Rust sources fails and is
+classified as the expected column failure; the recreated schema passes
+again; cleanup is scoped to the disposable schema; and online SQLx remains
+uncached. Linux is the only verified platform, and the warm timing comparison
+has normal slot/cache variance. There is no numeric Phase 03 latency or
+storage threshold in the RFC; the required unit-rebuild measurement and
+fail-closed correctness evidence are complete.
+
+The committed tree was then evaluated without worktree changes. The clean
+`nix run .#model-check` reproduced the model hash above, and clean
+`nix run .#test-db -- --slot 7` passed 6/6 in 97.81s under run
+`3558651-1784109421683769708`. Its SQLx log again recorded the mutation
+rejection and restored-schema acceptance; the warm successful prepares
+recompiled only `mfm-stream-store-postgres` in 0.65s and 0.43s. This is the
+phase-specific post-commit evaluation; the full required gates and CI were
+run on the identical final source before the commit.
