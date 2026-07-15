@@ -107,6 +107,19 @@ nix run .#test-db
 nix run .#ci
 ```
 
+The pinned developer lane is available through `nix develop`. It provides the
+repository Rust toolchain, Cargo helpers, SQLx CLI, and native build tools while
+leaving Cargo's incremental development target in the current worktree. For the
+non-gating broad feedback loop, run:
+
+```bash
+nix run .#quick
+```
+
+`.#quick` runs only `cargo fmt --all -- --check` and
+`cargo check --workspace --lib --bins`. It does not replace or invoke the
+comprehensive Nixfied gates above.
+
 `nix run .#model-check` validates the compiled model without executing project tasks.
 
 `nix run .#test` runs `cargo nextest run --workspace` followed by
