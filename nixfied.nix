@@ -215,8 +215,30 @@ in
 
           cd crates/storages/stream-store-postgres
           cargo sqlx migrate run --source migrations
-          cargo clean -p mfm-stream-store-postgres
-          cargo sqlx prepare --check -- --all-targets --features parity-tests
+          prepare_check() {
+            cargo sqlx prepare --check -- --all-targets --features parity-tests
+          }
+          prepare_check
+
+          # The migration-ledger query must notice schema changes even when Rust
+          # sources are unchanged and Cargo would otherwise reuse its artifacts.
+          psql "$admin_database_url" -v ON_ERROR_STOP=1 -c "ALTER TABLE \"$schema\"._sqlx_migrations DROP COLUMN checksum"
+          if mutation_output="$(prepare_check 2>&1)"; then
+            echo "schema mutation was not detected by cargo sqlx prepare --check" >&2
+            exit 1
+          fi
+          mutation_output="''${mutation_output,,}"
+          if [[ "$mutation_output" != *checksum* ]]; then
+            echo "schema mutation failed for an unexpected reason" >&2
+            exit 1
+          fi
+          echo "schema mutation correctly rejected by cargo sqlx prepare --check"
+
+          psql "$admin_database_url" -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS \"$schema\" CASCADE"
+          psql "$admin_database_url" -v ON_ERROR_STOP=1 -c "CREATE SCHEMA \"$schema\""
+          cargo sqlx migrate run --source migrations
+          prepare_check
+          echo "restored schema accepted by cargo sqlx prepare --check"
         ''
       ];
       env = postgresSqlxEnv;
