@@ -23,7 +23,6 @@ Environment variables:
 - `MFM_REST_API_ADDR`: bind address (default: `127.0.0.1:3001`)
 - `DATABASE_URL`: Postgres URL for the certified run store (required)
 - `MFM_REST_ROLE`: process role (`live` or `read`; default `live`)
-- `MFM_SOURCE_REVISION`: optional source revision evidence for typed run starts
 - `MFM_RUNTIME_CONFIG_FILE`: optional runtime config file path for live capability-backed runs
 
 The REST API validates the PostgreSQL schema on startup and does not create or

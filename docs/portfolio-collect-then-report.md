@@ -154,6 +154,12 @@ mfm_cli --output-format json run start \
   --database-url "$DATABASE_URL"
 ```
 
+The composed command above is the required one-parent workflow: both collectors and the report
+are children of one certified parent, and readiness gates the report on both collector summaries.
+The parity test exercises that exact production runner/Postgres path and evidence-only replay. The
+three-run sequence below is intentionally an independent-workflow recipe for operators who want
+separate run identities; it is not a substitute for the composed parent workflow.
+
 If operators intentionally keep the collectors and report as separate certified runs, publish or
 select the complete BTC, EVM, and portfolio values and use one exact request per run. The following
 sequence assumes `DATABASE_URL` points at a migrated Postgres store and `jq` is installed.

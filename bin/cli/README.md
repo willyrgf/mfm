@@ -526,9 +526,8 @@ execution lane for the same base work identity, start reports `already_active` w
 Stable launch errors include:
 
 - `EntryPointRequestReadFailed`: the JSON request file could not be read.
-- `EntryPointRequestInvalid`: the request file is not valid JSON.
+- `EntryPointRequestInvalid`: the request file is not valid strict JSON for the selected entry point.
 - `EntryPointNotFound`: the exact entry-point id is not registered.
-- `EntryPointRequestInvalid`: the request does not match the selected strict schema.
 - `CatalogValueNotFound`: an exact referenced catalog value is missing.
 - `CatalogValueTypeInvalid`: a catalog row does not decode as the referenced type.
 - `CatalogValueCanonicalMismatch`: a catalog row fails canonical byte/digest verification.

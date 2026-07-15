@@ -18,8 +18,12 @@ transport-only surfaces.
 ## Core Runtime Shape
 
 ```text
-typed or authored input
-  -> operation crate builds typed program draft
+setup TOML
+  -> app strictly decodes, validates, canonicalizes, scans for prohibited fields
+  -> app atomically publishes complete typed values to the catalog
+exact entry-point JSON request
+  -> app resolves and verifies each catalog reference
+  -> operation crate builds a concrete typed program draft
   -> mfm-certify lowers, validates, and emits certified typed execution spec
   -> app verifies persisted spec/certificate evidence and assembles launch material
   -> runtime rebuilds verified history from the append-only run stream
@@ -39,8 +43,9 @@ live driver for a base work identity; resource lanes protect certified side effe
 stores, transports, signer providers, and driver loops cannot define run identity, side-effect
 authority, replay authority, public-output authority, or terminal status.
 
-For the proposed consolidation of public run-start ingress around registered entry-point
-operations, see `docs/RFC_ENTRYPOINT_OP.md`.
+Public run-start ingress uses the exact catalog-backed entry-point request contract described in
+`docs/design.md`. Catalog resolution is an app pre-admission concern; it is not runtime or replay
+authority.
 
 For fact-backed portfolio collectors and report-only `portfolio_snapshot` authority,
 see `docs/portfolio-collect-then-report.md`.
@@ -109,6 +114,35 @@ capability, public type, CLI command, REST route, or test fixture.
 
 If a unit does not fit one category cleanly, the design is not ready.
 
+### Configuration Catalog And Runtime-Config Boundary
+
+The semantic configuration path has one ownership split:
+
+- `bin/cli` and `bin/rest-api` decode transport arguments and request JSON only;
+- `mfm-app` owns the closed setup TOML document, typed validation, canonical JSON, prohibited-field
+  scanning, catalog persistence, and exact reference resolution;
+- operation crates may own typed pre-planning request references and deterministic joins, but their
+  completed configs and graphs contain concrete values rather than `CatalogRef<T>`;
+- catalog storage persists opaque canonical rows and knows neither domain config nor setup kinds;
+- kernel, state, adapter, transport, runtime, replay, and binaries do not depend on the catalog
+  model or catalog persistence.
+
+Catalog resolution ends before certification and `RunAdmitted`. Launch evidence records the exact
+entry-point id and sorted source identities so a run can be verified without consulting mutable
+catalog state. Resume, status, stream, public-output, and replay paths use retained certified
+artifacts and the append-only run stream only.
+
+Two v1 decisions are deliberate:
+
+- `CollectThenReportReadinessState` remains operation-local. It is a pure fan-in state for the
+  composed workflow's two collector summaries, not reusable portfolio domain behavior. The app
+  registers its runner, while the operation owns the readiness semantics and graph topology.
+- Runtime TOML remains a process-local routing and signer boundary rather than semantic catalog
+  data. The current loader may parse the whole file when a live capability family is requested, so
+  malformed unrelated family data can reject that live request. Read-only paths do not load it, and
+  it is never persisted or used by replay. Selective family loading is a future optimization, not a
+  compatibility path or a hidden fallback.
+
 ## Boundary Contract
 
 ### Operation
@@ -118,7 +152,7 @@ Operations are deterministic planning only.
 Operations may:
 
 - parse and validate typed planning config
-- lower authored config into canonical typed config
+- lower validated config into canonical typed config
 - call other typed operation builders
 - create seeds, scopes, state nodes, bridge nodes, and public-output bindings
 - attach stable domain-key and lineage evidence
@@ -343,7 +377,7 @@ Good crate reasons:
 - reusable domain state family
 - deterministic workflow topology
 - pure domain model
-- authored/canonical config pipeline
+- setup/canonical config pipeline
 - storage implementation
 - runtime/kernel primitive
 

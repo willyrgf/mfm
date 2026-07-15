@@ -1,39 +1,33 @@
 # mfm-app
 
-Typed application assembly for certified MFM runs.
+Application assembly for catalog-backed, certified MFM runs.
 
-`mfm-app` wires entry-point operation launch and certified typed runtime pieces only:
+`mfm-app` owns the boundary between transport input, semantic configuration, and runtime
+authority. It provides:
 
-- entry-point operation registries
-- app-owned typed spec certification
-- typed runner registries
-- the production run store
-- narrow artifact read providers over run-store evidence
-- typed start/resume/replay dispatch
-- typed public-output read authority and rendering
+- strict setup TOML decoding and secret-free canonicalization;
+- one-transaction publication of complete typed values to the Postgres catalog;
+- exact catalog reference resolution and integrity/type/semantic verification at launch;
+- entry-point operation planning and typed certification;
+- production store, artifact, runner, and capability wiring;
+- typed start/resume/replay dispatch and public-output read authority.
 
-Domain runner behavior lives in adapter crates. For EVM contract lifecycles,
-`mfm-app` only wires concrete process resources such as JSON-RPC clients,
-artifact read providers, and keystore-backed signer providers into the adapter runner
-factory.
+The catalog is a pre-admission configuration surface. A setup document is a closed set of
+supported typed values; import validates every value, canonicalizes it, rejects prohibited fields,
+and appends all rows atomically. Run-start requests are strict JSON objects containing exact
+`CatalogRef<T>` identities. App resolves those references before calling the operation builders and
+records the resolved name/schema/digest as launch evidence. The resulting typed draft and
+certified spec contain concrete values, never catalog references.
 
-It depends on typed operation planning, typed certification, typed runtime dispatch, and explicit
-process capability wiring.
+Domain runner behavior lives in adapter crates. For EVM contract lifecycles, `mfm-app` wires
+concrete process resources such as JSON-RPC clients, artifact readers, and keystore-backed signer
+providers into adapter runner factories; it does not own lifecycle planning or state semantics.
 
-Entry-point start resolves a registered public op name and version, normalizes authored config,
-plans a typed draft, certifies it through `mfm-certify`, verifies config and seed inputs against the
-certified spec, and hands typed launch material to runtime middleware. The runtime passes launch
-artifact bytes in the prepared commit bundle that appends `RunAdmitted`. Resume and replay reload
-stored spec/certificate artifacts, verify them against the
-production registry, compare them to `RunAdmitted`, and rebuild stream evidence before constructing
-runtime or replay authority.
+After `RunAdmitted`, the run is self-contained. Resume, replay, status, stream, and public-output
+reads use the certified spec, certificate, retained artifacts, and append-only run evidence. They
+do not consult the mutable catalog. Public-output JSON is a cache surface and cannot authorize
+resume, replay, certification, or another render.
 
-Run status exposes manual-resolution requirements from certified policy only: evidence schema,
-manual authorization verifier, signing scheme, certified operator authority id, allowed operator
-public identities, and quorum. It does not expose signer runtime sources such as keystore paths,
-environment variables, passwords, or provider configuration.
-
-Public-output JSON is an output/cache surface. `mfm-app` renders it only through
-`PublicOutputReadAuthority`, which is minted after stored certified spec/certificate artifacts are
-verified and the public-output projection is rebuilt from the authoritative typed run stream.
-Rendered JSON cannot authorize resume, replay, or another render.
+Runtime TOML is a separate process-local routing and signer boundary. It is loaded only when a
+live capability family needs it and is never part of catalog values, certified specs, events,
+artifacts, or replay inputs.

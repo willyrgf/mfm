@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -401,9 +402,13 @@ fn config_catalog_ownership_and_dependency_boundaries_are_explicit() {
             assert!(
                 !matches!(
                     dependency.name,
-                    "mfm-app" | "mfm-storage-postgres" | "mfm-runtime-config"
+                    "mfm"
+                        | "mfm-app"
+                        | "mfm-rest-api"
+                        | "mfm-storage-postgres"
+                        | "mfm-runtime-config"
                 ) && dependency.name != "sqlx",
-                "{} may not depend on app, PostgreSQL, runtime config, or SQLx: {}",
+                "{} may not depend on binaries, app, PostgreSQL, runtime config, or SQLx: {}",
                 package.name,
                 dependency.name
             );
@@ -429,6 +434,114 @@ fn config_catalog_ownership_and_dependency_boundaries_are_explicit() {
             );
         }
     }
+}
+
+#[test]
+fn config_catalog_source_boundaries_are_enforced() {
+    let root = repo_root();
+    let metadata = workspace_metadata(&root);
+    let packages = workspace_packages(&metadata, &root).expect("workspace package categories");
+    let by_name = packages
+        .iter()
+        .map(|package| (package.name.as_str(), package))
+        .collect::<BTreeMap<_, _>>();
+
+    let catalog_users = packages
+        .iter()
+        .filter(|package| {
+            path_dependencies(&metadata, package.name.as_str(), &by_name)
+                .iter()
+                .any(|dependency| dependency.name == "mfm-catalog-model")
+        })
+        .map(|package| package.name.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        catalog_users,
+        BTreeSet::from(["mfm-app", "mfm-op-portfolio-collect-report"]),
+        "catalog identity users must stay at app and operation pre-planning boundaries"
+    );
+
+    let sources = rust_sources(&root);
+    let allowed_catalog_ref_paths = [
+        root.join("crates/catalog-model/src"),
+        root.join("crates/app/src"),
+        root.join("crates/ops/portfolio-collect-report-op/src"),
+    ];
+    for path in &sources {
+        let source = fs::read_to_string(path).expect("read Rust source");
+        if source.contains("CatalogRef") {
+            assert!(
+                allowed_catalog_ref_paths
+                    .iter()
+                    .any(|allowed| path.starts_with(allowed)),
+                "CatalogRef crossed its boundary: {}",
+                path.display()
+            );
+        }
+    }
+
+    let storage_root = root.join("crates/storages");
+    for path in sources
+        .iter()
+        .filter(|path| path.starts_with(&storage_root))
+    {
+        let source = fs::read_to_string(path).expect("read storage Rust source");
+        for forbidden in ["CatalogRef", "MfmConfig", "ValidatedConfig<"] {
+            assert!(
+                !source.contains(forbidden),
+                "storage source {} imports or names domain type {forbidden}",
+                path.display()
+            );
+        }
+    }
+
+    let app_root = root.join("crates/app/src");
+    let catalog_methods = [
+        "append_catalog_values(",
+        ".load_catalog_value(",
+        ".list_catalog_values(",
+        ".export_catalog_value(",
+    ];
+    for path in &sources {
+        if path.starts_with(&storage_root) || path.starts_with(&app_root) {
+            continue;
+        }
+        let source = fs::read_to_string(path).expect("read Rust source");
+        assert!(
+            !catalog_methods.iter().any(|method| source.contains(method)),
+            "non-app source directly calls catalog persistence: {}",
+            path.display()
+        );
+    }
+
+    let binary_root = root.join("bin");
+    for path in sources.iter().filter(|path| path.starts_with(&binary_root)) {
+        let source = fs::read_to_string(path).expect("read binary Rust source");
+        for forbidden in [
+            "SetupDocument",
+            "SetupValue",
+            "toml::from_str",
+            "ValidatedConfig<",
+            "MfmConfig",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "binary source {} owns domain setup/config construction: {forbidden}",
+                path.display()
+            );
+        }
+    }
+
+    let composed_source =
+        fs::read_to_string(root.join("crates/ops/portfolio-collect-report-op/src/lib.rs"))
+            .expect("read composed operation source");
+    let config_start = composed_source
+        .find("pub struct CollectThenReportConfig")
+        .expect("complete composed config");
+    assert!(
+        !composed_source[config_start..].contains("CatalogRef"),
+        "complete composed config and its certified graph helpers must not retain CatalogRef"
+    );
 }
 
 #[derive(Debug)]
@@ -468,6 +581,29 @@ fn repo_root() -> PathBuf {
         .and_then(Path::parent)
         .expect("integration crate lives under tests/integration")
         .to_path_buf()
+}
+
+fn rust_sources(root: &Path) -> Vec<PathBuf> {
+    let mut sources = Vec::new();
+    for directory in [root.join("crates"), root.join("bin")] {
+        collect_rust_sources(&directory, &mut sources);
+    }
+    sources.sort();
+    sources
+}
+
+fn collect_rust_sources(path: &Path, sources: &mut Vec<PathBuf>) {
+    let entries =
+        fs::read_dir(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    for entry in entries {
+        let entry = entry.expect("read source directory entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rust_sources(&path, sources);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+            sources.push(path);
+        }
+    }
 }
 
 fn workspace_metadata(root: &Path) -> Value {

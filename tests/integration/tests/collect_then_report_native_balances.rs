@@ -282,6 +282,10 @@ async fn collect_then_report_completes_from_collector_written_platform_holdings(
 
 #[cfg(feature = "parity-tests")]
 fn assert_composed_parent_plan(draft: &TypedProgramDraft) {
+    assert!(
+        !format!("{draft:?}").contains("CatalogRef"),
+        "the certified composed graph must contain resolved values, not catalog references"
+    );
     let scopes = draft.scopes();
     assert_eq!(scopes.len(), 3, "one root and two collector scopes");
     let root_scope = scopes

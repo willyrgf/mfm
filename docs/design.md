@@ -156,6 +156,44 @@ Persisted and public surfaces are inventoried in `docs/persisted-public-surfaces
 is the review checklist for applying this no-secret invariant to app, CLI, REST, storage, artifact,
 and diagnostic boundaries.
 
+## Semantic Configuration Catalog And Launch Boundary
+
+Semantic configuration has a strict pre-admission path and a separate process-local runtime path.
+
+Setup import is the only TOML semantic configuration surface. `mfm-app` decodes a closed setup
+document containing the supported typed value kinds, validates every value, canonicalizes it using
+the typed descriptor path, rejects prohibited secret-bearing fields, enforces size limits, and
+publishes the complete batch through one atomic catalog append. A failed value or conflicting
+duplicate leaves the catalog unchanged. Catalog storage persists opaque canonical bytes plus
+name/schema/digest identity; it does not know setup kinds or domain config types.
+
+Run-start requests are strict JSON objects selected by one exact entry-point id. Each reference
+contains a catalog name and exact content digest. App assembly resolves the expected schema,
+verifies the stored canonical bytes and digest, revalidates semantic config, and only then calls
+the deterministic operation builder. The operation may use request-local policy and pre-planning
+joins, but the completed config, typed graph, certificate, and runtime authority contain concrete
+values rather than `CatalogRef<T>`.
+
+`RunAdmitted` records the exact entry-point id and sorted catalog source evidence. The certified
+spec, certificate, seeds, retained artifacts, facts, outputs, and append-only run stream are the
+authority after admission. Resume, status, stream, public-output, and replay paths must not query
+the mutable catalog or reconstruct semantic config from current setup files. Replay verifies the
+retained evidence and recomputes pure behavior from certified values only.
+
+Runtime TOML is intentionally outside this semantic boundary. It maps non-secret source and signer
+references to process-local routing and capability resources, is not catalog data, and is never
+persisted in specs, events, artifacts, public outputs, or replay inputs. The v1 runtime loader may
+parse the whole file when a live capability family is requested; malformed unrelated family data
+can therefore reject that live request. Evidence-only reads do not load runtime TOML. This is an
+accepted v1 variance with no fallback or compatibility surface; selective family loading can be a
+future implementation improvement.
+
+`CollectThenReportReadinessState` is also an accepted placement decision. It remains an
+operation-local pure fan-in state because its semantics are specific to the composed workflow's
+collector summaries. The app registers its runner, while the operation owns the readiness node and
+the one-parent graph topology. It is not a general portfolio state or an excuse for app-owned
+workflow behavior.
+
 ## Typed Program Authoring
 
 State outputs are represented by branded typed handles. Handles carry the produced Rust value type,
