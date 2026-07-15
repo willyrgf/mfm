@@ -32,7 +32,7 @@ use crate::{
     EvmAddressNativeBalanceSubject, EvmStateError,
 };
 
-const NAMESPACE: &str = "mfm.evm";
+pub(crate) const NAMESPACE: &str = "mfm.evm";
 const EVM_JSONRPC_ADAPTER_NAME: &str = "jsonrpc";
 const EVM_JSONRPC_ADAPTER_VERSION: &str = "mfm.evm.jsonrpc.adapter.v1";
 /// Exact number of source reads required by one hash-pinned native-balance observation.
@@ -57,7 +57,7 @@ pub fn evm_jsonrpc_adapter_version() -> Result<AdapterVersion, mfm_ids::Identity
     AdapterVersion::new(EVM_JSONRPC_ADAPTER_VERSION)
 }
 
-fn adapter_binding() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
+pub(crate) fn adapter_binding() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
     Ok(vec![AdapterBindingSpec {
         adapter_kind: evm_jsonrpc_adapter_kind().map_err(|error| {
             mfm_program::PlanError::Key(format!("EVM JSON-RPC adapter kind invalid: {error}"))
@@ -68,7 +68,7 @@ fn adapter_binding() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
     }])
 }
 
-fn state_kind(name: &'static str) -> mfm_program::Result<StateKind> {
+pub(crate) fn state_kind(name: &'static str) -> mfm_program::Result<StateKind> {
     StateKind::new(
         NAMESPACE,
         name,
@@ -78,12 +78,12 @@ fn state_kind(name: &'static str) -> mfm_program::Result<StateKind> {
     .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
 }
 
-fn state_version(name: &'static str) -> mfm_program::Result<StateVersion> {
+pub(crate) fn state_version(name: &'static str) -> mfm_program::Result<StateVersion> {
     StateVersion::new(format!("mfm.evm.state.{name}.v1"))
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
 }
 
-fn adapter_required_error(state_name: &'static str) -> StateError {
+pub(crate) fn adapter_required_error(state_name: &'static str) -> StateError {
     StateError::Message(format!("{state_name} requires an EVM adapter runner"))
 }
 

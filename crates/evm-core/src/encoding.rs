@@ -7,11 +7,14 @@
 //!
 //! ```rust
 //! use alloy_primitives::Address;
-//! use mfm_evm_core::encoding::{encode_erc20_balance_of, normalize_address, parse_u256_hex};
+//! use mfm_evm_core::encoding::{
+//!     decode_erc20_decimals_result, encode_erc20_balance_of, normalize_address, parse_u256_hex,
+//! };
 //!
 //! let owner = Address::from([0x11; 20]);
 //! let calldata = encode_erc20_balance_of(&owner);
 //! assert!(calldata.starts_with("0x70a08231"));
+//! assert_eq!(decode_erc20_decimals_result(&[0; 32])?, 0);
 //! assert_eq!(parse_u256_hex("0xf")?.to_string(), "15");
 //! assert_eq!(
 //!     normalize_address("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")?,
@@ -50,6 +53,42 @@ pub fn encode_erc20_decimals() -> String {
     let mut data = Vec::with_capacity(4);
     data.extend_from_slice(&ERC20_SELECTOR_DECIMALS);
     format!("0x{}", hex::encode(data))
+}
+
+/// Decodes the exact ABI result word for ERC-20 `decimals()`.
+///
+/// Standard ERC-20 `decimals()` is accepted only as one 32-byte ABI word whose
+/// high 31 bytes are zero. The final byte is the complete `u8` result; wider
+/// integers, dynamic ABI values, and trailing bytes are rejected.
+pub fn decode_erc20_decimals_result(result: &[u8]) -> Result<u8, UtilError> {
+    if result.len() != 32 {
+        return Err(UtilError::new(
+            "evm_response_invalid",
+            "erc20 decimals result must be exactly one 32-byte ABI word",
+        ));
+    }
+    if result[..31].iter().any(|byte| *byte != 0) {
+        return Err(UtilError::new(
+            "evm_response_invalid",
+            "erc20 decimals result must be zero-padded to u8",
+        ));
+    }
+    Ok(result[31])
+}
+
+/// Decodes the exact ABI result word for ERC-20 `balanceOf(address)`.
+///
+/// The returned [`U256`] preserves the complete unsigned 256-bit range. Its
+/// [`std::fmt::Display`] representation is the canonical decimal digit-string
+/// projection used by source-near balance facts.
+pub fn decode_erc20_balance_result(result: &[u8]) -> Result<U256, UtilError> {
+    if result.len() != 32 {
+        return Err(UtilError::new(
+            "evm_response_invalid",
+            "erc20 balance result must be exactly one 32-byte ABI word",
+        ));
+    }
+    Ok(U256::from_be_slice(result))
 }
 
 /// Formats a `U256` using a decimal point at `decimals` places.

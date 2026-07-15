@@ -2,7 +2,7 @@
 name = "mfm-states-evm"
 version = "0.1.0"
 edition = "2021"
-description = "Reusable EVM native holding fact state contracts for MFM"
+description = "Reusable EVM holding fact state contracts for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
