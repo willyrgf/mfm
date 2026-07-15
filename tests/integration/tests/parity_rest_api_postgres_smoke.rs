@@ -125,17 +125,23 @@ async fn parity_rest_postgres_smoke() {
         &["acme/dual-mainnet", "not-a-digest"],
     )
     .await;
-    assert_start_error(
-        &app,
-        json!({
-            // Regression: the removed public portfolio id must never resolve as an alias.
-            "entry_point": "mfm.portfolio/portfolio_snapshot@1",
-            "request": {},
-        }),
-        "EntryPointNotFound",
-        &[],
-    )
-    .await;
+    for removed_entry_point in [
+        "mfm.evm/evm_native_balance@1",
+        "mfm.portfolio/portfolio_snapshot@1",
+        "mfm.portfolio/collect_then_report@1",
+    ] {
+        assert_start_error(
+            &app,
+            json!({
+                // Removed public IDs must never resolve through an alias.
+                "entry_point": removed_entry_point,
+                "request": {},
+            }),
+            "EntryPointNotFound",
+            &[],
+        )
+        .await;
+    }
 
     drop_postgres_schema(&database_url, &schema).await;
 }

@@ -250,6 +250,64 @@ in
       };
       requires = [ "postgres" ];
     };
+    mfm-cli-build = cargoLeaf {
+      run = [
+        "cargo"
+        "build"
+        "-p"
+        "mfm"
+        "--bin"
+        "mfm_cli"
+      ];
+    };
+    parity-catalog-setup = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm-integration-tests"
+        "--features"
+        "parity-tests"
+        "--test"
+        "catalog_setup_resolution"
+        "--"
+        "--nocapture"
+      ];
+      env = postgresEnv;
+      requires = [ "postgres" ];
+    };
+    parity-cli-setup = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm"
+        "--features"
+        "parity-tests"
+        "--test"
+        "setup_postgres"
+        "--"
+        "--nocapture"
+      ];
+      env = postgresEnv;
+      requires = [ "postgres" ];
+    };
+    parity-cli-postgres-status = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm"
+        "--features"
+        "parity-tests"
+        "--test"
+        "status_contract_postgres"
+        "--"
+        "--nocapture"
+      ];
+      env = postgresEnv;
+      requires = [ "postgres" ];
+    };
     parity-postgres-rest-api = cargoLeaf {
       run = [
         "cargo"
@@ -309,13 +367,32 @@ in
       kind = "composite";
       steps = {
         postgres-sqlx-check.task = "postgres-sqlx-check";
+        mfm-cli-build = {
+          task = "mfm-cli-build";
+          dependsOn = [ "postgres-sqlx-check" ];
+        };
         parity-postgres-state-events = {
           task = "parity-postgres-state-events";
           dependsOn = [ "postgres-sqlx-check" ];
         };
+        parity-catalog-setup = {
+          task = "parity-catalog-setup";
+          dependsOn = [ "postgres-sqlx-check" ];
+        };
+        parity-cli-setup = {
+          task = "parity-cli-setup";
+          dependsOn = [ "mfm-cli-build" ];
+        };
+        parity-cli-postgres-status = {
+          task = "parity-cli-postgres-status";
+          dependsOn = [ "mfm-cli-build" ];
+        };
         parity-postgres-rest-api = {
           task = "parity-postgres-rest-api";
-          dependsOn = [ "parity-postgres-state-events" ];
+          dependsOn = [
+            "parity-postgres-state-events"
+            "parity-catalog-setup"
+          ];
         };
       };
     };

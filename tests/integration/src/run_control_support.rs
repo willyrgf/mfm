@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use mfm_program::{CanonicalSeed, TypedProgramDraft};
 use mfm_store::v1 as store;
@@ -232,6 +233,51 @@ where
         })
         .collect();
     prepare_typed_launch_for_store(store, draft, seed_material, invocation_key).await
+}
+
+/// Admits a Bitcoin balance run without invoking live runners so status tests can append history.
+pub async fn admit_btc_balance_run_without_driving<S>(
+    store: &S,
+    config: &serde_json::Value,
+    runtime_config_path: &Path,
+) -> (mfm_ids::RunId, mfm_certify::CertifiedTypedSpec)
+where
+    S: store::RunEventStore
+        + store::StoreScopeStore
+        + store::RetainedArtifactReadProvider
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
+    let prepared = prepare_btc_balance_launch_for_store(store, config, None).await;
+    let run_id = prepared.run_id.clone();
+    let certified = prepared.certified_spec.clone();
+    let runners = mfm_app::production_runner_registry(
+        Arc::new(store.clone()),
+        mfm_app::ProjectionFactIndexProvider::empty_arc(),
+        Some(runtime_config_path),
+    )
+    .expect("production runners");
+    let scheduler = mfm_runtime::SerialTypedScheduler::new(runners, Arc::new(store.clone()));
+    let runtime_spec =
+        mfm_runtime::CertifiedRuntimeSpec::new(prepared.certified_spec).expect("runtime spec");
+    let launch = scheduler
+        .prepare_run_launch(
+            &runtime_spec,
+            prepared.identity_material,
+            prepared.evidence,
+            store
+                .expected_next_seq(&run_id)
+                .await
+                .unwrap_or_else(|error| panic!("expected next seq: {error}")),
+        )
+        .expect("prepared launch");
+    scheduler
+        .start_run(store, launch)
+        .await
+        .expect("start fixture run");
+    (run_id, certified)
 }
 
 async fn prepare_typed_launch_for_store<S>(

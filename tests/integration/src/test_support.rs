@@ -16,10 +16,10 @@ use sqlx::{AssertSqlSafe, PgPool};
 mod run_control_support;
 
 pub use run_control_support::{
-    prepare_btc_balance_launch_for_store, set_evm_runtime_config_env_with_signer_for_test,
-    start_collectors_rpc_mock, write_collectors_runtime_config_for_test,
-    write_evm_runtime_config_for_test, EnvVarRestore, RuntimeConfigSignerBinding,
-    ENV_RUNTIME_CONFIG_FILE,
+    admit_btc_balance_run_without_driving, prepare_btc_balance_launch_for_store,
+    set_evm_runtime_config_env_with_signer_for_test, start_collectors_rpc_mock,
+    write_collectors_runtime_config_for_test, write_evm_runtime_config_for_test, EnvVarRestore,
+    RuntimeConfigSignerBinding, ENV_RUNTIME_CONFIG_FILE,
 };
 
 /// Re-export: merge-safe Platform holding seed for store-backed portfolio report tests.
