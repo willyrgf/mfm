@@ -525,3 +525,133 @@ without a dirty-tree warning:
 
 The report-only metadata was then amended into the same logical commit; no
 source, profile, task, feature, or workflow behavior changed in that amend.
+
+## Phase 06: isolate mutable verification targets
+
+Phase 06 was explicitly re-scoped by the owner to permit manual cleanup of
+only the exact runtime-reported Cargo cache digest during measurement. This
+does not add a project cleaner or replace the missing Nixfied cache-family
+lifecycle operation. Broad slot cleanup remains outside the experiment.
+
+The candidate change uses Nixfied `invocation.cacheEnv.CARGO_TARGET_DIR` for
+every Cargo leaf. The cache is the `cargo-target` family with `slot` scope and
+key parts for `cargo-target-v2`, `aarch64-unknown-linux-gnu`, Rust 1.96.0, and
+`verification-v2`. The runtime therefore owns the cache placement below the
+caller-selected state root and slot. Separate worktrees must select separate
+`NIXFIED_STATE_DIR` values. The Cargo profile policy, task graph, services,
+SQLx behavior, test selection, and direct developer target are unchanged.
+
+### Phase 06 cache identity
+
+The clean candidate model hash is
+`d25c647af500ec8c060e173f05e199564cf3d3921663c82f04c3477a4c49ce84`, with
+runtime ABI `nixfied-runtime-abi:1-5ff3aa14f2bf` and Rust toolchain 1.96.0 on
+Linux aarch64. Every Cargo leaf reported the same cache identity:
+
+```text
+family: cargo-target
+scope: slot
+digest: dd27515db6a0fc48aabe31c5e300af7325e3af24a98f0560364fa9c516971e03
+```
+
+### Parent and candidate measurements
+
+The Phase 05 raw-target candidate is the direct parent for this scope change.
+The cache identity is expected to change placement and lifecycle ownership,
+not compile policy or artifact format.
+
+| State | Full CI | Nextest total | Nextest execution | Cargo cache | files | `.dwo` files | trybuild |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phase 05 raw target, clean | 307.13s |  — | — | 9.8 GiB | 17,791 | 0 | 1.7 GiB |
+| Phase 05 raw target, warm | 197.49s | — | — | 9.8 GiB | 17,791 | 0 | 1.7 GiB |
+| Phase 06 cache, clean | 322.37s | 147.891s | 105.561s | 9.8 GiB | 17,790 | 0 | 1.7 GiB |
+| Phase 06 cache, warm | 201.83s | 95.412s | 75.643s | 9.8 GiB | 17,790 | 0 | 1.7 GiB |
+
+The clean Phase 06 cache occupied 10,422,096,724 bytes and 20,930 entries;
+the warm repeat had the same size and entry count. The empty incremental
+directories remained 4 KiB placeholders, with no incremental artifacts. The
+trybuild subtree occupied 1,761,961,195 bytes. The derived compile/link and
+process remainder was approximately 42.33s clean and 19.77s warm after
+subtracting the Nextest execution summaries; these are task-level residuals,
+not an independently instrumented linker timer.
+
+The clean and warm full-CI runs both passed 13/13:
+
+- clean: `run-4155691-1784123066632728835`, 322.37s;
+- warm: `run-4192934-1784123414461861861`, 201.83s.
+
+The clean Nextest run passed 974/974 tests. Doctests remained 53 binaries and
+42 doctests; trybuild remained 9 harnesses, 80 UI cases, and 71 checked
+stderr baselines; database/parity coverage remained 6 leaves; and CI remained
+13 tasks. The clean and warm doctest tasks took 16.247s and 14.041s.
+
+### Isolation, invalidation, and cleanup
+
+The same digest was materialized at distinct paths for slot 7 and slot 8.
+Two concurrently launched `cargo-metadata-contract` tasks passed without
+cross-contamination:
+
+- slot 7: `run-12541-1784123817324835829`, 33.936s;
+- slot 8: `run-14329-1784123821352459016`, 33.568s.
+
+The same slot/digest combination under a separate
+`NIXFIED_STATE_DIR` also materialized beneath that separate state root:
+`run-11756-1784123637754781294`. The slot-8 focused proof was
+`run-11700-1784123629592338163`.
+
+Changing only the policy key produced digest
+`9e552086a3759121242668819fd47c6c5604339b100e888bfe7f309a7c4b91dd` in
+`run-11946-1784123677805871166`. Changing only the declared toolchain key
+produced digest
+`23d5bdddaaec9f53636136bbc0429a36ae6aa6ec1301e63e6867b0a66548c9ca` in
+`run-12058-1784123689352842570`. Platform identity is included in the key and
+the runtime target identity, but cross-platform execution remains unverified.
+
+For the owner-approved manual cleanup check, only the exact reported Phase 06
+digest directory was removed. `pgdata` remained at 1,025 entries, run-record
+state remained at 111 entries, and the Cargo cache family went from 20,931
+entries to zero. No service, registry, or diagnostic parent was deleted.
+
+### Phase 06 acceptance
+
+All applicable checks pass under the explicit re-scope: unchanged sequential
+runs reused one identity; slots and separate state roots isolated their paths;
+policy and declared toolchain changes invalidated the identity; the two-slot
+concurrent focused run passed; and exact-path cleanup preserved non-cache
+state. Disk growth was flat across the unchanged clean/warm pair. The
+remaining limitation is that cleanup is manual for this pilot because the
+locked Nixfied runtime still has no first-class cache-family cleanup surface;
+that limitation is tracked in `docs/nixfied-capability-gaps.md`.
+
+Before the Phase 06 commit, the required gates passed on the dirty candidate:
+
+- `nix run .#check -- --slot 7`: 4/4 in 37.86s,
+  `run-24675-1784123910494494304`;
+- `nix run .#test -- --slot 7`: 2/2 in 170.09s,
+  `run-30503-1784123953004592181`;
+- `nix run .#test-db -- --slot 7`: 6/6 in 108.60s,
+  `run-54899-1784124126546367061`; and
+- `nix run .#ci -- --slot 7`: 13/13 in 216.93s,
+  `run-57359-1784124239044961725`.
+
+The clean committed-tree evaluation of Phase 06 then passed model admission
+with the same model hash and full CI 13/13 in both cache states:
+
+- clean exact cache: 333.82s,
+  `run-70857-1784124512678583396`;
+- warm exact cache: 231.82s,
+  `run-108931-1784124855072711127`.
+
+The clean committed samples are slower than the dirty-candidate samples by
+11.45s and 29.99s respectively, which is retained as VM scheduling/service
+variance rather than attributed to the cache identity change. No source or
+model behavior changed between those evaluations.
+
+The final warm verification at the pre-measurement-amend committed revision
+also passed 13/13 in 213.81s under
+`run-122464-1784125134265099051`; the subsequent amendment adds measurement
+text only and does not alter the model or task behavior.
+
+The final `.#ci` program was 327 bytes. Its realized Nix closure remained 124
+paths and 12,219,706,744 NAR bytes, with the model/toolchain closure accounting
+for the same approximately 1.59 GiB store output observed in Phase 05.
