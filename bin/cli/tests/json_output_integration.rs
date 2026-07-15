@@ -369,6 +369,43 @@ fn test_run_start_run_id_flag_is_not_a_start_option() {
 }
 
 #[test]
+fn test_run_start_rejects_legacy_config_flags() {
+    let temp_dir = TempDir::new().unwrap();
+    let request_path = temp_dir.path().join("request.json");
+    std::fs::write(&request_path, "{}").expect("request fixture");
+
+    for flag in ["--op", "--op-version", "--config", "--config-format"] {
+        let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+        let output = cmd
+            .env_remove("DATABASE_URL")
+            .args([
+                "--output-format",
+                "json",
+                "run",
+                "start",
+                "--entry-point",
+                "mfm.portfolio/portfolio_snapshot@1",
+                "--request",
+                request_path.to_str().unwrap(),
+                flag,
+                "legacy-value",
+            ])
+            .output()
+            .expect("run CLI");
+
+        assert!(!output.status.success(), "legacy flag {flag} was accepted");
+        assert!(output.stdout.is_empty());
+        let parsed = verify_error_response(&String::from_utf8(output.stderr).unwrap());
+        assert_eq!(parsed.error.code, "CliParseError");
+        assert!(
+            parsed.error.message.contains(flag),
+            "legacy flag {flag} missing from parse error: {}",
+            parsed.error.message
+        );
+    }
+}
+
+#[test]
 fn test_json_commands_reach_store_connection_after_local_validation() {
     let temp_dir = TempDir::new().unwrap();
     let request_path = temp_dir.path().join("request.json");

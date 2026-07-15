@@ -88,27 +88,7 @@ pub async fn import_setup_toml(
     store: &PostgresStore,
     bytes: &[u8],
 ) -> Result<Vec<CatalogValueIdentity>, AppError> {
-    if bytes.len() > MAX_SETUP_FILE_BYTES {
-        return Err(AppError::new(
-            ErrorClass::BadRequest,
-            "SetupFileTooLarge",
-            "The setup file exceeds the permitted size",
-        ));
-    }
-    let text = std::str::from_utf8(bytes).map_err(|_| {
-        AppError::new(
-            ErrorClass::BadRequest,
-            "SetupDocumentInvalid",
-            "The setup document is not valid UTF-8",
-        )
-    })?;
-    let document: SetupDocument = toml::from_str(text).map_err(|_| {
-        AppError::new(
-            ErrorClass::BadRequest,
-            "SetupDocumentInvalid",
-            "The setup document is invalid TOML",
-        )
-    })?;
+    let document = parse_setup_document(bytes)?;
     let mut prepared = BTreeMap::<CatalogValueKey, Vec<u8>>::new();
     for entry in document.values {
         let prepared_value = prepare_value(entry.value)?;
@@ -152,6 +132,30 @@ pub async fn import_setup_toml(
         .await
         .map_err(AppError::from)?;
     Ok(identities)
+}
+
+fn parse_setup_document(bytes: &[u8]) -> Result<SetupDocument, AppError> {
+    if bytes.len() > MAX_SETUP_FILE_BYTES {
+        return Err(AppError::new(
+            ErrorClass::BadRequest,
+            "SetupFileTooLarge",
+            "The setup file exceeds the permitted size",
+        ));
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| {
+        AppError::new(
+            ErrorClass::BadRequest,
+            "SetupDocumentInvalid",
+            "The setup document is not valid UTF-8",
+        )
+    })?;
+    toml::from_str(text).map_err(|_| {
+        AppError::new(
+            ErrorClass::BadRequest,
+            "SetupDocumentInvalid",
+            "The setup document is invalid TOML",
+        )
+    })
 }
 
 /// Lists exact catalog identities using bounded keyset pagination.
@@ -350,7 +354,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::secret_field_path;
-    use super::{prepare_value, SetupDocument};
+    use super::{parse_setup_document, prepare_value, SetupDocument, MAX_SETUP_FILE_BYTES};
     use serde_json::json;
 
     #[test]
@@ -462,6 +466,40 @@ mod tests {
     }
 
     #[test]
+    fn every_registered_setup_kind_rejects_unknown_value_fields() {
+        let base: toml::Value = toml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/setup/organization.toml"
+        )))
+        .expect("setup fixture as toml value");
+        let values = base
+            .get("values")
+            .and_then(toml::Value::as_array)
+            .expect("setup values array");
+        assert_eq!(values.len(), 9);
+
+        for index in 0..values.len() {
+            let mut document = base.clone();
+            let value = document
+                .get_mut("values")
+                .and_then(toml::Value::as_array_mut)
+                .and_then(|values| values.get_mut(index))
+                .and_then(toml::Value::as_table_mut)
+                .and_then(|entry| entry.get_mut("value"))
+                .and_then(toml::Value::as_table_mut)
+                .expect("setup value table");
+            value.insert(
+                "unexpected_setup_field".to_owned(),
+                toml::Value::Boolean(true),
+            );
+            let bytes = toml::to_string(&document).expect("setup document serializes");
+            let error = toml::from_str::<SetupDocument>(&bytes)
+                .expect_err("unknown field must be rejected for every setup kind");
+            assert!(error.to_string().contains("unknown field"), "{error}");
+        }
+    }
+
+    #[test]
     fn setup_rejects_float_values_in_typed_configs() {
         let error = toml::from_str::<SetupDocument>(
             r#"
@@ -483,6 +521,116 @@ mod tests {
     }
 
     #[test]
+    fn setup_parser_rejects_oversized_files_invalid_utf8_and_malformed_toml() {
+        let oversized = parse_setup_document(&vec![b'x'; MAX_SETUP_FILE_BYTES + 1])
+            .expect_err("oversized setup file");
+        assert_eq!(oversized.code, "SetupFileTooLarge");
+
+        let invalid_utf8 =
+            parse_setup_document(&[0xff, 0xfe]).expect_err("invalid UTF-8 setup file");
+        assert_eq!(invalid_utf8.code, "SetupDocumentInvalid");
+
+        let malformed =
+            parse_setup_document(b"[[values]\nname = \"").expect_err("malformed setup TOML");
+        assert_eq!(malformed.code, "SetupDocumentInvalid");
+    }
+
+    #[test]
+    fn setup_rejects_an_oversized_individual_value_before_storage() {
+        let mut document: toml::Value = toml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/setup/organization.toml"
+        )))
+        .expect("setup fixture as toml value");
+        let metadata = document
+            .get_mut("values")
+            .and_then(toml::Value::as_array_mut)
+            .and_then(|values| values.first_mut())
+            .and_then(toml::Value::as_table_mut)
+            .and_then(|entry| entry.get_mut("value"))
+            .and_then(toml::Value::as_table_mut)
+            .and_then(|value| value.get_mut("metadata"))
+            .and_then(toml::Value::as_table_mut)
+            .expect("portfolio metadata table");
+        metadata.insert(
+            "large_public_note".to_owned(),
+            toml::Value::String("x".repeat(256 * 1024)),
+        );
+        let bytes = toml::to_string(&document).expect("oversized setup serializes");
+        let document = parse_setup_document(bytes.as_bytes()).expect("oversized value parses");
+        let error = prepare_value(
+            document
+                .values
+                .into_iter()
+                .next()
+                .expect("portfolio entry")
+                .value,
+        )
+        .err()
+        .expect("oversized value must be rejected before storage");
+        assert_eq!(error.code, "SetupValueTooLarge");
+        assert!(!error.message.contains("large_public_note"));
+    }
+
+    #[test]
+    fn normalized_portfolio_revisions_have_one_stable_digest() {
+        let base: toml::Value = toml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/setup/organization.toml"
+        )))
+        .expect("setup fixture as toml value");
+        let mut reordered = base.clone();
+        let value = reordered
+            .get_mut("values")
+            .and_then(toml::Value::as_array_mut)
+            .and_then(|values| values.first_mut())
+            .and_then(toml::Value::as_table_mut)
+            .and_then(|entry| entry.get_mut("value"))
+            .and_then(toml::Value::as_table_mut)
+            .expect("portfolio value table");
+        for key in ["quote_codes", "networks", "wallets", "symbol_configs"] {
+            value
+                .get_mut(key)
+                .and_then(toml::Value::as_array_mut)
+                .expect("portfolio array")
+                .reverse();
+        }
+
+        let first = parse_setup_document(
+            toml::to_string(&base)
+                .expect("base setup serializes")
+                .as_bytes(),
+        )
+        .expect("base setup parses");
+        let second = parse_setup_document(
+            toml::to_string(&reordered)
+                .expect("reordered setup serializes")
+                .as_bytes(),
+        )
+        .expect("reordered setup parses");
+        let first = prepare_value(
+            first
+                .values
+                .into_iter()
+                .next()
+                .expect("base portfolio")
+                .value,
+        )
+        .expect("base portfolio prepares");
+        let second = prepare_value(
+            second
+                .values
+                .into_iter()
+                .next()
+                .expect("reordered portfolio")
+                .value,
+        )
+        .expect("reordered portfolio prepares");
+        assert_eq!(first.digest, second.digest);
+        assert_eq!(first.canonical_json, second.canonical_json);
+    }
+
+    #[test]
     fn secret_scan_reports_only_the_field_path() {
         let value = json!({"nested": [{"private_key": "never-report-this"}]});
         assert_eq!(
@@ -498,5 +646,23 @@ mod tests {
             secret_field_path(&value, "$", None).as_deref(),
             Some("$.endpoint")
         );
+    }
+
+    #[test]
+    fn secret_scan_rejects_all_secret_marker_families_without_values() {
+        for field in [
+            "password",
+            "mnemonic",
+            "private_key",
+            "unlock_path",
+            "api-key",
+            "bearerToken",
+            "unknown_credential_field",
+        ] {
+            let value = json!({field: "secret-payload-sentinel"});
+            let path = secret_field_path(&value, "$", None).expect("secret marker");
+            assert_eq!(path, format!("$.{field}"));
+            assert!(!path.contains("secret-payload-sentinel"));
+        }
     }
 }

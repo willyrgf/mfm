@@ -3,14 +3,37 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use mfm_integration_tests::test_support::{
+    connect_postgres_with_retry, create_postgres_schema, drop_postgres_schema, json_post,
+    response_json, schema_scoped_database_url, unique_postgres_schema,
+};
+use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use mfm_integration_tests::test_support::{
-    connect_postgres_with_retry, create_postgres_schema, drop_postgres_schema, response_json,
-    schema_scoped_database_url, unique_postgres_schema,
-};
 const VALID_RUN_ID: &str =
     "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000033";
+const PORTFOLIO_ENTRY_POINT: &str = "mfm.portfolio/portfolio_snapshot@1";
+
+async fn assert_start_error(
+    app: &axum::Router,
+    body: Value,
+    expected_code: &str,
+    forbidden: &[&str],
+) {
+    let response = app
+        .clone()
+        .oneshot(json_post("/v1/runs/start", body))
+        .await
+        .expect("start response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = response_json(response).await;
+    assert_eq!(response["status"], "error");
+    assert_eq!(response["error"]["code"], expected_code);
+    let serialized = response.to_string();
+    for value in forbidden {
+        assert!(!serialized.contains(value), "REST error leaked {value}");
+    }
+}
 
 #[tokio::test]
 async fn parity_rest_postgres_smoke() {
@@ -45,6 +68,7 @@ async fn parity_rest_postgres_smoke() {
     assert_eq!(ready_v["data"]["checks"]["run_store"], "ready");
 
     let absent_status = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -55,5 +79,62 @@ async fn parity_rest_postgres_smoke() {
         .await
         .expect("status response");
     assert_eq!(absent_status.status(), StatusCode::NOT_FOUND);
+
+    for old_field in ["op", "op_version", "config_format", "config"] {
+        assert_start_error(
+            &app,
+            json!({
+                "entry_point": PORTFOLIO_ENTRY_POINT,
+                "request": {old_field: "legacy-value"},
+            }),
+            "EntryPointRequestInvalid",
+            &["legacy-value"],
+        )
+        .await;
+    }
+    assert_start_error(
+        &app,
+        json!({
+            "entry_point": PORTFOLIO_ENTRY_POINT,
+            "request": "portfolio = 'legacy TOML'",
+        }),
+        "EntryPointRequestInvalid",
+        &["legacy TOML"],
+    )
+    .await;
+    assert_start_error(
+        &app,
+        json!({
+            "entry_point": PORTFOLIO_ENTRY_POINT,
+            "request": {"portfolio": {"name": "acme/dual-mainnet"}},
+        }),
+        "EntryPointRequestInvalid",
+        &["acme/dual-mainnet"],
+    )
+    .await;
+    assert_start_error(
+        &app,
+        json!({
+            "entry_point": PORTFOLIO_ENTRY_POINT,
+            "request": {
+                "portfolio": {"name": "acme/dual-mainnet", "digest": "not-a-digest"},
+                "unknown": true,
+            },
+        }),
+        "EntryPointRequestInvalid",
+        &["acme/dual-mainnet", "not-a-digest"],
+    )
+    .await;
+    assert_start_error(
+        &app,
+        json!({
+            "entry_point": "mfm.portfolio/portfolio_snapshot",
+            "request": {},
+        }),
+        "EntryPointNotFound",
+        &[],
+    )
+    .await;
+
     drop_postgres_schema(&database_url, &schema).await;
 }

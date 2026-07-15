@@ -322,6 +322,38 @@ in
       env = postgresEnv;
       requires = [ "postgres" ];
     };
+    parity-catalog-setup = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm-integration-tests"
+        "--features"
+        "parity-tests"
+        "--test"
+        "catalog_setup_resolution"
+        "--"
+        "--nocapture"
+      ];
+      env = postgresEnv;
+      requires = [ "postgres" ];
+    };
+    parity-cli-setup = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm"
+        "--features"
+        "parity-tests"
+        "--test"
+        "setup_postgres"
+        "--"
+        "--nocapture"
+      ];
+      env = postgresEnv;
+      requires = [ "postgres" ];
+    };
     # Keep workspace tests as explicit leaves so each command has its own evidence.
     workspace-tests = {
       kind = "composite";
@@ -359,11 +391,23 @@ in
           task = "parity-postgres-state-events";
           dependsOn = [ "postgres-sqlx-check" ];
         };
+        parity-catalog-setup = {
+          task = "parity-catalog-setup";
+          dependsOn = [ "postgres-sqlx-check" ];
+        };
         parity-collect-then-report = {
           task = "parity-collect-then-report";
           dependsOn = [
             "mfm-cli-build"
             "parity-postgres-state-events"
+            "parity-catalog-setup"
+          ];
+        };
+        parity-cli-setup = {
+          task = "parity-cli-setup";
+          dependsOn = [
+            "mfm-cli-build"
+            "parity-catalog-setup"
           ];
         };
         parity-postgres-rest-api = {
