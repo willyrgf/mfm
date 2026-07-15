@@ -335,7 +335,6 @@ Stable launch error codes:
 - `CatalogValueTypeInvalid`: a catalog row does not decode as the referenced type.
 - `CatalogValueCanonicalMismatch`: a catalog row fails canonical byte/digest verification.
 - `CatalogValueValidationFailed`: a catalog value fails semantic validation.
-- `CollectThenReportConfigInvalid`: composed portfolio joins or policy are invalid.
 - `EvmContractPlanFailed`: EVM contract entry-point planning failed.
 - `EntryPointCertificationFailed`: the planned spec failed app-owned certification.
 - `LaunchRunnerUnavailable`: the verified spec references a state descriptor without a production

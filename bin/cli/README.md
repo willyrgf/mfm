@@ -514,7 +514,6 @@ Stable launch errors include:
 - `CatalogValueNotFound`: an exact referenced catalog value is missing.
 - `CatalogValueTypeInvalid`: a catalog row does not decode as the referenced type.
 - `CatalogValueCanonicalMismatch`: a catalog row fails canonical byte/digest verification.
-- `CollectThenReportConfigInvalid`: composed portfolio joins or policy are invalid.
 - `EntryPointCertificationFailed`: app assembly could not certify the planned typed spec.
 - `LaunchRunnerUnavailable`: the certified spec references a state descriptor with no production
   runner binding.

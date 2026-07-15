@@ -19,7 +19,8 @@ pub const FACT_CONTENT_IDENTITY_DIGEST_DOMAIN: &str = "mfm.fact.content-identity
 /// a fact was observed. This value instead identifies the descriptor, descriptor-derived subject
 /// material, response schema, and canonical response content. Construct it only with
 /// [`derive_fact_content_identity`] or one of the verification helpers, which recompute all four
-/// components from hydrated canonical material.
+/// components from hydrated canonical material. Direct deserialization is intentionally rejected:
+/// the compact serialized fields do not carry enough evidence to establish that relationship.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FactContentIdentity {
     fact_descriptor_hash: ContentDigest,
@@ -44,18 +45,13 @@ impl Serialize for FactContentIdentity {
 }
 
 impl<'de> Deserialize<'de> for FactContentIdentity {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(_deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let wire = FactContentIdentityValueWire::deserialize(deserializer)?;
-        parse_identity_components(
-            wire.fact_descriptor_hash,
-            wire.subject_material_hash,
-            wire.response_schema_id,
-            wire.response_hash,
-        )
-        .map_err(de::Error::custom)
+        Err(de::Error::custom(
+            "FactContentIdentity must be reconstructed from verified hydrated fact material",
+        ))
     }
 }
 
@@ -230,77 +226,18 @@ pub fn canonical_fact_content_identity_bytes(
         .map(|value| CanonicalJsonBytes::from_value(&value))
 }
 
-/// Parses canonical bytes for a fact-content identity digest payload.
-pub fn parse_canonical_fact_content_identity_bytes(bytes: &[u8]) -> Result<FactContentIdentity> {
-    PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
-        .map_err(|error| FactError::canonical(error.to_string()))?;
-    let wire = serde_json::from_slice::<FactContentIdentityWire>(bytes)
-        .map_err(|error| FactError::canonical(error.to_string()))?;
-    if wire.version != FACT_CONTENT_IDENTITY_DIGEST_DOMAIN {
-        return Err(FactError::canonical(
-            "fact content identity canonical version is unsupported",
-        ));
-    }
-
-    let identity = parse_identity_components(
-        wire.fact_descriptor_hash,
-        wire.subject_material_hash,
-        wire.response_schema_id,
-        wire.response_hash,
-    )?;
-    let canonical = canonical_fact_content_identity_bytes(&identity)?;
-    if canonical.as_bytes() != bytes {
-        return Err(FactError::canonical(
-            "fact content identity bytes are not canonical",
-        ));
-    }
-    Ok(identity)
-}
-
 /// Derives the content digest for a checked fact-content identity.
 pub fn fact_content_identity_digest(identity: &FactContentIdentity) -> Result<ContentDigest> {
     Ok(canonical_fact_content_identity_bytes(identity)?.content_digest())
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FactContentIdentityWire {
-    version: String,
-    fact_descriptor_hash: String,
-    subject_material_hash: String,
-    response_schema_id: String,
-    response_hash: String,
-}
-
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 #[serde(deny_unknown_fields)]
 struct FactContentIdentityValueWire {
     fact_descriptor_hash: String,
     subject_material_hash: String,
     response_schema_id: String,
     response_hash: String,
-}
-
-fn parse_identity_components(
-    fact_descriptor_hash: String,
-    subject_material_hash: String,
-    response_schema_id: String,
-    response_hash: String,
-) -> Result<FactContentIdentity> {
-    let fact_descriptor_hash = ContentDigest::parse(&fact_descriptor_hash)
-        .map_err(|error| FactError::canonical(error.to_string()))?;
-    let subject_material_hash = ContentDigest::parse(&subject_material_hash)
-        .map_err(|error| FactError::canonical(error.to_string()))?;
-    let response_schema_id = SchemaId::parse(&response_schema_id)
-        .map_err(|error| FactError::canonical(error.to_string()))?;
-    let response_hash = ContentDigest::parse(&response_hash)
-        .map_err(|error| FactError::canonical(error.to_string()))?;
-    Ok(FactContentIdentity::from_verified_components(
-        fact_descriptor_hash,
-        subject_material_hash,
-        response_schema_id,
-        response_hash,
-    ))
 }
 
 fn canonical_fact_content_identity_value(identity: &FactContentIdentity) -> Result<CanonicalValue> {
@@ -613,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_identity_round_trips_and_has_a_dedicated_digest_domain() {
+    fn canonical_identity_has_a_dedicated_digest_domain_and_rejects_direct_decode() {
         let descriptor = test_descriptor(
             schema_id("mfm.test.descriptor", 1),
             schema_id("mfm.test.response", 3),
@@ -627,15 +564,8 @@ mod tests {
         let bytes = canonical_fact_content_identity_bytes(&identity).expect("canonical bytes");
 
         assert!(bytes.as_str().contains(FACT_CONTENT_IDENTITY_DIGEST_DOMAIN));
-        assert_eq!(
-            parse_canonical_fact_content_identity_bytes(bytes.as_bytes()).expect("parsed identity"),
-            identity
-        );
         let serialized = serde_json::to_vec(&identity).expect("typed value JSON");
-        assert_eq!(
-            serde_json::from_slice::<FactContentIdentity>(&serialized).expect("typed value decode"),
-            identity
-        );
+        assert!(serde_json::from_slice::<FactContentIdentity>(&serialized).is_err());
         assert_eq!(
             fact_content_identity_digest(&identity).expect("identity digest"),
             bytes.content_digest()
@@ -663,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_identity_payload_and_noncanonical_response_fail_closed() {
+    fn forged_identity_payload_and_noncanonical_response_fail_closed() {
         let descriptor = test_descriptor(
             schema_id("mfm.test.descriptor", 1),
             schema_id("mfm.test.response", 3),
@@ -672,10 +602,13 @@ mod tests {
         assert!(
             derive_fact_content_identity(&descriptor, &material, br#"{"height":42.0}"#).is_err()
         );
-        assert!(parse_canonical_fact_content_identity_bytes(
-            br#"{"version":"mfm.fact.content-identity.v1","fact_descriptor_hash":"not-a-digest","subject_material_hash":"content:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","response_schema_id":"schema:mfm.test.response:mfm.test.v1:sha256-jcs-v1:0303030303030303030303030303030303030303030303030303030303030303","response_hash":"content:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"}"#,
-        )
-        .is_err());
+        let forged = serde_json::json!({
+            "fact_descriptor_hash": digest(97).as_str(),
+            "subject_material_hash": digest(98).as_str(),
+            "response_schema_id": schema_id("mfm.test.forged", 99).as_str(),
+            "response_hash": digest(100).as_str(),
+        });
+        assert!(serde_json::from_value::<FactContentIdentity>(forged).is_err());
 
         let descriptor = FactContentIdentity::schema_descriptor().expect("value descriptor");
         assert_eq!(
