@@ -30,9 +30,10 @@ pub use erc20_balance_collect::{
     normalize_erc20_balance_from_capability, normalize_erc20_token_metadata_from_capability,
     validate_observe_erc20_balance_config, validate_observe_erc20_token_metadata_config,
     EvmErc20TokenMetadata, ObserveErc20BalanceConfig, ObserveErc20BalanceInput,
-    ObserveErc20BalanceState, ObserveErc20TokenMetadataConfig, ObserveErc20TokenMetadataInput,
+    ObserveErc20BalanceInputHandles, ObserveErc20BalanceState, ObserveErc20TokenMetadataConfig,
+    ObserveErc20TokenMetadataInput, ObserveErc20TokenMetadataInputHandles,
     ObserveErc20TokenMetadataState, RecordErc20BalanceFactConfig, RecordErc20BalanceFactInput,
-    RecordErc20BalanceFactState, EVM_ERC20_BALANCE_COVERAGE,
+    RecordErc20BalanceFactInputHandles, RecordErc20BalanceFactState, EVM_ERC20_BALANCE_COVERAGE,
     EVM_ERC20_BALANCE_OBSERVE_SOURCE_READS, EVM_ERC20_BALANCE_SOURCE_STATUS,
     EVM_ERC20_METADATA_OBSERVE_SOURCE_READS,
 };
