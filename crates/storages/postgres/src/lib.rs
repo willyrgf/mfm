@@ -27,7 +27,7 @@ mod catalog;
 mod run_store;
 mod schema;
 
-pub use catalog::{CatalogValueKey, CatalogValueRow, CatalogValueSource, MAX_CATALOG_VALUE_BYTES};
+pub use catalog::{CatalogValueKey, CatalogValueRow, MAX_CATALOG_VALUE_BYTES};
 pub use run_store::{
     PostgresFactQueryResult, PostgresFactQueryRow, PostgresStore, PostgresStoreAuthority,
     PostgresStoreAuthorityError, PostgresStoreError,

@@ -408,9 +408,9 @@ CREATE TABLE run_observation_cursors (
 );
 
 CREATE TABLE catalog_values (
-  name TEXT NOT NULL,
-  schema_id TEXT NOT NULL,
-  digest TEXT NOT NULL,
+  name TEXT COLLATE "C" NOT NULL,
+  schema_id TEXT COLLATE "C" NOT NULL,
+  digest TEXT COLLATE "C" NOT NULL,
   canonical_json BYTEA NOT NULL,
   PRIMARY KEY (name, schema_id, digest),
   CONSTRAINT catalog_values_name_grammar CHECK (
@@ -420,7 +420,7 @@ CREATE TABLE catalog_values (
   ),
   CONSTRAINT catalog_values_schema_id_bounds CHECK (
     octet_length(schema_id) BETWEEN 1 AND 1024
-    AND schema_id ~ '^schema:[^:]+:[^:]+:sha256-jcs-v1:[0-9a-f]{64}$'
+    AND schema_id ~ '^schema:[a-z0-9][a-z0-9._/-]*:[a-z0-9][a-z0-9._/-]*:sha256-jcs-v1:[0-9a-f]{64}$'
   ),
   CONSTRAINT catalog_values_digest_bounds CHECK (
     digest ~ '^content:sha256-jcs-v1:[0-9a-f]{64}$'

@@ -10,7 +10,7 @@ use mfm_state_evm_contracts::{
     ConfigureAction, DeployAction, ImportConfiguredSpec, ImportDeployedSpec, ValidateAction,
 };
 use mfm_storage_postgres::{
-    CatalogValueKey, CatalogValueRow, CatalogValueSource, PostgresStore, MAX_CATALOG_VALUE_BYTES,
+    CatalogValueKey, CatalogValueRow, PostgresStore, MAX_CATALOG_VALUE_BYTES,
 };
 use mfm_values::{MfmConfig, ValidatedConfig};
 use serde::Deserialize;
@@ -180,7 +180,7 @@ pub async fn list_catalog_values(
         .list_catalog_values(after.as_ref(), limit)
         .await
         .map_err(AppError::from)
-        .map(|values| values.iter().map(identity_from_source).collect())
+        .map(|values| values.iter().map(identity_from_key).collect())
 }
 
 /// Loads one exact catalog value for export after storage integrity verification.
@@ -331,10 +331,6 @@ fn identity_from_key(key: &CatalogValueKey) -> CatalogValueIdentity {
         schema_id: key.schema_id.clone(),
         digest: key.digest.clone(),
     }
-}
-
-fn identity_from_source(source: &CatalogValueSource) -> CatalogValueIdentity {
-    identity_from_key(source)
 }
 
 fn serialize_schema_id<S>(value: &SchemaId, serializer: S) -> Result<S::Ok, S::Error>

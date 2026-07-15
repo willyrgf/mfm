@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{ContentDigest, SchemaId};
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::{postgres::PgRow, Postgres, Row, Transaction};
 
 use crate::run_store::{PostgresStore, PostgresStoreError, Result};
 
@@ -62,9 +62,6 @@ impl CatalogValueRow {
         Ok(row)
     }
 }
-
-/// Metadata returned by bounded catalog listing without canonical payload bytes.
-pub type CatalogValueSource = CatalogValueKey;
 
 impl PostgresStore {
     /// Appends a heterogeneous catalog batch atomically and idempotently.
@@ -134,7 +131,7 @@ impl PostgresStore {
         &self,
         after: Option<&CatalogValueKey>,
         limit: u32,
-    ) -> Result<Vec<CatalogValueSource>> {
+    ) -> Result<Vec<CatalogValueKey>> {
         if !(1..=100).contains(&limit) {
             return Err(PostgresStoreError::Corruption(
                 "catalog list limit must be between 1 and 100".to_owned(),
@@ -147,7 +144,7 @@ impl PostgresStore {
         let rows = match after {
             Some(after) => {
                 sqlx::query(
-                    "SELECT name, schema_id, digest FROM catalog_values \
+                    "SELECT name, schema_id, digest, canonical_json FROM catalog_values \
                      WHERE (name, schema_id, digest) > ($1, $2, $3) \
                      ORDER BY name, schema_id, digest LIMIT $4",
                 )
@@ -160,7 +157,7 @@ impl PostgresStore {
             }
             None => {
                 sqlx::query(
-                    "SELECT name, schema_id, digest FROM catalog_values \
+                    "SELECT name, schema_id, digest, canonical_json FROM catalog_values \
                  ORDER BY name, schema_id, digest LIMIT $1",
                 )
                 .bind(i64::from(limit))
@@ -171,36 +168,7 @@ impl PostgresStore {
         .map_err(|error| PostgresStoreError::Database(database_context(error)))?;
 
         rows.into_iter()
-            .map(|row| {
-                let name = row.try_get::<String, _>("name").map_err(|_| {
-                    PostgresStoreError::Corruption("catalog name is invalid".to_owned())
-                })?;
-                let schema_id = row
-                    .try_get::<String, _>("schema_id")
-                    .map_err(|_| {
-                        PostgresStoreError::Corruption("catalog schema id is invalid".to_owned())
-                    })?
-                    .parse()
-                    .map_err(|_| {
-                        PostgresStoreError::Corruption("catalog schema id is invalid".to_owned())
-                    })?;
-                let digest = row
-                    .try_get::<String, _>("digest")
-                    .map_err(|_| {
-                        PostgresStoreError::Corruption("catalog digest is invalid".to_owned())
-                    })?
-                    .parse()
-                    .map_err(|_| {
-                        PostgresStoreError::Corruption("catalog digest is invalid".to_owned())
-                    })?;
-                let key = CatalogValueKey {
-                    name,
-                    schema_id,
-                    digest,
-                };
-                validate_catalog_key(&key)?;
-                Ok(key)
-            })
+            .map(|row| catalog_value_row_from_sql_row(&row).map(|value| value.key))
             .collect()
     }
 }
@@ -239,6 +207,10 @@ async fn load_catalog_value_tx(
         return Ok(None);
     };
 
+    catalog_value_row_from_sql_row(&row).map(Some)
+}
+
+fn catalog_value_row_from_sql_row(row: &PgRow) -> Result<CatalogValueRow> {
     let name = row
         .try_get::<String, _>("name")
         .map_err(|_| PostgresStoreError::Corruption("catalog name is invalid".to_owned()))?;
@@ -264,7 +236,7 @@ async fn load_catalog_value_tx(
         canonical_json,
     };
     validate_catalog_row(&result)?;
-    Ok(Some(result))
+    Ok(result)
 }
 
 fn validate_catalog_batch(rows: &[CatalogValueRow]) -> Result<()> {
