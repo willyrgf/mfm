@@ -967,7 +967,9 @@ fn parse_run_artifact(json: &serde_json::Value) -> Result<events::RunArtifactEvi
 fn parse_entry_point_launch_evidence(
     json: &serde_json::Value,
 ) -> Result<events::EntryPointLaunchEvidence> {
+    require_exact_object_keys(json, &["catalog_sources", "entry_point_id"])?;
     let catalog_sources = parse_vec(json, "catalog_sources", |source| {
+        require_exact_object_keys(source, &["digest", "name", "schema_id"])?;
         Ok(events::CatalogSourceEvidence::new(
             required_str(source, "name")?,
             parse_identity(required_str(source, "schema_id")?)?,
@@ -980,7 +982,27 @@ fn parse_entry_point_launch_evidence(
     )?)
 }
 
+fn require_exact_object_keys(json: &serde_json::Value, expected: &[&'static str]) -> Result<()> {
+    let object = json
+        .as_object()
+        .ok_or_else(|| StoreError::Event("launch evidence must be an object".to_owned()))?;
+    if object.len() != expected.len() || expected.iter().any(|key| !object.contains_key(*key)) {
+        return Err(StoreError::Event(
+            "launch evidence contains unknown or missing fields".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn parse_run_identity_material(json: &serde_json::Value) -> Result<events::RunIdentityMaterialV1> {
+    require_exact_object_keys(
+        json,
+        &[
+            "certified_spec_hash",
+            "invocation_key_digest",
+            "store_scope_id",
+        ],
+    )?;
     Ok(events::RunIdentityMaterialV1 {
         certified_spec_hash: parse_identity(required_str(json, "certified_spec_hash")?)?,
         store_scope_id: StoreScopeId::new(required_str(json, "store_scope_id")?)?,

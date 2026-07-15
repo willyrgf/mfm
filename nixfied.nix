@@ -354,6 +354,22 @@ in
       env = postgresEnv;
       requires = [ "postgres" ];
     };
+    parity-catalog-replay = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm-integration-tests"
+        "--features"
+        "parity-tests"
+        "--test"
+        "catalog_replay_independence"
+        "--"
+        "--nocapture"
+      ];
+      env = postgresEnv;
+      requires = [ "postgres" ];
+    };
     # Keep workspace tests as explicit leaves so each command has its own evidence.
     workspace-tests = {
       kind = "composite";
@@ -400,6 +416,13 @@ in
           dependsOn = [
             "mfm-cli-build"
             "parity-postgres-state-events"
+            "parity-catalog-setup"
+          ];
+        };
+        parity-catalog-replay = {
+          task = "parity-catalog-replay";
+          dependsOn = [
+            "mfm-cli-build"
             "parity-catalog-setup"
           ];
         };
