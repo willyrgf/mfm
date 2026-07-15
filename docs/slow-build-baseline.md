@@ -655,3 +655,128 @@ text only and does not alter the model or task behavior.
 The final `.#ci` program was 327 bytes. Its realized Nix closure remained 124
 paths and 12,219,706,744 NAR bytes, with the model/toolchain closure accounting
 for the same approximately 1.59 GiB store output observed in Phase 05.
+
+## Phase 07: measured verification profile experiment
+
+Phase 07 was measured on 2026-07-15 on Linux aarch64 with Rust/Cargo 1.96.0,
+starting from committed Phase 06 revision
+`87487abb3d53055f8384ef5c150d69f958d76913`. The baseline retained the Phase 06
+verification policy: nonincremental builds, `debug=1`, and split debuginfo off.
+Each variant used its own disposable `NIXFIED_STATE_DIR`; no variant reused
+another variant's Cargo artifacts. The runtime-reported cache digest happened
+to remain `dd27515db6a0fc48aabe31c5e300af7325e3af24a98f0560364fa9c516971e03`
+because the Phase 06 cache key was intentionally unchanged.
+
+### Isolated variants
+
+| Variant | Temporary profile setting | Model hash | State root |
+| --- | --- | --- | --- |
+| Default | no additional profile setting | `d25c647af500ec8c060e173f05e199564cf3d3921663c82f04c3477a4c49ce84` | `/tmp/mfm-phase07-default` |
+| `codegen-units=256` | dev/test codegen units `256` | `6145b87382af1d29ebf24b666e3b7ce825a117aed4a99d9020759474f21788fd` | `/tmp/mfm-phase07-cgu256` |
+| `opt-level=1` | dev/test opt level `1` | `bd1c553808119f3ee0e2d08e3ce937342fe6d3d1002d574627301e44bb7d1ee8` | `/tmp/mfm-phase07-opt1` |
+
+The two non-default settings were temporary measurement edits to
+`nixfied.nix` and were removed before the Phase 07 report commit.
+
+### Full-CI and focused leaf measurements
+
+Each full run passed all 13 CI tasks. Nextest passed 974/974 tests in every
+run. `Nextest compile` is Cargo's logged `Finished` interval; `Nextest
+execution` is the Nextest summary interval. Linking is included in Cargo's
+compile interval because the task graph does not expose a separate linker
+timer; the remaining task interval after those two values was 0.38--0.60s.
+Parity is the sum of the seven parity leaf durations, not their concurrent
+critical path.
+
+| Variant | State | Run | Full CI | Nextest task | Compile | Execution | Doctest task | Parity sum |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Default | clean | `run-136609-1784125579154346098` | 341.392s | 160.765s | 45.93s | 114.415s | 15.903s | 95.368s |
+| Default | warm | `run-173731-1784125927514157988` | 226.593s | 110.181s | 25.10s | 84.651s | 16.399s | 78.136s |
+| `codegen-units=256` | clean | `run-186931-1784126306418770008` | 343.383s | 154.753s | 51.45s | 102.923s | 22.103s | 95.512s |
+| `codegen-units=256` | warm | `run-262519-1784126655476140855` | 243.883s | 114.991s | 30.31s | 84.078s | 18.850s | 85.271s |
+| `opt-level=1` | clean | `run-285647-1784126929587222287` | 470.965s | 233.171s | 115s | 117.608s | 10.669s | 81.149s |
+| `opt-level=1` | warm | `run-323368-1784127408590034967` | 236.160s | 140.381s | 40.57s | 99.214s | 11.719s | 55.931s |
+
+The focused one-leaf-edit runs added and then removed a comment in
+`crates/kernel/program/src/lib.rs`; each still passed 974/974 tests:
+
+| Variant | Run | Focused Nextest task | Execution summary |
+| --- | --- | ---: | ---: |
+| Default | `run-375417-1784128068095169401` | 142.090s | 94.759s |
+| `codegen-units=256` | `run-352545-1784127904596935915` | 147.178s | 84.379s |
+| `opt-level=1` | `run-337222-1784127682589024154` | 203.552s | 102.749s |
+
+The check-leaf durations were also captured from the full runs. In the order
+`fmt / clippy / cargo-metadata-contract / SQLx-offline`, they were:
+
+| Variant | Clean | Warm |
+| --- | --- | --- |
+| Default | 1.035 / 20.785 / 20.310 / 6.944s | 1.131 / 4.382 / 1.582 / 0.149s |
+| `codegen-units=256` | 1.063 / 22.601 / 23.667 / 5.701s | 1.052 / 3.802 / 1.123 / 0.147s |
+| `opt-level=1` | 1.422 / 29.657 / 72.546 / 7.361s | 1.382 / 5.087 / 2.266 / 0.235s |
+
+### Artifact and trybuild measurements
+
+The cache sizes below were captured after each variant's clean and warm full
+runs, before the separate leaf-edit probe. All variants produced zero `.dwo`
+files and no incremental artifacts; the empty incremental directory remained
+only as a filesystem placeholder.
+
+| Variant | Cache bytes | Human size | Files | Entries | Trybuild bytes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Default | 10,421,978,299 | 9.8G | 17,790 | 20,930 | 1,761,909,858 |
+| `codegen-units=256` | 10,257,175,248 | 9.7G | 17,601 | 20,715 | 1,777,342,998 |
+| `opt-level=1` | 9,102,066,063 | 8.6G | 16,246 | 19,188 | 1,792,098,139 |
+
+Trybuild remained nested inside the workspace test/doctest tasks rather than a
+separate Nixfied task. Clean logs show `trybuild v1.0.115` compilation in the
+affected task; warm logs omit that compilation. The retained inventory is nine
+harnesses, 80 Rust UI cases, and 71 checked stderr baselines. Its execution
+time is therefore included in the Nextest/doctest execution intervals above,
+while its artifact footprint is reported separately.
+
+### Correctness and diagnostics
+
+The actual `opt-level=1` compiler command contained `-C opt-level=1`,
+`-C debuginfo=1`, and `-C debug-assertions=on`. The default compiler command
+used no explicit optimization override, so it retained Cargo's test-profile
+level 0, and emitted `debuginfo=1`. `rustc --test --print cfg` reported
+`debug_assertions`.
+
+A disposable profile probe ran under both default settings and `opt-level=1`.
+It asserted `cfg!(debug_assertions)` and caught a runtime `u8` overflow panic;
+both probes passed 1/1, confirming debug assertions and overflow checks stayed
+enabled in the tested profiles. The focused Linux auto-lock diagnostic test
+also passed 1/1 in 0.83s with `RUST_BACKTRACE=1`. Its test binary contained
+`.debug_info`, `.debug_line`, and decoded entries for
+`crates/core/src/keystore/filesystem_tests.rs`, preserving source-line
+diagnostics. No panic was generated by the passing test, so no new failure
+trace was available. macOS was unavailable and remains unverified.
+
+### Phase 07 acceptance and decision
+
+The default profile remains the winner. Relative to it, `codegen-units=256`
+was 0.58% slower clean, 7.63% slower warm, and 3.58% slower after the leaf
+edit. `opt-level=1` was 37.95% slower clean, 4.22% slower warm, and 43.26%
+slower after the leaf edit. Both alternatives passed correctness, but neither
+improved total gate behavior; `opt-level=1` also materially increased clean
+compile time. No profile tuning is retained.
+
+Phase 07 is therefore a report-only rejection. The only committed change is
+this measurement record, with subject `docs: record verification profile
+experiment`; the Phase 06 default profile remains frozen for both cache pilots.
+The Linux matrix is complete for the requested variants and cache states;
+cross-platform consistency remains an explicit macOS limitation.
+
+### Clean committed-tree confirmation
+
+After the report-only commit, the exact committed tree was re-evaluated with
+model admission and the default Phase 06 profile. Model admission remained
+`d25c647af500ec8c060e173f05e199564cf3d3921663c82f04c3477a4c49ce84`, with the
+same runtime ABI and toolchain. The clean committed run passed 13/13 in
+436.377s under `run-453832-1784129299694723069`; the warm committed run passed
+13/13 in 249.277s under `run-498516-1784129741812724352`. Both committed runs
+passed 974/974 Nextest tests. The committed cache after the pair was
+10,421,992,215 bytes, 20,930 entries, 17,790 files, zero `.dwo` files, and
+1,761,915,884 bytes in trybuild artifacts. This confirms that the report-only
+commit did not alter the frozen verification profile or task graph.
