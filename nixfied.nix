@@ -29,11 +29,24 @@ let
   ];
 
   ccEnvSuffix = lib.replaceStrings [ "-" ] [ "_" ] pkgs.stdenv.hostPlatform.config;
+  verificationCachePolicy = "verification-v2";
+  cargoTargetCache = {
+    family = "cargo-target";
+    mode = "fast-dev";
+    # The runtime scopes this identity below the caller-selected state root
+    # and slot. Separate worktrees must select separate NIXFIED_STATE_DIR values.
+    scope = "slot";
+    key.parts = [
+      "cargo-target-v2"
+      "platform:${pkgs.stdenv.hostPlatform.config}"
+      "toolchain:rust-1.96.0"
+      "policy:${verificationCachePolicy}"
+    ];
+  };
   # Verification-only profile policy: keep line tables for file/line backtraces,
   # avoid incremental and split-debug artifacts, and leave direct Cargo profiles unchanged.
   # These values are inherited by nested Cargo invocations such as trybuild and SQLx.
   cargoEnv = {
-    CARGO_TARGET_DIR = "\${stateDir}/cargo-target";
     CARGO_INCREMENTAL = "0";
     CARGO_PROFILE_DEV_DEBUG = "1";
     CARGO_PROFILE_TEST_DEBUG = "1";
@@ -70,6 +83,7 @@ let
         inherit tools;
         inherit run;
         env = cargoEnv // env;
+        cacheEnv.CARGO_TARGET_DIR = cargoTargetCache;
         timeoutMs = 7200000;
       };
       inherit requires;

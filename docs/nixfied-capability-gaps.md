@@ -11,11 +11,10 @@ MFM is pinned to Nixfied revision `b0681e45ab76d5023d9c5e033087d34adf98e90b`
 with runtime ABI `nixfied-runtime-abi:1-5ff3aa14f2bf`.
 
 The current MFM verification lane uses the Phase 05 artifact policy and a
-shared `${stateDir}/cargo-target` path. Phase 06 is on hold because the current
-Nixfied runtime can materialize `invocation.cacheEnv`, but it cannot clean one
-cache family without deleting the whole slot state root. A broad slot cleanup
-would also remove Postgres data, run records, logs, and parity diagnostics, and
-is explicitly prohibited by `RFC_SLOW_BUILDS.md`.
+Nixfied `invocation.cacheEnv` identity for the `cargo-target` family. The
+runtime can materialize that identity, but it cannot clean one cache family
+without deleting the whole slot state root. A broad slot cleanup would also
+remove Postgres data, run records, logs, and parity diagnostics.
 
 ## Requested capabilities
 
@@ -54,13 +53,17 @@ Until the requested support exists:
 - keep the Phase 05 Nixfied verification lane as the authoritative gate lane;
 - use the existing slot lifecycle only when broad slot cleanup is intentional;
 - measure experimental cache identities in disposable, isolated targets; and
-- keep experiments report-only unless the Nixfied lifecycle contract is able to
-  preserve non-cache state.
+- for the explicitly approved Phase 06 pilot, manually remove only the exact
+  reported Cargo cache digest after recording its path and preserving the
+  surrounding state; and
+- keep this manual operation as a measurement-only exception, not as a
+  reusable project cleaner or a substitute for framework lifecycle semantics.
 
 MFM must not add a shell-level Cargo cache cleaner, broad recursive deletion,
 or a second ad hoc target path to simulate the missing framework capability.
-Phase 07 should not be started as a committed RFC phase until Phase 06 has a
-safe cache lifecycle or the RFC is explicitly re-scoped and re-approved.
+Phase 06 is explicitly re-scoped to permit the exact-path measurement exception
+above; the upstream cache lifecycle request remains open. Phase 07 may proceed
+under that owner-approved exception, with the limitation recorded in its report.
 
 ## Suggested framework test matrix
 
@@ -80,7 +83,7 @@ safe cache lifecycle or the RFC is explicitly re-scoped and re-approved.
 
 ## Decision status
 
-Phase 06 of [RFC_SLOW_BUILDS.md](../RFC_SLOW_BUILDS.md) is blocked on the P0
-capabilities above. MFM will keep this list current as the Nixfied team
-responds; no local workaround is intended to substitute for framework-owned
-lifecycle semantics.
+Phase 06 of [RFC_SLOW_BUILDS.md](../RFC_SLOW_BUILDS.md) is re-scoped under an
+owner-approved exact-path measurement exception. MFM will keep this list
+current as the Nixfied team responds; the P0 lifecycle capabilities remain
+needed before manual cleanup can become an ordinary project operation.
