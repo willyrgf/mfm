@@ -22,7 +22,12 @@ error[E0277]: the trait bound `serde_json::Value: mfm_values::StateInput` is not
   |         ^^^^^^^^^^^^^^^^^ the trait `mfm_values::MfmValue` is not implemented for `serde_json::Value`
   |
 help: the following other types implement trait `mfm_values::MfmValue`
- --> $WORKSPACE/crates/kernel/values/src/generic_values.rs
+ --> $WORKSPACE/crates/kernel/facts/src/content_identity.rs
+  |
+  | impl MfmValue for FactContentIdentity {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FactContentIdentity`
+  |
+ ::: $WORKSPACE/crates/kernel/values/src/generic_values.rs
   |
   | impl MfmValue for ContextRefValue {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ContextRefValue`
@@ -54,7 +59,12 @@ error[E0277]: the trait bound `serde_json::Value: mfm_values::MfmValue` is not s
   | |___________________________^ the trait `mfm_values::MfmValue` is not implemented for `serde_json::Value`
   |
 help: the following other types implement trait `mfm_values::MfmValue`
- --> $WORKSPACE/crates/kernel/values/src/generic_values.rs
+ --> $WORKSPACE/crates/kernel/facts/src/content_identity.rs
+  |
+  | impl MfmValue for FactContentIdentity {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FactContentIdentity`
+  |
+ ::: $WORKSPACE/crates/kernel/values/src/generic_values.rs
   |
   | impl MfmValue for ContextRefValue {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ContextRefValue`

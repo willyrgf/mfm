@@ -32,7 +32,12 @@ help: the trait `mfm_values::MfmValue` is not implemented for `ContextKey`
 1 | struct ContextKey(String);
   | ^^^^^^^^^^^^^^^^^
 help: the following other types implement trait `mfm_values::MfmValue`
- --> $WORKSPACE/crates/kernel/values/src/generic_values.rs
+ --> $WORKSPACE/crates/kernel/facts/src/content_identity.rs
+  |
+  | impl MfmValue for FactContentIdentity {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FactContentIdentity`
+  |
+ ::: $WORKSPACE/crates/kernel/values/src/generic_values.rs
   |
   | impl MfmValue for ContextRefValue {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ContextRefValue`
@@ -67,7 +72,12 @@ help: the trait `mfm_values::MfmValue` is not implemented for `ContextKey`
 1 | struct ContextKey(String);
   | ^^^^^^^^^^^^^^^^^
 help: the following other types implement trait `mfm_values::MfmValue`
- --> $WORKSPACE/crates/kernel/values/src/generic_values.rs
+ --> $WORKSPACE/crates/kernel/facts/src/content_identity.rs
+  |
+  | impl MfmValue for FactContentIdentity {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FactContentIdentity`
+  |
+ ::: $WORKSPACE/crates/kernel/values/src/generic_values.rs
   |
   | impl MfmValue for ContextRefValue {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ContextRefValue`

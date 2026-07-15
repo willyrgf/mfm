@@ -23,7 +23,12 @@ error[E0277]: the trait bound `Box<(dyn Any + Send + Sync + 'static)>: mfm_value
   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `mfm_values::MfmValue` is not implemented for `Box<(dyn Any + Send + Sync + 'static)>`
   |
 help: the following other types implement trait `mfm_values::MfmValue`
- --> $WORKSPACE/crates/kernel/values/src/generic_values.rs
+ --> $WORKSPACE/crates/kernel/facts/src/content_identity.rs
+  |
+  | impl MfmValue for FactContentIdentity {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FactContentIdentity`
+  |
+ ::: $WORKSPACE/crates/kernel/values/src/generic_values.rs
   |
   | impl MfmValue for ContextRefValue {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ContextRefValue`
@@ -55,7 +60,12 @@ error[E0277]: the trait bound `Box<(dyn Any + Send + Sync + 'static)>: mfm_value
   | |____________________________^ the trait `mfm_values::MfmValue` is not implemented for `Box<(dyn Any + Send + Sync + 'static)>`
   |
 help: the following other types implement trait `mfm_values::MfmValue`
- --> $WORKSPACE/crates/kernel/values/src/generic_values.rs
+ --> $WORKSPACE/crates/kernel/facts/src/content_identity.rs
+  |
+  | impl MfmValue for FactContentIdentity {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FactContentIdentity`
+  |
+ ::: $WORKSPACE/crates/kernel/values/src/generic_values.rs
   |
   | impl MfmValue for ContextRefValue {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ContextRefValue`

@@ -22,7 +22,12 @@ error[E0277]: the trait bound `Identity<CellIdKind>: mfm_values::StateInput` is 
   |                                                                      ^^^^^^ the trait `mfm_values::MfmValue` is not implemented for `Identity<CellIdKind>`
   |
 help: the following other types implement trait `mfm_values::MfmValue`
- --> $WORKSPACE/crates/kernel/values/src/generic_values.rs
+ --> $WORKSPACE/crates/kernel/facts/src/content_identity.rs
+  |
+  | impl MfmValue for FactContentIdentity {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FactContentIdentity`
+  |
+ ::: $WORKSPACE/crates/kernel/values/src/generic_values.rs
   |
   | impl MfmValue for ContextRefValue {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ContextRefValue`
@@ -49,7 +54,12 @@ error[E0277]: the trait bound `Identity<CellIdKind>: mfm_values::MfmValue` is no
   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `mfm_values::MfmValue` is not implemented for `Identity<CellIdKind>`
   |
 help: the following other types implement trait `mfm_values::MfmValue`
- --> $WORKSPACE/crates/kernel/values/src/generic_values.rs
+ --> $WORKSPACE/crates/kernel/facts/src/content_identity.rs
+  |
+  | impl MfmValue for FactContentIdentity {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FactContentIdentity`
+  |
+ ::: $WORKSPACE/crates/kernel/values/src/generic_values.rs
   |
   | impl MfmValue for ContextRefValue {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ContextRefValue`
