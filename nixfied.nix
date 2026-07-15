@@ -165,17 +165,8 @@ in
         "nextest"
         "run"
         "--workspace"
-      ];
-    };
-    app-test-support = cargoLeaf {
-      run = [
-        "cargo"
-        "nextest"
-        "run"
-        "-p"
-        "mfm-app"
         "--features"
-        "test-support"
+        "mfm-app/test-support"
       ];
     };
     doc-tests = cargoLeaf {
@@ -319,12 +310,12 @@ in
       env = postgresEnv;
       requires = [ "postgres" ];
     };
-    # Keep workspace tests as explicit leaves so each command has its own evidence.
+    # Keep workspace tests and doctests as explicit leaves so each command has
+    # its own evidence.
     workspace-tests = {
       kind = "composite";
       steps = nixfiedLib.seq [
         "nextest-run"
-        "app-test-support"
         "doc-tests"
       ];
     };

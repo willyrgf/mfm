@@ -1,6 +1,6 @@
 # Controlled slow-build baseline
 
-Status: Phase 01 baseline for RFC_SLOW_BUILDS.md
+Status: Phase 01 baseline and Phase 02 follow-up for RFC_SLOW_BUILDS.md
 
 This report measures the clean Phase 00 RFC commit
 `51a5f9a07808cd9a92b218a028dd2424c04ac76d` (`docs: rfc builds tt3`). The
@@ -179,3 +179,33 @@ as a second storage observation rather than merged into the slot-5 series.
 This report establishes a complete Linux baseline for the later build-policy
 phases. macOS remains unavailable and must be recorded as an unverified
 platform until a macOS runner is available.
+
+## Phase 02 follow-up: remove duplicate MFM app test run
+
+The Phase 02 implementation used the expected subject `remove duplicate mfm app
+test run`, with the Phase 01 report commit as its parent. The change made
+`mfm-app/test-support` explicit in workspace Nextest and removed the separate
+app-support task and composite edge.
+
+The pre-change workspace list contained 974 identifiers with canonical hash
+`bb5dbb8f080225104b31a0ae369db94ad4e8bc4c48213efb72c5dc48f817c2dd`. The
+separate app-support list contained 70 identifiers with hash
+`e398de989b467c3205ff70af300958ee7e15d50daaec0fe2130e8e0c47ec14b0`; its
+union with the workspace list was still 974 identifiers and the workspace
+hash. After the change, workspace Nextest with `mfm-app/test-support` again
+contained 974 identifiers with the same hash, including
+`mfm-app::manual_resolution`.
+
+The changed gates passed on Linux `aarch64`:
+
+- `nix run .#model-check`: model hash `6936ca7b9d3264c8940f29c3ec02a4e5d16ff1cec2da7427af8c181951c7b074`.
+- `nix run .#check -- --slot 7`: 4/4, 50.80s, run `3287287-1784085380130104204`.
+- `nix run .#test -- --slot 7`: 2/2 leaves, 178.48s, run `3302336-1784085434207388090`.
+- `nix run .#test-db -- --slot 7`: 6/6, 123.07s, run `3340323-1784085616938741564`.
+- `nix run .#ci -- --slot 7`: 13/13, 213.99s, run `3347233-1784085745199734840`.
+
+The test composite therefore changed from three workspace-test leaves to two,
+and CI changed from 14 tasks to 13. The post-change timings reused the
+verification target and are not a controlled Phase 02 performance matrix;
+they record removed execution and successful coverage. The Phase 01 artifact
+and Nix storage measurements remain the authoritative storage baseline.
