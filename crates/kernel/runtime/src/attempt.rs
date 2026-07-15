@@ -297,9 +297,7 @@ impl AttemptLifecycle {
         .build()
         {
             Ok(invocation) => invocation,
-            Err(error) => {
-                return terminalize_observed_failure(store, failure_context, error).await;
-            }
+            Err(error) => return terminalize_observed_failure(store, failure_context, error).await,
         };
         let output = match binding
             .runner
@@ -310,9 +308,7 @@ impl AttemptLifecycle {
             Err(RuntimeError::Blocked(_)) => {
                 return Ok(AttemptRunStatus::OperationalBlock);
             }
-            Err(error) => {
-                return terminalize_observed_failure(store, failure_context, error).await;
-            }
+            Err(error) => return terminalize_observed_failure(store, failure_context, error).await,
         };
         let terminal_output = match CommitPlanner::prepare_runner_output(RunnerOutputCommitInput {
             runtime_spec,
@@ -327,9 +323,7 @@ impl AttemptLifecycle {
             output,
         }) {
             Ok(output) => output,
-            Err(error) => {
-                return terminalize_observed_failure(store, failure_context, error).await;
-            }
+            Err(error) => return terminalize_observed_failure(store, failure_context, error).await,
         };
         let lane_projection = store
             .status_projection_snapshot(run_id)

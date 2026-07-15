@@ -11,7 +11,7 @@ use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
 use crate::framework::{
-    framework_complete_run_binding, framework_public_output_binding,
+    framework_bridge_binding, framework_complete_run_binding, framework_public_output_binding,
     framework_resolve_saga_terminal_binding, framework_retention_manifest_binding,
 };
 use crate::{
@@ -628,6 +628,9 @@ impl ErasedRunnerRegistry {
             Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
         ) {
             return framework_resolve_saga_terminal_binding(node, descriptor);
+        }
+        if matches!(&node.framework, Some(spec::FrameworkNodeSpec::Bridge(_))) {
+            return framework_bridge_binding(node, descriptor);
         }
         if matches!(
             &node.framework,

@@ -42,9 +42,9 @@ mfm-portfolio-model = { path = "../../crates/portfolio/model" }
 mfm-rest-api = { path = "../../bin/rest-api" }
 
 [dev-dependencies]
-assert_cmd = "2.0"
 alloy-primitives = { workspace = true }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-state-evm-contracts = { path = "../../crates/states/evm-contracts" }
 mfm-evm-contract-model = { path = "../../crates/evm-contract-model" }
+mfm-op-portfolio-collect-report = { path = "../../crates/ops/portfolio-collect-report-op" }
 tower = "0.5"

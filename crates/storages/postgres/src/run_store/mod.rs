@@ -213,7 +213,7 @@ impl RunEventStore for PostgresStore {
                     database_error("failed to begin committed stream load", error)
                 })?;
             let stream = load_run_stream_tx(&mut tx, run_id).await?;
-            let artifact_bytes = load_fact_rebuild_artifact_bytes_tx(&mut tx, &stream).await?;
+            let artifact_bytes = load_run_artifact_bytes_tx(&mut tx, run_id).await?;
             let committed = CommittedRunStream::from_events_with_artifact_bytes(
                 run_id.clone(),
                 stream,

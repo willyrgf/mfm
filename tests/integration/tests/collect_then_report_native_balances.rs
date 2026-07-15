@@ -1,20 +1,22 @@
-//! Collect-then-report e2e: balance collectors write Platform holdings, then report succeeds.
+//! Collect-then-report e2e: one certified parent run collects and reports balances.
 //!
-//! Highest-value operator path after cutover:
-//!   mock-transport collect (BTC + EVM natives, shared joint tip) → portfolio_snapshot Completes
-//! without seed helpers and without live chain crawl in the report graph.
+//! The highest-value operator path after cutover is one direct typed parent launch: mock
+//! transport collection (BTC + EVM natives, shared joint tip) → typed readiness → portfolio
+//! snapshot/report in the same run, followed by evidence-only replay.
 //!
-//! The test composes all collector and portfolio runners in one registry with process-owned
-//! fact capabilities, matching the production assembly boundary.
+//! The test uses the production runner registry and Postgres fact capabilities, matching the
+//! production assembly boundary without catalog or CLI orchestration.
 
 #![allow(clippy::disallowed_methods)]
 
+#[cfg(feature = "parity-tests")]
+use std::collections::{BTreeMap, BTreeSet};
+#[cfg(feature = "parity-tests")]
+use std::num::NonZeroU64;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use alloy_primitives::{Address, B256, U256};
-#[cfg(feature = "parity-tests")]
-use assert_cmd::Command;
 use mfm_btc_capabilities::{
     BtcBalanceReadProvider, BtcBalanceReadRequest, BtcBalanceReadResponse, BtcBlockHash,
     BtcCapabilityFuture, BtcChainHeadReadProvider, BtcChainHeadRequest, BtcChainHeadResponse,
@@ -38,18 +40,22 @@ use mfm_integration_tests::test_support::{
     register_process_fact_capabilities, ProjectionFactIndexProvider,
 };
 #[cfg(feature = "parity-tests")]
-use mfm_storage_postgres::{CatalogValueKey, CatalogValueRow, PostgresStore};
-use mfm_store::v1::{
-    AsyncInMemoryRunStore, ProjectionSnapshot, RetainedArtifactReadProvider, RunEventStore,
+use mfm_op_btc_collectors::BtcAddressBalanceObservationContext;
+#[cfg(feature = "parity-tests")]
+use mfm_op_portfolio_collect_report::{
+    build_collect_then_report_config, collect_then_report_program_draft, BitcoinCollectorPolicy,
+    EvmCollectorPolicy,
 };
 #[cfg(feature = "parity-tests")]
-use mfm_values::{MfmConfig, ValidatedConfig};
+use mfm_program::{
+    BridgeKind, CanonicalSeed, InputBindingNode, InputBindingNodeRef, TypedProgramDraft,
+};
+use mfm_store::v1::{
+    AsyncInMemoryRunStore, ProjectionSnapshot, RetainedArtifactReadProvider, RunEventStore,
+    StoreScopeStore,
+};
 #[cfg(feature = "parity-tests")]
 use serde_json::Value;
-#[cfg(feature = "parity-tests")]
-use std::path::Path;
-#[cfg(feature = "parity-tests")]
-use std::process::Output;
 
 const BTC_ADDRESS: &str = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
 const ETH_ACCOUNT: &str = "0x000000000000000000000000000000000000dead";
@@ -106,116 +112,75 @@ async fn collect_then_report_completes_from_collector_written_platform_holdings(
     let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
     let runtime_config_path =
         write_collectors_runtime_config_for_test(runtime_config_dir.path(), &rpc_url);
-    let config_dir = tempfile::tempdir().expect("collector config tempdir");
-    let btc_ref = publish_catalog_value(
-        &store,
-        "integration/btc-address-balance",
-        serde_json::from_value::<mfm_op_btc_collectors::BtcAddressBalanceConfig>(
-            btc_balance_config_json(),
-        )
-        .expect("btc catalog config"),
+    let portfolio: mfm_op_portfolio_tracker::PortfolioConfig = serde_json::from_value(
+        dual_mainnet_portfolio_json()
+            .get("portfolio")
+            .cloned()
+            .expect("portfolio value"),
     )
-    .await;
-    let evm_ref = publish_catalog_value(
-        &store,
-        "integration/evm-native-balance",
-        serde_json::from_value::<mfm_op_evm_collectors::EvmNativeBalanceConfig>(
-            evm_balance_config_json(),
-        )
-        .expect("evm catalog config"),
+    .expect("portfolio config");
+    let config = build_collect_then_report_config(
+        portfolio,
+        BitcoinCollectorPolicy::new("configured_only", NonZeroU64::new(1).expect("non-zero")),
+        EvmCollectorPolicy::new(
+            "configured_only",
+            Some(18),
+            NonZeroU64::new(1).expect("non-zero"),
+        ),
     )
-    .await;
-    let portfolio = dual_mainnet_portfolio_json();
-    let portfolio_ref = publish_catalog_value(
-        &store,
-        "integration/dual-mainnet-portfolio",
-        serde_json::from_value::<mfm_op_portfolio_tracker::PortfolioConfig>(
-            portfolio
-                .get("portfolio")
-                .cloned()
-                .expect("portfolio catalog value"),
-        )
-        .expect("portfolio catalog config"),
+    .expect("composed config");
+    let draft = collect_then_report_program_draft(config).expect("composed draft");
+    assert_composed_parent_plan(&draft);
+
+    let seed = CanonicalSeed::from_value(&BtcAddressBalanceObservationContext {
+        observed_at_unix_ms: None,
+    })
+    .expect("observation seed");
+    let seed_material = draft
+        .seeds()
+        .iter()
+        .map(|seed_spec| (seed_spec.seed_id.clone(), seed.canonical_json().clone()))
+        .collect::<BTreeMap<_, _>>();
+    let certification_registry = mfm_app::production_certification_registry().expect("cert");
+    let store_scope_id = store.load_store_scope_id().await.expect("store scope");
+    let prepared = mfm_app::prepare_typed_program_run_launch_for_test(
+        draft,
+        seed_material,
+        &certification_registry,
+        store_scope_id,
+        Some(mfm_app::InvocationKey::new("collect-then-report-parent").expect("invocation key")),
     )
-    .await;
-    let btc_request_path = write_json_config(
-        config_dir.path(),
-        "btc-request.json",
-        serde_json::json!({"config": btc_ref}),
+    .expect("prepared composed launch");
+    let certified_spec = prepared.certified_spec.clone();
+    let fact_index = mfm_app::production_fact_index_read_provider(store.clone());
+    let runners = mfm_app::production_runner_registry(
+        Arc::new(store.clone()),
+        fact_index,
+        Some(runtime_config_path.as_path()),
+    )
+    .expect("production runners");
+    let runtime_spec = mfm_runtime::CertifiedRuntimeSpec::new(prepared.certified_spec.clone())
+        .expect("runtime spec");
+    mfm_runtime::BoundRuntimeContextLoader::new(runners.clone())
+        .load(&runtime_spec)
+        .expect("runner bindings");
+    let services = mfm_app::make_run_services(
+        runners,
+        store.clone(),
+        store.clone(),
+        certification_registry,
     );
-    let evm_request_path = write_json_config(
-        config_dir.path(),
-        "evm-request.json",
-        serde_json::json!({"config": evm_ref}),
-    );
-    let portfolio_request_path = write_json_config(
-        config_dir.path(),
-        "portfolio-request.json",
-        serde_json::json!({"portfolio": portfolio_ref}),
-    );
-
-    // 1) Collect BTC then EVM natives through the actual CLI and production Postgres assembly.
-    let btc = run_cli(&[
-        "--output-format".to_owned(),
-        "json".to_owned(),
-        "run".to_owned(),
-        "start".to_owned(),
-        "--entry-point".to_owned(),
-        "mfm.bitcoin/btc_address_balance@1".to_owned(),
-        "--request".to_owned(),
-        path_arg(&btc_request_path),
-        "--runtime-config".to_owned(),
-        path_arg(&runtime_config_path),
-        "--database-url".to_owned(),
-        scoped_database_url.clone(),
-    ]);
-    assert_success(&btc);
-    let btc_data = parse_success_json(&btc.stdout);
-    assert_eq!(btc_data["outcome"], "admitted");
-    assert_eq!(btc_data["run"]["run_mode"], "completed");
-    let btc_run_id = run_id_from_start(&btc_data);
-
-    let evm = run_cli(&[
-        "--output-format".to_owned(),
-        "json".to_owned(),
-        "run".to_owned(),
-        "start".to_owned(),
-        "--entry-point".to_owned(),
-        "mfm.evm/evm_native_balance@1".to_owned(),
-        "--request".to_owned(),
-        path_arg(&evm_request_path),
-        "--runtime-config".to_owned(),
-        path_arg(&runtime_config_path),
-        "--database-url".to_owned(),
-        scoped_database_url.clone(),
-    ]);
-    assert_success(&evm);
-    let evm_data = parse_success_json(&evm.stdout);
-    assert_eq!(evm_data["outcome"], "admitted");
-    assert_eq!(evm_data["run"]["run_mode"], "completed");
-    let evm_run_id = run_id_from_start(&evm_data);
-
-    // 2) Report only over the collector-written Platform facts. The process receives no runtime
-    // config, so a successful report proves it did not perform a live chain crawl.
-    let report = run_cli(&[
-        "--output-format".to_owned(),
-        "json".to_owned(),
-        "run".to_owned(),
-        "start".to_owned(),
-        "--entry-point".to_owned(),
-        "mfm.portfolio/portfolio_snapshot@1".to_owned(),
-        "--request".to_owned(),
-        path_arg(&portfolio_request_path),
-        "--database-url".to_owned(),
-        scoped_database_url.clone(),
-    ]);
-    assert_success(&report);
-    let report_data = parse_success_json(&report.stdout);
-    assert_eq!(report_data["outcome"], "admitted");
-    assert_eq!(report_data["run"]["run_mode"], "completed");
-    let report_run_id = run_id_from_start(&report_data);
-    let json = &report_data["public_output"]["json"];
-    let snapshot = find_public_object(json, is_snapshot_public_object)
+    let report = services
+        .launch_run_and_render(prepared)
+        .await
+        .expect("composed launch");
+    assert_eq!(report.outcome, mfm_app::RunLaunchOutcomeStatus::Admitted);
+    let run = report.run.expect("composed run response");
+    assert_eq!(run.run_mode, mfm_app::RunModeStatus::Completed);
+    let run_id = run.run_id.parse().expect("run id");
+    let public_output = report.public_output.expect("composed public output");
+    let json = public_output.json.expect("composed public JSON");
+    let snapshot = find_public_object(&json, is_snapshot_public_object)
         .expect("public output should carry snapshot material");
     assert_observation(
         snapshot,
@@ -233,7 +198,7 @@ async fn collect_then_report_completes_from_collector_written_platform_holdings(
         "1.000000000000000000",
         "1800.000000000000000000",
     );
-    let report = find_public_object(json, is_report_public_object)
+    let report = find_public_object(&json, is_report_public_object)
         .expect("public output should carry report material");
     let usd_total = report["totals_by_quote"]
         .as_array()
@@ -249,25 +214,181 @@ async fn collect_then_report_completes_from_collector_written_platform_holdings(
         usd_total.get("net_value_dec").and_then(Value::as_str),
         Some("1850.000000000000000000")
     );
-    // 3) Replay all three persisted runs through the read-only CLI path.
-    for run_id in [btc_run_id, evm_run_id, report_run_id] {
-        let replay = run_cli(&[
-            "--output-format".to_owned(),
-            "json".to_owned(),
-            "run".to_owned(),
-            "replay".to_owned(),
-            run_id.clone(),
-            "--database-url".to_owned(),
-            scoped_database_url.clone(),
-        ]);
-        assert_success(&replay);
-        let replay_data = parse_success_json(&replay.stdout);
-        assert_eq!(replay_data["run_id"].as_str(), Some(run_id.as_str()));
-        assert_eq!(replay_data["run_mode"], "completed");
-        assert!(replay_data["retained_artifacts"].as_u64().unwrap_or(0) > 0);
-    }
+    let stream = store.load_run_stream(&run_id).await.expect("parent stream");
+    assert!(
+        !stream.is_empty(),
+        "parent stream should contain committed events"
+    );
+    assert!(stream.iter().all(|event| event.run_id() == &run_id));
+    assert_eq!(
+        stream
+            .iter()
+            .filter_map(|event| match event.payload() {
+                events::KernelEventPayload::FactRecorded(payload)
+                    if payload.claim.visibility()
+                        == &mfm_facts::FactVisibility::indexed_default(FactAudience::Platform) =>
+                {
+                    Some(payload.claim.fact_kind().as_str())
+                }
+                _ => None,
+            })
+            .filter(|fact_kind| {
+                *fact_kind == "bitcoin.address_balance_snapshot"
+                    || *fact_kind == "evm.address_native_balance_snapshot"
+            })
+            .count(),
+        2
+    );
+    assert_eq!(
+        stream
+            .iter()
+            .filter_map(|event| match event.payload() {
+                events::KernelEventPayload::FactRecorded(payload)
+                    if payload.claim.fact_kind().as_str() == "bitcoin.address_balance_snapshot" =>
+                {
+                    Some(())
+                }
+                _ => None,
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        stream
+            .iter()
+            .filter_map(|event| match event.payload() {
+                events::KernelEventPayload::FactRecorded(payload)
+                    if payload.claim.fact_kind().as_str()
+                        == "evm.address_native_balance_snapshot" =>
+                {
+                    Some(())
+                }
+                _ => None,
+            })
+            .count(),
+        1
+    );
+    let replay = services
+        .verify_replay_for_run(&run_id)
+        .await
+        .expect("parent replay");
+    assert_eq!(replay.run_id, run_id.to_string());
+    assert_eq!(replay.run_mode, mfm_app::RunModeStatus::Completed);
+    assert!(replay.retained_artifacts > 0);
+    assert_eq!(replay.spec_hash, certified_spec.spec_hash().to_string());
 
     drop_postgres_schema(&database_url, &schema).await;
+}
+
+#[cfg(feature = "parity-tests")]
+fn assert_composed_parent_plan(draft: &TypedProgramDraft) {
+    let scopes = draft.scopes();
+    assert_eq!(scopes.len(), 3, "one root and two collector scopes");
+    let root_scope = scopes
+        .iter()
+        .find(|scope| scope.parent_scope_id.is_none())
+        .expect("root scope");
+    assert_eq!(root_scope.key.as_str(), "portfolio_collect_then_report");
+    let scope_keys = scopes
+        .iter()
+        .map(|scope| scope.key.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        scope_keys,
+        BTreeSet::from([
+            "portfolio_collect_then_report",
+            "bitcoin_collector_0",
+            "evm_collector_0",
+        ])
+    );
+    for child in scopes
+        .iter()
+        .filter(|scope| scope.scope_id != root_scope.scope_id)
+    {
+        assert_eq!(
+            child.parent_scope_id.as_ref(),
+            Some(&root_scope.scope_id),
+            "collector scope must be a direct child of the certified parent"
+        );
+    }
+
+    let frames = draft.operation_lineage();
+    let composition = frames
+        .iter()
+        .find(|frame| frame.operation_name == "mfm.portfolio.collect_then_report")
+        .expect("composition lineage frame");
+    for frame in frames {
+        if frame.operation_instance_id != composition.operation_instance_id {
+            assert!(
+                frame
+                    .parent_operation_lineage
+                    .active_instances
+                    .contains(&composition.operation_instance_id),
+                "{} must retain the composed parent lineage",
+                frame.operation_name
+            );
+        }
+    }
+
+    let readiness = draft
+        .state_nodes()
+        .iter()
+        .find(|node| node.key.as_str() == "collectors_ready")
+        .expect("typed readiness state");
+    let mut readiness_inputs = BTreeSet::new();
+    collect_input_cell_ids(&readiness.input.root, &mut readiness_inputs);
+    assert_eq!(
+        readiness_inputs.len(),
+        2,
+        "readiness must consume one typed summary from each collector"
+    );
+    let exported_summary_cells = draft
+        .bridge_nodes()
+        .iter()
+        .filter(|bridge| {
+            bridge.bridge_kind == BridgeKind::ExportToParent
+                && bridge.target_scope_id == root_scope.scope_id
+        })
+        .map(|bridge| bridge.target_cell_id.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(exported_summary_cells, readiness_inputs);
+
+    let tracker = frames
+        .iter()
+        .find(|frame| frame.operation_name == "mfm.portfolio.tracker_workflow")
+        .expect("tracker lineage frame");
+    match tracker.input.root.as_ref() {
+        InputBindingNodeRef::Cell(binding) => {
+            assert_eq!(binding.cell_id(), &readiness.output_cell_id);
+        }
+        other => panic!("tracker must consume the readiness output cell, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "parity-tests")]
+fn collect_input_cell_ids(node: &InputBindingNode, output: &mut BTreeSet<mfm_ids::CellId>) {
+    match node.as_ref() {
+        InputBindingNodeRef::Unit => {}
+        InputBindingNodeRef::Cell(binding) => {
+            output.insert(binding.cell_id().clone());
+        }
+        InputBindingNodeRef::Tuple(elements) => {
+            for element in elements {
+                collect_input_cell_ids(element, output);
+            }
+        }
+        InputBindingNodeRef::Struct(fields) => {
+            for field in fields {
+                collect_input_cell_ids(&field.node, output);
+            }
+        }
+        InputBindingNodeRef::Vec { elements, .. }
+        | InputBindingNodeRef::NonEmptyVec { elements, .. } => {
+            for element in elements {
+                collect_input_cell_ids(element, output);
+            }
+        }
+    }
 }
 
 // --- services / launch -------------------------------------------------------
@@ -393,83 +514,6 @@ fn assert_platform_holding_kind(projection: &ProjectionSnapshot, fact_kind: &str
         count, expected,
         "expected {expected} platform facts of kind {fact_kind}"
     );
-}
-
-#[cfg(feature = "parity-tests")]
-fn write_json_config(dir: &Path, name: &str, value: Value) -> std::path::PathBuf {
-    let path = dir.join(name);
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&value).expect("config json"),
-    )
-    .expect("write config");
-    path
-}
-
-#[cfg(feature = "parity-tests")]
-async fn publish_catalog_value<T: MfmConfig>(store: &PostgresStore, name: &str, value: T) -> Value {
-    let validated = ValidatedConfig::new(value).expect("catalog value validation");
-    let canonical = validated
-        .canonical_json()
-        .expect("catalog value canonicalization");
-    let schema_id = T::schema_id().expect("catalog value schema");
-    let digest = canonical.content_digest();
-    let key = CatalogValueKey::new(name, schema_id, digest).expect("catalog value key");
-    let row = CatalogValueRow::new(
-        key.name.clone(),
-        key.schema_id.clone(),
-        key.digest.clone(),
-        canonical.as_bytes().to_vec(),
-    )
-    .expect("catalog value row");
-    store
-        .append_catalog_values(&[row])
-        .await
-        .expect("publish catalog value");
-    serde_json::json!({"name": key.name, "digest": key.digest.as_str()})
-}
-
-#[cfg(feature = "parity-tests")]
-fn path_arg(path: &Path) -> String {
-    path.to_str().expect("utf-8 test path").to_owned()
-}
-
-#[cfg(feature = "parity-tests")]
-fn run_cli(args: &[String]) -> Output {
-    let mut command = Command::cargo_bin("mfm_cli").expect("mfm_cli binary");
-    command
-        .env_remove("MFM_RUNTIME_CONFIG_FILE")
-        .env_remove("LOG_LEVEL")
-        .env_remove("RUST_LOG")
-        .env_remove("LOG_FORMAT")
-        .env_remove("LOG_SPAN_EVENTS")
-        .args(args)
-        .output()
-        .expect("execute mfm_cli")
-}
-
-#[cfg(feature = "parity-tests")]
-fn assert_success(output: &Output) {
-    assert!(
-        output.status.success(),
-        "mfm_cli failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[cfg(feature = "parity-tests")]
-fn parse_success_json(stdout: &[u8]) -> Value {
-    let response: Value = serde_json::from_slice(stdout).expect("CLI stdout must be JSON");
-    assert_eq!(response["status"], "success", "CLI response: {response}");
-    response["data"].clone()
-}
-
-#[cfg(feature = "parity-tests")]
-fn run_id_from_start(data: &Value) -> String {
-    data["run"]["run_id"]
-        .as_str()
-        .expect("start response run id")
-        .to_owned()
 }
 
 #[cfg(feature = "parity-tests")]

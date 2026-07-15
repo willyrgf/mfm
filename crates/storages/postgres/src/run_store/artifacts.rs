@@ -210,6 +210,59 @@ pub(super) async fn read_retained_artifact_from_pool(
     VerifiedRunArtifactBytes::new(record.artifact_bytes, record.evidence, requirement)
 }
 
+pub(super) async fn load_run_artifact_bytes_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+) -> Result<ArtifactByteAuthorityMap> {
+    let rows = sqlx::query(
+        "SELECT a.artifact_id, a.evidence_hash, a.digest, a.byte_len, a.media_type, \
+         a.schema_id, a.semantic_type_id, a.producer_node_id, a.producer_seed_id, \
+         a.artifact_role, b.bytes \
+         FROM run_artifact_admissions r \
+         INNER JOIN artifact_admissions a \
+           ON a.artifact_id = r.artifact_id AND a.evidence_hash = r.evidence_hash \
+         INNER JOIN artifact_blobs b \
+           ON b.artifact_id = a.artifact_id \
+          AND b.digest = a.digest \
+          AND b.byte_len = a.byte_len \
+         WHERE r.run_id = $1",
+    )
+    .bind(run_id.as_str())
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load run artifact bytes", error))?;
+
+    let mut artifact_bytes = ArtifactByteAuthorityMap::new();
+    for row in rows {
+        let record = artifact_record_from_row(row)?;
+        let evidence_hash = record.evidence.evidence_hash()?;
+        if evidence_hash != record.evidence_hash {
+            return Err(StoreError::ArtifactEvidenceMismatch {
+                artifact_id: record.evidence.artifact_id.clone(),
+                field: "evidence_hash",
+            }
+            .into());
+        }
+        let key = (record.evidence.artifact_id.clone(), evidence_hash);
+        let bytes = record.artifact_bytes;
+        match artifact_bytes.get(&key) {
+            Some((stored_bytes, stored_evidence))
+                if stored_bytes == &bytes && stored_evidence == &record.evidence => {}
+            Some((_, stored_evidence)) => {
+                return Err(StoreError::ArtifactEvidenceMismatch {
+                    artifact_id: stored_evidence.artifact_id.clone(),
+                    field: "artifact",
+                }
+                .into());
+            }
+            None => {
+                artifact_bytes.insert(key, (bytes, record.evidence));
+            }
+        }
+    }
+    Ok(artifact_bytes)
+}
+
 pub(super) struct ArtifactEvidenceParts {
     pub(super) artifact_id: ArtifactId,
     pub(super) digest: String,

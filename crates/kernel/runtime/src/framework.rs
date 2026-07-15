@@ -7,7 +7,7 @@ use mfm_ids::{ArtifactId, ContentDigest, RunId};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
-use crate::artifacts::{StagedArtifact, StagedRetentionRefs};
+use crate::artifacts::{verify_artifact_bytes, StagedArtifact, StagedRetentionRefs};
 use crate::invocation::ErasedRunCtx;
 use crate::runners::{
     ErasedNodeRunner, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
@@ -41,6 +41,144 @@ pub(crate) fn framework_public_output_binding(
         framework_executable(factory_id, "framework_public_output")?,
         Arc::new(FrameworkPublicOutputRunner),
     )
+}
+
+pub(crate) fn framework_bridge_binding(
+    node: &spec::NodeSpec,
+    descriptor: &spec::StateDescriptorIdentity,
+) -> Result<ErasedRunnerBinding> {
+    let Some(spec::FrameworkNodeSpec::Bridge(_)) = &node.framework else {
+        return Err(RuntimeError::RunnerBinding(format!(
+            "node {} is not a same-value bridge node",
+            node.node_id
+        )));
+    };
+    if descriptor.name != "mfm.framework.bridge_same_value" {
+        return Err(RuntimeError::RunnerBinding(format!(
+            "bridge node {} has non-framework descriptor {}",
+            node.node_id, descriptor.name
+        )));
+    }
+    let factory_id = events::RunnerFactoryId::new(descriptor.runner.as_str())?;
+    ErasedRunnerBinding::new(
+        node.descriptor_id.clone(),
+        factory_id.clone(),
+        framework_executable(factory_id, "framework_bridge")?,
+        Arc::new(FrameworkBridgeRunner),
+    )
+}
+
+struct FrameworkBridgeRunner;
+
+impl ErasedNodeRunner for FrameworkBridgeRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move { bridge_same_value(ctx) })
+    }
+}
+
+fn bridge_same_value(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
+    let Some(spec::FrameworkNodeSpec::Bridge(bridge)) = &ctx.node().framework else {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "node {} is not a same-value bridge node",
+            ctx.node().node_id
+        )));
+    };
+    if bridge.target_cell_id != ctx.node().output_cell {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "bridge node {} output cell does not match its framework metadata",
+            ctx.node().node_id
+        )));
+    }
+    let input = match &ctx.inputs().root {
+        crate::MaterializedInputNode::Cell(cell) => cell,
+        _ => {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "bridge node {} requires one materialized source cell",
+                ctx.node().node_id
+            )))
+        }
+    };
+    if input.cell_id != bridge.source_cell_id {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "bridge node {} input cell does not match its source cell",
+            ctx.node().node_id
+        )));
+    }
+    let (artifact_id, content_digest, evidence_hash) = match &input.terminal {
+        crate::MaterializedCellTerminal::Seed {
+            artifact_id,
+            content_digest,
+            evidence_hash,
+            ..
+        }
+        | crate::MaterializedCellTerminal::Produced {
+            artifact_id,
+            content_digest,
+            evidence_hash,
+            ..
+        } => (artifact_id, content_digest, evidence_hash),
+        crate::MaterializedCellTerminal::Skipped { .. } => {
+            return Err(RuntimeError::InvalidRunnerOutput(
+                "same-value bridge cannot copy a skipped input cell".to_owned(),
+            ))
+        }
+    };
+    let Some((bytes, source_evidence)) = ctx
+        .artifact_byte_authority()
+        .get(&(artifact_id.clone(), evidence_hash.clone()))
+    else {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "bridge input artifact {} is not in committed byte authority",
+            artifact_id
+        )));
+    };
+    if source_evidence.digest != *content_digest
+        || source_evidence.schema_id.as_ref() != Some(&input.schema_id)
+        || source_evidence.semantic_type_id.as_ref() != Some(&input.semantic_type_id)
+        || source_evidence.evidence_hash()? != *evidence_hash
+    {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "bridge input artifact {} evidence does not match its materialized cell",
+            artifact_id
+        )));
+    }
+    verify_artifact_bytes(bytes, source_evidence)?;
+
+    let output_evidence = store::ArtifactEvidenceRef {
+        artifact_id: artifact_id.clone(),
+        digest: content_digest.clone(),
+        byte_len: source_evidence.byte_len,
+        media_type: source_evidence.media_type.clone(),
+        schema_id: Some(ctx.output_cell().schema_id.clone()),
+        semantic_type_id: Some(ctx.output_cell().semantic_type_id.clone()),
+        producer_node_id: Some(ctx.node().node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: events::ArtifactRole::StateOutput,
+    };
+    let staged = StagedArtifact::inline_attempt_artifact(&ctx, bytes.clone(), output_evidence)?;
+    let output_evidence = staged.evidence().clone();
+    let evidence_hash = output_evidence.evidence_hash()?;
+    let produced = events::CellProduced {
+        spec_hash: ctx.spec_hash().clone(),
+        node_id: ctx.node().node_id.clone(),
+        cell_id: ctx.node().output_cell.clone(),
+        scope_id: ctx.output_cell().scope_id.clone(),
+        attempt_id: ctx.attempt_id().clone(),
+        semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
+        schema_id: ctx.output_cell().schema_id.clone(),
+        value_lineage: ctx.output_cell().value_lineage.clone(),
+        context: ctx.output_cell().context.clone(),
+        artifact_id: output_evidence.artifact_id,
+        content_digest: output_evidence.digest,
+        evidence_hash,
+        producer_state_kind: Some(ctx.node().state_kind.clone()),
+        producer_state_version: Some(ctx.node().state_version.clone()),
+    };
+    Ok(ErasedRunnerOutput::from_parts(
+        vec![staged],
+        Vec::new(),
+        vec![RunnerEventPayload::CellProduced(produced)],
+    ))
 }
 
 struct FrameworkPublicOutputRunner;

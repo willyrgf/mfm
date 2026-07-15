@@ -55,6 +55,8 @@ impl BoundCapabilityAuthority {
 /// Bound framework handler kind for a certified lifecycle node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BoundFrameworkHandlerKind {
+    /// Same-value child-scope bridge handler.
+    Bridge,
     /// Public output render handler.
     PublicOutputRender,
     /// Retention manifest projection handler.
@@ -391,6 +393,7 @@ fn bind_node(
 
 fn framework_handler_kind(node: &spec::NodeSpec) -> Option<BoundFrameworkHandlerKind> {
     match &node.framework {
+        Some(spec::FrameworkNodeSpec::Bridge(_)) => Some(BoundFrameworkHandlerKind::Bridge),
         Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => {
             Some(BoundFrameworkHandlerKind::PublicOutputRender)
         }
@@ -406,6 +409,6 @@ fn framework_handler_kind(node: &spec::NodeSpec) -> Option<BoundFrameworkHandler
         Some(spec::FrameworkNodeSpec::SideEffectVerify(_)) => {
             Some(BoundFrameworkHandlerKind::SideEffectVerify)
         }
-        Some(spec::FrameworkNodeSpec::Bridge(_)) | None => None,
+        None => None,
     }
 }

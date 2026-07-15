@@ -54,7 +54,10 @@ pub(crate) fn derive_logical_key(
             fact_claim_projection_key("fact", &claim_id)
         }
         KernelEventPayload::ArtifactReferenced(payload) => {
-            format!("artifact:{}:ref", payload.artifact_ref.artifact_id)
+            format!(
+                "artifact:{}:{}:ref",
+                payload.artifact_ref.artifact_id, payload.artifact_ref.evidence_hash
+            )
         }
         KernelEventPayload::CellProduced(payload) => {
             format!("cell:{}:terminal", payload.cell_id)
