@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use mfm_evm_capabilities::{EvmBalanceReadProvider, EvmBlockReadProvider, EvmNetworkBinding};
+use mfm_evm_capabilities::{
+    EvmBalanceReadProvider, EvmBlockReadProvider, EvmCallReadProvider, EvmNetworkBinding,
+};
 use mfm_store::v1 as store;
 
 use crate::{live_transports::LiveTransportRuntime, AppError};
@@ -57,6 +59,16 @@ impl EvmBalanceReadProvider for BoundLiveEvmProvider {
     ) -> mfm_evm_capabilities::EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmBalanceReadResponse>
     {
         self.provider.read_balance(request)
+    }
+}
+
+impl EvmCallReadProvider for BoundLiveEvmProvider {
+    fn read_call<'a>(
+        &'a self,
+        request: &'a mfm_evm_capabilities::EvmCallReadRequest,
+    ) -> mfm_evm_capabilities::EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmCallReadResponse>
+    {
+        self.provider.read_call(request)
     }
 }
 

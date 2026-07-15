@@ -1,9 +1,10 @@
 #![warn(missing_docs)]
-//! EVM native collector adapter runners.
+//! EVM collector adapter runners.
 //!
-//! Binds reusable EVM native-balance state contracts to block/balance read capabilities.
-//! Protocol IO stays in the transport crate; this crate owns request mapping, runner
-//! registration, and managed fact recording.
+//! Binds reusable EVM native-balance and ERC-20 state contracts to block, balance, and generic
+//! call-read capabilities. Protocol IO stays in the transport crate; this crate owns request
+//! mapping, redacted evidence recording, replay recomputation, runner registration, and managed
+//! fact recording.
 
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
@@ -17,7 +18,9 @@ use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
     EvmBalanceReadCapability, EvmBalanceReadProvider, EvmBalanceReadRequest,
     EvmBlockReadCapability, EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockSelector,
-    EvmCapabilityError, EvmNetworkBinding, EvmNetworkId,
+    EvmCallReadCapability, EvmCallReadProvider, EvmCallReadRequest, EvmCallReadResponse,
+    EvmCapabilityError, EvmNetworkBinding, EvmNetworkId, EvmSourcePolicyId, EvmSourceRef,
+    RedactedEvmSourceEvidence, EVM_JSONRPC_CAPABILITY_IMPLEMENTATION_ID,
 };
 use mfm_fact_capabilities::FactRecordCapability;
 use mfm_program::{ManagedWriteState, MfmFactType, StateSpec, ValidatedConfig};
@@ -31,14 +34,19 @@ use mfm_runtime::{
     RunnerRegistrationBuilder,
 };
 use mfm_states_evm::{
-    assemble_evm_native_balance_batch, evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version,
-    materialize_evm_joint_tip, native_balance_record_visibility,
+    assemble_evm_native_balance_batch, erc20_balance_record_visibility, evm_jsonrpc_adapter_kind,
+    evm_jsonrpc_adapter_version, materialize_evm_joint_tip, native_balance_record_visibility,
+    normalize_erc20_balance_from_capability, normalize_erc20_token_metadata_from_capability,
     normalize_evm_native_balance_observation, AssembleEvmNativeBalanceBatchConfig,
     AssembleEvmNativeBalanceBatchInput, AssembleEvmNativeBalanceBatchState,
-    EvmAddressNativeBalanceObservation, EvmAddressNativeBalanceSnapshotFact, EvmJointTip,
-    ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput, ObserveEvmNativeBalanceState,
-    RecordEvmNativeBalanceFactState, ResolveEvmJointTipConfig, ResolveEvmJointTipInput,
-    ResolveEvmJointTipState, EVM_JOINT_TIP_SOURCE_READS,
+    EvmAddressErc20BalanceObservation, EvmAddressErc20BalanceSnapshotFact,
+    EvmAddressNativeBalanceObservation, EvmAddressNativeBalanceSnapshotFact, EvmErc20TokenMetadata,
+    EvmJointTip, ObserveErc20BalanceConfig, ObserveErc20BalanceInput, ObserveErc20BalanceState,
+    ObserveErc20TokenMetadataConfig, ObserveErc20TokenMetadataInput,
+    ObserveErc20TokenMetadataState, ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput,
+    ObserveEvmNativeBalanceState, RecordErc20BalanceFactState, RecordEvmNativeBalanceFactState,
+    ResolveEvmJointTipConfig, ResolveEvmJointTipInput, ResolveEvmJointTipState,
+    EVM_JOINT_TIP_SOURCE_READS,
 };
 use mfm_store::v1 as store;
 use mfm_values::{MfmConfig, MfmValue, NonEmpty};
@@ -48,7 +56,6 @@ const PURE_FACTORY: &str = "pure";
 const READ_FACTORY: &str = "read_external";
 const MANAGED_WRITE_FACTORY: &str = "managed_platform_write";
 const ADAPTER_FACTORY: &str = "evm_jsonrpc_adapter";
-const CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.evm.jsonrpc.runtime.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[mfm(
@@ -74,6 +81,24 @@ impl EvmSourceReadEvidence {
             source_ref: evidence.source_ref.as_str().to_owned(),
             policy_id: evidence.policy_id.as_str().to_owned(),
         }
+    }
+
+    fn to_capability(&self) -> Result<RedactedEvmSourceEvidence> {
+        let network_id = EvmNetworkId::new(&self.network_id)
+            .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
+        let binding = EvmNetworkBinding::new(network_id, self.expected_chain_id)
+            .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
+        let source_ref = EvmSourceRef::new(&self.source_ref)
+            .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
+        let policy_id = EvmSourcePolicyId::new(&self.policy_id)
+            .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
+        RedactedEvmSourceEvidence::from_binding(
+            &binding,
+            self.observed_chain_id,
+            source_ref,
+            policy_id,
+        )
+        .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)
     }
 }
 
@@ -147,6 +172,136 @@ impl EvmNativeBalanceReadEvidence {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.jsonrpc",
+    name = "canonical_hash_selector_evidence",
+    version = "1",
+    schema = "mfm.evm.jsonrpc.external_read.canonical_hash_selector"
+)]
+struct EvmCanonicalHashSelectorEvidence {
+    block_hash: String,
+    require_canonical: bool,
+}
+
+impl EvmCanonicalHashSelectorEvidence {
+    fn from_selector(selector: &EvmBlockSelector) -> Result<Self> {
+        let EvmBlockSelector::Hash(block_hash) = selector else {
+            return Err(EvmAdapterError::InvalidCapabilityRequest);
+        };
+        Ok(Self {
+            block_hash: format!("{block_hash:#x}"),
+            require_canonical: true,
+        })
+    }
+
+    fn to_selector(&self) -> Result<EvmBlockSelector> {
+        if !self.require_canonical {
+            return Err(EvmAdapterError::InvalidCapabilityRequest);
+        }
+        let block_hash = parse_block_hash(&self.block_hash)?;
+        if format!("{block_hash:#x}") != self.block_hash {
+            return Err(EvmAdapterError::InvalidCapabilityRequest);
+        }
+        Ok(EvmBlockSelector::Hash(block_hash))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.jsonrpc",
+    name = "erc20_call_read_evidence",
+    version = "1",
+    schema = "mfm.evm.jsonrpc.external_read.erc20_call"
+)]
+struct EvmErc20CallReadEvidence {
+    destination: String,
+    calldata: String,
+    block_selector: EvmCanonicalHashSelectorEvidence,
+    return_data: String,
+    source: EvmSourceReadEvidence,
+    verification_block_hash: String,
+    verification_response_block_number: u64,
+    verification_response_block_hash: String,
+    verification_source: EvmSourceReadEvidence,
+}
+
+impl EvmErc20CallReadEvidence {
+    fn from_capability(
+        request: &EvmCallReadRequest,
+        response: &EvmCallReadResponse,
+        verification_request: &EvmBlockReadRequest,
+        verification_response: &mfm_evm_capabilities::EvmBlockReadResponse,
+    ) -> Result<Self> {
+        Ok(Self {
+            destination: format!("{:#x}", request.to()),
+            calldata: mfm_evm_core::hex::bytes_to_hex_prefixed(request.calldata()),
+            block_selector: EvmCanonicalHashSelectorEvidence::from_selector(request.block())?,
+            return_data: mfm_evm_core::hex::bytes_to_hex_prefixed(&response.return_data),
+            source: EvmSourceReadEvidence::from_capability(&response.evidence),
+            verification_block_hash: hash_selector_text(verification_request.block())?,
+            verification_response_block_number: verification_response.block_number,
+            verification_response_block_hash: format!("{:#x}", verification_response.block_hash),
+            verification_source: EvmSourceReadEvidence::from_capability(
+                &verification_response.evidence,
+            ),
+        })
+    }
+
+    fn replay_material(
+        &self,
+    ) -> Result<(
+        EvmCallReadRequest,
+        EvmCallReadResponse,
+        EvmBlockReadRequest,
+        mfm_evm_capabilities::EvmBlockReadResponse,
+    )> {
+        let destination = parse_account(&self.destination)?;
+        if format!("{destination:#x}") != self.destination {
+            return Err(EvmAdapterError::InvalidCapabilityRequest);
+        }
+        let calldata = mfm_evm_core::hex::hex_to_bytes(&self.calldata)
+            .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
+        if mfm_evm_core::hex::bytes_to_hex_prefixed(&calldata) != self.calldata {
+            return Err(EvmAdapterError::InvalidCapabilityRequest);
+        }
+        let return_data = mfm_evm_core::hex::hex_to_bytes(&self.return_data)
+            .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
+        if mfm_evm_core::hex::bytes_to_hex_prefixed(&return_data) != self.return_data {
+            return Err(EvmAdapterError::InvalidCapabilityRequest);
+        }
+        let block = self.block_selector.to_selector()?;
+        let verification_block_hash = parse_block_hash(&self.verification_block_hash)?;
+        if format!("{verification_block_hash:#x}") != self.verification_block_hash {
+            return Err(EvmAdapterError::InvalidCapabilityRequest);
+        }
+        let verification_hash = parse_block_hash(&self.verification_response_block_hash)?;
+        if format!("{verification_hash:#x}") != self.verification_response_block_hash {
+            return Err(EvmAdapterError::InvalidCapabilityRequest);
+        }
+        Ok((
+            EvmCallReadRequest::new(destination, calldata, block),
+            EvmCallReadResponse {
+                evidence: self.source.to_capability()?,
+                return_data,
+            },
+            EvmBlockReadRequest::new(EvmBlockSelector::Hash(verification_block_hash)),
+            mfm_evm_capabilities::EvmBlockReadResponse {
+                evidence: self.verification_source.to_capability()?,
+                block_number: self.verification_response_block_number,
+                block_hash: verification_hash,
+            },
+        ))
+    }
+}
+
+fn hash_selector_text(selector: &EvmBlockSelector) -> Result<String> {
+    let EvmBlockSelector::Hash(block_hash) = selector else {
+        return Err(EvmAdapterError::InvalidCapabilityRequest);
+    };
+    Ok(format!("{block_hash:#x}"))
+}
+
 fn evm_block_selector_text(selector: &EvmBlockSelector) -> String {
     match selector {
         EvmBlockSelector::Latest => "latest".to_owned(),
@@ -167,7 +322,7 @@ pub trait EvmProviderFactory: Send + Sync {
         binding: &EvmNetworkBinding,
     ) -> mfm_evm_capabilities::Result<()>;
 
-    /// Binds a checked network binding to a provider that supports block and balance reads.
+    /// Binds a checked network binding to a provider that supports block, balance, and call reads.
     fn bind_network(
         &self,
         binding: EvmNetworkBinding,
@@ -175,11 +330,17 @@ pub trait EvmProviderFactory: Send + Sync {
 }
 
 /// Bound EVM provider exposing the collector-needed read surfaces.
-pub trait EvmBoundProvider: EvmBlockReadProvider + EvmBalanceReadProvider {}
+pub trait EvmBoundProvider:
+    EvmBlockReadProvider + EvmBalanceReadProvider + EvmCallReadProvider
+{
+}
 
-impl<T> EvmBoundProvider for T where T: EvmBlockReadProvider + EvmBalanceReadProvider {}
+impl<T> EvmBoundProvider for T where
+    T: EvmBlockReadProvider + EvmBalanceReadProvider + EvmCallReadProvider
+{
+}
 
-/// Runtime capabilities used by EVM native collector runners.
+/// Runtime capabilities used by EVM collector runners.
 #[derive(Clone)]
 pub struct EvmRunnerCapabilities {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
@@ -204,7 +365,7 @@ impl EvmRunnerCapabilities {
     }
 }
 
-/// Registers typed EVM native collector runners.
+/// Registers typed EVM collector runners.
 pub fn register_evm_collectors_runners(
     registry: &mut ErasedRunnerRegistry,
     capabilities: EvmRunnerCapabilities,
@@ -212,11 +373,14 @@ pub fn register_evm_collectors_runners(
     let artifacts = capabilities.artifacts();
     let evm = capabilities.evm();
     registry.register_capability_spec::<EvmBlockReadCapability>(
-        CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?,
+        CapabilityImplementationId::new(EVM_JSONRPC_CAPABILITY_IMPLEMENTATION_ID)?,
     )?;
     registry.register_capability_spec::<EvmBalanceReadCapability>(
-        CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?,
+        CapabilityImplementationId::new(EVM_JSONRPC_CAPABILITY_IMPLEMENTATION_ID)?,
     )?;
+    registry.register_capability_spec::<EvmCallReadCapability>(CapabilityImplementationId::new(
+        EVM_JSONRPC_CAPABILITY_IMPLEMENTATION_ID,
+    )?)?;
     let mut registrations = RunnerRegistrationBuilder::new(registry);
     let executable_identities = RunnerExecutableIdentityTemplate::new(
         "mfm-adapters-evm",
@@ -247,6 +411,20 @@ pub fn register_evm_collectors_runners(
         &read_factory,
         Arc::new(ObserveNativeBalanceRunner {
             artifacts: artifacts.clone(),
+            evm: evm.clone(),
+        }),
+    )?;
+    registrations.register_state_runner_with_factory::<ObserveErc20TokenMetadataState>(
+        &read_factory,
+        Arc::new(ObserveErc20TokenMetadataRunner {
+            artifacts: artifacts.clone(),
+            evm: evm.clone(),
+        }),
+    )?;
+    registrations.register_state_runner_with_factory::<ObserveErc20BalanceState>(
+        &read_factory,
+        Arc::new(ObserveErc20BalanceRunner {
+            artifacts: artifacts.clone(),
             evm,
         }),
     )?;
@@ -258,6 +436,13 @@ pub fn register_evm_collectors_runners(
                 native_balance_record_visibility(),
             ),
         ),
+    )?;
+    registrations.register_state_runner_with_factory::<RecordErc20BalanceFactState>(
+        &managed_write_factory,
+        Arc::new(ManagedFactRecordRunner::<RecordErc20BalanceFactState>::new(
+            artifacts.clone(),
+            erc20_balance_record_visibility(),
+        )),
     )?;
     registrations.register_state_runner_with_factory::<AssembleEvmNativeBalanceBatchState>(
         &pure_factory,
@@ -287,6 +472,20 @@ fn joint_tip_binding(config: &ResolveEvmJointTipConfig) -> Result<EvmNetworkBind
 
 fn balance_binding(config: &ObserveEvmNativeBalanceConfig) -> Result<EvmNetworkBinding> {
     let (network, chain_id, _) = config
+        .evm_network_parts()
+        .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
+    network_binding(network, chain_id)
+}
+
+fn erc20_metadata_binding(config: &ObserveErc20TokenMetadataConfig) -> Result<EvmNetworkBinding> {
+    let (network, chain_id) = config
+        .evm_network_parts()
+        .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
+    network_binding(network, chain_id)
+}
+
+fn erc20_balance_binding(config: &ObserveErc20BalanceConfig) -> Result<EvmNetworkBinding> {
+    let (network, chain_id) = config
         .evm_network_parts()
         .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
     network_binding(network, chain_id)
@@ -458,6 +657,137 @@ impl ErasedNodeRunner for ObserveNativeBalanceRunner {
     }
 }
 
+struct ObserveErc20TokenMetadataRunner {
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
+    evm: Arc<dyn EvmProviderFactory>,
+}
+
+impl ErasedNodeRunner for ObserveErc20TokenMetadataRunner {
+    fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
+        let config =
+            load_launch_config_for_node::<ObserveErc20TokenMetadataConfig>(&ctx, ctx.node())?;
+        let binding = erc20_metadata_binding(config.as_ref()).map_err(evm_adapter_runtime_error)?;
+        self.evm
+            .validate_network_binding(&binding)
+            .map_err(evm_capability_runtime_error)
+    }
+
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            let config = load_runner_config_for_node::<ObserveErc20TokenMetadataConfig>(
+                ctx.node(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
+            let binding =
+                erc20_metadata_binding(config.as_ref()).map_err(evm_adapter_runtime_error)?;
+            let state = ObserveErc20TokenMetadataState::new(config).map_err(|error| {
+                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+            })?;
+            let input = load_materialized_struct_input::<ObserveErc20TokenMetadataInput>(
+                ctx.inputs(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
+            let request = state
+                .call_request(&input)
+                .map_err(evm_state_runtime_error)?;
+            let verification_request = EvmBlockReadRequest::new(request.block().clone());
+            let provider = self
+                .evm
+                .bind_network(binding)
+                .map_err(evm_capability_runtime_error)?;
+            let response = provider
+                .read_call(&request)
+                .await
+                .map_err(evm_capability_runtime_error)?;
+            let verification = provider
+                .read_block(&verification_request)
+                .await
+                .map_err(evm_capability_runtime_error)?;
+            let metadata = state
+                .materialize_response(&input, &request, &response, &verification)
+                .map_err(evm_state_runtime_error)?;
+            let evidence = EvmErc20CallReadEvidence::from_capability(
+                &request,
+                &response,
+                &verification_request,
+                &verification,
+            )
+            .map_err(evm_adapter_runtime_error)?;
+            let mut output = RunnerOutputBuilder::new(&ctx);
+            output.record_external_read_evidence(&evidence)?;
+            output.state_output(&metadata)?;
+            Ok(output.finish())
+        })
+    }
+}
+
+struct ObserveErc20BalanceRunner {
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
+    evm: Arc<dyn EvmProviderFactory>,
+}
+
+impl ErasedNodeRunner for ObserveErc20BalanceRunner {
+    fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
+        let config = load_launch_config_for_node::<ObserveErc20BalanceConfig>(&ctx, ctx.node())?;
+        let binding = erc20_balance_binding(config.as_ref()).map_err(evm_adapter_runtime_error)?;
+        self.evm
+            .validate_network_binding(&binding)
+            .map_err(evm_capability_runtime_error)
+    }
+
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            let config = load_runner_config_for_node::<ObserveErc20BalanceConfig>(
+                ctx.node(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
+            let binding =
+                erc20_balance_binding(config.as_ref()).map_err(evm_adapter_runtime_error)?;
+            let state = ObserveErc20BalanceState::new(config).map_err(|error| {
+                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+            })?;
+            let input = load_materialized_struct_input::<ObserveErc20BalanceInput>(
+                ctx.inputs(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
+            let request = state
+                .call_request(&input)
+                .map_err(evm_state_runtime_error)?;
+            let verification_request = EvmBlockReadRequest::new(request.block().clone());
+            let provider = self
+                .evm
+                .bind_network(binding)
+                .map_err(evm_capability_runtime_error)?;
+            let response = provider
+                .read_call(&request)
+                .await
+                .map_err(evm_capability_runtime_error)?;
+            let verification = provider
+                .read_block(&verification_request)
+                .await
+                .map_err(evm_capability_runtime_error)?;
+            let observation = state
+                .materialize_response(&input, &request, &response, &verification)
+                .map_err(evm_state_runtime_error)?;
+            let evidence = EvmErc20CallReadEvidence::from_capability(
+                &request,
+                &response,
+                &verification_request,
+                &verification,
+            )
+            .map_err(evm_adapter_runtime_error)?;
+            let mut output = RunnerOutputBuilder::new(&ctx);
+            output.record_external_read_evidence(&evidence)?;
+            output.state_output(&observation)?;
+            Ok(output.finish())
+        })
+    }
+}
+
 struct AssembleNativeBalanceBatchRunner {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 }
@@ -559,33 +889,80 @@ fn adapter_identity_error(error: mfm_ids::IdentityError) -> mfm_runtime::Runtime
     mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
 }
 
-/// Verifies EVM native-balance observation cell outputs from retained capability read evidence.
-pub fn verify_evm_native_balance_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
+/// Verifies EVM collector outputs from retained capability read evidence only.
+pub fn verify_evm_collector_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
     verify_evm_joint_tip_replay(broker)?;
-    let state_kind = ObserveEvmNativeBalanceState::kind().map_err(replay_adapter_error)?;
-    let state_version = ObserveEvmNativeBalanceState::version().map_err(replay_adapter_error)?;
-    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
-        Ok(node.state_kind == state_kind && node.state_version == state_version)
-    })?;
-    for frame in &frames {
+    let native_frames = replay_frames_for_state::<ObserveEvmNativeBalanceState>(broker)?;
+    for frame in &native_frames {
         verify_evm_native_balance_observation_replay(broker, frame)?;
     }
     verify_evm_native_balance_fact_replay(broker)?;
-    verify_evm_shared_joint_tips(broker, &frames)?;
+
+    let metadata_frames = replay_frames_for_state::<ObserveErc20TokenMetadataState>(broker)?;
+    for frame in &metadata_frames {
+        verify_erc20_token_metadata_replay(broker, frame)?;
+    }
+    let balance_frames = replay_frames_for_state::<ObserveErc20BalanceState>(broker)?;
+    for frame in &balance_frames {
+        verify_erc20_balance_observation_replay(broker, frame)?;
+    }
+    verify_erc20_balance_fact_replay(broker)?;
+
+    verify_evm_shared_joint_tips(broker, &native_frames, &metadata_frames, &balance_frames)?;
     verify_evm_native_balance_batch_replay(broker)?;
     Ok(())
 }
 
+fn replay_frames_for_state<S: StateSpec>(
+    broker: &replay::ReplayBroker,
+) -> replay::Result<Vec<replay::ProducedCellReplayFrame>> {
+    let state_kind = S::kind().map_err(replay_adapter_error)?;
+    let state_version = S::version().map_err(replay_adapter_error)?;
+    broker.produced_cell_frames_matching(|node, _cell, _produced| {
+        Ok(node.state_kind == state_kind && node.state_version == state_version)
+    })
+}
+
 fn verify_evm_shared_joint_tips(
     broker: &replay::ReplayBroker,
-    frames: &[replay::ProducedCellReplayFrame],
+    native_frames: &[replay::ProducedCellReplayFrame],
+    metadata_frames: &[replay::ProducedCellReplayFrame],
+    balance_frames: &[replay::ProducedCellReplayFrame],
 ) -> replay::Result<()> {
     let mut anchors = BTreeMap::<String, (u64, String)>::new();
-    for frame in frames {
+    for frame in native_frames {
         let config: ObserveEvmNativeBalanceConfig = replay_node_config(broker, &frame.node)?;
         let tip = replay_joint_tip_input(broker, &frame.node)?;
         let anchor = (tip.block_number(), tip.block_hash().to_owned());
         let (network, _, _) = config.evm_network_parts().map_err(replay_adapter_error)?;
+        if anchors
+            .insert(network.to_owned(), anchor.clone())
+            .is_some_and(|existing| existing != anchor)
+        {
+            return Err(replay_evm_mismatch(
+                "EVM same-network observations did not share one joint tip",
+            ));
+        }
+    }
+    for frame in metadata_frames {
+        let config: ObserveErc20TokenMetadataConfig = replay_node_config(broker, &frame.node)?;
+        let tip = replay_joint_tip_input(broker, &frame.node)?;
+        let anchor = (tip.block_number(), tip.block_hash().to_owned());
+        let (network, _) = config.evm_network_parts().map_err(replay_adapter_error)?;
+        if anchors
+            .insert(network.to_owned(), anchor.clone())
+            .is_some_and(|existing| existing != anchor)
+        {
+            return Err(replay_evm_mismatch(
+                "EVM same-network observations did not share one joint tip",
+            ));
+        }
+    }
+    for frame in balance_frames {
+        let config: ObserveErc20BalanceConfig = replay_node_config(broker, &frame.node)?;
+        let tip = replay_joint_tip_input(broker, &frame.node)?;
+        let anchor = (tip.block_number(), tip.block_hash().to_owned());
+        let (network, _) = config.evm_network_parts().map_err(replay_adapter_error)?;
         if anchors
             .insert(network.to_owned(), anchor.clone())
             .is_some_and(|existing| existing != anchor)
@@ -672,6 +1049,100 @@ fn verify_evm_native_balance_observation_replay(
     ensure_canonical_value_matches(&expected, &frame.artifact_bytes)
 }
 
+fn verify_erc20_token_metadata_replay(
+    broker: &replay::ReplayBroker,
+    frame: &replay::ProducedCellReplayFrame,
+) -> replay::Result<()> {
+    let config: ObserveErc20TokenMetadataConfig = replay_node_config(broker, &frame.node)?;
+    let joint_tip = replay_joint_tip_input(broker, &frame.node)?;
+    let (request, response, verification_request, verification) =
+        replay_erc20_call_evidence(broker, frame)?;
+    if verification_request.block() != request.block() {
+        return Err(replay_evm_mismatch(
+            "ERC-20 metadata anchor re-verification did not use the call hash selector",
+        ));
+    }
+    let (network, chain_id) = config.evm_network_parts().map_err(replay_adapter_error)?;
+    if !evm_source_matches(
+        &EvmSourceReadEvidence::from_capability(&response.evidence),
+        network,
+        chain_id,
+    ) || !evm_source_matches(
+        &EvmSourceReadEvidence::from_capability(&verification.evidence),
+        network,
+        chain_id,
+    ) {
+        return Err(replay_evm_mismatch(
+            "ERC-20 metadata read evidence did not match certified source binding",
+        ));
+    }
+    let expected = normalize_erc20_token_metadata_from_capability(
+        &config,
+        &joint_tip,
+        &request,
+        &response,
+        &verification,
+    )
+    .map_err(replay_adapter_error)?;
+    ensure_canonical_value_matches(&expected, &frame.artifact_bytes)
+}
+
+fn verify_erc20_balance_observation_replay(
+    broker: &replay::ReplayBroker,
+    frame: &replay::ProducedCellReplayFrame,
+) -> replay::Result<()> {
+    let config: ObserveErc20BalanceConfig = replay_node_config(broker, &frame.node)?;
+    let joint_tip = replay_joint_tip_input(broker, &frame.node)?;
+    let metadata = replay_erc20_metadata_input(broker, &frame.node)?;
+    let input = ObserveErc20BalanceInput {
+        joint_tip,
+        metadata,
+    };
+    let (request, response, verification_request, verification) =
+        replay_erc20_call_evidence(broker, frame)?;
+    if verification_request.block() != request.block() {
+        return Err(replay_evm_mismatch(
+            "ERC-20 balance anchor re-verification did not use the call hash selector",
+        ));
+    }
+    let (network, chain_id) = config.evm_network_parts().map_err(replay_adapter_error)?;
+    if !evm_source_matches(
+        &EvmSourceReadEvidence::from_capability(&response.evidence),
+        network,
+        chain_id,
+    ) || !evm_source_matches(
+        &EvmSourceReadEvidence::from_capability(&verification.evidence),
+        network,
+        chain_id,
+    ) {
+        return Err(replay_evm_mismatch(
+            "ERC-20 balance read evidence did not match certified source binding",
+        ));
+    }
+    let expected = normalize_erc20_balance_from_capability(
+        &config,
+        &input,
+        &request,
+        &response,
+        &verification,
+    )
+    .map_err(replay_adapter_error)?;
+    ensure_canonical_value_matches(&expected, &frame.artifact_bytes)
+}
+
+fn replay_erc20_call_evidence(
+    broker: &replay::ReplayBroker,
+    frame: &replay::ProducedCellReplayFrame,
+) -> replay::Result<(
+    EvmCallReadRequest,
+    EvmCallReadResponse,
+    EvmBlockReadRequest,
+    mfm_evm_capabilities::EvmBlockReadResponse,
+)> {
+    let evidence: EvmErc20CallReadEvidence = replay_external_read_evidence(broker, frame)?;
+    evidence.replay_material().map_err(replay_adapter_error)
+}
+
 fn verify_evm_native_balance_fact_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
     let state_kind = RecordEvmNativeBalanceFactState::kind().map_err(replay_adapter_error)?;
     let state_version = RecordEvmNativeBalanceFactState::version().map_err(replay_adapter_error)?;
@@ -698,6 +1169,35 @@ fn verify_evm_native_balance_fact_replay(broker: &replay::ReplayBroker) -> repla
             broker,
             frame,
             &EvmAddressNativeBalanceSnapshotFact::descriptor().map_err(replay_adapter_error)?,
+            fact.subject(),
+            fact.response(),
+        )?;
+    }
+    Ok(())
+}
+
+fn verify_erc20_balance_fact_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
+    let frames = replay_frames_for_state::<RecordErc20BalanceFactState>(broker)?;
+    for frame in &frames {
+        let observation_frames = replay_input_frames(
+            broker,
+            &frame.node,
+            &EvmAddressErc20BalanceObservation::semantic_id().map_err(replay_adapter_error)?,
+            &EvmAddressErc20BalanceObservation::schema_id().map_err(replay_adapter_error)?,
+        )?;
+        if observation_frames.len() != 1 {
+            return Err(replay_evm_mismatch(
+                "ERC-20 balance fact input was incomplete",
+            ));
+        }
+        let observation: EvmAddressErc20BalanceObservation =
+            decode_replay_value(&observation_frames[0])?;
+        let fact = observation.try_to_fact().map_err(replay_adapter_error)?;
+        ensure_canonical_value_matches(&fact, &frame.artifact_bytes)?;
+        verify_recorded_fact_evidence(
+            broker,
+            frame,
+            &EvmAddressErc20BalanceSnapshotFact::descriptor().map_err(replay_adapter_error)?,
             fact.subject(),
             fact.response(),
         )?;
@@ -840,7 +1340,7 @@ fn replay_joint_tip_input(
     )?;
     if frames.len() != 1 {
         return Err(replay_evm_mismatch(
-            "EVM native-balance observation did not consume exactly one joint tip",
+            "EVM observation did not consume exactly one joint tip",
         ));
     }
     let resolve_kind = ResolveEvmJointTipState::kind().map_err(replay_adapter_error)?;
@@ -848,7 +1348,32 @@ fn replay_joint_tip_input(
     if frames[0].node.state_kind != resolve_kind || frames[0].node.state_version != resolve_version
     {
         return Err(replay_evm_mismatch(
-            "EVM native-balance observation input was not produced by joint-tip resolution",
+            "EVM observation input was not produced by joint-tip resolution",
+        ));
+    }
+    decode_replay_value(&frames[0])
+}
+
+fn replay_erc20_metadata_input(
+    broker: &replay::ReplayBroker,
+    node: &mfm_spec::v1::NodeSpec,
+) -> replay::Result<EvmErc20TokenMetadata> {
+    let frames = replay_input_frames(
+        broker,
+        node,
+        &EvmErc20TokenMetadata::semantic_id().map_err(replay_adapter_error)?,
+        &EvmErc20TokenMetadata::schema_id().map_err(replay_adapter_error)?,
+    )?;
+    if frames.len() != 1 {
+        return Err(replay_evm_mismatch(
+            "ERC-20 balance observation did not consume exactly one token metadata value",
+        ));
+    }
+    let state_kind = ObserveErc20TokenMetadataState::kind().map_err(replay_adapter_error)?;
+    let state_version = ObserveErc20TokenMetadataState::version().map_err(replay_adapter_error)?;
+    if frames[0].node.state_kind != state_kind || frames[0].node.state_version != state_version {
+        return Err(replay_evm_mismatch(
+            "ERC-20 balance metadata input was not produced by metadata observation",
         ));
     }
     decode_replay_value(&frames[0])
@@ -1050,4 +1575,101 @@ fn replay_adapter_error(error: impl std::fmt::Display) -> replay::ReplayError {
 
 fn replay_evm_mismatch(message: &'static str) -> replay::ReplayError {
     replay::ReplayError::new(replay::ReplayErrorKind::CertifiedEvidenceMismatch, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    const TOKEN: &str = "0x0000000000000000000000000000000000000001";
+
+    fn source_evidence() -> RedactedEvmSourceEvidence {
+        let binding =
+            EvmNetworkBinding::new(EvmNetworkId::new("ethereum-mainnet").expect("net"), 1)
+                .expect("binding");
+        RedactedEvmSourceEvidence::from_binding(
+            &binding,
+            1,
+            EvmSourceRef::new("primary").expect("source"),
+            EvmSourcePolicyId::new("default").expect("policy"),
+        )
+        .expect("source evidence")
+    }
+
+    fn hash() -> B256 {
+        B256::from_str(HASH.strip_prefix("0x").expect("prefix")).expect("hash")
+    }
+
+    fn evidence() -> EvmErc20CallReadEvidence {
+        let request = EvmCallReadRequest::new(
+            Address::from_str(TOKEN).expect("token"),
+            vec![0x31, 0x3c, 0xe5, 0x67],
+            EvmBlockSelector::Hash(hash()),
+        );
+        let response = EvmCallReadResponse {
+            evidence: source_evidence(),
+            return_data: vec![0; 32],
+        };
+        let verification_request = EvmBlockReadRequest::new(EvmBlockSelector::Hash(hash()));
+        let verification_response = mfm_evm_capabilities::EvmBlockReadResponse {
+            evidence: source_evidence(),
+            block_number: 100,
+            block_hash: hash(),
+        };
+        EvmErc20CallReadEvidence::from_capability(
+            &request,
+            &response,
+            &verification_request,
+            &verification_response,
+        )
+        .expect("evidence")
+    }
+
+    #[test]
+    fn erc20_evidence_retains_exact_hash_bound_call_and_redacted_source() {
+        let evidence = evidence();
+        assert_eq!(evidence.destination, TOKEN);
+        assert_eq!(evidence.calldata, "0x313ce567");
+        assert_eq!(evidence.block_selector.block_hash, HASH);
+        assert!(evidence.block_selector.require_canonical);
+        assert_eq!(evidence.return_data, format!("0x{}", "00".repeat(32)));
+        assert_eq!(evidence.verification_block_hash, HASH);
+        assert_eq!(evidence.verification_response_block_number, 100);
+        assert_eq!(evidence.verification_response_block_hash, HASH);
+        assert_eq!(evidence.source.network_id, "ethereum-mainnet");
+        assert_eq!(evidence.source.source_ref, "primary");
+        assert_eq!(evidence.source.policy_id, "default");
+        let rendered = serde_json::to_string(&evidence).expect("json");
+        for forbidden in ["http://", "https://", "authorization", "password"] {
+            assert!(!rendered.contains(forbidden), "leaked {forbidden}");
+        }
+
+        let (request, response, verification_request, verification_response) =
+            evidence.replay_material().expect("replay material");
+        assert_eq!(format!("{:#x}", request.to()), TOKEN);
+        assert_eq!(request.calldata(), &[0x31, 0x3c, 0xe5, 0x67]);
+        assert!(
+            matches!(request.block(), EvmBlockSelector::Hash(value) if format!("{value:#x}") == HASH)
+        );
+        assert_eq!(response.return_data, vec![0; 32]);
+        assert_eq!(verification_request.block(), request.block());
+        assert_eq!(verification_response.block_number, 100);
+        assert_eq!(format!("{:#x}", verification_response.block_hash), HASH);
+    }
+
+    #[test]
+    fn erc20_evidence_rejects_noncanonical_or_noncanonicality_tampering() {
+        let mut missing_canonicality = evidence();
+        missing_canonicality.block_selector.require_canonical = false;
+        assert!(missing_canonicality.replay_material().is_err());
+
+        let mut noncanonical_hex = evidence();
+        noncanonical_hex.calldata = "0x313CE567".to_owned();
+        assert!(noncanonical_hex.replay_material().is_err());
+
+        let mut latest_verification = evidence();
+        latest_verification.verification_block_hash = "0x".to_owned();
+        assert!(latest_verification.replay_material().is_err());
+    }
 }

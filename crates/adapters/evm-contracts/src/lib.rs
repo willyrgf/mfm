@@ -24,17 +24,18 @@ use alloy_primitives::{keccak256, Address, B256};
 use mfm_adapter_contracts::evm_contract_lifecycle_adapter_binding;
 use mfm_artifact_capabilities::ArtifactEvidenceRef as CapabilityArtifactEvidenceRef;
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
+use mfm_capabilities::CapabilitySpec;
 use mfm_events::v1::{self as events, side_effect};
 use mfm_evm_capabilities::{
-    EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockSelector, EvmCallReadProvider,
-    EvmCallReadRequest, EvmCapabilityError, EvmChainIdentityProvider, EvmChainIdentityRequest,
-    EvmChainIdentityResponse, EvmCodeReadProvider, EvmCodeReadRequest, EvmFeeReadProvider,
-    EvmFeeReadRequest, EvmGasEstimateProvider, EvmGasEstimateRequest, EvmLogsReadProvider,
-    EvmLogsReadRequest, EvmNetworkBinding, EvmNetworkId, EvmNonceOccupancy,
+    EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockSelector, EvmCallReadCapability,
+    EvmCallReadProvider, EvmCallReadRequest, EvmCapabilityError, EvmChainIdentityProvider,
+    EvmChainIdentityRequest, EvmChainIdentityResponse, EvmCodeReadProvider, EvmCodeReadRequest,
+    EvmFeeReadProvider, EvmFeeReadRequest, EvmGasEstimateProvider, EvmGasEstimateRequest,
+    EvmLogsReadProvider, EvmLogsReadRequest, EvmNetworkBinding, EvmNetworkId, EvmNonceOccupancy,
     EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest, EvmNonceReadProvider,
     EvmNonceReadRequest, EvmReceiptReadProvider, EvmReceiptReadRequest, EvmReceiptReadResponse,
     EvmTransactionSubmitCapability, EvmTransactionSubmitProvider, EvmTransactionSubmitRequest,
-    RedactedEvmSourceEvidence, SignedEvmPayload,
+    RedactedEvmSourceEvidence, SignedEvmPayload, EVM_JSONRPC_CAPABILITY_IMPLEMENTATION_ID,
 };
 use mfm_evm_contract_model::{
     configured_contract_stage, constructor_data, contract_instance_resource_kind,
@@ -65,14 +66,15 @@ use mfm_replay::v1 as replay;
 use mfm_runtime::{
     load_launch_config_for_node, load_materialized_struct_field_value, load_runner_config_for_node,
     load_side_effect_artifact_for_node, preclaim_side_effect_resource_lane,
-    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
-    ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedInputs, PreInvocationRunCtx,
-    PreInvocationRunnerFuture, RunnerCapabilityBinding, RunnerExecutableIdentityTemplate,
-    RunnerIngressContext, RunnerRegistrationBuilder, RuntimeDiagnostic, RuntimeFailure,
-    SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
-    SideEffectObservedEvidence, SideEffectProtocolAction, SideEffectReplayEvidence,
-    SideEffectSubmissionDecision, SideEffectUnknownSubmissionDecision, SideEffectVerifyCallbacks,
-    SideEffectVerifyDriver, TypedContextOutputExtractor,
+    CapabilityImplementationBinding, CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx,
+    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedInputs,
+    PreInvocationRunCtx, PreInvocationRunnerFuture, RunnerCapabilityBinding,
+    RunnerExecutableIdentityTemplate, RunnerIngressContext, RunnerRegistrationBuilder,
+    RuntimeDiagnostic, RuntimeFailure, SideEffectDriver, SideEffectDriverCallbacks,
+    SideEffectDriverFuture, SideEffectIntentPlan, SideEffectObservedEvidence,
+    SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
+    SideEffectUnknownSubmissionDecision, SideEffectVerifyCallbacks, SideEffectVerifyDriver,
+    TypedContextOutputExtractor,
 };
 use mfm_signing::{PublicKeyBytes, SignerRef, SigningProvider};
 use mfm_spec::v1 as spec;

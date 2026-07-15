@@ -52,7 +52,11 @@ impl ReplayVerifierRegistry {
                     state_keys: &[
                         state_key::<mfm_states_evm::ResolveEvmJointTipState>,
                         state_key::<mfm_states_evm::ObserveEvmNativeBalanceState>,
+                        state_key::<mfm_states_evm::RecordEvmNativeBalanceFactState>,
                         state_key::<mfm_states_evm::AssembleEvmNativeBalanceBatchState>,
+                        state_key::<mfm_states_evm::ObserveErc20TokenMetadataState>,
+                        state_key::<mfm_states_evm::ObserveErc20BalanceState>,
+                        state_key::<mfm_states_evm::RecordErc20BalanceFactState>,
                     ],
                     intent_matcher: None,
                     verifier: verify_evm,
@@ -134,7 +138,7 @@ fn verify_btc(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Resul
 }
 
 fn verify_evm(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
-    mfm_adapters_evm::verify_evm_native_balance_replay(broker)
+    mfm_adapters_evm::verify_evm_collector_replay(broker)
 }
 
 fn verify_contracts(broker: &ReplayBroker, registry: &CertificationRegistry) -> Result<()> {

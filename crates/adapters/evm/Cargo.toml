@@ -2,7 +2,7 @@
 name = "mfm-adapters-evm"
 version = "0.1.0"
 edition = "2021"
-description = "EVM native collector adapter runners for typed workflow execution"
+description = "EVM collector adapter runners for typed workflow execution"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
@@ -16,6 +16,7 @@ thiserror = { workspace = true }
 
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-events = { path = "../../kernel/events" }
+mfm-evm-core = { path = "../../evm-core" }
 mfm-evm-capabilities = { path = "../../evm-capabilities" }
 mfm-fact-capabilities = { path = "../../fact-capabilities" }
 mfm-facts = { path = "../../kernel/facts" }

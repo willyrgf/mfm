@@ -40,6 +40,14 @@ pub type Result<T> = std::result::Result<T, EvmCapabilityError>;
 /// Boxed future returned by EVM capability providers.
 pub type EvmCapabilityFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
+/// Stable runtime implementation id for generic EVM JSON-RPC read capabilities.
+///
+/// Multiple adapters may consume the same generic read capability through the
+/// same process-local JSON-RPC provider. Their runner registrations must use
+/// this one id so a certified capability descriptor has one unambiguous live
+/// implementation binding.
+pub const EVM_JSONRPC_CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.evm.jsonrpc.runtime.v1";
+
 macro_rules! evm_capability {
     ($(#[$meta:meta])* $ty:ident, $role:ty, $name:literal) => {
         $(#[$meta])*

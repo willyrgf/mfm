@@ -76,7 +76,10 @@ resolve them against current runtime config.
 Portfolio snapshots pin EVM views by chain id, block number, and block hash. Later EVM balance and
 contract-call reads use the pinned block hash as an EIP-1898 block selector with
 `requireCanonical: true`; the stored block number is audit context and must not be used as the
-provider read selector.
+provider read selector. ERC-20 metadata and balance states use the existing generic `eth_call`
+capability only: `decimals()` and `balanceOf(address)` retain the destination, exact calldata,
+canonical hash selector, raw return bytes, and redacted certified-source identity as external-read
+evidence. Each call is followed by an exact hash block re-verification before a fact is recorded.
 
 Transport failures, HTTP status failures, JSON-RPC error objects, malformed responses, and source
 mismatches are classified as redacted provider diagnostics. Diagnostics may carry the stable EVM
@@ -97,9 +100,12 @@ transactions remain runtime-only and must be redacted from diagnostics.
 Replay uses the stored certified spec, typed run stream, typed artifacts, and replay verifiers. It
 must not open live RPC connections or consult runtime config.
 
-EVM contract replay recomputes the certified semantic binding from the lifecycle context and
-context-bound artifacts, then checks stored fact evidence, side-effect evidence, import evidence,
-validation evidence, and terminal output artifacts against that expected authority.
+EVM collector replay recomputes native and ERC-20 reads from retained evidence without a live
+provider: it validates the destination, calldata, canonical hash selector, raw return bytes,
+source binding, re-verified anchor, decoded output, and recorded fact evidence. EVM contract replay
+recomputes the certified semantic binding from the lifecycle context and context-bound artifacts,
+then checks stored fact evidence, side-effect evidence, import evidence, validation evidence, and
+terminal output artifacts against that expected authority.
 
 ## Contributor Guidance
 

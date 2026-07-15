@@ -26,7 +26,7 @@ pub fn register_contract_lifecycle_runners_with_factory(
         &import_deployed_descriptor,
         &import_configured_descriptor,
     ] {
-        registry.register_capability_set(descriptor.capabilities(), implementation_id.clone())?;
+        register_contract_capabilities(registry, descriptor.capabilities(), &implementation_id)?;
     }
     let mut registrations = RunnerRegistrationBuilder::new(registry);
     let executable_identities = RunnerExecutableIdentityTemplate::new(
@@ -103,5 +103,31 @@ pub fn register_contract_lifecycle_runners_with_factory(
             extractor: ContractLifecycleContextOutputExtractor::new(),
         }),
     )?;
+    Ok(())
+}
+
+fn register_contract_capabilities(
+    registry: &mut ErasedRunnerRegistry,
+    capabilities: &mfm_capabilities::CapabilitySetDescriptor,
+    contract_implementation_id: &CapabilityImplementationId,
+) -> mfm_runtime::Result<()> {
+    let generic_call = EvmCallReadCapability::descriptor()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    let generic_call_implementation =
+        CapabilityImplementationId::new(EVM_JSONRPC_CAPABILITY_IMPLEMENTATION_ID)?;
+    for capability in &capabilities.capabilities {
+        // Generic call reads are shared with hash-anchored collectors, so a capability descriptor
+        // must retain one provider binding even when the consuming adapter differs.
+        let implementation_id =
+            if capability.kind == generic_call.kind && capability.version == generic_call.version {
+                generic_call_implementation.clone()
+            } else {
+                contract_implementation_id.clone()
+            };
+        registry.register_capability(CapabilityImplementationBinding::new(
+            capability.clone(),
+            implementation_id,
+        ))?;
+    }
     Ok(())
 }

@@ -2152,6 +2152,7 @@ dependencies = [
  "mfm-canonical",
  "mfm-events",
  "mfm-evm-capabilities",
+ "mfm-evm-core",
  "mfm-fact-capabilities",
  "mfm-facts",
  "mfm-ids",
