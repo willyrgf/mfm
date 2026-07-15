@@ -24,8 +24,7 @@ use mfm_portfolio_model::portfolio::{
     ExecutionAnchor, NetworkConfig, NetworkFamilyConfig, PortfolioConfig,
 };
 use mfm_portfolio_model::symbol::{
-    BalanceReaderConfig, QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole,
-    SymbolValuationConfig,
+    HoldingSourceConfig, QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolValuationConfig,
 };
 use mfm_portfolio_model::wallet::{
     WalletConfig, WalletImplementationConfig, WalletSubject, WalletSubjectKind,

@@ -29,7 +29,8 @@ pub use address_balance_collect::{
     ObserveBtcAddressBalanceState, RecordBtcAddressBalanceFactConfig,
     RecordBtcAddressBalanceFactInput, RecordBtcAddressBalanceFactInputHandles,
     RecordBtcAddressBalanceFactState, ResolveBtcJointTipConfig, ResolveBtcJointTipInput,
-    ResolveBtcJointTipInputHandles, ResolveBtcJointTipState,
+    ResolveBtcJointTipInputHandles, ResolveBtcJointTipState, BTC_JOINT_TIP_SOURCE_READS,
+    BTC_NATIVE_BALANCE_COVERAGE, BTC_NATIVE_BALANCE_OBSERVE_SOURCE_READS,
 };
 
 pub use chain_head::{

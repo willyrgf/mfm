@@ -28,6 +28,7 @@ enum PriceKind {
 #[derive(Clone, Serialize, Deserialize, MfmValue)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum PriceSource {
+    Native,
     Fixed { price: AssetPrice },
     Oracle { source_id: String },
 }

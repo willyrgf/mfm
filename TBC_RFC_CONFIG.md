@@ -1,4 +1,4 @@
-# RFC_CONFIG implementation review
+# RFC_CONFIG implementation review (historical architecture record)
 
 Date: 2026-07-14  
 Branch reviewed: refac-config  

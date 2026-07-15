@@ -10,8 +10,8 @@ use crate::ids::{
 };
 use crate::metadata::PublicMetadata;
 use crate::symbol::{
-    validate_symbol_config, BalanceReaderConfig, Observation, QuoteCode, SymbolConfig,
-    SymbolConfigError, SymbolKind,
+    validate_symbol_config, HoldingSourceConfig, Observation, QuoteCode, SymbolConfig,
+    SymbolConfigError,
 };
 use crate::wallet::{WalletConfig, WalletSubjectKind};
 
@@ -135,6 +135,8 @@ pub enum NetworkConfig {
         network_id: NetworkId,
         /// Non-zero EVM chain id for the network.
         chain_id: NonZeroU64,
+        /// Native asset scale for this semantic EVM network.
+        native_decimals: u8,
         /// Canonical metadata surface.
         #[serde(default)]
         metadata: PublicMetadata,
@@ -154,11 +156,13 @@ pub enum NetworkConfig {
 }
 
 impl NetworkConfig {
-    /// Creates a validated network config.
+    /// Creates a validated network config without any implicit native-scale fallback.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         network_id: String,
         family: NetworkFamilyConfig,
         chain_id: Option<u64>,
+        native_decimals: Option<u8>,
         bitcoin_network: Option<String>,
         source_identity: Option<String>,
         metadata: BTreeMap<String, String>,
@@ -193,9 +197,15 @@ impl NetworkConfig {
                         network_id: network_id.to_string(),
                     });
                 };
+                let Some(native_decimals) = native_decimals else {
+                    return Err(PortfolioConfigError::MissingEvmNativeDecimals {
+                        network_id: network_id.to_string(),
+                    });
+                };
                 Self::Evm {
                     network_id,
                     chain_id,
+                    native_decimals,
                     metadata,
                 }
                 .validated()
@@ -203,6 +213,11 @@ impl NetworkConfig {
             NetworkFamilyConfig::Bitcoin => {
                 if chain_id.is_some() {
                     return Err(PortfolioConfigError::UnexpectedBitcoinChainId {
+                        network_id: network_id.to_string(),
+                    });
+                }
+                if native_decimals.is_some() {
+                    return Err(PortfolioConfigError::UnexpectedBitcoinNativeDecimals {
                         network_id: network_id.to_string(),
                     });
                 }
@@ -241,6 +256,7 @@ impl NetworkConfig {
 
     /// Validates this network config and returns it unchanged.
     pub fn validated(self) -> Result<Self, PortfolioConfigError> {
+        validate_network_config(&self)?;
         Ok(self)
     }
 
@@ -271,6 +287,16 @@ impl NetworkConfig {
     pub const fn chain_id_u64(&self) -> Option<u64> {
         match self {
             Self::Evm { chain_id, .. } => Some(chain_id.get()),
+            Self::Bitcoin { .. } => None,
+        }
+    }
+
+    /// Returns the EVM-native decimal scale when this is an EVM network.
+    pub const fn native_decimals(&self) -> Option<u8> {
+        match self {
+            Self::Evm {
+                native_decimals, ..
+            } => Some(*native_decimals),
             Self::Bitcoin { .. } => None,
         }
     }
@@ -321,6 +347,7 @@ impl ValidatedNetworkConfigs {
     pub fn new(networks: Vec<NetworkConfig>) -> Result<Self, PortfolioConfigError> {
         let mut seen = BTreeSet::new();
         for network in &networks {
+            validate_network_config(network)?;
             if !seen.insert(network.network_id().as_str()) {
                 return Err(PortfolioConfigError::DuplicateNetworkId {
                     network_id: network.network_id().to_string(),
@@ -563,9 +590,21 @@ pub enum PortfolioConfigError {
         /// Network id associated with the failure.
         network_id: String,
     },
+    /// EVM networks require an explicit native-asset scale.
+    #[error("network `{network_id}` with family `evm` must declare native_decimals")]
+    MissingEvmNativeDecimals {
+        /// Network id associated with the failure.
+        network_id: String,
+    },
     /// Bitcoin networks must not declare an EVM chain id.
     #[error("network `{network_id}` with family `bitcoin` must not declare chain_id")]
     UnexpectedBitcoinChainId {
+        /// Network id associated with the failure.
+        network_id: String,
+    },
+    /// Bitcoin networks must not declare an EVM-native scale.
+    #[error("network `{network_id}` with family `bitcoin` must not declare native_decimals")]
+    UnexpectedBitcoinNativeDecimals {
         /// Network id associated with the failure.
         network_id: String,
     },
@@ -596,7 +635,7 @@ pub enum PortfolioConfigError {
     /// Network metadata contained a secret-shaped key or value.
     #[error("network `{network_id}` metadata key `{key}` contains secret-shaped content")]
     NetworkMetadataContainsSecret {
-        /// Network associated with the rejected metadata.
+        /// Network associated with the failure.
         network_id: String,
         /// Metadata key associated with the rejected content.
         key: String,
@@ -607,6 +646,16 @@ pub enum PortfolioConfigError {
         /// Duplicate wallet id.
         wallet_id: String,
     },
+    /// Two wallet declarations named the same semantic subject on one network.
+    #[error("wallet `{wallet_id}` duplicates semantic subject of wallet `{existing_wallet_id}` on network `{network_id}")]
+    DuplicateWalletSubject {
+        /// Later wallet id that duplicated the subject.
+        wallet_id: String,
+        /// Earlier wallet id using the same subject.
+        existing_wallet_id: String,
+        /// Shared network id.
+        network_id: String,
+    },
     /// Wallet referenced an unknown network.
     #[error("wallet `{wallet_id}` referenced unknown network `{network_id}`")]
     UnknownWalletNetwork {
@@ -616,7 +665,7 @@ pub enum PortfolioConfigError {
         network_id: String,
     },
     /// Wallet subject family did not match the referenced network family.
-    #[error("wallet `{wallet_id}` subject_kind `{wallet_subject_kind:?}` did not match network `{network_id}` family `{network_family:?}`")]
+    #[error("wallet `{wallet_id}` subject_kind `{wallet_subject_kind:?}` did not match network `{network_id}` family `{network_family:?}")]
     WalletSubjectNetworkFamilyMismatch {
         /// Wallet id associated with the failure.
         wallet_id: String,
@@ -628,7 +677,7 @@ pub enum PortfolioConfigError {
         network_family: NetworkFamilyConfig,
     },
     /// Wallet referenced an unknown symbol.
-    #[error("wallet `{wallet_id}` referenced unknown symbol `{symbol_id}`")]
+    #[error("wallet `{wallet_id}` referenced unknown symbol `{symbol_id}")]
     UnknownWalletSymbol {
         /// Wallet id associated with the failure.
         wallet_id: String,
@@ -644,7 +693,7 @@ pub enum PortfolioConfigError {
         symbol_id: String,
     },
     /// Wallet referenced a symbol configured for a different network.
-    #[error("wallet `{wallet_id}` on network `{wallet_network_id}` referenced symbol `{symbol_id}` on network `{symbol_network_id}`")]
+    #[error("wallet `{wallet_id}` on network `{wallet_network_id}` referenced symbol `{symbol_id}` on network `{symbol_network_id}")]
     WalletSymbolNetworkMismatch {
         /// Wallet id associated with the failure.
         wallet_id: String,
@@ -669,9 +718,9 @@ pub enum PortfolioConfigError {
         /// Underlying symbol validation failure.
         source: Box<SymbolConfigError>,
     },
-    /// Symbol used a reader or symbol kind unsupported by the referenced network family.
-    #[error("symbol `{symbol_id}` used unsupported kind/reader for network `{network_id}` family `{network_family:?}`")]
-    UnsupportedSymbolNetworkFamily {
+    /// A holding source was unsupported by its network family.
+    #[error("symbol `{symbol_id}` used unsupported holding source for network `{network_id}` family `{network_family:?}")]
+    UnsupportedHoldingSourceNetworkFamily {
         /// Symbol id associated with the failure.
         symbol_id: String,
         /// Network id associated with the failure.
@@ -680,7 +729,7 @@ pub enum PortfolioConfigError {
         network_family: NetworkFamilyConfig,
     },
     /// Symbol referenced an unknown network.
-    #[error("symbol `{symbol_id}` referenced unknown network `{network_id}`")]
+    #[error("symbol `{symbol_id}` referenced unknown network `{network_id}")]
     UnknownSymbolNetwork {
         /// Symbol id associated with the failure.
         symbol_id: String,
@@ -694,7 +743,7 @@ pub enum PortfolioConfigError {
         quote: QuoteCode,
     },
     /// Symbol did not provide a route for one requested quote.
-    #[error("symbol `{symbol_id}` is missing valuation route for quote `{quote}`")]
+    #[error("symbol `{symbol_id}` is missing valuation route for quote `{quote}")]
     MissingValuationQuote {
         /// Symbol id associated with the failure.
         symbol_id: String,
@@ -702,7 +751,7 @@ pub enum PortfolioConfigError {
         quote: QuoteCode,
     },
     /// Symbol defined a quote route that was not requested by the portfolio.
-    #[error("symbol `{symbol_id}` defined unexpected valuation route for quote `{quote}`")]
+    #[error("symbol `{symbol_id}` defined unexpected valuation route for quote `{quote}")]
     UnexpectedValuationQuote {
         /// Symbol id associated with the failure.
         symbol_id: String,
@@ -710,7 +759,7 @@ pub enum PortfolioConfigError {
         quote: QuoteCode,
     },
     /// A valuation route referenced an unknown priced symbol.
-    #[error("symbol `{symbol_id}` quote `{quote}` referenced unknown priced_symbol_id `{priced_symbol_id}`")]
+    #[error("symbol `{symbol_id}` quote `{quote}` referenced unknown priced_symbol_id `{priced_symbol_id}")]
     UnknownPricedSymbol {
         /// Symbol id associated with the failure.
         symbol_id: String,
@@ -719,15 +768,22 @@ pub enum PortfolioConfigError {
         /// Unknown priced symbol id.
         priced_symbol_id: String,
     },
-    /// `underlying_symbol_id` referenced an unknown symbol.
-    #[error(
-        "symbol `{symbol_id}` referenced unknown underlying_symbol_id `{underlying_symbol_id}`"
-    )]
-    UnknownUnderlyingSymbol {
-        /// Symbol id associated with the failure.
+    /// The explicit wallet-to-symbol holding relation was empty.
+    #[error("portfolio must declare at least one wallet-to-symbol holding")]
+    EmptyHoldingDemand,
+    /// Two logical wallet-to-symbol edges targeted the same balance source.
+    #[error("holding `{wallet_id}/{symbol_id}` aliases source used by `{existing_wallet_id}/{existing_symbol_id}` on network `{network_id}")]
+    AliasedHoldingSource {
+        /// Later wallet id that aliases a source.
+        wallet_id: String,
+        /// Later symbol id that aliases a source.
         symbol_id: String,
-        /// Unknown underlying symbol id.
-        underlying_symbol_id: String,
+        /// Earlier wallet id using the same physical source.
+        existing_wallet_id: String,
+        /// Earlier symbol id using the same physical source.
+        existing_symbol_id: String,
+        /// Shared network id.
+        network_id: String,
     },
 }
 
@@ -736,6 +792,22 @@ pub fn decode_portfolio_config(value: &Value) -> Result<PortfolioConfig, Portfol
     let cfg: PortfolioConfig = serde_json::from_value(value.clone())
         .map_err(|err| PortfolioConfigError::Decode(err.to_string()))?;
     cfg.validated()
+}
+
+fn validate_network_config(network: &NetworkConfig) -> Result<(), PortfolioConfigError> {
+    if let NetworkConfig::Bitcoin {
+        network_id,
+        bitcoin_network,
+        ..
+    } = network
+    {
+        validate_bitcoin_network(bitcoin_network).map_err(|_| {
+            PortfolioConfigError::InvalidBitcoinNetwork {
+                network_id: network_id.to_string(),
+            }
+        })?;
+    }
+    Ok(())
 }
 
 fn validate_bitcoin_network(value: &str) -> Result<(), ()> {
@@ -754,15 +826,19 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
     }
 
     let mut network_ids = HashSet::new();
+    let mut networks_by_id = BTreeMap::new();
     for network in &cfg.networks {
+        validate_network_config(network)?;
         if !network_ids.insert(network.network_id().clone()) {
             return Err(PortfolioConfigError::DuplicateNetworkId {
                 network_id: network.network_id().to_string(),
             });
         }
+        networks_by_id.insert(network.network_id().clone(), network);
     }
 
     let mut symbol_ids = HashSet::new();
+    let mut symbols_by_id = BTreeMap::new();
     for symbol in &cfg.symbol_configs {
         validate_symbol_config(symbol).map_err(|source| {
             PortfolioConfigError::InvalidSymbolConfig {
@@ -775,50 +851,37 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
                 symbol_id: symbol.symbol_id.to_string(),
             });
         }
+        symbols_by_id.insert(symbol.symbol_id.clone(), symbol);
     }
 
     for symbol in &cfg.symbol_configs {
-        if !network_ids.contains(&symbol.network_id) {
+        let Some(network) = networks_by_id.get(&symbol.network_id).copied() else {
             return Err(PortfolioConfigError::UnknownSymbolNetwork {
                 symbol_id: symbol.symbol_id.to_string(),
                 network_id: symbol.network_id.to_string(),
             });
-        }
-        let network = cfg
-            .networks
-            .iter()
-            .find(|network| network.network_id() == &symbol.network_id)
-            .expect("validated network id must exist");
+        };
         validate_symbol_for_network_family(symbol, network)?;
-        if let Some(underlying_symbol_id) = &symbol.underlying_symbol_id {
-            if !symbol_ids.contains(underlying_symbol_id) {
-                return Err(PortfolioConfigError::UnknownUnderlyingSymbol {
-                    symbol_id: symbol.symbol_id.to_string(),
-                    underlying_symbol_id: underlying_symbol_id.to_string(),
-                });
-            }
-        }
         validate_symbol_quote_routes(symbol, &requested_quotes, &symbol_ids)?;
     }
 
     let mut wallet_ids = HashSet::new();
+    let mut wallet_subjects = BTreeMap::new();
+    let mut physical_sources = BTreeMap::new();
+    let mut demand_count = 0_u64;
+
     for wallet in &cfg.wallets {
         if !wallet_ids.insert(wallet.wallet_id.clone()) {
             return Err(PortfolioConfigError::DuplicateWalletId {
                 wallet_id: wallet.wallet_id.to_string(),
             });
         }
-        if !network_ids.contains(&wallet.network_id) {
+        let Some(network) = networks_by_id.get(&wallet.network_id).copied() else {
             return Err(PortfolioConfigError::UnknownWalletNetwork {
                 wallet_id: wallet.wallet_id.to_string(),
                 network_id: wallet.network_id.to_string(),
             });
-        }
-        let network = cfg
-            .networks
-            .iter()
-            .find(|network| network.network_id() == &wallet.network_id)
-            .expect("validated network id must exist");
+        };
         let wallet_subject_kind = wallet.subject.kind();
         if !wallet_subject_matches_network_family(wallet_subject_kind, network.family()) {
             return Err(PortfolioConfigError::WalletSubjectNetworkFamilyMismatch {
@@ -828,6 +891,20 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
                 network_family: network.family(),
             });
         }
+        let subject_key = (
+            wallet.network_id.clone(),
+            wallet.subject.address_str().to_owned(),
+        );
+        if let Some(existing_wallet_id) =
+            wallet_subjects.insert(subject_key, wallet.wallet_id.clone())
+        {
+            return Err(PortfolioConfigError::DuplicateWalletSubject {
+                wallet_id: wallet.wallet_id.to_string(),
+                existing_wallet_id: existing_wallet_id.to_string(),
+                network_id: wallet.network_id.to_string(),
+            });
+        }
+
         let mut wallet_symbol_ids = HashSet::new();
         for symbol_id in &wallet.symbol_ids {
             if !wallet_symbol_ids.insert(symbol_id) {
@@ -836,17 +913,12 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
                     symbol_id: symbol_id.to_string(),
                 });
             }
-            if !symbol_ids.contains(symbol_id) {
+            let Some(symbol) = symbols_by_id.get(symbol_id).copied() else {
                 return Err(PortfolioConfigError::UnknownWalletSymbol {
                     wallet_id: wallet.wallet_id.to_string(),
                     symbol_id: symbol_id.to_string(),
                 });
-            }
-            let symbol = cfg
-                .symbol_configs
-                .iter()
-                .find(|symbol| symbol.symbol_id == *symbol_id)
-                .expect("validated symbol id must exist");
+            };
             if symbol.network_id != wallet.network_id {
                 return Err(PortfolioConfigError::WalletSymbolNetworkMismatch {
                     wallet_id: wallet.wallet_id.to_string(),
@@ -855,10 +927,58 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
                     symbol_network_id: symbol.network_id.to_string(),
                 });
             }
+
+            demand_count += 1;
+            let source_key = physical_source_key(wallet, symbol, network)?;
+            if let Some((existing_wallet_id, existing_symbol_id)) = physical_sources.insert(
+                source_key,
+                (wallet.wallet_id.clone(), symbol.symbol_id.clone()),
+            ) {
+                return Err(PortfolioConfigError::AliasedHoldingSource {
+                    wallet_id: wallet.wallet_id.to_string(),
+                    symbol_id: symbol.symbol_id.to_string(),
+                    existing_wallet_id: existing_wallet_id.to_string(),
+                    existing_symbol_id: existing_symbol_id.to_string(),
+                    network_id: wallet.network_id.to_string(),
+                });
+            }
         }
     }
 
+    if demand_count == 0 {
+        return Err(PortfolioConfigError::EmptyHoldingDemand);
+    }
+
     Ok(())
+}
+
+fn physical_source_key(
+    wallet: &WalletConfig,
+    symbol: &SymbolConfig,
+    network: &NetworkConfig,
+) -> Result<(NetworkId, String), PortfolioConfigError> {
+    let address = wallet.subject.address_str();
+    let source = match (&symbol.source, network.family()) {
+        (HoldingSourceConfig::Native, NetworkFamilyConfig::Bitcoin) => {
+            format!("bitcoin-native:{address}")
+        }
+        (HoldingSourceConfig::Native, NetworkFamilyConfig::Evm) => {
+            format!("evm-native:{address}")
+        }
+        (HoldingSourceConfig::Erc20 { contract_address }, NetworkFamilyConfig::Evm) => {
+            format!("evm-erc20:{}:{address}", contract_address.as_str())
+        }
+        (HoldingSourceConfig::Erc20 { .. }, NetworkFamilyConfig::Bitcoin) => {
+            return Err(
+                PortfolioConfigError::UnsupportedHoldingSourceNetworkFamily {
+                    symbol_id: symbol.symbol_id.to_string(),
+                    network_id: network.network_id().to_string(),
+                    network_family: network.family(),
+                },
+            );
+        }
+    };
+    Ok((network.network_id().clone(), source))
 }
 
 fn validate_portfolio_config_for_mfm(cfg: &PortfolioConfig) -> Result<(), String> {
@@ -885,20 +1005,22 @@ fn validate_symbol_for_network_family(
     symbol: &SymbolConfig,
     network: &NetworkConfig,
 ) -> Result<(), PortfolioConfigError> {
-    if network.family() == NetworkFamilyConfig::Bitcoin
-        && !matches!(
-            (&symbol.kind, &symbol.balance_reader),
-            (
-                SymbolKind::NativeBalance,
-                BalanceReaderConfig::NativeBalance {}
+    let supported = matches!(
+        (network.family(), &symbol.source),
+        (NetworkFamilyConfig::Bitcoin, HoldingSourceConfig::Native)
+            | (
+                NetworkFamilyConfig::Evm,
+                HoldingSourceConfig::Native | HoldingSourceConfig::Erc20 { .. }
             )
-        )
-    {
-        return Err(PortfolioConfigError::UnsupportedSymbolNetworkFamily {
-            symbol_id: symbol.symbol_id.to_string(),
-            network_id: network.network_id().to_string(),
-            network_family: network.family(),
-        });
+    );
+    if !supported {
+        return Err(
+            PortfolioConfigError::UnsupportedHoldingSourceNetworkFamily {
+                symbol_id: symbol.symbol_id.to_string(),
+                network_id: network.network_id().to_string(),
+                network_family: network.family(),
+            },
+        );
     }
     Ok(())
 }

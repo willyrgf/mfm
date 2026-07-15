@@ -23,10 +23,10 @@ use self::decimal::{multiply_decimal_strings, DecimalValue};
 pub use selection::{
     holding_candidate_from_normalized, is_filter_empty_holding_error,
     portfolio_holding_select_scope_decision_hash, portfolio_holding_selection_policy_digest,
-    project_holding_fact_for_network, project_holding_fact_kind,
-    project_network_pins_from_observations, select_network_coherent, HoldingAnchor,
-    HoldingCandidate, HoldingFactProjection, NormalizedHoldingFields, PortfolioHoldingErrorCode,
-    PortfolioHoldingSelectionError, RequiredHoldingKey, SelectedHolding, SelectedHoldingMaterial,
+    project_holding_fact_for_network, project_network_pins_from_observations,
+    select_network_coherent, HoldingAnchor, HoldingCandidate, HoldingFactProjection,
+    NormalizedHoldingFields, PortfolioHoldingErrorCode, PortfolioHoldingSelectionError,
+    RequiredHoldingKey, SelectedHolding, SelectedHoldingMaterial,
     PORTFOLIO_HOLDING_LATEST_NETWORK_COHERENT_POLICY_ID,
 };
 
@@ -40,15 +40,14 @@ use mfm_effects::{Pure, ReadExternal};
 use mfm_fact_capabilities::FactIndexReadCapability;
 use mfm_facts::{FactSelectionEvidence, StoreScopeRef};
 use mfm_ids::{AdapterKind, AdapterVersion, DigestAlgorithm, StateKind, StateVersion};
-use mfm_portfolio_model::aave::AAVE_V3_PROTOCOL_ID;
 use mfm_portfolio_model::portfolio::{
-    NetworkConfig, NetworkFamilyConfig, PortfolioConfig, PortfolioQuoteTotal, PortfolioReport,
-    PortfolioSnapshot, ValidatedPortfolioConfig, ValidatedSymbolConfigs, ValidatedWalletConfigs,
-    WalletReport, WalletSnapshot,
+    NetworkConfig, PortfolioConfig, PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot,
+    ValidatedPortfolioConfig, ValidatedSymbolConfigs, ValidatedWalletConfigs, WalletReport,
+    WalletSnapshot,
 };
 use mfm_portfolio_model::symbol::{
-    BalanceReaderConfig, Observation, ObservationQuantity, ObservationSource, ObservationValue,
-    QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolKind, SymbolRole,
+    AnchoredHoldingSource, Observation, ObservationQuantity, ObservationValue, QuoteCode,
+    QuoteValuationConfig, SymbolConfig,
 };
 use mfm_portfolio_model::wallet::{WalletConfig, WalletImplementationConfig, WalletSubjectKind};
 use mfm_program::{

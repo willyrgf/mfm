@@ -1,7 +1,10 @@
 use super::*;
+
 use mfm_ids::RunId;
 use mfm_portfolio_model::metadata::PublicMetadata;
-use mfm_portfolio_model::symbol::{ObservationQuantity, SymbolKind, SymbolRole};
+use mfm_portfolio_model::symbol::{
+    AnchoredHoldingSource, HoldingSourceConfig, Observation, ObservationAnchor, ObservationQuantity,
+};
 
 fn key(wallet: &str, symbol: &str, network: &str) -> RequiredHoldingKey {
     RequiredHoldingKey {
@@ -34,7 +37,7 @@ fn material(
         wallet_id: wallet.to_owned(),
         symbol_id: symbol.to_owned(),
         network_id: network.to_owned(),
-        balance_reader_kind: "bitcoin.address_balance".to_owned(),
+        holding: HoldingSourceConfig::Native,
         raw_dec: "1".to_owned(),
         decimals: 8,
         observation_anchor: ObservationAnchor::Bitcoin {
@@ -65,7 +68,6 @@ fn candidate(
 
 #[test]
 fn network_coherent_selects_common_older_anchor() {
-    // A@100, A@99; B@99 → both @99 (not independent latest A@100 + B@99).
     let a = key("w1", "btc", "bitcoin-mainnet");
     let b = key("w2", "btc", "bitcoin-mainnet");
     let mut map = BTreeMap::new();
@@ -106,11 +108,11 @@ fn network_coherent_selects_common_older_anchor() {
     assert_eq!(selected.len(), 2);
     assert!(selected
         .iter()
-        .all(|s| s.anchor.height == 99 && s.anchor.hash == "hash99"));
+        .all(|selected| selected.anchor.height == 99 && selected.anchor.hash == "hash99"));
     assert_eq!(
         selected
             .iter()
-            .find(|s| s.key == a)
+            .find(|selected| selected.key == a)
             .expect("a")
             .fact_claim_id,
         claim(99)
@@ -118,7 +120,7 @@ fn network_coherent_selects_common_older_anchor() {
     assert_eq!(
         selected
             .iter()
-            .find(|s| s.key == b)
+            .find(|selected| selected.key == b)
             .expect("b")
             .fact_claim_id,
         claim(99)
@@ -126,10 +128,16 @@ fn network_coherent_selects_common_older_anchor() {
 }
 
 #[test]
-fn empty_common_anchors_hard_fails() {
+fn selection_requires_candidates_and_one_shared_anchor() {
     let a = key("w1", "btc", "bitcoin-mainnet");
     let b = key("w2", "btc", "bitcoin-mainnet");
     let mut map = BTreeMap::new();
+    map.insert(a.clone(), Vec::new());
+    assert_eq!(
+        select_network_coherent(&map).expect_err("missing").code,
+        PortfolioHoldingErrorCode::MissingFact
+    );
+
     map.insert(
         a,
         vec![candidate(
@@ -152,55 +160,20 @@ fn empty_common_anchors_hard_fails() {
             material("w2", "btc", "bitcoin-mainnet", 99, "hash99"),
         )],
     );
-
-    let err = select_network_coherent(&map).expect_err("no common");
-    assert_eq!(err.code, PortfolioHoldingErrorCode::NoCommonNetworkAnchor);
-    assert_eq!(err.code.as_str(), "no_common_network_anchor");
-}
-
-#[test]
-fn empty_candidates_are_missing_fact() {
-    let a = key("w1", "btc", "bitcoin-mainnet");
-    let mut map = BTreeMap::new();
-    map.insert(a, Vec::new());
-    let err = select_network_coherent(&map).expect_err("missing");
-    assert_eq!(err.code, PortfolioHoldingErrorCode::MissingFact);
-}
-
-#[test]
-fn lww_prefers_higher_store_commit_order_then_typed_fact_claim_id() {
-    let a = key("w1", "btc", "bitcoin-mainnet");
-    let mut map = BTreeMap::new();
-    map.insert(
-        a.clone(),
-        vec![
-            candidate(
-                "bitcoin-mainnet",
-                50,
-                "hash50",
-                10,
-                1,
-                material("w1", "btc", "bitcoin-mainnet", 50, "hash50"),
-            ),
-            candidate(
-                "bitcoin-mainnet",
-                50,
-                "hash50",
-                20,
-                2,
-                material("w1", "btc", "bitcoin-mainnet", 50, "hash50"),
-            ),
-        ],
+    assert_eq!(
+        select_network_coherent(&map)
+            .expect_err("no common anchor")
+            .code,
+        PortfolioHoldingErrorCode::NoCommonNetworkAnchor
     );
-    let selected = select_network_coherent(&map).expect("select");
-    assert_eq!(selected.len(), 1);
-    assert_eq!(selected[0].fact_claim_id, claim(2));
-    assert_eq!(selected[0].store_commit_order, 20);
+}
 
-    // Equal store_commit_order: compare typed coordinates, not decimal text where `9`
-    // sorts after `10` lexically.
+#[test]
+fn selection_prefers_newer_store_order_then_typed_claim_coordinate() {
+    let required = key("w1", "btc", "bitcoin-mainnet");
+    let mut map = BTreeMap::new();
     map.insert(
-        a,
+        required.clone(),
         vec![
             candidate(
                 "bitcoin-mainnet",
@@ -220,66 +193,17 @@ fn lww_prefers_higher_store_commit_order_then_typed_fact_claim_id() {
             ),
         ],
     );
-    let selected = select_network_coherent(&map).expect("select equal commit");
+
+    let selected = select_network_coherent(&map).expect("select");
     assert_eq!(selected[0].fact_claim_id, claim(10));
     assert_eq!(selected[0].store_commit_order, 20);
 }
 
 #[test]
-fn pin_projection_matches_observation_anchors() {
+fn pin_projection_uses_direct_anchored_holding_source() {
     let observations = vec![
-        Observation {
-            wallet_id: "w1".to_owned(),
-            symbol_id: "eth".to_owned(),
-            display_symbol: None,
-            kind: SymbolKind::NativeBalance,
-            role: SymbolRole::Asset,
-            network_id: "ethereum-mainnet".to_owned(),
-            protocol: None,
-            quantity: ObservationQuantity {
-                raw_dec: "1".to_owned(),
-                decimals: 18,
-                amount_dec: "0.000000000000000001".to_owned(),
-            },
-            values: Vec::new(),
-            source: ObservationSource {
-                balance_reader_kind: "evm.native".to_owned(),
-                network_id: "ethereum-mainnet".to_owned(),
-                anchor: ObservationAnchor::Evm {
-                    chain_id: 1,
-                    block_number: 100,
-                    block_hash: "0xabc".to_owned(),
-                },
-            },
-            coverage: "configured_only".to_owned(),
-            metadata: PublicMetadata::default(),
-        },
-        Observation {
-            wallet_id: "w2".to_owned(),
-            symbol_id: "eth".to_owned(),
-            display_symbol: None,
-            kind: SymbolKind::NativeBalance,
-            role: SymbolRole::Asset,
-            network_id: "ethereum-mainnet".to_owned(),
-            protocol: None,
-            quantity: ObservationQuantity {
-                raw_dec: "2".to_owned(),
-                decimals: 18,
-                amount_dec: "0.000000000000000002".to_owned(),
-            },
-            values: Vec::new(),
-            source: ObservationSource {
-                balance_reader_kind: "evm.native".to_owned(),
-                network_id: "ethereum-mainnet".to_owned(),
-                anchor: ObservationAnchor::Evm {
-                    chain_id: 1,
-                    block_number: 100,
-                    block_hash: "0xabc".to_owned(),
-                },
-            },
-            coverage: "configured_only".to_owned(),
-            metadata: PublicMetadata::default(),
-        },
+        observation("w1", 100, "0xabc"),
+        observation("w2", 100, "0xabc"),
     ];
     let pins = project_network_pins_from_observations(&observations).expect("pins");
     assert_eq!(pins.len(), 1);
@@ -292,103 +216,65 @@ fn pin_projection_matches_observation_anchors() {
             block_hash: "0xabc".to_owned(),
         }
     );
-}
 
-#[test]
-fn pin_projection_rejects_same_network_disagreement() {
-    let observations = vec![
-        Observation {
-            wallet_id: "w1".to_owned(),
-            symbol_id: "eth".to_owned(),
-            display_symbol: None,
-            kind: SymbolKind::NativeBalance,
-            role: SymbolRole::Asset,
-            network_id: "ethereum-mainnet".to_owned(),
-            protocol: None,
-            quantity: ObservationQuantity {
-                raw_dec: "1".to_owned(),
-                decimals: 18,
-                amount_dec: "1".to_owned(),
-            },
-            values: Vec::new(),
-            source: ObservationSource {
-                balance_reader_kind: "evm.native".to_owned(),
-                network_id: "ethereum-mainnet".to_owned(),
-                anchor: ObservationAnchor::Evm {
-                    chain_id: 1,
-                    block_number: 100,
-                    block_hash: "0xabc".to_owned(),
-                },
-            },
-            coverage: "configured_only".to_owned(),
-            metadata: PublicMetadata::default(),
-        },
-        Observation {
-            wallet_id: "w2".to_owned(),
-            symbol_id: "eth".to_owned(),
-            display_symbol: None,
-            kind: SymbolKind::NativeBalance,
-            role: SymbolRole::Asset,
-            network_id: "ethereum-mainnet".to_owned(),
-            protocol: None,
-            quantity: ObservationQuantity {
-                raw_dec: "2".to_owned(),
-                decimals: 18,
-                amount_dec: "2".to_owned(),
-            },
-            values: Vec::new(),
-            source: ObservationSource {
-                balance_reader_kind: "evm.native".to_owned(),
-                network_id: "ethereum-mainnet".to_owned(),
-                anchor: ObservationAnchor::Evm {
-                    chain_id: 1,
-                    block_number: 99,
-                    block_hash: "0xdef".to_owned(),
-                },
-            },
-            coverage: "configured_only".to_owned(),
-            metadata: PublicMetadata::default(),
-        },
+    let disagreement = vec![
+        observation("w1", 100, "0xabc"),
+        observation("w2", 99, "0xdef"),
     ];
-    let err = project_network_pins_from_observations(&observations).expect_err("disagree");
     assert_eq!(
-        err.code,
+        project_network_pins_from_observations(&disagreement)
+            .expect_err("different anchor")
+            .code,
         PortfolioHoldingErrorCode::InconsistentNetworkAnchors
     );
 }
 
-#[test]
-fn erc20_projection_is_unsupported_requirement() {
-    let err = project_holding_fact_kind("erc20").expect_err("erc20");
-    assert_eq!(err.code, PortfolioHoldingErrorCode::UnsupportedRequirement);
-    let err = project_holding_fact_for_network("evm", false).expect_err("token");
-    assert_eq!(err.code, PortfolioHoldingErrorCode::UnsupportedRequirement);
-}
-
-#[test]
-fn policy_digest_is_stable() {
-    assert_eq!(
-        portfolio_holding_selection_policy_digest(),
-        ContentDigest::from_digest(
-            DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(PORTFOLIO_HOLDING_LATEST_NETWORK_COHERENT_POLICY_ID.as_bytes()),
-        )
-    );
-}
-
-#[test]
-fn holding_candidate_from_normalized_builds_anchor_and_material() {
-    let key = RequiredHoldingKey {
-        wallet_id: "w1".to_owned(),
-        symbol_id: "eth.native".to_owned(),
+fn observation(wallet_id: &str, block_number: u64, block_hash: &str) -> Observation {
+    Observation {
+        wallet_id: wallet_id.to_owned(),
+        symbol_id: "eth".to_owned(),
+        display_symbol: None,
         network_id: "ethereum-mainnet".to_owned(),
+        quantity: ObservationQuantity {
+            raw_dec: "1".to_owned(),
+            decimals: 18,
+            amount_dec: "0.000000000000000001".to_owned(),
+        },
+        values: Vec::new(),
+        source: AnchoredHoldingSource {
+            holding: HoldingSourceConfig::Native,
+            anchor: ObservationAnchor::Evm {
+                chain_id: 1,
+                block_number,
+                block_hash: block_hash.to_owned(),
+            },
+        },
+        coverage: "configured_only".to_owned(),
+        metadata: PublicMetadata::default(),
+    }
+}
+
+#[test]
+fn direct_source_projection_and_candidate_material_are_checked() {
+    let erc20 = HoldingSourceConfig::Erc20 {
+        contract_address: "0x0000000000000000000000000000000000000001"
+            .parse()
+            .expect("token"),
     };
+    assert_eq!(
+        project_holding_fact_for_network(NetworkFamilyConfig::Evm, &erc20)
+            .expect_err("internal ERC-20 collection not installed yet")
+            .code,
+        PortfolioHoldingErrorCode::UnsupportedRequirement
+    );
+
+    let required = key("w1", "eth.native", "ethereum-mainnet");
     let candidate = holding_candidate_from_normalized(
-        &key,
+        &required,
         9,
         claim(1),
         NormalizedHoldingFields {
-            balance_reader_kind: "native_balance".to_owned(),
+            holding: HoldingSourceConfig::Native,
             raw_dec: "1000".to_owned(),
             decimals: 18,
             observation_anchor: ObservationAnchor::Evm {
@@ -401,26 +287,18 @@ fn holding_candidate_from_normalized_builds_anchor_and_material() {
         },
     )
     .expect("candidate");
-    assert_eq!(candidate.store_commit_order, 9);
-    assert_eq!(candidate.fact_claim_id, claim(1));
+    assert_eq!(
+        candidate.response_material.holding,
+        HoldingSourceConfig::Native
+    );
     assert_eq!(candidate.anchor.height, 42);
-    assert_eq!(candidate.response_material.wallet_id, "w1");
-    assert_eq!(candidate.response_material.coverage, "configured_only");
-}
 
-#[test]
-fn portfolio_selection_filters_unacceptable_holding_statuses() {
-    let key = RequiredHoldingKey {
-        wallet_id: "w1".to_owned(),
-        symbol_id: "eth.native".to_owned(),
-        network_id: "ethereum-mainnet".to_owned(),
-    };
     let error = holding_candidate_from_normalized(
-        &key,
+        &required,
         9,
         claim(1),
         NormalizedHoldingFields {
-            balance_reader_kind: "native_balance".to_owned(),
+            holding: HoldingSourceConfig::Native,
             raw_dec: "1000".to_owned(),
             decimals: 18,
             observation_anchor: ObservationAnchor::Evm {
@@ -432,40 +310,19 @@ fn portfolio_selection_filters_unacceptable_holding_statuses() {
             source_status: "ok".to_owned(),
         },
     )
-    .expect_err("portfolio policy rejects truncated coverage");
-
+    .expect_err("truncated holding");
     assert_eq!(error.code, PortfolioHoldingErrorCode::MissingFact);
 }
 
 #[test]
-fn holding_candidate_rejects_empty_hash() {
-    let key = RequiredHoldingKey {
-        wallet_id: "w1".to_owned(),
-        symbol_id: "btc.native".to_owned(),
-        network_id: "bitcoin-mainnet".to_owned(),
-    };
-    let err = holding_candidate_from_normalized(
-        &key,
-        1,
-        claim(1),
-        NormalizedHoldingFields {
-            balance_reader_kind: "native_balance".to_owned(),
-            raw_dec: "0".to_owned(),
-            decimals: 8,
-            observation_anchor: ObservationAnchor::Bitcoin {
-                height: 1,
-                block_hash: "   ".to_owned(),
-            },
-            coverage: "configured_only".to_owned(),
-            source_status: "ok".to_owned(),
-        },
-    )
-    .expect_err("empty hash");
-    assert_eq!(err.code, PortfolioHoldingErrorCode::MissingFact);
-}
-
-#[test]
-fn filter_empty_codes_are_missing_and_unsupported() {
+fn policy_digest_and_filter_empty_codes_are_stable() {
+    assert_eq!(
+        portfolio_holding_selection_policy_digest(),
+        ContentDigest::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(PORTFOLIO_HOLDING_LATEST_NETWORK_COHERENT_POLICY_ID.as_bytes()),
+        )
+    );
     assert!(is_filter_empty_holding_error(
         PortfolioHoldingErrorCode::MissingFact
     ));

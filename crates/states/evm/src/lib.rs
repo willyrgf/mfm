@@ -11,8 +11,8 @@
 mod native_balance_collect;
 
 pub use native_balance_collect::{
-    assemble_evm_native_balance_batch, default_native_decimals, evm_jsonrpc_adapter_kind,
-    evm_jsonrpc_adapter_version, materialize_evm_joint_tip, native_balance_record_visibility,
+    assemble_evm_native_balance_batch, evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version,
+    materialize_evm_joint_tip, native_balance_record_visibility,
     normalize_evm_native_balance_from_capability, normalize_evm_native_balance_observation,
     require_shared_evm_joint_tip, validate_observe_evm_native_balance_config,
     validate_resolve_evm_joint_tip_config, AssembleEvmNativeBalanceBatchConfig,
@@ -23,7 +23,8 @@ pub use native_balance_collect::{
     RecordEvmNativeBalanceFactConfig, RecordEvmNativeBalanceFactInput,
     RecordEvmNativeBalanceFactInputHandles, RecordEvmNativeBalanceFactState,
     ResolveEvmJointTipConfig, ResolveEvmJointTipInput, ResolveEvmJointTipInputHandles,
-    ResolveEvmJointTipState, EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS,
+    ResolveEvmJointTipState, EVM_JOINT_TIP_SOURCE_READS, EVM_NATIVE_BALANCE_COVERAGE,
+    EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS,
 };
 
 use alloy_primitives::B256;

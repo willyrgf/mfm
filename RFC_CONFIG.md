@@ -1,6 +1,11 @@
 # RFC: configuration authoring current state, problem statement, and proposed solution 1
 
-Status: preferred design accepted for implementation planning
+Status: historical architecture record (superseded for the portfolio source-model cutover)
+
+> Historical record as of 2026-07-15. The catalog design remains useful context, but its former
+> portfolio and standalone EVM public-entry examples are not current interfaces. The active
+> portfolio contract is the direct holding-source model in `docs/design.md` and
+> `IMPL_PLAN_RFC_GENERIC_PORT_COLL_REPORT.md`.
 
 Date: 2026-07-14
 

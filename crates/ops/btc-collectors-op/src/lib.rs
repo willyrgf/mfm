@@ -48,7 +48,8 @@ pub use mfm_states_btc::{
     RecordBtcChainHeadFactState, RecordCollectorCheckpointConfig, RecordCollectorCheckpointInput,
     RecordCollectorCheckpointInputHandles, RecordCollectorCheckpointState,
     ResolveBtcJointTipConfig, ResolveBtcJointTipInput, ResolveBtcJointTipInputHandles,
-    ResolveBtcJointTipState,
+    ResolveBtcJointTipState, BTC_JOINT_TIP_SOURCE_READS, BTC_NATIVE_BALANCE_COVERAGE,
+    BTC_NATIVE_BALANCE_OBSERVE_SOURCE_READS,
 };
 use serde::{Deserialize, Serialize};
 

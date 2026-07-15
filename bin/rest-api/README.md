@@ -218,10 +218,10 @@ Request shape:
 
 ```json
 {
-  "entry_point": "mfm.portfolio/portfolio_snapshot@1",
+  "entry_point": "mfm.bitcoin/btc_address_balance@1",
   "request": {
-    "portfolio": {
-      "name": "acme/portfolio",
+    "config": {
+      "name": "acme/bitcoin-balance",
       "digest": "content:sha256-jcs-v1:..."
     }
   },
@@ -235,8 +235,8 @@ Request notes:
 - `request` is required, must be a JSON object, and is rejected when it contains unknown fields.
 - Requests contain exact catalog references (`name` and `digest`); name-only selection and latest
   resolution do not exist.
-- The production surface contains eight version-1 ids, including
-  `mfm.portfolio/collect_then_report@1`; the internal BTC chain-head checkpoint op is not public.
+- The exact public ids are returned by the CLI `ops list` command; the internal BTC chain-head
+  checkpoint, EVM native collector, and portfolio snapshot objective are not public.
 - Normal start derives the typed run id from certified run identity material: certified spec hash,
   store scope, and a required invocation key digest.
 - `invocation_key` is optional at the API boundary. Supplying it makes retries target the same run.
@@ -252,13 +252,13 @@ execution lane for the same base work identity, start reports `already_active` w
 `public_output` is present when the run completes while driving and the op exposes a public output
 schema id.
 
-Portfolio snapshot request:
+Bitcoin balance request:
 
 ```json
 {
-  "entry_point": "mfm.portfolio/portfolio_snapshot@1",
+  "entry_point": "mfm.bitcoin/btc_address_balance@1",
   "request": {
-    "portfolio": {"name": "acme/portfolio", "digest": "content:sha256-jcs-v1:..."}
+    "config": {"name": "acme/bitcoin-balance", "digest": "content:sha256-jcs-v1:..."}
   }
 }
 ```

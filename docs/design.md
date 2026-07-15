@@ -279,10 +279,10 @@ Replay and resume semantics follow the effect class:
   mutations or infer mutation status from unstored state.
 - Replay never constructs live transports or signer providers.
 
-Portfolio reporting is fact-backed and report-only after collectors cutover: pure report states
-recompute from certified config; SelectHoldings recomputes from recorded Platform fact-query
-evidence and retained response artifacts only. Public-facts CLI/REST is not report selection
-authority. See `docs/portfolio-collect-then-report.md`.
+Portfolio holding intent is direct and aggregate-validated: each symbol is a `Native` source or an
+EVM `Erc20` source with a normalized non-zero contract address, and EVM native scale is owned by
+the semantic network. Collection and reporting remain internal while anchored source receipts are
+being completed. Public-facts CLI/REST is not portfolio selection authority.
 
 ## Certified Saga Semantics
 

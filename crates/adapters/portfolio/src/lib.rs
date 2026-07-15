@@ -25,13 +25,13 @@ use mfm_runtime::{
     RunnerExecutableIdentityTemplate, RunnerOutputBuilder, RunnerRegistrationBuilder,
 };
 use mfm_state_portfolio::{
-    assemble_snapshot, balance_reader_kind, expand_required_holdings,
-    holding_candidate_from_normalized, is_filter_empty_holding_error,
-    observations_from_selected_holdings, portfolio_adapter_kind, portfolio_adapter_version,
-    portfolio_holding_select_scope_decision_hash, project_network_pins_from_observations,
-    resolve_subjects_from_config, resolve_valuations_from_config, select_network_coherent,
-    symbols_by_id_map, AssembleSnapshotConfig, AssembleSnapshotInput, AssembleSnapshotState,
-    HoldingCandidate, HoldingFactProjection, NormalizedHoldingFields, PortfolioHoldingErrorCode,
+    assemble_snapshot, expand_required_holdings, holding_candidate_from_normalized,
+    is_filter_empty_holding_error, observations_from_selected_holdings, portfolio_adapter_kind,
+    portfolio_adapter_version, portfolio_holding_select_scope_decision_hash,
+    project_network_pins_from_observations, resolve_subjects_from_config,
+    resolve_valuations_from_config, select_network_coherent, symbols_by_id_map,
+    AssembleSnapshotConfig, AssembleSnapshotInput, AssembleSnapshotState, HoldingCandidate,
+    HoldingFactProjection, NormalizedHoldingFields, PortfolioHoldingErrorCode,
     PortfolioHoldingSelectionError, PortfolioInputsReadyConfig, PortfolioInputsReadyState,
     ProjectReportConfig, ProjectReportInput, ProjectReportState, RequiredHoldingKey,
     RequiredHoldingRequirement, ResolveSubjectsConfig, ResolveSubjectsState,
@@ -261,7 +261,7 @@ impl ErasedNodeRunner for AssembleSnapshotRunner {
                 self.artifacts.as_ref(),
             )
             .await?;
-            let output = assemble_snapshot(config.as_ref(), input, 0).map_err(|error| {
+            let output = assemble_snapshot(config.as_ref(), input).map_err(|error| {
                 mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
             })?;
             state_output(ctx, &output)

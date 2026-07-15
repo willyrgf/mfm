@@ -5,32 +5,27 @@
 //! BTC or EVM collector operation per relevant network, fans into typed readiness, and then calls
 //! the independent portfolio tracker operation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 
-use mfm_catalog_model::CatalogRef;
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_op_btc_collectors::{
     BtcAddressBalanceBatchSummary, BtcAddressBalanceConfig, BtcAddressBalanceObservationContext,
-    BtcAddressBalanceOperation,
+    BtcAddressBalanceOperation, BTC_JOINT_TIP_SOURCE_READS, BTC_NATIVE_BALANCE_COVERAGE,
 };
 use mfm_op_evm_collectors::{
     EvmNativeBalanceBatchSummary, EvmNativeBalanceConfig, EvmNativeBalanceOperation,
 };
 use mfm_op_portfolio_tracker::{
-    PortfolioInputsReady, PortfolioOperationOutputs, PortfolioPublicOutputs,
-    PortfolioTrackerWorkflowOperation,
+    PortfolioInputsReady, PortfolioOperationOutputs, PortfolioTrackerWorkflowOperation,
 };
 use mfm_portfolio_model::portfolio::{
-    NetworkConfig, NetworkFamilyConfig, PortfolioConfig as ModelPortfolioConfig,
-    ValidatedPortfolioConfig,
+    NetworkConfig, PortfolioConfig as ModelPortfolioConfig, ValidatedPortfolioConfig,
 };
-use mfm_portfolio_model::symbol::{BalanceReaderConfig, SymbolKind, SymbolRole};
-use mfm_portfolio_model::wallet::WalletSubjectKind;
+use mfm_portfolio_model::symbol::HoldingSourceConfig;
 use mfm_program::{
-    build_root_with_registries, BridgeKey, BridgePolicy, CanonicalSeed, Handle, NoContext,
-    Operation, OperationExpansion, OperationKey, PublicOutputKey, RootBuilder, ScopeKey, SeedKey,
-    StateError, StateKey, StateResult, StateSpec, TypedProgramLaunchPlan,
+    BridgeKey, BridgePolicy, Handle, NoContext, Operation, OperationExpansion, OperationKey,
+    ScopeKey, StateError, StateKey, StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, StateInput};
 use mfm_state_portfolio::{
@@ -43,86 +38,6 @@ use serde::{Deserialize, Serialize};
 const OP_NAMESPACE: &str = "mfm.portfolio";
 const OP_KIND_NAME: &str = "collect_then_report";
 const OP_VERSION: &str = "mfm.portfolio.operation.collect_then_report.v1";
-const ROOT_SCOPE: &str = "portfolio_collect_then_report";
-const OP_KEY: &str = "collect_then_report";
-const PUBLIC_OUTPUT_KEY: &str = "portfolio";
-const BTC_CONTEXT_SEED_KEY: &str = "btc_observation_context";
-
-/// Explicit read and coverage policy for Bitcoin collector batches.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct BitcoinCollectorPolicy {
-    /// Coverage claim written by each successful collector.
-    pub coverage: String,
-    /// Maximum source reads used for joint-tip resolution.
-    pub max_source_reads: NonZeroU64,
-}
-
-impl BitcoinCollectorPolicy {
-    /// Creates an explicit Bitcoin collector policy.
-    pub fn new(coverage: impl Into<String>, max_source_reads: NonZeroU64) -> Self {
-        Self {
-            coverage: coverage.into(),
-            max_source_reads,
-        }
-    }
-}
-
-/// Explicit read and coverage policy for EVM native-balance batches.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct EvmCollectorPolicy {
-    /// Coverage claim written by each successful collector.
-    pub coverage: String,
-    /// Native-asset decimals required to render collected quantities.
-    pub decimals: Option<u8>,
-    /// Maximum source reads used for joint-tip resolution.
-    pub max_source_reads: NonZeroU64,
-}
-
-impl EvmCollectorPolicy {
-    /// Creates an explicit EVM collector policy.
-    pub fn new(
-        coverage: impl Into<String>,
-        decimals: Option<u8>,
-        max_source_reads: NonZeroU64,
-    ) -> Self {
-        Self {
-            coverage: coverage.into(),
-            decimals,
-            max_source_reads,
-        }
-    }
-}
-
-/// Strict public request shape for the composed entry point.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct CollectThenReportRequest {
-    /// Exact catalog reference to the portfolio config.
-    pub portfolio: CatalogRef<ModelPortfolioConfig>,
-    /// Explicit Bitcoin collector policy.
-    pub bitcoin_policy: BitcoinCollectorPolicy,
-    /// Explicit EVM collector policy.
-    pub evm_policy: EvmCollectorPolicy,
-}
-
-impl CollectThenReportRequest {
-    /// Returns the portfolio catalog reference.
-    pub const fn portfolio(&self) -> &CatalogRef<ModelPortfolioConfig> {
-        &self.portfolio
-    }
-
-    /// Returns the explicit Bitcoin collector policy.
-    pub const fn bitcoin_policy(&self) -> &BitcoinCollectorPolicy {
-        &self.bitcoin_policy
-    }
-
-    /// Returns the explicit EVM collector policy.
-    pub const fn evm_policy(&self) -> &EvmCollectorPolicy {
-        &self.evm_policy
-    }
-}
 
 /// Complete deterministic config for the composed collector/report operation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
@@ -160,109 +75,29 @@ pub enum CollectThenReportConfigError {
     /// The portfolio failed canonical validation.
     #[error("portfolio config is invalid")]
     InvalidPortfolio,
-    /// A configured network did not have the required identity.
-    #[error("network identity is missing")]
-    MissingNetworkIdentity,
-    /// A network has no supported native symbol.
-    #[error("native symbol is missing or unsupported")]
-    MissingNativeSymbol,
-    /// A network has no wallet subject joined to its native symbol.
-    #[error("collector collection is empty")]
-    EmptyCollection,
-    /// A wallet subject kind does not match its network family.
-    #[error("wallet subject does not match network family")]
-    UnsupportedWalletSubject,
-    /// A wallet references a symbol that cannot join its network.
-    #[error("wallet and symbol join is unsupported")]
-    UnsupportedWalletSymbolJoin,
-    /// Two configured wallets resolve to the same collector subject.
-    #[error("collector subject is duplicated")]
-    DuplicateSubject,
-    /// The request omitted EVM native decimals.
-    #[error("EVM native decimals are required")]
-    MissingNativeDecimals,
-    /// A collector policy is empty or unsupported.
-    #[error("collector policy is invalid")]
-    InvalidPolicy,
     /// A derived child config failed its own validation.
     #[error("derived collector config is invalid")]
     InvalidCollectorConfig,
 }
 
-/// Derives one complete composed-operation config from a validated portfolio and explicit policy.
+/// Derives native collector children from the exact normalized holding demand.
+///
+/// Token-only demand intentionally contributes no native collector child at this cutover point.
+/// The complete token path is added by the anchored ERC-20 collector phase; no caller-selected
+/// fallback collector is synthesized here.
 pub fn build_collect_then_report_config(
     portfolio: ModelPortfolioConfig,
-    bitcoin_policy: BitcoinCollectorPolicy,
-    evm_policy: EvmCollectorPolicy,
 ) -> Result<CollectThenReportConfig, CollectThenReportConfigError> {
-    if bitcoin_policy.coverage.is_empty() || evm_policy.coverage.is_empty() {
-        return Err(CollectThenReportConfigError::InvalidPolicy);
-    }
     let portfolio = ValidatedPortfolioConfig::new(portfolio)
         .map_err(|_| CollectThenReportConfigError::InvalidPortfolio)?
         .into_config();
-
+    let native_subjects = native_subjects_by_network(&portfolio);
     let mut bitcoin_collectors = Vec::new();
     let mut evm_collectors = Vec::new();
-    let mut seen_any_subject = false;
-
     for network in &portfolio.networks {
-        let native_symbol = native_symbol_for_network(&portfolio, network)?;
-        let has_network_wallet = portfolio
-            .wallets
-            .iter()
-            .any(|wallet| wallet.network_id == *network.network_id());
-        let mut subjects = Vec::new();
-        let mut seen_subjects = BTreeSet::new();
-
-        for wallet in portfolio
-            .wallets
-            .iter()
-            .filter(|wallet| wallet.network_id == *network.network_id())
-        {
-            let joins_native = wallet.symbol_ids.iter().any(|symbol_id| {
-                native_symbol
-                    .as_ref()
-                    .is_some_and(|symbol| symbol.symbol_id == *symbol_id)
-            });
-            if !joins_native {
-                continue;
-            }
-            for symbol_id in &wallet.symbol_ids {
-                let symbol = portfolio
-                    .symbol_configs
-                    .iter()
-                    .find(|symbol| symbol.symbol_id == *symbol_id)
-                    .ok_or(CollectThenReportConfigError::UnsupportedWalletSymbolJoin)?;
-                if symbol.network_id != wallet.network_id {
-                    return Err(CollectThenReportConfigError::UnsupportedWalletSymbolJoin);
-                }
-            }
-            let expected_subject = match network.family() {
-                NetworkFamilyConfig::Bitcoin => WalletSubjectKind::BitcoinAddress,
-                NetworkFamilyConfig::Evm => WalletSubjectKind::EvmAddress,
-            };
-            if wallet.subject.kind() != expected_subject {
-                return Err(CollectThenReportConfigError::UnsupportedWalletSubject);
-            }
-            let address = wallet.subject.address_str().to_owned();
-            if !seen_subjects.insert(address.clone()) {
-                return Err(CollectThenReportConfigError::DuplicateSubject);
-            }
-            subjects.push(address);
-        }
-
-        if subjects.is_empty() {
-            if native_symbol.is_some() {
-                return Err(CollectThenReportConfigError::EmptyCollection);
-            }
-            if has_network_wallet {
-                return Err(CollectThenReportConfigError::MissingNativeSymbol);
-            }
+        let Some(subjects) = native_subjects.get(network.network_id().as_str()) else {
             continue;
-        }
-        seen_any_subject = true;
-
+        };
         match network {
             NetworkConfig::Bitcoin {
                 network_id,
@@ -270,52 +105,22 @@ pub fn build_collect_then_report_config(
                 source_identity,
                 ..
             } => {
-                let Some(native_symbol) = native_symbol else {
-                    return Err(CollectThenReportConfigError::MissingNativeSymbol);
-                };
-                let _ = native_symbol;
-                let semantic_source_identity = source_identity.to_string();
-                if semantic_source_identity.is_empty() || network_id.as_str().is_empty() {
-                    return Err(CollectThenReportConfigError::MissingNetworkIdentity);
-                }
+                let max_source_reads = NonZeroU64::new(BTC_JOINT_TIP_SOURCE_READS)
+                    .ok_or(CollectThenReportConfigError::InvalidCollectorConfig)?;
                 bitcoin_collectors.push(BtcAddressBalanceConfig {
                     network: network_id.to_string(),
                     bitcoin_network: bitcoin_network.clone(),
-                    semantic_source_identity,
-                    addresses: subjects,
-                    coverage: bitcoin_policy.coverage.clone(),
-                    max_source_reads: bitcoin_policy.max_source_reads,
+                    semantic_source_identity: source_identity.to_string(),
+                    addresses: subjects.iter().cloned().collect(),
+                    coverage: BTC_NATIVE_BALANCE_COVERAGE.to_owned(),
+                    max_source_reads,
                 });
             }
-            NetworkConfig::Evm {
-                network_id,
-                chain_id,
-                ..
-            } => {
-                let Some(native_symbol) = native_symbol else {
-                    return Err(CollectThenReportConfigError::MissingNativeSymbol);
-                };
-                let _ = native_symbol;
-                let decimals = evm_policy
-                    .decimals
-                    .ok_or(CollectThenReportConfigError::MissingNativeDecimals)?;
-                if network_id.as_str().is_empty() || chain_id.get() == 0 {
-                    return Err(CollectThenReportConfigError::MissingNetworkIdentity);
-                }
-                evm_collectors.push(EvmNativeBalanceConfig {
-                    network: network_id.to_string(),
-                    chain_id: chain_id.get(),
-                    accounts: subjects,
-                    coverage: evm_policy.coverage.clone(),
-                    decimals,
-                    max_source_reads: evm_policy.max_source_reads,
-                });
-            }
+            NetworkConfig::Evm { .. } => evm_collectors.push(EvmNativeBalanceConfig {
+                network: network.clone(),
+                accounts: subjects.iter().cloned().collect(),
+            }),
         }
-    }
-
-    if !seen_any_subject {
-        return Err(CollectThenReportConfigError::EmptyCollection);
     }
     let config = CollectThenReportConfig {
         portfolio,
@@ -327,38 +132,35 @@ pub fn build_collect_then_report_config(
     Ok(config)
 }
 
-fn native_symbol_for_network(
+fn native_subjects_by_network(
     portfolio: &ModelPortfolioConfig,
-    network: &NetworkConfig,
-) -> Result<Option<mfm_portfolio_model::symbol::SymbolConfig>, CollectThenReportConfigError> {
-    let candidates = portfolio
+) -> BTreeMap<String, BTreeSet<String>> {
+    let symbols = portfolio
         .symbol_configs
         .iter()
-        .filter(|symbol| {
-            symbol.network_id == *network.network_id() && symbol.kind == SymbolKind::NativeBalance
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    if candidates.len() > 1 {
-        return Err(CollectThenReportConfigError::MissingNativeSymbol);
+        .map(|symbol| (symbol.symbol_id.clone(), symbol))
+        .collect::<BTreeMap<_, _>>();
+    let mut subjects = BTreeMap::<String, BTreeSet<String>>::new();
+    for wallet in &portfolio.wallets {
+        for symbol_id in &wallet.symbol_ids {
+            let Some(symbol) = symbols.get(symbol_id) else {
+                continue;
+            };
+            if !matches!(&symbol.source, HoldingSourceConfig::Native) {
+                continue;
+            }
+            subjects
+                .entry(wallet.network_id.to_string())
+                .or_default()
+                .insert(wallet.subject.address_str().to_owned());
+        }
     }
-    let Some(symbol) = candidates.into_iter().next() else {
-        return Ok(None);
-    };
-    if symbol.role != SymbolRole::Native
-        || !matches!(symbol.balance_reader, BalanceReaderConfig::NativeBalance {})
-    {
-        return Err(CollectThenReportConfigError::MissingNativeSymbol);
-    }
-    Ok(Some(symbol))
+    subjects
 }
 
 fn validate_collect_then_report_config(
     config: &CollectThenReportConfig,
 ) -> Result<(), ConfigError> {
-    if config.bitcoin_collectors.is_empty() && config.evm_collectors.is_empty() {
-        return Err(ConfigError::new("at least one collector is required"));
-    }
     ValidatedPortfolioConfig::new(config.portfolio.clone())
         .map_err(|error| ConfigError::new(error.to_string()))?;
     for child in &config.bitcoin_collectors {
@@ -597,276 +399,97 @@ mfm_certify::define_program_descriptor_registry! {
     ],
 }
 
-/// Builds a typed draft for the composed collector/report operation.
-pub fn collect_then_report_program_draft(
-    config: CollectThenReportConfig,
-) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
-    build_root_with_registries(
-        ScopeKey::new(ROOT_SCOPE)?,
-        collect_then_report_state_registry()?,
-        collect_then_report_operation_registry()?,
-        |root: &mut RootBuilder<'_, '_>| {
-            let observation_context = root.seed(
-                SeedKey::new(BTC_CONTEXT_SEED_KEY)?,
-                CanonicalSeed::from_value(&BtcAddressBalanceObservationContext {
-                    observed_at_unix_ms: None,
-                })?,
-            )?;
-            let result = root.scope().call::<CollectThenReportOperation, _>(
-                OperationKey::new(OP_KEY)?,
-                CollectThenReportOperation,
-                config,
-                observation_context,
-            )?;
-            root.bind_public_outputs(
-                PublicOutputKey::new(PUBLIC_OUTPUT_KEY)?,
-                &PortfolioPublicOutputs {
-                    snapshot: result.snapshot,
-                    report: result.report,
-                },
-            )
-        },
-    )
-}
-
-/// Builds launch material for the composed collector/report operation.
-pub fn collect_then_report_program_launch_plan(
-    config: CollectThenReportConfig,
-) -> mfm_program::Result<TypedProgramLaunchPlan> {
-    let draft = collect_then_report_program_draft(config)?;
-    let mut seeds = std::collections::BTreeMap::new();
-    for seed in draft.seeds() {
-        seeds.insert(
-            seed.seed_id.clone(),
-            CanonicalSeed::from_value(&BtcAddressBalanceObservationContext {
-                observed_at_unix_ms: None,
-            })?
-            .canonical_json()
-            .clone(),
-        );
-    }
-    TypedProgramLaunchPlan::from_draft_and_seed_material(draft, seeds)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
     #[test]
-    fn policy_wire_shape_is_strict() {
-        let policy =
-            BitcoinCollectorPolicy::new("configured_only", NonZeroU64::new(1).expect("non-zero"));
-        let json = serde_json::to_value(&policy).expect("policy json");
-        assert_eq!(json["coverage"], "configured_only");
-        assert!(
-            serde_json::from_value::<BitcoinCollectorPolicy>(serde_json::json!({
-                "coverage": "configured_only",
-                "max_source_reads": 1,
-                "unexpected": true
-            }))
-            .is_err()
+    fn derives_native_collectors_from_explicit_demand() {
+        let config = build_collect_then_report_config(portfolio_config(true, true, true))
+            .expect("native composition");
+        let btc = &config.bitcoin_collectors;
+        assert_eq!(btc.len(), 1);
+        assert_eq!(btc[0].coverage, BTC_NATIVE_BALANCE_COVERAGE);
+        assert_eq!(btc[0].max_source_reads.get(), BTC_JOINT_TIP_SOURCE_READS);
+        assert_eq!(config.evm_collectors.len(), 1);
+        let evm = &config.evm_collectors[0];
+        assert_eq!(evm.accounts, vec![EVM_ACCOUNT.to_owned()]);
+        assert_eq!(evm.network.native_decimals(), Some(18));
+        assert_eq!(
+            evm.observe_config_for_account(EVM_ACCOUNT)
+                .expect("derived observer")
+                .evm_network_parts()
+                .expect("derived EVM network"),
+            ("ethereum-mainnet", 1, 18)
         );
     }
 
     #[test]
-    fn derives_btc_only_evm_only_and_dual_compositions() {
-        let btc = build_collect_then_report_config(
-            portfolio_config(true, false),
-            bitcoin_policy(),
-            evm_policy(Some(18)),
-        )
-        .expect("Bitcoin composition");
-        assert_eq!(btc.bitcoin_collectors.len(), 1);
-        assert!(btc.evm_collectors.is_empty());
-
-        let evm = build_collect_then_report_config(
-            portfolio_config(false, true),
-            bitcoin_policy(),
-            evm_policy(Some(18)),
-        )
-        .expect("EVM composition");
-        assert!(evm.bitcoin_collectors.is_empty());
-        assert_eq!(evm.evm_collectors.len(), 1);
-
-        let dual = build_collect_then_report_config(
-            portfolio_config(true, true),
-            bitcoin_policy(),
-            evm_policy(Some(18)),
-        )
-        .expect("dual composition");
-        assert_eq!(dual.bitcoin_collectors.len(), 1);
-        assert_eq!(dual.evm_collectors.len(), 1);
+    fn token_only_demand_does_not_create_a_native_child() {
+        let config = build_collect_then_report_config(portfolio_config(false, false, true))
+            .expect("token-only model config remains valid");
+        assert!(config.bitcoin_collectors.is_empty());
+        assert!(config.evm_collectors.is_empty());
+        config.validate().expect("derived config");
     }
 
     #[test]
-    fn requires_evm_decimals_and_a_native_symbol() {
-        let missing_decimals = build_collect_then_report_config(
-            portfolio_config(false, true),
-            bitcoin_policy(),
-            evm_policy(None),
-        )
-        .expect_err("EVM decimals are required");
+    fn rejects_portfolios_without_explicit_holding_demand() {
+        let mut value = serde_json::to_value(portfolio_config(false, true, false))
+            .expect("fixture serialization");
+        value["wallets"][0]["symbol_ids"] = json!([]);
+        let invalid = serde_json::from_value(value).expect("deserializable invalid aggregate");
         assert_eq!(
-            missing_decimals,
-            CollectThenReportConfigError::MissingNativeDecimals
-        );
-
-        let mut without_native_json =
-            serde_json::to_value(portfolio_config(false, true)).expect("portfolio json");
-        without_native_json["symbol_configs"][0]["kind"] = json!("erc20_balance");
-        without_native_json["symbol_configs"][0]["role"] = json!("asset");
-        without_native_json["symbol_configs"][0]["balance_reader"] = json!({
-            "kind": "erc20_balance",
-            "token_address": "0x0000000000000000000000000000000000000001"
-        });
-        let without_native =
-            serde_json::from_value(without_native_json).expect("portfolio without native symbol");
-        let missing_symbol = build_collect_then_report_config(
-            without_native,
-            bitcoin_policy(),
-            evm_policy(Some(18)),
-        )
-        .expect_err("native symbol is required");
-        assert!(
-            matches!(
-                missing_symbol,
-                CollectThenReportConfigError::EmptyCollection
-                    | CollectThenReportConfigError::MissingNativeSymbol
-            ),
-            "unexpected error: {missing_symbol:?}"
-        );
-    }
-
-    #[test]
-    fn rejects_empty_collections_duplicate_subjects_and_incompatible_joins() {
-        let mut empty_json =
-            serde_json::to_value(portfolio_config(false, true)).expect("portfolio json");
-        empty_json["wallets"] = json!([]);
-        let empty = serde_json::from_value(empty_json).expect("empty wallet portfolio");
-        assert_eq!(
-            build_collect_then_report_config(empty, bitcoin_policy(), evm_policy(Some(18)))
-                .expect_err("empty collection"),
-            CollectThenReportConfigError::EmptyCollection
-        );
-
-        let mut duplicate_json =
-            serde_json::to_value(portfolio_config(false, true)).expect("portfolio json");
-        let duplicate_wallet = duplicate_json["wallets"][0].clone();
-        duplicate_json["wallets"]
-            .as_array_mut()
-            .expect("wallet array")
-            .push(json!({
-                "wallet_id": "wallet_eth_duplicate",
-                "network_id": duplicate_wallet["network_id"],
-                "symbol_ids": duplicate_wallet["symbol_ids"],
-                "subject": duplicate_wallet["subject"],
-                "implementation": duplicate_wallet["implementation"],
-                "metadata": {}
-            }));
-        let duplicate =
-            serde_json::from_value(duplicate_json).expect("duplicate subject portfolio");
-        assert_eq!(
-            build_collect_then_report_config(duplicate, bitcoin_policy(), evm_policy(Some(18)))
-                .expect_err("duplicate collector subject"),
-            CollectThenReportConfigError::DuplicateSubject
-        );
-
-        let mut mismatch_json =
-            serde_json::to_value(portfolio_config(true, true)).expect("portfolio json");
-        mismatch_json["wallets"][0]["symbol_ids"] = json!(["btc.native.bitcoin-mainnet"]);
-        let mismatch = serde_json::from_value(mismatch_json).expect("mismatched join portfolio");
-        assert!(matches!(
-            build_collect_then_report_config(mismatch, bitcoin_policy(), evm_policy(Some(18)))
-                .expect_err("mismatched wallet and symbol join"),
+            build_collect_then_report_config(invalid).expect_err("empty demand is invalid"),
             CollectThenReportConfigError::InvalidPortfolio
-                | CollectThenReportConfigError::UnsupportedWalletSymbolJoin
-        ));
-    }
-
-    #[test]
-    fn rejects_empty_explicit_collector_policy() {
-        let error = build_collect_then_report_config(
-            portfolio_config(false, true),
-            BitcoinCollectorPolicy::new("", NonZeroU64::new(1).expect("non-zero")),
-            evm_policy(Some(18)),
-        )
-        .expect_err("empty coverage policy");
-        assert_eq!(error, CollectThenReportConfigError::InvalidPolicy);
-    }
-
-    #[test]
-    fn composed_draft_records_parent_child_and_tracker_lineage() {
-        let config = build_collect_then_report_config(
-            portfolio_config(true, true),
-            bitcoin_policy(),
-            evm_policy(Some(18)),
-        )
-        .expect("dual composition");
-        let draft = collect_then_report_program_draft(config).expect("composed draft");
-        let names = draft
-            .operation_lineage()
-            .iter()
-            .map(|frame| frame.operation_name.as_str())
-            .collect::<Vec<_>>();
-        assert!(names.contains(&"mfm.portfolio.collect_then_report"));
-        assert!(names.contains(&"mfm.bitcoin.btc_address_balance"));
-        assert!(names.contains(&"mfm.evm.evm_native_balance"));
-        assert!(names.contains(&"mfm.portfolio.tracker_workflow"));
-        let state_names = draft
-            .state_nodes()
-            .iter()
-            .map(|node| node.state_kind.as_str().to_owned())
-            .collect::<Vec<_>>();
-        assert!(
-            draft.state_nodes().iter().any(|node| {
-                node.state_kind
-                    .as_str()
-                    .contains("collect_then_report_ready")
-            }),
-            "state names: {state_names:?}"
         );
     }
 
-    fn bitcoin_policy() -> BitcoinCollectorPolicy {
-        BitcoinCollectorPolicy::new("configured_only", NonZeroU64::new(1).expect("non-zero"))
-    }
+    const EVM_ACCOUNT: &str = "0x000000000000000000000000000000000000dead";
 
-    fn evm_policy(decimals: Option<u8>) -> EvmCollectorPolicy {
-        EvmCollectorPolicy::new(
-            "configured_only",
-            decimals,
-            NonZeroU64::new(1).expect("non-zero"),
-        )
-    }
-
-    fn portfolio_config(include_btc: bool, include_evm: bool) -> ModelPortfolioConfig {
+    fn portfolio_config(
+        include_btc: bool,
+        include_evm_native: bool,
+        include_evm_token: bool,
+    ) -> ModelPortfolioConfig {
         let mut networks = Vec::new();
         let mut wallets = Vec::new();
         let mut symbols = Vec::new();
-        if include_evm {
+        if include_evm_native || include_evm_token {
             networks.push(json!({
                 "network_id": "ethereum-mainnet",
                 "family": "evm",
                 "chain_id": 1,
+                "native_decimals": 18,
                 "metadata": {}
             }));
+            let mut symbol_ids = Vec::new();
+            if include_evm_native {
+                symbol_ids.push("eth.native.ethereum-mainnet");
+                symbols.push(symbol(
+                    "eth.native.ethereum-mainnet",
+                    "ethereum-mainnet",
+                    json!({"kind": "native"}),
+                ));
+            }
+            if include_evm_token {
+                symbol_ids.push("usdc.wallet.ethereum-mainnet");
+                symbols.push(symbol(
+                    "usdc.wallet.ethereum-mainnet",
+                    "ethereum-mainnet",
+                    json!({
+                        "kind": "erc20",
+                        "contract_address": "0x0000000000000000000000000000000000000001"
+                    }),
+                ));
+            }
             wallets.push(json!({
                 "wallet_id": "wallet_eth",
                 "network_id": "ethereum-mainnet",
-                "symbol_ids": ["eth.native.ethereum-mainnet"],
-                "subject": {"kind": "evm_address", "address": "0x000000000000000000000000000000000000dead"},
+                "symbol_ids": symbol_ids,
+                "subject": {"kind": "evm_address", "address": EVM_ACCOUNT},
                 "implementation": {"kind": "address_only"},
-                "metadata": {}
-            }));
-            symbols.push(json!({
-                "symbol_id": "eth.native.ethereum-mainnet",
-                "display_symbol": "ETH",
-                "kind": "native_balance",
-                "role": "native",
-                "network_id": "ethereum-mainnet",
-                "balance_reader": {"kind": "native_balance"},
-                "valuation": {"quotes": [{"quote": "USD", "priced_symbol_id": "eth.native.ethereum-mainnet", "unit_price_dec": "1800.00"}]},
                 "metadata": {}
             }));
         }
@@ -886,16 +509,11 @@ mod tests {
                 "implementation": {"kind": "address_only"},
                 "metadata": {}
             }));
-            symbols.push(json!({
-                "symbol_id": "btc.native.bitcoin-mainnet",
-                "display_symbol": "BTC",
-                "kind": "native_balance",
-                "role": "native",
-                "network_id": "bitcoin-mainnet",
-                "balance_reader": {"kind": "native_balance"},
-                "valuation": {"quotes": [{"quote": "USD", "priced_symbol_id": "btc.native.bitcoin-mainnet", "unit_price_dec": "50000.00"}]},
-                "metadata": {}
-            }));
+            symbols.push(symbol(
+                "btc.native.bitcoin-mainnet",
+                "bitcoin-mainnet",
+                json!({"kind": "native"}),
+            ));
         }
         serde_json::from_value(json!({
             "portfolio_id": "composition-test",
@@ -906,5 +524,22 @@ mod tests {
             "metadata": {}
         }))
         .expect("portfolio fixture")
+    }
+
+    fn symbol(symbol_id: &str, network_id: &str, source: serde_json::Value) -> serde_json::Value {
+        json!({
+            "symbol_id": symbol_id,
+            "display_symbol": symbol_id,
+            "network_id": network_id,
+            "source": source,
+            "valuation": {
+                "quotes": [{
+                    "quote": "USD",
+                    "priced_symbol_id": symbol_id,
+                    "unit_price_dec": "1.00"
+                }]
+            },
+            "metadata": {}
+        })
     }
 }

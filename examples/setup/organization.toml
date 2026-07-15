@@ -14,6 +14,7 @@ metadata = {}
 family = "evm"
 network_id = "ethereum-mainnet"
 chain_id = 1
+native_decimals = 18
 metadata = {}
 
 [[values.value.networks]]
@@ -52,13 +53,11 @@ kind = "address_only"
 [[values.value.symbol_configs]]
 symbol_id = "eth.native.ethereum-mainnet"
 display_symbol = "ETH"
-kind = "native_balance"
-role = "native"
 network_id = "ethereum-mainnet"
 metadata = {}
 
-[values.value.symbol_configs.balance_reader]
-kind = "native_balance"
+[values.value.symbol_configs.source]
+kind = "native"
 
 [values.value.symbol_configs.valuation]
 quotes = [
@@ -68,13 +67,11 @@ quotes = [
 [[values.value.symbol_configs]]
 symbol_id = "btc.native.bitcoin-mainnet"
 display_symbol = "BTC"
-kind = "native_balance"
-role = "native"
 network_id = "bitcoin-mainnet"
 metadata = {}
 
-[values.value.symbol_configs.balance_reader]
-kind = "native_balance"
+[values.value.symbol_configs.source]
+kind = "native"
 
 [values.value.symbol_configs.valuation]
 quotes = [
@@ -91,18 +88,6 @@ bitcoin_network = "main"
 semantic_source_identity = "public-bitcoin-core"
 addresses = ["bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw"]
 coverage = "configured_only"
-max_source_reads = 1
-
-[[values]]
-name = "acme/ethereum-balance"
-kind = "evm_native_balance"
-
-[values.value]
-network = "ethereum-mainnet"
-chain_id = 1
-accounts = ["0xabdbbd00fad79b257e7313b398a1ea10d9eef8d6"]
-coverage = "configured_only"
-decimals = 18
 max_source_reads = 1
 
 [[values]]

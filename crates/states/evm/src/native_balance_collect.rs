@@ -17,6 +17,7 @@ use mfm_evm_capabilities::{
 use mfm_fact_capabilities::FactRecordCapability;
 use mfm_ids::{AdapterKind, AdapterVersion, DigestAlgorithm, StateKind, StateVersion};
 use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
+use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig};
 use mfm_program::{
     fact_descriptor_ref, AdapterBindingSpec, FactDescriptorRef, ManagedWriteState, NoContext,
     PureState, ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
@@ -34,10 +35,12 @@ use crate::{
 const NAMESPACE: &str = "mfm.evm";
 const EVM_JSONRPC_ADAPTER_NAME: &str = "jsonrpc";
 const EVM_JSONRPC_ADAPTER_VERSION: &str = "mfm.evm.jsonrpc.adapter.v1";
-const DEFAULT_NATIVE_DECIMALS: u8 = 18;
-
 /// Exact number of source reads required by one hash-pinned native-balance observation.
 pub const EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS: u64 = 2;
+/// Exact number of source reads required to resolve an EVM batch joint tip.
+pub const EVM_JOINT_TIP_SOURCE_READS: u64 = 1;
+/// Closed coverage claim for a successful configured native source observation.
+pub const EVM_NATIVE_BALANCE_COVERAGE: &str = "configured_only";
 
 /// Returns the stable EVM JSON-RPC adapter kind for native collectors.
 pub fn evm_jsonrpc_adapter_kind() -> Result<AdapterKind, mfm_ids::IdentityError> {
@@ -335,22 +338,18 @@ impl ReadState for ResolveEvmJointTipState {
 }
 
 /// Config for an EVM native address-balance observation state.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
 #[mfm(
     schema = "mfm.evm.state.config.observe_native_balance",
     validate = "validate_observe_evm_native_balance_config"
 )]
 pub struct ObserveEvmNativeBalanceConfig {
-    /// Semantic network id.
-    pub network: String,
-    /// Expected EVM chain id.
-    pub chain_id: u64,
+    /// Exact semantic EVM network that owns the native-asset scale.
+    pub network: NetworkConfig,
     /// Account address to observe.
     pub account: String,
     /// Coverage claim written on success.
     pub coverage: String,
-    /// Native token decimals (typically 18).
-    pub decimals: u8,
     /// Maximum number of source reads this bounded state may request.
     pub max_source_reads: NonZeroU64,
 }
@@ -359,10 +358,7 @@ pub struct ObserveEvmNativeBalanceConfig {
 pub fn validate_observe_evm_native_balance_config(
     config: &ObserveEvmNativeBalanceConfig,
 ) -> Result<(), String> {
-    EvmNetworkId::new(&config.network).map_err(|error| error.to_string())?;
-    if config.chain_id == 0 {
-        return Err("chain_id must be non-zero".to_owned());
-    }
+    let _ = config.evm_network_parts()?;
     validate_canonical_evm_account(&config.account).map_err(|error| error.to_string())?;
     if config.max_source_reads.get() != EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS {
         return Err(format!(
@@ -381,6 +377,26 @@ pub fn validate_observe_evm_native_balance_config(
 }
 
 impl ObserveEvmNativeBalanceConfig {
+    /// Returns the semantic network id, EVM chain id, and native scale.
+    pub fn evm_network_parts(&self) -> Result<(&str, u64, u8), String> {
+        if self.network.family() != NetworkFamilyConfig::Evm {
+            return Err("native EVM balance observation requires an EVM network".to_owned());
+        }
+        let chain_id = self
+            .network
+            .chain_id_u64()
+            .ok_or_else(|| "EVM network is missing chain_id".to_owned())?;
+        let native_decimals = self
+            .network
+            .native_decimals()
+            .ok_or_else(|| "EVM network is missing native_decimals".to_owned())?;
+        Ok((
+            self.network.network_id().as_str(),
+            chain_id,
+            native_decimals,
+        ))
+    }
+
     /// Parses the configured coverage claim.
     pub fn coverage_status(&self) -> Result<CoverageStatus, EvmStateError> {
         validate_observe_evm_native_balance_config(self)
@@ -472,7 +488,10 @@ pub fn normalize_evm_native_balance_observation(
             reason: "joint tip is not admissible for balance write".to_owned(),
         });
     }
-    if joint_tip.network() != config.network || joint_tip.chain_id() != config.chain_id {
+    let (network_id, chain_id, native_decimals) = config
+        .evm_network_parts()
+        .map_err(|reason| EvmStateError::InvalidInput { reason })?;
+    if joint_tip.network() != network_id || joint_tip.chain_id() != chain_id {
         return Err(EvmStateError::InvalidInput {
             reason: "joint tip binding does not match native balance config".to_owned(),
         });
@@ -486,7 +505,7 @@ pub fn normalize_evm_native_balance_observation(
             reason: "tip drift or hash mismatch before Platform write".to_owned(),
         });
     }
-    if balance_evidence_chain_id != config.chain_id || balance_evidence_network != config.network {
+    if balance_evidence_chain_id != chain_id || balance_evidence_network != network_id {
         return Err(EvmStateError::InvalidInput {
             reason: "balance response evidence does not match collector config".to_owned(),
         });
@@ -500,15 +519,15 @@ pub fn normalize_evm_native_balance_observation(
     }
     let coverage = config.coverage_status()?;
     let subject = EvmAddressNativeBalanceSubject::new(
-        config.network.clone(),
-        config.chain_id,
+        network_id.to_owned(),
+        chain_id,
         config.account.clone(),
     )?;
     let response = EvmAddressNativeBalanceResponse::new(
         joint_tip.block_number(),
         joint_tip.block_hash(),
         balance_wei_decimal,
-        config.decimals,
+        native_decimals,
         coverage,
         HoldingSourceStatus::Ok,
     )?;
@@ -833,11 +852,6 @@ pub fn assemble_evm_native_balance_batch(
         joint_tip_block_hash: input.joint_tip.block_hash().to_owned(),
         account_count,
     })
-}
-
-/// Default native token decimals used when config omits a custom value.
-pub const fn default_native_decimals() -> u8 {
-    DEFAULT_NATIVE_DECIMALS
 }
 
 #[cfg(test)]

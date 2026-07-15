@@ -12,8 +12,11 @@ use mfm_canonical::sha256_digest_bytes;
 use mfm_facts::FactClaimId;
 use mfm_ids::{ContentDigest, DigestAlgorithm};
 use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
+use mfm_portfolio_model::portfolio::NetworkFamilyConfig;
 use mfm_portfolio_model::portfolio::{ExecutionAnchor, NetworkPin};
-use mfm_portfolio_model::symbol::{Observation, ObservationAnchor, ObservationSource};
+use mfm_portfolio_model::symbol::{
+    AnchoredHoldingSource, HoldingSourceConfig, Observation, ObservationAnchor,
+};
 
 /// Certified selection policy id for cutover portfolio holding selection.
 pub const PORTFOLIO_HOLDING_LATEST_NETWORK_COHERENT_POLICY_ID: &str =
@@ -160,8 +163,8 @@ pub struct SelectedHoldingMaterial {
     pub symbol_id: String,
     /// Network id.
     pub network_id: String,
-    /// Balance reader kind tag for observation source.
-    pub balance_reader_kind: String,
+    /// Direct holding source for the observation.
+    pub holding: HoldingSourceConfig,
     /// Raw amount decimal string.
     pub raw_dec: String,
     /// Token decimals.
@@ -195,8 +198,8 @@ impl RequiredHoldingKey {
 /// Family-normalized quantity/anchor fields used to build a [`HoldingCandidate`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizedHoldingFields {
-    /// Balance reader kind tag for observation source.
-    pub balance_reader_kind: String,
+    /// Direct holding source for the observation.
+    pub holding: HoldingSourceConfig,
     /// Raw amount decimal string.
     pub raw_dec: String,
     /// Token decimals.
@@ -267,7 +270,7 @@ pub fn holding_candidate_from_normalized(
             wallet_id: key.wallet_id.clone(),
             symbol_id: key.symbol_id.clone(),
             network_id: key.network_id.clone(),
-            balance_reader_kind: fields.balance_reader_kind,
+            holding: fields.holding,
             raw_dec: fields.raw_dec,
             decimals: fields.decimals,
             observation_anchor: fields.observation_anchor,
@@ -462,7 +465,10 @@ pub fn project_network_pins_from_observations(
 ) -> Result<Vec<NetworkPin>, PortfolioHoldingSelectionError> {
     let mut by_network: BTreeMap<String, ExecutionAnchor> = BTreeMap::new();
     for observation in observations {
-        let execution = execution_anchor_from_observation_source(&observation.source)?;
+        let execution = execution_anchor_from_anchored_holding_source(
+            &observation.source,
+            &observation.network_id,
+        )?;
         match by_network.get(&observation.network_id) {
             None => {
                 by_network.insert(observation.network_id.clone(), execution);
@@ -489,8 +495,9 @@ pub fn project_network_pins_from_observations(
     Ok(pins)
 }
 
-fn execution_anchor_from_observation_source(
-    source: &ObservationSource,
+fn execution_anchor_from_anchored_holding_source(
+    source: &AnchoredHoldingSource,
+    network_id: &str,
 ) -> Result<ExecutionAnchor, PortfolioHoldingSelectionError> {
     match &source.anchor {
         ObservationAnchor::Evm {
@@ -503,7 +510,7 @@ fn execution_anchor_from_observation_source(
                     PortfolioHoldingErrorCode::MissingFact,
                     "observation EVM block_hash is required",
                     None,
-                    Some(source.network_id.clone()),
+                    Some(network_id.to_owned()),
                 ));
             }
             Ok(ExecutionAnchor::Evm {
@@ -518,7 +525,7 @@ fn execution_anchor_from_observation_source(
                     PortfolioHoldingErrorCode::MissingFact,
                     "observation Bitcoin block_hash is required",
                     None,
-                    Some(source.network_id.clone()),
+                    Some(network_id.to_owned()),
                 ));
             }
             Ok(ExecutionAnchor::Bitcoin {
@@ -538,52 +545,34 @@ pub enum HoldingFactProjection {
     EvmNativeBalance,
 }
 
-/// Classifies a configured symbol into a cutover fact projection, or unsupported.
-pub fn project_holding_fact_kind(
-    symbol_kind: &str,
+/// Projects cutover fact kind from the direct network-family/source algebra.
+pub fn project_holding_fact_for_network(
+    network_family: NetworkFamilyConfig,
+    source: &HoldingSourceConfig,
 ) -> Result<HoldingFactProjection, PortfolioHoldingSelectionError> {
-    match symbol_kind {
-        "native_asset" | "native" | "bitcoin_native" => {
-            // Disambiguated by network family at call site; this is the kind tag surface.
-            // Callers should use project_holding_fact_for_network.
+    match (network_family, source) {
+        (NetworkFamilyConfig::Bitcoin, HoldingSourceConfig::Native) => {
             Ok(HoldingFactProjection::BitcoinAddressBalance)
         }
-        "evm_native" => Ok(HoldingFactProjection::EvmNativeBalance),
-        "erc20" | "erc-20" | "token" => Err(PortfolioHoldingSelectionError::new(
-            PortfolioHoldingErrorCode::UnsupportedRequirement,
-            format!("symbol kind {symbol_kind} is not supported at cutover"),
-            None,
-            None,
-        )),
-        other => Err(PortfolioHoldingSelectionError::new(
-            PortfolioHoldingErrorCode::UnsupportedRequirement,
-            format!("symbol kind {other} has no holding fact projection"),
-            None,
-            None,
-        )),
-    }
-}
-
-/// Projects cutover fact kind from network family + symbol shape.
-pub fn project_holding_fact_for_network(
-    network_family: &str,
-    symbol_is_native: bool,
-) -> Result<HoldingFactProjection, PortfolioHoldingSelectionError> {
-    match (network_family, symbol_is_native) {
-        ("bitcoin", true) => Ok(HoldingFactProjection::BitcoinAddressBalance),
-        ("evm", true) => Ok(HoldingFactProjection::EvmNativeBalance),
-        ("bitcoin" | "evm", false) => Err(PortfolioHoldingSelectionError::new(
-            PortfolioHoldingErrorCode::UnsupportedRequirement,
-            "non-native holdings are not supported at cutover",
-            None,
-            None,
-        )),
-        (family, _) => Err(PortfolioHoldingSelectionError::new(
-            PortfolioHoldingErrorCode::UnsupportedRequirement,
-            format!("network family {family} has no holding fact projection"),
-            None,
-            None,
-        )),
+        (NetworkFamilyConfig::Evm, HoldingSourceConfig::Native) => {
+            Ok(HoldingFactProjection::EvmNativeBalance)
+        }
+        (NetworkFamilyConfig::Evm, HoldingSourceConfig::Erc20 { .. }) => {
+            Err(PortfolioHoldingSelectionError::new(
+                PortfolioHoldingErrorCode::UnsupportedRequirement,
+                "ERC-20 holding collection is not available in this internal pre-cutover state",
+                None,
+                None,
+            ))
+        }
+        (NetworkFamilyConfig::Bitcoin, HoldingSourceConfig::Erc20 { .. }) => {
+            Err(PortfolioHoldingSelectionError::new(
+                PortfolioHoldingErrorCode::UnsupportedRequirement,
+                "Bitcoin does not support ERC-20 holdings",
+                None,
+                None,
+            ))
+        }
     }
 }
 

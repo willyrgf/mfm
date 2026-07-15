@@ -47,8 +47,10 @@ Public run-start ingress uses the exact catalog-backed entry-point request contr
 `docs/design.md`. Catalog resolution is an app pre-admission concern; it is not runtime or replay
 authority.
 
-For fact-backed portfolio collectors and report-only `portfolio_snapshot` authority,
-see `docs/portfolio-collect-then-report.md`.
+The portfolio model has one direct `HoldingSourceConfig` algebra: `Native` or EVM `Erc20` with a
+normalized non-zero contract address. EVM native scale belongs only to `NetworkConfig::Evm`.
+Standalone portfolio and EVM-native public objectives are intentionally absent during the anchored
+collector cutover; operations remain internal until the complete snapshot graph is published.
 
 ## Authority Contract
 

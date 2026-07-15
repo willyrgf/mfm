@@ -35,6 +35,13 @@ use crate::{
     BtcStateError,
 };
 
+/// Exact number of source reads required to resolve a Bitcoin balance batch joint tip.
+pub const BTC_JOINT_TIP_SOURCE_READS: u64 = 1;
+/// Exact number of source reads required for one Bitcoin address-balance observation.
+pub const BTC_NATIVE_BALANCE_OBSERVE_SOURCE_READS: u64 = 1;
+/// Closed coverage claim for a successful configured Bitcoin native source observation.
+pub const BTC_NATIVE_BALANCE_COVERAGE: &str = "configured_only";
+
 /// Shared joint tip resolved once for a same-network multi-subject batch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[mfm(

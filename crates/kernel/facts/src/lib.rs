@@ -4,7 +4,7 @@
 //! This crate owns the domain-free facts kernel surface: descriptor identity,
 //! field extraction contracts, fact visibility, fact keys, claim identity,
 //! internal refs, and canonical query evidence. See `docs/design.md` for the
-//! typed-core authority contract and `docs/portfolio-collect-then-report.md`
+//! typed-core authority contract and the portfolio section of `docs/design.md`
 //! for portfolio fact-backed reporting. The crate stays behind the kernel
 //! dependency boundary without mixing domain logic into event, runtime, store,
 //! app, or collector code.

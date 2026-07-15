@@ -18,13 +18,24 @@ fn tip_config() -> ResolveEvmJointTipConfig {
     }
 }
 
+fn semantic_evm_network() -> NetworkConfig {
+    NetworkConfig::new(
+        "ethereum-mainnet".to_owned(),
+        NetworkFamilyConfig::Evm,
+        Some(1),
+        Some(18),
+        None,
+        None,
+        std::collections::BTreeMap::new(),
+    )
+    .expect("EVM network")
+}
+
 fn observe_config(account: &str) -> ObserveEvmNativeBalanceConfig {
     ObserveEvmNativeBalanceConfig {
-        network: "ethereum-mainnet".to_owned(),
-        chain_id: 1,
+        network: semantic_evm_network(),
         account: account.to_owned(),
         coverage: "configured_only".to_owned(),
-        decimals: 18,
         max_source_reads: NonZeroU64::new(EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS)
             .expect("non-zero source reads"),
     }

@@ -86,8 +86,6 @@ pub struct PortfolioSnapshot {
     pub schema_version: u64,
     /// Stable portfolio identifier.
     pub portfolio_id: String,
-    /// Generation timestamp in milliseconds since epoch.
-    pub generated_at_ms: u64,
     /// One pin per referenced network.
     pub network_pins: Vec<NetworkPin>,
     /// Per-wallet observations.
@@ -126,8 +124,6 @@ pub struct PortfolioReport {
     pub schema_version: u64,
     /// Stable portfolio identifier.
     pub portfolio_id: String,
-    /// Generation timestamp in milliseconds since epoch.
-    pub generated_at_ms: u64,
     /// One pin per referenced network.
     pub network_pins: Vec<NetworkPin>,
     /// Per-wallet quote summaries.
@@ -183,14 +179,6 @@ impl WalletReport {
 pub struct PortfolioQuoteTotal {
     /// Quote unit.
     pub quote: QuoteCode,
-    /// Assets total in the quote unit.
-    pub assets_value_dec: String,
-    /// Collateral total in the quote unit.
-    pub collateral_value_dec: String,
-    /// Debt total in the quote unit.
-    pub debt_value_dec: String,
-    /// Staked total in the quote unit.
-    pub staked_value_dec: String,
-    /// Net total in the quote unit.
-    pub net_value_dec: String,
+    /// Direct total value in the quote unit.
+    pub total_value_dec: String,
 }

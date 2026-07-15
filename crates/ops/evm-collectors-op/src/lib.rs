@@ -1,65 +1,39 @@
 #![warn(missing_docs)]
 //! Deterministic EVM collector family operations.
 //!
-//! This monocrate owns EVM collector topologies only (native balance at cutover).
-//! It performs no live IO and does not register app assembly, adapters, transports,
-//! storage, binaries, or recurring scheduler policy.
-//!
-//! # Examples
-//!
-//! ```rust
-//! use std::num::NonZeroU64;
-//!
-//! use mfm_op_evm_collectors::{
-//!     evm_native_balance_program_draft, EvmNativeBalanceConfig,
-//! };
-//!
-//! let draft = evm_native_balance_program_draft(EvmNativeBalanceConfig {
-//!     network: "ethereum-mainnet".to_owned(),
-//!     chain_id: 1,
-//!     accounts: vec!["0x0000000000000000000000000000000000000001".to_owned()],
-//!     coverage: "configured_only".to_owned(),
-//!     decimals: 18,
-//!     max_source_reads: NonZeroU64::new(1).expect("non-zero"),
-//! })
-//! .unwrap();
-//! assert!(draft.state_nodes().len() >= 3);
-//! ```
+//! This crate owns internal EVM collector topology. Its callers supply the semantic
+//! `NetworkConfig`; the operation derives every child read bound, coverage claim,
+//! chain id, and native scale from state-owned policy and that network value.
 
 use std::num::NonZeroU64;
 
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
-use mfm_program::{
-    build_root_with_registries, NoContext, NonEmptyHandles, Operation, OperationExpansion,
-    OperationKey, PublicOutputKey, RootBuilder, ScopeKey, StateKey, TypedProgramLaunchPlan,
-};
-use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs};
+use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig};
+use mfm_program::{NoContext, NonEmptyHandles, Operation, OperationExpansion, StateKey};
+use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput};
 pub use mfm_states_evm::{
-    default_native_decimals, AssembleEvmNativeBalanceBatchConfig,
-    AssembleEvmNativeBalanceBatchInput, AssembleEvmNativeBalanceBatchInputHandles,
-    AssembleEvmNativeBalanceBatchState, EvmAddressNativeBalanceObservation,
-    EvmAddressNativeBalanceSnapshotFact, EvmJointTip, EvmNativeBalanceBatchSummary,
-    ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput,
+    AssembleEvmNativeBalanceBatchConfig, AssembleEvmNativeBalanceBatchInput,
+    AssembleEvmNativeBalanceBatchInputHandles, AssembleEvmNativeBalanceBatchState,
+    EvmAddressNativeBalanceObservation, EvmAddressNativeBalanceSnapshotFact, EvmJointTip,
+    EvmNativeBalanceBatchSummary, ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput,
     ObserveEvmNativeBalanceInputHandles, ObserveEvmNativeBalanceState,
     RecordEvmNativeBalanceFactConfig, RecordEvmNativeBalanceFactInput,
     RecordEvmNativeBalanceFactInputHandles, RecordEvmNativeBalanceFactState,
     ResolveEvmJointTipConfig, ResolveEvmJointTipInput, ResolveEvmJointTipInputHandles,
-    ResolveEvmJointTipState, EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS,
+    ResolveEvmJointTipState, EVM_JOINT_TIP_SOURCE_READS, EVM_NATIVE_BALANCE_COVERAGE,
+    EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS,
 };
 use serde::{Deserialize, Serialize};
 
 const OP_NAMESPACE: &str = "mfm.evm";
 const BALANCE_OP_KIND_NAME: &str = "evm_native_balance";
 const BALANCE_OP_VERSION: &str = "mfm.evm.operation.evm_native_balance.v1";
-const BALANCE_ROOT_SCOPE: &str = "evm_native_balance";
-const BALANCE_OP_KEY: &str = "evm_native_balance";
-const BALANCE_PUBLIC_OUTPUT_KEY: &str = "balance_batch";
 
 /// Planning config for a multi-account EVM native balance collector batch.
 ///
 /// Multi-subject same-network batches **must** share one joint tip resolved once
 /// in expand.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig, MfmValue)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm",
@@ -68,41 +42,55 @@ const BALANCE_PUBLIC_OUTPUT_KEY: &str = "balance_batch";
     validate = "validate_evm_native_balance_config"
 )]
 pub struct EvmNativeBalanceConfig {
-    /// Semantic network id.
-    pub network: String,
-    /// Expected EVM chain id.
-    pub chain_id: u64,
+    /// Exact semantic EVM network, including the only authored native scale.
+    pub network: NetworkConfig,
     /// Account addresses to observe (at least one).
     pub accounts: Vec<String>,
-    /// Coverage claim written on success (default `configured_only`).
-    pub coverage: String,
-    /// Native token decimals (typically 18).
-    pub decimals: u8,
-    /// Maximum source reads for joint-tip resolution.
-    pub max_source_reads: NonZeroU64,
 }
 
 impl EvmNativeBalanceConfig {
     /// Builds the joint-tip resolve config for this batch.
-    pub fn joint_tip_config(&self) -> ResolveEvmJointTipConfig {
-        ResolveEvmJointTipConfig {
-            network: self.network.clone(),
-            chain_id: self.chain_id,
-            max_source_reads: self.max_source_reads,
-        }
+    pub fn joint_tip_config(&self) -> Result<ResolveEvmJointTipConfig, String> {
+        let (network, chain_id) = self.evm_network_parts()?;
+        let max_source_reads = NonZeroU64::new(EVM_JOINT_TIP_SOURCE_READS)
+            .ok_or_else(|| "EVM joint-tip source-read policy must be non-zero".to_owned())?;
+        Ok(ResolveEvmJointTipConfig {
+            network: network.to_owned(),
+            chain_id,
+            max_source_reads,
+        })
     }
 
     /// Builds an observe config for one account in this batch.
-    pub fn observe_config_for_account(&self, account: &str) -> ObserveEvmNativeBalanceConfig {
-        ObserveEvmNativeBalanceConfig {
+    pub fn observe_config_for_account(
+        &self,
+        account: &str,
+    ) -> Result<ObserveEvmNativeBalanceConfig, String> {
+        let _ = self.evm_network_parts()?;
+        let max_source_reads = NonZeroU64::new(EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS)
+            .ok_or_else(|| {
+                "EVM native observation source-read policy must be non-zero".to_owned()
+            })?;
+        Ok(ObserveEvmNativeBalanceConfig {
             network: self.network.clone(),
-            chain_id: self.chain_id,
             account: account.to_owned(),
-            coverage: self.coverage.clone(),
-            decimals: self.decimals,
-            max_source_reads: NonZeroU64::new(EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS)
-                .expect("native observation source reads are non-zero"),
+            coverage: EVM_NATIVE_BALANCE_COVERAGE.to_owned(),
+            max_source_reads,
+        })
+    }
+
+    fn evm_network_parts(&self) -> Result<(&str, u64), String> {
+        if self.network.family() != NetworkFamilyConfig::Evm {
+            return Err("EVM native balance collector requires an EVM network".to_owned());
         }
+        let chain_id = self
+            .network
+            .chain_id_u64()
+            .ok_or_else(|| "EVM network is missing chain_id".to_owned())?;
+        if self.network.native_decimals().is_none() {
+            return Err("EVM network is missing native_decimals".to_owned());
+        }
+        Ok((self.network.network_id().as_str(), chain_id))
     }
 }
 
@@ -114,13 +102,13 @@ pub fn validate_evm_native_balance_config(config: &EvmNativeBalanceConfig) -> Re
     let mut seen = std::collections::BTreeSet::new();
     for account in &config.accounts {
         mfm_states_evm::validate_observe_evm_native_balance_config(
-            &config.observe_config_for_account(account),
+            &config.observe_config_for_account(account)?,
         )?;
         if !seen.insert(account.as_str()) {
             return Err(format!("duplicate account in batch: {account}"));
         }
     }
-    mfm_states_evm::validate_resolve_evm_joint_tip_config(&config.joint_tip_config())?;
+    mfm_states_evm::validate_resolve_evm_joint_tip_config(&config.joint_tip_config()?)?;
     Ok(())
 }
 
@@ -131,14 +119,6 @@ pub struct EvmNativeBalanceOutputs<'program, 'scope> {
     /// Joint tip shared by every subject in the batch.
     pub joint_tip: mfm_program::Handle<'program, 'scope, EvmJointTip>,
     /// Batch summary after shared-tip verification.
-    pub batch_summary: mfm_program::Handle<'program, 'scope, EvmNativeBalanceBatchSummary>,
-}
-
-/// Root public outputs for the native balance collector.
-#[derive(PublicOutputs)]
-#[mfm(schema = "mfm.evm.public_outputs.evm_native_balance")]
-pub struct EvmNativeBalancePublicOutputs<'program, 'scope> {
-    /// Batch summary produced by the collector.
     pub batch_summary: mfm_program::Handle<'program, 'scope, EvmNativeBalanceBatchSummary>,
 }
 
@@ -181,7 +161,9 @@ impl Operation for EvmNativeBalanceOperation {
         let joint_tip = builder.state::<ResolveEvmJointTipState, _>(
             StateKey::new("resolve_joint_tip")?,
             NoContext,
-            config.joint_tip_config(),
+            config
+                .joint_tip_config()
+                .map_err(mfm_program::PlanError::Key)?,
             ResolveEvmJointTipInputHandles {},
         )?;
 
@@ -190,7 +172,9 @@ impl Operation for EvmNativeBalanceOperation {
             let observe = builder.state::<ObserveEvmNativeBalanceState, _>(
                 StateKey::new(format!("observe_native_balance_{index}"))?,
                 NoContext,
-                config.observe_config_for_account(account),
+                config
+                    .observe_config_for_account(account)
+                    .map_err(mfm_program::PlanError::Key)?,
                 ObserveEvmNativeBalanceInputHandles {
                     joint_tip: joint_tip.clone(),
                 },
@@ -223,38 +207,6 @@ impl Operation for EvmNativeBalanceOperation {
             batch_summary,
         })
     }
-}
-
-/// Builds a typed program draft for a multi-account EVM native balance collector batch.
-pub fn evm_native_balance_program_draft(
-    config: EvmNativeBalanceConfig,
-) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
-    build_root_with_registries(
-        ScopeKey::new(BALANCE_ROOT_SCOPE)?,
-        evm_collectors_state_registry()?,
-        evm_collectors_operation_registry()?,
-        |root: &mut RootBuilder<'_, '_>| {
-            let result = root.scope().call::<EvmNativeBalanceOperation, _>(
-                OperationKey::new(BALANCE_OP_KEY)?,
-                EvmNativeBalanceOperation,
-                config,
-                (),
-            )?;
-            root.bind_public_outputs(
-                PublicOutputKey::new(BALANCE_PUBLIC_OUTPUT_KEY)?,
-                &EvmNativeBalancePublicOutputs {
-                    batch_summary: result.batch_summary,
-                },
-            )
-        },
-    )
-}
-
-/// Builds a launch plan for an EVM native-balance collector program.
-pub fn evm_native_balance_program_launch_plan(
-    config: EvmNativeBalanceConfig,
-) -> mfm_program::Result<TypedProgramLaunchPlan> {
-    TypedProgramLaunchPlan::from_draft(evm_native_balance_program_draft(config)?)
 }
 
 mfm_certify::define_program_descriptor_registry! {

@@ -84,36 +84,8 @@ pub fn expand_required_holdings(
                         Some(symbol.network_id.to_string()),
                     )
                 })?;
-            let family = match network.family() {
-                NetworkFamilyConfig::Bitcoin => "bitcoin",
-                NetworkFamilyConfig::Evm => "evm",
-            };
-            let is_native = matches!(
-                (&symbol.kind, &symbol.balance_reader),
-                (
-                    SymbolKind::NativeBalance,
-                    BalanceReaderConfig::NativeBalance {}
-                )
-            );
-            if matches!(
-                (&symbol.kind, &symbol.balance_reader),
-                (
-                    SymbolKind::Erc20Balance,
-                    BalanceReaderConfig::Erc20Balance { .. }
-                )
-            ) {
-                return Err(PortfolioHoldingSelectionError::new(
-                    PortfolioHoldingErrorCode::UnsupportedRequirement,
-                    format!(
-                        "ERC-20 symbol `{}` is not supported at cutover",
-                        symbol.symbol_id
-                    ),
-                    Some(format!("{}/{}", wallet.wallet_id, symbol.symbol_id)),
-                    Some(symbol.network_id.to_string()),
-                ));
-            }
-            let projection =
-                project_holding_fact_for_network(family, is_native).map_err(|mut err| {
+            let projection = project_holding_fact_for_network(network.family(), &symbol.source)
+                .map_err(|mut err| {
                     err.holding_key = Some(format!("{}/{}", wallet.wallet_id, symbol.symbol_id));
                     err.network_id = Some(symbol.network_id.to_string());
                     err
@@ -169,19 +141,15 @@ pub fn observations_from_selected_holdings(
             wallet_id: item.material.wallet_id.clone(),
             symbol_id: item.material.symbol_id.clone(),
             display_symbol: symbol.display_symbol.clone(),
-            kind: symbol.kind,
-            role: symbol.role,
             network_id: item.material.network_id.clone(),
-            protocol: symbol.protocol.as_ref().map(ToString::to_string),
             quantity: ObservationQuantity {
                 raw_dec: item.material.raw_dec.clone(),
                 decimals: item.material.decimals,
                 amount_dec,
             },
             values: Vec::new(),
-            source: ObservationSource {
-                balance_reader_kind: item.material.balance_reader_kind.clone(),
-                network_id: item.material.network_id.clone(),
+            source: AnchoredHoldingSource {
+                holding: item.material.holding.clone(),
                 anchor: item.material.observation_anchor.clone(),
             },
             coverage: item.material.coverage.clone(),
@@ -306,7 +274,6 @@ fn require_required_holdings_present(
 pub fn assemble_snapshot(
     config: &AssembleSnapshotConfig,
     input: AssembleSnapshotInput,
-    generated_at_ms: u64,
 ) -> StateResult<PortfolioSnapshot> {
     let symbols = symbols_by_id(&config.portfolio.symbol_configs).map_err(|error| {
         StateError::Message(format!(
@@ -382,7 +349,6 @@ pub fn assemble_snapshot(
     let mut snapshot = PortfolioSnapshot {
         schema_version: config.snapshot_version(),
         portfolio_id: config.portfolio.portfolio_id.to_string(),
-        generated_at_ms,
         network_pins,
         wallets,
         symbol_configs,
@@ -415,29 +381,12 @@ pub fn project_report_from_snapshot(
     let mut report = PortfolioReport {
         schema_version: report_version,
         portfolio_id: snapshot.portfolio_id,
-        generated_at_ms: snapshot.generated_at_ms,
         network_pins: snapshot.network_pins,
         wallet_summaries,
         totals_by_quote: quote_totals_to_vec(portfolio_totals),
     };
     report.normalize();
     Ok(report)
-}
-
-/// Returns the canonical balance reader kind string.
-pub fn balance_reader_kind(reader: &BalanceReaderConfig) -> &'static str {
-    match reader {
-        BalanceReaderConfig::NativeBalance {} => "native_balance",
-        BalanceReaderConfig::Erc20Balance { .. } => "erc20_balance",
-        BalanceReaderConfig::ProtocolPosition {
-            protocol, reader, ..
-        } if protocol.as_str() == AAVE_V3_PROTOCOL_ID => match reader.as_str() {
-            "reserve_position" => "aave_v3/reserve_position",
-            "debt_position" => "aave_v3/debt_position",
-            _ => "protocol_position",
-        },
-        BalanceReaderConfig::ProtocolPosition { .. } => "protocol_position",
-    }
 }
 
 /// Builds a symbols-by-id index for assemble / observation join.
@@ -546,22 +495,9 @@ fn derive_quote_totals(
     for observation in observations {
         for value in &observation.values {
             let entry = totals.entry(value.quote).or_default();
-            let value_dec = DecimalValue::parse_signed(&value.value_dec)
+            let value_dec = DecimalValue::parse_non_negative(&value.value_dec)
                 .map_err(|error| StateError::Message(error.to_string()))?;
-            match observation.role {
-                SymbolRole::Native | SymbolRole::Asset => {
-                    entry.assets_value = entry.assets_value.add(&value_dec);
-                }
-                SymbolRole::Collateral => {
-                    entry.collateral_value = entry.collateral_value.add(&value_dec);
-                }
-                SymbolRole::Debt => {
-                    entry.debt_value = entry.debt_value.add(&value_dec);
-                }
-                SymbolRole::Staked => {
-                    entry.staked_value = entry.staked_value.add(&value_dec);
-                }
-            }
+            entry.total_value = entry.total_value.add(&value_dec);
         }
     }
     Ok(totals)
@@ -600,33 +536,18 @@ fn quote_totals_to_vec(
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct QuoteTotalsAccumulator {
-    assets_value: DecimalValue,
-    collateral_value: DecimalValue,
-    debt_value: DecimalValue,
-    staked_value: DecimalValue,
+    total_value: DecimalValue,
 }
 
 impl QuoteTotalsAccumulator {
     fn merge(&mut self, other: &Self) {
-        self.assets_value = self.assets_value.add(&other.assets_value);
-        self.collateral_value = self.collateral_value.add(&other.collateral_value);
-        self.debt_value = self.debt_value.add(&other.debt_value);
-        self.staked_value = self.staked_value.add(&other.staked_value);
+        self.total_value = self.total_value.add(&other.total_value);
     }
 
     fn into_report_total(self, quote: QuoteCode) -> PortfolioQuoteTotal {
-        let positive_value = self
-            .assets_value
-            .add(&self.collateral_value)
-            .add(&self.staked_value);
-        let net_value = positive_value.sub(&self.debt_value);
         PortfolioQuoteTotal {
             quote,
-            assets_value_dec: self.assets_value.to_canonical_string(),
-            collateral_value_dec: self.collateral_value.to_canonical_string(),
-            debt_value_dec: self.debt_value.to_canonical_string(),
-            staked_value_dec: self.staked_value.to_canonical_string(),
-            net_value_dec: net_value.to_canonical_string(),
+            total_value_dec: self.total_value.to_canonical_string(),
         }
     }
 }

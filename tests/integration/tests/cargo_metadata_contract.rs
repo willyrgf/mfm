@@ -457,15 +457,14 @@ fn config_catalog_source_boundaries_are_enforced() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         catalog_users,
-        BTreeSet::from(["mfm-app", "mfm-op-portfolio-collect-report"]),
-        "catalog identity users must stay at app and operation pre-planning boundaries"
+        BTreeSet::from(["mfm-app"]),
+        "catalog identity users must stay at the app ingress boundary"
     );
 
     let sources = rust_sources(&root);
     let allowed_catalog_ref_paths = [
         root.join("crates/catalog-model/src"),
         root.join("crates/app/src"),
-        root.join("crates/ops/portfolio-collect-report-op/src"),
     ];
     for path in &sources {
         let source = fs::read_to_string(path).expect("read Rust source");

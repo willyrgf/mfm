@@ -282,7 +282,7 @@ pub(crate) fn btc_holding_candidate(
         store_commit_order,
         fact_claim_id,
         NormalizedHoldingFields {
-            balance_reader_kind: balance_reader_kind(&requirement.symbol.balance_reader).to_owned(),
+            holding: requirement.symbol.source.clone(),
             raw_dec: normalized.balance_sats.to_string(),
             decimals: 8,
             observation_anchor: ObservationAnchor::Bitcoin {
@@ -322,7 +322,7 @@ pub(crate) fn evm_holding_candidate(
         store_commit_order,
         fact_claim_id,
         NormalizedHoldingFields {
-            balance_reader_kind: balance_reader_kind(&requirement.symbol.balance_reader).to_owned(),
+            holding: requirement.symbol.source.clone(),
             raw_dec: normalized.raw_wei,
             decimals: normalized.decimals,
             observation_anchor: ObservationAnchor::Evm {

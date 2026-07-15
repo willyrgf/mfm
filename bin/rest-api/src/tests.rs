@@ -77,7 +77,7 @@ async fn read_role_refuses_live_start_and_serves_public_fact_queries() {
                 .uri("/v1/runs/start")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"entry_point":"mfm.portfolio/portfolio_snapshot@1","request":{}}"#,
+                    r#"{"entry_point":"mfm.bitcoin/btc_address_balance@1","request":{}}"#,
                 ))
                 .expect("request"),
         )

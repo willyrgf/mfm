@@ -395,17 +395,15 @@ mfm_cli --output-format json ops list
 
 JSON output returns the descriptors under `entry_points`. The production surface is:
 
-- `mfm.portfolio/portfolio_snapshot@1`
 - `mfm.bitcoin/btc_address_balance@1`
-- `mfm.evm/evm_native_balance@1`
 - `mfm.evm.contract/deploy@1`
 - `mfm.evm.contract/configure@1`
 - `mfm.evm.contract/validate@1`
 - `mfm.evm.contract/lifecycle@1`
-- `mfm.portfolio/collect_then_report@1`
 
 There is no latest-version selection. The internal BTC chain-head checkpoint operation is not a
-public entry point.
+public entry point. The portfolio snapshot objective and EVM native collector are internal while
+their source-model cutover is in progress.
 
 ## Run Commands (Experimental)
 
@@ -436,7 +434,7 @@ or resume certified typed runs.
 ### `run start`
 
 Starts a run from an exact entry-point id and a strict JSON request file. The request contains
-exact catalog references (`name` plus `digest`) and any operation-local policy. Catalog values are
+exact catalog references (`name` plus `digest`). Catalog values are
 resolved and validated by app assembly before planning; the resulting typed spec is then certified
 and admitted.
 
@@ -460,16 +458,16 @@ Publish values once through setup, then submit a request such as:
 ```sh
 mfm_cli setup import --file setup.local.toml
 mfm_cli run start \
-  --entry-point mfm.portfolio/portfolio_snapshot@1 \
-  --request portfolio-request.json
+  --entry-point mfm.bitcoin/btc_address_balance@1 \
+  --request btc-request.json
 ```
 
-For a portfolio request, `portfolio-request.json` has the exact shape:
+For the Bitcoin balance entry point, `btc-request.json` has the exact shape:
 
 ```json
 {
-  "portfolio": {
-    "name": "acme/portfolio",
+  "config": {
+    "name": "acme/bitcoin-balance",
     "digest": "content:sha256-jcs-v1:..."
   }
 }
@@ -478,24 +476,9 @@ For a portfolio request, `portfolio-request.json` has the exact shape:
 The repository includes a complete strict-import fixture at
 `examples/setup/organization.toml`; copy it to a local setup file before importing.
 
-Collector entry points write Platform holding facts from live chain reads. The composed
-`mfm.portfolio/collect_then_report@1` entry point accepts one exact portfolio reference plus
-explicit BTC/EVM coverage and read policies, derives child collector configs, proves readiness,
-and calls the report graph. `portfolio_snapshot` remains report-only and selects admitted facts.
-See [`../../docs/portfolio-collect-then-report.md`](../../docs/portfolio-collect-then-report.md).
-
-Collector entry points (`btc_address_balance`, `evm_native_balance`) write Platform holding facts
-from live chain reads (joint tip once per same-network batch). They are external multi-run only and
-are not mixed into the report graph. See
-[`../../docs/portfolio-collect-then-report.md`](../../docs/portfolio-collect-then-report.md).
-
-`portfolio_snapshot` is **report-only**: it selects Platform holding facts (BTC/EVM native at
-cutover) under the network-coherent policy
-`mfm.portfolio.holding.latest-network-coherent.v1` and hard-fails when required facts are missing.
-It is published as public entry-point version `1`.
-It does not crawl live chain balances. Collect balances into Platform facts first, then run the
-report. Soft partial success (`error_count`) is not part of the public report surface. Public
-observations include selected holding `coverage` for configured-mode honesty.
+The portfolio model accepts direct native and ERC-20 holding sources, but its complete snapshot
+objective is not publicly published during the collector cutover. Likewise, the EVM native
+collector is internal. `ops list` is the authoritative current public surface.
 
 EVM contract entry-point config shapes and import authority rules are documented in
 [`../../docs/evm-contract-lifecycle.md`](../../docs/evm-contract-lifecycle.md).
@@ -503,7 +486,7 @@ EVM contract entry-point config shapes and import authority rules are documented
 For local development against a managed persistent run-store database, use:
 
 ```sh
-nix run .#mfm-start -- --entry-point mfm.portfolio/portfolio_snapshot@1 --request portfolio-request.json
+nix run .#mfm-start -- --entry-point mfm.bitcoin/btc_address_balance@1 --request btc-request.json
 ```
 
 `.#mfm-start` starts a Nixfied-managed PostgreSQL process in slot 9 for the

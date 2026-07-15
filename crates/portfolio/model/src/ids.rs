@@ -181,38 +181,6 @@ portfolio_id_type!(
     "Stable typed portfolio symbol identifier."
 );
 
-portfolio_id_type!(
-    ProtocolId,
-    "protocol",
-    "protocol-id",
-    "mfm.portfolio.id.protocol",
-    "Stable typed portfolio protocol identifier."
-);
-
-portfolio_id_type!(
-    ProtocolReaderId,
-    "protocol_reader",
-    "protocol-reader-id",
-    "mfm.portfolio.id.protocol_reader",
-    "Stable typed portfolio protocol reader identifier."
-);
-
-portfolio_id_type!(
-    AaveMarketId,
-    "aave_market_id",
-    "aave-market-id",
-    "mfm.portfolio.id.aave_market",
-    "Stable typed Aave market identifier."
-);
-
-portfolio_id_type!(
-    AaveReserveId,
-    "aave_reserve_id",
-    "aave-reserve-id",
-    "mfm.portfolio.id.aave_reserve",
-    "Stable typed Aave reserve identifier."
-);
-
 /// Stable typed Bitcoin source identity selected by portfolio network config.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, MfmValue)]
 #[serde(try_from = "String", into = "String")]
@@ -365,6 +333,11 @@ impl NormalizedEvmAddress {
     /// Returns the canonical normalized address string.
     pub fn as_str(&self) -> &str {
         &self.raw
+    }
+
+    /// Returns whether this is the all-zero EVM address.
+    pub fn is_zero(&self) -> bool {
+        self.raw.as_bytes() == b"0x0000000000000000000000000000000000000000"
     }
 
     /// Consumes this authority into its canonical normalized address string.

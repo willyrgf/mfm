@@ -4,7 +4,6 @@ use mfm_catalog_model::CatalogName;
 use mfm_evm_contract_model::EvmContractContext;
 use mfm_ids::{ContentDigest, SchemaId};
 use mfm_op_btc_collectors::BtcAddressBalanceConfig;
-use mfm_op_evm_collectors::EvmNativeBalanceConfig;
 use mfm_op_portfolio_tracker::PortfolioConfig;
 use mfm_state_evm_contracts::{
     ConfigureAction, DeployAction, ImportConfiguredSpec, ImportDeployedSpec, ValidateAction,
@@ -67,8 +66,6 @@ enum SetupValue {
     Portfolio(PortfolioConfig),
     #[serde(rename = "btc_address_balance")]
     BtcAddressBalance(BtcAddressBalanceConfig),
-    #[serde(rename = "evm_native_balance")]
-    EvmNativeBalance(EvmNativeBalanceConfig),
     #[serde(rename = "evm_contract_context")]
     EvmContractContext(EvmContractContext),
     #[serde(rename = "evm_deploy_action")]
@@ -227,7 +224,6 @@ fn prepare_value(value: SetupValue) -> Result<PreparedValue, AppError> {
     match value {
         SetupValue::Portfolio(config) => prepare_config(config.normalized()),
         SetupValue::BtcAddressBalance(config) => prepare_config(config),
-        SetupValue::EvmNativeBalance(config) => prepare_config(config),
         SetupValue::EvmContractContext(config) => prepare_config(config),
         SetupValue::EvmDeployAction(config) => prepare_config(config),
         SetupValue::EvmConfigureAction(config) => prepare_config(config),
@@ -364,7 +360,7 @@ mod tests {
             "/../../examples/setup/organization.toml"
         )))
         .expect("complete setup fixture");
-        assert_eq!(document.values.len(), 9);
+        assert_eq!(document.values.len(), 8);
         for entry in document.values {
             let prepared = prepare_value(entry.value).expect("fixture value prepares");
             assert!(!prepared.canonical_json.is_empty());
@@ -501,7 +497,7 @@ mod tests {
             .get("values")
             .and_then(toml::Value::as_array)
             .expect("setup values array");
-        assert_eq!(values.len(), 9);
+        assert_eq!(values.len(), 8);
 
         for index in 0..values.len() {
             let mut document = base.clone();
@@ -533,7 +529,7 @@ mod tests {
             .get("values")
             .and_then(toml::Value::as_array)
             .expect("setup values array");
-        assert_eq!(values.len(), 9);
+        assert_eq!(values.len(), 8);
 
         for index in 0..values.len() {
             let mut document = base.clone();

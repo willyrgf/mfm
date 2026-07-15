@@ -9,6 +9,7 @@ pub(super) fn dual_mainnet_portfolio() -> PortfolioConfig {
                 "ethereum-mainnet".to_owned(),
                 NetworkFamilyConfig::Evm,
                 Some(1),
+                Some(18),
                 None,
                 None,
                 BTreeMap::new(),
@@ -17,6 +18,7 @@ pub(super) fn dual_mainnet_portfolio() -> PortfolioConfig {
             NetworkConfig::new(
                 "bitcoin-mainnet".to_owned(),
                 NetworkFamilyConfig::Bitcoin,
+                None,
                 None,
                 Some("main".to_owned()),
                 Some("public-bitcoin-core".to_owned()),
@@ -54,11 +56,8 @@ pub(super) fn dual_mainnet_portfolio() -> PortfolioConfig {
             SymbolConfig {
                 symbol_id: "eth.native.ethereum-mainnet".parse().expect("symbol"),
                 display_symbol: Some("ETH".to_owned()),
-                kind: SymbolKind::NativeBalance,
-                role: SymbolRole::Native,
                 network_id: "ethereum-mainnet".parse().expect("network"),
-                protocol: None,
-                balance_reader: BalanceReaderConfig::NativeBalance {},
+                source: HoldingSourceConfig::Native,
                 valuation: SymbolValuationConfig {
                     quotes: vec![QuoteValuationConfig {
                         quote: QuoteCode::Usd,
@@ -66,17 +65,13 @@ pub(super) fn dual_mainnet_portfolio() -> PortfolioConfig {
                         unit_price_dec: "2.5".parse().expect("price"),
                     }],
                 },
-                underlying_symbol_id: None,
                 metadata: PublicMetadata::default(),
             },
             SymbolConfig {
                 symbol_id: "btc.native.bitcoin-mainnet".parse().expect("symbol"),
                 display_symbol: Some("BTC".to_owned()),
-                kind: SymbolKind::NativeBalance,
-                role: SymbolRole::Native,
                 network_id: "bitcoin-mainnet".parse().expect("network"),
-                protocol: None,
-                balance_reader: BalanceReaderConfig::NativeBalance {},
+                source: HoldingSourceConfig::Native,
                 valuation: SymbolValuationConfig {
                     quotes: vec![QuoteValuationConfig {
                         quote: QuoteCode::Usd,
@@ -84,7 +79,6 @@ pub(super) fn dual_mainnet_portfolio() -> PortfolioConfig {
                         unit_price_dec: "1".parse().expect("price"),
                     }],
                 },
-                underlying_symbol_id: None,
                 metadata: PublicMetadata::default(),
             },
         ],
@@ -100,6 +94,7 @@ pub(super) fn dual_wallet_same_network_portfolio() -> PortfolioConfig {
             "ethereum-mainnet".to_owned(),
             NetworkFamilyConfig::Evm,
             Some(1),
+            Some(18),
             None,
             None,
             BTreeMap::new(),
@@ -134,11 +129,8 @@ pub(super) fn dual_wallet_same_network_portfolio() -> PortfolioConfig {
         symbol_configs: vec![SymbolConfig {
             symbol_id: "eth.native.ethereum-mainnet".parse().expect("symbol"),
             display_symbol: Some("ETH".to_owned()),
-            kind: SymbolKind::NativeBalance,
-            role: SymbolRole::Native,
             network_id: "ethereum-mainnet".parse().expect("network"),
-            protocol: None,
-            balance_reader: BalanceReaderConfig::NativeBalance {},
+            source: HoldingSourceConfig::Native,
             valuation: SymbolValuationConfig {
                 quotes: vec![QuoteValuationConfig {
                     quote: QuoteCode::Usd,
@@ -146,7 +138,6 @@ pub(super) fn dual_wallet_same_network_portfolio() -> PortfolioConfig {
                     unit_price_dec: "1".parse().expect("price"),
                 }],
             },
-            underlying_symbol_id: None,
             metadata: PublicMetadata::default(),
         }],
         metadata: PublicMetadata::default(),

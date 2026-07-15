@@ -6,11 +6,8 @@ pub(super) fn run_admitted_payload() -> KernelEventPayload {
     KernelEventPayload::RunAdmitted(Box::new(RunAdmitted {
         run_id,
         identity_material,
-        entry_point: EntryPointLaunchEvidence::new(
-            "mfm.portfolio/portfolio_snapshot@1",
-            Vec::new(),
-        )
-        .expect("entry point evidence"),
+        entry_point: EntryPointLaunchEvidence::new("mfm.test/example@1", Vec::new())
+            .expect("entry point evidence"),
         spec_hash: spec_hash(2),
         spec_artifact: run_artifact_ref(
             artifact_id(3),

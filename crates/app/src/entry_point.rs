@@ -4,13 +4,10 @@ use mfm_certify::CertificationRegistry;
 use mfm_evm_contract_model::EvmContractContext;
 use mfm_ids::{DigestAlgorithm, SchemaId, StoreScopeId};
 use mfm_op_btc_collectors::BtcAddressBalanceConfig;
-use mfm_op_evm_collectors::EvmNativeBalanceConfig;
 use mfm_op_evm_contract_lifecycle::{
     build_configure_entry_config, build_deploy_entry_config, build_lifecycle_entry_config,
     build_validate_entry_config,
 };
-use mfm_op_portfolio_collect_report::{build_collect_then_report_config, CollectThenReportRequest};
-use mfm_op_portfolio_tracker::PortfolioConfig;
 use mfm_program::TypedProgramLaunchPlan;
 use mfm_state_evm_contracts::{
     ConfigureAction, DeployAction, ImportConfiguredSpec, ImportDeployedSpec, ValidateAction,
@@ -26,26 +23,14 @@ use crate::{
     RunLaunchRequest,
 };
 
-const PORTFOLIO_SNAPSHOT_ID: &str = "mfm.portfolio/portfolio_snapshot@1";
 const BTC_ADDRESS_BALANCE_ID: &str = "mfm.bitcoin/btc_address_balance@1";
-const EVM_NATIVE_BALANCE_ID: &str = "mfm.evm/evm_native_balance@1";
 const CONTRACT_DEPLOY_ID: &str = "mfm.evm.contract/deploy@1";
 const CONTRACT_CONFIGURE_ID: &str = "mfm.evm.contract/configure@1";
 const CONTRACT_VALIDATE_ID: &str = "mfm.evm.contract/validate@1";
 const CONTRACT_LIFECYCLE_ID: &str = "mfm.evm.contract/lifecycle@1";
-const COLLECT_THEN_REPORT_ID: &str = "mfm.portfolio/collect_then_report@1";
-
-const PORTFOLIO_REQUEST_SCHEMA: (&str, &[u8]) = (
-    "mfm.app.request.portfolio_snapshot",
-    b"mfm.app.request:portfolio_snapshot:v1",
-);
 const BTC_REQUEST_SCHEMA: (&str, &[u8]) = (
     "mfm.app.request.btc_address_balance",
     b"mfm.app.request:btc_address_balance:v1",
-);
-const EVM_REQUEST_SCHEMA: (&str, &[u8]) = (
-    "mfm.app.request.evm_native_balance",
-    b"mfm.app.request:evm_native_balance:v1",
 );
 const CONTRACT_DEPLOY_REQUEST_SCHEMA: (&str, &[u8]) = (
     "mfm.app.request.evm_contract_deploy",
@@ -63,10 +48,6 @@ const CONTRACT_LIFECYCLE_REQUEST_SCHEMA: (&str, &[u8]) = (
     "mfm.app.request.evm_contract_lifecycle",
     b"mfm.app.request:evm_contract_lifecycle:v1",
 );
-const COLLECT_THEN_REPORT_REQUEST_SCHEMA: (&str, &[u8]) = (
-    "mfm.app.request.collect_then_report",
-    b"mfm.app.request:collect_then_report:v1",
-);
 
 /// One exact public entry point and the request schema accepted by it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -80,20 +61,8 @@ pub struct EntryPointSummary {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PortfolioSnapshotRequest {
-    portfolio: CatalogRef<PortfolioConfig>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct BtcAddressBalanceRequest {
     config: CatalogRef<BtcAddressBalanceConfig>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EvmNativeBalanceRequest {
-    config: CatalogRef<EvmNativeBalanceConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,27 +99,21 @@ struct ContractLifecycleRequest {
 
 #[derive(Debug, Clone, Copy)]
 enum EntryPoint {
-    PortfolioSnapshot,
     BtcAddressBalance,
-    EvmNativeBalance,
     ContractDeploy,
     ContractConfigure,
     ContractValidate,
     ContractLifecycle,
-    CollectThenReport,
 }
 
 impl EntryPoint {
     fn parse(value: &str) -> Result<Self, AppError> {
         match value {
-            PORTFOLIO_SNAPSHOT_ID => Ok(Self::PortfolioSnapshot),
             BTC_ADDRESS_BALANCE_ID => Ok(Self::BtcAddressBalance),
-            EVM_NATIVE_BALANCE_ID => Ok(Self::EvmNativeBalance),
             CONTRACT_DEPLOY_ID => Ok(Self::ContractDeploy),
             CONTRACT_CONFIGURE_ID => Ok(Self::ContractConfigure),
             CONTRACT_VALIDATE_ID => Ok(Self::ContractValidate),
             CONTRACT_LIFECYCLE_ID => Ok(Self::ContractLifecycle),
-            COLLECT_THEN_REPORT_ID => Ok(Self::CollectThenReport),
             _ => Err(AppError::new(
                 ErrorClass::BadRequest,
                 "EntryPointNotFound",
@@ -161,27 +124,21 @@ impl EntryPoint {
 
     fn id(self) -> &'static str {
         match self {
-            Self::PortfolioSnapshot => PORTFOLIO_SNAPSHOT_ID,
             Self::BtcAddressBalance => BTC_ADDRESS_BALANCE_ID,
-            Self::EvmNativeBalance => EVM_NATIVE_BALANCE_ID,
             Self::ContractDeploy => CONTRACT_DEPLOY_ID,
             Self::ContractConfigure => CONTRACT_CONFIGURE_ID,
             Self::ContractValidate => CONTRACT_VALIDATE_ID,
             Self::ContractLifecycle => CONTRACT_LIFECYCLE_ID,
-            Self::CollectThenReport => COLLECT_THEN_REPORT_ID,
         }
     }
 
     fn request_schema_id(self) -> Result<SchemaId, AppError> {
         let (name, seed) = match self {
-            Self::PortfolioSnapshot => PORTFOLIO_REQUEST_SCHEMA,
             Self::BtcAddressBalance => BTC_REQUEST_SCHEMA,
-            Self::EvmNativeBalance => EVM_REQUEST_SCHEMA,
             Self::ContractDeploy => CONTRACT_DEPLOY_REQUEST_SCHEMA,
             Self::ContractConfigure => CONTRACT_CONFIGURE_REQUEST_SCHEMA,
             Self::ContractValidate => CONTRACT_VALIDATE_REQUEST_SCHEMA,
             Self::ContractLifecycle => CONTRACT_LIFECYCLE_REQUEST_SCHEMA,
-            Self::CollectThenReport => COLLECT_THEN_REPORT_REQUEST_SCHEMA,
         };
         SchemaId::new(
             name,
@@ -204,28 +161,11 @@ impl EntryPoint {
         request: &Value,
     ) -> Result<PreparedEntryPoint, AppError> {
         match self {
-            Self::PortfolioSnapshot => {
-                let request: PortfolioSnapshotRequest = decode_request(request)?;
-                let (portfolio, source) = resolve_catalog(store, &request.portfolio).await?;
-                let plan = TypedProgramLaunchPlan::from_draft(
-                    mfm_op_portfolio_tracker::portfolio_program_draft(portfolio)
-                        .map_err(|_| plan_error("PortfolioSnapshotPlanFailed"))?,
-                )
-                .map_err(|_| plan_error("PortfolioSnapshotPlanFailed"))?;
-                Ok(PreparedEntryPoint::new(plan, [source]))
-            }
             Self::BtcAddressBalance => {
                 let request: BtcAddressBalanceRequest = decode_request(request)?;
                 let (config, source) = resolve_catalog(store, &request.config).await?;
                 let plan = mfm_op_btc_collectors::btc_address_balance_program_launch_plan(config)
                     .map_err(|_| plan_error("BtcAddressBalancePlanFailed"))?;
-                Ok(PreparedEntryPoint::new(plan, [source]))
-            }
-            Self::EvmNativeBalance => {
-                let request: EvmNativeBalanceRequest = decode_request(request)?;
-                let (config, source) = resolve_catalog(store, &request.config).await?;
-                let plan = mfm_op_evm_collectors::evm_native_balance_program_launch_plan(config)
-                    .map_err(|_| plan_error("EvmNativeBalancePlanFailed"))?;
                 Ok(PreparedEntryPoint::new(plan, [source]))
             }
             Self::ContractDeploy => {
@@ -309,23 +249,6 @@ impl EntryPoint {
                     ],
                 ))
             }
-            Self::CollectThenReport => {
-                let request: CollectThenReportRequest = decode_request(request)?;
-                let (portfolio, portfolio_source) =
-                    resolve_catalog(store, request.portfolio()).await?;
-                let config = build_collect_then_report_config(
-                    portfolio,
-                    request.bitcoin_policy().clone(),
-                    request.evm_policy().clone(),
-                )
-                .map_err(|_| plan_error("CollectThenReportConfigInvalid"))?;
-                let plan =
-                    mfm_op_portfolio_collect_report::collect_then_report_program_launch_plan(
-                        config,
-                    )
-                    .map_err(|_| plan_error("CollectThenReportPlanFailed"))?;
-                Ok(PreparedEntryPoint::new(plan, [portfolio_source]))
-            }
         }
     }
 }
@@ -350,14 +273,11 @@ impl PreparedEntryPoint {
 /// Returns the exact compiled entry-point discovery surface.
 pub fn entry_point_summaries() -> Result<Vec<EntryPointSummary>, AppError> {
     let mut summaries: Vec<EntryPointSummary> = [
-        EntryPoint::PortfolioSnapshot,
         EntryPoint::BtcAddressBalance,
-        EntryPoint::EvmNativeBalance,
         EntryPoint::ContractDeploy,
         EntryPoint::ContractConfigure,
         EntryPoint::ContractValidate,
         EntryPoint::ContractLifecycle,
-        EntryPoint::CollectThenReport,
     ]
     .into_iter()
     .map(|entry_point| {

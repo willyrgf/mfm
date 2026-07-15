@@ -234,16 +234,6 @@ in
       env = postgresSqlxEnv;
       requires = [ "postgres" ];
     };
-    mfm-cli-build = cargoLeaf {
-      run = [
-        "cargo"
-        "build"
-        "-p"
-        "mfm"
-        "--bin"
-        "mfm_cli"
-      ];
-    };
     mfm-start-store = {
       serviceLifetime = "persistent-until-down";
       invocation = {
@@ -276,38 +266,6 @@ in
       env = postgresEnv;
       requires = [ "postgres" ];
     };
-    parity-collect-then-report = cargoLeaf {
-      run = [
-        "cargo"
-        "test"
-        "-p"
-        "mfm-integration-tests"
-        "--features"
-        "parity-tests"
-        "--test"
-        "collect_then_report_native_balances"
-        "--"
-        "--nocapture"
-      ];
-      env = postgresEnv;
-      requires = [ "postgres" ];
-    };
-    parity-cli-postgres-status = cargoLeaf {
-      run = [
-        "cargo"
-        "test"
-        "-p"
-        "mfm"
-        "--features"
-        "parity-tests"
-        "--test"
-        "status_contract_postgres"
-        "--"
-        "--nocapture"
-      ];
-      env = postgresEnv;
-      requires = [ "postgres" ];
-    };
     parity-postgres-state-events = cargoLeaf {
       run = [
         "cargo"
@@ -316,54 +274,6 @@ in
         "mfm-storage-postgres"
         "--features"
         "parity-tests"
-        "--"
-        "--nocapture"
-      ];
-      env = postgresEnv;
-      requires = [ "postgres" ];
-    };
-    parity-catalog-setup = cargoLeaf {
-      run = [
-        "cargo"
-        "test"
-        "-p"
-        "mfm-integration-tests"
-        "--features"
-        "parity-tests"
-        "--test"
-        "catalog_setup_resolution"
-        "--"
-        "--nocapture"
-      ];
-      env = postgresEnv;
-      requires = [ "postgres" ];
-    };
-    parity-cli-setup = cargoLeaf {
-      run = [
-        "cargo"
-        "test"
-        "-p"
-        "mfm"
-        "--features"
-        "parity-tests"
-        "--test"
-        "setup_postgres"
-        "--"
-        "--nocapture"
-      ];
-      env = postgresEnv;
-      requires = [ "postgres" ];
-    };
-    parity-catalog-replay = cargoLeaf {
-      run = [
-        "cargo"
-        "test"
-        "-p"
-        "mfm-integration-tests"
-        "--features"
-        "parity-tests"
-        "--test"
-        "catalog_replay_independence"
         "--"
         "--nocapture"
       ];
@@ -399,47 +309,13 @@ in
       kind = "composite";
       steps = {
         postgres-sqlx-check.task = "postgres-sqlx-check";
-        mfm-cli-build = {
-          task = "mfm-cli-build";
-          dependsOn = [ "postgres-sqlx-check" ];
-        };
         parity-postgres-state-events = {
           task = "parity-postgres-state-events";
           dependsOn = [ "postgres-sqlx-check" ];
         };
-        parity-catalog-setup = {
-          task = "parity-catalog-setup";
-          dependsOn = [ "postgres-sqlx-check" ];
-        };
-        parity-collect-then-report = {
-          task = "parity-collect-then-report";
-          dependsOn = [
-            "mfm-cli-build"
-            "parity-postgres-state-events"
-            "parity-catalog-setup"
-          ];
-        };
-        parity-catalog-replay = {
-          task = "parity-catalog-replay";
-          dependsOn = [
-            "mfm-cli-build"
-            "parity-catalog-setup"
-          ];
-        };
-        parity-cli-setup = {
-          task = "parity-cli-setup";
-          dependsOn = [
-            "mfm-cli-build"
-            "parity-catalog-setup"
-          ];
-        };
         parity-postgres-rest-api = {
           task = "parity-postgres-rest-api";
-          dependsOn = [ "parity-collect-then-report" ];
-        };
-        parity-cli-postgres-status = {
-          task = "parity-cli-postgres-status";
-          dependsOn = [ "parity-postgres-rest-api" ];
+          dependsOn = [ "parity-postgres-state-events" ];
         };
       };
     };

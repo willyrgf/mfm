@@ -1,6 +1,6 @@
 # Implementation plan: typed PostgreSQL configuration catalog
 
-Status: engineering-ready plan for `RFC_CONFIG.md`
+Status: historical architecture record; superseded for the portfolio source-model cutover
 
 Date: 2026-07-14
 

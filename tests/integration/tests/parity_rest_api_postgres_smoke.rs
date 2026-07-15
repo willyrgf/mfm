@@ -12,7 +12,7 @@ use tower::ServiceExt;
 
 const VALID_RUN_ID: &str =
     "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000033";
-const PORTFOLIO_ENTRY_POINT: &str = "mfm.portfolio/portfolio_snapshot@1";
+const BTC_ENTRY_POINT: &str = "mfm.bitcoin/btc_address_balance@1";
 
 async fn assert_start_error(
     app: &axum::Router,
@@ -84,7 +84,7 @@ async fn parity_rest_postgres_smoke() {
         assert_start_error(
             &app,
             json!({
-                "entry_point": PORTFOLIO_ENTRY_POINT,
+                "entry_point": BTC_ENTRY_POINT,
                 "request": {old_field: "legacy-value"},
             }),
             "EntryPointRequestInvalid",
@@ -95,8 +95,8 @@ async fn parity_rest_postgres_smoke() {
     assert_start_error(
         &app,
         json!({
-            "entry_point": PORTFOLIO_ENTRY_POINT,
-            "request": "portfolio = 'legacy TOML'",
+            "entry_point": BTC_ENTRY_POINT,
+            "request": "config = 'legacy TOML'",
         }),
         "EntryPointRequestInvalid",
         &["legacy TOML"],
@@ -105,8 +105,8 @@ async fn parity_rest_postgres_smoke() {
     assert_start_error(
         &app,
         json!({
-            "entry_point": PORTFOLIO_ENTRY_POINT,
-            "request": {"portfolio": {"name": "acme/dual-mainnet"}},
+            "entry_point": BTC_ENTRY_POINT,
+            "request": {"config": {"name": "acme/dual-mainnet"}},
         }),
         "EntryPointRequestInvalid",
         &["acme/dual-mainnet"],
@@ -115,9 +115,9 @@ async fn parity_rest_postgres_smoke() {
     assert_start_error(
         &app,
         json!({
-            "entry_point": PORTFOLIO_ENTRY_POINT,
+            "entry_point": BTC_ENTRY_POINT,
             "request": {
-                "portfolio": {"name": "acme/dual-mainnet", "digest": "not-a-digest"},
+                "config": {"name": "acme/dual-mainnet", "digest": "not-a-digest"},
                 "unknown": true,
             },
         }),
@@ -128,7 +128,8 @@ async fn parity_rest_postgres_smoke() {
     assert_start_error(
         &app,
         json!({
-            "entry_point": "mfm.portfolio/portfolio_snapshot",
+            // Regression: the removed public portfolio id must never resolve as an alias.
+            "entry_point": "mfm.portfolio/portfolio_snapshot@1",
             "request": {},
         }),
         "EntryPointNotFound",

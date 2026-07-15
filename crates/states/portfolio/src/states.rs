@@ -261,7 +261,7 @@ impl PureState for AssembleSnapshotState {
         input: Self::Input,
         _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
-        assemble_snapshot(&self.config, input, 0)
+        assemble_snapshot(&self.config, input)
     }
 }
 

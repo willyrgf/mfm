@@ -2,30 +2,15 @@
 //! Typed portfolio tracker workflow operation (fact-backed report-only).
 //!
 //! Graph: ResolveSubjects → SelectHoldings → ResolveValuations → AssembleSnapshot → ProjectReport.
-//!
-//! # Examples
-//!
-//! ```rust
-//! use mfm_op_portfolio_tracker::{portfolio_program_draft, PortfolioConfig};
-//!
-//! # fn demo(config: PortfolioConfig) -> mfm_program::Result<()> {
-//! let draft = portfolio_program_draft(config)?;
-//! assert!(!draft.state_nodes().is_empty());
-//! # Ok(())
-//! # }
-//! ```
 
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_portfolio_model::domain_key::{
     HoldingsDomainKey, ReportDomainKey, SubjectDomainKey, ValuationDomainKey,
 };
 pub use mfm_portfolio_model::portfolio::PortfolioConfig;
-use mfm_program::{
-    build_root_with_registries, Handle, NoContext, Operation, OperationExpansion, OperationKey,
-    PublicOutputKey, RootBuilder, ScopeKey, StateKey,
-};
+use mfm_program::{Handle, NoContext, Operation, OperationExpansion, StateKey};
 pub use mfm_state_portfolio::{
-    balance_reader_kind, portfolio_adapter_kind, portfolio_adapter_version, AssembleSnapshotConfig,
+    portfolio_adapter_kind, portfolio_adapter_version, AssembleSnapshotConfig,
     AssembleSnapshotInput, AssembleSnapshotInputHandles, AssembleSnapshotState,
     PortfolioInputsReady, PortfolioInputsReadyConfig, PortfolioInputsReadyState,
     PortfolioOperationOutputs, PortfolioPublicOutputs, ProjectReportConfig, ProjectReportInput,
@@ -36,9 +21,6 @@ pub use mfm_state_portfolio::{
 
 const PORTFOLIO_OPERATION_KIND_NAME: &str = "tracker_workflow";
 const PORTFOLIO_OPERATION_VERSION: &str = "mfm.portfolio.operation.tracker_workflow.v2";
-const ROOT_SCOPE: &str = "portfolio";
-const OP_KEY: &str = "portfolio_tracker";
-const PUBLIC_OUTPUT_KEY: &str = "portfolio";
 
 /// Typed portfolio tracker workflow operation.
 pub struct PortfolioTrackerWorkflowOperation;
@@ -158,39 +140,3 @@ mfm_certify::define_program_descriptor_registry! {
     ],
     operations: [PortfolioTrackerWorkflowOperation],
 }
-
-/// Builds a typed portfolio program draft.
-pub fn portfolio_program_draft(
-    config: PortfolioConfig,
-) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
-    build_root_with_registries(
-        ScopeKey::new(ROOT_SCOPE)?,
-        portfolio_state_registry()?,
-        portfolio_operation_registry()?,
-        |root: &mut RootBuilder<'_, '_>| {
-            let readiness = root.scope().state::<PortfolioInputsReadyState, _>(
-                StateKey::new("portfolio_inputs_ready")?,
-                NoContext,
-                PortfolioInputsReadyConfig::new(0, 0),
-                (),
-            )?;
-            let result = root.scope().call::<PortfolioTrackerWorkflowOperation, _>(
-                OperationKey::new(OP_KEY)?,
-                PortfolioTrackerWorkflowOperation,
-                config,
-                readiness,
-            )?;
-            root.bind_public_outputs(
-                PublicOutputKey::new(PUBLIC_OUTPUT_KEY)?,
-                &PortfolioPublicOutputs {
-                    snapshot: result.snapshot,
-                    report: result.report,
-                },
-            )
-        },
-    )
-}
-
-#[cfg(test)]
-#[path = "portfolio_tracker_tests.rs"]
-mod tests;

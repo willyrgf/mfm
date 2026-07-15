@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
 
-use mfm_ids::RunId;
 use mfm_program::{CanonicalSeed, TypedProgramDraft};
 use mfm_store::v1 as store;
 
@@ -36,29 +34,6 @@ impl Drop for EnvVarRestore {
             }
         }
     }
-}
-
-/// Starts a local JSON-RPC mock for portfolio balance reads.
-pub async fn start_portfolio_rpc_mock(expected_chain_id: u64) -> String {
-    let app = axum::Router::new()
-        .route("/", axum::routing::post(portfolio_rpc_handler))
-        .with_state(expected_chain_id);
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind rpc mock");
-    let addr = listener.local_addr().expect("rpc mock addr");
-    listener
-        .set_nonblocking(true)
-        .expect("set rpc mock nonblocking");
-    std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("rpc mock runtime");
-        runtime.block_on(async move {
-            let listener = tokio::net::TcpListener::from_std(listener).expect("tokio rpc listener");
-            axum::serve(listener, app).await.expect("rpc mock serve");
-        });
-    });
-    format!("http://{addr}")
 }
 
 /// Starts one JSON-RPC mock serving the EVM and Bitcoin calls used by the production collector
@@ -136,34 +111,6 @@ async fn collectors_rpc_handler(
                 "error": { "code": -32601, "message": format!("unsupported test method {other}") }
             }));
         }
-    };
-    axum::Json(serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": result
-    }))
-}
-
-async fn portfolio_rpc_handler(
-    axum::extract::State(expected_chain_id): axum::extract::State<u64>,
-    axum::Json(request): axum::Json<serde_json::Value>,
-) -> axum::Json<serde_json::Value> {
-    let id = request
-        .get("id")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!(1));
-    let method = request
-        .get("method")
-        .and_then(|value| value.as_str())
-        .expect("json-rpc method");
-    let result = match method {
-        "eth_chainId" => serde_json::json!(format!("0x{expected_chain_id:x}")),
-        "eth_getBlockByNumber" => serde_json::json!({
-            "number": "0x64",
-            "hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
-        }),
-        "eth_getBalance" => serde_json::json!("0xde0b6b3a7640000"),
-        other => panic!("unexpected rpc method {other}"),
     };
     axum::Json(serde_json::json!({
         "jsonrpc": "2.0",
@@ -257,25 +204,6 @@ fn toml_string(value: &str) -> String {
     serde_json::to_string(value).expect("toml-compatible string")
 }
 
-/// Prepares a typed portfolio report launch against the supplied store scope.
-pub async fn prepare_portfolio_launch_for_store<S>(
-    store: &S,
-    config: &serde_json::Value,
-    invocation_key: Option<&str>,
-) -> mfm_app::RunLaunchRequest
-where
-    S: store::StoreScopeStore,
-{
-    let portfolio = config
-        .get("portfolio")
-        .cloned()
-        .unwrap_or_else(|| config.clone());
-    let portfolio = serde_json::from_value(portfolio).expect("portfolio config");
-    let draft = mfm_op_portfolio_tracker::portfolio_program_draft(portfolio)
-        .expect("portfolio program draft");
-    prepare_typed_launch_for_store(store, draft, BTreeMap::new(), invocation_key).await
-}
-
 /// Prepares a typed Bitcoin collector launch against the supplied store scope.
 pub async fn prepare_btc_balance_launch_for_store<S>(
     store: &S,
@@ -306,21 +234,6 @@ where
     prepare_typed_launch_for_store(store, draft, seed_material, invocation_key).await
 }
 
-/// Prepares a typed EVM collector launch against the supplied store scope.
-pub async fn prepare_evm_balance_launch_for_store<S>(
-    store: &S,
-    config: &serde_json::Value,
-    invocation_key: Option<&str>,
-) -> mfm_app::RunLaunchRequest
-where
-    S: store::StoreScopeStore,
-{
-    let config = serde_json::from_value(config.clone()).expect("EVM collector config");
-    let draft = mfm_op_evm_collectors::evm_native_balance_program_draft(config)
-        .expect("EVM collector program draft");
-    prepare_typed_launch_for_store(store, draft, BTreeMap::new(), invocation_key).await
-}
-
 async fn prepare_typed_launch_for_store<S>(
     store: &S,
     draft: TypedProgramDraft,
@@ -346,48 +259,4 @@ where
             .expect("invocation key"),
     )
     .expect("prepared typed launch")
-}
-
-/// Admits a portfolio run without driving it so tests can append history before resume.
-pub async fn admit_portfolio_run_without_driving<S>(
-    store: &S,
-    config: &serde_json::Value,
-) -> (RunId, mfm_certify::CertifiedTypedSpec)
-where
-    S: store::RunEventStore
-        + store::StoreScopeStore
-        + store::RetainedArtifactReadProvider
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-{
-    let prepared = prepare_portfolio_launch_for_store(store, config, None).await;
-    let run_id = prepared.run_id.clone();
-    let certified = prepared.certified_spec.clone();
-    let runners = mfm_app::production_runner_registry(
-        Arc::new(store.clone()),
-        mfm_app::ProjectionFactIndexProvider::empty_arc(),
-        None,
-    )
-    .expect("production runners");
-    let scheduler = mfm_runtime::SerialTypedScheduler::new(runners, Arc::new(store.clone()));
-    let runtime_spec =
-        mfm_runtime::CertifiedRuntimeSpec::new(prepared.certified_spec).expect("runtime spec");
-    let launch = scheduler
-        .prepare_run_launch(
-            &runtime_spec,
-            prepared.identity_material,
-            prepared.evidence,
-            store
-                .expected_next_seq(&run_id)
-                .await
-                .unwrap_or_else(|error| panic!("expected next seq: {error}")),
-        )
-        .expect("prepared launch");
-    scheduler
-        .start_run(store, launch)
-        .await
-        .expect("start fixture run");
-    (run_id, certified)
 }

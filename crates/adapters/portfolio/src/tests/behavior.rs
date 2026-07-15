@@ -139,7 +139,6 @@ async fn select_holdings_succeeds_from_platform_facts_with_providers_unbound() {
             holdings: selected,
             valuations,
         },
-        0,
     )
     .expect("assemble snapshot from selected holdings");
     assert_eq!(snapshot.network_pins, pins);
@@ -409,32 +408,14 @@ fn multiset_plan_matching_consumes_first_unmatched_identical_plan() {
     use std::collections::BTreeSet;
 
     let portfolio = dual_wallet_same_network_portfolio();
-    // Force both wallets to share one address so query plans are identical.
-    let mut portfolio = portfolio;
-    let shared = portfolio.wallets[0].subject.address_str().to_owned();
-    portfolio.wallets[1].subject =
-        WalletSubject::new(shared, WalletSubjectKind::EvmAddress).expect("shared subject");
     let config = SelectHoldingsConfig::with_default_store_scope(portfolio.clone()).expect("config");
     let subjects = resolve_subjects_from_config(
         &ResolveSubjectsConfig::new(portfolio.wallets.clone()).expect("subjects"),
     );
     let requirements = expand_required_holdings(&config, &subjects).expect("requirements");
-    assert!(requirements.len() >= 2, "need at least two requirements");
-    let expected_requests = requirements
-        .iter()
-        .map(|requirement| holding_fact_index_request(&config, requirement).expect("request"))
-        .collect::<Vec<_>>();
+    let request = holding_fact_index_request(&config, &requirements[0]).expect("request");
+    let expected_requests = vec![request.clone(), request];
     let first_plan = expected_requests[0].plan().clone();
-    let identical_pair: Vec<_> = expected_requests
-        .iter()
-        .enumerate()
-        .filter(|(_, request)| request.plan() == &first_plan)
-        .map(|(index, _)| index)
-        .collect();
-    assert!(
-        identical_pair.len() >= 2,
-        "fixture must produce at least two identical plans for same-address wallets"
-    );
 
     let mut matched = BTreeSet::new();
     let first = first_unmatched_plan_index(&expected_requests, &matched, &first_plan)

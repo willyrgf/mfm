@@ -2567,6 +2567,7 @@ dependencies = [
  "mfm-canonical",
  "mfm-certify",
  "mfm-ids",
+ "mfm-portfolio-model",
  "mfm-program",
  "mfm-program-derive",
  "mfm-states-evm",
@@ -2599,7 +2600,6 @@ version = "0.1.0"
 dependencies = [
  "mfm-canonical",
  "mfm-capabilities",
- "mfm-catalog-model",
  "mfm-certify",
  "mfm-effects",
  "mfm-ids",

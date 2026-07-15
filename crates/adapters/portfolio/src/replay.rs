@@ -194,7 +194,6 @@ pub fn verify_portfolio_replay(broker: &replay::ReplayBroker) -> replay::Result<
             holdings: expected_output.clone(),
             valuations,
         },
-        0,
     )
     .map_err(replay_adapter_error)?;
     verify_replay_output_bytes(&snapshot_frame, &snapshot, "assembled snapshot")?;

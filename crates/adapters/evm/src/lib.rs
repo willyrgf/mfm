@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
+use std::num::NonZeroU64;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -37,7 +38,7 @@ use mfm_states_evm::{
     EvmAddressNativeBalanceObservation, EvmAddressNativeBalanceSnapshotFact, EvmJointTip,
     ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput, ObserveEvmNativeBalanceState,
     RecordEvmNativeBalanceFactState, ResolveEvmJointTipConfig, ResolveEvmJointTipInput,
-    ResolveEvmJointTipState,
+    ResolveEvmJointTipState, EVM_JOINT_TIP_SOURCE_READS,
 };
 use mfm_store::v1 as store;
 use mfm_values::{MfmConfig, MfmValue, NonEmpty};
@@ -285,7 +286,25 @@ fn joint_tip_binding(config: &ResolveEvmJointTipConfig) -> Result<EvmNetworkBind
 }
 
 fn balance_binding(config: &ObserveEvmNativeBalanceConfig) -> Result<EvmNetworkBinding> {
-    network_binding(&config.network, config.chain_id)
+    let (network, chain_id, _) = config
+        .evm_network_parts()
+        .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
+    network_binding(network, chain_id)
+}
+
+fn joint_tip_config_for_observation(
+    config: &ObserveEvmNativeBalanceConfig,
+) -> Result<ResolveEvmJointTipConfig> {
+    let (network, chain_id, _) = config
+        .evm_network_parts()
+        .map_err(|_| EvmAdapterError::InvalidCapabilityRequest)?;
+    let max_source_reads = NonZeroU64::new(EVM_JOINT_TIP_SOURCE_READS)
+        .ok_or(EvmAdapterError::InvalidCapabilityRequest)?;
+    Ok(ResolveEvmJointTipConfig {
+        network: network.to_owned(),
+        chain_id,
+        max_source_reads,
+    })
 }
 
 fn parse_block_hash(value: &str) -> Result<B256> {
@@ -405,11 +424,8 @@ impl ErasedNodeRunner for ObserveNativeBalanceRunner {
                 .await
                 .map_err(evm_capability_runtime_error)?;
             let verified_tip = materialize_evm_joint_tip(
-                &ResolveEvmJointTipConfig {
-                    network: state.config().network.clone(),
-                    chain_id: state.config().chain_id,
-                    max_source_reads: state.config().max_source_reads,
-                },
+                &joint_tip_config_for_observation(state.config())
+                    .map_err(evm_adapter_runtime_error)?,
                 &verified_block,
             )
             .map_err(evm_state_runtime_error)?;
@@ -569,8 +585,9 @@ fn verify_evm_shared_joint_tips(
         let config: ObserveEvmNativeBalanceConfig = replay_node_config(broker, &frame.node)?;
         let tip = replay_joint_tip_input(broker, &frame.node)?;
         let anchor = (tip.block_number(), tip.block_hash().to_owned());
+        let (network, _, _) = config.evm_network_parts().map_err(replay_adapter_error)?;
         if anchors
-            .insert(config.network.clone(), anchor.clone())
+            .insert(network.to_owned(), anchor.clone())
             .is_some_and(|existing| existing != anchor)
         {
             return Err(replay_evm_mismatch(
@@ -623,9 +640,10 @@ fn verify_evm_native_balance_observation_replay(
         "hash:{:#x}",
         parse_block_hash(input_tip.block_hash()).map_err(replay_adapter_error)?
     );
+    let (network, chain_id, _) = config.evm_network_parts().map_err(replay_adapter_error)?;
     let verified_tip = EvmJointTip::new(
-        config.network.clone(),
-        config.chain_id,
+        network,
+        chain_id,
         evidence.verification_response_block_number,
         &evidence.verification_response_block_hash,
     )
@@ -635,12 +653,8 @@ fn verify_evm_native_balance_observation_replay(
         || evidence.verification_request_block_selector != expected_selector
         || evidence.verification_response_block_number != input_tip.block_number()
         || verified_tip.block_hash() != input_tip.block_hash()
-        || !evm_source_matches(&evidence.balance_source, &config.network, config.chain_id)
-        || !evm_source_matches(
-            &evidence.verification_source,
-            &config.network,
-            config.chain_id,
-        )
+        || !evm_source_matches(&evidence.balance_source, network, chain_id)
+        || !evm_source_matches(&evidence.verification_source, network, chain_id)
     {
         return Err(replay_evm_mismatch(
             "EVM native-balance read evidence did not match certified requests or source binding",

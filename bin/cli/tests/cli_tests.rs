@@ -49,9 +49,6 @@ fn test_ops_help_and_list() {
         "evm_contract_deploy",
         "evm_contract_lifecycle",
         "evm_contract_validate",
-        "evm_native_balance",
-        "collect_then_report",
-        "portfolio_snapshot",
     ] {
         assert!(
             rendered.contains(operation),

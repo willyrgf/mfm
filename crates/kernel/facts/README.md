@@ -9,5 +9,5 @@ Collectors and report hydration must derive it from hydrated canonical material;
 reference hashes are checked against that material rather than trusted as a constructor input.
 
 `docs/design.md` is the normative typed-core authority contract. Portfolio collectors and
-fact-backed reporting authority live in `docs/portfolio-collect-then-report.md`. This crate is
+fact-backed reporting authority live in `docs/design.md`. This crate is
 framework-owned and must remain domain-free.
