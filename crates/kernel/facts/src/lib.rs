@@ -86,8 +86,9 @@ pub use codec::{
 };
 pub use content_identity::{
     canonical_fact_content_identity_bytes, derive_fact_content_identity,
-    fact_content_identity_digest, verify_fact_claim_content_identity,
-    verify_internal_fact_ref_content_identity, FactContentIdentity,
+    derive_fact_content_identity_from_typed_values, fact_content_identity_digest,
+    verify_fact_claim_content_identity, verify_internal_fact_ref_content_identity,
+    verify_serialized_fact_content_identity_from_typed_values, FactContentIdentity,
     FACT_CONTENT_IDENTITY_DIGEST_DOMAIN,
 };
 pub use descriptor::{

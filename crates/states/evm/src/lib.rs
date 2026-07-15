@@ -24,11 +24,16 @@
 
 mod erc20_balance_collect;
 mod native_balance_collect;
+mod network_collection_receipt;
 
 pub use erc20_balance_collect::{
-    erc20_balance_call_request, erc20_balance_record_visibility, erc20_metadata_call_request,
+    assemble_evm_erc20_balance_batch_receipt, erc20_balance_call_request,
+    erc20_balance_record_visibility, erc20_metadata_call_request,
     normalize_erc20_balance_from_capability, normalize_erc20_token_metadata_from_capability,
     validate_observe_erc20_balance_config, validate_observe_erc20_token_metadata_config,
+    AssembleEvmErc20BalanceBatchReceiptConfig, AssembleEvmErc20BalanceBatchReceiptInput,
+    AssembleEvmErc20BalanceBatchReceiptInputHandles, AssembleEvmErc20BalanceBatchReceiptState,
+    EvmErc20BalanceBatchReceipt, EvmErc20BalanceReceiptEntry, EvmErc20BalanceSourceKey,
     EvmErc20TokenMetadata, ObserveErc20BalanceConfig, ObserveErc20BalanceInput,
     ObserveErc20BalanceInputHandles, ObserveErc20BalanceState, ObserveErc20TokenMetadataConfig,
     ObserveErc20TokenMetadataInput, ObserveErc20TokenMetadataInputHandles,
@@ -39,20 +44,29 @@ pub use erc20_balance_collect::{
 };
 
 pub use native_balance_collect::{
-    assemble_evm_native_balance_batch, evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version,
-    materialize_evm_joint_tip, native_balance_record_visibility,
+    assemble_evm_native_balance_batch_receipt, evm_jsonrpc_adapter_kind,
+    evm_jsonrpc_adapter_version, materialize_evm_joint_tip, native_balance_record_visibility,
     normalize_evm_native_balance_from_capability, normalize_evm_native_balance_observation,
-    require_shared_evm_joint_tip, validate_observe_evm_native_balance_config,
-    validate_resolve_evm_joint_tip_config, AssembleEvmNativeBalanceBatchConfig,
-    AssembleEvmNativeBalanceBatchInput, AssembleEvmNativeBalanceBatchInputHandles,
-    AssembleEvmNativeBalanceBatchState, EvmAddressNativeBalanceObservation, EvmJointTip,
-    EvmNativeBalanceBatchSummary, ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput,
-    ObserveEvmNativeBalanceInputHandles, ObserveEvmNativeBalanceState,
-    RecordEvmNativeBalanceFactConfig, RecordEvmNativeBalanceFactInput,
-    RecordEvmNativeBalanceFactInputHandles, RecordEvmNativeBalanceFactState,
-    ResolveEvmJointTipConfig, ResolveEvmJointTipInput, ResolveEvmJointTipInputHandles,
-    ResolveEvmJointTipState, EVM_JOINT_TIP_SOURCE_READS, EVM_NATIVE_BALANCE_COVERAGE,
-    EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS,
+    validate_observe_evm_native_balance_config, validate_resolve_evm_joint_tip_config,
+    AssembleEvmNativeBalanceBatchReceiptConfig, AssembleEvmNativeBalanceBatchReceiptInput,
+    AssembleEvmNativeBalanceBatchReceiptInputHandles, AssembleEvmNativeBalanceBatchReceiptState,
+    EvmAddressNativeBalanceObservation, EvmJointTip, EvmNativeBalanceBatchReceipt,
+    EvmNativeBalanceReceiptEntry, EvmNativeBalanceSourceKey, ObserveEvmNativeBalanceConfig,
+    ObserveEvmNativeBalanceInput, ObserveEvmNativeBalanceInputHandles,
+    ObserveEvmNativeBalanceState, RecordEvmNativeBalanceFactConfig,
+    RecordEvmNativeBalanceFactInput, RecordEvmNativeBalanceFactInputHandles,
+    RecordEvmNativeBalanceFactState, ResolveEvmJointTipConfig, ResolveEvmJointTipInput,
+    ResolveEvmJointTipInputHandles, ResolveEvmJointTipState, EVM_JOINT_TIP_SOURCE_READS,
+    EVM_NATIVE_BALANCE_COVERAGE, EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS,
+    EVM_NATIVE_BALANCE_SOURCE_STATUS,
+};
+
+pub use network_collection_receipt::{
+    assemble_evm_network_collection_receipt,
+    validate_assemble_evm_network_collection_receipt_config,
+    AssembleEvmNetworkCollectionReceiptConfig, AssembleEvmNetworkCollectionReceiptInput,
+    AssembleEvmNetworkCollectionReceiptInputHandles, AssembleEvmNetworkCollectionReceiptState,
+    EvmNetworkCollectionReceipt,
 };
 
 use std::str::FromStr;

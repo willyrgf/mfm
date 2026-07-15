@@ -3,7 +3,7 @@
 //!
 //! This monocrate owns BTC collector topologies only:
 //! - one-cycle chain-head collector (control checkpoints; not report pin authority)
-//! - multi-address native balance collector (joint tip once → pin-in observe → record)
+//! - internal anchored native-balance collection (one network tip → per-source facts → receipt)
 //!
 //! It performs no live IO and does not register app assembly, adapters, transports, storage,
 //! binaries, or recurring scheduler policy.
@@ -28,28 +28,27 @@ use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, Handle, NoContext, NonEmptyHandles, Operation,
     OperationExpansion, OperationKey, PublicOutputKey, RootBuilder, ScopeKey, SeedKey, StateKey,
-    TypedProgramLaunchPlan,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs};
 pub use mfm_states_btc::{
-    AssembleBtcAddressBalanceBatchConfig, AssembleBtcAddressBalanceBatchInput,
-    AssembleBtcAddressBalanceBatchInputHandles, AssembleBtcAddressBalanceBatchState,
-    BtcAddressBalanceBatchSummary, BtcAddressBalanceObservation,
-    BtcAddressBalanceObservationContext, BtcAddressBalanceSnapshotFact, BtcChainHeadFact,
-    BtcChainHeadObservation, BtcChainHeadObservationContext, BtcJointTip, CollectorCheckpointFact,
-    LoadedCollectorCheckpoint, ObserveBtcAddressBalanceConfig, ObserveBtcAddressBalanceInput,
-    ObserveBtcAddressBalanceInputHandles, ObserveBtcAddressBalanceState, ObserveBtcChainHeadConfig,
-    ObserveBtcChainHeadInput, ObserveBtcChainHeadInputHandles, ObserveBtcChainHeadState,
-    QueryCollectorCheckpointConfig, QueryCollectorCheckpointInput,
-    QueryCollectorCheckpointInputHandles, QueryCollectorCheckpointState,
-    RecordBtcAddressBalanceFactConfig, RecordBtcAddressBalanceFactInput,
-    RecordBtcAddressBalanceFactInputHandles, RecordBtcAddressBalanceFactState,
-    RecordBtcChainHeadFactConfig, RecordBtcChainHeadFactInput, RecordBtcChainHeadFactInputHandles,
-    RecordBtcChainHeadFactState, RecordCollectorCheckpointConfig, RecordCollectorCheckpointInput,
+    AssembleBtcNetworkCollectionReceiptConfig, AssembleBtcNetworkCollectionReceiptInput,
+    AssembleBtcNetworkCollectionReceiptInputHandles, AssembleBtcNetworkCollectionReceiptState,
+    BtcAddressBalanceSnapshotFact, BtcChainHeadFact, BtcChainHeadObservation,
+    BtcChainHeadObservationContext, BtcJointTip, BtcNetworkCollectionReceipt,
+    CollectorCheckpointFact, LoadedCollectorCheckpoint, ObserveBtcAddressBalanceConfig,
+    ObserveBtcAddressBalanceInput, ObserveBtcAddressBalanceInputHandles,
+    ObserveBtcAddressBalanceState, ObserveBtcChainHeadConfig, ObserveBtcChainHeadInput,
+    ObserveBtcChainHeadInputHandles, ObserveBtcChainHeadState, QueryCollectorCheckpointConfig,
+    QueryCollectorCheckpointInput, QueryCollectorCheckpointInputHandles,
+    QueryCollectorCheckpointState, RecordBtcAddressBalanceFactConfig,
+    RecordBtcAddressBalanceFactInput, RecordBtcAddressBalanceFactInputHandles,
+    RecordBtcAddressBalanceFactState, RecordBtcChainHeadFactConfig, RecordBtcChainHeadFactInput,
+    RecordBtcChainHeadFactInputHandles, RecordBtcChainHeadFactState,
+    RecordCollectorCheckpointConfig, RecordCollectorCheckpointInput,
     RecordCollectorCheckpointInputHandles, RecordCollectorCheckpointState,
     ResolveBtcJointTipConfig, ResolveBtcJointTipInput, ResolveBtcJointTipInputHandles,
     ResolveBtcJointTipState, BTC_JOINT_TIP_SOURCE_READS, BTC_NATIVE_BALANCE_COVERAGE,
-    BTC_NATIVE_BALANCE_OBSERVE_SOURCE_READS,
+    BTC_NATIVE_BALANCE_OBSERVE_SOURCE_READS, BTC_NATIVE_BALANCE_SOURCE_STATUS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -286,252 +285,236 @@ pub fn btc_chain_head_collector_cycle_program_draft(
     )
 }
 
-// --- Address-balance collector (joint tip + multi-address pin-in reads) ------
+// --- Internal anchored native-balance collection --------------------------------
 
-const BALANCE_OP_KIND_NAME: &str = "btc_address_balance";
-const BALANCE_OP_VERSION: &str = "mfm.bitcoin.operation.btc_address_balance.v1";
-const BALANCE_ROOT_SCOPE: &str = "btc_address_balance";
-const BALANCE_OP_KEY: &str = "btc_address_balance";
-const BALANCE_PUBLIC_OUTPUT_KEY: &str = "balance_batch";
-const BALANCE_CONTEXT_SEED_KEY: &str = "balance_observation_context";
+const BTC_NETWORK_COLLECTION_OP_KIND_NAME: &str = "btc_network_collection";
+const BTC_NETWORK_COLLECTION_OP_VERSION: &str = "mfm.bitcoin.operation.btc_network_collection.v1";
+const BTC_NATIVE_AT_ANCHOR_OP_KIND_NAME: &str = "btc_native_balances_at_anchor";
+const BTC_NATIVE_AT_ANCHOR_OP_VERSION: &str =
+    "mfm.bitcoin.operation.btc_native_balances_at_anchor.v1";
 
-/// Planning config for a multi-address Bitcoin native balance collector batch.
-///
-/// Multi-subject same-network batches **must** share one joint tip resolved once
-/// in expand.
+/// Deterministic native Bitcoin source demand for one semantic network collection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
-    namespace = "mfm.bitcoin",
-    name = "btc-address-balance-config",
-    schema = "mfm.bitcoin.operation.config.btc_address_balance",
-    validate = "validate_btc_address_balance_config"
+    schema = "mfm.bitcoin.operation.config.native_balances_at_anchor",
+    validate = "validate_btc_native_balances_at_anchor_config"
 )]
-pub struct BtcAddressBalanceConfig {
+pub struct BtcNativeBalancesAtAnchorConfig {
     /// Semantic Bitcoin network id.
     pub network: String,
     /// Expected Bitcoin Core network tag.
     pub bitcoin_network: String,
     /// Non-secret semantic source identity.
     pub semantic_source_identity: String,
-    /// Public Bitcoin addresses to observe (at least one).
+    /// Strictly sorted, unique public Bitcoin addresses to collect.
     pub addresses: Vec<String>,
-    /// Coverage claim written on success (default `configured_only`).
-    pub coverage: String,
-    /// Maximum source reads for joint-tip resolution.
-    pub max_source_reads: NonZeroU64,
 }
 
-impl BtcAddressBalanceConfig {
-    /// Builds the joint-tip resolve config for this batch.
+impl BtcNativeBalancesAtAnchorConfig {
+    /// Builds the exact state-owned joint-tip policy for this network.
     pub fn joint_tip_config(&self) -> ResolveBtcJointTipConfig {
         ResolveBtcJointTipConfig {
             network: self.network.clone(),
             bitcoin_network: self.bitcoin_network.clone(),
             semantic_source_identity: self.semantic_source_identity.clone(),
-            max_source_reads: self.max_source_reads,
+            max_source_reads: NonZeroU64::new(BTC_JOINT_TIP_SOURCE_READS)
+                .expect("non-zero Bitcoin joint-tip policy"),
         }
     }
 
-    /// Builds an observe config for one address in this batch.
+    /// Builds the exact state-owned observation policy for one demanded address.
     pub fn observe_config_for_address(&self, address: &str) -> ObserveBtcAddressBalanceConfig {
         ObserveBtcAddressBalanceConfig {
             network: self.network.clone(),
             bitcoin_network: self.bitcoin_network.clone(),
             semantic_source_identity: self.semantic_source_identity.clone(),
             address: address.to_owned(),
-            coverage: self.coverage.clone(),
-            max_source_reads: NonZeroU64::new(1).expect("non-zero static value"),
+            coverage: BTC_NATIVE_BALANCE_COVERAGE.to_owned(),
+            max_source_reads: NonZeroU64::new(BTC_NATIVE_BALANCE_OBSERVE_SOURCE_READS)
+                .expect("non-zero Bitcoin native-balance policy"),
         }
     }
 }
 
-/// Validates multi-address balance collector planning config.
-pub fn validate_btc_address_balance_config(config: &BtcAddressBalanceConfig) -> Result<(), String> {
+/// Validates deterministic native Bitcoin source demand.
+pub fn validate_btc_native_balances_at_anchor_config(
+    config: &BtcNativeBalancesAtAnchorConfig,
+) -> Result<(), String> {
     if config.addresses.is_empty() {
         return Err("addresses must contain at least one public Bitcoin address".to_owned());
     }
-    let mut seen = std::collections::BTreeSet::new();
+    let mut previous: Option<&str> = None;
     for address in &config.addresses {
-        if !seen.insert(address.as_str()) {
-            return Err(format!("duplicate address in batch: {address}"));
+        if previous.is_some_and(|prior| prior >= address.as_str()) {
+            return Err("addresses must be strictly sorted and unique".to_owned());
         }
         mfm_states_btc::validate_observe_btc_address_balance_config(
             &config.observe_config_for_address(address),
         )?;
+        previous = Some(address);
     }
-    mfm_states_btc::validate_resolve_btc_joint_tip_config(&config.joint_tip_config())?;
-    Ok(())
+    mfm_states_btc::validate_resolve_btc_joint_tip_config(&config.joint_tip_config())
 }
 
-/// Output handles produced by one Bitcoin address-balance collector batch.
+/// Certified demand for one internally coordinated Bitcoin network collection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig, MfmValue)]
+#[serde(deny_unknown_fields)]
+#[mfm(
+    schema = "mfm.bitcoin.operation.config.network_collection",
+    validate = "validate_btc_network_collection_config"
+)]
+pub struct BtcNetworkCollectionConfig {
+    /// All native source demand for this Bitcoin network.
+    pub native_balances: BtcNativeBalancesAtAnchorConfig,
+}
+
+/// Validates the deterministic one-resource Bitcoin network collection shape.
+pub fn validate_btc_network_collection_config(
+    config: &BtcNetworkCollectionConfig,
+) -> Result<(), String> {
+    validate_btc_native_balances_at_anchor_config(&config.native_balances)
+}
+
+/// Output of an at-anchor Bitcoin native resource child.
 #[derive(OperationOutput)]
-#[mfm(schema = "mfm.bitcoin.operation_outputs.btc_address_balance")]
-pub struct BtcAddressBalanceOutputs<'program, 'scope> {
-    /// Joint tip shared by every subject in the batch.
-    pub joint_tip: mfm_program::Handle<'program, 'scope, BtcJointTip>,
-    /// Batch summary after shared-tip verification.
-    pub batch_summary: mfm_program::Handle<'program, 'scope, BtcAddressBalanceBatchSummary>,
+#[mfm(schema = "mfm.bitcoin.operation_outputs.native_balances_at_anchor")]
+pub struct BtcNativeBalancesAtAnchorOutputs<'program, 'scope> {
+    /// Exact source-near receipt after every managed fact record completed.
+    pub receipt: Handle<'program, 'scope, BtcNetworkCollectionReceipt>,
 }
 
-/// Root public outputs for the address-balance collector.
-#[derive(PublicOutputs)]
-#[mfm(schema = "mfm.bitcoin.public_outputs.btc_address_balance")]
-pub struct BtcAddressBalancePublicOutputs<'program, 'scope> {
-    /// Batch summary produced by the collector.
-    pub batch_summary: mfm_program::Handle<'program, 'scope, BtcAddressBalanceBatchSummary>,
+/// Output of one internally coordinated Bitcoin network collection.
+#[derive(OperationOutput)]
+#[mfm(schema = "mfm.bitcoin.operation_outputs.network_collection")]
+pub struct BtcNetworkCollectionOutputs<'program, 'scope> {
+    /// Joint tip resolved exactly once for this network.
+    pub joint_tip: Handle<'program, 'scope, BtcJointTip>,
+    /// Exact source-near network receipt.
+    pub receipt: Handle<'program, 'scope, BtcNetworkCollectionReceipt>,
 }
 
-/// Deterministic multi-address Bitcoin native balance collector operation.
-///
-/// Expand resolves joint tip **once**, then observes and records each address
-/// at that tip. Recorded facts are verified to share the tip before summary.
-pub struct BtcAddressBalanceOperation;
+/// Reusable at-anchor Bitcoin native balance resource operation.
+pub struct BtcNativeBalancesAtAnchorOperation;
 
-impl Operation for BtcAddressBalanceOperation {
-    type Config = BtcAddressBalanceConfig;
-    type Input<'program, 'scope> = Handle<'program, 'scope, BtcAddressBalanceObservationContext>;
-    type Output<'program, 'scope> = BtcAddressBalanceOutputs<'program, 'scope>;
+impl Operation for BtcNativeBalancesAtAnchorOperation {
+    type Config = BtcNativeBalancesAtAnchorConfig;
+    type Input<'program, 'scope> = Handle<'program, 'scope, BtcJointTip>;
+    type Output<'program, 'scope> = BtcNativeBalancesAtAnchorOutputs<'program, 'scope>;
 
     fn kind() -> mfm_program::Result<OperationKind> {
         OperationKind::new(
             OP_NAMESPACE,
-            BALANCE_OP_KIND_NAME,
+            BTC_NATIVE_AT_ANCHOR_OP_KIND_NAME,
             DigestAlgorithm::Sha256JcsV1,
-            mfm_canonical::sha256_digest_bytes(b"mfm.bitcoin.operation:btc_address_balance"),
+            mfm_canonical::sha256_digest_bytes(
+                b"mfm.bitcoin.operation:btc_native_balances_at_anchor",
+            ),
         )
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
     }
 
     fn version() -> mfm_program::Result<OperationVersion> {
-        OperationVersion::new(BALANCE_OP_VERSION)
+        OperationVersion::new(BTC_NATIVE_AT_ANCHOR_OP_VERSION)
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
     }
 
     fn name() -> &'static str {
-        "mfm.bitcoin.btc_address_balance"
+        "mfm.bitcoin.btc_native_balances_at_anchor"
     }
 
     fn expand<'program, 'scope>(
         &self,
         config: mfm_program::ValidatedConfig<Self::Config>,
-        observation_context: Self::Input<'program, 'scope>,
+        joint_tip: Self::Input<'program, 'scope>,
         builder: &mut OperationExpansion<'program, 'scope>,
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
         let config = config.into_inner();
-        // Resolve the joint tip once for the entire same-network batch.
-        let joint_tip = builder.state::<ResolveBtcJointTipState, _>(
-            StateKey::new("resolve_joint_tip")?,
-            NoContext,
-            config.joint_tip_config(),
-            ResolveBtcJointTipInputHandles {
-                context: observation_context.clone(),
-            },
-        )?;
-
         let mut fact_handles = Vec::with_capacity(config.addresses.len());
         for (index, address) in config.addresses.iter().enumerate() {
-            let observe = builder.state::<ObserveBtcAddressBalanceState, _>(
+            let observation = builder.state::<ObserveBtcAddressBalanceState, _>(
                 StateKey::new(format!("observe_address_balance_{index}"))?,
                 NoContext,
                 config.observe_config_for_address(address),
                 ObserveBtcAddressBalanceInputHandles {
                     joint_tip: joint_tip.clone(),
-                    context: observation_context.clone(),
                 },
             )?;
-            let fact = builder.state::<RecordBtcAddressBalanceFactState, _>(
+            fact_handles.push(builder.state::<RecordBtcAddressBalanceFactState, _>(
                 StateKey::new(format!("record_address_balance_{index}"))?,
                 NoContext,
                 RecordBtcAddressBalanceFactConfig {},
-                RecordBtcAddressBalanceFactInputHandles {
-                    observation: observe,
-                },
-            )?;
-            fact_handles.push(fact);
+                RecordBtcAddressBalanceFactInputHandles { observation },
+            )?);
         }
-
         let balance_facts = NonEmptyHandles::try_from_vec(fact_handles)
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
-        let batch_summary = builder.state::<AssembleBtcAddressBalanceBatchState, _>(
-            StateKey::new("assemble_address_balance_batch")?,
+        let receipt = builder.state::<AssembleBtcNetworkCollectionReceiptState, _>(
+            StateKey::new("assemble_network_collection_receipt")?,
             NoContext,
-            AssembleBtcAddressBalanceBatchConfig {},
-            AssembleBtcAddressBalanceBatchInputHandles {
-                joint_tip: joint_tip.clone(),
+            AssembleBtcNetworkCollectionReceiptConfig {},
+            AssembleBtcNetworkCollectionReceiptInputHandles {
+                joint_tip,
                 balance_facts,
             },
         )?;
+        Ok(BtcNativeBalancesAtAnchorOutputs { receipt })
+    }
+}
 
-        Ok(BtcAddressBalanceOutputs {
+/// Network coordinator that resolves one Bitcoin tip then invokes its anchored resource child.
+pub struct BtcNetworkCollectionOperation;
+
+impl Operation for BtcNetworkCollectionOperation {
+    type Config = BtcNetworkCollectionConfig;
+    type Input<'program, 'scope> = ();
+    type Output<'program, 'scope> = BtcNetworkCollectionOutputs<'program, 'scope>;
+
+    fn kind() -> mfm_program::Result<OperationKind> {
+        OperationKind::new(
+            OP_NAMESPACE,
+            BTC_NETWORK_COLLECTION_OP_KIND_NAME,
+            DigestAlgorithm::Sha256JcsV1,
+            mfm_canonical::sha256_digest_bytes(b"mfm.bitcoin.operation:btc_network_collection"),
+        )
+        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+    }
+
+    fn version() -> mfm_program::Result<OperationVersion> {
+        OperationVersion::new(BTC_NETWORK_COLLECTION_OP_VERSION)
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.bitcoin.btc_network_collection"
+    }
+
+    fn expand<'program, 'scope>(
+        &self,
+        config: mfm_program::ValidatedConfig<Self::Config>,
+        _input: Self::Input<'program, 'scope>,
+        builder: &mut OperationExpansion<'program, 'scope>,
+        _dispatch: mfm_program::OperationExpansionDispatch<Self>,
+    ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
+        let config = config.into_inner();
+        let joint_tip = builder.state::<ResolveBtcJointTipState, _>(
+            StateKey::new("resolve_joint_tip")?,
+            NoContext,
+            config.native_balances.joint_tip_config(),
+            ResolveBtcJointTipInputHandles {},
+        )?;
+        let resource = builder.call::<BtcNativeBalancesAtAnchorOperation, _>(
+            OperationKey::new("native_balances_at_anchor")?,
+            BtcNativeBalancesAtAnchorOperation,
+            config.native_balances,
+            joint_tip.clone(),
+        )?;
+        Ok(BtcNetworkCollectionOutputs {
             joint_tip,
-            batch_summary,
+            receipt: resource.receipt,
         })
     }
-}
-
-/// Builds a typed program draft for a multi-address Bitcoin balance collector batch.
-pub fn btc_address_balance_program_draft(
-    config: BtcAddressBalanceConfig,
-) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
-    build_root_with_registries(
-        ScopeKey::new(BALANCE_ROOT_SCOPE)?,
-        btc_collectors_state_registry()?,
-        btc_collectors_operation_registry()?,
-        |root: &mut RootBuilder<'_, '_>| {
-            let observation_context = root.seed(
-                SeedKey::new(BALANCE_CONTEXT_SEED_KEY)?,
-                CanonicalSeed::from_value(&BtcAddressBalanceObservationContext {
-                    observed_at_unix_ms: None,
-                })?,
-            )?;
-            let result = root.scope().call::<BtcAddressBalanceOperation, _>(
-                OperationKey::new(BALANCE_OP_KEY)?,
-                BtcAddressBalanceOperation,
-                config,
-                observation_context,
-            )?;
-            root.bind_public_outputs(
-                PublicOutputKey::new(BALANCE_PUBLIC_OUTPUT_KEY)?,
-                &BtcAddressBalancePublicOutputs {
-                    batch_summary: result.batch_summary,
-                },
-            )
-        },
-    )
-}
-
-/// Builds a launch plan for a Bitcoin address-balance collector program.
-pub fn btc_address_balance_program_launch_plan(
-    config: BtcAddressBalanceConfig,
-) -> mfm_program::Result<TypedProgramLaunchPlan> {
-    let draft = btc_address_balance_program_draft(config)?;
-    let seed_material = btc_address_balance_seed_material(&draft)?;
-    TypedProgramLaunchPlan::from_draft_and_seed_material(draft, seed_material)
-}
-
-fn btc_address_balance_seed_material(
-    draft: &mfm_program::TypedProgramDraft,
-) -> mfm_program::Result<
-    std::collections::BTreeMap<mfm_ids::SeedId, mfm_canonical::PlainCanonicalJsonBytes>,
-> {
-    let mut seeds = std::collections::BTreeMap::new();
-    for seed in draft.seeds() {
-        if seed.key.as_str() != BALANCE_CONTEXT_SEED_KEY {
-            return Err(mfm_program::PlanError::Key(format!(
-                "unexpected btc address balance seed key: {}",
-                seed.key.as_str()
-            )));
-        }
-        let bytes = CanonicalSeed::from_value(&BtcAddressBalanceObservationContext {
-            observed_at_unix_ms: None,
-        })?
-        .canonical_json()
-        .clone();
-        seeds.insert(seed.seed_id.clone(), bytes);
-    }
-    Ok(seeds)
 }
 
 mfm_certify::define_program_descriptor_registry! {
@@ -546,11 +529,12 @@ mfm_certify::define_program_descriptor_registry! {
         ResolveBtcJointTipState,
         ObserveBtcAddressBalanceState,
         RecordBtcAddressBalanceFactState,
-        AssembleBtcAddressBalanceBatchState,
+        AssembleBtcNetworkCollectionReceiptState,
     ],
     operations: [
         BtcChainHeadCollectorCycleOperation,
-        BtcAddressBalanceOperation,
+        BtcNativeBalancesAtAnchorOperation,
+        BtcNetworkCollectionOperation,
     ],
 }
 

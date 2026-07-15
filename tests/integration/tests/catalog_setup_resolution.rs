@@ -3,41 +3,14 @@
 
 use std::collections::BTreeMap;
 
-use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_integration_tests::test_support::{
     connect_postgres_with_retry, create_postgres_schema, drop_postgres_schema,
     schema_scoped_database_url, unique_postgres_schema,
 };
-use mfm_op_btc_collectors::BtcAddressBalanceConfig;
 use mfm_storage_postgres::PostgresStore;
-use mfm_values::MfmConfig;
 use serde_json::{json, Value};
-use sqlx::PgPool;
 
 const SETUP_FIXTURE: &[u8] = include_bytes!("../../../examples/setup/organization.toml");
-
-async fn insert_raw(
-    database_url: &str,
-    name: &str,
-    schema_id: &str,
-    digest: &str,
-    canonical_json: &[u8],
-) {
-    let pool = PgPool::connect(database_url)
-        .await
-        .expect("connect raw catalog pool");
-    sqlx::query(
-        "INSERT INTO catalog_values (name, schema_id, digest, canonical_json) VALUES ($1, $2, $3, $4)",
-    )
-    .bind(name)
-    .bind(schema_id)
-    .bind(digest)
-    .bind(canonical_json)
-    .execute(&pool)
-    .await
-    .expect("insert raw catalog fixture");
-    pool.close().await;
-}
 
 fn identity<'a>(
     values: &'a BTreeMap<String, mfm_app::CatalogValueIdentity>,
@@ -84,14 +57,9 @@ async fn setup_resolves_and_prepares_all_current_public_entry_points() {
         .into_iter()
         .map(|value| (value.name.clone(), value))
         .collect::<BTreeMap<_, _>>();
-    assert_eq!(values.len(), 8);
+    assert_eq!(values.len(), 7);
 
     let cases = [
-        (
-            "mfm.bitcoin/btc_address_balance@1",
-            json!({"config": reference(&values, "acme/bitcoin-balance")}),
-            ["acme/bitcoin-balance"].as_slice(),
-        ),
         (
             "mfm.evm.contract/deploy@1",
             json!({
@@ -167,91 +135,5 @@ async fn setup_resolves_and_prepares_all_current_public_entry_points() {
         assert!(!launch.evidence.config_artifacts.is_empty());
     }
 
-    drop_postgres_schema(&database_url, &schema).await;
-}
-
-#[tokio::test]
-async fn btc_catalog_resolution_rejects_missing_invalid_and_corrupt_rows_before_admission() {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let schema = unique_postgres_schema("catalog_btc");
-    create_postgres_schema(&database_url, &schema).await;
-    let scoped_url = schema_scoped_database_url(&database_url, &schema);
-    let store = connect_postgres_with_retry(&scoped_url, 20, 250).await;
-    let values = mfm_app::import_setup_toml(&store, SETUP_FIXTURE)
-        .await
-        .expect("setup import")
-        .into_iter()
-        .map(|value| (value.name.clone(), value))
-        .collect::<BTreeMap<_, _>>();
-    let btc = identity(&values, "acme/bitcoin-balance");
-
-    let missing = prepare(
-        &store,
-        "mfm.bitcoin/btc_address_balance@1",
-        &json!({"config": {"name": "acme/missing", "digest": btc.digest.as_str()}}),
-    )
-    .await
-    .expect_err("missing catalog row");
-    assert_eq!(missing.code, "CatalogValueNotFound");
-
-    let invalid = PlainCanonicalJsonBytes::from_json_str(
-        r#"{"addresses":[],"bitcoin_network":"main","coverage":"configured_only","max_source_reads":1,"network":"bitcoin-mainnet","semantic_source_identity":"public-bitcoin-core"}"#,
-    )
-    .expect("canonical invalid BTC config");
-    let btc_schema = BtcAddressBalanceConfig::schema_id().expect("BTC schema");
-    insert_raw(
-        &scoped_url,
-        "acme/invalid-btc",
-        btc_schema.as_str(),
-        invalid.content_digest().as_str(),
-        invalid.as_bytes(),
-    )
-    .await;
-    let invalid_error = prepare(
-        &store,
-        "mfm.bitcoin/btc_address_balance@1",
-        &json!({
-            "config": {
-                "name": "acme/invalid-btc",
-                "digest": invalid.content_digest().as_str(),
-            }
-        }),
-    )
-    .await
-    .expect_err("semantically invalid catalog row");
-    assert_eq!(invalid_error.code, "CatalogValueValidationFailed");
-
-    insert_raw(
-        &scoped_url,
-        "acme/corrupt-btc",
-        btc.schema_id.as_str(),
-        btc.digest.as_str(),
-        b"not-canonical-json",
-    )
-    .await;
-    let corrupt = prepare(
-        &store,
-        "mfm.bitcoin/btc_address_balance@1",
-        &json!({
-            "config": {
-                "name": "acme/corrupt-btc",
-                "digest": btc.digest.as_str(),
-            }
-        }),
-    )
-    .await
-    .expect_err("corrupt catalog row");
-    assert_eq!(corrupt.code, "RunStoreCorruption");
-    assert!(!corrupt.message.contains("not-canonical-json"));
-
-    let pool = PgPool::connect(&scoped_url)
-        .await
-        .expect("connect admission assertion pool");
-    let run_events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM run_events")
-        .fetch_one(&pool)
-        .await
-        .expect("count run events");
-    assert_eq!(run_events, 0, "catalog failures must precede admission");
-    pool.close().await;
     drop_postgres_schema(&database_url, &schema).await;
 }

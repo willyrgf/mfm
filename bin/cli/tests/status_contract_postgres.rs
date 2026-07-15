@@ -17,7 +17,7 @@ mod run_control_support;
 mod support;
 
 #[tokio::test]
-async fn run_status_and_stream_preserve_interrupted_btc_attempt_history() {
+async fn run_status_and_stream_preserve_interrupted_chain_head_attempt_history() {
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
     let schema = unique_schema();
@@ -30,25 +30,14 @@ async fn run_status_and_stream_preserve_interrupted_btc_attempt_history() {
     let store = PostgresStore::connect(&scoped_database_url)
         .await
         .expect("connect typed postgres store");
-    let config = serde_json::json!({
-        "network": "bitcoin-mainnet",
-        "bitcoin_network": "main",
-        "semantic_source_identity": "public-bitcoin-core",
-        "addresses": ["bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw"],
-        "coverage": "configured_only",
-        "max_source_reads": 1,
-    });
     let runtime_config_dir = tempfile::tempdir().expect("runtime config directory");
     let runtime_config_path = run_control_support::write_collectors_runtime_config_for_test(
         runtime_config_dir.path(),
         "http://127.0.0.1:8332",
     );
-    let (run_id, certified) = run_control_support::admit_btc_balance_run_without_driving(
-        &store,
-        &config,
-        &runtime_config_path,
-    )
-    .await;
+    let (run_id, certified) =
+        run_control_support::admit_btc_chain_head_run_without_driving(&store, &runtime_config_path)
+            .await;
 
     let interrupted_node = certified
         .envelope()

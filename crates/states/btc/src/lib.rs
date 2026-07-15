@@ -18,19 +18,20 @@ pub use address_balance::{
     NormalizedBtcAddressHolding,
 };
 pub use address_balance_collect::{
-    address_balance_record_visibility, assemble_btc_address_balance_batch,
-    materialize_btc_joint_tip, normalize_btc_address_balance_observation, require_shared_joint_tip,
+    address_balance_record_visibility, assemble_btc_network_collection_receipt,
+    materialize_btc_joint_tip, normalize_btc_address_balance_observation,
     validate_observe_btc_address_balance_config, validate_resolve_btc_joint_tip_config,
-    AssembleBtcAddressBalanceBatchConfig, AssembleBtcAddressBalanceBatchInput,
-    AssembleBtcAddressBalanceBatchInputHandles, AssembleBtcAddressBalanceBatchState,
-    BtcAddressBalanceBatchSummary, BtcAddressBalanceObservation,
-    BtcAddressBalanceObservationContext, BtcJointTip, ObserveBtcAddressBalanceConfig,
+    AssembleBtcNetworkCollectionReceiptConfig, AssembleBtcNetworkCollectionReceiptInput,
+    AssembleBtcNetworkCollectionReceiptInputHandles, AssembleBtcNetworkCollectionReceiptState,
+    BtcAddressBalanceObservation, BtcJointTip, BtcNativeBalanceReceiptEntry,
+    BtcNativeBalanceSourceKey, BtcNetworkCollectionReceipt, ObserveBtcAddressBalanceConfig,
     ObserveBtcAddressBalanceInput, ObserveBtcAddressBalanceInputHandles,
     ObserveBtcAddressBalanceState, RecordBtcAddressBalanceFactConfig,
     RecordBtcAddressBalanceFactInput, RecordBtcAddressBalanceFactInputHandles,
     RecordBtcAddressBalanceFactState, ResolveBtcJointTipConfig, ResolveBtcJointTipInput,
     ResolveBtcJointTipInputHandles, ResolveBtcJointTipState, BTC_JOINT_TIP_SOURCE_READS,
     BTC_NATIVE_BALANCE_COVERAGE, BTC_NATIVE_BALANCE_OBSERVE_SOURCE_READS,
+    BTC_NATIVE_BALANCE_SOURCE_STATUS,
 };
 
 pub use chain_head::{

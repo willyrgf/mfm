@@ -143,6 +143,61 @@ pub fn derive_fact_content_identity(
     ))
 }
 
+/// Derives fact-content identity from concrete typed fact subject and response values.
+///
+/// This is the typed-value counterpart to [`derive_fact_content_identity`]. It first derives
+/// descriptor-checked subject material and canonical response bytes, then delegates to the
+/// hydrated-material boundary. Callers must use concrete fact material that has already passed
+/// the corresponding typed fact contract; this helper accepts no caller-authored identity
+/// components.
+pub fn derive_fact_content_identity_from_typed_values<S, R>(
+    descriptor: &FactDescriptor,
+    subject: &S,
+    response: &R,
+) -> Result<FactContentIdentity>
+where
+    S: Serialize,
+    R: Serialize,
+{
+    let subject =
+        serde_json::to_value(subject).map_err(|error| FactError::canonical(error.to_string()))?;
+    let subject = typed_fact_subject_value(descriptor, &subject)?;
+    let subject_material = extract_subject_material(descriptor, &subject)?;
+    let response =
+        serde_json::to_string(response).map_err(|error| FactError::canonical(error.to_string()))?;
+    let response = PlainCanonicalJsonBytes::from_json_str(&response)
+        .map_err(|error| FactError::canonical(error.to_string()))?;
+    derive_fact_content_identity(descriptor, &subject_material, response.as_bytes())
+}
+
+/// Re-derives and verifies a serialized identity against concrete typed fact material.
+///
+/// This is intentionally the only admission path for persisted compact identity fields. The
+/// identity wire is parsed only so it can be compared with an identity re-derived from the
+/// descriptor-checked subject and canonical response; it is never trusted as a constructor.
+pub fn verify_serialized_fact_content_identity_from_typed_values<S, R>(
+    serialized_identity: &serde_json::Value,
+    descriptor: &FactDescriptor,
+    subject: &S,
+    response: &R,
+) -> Result<FactContentIdentity>
+where
+    S: Serialize,
+    R: Serialize,
+{
+    let supplied: FactContentIdentityValueWire =
+        serde_json::from_value(serialized_identity.clone())
+            .map_err(|error| FactError::canonical(error.to_string()))?;
+    let supplied = fact_content_identity_from_wire(supplied)?;
+    let derived = derive_fact_content_identity_from_typed_values(descriptor, subject, response)?;
+    if supplied != derived {
+        return Err(FactError::descriptor(
+            "serialized fact content identity did not match verified typed fact material",
+        ));
+    }
+    Ok(derived)
+}
+
 /// Recomputes and verifies semantic content identity for a recorded fact claim.
 ///
 /// The caller must hydrate the response artifact before invoking this helper. The claim's compact
@@ -231,13 +286,40 @@ pub fn fact_content_identity_digest(identity: &FactContentIdentity) -> Result<Co
     Ok(canonical_fact_content_identity_bytes(identity)?.content_digest())
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FactContentIdentityValueWire {
     fact_descriptor_hash: String,
     subject_material_hash: String,
     response_schema_id: String,
     response_hash: String,
+}
+
+fn fact_content_identity_from_wire(
+    wire: FactContentIdentityValueWire,
+) -> Result<FactContentIdentity> {
+    let fact_descriptor_hash = wire
+        .fact_descriptor_hash
+        .parse()
+        .map_err(|error: mfm_ids::IdentityError| FactError::canonical(error.to_string()))?;
+    let subject_material_hash = wire
+        .subject_material_hash
+        .parse()
+        .map_err(|error: mfm_ids::IdentityError| FactError::canonical(error.to_string()))?;
+    let response_schema_id = wire
+        .response_schema_id
+        .parse()
+        .map_err(|error: mfm_ids::IdentityError| FactError::canonical(error.to_string()))?;
+    let response_hash = wire
+        .response_hash
+        .parse()
+        .map_err(|error: mfm_ids::IdentityError| FactError::canonical(error.to_string()))?;
+    Ok(FactContentIdentity::from_verified_components(
+        fact_descriptor_hash,
+        subject_material_hash,
+        response_schema_id,
+        response_hash,
+    ))
 }
 
 fn canonical_fact_content_identity_value(identity: &FactContentIdentity) -> Result<CanonicalValue> {
@@ -570,6 +652,51 @@ mod tests {
             fact_content_identity_digest(&identity).expect("identity digest"),
             bytes.content_digest()
         );
+    }
+
+    #[test]
+    fn typed_value_identity_verification_rederives_compact_identity() {
+        let descriptor = test_descriptor(
+            schema_id("mfm.test.descriptor", 1),
+            schema_id("mfm.test.response", 3),
+        );
+        let subject = serde_json::json!({ "chain": "bitcoin" });
+        let response = serde_json::json!({ "height": 42 });
+
+        let identity =
+            derive_fact_content_identity_from_typed_values(&descriptor, &subject, &response)
+                .expect("typed identity");
+        assert_eq!(
+            identity,
+            derive_fact_content_identity(
+                &descriptor,
+                &subject_material(&descriptor, "bitcoin"),
+                br#"{"height":42}"#,
+            )
+            .expect("hydrated identity")
+        );
+
+        let serialized = serde_json::to_value(&identity).expect("serialized identity");
+        assert_eq!(
+            verify_serialized_fact_content_identity_from_typed_values(
+                &serialized,
+                &descriptor,
+                &subject,
+                &response,
+            )
+            .expect("verified identity"),
+            identity
+        );
+
+        let mut tampered = serialized;
+        tampered["response_hash"] = serde_json::json!(digest(99).as_str());
+        assert!(verify_serialized_fact_content_identity_from_typed_values(
+            &tampered,
+            &descriptor,
+            &subject,
+            &response,
+        )
+        .is_err());
     }
 
     #[test]

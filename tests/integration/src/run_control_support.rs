@@ -205,40 +205,38 @@ fn toml_string(value: &str) -> String {
     serde_json::to_string(value).expect("toml-compatible string")
 }
 
-/// Prepares a typed Bitcoin collector launch against the supplied store scope.
-pub async fn prepare_btc_balance_launch_for_store<S>(
+/// Prepares the retained Bitcoin chain-head control-cycle launch against the supplied store scope.
+pub async fn prepare_btc_chain_head_launch_for_store<S>(
     store: &S,
-    config: &serde_json::Value,
     invocation_key: Option<&str>,
 ) -> mfm_app::RunLaunchRequest
 where
     S: store::StoreScopeStore,
 {
-    let config = serde_json::from_value(config.clone()).expect("Bitcoin collector config");
-    let draft = mfm_op_btc_collectors::btc_address_balance_program_draft(config)
-        .expect("Bitcoin collector program draft");
+    let draft = mfm_op_btc_collectors::btc_chain_head_collector_cycle_program_draft(
+        mfm_op_btc_collectors::BtcChainHeadCollectorConfig::default(),
+    )
+    .expect("Bitcoin chain-head control-cycle draft");
     let seed_material = draft
         .seeds()
         .iter()
         .map(|seed| {
-            let bytes = CanonicalSeed::from_value(
-                &mfm_op_btc_collectors::BtcAddressBalanceObservationContext {
+            let bytes =
+                CanonicalSeed::from_value(&mfm_op_btc_collectors::BtcChainHeadObservationContext {
                     observed_at_unix_ms: None,
-                },
-            )
-            .expect("Bitcoin observation seed")
-            .canonical_json()
-            .clone();
+                })
+                .expect("Bitcoin chain-head observation seed")
+                .canonical_json()
+                .clone();
             (seed.seed_id.clone(), bytes)
         })
         .collect();
     prepare_typed_launch_for_store(store, draft, seed_material, invocation_key).await
 }
 
-/// Admits a Bitcoin balance run without invoking live runners so status tests can append history.
-pub async fn admit_btc_balance_run_without_driving<S>(
+/// Admits a Bitcoin chain-head control run without driving live runners so status tests can append history.
+pub async fn admit_btc_chain_head_run_without_driving<S>(
     store: &S,
-    config: &serde_json::Value,
     runtime_config_path: &Path,
 ) -> (mfm_ids::RunId, mfm_certify::CertifiedTypedSpec)
 where
@@ -250,7 +248,7 @@ where
         + Sync
         + 'static,
 {
-    let prepared = prepare_btc_balance_launch_for_store(store, config, None).await;
+    let prepared = prepare_btc_chain_head_launch_for_store(store, None).await;
     let run_id = prepared.run_id.clone();
     let certified = prepared.certified_spec.clone();
     let runners = mfm_app::production_runner_registry(

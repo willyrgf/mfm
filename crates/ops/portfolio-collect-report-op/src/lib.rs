@@ -1,31 +1,32 @@
 #![warn(missing_docs)]
-//! Deterministic portfolio collector composition followed by the shared report graph.
+//! Deterministic internal portfolio collection/report composition.
 //!
-//! The operation owns relational derivation from one normalized portfolio. It launches one typed
-//! BTC or EVM collector operation per relevant network, fans into typed readiness, and then calls
-//! the independent portfolio tracker operation.
+//! This operation derives family collection work from normalized portfolio demand. It does not
+//! accept observation context, collector read policy, or independently authored resource vectors.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::num::NonZeroU64;
 
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_op_btc_collectors::{
-    BtcAddressBalanceBatchSummary, BtcAddressBalanceConfig, BtcAddressBalanceObservationContext,
-    BtcAddressBalanceOperation, BTC_JOINT_TIP_SOURCE_READS, BTC_NATIVE_BALANCE_COVERAGE,
+    BtcNativeBalancesAtAnchorConfig, BtcNetworkCollectionConfig, BtcNetworkCollectionOperation,
+    BtcNetworkCollectionReceipt,
 };
 use mfm_op_evm_collectors::{
-    EvmNativeBalanceBatchSummary, EvmNativeBalanceConfig, EvmNativeBalanceOperation,
+    EvmErc20BalanceSourceConfig, EvmNetworkCollectionConfig, EvmNetworkCollectionOperation,
+    EvmNetworkCollectionReceipt,
 };
 use mfm_op_portfolio_tracker::{
     PortfolioInputsReady, PortfolioOperationOutputs, PortfolioTrackerWorkflowOperation,
 };
+use mfm_portfolio_model::ids::NormalizedEvmAddress;
 use mfm_portfolio_model::portfolio::{
-    NetworkConfig, PortfolioConfig as ModelPortfolioConfig, ValidatedPortfolioConfig,
+    NetworkConfig, NetworkFamilyConfig, PortfolioConfig as ModelPortfolioConfig,
+    ValidatedPortfolioConfig,
 };
 use mfm_portfolio_model::symbol::HoldingSourceConfig;
 use mfm_program::{
-    BridgeKey, BridgePolicy, Handle, NoContext, Operation, OperationExpansion, OperationKey,
-    ScopeKey, StateError, StateKey, StateResult, StateSpec,
+    BridgeKey, BridgePolicy, NoContext, Operation, OperationExpansion, OperationKey, ScopeKey,
+    StateError, StateKey, StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, StateInput};
 use mfm_state_portfolio::{
@@ -39,7 +40,7 @@ const OP_NAMESPACE: &str = "mfm.portfolio";
 const OP_KIND_NAME: &str = "collect_then_report";
 const OP_VERSION: &str = "mfm.portfolio.operation.collect_then_report.v1";
 
-/// Complete deterministic config for the composed collector/report operation.
+/// Complete deterministic config for the internal collection/report composition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
 #[serde(deny_unknown_fields)]
 #[mfm(
@@ -47,21 +48,21 @@ const OP_VERSION: &str = "mfm.portfolio.operation.collect_then_report.v1";
     validate = "validate_collect_then_report_config"
 )]
 pub struct CollectThenReportConfig {
-    /// Normalized portfolio consumed by the report graph.
+    /// Normalized portfolio consumed by collection and report topology.
     pub portfolio: ModelPortfolioConfig,
-    /// One derived Bitcoin collector config per relevant Bitcoin network.
-    pub bitcoin_collectors: Vec<BtcAddressBalanceConfig>,
-    /// One derived EVM collector config per relevant EVM network.
-    pub evm_collectors: Vec<EvmNativeBalanceConfig>,
+    /// Derived, strictly sorted Bitcoin network collection children.
+    pub bitcoin_collections: Vec<BtcNetworkCollectionConfig>,
+    /// Derived, strictly sorted EVM network collection children.
+    pub evm_collections: Vec<EvmNetworkCollectionConfig>,
 }
 
 impl CollectThenReportConfig {
-    /// Returns the readiness counts used by the parent fan-in state.
+    /// Returns the temporary typed receipt fan-in count contract.
     pub fn readiness_config(&self) -> Result<PortfolioInputsReadyConfig, ConfigError> {
-        let bitcoin_network_count = u32::try_from(self.bitcoin_collectors.len())
-            .map_err(|_| ConfigError::new("too many Bitcoin collector networks"))?;
-        let evm_network_count = u32::try_from(self.evm_collectors.len())
-            .map_err(|_| ConfigError::new("too many EVM collector networks"))?;
+        let bitcoin_network_count = u32::try_from(self.bitcoin_collections.len())
+            .map_err(|_| ConfigError::new("too many Bitcoin collection networks"))?;
+        let evm_network_count = u32::try_from(self.evm_collections.len())
+            .map_err(|_| ConfigError::new("too many EVM collection networks"))?;
         Ok(PortfolioInputsReadyConfig::new(
             bitcoin_network_count,
             evm_network_count,
@@ -75,118 +76,171 @@ pub enum CollectThenReportConfigError {
     /// The portfolio failed canonical validation.
     #[error("portfolio config is invalid")]
     InvalidPortfolio,
-    /// A derived child config failed its own validation.
-    #[error("derived collector config is invalid")]
-    InvalidCollectorConfig,
+    /// A derived internal collection config failed its own validation.
+    #[error("derived collection config is invalid")]
+    InvalidCollectionConfig,
 }
 
-/// Derives native collector children from the exact normalized holding demand.
-///
-/// Token-only demand intentionally contributes no native collector child at this cutover point.
-/// The complete token path is added by the anchored ERC-20 collector phase; no caller-selected
-/// fallback collector is synthesized here.
+/// Derives exact family collection children from normalized portfolio holding demand.
 pub fn build_collect_then_report_config(
     portfolio: ModelPortfolioConfig,
 ) -> Result<CollectThenReportConfig, CollectThenReportConfigError> {
     let portfolio = ValidatedPortfolioConfig::new(portfolio)
         .map_err(|_| CollectThenReportConfigError::InvalidPortfolio)?
         .into_config();
-    let native_subjects = native_subjects_by_network(&portfolio);
-    let mut bitcoin_collectors = Vec::new();
-    let mut evm_collectors = Vec::new();
-    for network in &portfolio.networks {
-        let Some(subjects) = native_subjects.get(network.network_id().as_str()) else {
+    let demand = collection_demand_by_network(&portfolio)?;
+    let networks = portfolio
+        .networks
+        .iter()
+        .map(|network| (network.network_id().as_str().to_owned(), network))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut bitcoin_collections = Vec::new();
+    let mut evm_collections = Vec::new();
+    for (network_id, network) in networks {
+        let Some(network_demand) = demand.get(&network_id) else {
             continue;
         };
         match network {
             NetworkConfig::Bitcoin {
-                network_id,
                 bitcoin_network,
                 source_identity,
                 ..
             } => {
-                let max_source_reads = NonZeroU64::new(BTC_JOINT_TIP_SOURCE_READS)
-                    .ok_or(CollectThenReportConfigError::InvalidCollectorConfig)?;
-                bitcoin_collectors.push(BtcAddressBalanceConfig {
-                    network: network_id.to_string(),
-                    bitcoin_network: bitcoin_network.clone(),
-                    semantic_source_identity: source_identity.to_string(),
-                    addresses: subjects.iter().cloned().collect(),
-                    coverage: BTC_NATIVE_BALANCE_COVERAGE.to_owned(),
-                    max_source_reads,
+                if !network_demand.evm_native_accounts.is_empty()
+                    || !network_demand.erc20_sources.is_empty()
+                    || network_demand.bitcoin_addresses.is_empty()
+                {
+                    return Err(CollectThenReportConfigError::InvalidCollectionConfig);
+                }
+                bitcoin_collections.push(BtcNetworkCollectionConfig {
+                    native_balances: BtcNativeBalancesAtAnchorConfig {
+                        network: network_id,
+                        bitcoin_network: bitcoin_network.clone(),
+                        semantic_source_identity: source_identity.to_string(),
+                        addresses: network_demand.bitcoin_addresses.iter().cloned().collect(),
+                    },
                 });
             }
-            NetworkConfig::Evm { .. } => evm_collectors.push(EvmNativeBalanceConfig {
-                network: network.clone(),
-                accounts: subjects.iter().cloned().collect(),
-            }),
+            NetworkConfig::Evm { .. } => {
+                if !network_demand.bitcoin_addresses.is_empty() {
+                    return Err(CollectThenReportConfigError::InvalidCollectionConfig);
+                }
+                evm_collections.push(EvmNetworkCollectionConfig {
+                    network: network.clone(),
+                    native_accounts: network_demand.evm_native_accounts.iter().cloned().collect(),
+                    erc20_sources: network_demand.erc20_sources.iter().cloned().collect(),
+                });
+            }
         }
     }
     let config = CollectThenReportConfig {
         portfolio,
-        bitcoin_collectors,
-        evm_collectors,
+        bitcoin_collections,
+        evm_collections,
     };
     validate_collect_then_report_config(&config)
-        .map_err(|_| CollectThenReportConfigError::InvalidCollectorConfig)?;
+        .map_err(|_| CollectThenReportConfigError::InvalidCollectionConfig)?;
     Ok(config)
 }
 
-fn native_subjects_by_network(
+#[derive(Default)]
+struct NetworkCollectionDemand {
+    bitcoin_addresses: BTreeSet<String>,
+    evm_native_accounts: BTreeSet<NormalizedEvmAddress>,
+    erc20_sources: BTreeSet<EvmErc20BalanceSourceConfig>,
+}
+
+fn collection_demand_by_network(
     portfolio: &ModelPortfolioConfig,
-) -> BTreeMap<String, BTreeSet<String>> {
+) -> Result<BTreeMap<String, NetworkCollectionDemand>, CollectThenReportConfigError> {
     let symbols = portfolio
         .symbol_configs
         .iter()
         .map(|symbol| (symbol.symbol_id.clone(), symbol))
         .collect::<BTreeMap<_, _>>();
-    let mut subjects = BTreeMap::<String, BTreeSet<String>>::new();
+    let networks = portfolio
+        .networks
+        .iter()
+        .map(|network| (network.network_id().clone(), network))
+        .collect::<BTreeMap<_, _>>();
+    let mut demand = BTreeMap::<String, NetworkCollectionDemand>::new();
     for wallet in &portfolio.wallets {
+        let network = networks
+            .get(&wallet.network_id)
+            .ok_or(CollectThenReportConfigError::InvalidPortfolio)?;
+        let network_demand = demand.entry(wallet.network_id.to_string()).or_default();
         for symbol_id in &wallet.symbol_ids {
-            let Some(symbol) = symbols.get(symbol_id) else {
-                continue;
-            };
-            if !matches!(&symbol.source, HoldingSourceConfig::Native) {
-                continue;
+            let symbol = symbols
+                .get(symbol_id)
+                .ok_or(CollectThenReportConfigError::InvalidPortfolio)?;
+            match (&network.family(), &symbol.source) {
+                (NetworkFamilyConfig::Bitcoin, HoldingSourceConfig::Native) => {
+                    network_demand
+                        .bitcoin_addresses
+                        .insert(wallet.subject.address_str().to_owned());
+                }
+                (NetworkFamilyConfig::Evm, HoldingSourceConfig::Native) => {
+                    let account = wallet
+                        .subject
+                        .evm_address()
+                        .ok_or(CollectThenReportConfigError::InvalidPortfolio)?;
+                    network_demand.evm_native_accounts.insert(account.clone());
+                }
+                (NetworkFamilyConfig::Evm, HoldingSourceConfig::Erc20 { contract_address }) => {
+                    let account = wallet
+                        .subject
+                        .evm_address()
+                        .ok_or(CollectThenReportConfigError::InvalidPortfolio)?;
+                    network_demand
+                        .erc20_sources
+                        .insert(EvmErc20BalanceSourceConfig {
+                            contract_address: contract_address.clone(),
+                            account: account.clone(),
+                        });
+                }
+                _ => return Err(CollectThenReportConfigError::InvalidPortfolio),
             }
-            subjects
-                .entry(wallet.network_id.to_string())
-                .or_default()
-                .insert(wallet.subject.address_str().to_owned());
         }
     }
-    subjects
+    Ok(demand)
 }
 
 fn validate_collect_then_report_config(
     config: &CollectThenReportConfig,
 ) -> Result<(), ConfigError> {
-    ValidatedPortfolioConfig::new(config.portfolio.clone())
-        .map_err(|error| ConfigError::new(error.to_string()))?;
-    for child in &config.bitcoin_collectors {
-        child
-            .validate()
-            .map_err(|_| ConfigError::new("invalid Bitcoin collector config"))?;
+    let normalized = ValidatedPortfolioConfig::new(config.portfolio.clone())
+        .map_err(|error| ConfigError::new(error.to_string()))?
+        .into_config();
+    if normalized != config.portfolio {
+        return Err(ConfigError::new(
+            "portfolio must be normalized before internal collection expansion",
+        ));
     }
-    for child in &config.evm_collectors {
+    for child in &config.bitcoin_collections {
         child
             .validate()
-            .map_err(|_| ConfigError::new("invalid EVM collector config"))?;
+            .map_err(|_| ConfigError::new("invalid Bitcoin network collection config"))?;
+    }
+    for child in &config.evm_collections {
+        child
+            .validate()
+            .map_err(|_| ConfigError::new("invalid EVM network collection config"))?;
     }
     Ok(())
 }
 
-/// Typed input consumed by the composed readiness fan-in state.
+/// Typed input consumed by the transitional collection-completion fan-in state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, StateInput)]
 #[mfm(schema = "mfm.portfolio.input.collect_then_report_ready")]
 pub struct CollectThenReportReadinessInput {
-    /// One typed summary from every Bitcoin child operation.
-    pub bitcoin_summaries: Vec<BtcAddressBalanceBatchSummary>,
-    /// One typed summary from every EVM child operation.
-    pub evm_summaries: Vec<EvmNativeBalanceBatchSummary>,
+    /// One exact receipt from every Bitcoin network child.
+    pub bitcoin_receipts: Vec<BtcNetworkCollectionReceipt>,
+    /// One exact receipt from every EVM network child.
+    pub evm_receipts: Vec<EvmNetworkCollectionReceipt>,
 }
 
-/// Pure fan-in state proving that every collector child produced a non-empty summary.
+/// Pure fan-in state proving that every configured child completed one non-empty exact receipt.
 pub struct CollectThenReportReadinessState {
     config: PortfolioInputsReadyConfig,
 }
@@ -235,45 +289,47 @@ impl mfm_program::PureState for CollectThenReportReadinessState {
     }
 }
 
-/// Executes the composed readiness validation for an erased runtime runner.
+/// Executes the temporary typed collection completion validation for a runtime runner.
 pub fn collect_then_report_readiness(
     config: &PortfolioInputsReadyConfig,
     input: CollectThenReportReadinessInput,
 ) -> StateResult<PortfolioInputsReady> {
-    let bitcoin_count = u32::try_from(input.bitcoin_summaries.len())
-        .map_err(|_| StateError::Message("Bitcoin summary count overflow".to_owned()))?;
-    let evm_count = u32::try_from(input.evm_summaries.len())
-        .map_err(|_| StateError::Message("EVM summary count overflow".to_owned()))?;
+    let bitcoin_count = u32::try_from(input.bitcoin_receipts.len())
+        .map_err(|_| StateError::Message("Bitcoin receipt count overflow".to_owned()))?;
+    let evm_count = u32::try_from(input.evm_receipts.len())
+        .map_err(|_| StateError::Message("EVM receipt count overflow".to_owned()))?;
     if bitcoin_count != config.bitcoin_network_count() || evm_count != config.evm_network_count() {
         return Err(StateError::Message(
-            "collector summary count does not match composed config".to_owned(),
+            "collection receipt count does not match composed config".to_owned(),
         ));
     }
     let mut bitcoin_networks = BTreeSet::new();
-    for summary in &input.bitcoin_summaries {
-        if summary.address_count() == 0 || !bitcoin_networks.insert(summary.network()) {
+    for receipt in &input.bitcoin_receipts {
+        if receipt.entries().is_empty() || !bitcoin_networks.insert(receipt.network()) {
             return Err(StateError::Message(
-                "Bitcoin collector summaries are incomplete or duplicated".to_owned(),
+                "Bitcoin collection receipts are incomplete or duplicated".to_owned(),
             ));
         }
     }
     let mut evm_networks = BTreeSet::new();
-    for summary in &input.evm_summaries {
-        if summary.account_count() == 0 || !evm_networks.insert(summary.network()) {
+    for receipt in &input.evm_receipts {
+        if receipt.native_balance_receipt().is_none() && receipt.erc20_balance_receipt().is_none()
+            || !evm_networks.insert(receipt.network())
+        {
             return Err(StateError::Message(
-                "EVM collector summaries are incomplete or duplicated".to_owned(),
+                "EVM collection receipts are incomplete or duplicated".to_owned(),
             ));
         }
     }
     Ok(PortfolioInputsReady::new(bitcoin_count, evm_count))
 }
 
-/// Typed composed collector/report operation.
+/// Typed internal collection/report operation.
 pub struct CollectThenReportOperation;
 
 impl Operation for CollectThenReportOperation {
     type Config = CollectThenReportConfig;
-    type Input<'program, 'scope> = Handle<'program, 'scope, BtcAddressBalanceObservationContext>;
+    type Input<'program, 'scope> = ();
     type Output<'program, 'scope> = PortfolioOperationOutputs<'program, 'scope>;
 
     fn kind() -> mfm_program::Result<OperationKind> {
@@ -298,67 +354,62 @@ impl Operation for CollectThenReportOperation {
     fn expand<'program, 'scope>(
         &self,
         config: mfm_program::ValidatedConfig<Self::Config>,
-        observation_context: Self::Input<'program, 'scope>,
+        _input: Self::Input<'program, 'scope>,
         builder: &mut OperationExpansion<'program, 'scope>,
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
         let config = config.into_inner();
-        let mut bitcoin_summaries = Vec::with_capacity(config.bitcoin_collectors.len());
-        for (index, child_config) in config.bitcoin_collectors.iter().enumerate() {
+        let mut bitcoin_receipts = Vec::with_capacity(config.bitcoin_collections.len());
+        for (index, child_config) in config.bitcoin_collections.iter().enumerate() {
             let child_config = child_config.clone();
-            let summary = builder.child_scope(
-                ScopeKey::new(format!("bitcoin_collector_{index}"))?,
+            bitcoin_receipts.push(builder.child_scope(
+                ScopeKey::new(format!("bitcoin_collection_{index}"))?,
                 |child| {
-                    let observation_context = child.import_from_parent(
-                        BridgeKey::new("observation_context")?,
-                        observation_context.clone(),
-                        BridgePolicy::same_run_same_value(),
-                    )?;
-                    let child_output = child.scope().call::<BtcAddressBalanceOperation, _>(
-                        OperationKey::new("btc_address_balance")?,
-                        BtcAddressBalanceOperation,
-                        child_config,
-                        observation_context,
-                    )?;
-                    let summary = child.export_to_parent(
-                        BridgeKey::new("batch_summary")?,
-                        child_output.batch_summary,
-                        BridgePolicy::same_run_same_value(),
-                    )?;
-                    child.bridge_to_parent(summary)
-                },
-            )?;
-            bitcoin_summaries.push(summary);
-        }
-        let mut evm_summaries = Vec::with_capacity(config.evm_collectors.len());
-        for (index, child_config) in config.evm_collectors.iter().enumerate() {
-            let child_config = child_config.clone();
-            let summary =
-                builder.child_scope(ScopeKey::new(format!("evm_collector_{index}"))?, |child| {
-                    let child_output = child.scope().call::<EvmNativeBalanceOperation, _>(
-                        OperationKey::new("evm_native_balance")?,
-                        EvmNativeBalanceOperation,
+                    let output = child.scope().call::<BtcNetworkCollectionOperation, _>(
+                        OperationKey::new("btc_network_collection")?,
+                        BtcNetworkCollectionOperation,
                         child_config,
                         (),
                     )?;
-                    let summary = child.export_to_parent(
-                        BridgeKey::new("batch_summary")?,
-                        child_output.batch_summary,
+                    let receipt = child.export_to_parent(
+                        BridgeKey::new("network_receipt")?,
+                        output.receipt,
                         BridgePolicy::same_run_same_value(),
                     )?;
-                    child.bridge_to_parent(summary)
-                })?;
-            evm_summaries.push(summary);
+                    child.bridge_to_parent(receipt)
+                },
+            )?);
+        }
+        let mut evm_receipts = Vec::with_capacity(config.evm_collections.len());
+        for (index, child_config) in config.evm_collections.iter().enumerate() {
+            let child_config = child_config.clone();
+            evm_receipts.push(builder.child_scope(
+                ScopeKey::new(format!("evm_collection_{index}"))?,
+                |child| {
+                    let output = child.scope().call::<EvmNetworkCollectionOperation, _>(
+                        OperationKey::new("evm_network_collection")?,
+                        EvmNetworkCollectionOperation,
+                        child_config,
+                        (),
+                    )?;
+                    let receipt = child.export_to_parent(
+                        BridgeKey::new("network_receipt")?,
+                        output.receipt,
+                        BridgePolicy::same_run_same_value(),
+                    )?;
+                    child.bridge_to_parent(receipt)
+                },
+            )?);
         }
         let readiness = builder.state::<CollectThenReportReadinessState, _>(
-            StateKey::new("collectors_ready")?,
+            StateKey::new("collections_ready")?,
             NoContext,
             config
                 .readiness_config()
                 .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
             CollectThenReportReadinessInputHandles {
-                bitcoin_summaries,
-                evm_summaries,
+                bitcoin_receipts,
+                evm_receipts,
             },
         )?;
         builder.call::<PortfolioTrackerWorkflowOperation, _>(
@@ -385,16 +436,24 @@ mfm_certify::define_program_descriptor_registry! {
         mfm_op_btc_collectors::ResolveBtcJointTipState,
         mfm_op_btc_collectors::ObserveBtcAddressBalanceState,
         mfm_op_btc_collectors::RecordBtcAddressBalanceFactState,
-        mfm_op_btc_collectors::AssembleBtcAddressBalanceBatchState,
+        mfm_op_btc_collectors::AssembleBtcNetworkCollectionReceiptState,
         mfm_op_evm_collectors::ResolveEvmJointTipState,
         mfm_op_evm_collectors::ObserveEvmNativeBalanceState,
         mfm_op_evm_collectors::RecordEvmNativeBalanceFactState,
-        mfm_op_evm_collectors::AssembleEvmNativeBalanceBatchState,
+        mfm_op_evm_collectors::AssembleEvmNativeBalanceBatchReceiptState,
+        mfm_op_evm_collectors::ObserveErc20TokenMetadataState,
+        mfm_op_evm_collectors::ObserveErc20BalanceState,
+        mfm_op_evm_collectors::RecordErc20BalanceFactState,
+        mfm_op_evm_collectors::AssembleEvmErc20BalanceBatchReceiptState,
+        mfm_op_evm_collectors::AssembleEvmNetworkCollectionReceiptState,
     ],
     operations: [
         CollectThenReportOperation,
-        BtcAddressBalanceOperation,
-        EvmNativeBalanceOperation,
+        BtcNetworkCollectionOperation,
+        mfm_op_btc_collectors::BtcNativeBalancesAtAnchorOperation,
+        EvmNetworkCollectionOperation,
+        mfm_op_evm_collectors::EvmNativeBalancesAtAnchorOperation,
+        mfm_op_evm_collectors::EvmErc20BalancesAtAnchorOperation,
         PortfolioTrackerWorkflowOperation,
     ],
 }
@@ -404,34 +463,37 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const EVM_ACCOUNT: &str = "0x000000000000000000000000000000000000dead";
+    const TOKEN: &str = "0x0000000000000000000000000000000000000001";
+
     #[test]
-    fn derives_native_collectors_from_explicit_demand() {
+    fn derives_sorted_family_collections_from_explicit_demand() {
         let config = build_collect_then_report_config(portfolio_config(true, true, true))
-            .expect("native composition");
-        let btc = &config.bitcoin_collectors;
-        assert_eq!(btc.len(), 1);
-        assert_eq!(btc[0].coverage, BTC_NATIVE_BALANCE_COVERAGE);
-        assert_eq!(btc[0].max_source_reads.get(), BTC_JOINT_TIP_SOURCE_READS);
-        assert_eq!(config.evm_collectors.len(), 1);
-        let evm = &config.evm_collectors[0];
-        assert_eq!(evm.accounts, vec![EVM_ACCOUNT.to_owned()]);
-        assert_eq!(evm.network.native_decimals(), Some(18));
+            .expect("collection composition");
+        assert_eq!(config.bitcoin_collections.len(), 1);
         assert_eq!(
-            evm.observe_config_for_account(EVM_ACCOUNT)
-                .expect("derived observer")
-                .evm_network_parts()
-                .expect("derived EVM network"),
-            ("ethereum-mainnet", 1, 18)
+            config.bitcoin_collections[0]
+                .native_balances
+                .addresses
+                .len(),
+            1
         );
+        assert_eq!(config.evm_collections.len(), 1);
+        let evm = &config.evm_collections[0];
+        assert_eq!(evm.native_accounts.len(), 1);
+        assert_eq!(evm.erc20_sources.len(), 1);
+        assert_eq!(evm.erc20_sources[0].contract_address.as_str(), TOKEN);
+        assert_eq!(evm.erc20_sources[0].account.as_str(), EVM_ACCOUNT);
     }
 
     #[test]
-    fn token_only_demand_does_not_create_a_native_child() {
+    fn token_only_demand_creates_an_evm_collection_without_native_accounts() {
         let config = build_collect_then_report_config(portfolio_config(false, false, true))
-            .expect("token-only model config remains valid");
-        assert!(config.bitcoin_collectors.is_empty());
-        assert!(config.evm_collectors.is_empty());
-        config.validate().expect("derived config");
+            .expect("token-only config");
+        assert!(config.bitcoin_collections.is_empty());
+        assert_eq!(config.evm_collections.len(), 1);
+        assert!(config.evm_collections[0].native_accounts.is_empty());
+        assert_eq!(config.evm_collections[0].erc20_sources.len(), 1);
     }
 
     #[test]
@@ -445,8 +507,6 @@ mod tests {
             CollectThenReportConfigError::InvalidPortfolio
         );
     }
-
-    const EVM_ACCOUNT: &str = "0x000000000000000000000000000000000000dead";
 
     fn portfolio_config(
         include_btc: bool,
@@ -478,10 +538,7 @@ mod tests {
                 symbols.push(symbol(
                     "usdc.wallet.ethereum-mainnet",
                     "ethereum-mainnet",
-                    json!({
-                        "kind": "erc20",
-                        "contract_address": "0x0000000000000000000000000000000000000001"
-                    }),
+                    json!({"kind": "erc20", "contract_address": TOKEN}),
                 ));
             }
             wallets.push(json!({

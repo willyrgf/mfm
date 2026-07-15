@@ -79,18 +79,6 @@ quotes = [
 ]
 
 [[values]]
-name = "acme/bitcoin-balance"
-kind = "btc_address_balance"
-
-[values.value]
-network = "bitcoin-mainnet"
-bitcoin_network = "main"
-semantic_source_identity = "public-bitcoin-core"
-addresses = ["bc1qns9f7yfx3ry9lj6yz7c9er0vwa0ye2eklpzqfw"]
-coverage = "configured_only"
-max_source_reads = 1
-
-[[values]]
 name = "acme/contract-context"
 kind = "evm_contract_context"
 

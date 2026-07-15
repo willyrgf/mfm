@@ -1,10 +1,57 @@
 use mfm_op_btc_collectors::{
     btc_chain_head_collector_cycle_program_draft, btc_collectors_operation_registry,
-    BtcChainHeadCollectorConfig, BtcChainHeadCollectorCycleOperation, BtcChainHeadFact,
-    CollectorCheckpointFact, ObserveBtcChainHeadState, QueryCollectorCheckpointState,
-    RecordBtcChainHeadFactState, RecordCollectorCheckpointState,
+    btc_collectors_state_registry, BtcChainHeadCollectorConfig,
+    BtcChainHeadCollectorCycleOperation, BtcChainHeadFact, BtcNativeBalancesAtAnchorConfig,
+    BtcNetworkCollectionConfig, BtcNetworkCollectionOperation, BtcNetworkCollectionReceipt,
+    CollectorCheckpointFact, ObserveBtcAddressBalanceState, ObserveBtcChainHeadState,
+    QueryCollectorCheckpointState, RecordBtcAddressBalanceFactState, RecordBtcChainHeadFactState,
+    RecordCollectorCheckpointState, ResolveBtcJointTipState,
 };
-use mfm_program::{InputBindingNodeRef, MfmFactType as _, StateSpec as _};
+use mfm_program::{
+    build_root_with_registries, InputBindingNodeRef, MfmFactType as _, OperationKey,
+    PublicOutputKey, RootBuilder, ScopeKey, StateSpec as _,
+};
+use mfm_program_derive::PublicOutputs;
+
+#[derive(PublicOutputs)]
+#[mfm(schema = "mfm.bitcoin.test.network_collection_public_outputs")]
+struct TestNetworkCollectionPublicOutputs<'program, 'scope> {
+    receipt: mfm_program::Handle<'program, 'scope, BtcNetworkCollectionReceipt>,
+}
+
+fn network_collection_config() -> BtcNetworkCollectionConfig {
+    BtcNetworkCollectionConfig {
+        native_balances: BtcNativeBalancesAtAnchorConfig {
+            network: "bitcoin-mainnet".to_owned(),
+            bitcoin_network: "main".to_owned(),
+            semantic_source_identity: "public-bitcoin-core".to_owned(),
+            addresses: vec!["bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh".to_owned()],
+        },
+    }
+}
+
+fn network_collection_draft(config: BtcNetworkCollectionConfig) -> mfm_program::TypedProgramDraft {
+    build_root_with_registries(
+        ScopeKey::new("btc_network_collection_topology").expect("root key"),
+        btc_collectors_state_registry().expect("state registry"),
+        btc_collectors_operation_registry().expect("operation registry"),
+        |root: &mut RootBuilder<'_, '_>| {
+            let outputs = root.scope().call::<BtcNetworkCollectionOperation, _>(
+                OperationKey::new("network_collection").expect("operation key"),
+                BtcNetworkCollectionOperation,
+                config,
+                (),
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("network_receipt").expect("public output key"),
+                &TestNetworkCollectionPublicOutputs {
+                    receipt: outputs.receipt,
+                },
+            )
+        },
+    )
+    .expect("network collection draft")
+}
 
 #[test]
 fn cycle_topology_is_deterministic_and_linear() {
@@ -64,6 +111,50 @@ fn cycle_topology_is_deterministic_and_linear() {
             nodes[0].output_cell_id.as_str()
         ]
     );
+}
+
+#[test]
+fn internal_native_collection_resolves_one_tip_before_all_managed_facts_and_receipt() {
+    let first = network_collection_draft(network_collection_config());
+    let second = network_collection_draft(network_collection_config());
+    assert_eq!(first, second, "network expansion must be deterministic");
+
+    let nodes = first.state_nodes();
+    assert_eq!(
+        nodes
+            .iter()
+            .map(|node| node.key.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "resolve_joint_tip",
+            "observe_address_balance_0",
+            "record_address_balance_0",
+            "assemble_network_collection_receipt",
+        ]
+    );
+    assert_eq!(
+        nodes[0].state_kind,
+        ResolveBtcJointTipState::kind().unwrap()
+    );
+    assert_eq!(
+        nodes[1].state_kind,
+        ObserveBtcAddressBalanceState::kind().unwrap()
+    );
+    assert_eq!(
+        nodes[2].state_kind,
+        RecordBtcAddressBalanceFactState::kind().unwrap()
+    );
+
+    let tip_cell = nodes[0].output_cell_id.as_str();
+    assert_eq!(state_input_cells(&nodes[1], nodes), vec![tip_cell]);
+    assert_eq!(
+        state_input_cells(&nodes[2], nodes),
+        vec![nodes[1].output_cell_id.as_str()]
+    );
+    let receipt_inputs = state_input_cells(&nodes[3], nodes);
+    assert_eq!(receipt_inputs.len(), 2);
+    assert!(receipt_inputs.contains(&tip_cell));
+    assert!(receipt_inputs.contains(&nodes[2].output_cell_id.as_str()));
 }
 
 #[test]

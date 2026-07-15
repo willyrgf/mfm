@@ -142,11 +142,9 @@ The public discovery surface exposes only exact ids and request schema ids. It d
 implement latest selection, accepted encodings, a registry digest, a dynamic builder trait, or
 public registration helpers.
 
-The eight implemented ids are:
+The superseded implementation formerly exposed additional portfolio and collector ids. They are
+not current interfaces. During the receipt cutover, the registered public ids are:
 
-- `mfm.portfolio/portfolio_snapshot@1`
-- `mfm.bitcoin/btc_address_balance@1`
-- `mfm.evm/evm_native_balance@1`
 - `mfm.evm.contract/deploy@1`
 - `mfm.evm.contract/configure@1`
 - `mfm.evm.contract/validate@1`
@@ -155,10 +153,11 @@ The eight implemented ids are:
 
 ### Operation-owned config
 
-Config ownership follows the semantic boundaries:
+Current config ownership follows the semantic boundaries:
 
-- Portfolio uses `mfm_portfolio_model::PortfolioConfig` directly in the tracker operation.
-- BTC and EVM balance collector configs remain owned by their operation crates.
+- Portfolio collection is internal and derives demand from `mfm_portfolio_model::PortfolioConfig`.
+- BTC and EVM collection policies are closed internal operation policy, not public authored
+  collector config.
 - EVM state config/support types are owned by `mfm-state-evm-contracts`; the four lifecycle entry
   configs are owned by `mfm-op-evm-contract-lifecycle`.
 - `mfm-op-portfolio-collect-report` owns relational derivation and the explicit composed graph.
@@ -185,19 +184,17 @@ and content-addressed.
 
 The persisted config artifacts are the configs used by operation/state nodes. Catalog source names,
 schema ids, and digests are retained in launch evidence, but the catalog is not a run dependency
-after admission. The composed collect-then-report graph is one certified run; deliberately separate
-collector/report runs remain an external workflow.
+after admission. Internal collection graphs remain part of one certified workflow; standalone
+collector/report launch paths are not supported.
 
-## Public entry-point inventory
+## Current public entry-point inventory
 
-The private app dispatch publishes eight exact version-1 entry points. Run start accepts strict JSON
-requests only; setup TOML publishes the referenced values.
+The private app dispatch currently publishes four exact version-1 contract entry points. Run start
+accepts strict JSON requests only; setup TOML publishes the referenced values. The standalone
+portfolio and collector surfaces described by earlier revisions of this RFC are removed.
 
 | Exact entry point | Request references | Main semantic content | Live runtime config |
 |---|---|---|---|
-| `mfm.portfolio/portfolio_snapshot@1` | `portfolio: CatalogRef<PortfolioConfig>` | Report-only portfolio selection and valuation | Store facts; no balance crawl |
-| `mfm.bitcoin/btc_address_balance@1` | `config: CatalogRef<BtcAddressBalanceConfig>` | BTC addresses, coverage, and read bound | BTC route by semantic source |
-| `mfm.evm/evm_native_balance@1` | `config: CatalogRef<EvmNativeBalanceConfig>` | EVM accounts, chain id, decimals, coverage | EVM route by semantic network |
 | `mfm.evm.contract/deploy@1` | context + deploy action refs | Lifecycle context and deploy action | EVM route plus signer binding |
 | `mfm.evm.contract/configure@1` | context + import + configure refs | Deployed import and configure action | EVM route plus signer binding |
 | `mfm.evm.contract/validate@1` | context + import + validate refs | Configured import and validation action | EVM route; signer only when required by state |
@@ -611,16 +608,9 @@ variant, performs semantic validation, canonicalization, payload bounds, and the
 secret-field scan, then hands an already prepared raw row to storage. Storage independently verifies
 canonical and digest integrity because persisted input remains untrusted.
 
-An entry-point request uses typed references and operation-local policy:
-
-```rust
-struct EvmBalanceRequest {
-    config: CatalogRef<EvmNativeBalanceConfig>,
-}
-```
-
-No `Resolved<T>` framework type is required. The application loads ordinary typed values, and the
-operation-owned builder accepts those values directly.
+The former standalone collector request is superseded and intentionally omitted. No `Resolved<T>`
+framework type is required: the application loads ordinary typed values, and an operation-owned
+builder accepts those values directly.
 
 ### Names are labels; digests are durable identity
 
@@ -706,11 +696,7 @@ operation-local policy must be joined, the operation owns an ordinary pure funct
 implementing a new universal builder trait:
 
 ```rust
-fn build_config(
-    request: EvmBalanceRequest,
-    network: EvmNetwork,
-    accounts: EvmAccountSet,
-) -> Result<EvmNativeBalanceConfig>;
+fn build_config(context: EvmContractContext, action: DeployAction) -> Result<CompleteConfig>;
 ```
 
 The application flow is:

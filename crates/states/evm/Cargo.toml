@@ -12,6 +12,7 @@ category = "state"
 [dependencies]
 alloy-primitives = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 mfm-canonical = { path = "../../kernel/canonical", version = "0.1.0" }
@@ -26,6 +27,3 @@ mfm-portfolio-model = { path = "../../portfolio/model", version = "0.1.0" }
 mfm-program = { path = "../../kernel/program", version = "0.1.0" }
 mfm-program-derive = { path = "../../kernel/program-derive", version = "0.1.0" }
 mfm-values = { path = "../../kernel/values", version = "0.1.0" }
-
-[dev-dependencies]
-serde_json = { workspace = true }

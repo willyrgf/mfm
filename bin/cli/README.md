@@ -393,17 +393,15 @@ mfm_cli ops list
 mfm_cli --output-format json ops list
 ```
 
-JSON output returns the descriptors under `entry_points`. The production surface is:
+JSON output returns the descriptors under `entry_points`. The current production surface is:
 
-- `mfm.bitcoin/btc_address_balance@1`
 - `mfm.evm.contract/deploy@1`
 - `mfm.evm.contract/configure@1`
 - `mfm.evm.contract/validate@1`
 - `mfm.evm.contract/lifecycle@1`
 
-There is no latest-version selection. The internal BTC chain-head checkpoint operation is not a
-public entry point. The portfolio snapshot objective and EVM native collector are internal while
-their source-model cutover is in progress.
+There is no latest-version selection. BTC/EVM balance collection and the portfolio snapshot
+objective are internal while the anchored receipt cutover is in progress.
 
 ## Run Commands (Experimental)
 
@@ -458,16 +456,20 @@ Publish values once through setup, then submit a request such as:
 ```sh
 mfm_cli setup import --file setup.local.toml
 mfm_cli run start \
-  --entry-point mfm.bitcoin/btc_address_balance@1 \
-  --request btc-request.json
+  --entry-point mfm.evm.contract/deploy@1 \
+  --request contract-deploy-request.json
 ```
 
-For the Bitcoin balance entry point, `btc-request.json` has the exact shape:
+For contract deployment, `contract-deploy-request.json` has the exact shape:
 
 ```json
 {
-  "config": {
-    "name": "acme/bitcoin-balance",
+  "context": {
+    "name": "acme/contract-context",
+    "digest": "content:sha256-jcs-v1:..."
+  },
+  "deploy_action": {
+    "name": "acme/deploy-action",
     "digest": "content:sha256-jcs-v1:..."
   }
 }
@@ -486,7 +488,7 @@ EVM contract entry-point config shapes and import authority rules are documented
 For local development against a managed persistent run-store database, use:
 
 ```sh
-nix run .#mfm-start -- --entry-point mfm.bitcoin/btc_address_balance@1 --request btc-request.json
+nix run .#mfm-start -- --entry-point mfm.evm.contract/deploy@1 --request contract-deploy-request.json
 ```
 
 `.#mfm-start` starts a Nixfied-managed PostgreSQL process in slot 9 for the
@@ -497,9 +499,9 @@ runs the typed store migrations, sets `DATABASE_URL`, and then delegates to
 Run start always resolves runner executable identities before `RunAdmitted`, because those identities
 are replay authority. Specs that reference unported domain state descriptors fail with
 `LaunchRunnerUnavailable` before any typed run event is written. The production CLI runner registry
-contains the framework public-output renderer plus the portfolio, BTC collector, EVM native-balance,
-and EVM contract domain runners used by registered entry-point ops. All currently registered public
-entry-point operations use version `1`; the internal BTC chain-head checkpoint op is not registered.
+contains the framework public-output renderer, EVM contract domain runners, and internal collector
+and portfolio runners used by certified graphs. All currently registered public entry-point
+operations use version `1`.
 
 JSON and text output include `launch_outcome`. Fresh admissions report `admitted`. A duplicate start
 for the same certified run identity reports `attached` without driving. If another process holds the

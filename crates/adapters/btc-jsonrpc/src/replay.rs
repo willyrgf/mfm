@@ -48,7 +48,7 @@ pub fn verify_btc_jsonrpc_replay(broker: &replay::ReplayBroker) -> replay::Resul
     verify_btc_address_balance_fact_replay(broker)?;
     verify_btc_collector_checkpoint_fact_replay(broker)?;
     verify_btc_shared_joint_tips(broker, &balance_frames)?;
-    verify_btc_address_balance_batch_replay(broker)?;
+    verify_btc_network_collection_receipt_replay(broker)?;
     Ok(())
 }
 
@@ -498,15 +498,18 @@ fn canonical_json_bytes<T: serde::Serialize>(value: &T) -> replay::Result<PlainC
     PlainCanonicalJsonBytes::from_json_str(&json).map_err(replay_adapter_error)
 }
 
-fn verify_btc_address_balance_batch_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
-    let state_kind = AssembleBtcAddressBalanceBatchState::kind().map_err(replay_adapter_error)?;
+fn verify_btc_network_collection_receipt_replay(
+    broker: &replay::ReplayBroker,
+) -> replay::Result<()> {
+    let state_kind =
+        AssembleBtcNetworkCollectionReceiptState::kind().map_err(replay_adapter_error)?;
     let state_version =
-        AssembleBtcAddressBalanceBatchState::version().map_err(replay_adapter_error)?;
+        AssembleBtcNetworkCollectionReceiptState::version().map_err(replay_adapter_error)?;
     let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
         Ok(node.state_kind == state_kind && node.state_version == state_version)
     })?;
     for frame in &frames {
-        let _config: AssembleBtcAddressBalanceBatchConfig =
+        let _config: AssembleBtcNetworkCollectionReceiptConfig =
             replay_node_config(broker, &frame.node)?;
         let joint_tip_frames = replay_input_frames(
             broker,
@@ -522,7 +525,7 @@ fn verify_btc_address_balance_batch_replay(broker: &replay::ReplayBroker) -> rep
         )?;
         if joint_tip_frames.len() != 1 || fact_frames.is_empty() {
             return Err(replay_btc_mismatch(
-                "Bitcoin balance batch inputs were incomplete",
+                "Bitcoin network collection receipt inputs were incomplete",
             ));
         }
         let joint_tip: BtcJointTip = decode_replay_value(&joint_tip_frames[0])?;
@@ -530,11 +533,12 @@ fn verify_btc_address_balance_batch_replay(broker: &replay::ReplayBroker) -> rep
             .iter()
             .map(decode_replay_value)
             .collect::<replay::Result<Vec<BtcAddressBalanceSnapshotFact>>>()?;
-        let input = AssembleBtcAddressBalanceBatchInput {
+        let input = AssembleBtcNetworkCollectionReceiptInput {
             joint_tip,
             balance_facts: NonEmpty::try_from_vec(facts).map_err(replay_adapter_error)?,
         };
-        let expected = assemble_btc_address_balance_batch(input).map_err(replay_adapter_error)?;
+        let expected =
+            assemble_btc_network_collection_receipt(input).map_err(replay_adapter_error)?;
         ensure_canonical_value_matches(&expected, &frame.artifact_bytes)?;
     }
     Ok(())

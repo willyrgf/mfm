@@ -121,7 +121,7 @@ Run binaries locally:
 ```bash
 nix run .#mfm -- --help
 nix run .#mfm -- setup import --file examples/setup/organization.toml
-nix run .#mfm-start -- --entry-point mfm.bitcoin/btc_address_balance@1 --request btc-request.json
+nix run .#mfm-start -- --entry-point mfm.evm.contract/deploy@1 --request contract-deploy-request.json
 cargo run -p mfm -- --help
 cargo run -p mfm-rest-api
 ```

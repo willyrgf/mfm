@@ -3,7 +3,9 @@ use alloy_primitives::{Address, B256, U256};
 use mfm_evm_capabilities::{
     EvmNetworkBinding, EvmNetworkId, EvmSourcePolicyId, EvmSourceRef, RedactedEvmSourceEvidence,
 };
+use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_program::StateSpec;
+use mfm_values::NonEmpty;
 
 const HASH_A: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 const HASH_B: &str = "0x2222222222222222222222222222222222222222222222222222222222222222";
@@ -166,33 +168,92 @@ fn observe_config_requires_canonical_account_and_exact_read_budget() {
 #[test]
 fn multi_subject_batch_must_share_one_joint_tip() {
     let tip = materialize_evm_joint_tip(&tip_config(), &block_response(100, HASH_A)).expect("tip");
-    let obs_a = normalize_evm_native_balance_from_capability(
-        &observe_config(ACCT_A),
-        &tip,
-        &tip,
-        &balance_response(1),
+    let receipt =
+        assemble_evm_native_balance_batch_receipt(AssembleEvmNativeBalanceBatchReceiptInput {
+            joint_tip: tip.clone(),
+            balance_facts: NonEmpty::try_from_vec(vec![
+                native_fact(&tip, ACCT_A, 1),
+                native_fact(&tip, ACCT_B, 2),
+            ])
+            .expect("facts"),
+        })
+        .expect("receipt");
+    assert_eq!(receipt.entries().len(), 2);
+    assert_eq!(receipt.successful_observation_count(), 2);
+    assert_eq!(receipt.entries()[0].coverage(), EVM_NATIVE_BALANCE_COVERAGE);
+    assert_eq!(receipt.entries()[0].source_status(), "ok");
+}
+
+fn native_fact(tip: &EvmJointTip, account: &str, wei: u64) -> EvmAddressNativeBalanceSnapshotFact {
+    normalize_evm_native_balance_from_capability(
+        &observe_config(account),
+        tip,
+        tip,
+        &balance_response(wei),
     )
-    .expect("a");
-    let obs_b = normalize_evm_native_balance_from_capability(
-        &observe_config(ACCT_B),
-        &tip,
-        &tip,
-        &balance_response(2),
-    )
-    .expect("b");
-    require_shared_evm_joint_tip(&[&obs_a, &obs_b]).expect("shared");
+    .expect("observation")
+    .to_fact()
+}
+
+#[test]
+fn native_receipt_rejects_tampered_identity_fact_anchor_and_duplicate_source() {
+    let tip = materialize_evm_joint_tip(&tip_config(), &block_response(100, HASH_A)).expect("tip");
+    let fact = native_fact(&tip, ACCT_A, 1);
+    let receipt =
+        assemble_evm_native_balance_batch_receipt(AssembleEvmNativeBalanceBatchReceiptInput {
+            joint_tip: tip.clone(),
+            balance_facts: NonEmpty::try_from_vec(vec![fact.clone()]).expect("fact"),
+        })
+        .expect("receipt");
+
+    let mut tampered_identity = serde_json::to_value(&receipt).expect("receipt JSON");
+    tampered_identity["entries"][0]["fact_content_identity"]["response_hash"] = serde_json::json!(
+        "sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"
+    );
+    assert!(serde_json::from_value::<EvmNativeBalanceBatchReceipt>(tampered_identity).is_err());
+
+    let mut tampered_fact = serde_json::to_value(&receipt).expect("receipt JSON");
+    tampered_fact["entries"][0]["verified_fact"]["response"]["raw_wei"] = serde_json::json!("2");
+    assert!(serde_json::from_value::<EvmNativeBalanceBatchReceipt>(tampered_fact).is_err());
+
+    assert!(
+        assemble_evm_native_balance_batch_receipt(AssembleEvmNativeBalanceBatchReceiptInput {
+            joint_tip: tip.clone(),
+            balance_facts: NonEmpty::try_from_vec(vec![fact.clone(), fact]).expect("facts"),
+        },)
+        .is_err()
+    );
+
+    let non_fixed_coverage = EvmAddressNativeBalanceSnapshotFact::new(
+        EvmAddressNativeBalanceSubject::new("ethereum-mainnet", 1, ACCT_A).expect("subject"),
+        EvmAddressNativeBalanceResponse::new(
+            tip.block_number(),
+            tip.block_hash(),
+            "1",
+            18,
+            CoverageStatus::CompleteAtAnchor,
+            HoldingSourceStatus::Ok,
+        )
+        .expect("response"),
+    );
+    assert!(
+        assemble_evm_native_balance_batch_receipt(AssembleEvmNativeBalanceBatchReceiptInput {
+            joint_tip: tip.clone(),
+            balance_facts: NonEmpty::try_from_vec(vec![non_fixed_coverage]).expect("fact"),
+        },)
+        .is_err()
+    );
 
     let other =
         materialize_evm_joint_tip(&tip_config(), &block_response(99, HASH_B)).expect("other");
-    let obs_b_drifted = normalize_evm_native_balance_from_capability(
-        &observe_config(ACCT_B),
-        &other,
-        &other,
-        &balance_response(2),
-    )
-    .expect("b drifted");
-    let error = require_shared_evm_joint_tip(&[&obs_a, &obs_b_drifted]).expect_err("not shared");
-    assert!(error.to_string().contains("share one joint tip"));
+    assert!(
+        assemble_evm_native_balance_batch_receipt(AssembleEvmNativeBalanceBatchReceiptInput {
+            joint_tip: other,
+            balance_facts: NonEmpty::try_from_vec(vec![native_fact(&tip, ACCT_A, 1)])
+                .expect("fact"),
+        },)
+        .is_err()
+    );
 }
 
 #[test]

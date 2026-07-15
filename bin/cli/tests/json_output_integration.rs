@@ -45,14 +45,13 @@ fn test_ops_list_json_output() {
     assert!(output.status.success());
     let data = verify_success_response(&String::from_utf8(output.stdout).expect("UTF-8 output"));
     let entry_points = data["entry_points"].as_array().expect("entry-points array");
-    assert_eq!(entry_points.len(), 5);
+    assert_eq!(entry_points.len(), 4);
     assert_eq!(
         entry_points
             .iter()
             .map(|entry_point| entry_point["entry_point_id"].as_str().unwrap())
             .collect::<Vec<_>>(),
         vec![
-            "mfm.bitcoin/btc_address_balance@1",
             "mfm.evm.contract/configure@1",
             "mfm.evm.contract/deploy@1",
             "mfm.evm.contract/lifecycle@1",
@@ -348,7 +347,7 @@ fn test_run_start_run_id_flag_is_not_a_start_option() {
             "run",
             "start",
             "--entry-point",
-            "mfm.bitcoin/btc_address_balance@1",
+            "mfm.evm.contract/deploy@1",
             "--request",
             request_path.to_str().unwrap(),
             "--run-id",
@@ -381,7 +380,7 @@ fn test_run_start_rejects_legacy_config_flags() {
                 "run",
                 "start",
                 "--entry-point",
-                "mfm.bitcoin/btc_address_balance@1",
+                "mfm.evm.contract/deploy@1",
                 "--request",
                 request_path.to_str().unwrap(),
                 flag,
@@ -423,7 +422,7 @@ fn test_json_commands_reach_store_connection_after_local_validation() {
                 "run",
                 "start",
                 "--entry-point",
-                "mfm.bitcoin/btc_address_balance@1",
+                "mfm.evm.contract/deploy@1",
                 "--request",
                 request_path,
             ],

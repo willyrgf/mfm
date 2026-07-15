@@ -1,14 +1,14 @@
 use super::*;
 use mfm_program::StateSpec;
 
-fn balance_fixture() -> BtcAddressBalanceConfig {
-    BtcAddressBalanceConfig {
-        network: "bitcoin-mainnet".to_owned(),
-        bitcoin_network: "main".to_owned(),
-        semantic_source_identity: "public-bitcoin-core".to_owned(),
-        addresses: vec!["bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh".to_owned()],
-        coverage: "configured_only".to_owned(),
-        max_source_reads: NonZeroU64::new(1).expect("non-zero"),
+fn network_fixture() -> BtcNetworkCollectionConfig {
+    BtcNetworkCollectionConfig {
+        native_balances: BtcNativeBalancesAtAnchorConfig {
+            network: "bitcoin-mainnet".to_owned(),
+            bitcoin_network: "main".to_owned(),
+            semantic_source_identity: "public-bitcoin-core".to_owned(),
+            addresses: vec!["bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh".to_owned()],
+        },
     }
 }
 
@@ -19,54 +19,41 @@ fn default_chain_head_config_is_valid() {
 }
 
 #[test]
-fn fixture_balance_config_is_valid() {
-    validate_btc_address_balance_config(&balance_fixture()).expect("fixture balance config");
+fn network_collection_derives_closed_state_policy() {
+    let config = network_fixture();
+    validate_btc_network_collection_config(&config).expect("network config");
+    let native = &config.native_balances;
+    assert_eq!(
+        native.joint_tip_config().max_source_reads.get(),
+        BTC_JOINT_TIP_SOURCE_READS
+    );
+    let observe = native.observe_config_for_address(&native.addresses[0]);
+    assert_eq!(observe.coverage, BTC_NATIVE_BALANCE_COVERAGE);
+    assert_eq!(
+        observe.max_source_reads.get(),
+        BTC_NATIVE_BALANCE_OBSERVE_SOURCE_READS
+    );
 }
 
 #[test]
-fn multi_address_draft_shares_one_joint_tip_node() {
-    let config = BtcAddressBalanceConfig {
-        addresses: vec![
-            "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh".to_owned(),
-            "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4".to_owned(),
-        ],
-        ..balance_fixture()
-    };
-    let draft = btc_address_balance_program_draft(config).expect("draft");
-    let nodes = draft.state_nodes();
-    let joint_tip_nodes = nodes
-        .iter()
-        .filter(|node| node.key.as_str() == "resolve_joint_tip")
-        .count();
-    assert_eq!(joint_tip_nodes, 1, "must resolve joint tip exactly once");
-    // tip + 2*(observe+record) + assemble = 1 + 4 + 1 = 6
-    assert_eq!(nodes.len(), 6);
-    let observe_count = nodes
-        .iter()
-        .filter(|node| node.key.as_str().starts_with("observe_address_balance_"))
-        .count();
-    assert_eq!(observe_count, 2);
-    // Both observe nodes take the same joint tip cell as input.
-    let tip_cell = nodes
-        .iter()
-        .find(|node| node.key.as_str() == "resolve_joint_tip")
-        .expect("tip")
-        .output_cell_id
-        .as_str();
-    for node in nodes
-        .iter()
-        .filter(|node| node.key.as_str().starts_with("observe_address_balance_"))
-    {
-        let rendered = format!("{:?}", node.input);
-        assert!(
-            rendered.contains(tip_cell),
-            "observe must depend on shared joint tip cell: {rendered}"
-        );
-    }
+fn network_collection_rejects_unsorted_or_duplicate_addresses() {
+    let mut unsorted = network_fixture();
+    unsorted.native_balances.addresses = vec![
+        "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh".to_owned(),
+        "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4".to_owned(),
+    ];
+    assert!(validate_btc_network_collection_config(&unsorted).is_err());
+
+    let mut duplicate = network_fixture();
+    duplicate
+        .native_balances
+        .addresses
+        .push("bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh".to_owned());
+    assert!(validate_btc_network_collection_config(&duplicate).is_err());
 }
 
 #[test]
-fn chain_head_record_states_advertise_exact_fact_descriptor_allow_lists() {
+fn fact_record_states_advertise_exact_fact_descriptor_allow_lists() {
     let chain_head =
         RecordBtcChainHeadFactState::emitted_fact_descriptors().expect("chain-head descriptors");
     let checkpoint =

@@ -44,7 +44,6 @@ fn test_ops_help_and_list() {
         .clone();
     let rendered = String::from_utf8(output).expect("ops output is UTF-8");
     for operation in [
-        "btc_address_balance",
         "evm_contract_configure",
         "evm_contract_deploy",
         "evm_contract_lifecycle",

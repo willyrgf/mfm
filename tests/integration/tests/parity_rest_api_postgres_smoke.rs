@@ -12,7 +12,7 @@ use tower::ServiceExt;
 
 const VALID_RUN_ID: &str =
     "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000033";
-const BTC_ENTRY_POINT: &str = "mfm.bitcoin/btc_address_balance@1";
+const CONTRACT_DEPLOY_ENTRY_POINT: &str = "mfm.evm.contract/deploy@1";
 
 async fn assert_start_error(
     app: &axum::Router,
@@ -84,7 +84,7 @@ async fn parity_rest_postgres_smoke() {
         assert_start_error(
             &app,
             json!({
-                "entry_point": BTC_ENTRY_POINT,
+                "entry_point": CONTRACT_DEPLOY_ENTRY_POINT,
                 "request": {old_field: "legacy-value"},
             }),
             "EntryPointRequestInvalid",
@@ -95,7 +95,7 @@ async fn parity_rest_postgres_smoke() {
     assert_start_error(
         &app,
         json!({
-            "entry_point": BTC_ENTRY_POINT,
+            "entry_point": CONTRACT_DEPLOY_ENTRY_POINT,
             "request": "config = 'legacy TOML'",
         }),
         "EntryPointRequestInvalid",
@@ -105,7 +105,7 @@ async fn parity_rest_postgres_smoke() {
     assert_start_error(
         &app,
         json!({
-            "entry_point": BTC_ENTRY_POINT,
+            "entry_point": CONTRACT_DEPLOY_ENTRY_POINT,
             "request": {"config": {"name": "acme/dual-mainnet"}},
         }),
         "EntryPointRequestInvalid",
@@ -115,7 +115,7 @@ async fn parity_rest_postgres_smoke() {
     assert_start_error(
         &app,
         json!({
-            "entry_point": BTC_ENTRY_POINT,
+            "entry_point": CONTRACT_DEPLOY_ENTRY_POINT,
             "request": {
                 "config": {"name": "acme/dual-mainnet", "digest": "not-a-digest"},
                 "unknown": true,
@@ -126,6 +126,7 @@ async fn parity_rest_postgres_smoke() {
     )
     .await;
     for removed_entry_point in [
+        "mfm.bitcoin/btc_address_balance@1",
         "mfm.evm/evm_native_balance@1",
         "mfm.portfolio/portfolio_snapshot@1",
         "mfm.portfolio/collect_then_report@1",

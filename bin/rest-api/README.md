@@ -218,10 +218,14 @@ Request shape:
 
 ```json
 {
-  "entry_point": "mfm.bitcoin/btc_address_balance@1",
+  "entry_point": "mfm.evm.contract/deploy@1",
   "request": {
-    "config": {
-      "name": "acme/bitcoin-balance",
+    "context": {
+      "name": "acme/contract-context",
+      "digest": "content:sha256-jcs-v1:..."
+    },
+    "deploy_action": {
+      "name": "acme/deploy-action",
       "digest": "content:sha256-jcs-v1:..."
     }
   },
@@ -235,8 +239,8 @@ Request notes:
 - `request` is required, must be a JSON object, and is rejected when it contains unknown fields.
 - Requests contain exact catalog references (`name` and `digest`); name-only selection and latest
   resolution do not exist.
-- The exact public ids are returned by the CLI `ops list` command; the internal BTC chain-head
-  checkpoint, EVM native collector, and portfolio snapshot objective are not public.
+- The exact public ids are returned by the CLI `ops list` command; BTC/EVM balance collection and
+  the portfolio snapshot objective are internal during the anchored receipt cutover.
 - Normal start derives the typed run id from certified run identity material: certified spec hash,
   store scope, and a required invocation key digest.
 - `invocation_key` is optional at the API boundary. Supplying it makes retries target the same run.
@@ -251,17 +255,6 @@ execution lane for the same base work identity, start reports `already_active` w
 `active_run_id` and omits `run`.
 `public_output` is present when the run completes while driving and the op exposes a public output
 schema id.
-
-Bitcoin balance request:
-
-```json
-{
-  "entry_point": "mfm.bitcoin/btc_address_balance@1",
-  "request": {
-    "config": {"name": "acme/bitcoin-balance", "digest": "content:sha256-jcs-v1:..."}
-  }
-}
-```
 
 EVM contract deploy:
 

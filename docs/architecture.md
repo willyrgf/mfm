@@ -49,8 +49,10 @@ authority.
 
 The portfolio model has one direct `HoldingSourceConfig` algebra: `Native` or EVM `Erc20` with a
 normalized non-zero contract address. EVM native scale belongs only to `NetworkConfig::Evm`.
-Standalone portfolio and EVM-native public objectives are intentionally absent during the anchored
-collector cutover; operations remain internal until the complete snapshot graph is published.
+Standalone BTC/EVM collectors and portfolio objectives are intentionally absent during the anchored
+collector cutover. Internal network coordinators resolve one shared tip per required network and
+emit family-specific, content-bound source receipts; only the complete snapshot graph may become a
+public objective.
 
 ## Authority Contract
 

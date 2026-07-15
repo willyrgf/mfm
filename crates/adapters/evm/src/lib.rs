@@ -34,15 +34,20 @@ use mfm_runtime::{
     RunnerRegistrationBuilder,
 };
 use mfm_states_evm::{
-    assemble_evm_native_balance_batch, erc20_balance_record_visibility, evm_jsonrpc_adapter_kind,
-    evm_jsonrpc_adapter_version, materialize_evm_joint_tip, native_balance_record_visibility,
-    normalize_erc20_balance_from_capability, normalize_erc20_token_metadata_from_capability,
-    normalize_evm_native_balance_observation, AssembleEvmNativeBalanceBatchConfig,
-    AssembleEvmNativeBalanceBatchInput, AssembleEvmNativeBalanceBatchState,
-    EvmAddressErc20BalanceObservation, EvmAddressErc20BalanceSnapshotFact,
-    EvmAddressNativeBalanceObservation, EvmAddressNativeBalanceSnapshotFact, EvmErc20TokenMetadata,
-    EvmJointTip, ObserveErc20BalanceConfig, ObserveErc20BalanceInput, ObserveErc20BalanceState,
-    ObserveErc20TokenMetadataConfig, ObserveErc20TokenMetadataInput,
+    assemble_evm_erc20_balance_batch_receipt, assemble_evm_native_balance_batch_receipt,
+    assemble_evm_network_collection_receipt, erc20_balance_record_visibility,
+    evm_jsonrpc_adapter_kind, evm_jsonrpc_adapter_version, materialize_evm_joint_tip,
+    native_balance_record_visibility, normalize_erc20_balance_from_capability,
+    normalize_erc20_token_metadata_from_capability, normalize_evm_native_balance_observation,
+    AssembleEvmErc20BalanceBatchReceiptConfig, AssembleEvmErc20BalanceBatchReceiptInput,
+    AssembleEvmErc20BalanceBatchReceiptState, AssembleEvmNativeBalanceBatchReceiptConfig,
+    AssembleEvmNativeBalanceBatchReceiptInput, AssembleEvmNativeBalanceBatchReceiptState,
+    AssembleEvmNetworkCollectionReceiptConfig, AssembleEvmNetworkCollectionReceiptInput,
+    AssembleEvmNetworkCollectionReceiptState, EvmAddressErc20BalanceObservation,
+    EvmAddressErc20BalanceSnapshotFact, EvmAddressNativeBalanceObservation,
+    EvmAddressNativeBalanceSnapshotFact, EvmErc20BalanceBatchReceipt, EvmErc20TokenMetadata,
+    EvmJointTip, EvmNativeBalanceBatchReceipt, ObserveErc20BalanceConfig, ObserveErc20BalanceInput,
+    ObserveErc20BalanceState, ObserveErc20TokenMetadataConfig, ObserveErc20TokenMetadataInput,
     ObserveErc20TokenMetadataState, ObserveEvmNativeBalanceConfig, ObserveEvmNativeBalanceInput,
     ObserveEvmNativeBalanceState, RecordErc20BalanceFactState, RecordEvmNativeBalanceFactState,
     ResolveEvmJointTipConfig, ResolveEvmJointTipInput, ResolveEvmJointTipState,
@@ -444,9 +449,21 @@ pub fn register_evm_collectors_runners(
             erc20_balance_record_visibility(),
         )),
     )?;
-    registrations.register_state_runner_with_factory::<AssembleEvmNativeBalanceBatchState>(
+    registrations.register_state_runner_with_factory::<AssembleEvmNativeBalanceBatchReceiptState>(
         &pure_factory,
-        Arc::new(AssembleNativeBalanceBatchRunner { artifacts }),
+        Arc::new(AssembleNativeBalanceReceiptRunner {
+            artifacts: artifacts.clone(),
+        }),
+    )?;
+    registrations.register_state_runner_with_factory::<AssembleEvmErc20BalanceBatchReceiptState>(
+        &pure_factory,
+        Arc::new(AssembleErc20BalanceReceiptRunner {
+            artifacts: artifacts.clone(),
+        }),
+    )?;
+    registrations.register_state_runner_with_factory::<AssembleEvmNetworkCollectionReceiptState>(
+        &pure_factory,
+        Arc::new(AssembleNetworkCollectionReceiptRunner { artifacts }),
     )?;
     Ok(())
 }
@@ -788,27 +805,79 @@ impl ErasedNodeRunner for ObserveErc20BalanceRunner {
     }
 }
 
-struct AssembleNativeBalanceBatchRunner {
+struct AssembleNativeBalanceReceiptRunner {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 }
 
-impl ErasedNodeRunner for AssembleNativeBalanceBatchRunner {
+impl ErasedNodeRunner for AssembleNativeBalanceReceiptRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let _config = load_runner_config_for_node::<AssembleEvmNativeBalanceBatchConfig>(
+            let _config =
+                load_runner_config_for_node::<AssembleEvmNativeBalanceBatchReceiptConfig>(
+                    ctx.node(),
+                    self.artifacts.as_ref(),
+                )
+                .await?;
+            let input =
+                load_materialized_struct_input::<AssembleEvmNativeBalanceBatchReceiptInput>(
+                    ctx.inputs(),
+                    self.artifacts.as_ref(),
+                )
+                .await?;
+            let receipt = assemble_evm_native_balance_batch_receipt(input).map_err(|error| {
+                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+            })?;
+            ErasedRunnerOutput::state_output(&ctx, &receipt)
+        })
+    }
+}
+
+struct AssembleErc20BalanceReceiptRunner {
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
+}
+
+impl ErasedNodeRunner for AssembleErc20BalanceReceiptRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            let _config = load_runner_config_for_node::<AssembleEvmErc20BalanceBatchReceiptConfig>(
                 ctx.node(),
                 self.artifacts.as_ref(),
             )
             .await?;
-            let input = load_materialized_struct_input::<AssembleEvmNativeBalanceBatchInput>(
+            let input = load_materialized_struct_input::<AssembleEvmErc20BalanceBatchReceiptInput>(
                 ctx.inputs(),
                 self.artifacts.as_ref(),
             )
             .await?;
-            let summary = assemble_evm_native_balance_batch(input).map_err(|error| {
+            let receipt = assemble_evm_erc20_balance_batch_receipt(input).map_err(|error| {
                 mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
             })?;
-            ErasedRunnerOutput::state_output(&ctx, &summary)
+            ErasedRunnerOutput::state_output(&ctx, &receipt)
+        })
+    }
+}
+
+struct AssembleNetworkCollectionReceiptRunner {
+    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
+}
+
+impl ErasedNodeRunner for AssembleNetworkCollectionReceiptRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            let config = load_runner_config_for_node::<AssembleEvmNetworkCollectionReceiptConfig>(
+                ctx.node(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
+            let input = load_materialized_struct_input::<AssembleEvmNetworkCollectionReceiptInput>(
+                ctx.inputs(),
+                self.artifacts.as_ref(),
+            )
+            .await?;
+            let receipt = assemble_evm_network_collection_receipt(config.as_ref(), input).map_err(
+                |error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()),
+            )?;
+            ErasedRunnerOutput::state_output(&ctx, &receipt)
         })
     }
 }
@@ -909,7 +978,9 @@ pub fn verify_evm_collector_replay(broker: &replay::ReplayBroker) -> replay::Res
     verify_erc20_balance_fact_replay(broker)?;
 
     verify_evm_shared_joint_tips(broker, &native_frames, &metadata_frames, &balance_frames)?;
-    verify_evm_native_balance_batch_replay(broker)?;
+    verify_evm_native_balance_receipt_replay(broker)?;
+    verify_evm_erc20_balance_receipt_replay(broker)?;
+    verify_evm_network_collection_receipt_replay(broker)?;
     Ok(())
 }
 
@@ -1287,15 +1358,17 @@ fn canonical_json_bytes<T: serde::Serialize>(value: &T) -> replay::Result<PlainC
     PlainCanonicalJsonBytes::from_json_str(&json).map_err(replay_adapter_error)
 }
 
-fn verify_evm_native_balance_batch_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
-    let state_kind = AssembleEvmNativeBalanceBatchState::kind().map_err(replay_adapter_error)?;
+fn verify_evm_native_balance_receipt_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
+    let state_kind =
+        AssembleEvmNativeBalanceBatchReceiptState::kind().map_err(replay_adapter_error)?;
     let state_version =
-        AssembleEvmNativeBalanceBatchState::version().map_err(replay_adapter_error)?;
+        AssembleEvmNativeBalanceBatchReceiptState::version().map_err(replay_adapter_error)?;
     let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
         Ok(node.state_kind == state_kind && node.state_version == state_version)
     })?;
     for frame in &frames {
-        let _config: AssembleEvmNativeBalanceBatchConfig = replay_node_config(broker, &frame.node)?;
+        let _config: AssembleEvmNativeBalanceBatchReceiptConfig =
+            replay_node_config(broker, &frame.node)?;
         let joint_tip_frames = replay_input_frames(
             broker,
             &frame.node,
@@ -1310,7 +1383,7 @@ fn verify_evm_native_balance_batch_replay(broker: &replay::ReplayBroker) -> repl
         )?;
         if joint_tip_frames.len() != 1 || fact_frames.is_empty() {
             return Err(replay_evm_mismatch(
-                "EVM native-balance batch inputs were incomplete",
+                "EVM native-balance receipt inputs were incomplete",
             ));
         }
         let joint_tip: EvmJointTip = decode_replay_value(&joint_tip_frames[0])?;
@@ -1318,11 +1391,114 @@ fn verify_evm_native_balance_batch_replay(broker: &replay::ReplayBroker) -> repl
             .iter()
             .map(decode_replay_value)
             .collect::<replay::Result<Vec<EvmAddressNativeBalanceSnapshotFact>>>()?;
-        let input = AssembleEvmNativeBalanceBatchInput {
+        let input = AssembleEvmNativeBalanceBatchReceiptInput {
             joint_tip,
             balance_facts: NonEmpty::try_from_vec(facts).map_err(replay_adapter_error)?,
         };
-        let expected = assemble_evm_native_balance_batch(input).map_err(replay_adapter_error)?;
+        let expected =
+            assemble_evm_native_balance_batch_receipt(input).map_err(replay_adapter_error)?;
+        ensure_canonical_value_matches(&expected, &frame.artifact_bytes)?;
+    }
+    Ok(())
+}
+
+fn verify_evm_erc20_balance_receipt_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
+    let state_kind =
+        AssembleEvmErc20BalanceBatchReceiptState::kind().map_err(replay_adapter_error)?;
+    let state_version =
+        AssembleEvmErc20BalanceBatchReceiptState::version().map_err(replay_adapter_error)?;
+    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
+        Ok(node.state_kind == state_kind && node.state_version == state_version)
+    })?;
+    for frame in &frames {
+        let _config: AssembleEvmErc20BalanceBatchReceiptConfig =
+            replay_node_config(broker, &frame.node)?;
+        let joint_tip_frames = replay_input_frames(
+            broker,
+            &frame.node,
+            &EvmJointTip::semantic_id().map_err(replay_adapter_error)?,
+            &EvmJointTip::schema_id().map_err(replay_adapter_error)?,
+        )?;
+        let fact_frames = replay_input_frames(
+            broker,
+            &frame.node,
+            &EvmAddressErc20BalanceSnapshotFact::semantic_id().map_err(replay_adapter_error)?,
+            &EvmAddressErc20BalanceSnapshotFact::schema_id().map_err(replay_adapter_error)?,
+        )?;
+        if joint_tip_frames.len() != 1 || fact_frames.is_empty() {
+            return Err(replay_evm_mismatch(
+                "EVM ERC-20 balance receipt inputs were incomplete",
+            ));
+        }
+        let joint_tip: EvmJointTip = decode_replay_value(&joint_tip_frames[0])?;
+        let facts = fact_frames
+            .iter()
+            .map(decode_replay_value)
+            .collect::<replay::Result<Vec<EvmAddressErc20BalanceSnapshotFact>>>()?;
+        let input = AssembleEvmErc20BalanceBatchReceiptInput {
+            joint_tip,
+            balance_facts: NonEmpty::try_from_vec(facts).map_err(replay_adapter_error)?,
+        };
+        let expected =
+            assemble_evm_erc20_balance_batch_receipt(input).map_err(replay_adapter_error)?;
+        ensure_canonical_value_matches(&expected, &frame.artifact_bytes)?;
+    }
+    Ok(())
+}
+
+fn verify_evm_network_collection_receipt_replay(
+    broker: &replay::ReplayBroker,
+) -> replay::Result<()> {
+    let state_kind =
+        AssembleEvmNetworkCollectionReceiptState::kind().map_err(replay_adapter_error)?;
+    let state_version =
+        AssembleEvmNetworkCollectionReceiptState::version().map_err(replay_adapter_error)?;
+    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
+        Ok(node.state_kind == state_kind && node.state_version == state_version)
+    })?;
+    for frame in &frames {
+        let config: AssembleEvmNetworkCollectionReceiptConfig =
+            replay_node_config(broker, &frame.node)?;
+        let joint_tip_frames = replay_input_frames(
+            broker,
+            &frame.node,
+            &EvmJointTip::semantic_id().map_err(replay_adapter_error)?,
+            &EvmJointTip::schema_id().map_err(replay_adapter_error)?,
+        )?;
+        let native_frames = replay_input_frames(
+            broker,
+            &frame.node,
+            &EvmNativeBalanceBatchReceipt::semantic_id().map_err(replay_adapter_error)?,
+            &EvmNativeBalanceBatchReceipt::schema_id().map_err(replay_adapter_error)?,
+        )?;
+        let erc20_frames = replay_input_frames(
+            broker,
+            &frame.node,
+            &EvmErc20BalanceBatchReceipt::semantic_id().map_err(replay_adapter_error)?,
+            &EvmErc20BalanceBatchReceipt::schema_id().map_err(replay_adapter_error)?,
+        )?;
+        if joint_tip_frames.len() != 1 {
+            return Err(replay_evm_mismatch(
+                "EVM network collection receipt did not consume exactly one joint tip",
+            ));
+        }
+        let joint_tip: EvmJointTip = decode_replay_value(&joint_tip_frames[0])?;
+        let native_balance_receipts = native_frames
+            .iter()
+            .map(decode_replay_value)
+            .collect::<replay::Result<Vec<EvmNativeBalanceBatchReceipt>>>(
+        )?;
+        let erc20_balance_receipts = erc20_frames
+            .iter()
+            .map(decode_replay_value)
+            .collect::<replay::Result<Vec<EvmErc20BalanceBatchReceipt>>>()?;
+        let input = AssembleEvmNetworkCollectionReceiptInput {
+            joint_tip,
+            native_balance_receipts,
+            erc20_balance_receipts,
+        };
+        let expected = assemble_evm_network_collection_receipt(&config, input)
+            .map_err(replay_adapter_error)?;
         ensure_canonical_value_matches(&expected, &frame.artifact_bytes)?;
     }
     Ok(())

@@ -3,7 +3,6 @@ use mfm_catalog_model::CatalogRef;
 use mfm_certify::CertificationRegistry;
 use mfm_evm_contract_model::EvmContractContext;
 use mfm_ids::{DigestAlgorithm, SchemaId, StoreScopeId};
-use mfm_op_btc_collectors::BtcAddressBalanceConfig;
 use mfm_op_evm_contract_lifecycle::{
     build_configure_entry_config, build_deploy_entry_config, build_lifecycle_entry_config,
     build_validate_entry_config,
@@ -23,15 +22,10 @@ use crate::{
     RunLaunchRequest,
 };
 
-const BTC_ADDRESS_BALANCE_ID: &str = "mfm.bitcoin/btc_address_balance@1";
 const CONTRACT_DEPLOY_ID: &str = "mfm.evm.contract/deploy@1";
 const CONTRACT_CONFIGURE_ID: &str = "mfm.evm.contract/configure@1";
 const CONTRACT_VALIDATE_ID: &str = "mfm.evm.contract/validate@1";
 const CONTRACT_LIFECYCLE_ID: &str = "mfm.evm.contract/lifecycle@1";
-const BTC_REQUEST_SCHEMA: (&str, &[u8]) = (
-    "mfm.app.request.btc_address_balance",
-    b"mfm.app.request:btc_address_balance:v1",
-);
 const CONTRACT_DEPLOY_REQUEST_SCHEMA: (&str, &[u8]) = (
     "mfm.app.request.evm_contract_deploy",
     b"mfm.app.request:evm_contract_deploy:v1",
@@ -57,12 +51,6 @@ pub struct EntryPointSummary {
     /// Stable schema id for the strict JSON request object.
     #[serde(serialize_with = "serialize_schema_id")]
     pub request_schema_id: SchemaId,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BtcAddressBalanceRequest {
-    config: CatalogRef<BtcAddressBalanceConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,21 +87,19 @@ struct ContractLifecycleRequest {
 
 #[derive(Debug, Clone, Copy)]
 enum EntryPoint {
-    BtcAddressBalance,
-    ContractDeploy,
-    ContractConfigure,
-    ContractValidate,
-    ContractLifecycle,
+    Deploy,
+    Configure,
+    Validate,
+    Lifecycle,
 }
 
 impl EntryPoint {
     fn parse(value: &str) -> Result<Self, AppError> {
         match value {
-            BTC_ADDRESS_BALANCE_ID => Ok(Self::BtcAddressBalance),
-            CONTRACT_DEPLOY_ID => Ok(Self::ContractDeploy),
-            CONTRACT_CONFIGURE_ID => Ok(Self::ContractConfigure),
-            CONTRACT_VALIDATE_ID => Ok(Self::ContractValidate),
-            CONTRACT_LIFECYCLE_ID => Ok(Self::ContractLifecycle),
+            CONTRACT_DEPLOY_ID => Ok(Self::Deploy),
+            CONTRACT_CONFIGURE_ID => Ok(Self::Configure),
+            CONTRACT_VALIDATE_ID => Ok(Self::Validate),
+            CONTRACT_LIFECYCLE_ID => Ok(Self::Lifecycle),
             _ => Err(AppError::new(
                 ErrorClass::BadRequest,
                 "EntryPointNotFound",
@@ -124,21 +110,19 @@ impl EntryPoint {
 
     fn id(self) -> &'static str {
         match self {
-            Self::BtcAddressBalance => BTC_ADDRESS_BALANCE_ID,
-            Self::ContractDeploy => CONTRACT_DEPLOY_ID,
-            Self::ContractConfigure => CONTRACT_CONFIGURE_ID,
-            Self::ContractValidate => CONTRACT_VALIDATE_ID,
-            Self::ContractLifecycle => CONTRACT_LIFECYCLE_ID,
+            Self::Deploy => CONTRACT_DEPLOY_ID,
+            Self::Configure => CONTRACT_CONFIGURE_ID,
+            Self::Validate => CONTRACT_VALIDATE_ID,
+            Self::Lifecycle => CONTRACT_LIFECYCLE_ID,
         }
     }
 
     fn request_schema_id(self) -> Result<SchemaId, AppError> {
         let (name, seed) = match self {
-            Self::BtcAddressBalance => BTC_REQUEST_SCHEMA,
-            Self::ContractDeploy => CONTRACT_DEPLOY_REQUEST_SCHEMA,
-            Self::ContractConfigure => CONTRACT_CONFIGURE_REQUEST_SCHEMA,
-            Self::ContractValidate => CONTRACT_VALIDATE_REQUEST_SCHEMA,
-            Self::ContractLifecycle => CONTRACT_LIFECYCLE_REQUEST_SCHEMA,
+            Self::Deploy => CONTRACT_DEPLOY_REQUEST_SCHEMA,
+            Self::Configure => CONTRACT_CONFIGURE_REQUEST_SCHEMA,
+            Self::Validate => CONTRACT_VALIDATE_REQUEST_SCHEMA,
+            Self::Lifecycle => CONTRACT_LIFECYCLE_REQUEST_SCHEMA,
         };
         SchemaId::new(
             name,
@@ -161,14 +145,7 @@ impl EntryPoint {
         request: &Value,
     ) -> Result<PreparedEntryPoint, AppError> {
         match self {
-            Self::BtcAddressBalance => {
-                let request: BtcAddressBalanceRequest = decode_request(request)?;
-                let (config, source) = resolve_catalog(store, &request.config).await?;
-                let plan = mfm_op_btc_collectors::btc_address_balance_program_launch_plan(config)
-                    .map_err(|_| plan_error("BtcAddressBalancePlanFailed"))?;
-                Ok(PreparedEntryPoint::new(plan, [source]))
-            }
-            Self::ContractDeploy => {
+            Self::Deploy => {
                 let request: ContractDeployRequest = decode_request(request)?;
                 let (context, context_source) = resolve_catalog(store, &request.context).await?;
                 let (deploy, deploy_source) =
@@ -185,7 +162,7 @@ impl EntryPoint {
                     [context_source, deploy_source],
                 ))
             }
-            Self::ContractConfigure => {
+            Self::Configure => {
                 let request: ContractConfigureRequest = decode_request(request)?;
                 let (context, context_source) = resolve_catalog(store, &request.context).await?;
                 let (import_deployed, import_source) =
@@ -204,7 +181,7 @@ impl EntryPoint {
                     [context_source, import_source, configure_source],
                 ))
             }
-            Self::ContractValidate => {
+            Self::Validate => {
                 let request: ContractValidateRequest = decode_request(request)?;
                 let (context, context_source) = resolve_catalog(store, &request.context).await?;
                 let (import_configured, import_source) =
@@ -223,7 +200,7 @@ impl EntryPoint {
                     [context_source, import_source, validate_source],
                 ))
             }
-            Self::ContractLifecycle => {
+            Self::Lifecycle => {
                 let request: ContractLifecycleRequest = decode_request(request)?;
                 let (context, context_source) = resolve_catalog(store, &request.context).await?;
                 let (deploy, deploy_source) =
@@ -273,11 +250,10 @@ impl PreparedEntryPoint {
 /// Returns the exact compiled entry-point discovery surface.
 pub fn entry_point_summaries() -> Result<Vec<EntryPointSummary>, AppError> {
     let mut summaries: Vec<EntryPointSummary> = [
-        EntryPoint::BtcAddressBalance,
-        EntryPoint::ContractDeploy,
-        EntryPoint::ContractConfigure,
-        EntryPoint::ContractValidate,
-        EntryPoint::ContractLifecycle,
+        EntryPoint::Deploy,
+        EntryPoint::Configure,
+        EntryPoint::Validate,
+        EntryPoint::Lifecycle,
     ]
     .into_iter()
     .map(|entry_point| {

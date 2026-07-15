@@ -19,12 +19,12 @@ use mfm_ids::{AdapterKind, AdapterVersion, DigestAlgorithm, StateKind, StateVers
 use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig};
 use mfm_program::{
-    fact_descriptor_ref, AdapterBindingSpec, FactDescriptorRef, ManagedWriteState, NoContext,
-    PureState, ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
+    fact_descriptor_ref, AdapterBindingSpec, FactDescriptorRef, ManagedWriteState, MfmFactType,
+    NoContext, PureState, ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, StateInput};
 use mfm_values::NonEmpty;
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Serialize};
 
 use crate::{
     address_native_balance_fact_visibility, validate_canonical_evm_account,
@@ -37,10 +37,12 @@ const EVM_JSONRPC_ADAPTER_NAME: &str = "jsonrpc";
 const EVM_JSONRPC_ADAPTER_VERSION: &str = "mfm.evm.jsonrpc.adapter.v1";
 /// Exact number of source reads required by one hash-pinned native-balance observation.
 pub const EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS: u64 = 2;
-/// Exact number of source reads required to resolve an EVM batch joint tip.
+/// Exact number of source reads required to resolve an EVM network collection joint tip.
 pub const EVM_JOINT_TIP_SOURCE_READS: u64 = 1;
 /// Closed coverage claim for a successful configured native source observation.
 pub const EVM_NATIVE_BALANCE_COVERAGE: &str = "configured_only";
+/// Closed source-status claim for a successful EVM native source observation.
+pub const EVM_NATIVE_BALANCE_SOURCE_STATUS: &str = "ok";
 
 /// Returns the stable EVM JSON-RPC adapter kind for native collectors.
 pub fn evm_jsonrpc_adapter_kind() -> Result<AdapterKind, mfm_ids::IdentityError> {
@@ -189,38 +191,6 @@ fn format_block_hash(hash: &alloy_primitives::B256) -> String {
     format!("{hash:#x}")
 }
 
-/// Requires every observation in a same-network batch to share one joint tip anchor.
-pub fn require_shared_evm_joint_tip(
-    observations: &[&EvmAddressNativeBalanceObservation],
-) -> Result<(), EvmStateError> {
-    let Some(first) = observations.first() else {
-        return Err(EvmStateError::InvalidInput {
-            reason: "shared tip batch requires at least one observation".to_owned(),
-        });
-    };
-    let number = first.response().block_number();
-    let hash = first.response().block_hash();
-    let network = first.subject().network();
-    let chain_id = first.subject().chain_id();
-    for observation in observations.iter().skip(1) {
-        if observation.subject().network() != network
-            || observation.subject().chain_id() != chain_id
-        {
-            return Err(EvmStateError::InvalidInput {
-                reason: "shared tip batch subjects must share one network/chain".to_owned(),
-            });
-        }
-        if observation.response().block_number() != number
-            || observation.response().block_hash() != hash
-        {
-            return Err(EvmStateError::InvalidInput {
-                reason: "multi-subject same-network batch must share one joint tip".to_owned(),
-            });
-        }
-    }
-    Ok(())
-}
-
 /// Config for resolving a joint tip once per same-network collector batch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
 #[mfm(
@@ -355,7 +325,7 @@ pub struct ObserveEvmNativeBalanceConfig {
     pub network: NetworkConfig,
     /// Account address to observe.
     pub account: String,
-    /// Coverage claim written on success.
+    /// Fixed coverage claim written on success (`configured_only`).
     pub coverage: String,
     /// Maximum number of source reads this bounded state may request.
     pub max_source_reads: NonZeroU64,
@@ -370,6 +340,11 @@ pub fn validate_observe_evm_native_balance_config(
     if config.max_source_reads.get() != EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS {
         return Err(format!(
             "max_source_reads must equal {EVM_NATIVE_BALANCE_OBSERVE_SOURCE_READS} for native balance observation"
+        ));
+    }
+    if config.coverage != EVM_NATIVE_BALANCE_COVERAGE {
+        return Err(format!(
+            "coverage must equal {EVM_NATIVE_BALANCE_COVERAGE} for native balance observation"
         ));
     }
     let coverage = CoverageStatus::from_str(&config.coverage)
@@ -729,80 +704,387 @@ pub fn native_balance_record_visibility() -> mfm_facts::FactVisibility {
     address_native_balance_fact_visibility()
 }
 
-/// Config for assembling a multi-account native balance batch summary.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-#[mfm(schema = "mfm.evm.state.config.assemble_native_balance_batch")]
-pub struct AssembleEvmNativeBalanceBatchConfig {}
-
-/// Input for assembling a multi-account native balance batch summary.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, StateInput)]
-#[mfm(schema = "mfm.evm.state.input.assemble_native_balance_batch")]
-pub struct AssembleEvmNativeBalanceBatchInput {
-    /// Joint tip shared by the batch.
-    pub joint_tip: EvmJointTip,
-    /// Recorded native-balance facts (at least one).
-    pub balance_facts: NonEmpty<EvmAddressNativeBalanceSnapshotFact>,
-}
-
-/// Summary of a multi-account same-network native balance collector batch.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+/// Exact EVM native-balance source key carried by a collection receipt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, MfmValue)]
 #[mfm(
     namespace = "mfm.evm",
-    name = "native_balance_batch_summary",
+    name = "native_balance_source_key",
     version = "1",
-    schema = "mfm.evm.state.output.native_balance_batch_summary"
+    schema = "mfm.evm.collection.native_balance_source_key"
 )]
-pub struct EvmNativeBalanceBatchSummary {
+pub struct EvmNativeBalanceSourceKey {
     network: String,
     chain_id: u64,
-    joint_tip_block_number: u64,
-    joint_tip_block_hash: String,
-    account_count: u64,
+    account: String,
 }
 
-impl EvmNativeBalanceBatchSummary {
-    /// Returns the semantic network id.
+impl EvmNativeBalanceSourceKey {
+    fn from_fact(fact: &EvmAddressNativeBalanceSnapshotFact) -> Result<Self, EvmStateError> {
+        let subject = fact.subject();
+        let subject = EvmAddressNativeBalanceSubject::new(
+            subject.network(),
+            subject.chain_id(),
+            subject.account(),
+        )?;
+        Ok(Self {
+            network: subject.network().to_owned(),
+            chain_id: subject.chain_id(),
+            account: subject.account().to_owned(),
+        })
+    }
+
+    /// Returns the semantic EVM network id.
     pub fn network(&self) -> &str {
         &self.network
     }
 
-    /// Returns the joint tip block number.
-    pub const fn joint_tip_block_number(&self) -> u64 {
-        self.joint_tip_block_number
+    /// Returns the EVM chain id.
+    pub const fn chain_id(&self) -> u64 {
+        self.chain_id
     }
 
-    /// Returns the joint tip block hash.
-    pub fn joint_tip_block_hash(&self) -> &str {
-        &self.joint_tip_block_hash
-    }
-
-    /// Returns the number of accounts collected.
-    pub const fn account_count(&self) -> u64 {
-        self.account_count
+    /// Returns the canonical observed account.
+    pub fn account(&self) -> &str {
+        &self.account
     }
 }
 
-/// Pure state that verifies shared tip and summarizes a native balance batch.
-pub struct AssembleEvmNativeBalanceBatchState;
+/// One checked EVM native-balance fact included in a resource receipt.
+///
+/// The embedded fact is private hydration material used only to re-derive and verify the content
+/// identity when this receipt is decoded. It is not a report-selection shortcut.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "native_balance_receipt_entry",
+    version = "1",
+    schema = "mfm.evm.collection.native_balance_receipt_entry"
+)]
+pub struct EvmNativeBalanceReceiptEntry {
+    source_key: EvmNativeBalanceSourceKey,
+    block_number: u64,
+    block_hash: String,
+    coverage: String,
+    source_status: String,
+    fact_content_identity: mfm_facts::FactContentIdentity,
+    verified_fact: EvmAddressNativeBalanceSnapshotFact,
+}
 
-impl StateSpec for AssembleEvmNativeBalanceBatchState {
-    type Config = AssembleEvmNativeBalanceBatchConfig;
+impl EvmNativeBalanceReceiptEntry {
+    fn from_verified_fact(
+        fact: &EvmAddressNativeBalanceSnapshotFact,
+    ) -> Result<Self, EvmStateError> {
+        let source_key = EvmNativeBalanceSourceKey::from_fact(fact)?;
+        let response = fact.response();
+        let coverage = response.coverage_status()?;
+        let source_status = response.holding_source_status()?;
+        if coverage.as_str() != EVM_NATIVE_BALANCE_COVERAGE
+            || source_status.as_str() != EVM_NATIVE_BALANCE_SOURCE_STATUS
+        {
+            return Err(EvmStateError::InvalidInput {
+                reason: "receipt fact did not use the fixed EVM native coverage/status".to_owned(),
+            });
+        }
+        let rebuilt_response = EvmAddressNativeBalanceResponse::new(
+            response.block_number(),
+            response.block_hash(),
+            response.raw_wei(),
+            response.decimals(),
+            coverage,
+            source_status,
+        )?;
+        let rebuilt_subject = EvmAddressNativeBalanceSubject::new(
+            source_key.network(),
+            source_key.chain_id(),
+            source_key.account(),
+        )?;
+        let rebuilt_fact =
+            EvmAddressNativeBalanceSnapshotFact::new(rebuilt_subject, rebuilt_response);
+        if &rebuilt_fact != fact {
+            return Err(EvmStateError::InvalidInput {
+                reason: "receipt fact did not satisfy the EVM native-balance fact contract"
+                    .to_owned(),
+            });
+        }
+        let descriptor = EvmAddressNativeBalanceSnapshotFact::descriptor().map_err(|error| {
+            EvmStateError::InvalidInput {
+                reason: error.to_string(),
+            }
+        })?;
+        let fact_content_identity = mfm_facts::derive_fact_content_identity_from_typed_values(
+            &descriptor,
+            fact.subject(),
+            fact.response(),
+        )
+        .map_err(|error| EvmStateError::InvalidInput {
+            reason: error.to_string(),
+        })?;
+        Ok(Self {
+            source_key,
+            block_number: response.block_number(),
+            block_hash: response.block_hash().to_owned(),
+            coverage: coverage.as_str().to_owned(),
+            source_status: source_status.as_str().to_owned(),
+            fact_content_identity,
+            verified_fact: fact.clone(),
+        })
+    }
+
+    /// Returns the exact family-specific source key.
+    pub const fn source_key(&self) -> &EvmNativeBalanceSourceKey {
+        &self.source_key
+    }
+
+    /// Returns the exact anchor block number.
+    pub const fn block_number(&self) -> u64 {
+        self.block_number
+    }
+
+    /// Returns the exact canonical anchor block hash.
+    pub fn block_hash(&self) -> &str {
+        &self.block_hash
+    }
+
+    /// Returns the fixed admissible coverage tag.
+    pub fn coverage(&self) -> &str {
+        &self.coverage
+    }
+
+    /// Returns the fixed successful source-status tag.
+    pub fn source_status(&self) -> &str {
+        &self.source_status
+    }
+
+    /// Returns the checked fact-content identity.
+    pub const fn fact_content_identity(&self) -> &mfm_facts::FactContentIdentity {
+        &self.fact_content_identity
+    }
+}
+
+impl<'de> Deserialize<'de> for EvmNativeBalanceReceiptEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            source_key: EvmNativeBalanceSourceKey,
+            block_number: u64,
+            block_hash: String,
+            coverage: String,
+            source_status: String,
+            fact_content_identity: serde_json::Value,
+            verified_fact: EvmAddressNativeBalanceSnapshotFact,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let expected = Self::from_verified_fact(&wire.verified_fact).map_err(de::Error::custom)?;
+        let descriptor =
+            EvmAddressNativeBalanceSnapshotFact::descriptor().map_err(de::Error::custom)?;
+        let identity = mfm_facts::verify_serialized_fact_content_identity_from_typed_values(
+            &wire.fact_content_identity,
+            &descriptor,
+            wire.verified_fact.subject(),
+            wire.verified_fact.response(),
+        )
+        .map_err(de::Error::custom)?;
+        if wire.source_key != expected.source_key
+            || wire.block_number != expected.block_number
+            || wire.block_hash != expected.block_hash
+            || wire.coverage != expected.coverage
+            || wire.source_status != expected.source_status
+            || identity != expected.fact_content_identity
+        {
+            return Err(de::Error::custom(
+                "EVM native balance receipt entry did not match verified fact material",
+            ));
+        }
+        Ok(expected)
+    }
+}
+
+/// Config for assembling an exact EVM native-balance resource receipt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[mfm(schema = "mfm.evm.state.config.assemble_native_balance_receipt")]
+pub struct AssembleEvmNativeBalanceBatchReceiptConfig {}
+
+/// Input for assembling an exact EVM native-balance resource receipt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, StateInput)]
+#[mfm(schema = "mfm.evm.state.input.assemble_native_balance_receipt")]
+pub struct AssembleEvmNativeBalanceBatchReceiptInput {
+    /// Joint tip shared by every recorded native fact.
+    pub joint_tip: EvmJointTip,
+    /// Completed managed fact outputs for every configured EVM native source.
+    pub balance_facts: NonEmpty<EvmAddressNativeBalanceSnapshotFact>,
+}
+
+/// Exact successful EVM native-balance collection at one shared network anchor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "native_balance_batch_receipt",
+    version = "1",
+    schema = "mfm.evm.collection.native_balance_batch_receipt"
+)]
+pub struct EvmNativeBalanceBatchReceipt {
+    network: String,
+    chain_id: u64,
+    block_number: u64,
+    block_hash: String,
+    successful_observation_count: u64,
+    entries: Vec<EvmNativeBalanceReceiptEntry>,
+}
+
+impl EvmNativeBalanceBatchReceipt {
+    fn from_entries(
+        network: String,
+        chain_id: u64,
+        block_number: u64,
+        block_hash: String,
+        successful_observation_count: u64,
+        entries: Vec<EvmNativeBalanceReceiptEntry>,
+    ) -> Result<Self, EvmStateError> {
+        if network.trim().is_empty() || chain_id == 0 || entries.is_empty() {
+            return Err(EvmStateError::InvalidInput {
+                reason:
+                    "EVM native balance receipt requires a non-empty network, chain, and entries"
+                        .to_owned(),
+            });
+        }
+        let expected_count =
+            u64::try_from(entries.len()).map_err(|_| EvmStateError::InvalidInput {
+                reason: "EVM native balance receipt entry count overflowed u64".to_owned(),
+            })?;
+        if successful_observation_count != expected_count {
+            return Err(EvmStateError::InvalidInput {
+                reason: "EVM native balance receipt successful count did not match entries"
+                    .to_owned(),
+            });
+        }
+        let block_hash = crate::canonical_evm_block_hash(block_hash)?;
+        let mut previous = None;
+        for entry in &entries {
+            if entry.source_key.network != network
+                || entry.source_key.chain_id != chain_id
+                || entry.block_number != block_number
+                || entry.block_hash != block_hash
+            {
+                return Err(EvmStateError::InvalidInput {
+                    reason: "EVM native balance receipt entry did not match network anchor binding"
+                        .to_owned(),
+                });
+            }
+            if entry.coverage != EVM_NATIVE_BALANCE_COVERAGE
+                || entry.source_status != EVM_NATIVE_BALANCE_SOURCE_STATUS
+            {
+                return Err(EvmStateError::InvalidInput {
+                    reason: "EVM native balance receipt entry did not use fixed coverage/status"
+                        .to_owned(),
+                });
+            }
+            if previous
+                .as_ref()
+                .is_some_and(|key: &&EvmNativeBalanceSourceKey| *key >= &entry.source_key)
+            {
+                return Err(EvmStateError::InvalidInput {
+                    reason: "EVM native balance receipt entries were not strictly sorted"
+                        .to_owned(),
+                });
+            }
+            previous = Some(&entry.source_key);
+        }
+        Ok(Self {
+            network,
+            chain_id,
+            block_number,
+            block_hash,
+            successful_observation_count,
+            entries,
+        })
+    }
+
+    /// Returns the semantic EVM network id.
+    pub fn network(&self) -> &str {
+        &self.network
+    }
+
+    /// Returns the EVM chain id.
+    pub const fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
+    /// Returns the shared anchor block number.
+    pub const fn block_number(&self) -> u64 {
+        self.block_number
+    }
+
+    /// Returns the shared canonical anchor block hash.
+    pub fn block_hash(&self) -> &str {
+        &self.block_hash
+    }
+
+    /// Returns the completed source observation count.
+    pub const fn successful_observation_count(&self) -> u64 {
+        self.successful_observation_count
+    }
+
+    /// Returns entries in strict source-key order.
+    pub fn entries(&self) -> &[EvmNativeBalanceReceiptEntry] {
+        &self.entries
+    }
+}
+
+impl<'de> Deserialize<'de> for EvmNativeBalanceBatchReceipt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            network: String,
+            chain_id: u64,
+            block_number: u64,
+            block_hash: String,
+            successful_observation_count: u64,
+            entries: Vec<EvmNativeBalanceReceiptEntry>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::from_entries(
+            wire.network,
+            wire.chain_id,
+            wire.block_number,
+            wire.block_hash,
+            wire.successful_observation_count,
+            wire.entries,
+        )
+        .map_err(de::Error::custom)
+    }
+}
+
+/// Pure state that assembles one exact EVM native-balance resource receipt.
+pub struct AssembleEvmNativeBalanceBatchReceiptState;
+
+impl StateSpec for AssembleEvmNativeBalanceBatchReceiptState {
+    type Config = AssembleEvmNativeBalanceBatchReceiptConfig;
     type Context = NoContext;
-    type Input = AssembleEvmNativeBalanceBatchInput;
-    type Output = EvmNativeBalanceBatchSummary;
+    type Input = AssembleEvmNativeBalanceBatchReceiptInput;
+    type Output = EvmNativeBalanceBatchReceipt;
     type Effect = Pure;
     type Caps = NoCaps;
 
     fn kind() -> mfm_program::Result<StateKind> {
-        state_kind("native_balance.assemble_batch")
+        state_kind("native_balance.assemble_receipt")
     }
 
     fn version() -> mfm_program::Result<StateVersion> {
-        state_version("native_balance.assemble_batch")
+        state_version("native_balance.assemble_receipt")
     }
 
     fn name() -> &'static str {
-        "mfm.evm.native_balance.assemble_batch"
+        "mfm.evm.native_balance.assemble_receipt"
     }
 
     fn new(_config: ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
@@ -810,55 +1092,42 @@ impl StateSpec for AssembleEvmNativeBalanceBatchState {
     }
 }
 
-impl PureState for AssembleEvmNativeBalanceBatchState {
+impl PureState for AssembleEvmNativeBalanceBatchReceiptState {
     fn run(
         &self,
         input: Self::Input,
         _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
-        assemble_evm_native_balance_batch(input)
+        assemble_evm_native_balance_batch_receipt(input)
     }
 }
 
-/// Verifies shared tip across recorded facts and builds a batch summary.
-pub fn assemble_evm_native_balance_batch(
-    input: AssembleEvmNativeBalanceBatchInput,
-) -> StateResult<EvmNativeBalanceBatchSummary> {
-    let facts = input.balance_facts.values();
-    let observations: Vec<EvmAddressNativeBalanceObservation> = facts
+/// Derives one exact EVM native-balance receipt from completed managed fact outputs.
+pub fn assemble_evm_native_balance_batch_receipt(
+    input: AssembleEvmNativeBalanceBatchReceiptInput,
+) -> StateResult<EvmNativeBalanceBatchReceipt> {
+    let mut entries = input
+        .balance_facts
+        .values()
         .iter()
-        .map(|fact| {
-            EvmAddressNativeBalanceObservation::new(
-                fact.subject().clone(),
-                fact.response().clone(),
-                1,
-            )
-        })
-        .collect();
-    let refs: Vec<&EvmAddressNativeBalanceObservation> = observations.iter().collect();
-    require_shared_evm_joint_tip(&refs).map_err(StateError::from)?;
-    let first = facts
-        .first()
-        .expect("NonEmpty guarantees at least one fact");
-    if first.response().block_number() != input.joint_tip.block_number()
-        || first.response().block_hash() != input.joint_tip.block_hash()
-    {
-        return Err(StateError::from(EvmStateError::InvalidInput {
-            reason: "recorded facts do not match batch joint tip".to_owned(),
-        }));
-    }
-    let account_count = u64::try_from(facts.len()).map_err(|_| {
+        .map(EvmNativeBalanceReceiptEntry::from_verified_fact)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StateError::from)?;
+    entries.sort_by(|left, right| left.source_key.cmp(&right.source_key));
+    let count = u64::try_from(entries.len()).map_err(|_| {
         StateError::from(EvmStateError::InvalidInput {
-            reason: "account count overflow".to_owned(),
+            reason: "EVM native balance receipt entry count overflowed u64".to_owned(),
         })
     })?;
-    Ok(EvmNativeBalanceBatchSummary {
-        network: input.joint_tip.network().to_owned(),
-        chain_id: input.joint_tip.chain_id(),
-        joint_tip_block_number: input.joint_tip.block_number(),
-        joint_tip_block_hash: input.joint_tip.block_hash().to_owned(),
-        account_count,
-    })
+    EvmNativeBalanceBatchReceipt::from_entries(
+        input.joint_tip.network().to_owned(),
+        input.joint_tip.chain_id(),
+        input.joint_tip.block_number(),
+        input.joint_tip.block_hash().to_owned(),
+        count,
+        entries,
+    )
+    .map_err(StateError::from)
 }
 
 #[cfg(test)]

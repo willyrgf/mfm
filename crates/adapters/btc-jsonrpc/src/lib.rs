@@ -35,11 +35,11 @@ use mfm_runtime::{
     RunnerRegistrationBuilder,
 };
 use mfm_states_btc::{
-    address_balance_record_visibility, assemble_btc_address_balance_batch,
+    address_balance_record_visibility, assemble_btc_network_collection_receipt,
     btc_jsonrpc_adapter_kind, btc_jsonrpc_adapter_version, chain_head_fact_visibility,
     collector_checkpoint_fact_visibility, normalize_btc_address_balance_observation,
-    record_collector_checkpoint_from_outputs, AssembleBtcAddressBalanceBatchConfig,
-    AssembleBtcAddressBalanceBatchInput, AssembleBtcAddressBalanceBatchState,
+    record_collector_checkpoint_from_outputs, AssembleBtcNetworkCollectionReceiptConfig,
+    AssembleBtcNetworkCollectionReceiptInput, AssembleBtcNetworkCollectionReceiptState,
     BtcAddressBalanceObservation, BtcAddressBalanceSnapshotFact, BtcChainHeadFact,
     BtcChainHeadObservation, BtcJointTip, CollectorCheckpointFact, CollectorCheckpointResponse,
     LoadedCollectorCheckpoint, ObserveBtcAddressBalanceConfig, ObserveBtcAddressBalanceInput,
@@ -291,34 +291,34 @@ pub fn register_btc_jsonrpc_runners(
             ),
         ),
     )?;
-    registrations.register_state_runner_with_factory::<AssembleBtcAddressBalanceBatchState>(
+    registrations.register_state_runner_with_factory::<AssembleBtcNetworkCollectionReceiptState>(
         &pure_factory,
-        Arc::new(AssembleAddressBalanceBatchRunner { artifacts }),
+        Arc::new(AssembleNetworkCollectionReceiptRunner { artifacts }),
     )?;
     Ok(())
 }
 
-struct AssembleAddressBalanceBatchRunner {
+struct AssembleNetworkCollectionReceiptRunner {
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 }
 
-impl ErasedNodeRunner for AssembleAddressBalanceBatchRunner {
+impl ErasedNodeRunner for AssembleNetworkCollectionReceiptRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let _config = load_runner_config_for_node::<AssembleBtcAddressBalanceBatchConfig>(
+            let _config = load_runner_config_for_node::<AssembleBtcNetworkCollectionReceiptConfig>(
                 ctx.node(),
                 self.artifacts.as_ref(),
             )
             .await?;
-            let input = load_materialized_struct_input::<AssembleBtcAddressBalanceBatchInput>(
+            let input = load_materialized_struct_input::<AssembleBtcNetworkCollectionReceiptInput>(
                 ctx.inputs(),
                 self.artifacts.as_ref(),
             )
             .await?;
-            let summary = assemble_btc_address_balance_batch(input).map_err(|error| {
+            let receipt = assemble_btc_network_collection_receipt(input).map_err(|error| {
                 mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
             })?;
-            ErasedRunnerOutput::state_output(&ctx, &summary)
+            ErasedRunnerOutput::state_output(&ctx, &receipt)
         })
     }
 }

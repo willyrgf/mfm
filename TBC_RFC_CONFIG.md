@@ -140,16 +140,13 @@ This is required by
 
 ### 3. Complete catalog-backed launch coverage
 
-Add integration coverage for all eight exact entry points:
+This historical checklist is superseded for portfolio and collector ingress. During the receipt
+cutover, integration coverage applies to the four registered contract entry points:
 
-- mfm.portfolio/portfolio_snapshot@1
-- mfm.bitcoin/btc_address_balance@1
-- mfm.evm/evm_native_balance@1
 - mfm.evm.contract/deploy@1
 - mfm.evm.contract/configure@1
 - mfm.evm.contract/validate@1
 - mfm.evm.contract/lifecycle@1
-- mfm.portfolio/collect_then_report@1
 
 Each entry point needs successful and failure-path coverage for:
 

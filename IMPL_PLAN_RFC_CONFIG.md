@@ -291,8 +291,6 @@ Use one private, deny-unknown-fields, tagged enum in app setup code. The initial
 smallest set needed by all current entry points and the representative composed workflow:
 
 - `portfolio` -> `PortfolioConfig` after semantic normalization;
-- `btc_address_balance` -> `BtcAddressBalanceConfig`;
-- `evm_native_balance` -> `EvmNativeBalanceConfig`;
 - `evm_contract_context` -> `EvmContractContext`;
 - `evm_deploy_action` -> `DeployAction`;
 - `evm_configure_action` -> `ConfigureAction`;
@@ -325,14 +323,10 @@ The target inventory is:
 
 | Exact id | Request inputs | Complete operation config construction |
 |---|---|---|
-| `mfm.portfolio/portfolio_snapshot@1` | `CatalogRef<PortfolioConfig>` | Direct typed resolution |
-| `mfm.bitcoin/btc_address_balance@1` | `CatalogRef<BtcAddressBalanceConfig>` | Direct typed resolution |
-| `mfm.evm/evm_native_balance@1` | `CatalogRef<EvmNativeBalanceConfig>` | Direct typed resolution |
 | `mfm.evm.contract/deploy@1` | context ref + deploy-action ref | Pure `build_deploy_config` |
 | `mfm.evm.contract/configure@1` | context ref + deployed-import ref + configure-action ref | Pure `build_configure_config` |
 | `mfm.evm.contract/validate@1` | context ref + configured-import ref + validate-action ref | Pure `build_validate_config` |
 | `mfm.evm.contract/lifecycle@1` | context ref + deploy/configure/validate action refs | Pure `build_lifecycle_config` |
-| `mfm.portfolio/collect_then_report@1` | portfolio ref + explicit collector policies | Pure composed-workflow config builder |
 
 Every request type is strict, typed, and has a stable request schema id. The four contract
 entry-config types move to `mfm-op-evm-contract-lifecycle` and gain ordinary constructors from their
@@ -362,9 +356,8 @@ configs. The composed portfolio workflow derives collector configs from one `Por
 which removes the repeated network and wallet data in the motivating scenario. More granular
 catalog types require a demonstrated second consumer.
 
-Remove the sample-network `Default` implementations from `BtcAddressBalanceConfig` and
-`EvmNativeBalanceConfig`. Tests must use explicit fixture constructors. Collector policy in the
-composed request must also be explicit; do not replace the removed defaults with hidden app values.
+The superseded standalone collector defaults must not be restored. Internal collection policy is
+closed in the certified operation graph rather than supplied by public collector requests.
 
 ## Collect-then-report composition
 

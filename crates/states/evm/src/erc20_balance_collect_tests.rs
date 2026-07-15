@@ -6,6 +6,7 @@ use mfm_evm_capabilities::{
 use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_portfolio_model::ids::NormalizedEvmAddress;
 use mfm_program::{MfmFactType, StateSpec};
+use mfm_values::NonEmpty;
 
 const HASH_A: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 const HASH_B: &str = "0x2222222222222222222222222222222222222222222222222222222222222222";
@@ -405,4 +406,42 @@ fn configs_require_exact_state_owned_read_budgets() {
     let mut balance = balance_config(ACCT_A);
     balance.max_source_reads = NonZeroU64::new(1).expect("non-zero");
     assert!(validate_observe_erc20_balance_config(&balance).is_err());
+}
+
+#[test]
+fn erc20_receipt_preserves_zero_and_rejects_tampered_material() {
+    let subject = EvmAddressErc20BalanceSubject::new("ethereum-mainnet", 1, TOKEN_A, ACCT_A)
+        .expect("subject");
+    let fact = EvmAddressErc20BalanceSnapshotFact::try_new(subject, 100, HASH_A, "0", 18)
+        .expect("zero fact");
+    let receipt =
+        assemble_evm_erc20_balance_batch_receipt(AssembleEvmErc20BalanceBatchReceiptInput {
+            joint_tip: tip(),
+            balance_facts: NonEmpty::try_from_vec(vec![fact.clone()]).expect("fact"),
+        })
+        .expect("receipt");
+    assert_eq!(receipt.entries().len(), 1);
+    assert_eq!(receipt.entries()[0].coverage(), EVM_ERC20_BALANCE_COVERAGE);
+    assert_eq!(
+        receipt.entries()[0].source_status(),
+        EVM_ERC20_BALANCE_SOURCE_STATUS
+    );
+
+    let mut tampered_identity = serde_json::to_value(&receipt).expect("receipt JSON");
+    tampered_identity["entries"][0]["fact_content_identity"]["response_hash"] = serde_json::json!(
+        "sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"
+    );
+    assert!(serde_json::from_value::<EvmErc20BalanceBatchReceipt>(tampered_identity).is_err());
+
+    let mut tampered_fact = serde_json::to_value(&receipt).expect("receipt JSON");
+    tampered_fact["entries"][0]["verified_fact"]["response"]["raw_units"] = serde_json::json!("1");
+    assert!(serde_json::from_value::<EvmErc20BalanceBatchReceipt>(tampered_fact).is_err());
+
+    assert!(
+        assemble_evm_erc20_balance_batch_receipt(AssembleEvmErc20BalanceBatchReceiptInput {
+            joint_tip: tip(),
+            balance_facts: NonEmpty::try_from_vec(vec![fact.clone(), fact]).expect("facts"),
+        },)
+        .is_err()
+    );
 }

@@ -19,12 +19,12 @@ use mfm_fact_capabilities::FactRecordCapability;
 use mfm_ids::{StateKind, StateVersion};
 use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
 use mfm_program::{
-    fact_descriptor_ref, AdapterBindingSpec, FactDescriptorRef, ManagedWriteState, NoContext,
-    PureState, ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
+    fact_descriptor_ref, AdapterBindingSpec, FactDescriptorRef, ManagedWriteState, MfmFactType,
+    NoContext, PureState, ReadState, StateError, StateResult, StateSpec, ValidatedConfig,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, StateInput};
 use mfm_values::NonEmpty;
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Serialize};
 
 use crate::address_balance::{
     address_balance_fact_visibility, BtcAddressBalanceResponse, BtcAddressBalanceSnapshotFact,
@@ -35,12 +35,14 @@ use crate::{
     BtcStateError,
 };
 
-/// Exact number of source reads required to resolve a Bitcoin balance batch joint tip.
+/// Exact number of source reads required to resolve a Bitcoin network collection joint tip.
 pub const BTC_JOINT_TIP_SOURCE_READS: u64 = 1;
 /// Exact number of source reads required for one Bitcoin address-balance observation.
 pub const BTC_NATIVE_BALANCE_OBSERVE_SOURCE_READS: u64 = 1;
 /// Closed coverage claim for a successful configured Bitcoin native source observation.
 pub const BTC_NATIVE_BALANCE_COVERAGE: &str = "configured_only";
+/// Closed source-status claim for a successful Bitcoin native source observation.
+pub const BTC_NATIVE_BALANCE_SOURCE_STATUS: &str = "ok";
 
 /// Shared joint tip resolved once for a same-network multi-subject batch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
@@ -165,35 +167,6 @@ impl BtcJointTip {
     }
 }
 
-/// Requires every observation in a same-network batch to share one joint tip anchor.
-pub fn require_shared_joint_tip(
-    observations: &[&BtcAddressBalanceObservation],
-) -> Result<(), BtcStateError> {
-    let Some(first) = observations.first() else {
-        return Err(BtcStateError::InvalidInput {
-            reason: "shared tip batch requires at least one observation".to_owned(),
-        });
-    };
-    let height = first.response().anchor_height();
-    let hash = first.response().anchor_hash();
-    let network = first.subject().network();
-    for observation in observations.iter().skip(1) {
-        if observation.subject().network() != network {
-            return Err(BtcStateError::InvalidInput {
-                reason: "shared tip batch subjects must share one network".to_owned(),
-            });
-        }
-        if observation.response().anchor_height() != height
-            || observation.response().anchor_hash() != hash
-        {
-            return Err(BtcStateError::InvalidInput {
-                reason: "multi-subject same-network batch must share one joint tip".to_owned(),
-            });
-        }
-    }
-    Ok(())
-}
-
 /// Config for resolving a joint tip once per same-network collector batch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
 #[mfm(
@@ -218,6 +191,11 @@ pub fn validate_resolve_btc_joint_tip_config(
     BtcNetworkId::new(&config.network).map_err(|error| error.to_string())?;
     validate_bitcoin_network(&config.bitcoin_network)?;
     BtcSourceIdentity::new(&config.semantic_source_identity).map_err(|error| error.to_string())?;
+    if config.max_source_reads.get() != BTC_JOINT_TIP_SOURCE_READS {
+        return Err(format!(
+            "max_source_reads must equal {BTC_JOINT_TIP_SOURCE_READS} for Bitcoin joint-tip resolution"
+        ));
+    }
     Ok(())
 }
 
@@ -228,26 +206,10 @@ impl ResolveBtcJointTipConfig {
     }
 }
 
-/// Input for joint-tip resolution (adapter-supplied observation context only).
+/// Input for joint-tip resolution.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, StateInput)]
 #[mfm(schema = "mfm.bitcoin.state.input.resolve_joint_tip")]
-pub struct ResolveBtcJointTipInput {
-    /// Optional observation context supplied by the adapter.
-    pub context: BtcAddressBalanceObservationContext,
-}
-
-/// Adapter-supplied context for balance observation materialization.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.bitcoin",
-    name = "address_balance_observation_context",
-    version = "1",
-    schema = "mfm.bitcoin.state.value.address_balance_observation_context"
-)]
-pub struct BtcAddressBalanceObservationContext {
-    /// State observation time in Unix milliseconds, when supplied by an adapter.
-    pub observed_at_unix_ms: Option<u64>,
-}
+pub struct ResolveBtcJointTipInput {}
 
 /// State contract for resolving one joint tip for a same-network batch.
 pub struct ResolveBtcJointTipState {
@@ -346,7 +308,7 @@ pub struct ObserveBtcAddressBalanceConfig {
     pub semantic_source_identity: String,
     /// Public Bitcoin address to observe.
     pub address: String,
-    /// Coverage claim written on success (`configured_only` or `complete_at_anchor`).
+    /// Fixed coverage claim written on success (`configured_only`).
     pub coverage: String,
     /// Maximum number of source reads this bounded state may request.
     pub max_source_reads: NonZeroU64,
@@ -361,6 +323,16 @@ pub fn validate_observe_btc_address_balance_config(
     BtcSourceIdentity::new(&config.semantic_source_identity).map_err(|error| error.to_string())?;
     BtcAddress::new(&config.address)
         .map_err(|_| "address is not a supported Bitcoin address".to_owned())?;
+    if config.max_source_reads.get() != BTC_NATIVE_BALANCE_OBSERVE_SOURCE_READS {
+        return Err(format!(
+            "max_source_reads must equal {BTC_NATIVE_BALANCE_OBSERVE_SOURCE_READS} for Bitcoin native balance observation"
+        ));
+    }
+    if config.coverage != BTC_NATIVE_BALANCE_COVERAGE {
+        return Err(format!(
+            "coverage must equal {BTC_NATIVE_BALANCE_COVERAGE} for Bitcoin native balance observation"
+        ));
+    }
     let coverage = CoverageStatus::from_str(&config.coverage)
         .map_err(|_| format!("unknown coverage status {:?}", config.coverage))?;
     if !coverage.is_admissible_for_write() {
@@ -389,8 +361,6 @@ impl ObserveBtcAddressBalanceConfig {
 pub struct ObserveBtcAddressBalanceInput {
     /// Joint tip resolved once for this same-network batch.
     pub joint_tip: BtcJointTip,
-    /// Optional observation context supplied by the adapter.
-    pub context: BtcAddressBalanceObservationContext,
 }
 
 /// Normalized address-balance observation state output.
@@ -672,81 +642,407 @@ pub fn address_balance_record_visibility() -> mfm_facts::FactVisibility {
     address_balance_fact_visibility()
 }
 
-/// Config for assembling a multi-address balance batch summary.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-#[mfm(schema = "mfm.bitcoin.state.config.assemble_address_balance_batch")]
-pub struct AssembleBtcAddressBalanceBatchConfig {}
-
-/// Input for assembling a multi-address balance batch summary.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, StateInput)]
-#[mfm(schema = "mfm.bitcoin.state.input.assemble_address_balance_batch")]
-pub struct AssembleBtcAddressBalanceBatchInput {
-    /// Joint tip shared by the batch.
-    pub joint_tip: BtcJointTip,
-    /// Recorded address-balance facts (at least one).
-    pub balance_facts: NonEmpty<BtcAddressBalanceSnapshotFact>,
-}
-
-/// Summary of a multi-address same-network balance collector batch.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+/// Exact Bitcoin native-balance source key carried by a collection receipt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, MfmValue)]
 #[mfm(
     namespace = "mfm.bitcoin",
-    name = "address_balance_batch_summary",
+    name = "native_balance_source_key",
     version = "1",
-    schema = "mfm.bitcoin.state.output.address_balance_batch_summary"
+    schema = "mfm.bitcoin.collection.native_balance_source_key"
 )]
-pub struct BtcAddressBalanceBatchSummary {
+pub struct BtcNativeBalanceSourceKey {
     network: String,
     bitcoin_network: String,
     semantic_source_identity: String,
-    joint_tip_height: u64,
-    joint_tip_hash: String,
-    address_count: u64,
+    address: String,
 }
 
-impl BtcAddressBalanceBatchSummary {
+impl BtcNativeBalanceSourceKey {
+    fn from_fact(fact: &BtcAddressBalanceSnapshotFact) -> Result<Self, BtcStateError> {
+        let subject = fact.subject();
+        let subject = BtcAddressBalanceSubject::new(
+            subject.network(),
+            subject.bitcoin_network(),
+            subject.semantic_source_identity(),
+            subject.address(),
+        )?;
+        BtcAddress::new(subject.address()).map_err(|_| BtcStateError::InvalidInput {
+            reason: "receipt fact address is not a supported Bitcoin address".to_owned(),
+        })?;
+        Ok(Self {
+            network: subject.network().to_owned(),
+            bitcoin_network: subject.bitcoin_network().to_owned(),
+            semantic_source_identity: subject.semantic_source_identity().to_owned(),
+            address: subject.address().to_owned(),
+        })
+    }
+
     /// Returns the semantic network id.
     pub fn network(&self) -> &str {
         &self.network
     }
 
-    /// Returns the joint tip height shared by the batch.
-    pub const fn joint_tip_height(&self) -> u64 {
-        self.joint_tip_height
+    /// Returns the Bitcoin Core network tag.
+    pub fn bitcoin_network(&self) -> &str {
+        &self.bitcoin_network
     }
 
-    /// Returns the joint tip hash shared by the batch.
-    pub fn joint_tip_hash(&self) -> &str {
-        &self.joint_tip_hash
+    /// Returns the non-secret semantic source identity.
+    pub fn semantic_source_identity(&self) -> &str {
+        &self.semantic_source_identity
     }
 
-    /// Returns the number of addresses collected.
-    pub const fn address_count(&self) -> u64 {
-        self.address_count
+    /// Returns the observed Bitcoin address.
+    pub fn address(&self) -> &str {
+        &self.address
     }
 }
 
-/// Pure state that verifies shared tip and summarizes a balance batch.
-pub struct AssembleBtcAddressBalanceBatchState;
+/// One checked Bitcoin native-balance fact included in a network collection receipt.
+///
+/// The embedded fact is private hydration material used only to re-derive and verify the content
+/// identity when this receipt is decoded. It is not a report-selection shortcut.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.bitcoin",
+    name = "native_balance_receipt_entry",
+    version = "1",
+    schema = "mfm.bitcoin.collection.native_balance_receipt_entry"
+)]
+pub struct BtcNativeBalanceReceiptEntry {
+    source_key: BtcNativeBalanceSourceKey,
+    anchor_height: u64,
+    anchor_hash: String,
+    coverage: String,
+    source_status: String,
+    fact_content_identity: mfm_facts::FactContentIdentity,
+    verified_fact: BtcAddressBalanceSnapshotFact,
+}
 
-impl StateSpec for AssembleBtcAddressBalanceBatchState {
-    type Config = AssembleBtcAddressBalanceBatchConfig;
+impl BtcNativeBalanceReceiptEntry {
+    fn from_verified_fact(fact: &BtcAddressBalanceSnapshotFact) -> Result<Self, BtcStateError> {
+        let source_key = BtcNativeBalanceSourceKey::from_fact(fact)?;
+        let response = fact.response();
+        let coverage = response.coverage_status()?;
+        let source_status = response.holding_source_status()?;
+        if coverage.as_str() != BTC_NATIVE_BALANCE_COVERAGE
+            || source_status.as_str() != BTC_NATIVE_BALANCE_SOURCE_STATUS
+        {
+            return Err(BtcStateError::InvalidInput {
+                reason: "receipt fact did not use the fixed Bitcoin native coverage/status"
+                    .to_owned(),
+            });
+        }
+        let rebuilt_response = BtcAddressBalanceResponse::new(
+            response.anchor_height(),
+            response.anchor_hash(),
+            response.balance_sats(),
+            coverage,
+            source_status,
+        )?;
+        let rebuilt_subject = BtcAddressBalanceSubject::new(
+            source_key.network(),
+            source_key.bitcoin_network(),
+            source_key.semantic_source_identity(),
+            source_key.address(),
+        )?;
+        let rebuilt_fact = BtcAddressBalanceSnapshotFact::new(rebuilt_subject, rebuilt_response);
+        if &rebuilt_fact != fact {
+            return Err(BtcStateError::InvalidInput {
+                reason: "receipt fact did not satisfy the Bitcoin address-balance fact contract"
+                    .to_owned(),
+            });
+        }
+        let descriptor = BtcAddressBalanceSnapshotFact::descriptor().map_err(|error| {
+            BtcStateError::InvalidInput {
+                reason: error.to_string(),
+            }
+        })?;
+        let fact_content_identity = mfm_facts::derive_fact_content_identity_from_typed_values(
+            &descriptor,
+            fact.subject(),
+            fact.response(),
+        )
+        .map_err(|error| BtcStateError::InvalidInput {
+            reason: error.to_string(),
+        })?;
+        Ok(Self {
+            source_key,
+            anchor_height: response.anchor_height(),
+            anchor_hash: response.anchor_hash().to_owned(),
+            coverage: coverage.as_str().to_owned(),
+            source_status: source_status.as_str().to_owned(),
+            fact_content_identity,
+            verified_fact: fact.clone(),
+        })
+    }
+
+    /// Returns the exact family-specific source key.
+    pub const fn source_key(&self) -> &BtcNativeBalanceSourceKey {
+        &self.source_key
+    }
+
+    /// Returns the exact anchor height.
+    pub const fn anchor_height(&self) -> u64 {
+        self.anchor_height
+    }
+
+    /// Returns the exact anchor hash.
+    pub fn anchor_hash(&self) -> &str {
+        &self.anchor_hash
+    }
+
+    /// Returns the fixed admissible coverage tag.
+    pub fn coverage(&self) -> &str {
+        &self.coverage
+    }
+
+    /// Returns the fixed successful source-status tag.
+    pub fn source_status(&self) -> &str {
+        &self.source_status
+    }
+
+    /// Returns the checked fact-content identity.
+    pub const fn fact_content_identity(&self) -> &mfm_facts::FactContentIdentity {
+        &self.fact_content_identity
+    }
+}
+
+impl<'de> Deserialize<'de> for BtcNativeBalanceReceiptEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            source_key: BtcNativeBalanceSourceKey,
+            anchor_height: u64,
+            anchor_hash: String,
+            coverage: String,
+            source_status: String,
+            fact_content_identity: serde_json::Value,
+            verified_fact: BtcAddressBalanceSnapshotFact,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let expected = Self::from_verified_fact(&wire.verified_fact).map_err(de::Error::custom)?;
+        let descriptor = BtcAddressBalanceSnapshotFact::descriptor().map_err(de::Error::custom)?;
+        let identity = mfm_facts::verify_serialized_fact_content_identity_from_typed_values(
+            &wire.fact_content_identity,
+            &descriptor,
+            wire.verified_fact.subject(),
+            wire.verified_fact.response(),
+        )
+        .map_err(de::Error::custom)?;
+        if wire.source_key != expected.source_key
+            || wire.anchor_height != expected.anchor_height
+            || wire.anchor_hash != expected.anchor_hash
+            || wire.coverage != expected.coverage
+            || wire.source_status != expected.source_status
+            || identity != expected.fact_content_identity
+        {
+            return Err(de::Error::custom(
+                "Bitcoin native balance receipt entry did not match verified fact material",
+            ));
+        }
+        Ok(expected)
+    }
+}
+
+/// Config for assembling one exact Bitcoin network collection receipt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[mfm(schema = "mfm.bitcoin.state.config.assemble_network_collection_receipt")]
+pub struct AssembleBtcNetworkCollectionReceiptConfig {}
+
+/// Input for assembling one exact Bitcoin network collection receipt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, StateInput)]
+#[mfm(schema = "mfm.bitcoin.state.input.assemble_network_collection_receipt")]
+pub struct AssembleBtcNetworkCollectionReceiptInput {
+    /// Joint tip shared by every fact in this network collection.
+    pub joint_tip: BtcJointTip,
+    /// Completed managed fact outputs for every configured Bitcoin source.
+    pub balance_facts: NonEmpty<BtcAddressBalanceSnapshotFact>,
+}
+
+/// Exact successful Bitcoin native collection for one semantic network/source binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[mfm(
+    namespace = "mfm.bitcoin",
+    name = "network_collection_receipt",
+    version = "1",
+    schema = "mfm.bitcoin.collection.network_receipt"
+)]
+pub struct BtcNetworkCollectionReceipt {
+    network: String,
+    bitcoin_network: String,
+    semantic_source_identity: String,
+    anchor_height: u64,
+    anchor_hash: String,
+    successful_observation_count: u64,
+    entries: Vec<BtcNativeBalanceReceiptEntry>,
+}
+
+impl BtcNetworkCollectionReceipt {
+    fn from_entries(
+        network: String,
+        bitcoin_network: String,
+        semantic_source_identity: String,
+        anchor_height: u64,
+        anchor_hash: String,
+        successful_observation_count: u64,
+        entries: Vec<BtcNativeBalanceReceiptEntry>,
+    ) -> Result<Self, BtcStateError> {
+        if entries.is_empty() {
+            return Err(BtcStateError::InvalidInput {
+                reason: "Bitcoin network collection receipt requires at least one entry".to_owned(),
+            });
+        }
+        let expected_count =
+            u64::try_from(entries.len()).map_err(|_| BtcStateError::InvalidInput {
+                reason: "Bitcoin network collection receipt entry count overflowed u64".to_owned(),
+            })?;
+        if successful_observation_count != expected_count {
+            return Err(BtcStateError::InvalidInput {
+                reason: "Bitcoin network collection receipt successful count did not match entries"
+                    .to_owned(),
+            });
+        }
+        BtcBlockHash::new(&anchor_hash).map_err(|_| BtcStateError::InvalidInput {
+            reason: "Bitcoin network collection receipt anchor hash was malformed".to_owned(),
+        })?;
+        let mut previous = None;
+        for entry in &entries {
+            if entry.source_key.network != network
+                || entry.source_key.bitcoin_network != bitcoin_network
+                || entry.source_key.semantic_source_identity != semantic_source_identity
+                || entry.anchor_height != anchor_height
+                || entry.anchor_hash != anchor_hash
+            {
+                return Err(BtcStateError::InvalidInput {
+                    reason: "Bitcoin network collection receipt entry did not match network anchor binding"
+                        .to_owned(),
+                });
+            }
+            if entry.coverage != BTC_NATIVE_BALANCE_COVERAGE
+                || entry.source_status != BTC_NATIVE_BALANCE_SOURCE_STATUS
+            {
+                return Err(BtcStateError::InvalidInput {
+                    reason:
+                        "Bitcoin network collection receipt entry did not use fixed coverage/status"
+                            .to_owned(),
+                });
+            }
+            if previous
+                .as_ref()
+                .is_some_and(|key: &&BtcNativeBalanceSourceKey| *key >= &entry.source_key)
+            {
+                return Err(BtcStateError::InvalidInput {
+                    reason: "Bitcoin network collection receipt entries were not strictly sorted"
+                        .to_owned(),
+                });
+            }
+            previous = Some(&entry.source_key);
+        }
+        Ok(Self {
+            network,
+            bitcoin_network,
+            semantic_source_identity,
+            anchor_height,
+            anchor_hash,
+            successful_observation_count,
+            entries,
+        })
+    }
+
+    /// Returns the semantic network id.
+    pub fn network(&self) -> &str {
+        &self.network
+    }
+
+    /// Returns the Bitcoin Core network tag.
+    pub fn bitcoin_network(&self) -> &str {
+        &self.bitcoin_network
+    }
+
+    /// Returns the non-secret semantic source identity.
+    pub fn semantic_source_identity(&self) -> &str {
+        &self.semantic_source_identity
+    }
+
+    /// Returns the shared anchor height.
+    pub const fn anchor_height(&self) -> u64 {
+        self.anchor_height
+    }
+
+    /// Returns the shared anchor hash.
+    pub fn anchor_hash(&self) -> &str {
+        &self.anchor_hash
+    }
+
+    /// Returns the completed source observation count.
+    pub const fn successful_observation_count(&self) -> u64 {
+        self.successful_observation_count
+    }
+
+    /// Returns entries in strict source-key order.
+    pub fn entries(&self) -> &[BtcNativeBalanceReceiptEntry] {
+        &self.entries
+    }
+}
+
+impl<'de> Deserialize<'de> for BtcNetworkCollectionReceipt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            network: String,
+            bitcoin_network: String,
+            semantic_source_identity: String,
+            anchor_height: u64,
+            anchor_hash: String,
+            successful_observation_count: u64,
+            entries: Vec<BtcNativeBalanceReceiptEntry>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::from_entries(
+            wire.network,
+            wire.bitcoin_network,
+            wire.semantic_source_identity,
+            wire.anchor_height,
+            wire.anchor_hash,
+            wire.successful_observation_count,
+            wire.entries,
+        )
+        .map_err(de::Error::custom)
+    }
+}
+
+/// Pure state that assembles one exact Bitcoin network collection receipt.
+pub struct AssembleBtcNetworkCollectionReceiptState;
+
+impl StateSpec for AssembleBtcNetworkCollectionReceiptState {
+    type Config = AssembleBtcNetworkCollectionReceiptConfig;
     type Context = NoContext;
-    type Input = AssembleBtcAddressBalanceBatchInput;
-    type Output = BtcAddressBalanceBatchSummary;
+    type Input = AssembleBtcNetworkCollectionReceiptInput;
+    type Output = BtcNetworkCollectionReceipt;
     type Effect = Pure;
     type Caps = NoCaps;
 
     fn kind() -> mfm_program::Result<StateKind> {
-        state_kind("address_balance.assemble_batch")
+        state_kind("address_balance.assemble_network_receipt")
     }
 
     fn version() -> mfm_program::Result<StateVersion> {
-        state_version("address_balance.assemble_batch")
+        state_version("address_balance.assemble_network_receipt")
     }
 
     fn name() -> &'static str {
-        "mfm.bitcoin.address_balance.assemble_batch"
+        "mfm.bitcoin.address_balance.assemble_network_receipt"
     }
 
     fn new(_config: ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
@@ -754,60 +1050,43 @@ impl StateSpec for AssembleBtcAddressBalanceBatchState {
     }
 }
 
-impl PureState for AssembleBtcAddressBalanceBatchState {
+impl PureState for AssembleBtcNetworkCollectionReceiptState {
     fn run(
         &self,
         input: Self::Input,
         _context: &mfm_program::CertifiedContext<Self::Context>,
     ) -> StateResult<Self::Output> {
-        assemble_btc_address_balance_batch(input)
+        assemble_btc_network_collection_receipt(input)
     }
 }
 
-/// Verifies shared tip across recorded facts and builds a batch summary.
-pub fn assemble_btc_address_balance_batch(
-    input: AssembleBtcAddressBalanceBatchInput,
-) -> StateResult<BtcAddressBalanceBatchSummary> {
-    let facts = input.balance_facts.values();
-    let observations: Vec<BtcAddressBalanceObservation> = facts
+/// Derives one exact Bitcoin network collection receipt from completed managed fact outputs.
+pub fn assemble_btc_network_collection_receipt(
+    input: AssembleBtcNetworkCollectionReceiptInput,
+) -> StateResult<BtcNetworkCollectionReceipt> {
+    let mut entries = input
+        .balance_facts
+        .values()
         .iter()
-        .map(|fact| {
-            BtcAddressBalanceObservation::new(fact.subject().clone(), fact.response().clone(), 1)
-        })
-        .collect();
-    let refs: Vec<&BtcAddressBalanceObservation> = observations.iter().collect();
-    require_shared_joint_tip(&refs).map_err(StateError::from)?;
-    let first = facts
-        .first()
-        .expect("NonEmpty guarantees at least one fact");
-    if first.response().anchor_height() != input.joint_tip.block_height()
-        || first.response().anchor_hash() != input.joint_tip.block_hash()
-    {
-        return Err(StateError::from(BtcStateError::InvalidInput {
-            reason: "recorded facts do not match batch joint tip".to_owned(),
-        }));
-    }
-    if first.subject().network() != input.joint_tip.network()
-        || first.subject().bitcoin_network() != input.joint_tip.bitcoin_network()
-        || first.subject().semantic_source_identity() != input.joint_tip.semantic_source_identity()
-    {
-        return Err(StateError::from(BtcStateError::InvalidInput {
-            reason: "recorded facts do not match joint tip binding".to_owned(),
-        }));
-    }
-    let address_count = u64::try_from(facts.len()).map_err(|_| {
+        .map(BtcNativeBalanceReceiptEntry::from_verified_fact)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StateError::from)?;
+    entries.sort_by(|left, right| left.source_key.cmp(&right.source_key));
+    let count = u64::try_from(entries.len()).map_err(|_| {
         StateError::from(BtcStateError::InvalidInput {
-            reason: "address count overflow".to_owned(),
+            reason: "Bitcoin network collection receipt entry count overflowed u64".to_owned(),
         })
     })?;
-    Ok(BtcAddressBalanceBatchSummary {
-        network: input.joint_tip.network().to_owned(),
-        bitcoin_network: input.joint_tip.bitcoin_network().to_owned(),
-        semantic_source_identity: input.joint_tip.semantic_source_identity().to_owned(),
-        joint_tip_height: input.joint_tip.block_height(),
-        joint_tip_hash: input.joint_tip.block_hash().to_owned(),
-        address_count,
-    })
+    BtcNetworkCollectionReceipt::from_entries(
+        input.joint_tip.network().to_owned(),
+        input.joint_tip.bitcoin_network().to_owned(),
+        input.joint_tip.semantic_source_identity().to_owned(),
+        input.joint_tip.block_height(),
+        input.joint_tip.block_hash().to_owned(),
+        count,
+        entries,
+    )
+    .map_err(StateError::from)
 }
 
 #[cfg(test)]
