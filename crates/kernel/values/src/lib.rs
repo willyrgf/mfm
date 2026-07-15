@@ -1046,7 +1046,13 @@ impl<T> MfmDefault for Vec<T> {}
 
 impl<V> MfmDefault for BTreeMap<String, V> {}
 
-fn framework_value_descriptor(
+/// Builds a descriptor for a framework-owned, hand-written value contract.
+///
+/// Domain crates must use the derive path. This hidden helper exists only for
+/// typed kernel contracts that cannot use derives because their checked fields
+/// intentionally do not implement generic serde traits.
+#[doc(hidden)]
+pub fn framework_value_descriptor(
     semantic_type_id: SemanticTypeId,
     schema_name: &str,
     shape: SchemaShape,

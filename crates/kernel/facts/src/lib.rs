@@ -10,7 +10,10 @@
 //! app, or collector code.
 //!
 //! ```
-//! assert_eq!(mfm_facts::FACTS_KERNEL_CONTRACT_VERSION, "mfm.facts.v1");
+//! use mfm_facts::{FACT_CONTENT_IDENTITY_DIGEST_DOMAIN, FACTS_KERNEL_CONTRACT_VERSION};
+//!
+//! assert_eq!(FACTS_KERNEL_CONTRACT_VERSION, "mfm.facts.v1");
+//! assert_eq!(FACT_CONTENT_IDENTITY_DIGEST_DOMAIN, "mfm.fact.content-identity.v1");
 //! ```
 
 macro_rules! impl_fact_tag {
@@ -51,6 +54,7 @@ macro_rules! impl_fact_tag {
 
 mod claim;
 mod codec;
+mod content_identity;
 mod descriptor;
 mod extraction;
 mod ids;
@@ -79,6 +83,12 @@ pub use codec::{
     parse_canonical_fact_subject_material_bytes, selected_returned_field_summaries_digest,
     subject_material_hash, typed_fact_subject_evidence, typed_fact_subject_value,
     validate_descriptor, validate_fact_query_evidence,
+};
+pub use content_identity::{
+    canonical_fact_content_identity_bytes, derive_fact_content_identity,
+    fact_content_identity_digest, parse_canonical_fact_content_identity_bytes,
+    verify_fact_claim_content_identity, verify_internal_fact_ref_content_identity,
+    FactContentIdentity, FACT_CONTENT_IDENTITY_DIGEST_DOMAIN,
 };
 pub use descriptor::{
     FactDescriptor, FactFieldDescriptor, FactFieldPolicy, FactOrderingPolicy, FactOrderingTerm,
