@@ -1,6 +1,6 @@
 # Controlled slow-build baseline
 
-Status: Phase 01 baseline and Phase 02 follow-up for RFC_SLOW_BUILDS.md
+Status: Phase 01 baseline and Phase 02/03/04 follow-up for RFC_SLOW_BUILDS.md
 
 This report measures the clean Phase 00 RFC commit
 `51a5f9a07808cd9a92b218a028dd2424c04ac76d` (`docs: rfc builds tt3`). The
@@ -283,3 +283,80 @@ rejection and restored-schema acceptance; the warm successful prepares
 recompiled only `mfm-stream-store-postgres` in 0.65s and 0.43s. This is the
 phase-specific post-commit evaluation; the full required gates and CI were
 run on the identical final source before the commit.
+
+## Phase 04: add the developer lane
+
+The Phase 04 candidate is based on the clean Phase 03 commit
+`e94f09c644d6a001df1fcb58e3e3b9ba1c15ec46`. It adds a repository-pinned
+`devShells.default` and the `.#quick` app/package in `flake.nix`, and documents
+them in `README.md`. The shell and quick app reuse `nix/rust-toolchain.nix`,
+Cargo Nextest, SQLx CLI, Git, pkg-config, and the native C toolchain. Their
+shell hook/app unset `CARGO_TARGET_DIR`, so Cargo owns the normal `target`
+directory of the current worktree; no verification target is shared. Cargo's
+normal development profile remains incremental with full development debug
+information.
+
+The quick contract is exactly:
+
+```text
+cargo fmt --all -- --check
+cargo check --workspace --lib --bins
+```
+
+It is a standalone flake app and is not a Nixfied task. The compiled Nixfied
+model remains unchanged at hash
+`6fbe540c52e997047a206a056c0b676198729c165a45e2720b07192000a5becf`; its
+task model contains no `quick` task.
+
+The parent direct-Cargo warm observations on the existing worktree target
+were: `cargo check -p mfm-program` 2.94s, `cargo test -p mfm-program --lib`
+5.85s, format 0.95s, and broad `cargo check --workspace --lib --bins`
+10.24s. The Phase 04 developer shell used the same pinned Rust/Cargo 1.96.0
+toolchain, and its focused package check/test took 2.63s/3.96s. The first
+`nix run .#quick` took 9.22s including Nix app realization and the broad
+Cargo check; a warm quick run took 6.66s, with Cargo's broad check finishing
+in 5.36s. These are named warm/realization observations, not a controlled
+performance threshold.
+
+The final-code comprehensive gates passed on Linux `aarch64`, slot 7:
+
+- `nix run .#model-check`: unchanged model hash above.
+- `nix run .#check -- --slot 7`: 4/4, 61.79s, run
+  `3752493-1784116230565407824`.
+- `nix run .#test -- --slot 7`: 2/2, 201.93s, run
+  `3767570-1784116297983467642`.
+- `nix run .#test-db -- --slot 7`: 6/6, 131.09s, run
+  `3806038-1784116508979241289`.
+- `nix run .#ci -- --slot 7`: 13/13, 217.28s, run
+  `3813018-1784116651292329201`.
+
+The test inventory is unchanged: 974 workspace Nextest tests across 99
+binaries, 53 doctest binaries with 42 doctests, 9 trybuild harnesses with 80
+UI cases and 71 checked stderr baselines, 6 database leaves, and 13 CI tasks.
+No feature, ordering, parity, SQLx, or service behavior changed.
+
+The developer target grew from the parent observation of 11 GiB / 49,537
+files to 12 GiB / 57,646 files after the focused and quick runs. The candidate
+target contained 7.2 GiB of incremental artifacts, 1.2 GiB of trybuild
+artifacts, 22,280 `.dwo` files totaling 1.25 GiB, and `debug` totaled 11 GiB.
+The quick launcher output was 12 KiB with a 110-path closure totaling
+1,506,420,728 NAR bytes and 1.5 GiB on disk. The development-shell output
+was 80 KiB with a 137-path closure totaling 1,531,319,936 NAR bytes and
+1.5 GiB on disk. Nixfied slot 7 measured 18 GiB after the comprehensive
+gates. No compiler-object cache was present; the Cargo registry and Git
+caches were 1.1 GiB and 1.3 MiB.
+
+All Phase 04 acceptance checks pass: the pinned developer environment exposes
+the same Rust/Cargo versions as Nixfied; the quick app executes exactly its
+two non-gating commands; its target is worktree-owned and retains incremental
+development artifacts; the quick app is absent from the Nixfied model; and
+all comprehensive gate commands retain their prior graph and semantics.
+Linux is the only verified platform, and no numeric Phase 04 latency
+threshold is specified.
+
+The committed tree was then evaluated without worktree changes. Clean model
+admission reproduced the same hash, clean `nix develop` exposed Rust/Cargo
+1.96.0 with empty `CARGO_TARGET_DIR` and `CARGO_INCREMENTAL`, and clean
+`nix run .#quick` passed in 2.30s after the target was warm. This confirms the
+developer lane and quick contract on the committed tree; slot 7 was then
+stopped and cleaned through Nixfied's scoped lifecycle operations.

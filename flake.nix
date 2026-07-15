@@ -43,6 +43,21 @@
         in
         assert pkgs.sqlx-cli.version == "0.9.0";
         pkgs.sqlx-cli;
+      mkDevTools =
+        system:
+        let
+          pkgs = mkPkgs system;
+          rustToolchain = import ./nix/rust-toolchain.nix { inherit pkgs; };
+        in
+        [
+          rustToolchain
+          pkgs.cargo-nextest
+          pkgs.git
+          pkgs.pkg-config
+          pkgs.stdenv.cc
+          (mkSqlxCli system)
+        ]
+        ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.libiconv ];
     in
     {
       packages = forAllSystems (
@@ -54,12 +69,22 @@
             cargo = rustToolchain;
             rustc = rustToolchain;
           };
+          devTools = mkDevTools system;
           projectApps = nixfied.lib.${system}.projectApps ./nixfied.nix;
         in
         {
           default = self.packages.${system}.model;
           model = nixfied.lib.${system}.compileModel ./nixfied.nix;
           sqlx-cli = mkSqlxCli system;
+          quick = pkgs.writeShellApplication {
+            name = "mfm-quick";
+            runtimeInputs = devTools;
+            text = ''
+              unset CARGO_TARGET_DIR
+              cargo fmt --all -- --check
+              cargo check --workspace --lib --bins
+            '';
+          };
           mfm = rustPlatform.buildRustPackage {
             pname = "mfm";
             version = "0.1.29";
@@ -135,6 +160,21 @@
         }
       );
 
+      devShells = forAllSystems (
+        system:
+        let
+          pkgs = mkPkgs system;
+        in
+        {
+          default = pkgs.mkShell {
+            packages = mkDevTools system;
+            shellHook = ''
+              unset CARGO_TARGET_DIR
+            '';
+          };
+        }
+      );
+
       apps = forAllSystems (
         system:
         # The verification surface is generated: MFM's own task names become
@@ -149,6 +189,10 @@
           mfm-start = {
             type = "app";
             program = "${self.packages.${system}.mfm-start}/bin/mfm-start";
+          };
+          quick = {
+            type = "app";
+            program = "${self.packages.${system}.quick}/bin/mfm-quick";
           };
         }
       );
