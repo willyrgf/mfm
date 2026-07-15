@@ -1,6 +1,6 @@
 # Controlled slow-build baseline
 
-Status: Phase 01 baseline and Phase 02/03/04 follow-up for RFC_SLOW_BUILDS.md
+Status: Phase 01 baseline and Phase 02/03/04/05 follow-up for RFC_SLOW_BUILDS.md
 
 This report measures the clean Phase 00 RFC commit
 `51a5f9a07808cd9a92b218a028dd2424c04ac76d` (`docs: rfc builds tt3`). The
@@ -360,3 +360,168 @@ admission reproduced the same hash, clean `nix develop` exposed Rust/Cargo
 `nix run .#quick` passed in 2.30s after the target was warm. This confirms the
 developer lane and quick contract on the committed tree; slot 7 was then
 stopped and cleaned through Nixfied's scoped lifecycle operations.
+
+## Phase 05: compact verification artifacts
+
+The Phase 05 candidate is based on the clean Phase 04 commit
+`76a0a82176df24410305e71f82603168a2e0ee2d` (`add pinned quick development
+lane`). The implementation uses the expected subject `use compact verification
+build artifacts`. The initial implementation commit before this report-only
+metadata append was `8ae1ae25f038ae5f84c6e55f2571858239f62a05`; the final
+amended commit is the same logical Phase 05 change.
+
+The change is limited to two files:
+
+- `Cargo.toml` no longer declares the ineffective `[profile.ci]` profile.
+- `nixfied.nix` centrally applies the RFC's verification policy to every
+  Nixfied Cargo leaf and its nested Cargo invocations:
+
+  ```text
+  CARGO_INCREMENTAL=0
+  CARGO_PROFILE_DEV_DEBUG=1
+  CARGO_PROFILE_TEST_DEBUG=1
+  CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=off
+  CARGO_PROFILE_TEST_SPLIT_DEBUGINFO=off
+  ```
+
+  `debug=1` retains line tables; split-debug output and incremental compiler
+  artifacts are disabled. The direct `[profile.dev]` and `[profile.test]`
+  settings remain unchanged, as do `CARGO_TARGET_DIR`, the task graph, service
+  lifecycle, SQLx behavior, test selection, and the developer lane.
+
+### Parent and candidate verification
+
+The Linux `aarch64` parent context was the pinned Rust/Cargo 1.96.0 toolchain,
+Nixfied runtime ABI `nixfied-runtime-abi:1-5ff3aa14f2bf`, and model hash
+`6fbe540c52e997047a206a056c0b676198729c165a45e2720b07192000a5becf`. No
+compiler-object cache was present. The parent full-CI clean run
+`run-3851733-1784117244059101633` passed 13/13 in 398.11s. Its post-run target
+was 17 GiB, with 15 GiB in `debug`, 6.8 GiB in `debug/incremental`, 2.1 GiB
+in nested trybuild artifacts, 98,462 files, and 52,635 `.dwo` files totaling
+2.98 GiB.
+
+The first parent warm run, `run-3914368-1784117659100948595`, took 57.52s but
+failed one timing-sensitive test:
+`mfm_core::keystore::tests::filesystem_tests::test_auto_lock_timeout_refreshes_on_sensitive_operations`
+at `crates/core/src/keystore/filesystem_tests.rs:322`; 927/928 tests passed
+and 46 were canceled. A single retry passed all 13 tasks in 186.01s under
+`run-3923761-1784117748531381724`. The resulting parent target was 18 GiB,
+with 16 GiB in `debug`, 7.7 GiB in `debug/incremental`, 2.1 GiB in trybuild,
+116,674 files, and 64,724 `.dwo` files totaling 3.94 GiB. The failed attempt
+is retained as observed scheduling variance and is not used as a successful
+performance sample.
+
+The candidate model admission passed with hash
+`671a8642bd1436e705771a567f5aafed46b98de26dc919bf0ac546f87fc228d1`.
+The required gates passed on the dirty candidate before commit:
+
+- `nix run .#check -- --slot 7`: 4/4 in 48.39s,
+  `run-3937479-1784117991138124567`.
+- `nix run .#test -- --slot 7`: 2/2 in 175.24s,
+  `run-3947577-1784118043061188390`.
+- `nix run .#test-db -- --slot 7`: 6/6 in 104.37s,
+  `run-3972481-1784118222441761281`.
+
+After Nixfied slot 7 was cleaned, the two required full candidate runs passed
+13/13:
+
+- clean: `run-3974791-1784118343065006887`, 307.13s;
+- warm: `run-4011750-1784118670744907098`, 197.49s.
+
+The clean candidate Nextest task compiled the test profile in 37.51s and ran
+974 tests in 100.47s. The warm task compiled in 16.73s and ran the same 974
+tests in 73.05s. The remaining task timings, including format, Clippy,
+metadata, SQLx, doctests, CLI, and Postgres parity, are retained in the two
+Nixfied run summaries. Full-CI wall time was 90.98s lower on the clean
+candidate than the parent clean sample; the successful warm candidate was
+11.48s slower than the successful parent retry, so warm timing remains subject
+to service and scheduling variance.
+
+### Test and feature inventory
+
+The candidate inventory is unchanged from Phase 04 and complete for the
+selected graph:
+
+- Workspace Nextest: 974 tests across 99 binaries; 974 passed.
+- Workspace doctests: 53 doctest binaries and 42 doctests passed.
+- Trybuild: 9 harnesses, 80 Rust UI cases, and 71 checked stderr baselines.
+- Database/parity coverage: 6 database leaves; CI contains 13 tasks.
+- Declared package features: `mfm/parity-tests`,
+  `mfm-app/test-support`, `mfm-integration-tests/parity-tests`,
+  `mfm-rest-api/parity-tests`, `mfm-stream-store-postgres/parity-tests`,
+  `mfm-store/test-support`, and `mfm_core/default` plus
+  `mfm_core/dangerous-secret-export`.
+- Active gate feature selection remains `--all-features` for Clippy,
+  `mfm-app/test-support` for workspace Nextest, and `parity-tests` for SQLx
+  and parity tasks. No package, feature, test, doctest, trybuild, ordering, or
+  service-selection surface changed.
+
+### Artifact and cache measurements
+
+The exact two-full-run artifact matrix was measured before the focused
+diagnostic probe added one test binary to the warm target:
+
+| State | Full CI | Cargo target | `debug` | `debug/incremental` | trybuild | files | `.dwo` files | `.dwo` size |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Parent clean | 398.11s | 17 GiB | 15 GiB | 6.8 GiB | 2.1 GiB | 98,462 | 52,635 | 2.98 GiB |
+| Parent warm retry | 186.01s | 18 GiB | 16 GiB | 7.7 GiB | 2.1 GiB | 116,674 | 64,724 | 3.94 GiB |
+| Candidate clean | 307.13s | 9.8 GiB | 8.1 GiB | 4 KiB directory, no artifacts | 1.7 GiB | 17,791 | 0 | 0 |
+| Candidate warm | 197.49s | 9.8 GiB | 8.1 GiB | 4 KiB directory, no artifacts | 1.7 GiB | 17,791 | 0 | 0 |
+
+The candidate warm target had 20,932 filesystem entries when measured with
+`find -printf`; the parent file counts above are the preserved baseline metric
+and did not include a separate all-entry inode capture. After the focused
+backtrace probe, the candidate target was 10 GiB with 18,227 files, still with
+no `.dwo` files and no incremental artifacts. The direct developer target
+remained 12 GiB with 11 GiB in `debug`, 7.2 GiB in `debug/incremental`, 1.2
+GiB in trybuild artifacts, 57,646 files, and 22,280 `.dwo` files totaling
+1.25 GiB. This confirms the verification environment did not alter direct
+developer Cargo output.
+
+The realized candidate CI launcher was 12 KiB. Its Nix closure remained 124
+paths, with 1,594,576,408 NAR bytes and approximately 1.6 GiB on disk. Cargo
+registry and Git caches were 1.1 GiB and 1.3 MiB. No `sccache`, `ccache`, or
+other compiler-object cache was enabled.
+
+### Diagnostics and rollback
+
+The focused candidate run of the previously timing-sensitive auto-lock test
+passed 1/1 in 0.83s with `RUST_BACKTRACE=1`. It did not generate a panic, so
+there is no new candidate failure trace to compare. The candidate test binary
+contains `.debug_line` and decoded source line entries, and the parent
+transient failure had already demonstrated file/line reporting at
+`crates/core/src/keystore/filesystem_tests.rs:322`. This is a structural and
+behavior-preserving Linux backtrace check; macOS was unavailable and remains
+unverified.
+
+Phase 05 does not introduce an explicit policy-version key; that identity is
+the Phase 06 cache-scope change. As a disposable rollback proxy, a focused
+`mfm-program` check in a temporary target took 3.07s on the first
+`debug=1` policy, 0.05s warm, and 1.89s after changing the policy to
+`debug=2`. The changed-policy run recompiled affected units and produced no
+`.dwo` files, proving Cargo fingerprints do not silently reuse incompatible
+profile artifacts. No temporary target was retained. No additional codegen or
+optimization profile values were changed, so the RFC's future benchmark of
+those alternatives is not applicable to this phase.
+
+All applicable Phase 05 acceptance checks pass: the centralized policy covers
+verification and nested Cargo; line tables remain while split and incremental
+artifacts disappear; direct development profiles remain unchanged; the full
+test, feature, doctest, trybuild, SQLx, and parity inventory is preserved; and
+the policy toggle invalidates a disposable target. The Linux-only limitation,
+the one parent timing-flake retry, and the lack of an explicit versioned cache
+identity are recorded risks. No Nixfied workaround or missing support was
+required.
+
+The committed tree is evaluated below after the single logical commit.
+
+The clean committed-tree evaluation of the initial Phase 05 commit passed
+without a dirty-tree warning:
+
+- `nix run .#model-check`: model hash
+  `671a8642bd1436e705771a567f5aafed46b98de26dc919bf0ac546f87fc228d1`.
+- `nix run .#ci -- --slot 7`: 13/13 in 197.96s,
+  `run-4058941-1784119789680531480`.
+
+The report-only metadata was then amended into the same logical commit; no
+source, profile, task, feature, or workflow behavior changed in that amend.

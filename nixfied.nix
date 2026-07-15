@@ -29,9 +29,16 @@ let
   ];
 
   ccEnvSuffix = lib.replaceStrings [ "-" ] [ "_" ] pkgs.stdenv.hostPlatform.config;
-  # Hermetic environment values; no append-to-inherited behavior because the child env starts empty.
+  # Verification-only profile policy: keep line tables for file/line backtraces,
+  # avoid incremental and split-debug artifacts, and leave direct Cargo profiles unchanged.
+  # These values are inherited by nested Cargo invocations such as trybuild and SQLx.
   cargoEnv = {
     CARGO_TARGET_DIR = "\${stateDir}/cargo-target";
+    CARGO_INCREMENTAL = "0";
+    CARGO_PROFILE_DEV_DEBUG = "1";
+    CARGO_PROFILE_TEST_DEBUG = "1";
+    CARGO_PROFILE_DEV_SPLIT_DEBUGINFO = "off";
+    CARGO_PROFILE_TEST_SPLIT_DEBUGINFO = "off";
     RUST_BACKTRACE = "1";
     TMPDIR = "\${stateDir}";
   }
