@@ -466,6 +466,63 @@ mod tests {
     }
 
     #[test]
+    fn every_setup_family_with_nested_values_rejects_unknown_nested_fields() {
+        fn add_unknown_field(value: &mut toml::Value) -> bool {
+            match value {
+                toml::Value::Table(table) => {
+                    for (key, child) in table.iter_mut() {
+                        if key == "metadata" {
+                            continue;
+                        }
+                        if let toml::Value::Table(child_table) = child {
+                            child_table.insert(
+                                "unexpected_nested_setup_field".to_owned(),
+                                toml::Value::Boolean(true),
+                            );
+                            return true;
+                        }
+                        if add_unknown_field(child) {
+                            return true;
+                        }
+                    }
+                    false
+                }
+                toml::Value::Array(values) => values.iter_mut().any(add_unknown_field),
+                _ => false,
+            }
+        }
+
+        let base: toml::Value = toml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/setup/organization.toml"
+        )))
+        .expect("setup fixture as toml value");
+        let values = base
+            .get("values")
+            .and_then(toml::Value::as_array)
+            .expect("setup values array");
+        assert_eq!(values.len(), 9);
+
+        for index in 0..values.len() {
+            let mut document = base.clone();
+            let value = document
+                .get_mut("values")
+                .and_then(toml::Value::as_array_mut)
+                .and_then(|values| values.get_mut(index))
+                .and_then(toml::Value::as_table_mut)
+                .and_then(|entry| entry.get_mut("value"))
+                .expect("setup value");
+            if !add_unknown_field(value) {
+                continue;
+            }
+            let bytes = toml::to_string(&document).expect("setup document serializes");
+            let error = toml::from_str::<SetupDocument>(&bytes)
+                .expect_err("unknown nested field must be rejected");
+            assert!(error.to_string().contains("unknown field"), "{error}");
+        }
+    }
+
+    #[test]
     fn every_registered_setup_kind_rejects_unknown_value_fields() {
         let base: toml::Value = toml::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),

@@ -694,6 +694,11 @@ fn validate_category_dependency_rules(metadata: &Value, root: &Path) -> Result<(
         };
 
         for dependency in dependencies {
+            // Category rules describe runtime ownership boundaries. Test-only dependencies may
+            // exercise another binary surface without becoming a production binary edge.
+            if dependency.get("kind").and_then(Value::as_str) == Some("dev") {
+                continue;
+            }
             let Some(dependency_path) = dependency.get("path").and_then(Value::as_str) else {
                 continue;
             };

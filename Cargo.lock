@@ -2087,6 +2087,7 @@ dependencies = [
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
  "mfm-program",
+ "mfm-rest-api",
  "mfm-runtime",
  "mfm-runtime-config",
  "mfm-spec",
@@ -2102,6 +2103,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tower",
  "uuid",
  "zeroize",
 ]
@@ -2518,6 +2520,7 @@ dependencies = [
  "mfm-storage-postgres",
  "mfm-store",
  "mfm-values",
+ "serde",
  "serde_json",
  "sqlx",
  "tempfile",

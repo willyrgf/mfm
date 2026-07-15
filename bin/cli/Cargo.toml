@@ -42,12 +42,14 @@ mfm-program = { path = "../../crates/kernel/program" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
 mfm-spec = { path = "../../crates/kernel/spec" }
 mfm-store = { path = "../../crates/kernel/store", features = ["test-support"] }
+mfm-rest-api = { path = "../rest-api" }
 tempfile = "3.0"
 assert_cmd = "2.0"
 predicates = "3.0"
 rand = { workspace = true }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-none", "postgres"] }
+tower = "0.5"
 
 [[bin]]
 name = "mfm_cli"
