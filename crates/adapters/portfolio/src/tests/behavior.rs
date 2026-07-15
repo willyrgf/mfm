@@ -7,429 +7,425 @@ fn portfolio_runner_registration_keeps_factory_identity_explicit() {
     assert_eq!(ADAPTER_FACTORY, "portfolio_adapter");
 }
 
-/// Dual-mainnet native facts admitted as retained FactResponse artifacts; Platform
-/// fact-index returns them; SelectHoldings hydrates and selects with providers unbound.
 #[tokio::test]
-async fn select_holdings_succeeds_from_platform_facts_with_providers_unbound() {
+async fn selects_exact_receipt_facts_and_projects_receipt_pins() {
     let portfolio = dual_mainnet_portfolio();
-    let config =
-        SelectHoldingsConfig::with_default_store_scope(portfolio.clone()).expect("select config");
-    let subjects = resolve_subjects_from_config(
-        &ResolveSubjectsConfig::new(portfolio.wallets.clone()).expect("subjects config"),
+    let btc = btc_fixture(
+        BtcAddressBalanceResponse::new(
+            850_000,
+            BTC_HASH,
+            100_000,
+            CoverageStatus::ConfiguredOnly,
+            HoldingSourceStatus::Ok,
+        )
+        .expect("Bitcoin response"),
+        1,
     );
-
-    let btc_response = BtcAddressBalanceResponse::new(
-        850_000,
-        "ab".repeat(32),
-        100_000,
-        CoverageStatus::ConfiguredOnly,
-        HoldingSourceStatus::Ok,
-    )
-    .expect("btc response");
-
-    let evm_response = EvmAddressNativeBalanceResponse::new(
-        21_000_000,
-        "0x".to_owned() + &"cd".repeat(32),
-        "1000000000000000000",
-        18,
-        CoverageStatus::ConfiguredOnly,
-        HoldingSourceStatus::Ok,
-    )
-    .expect("evm response");
-
-    let (btc_bytes, btc_evidence, btc_ref) =
-        holding_artifact_and_ref(&btc_response, "bitcoin.address_balance_snapshot", 1, 17);
-    let (evm_bytes, evm_evidence, evm_ref) =
-        holding_artifact_and_ref(&evm_response, "evm.address_native_balance_snapshot", 2, 19);
-
-    let artifacts = MockArtifacts::with_map(HashMap::from([
-        (btc_ref.artifact_id().clone(), (btc_bytes, btc_evidence)),
-        (evm_ref.artifact_id().clone(), (evm_bytes, evm_evidence)),
-    ]));
-    let fact_index = MockFactIndex::with_plan_refs(HashMap::from([
+    let evm = evm_native_fixture(
+        EVM_ACCOUNT,
+        EvmAddressNativeBalanceResponse::new(
+            21_000_000,
+            EVM_HASH,
+            "1000000000000000000",
+            18,
+            CoverageStatus::ConfiguredOnly,
+            HoldingSourceStatus::Ok,
+        )
+        .expect("EVM response"),
+        2,
+    );
+    let input = select_input_for_dual_mainnet(&btc, &evm);
+    let artifacts = MockArtifacts::with_fixtures(&[btc.clone(), evm.clone()]);
+    let fact_index = MockFactIndex::with_rows(HashMap::from([
         (
-            "bitcoin.address_balance_snapshot".to_owned(),
-            vec![(btc_ref, 17)],
+            format!("bitcoin.address_balance_snapshot:{BTC_ADDRESS}"),
+            vec![(btc.fact_ref.clone(), 17)],
         ),
         (
-            "evm.address_native_balance_snapshot".to_owned(),
-            vec![(evm_ref, 19)],
+            format!("evm.address_native_balance_snapshot:{EVM_ACCOUNT}"),
+            vec![(evm.fact_ref.clone(), 19)],
         ),
     ]));
 
-    let validated = ValidatedConfig::new(config).expect("validated");
-    let (selected, evidences) = select_holdings(validated, subjects, &artifacts, &fact_index)
-        .await
-        .expect("select holdings from Platform facts");
+    let (selected, evidences) = select_holdings(
+        ValidatedConfig::new(SelectHoldingsConfig::new(portfolio.clone()).expect("config"))
+            .expect("validated config"),
+        input.clone(),
+        &artifacts,
+        &fact_index,
+    )
+    .await
+    .expect("receipt-pinned select");
 
-    // No live chain providers; one shared-frontier batch fact-index read + retained artifacts.
     assert_eq!(fact_index.calls(), 1);
     assert_eq!(selected.observations.len(), 2);
     assert_eq!(evidences.len(), 2);
-
-    let pins = project_network_pins_from_observations(&selected.observations).expect("pins");
-    assert_eq!(pins.len(), 2);
-
-    let btc_obs = selected
+    assert_eq!(
+        project_network_pins_from_observations(&selected.observations).expect("pins"),
+        input.receipt.network_anchors()
+    );
+    assert!(selected
         .observations
         .iter()
-        .find(|o| o.network_id == "bitcoin-mainnet")
-        .expect("btc observation");
-    let evm_obs = selected
+        .any(|observation| observation.quantity.raw_dec == "100000"));
+    assert!(selected
         .observations
         .iter()
-        .find(|o| o.network_id == "ethereum-mainnet")
-        .expect("evm observation");
+        .any(|observation| observation.quantity.raw_dec == "1000000000000000000"));
 
-    assert_eq!(btc_obs.quantity.raw_dec, "100000");
-    assert_eq!(btc_obs.coverage, "configured_only");
-    assert_eq!(
-        btc_obs.source.anchor,
-        ObservationAnchor::Bitcoin {
-            height: 850_000,
-            block_hash: "ab".repeat(32),
-        }
+    let subjects = resolve_subjects_from_config(
+        &ResolveSubjectsConfig::new(portfolio.clone()).expect("subjects config"),
     );
-    assert_eq!(evm_obs.quantity.raw_dec, "1000000000000000000");
-    assert_eq!(evm_obs.coverage, "configured_only");
-    assert_eq!(
-        evm_obs.source.anchor,
-        ObservationAnchor::Evm {
-            chain_id: 1,
-            block_number: 21_000_000,
-            block_hash: "0x".to_owned() + &"cd".repeat(32),
-        }
-    );
-
-    let btc_pin = pins
-        .iter()
-        .find(|p| p.network_id == "bitcoin-mainnet")
-        .expect("btc pin");
-    let evm_pin = pins
-        .iter()
-        .find(|p| p.network_id == "ethereum-mainnet")
-        .expect("evm pin");
-    assert_eq!(
-        btc_pin.anchor,
-        ExecutionAnchor::Bitcoin {
-            height: 850_000,
-            block_hash: "ab".repeat(32),
-        }
-    );
-    assert_eq!(
-        evm_pin.anchor,
-        ExecutionAnchor::Evm {
-            chain_id: 1,
-            block_number: 21_000_000,
-            block_hash: "0x".to_owned() + &"cd".repeat(32),
-        }
-    );
-
-    // Continue shipped pure report path: valuations + assemble + project (no live chain).
     let valuations = resolve_valuations_from_config(
-        &ResolveValuationsConfig::new(portfolio.symbol_configs.clone()).expect("valuations config"),
+        &ResolveValuationsConfig::new(portfolio.clone()).expect("valuations config"),
     )
-    .expect("resolve valuations");
+    .expect("valuations");
     let snapshot = assemble_snapshot(
-        &AssembleSnapshotConfig::new(2, portfolio.clone()).expect("assemble config"),
+        &AssembleSnapshotConfig::new(2, portfolio).expect("snapshot config"),
         AssembleSnapshotInput {
-            subjects: resolve_subjects_from_config(
-                &ResolveSubjectsConfig::new(portfolio.wallets.clone()).expect("subjects"),
-            ),
+            subjects,
             holdings: selected,
             valuations,
+            receipt: input.receipt,
         },
     )
-    .expect("assemble snapshot from selected holdings");
-    assert_eq!(snapshot.network_pins, pins);
-    assert_eq!(snapshot.wallets.len(), 2);
-    // Public snapshot JSON must retain selected coverage honesty (W1).
-    let snapshot_json = serde_json::to_value(&snapshot).expect("snapshot json");
-    let coverage_tags = snapshot_json
-        .pointer("/wallets")
-        .and_then(|w| w.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|wallet| wallet.get("observations")?.as_array())
-        .flatten()
-        .filter_map(|obs| obs.get("coverage")?.as_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        coverage_tags.len(),
-        2,
-        "coverage present on each observation"
-    );
-    assert!(coverage_tags.iter().all(|c| c == "configured_only"));
-
-    let report =
-        mfm_state_portfolio::project_report_from_snapshot(snapshot, 2).expect("project report");
+    .expect("snapshot");
+    let report = mfm_state_portfolio::project_report_from_snapshot(snapshot, 2).expect("report");
     assert_eq!(report.portfolio_id, "dual-mainnet");
-    assert_eq!(report.network_pins, pins);
 }
 
-/// Network-coherent: two holdings on one network; A@100+A@99 and B@99 → both @99.
 #[tokio::test]
-async fn select_holdings_network_coherent_picks_common_anchor_not_independent_latest() {
-    let portfolio = dual_wallet_same_network_portfolio();
-    let config =
-        SelectHoldingsConfig::with_default_store_scope(portfolio.clone()).expect("select config");
-    let subjects = resolve_subjects_from_config(
-        &ResolveSubjectsConfig::new(portfolio.wallets.clone()).expect("subjects config"),
-    );
+async fn identity_filtering_precedes_order_for_same_anchor_conflicts() {
+    let target = evm_native_fixture(EVM_ACCOUNT, native_response(42, EVM_HASH, "1"), 10);
+    let conflicting = evm_native_fixture(EVM_ACCOUNT, native_response(42, EVM_HASH, "999"), 11);
+    let input = select_input_for_evm_native(&target, 42, EVM_HASH);
+    let artifacts = MockArtifacts::with_fixtures(&[target.clone(), conflicting.clone()]);
+    let fact_index = MockFactIndex::with_rows(HashMap::from([(
+        format!("evm.address_native_balance_snapshot:{EVM_ACCOUNT}"),
+        vec![
+            (conflicting.fact_ref.clone(), 99),
+            (target.fact_ref.clone(), 1),
+        ],
+    )]));
 
-    // Wallet A candidates @100 and @99; wallet B only @99.
-    let a99 = EvmAddressNativeBalanceResponse::new(
-        99,
-        "0x".to_owned() + &"99".repeat(32),
-        "1",
-        18,
-        CoverageStatus::ConfiguredOnly,
-        HoldingSourceStatus::Ok,
+    let (selected, evidence) = select_holdings(
+        ValidatedConfig::new(SelectHoldingsConfig::new(evm_native_portfolio()).expect("config"))
+            .expect("validated config"),
+        input,
+        &artifacts,
+        &fact_index,
     )
-    .expect("a99");
-    let a100 = EvmAddressNativeBalanceResponse::new(
-        100,
-        "0x".to_owned() + &"aa".repeat(32),
-        "2",
-        18,
-        CoverageStatus::ConfiguredOnly,
-        HoldingSourceStatus::Ok,
+    .await
+    .expect("target identity must survive conflicting newer content");
+
+    assert_eq!(selected.observations[0].quantity.raw_dec, "1");
+    assert_eq!(evidence[0].selection().selected_indices(), &[1]);
+}
+
+#[tokio::test]
+async fn identical_content_claims_are_ordered_only_after_identity_filtering() {
+    let first = evm_native_fixture(EVM_ACCOUNT, native_response(42, EVM_HASH, "1"), 20);
+    let second = evm_native_fixture(EVM_ACCOUNT, native_response(42, EVM_HASH, "1"), 21);
+    let input = select_input_for_evm_native(&first, 42, EVM_HASH);
+    let artifacts = MockArtifacts::with_fixtures(&[first.clone(), second.clone()]);
+    let fact_index = MockFactIndex::with_rows(HashMap::from([(
+        format!("evm.address_native_balance_snapshot:{EVM_ACCOUNT}"),
+        vec![(first.fact_ref.clone(), 7), (second.fact_ref.clone(), 7)],
+    )]));
+
+    let (_, evidence) = select_holdings(
+        ValidatedConfig::new(SelectHoldingsConfig::new(evm_native_portfolio()).expect("config"))
+            .expect("validated config"),
+        input,
+        &artifacts,
+        &fact_index,
     )
-    .expect("a100");
-    let b99 = EvmAddressNativeBalanceResponse::new(
-        99,
-        "0x".to_owned() + &"99".repeat(32),
-        "3",
-        18,
-        CoverageStatus::ConfiguredOnly,
-        HoldingSourceStatus::Ok,
-    )
-    .expect("b99");
+    .await
+    .expect("identical content claims are valid candidates");
 
-    let (a99_bytes, a99_ev, a99_ref) =
-        holding_artifact_and_ref(&a99, "evm.address_native_balance_snapshot", 10, 1);
-    let (a100_bytes, a100_ev, a100_ref) =
-        holding_artifact_and_ref(&a100, "evm.address_native_balance_snapshot", 11, 2);
-    let (b99_bytes, b99_ev, b99_ref) =
-        holding_artifact_and_ref(&b99, "evm.address_native_balance_snapshot", 12, 3);
-
-    let artifacts = MockArtifacts::with_map(HashMap::from([
-        (a99_ref.artifact_id().clone(), (a99_bytes, a99_ev)),
-        (a100_ref.artifact_id().clone(), (a100_bytes, a100_ev)),
-        (b99_ref.artifact_id().clone(), (b99_bytes, b99_ev)),
-    ]));
-
-    // Map by wallet address predicate — mock returns candidates based on request plan kind.
-    // Both holdings share the same fact kind; dispatch by subject.account in the mock.
-    let fact_index = MockFactIndex::with_account_refs(HashMap::from([
-        (
-            "0x000000000000000000000000000000000000000a".to_owned(),
-            vec![(a100_ref, 10), (a99_ref, 5)],
-        ),
-        (
-            "0x000000000000000000000000000000000000000b".to_owned(),
-            vec![(b99_ref, 7)],
-        ),
-    ]));
-
-    let validated = ValidatedConfig::new(config).expect("validated");
-    let (selected, _) = select_holdings(validated, subjects, &artifacts, &fact_index)
-        .await
-        .expect("network-coherent select");
-
-    assert_eq!(selected.observations.len(), 2);
-    for obs in &selected.observations {
-        match &obs.source.anchor {
-            ObservationAnchor::Evm {
-                block_number,
-                block_hash,
-                ..
-            } => {
-                assert_eq!(*block_number, 99, "must select common @99 not A@100");
-                assert_eq!(block_hash, &("0x".to_owned() + &"99".repeat(32)));
-            }
-            other => panic!("expected EVM anchor, got {other:?}"),
-        }
-    }
-    let pins = project_network_pins_from_observations(&selected.observations).expect("pins");
-    assert_eq!(pins.len(), 1);
     assert_eq!(
-        pins[0].anchor,
-        ExecutionAnchor::Evm {
-            chain_id: 1,
-            block_number: 99,
-            block_hash: "0x".to_owned() + &"99".repeat(32),
-        }
+        evidence[0].selection().selected_indices(),
+        &[1],
+        "higher claim coordinate wins only after both rows match the receipt identity"
     );
 }
 
 #[tokio::test]
-async fn select_holdings_hard_fails_when_platform_facts_missing() {
-    let portfolio = dual_mainnet_portfolio();
-    let config =
-        SelectHoldingsConfig::with_default_store_scope(portfolio.clone()).expect("select config");
-    let subjects = resolve_subjects_from_config(
-        &ResolveSubjectsConfig::new(portfolio.wallets.clone()).expect("subjects config"),
+async fn newer_fact_at_another_anchor_cannot_replace_the_receipt_anchor() {
+    let target = evm_native_fixture(EVM_ACCOUNT, native_response(42, EVM_HASH, "1"), 30);
+    let newer = evm_native_fixture(
+        EVM_ACCOUNT,
+        native_response(
+            43,
+            "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "2",
+        ),
+        31,
     );
-    let artifacts = MockArtifacts::with_map(HashMap::new());
-    let fact_index = MockFactIndex::with_plan_refs(HashMap::new());
-    let validated = ValidatedConfig::new(config).expect("validated");
-    let err = select_holdings(validated, subjects, &artifacts, &fact_index)
-        .await
-        .expect_err("missing facts");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("missing_fact") || msg.contains("no acceptable"),
-        "expected missing_fact hard-fail, got {msg}"
-    );
-}
+    let input = select_input_for_evm_native(&target, 42, EVM_HASH);
+    let artifacts = MockArtifacts::with_fixtures(&[target, newer.clone()]);
+    let fact_index = MockFactIndex::with_rows(HashMap::from([(
+        format!("evm.address_native_balance_snapshot:{EVM_ACCOUNT}"),
+        vec![(newer.fact_ref.clone(), 100)],
+    )]));
 
-#[tokio::test]
-async fn select_holdings_hard_fails_on_mixed_read_frontiers() {
-    let portfolio = dual_mainnet_portfolio();
-    let config =
-        SelectHoldingsConfig::with_default_store_scope(portfolio.clone()).expect("select config");
-    let subjects = resolve_subjects_from_config(
-        &ResolveSubjectsConfig::new(portfolio.wallets.clone()).expect("subjects config"),
-    );
-
-    let btc_response = BtcAddressBalanceResponse::new(
-        850_000,
-        "ab".repeat(32),
-        100_000,
-        CoverageStatus::ConfiguredOnly,
-        HoldingSourceStatus::Ok,
+    let error = select_holdings(
+        ValidatedConfig::new(SelectHoldingsConfig::new(evm_native_portfolio()).expect("config"))
+            .expect("validated config"),
+        input,
+        &artifacts,
+        &fact_index,
     )
-    .expect("btc response");
-    let evm_response = EvmAddressNativeBalanceResponse::new(
-        21_000_000,
-        "0x".to_owned() + &"cd".repeat(32),
-        "1000000000000000000",
-        18,
-        CoverageStatus::ConfiguredOnly,
-        HoldingSourceStatus::Ok,
+    .await
+    .expect_err("another anchor must not be accepted");
+    assert!(error.to_string().contains("receipt_mismatch"));
+}
+
+#[tokio::test]
+async fn saturation_fails_before_any_candidate_hydration() {
+    let target = evm_native_fixture(EVM_ACCOUNT, native_response(42, EVM_HASH, "1"), 40);
+    let input = select_input_for_evm_native(&target, 42, EVM_HASH);
+    let artifacts = MockArtifacts::with_fixtures(std::slice::from_ref(&target));
+    let fact_index = MockFactIndex::with_saturated_rows(HashMap::from([(
+        format!("evm.address_native_balance_snapshot:{EVM_ACCOUNT}"),
+        std::iter::repeat_n((target.fact_ref.clone(), 1), 11).collect(),
+    )]));
+
+    let error = select_holdings(
+        ValidatedConfig::new(SelectHoldingsConfig::new(evm_native_portfolio()).expect("config"))
+            .expect("validated config"),
+        input,
+        &artifacts,
+        &fact_index,
     )
-    .expect("evm response");
-    let (btc_bytes, btc_evidence, btc_ref) =
-        holding_artifact_and_ref(&btc_response, "bitcoin.address_balance_snapshot", 1, 17);
-    let (evm_bytes, evm_evidence, evm_ref) =
-        holding_artifact_and_ref(&evm_response, "evm.address_native_balance_snapshot", 2, 19);
-    let artifacts = MockArtifacts::with_map(HashMap::from([
-        (btc_ref.artifact_id().clone(), (btc_bytes, btc_evidence)),
-        (evm_ref.artifact_id().clone(), (evm_bytes, evm_evidence)),
-    ]));
-    let fact_index = MixedFrontierFactIndex {
-        by_kind: HashMap::from([
-            (
-                "bitcoin.address_balance_snapshot".to_owned(),
-                vec![(btc_ref, 17)],
-            ),
-            (
-                "evm.address_native_balance_snapshot".to_owned(),
-                vec![(evm_ref, 19)],
-            ),
-        ]),
-    };
-    let validated = ValidatedConfig::new(config).expect("validated");
-    let err = select_holdings(validated, subjects, &artifacts, &fact_index)
-        .await
-        .expect_err("mixed frontiers must hard-fail");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("runner_output_invalid") && msg.contains("mixed read frontiers"),
-        "expected runner_output_invalid hard-fail, got {msg}"
+    .await
+    .expect_err("N + 1 candidates must fail");
+    assert!(error.to_string().contains("candidate_bound_exhausted"));
+    assert_eq!(
+        artifacts.reads(),
+        0,
+        "saturation is checked before hydration"
     );
 }
 
-/// Candidates present but all fail coverage/status filter → hard missing_fact (not soft success).
 #[tokio::test]
-async fn select_holdings_hard_fails_when_only_truncated_candidates_present() {
-    let portfolio = dual_mainnet_portfolio();
-    let config =
-        SelectHoldingsConfig::with_default_store_scope(portfolio.clone()).expect("select config");
-    let subjects = resolve_subjects_from_config(
-        &ResolveSubjectsConfig::new(portfolio.wallets.clone()).expect("subjects config"),
+async fn any_saturated_receipt_query_blocks_hydration_for_every_holding() {
+    let btc = btc_fixture(
+        BtcAddressBalanceResponse::new(
+            850_000,
+            BTC_HASH,
+            100_000,
+            CoverageStatus::ConfiguredOnly,
+            HoldingSourceStatus::Ok,
+        )
+        .expect("Bitcoin response"),
+        45,
     );
-
-    // Truncated is not constructible via Response::new (write-admission fail-closed).
-    // Build inadmissible rows the same way a tampered/legacy payload would hydrate.
-    let truncated_btc = serde_json::from_value::<BtcAddressBalanceResponse>(serde_json::json!({
-        "anchor_height": 850_000,
-        "anchor_hash": "ab".repeat(32),
-        "balance_sats": 100_000,
-        "coverage": "truncated",
-        "source_status": "ok"
-    }))
-    .expect("truncated btc response");
-    let truncated_evm =
-        serde_json::from_value::<EvmAddressNativeBalanceResponse>(serde_json::json!({
-            "block_number": 21_000_000,
-            "block_hash": "0x".to_owned() + &"cd".repeat(32),
-            "raw_wei": "1000000000000000000",
-            "decimals": 18,
-            "coverage": "truncated",
-            "source_status": "ok"
-        }))
-        .expect("truncated evm response");
-
-    let (btc_bytes, btc_evidence, btc_ref) =
-        holding_artifact_and_ref(&truncated_btc, "bitcoin.address_balance_snapshot", 3, 17);
-    let (evm_bytes, evm_evidence, evm_ref) =
-        holding_artifact_and_ref(&truncated_evm, "evm.address_native_balance_snapshot", 4, 19);
-
-    let artifacts = MockArtifacts::with_map(HashMap::from([
-        (btc_ref.artifact_id().clone(), (btc_bytes, btc_evidence)),
-        (evm_ref.artifact_id().clone(), (evm_bytes, evm_evidence)),
-    ]));
-    let fact_index = MockFactIndex::with_plan_refs(HashMap::from([
+    let evm = evm_native_fixture(EVM_ACCOUNT, native_response(42, EVM_HASH, "1"), 46);
+    let input = select_input_for_dual_mainnet(&btc, &evm);
+    let artifacts = MockArtifacts::with_fixtures(&[btc.clone(), evm.clone()]);
+    let fact_index = MockFactIndex::with_rows(HashMap::from([
         (
-            "bitcoin.address_balance_snapshot".to_owned(),
-            vec![(btc_ref, 17)],
+            format!("bitcoin.address_balance_snapshot:{BTC_ADDRESS}"),
+            vec![(btc.fact_ref.clone(), 1)],
         ),
         (
-            "evm.address_native_balance_snapshot".to_owned(),
-            vec![(evm_ref, 19)],
+            format!("evm.address_native_balance_snapshot:{EVM_ACCOUNT}"),
+            std::iter::repeat_n((evm.fact_ref.clone(), 1), 11).collect(),
         ),
     ]));
 
-    let validated = ValidatedConfig::new(config).expect("validated");
-    let err = select_holdings(validated, subjects, &artifacts, &fact_index)
-        .await
-        .expect_err("truncated-only candidates must hard-fail");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("missing_fact") || msg.contains("no acceptable"),
-        "coverage filter-empty must surface missing_fact, got {msg}"
+    let error = select_holdings(
+        ValidatedConfig::new(SelectHoldingsConfig::new(dual_mainnet_portfolio()).expect("config"))
+            .expect("validated config"),
+        input,
+        &artifacts,
+        &fact_index,
+    )
+    .await
+    .expect_err("a saturated sibling query must fail the entire receipt selection");
+    assert!(error.to_string().contains("candidate_bound_exhausted"));
+    assert_eq!(
+        artifacts.reads(),
+        0,
+        "all N + 1 proofs complete before any holding candidate is hydrated"
     );
+}
+
+#[tokio::test]
+async fn zero_native_and_token_facts_remain_zero_observations() {
+    let native = evm_native_fixture(EVM_ACCOUNT, native_response(25, EVM_HASH, "0"), 50);
+    let token = evm_erc20_fixture(
+        EVM_ACCOUNT,
+        TOKEN,
+        EvmAddressErc20BalanceResponse::new(25, EVM_HASH, "0", 6).expect("token response"),
+        51,
+    );
+    let input = select_input_for_evm_native_and_erc20(&native, &token, 25, EVM_HASH);
+    let artifacts = MockArtifacts::with_fixtures(&[native.clone(), token.clone()]);
+    let fact_index = MockFactIndex::with_rows(HashMap::from([
+        (
+            format!("evm.address_native_balance_snapshot:{EVM_ACCOUNT}"),
+            vec![(native.fact_ref.clone(), 1)],
+        ),
+        (
+            format!("evm.address_erc20_balance_snapshot:{EVM_ACCOUNT}"),
+            vec![(token.fact_ref.clone(), 2)],
+        ),
+    ]));
+
+    let (selected, _) = select_holdings(
+        ValidatedConfig::new(
+            SelectHoldingsConfig::new(evm_native_and_erc20_portfolio()).expect("config"),
+        )
+        .expect("validated config"),
+        input,
+        &artifacts,
+        &fact_index,
+    )
+    .await
+    .expect("zero balances are successful holdings");
+    assert_eq!(selected.observations.len(), 2);
+    assert!(selected
+        .observations
+        .iter()
+        .all(|observation| observation.quantity.raw_dec == "0"));
+}
+
+#[tokio::test]
+async fn missing_identity_and_tampered_reference_components_hard_fail() {
+    let target = evm_native_fixture(EVM_ACCOUNT, native_response(42, EVM_HASH, "1"), 60);
+    let different_content = evm_native_fixture(EVM_ACCOUNT, native_response(42, EVM_HASH, "2"), 61);
+    let input = select_input_for_evm_native(&target, 42, EVM_HASH);
+    let no_match_artifacts = MockArtifacts::with_fixtures(std::slice::from_ref(&different_content));
+    let no_match_index = MockFactIndex::with_rows(HashMap::from([(
+        format!("evm.address_native_balance_snapshot:{EVM_ACCOUNT}"),
+        vec![(different_content.fact_ref.clone(), 1)],
+    )]));
+    let error = select_holdings(
+        ValidatedConfig::new(SelectHoldingsConfig::new(evm_native_portfolio()).expect("config"))
+            .expect("validated config"),
+        input.clone(),
+        &no_match_artifacts,
+        &no_match_index,
+    )
+    .await
+    .expect_err("same-anchor response content must match the receipt");
+    assert!(error.to_string().contains("missing_fact"));
+
+    for (descriptor_hash, subject_hash, label) in [
+        (
+            digest(0x61),
+            target.identity.subject_material_hash().clone(),
+            "descriptor",
+        ),
+        (
+            target.identity.fact_descriptor_hash().clone(),
+            digest(0x62),
+            "subject",
+        ),
+    ] {
+        let forged = forged_reference(
+            &target,
+            descriptor_hash,
+            subject_hash,
+            target.identity.response_schema_id().clone(),
+            target.identity.response_hash().clone(),
+            70,
+        );
+        let artifacts = MockArtifacts::with_fixtures(std::slice::from_ref(&target));
+        let fact_index = MockFactIndex::with_rows(HashMap::from([(
+            format!("evm.address_native_balance_snapshot:{EVM_ACCOUNT}"),
+            vec![(forged, 1)],
+        )]));
+        let error = select_holdings(
+            ValidatedConfig::new(
+                SelectHoldingsConfig::new(evm_native_portfolio()).expect("config"),
+            )
+            .expect("validated config"),
+            input.clone(),
+            &artifacts,
+            &fact_index,
+        )
+        .await
+        .expect_err(&format!("{label} tampering must fail"));
+        assert!(error.to_string().contains("receipt_mismatch"));
+    }
+}
+
+#[tokio::test]
+async fn mixed_fact_index_frontiers_hard_fail() {
+    let btc = btc_fixture(
+        BtcAddressBalanceResponse::new(
+            850_000,
+            BTC_HASH,
+            1,
+            CoverageStatus::ConfiguredOnly,
+            HoldingSourceStatus::Ok,
+        )
+        .expect("Bitcoin response"),
+        80,
+    );
+    let evm = evm_native_fixture(EVM_ACCOUNT, native_response(21_000_000, EVM_HASH, "1"), 81);
+    let input = select_input_for_dual_mainnet(&btc, &evm);
+    let artifacts = MockArtifacts::with_fixtures(&[btc.clone(), evm.clone()]);
+    let fact_index = MockFactIndex::with_mixed_frontiers(HashMap::from([
+        (
+            format!("bitcoin.address_balance_snapshot:{BTC_ADDRESS}"),
+            vec![(btc.fact_ref, 1)],
+        ),
+        (
+            format!("evm.address_native_balance_snapshot:{EVM_ACCOUNT}"),
+            vec![(evm.fact_ref, 1)],
+        ),
+    ]));
+
+    let error = select_holdings(
+        ValidatedConfig::new(SelectHoldingsConfig::new(dual_mainnet_portfolio()).expect("config"))
+            .expect("validated config"),
+        input,
+        &artifacts,
+        &fact_index,
+    )
+    .await
+    .expect_err("mixed snapshot frontiers");
+    assert!(error.to_string().contains("mixed read frontiers"));
 }
 
 #[test]
-fn multiset_plan_matching_consumes_first_unmatched_identical_plan() {
-    use std::collections::BTreeSet;
+fn receipt_constrained_requests_bind_anchor_status_scope_and_limit() {
+    let target = evm_native_fixture(EVM_ACCOUNT, native_response(42, EVM_HASH, "1"), 90);
+    let input = select_input_for_evm_native(&target, 42, EVM_HASH);
+    let config = SelectHoldingsConfig::new(evm_native_portfolio()).expect("config");
+    let request =
+        holding_fact_index_request(&config, &input.receipt.holdings()[0]).expect("request");
+    let plan = request.plan();
+    assert_eq!(plan.limit(), Some(11));
+    assert_eq!(plan.store_scope().as_str(), "mfm.store.default");
+    let query = plan.canonical_query().as_str();
+    for field in [
+        "subject.account",
+        "result.block_number",
+        "result.block_hash",
+        "result.coverage",
+        "result.source_status",
+    ] {
+        assert!(query.contains(field), "receipt request omitted {field}");
+    }
+}
 
-    let portfolio = dual_wallet_same_network_portfolio();
-    let config = SelectHoldingsConfig::with_default_store_scope(portfolio.clone()).expect("config");
-    let subjects = resolve_subjects_from_config(
-        &ResolveSubjectsConfig::new(portfolio.wallets.clone()).expect("subjects"),
-    );
-    let requirements = expand_required_holdings(&config, &subjects).expect("requirements");
-    let request = holding_fact_index_request(&config, &requirements[0]).expect("request");
-    let expected_requests = vec![request.clone(), request];
-    let first_plan = expected_requests[0].plan().clone();
-
-    let mut matched = BTreeSet::new();
-    let first = first_unmatched_plan_index(&expected_requests, &matched, &first_plan)
-        .expect("first identical plan slot");
-    matched.insert(first);
-    let second = first_unmatched_plan_index(&expected_requests, &matched, &first_plan)
-        .expect("second identical plan slot");
-    assert_ne!(
-        first, second,
-        "duplicate plans must bind distinct requirement slots"
-    );
-    matched.insert(second);
-    assert!(
-        first_unmatched_plan_index(&expected_requests, &matched, &first_plan).is_none(),
-        "no third unmatched slot for the same plan"
-    );
+fn native_response(
+    block_number: u64,
+    block_hash: &str,
+    raw_wei: &str,
+) -> EvmAddressNativeBalanceResponse {
+    EvmAddressNativeBalanceResponse::new(
+        block_number,
+        block_hash,
+        raw_wei,
+        18,
+        CoverageStatus::ConfiguredOnly,
+        HoldingSourceStatus::Ok,
+    )
+    .expect("native response")
 }

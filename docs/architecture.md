@@ -138,9 +138,11 @@ artifacts and the append-only run stream only.
 
 Two v1 decisions are deliberate:
 
-- `CollectThenReportReadinessState` remains operation-local. It is a pure fan-in state for the
-  composed workflow's two collector summaries, not reusable portfolio domain behavior. The app
-  registers its runner, while the operation owns the readiness semantics and graph topology.
+- `AssemblePortfolioCollectionReceiptState` remains operation-local. It is the pure fan-in state
+  for sorted BTC/EVM family receipts and the compiled logical manifest, not reusable portfolio
+  domain behavior. It proves exact source completion, number/hash anchors, admissible
+  status/coverage, and fact-content identities; it does not retain count readiness. The app
+  registers its runner, while the operation owns receipt assembly semantics and graph topology.
 - Runtime TOML remains a process-local routing and signer boundary rather than semantic catalog
   data. The current loader may parse the whole file when a live capability family is requested, so
   malformed unrelated family data can reject that live request. Read-only paths do not load it, and

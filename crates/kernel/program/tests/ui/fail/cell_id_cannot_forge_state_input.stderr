@@ -21,22 +21,12 @@ error[E0277]: the trait bound `Identity<CellIdKind>: mfm_values::StateInput` is 
 8 |     let _ = <CellId as mfm_program::IntoStateInput<'static, 'static, CellId>>::into_binding(cell);
   |                                                                      ^^^^^^ the trait `mfm_values::MfmValue` is not implemented for `Identity<CellIdKind>`
   |
-help: the following other types implement trait `mfm_values::MfmValue`
- --> $WORKSPACE/crates/kernel/facts/src/content_identity.rs
-  |
-  | impl MfmValue for FactContentIdentity {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FactContentIdentity`
-  |
- ::: $WORKSPACE/crates/kernel/values/src/generic_values.rs
-  |
-  | impl MfmValue for ContextRefValue {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ContextRefValue`
-...
-  | impl<T: MfmValue> MfmValue for MaybeValue<T> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::MaybeValue<T>`
-...
-  | impl<T: MfmValue> MfmValue for ArtifactRef<T> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ArtifactRef<T>`
+  = help: the following other types implement trait `mfm_values::MfmValue`:
+            FactContentIdentity
+            FactContentIdentityEvidence
+            mfm_values::generic_values::ArtifactRef<T>
+            mfm_values::generic_values::ContextRefValue
+            mfm_values::generic_values::MaybeValue<T>
   = note: required for `Identity<CellIdKind>` to implement `mfm_values::StateInput`
 note: required by a bound in `into_binding`
  --> src/input_binding.rs
@@ -53,22 +43,12 @@ error[E0277]: the trait bound `Identity<CellIdKind>: mfm_values::MfmValue` is no
 8 |     let _ = <CellId as mfm_program::IntoStateInput<'static, 'static, CellId>>::into_binding(cell);
   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `mfm_values::MfmValue` is not implemented for `Identity<CellIdKind>`
   |
-help: the following other types implement trait `mfm_values::MfmValue`
- --> $WORKSPACE/crates/kernel/facts/src/content_identity.rs
-  |
-  | impl MfmValue for FactContentIdentity {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FactContentIdentity`
-  |
- ::: $WORKSPACE/crates/kernel/values/src/generic_values.rs
-  |
-  | impl MfmValue for ContextRefValue {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ContextRefValue`
-...
-  | impl<T: MfmValue> MfmValue for MaybeValue<T> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::MaybeValue<T>`
-...
-  | impl<T: MfmValue> MfmValue for ArtifactRef<T> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ArtifactRef<T>`
+  = help: the following other types implement trait `mfm_values::MfmValue`:
+            FactContentIdentity
+            FactContentIdentityEvidence
+            mfm_values::generic_values::ArtifactRef<T>
+            mfm_values::generic_values::ContextRefValue
+            mfm_values::generic_values::MaybeValue<T>
   = note: required for `Identity<CellIdKind>` to implement `mfm_values::StateInput`
 note: required by a bound in `InputBinding`
  --> src/input_binding.rs

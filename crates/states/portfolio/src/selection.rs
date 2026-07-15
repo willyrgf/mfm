@@ -1,32 +1,29 @@
-//! Network-coherent holding selection for fact-backed portfolio reports.
+//! Receipt-pinned holding projection helpers for fact-backed portfolio reports.
 //!
-//! Policy id: `mfm.portfolio.holding.latest-network-coherent.v1`
-//!
-//! Selection is pure: full Exact candidate sets per required holding, then
-//! intersection of anchors within each network group. Independent per-holding
-//! latest is forbidden (misses coherent older common anchors).
+//! Policy id: `mfm.portfolio.holding.collection-receipt-anchor.v1`.
+//! The collection receipt fixes every source, anchor, status, coverage, and fact-content identity
+//! before this module projects a hydrated, identity-matching fact into an observation.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_facts::FactClaimId;
 use mfm_ids::{ContentDigest, DigestAlgorithm};
 use mfm_portfolio_model::holding::{CoverageStatus, HoldingSourceStatus};
-use mfm_portfolio_model::portfolio::NetworkFamilyConfig;
 use mfm_portfolio_model::portfolio::{ExecutionAnchor, NetworkPin};
 use mfm_portfolio_model::symbol::{
     AnchoredHoldingSource, HoldingSourceConfig, Observation, ObservationAnchor,
 };
 
-/// Certified selection policy id for cutover portfolio holding selection.
-pub const PORTFOLIO_HOLDING_LATEST_NETWORK_COHERENT_POLICY_ID: &str =
-    "mfm.portfolio.holding.latest-network-coherent.v1";
+/// Certified selection policy id for receipt-pinned portfolio holding selection.
+pub const PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID: &str =
+    "mfm.portfolio.holding.collection-receipt-anchor.v1";
 
 /// Content digest of the selection policy id bytes (for selection evidence).
 pub fn portfolio_holding_selection_policy_digest() -> ContentDigest {
     ContentDigest::from_digest(
         DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(PORTFOLIO_HOLDING_LATEST_NETWORK_COHERENT_POLICY_ID.as_bytes()),
+        sha256_digest_bytes(PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID.as_bytes()),
     )
 }
 
@@ -38,26 +35,20 @@ pub fn portfolio_holding_select_scope_decision_hash() -> ContentDigest {
     )
 }
 
-/// Whether a candidate-build error should drop the row (filter-empty → missing_fact later).
-pub const fn is_filter_empty_holding_error(code: PortfolioHoldingErrorCode) -> bool {
-    matches!(
-        code,
-        PortfolioHoldingErrorCode::MissingFact | PortfolioHoldingErrorCode::UnsupportedRequirement
-    )
-}
-
 /// Minimal public hard-fail codes for portfolio holding selection / assembly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PortfolioHoldingErrorCode {
-    /// No acceptable Platform fact for a required subject (includes coverage filter-empty).
+    /// No retained Platform fact matched an exact receipt identity.
     MissingFact,
-    /// Network group has facts but empty intersection of anchors.
-    NoCommonNetworkAnchor,
     /// Selection cardinality violated after policy / receipt.
     AmbiguousFacts,
+    /// The receipt, queried source, anchor, or fact identity did not match exactly.
+    ReceiptMismatch,
+    /// The fixed N + 1 candidate query saturated before exhaustion was proven.
+    CandidateBoundExhausted,
     /// Residual same-network selected anchors disagree (guard).
     InconsistentNetworkAnchors,
-    /// Portfolio requirement has no projection rule (e.g. ERC-20 at cutover).
+    /// A portfolio requirement could not be projected into a report observation.
     UnsupportedRequirement,
 }
 
@@ -66,8 +57,9 @@ impl PortfolioHoldingErrorCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::MissingFact => "missing_fact",
-            Self::NoCommonNetworkAnchor => "no_common_network_anchor",
             Self::AmbiguousFacts => "ambiguous_facts",
+            Self::ReceiptMismatch => "receipt_mismatch",
+            Self::CandidateBoundExhausted => "candidate_bound_exhausted",
             Self::InconsistentNetworkAnchors => "inconsistent_network_anchors",
             Self::UnsupportedRequirement => "unsupported_requirement",
         }
@@ -177,24 +169,6 @@ pub struct SelectedHoldingMaterial {
     pub source_status: String,
 }
 
-/// Required holding key used as map key for selection inputs.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RequiredHoldingKey {
-    /// Wallet id.
-    pub wallet_id: String,
-    /// Symbol id.
-    pub symbol_id: String,
-    /// Network id.
-    pub network_id: String,
-}
-
-impl RequiredHoldingKey {
-    /// Stable key string for diagnostics.
-    pub fn as_key_str(&self) -> String {
-        format!("{}/{}/{}", self.wallet_id, self.symbol_id, self.network_id)
-    }
-}
-
 /// Family-normalized quantity/anchor fields used to build a [`HoldingCandidate`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizedHoldingFields {
@@ -216,7 +190,7 @@ pub struct NormalizedHoldingFields {
 ///
 /// Family crates own normalize/acceptability; this joins report keys and selection anchors.
 pub fn holding_candidate_from_normalized(
-    key: &RequiredHoldingKey,
+    key: &crate::HoldingRequirementKey,
     store_commit_order: u64,
     fact_claim_id: FactClaimId,
     fields: NormalizedHoldingFields,
@@ -293,12 +267,12 @@ fn portfolio_selection_accepts_status(
     )
 }
 
-/// One selected holding after network-coherent selection.
+/// One selected holding after receipt-pinned identity filtering and ordering.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedHolding {
     /// Required holding key.
-    pub key: RequiredHoldingKey,
-    /// Chosen anchor (shared across same-network group).
+    pub key: crate::HoldingRequirementKey,
+    /// Anchor verified against the exact receipt entry.
     pub anchor: HoldingAnchor,
     /// Store commit order of the winning candidate.
     pub store_commit_order: u64,
@@ -306,155 +280,6 @@ pub struct SelectedHolding {
     pub fact_claim_id: FactClaimId,
     /// Material for observation construction.
     pub material: SelectedHoldingMaterial,
-}
-
-/// Pure network-coherent selection over full candidate sets.
-///
-/// Canonical case: A@100+A@99, B@99 same network → both @99.
-pub fn select_network_coherent(
-    candidates_by_holding: &BTreeMap<RequiredHoldingKey, Vec<HoldingCandidate>>,
-) -> Result<Vec<SelectedHolding>, PortfolioHoldingSelectionError> {
-    if candidates_by_holding.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Group required holdings by network_id.
-    let mut by_network: BTreeMap<String, Vec<&RequiredHoldingKey>> = BTreeMap::new();
-    for key in candidates_by_holding.keys() {
-        by_network
-            .entry(key.network_id.clone())
-            .or_default()
-            .push(key);
-    }
-
-    let mut selected = Vec::new();
-
-    for (network_id, holdings) in by_network {
-        // Empty candidate sets → missing_fact.
-        for key in &holdings {
-            let candidates = candidates_by_holding.get(*key).expect("key from map keys");
-            if candidates.is_empty() {
-                return Err(PortfolioHoldingSelectionError::new(
-                    PortfolioHoldingErrorCode::MissingFact,
-                    format!("no acceptable Platform fact for {}", key.as_key_str()),
-                    Some(key.as_key_str()),
-                    Some(network_id.clone()),
-                ));
-            }
-            // Guard: candidates must share the holding's network_id.
-            for candidate in candidates {
-                if candidate.network_id != network_id {
-                    return Err(PortfolioHoldingSelectionError::new(
-                        PortfolioHoldingErrorCode::InconsistentNetworkAnchors,
-                        "candidate network_id disagrees with holding network_id",
-                        Some(key.as_key_str()),
-                        Some(network_id.clone()),
-                    ));
-                }
-            }
-        }
-
-        // common_anchors = intersection of candidate anchors per holding in group.
-        let mut common: Option<BTreeSet<HoldingAnchor>> = None;
-        for key in &holdings {
-            let anchors: BTreeSet<HoldingAnchor> = candidates_by_holding
-                .get(*key)
-                .expect("key present")
-                .iter()
-                .map(|c| c.anchor.clone())
-                .collect();
-            common = Some(match common {
-                None => anchors,
-                Some(existing) => existing.intersection(&anchors).cloned().collect(),
-            });
-        }
-        let common = common.unwrap_or_default();
-        if common.is_empty() {
-            return Err(PortfolioHoldingSelectionError::new(
-                PortfolioHoldingErrorCode::NoCommonNetworkAnchor,
-                format!("no common network anchor for holdings on network {network_id}"),
-                None,
-                Some(network_id.clone()),
-            ));
-        }
-
-        // chosen_anchor = max by height desc, then hash bytes desc.
-        let chosen_anchor = common
-            .into_iter()
-            .max_by(|left, right| {
-                left.height
-                    .cmp(&right.height)
-                    .then_with(|| left.hash.as_bytes().cmp(right.hash.as_bytes()))
-            })
-            .expect("non-empty common set");
-
-        for key in holdings {
-            let candidates = candidates_by_holding.get(key).expect("key present");
-            let mut at: Vec<&HoldingCandidate> = candidates
-                .iter()
-                .filter(|c| c.anchor == chosen_anchor)
-                .collect();
-            if at.is_empty() {
-                return Err(PortfolioHoldingSelectionError::new(
-                    PortfolioHoldingErrorCode::MissingFact,
-                    format!("no candidate at chosen anchor for {}", key.as_key_str()),
-                    Some(key.as_key_str()),
-                    Some(network_id.clone()),
-                ));
-            }
-            // LWW v1: store_commit_order DESC, then FactClaimId coordinate DESC (RFC secondary).
-            at.sort_by(|left, right| {
-                right
-                    .store_commit_order
-                    .cmp(&left.store_commit_order)
-                    .then_with(|| right.fact_claim_id.cmp(&left.fact_claim_id))
-            });
-            let winner = at[0];
-            selected.push(SelectedHolding {
-                key: key.clone(),
-                anchor: chosen_anchor.clone(),
-                store_commit_order: winner.store_commit_order,
-                fact_claim_id: winner.fact_claim_id.clone(),
-                material: winner.response_material.clone(),
-            });
-        }
-    }
-
-    // Residual same-network selected anchors must agree.
-    let mut network_anchors: BTreeMap<String, HoldingAnchor> = BTreeMap::new();
-    for item in &selected {
-        match network_anchors.get(&item.key.network_id) {
-            None => {
-                network_anchors.insert(item.key.network_id.clone(), item.anchor.clone());
-            }
-            Some(existing) if existing != &item.anchor => {
-                return Err(PortfolioHoldingSelectionError::new(
-                    PortfolioHoldingErrorCode::InconsistentNetworkAnchors,
-                    format!(
-                        "selected anchors disagree on network {}",
-                        item.key.network_id
-                    ),
-                    Some(item.key.as_key_str()),
-                    Some(item.key.network_id.clone()),
-                ));
-            }
-            Some(_) => {}
-        }
-    }
-
-    selected.sort_by(|left, right| {
-        (
-            left.key.network_id.as_str(),
-            left.key.wallet_id.as_str(),
-            left.key.symbol_id.as_str(),
-        )
-            .cmp(&(
-                right.key.network_id.as_str(),
-                right.key.wallet_id.as_str(),
-                right.key.symbol_id.as_str(),
-            ))
-    });
-    Ok(selected)
 }
 
 /// Projects `network_pins` purely from selected observation anchors.
@@ -532,46 +357,6 @@ fn execution_anchor_from_anchored_holding_source(
                 height: *height,
                 block_hash: block_hash.clone(),
             })
-        }
-    }
-}
-
-/// Subject projection kind supported at cutover.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HoldingFactProjection {
-    /// `bitcoin.address_balance_snapshot`.
-    BitcoinAddressBalance,
-    /// `evm.address_native_balance_snapshot`.
-    EvmNativeBalance,
-}
-
-/// Projects cutover fact kind from the direct network-family/source algebra.
-pub fn project_holding_fact_for_network(
-    network_family: NetworkFamilyConfig,
-    source: &HoldingSourceConfig,
-) -> Result<HoldingFactProjection, PortfolioHoldingSelectionError> {
-    match (network_family, source) {
-        (NetworkFamilyConfig::Bitcoin, HoldingSourceConfig::Native) => {
-            Ok(HoldingFactProjection::BitcoinAddressBalance)
-        }
-        (NetworkFamilyConfig::Evm, HoldingSourceConfig::Native) => {
-            Ok(HoldingFactProjection::EvmNativeBalance)
-        }
-        (NetworkFamilyConfig::Evm, HoldingSourceConfig::Erc20 { .. }) => {
-            Err(PortfolioHoldingSelectionError::new(
-                PortfolioHoldingErrorCode::UnsupportedRequirement,
-                "ERC-20 holding collection is not available in this internal pre-cutover state",
-                None,
-                None,
-            ))
-        }
-        (NetworkFamilyConfig::Bitcoin, HoldingSourceConfig::Erc20 { .. }) => {
-            Err(PortfolioHoldingSelectionError::new(
-                PortfolioHoldingErrorCode::UnsupportedRequirement,
-                "Bitcoin does not support ERC-20 holdings",
-                None,
-                None,
-            ))
         }
     }
 }

@@ -1,23 +1,11 @@
 use super::*;
-
-/// One required holding expanded from portfolio config + resolved subjects.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RequiredHoldingRequirement {
-    /// Selection key.
-    pub key: RequiredHoldingKey,
-    /// Cutover fact projection kind.
-    pub projection: HoldingFactProjection,
-    /// Wallet address for subject predicates.
-    pub address: String,
-    /// Symbol config for observation join.
-    pub symbol: SymbolConfig,
-    /// Network config for subject predicates.
-    pub network: NetworkConfig,
-}
+use mfm_portfolio_model::portfolio::ExecutionAnchor;
+use mfm_portfolio_model::symbol::HoldingSourceConfig;
 
 /// Resolves configured wallets into typed subjects.
 pub fn resolve_subjects_from_config(config: &ResolveSubjectsConfig) -> ResolvedSubjects {
     let mut subjects = config
+        .portfolio
         .wallets
         .iter()
         .map(|wallet| ResolvedSubject {
@@ -30,92 +18,6 @@ pub fn resolve_subjects_from_config(config: &ResolveSubjectsConfig) -> ResolvedS
         .collect::<Vec<_>>();
     subjects.sort_by(|left, right| left.wallet_id.cmp(&right.wallet_id));
     ResolvedSubjects { subjects }
-}
-
-/// Expands wallet×symbol requirements into cutover-supported holding requirements.
-pub fn expand_required_holdings(
-    config: &SelectHoldingsConfig,
-    subjects: &ResolvedSubjects,
-) -> Result<Vec<RequiredHoldingRequirement>, PortfolioHoldingSelectionError> {
-    let networks = networks_by_id(&config.portfolio.networks)?;
-    let symbols = symbols_by_id(&config.portfolio.symbol_configs)?;
-    let subjects_by_wallet = subjects
-        .subjects
-        .iter()
-        .map(|subject| (subject.wallet_id.as_str(), subject))
-        .collect::<BTreeMap<_, _>>();
-
-    let mut requirements = Vec::new();
-    for wallet in &config.portfolio.wallets {
-        let subject = subjects_by_wallet
-            .get(wallet.wallet_id.as_str())
-            .copied()
-            .ok_or_else(|| {
-                PortfolioHoldingSelectionError::new(
-                    PortfolioHoldingErrorCode::MissingFact,
-                    format!("missing resolved subject for wallet {}", wallet.wallet_id),
-                    Some(wallet.wallet_id.to_string()),
-                    Some(wallet.network_id.to_string()),
-                )
-            })?;
-        for symbol_id in &wallet.symbol_ids {
-            let symbol = symbols.get(symbol_id.as_str()).copied().ok_or_else(|| {
-                PortfolioHoldingSelectionError::new(
-                    PortfolioHoldingErrorCode::UnsupportedRequirement,
-                    format!(
-                        "wallet `{}` referenced unknown symbol `{symbol_id}`",
-                        wallet.wallet_id
-                    ),
-                    Some(format!("{}/{}", wallet.wallet_id, symbol_id)),
-                    Some(wallet.network_id.to_string()),
-                )
-            })?;
-            let network = networks
-                .get(symbol.network_id.as_str())
-                .copied()
-                .ok_or_else(|| {
-                    PortfolioHoldingSelectionError::new(
-                        PortfolioHoldingErrorCode::UnsupportedRequirement,
-                        format!(
-                            "missing network `{}` for symbol `{}`",
-                            symbol.network_id, symbol.symbol_id
-                        ),
-                        Some(format!("{}/{}", wallet.wallet_id, symbol.symbol_id)),
-                        Some(symbol.network_id.to_string()),
-                    )
-                })?;
-            let projection = project_holding_fact_for_network(network.family(), &symbol.source)
-                .map_err(|mut err| {
-                    err.holding_key = Some(format!("{}/{}", wallet.wallet_id, symbol.symbol_id));
-                    err.network_id = Some(symbol.network_id.to_string());
-                    err
-                })?;
-            requirements.push(RequiredHoldingRequirement {
-                key: RequiredHoldingKey {
-                    wallet_id: wallet.wallet_id.to_string(),
-                    symbol_id: symbol.symbol_id.to_string(),
-                    network_id: symbol.network_id.to_string(),
-                },
-                projection,
-                address: subject.address.clone(),
-                symbol: symbol.clone(),
-                network: network.clone(),
-            });
-        }
-    }
-    requirements.sort_by(|left, right| {
-        (
-            left.key.network_id.as_str(),
-            left.key.wallet_id.as_str(),
-            left.key.symbol_id.as_str(),
-        )
-            .cmp(&(
-                right.key.network_id.as_str(),
-                right.key.wallet_id.as_str(),
-                right.key.symbol_id.as_str(),
-            ))
-    });
-    Ok(requirements)
 }
 
 /// Builds quantity-only observations from selected holdings (valuation join deferred).
@@ -216,7 +118,7 @@ pub fn resolve_valuations_from_config(
     config: &ResolveValuationsConfig,
 ) -> StateResult<ResolvedValuations> {
     let mut valuations = Vec::new();
-    for symbol in &config.symbol_configs {
+    for symbol in &config.portfolio.symbol_configs {
         for quote in &symbol.valuation.quotes {
             valuations.push(resolved_valuation_for_quote(symbol, quote)?);
         }
@@ -239,35 +141,122 @@ fn resolved_valuation_for_quote(
     })
 }
 
-/// Hard-fail when any configured wallet×symbol required holding lacks an observation.
+/// Proves that selected observations exactly realize the collection receipt.
 ///
-/// Defense-in-depth for the pure assemble path: SelectHoldings is the graph authority, but
-/// assemble must not emit a successful snapshot with empty/partial required holdings.
-fn require_required_holdings_present(
-    portfolio: &PortfolioConfig,
+/// Selection is the primary receipt consumer, but snapshot assembly independently rejects
+/// missing, duplicated, unexpected, source-mismatched, or anchor-mismatched observations so a
+/// substituted runner output cannot become a public snapshot.
+fn require_receipt_holding_observations(
+    receipt: &PortfolioCollectionReceipt,
     observations: &[Observation],
 ) -> Result<(), PortfolioHoldingSelectionError> {
-    let present: BTreeSet<(String, String)> = observations
+    let expected = receipt
+        .holdings()
         .iter()
-        .map(|observation| (observation.wallet_id.clone(), observation.symbol_id.clone()))
-        .collect();
-    for wallet in &portfolio.wallets {
-        for symbol_id in &wallet.symbol_ids {
-            let key = (wallet.wallet_id.to_string(), symbol_id.to_string());
-            if !present.contains(&key) {
-                return Err(PortfolioHoldingSelectionError::new(
-                    PortfolioHoldingErrorCode::MissingFact,
-                    format!(
-                        "required holding missing observation for wallet `{}` symbol `{symbol_id}`",
-                        wallet.wallet_id
-                    ),
-                    Some(format!("{}/{}", wallet.wallet_id, symbol_id)),
-                    Some(wallet.network_id.to_string()),
-                ));
-            }
+        .map(|entry| (entry.requirement().clone(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut actual = BTreeMap::new();
+    for observation in observations {
+        let key = HoldingRequirementKey {
+            wallet_id: observation.wallet_id.clone(),
+            symbol_id: observation.symbol_id.clone(),
+            network_id: observation.network_id.clone(),
+        };
+        let Some(entry) = expected.get(&key).copied() else {
+            return Err(receipt_observation_error(
+                &key,
+                "selected observations contained a holding absent from the collection receipt",
+            ));
+        };
+        if actual.insert(key.clone(), observation).is_some() {
+            return Err(receipt_observation_error(
+                &key,
+                "selected observations contained a duplicate collection receipt holding",
+            ));
+        }
+        if !observation_source_matches_receipt(entry.source(), &observation.source.holding) {
+            return Err(receipt_observation_error(
+                &key,
+                "selected observation source did not match the collection receipt",
+            ));
+        }
+        if observation_execution_anchor(&observation.source.anchor) != *entry.anchor() {
+            return Err(receipt_observation_error(
+                &key,
+                "selected observation anchor did not match the collection receipt",
+            ));
+        }
+        if observation.coverage != entry.coverage() {
+            return Err(receipt_observation_error(
+                &key,
+                "selected observation coverage did not match the collection receipt",
+            ));
+        }
+    }
+    for key in expected.keys() {
+        if !actual.contains_key(key) {
+            return Err(receipt_observation_error(
+                key,
+                "collection receipt holding was missing from selected observations",
+            ));
         }
     }
     Ok(())
+}
+
+fn receipt_observation_error(
+    key: &HoldingRequirementKey,
+    message: impl Into<String>,
+) -> PortfolioHoldingSelectionError {
+    PortfolioHoldingSelectionError::new(
+        PortfolioHoldingErrorCode::ReceiptMismatch,
+        message,
+        Some(key.as_key_str()),
+        Some(key.network_id.clone()),
+    )
+}
+
+fn observation_source_matches_receipt(
+    source: &HoldingSourceKey,
+    observation_source: &HoldingSourceConfig,
+) -> bool {
+    matches!(
+        (source, observation_source),
+        (
+            HoldingSourceKey::BitcoinNative { .. },
+            HoldingSourceConfig::Native
+        ) | (
+            HoldingSourceKey::EvmNative { .. },
+            HoldingSourceConfig::Native
+        )
+    ) || matches!(
+        (source, observation_source),
+        (
+            HoldingSourceKey::EvmErc20 {
+                contract_address: expected,
+                ..
+            },
+            HoldingSourceConfig::Erc20 { contract_address: actual }
+        ) if expected == actual.as_str()
+    )
+}
+
+fn observation_execution_anchor(anchor: &ObservationAnchor) -> ExecutionAnchor {
+    match anchor {
+        ObservationAnchor::Bitcoin { height, block_hash } => ExecutionAnchor::Bitcoin {
+            height: *height,
+            block_hash: block_hash.clone(),
+        },
+        ObservationAnchor::Evm {
+            chain_id,
+            block_number,
+            block_hash,
+        } => ExecutionAnchor::Evm {
+            chain_id: *chain_id,
+            block_number: *block_number,
+            block_hash: block_hash.clone(),
+        },
+    }
 }
 
 /// Assembles the canonical portfolio snapshot (hard-fail; pins from selected observations).
@@ -275,6 +264,22 @@ pub fn assemble_snapshot(
     config: &AssembleSnapshotConfig,
     input: AssembleSnapshotInput,
 ) -> StateResult<PortfolioSnapshot> {
+    validate_receipt_against_portfolio(&input.receipt, &config.portfolio).map_err(|error| {
+        StateError::Message(format!(
+            "{code}: {message}",
+            code = error.code,
+            message = error.message
+        ))
+    })?;
+    require_receipt_holding_observations(&input.receipt, &input.holdings.observations).map_err(
+        |error| {
+            StateError::Message(format!(
+                "{code}: {message}",
+                code = error.code,
+                message = error.message
+            ))
+        },
+    )?;
     let symbols = symbols_by_id(&config.portfolio.symbol_configs).map_err(|error| {
         StateError::Message(format!(
             "{code}: {message}",
@@ -284,13 +289,6 @@ pub fn assemble_snapshot(
     })?;
     let observations =
         apply_valuations_to_observations(input.holdings.observations, &input.valuations, &symbols)?;
-    require_required_holdings_present(&config.portfolio, &observations).map_err(|error| {
-        StateError::Message(format!(
-            "{code}: {message}",
-            code = error.code,
-            message = error.message
-        ))
-    })?;
     let network_pins = project_network_pins_from_observations(&observations).map_err(|error| {
         StateError::Message(format!(
             "{code}: {message}",
@@ -298,6 +296,12 @@ pub fn assemble_snapshot(
             message = error.message
         ))
     })?;
+    if network_pins.as_slice() != input.receipt.network_anchors() {
+        return Err(StateError::Message(
+            "receipt_mismatch: selected observation pins did not equal collection receipt anchors"
+                .to_owned(),
+        ));
+    }
 
     let mut observations_by_wallet: BTreeMap<String, Vec<Observation>> = BTreeMap::new();
     for observation in observations {
@@ -394,26 +398,6 @@ pub fn symbols_by_id_map(
     symbols: &[SymbolConfig],
 ) -> Result<BTreeMap<&str, &SymbolConfig>, PortfolioHoldingSelectionError> {
     symbols_by_id(symbols)
-}
-
-fn networks_by_id(
-    networks: &[NetworkConfig],
-) -> Result<BTreeMap<&str, &NetworkConfig>, PortfolioHoldingSelectionError> {
-    let mut by_id = BTreeMap::new();
-    for network in networks {
-        if by_id
-            .insert(network.network_id().as_str(), network)
-            .is_some()
-        {
-            return Err(PortfolioHoldingSelectionError::new(
-                PortfolioHoldingErrorCode::UnsupportedRequirement,
-                format!("duplicate network id `{}`", network.network_id()),
-                None,
-                Some(network.network_id().to_string()),
-            ));
-        }
-    }
-    Ok(by_id)
 }
 
 fn symbols_by_id(

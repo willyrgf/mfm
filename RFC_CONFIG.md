@@ -160,7 +160,8 @@ Current config ownership follows the semantic boundaries:
   collector config.
 - EVM state config/support types are owned by `mfm-state-evm-contracts`; the four lifecycle entry
   configs are owned by `mfm-op-evm-contract-lifecycle`.
-- `mfm-op-portfolio-collect-report` owns relational derivation and the explicit composed graph.
+- `mfm-op-portfolio-collect-report` owns exact portfolio-demand derivation, family collection,
+  content-bound receipt assembly, and the explicit composed graph.
 
 The implemented workspace has 52 packages. The relevant configuration boundaries are:
 
@@ -190,8 +191,9 @@ collector/report launch paths are not supported.
 ## Current public entry-point inventory
 
 The private app dispatch currently publishes four exact version-1 contract entry points. Run start
-accepts strict JSON requests only; setup TOML publishes the referenced values. The standalone
-portfolio and collector surfaces described by earlier revisions of this RFC are removed.
+accepts strict JSON requests only; setup TOML publishes the referenced values. The portfolio
+snapshot graph is internal during this collection cutover, and standalone portfolio and collector
+surfaces described by earlier revisions of this RFC are removed.
 
 | Exact entry point | Request references | Main semantic content | Live runtime config |
 |---|---|---|---|
@@ -199,7 +201,6 @@ portfolio and collector surfaces described by earlier revisions of this RFC are 
 | `mfm.evm.contract/configure@1` | context + import + configure refs | Deployed import and configure action | EVM route plus signer binding |
 | `mfm.evm.contract/validate@1` | context + import + validate refs | Configured import and validation action | EVM route; signer only when required by state |
 | `mfm.evm.contract/lifecycle@1` | context + deploy/configure/validate refs | Complete lifecycle composition | EVM route plus signer binding |
-| `mfm.portfolio/collect_then_report@1` | portfolio ref + BTC/EVM policies | Derived collectors, readiness, and report graph | BTC/EVM routes |
 
 The internal BTC chain-head checkpoint operation is intentionally not a public entry point.
 
@@ -250,7 +251,7 @@ mfm run start --entry-point <ID> --request <PATH> [--runtime-config <PATH>]
 ```
 
 The request file is JSON and contains the exact typed refs. `ops list` works offline and reports
-the eight exact ids plus request schema ids. There is no latest selection, format flag, or direct
+the four exact ids plus request schema ids. There is no latest selection, format flag, or direct
 per-operation TOML launch path.
 
 ### REST
@@ -265,34 +266,20 @@ REST accepts `entry_point`, strict JSON `request`, and optional `invocation_key`
 - Runtime config is server process state rather than request data, as required by the security and
   replay model.
 
-## The representative failure: collect then report
+## Internal portfolio collection graph
 
-The dual-mainnet portfolio recipe motivated the catalog and now has two explicit paths. The
-catalog-backed composed path requires:
+The dual-mainnet portfolio recipe now has one internal composition authority:
 
-1. one setup import containing a complete portfolio value;
-2. one exact portfolio reference and explicit BTC/EVM policies in a JSON request;
-3. one runtime routing config for live collector capabilities;
-4. one composed certified start.
+1. one normalized `PortfolioConfig` determines the complete logical wallet-to-symbol demand;
+2. the operation derives all BTC/EVM child work and one shared anchor per demanded network;
+3. completed family receipts fan in to one exact `PortfolioCollectionReceipt` with a manifest
+   identity and checked fact-content identities;
+4. reporting queries only the receipt's exact source, descriptor, number/hash anchor, coverage,
+   and status, with a fixed N + 1 bound; it hydrates and identity-filters before claim ordering.
 
-The independent path still permits separate BTC, EVM, and report runs, but each request pins an
-exact catalog value and the ordering remains an explicit workflow decision.
-
-The repeated data is not incidental:
-
-| Concept | BTC collector | EVM collector | Portfolio report | Runtime config |
-|---|---:|---:|---:|---:|
-| Semantic network id | yes | yes | yes | EVM route key |
-| Expected EVM chain id | no | yes | yes | deliberately no |
-| Bitcoin network tag | yes | no | yes | deliberately no |
-| Bitcoin semantic source identity | yes | no | yes | BTC route key |
-| Wallet/account address | addresses | accounts | wallet subjects | no |
-| Native asset decimals | no | yes | no; consumed from selected fact evidence | no |
-| Coverage/read policy | yes | yes | selection expects acceptable coverage | no |
-
-The architecture keeps `portfolio_snapshot` report-only while the dedicated composition operation
-acts as the compiler from one portfolio intent to child collector configs and typed readiness. The
-repository no longer uses per-operation semantic TOML files as the run-start contract.
+No caller-authored child policy, count readiness, independent collector/report run, or
+latest-common-anchor selection remains in this workflow. The graph is not published as a portfolio
+entry point until the final public ingress cutover.
 
 Setup and runtime files are now distinct: setup TOML is published explicitly, request JSON pins
 catalog identities, and only named local setup/runtime files are ignored by the repository.

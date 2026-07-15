@@ -372,14 +372,20 @@ pub fn normalize_btc_address_balance_fact(
     normalize_btc_address_balance(fact.subject(), fact.response())
 }
 
-/// Builds the Platform fact-index plan for portfolio (or other) candidate selection.
+/// Builds the receipt-pinned Platform fact-index plan for one Bitcoin balance source.
 ///
-/// Exact subject predicates, full return set including `metadata.store_commit_order`,
-/// height-desc ordering, and **`limit: None`** so selection sees the full acceptable set.
-pub fn platform_address_balance_candidate_plan(
+/// The receipt fixes subject, anchor, coverage, status, and the closed N + 1 scan limit. The
+/// resulting `Exact(n)` response proves exhaustion only when `n` stays below that limit.
+#[allow(clippy::too_many_arguments)]
+pub fn platform_address_balance_at_anchor_plan(
     store_scope: &StoreScopeRef,
     scope_decision: ScopeDecisionEvidence,
     subject: &BtcAddressBalanceSubject,
+    anchor_height: u64,
+    anchor_hash: &str,
+    coverage: &str,
+    source_status: &str,
+    limit: u64,
 ) -> Result<CanonicalFactQueryPlan, BtcStateError> {
     use mfm_program::MfmFactType;
 
@@ -400,6 +406,13 @@ pub fn platform_address_balance_candidate_plan(
             FactCanonicalScalar::string(value),
         ))
     };
+    let eq_u64 = |id: &str, value: u64| -> Result<FactQueryPredicate, BtcStateError> {
+        Ok(FactQueryPredicate::new(
+            field(id)?,
+            FactQueryOperator::Equal,
+            FactCanonicalScalar::UnsignedInteger(value),
+        ))
+    };
     let input = FactQueryInput::new(
         store_scope.clone(),
         FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
@@ -412,6 +425,10 @@ pub fn platform_address_balance_candidate_plan(
                 subject.semantic_source_identity(),
             )?,
             eq("subject.address", subject.address())?,
+            eq_u64("result.anchor_height", anchor_height)?,
+            eq("result.anchor_hash", anchor_hash)?,
+            eq("result.coverage", coverage)?,
+            eq("result.source_status", source_status)?,
         ],
         vec![
             field("result.anchor_height")?,
@@ -421,12 +438,12 @@ pub fn platform_address_balance_candidate_plan(
             field("result.source_status")?,
             field("metadata.store_commit_order")?,
         ],
-        FactOrderingName::new("result.anchor_height.desc").map_err(|error| {
+        FactOrderingName::new("metadata.store_commit_order.desc").map_err(|error| {
             BtcStateError::InvalidInput {
                 reason: error.to_string(),
             }
         })?,
-        None,
+        Some(limit),
     )
     .map_err(|error| BtcStateError::InvalidInput {
         reason: error.to_string(),

@@ -14,20 +14,24 @@
 //! }
 //! ```
 
+mod collection_receipt;
 mod selection;
 
 #[path = "decimal.rs"]
 mod decimal;
 use self::decimal::{multiply_decimal_strings, DecimalValue};
 
+pub use collection_receipt::{
+    manifest_identity, validate_receipt_against_portfolio, CollectedHoldingReceipt,
+    HoldingManifestEntry, HoldingRequirementKey, HoldingSourceKey, PortfolioCollectionReceipt,
+    SelectHoldingsInput, SelectHoldingsInputHandles,
+};
 pub use selection::{
-    holding_candidate_from_normalized, is_filter_empty_holding_error,
-    portfolio_holding_select_scope_decision_hash, portfolio_holding_selection_policy_digest,
-    project_holding_fact_for_network, project_network_pins_from_observations,
-    select_network_coherent, HoldingAnchor, HoldingCandidate, HoldingFactProjection,
-    NormalizedHoldingFields, PortfolioHoldingErrorCode, PortfolioHoldingSelectionError,
-    RequiredHoldingKey, SelectedHolding, SelectedHoldingMaterial,
-    PORTFOLIO_HOLDING_LATEST_NETWORK_COHERENT_POLICY_ID,
+    holding_candidate_from_normalized, portfolio_holding_select_scope_decision_hash,
+    portfolio_holding_selection_policy_digest, project_network_pins_from_observations,
+    HoldingAnchor, HoldingCandidate, NormalizedHoldingFields, PortfolioHoldingErrorCode,
+    PortfolioHoldingSelectionError, SelectedHolding, SelectedHoldingMaterial,
+    PORTFOLIO_HOLDING_COLLECTION_RECEIPT_ANCHOR_POLICY_ID,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -41,15 +45,14 @@ use mfm_fact_capabilities::FactIndexReadCapability;
 use mfm_facts::{FactSelectionEvidence, StoreScopeRef};
 use mfm_ids::{AdapterKind, AdapterVersion, DigestAlgorithm, StateKind, StateVersion};
 use mfm_portfolio_model::portfolio::{
-    NetworkConfig, PortfolioConfig, PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot,
-    ValidatedPortfolioConfig, ValidatedSymbolConfigs, ValidatedWalletConfigs, WalletReport,
-    WalletSnapshot,
+    PortfolioConfig, PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot,
+    ValidatedPortfolioConfig, WalletReport, WalletSnapshot,
 };
 use mfm_portfolio_model::symbol::{
-    AnchoredHoldingSource, Observation, ObservationQuantity, ObservationValue, QuoteCode,
-    QuoteValuationConfig, SymbolConfig,
+    AnchoredHoldingSource, Observation, ObservationAnchor, ObservationQuantity, ObservationValue,
+    QuoteCode, QuoteValuationConfig, SymbolConfig,
 };
-use mfm_portfolio_model::wallet::{WalletConfig, WalletImplementationConfig, WalletSubjectKind};
+use mfm_portfolio_model::wallet::{WalletImplementationConfig, WalletSubjectKind};
 use mfm_program::{
     AdapterBindingSpec, NoContext, PureState, ReadState, StateError, StateResult, StateSpec,
 };
@@ -60,8 +63,9 @@ use serde::{Deserialize, Serialize};
 const NAMESPACE: &str = "mfm.portfolio";
 const ADAPTER_NAME: &str = "typed-portfolio";
 const ADAPTER_VERSION: &str = "mfm.portfolio.adapter.typed.v1";
-/// Default store scope used by portfolio Platform holding selection.
-pub const DEFAULT_PORTFOLIO_STORE_SCOPE: &str = "mfm.store.default";
+const PORTFOLIO_STORE_SCOPE: &str = "mfm.store.default";
+const PORTFOLIO_FACT_CANDIDATE_BOUND: u64 = 10;
+const PORTFOLIO_FACT_SCAN_LIMIT: u64 = PORTFOLIO_FACT_CANDIDATE_BOUND + 1;
 
 #[path = "config.rs"]
 mod config;
@@ -134,34 +138,6 @@ pub struct ResolvedSubject {
     pub implementation_kind: String,
 }
 
-/// Typed readiness evidence consumed before report fact selection.
-///
-/// Standalone reports use zero collector counts. Composed reports carry the number of
-/// successfully summarized collector networks so the report graph cannot be detached from its
-/// collector fan-in.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "portfolio-inputs-ready",
-    schema = "mfm.portfolio.portfolio_inputs_ready"
-)]
-pub struct PortfolioInputsReady {
-    /// Number of Bitcoin collector summaries consumed by readiness.
-    pub bitcoin_network_count: u32,
-    /// Number of EVM collector summaries consumed by readiness.
-    pub evm_network_count: u32,
-}
-
-impl PortfolioInputsReady {
-    /// Creates readiness evidence from validated summary counts.
-    pub const fn new(bitcoin_network_count: u32, evm_network_count: u32) -> Self {
-        Self {
-            bitcoin_network_count,
-            evm_network_count,
-        }
-    }
-}
-
 /// Resolved subject collection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[mfm(
@@ -226,6 +202,8 @@ pub struct AssembleSnapshotInput {
     pub holdings: SelectedHoldings,
     /// Resolved fixed unit-price valuations.
     pub valuations: ResolvedValuations,
+    /// Exact collection receipt that must match all selected observation anchors.
+    pub receipt: PortfolioCollectionReceipt,
 }
 
 /// Input consumed by report projection.

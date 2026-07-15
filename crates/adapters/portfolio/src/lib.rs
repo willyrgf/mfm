@@ -5,7 +5,7 @@
 //! and Platform fact-index capability contracts. Live chain transports are not used by the report
 //! graph after the collectors cutover.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use mfm_artifact_capabilities::{fact_response_artifact_requirement, hydrate_fact_response_json};
@@ -13,38 +13,40 @@ use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1 as events;
 use mfm_fact_capabilities::{FactIndexReadProvider, FactIndexReadRequest};
 use mfm_facts::{
-    fact_query_result_rows_from_receipt, CanonicalFactQueryPlan, FactCanonicalScalar, FactClaimId,
+    fact_query_result_rows_from_receipt, CanonicalFactQueryPlan, FactCanonicalScalar,
     FactQueryEvidence, QueryResultCardinality, ScopeDecisionEvidence, StoreReadFrontier,
     StoreReadFrontierType, StoreScopeRef,
 };
-use mfm_portfolio_model::symbol::ObservationAnchor;
-use mfm_program::{StateSpec, ValidatedConfig};
+use mfm_portfolio_model::symbol::{HoldingSourceConfig, ObservationAnchor};
+use mfm_program::{MfmFactType, StateSpec, ValidatedConfig};
 use mfm_runtime::{
-    load_materialized_node_value, load_materialized_struct_input, load_runner_config_for_node,
-    ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
-    RunnerExecutableIdentityTemplate, RunnerOutputBuilder, RunnerRegistrationBuilder,
+    load_materialized_struct_input, load_runner_config_for_node, ErasedNodeRunner, ErasedRunCtx,
+    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, RunnerExecutableIdentityTemplate,
+    RunnerOutputBuilder, RunnerRegistrationBuilder,
 };
 use mfm_state_portfolio::{
-    assemble_snapshot, expand_required_holdings, holding_candidate_from_normalized,
-    is_filter_empty_holding_error, observations_from_selected_holdings, portfolio_adapter_kind,
-    portfolio_adapter_version, portfolio_holding_select_scope_decision_hash,
-    project_network_pins_from_observations, resolve_subjects_from_config,
-    resolve_valuations_from_config, select_network_coherent, symbols_by_id_map,
-    AssembleSnapshotConfig, AssembleSnapshotInput, AssembleSnapshotState, HoldingCandidate,
-    HoldingFactProjection, NormalizedHoldingFields, PortfolioHoldingErrorCode,
-    PortfolioHoldingSelectionError, PortfolioInputsReadyConfig, PortfolioInputsReadyState,
-    ProjectReportConfig, ProjectReportInput, ProjectReportState, RequiredHoldingKey,
-    RequiredHoldingRequirement, ResolveSubjectsConfig, ResolveSubjectsState,
-    ResolveValuationsConfig, ResolveValuationsState, SelectHoldingsConfig, SelectHoldingsState,
-    SelectedHoldings,
+    assemble_snapshot, holding_candidate_from_normalized, observations_from_selected_holdings,
+    portfolio_adapter_kind, portfolio_adapter_version,
+    portfolio_holding_select_scope_decision_hash, project_network_pins_from_observations,
+    resolve_subjects_from_config, resolve_valuations_from_config, symbols_by_id_map,
+    validate_receipt_against_portfolio, AssembleSnapshotConfig, AssembleSnapshotInput,
+    AssembleSnapshotState, CollectedHoldingReceipt, HoldingCandidate, HoldingRequirementKey,
+    HoldingSourceKey, NormalizedHoldingFields, PortfolioCollectionReceipt,
+    PortfolioHoldingErrorCode, PortfolioHoldingSelectionError, ProjectReportConfig,
+    ProjectReportInput, ProjectReportState, ResolveSubjectsConfig, ResolveSubjectsState,
+    ResolveValuationsConfig, ResolveValuationsState, SelectHoldingsConfig, SelectHoldingsInput,
+    SelectHoldingsState, SelectedHolding, SelectedHoldings,
 };
 use mfm_states_btc::{
-    normalize_btc_address_balance, platform_address_balance_candidate_plan,
-    BtcAddressBalanceResponse, BtcAddressBalanceSubject,
+    normalize_btc_address_balance, platform_address_balance_at_anchor_plan,
+    BtcAddressBalanceResponse, BtcAddressBalanceSnapshotFact, BtcAddressBalanceSubject,
 };
 use mfm_states_evm::{
-    normalize_evm_address_native_balance, platform_native_balance_candidate_plan,
-    EvmAddressNativeBalanceResponse, EvmAddressNativeBalanceSubject,
+    normalize_evm_address_native_balance, platform_erc20_balance_at_anchor_plan,
+    platform_native_balance_at_anchor_plan, EvmAddressErc20BalanceResponse,
+    EvmAddressErc20BalanceSnapshotFact, EvmAddressErc20BalanceSubject,
+    EvmAddressNativeBalanceResponse, EvmAddressNativeBalanceSnapshotFact,
+    EvmAddressNativeBalanceSubject,
 };
 use mfm_store::v1 as store;
 use mfm_values::MfmValue;
@@ -54,8 +56,6 @@ use serde::de::DeserializeOwned;
 mod replay;
 #[path = "selection.rs"]
 mod selection;
-#[cfg(test)]
-pub(crate) use self::replay::first_unmatched_plan_index;
 pub use self::replay::verify_portfolio_replay;
 #[cfg(test)]
 pub(crate) use self::selection::{holding_fact_index_request, select_holdings};
@@ -116,12 +116,6 @@ pub fn register_portfolio_runners(
         portfolio_adapter_version()?,
         &adapter_factory,
     )?;
-    registrations.register_state_runner_with_factory::<PortfolioInputsReadyState>(
-        &pure_factory,
-        Arc::new(PortfolioInputsReadyRunner {
-            artifacts: artifacts.clone(),
-        }),
-    )?;
     registrations.register_state_runner_with_factory::<ResolveSubjectsState>(
         &pure_factory,
         Arc::new(ResolveSubjectsRunner {
@@ -152,28 +146,6 @@ pub fn register_portfolio_runners(
         Arc::new(ProjectReportRunner { artifacts }),
     )?;
     Ok(())
-}
-
-struct PortfolioInputsReadyRunner {
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-}
-
-impl ErasedNodeRunner for PortfolioInputsReadyRunner {
-    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        Box::pin(async move {
-            let config = load_runner_config_for_node::<PortfolioInputsReadyConfig>(
-                ctx.node(),
-                self.artifacts.as_ref(),
-            )
-            .await?;
-            let config = config.into_inner();
-            let output = mfm_state_portfolio::PortfolioInputsReady::new(
-                config.bitcoin_network_count(),
-                config.evm_network_count(),
-            );
-            state_output(ctx, &output)
-        })
-    }
 }
 
 struct ResolveSubjectsRunner {
@@ -207,14 +179,14 @@ impl ErasedNodeRunner for SelectHoldingsRunner {
                 self.artifacts.as_ref(),
             )
             .await?;
-            let subjects = load_materialized_node_value::<mfm_state_portfolio::ResolvedSubjects>(
-                &ctx.inputs().root,
+            let input = load_materialized_struct_input::<SelectHoldingsInput>(
+                ctx.inputs(),
                 self.artifacts.as_ref(),
             )
             .await?;
             let (selected, evidences) = selection::select_holdings(
                 config,
-                subjects,
+                input,
                 self.artifacts.as_ref(),
                 self.fact_index.as_ref(),
             )

@@ -8,9 +8,10 @@ from runtime/app assembly.
 
 ## Live path
 
-1. `SelectHoldings` hydrates retained `FactResponse` artifacts via the shared kit
-   (`fact_response_artifact_requirement`, `hydrate_fact_response_json`), runs pure network-coherent
-   selection, and records fact-query evidence for replay.
+1. `SelectHoldings` consumes one exact `PortfolioCollectionReceipt`, queries only its certified
+   source/descriptor/anchor/coverage/status predicates with the closed N + 1 bound, hydrates every
+   retained `FactResponse` artifact via the shared kit, rederives each identity, and orders only
+   identity-matching candidates. It records the bounded query evidence for replay.
 2. Downstream pure states assemble valuations, snapshot, and report from certified config and the
    selected holdings.
 
@@ -23,10 +24,11 @@ verified fact-query evidence, then compares each produced cell byte-for-byte:
 
 | State | Replay behavior |
 | --- | --- |
+| operation-local collection receipt | recompute exact manifest/family receipt fan-in and compare its output |
 | `ResolveSubjects` | recompute from certified config (not history deserialization alone) |
-| `SelectHoldings` | recompute from recorded query evidence + selection policy |
+| `SelectHoldings` | recompute bounded cardinality, hydration, identity filtering, and post-identity ordering from recorded query evidence |
 | `ResolveValuations` | recompute from certified valuation config |
-| `AssembleSnapshot` | recompute from recomputed subjects/holdings/valuations |
+| `AssembleSnapshot` | recompute from recomputed subjects/holdings/valuations and prove it consumed the exact collection receipt |
 | `ProjectReport` | recompute from assembled snapshot + report config |
 
 Replay and resume authority remains with the certified spec and typed run stream. This crate does

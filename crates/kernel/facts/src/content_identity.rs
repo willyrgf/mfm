@@ -118,6 +118,99 @@ impl FactContentIdentity {
     }
 }
 
+/// Opaque persisted evidence for a checked [`FactContentIdentity`].
+///
+/// This carrier deliberately does not expose an identity or make its compact components
+/// authoritative. Collection code may create it only from a verified identity. A later consumer
+/// must rederive identity from a descriptor, typed subject, and hydrated response through
+/// [`Self::verify_against_typed_values`] before it can obtain a [`FactContentIdentity`].
+///
+/// It exists for typed persisted values such as receipts: those values must deserialize before
+/// their later consumer has access to the hydrated fact material needed to verify the compact
+/// identity wire. It is fact-layer infrastructure, not a domain-specific identity type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FactContentIdentityEvidence {
+    fact_descriptor_hash: String,
+    subject_material_hash: String,
+    response_schema_id: String,
+    response_hash: String,
+}
+
+impl FactContentIdentityEvidence {
+    /// Copies compact wire components from an identity already verified against hydrated material.
+    pub fn from_verified(identity: &FactContentIdentity) -> Self {
+        Self {
+            fact_descriptor_hash: identity.fact_descriptor_hash().as_str().to_owned(),
+            subject_material_hash: identity.subject_material_hash().as_str().to_owned(),
+            response_schema_id: identity.response_schema_id().as_str().to_owned(),
+            response_hash: identity.response_hash().as_str().to_owned(),
+        }
+    }
+
+    /// Re-derives identity from hydrated typed fact material and returns it only on exact match.
+    ///
+    /// `Ok(None)` means the hydrated fact is valid fact material but not the fact content pinned
+    /// by this evidence. Callers use that outcome to filter a candidate before any ordering.
+    pub fn verify_against_typed_values<S, R>(
+        &self,
+        descriptor: &FactDescriptor,
+        subject: &S,
+        response: &R,
+    ) -> Result<Option<FactContentIdentity>>
+    where
+        S: Serialize,
+        R: Serialize,
+    {
+        let identity =
+            derive_fact_content_identity_from_typed_values(descriptor, subject, response)?;
+        Ok((Self::from_verified(&identity) == *self).then_some(identity))
+    }
+}
+
+impl<'de> Deserialize<'de> for FactContentIdentityEvidence {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = FactContentIdentityValueWire::deserialize(deserializer)?;
+        validate_fact_content_identity_wire(&wire).map_err(de::Error::custom)?;
+        Ok(Self {
+            fact_descriptor_hash: wire.fact_descriptor_hash,
+            subject_material_hash: wire.subject_material_hash,
+            response_schema_id: wire.response_schema_id,
+            response_hash: wire.response_hash,
+        })
+    }
+}
+
+impl MfmValue for FactContentIdentityEvidence {
+    fn schema_descriptor() -> mfm_values::Result<SchemaDescriptor> {
+        mfm_values::framework_value_descriptor(
+            Self::semantic_id()?,
+            "mfm.fact.content_identity_evidence",
+            SchemaShape::named_struct(vec![
+                FieldDescriptor::required("fact_descriptor_hash", SchemaShape::String),
+                FieldDescriptor::required("response_hash", SchemaShape::String),
+                FieldDescriptor::required("response_schema_id", SchemaShape::String),
+                FieldDescriptor::required("subject_material_hash", SchemaShape::String),
+            ])?,
+            "mfm_facts::FactContentIdentityEvidence",
+        )
+    }
+
+    fn semantic_id() -> mfm_values::Result<SemanticTypeId> {
+        SemanticTypeId::new(
+            "mfm.fact",
+            "content-identity-evidence",
+            "1",
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(b"semantic:mfm.fact:content-identity-evidence:1"),
+        )
+        .map_err(|error| ValueError::Identity(error.to_string()))
+    }
+}
+
 /// Recomputes the semantic content identity for verified fact material.
 ///
 /// The supplied response must be canonical JSON and must conform to descriptor-declared response
@@ -298,6 +391,7 @@ struct FactContentIdentityValueWire {
 fn fact_content_identity_from_wire(
     wire: FactContentIdentityValueWire,
 ) -> Result<FactContentIdentity> {
+    validate_fact_content_identity_wire(&wire)?;
     let fact_descriptor_hash = wire
         .fact_descriptor_hash
         .parse()
@@ -320,6 +414,22 @@ fn fact_content_identity_from_wire(
         response_schema_id,
         response_hash,
     ))
+}
+
+fn validate_fact_content_identity_wire(wire: &FactContentIdentityValueWire) -> Result<()> {
+    wire.fact_descriptor_hash
+        .parse::<ContentDigest>()
+        .map_err(|error| FactError::canonical(error.to_string()))?;
+    wire.subject_material_hash
+        .parse::<ContentDigest>()
+        .map_err(|error| FactError::canonical(error.to_string()))?;
+    wire.response_schema_id
+        .parse::<SchemaId>()
+        .map_err(|error| FactError::canonical(error.to_string()))?;
+    wire.response_hash
+        .parse::<ContentDigest>()
+        .map_err(|error| FactError::canonical(error.to_string()))?;
+    Ok(())
 }
 
 fn canonical_fact_content_identity_value(identity: &FactContentIdentity) -> Result<CanonicalValue> {
@@ -697,6 +807,41 @@ mod tests {
             &response,
         )
         .is_err());
+    }
+
+    #[test]
+    fn opaque_identity_evidence_requires_rederivation_before_it_yields_an_identity() {
+        let descriptor = test_descriptor(
+            schema_id("mfm.test.descriptor", 1),
+            schema_id("mfm.test.response", 3),
+        );
+        let subject = serde_json::json!({ "chain": "bitcoin" });
+        let response = serde_json::json!({ "height": 42 });
+        let identity =
+            derive_fact_content_identity_from_typed_values(&descriptor, &subject, &response)
+                .expect("typed identity");
+        let evidence = FactContentIdentityEvidence::from_verified(&identity);
+        let decoded: FactContentIdentityEvidence =
+            serde_json::from_value(serde_json::to_value(&evidence).expect("serialize evidence"))
+                .expect("decode opaque evidence");
+
+        assert_eq!(
+            decoded
+                .verify_against_typed_values(&descriptor, &subject, &response)
+                .expect("rederive evidence"),
+            Some(identity)
+        );
+
+        let mut tampered = serde_json::to_value(&evidence).expect("serialize evidence");
+        tampered["response_hash"] = serde_json::json!(digest(99).as_str());
+        let tampered: FactContentIdentityEvidence =
+            serde_json::from_value(tampered).expect("well-formed opaque evidence");
+        assert_eq!(
+            tampered
+                .verify_against_typed_values(&descriptor, &subject, &response)
+                .expect("rederive tampered evidence"),
+            None
+        );
     }
 
     #[test]

@@ -8,15 +8,15 @@ Typed portfolio tracking operation (report-only after collectors cutover):
 ## Graph
 
 ```text
-ResolveSubjects
-  → SelectHoldings           // Platform fact-index + network-coherent select
-  → ResolveValuations        // FixedUnitPrice only
-  → AssembleSnapshot         // network_pins from selected holding anchors
-  → ProjectReport
+PortfolioCollectionReceipt → SelectHoldings  // exact receipt-pinned Platform fact query
+ResolveSubjects ────────────────────────────┐
+ResolveValuations ──────────────────────────┼→ AssembleSnapshot → ProjectReport
+SelectHoldings ─────────────────────────────┘
 ```
 
-Live `PinViews` / `ObserveBatch` / `MergeObservations` are **not** part of this op. Collectors
-write Platform holding facts in separate runs; this op only reports.
+Live `PinViews` / `ObserveBatch` / `MergeObservations` are **not** part of this op. The parent
+collection operation supplies one exact family-complete receipt; this workflow reads only
+receipt-named Platform facts and reports from that evidence.
 
 Runtime execution is provided by the typed runner registry in `mfm-adapters-portfolio`.
 

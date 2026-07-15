@@ -534,16 +534,21 @@ fn config_catalog_source_boundaries_are_enforced() {
     let composed_source =
         fs::read_to_string(root.join("crates/ops/portfolio-collect-report-op/src/lib.rs"))
             .expect("read composed operation source");
-    let config_start = composed_source
-        .find("pub struct CollectThenReportConfig")
-        .expect("complete composed config");
     assert!(
-        !composed_source[config_start..].contains("CatalogRef"),
-        "complete composed config and its certified graph helpers must not retain CatalogRef"
+        !composed_source.contains("CatalogRef"),
+        "portfolio composition and its certified graph helpers must not retain CatalogRef"
     );
     assert!(
-        composed_source.contains("struct CollectThenReportReadinessState"),
-        "composed readiness must remain the operation-local aggregation state"
+        composed_source.contains("type Config = PortfolioConfig"),
+        "portfolio composition must take the aggregate PortfolioConfig as its only authority"
+    );
+    assert!(
+        composed_source.contains("struct AssemblePortfolioCollectionReceiptState"),
+        "composition must own its operation-local exact receipt fan-in state"
+    );
+    assert!(
+        !composed_source.contains("CollectThenReportReadiness"),
+        "count readiness must not survive receipt-pinned portfolio composition"
     );
     let portfolio_state_root = root.join("crates/states/portfolio/src");
     for path in sources
@@ -552,8 +557,8 @@ fn config_catalog_source_boundaries_are_enforced() {
     {
         let source = fs::read_to_string(path).expect("read portfolio state source");
         assert!(
-            !source.contains("CollectThenReportReadinessState"),
-            "portfolio state source must not duplicate operation-local readiness: {}",
+            !source.contains("AssemblePortfolioCollectionReceiptState"),
+            "portfolio state source must not duplicate operation-local receipt fan-in: {}",
             path.display()
         );
     }

@@ -179,7 +179,7 @@ fn response_json_round_trip_has_no_floats_or_secrets() {
 }
 
 #[test]
-fn platform_candidate_query_plan_is_exact_full_set_not_limit_one() {
+fn receipt_pinned_query_plan_binds_anchor_status_and_n_plus_one_limit() {
     use mfm_facts::{FactAudience, ScopeDecisionEvidence, StoreScopeRef};
     use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes};
 
@@ -189,12 +189,27 @@ fn platform_candidate_query_plan_is_exact_full_set_not_limit_one() {
         DigestAlgorithm::Sha256JcsV1,
         DigestBytes::from_array([0x31; 32]),
     ));
-    let plan = platform_address_balance_candidate_plan(&store_scope, scope_decision, &subject)
-        .expect("plan");
+    let plan = platform_address_balance_at_anchor_plan(
+        &store_scope,
+        scope_decision,
+        &subject,
+        850_000,
+        &"aa".repeat(32),
+        "configured_only",
+        "ok",
+        11,
+    )
+    .expect("plan");
     assert_eq!(plan.query_scope().audience(), FactAudience::Platform);
-    assert_eq!(plan.limit(), None);
-    assert_eq!(plan.ordering().name().as_str(), "result.anchor_height.desc");
+    assert_eq!(plan.limit(), Some(11));
+    assert_eq!(
+        plan.ordering().name().as_str(),
+        "metadata.store_commit_order.desc"
+    );
     let query = plan.canonical_query().as_str();
     assert!(query.contains("metadata.store_commit_order"));
+    assert!(query.contains("result.anchor_height"));
     assert!(query.contains("result.anchor_hash"));
+    assert!(query.contains("result.coverage"));
+    assert!(query.contains("result.source_status"));
 }

@@ -1,50 +1,5 @@
 use super::*;
 
-/// Pure state that creates the typed report-readiness value.
-pub struct PortfolioInputsReadyState {
-    config: PortfolioInputsReadyConfig,
-}
-
-impl StateSpec for PortfolioInputsReadyState {
-    type Config = PortfolioInputsReadyConfig;
-    type Context = NoContext;
-    type Input = ();
-    type Output = PortfolioInputsReady;
-    type Effect = Pure;
-    type Caps = NoCaps;
-
-    fn kind() -> mfm_program::Result<StateKind> {
-        state_kind("portfolio_inputs_ready")
-    }
-
-    fn version() -> mfm_program::Result<StateVersion> {
-        state_version("portfolio_inputs_ready")
-    }
-
-    fn name() -> &'static str {
-        "mfm.portfolio.portfolio_inputs_ready"
-    }
-
-    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
-        Ok(Self {
-            config: config.into_inner(),
-        })
-    }
-}
-
-impl PureState for PortfolioInputsReadyState {
-    fn run(
-        &self,
-        _input: Self::Input,
-        _context: &mfm_program::CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Output> {
-        Ok(PortfolioInputsReady::new(
-            self.config.bitcoin_network_count(),
-            self.config.evm_network_count(),
-        ))
-    }
-}
-
 /// State that resolves configured wallet subjects.
 pub struct ResolveSubjectsState {
     config: ResolveSubjectsConfig,
@@ -53,7 +8,7 @@ pub struct ResolveSubjectsState {
 impl StateSpec for ResolveSubjectsState {
     type Config = ResolveSubjectsConfig;
     type Context = NoContext;
-    type Input = PortfolioInputsReady;
+    type Input = ();
     type Output = ResolvedSubjects;
     type Effect = Pure;
     type Caps = NoCaps;
@@ -98,29 +53,22 @@ impl SelectHoldingsState {
         &self.config
     }
 
-    /// Expands required holdings from config + resolved subjects.
-    pub fn expand_requirements(
+    /// Builds receipt-pinned selection evidence for one identity-matching claim row.
+    pub fn selection_evidence_for_index(
         &self,
-        subjects: &ResolvedSubjects,
-    ) -> Result<Vec<RequiredHoldingRequirement>, PortfolioHoldingSelectionError> {
-        expand_required_holdings(&self.config, subjects)
-    }
-
-    /// Builds selection evidence for one holding query using selected claim ids.
-    pub fn selection_evidence_for_claims(
-        &self,
-        row_claim_ids: &[String],
-        selected_claim_ids: &BTreeSet<String>,
+        selected_index: usize,
     ) -> Result<FactSelectionEvidence, PortfolioHoldingSelectionError> {
-        let mut selected_indices = Vec::new();
-        for (index, claim_id) in row_claim_ids.iter().enumerate() {
-            if selected_claim_ids.contains(claim_id) {
-                selected_indices.push(index as u64);
-            }
-        }
+        let selected_index = u64::try_from(selected_index).map_err(|_| {
+            PortfolioHoldingSelectionError::new(
+                PortfolioHoldingErrorCode::AmbiguousFacts,
+                "selected fact query row index overflowed u64",
+                None,
+                None,
+            )
+        })?;
         FactSelectionEvidence::new(
             portfolio_holding_selection_policy_digest(),
-            selected_indices,
+            vec![selected_index],
             None,
         )
         .map_err(|error| {
@@ -137,7 +85,7 @@ impl SelectHoldingsState {
 impl StateSpec for SelectHoldingsState {
     type Config = SelectHoldingsConfig;
     type Context = NoContext;
-    type Input = ResolvedSubjects;
+    type Input = SelectHoldingsInput;
     type Output = SelectedHoldings;
     type Effect = ReadExternal;
     type Caps = (FactIndexReadCapability,);

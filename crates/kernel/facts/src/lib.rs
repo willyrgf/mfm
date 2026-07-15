@@ -89,7 +89,7 @@ pub use content_identity::{
     derive_fact_content_identity_from_typed_values, fact_content_identity_digest,
     verify_fact_claim_content_identity, verify_internal_fact_ref_content_identity,
     verify_serialized_fact_content_identity_from_typed_values, FactContentIdentity,
-    FACT_CONTENT_IDENTITY_DIGEST_DOMAIN,
+    FactContentIdentityEvidence, FACT_CONTENT_IDENTITY_DIGEST_DOMAIN,
 };
 pub use descriptor::{
     FactDescriptor, FactFieldDescriptor, FactFieldPolicy, FactOrderingPolicy, FactOrderingTerm,

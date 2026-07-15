@@ -188,11 +188,12 @@ can therefore reject that live request. Evidence-only reads do not load runtime 
 accepted v1 variance with no fallback or compatibility surface; selective family loading can be a
 future implementation improvement.
 
-`CollectThenReportReadinessState` is also an accepted placement decision. It remains an
+`AssemblePortfolioCollectionReceiptState` is also an accepted placement decision. It remains an
 operation-local pure fan-in state because its semantics are specific to the composed workflow's
-collector summaries. The app registers its runner, while the operation owns the readiness node and
-the one-parent graph topology. It is not a general portfolio state or an excuse for app-owned
-workflow behavior.
+sorted family receipts and exact logical manifest. The app registers its runner, while the
+operation owns the receipt node and the one-parent graph topology. It is not a general portfolio
+state or an excuse for app-owned workflow behavior. The receipt, rather than a count, is the
+authority consumed by holding selection and snapshot assembly.
 
 ## Typed Program Authoring
 

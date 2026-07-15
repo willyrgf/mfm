@@ -905,14 +905,20 @@ pub fn normalize_evm_address_native_balance_fact(
     normalize_evm_address_native_balance(fact.subject(), fact.response())
 }
 
-/// Builds the Platform fact-index plan for portfolio (or other) candidate selection.
+/// Builds the receipt-pinned Platform fact-index plan for one EVM native-balance source.
 ///
-/// Exact subject predicates, full return set including `metadata.store_commit_order`,
-/// block_number-desc ordering, and **`limit: None`** so selection sees the full set.
-pub fn platform_native_balance_candidate_plan(
+/// The receipt fixes subject, exact block number/hash, coverage, status, and the closed N + 1
+/// scan limit. A saturated response is deliberately not a successful report input.
+#[allow(clippy::too_many_arguments)]
+pub fn platform_native_balance_at_anchor_plan(
     store_scope: &StoreScopeRef,
     scope_decision: ScopeDecisionEvidence,
     subject: &EvmAddressNativeBalanceSubject,
+    block_number: u64,
+    block_hash: &str,
+    coverage: &str,
+    source_status: &str,
+    limit: u64,
 ) -> Result<CanonicalFactQueryPlan, EvmStateError> {
     use mfm_program::MfmFactType;
 
@@ -948,6 +954,10 @@ pub fn platform_native_balance_candidate_plan(
             eq_str("subject.network", subject.network())?,
             eq_u64("subject.chain_id", subject.chain_id())?,
             eq_str("subject.account", subject.account())?,
+            eq_u64("result.block_number", block_number)?,
+            eq_str("result.block_hash", block_hash)?,
+            eq_str("result.coverage", coverage)?,
+            eq_str("result.source_status", source_status)?,
         ],
         vec![
             field("result.block_number")?,
@@ -958,12 +968,91 @@ pub fn platform_native_balance_candidate_plan(
             field("result.source_status")?,
             field("metadata.store_commit_order")?,
         ],
-        FactOrderingName::new("result.block_number.desc").map_err(|error| {
+        FactOrderingName::new("metadata.store_commit_order.desc").map_err(|error| {
             EvmStateError::InvalidInput {
                 reason: error.to_string(),
             }
         })?,
-        None,
+        Some(limit),
+    )
+    .map_err(|error| EvmStateError::InvalidInput {
+        reason: error.to_string(),
+    })?;
+    compile_fact_query_plan(&descriptor, input).map_err(|error| EvmStateError::InvalidInput {
+        reason: error.to_string(),
+    })
+}
+
+/// Builds the receipt-pinned Platform fact-index plan for one EVM ERC-20 balance source.
+///
+/// The token contract, account, exact hash anchor, complete coverage, successful status, and the
+/// closed N + 1 scan limit are all certified before the query is issued.
+#[allow(clippy::too_many_arguments)]
+pub fn platform_erc20_balance_at_anchor_plan(
+    store_scope: &StoreScopeRef,
+    scope_decision: ScopeDecisionEvidence,
+    subject: &EvmAddressErc20BalanceSubject,
+    block_number: u64,
+    block_hash: &str,
+    coverage: &str,
+    source_status: &str,
+    limit: u64,
+) -> Result<CanonicalFactQueryPlan, EvmStateError> {
+    use mfm_program::MfmFactType;
+
+    let descriptor = EvmAddressErc20BalanceSnapshotFact::descriptor().map_err(|error| {
+        EvmStateError::InvalidInput {
+            reason: error.to_string(),
+        }
+    })?;
+    let field = |id: &str| -> Result<FactFieldId, EvmStateError> {
+        FactFieldId::new(id).map_err(|error| EvmStateError::InvalidInput {
+            reason: error.to_string(),
+        })
+    };
+    let eq_str = |id: &str, value: &str| -> Result<FactQueryPredicate, EvmStateError> {
+        Ok(FactQueryPredicate::new(
+            field(id)?,
+            FactQueryOperator::Equal,
+            FactCanonicalScalar::string(value),
+        ))
+    };
+    let eq_u64 = |id: &str, value: u64| -> Result<FactQueryPredicate, EvmStateError> {
+        Ok(FactQueryPredicate::new(
+            field(id)?,
+            FactQueryOperator::Equal,
+            FactCanonicalScalar::UnsignedInteger(value),
+        ))
+    };
+    let input = FactQueryInput::new(
+        store_scope.clone(),
+        FactQueryScope::new(FactAudience::Platform, FactVisibilityScope::Default),
+        scope_decision,
+        vec![
+            eq_str("subject.network", subject.network())?,
+            eq_u64("subject.chain_id", subject.chain_id())?,
+            eq_str("subject.contract_address", subject.contract_address())?,
+            eq_str("subject.account", subject.account())?,
+            eq_u64("result.block_number", block_number)?,
+            eq_str("result.block_hash", block_hash)?,
+            eq_str("result.coverage", coverage)?,
+            eq_str("result.source_status", source_status)?,
+        ],
+        vec![
+            field("result.block_number")?,
+            field("result.block_hash")?,
+            field("result.raw_units")?,
+            field("result.decimals")?,
+            field("result.coverage")?,
+            field("result.source_status")?,
+            field("metadata.store_commit_order")?,
+        ],
+        FactOrderingName::new("metadata.store_commit_order.desc").map_err(|error| {
+            EvmStateError::InvalidInput {
+                reason: error.to_string(),
+            }
+        })?,
+        Some(limit),
     )
     .map_err(|error| EvmStateError::InvalidInput {
         reason: error.to_string(),

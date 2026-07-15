@@ -21,22 +21,12 @@ error[E0277]: the trait bound `serde_json::Value: mfm_values::StateInput` is not
 6 |         serde_json::Value,
   |         ^^^^^^^^^^^^^^^^^ the trait `mfm_values::MfmValue` is not implemented for `serde_json::Value`
   |
-help: the following other types implement trait `mfm_values::MfmValue`
- --> $WORKSPACE/crates/kernel/facts/src/content_identity.rs
-  |
-  | impl MfmValue for FactContentIdentity {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FactContentIdentity`
-  |
- ::: $WORKSPACE/crates/kernel/values/src/generic_values.rs
-  |
-  | impl MfmValue for ContextRefValue {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ContextRefValue`
-...
-  | impl<T: MfmValue> MfmValue for MaybeValue<T> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::MaybeValue<T>`
-...
-  | impl<T: MfmValue> MfmValue for ArtifactRef<T> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ArtifactRef<T>`
+  = help: the following other types implement trait `mfm_values::MfmValue`:
+            FactContentIdentity
+            FactContentIdentityEvidence
+            mfm_values::generic_values::ArtifactRef<T>
+            mfm_values::generic_values::ContextRefValue
+            mfm_values::generic_values::MaybeValue<T>
   = note: required for `serde_json::Value` to implement `mfm_values::StateInput`
 note: required by a bound in `into_binding`
  --> src/input_binding.rs
@@ -58,22 +48,12 @@ error[E0277]: the trait bound `serde_json::Value: mfm_values::MfmValue` is not s
 7 | |     >>::into_binding(value);
   | |___________________________^ the trait `mfm_values::MfmValue` is not implemented for `serde_json::Value`
   |
-help: the following other types implement trait `mfm_values::MfmValue`
- --> $WORKSPACE/crates/kernel/facts/src/content_identity.rs
-  |
-  | impl MfmValue for FactContentIdentity {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FactContentIdentity`
-  |
- ::: $WORKSPACE/crates/kernel/values/src/generic_values.rs
-  |
-  | impl MfmValue for ContextRefValue {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ContextRefValue`
-...
-  | impl<T: MfmValue> MfmValue for MaybeValue<T> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::MaybeValue<T>`
-...
-  | impl<T: MfmValue> MfmValue for ArtifactRef<T> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `mfm_values::generic_values::ArtifactRef<T>`
+  = help: the following other types implement trait `mfm_values::MfmValue`:
+            FactContentIdentity
+            FactContentIdentityEvidence
+            mfm_values::generic_values::ArtifactRef<T>
+            mfm_values::generic_values::ContextRefValue
+            mfm_values::generic_values::MaybeValue<T>
   = note: required for `serde_json::Value` to implement `mfm_values::StateInput`
 note: required by a bound in `InputBinding`
  --> src/input_binding.rs
