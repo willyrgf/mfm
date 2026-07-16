@@ -393,10 +393,10 @@ mfm_cli ops list
 mfm_cli --output-format json ops list
 ```
 
-JSON output returns the descriptors under `entry_points`. During the contract-state cleanup phase
-the production surface intentionally has no public entry points. Reusable deploy, configure, and
-validate states are library-only and cannot be started through this command. There is no
-latest-version selection or compatibility alias.
+JSON output returns the descriptors under `entry_points`. The production surface contains exactly
+one entry point, `mfm.portfolio/snapshot@1`. Reusable deploy, configure, and validate states are
+library-only and cannot be started through this command. There is no latest-version selection,
+compatibility alias, collector root, report-only mode, or contract workflow entry point.
 
 ## Run Commands (Experimental)
 
@@ -452,6 +452,22 @@ The repository includes a complete strict-import fixture at
 `ops list` is the authoritative public surface. The setup fixture publishes portfolio config only;
 it does not create an independently startable collector or contract workflow.
 
+The sole public request is:
+
+```json
+{
+  "portfolio": {
+    "name": "acme/dual-mainnet",
+    "digest": "content:sha256-jcs-v1:..."
+  }
+}
+```
+
+The digest must be the exact value printed by `mfm_cli setup import` or `mfm_cli setup list`.
+Unknown request fields, old entry-point ids, unversioned ids, and latest-like forms are rejected.
+The request cannot select collector policies, child configs, native decimals, runtime routes, or a
+collect/reuse/report-only mode.
+
 `.#mfm-start` starts a Nixfied-managed PostgreSQL process in slot 9 for the
 command, keeps the data directory under the Nixfied state root for `mfm/dev/9`,
 runs the typed store migrations, sets `DATABASE_URL`, and then delegates to
@@ -477,6 +493,8 @@ Stable launch errors include:
 - `CatalogValueNotFound`: an exact referenced catalog value is missing.
 - `CatalogValueTypeInvalid`: a catalog row does not decode as the referenced type.
 - `CatalogValueCanonicalMismatch`: a catalog row fails canonical byte/digest verification.
+- `CatalogValueValidationFailed`: a catalog row fails semantic portfolio validation.
+- `PortfolioSnapshotPlanFailed`: the concrete portfolio cannot expand into the snapshot objective.
 - `EntryPointCertificationFailed`: app assembly could not certify the planned typed spec.
 - `LaunchRunnerUnavailable`: the certified spec references a state descriptor with no production
   runner binding.

@@ -43,8 +43,13 @@ fn test_ops_help_and_list() {
         .stdout
         .clone();
     let rendered = String::from_utf8(output).expect("ops output is UTF-8");
+    let entry_points = rendered
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(entry_points.len(), 1, "public operation output: {rendered}");
     assert!(
-        rendered.trim().is_empty(),
+        entry_points[0].starts_with("mfm.portfolio/snapshot@1 request_schema_id=schema:"),
         "unexpected public operation: {rendered}"
     );
 }

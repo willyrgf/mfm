@@ -3,10 +3,16 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use mfm_events::v1::KernelEventPayload;
 use mfm_integration_tests::test_support::{
-    connect_postgres_with_retry, create_postgres_schema, drop_postgres_schema, response_json,
-    schema_scoped_database_url, unique_postgres_schema,
+    connect_postgres_with_retry, create_postgres_schema, drop_postgres_schema, json_post,
+    response_json, schema_scoped_database_url, start_collectors_rpc_mock, unique_postgres_schema,
+    write_collectors_runtime_config_for_test,
 };
+use mfm_portfolio_model::portfolio::PortfolioConfig;
+use mfm_store::v1::{RunEventStore, StoreScopeStore};
+use mfm_values::MfmConfig;
+use serde_json::json;
 use tower::ServiceExt;
 
 const VALID_RUN_ID: &str =
@@ -55,6 +61,192 @@ async fn parity_rest_postgres_smoke() {
         .await
         .expect("status response");
     assert_eq!(absent_status.status(), StatusCode::NOT_FOUND);
+
+    drop_postgres_schema(&database_url, &schema).await;
+}
+
+#[tokio::test]
+async fn parity_portfolio_snapshot_admission_resolves_one_exact_catalog_value() {
+    let database_url =
+        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
+    let schema = unique_postgres_schema("portfolio_snapshot_admission");
+    create_postgres_schema(&database_url, &schema).await;
+    let scoped_database_url = schema_scoped_database_url(&database_url, &schema);
+    let store = connect_postgres_with_retry(&scoped_database_url, 20, 250).await;
+
+    let identities = mfm_app::import_setup_toml(
+        &store,
+        include_bytes!("../../../examples/setup/organization.toml"),
+    )
+    .await
+    .expect("publish portfolio-only setup");
+    assert_eq!(identities.len(), 1, "setup exposes one portfolio value");
+    let identity = &identities[0];
+    assert_eq!(
+        identity.schema_id,
+        PortfolioConfig::schema_id().expect("portfolio schema")
+    );
+
+    let request = json!({
+        "portfolio": {
+            "name": identity.name,
+            "digest": identity.digest.as_str(),
+        }
+    });
+    let store_scope_id = store.load_store_scope_id().await.expect("store scope");
+    let launch = mfm_app::prepare_entry_point_run_launch(
+        &store,
+        "mfm.portfolio/snapshot@1",
+        &request,
+        &mfm_app::production_certification_registry().expect("production certification registry"),
+        store_scope_id,
+        Some(mfm_app::InvocationKey::new("postgres-portfolio-admission").expect("invocation key")),
+    )
+    .await
+    .expect("prepare exact portfolio snapshot admission");
+
+    assert_eq!(
+        launch.evidence.entry_point.entry_point_id.as_str(),
+        "mfm.portfolio/snapshot@1"
+    );
+    assert_eq!(launch.evidence.entry_point.catalog_sources.len(), 1);
+    let source = &launch.evidence.entry_point.catalog_sources[0];
+    assert_eq!(source.name.as_str(), identity.name);
+    assert_eq!(source.schema_id, identity.schema_id);
+    assert_eq!(source.digest, identity.digest);
+    assert!(launch
+        .evidence
+        .config_artifacts
+        .iter()
+        .any(|artifact| artifact.evidence.schema_id.as_ref() == Some(&identity.schema_id)));
+
+    drop_postgres_schema(&database_url, &schema).await;
+}
+
+#[tokio::test]
+async fn parity_rest_snapshot_start_retains_catalog_evidence_and_replays_without_live_inputs() {
+    let database_url =
+        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
+    let schema = unique_postgres_schema("portfolio_snapshot_rest");
+    create_postgres_schema(&database_url, &schema).await;
+    let scoped_database_url = schema_scoped_database_url(&database_url, &schema);
+    let store = connect_postgres_with_retry(&scoped_database_url, 20, 250).await;
+    let identity = mfm_app::import_setup_toml(
+        &store,
+        include_bytes!("../../../examples/setup/organization.toml"),
+    )
+    .await
+    .expect("publish portfolio-only setup")
+    .into_iter()
+    .next()
+    .expect("one setup identity");
+    let rpc_url = start_collectors_rpc_mock().await;
+    let runtime_dir = tempfile::tempdir().expect("runtime config directory");
+    let runtime_config_path =
+        write_collectors_runtime_config_for_test(runtime_dir.path(), &rpc_url);
+    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
+        role: mfm_rest_api::RestProcessRole::Live,
+        fact_index: mfm_app::production_fact_index_read_provider(store.clone()),
+        catalog_store: Some(store.clone()),
+        store: store.clone(),
+        runtime_config_path: Some(runtime_config_path.clone()),
+    });
+    let request = json!({
+        "entry_point": "mfm.portfolio/snapshot@1",
+        "request": {
+            "portfolio": {
+                "name": identity.name,
+                "digest": identity.digest.as_str(),
+            }
+        },
+        "invocation_key": "postgres-rest-portfolio-snapshot",
+    });
+
+    for malformed_request in [
+        json!({
+            "entry_point": "mfm.portfolio/snapshot@1",
+            "request": {},
+        }),
+        json!({
+            "entry_point": "mfm.portfolio/snapshot@1",
+            "request": {
+                "portfolio": {
+                    "name": identity.name,
+                    "digest": identity.digest.as_str(),
+                },
+                "policy": {},
+            },
+        }),
+    ] {
+        let malformed = app
+            .clone()
+            .oneshot(json_post("/v1/runs/start", malformed_request))
+            .await
+            .expect("REST malformed-request response");
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        let malformed = response_json(malformed).await;
+        assert_eq!(malformed["error"]["code"], "EntryPointRequestInvalid");
+    }
+
+    let response = app
+        .clone()
+        .oneshot(json_post("/v1/runs/start", request))
+        .await
+        .expect("REST start response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = response_json(response).await;
+    assert_eq!(response["status"], "success");
+    assert_eq!(response["data"]["outcome"], "admitted");
+    assert_eq!(response["data"]["run"]["run_mode"], "completed");
+    let run_id: mfm_ids::RunId = response["data"]["run"]["run_id"]
+        .as_str()
+        .expect("started run id")
+        .parse()
+        .expect("typed started run id");
+
+    let stream = store
+        .load_run_stream(&run_id)
+        .await
+        .expect("started run stream");
+    let admitted = stream
+        .iter()
+        .find_map(|event| match event.payload() {
+            KernelEventPayload::RunAdmitted(payload) => Some(payload.as_ref()),
+            _ => None,
+        })
+        .expect("run admission evidence");
+    assert_eq!(
+        admitted.entry_point.entry_point_id.as_str(),
+        "mfm.portfolio/snapshot@1"
+    );
+    assert_eq!(admitted.entry_point.catalog_sources.len(), 1);
+    let source = &admitted.entry_point.catalog_sources[0];
+    assert_eq!(source.name.as_str(), identity.name);
+    assert_eq!(source.schema_id, identity.schema_id);
+    assert_eq!(source.digest, identity.digest);
+
+    std::fs::remove_file(&runtime_config_path).expect("remove live runtime config");
+    let reader = mfm_rest_api::make_app(mfm_rest_api::AppState {
+        role: mfm_rest_api::RestProcessRole::Read,
+        fact_index: mfm_app::production_fact_index_read_provider(store.clone()),
+        catalog_store: None,
+        store,
+        runtime_config_path: None,
+    });
+    let replay = reader
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/runs/{run_id}/replay"))
+                .body(Body::empty())
+                .expect("replay request"),
+        )
+        .await
+        .expect("REST replay response");
+    assert_eq!(replay.status(), StatusCode::OK);
+    let replay = response_json(replay).await;
+    assert_eq!(replay["status"], "success");
+    assert_eq!(replay["data"]["run_mode"], "completed");
 
     drop_postgres_schema(&database_url, &schema).await;
 }

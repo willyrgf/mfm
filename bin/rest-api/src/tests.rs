@@ -59,6 +59,29 @@ async fn run_start_accepts_entry_point_shape() {
 }
 
 #[tokio::test]
+async fn run_start_recognizes_the_snapshot_entry_point_before_catalog_resolution() {
+    let response = test_app()
+        .oneshot(json_post(
+            "/v1/runs/start",
+            json!({
+                "entry_point": "mfm.portfolio/snapshot@1",
+                "request": {
+                    "portfolio": {
+                        "name": "acme/primary",
+                        "digest": "content:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000001"
+                    }
+                }
+            }),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let value = response_json(response).await;
+    assert_eq!(value["error"]["code"], "CatalogStoreUnavailable");
+}
+
+#[tokio::test]
 async fn read_role_refuses_live_start_and_serves_public_fact_queries() {
     let fixture = mfm_app::PublicFactVisibilityFixtureForTest::new();
     let app = make_app(AppState {

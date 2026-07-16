@@ -5,11 +5,16 @@ Status: historical architecture record (superseded for the portfolio source-mode
 > Historical record as of 2026-07-15. The catalog design remains useful context, but its former
 > portfolio and standalone EVM public-entry examples are not current interfaces. The active
 > portfolio contract is the direct holding-source model in `docs/design.md` and
-> `IMPL_PLAN_RFC_GENERIC_PORT_COLL_REPORT.md`.
+> `RFC_GENERIC_PORT_COLL_REPORT.md`: exactly `mfm.portfolio/snapshot@1` accepts one exact
+> `portfolio: CatalogRef<PortfolioConfig>` request.
 
 Date: 2026-07-14
 
 ## Summary
+
+The remainder of this opening summary records the pre-cutover problem statement. Current public
+behavior is the sole portfolio snapshot ingress described above and in
+`RFC_GENERIC_PORT_COLL_REPORT.md`.
 
 MFM has strong configuration boundaries once a run is planned: semantic config is typed,
 validated, canonicalized, content-addressed, certified, and kept free of secrets; runtime config is
@@ -53,9 +58,9 @@ configuration. Nixfied is relevant only where it generates or supplies MFM runti
 
 ### Setup document and launch request
 
-Setup TOML publishes complete typed semantic `MfmConfig` values to the append-only catalog. A run
-launch request is strict JSON containing exact `CatalogRef<T>` values and operation-local policy.
-Neither surface may contain secrets or process-local resource paths.
+Setup TOML publishes complete typed semantic `MfmConfig` values to the append-only catalog. The
+sole run-launch request is strict JSON containing exactly one `CatalogRef<PortfolioConfig>` and no
+operation-local policy. Neither surface may contain secrets or process-local resource paths.
 
 ### Canonical typed config
 
@@ -85,9 +90,10 @@ Any future design must retain the following properties:
   output, or replay input.
 - Hashed structured config contains no floating-point values.
 - Certified specs remain the runtime contract.
-- Collector and report operations remain independently reusable typed operations.
-- `portfolio_snapshot` remains report-only. A distinct higher-level operation may compose typed
-  collector and report operations into one certified graph when one workflow requires both.
+- Collector and report states and internal operations remain independently reusable typed
+  components.
+- `mfm.portfolio/snapshot@1` is the one complete public objective; it composes collection and
+  receipt-pinned reporting from one concrete `PortfolioConfig`.
 - Cross-operation dependencies belong to operation composition and the resulting typed graph, not
   to the configuration catalog.
 - Replay and evidence-only reads do not load runtime config.
@@ -131,7 +137,7 @@ size bounds, exact-key idempotence, and append-only behavior; it does not decode
 
 ### Exact entry-point dispatch
 
-`crates/app/src/entry_point.rs` keeps a private exhaustive enum connecting:
+`crates/app/src/entry_point.rs` keeps one direct private admission path connecting:
 
 - one exact id containing namespace, name, and version;
 - one strict request type;
@@ -163,7 +169,7 @@ The implemented workspace has 51 packages. The relevant configuration boundaries
 
 | Package | Implementation lines | Direct dependents | Architectural role |
 |---|---:|---:|---|
-| `mfm-catalog-model` | small | app/operation request users | `CatalogName` and typed `CatalogRef<T>` only |
+| `mfm-catalog-model` | small | app ingress | `CatalogName` and typed `CatalogRef<T>` only |
 | `mfm-storage-postgres` | storage | app and runtime | raw run/artifact/fact/catalog persistence and integrity |
 | `mfm-runtime-config` | runtime-only | app/live transports | process-local routing and redacted live capability descriptors |
 
@@ -186,10 +192,16 @@ collector/report launch paths are not supported.
 
 ## Current public entry-point inventory
 
-This historical RFC no longer describes a current public entry-point inventory. During the
-contract-state cleanup phase, app discovery is intentionally empty. Setup TOML publishes only
-portfolio configuration, and the direct deploy-to-configure-to-validate graph is available solely
-to library consumers and its test graph.
+The current public entry-point inventory has exactly one item:
+
+```text
+mfm.portfolio/snapshot@1
+```
+
+Its strict JSON request has exactly one `portfolio: CatalogRef<PortfolioConfig>` field. Setup TOML
+publishes only portfolio configuration in this domain. The direct deploy-to-configure-to-validate
+graph remains available solely to library consumers and its test graph; it has no entry point,
+setup kind, or catalog request.
 
 The internal BTC chain-head checkpoint operation is intentionally not a public entry point.
 
@@ -241,9 +253,9 @@ The CLI start contract is:
 mfm run start --entry-point <ID> --request <PATH> [--runtime-config <PATH>]
 ```
 
-The request file is JSON and contains the exact typed refs. `ops list` works offline and reports
-the four exact ids plus request schema ids. There is no latest selection, format flag, or direct
-per-operation TOML launch path.
+The request file is JSON and contains exactly one portfolio reference. `ops list` works offline and
+reports only `mfm.portfolio/snapshot@1` plus its request schema id. There is no latest selection,
+format flag, alias, collector root, or direct per-operation TOML launch path.
 
 ### REST
 
@@ -269,14 +281,14 @@ The dual-mainnet portfolio recipe now has one internal composition authority:
    and status, with a fixed N + 1 bound; it hydrates and identity-filters before claim ordering.
 
 No caller-authored child policy, count readiness, independent collector/report run, or
-latest-common-anchor selection remains in this workflow. The graph is not published as a portfolio
-entry point until the final public ingress cutover.
+latest-common-anchor selection remains in this workflow. The graph is exposed only as
+`mfm.portfolio/snapshot@1`.
 
 The complete internal graph is built only by `mfm-op-portfolio-snapshot` through
 `portfolio_snapshot_program_draft` and `portfolio_snapshot_program_launch_plan`. Both helpers
 exercise the same root: one normalized config, collection, exact receipt, report, and one
-`PortfolioPublicOutputs` binding. `mfm-app` supplies runners and certification descriptors but
-does not publish `mfm.portfolio/snapshot@1` at this stage.
+`PortfolioPublicOutputs` binding. `mfm-app` supplies runners and certification descriptors and
+publishes the exact root after resolving the one portfolio catalog reference at admission.
 
 Setup and runtime files are now distinct: setup TOML is published explicitly, request JSON pins
 catalog identities, and only named local setup/runtime files are ignored by the repository.

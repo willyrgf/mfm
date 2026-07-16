@@ -215,9 +215,24 @@ the same catalog-reference contract as the CLI; the REST layer delegates exact r
 planning, certification, admission, and verified rendering to app assembly.
 
 The endpoint shape remains an `entry_point`, `request`, and optional `invocation_key` JSON object.
-During the contract-state cleanup phase no public entry-point id is registered, so every attempted
-start is rejected with `EntryPointNotFound`. Reusable contract states are library-only and have no
-REST request schema.
+The only accepted entry point is `mfm.portfolio/snapshot@1`; its request is exactly one portfolio
+catalog reference:
+
+```json
+{
+  "entry_point": "mfm.portfolio/snapshot@1",
+  "request": {
+    "portfolio": {
+      "name": "acme/primary",
+      "digest": "content:sha256-jcs-v1:..."
+    }
+  }
+}
+```
+
+Reusable contract states are library-only and have no REST request schema. Standalone collector,
+report-only, collect/reuse, alias, unversioned, latest-like, and contract-workflow entry points are
+rejected.
 
 Request notes:
 
@@ -256,7 +271,7 @@ Stable launch error codes:
 - `CatalogValueTypeInvalid`: a catalog row does not decode as the referenced type.
 - `CatalogValueCanonicalMismatch`: a catalog row fails canonical byte/digest verification.
 - `CatalogValueValidationFailed`: a catalog value fails semantic validation.
-- `EvmContractPlanFailed`: EVM contract entry-point planning failed.
+- `PortfolioSnapshotPlanFailed`: portfolio snapshot planning failed.
 - `EntryPointCertificationFailed`: the planned spec failed app-owned certification.
 - `LaunchRunnerUnavailable`: the verified spec references a state descriptor without a production
   runner binding.

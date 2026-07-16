@@ -19,6 +19,23 @@ and appends all rows atomically. Run-start requests are strict JSON objects cont
 records the resolved name/schema/digest as launch evidence. The resulting typed draft and
 certified spec contain concrete values, never catalog references.
 
+The sole public objective is `mfm.portfolio/snapshot@1`. Its request has exactly one field:
+
+```json
+{
+  "portfolio": {
+    "name": "acme/primary",
+    "digest": "content:sha256-jcs-v1:..."
+  }
+}
+```
+
+The request carries no collector policy, child config, runtime route, or report-only/reuse mode.
+Setup publishes only `PortfolioConfig` in this domain. The app resolves and normalizes that value
+once at admission, records its catalog identity in `RunAdmitted`, and passes the concrete value to
+the complete snapshot operation. Resume, replay, status, stream, and public-output reads never
+consult the catalog.
+
 Domain runner behavior lives in adapter crates. Reusable EVM contract states are exercised by
 their library-level adapter test graph; `mfm-app` does not register speculative contract runners
 without a current certified public graph consumer.

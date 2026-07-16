@@ -563,9 +563,9 @@ fn expand_receipt_pinned_report<'program, 'scope>(
 
 /// Builds one complete typed portfolio snapshot program draft.
 ///
-/// The draft binds exactly one [`PortfolioPublicOutputs`] value. It intentionally remains an
-/// internal operation helper until application ingress publishes the portfolio snapshot entry
-/// point in the later ingress phase.
+/// The draft binds exactly one [`PortfolioPublicOutputs`] value. Application ingress uses this
+/// exact helper after resolving the sole `mfm.portfolio/snapshot@1` portfolio reference; it does
+/// not maintain a parallel app-owned graph builder.
 pub fn portfolio_snapshot_program_draft(
     config: PortfolioConfig,
 ) -> mfm_program::Result<mfm_program::TypedProgramDraft> {

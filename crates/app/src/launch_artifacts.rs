@@ -58,7 +58,6 @@ where
     Ok(source_events.into_values().collect())
 }
 
-#[cfg(any(test, feature = "test-support"))]
 pub(super) fn certified_spec_launch_artifact(
     runtime_spec: &CertifiedRuntimeSpec,
 ) -> Result<RunLaunchArtifact, AppError> {
@@ -86,7 +85,6 @@ pub(super) fn certified_spec_launch_artifact(
     ))
 }
 
-#[cfg(any(test, feature = "test-support"))]
 pub(super) fn certified_spec_certificate_launch_artifact(
     runtime_spec: &CertifiedRuntimeSpec,
 ) -> Result<RunLaunchArtifact, AppError> {
@@ -128,7 +126,6 @@ pub(super) fn certified_spec_certificate_launch_artifact(
     ))
 }
 
-#[cfg(any(test, feature = "test-support"))]
 pub(super) fn config_launch_artifacts_for_spec(
     runtime_spec: &CertifiedRuntimeSpec,
     registry: &CertificationRegistry,
@@ -207,7 +204,6 @@ pub(super) fn config_launch_artifacts_for_spec(
     Ok(validated)
 }
 
-#[cfg(any(test, feature = "test-support"))]
 pub(super) fn fact_descriptor_launch_artifacts_for_spec(
     runtime_spec: &CertifiedRuntimeSpec,
     registry: &CertificationRegistry,
@@ -264,7 +260,6 @@ pub(super) fn fact_descriptor_launch_artifacts_for_spec(
     Ok(artifacts)
 }
 
-#[cfg(any(test, feature = "test-support"))]
 pub(super) fn framework_config_launch_artifacts_for_spec(
     execution_spec: &spec::TypedExecutionSpec,
 ) -> Result<Vec<RunLaunchConfigArtifact>, AppError> {
@@ -294,7 +289,6 @@ pub(super) fn framework_config_launch_artifacts_for_spec(
     Ok(artifacts)
 }
 
-#[cfg(any(test, feature = "test-support"))]
 pub(super) fn framework_config_matches_ref(
     execution_spec: &spec::TypedExecutionSpec,
     config_ref: &spec::ConfigRef,
@@ -323,7 +317,6 @@ pub(super) fn framework_config_matches_ref(
     Ok(false)
 }
 
-#[cfg(any(test, feature = "test-support"))]
 pub(super) fn seed_launch_cells_for_spec(
     runtime_spec: &CertifiedRuntimeSpec,
     seeds: Vec<RunLaunchSeedArtifact>,
@@ -404,7 +397,6 @@ pub(super) fn seed_launch_cells_for_spec(
     Ok(seed_refs)
 }
 
-#[cfg(any(test, feature = "test-support"))]
 pub(super) fn launch_artifact(
     bytes: Vec<u8>,
     media_type: spec::MediaType,
@@ -435,12 +427,10 @@ pub(super) fn content_digest_for_bytes(bytes: &[u8]) -> ContentDigest {
     ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes))
 }
 
-#[cfg(any(test, feature = "test-support"))]
 pub(super) fn artifact_id_for_digest(digest: &ContentDigest) -> ArtifactId {
     ArtifactId::from_digest(digest.algorithm(), *digest.digest())
 }
 
-#[cfg(any(test, feature = "test-support"))]
 pub(super) fn config_input_key(schema_id: &SchemaId, digest: &ContentDigest) -> String {
     format!("{schema_id}:{digest}")
 }
@@ -500,7 +490,6 @@ pub(super) fn artifact_referenced_artifact_requirement(
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
 pub(super) fn config_ref_artifact_requirement(
     config_ref: &spec::ConfigRef,
 ) -> Result<store::EventArtifactRequirement, AppError> {
@@ -530,7 +519,6 @@ pub(super) fn config_ref_artifact_requirement(
     })
 }
 
-#[cfg(any(test, feature = "test-support"))]
 pub(super) fn seed_artifact_requirement(
     seed_spec: &spec::SeedSpec,
     evidence: &store::ArtifactEvidenceRef,

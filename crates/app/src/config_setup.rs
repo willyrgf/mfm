@@ -342,6 +342,27 @@ mod tests {
     }
 
     #[test]
+    fn setup_rejects_every_removed_collector_and_contract_kind() {
+        for kind in [
+            "btc_address_balance",
+            "evm_native_balance",
+            "evm_contract_context",
+            "evm_deploy_action",
+            "evm_configure_action",
+            "evm_validate_action",
+            "evm_import_deployed",
+            "evm_import_configured",
+        ] {
+            let document = format!(
+                "[[values]]\nname = \"acme/removed\"\nkind = \"{kind}\"\n\n[values.value]\n"
+            );
+            let error = parse_setup_document(document.as_bytes())
+                .expect_err("removed setup kind must not decode");
+            assert_eq!(error.code, "SetupDocumentInvalid", "{kind}");
+        }
+    }
+
+    #[test]
     fn setup_document_rejects_unknown_fields_at_the_envelope() {
         let mut document: toml::Value = toml::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),

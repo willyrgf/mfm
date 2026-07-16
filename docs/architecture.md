@@ -49,16 +49,17 @@ authority.
 
 The portfolio model has one direct `HoldingSourceConfig` algebra: `Native` or EVM `Erc20` with a
 normalized non-zero contract address. EVM native scale belongs only to `NetworkConfig::Evm`.
-Standalone BTC/EVM collectors and portfolio objectives are intentionally absent during the anchored
-collector cutover. Internal network coordinators resolve one shared tip per required network and
-emit family-specific, content-bound source receipts; only the complete snapshot graph may become a
-public objective.
+Standalone BTC/EVM collectors, report-only roots, and contract workflows are absent. Internal
+network coordinators resolve one shared tip per required network and emit family-specific,
+content-bound source receipts. The complete snapshot graph is the sole public objective,
+`mfm.portfolio/snapshot@1`.
 
 `mfm-op-portfolio-snapshot` owns that complete internal graph from normalized
 `PortfolioConfig` through family collection, exact receipt assembly, receipt-pinned selection,
 snapshot assembly, and report projection. Its one production draft helper binds exactly one
-`PortfolioPublicOutputs` root. The app registers the needed runners and certification descriptors
-but does not yet expose a portfolio snapshot entry point.
+`PortfolioPublicOutputs` root. The app registers the needed runners and certification descriptors,
+strictly resolves one `CatalogRef<PortfolioConfig>` at admission, and exposes that exact graph only
+through `mfm.portfolio/snapshot@1`.
 
 ## Authority Contract
 

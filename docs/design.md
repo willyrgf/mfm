@@ -167,12 +167,13 @@ publishes the complete batch through one atomic catalog append. A failed value o
 duplicate leaves the catalog unchanged. Catalog storage persists opaque canonical bytes plus
 name/schema/digest identity; it does not know setup kinds or domain config types.
 
-Run-start requests are strict JSON objects selected by one exact entry-point id. Each reference
-contains a catalog name and exact content digest. App assembly resolves the expected schema,
-verifies the stored canonical bytes and digest, revalidates semantic config, and only then calls
-the deterministic operation builder. The operation may use request-local policy and pre-planning
-joins, but the completed config, typed graph, certificate, and runtime authority contain concrete
-values rather than `CatalogRef<T>`.
+Run-start requests are strict JSON objects selected by one exact entry-point id. The sole public
+entry point is `mfm.portfolio/snapshot@1`, whose request contains exactly one
+`portfolio: CatalogRef<PortfolioConfig>` value. The request contains no collector policy, child
+config, runtime route, read bound, collect/reuse switch, or report-only switch. App assembly
+resolves the expected schema, verifies the stored canonical bytes and digest, revalidates semantic
+config, and only then calls the deterministic operation builder. The completed config, typed graph,
+certificate, and runtime authority contain concrete values rather than `CatalogRef<T>`.
 
 `RunAdmitted` records the exact entry-point id and sorted catalog source evidence. The certified
 spec, certificate, seeds, retained artifacts, facts, outputs, and append-only run stream are the

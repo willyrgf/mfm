@@ -2,10 +2,9 @@
 //! Typed application assembly for certified MFM runs.
 //!
 //! `mfm-app` is the typed boundary used by binaries and process adapters. Its published
-//! objectives use exact entry-point ids and catalog-backed requests; this crate resolves, plans,
-//! certifies, stages launch material, and wires typed services for start, resume, replay, and
-//! public-output rendering. The transition before publishing the portfolio objective deliberately
-//! has no public entry point.
+//! objective uses one exact entry-point id and one catalog-backed portfolio request; this crate
+//! resolves, plans, certifies, stages launch material, and wires typed services for start, resume,
+//! replay, and public-output rendering.
 //!
 //! Production binaries should construct run services through the Postgres-backed factory exported by
 //! this crate, while tests can use explicit test-support stores.
@@ -23,10 +22,9 @@ use mfm_certify::{CertificationRegistry, CertifiedTypedSpec};
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{EvmNetworkId, EvmSourcePolicyId, EvmSourceRef};
 use mfm_ids::{
-    ArtifactId, ContentDigest, DigestAlgorithm, EventId, RunId, SchemaId, SpecHash, StoreScopeId,
+    ArtifactId, ContentDigest, DigestAlgorithm, EventId, RunId, SchemaId, SeedId, SemanticTypeId,
+    SpecHash, StoreScopeId,
 };
-#[cfg(any(test, feature = "test-support"))]
-use mfm_ids::{SeedId, SemanticTypeId};
 use mfm_replay::v1::{ReplayBroker, ReplayReadAuthority, RetainedSourceFactReplayEvent};
 use mfm_runtime::{
     CertifiedRuntimeSpec, ManualResolutionEvidenceArtifact, ManualResolutionRequest,
@@ -424,7 +422,6 @@ impl InvocationKey {
             .map_err(invocation_key_error)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn mint() -> Result<Self, AppError> {
         Self::new(format!("mfm.invocation_key.v1:{}", uuid::Uuid::new_v4()))
     }
@@ -475,7 +472,6 @@ pub struct ManualResolutionRecordRequest {
 }
 
 /// Config bytes supplied to a typed run start request.
-#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone)]
 pub(crate) struct RunLaunchConfigArtifact {
     /// Certified config schema id.
@@ -487,7 +483,6 @@ pub(crate) struct RunLaunchConfigArtifact {
 }
 
 /// Seed bytes supplied to a typed run start request.
-#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone)]
 pub(crate) struct RunLaunchSeedArtifact {
     /// Seed id from the certified spec.
@@ -871,7 +866,6 @@ pub fn prepare_typed_program_run_launch_for_test(
     )
 }
 
-#[cfg(any(test, feature = "test-support"))]
 fn certify_launch_plan(
     plan: &mfm_program::TypedProgramLaunchPlan,
     certification_registry: &CertificationRegistry,
@@ -915,7 +909,6 @@ fn certify_launch_plan(
     Ok((certified_spec, scoped_registry, config_inputs, seed_inputs))
 }
 
-#[cfg(any(test, feature = "test-support"))]
 fn entry_point_certification_error(_error: mfm_certify::CertifyError) -> AppError {
     AppError::backend(
         ErrorClass::BadRequest,
@@ -924,13 +917,11 @@ fn entry_point_certification_error(_error: mfm_certify::CertifyError) -> AppErro
     )
 }
 
-#[cfg(any(test, feature = "test-support"))]
 fn entry_point_launch_internal_error(code: &'static str, message: &'static str) -> AppError {
     AppError::backend(ErrorClass::Internal, code, message)
 }
 
 /// Certifier-backed typed spec authority plus launch metadata for a typed run start.
-#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct CertifiedRunLaunchInput<'a> {
     /// Certifier-backed typed spec authority.
     pub(crate) certified_spec: CertifiedTypedSpec,
@@ -945,7 +936,6 @@ pub(crate) struct CertifiedRunLaunchInput<'a> {
 }
 
 /// Builds a typed run-start request from certifier-backed typed spec authority and launch inputs.
-#[cfg(any(test, feature = "test-support"))]
 fn prepare_certified_run_launch(
     input: CertifiedRunLaunchInput<'_>,
     config_inputs: Vec<RunLaunchConfigArtifact>,
@@ -986,7 +976,6 @@ fn prepare_certified_run_launch(
     })
 }
 
-#[cfg(any(test, feature = "test-support"))]
 fn invocation_key_digest_or_mint(key: Option<&InvocationKey>) -> Result<ContentDigest, AppError> {
     match key {
         Some(key) => key.digest(),

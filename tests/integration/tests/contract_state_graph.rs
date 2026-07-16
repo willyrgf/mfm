@@ -67,13 +67,8 @@ struct DirectContractStateOutputs<'program, 'scope> {
 /// The contract states remain executable through a direct typed graph. This deliberately bypasses
 /// app entry-point discovery: the app is used only as generic launch/scheduler test support.
 #[tokio::test]
-async fn direct_contract_states_certify_and_run_without_app_entry_point_registration() {
-    assert!(
-        mfm_app::entry_point_summaries()
-            .expect("entry-point discovery")
-            .is_empty(),
-        "the direct state graph must not depend on a public app entry point"
-    );
+async fn direct_contract_states_certify_and_run_without_contract_entry_point_registration() {
+    assert_contract_entry_points_are_absent();
 
     let expected_code_hash = expected_runtime_code_hash();
     let (stream, provider) = run_direct_contract_state_graph(
@@ -140,12 +135,7 @@ async fn direct_contract_replay_rejects_tampered_runtime_code_evidence() {
 /// receipt. The retained terminal evidence must still be sufficient for offline replay.
 #[tokio::test]
 async fn direct_contract_states_resume_submission_and_confirmation_boundaries() {
-    assert!(
-        mfm_app::entry_point_summaries()
-            .expect("entry-point discovery")
-            .is_empty(),
-        "the direct state graph must not depend on a public app entry point"
-    );
+    assert_contract_entry_points_are_absent();
 
     for (boundary, invocation_key) in [
         (
@@ -208,6 +198,28 @@ async fn direct_contract_states_resume_submission_and_confirmation_boundaries() 
         );
         assert_contract_finality_anchor_reads(harness.provider.as_ref());
         verify_direct_contract_state_replay(&harness).await;
+    }
+}
+
+fn assert_contract_entry_points_are_absent() {
+    let entry_points = mfm_app::entry_point_summaries().expect("entry-point discovery");
+    assert_eq!(
+        entry_points
+            .iter()
+            .map(|entry_point| entry_point.entry_point_id)
+            .collect::<Vec<_>>(),
+        vec!["mfm.portfolio/snapshot@1"],
+        "the public portfolio objective must not register contract state graphs"
+    );
+    for id in [
+        "mfm.evm.contract/deploy@1",
+        "mfm.evm.contract/configure@1",
+        "mfm.evm.contract/validate@1",
+        "mfm.evm.contract/lifecycle@1",
+    ] {
+        let error = mfm_app::validate_entry_point_id(id)
+            .expect_err("a reusable contract state must not be public");
+        assert_eq!(error.code, "EntryPointNotFound", "{id}");
     }
 }
 
