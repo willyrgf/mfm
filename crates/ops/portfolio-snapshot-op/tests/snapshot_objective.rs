@@ -40,9 +40,7 @@ fn complete_snapshot_helper_builds_and_certifies_one_root_for_mixed_demand() {
         .collect::<Vec<_>>();
     for required in [
         "mfm.portfolio.assemble_collection_receipt",
-        "mfm.portfolio.resolve_subjects",
         "mfm.portfolio.select_holdings",
-        "mfm.portfolio.resolve_valuations",
         "mfm.portfolio.assemble_snapshot",
         "mfm.portfolio.project_report",
     ] {

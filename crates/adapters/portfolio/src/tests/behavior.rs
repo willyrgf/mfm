@@ -73,19 +73,10 @@ async fn selects_exact_receipt_facts_and_projects_receipt_pins() {
         .iter()
         .any(|observation| observation.quantity.raw_dec == "1000000000000000000"));
 
-    let subjects = resolve_subjects_from_config(
-        &ResolveSubjectsConfig::new(portfolio.clone()).expect("subjects config"),
-    );
-    let valuations = resolve_valuations_from_config(
-        &ResolveValuationsConfig::new(portfolio.clone()).expect("valuations config"),
-    )
-    .expect("valuations");
     let snapshot = assemble_snapshot(
         &AssembleSnapshotConfig::new(portfolio).expect("snapshot config"),
         AssembleSnapshotInput {
-            subjects,
             holdings: selected,
-            valuations,
             receipt: input.receipt,
         },
     )

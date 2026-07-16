@@ -28,13 +28,11 @@ use mfm_state_portfolio::{
     assemble_snapshot, holding_candidate_from_normalized, observations_from_selected_holdings,
     portfolio_adapter_kind, portfolio_adapter_version,
     portfolio_holding_select_scope_decision_hash, project_network_pins_from_observations,
-    resolve_subjects_from_config, resolve_valuations_from_config, symbols_by_id_map,
-    validate_receipt_against_portfolio, AssembleSnapshotConfig, AssembleSnapshotInput,
-    AssembleSnapshotState, CollectedHoldingReceipt, HoldingCandidate, HoldingRequirementKey,
-    HoldingSourceKey, NormalizedHoldingFields, PortfolioCollectionReceipt,
+    symbols_by_id_map, validate_receipt_against_portfolio, AssembleSnapshotConfig,
+    AssembleSnapshotInput, AssembleSnapshotState, CollectedHoldingReceipt, HoldingCandidate,
+    HoldingRequirementKey, HoldingSourceKey, NormalizedHoldingFields, PortfolioCollectionReceipt,
     PortfolioHoldingErrorCode, PortfolioHoldingSelectionError, ProjectReportConfig,
-    ProjectReportInput, ProjectReportState, ResolveSubjectsConfig, ResolveSubjectsState,
-    ResolveValuationsConfig, ResolveValuationsState, SelectHoldingsConfig, SelectHoldingsInput,
+    ProjectReportInput, ProjectReportState, SelectHoldingsConfig, SelectHoldingsInput,
     SelectHoldingsState, SelectedHolding, SelectedHoldings,
 };
 use mfm_states_btc::{
@@ -116,23 +114,11 @@ pub fn register_portfolio_runners(
         portfolio_adapter_version()?,
         &adapter_factory,
     )?;
-    registrations.register_state_runner_with_factory::<ResolveSubjectsState>(
-        &pure_factory,
-        Arc::new(ResolveSubjectsRunner {
-            artifacts: artifacts.clone(),
-        }),
-    )?;
     registrations.register_state_runner_with_factory::<SelectHoldingsState>(
         &read_factory,
         Arc::new(SelectHoldingsRunner {
             artifacts: artifacts.clone(),
             fact_index,
-        }),
-    )?;
-    registrations.register_state_runner_with_factory::<ResolveValuationsState>(
-        &pure_factory,
-        Arc::new(ResolveValuationsRunner {
-            artifacts: artifacts.clone(),
         }),
     )?;
     registrations.register_state_runner_with_factory::<AssembleSnapshotState>(
@@ -146,24 +132,6 @@ pub fn register_portfolio_runners(
         Arc::new(ProjectReportRunner { artifacts }),
     )?;
     Ok(())
-}
-
-struct ResolveSubjectsRunner {
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-}
-
-impl ErasedNodeRunner for ResolveSubjectsRunner {
-    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        Box::pin(async move {
-            let config = load_runner_config_for_node::<ResolveSubjectsConfig>(
-                ctx.node(),
-                self.artifacts.as_ref(),
-            )
-            .await?;
-            let output = resolve_subjects_from_config(config.as_ref());
-            state_output(ctx, &output)
-        })
-    }
 }
 
 struct SelectHoldingsRunner {
@@ -192,26 +160,6 @@ impl ErasedNodeRunner for SelectHoldingsRunner {
             )
             .await?;
             selection::select_holdings_output(ctx, &selected, &evidences)
-        })
-    }
-}
-
-struct ResolveValuationsRunner {
-    artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
-}
-
-impl ErasedNodeRunner for ResolveValuationsRunner {
-    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        Box::pin(async move {
-            let config = load_runner_config_for_node::<ResolveValuationsConfig>(
-                ctx.node(),
-                self.artifacts.as_ref(),
-            )
-            .await?;
-            let output = resolve_valuations_from_config(config.as_ref()).map_err(|error| {
-                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
-            })?;
-            state_output(ctx, &output)
         })
     }
 }

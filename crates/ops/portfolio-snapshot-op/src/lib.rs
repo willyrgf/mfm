@@ -28,9 +28,7 @@ use mfm_op_evm_collectors::{
     EvmErc20BalanceSourceConfig, EvmNetworkCollectionConfig, EvmNetworkCollectionOperation,
     EvmNetworkCollectionReceipt,
 };
-use mfm_portfolio_model::domain_key::{
-    HoldingsDomainKey, ReportDomainKey, SubjectDomainKey, ValuationDomainKey,
-};
+use mfm_portfolio_model::domain_key::{HoldingsDomainKey, ReportDomainKey};
 use mfm_portfolio_model::ids::NormalizedEvmAddress;
 use mfm_portfolio_model::portfolio::{
     ExecutionAnchor, NetworkConfig, NetworkPin, PortfolioConfig, ValidatedPortfolioConfig,
@@ -47,7 +45,6 @@ use mfm_state_portfolio::{
     CollectedHoldingReceipt, HoldingManifestEntry, HoldingRequirementKey, HoldingSourceKey,
     PortfolioCollectionReceipt, PortfolioHoldingErrorCode, PortfolioHoldingSelectionError,
     PortfolioPublicOutputs, ProjectReportConfig, ProjectReportInputHandles, ProjectReportState,
-    ResolveSubjectsConfig, ResolveSubjectsState, ResolveValuationsConfig, ResolveValuationsState,
     SelectHoldingsConfig, SelectHoldingsInputHandles, SelectHoldingsState,
 };
 use mfm_values::ConfigError;
@@ -500,23 +497,11 @@ fn expand_receipt_pinned_report<'program, 'scope>(
         ));
     }
 
-    let subject_key = SubjectDomainKey::new("portfolio_subjects")
-        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
     let holdings_key = HoldingsDomainKey::new("portfolio_holdings")
-        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
-    let valuation_key = ValuationDomainKey::new("portfolio_valuations")
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
     let report_key = ReportDomainKey::new("portfolio_report")
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
 
-    let subjects = builder.state_with_domain_keys::<ResolveSubjectsState, _, _>(
-        mfm_program::StateKey::new("resolve_subjects")?,
-        NoContext,
-        ResolveSubjectsConfig::new(portfolio.clone())
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
-        (),
-        vec![subject_key],
-    )?;
     let holdings = builder.state_with_domain_keys::<SelectHoldingsState, _, _>(
         mfm_program::StateKey::new("select_holdings")?,
         NoContext,
@@ -527,25 +512,12 @@ fn expand_receipt_pinned_report<'program, 'scope>(
         },
         vec![holdings_key],
     )?;
-    let valuations = builder.state_with_domain_keys::<ResolveValuationsState, _, _>(
-        mfm_program::StateKey::new("resolve_valuations")?,
-        NoContext,
-        ResolveValuationsConfig::new(portfolio.clone())
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
-        (),
-        vec![valuation_key],
-    )?;
     let snapshot = builder.state::<AssembleSnapshotState, _>(
         mfm_program::StateKey::new("assemble_snapshot")?,
         NoContext,
         AssembleSnapshotConfig::new(portfolio.clone())
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
-        AssembleSnapshotInputHandles {
-            subjects,
-            holdings,
-            valuations,
-            receipt,
-        },
+        AssembleSnapshotInputHandles { holdings, receipt },
     )?;
     let report = builder.state_with_domain_keys::<ProjectReportState, _, _>(
         mfm_program::StateKey::new("project_report")?,
@@ -783,9 +755,7 @@ mfm_certify::define_program_descriptor_registry! {
     certification: pub register_portfolio_snapshot_certification_descriptors,
     states: [
         AssemblePortfolioCollectionReceiptState,
-        mfm_state_portfolio::ResolveSubjectsState,
         mfm_state_portfolio::SelectHoldingsState,
-        mfm_state_portfolio::ResolveValuationsState,
         mfm_state_portfolio::AssembleSnapshotState,
         mfm_state_portfolio::ProjectReportState,
         mfm_op_btc_collectors::ResolveBtcJointTipState,

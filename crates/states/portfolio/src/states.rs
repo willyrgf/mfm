@@ -1,47 +1,5 @@
 use super::*;
 
-/// State that resolves configured wallet subjects.
-pub struct ResolveSubjectsState {
-    config: ResolveSubjectsConfig,
-}
-
-impl StateSpec for ResolveSubjectsState {
-    type Config = ResolveSubjectsConfig;
-    type Context = NoContext;
-    type Input = ();
-    type Output = ResolvedSubjects;
-    type Effect = Pure;
-    type Caps = NoCaps;
-
-    fn kind() -> mfm_program::Result<StateKind> {
-        state_kind("resolve_subjects")
-    }
-
-    fn version() -> mfm_program::Result<StateVersion> {
-        state_version("resolve_subjects")
-    }
-
-    fn name() -> &'static str {
-        "mfm.portfolio.resolve_subjects"
-    }
-
-    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
-        Ok(Self {
-            config: config.into_inner(),
-        })
-    }
-}
-
-impl PureState for ResolveSubjectsState {
-    fn run(
-        &self,
-        _input: Self::Input,
-        _context: &mfm_program::CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Output> {
-        Ok(resolve_subjects_from_config(&self.config))
-    }
-}
-
 /// State that selects required holdings from Platform facts (adapter-bound).
 pub struct SelectHoldingsState {
     config: SelectHoldingsConfig,
@@ -126,48 +84,6 @@ impl ReadState for SelectHoldingsState {
             "{} requires adapter-bound Platform fact-index execution",
             Self::name()
         ))))
-    }
-}
-
-/// State that resolves configured fixed unit-price valuation routes.
-pub struct ResolveValuationsState {
-    config: ResolveValuationsConfig,
-}
-
-impl StateSpec for ResolveValuationsState {
-    type Config = ResolveValuationsConfig;
-    type Context = NoContext;
-    type Input = ();
-    type Output = ResolvedValuations;
-    type Effect = Pure;
-    type Caps = NoCaps;
-
-    fn kind() -> mfm_program::Result<StateKind> {
-        state_kind("resolve_valuations")
-    }
-
-    fn version() -> mfm_program::Result<StateVersion> {
-        state_version("resolve_valuations")
-    }
-
-    fn name() -> &'static str {
-        "mfm.portfolio.resolve_valuations"
-    }
-
-    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
-        Ok(Self {
-            config: config.into_inner(),
-        })
-    }
-}
-
-impl PureState for ResolveValuationsState {
-    fn run(
-        &self,
-        _input: Self::Input,
-        _context: &mfm_program::CertifiedContext<Self::Context>,
-    ) -> StateResult<Self::Output> {
-        resolve_valuations_from_config(&self.config)
     }
 }
 

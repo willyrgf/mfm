@@ -8,7 +8,8 @@ use mfm_portfolio_model::portfolio::{
 };
 use mfm_portfolio_model::symbol::{
     AnchoredHoldingSource, HoldingSourceConfig, Observation, ObservationAnchor,
-    ObservationQuantity, QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolValuationConfig,
+    ObservationQuantity, ObservationValue, QuoteCode, QuoteValuationConfig, SymbolConfig,
+    SymbolValuationConfig,
 };
 use mfm_portfolio_model::wallet::{
     WalletConfig, WalletImplementationConfig, WalletSubject, WalletSubjectKind,
@@ -401,22 +402,13 @@ fn fixed_price_selection_assembles_direct_totals_and_receipt_pins() {
     let portfolio = sample_portfolio();
     let receipt = receipt();
     validate_receipt_against_portfolio(&receipt, &portfolio).expect("receipt matches portfolio");
-    let subjects = resolve_subjects_from_config(
-        &ResolveSubjectsConfig::new(portfolio.clone()).expect("subjects config"),
-    );
-    let valuations = resolve_valuations_from_config(
-        &ResolveValuationsConfig::new(portfolio.clone()).expect("valuation config"),
-    )
-    .expect("valuations");
 
     let snapshot = assemble_snapshot(
         &AssembleSnapshotConfig::new(portfolio).expect("assemble config"),
         AssembleSnapshotInput {
-            subjects,
             holdings: SelectedHoldings {
                 observations: vec![observation("1000000000000000000")],
             },
-            valuations,
             receipt: receipt.clone(),
         },
     )
@@ -441,21 +433,12 @@ fn fixed_price_selection_assembles_direct_totals_and_receipt_pins() {
 fn direct_total_reducer_preserves_configured_zero_rows() {
     let portfolio = sample_portfolio();
     let receipt = receipt();
-    let subjects = resolve_subjects_from_config(
-        &ResolveSubjectsConfig::new(portfolio.clone()).expect("subjects config"),
-    );
-    let valuations = resolve_valuations_from_config(
-        &ResolveValuationsConfig::new(portfolio.clone()).expect("valuation config"),
-    )
-    .expect("valuations");
     let snapshot = assemble_snapshot(
         &AssembleSnapshotConfig::new(portfolio).expect("assemble config"),
         AssembleSnapshotInput {
-            subjects,
             holdings: SelectedHoldings {
                 observations: vec![observation("0")],
             },
-            valuations,
             receipt,
         },
     )
@@ -474,23 +457,14 @@ fn direct_total_reducer_preserves_configured_zero_rows() {
 fn assemble_hard_fails_on_missing_or_substituted_receipt_observations() {
     let portfolio = sample_portfolio();
     let config = AssembleSnapshotConfig::new(portfolio.clone()).expect("assemble config");
-    let subjects = resolve_subjects_from_config(
-        &ResolveSubjectsConfig::new(portfolio.clone()).expect("subjects config"),
-    );
-    let valuations = resolve_valuations_from_config(
-        &ResolveValuationsConfig::new(portfolio).expect("valuation config"),
-    )
-    .expect("valuations");
     let receipt = receipt();
 
     let missing = assemble_snapshot(
         &config,
         AssembleSnapshotInput {
-            subjects: subjects.clone(),
             holdings: SelectedHoldings {
                 observations: Vec::new(),
             },
-            valuations: valuations.clone(),
             receipt: receipt.clone(),
         },
     )
@@ -506,14 +480,67 @@ fn assemble_hard_fails_on_missing_or_substituted_receipt_observations() {
     let mismatch = assemble_snapshot(
         &config,
         AssembleSnapshotInput {
-            subjects,
             holdings: SelectedHoldings {
                 observations: vec![substituted],
             },
-            valuations,
             receipt,
         },
     )
     .expect_err("anchor substitution must prevent root output");
     assert!(mismatch.to_string().contains("receipt_mismatch"));
+}
+
+#[test]
+fn assembly_derives_public_identity_metadata_and_valuation_from_config() {
+    let mut portfolio = sample_portfolio();
+    portfolio.symbol_configs[0].display_symbol = Some("configured ETH".to_owned());
+    portfolio.symbol_configs[0].metadata = PublicMetadata::new(BTreeMap::from([(
+        "source".to_owned(),
+        "portfolio-config".to_owned(),
+    )]))
+    .expect("public metadata");
+    let config = AssembleSnapshotConfig::new(portfolio).expect("assemble config");
+    let mut untrusted = observation("1000000000000000000");
+    untrusted.display_symbol = Some("substituted ETH".to_owned());
+    untrusted.metadata = PublicMetadata::new(BTreeMap::from([(
+        "source".to_owned(),
+        "substituted".to_owned(),
+    )]))
+    .expect("public metadata");
+    untrusted.values = vec![ObservationValue {
+        quote: QuoteCode::Usd,
+        priced_symbol_id: "substituted.symbol".to_owned(),
+        value_dec: "999".to_owned(),
+        unit_price_dec: "999".to_owned(),
+    }];
+
+    let snapshot = assemble_snapshot(
+        &config,
+        AssembleSnapshotInput {
+            holdings: SelectedHoldings {
+                observations: vec![untrusted],
+            },
+            receipt: receipt(),
+        },
+    )
+    .expect("snapshot");
+    let wallet = &snapshot.wallets[0];
+    let observation = &wallet.observations[0];
+    assert_eq!(wallet.address, EVM_ACCOUNT);
+    assert_eq!(wallet.subject_kind, WalletSubjectKind::EvmAddress);
+    assert_eq!(wallet.network_id, "ethereum-mainnet");
+    assert_eq!(
+        observation.display_symbol.as_deref(),
+        Some("configured ETH")
+    );
+    assert_eq!(
+        observation.metadata.as_map(),
+        config.portfolio().symbol_configs[0].metadata.as_map()
+    );
+    assert_eq!(
+        observation.values[0].priced_symbol_id,
+        "eth.native.ethereum-mainnet"
+    );
+    assert_eq!(observation.values[0].unit_price_dec, "2.5");
+    assert_eq!(observation.values[0].value_dec, "2.500000000000000000");
 }

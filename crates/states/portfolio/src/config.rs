@@ -1,30 +1,5 @@
 use super::*;
 
-/// Config for subject resolution.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
-#[mfm(
-    schema = "mfm.portfolio.config.resolve_subjects",
-    validate = "validate_resolve_subjects_config"
-)]
-pub struct ResolveSubjectsConfig {
-    /// The normalized aggregate portfolio authority.
-    pub(super) portfolio: PortfolioConfig,
-}
-
-impl ResolveSubjectsConfig {
-    /// Creates validated subject-resolution config from the sole portfolio authority.
-    pub fn new(portfolio: PortfolioConfig) -> Result<Self, ConfigError> {
-        let config = Self { portfolio };
-        validate_resolve_subjects_config(&config).map_err(ConfigError::new)?;
-        Ok(config)
-    }
-
-    /// Returns the normalized aggregate portfolio authority.
-    pub const fn portfolio(&self) -> &PortfolioConfig {
-        &self.portfolio
-    }
-}
-
 /// Config for Platform fact-backed holding selection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
 #[mfm(
@@ -82,31 +57,6 @@ impl SelectHoldingsConfig {
     }
 }
 
-/// Config for valuation resolution.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
-#[mfm(
-    schema = "mfm.portfolio.config.resolve_valuations",
-    validate = "validate_resolve_valuations_config"
-)]
-pub struct ResolveValuationsConfig {
-    /// The normalized aggregate portfolio authority.
-    pub(super) portfolio: PortfolioConfig,
-}
-
-impl ResolveValuationsConfig {
-    /// Creates validated valuation-resolution config from the sole portfolio authority.
-    pub fn new(portfolio: PortfolioConfig) -> Result<Self, ConfigError> {
-        let config = Self { portfolio };
-        validate_resolve_valuations_config(&config).map_err(ConfigError::new)?;
-        Ok(config)
-    }
-
-    /// Returns the normalized aggregate portfolio authority.
-    pub const fn portfolio(&self) -> &PortfolioConfig {
-        &self.portfolio
-    }
-}
-
 /// Config for snapshot assembly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
 #[serde(deny_unknown_fields)]
@@ -139,10 +89,6 @@ impl AssembleSnapshotConfig {
 #[mfm(schema = "mfm.portfolio.config.project_report")]
 pub struct ProjectReportConfig {}
 
-fn validate_resolve_subjects_config(config: &ResolveSubjectsConfig) -> Result<(), String> {
-    validate_normalized_portfolio(&config.portfolio)
-}
-
 fn validate_select_holdings_config(config: &SelectHoldingsConfig) -> Result<(), String> {
     validate_normalized_portfolio(&config.portfolio)?;
     StoreScopeRef::new(&config.store_scope).map_err(|error| error.to_string())?;
@@ -161,10 +107,6 @@ fn validate_select_holdings_config(config: &SelectHoldingsConfig) -> Result<(), 
         );
     }
     Ok(())
-}
-
-fn validate_resolve_valuations_config(config: &ResolveValuationsConfig) -> Result<(), String> {
-    validate_normalized_portfolio(&config.portfolio)
 }
 
 fn validate_assemble_snapshot_config(config: &AssembleSnapshotConfig) -> Result<(), String> {

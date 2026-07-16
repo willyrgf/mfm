@@ -13,17 +13,11 @@ use super::selection::{
 /// The operation owner reconstructs `receipt` from family receipts before calling this adapter
 /// verifier. This adapter then proves that selection and snapshot assembly consumed exactly that
 /// value before replaying every bounded query, hydration, identity comparison, post-identity
-/// ordering, projection, and totals calculation.
+/// ordering, config-derived public projection, and totals calculation.
 pub fn verify_portfolio_replay(
     broker: &replay::ReplayBroker,
     receipt: &PortfolioCollectionReceipt,
 ) -> replay::Result<()> {
-    let subjects_frame =
-        replay_single_state_frame::<ResolveSubjectsState>(broker, "resolved subjects")?;
-    let subjects_config: ResolveSubjectsConfig = replay_node_config(broker, &subjects_frame.node)?;
-    let subjects = resolve_subjects_from_config(&subjects_config);
-    verify_replay_output_bytes(&subjects_frame, &subjects, "resolved subjects")?;
-
     let select_frame = replay_single_state_frame::<SelectHoldingsState>(broker, "SelectHoldings")?;
     let config: SelectHoldingsConfig = replay_node_config(broker, &select_frame.node)?;
     if config.selection_policy_id()
@@ -31,11 +25,6 @@ pub fn verify_portfolio_replay(
     {
         return Err(replay_portfolio_mismatch(
             "portfolio selection policy does not match the receipt-anchor policy",
-        ));
-    }
-    if subjects_config.portfolio() != config.portfolio() {
-        return Err(replay_portfolio_mismatch(
-            "portfolio subject config does not match SelectHoldings config",
         ));
     }
     let receipt_input =
@@ -135,19 +124,6 @@ pub fn verify_portfolio_replay(
     let selected_output = SelectedHoldings { observations };
     verify_replay_output_bytes(&select_frame, &selected_output, "selected holdings")?;
 
-    let valuations_frame =
-        replay_single_state_frame::<ResolveValuationsState>(broker, "resolved valuations")?;
-    let valuations_config: ResolveValuationsConfig =
-        replay_node_config(broker, &valuations_frame.node)?;
-    if valuations_config.portfolio() != config.portfolio() {
-        return Err(replay_portfolio_mismatch(
-            "portfolio valuation config does not match SelectHoldings config",
-        ));
-    }
-    let valuations =
-        resolve_valuations_from_config(&valuations_config).map_err(replay_adapter_error)?;
-    verify_replay_output_bytes(&valuations_frame, &valuations, "resolved valuations")?;
-
     let snapshot_frame =
         replay_single_state_frame::<AssembleSnapshotState>(broker, "assembled snapshot")?;
     let snapshot_config: AssembleSnapshotConfig = replay_node_config(broker, &snapshot_frame.node)?;
@@ -166,9 +142,7 @@ pub fn verify_portfolio_replay(
     let snapshot = assemble_snapshot(
         &snapshot_config,
         AssembleSnapshotInput {
-            subjects,
             holdings: selected_output.clone(),
-            valuations,
             receipt: receipt.clone(),
         },
     )

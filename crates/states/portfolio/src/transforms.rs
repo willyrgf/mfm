@@ -2,24 +2,6 @@ use super::*;
 use mfm_portfolio_model::portfolio::ExecutionAnchor;
 use mfm_portfolio_model::symbol::HoldingSourceConfig;
 
-/// Resolves configured wallets into typed subjects.
-pub fn resolve_subjects_from_config(config: &ResolveSubjectsConfig) -> ResolvedSubjects {
-    let mut subjects = config
-        .portfolio
-        .wallets
-        .iter()
-        .map(|wallet| ResolvedSubject {
-            wallet_id: wallet.wallet_id.to_string(),
-            address: wallet.subject.address_str().to_owned(),
-            subject_kind: wallet.subject.kind(),
-            network_id: wallet.network_id.to_string(),
-            implementation_kind: wallet_implementation_kind(&wallet.implementation).to_owned(),
-        })
-        .collect::<Vec<_>>();
-    subjects.sort_by(|left, right| left.wallet_id.cmp(&right.wallet_id));
-    ResolvedSubjects { subjects }
-}
-
 /// Builds quantity-only observations from selected holdings (valuation join deferred).
 pub fn observations_from_selected_holdings(
     selected: &[SelectedHolding],
@@ -63,10 +45,12 @@ pub fn observations_from_selected_holdings(
     Ok(observations)
 }
 
-/// Joins fixed unit-price valuations onto observations (hard-fail on missing route).
-pub fn apply_valuations_to_observations(
+/// Derives configured display fields and fixed unit-price valuations onto observations.
+///
+/// The selected holdings are only authority for quantity and receipt-pinned collection evidence.
+/// Every public presentation and valuation field is rebuilt from the certified portfolio config.
+fn apply_configured_valuations_to_observations(
     mut observations: Vec<Observation>,
-    valuations: &ResolvedValuations,
     symbols_by_id: &BTreeMap<&str, &SymbolConfig>,
 ) -> StateResult<Vec<Observation>> {
     for observation in &mut observations {
@@ -79,31 +63,20 @@ pub fn apply_valuations_to_observations(
                     observation.symbol_id
                 ))
             })?;
+        observation.display_symbol = symbol.display_symbol.clone();
+        observation.metadata = symbol.metadata.clone();
         let mut values = Vec::new();
         for quote in &symbol.valuation.quotes {
-            let resolved = valuations
-                .valuations
-                .iter()
-                .find(|valuation| {
-                    valuation.symbol_id == observation.symbol_id.as_str()
-                        && valuation.quote == quote.quote
-                })
-                .ok_or_else(|| {
-                    StateError::Message(format!(
-                        "missing_fixed_unit_price: missing valuation for symbol `{}` quote `{}`",
-                        observation.symbol_id, quote.quote
-                    ))
-                })?;
             let value_dec = multiply_decimal_strings(
                 &observation.quantity.amount_dec,
-                &resolved.unit_price_dec,
+                quote.unit_price_dec.as_str(),
             )
             .map_err(|error| StateError::Message(error.to_string()))?;
             values.push(ObservationValue {
-                quote: resolved.quote,
-                priced_symbol_id: resolved.priced_symbol_id.clone(),
+                quote: quote.quote,
+                priced_symbol_id: quote.priced_symbol_id.to_string(),
                 value_dec,
-                unit_price_dec: resolved.unit_price_dec.clone(),
+                unit_price_dec: quote.unit_price_dec.to_string(),
             });
         }
         values.sort_by_key(|value| value.quote);
@@ -111,34 +84,6 @@ pub fn apply_valuations_to_observations(
         observation.normalize();
     }
     Ok(observations)
-}
-
-/// Resolves configured fixed unit-price valuation routes (hard-fail).
-pub fn resolve_valuations_from_config(
-    config: &ResolveValuationsConfig,
-) -> StateResult<ResolvedValuations> {
-    let mut valuations = Vec::new();
-    for symbol in &config.portfolio.symbol_configs {
-        for quote in &symbol.valuation.quotes {
-            valuations.push(resolved_valuation_for_quote(symbol, quote)?);
-        }
-    }
-    valuations.sort_by(|left, right| {
-        (left.symbol_id.as_str(), left.quote).cmp(&(right.symbol_id.as_str(), right.quote))
-    });
-    Ok(ResolvedValuations { valuations })
-}
-
-fn resolved_valuation_for_quote(
-    symbol: &SymbolConfig,
-    quote: &QuoteValuationConfig,
-) -> StateResult<ResolvedValuation> {
-    Ok(ResolvedValuation {
-        symbol_id: symbol.symbol_id.to_string(),
-        quote: quote.quote,
-        priced_symbol_id: quote.priced_symbol_id.to_string(),
-        unit_price_dec: quote.unit_price_dec.to_string(),
-    })
 }
 
 /// Proves that selected observations exactly realize the collection receipt.
@@ -288,7 +233,7 @@ pub fn assemble_snapshot(
         ))
     })?;
     let observations =
-        apply_valuations_to_observations(input.holdings.observations, &input.valuations, &symbols)?;
+        apply_configured_valuations_to_observations(input.holdings.observations, &symbols)?;
     let network_pins = project_network_pins_from_observations(&observations).map_err(|error| {
         StateError::Message(format!(
             "{code}: {message}",
@@ -310,33 +255,17 @@ pub fn assemble_snapshot(
             .or_default()
             .push(observation);
     }
-    let mut subjects_by_wallet = BTreeMap::new();
-    for subject in input.subjects.subjects {
-        subjects_by_wallet.insert(subject.wallet_id.clone(), subject);
-    }
-
     let mut wallets = Vec::with_capacity(config.portfolio.wallets.len());
     for wallet_cfg in &config.portfolio.wallets {
-        let subject = subjects_by_wallet
-            .get(wallet_cfg.wallet_id.as_str())
-            .cloned()
-            .unwrap_or_else(|| ResolvedSubject {
-                wallet_id: wallet_cfg.wallet_id.to_string(),
-                address: wallet_cfg.subject.address_str().to_owned(),
-                subject_kind: wallet_cfg.subject.kind(),
-                network_id: wallet_cfg.network_id.to_string(),
-                implementation_kind: wallet_implementation_kind(&wallet_cfg.implementation)
-                    .to_owned(),
-            });
         // Required holdings already verified; absent wallet key means zero symbols configured.
         let observations = observations_by_wallet
             .remove(wallet_cfg.wallet_id.as_str())
             .unwrap_or_default();
         let mut wallet = WalletSnapshot {
             wallet_id: wallet_cfg.wallet_id.to_string(),
-            address: subject.address,
-            subject_kind: subject.subject_kind,
-            network_id: subject.network_id,
+            address: wallet_cfg.subject.address_str().to_owned(),
+            subject_kind: wallet_cfg.subject.kind(),
+            network_id: wallet_cfg.network_id.to_string(),
             observations,
         };
         wallet.normalize();
@@ -444,15 +373,6 @@ fn format_decimal_amount(raw_dec: &str, decimals: u8) -> String {
     } else {
         let split = raw_dec.len() - d;
         format!("{}.{}", &raw_dec[..split], &raw_dec[split..])
-    }
-}
-
-fn wallet_implementation_kind(implementation: &WalletImplementationConfig) -> &'static str {
-    match implementation {
-        WalletImplementationConfig::AddressOnly {} => "address_only",
-        WalletImplementationConfig::KeystoreEntry { .. } => "keystore_entry",
-        WalletImplementationConfig::NodeManagedAccount { .. } => "node_managed_account",
-        WalletImplementationConfig::ExternalSigner { .. } => "external_signer",
     }
 }
 

@@ -2,7 +2,7 @@
 //! Typed portfolio-domain state contracts for fact-backed receipt-pinned snapshots.
 //!
 //! After the collectors cutover, `portfolio_snapshot` is select-centric:
-//! `ResolveSubjects → SelectHoldings → ResolveValuations → AssembleSnapshot → ProjectReport`.
+//! `SelectHoldings → AssembleSnapshot → ProjectReport`.
 //!
 //! # Examples
 //!
@@ -50,9 +50,8 @@ use mfm_portfolio_model::portfolio::{
 };
 use mfm_portfolio_model::symbol::{
     AnchoredHoldingSource, Observation, ObservationAnchor, ObservationQuantity, ObservationValue,
-    QuoteCode, QuoteValuationConfig, SymbolConfig,
+    QuoteCode, SymbolConfig,
 };
-use mfm_portfolio_model::wallet::{WalletImplementationConfig, WalletSubjectKind};
 use mfm_program::{
     AdapterBindingSpec, NoContext, PureState, ReadState, StateError, StateResult, StateSpec,
 };
@@ -118,68 +117,6 @@ fn state_version(name: &'static str) -> mfm_program::Result<StateVersion> {
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
 }
 
-/// Resolved wallet subject.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "resolved-subject",
-    schema = "mfm.portfolio.resolved_subject"
-)]
-pub struct ResolvedSubject {
-    /// Stable wallet identifier.
-    pub wallet_id: String,
-    /// Canonical resolved address.
-    pub address: String,
-    /// Subject kind.
-    pub subject_kind: WalletSubjectKind,
-    /// Stable network identifier.
-    pub network_id: String,
-    /// Stable wallet implementation kind.
-    pub implementation_kind: String,
-}
-
-/// Resolved subject collection.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "resolved-subjects",
-    schema = "mfm.portfolio.resolved_subjects"
-)]
-pub struct ResolvedSubjects {
-    /// Subjects in canonical wallet order.
-    pub subjects: Vec<ResolvedSubject>,
-}
-
-/// Resolved unit-price valuation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "resolved-valuation",
-    schema = "mfm.portfolio.resolved_valuation"
-)]
-pub struct ResolvedValuation {
-    /// Symbol whose quote route was resolved.
-    pub symbol_id: String,
-    /// Quote unit.
-    pub quote: QuoteCode,
-    /// Symbol whose unit price applies to this route.
-    pub priced_symbol_id: String,
-    /// Decimal-string unit price.
-    pub unit_price_dec: String,
-}
-
-/// Resolved valuation collection (hard-fail: empty only when no symbols; no soft errors).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmValue)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "resolved-valuations",
-    schema = "mfm.portfolio.resolved_valuations"
-)]
-pub struct ResolvedValuations {
-    /// Valuations in canonical symbol/quote order.
-    pub valuations: Vec<ResolvedValuation>,
-}
-
 /// Selected holdings material emitted by SelectHoldings (observations without valuation join).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmValue)]
 #[mfm(
@@ -196,12 +133,8 @@ pub struct SelectedHoldings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, StateInput)]
 #[mfm(schema = "mfm.portfolio.input.assemble_snapshot")]
 pub struct AssembleSnapshotInput {
-    /// Resolved wallet subjects.
-    pub subjects: ResolvedSubjects,
     /// Selected holdings from Platform fact selection.
     pub holdings: SelectedHoldings,
-    /// Resolved fixed unit-price valuations.
-    pub valuations: ResolvedValuations,
     /// Exact collection receipt that must match all selected observation anchors.
     pub receipt: PortfolioCollectionReceipt,
 }

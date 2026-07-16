@@ -9,19 +9,18 @@ assemble/report projection. Runtime capability execution is supplied by typed ru
 ## Graph (cutover)
 
 ```text
-PortfolioCollectionReceipt → SelectHoldings  // Platform fact-index, exact receipt pinning
-ResolveSubjects ────────────────────────────┐
-ResolveValuations ──────────────────────────┼→ AssembleSnapshot → ProjectReport
-SelectHoldings ─────────────────────────────┘
+PortfolioCollectionReceipt → SelectHoldings → AssembleSnapshot → ProjectReport
 ```
 
 State contracts:
 
-- `ResolveSubjectsState`
 - `SelectHoldingsState`
-- `ResolveValuationsState`
 - `AssembleSnapshotState`
 - `ProjectReportState`
+
+`AssembleSnapshotState` derives wallet identity, symbol metadata, and fixed valuations directly
+from its certified `PortfolioConfig`; selected holdings contribute only receipt-pinned quantities
+and collection evidence.
 
 Selection policy: `mfm.portfolio.holding.collection-receipt-anchor.v1`. The receipt fixes each
 logical source, descriptor-checked fact-content identity, exact anchor, coverage, and status.
