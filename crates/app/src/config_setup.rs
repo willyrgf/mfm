@@ -328,16 +328,23 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn setup_fixture_decodes_and_prepares_the_portfolio_value() {
-        let document: SetupDocument = toml::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../examples/setup/organization.toml"
-        )))
-        .expect("setup fixture");
-        assert_eq!(document.values.len(), 1);
-        for entry in document.values {
-            let prepared = prepare_value(entry.value).expect("portfolio value prepares");
-            assert!(!prepared.canonical_json.is_empty());
+    fn setup_fixtures_decode_and_prepare_the_portfolio_value() {
+        for fixture in [
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../examples/setup/organization.toml"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../examples/setup/portfolio-erc20.toml"
+            )),
+        ] {
+            let document: SetupDocument = toml::from_str(fixture).expect("setup fixture");
+            assert_eq!(document.values.len(), 1);
+            for entry in document.values {
+                let prepared = prepare_value(entry.value).expect("portfolio value prepares");
+                assert!(!prepared.canonical_json.is_empty());
+            }
         }
     }
 

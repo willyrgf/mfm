@@ -448,6 +448,8 @@ mfm_cli run start --entry-point <ID> --request <PATH> [OPTIONS]
 
 The repository includes a complete strict-import fixture at
 `examples/setup/organization.toml`; copy it to a local setup file before importing.
+`examples/setup/portfolio-erc20.toml` is the runnable token-only counterpart; pair it with an
+Ethereum runtime route and import its returned exact catalog reference before starting.
 
 `ops list` is the authoritative public surface. The setup fixture publishes portfolio config only;
 it does not create an independently startable collector or contract workflow.

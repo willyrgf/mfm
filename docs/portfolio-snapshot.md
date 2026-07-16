@@ -22,6 +22,13 @@ Import a `PortfolioConfig` through setup first, then use the returned `name` and
 REST start request. There is no standalone collector, report-only, collect/reuse, latest, alias, or
 contract-workflow entry point.
 
+For a runnable token-only setup, import
+[`examples/setup/portfolio-erc20.toml`](../examples/setup/portfolio-erc20.toml) and use the EVM
+route in [`examples/configs/runtime-dual-mainnet.toml`](../examples/configs/runtime-dual-mainnet.toml)
+with `MFM_ETHEREUM_MAINNET_RPC_URL` set. The setup deliberately has an ERC-20 contract address but
+no authored token decimals, endpoint, source policy, or read bound; the collector observes decimals
+and balances at the retained anchor.
+
 At admission, the app verifies and normalizes the exact catalog value, records its identity in
 `RunAdmitted`, and gives the concrete `PortfolioConfig` to the snapshot operation. The operation
 derives only explicit wallet-to-symbol demand, resolves one shared anchor per demanded network,
