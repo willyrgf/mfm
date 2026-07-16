@@ -467,11 +467,10 @@ PortfolioSnapshotOperation(Config = PortfolioConfig)
   -> AssemblePortfolioCollectionReceiptState
        -> exact expected/actual requirement equality
        -> one exact anchor per network
-  -> internal PortfolioReportOperation
-       -> ResolveSubjects
-       -> SelectHoldings constrained by receipt anchors
-       -> ResolveValuations
-       -> AssembleSnapshot
+  -> SelectHoldings constrained by receipt anchors
+  -> AssembleSnapshot
+       -> derives wallet identity, display metadata, quote routes, and fixed valuations
+          directly from the certified PortfolioConfig
        -> ProjectReport
 ```
 
