@@ -32,14 +32,17 @@ test are:
 - the current scoped Cargo target on a persistent trusted runner;
 - a bounded `sccache` object cache around the same Cargo build;
 - a coarse Nix-native verification artifact built with Crane and consumed
-  directly by Nixfied; and
+  directly by Nixfied;
+- granular per-crate Nix artifacts generated independently with `crate2nix`
+  and `cargo2nix`; and
 - the current target-only design if no added mechanism produces enough value.
 
 Test execution and task scheduling are measured as an independent candidate
 work stream because compilation is no longer the majority of every full gate.
-MFM will not build a second per-crate Cargo graph in Nix, write a project-local
-Rust build framework, copy mutable targets out of `/nix/store`, or cache a
-successful test result.
+MFM will test maintained per-crate Nix graph generators, but it will not adopt
+one without artifact-consumption and full-surface parity evidence, write a
+project-local Rust build framework, copy mutable targets out of `/nix/store`,
+or cache a successful test result.
 
 The experiments come first. A later decision phase will define the selected
 architecture, ownership, trust, retention, rollback, and gate governance. Only
@@ -65,8 +68,9 @@ The lesson is broader than that failed pilot:
 - a dependency cache must be measured through the final artifact that consumes
   it;
 - immutable compilation does not reduce test, service, or parity execution;
-- per-crate derivations would make MFM maintain Cargo's unit-graph semantics a
-  second time; and
+- per-crate derivations introduce a second representation of Cargo's build
+  graph whose fidelity, reuse granularity, and maintenance cost must be
+  measured; and
 - choosing a cache before measuring real CI transfer and execution costs
   optimizes the mechanism rather than the platform.
 
@@ -219,7 +223,10 @@ Revision 2 is complete only when it can answer all of these with measurements:
 5. If Nix builds verification artifacts, can Nixfied consume those immutable
    closures directly without realizing them for unrelated tasks or copying a
    Cargo target?
-6. Which cache ownership, inspection, lease, retention, cleanup, and evidence
+6. Can `crate2nix` or `cargo2nix` provide useful per-crate derivation reuse
+   while preserving MFM's exact feature, host/target, build-script, proc-macro,
+   test-binary, and non-Rust input semantics?
+7. Which cache ownership, inspection, lease, retention, cleanup, and evidence
    capabilities actually belong in Nixfied after the long-term design is
    selected?
 
@@ -254,6 +261,14 @@ The following are non-negotiable:
 - missing framework support is reported and designed properly rather than
   replaced by shell deletion, target copying, path rewriting, or generated
   stand-in crates.
+
+A tool-generated `Cargo.nix` or equivalent Nix graph is not a stand-in crate.
+It is allowed in the granular experiments when generation is reproducible,
+drift is detectable, and the graph refers to the real locked sources. The
+experiments may use bounded declarative crate overrides, but every override and
+regeneration step counts toward maintenance cost. They may not fabricate Rust
+source, patch around an unsupported semantic, or grow into an MFM-owned Cargo
+graph implementation.
 
 ## Candidate assessment before testing
 
@@ -302,10 +317,10 @@ must produce the same inventory and results.
 
 ### Crane dependency and verification artifacts
 
-Crane is the only Nix-native Rust builder in the initial experiment set. It
+Crane is the coarse-grained Nix-native builder in the experiment set. It
 continues to invoke Cargo while providing a maintained dependency-artifact
-pattern and final-artifact consumers. This is materially different from
-reimplementing Cargo's package graph as one Nix derivation per crate.
+pattern and final-artifact consumers. This is materially different from the
+separately tested per-crate graph generators.
 
 The pilot is one end-to-end chain:
 
@@ -362,26 +377,58 @@ No ordering edge is removed merely because two tasks appear independent. Any
 parallel candidate must preserve service isolation, schema isolation, evidence
 ordering, resource bounds, and deterministic failure diagnostics.
 
-### Per-crate Nix builders and a new MFM Nix library
+### Granular Nix crate graphs: `crate2nix` and `cargo2nix`
 
-`crate2nix`, `cargo2nix`, and a new MFM-specific graph generator are not initial
-candidates. They translate Cargo metadata into a second per-crate build graph,
-while Cargo's exact unit graph varies by command, target, features, profile,
-host/target roles, build scripts, proc macros, and test targets. Cargo's unit
-graph interface remains unstable.
+`crate2nix` and `cargo2nix` are viable experiment candidates for the specific
+hypothesis that Nix should cache third-party dependencies and MFM workspace
+crates as separate derivations. Both generate Nix expressions from Cargo
+workspace and lock information and build crates in isolation. This could give
+Nix exact per-crate reuse across worktrees and CI substitutions while Cargo
+continues to own the developer loop.
 
-MFM also has cross-workspace included sources and a large verification surface.
-Current crate2nix documentation describes test support as experimental and
-notes workspace-source and target-specific feature restrictions. These tools
-may be reconsidered only if the bounded Crane pilot proves that coarse reuse
-is valuable but insufficient, and a new RFC demonstrates why maintaining a
-second graph is cheaper and safer than the measured alternatives.
+They are tested as two independent candidates. Success by one is not evidence
+for the other, and neither is combined with Crane or `sccache` during
+screening. Each pilot must:
+
+1. generate its graph deterministically from the real workspace and
+   `Cargo.lock`;
+2. use the exact pinned MFM Rust and native toolchain on Linux and macOS;
+3. build real dependency and workspace crate derivations without generated
+   Rust stand-ins;
+4. produce final verification binaries or an immutable bundle that consumes
+   those per-crate outputs;
+5. let an opt-in Nixfied task execute the final artifacts directly; and
+6. prove which derivations rebuild or substitute for every common source/cache
+   matrix case.
+
+Graph generation alone is not a passing result. A root package that builds but
+cannot expose the real MFM test binaries is also insufficient. If a tool's test
+support couples compilation and execution into a cacheable derivation, that
+surface may be used to diagnose graph fidelity, but its cached success cannot
+replace executing tests in the authoritative Nixfied gate.
+
+The known hard cases are deliberate tests: command-specific feature
+unification, target-specific dependencies, host versus target units, build
+scripts, proc macros, native dependencies, cross-workspace `include_str!`
+inputs, migrations and `.sqlx`, trybuild sources and stderr baselines,
+doctests, and final binary linkage. Current `crate2nix` documentation marks its
+test interface experimental and documents target-feature and workspace-source
+restrictions. Current `cargo2nix` documents global feature choices, propagated
+link/build information, generated-graph upkeep, and package overrides. The
+pilot measures whether these constraints are manageable for MFM rather than
+assuming either success or failure.
+
+The comparison includes graph generation mode, generated-file drift,
+evaluation time, derivation count, rebuild fan-out, output and closure size,
+binary-cache transfer, override volume, upgrade workflow, and diagnostics. A
+new MFM-specific graph generator remains rejected: maintained upstream tools
+are being tested precisely so MFM does not invent a third implementation.
 
 ### Cargo `build-dir` evolution
 
-Cargo now permits separating intermediate `build-dir` from final `target-dir`, and the
-MFM toolchain accepted a shared `CARGO_BUILD_BUILD_DIR` in disposable probes.
-One focused package probe produced these exploratory results:
+Cargo now permits separating intermediate `build-dir` from final `target-dir`,
+and the MFM toolchain accepted a shared `CARGO_BUILD_BUILD_DIR` in disposable
+probes. One focused package probe produced these exploratory results:
 
 | Probe | Observation |
 | --- | ---: |
@@ -432,8 +479,8 @@ Each run records:
   configuration;
 - operating system, architecture, runner class, CPU, memory, filesystem, and
   relevant host load;
-- exact Nix, Nixpkgs, Nixfied, Rust, Cargo, Nextest, SQLx, Crane, and `sccache`
-  identities as applicable;
+- exact Nix, Nixpkgs, Nixfied, Rust, Cargo, Nextest, SQLx, Crane, `crate2nix`,
+  `cargo2nix`, and `sccache` identities as applicable;
 - model hash, task graph, command, features, profiles, and cache state;
 - Nix evaluation, realization, build, substitution, and transfer time;
 - Cargo planning, compilation, linking, rustdoc, and nested-Cargo time where
@@ -443,6 +490,8 @@ Each run records:
   database, CLI, REST, and keystore inventories;
 - Cargo target, compiler cache, Nix output and closure sizes, NAR sizes, file
   counts, and repeated-run growth;
+- generated-graph digest and drift, Nix evaluation time, derivation count, and
+  derivations rebuilt, reused locally, or substituted for granular candidates;
 - hit, miss, cacheability, eviction, upload, download, and bypass statistics;
   and
 - failure diagnostics, backtrace file/line quality, cleanup behavior, and
@@ -712,7 +761,8 @@ docs: record bounded sccache experiment
 ```
 
 Stop decision: qualify or reject `sccache` as a standalone environment-specific
-candidate. Do not combine it with Crane in this phase.
+candidate. Do not combine it with any Nix-native compilation candidate in this
+phase.
 
 ### R2-06: test a consumed Crane verification artifact
 
@@ -752,10 +802,110 @@ Expected commit subject:
 docs: record consumed nix artifact experiment
 ```
 
-Stop decision: qualify or reject coarse Nix-native verification. Per-crate Nix
-derivations remain out of scope.
+Stop decision: qualify or reject coarse Nix-native verification and record the
+baseline against which granular Nix reuse will be compared.
 
-### R2-07: compare qualifying candidates
+### R2-07: test granular `crate2nix` artifacts
+
+Change:
+
+- pin `crate2nix` in an isolated pilot;
+- generate its Nix graph from the exact MFM workspace and lockfile;
+- build real per-dependency and per-workspace-crate derivations;
+- attempt to produce and directly consume a final immutable verification
+  artifact from that graph; and
+- leave public gates, the main flake inputs, and the authoritative Cargo path
+  unchanged.
+
+Test:
+
+- deterministic `Cargo.nix` generation, committed versus IFD generation cost,
+  and an explicit stale-generated-graph failure check;
+- Cargo.lock package/version equality and the active feature, target,
+  host/build, build-script, proc-macro, native-link, and profile surfaces;
+- the complete common source/cache matrix and exact derivations rebuilt,
+  reused locally, or substituted in every case;
+- cross-workspace included files, migrations, `.sqlx` metadata, trybuild
+  sources and stderr files, examples, and generated inputs;
+- documented target-feature and workspace-source restrictions against MFM's
+  actual graph;
+- final test-binary and test-identifier parity, including whether artifacts can
+  be exposed for repeated Nixfied execution rather than only caching a
+  `runTests` derivation's success;
+- doctest, trybuild nested-Cargo, online SQLx, and live-service residuals;
+- direct Nixfied closure consumption without mutable-target copying or eager
+  realization by unrelated tasks;
+- graph generation/evaluation time, derivation count, rebuild fan-out, local
+  build time, output/closure/NAR size, and signed binary-cache transfer; and
+- crate overrides, unsupported cases, diagnostic quality, regeneration
+  workflow, and expected maintenance across crate2nix, Cargo, Rust, and
+  Nixpkgs upgrades.
+
+The pilot fails screening if it can only build a convenient subset that omits
+MFM's verification surface, requires fabricated Rust sources or semantic
+patches to imitate Cargo, or produces outputs that no verification task
+consumes. Small declarative native-dependency or platform overrides are
+permitted but must be listed and costed.
+
+Expected commit subject:
+
+```text
+docs: record crate2nix artifact experiment
+```
+
+Stop decision: qualify or reject `crate2nix` independently. Do not alter the
+`cargo2nix` experiment or create an MFM-specific graph generator.
+
+### R2-08: test granular `cargo2nix` artifacts
+
+Change:
+
+- pin `cargo2nix` in an isolated pilot;
+- generate its `Cargo.nix` from the same exact MFM workspace and lockfile used
+  by R2-07;
+- construct the per-crate package set with the MFM-pinned Rust toolchain;
+- attempt to produce and directly consume a final immutable verification
+  artifact from that graph; and
+- leave public gates, the main flake inputs, and the authoritative Cargo path
+  unchanged.
+
+Test:
+
+- deterministic graph generation, generated-file drift, and generator/overlay
+  version compatibility;
+- Cargo.lock package/version equality and the active root-feature, global
+  feature, target, host/build, build-script, proc-macro, native-link, and
+  profile surfaces;
+- the complete common source/cache matrix and exact derivations rebuilt,
+  reused locally, or substituted in every case;
+- propagated rlib, linker, build-script, and native dependency information;
+- all cross-crate included files, migrations, `.sqlx` metadata, trybuild
+  sources and stderr files, examples, and generated inputs;
+- final test-binary and test-identifier parity and repeated Nixfied execution
+  independent of any cached build-time test result;
+- doctest, trybuild nested-Cargo, online SQLx, and live-service residuals;
+- direct Nixfied closure consumption without mutable-target copying or eager
+  realization by unrelated tasks;
+- graph generation/evaluation time, derivation count, rebuild fan-out, local
+  build time, output/closure/NAR size, and signed binary-cache transfer; and
+- package overrides, unsupported cases, diagnostic quality, regeneration
+  workflow, and expected maintenance across cargo2nix, Cargo, Rust, rust-overlay,
+  and Nixpkgs upgrades.
+
+The same screening failure and bounded-override rules from R2-07 apply. The
+result is assessed on its own; it neither inherits a crate2nix failure nor wins
+because crate2nix failed.
+
+Expected commit subject:
+
+```text
+docs: record cargo2nix artifact experiment
+```
+
+Stop decision: qualify or reject `cargo2nix` independently. Do not create an
+MFM-specific graph generator to rescue the result.
+
+### R2-09: compare qualifying candidates
 
 Change:
 
@@ -781,6 +931,8 @@ The report fills this decision table with measured values:
 | Persistent runner | pending | pending | none | pending | pending | pending | pending |
 | `sccache` | pending | pending | pending | pending | pending | pending | pending |
 | Crane artifact | pending | pending | pending | pending | pending | pending | pending |
+| `crate2nix` artifacts | pending | pending | pending | pending | pending | pending | pending |
+| `cargo2nix` artifacts | pending | pending | pending | pending | pending | pending | pending |
 | Execution topology | pending | n/a | n/a | pending | pending | pending | pending |
 
 Expected commit subject:
@@ -793,7 +945,7 @@ Stop decision: declare the evidence decision-quality or request one narrowly
 defined missing measurement. Do not select by preference or prototype effort
 already spent.
 
-### R2-08: select and define the long-term architecture
+### R2-10: select and define the long-term architecture
 
 Change:
 
@@ -824,9 +976,9 @@ docs: select mfm build architecture
 Stop decision: owner approval of the complete long-term definition and the
 minimal upstream capabilities it requires.
 
-### R2-09: finalize the Nixfied architect handoff
+### R2-11: finalize the Nixfied architect handoff
 
-This is the final phase of this RFC and cannot begin before R2-08 is accepted.
+This is the final phase of this RFC and cannot begin before R2-10 is accepted.
 
 Change:
 
@@ -947,7 +1099,8 @@ The following are outside Revision 2 without a new RFC:
 - a repository-owned generator that fabricates dependency crate sources;
 - a Nix derivation whose output is not consumed by the measured workload;
 - copying a prewarmed Cargo target from `/nix/store` into mutable state;
-- one Nix derivation per crate as the first or default solution;
+- adopting `crate2nix` or `cargo2nix` without the R2-07/R2-08 graph-fidelity,
+  artifact-consumption, and full-coverage evidence;
 - an MFM-specific replacement for Cargo's unit graph;
 - calling a Nix launcher or vendored source derivation a compiled Rust cache;
 - persisting the entire mutable Cargo target through a generic CI archive;
@@ -971,6 +1124,8 @@ The evidence may support different mechanisms at different boundaries:
 - trusted persistent CI may reuse that target without transfer;
 - ephemeral CI may use `sccache` or a signed Nix verification artifact if one
   qualifies after transfer costs;
+- a qualifying `crate2nix` or `cargo2nix` graph may provide per-crate Nix cache
+  reuse for verification while developers continue to use Cargo directly;
 - packaging may remain a coarse `buildRustPackage` derivation; and
 - full-gate latency may improve more from execution topology and gate
   governance than from another compile cache.
@@ -991,6 +1146,8 @@ contract. Uniformity of mechanism is less important than clarity of ownership.
   and [test-runner scope](https://nexte.st/)
 - [`sccache` Rust limitations](https://github.com/mozilla/sccache/blob/main/docs/Rust.md)
 - [Nix signed binary-cache configuration](https://nix.dev/guides/recipes/add-binary-cache.html)
-- [crate2nix known restrictions](https://nix-community.github.io/crate2nix/90_reference/20_known_restrictions/)
+- [crate2nix crate-by-crate design](https://nix-community.github.io/crate2nix/),
+  [test support](https://nix-community.github.io/crate2nix/30_building/40_tests/),
+  and [known restrictions](https://nix-community.github.io/crate2nix/90_reference/20_known_restrictions/)
 - [cargo2nix granular-build design](https://github.com/cargo2nix/cargo2nix)
 - [Pinned Nixfied architecture](https://github.com/willyrgf/nixfied/blob/b0681e45ab76d5023d9c5e033087d34adf98e90b/docs/ARCHITECTURE.md)
