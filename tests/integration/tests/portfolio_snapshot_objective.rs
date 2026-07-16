@@ -182,6 +182,85 @@ async fn snapshot_root_preserves_zero_btc_native_and_erc20_values() {
     );
 }
 
+/// A wallet without configured symbols is retained as a zero-total public wallet, but its network
+/// remains outside the explicit holding-demand graph and never opens a collector source.
+#[tokio::test]
+async fn snapshot_root_keeps_zero_symbol_wallet_without_undemanded_network_work() {
+    let server = start_snapshot_rpc_mock(SnapshotRpcConfig::default()).await;
+    let runtime_dir = tempfile::tempdir().expect("runtime config directory");
+    let runtime_path = write_collectors_runtime_config_for_test(runtime_dir.path(), &server.url);
+    let store = store::AsyncInMemoryRunStore::default();
+    let services = snapshot_services(
+        &store,
+        Arc::new(mfm_app::ProjectionFactIndexProvider::new(store.clone())),
+        Some(&runtime_path),
+    );
+    let config = snapshot_config_with_zero_symbol_bitcoin_wallet();
+    let draft = portfolio_snapshot_program_draft(config.clone()).expect("zero-symbol wallet draft");
+    assert!(
+        draft
+            .operation_lineage()
+            .iter()
+            .all(|operation| operation.operation_name != "mfm.bitcoin.btc_network_collection"),
+        "an undemanded Bitcoin wallet must not create a collection operation"
+    );
+    assert!(
+        draft
+            .state_nodes()
+            .iter()
+            .all(|node| !node.state_descriptor_name.starts_with("mfm.bitcoin.")),
+        "an undemanded Bitcoin wallet must not create collector states"
+    );
+
+    let request = prepare_snapshot_request(&services, config, "zero-symbol-wallet").await;
+    let rendered = services
+        .launch_run_and_render(request)
+        .await
+        .expect("zero-symbol wallet snapshot launch")
+        .public_output
+        .expect("zero-symbol wallet public output")
+        .json
+        .expect("zero-symbol wallet JSON");
+    let snapshot = &rendered["snapshot"];
+    let report = &rendered["report"];
+    let pins = snapshot["network_pins"]
+        .as_array()
+        .expect("snapshot network pins");
+    assert_eq!(pins.len(), 1);
+    assert_eq!(pins[0]["network_id"], json!("ethereum-mainnet"));
+    let zero_wallet = snapshot["wallets"]
+        .as_array()
+        .expect("snapshot wallets")
+        .iter()
+        .find(|wallet| wallet["wallet_id"] == json!("wallet_btc_zero"))
+        .expect("zero-symbol wallet snapshot");
+    assert_eq!(zero_wallet["network_id"], json!("bitcoin-mainnet"));
+    assert_eq!(zero_wallet["observations"], json!([]));
+    let zero_summary = report["wallet_summaries"]
+        .as_array()
+        .expect("report wallet summaries")
+        .iter()
+        .find(|wallet| wallet["wallet_id"] == json!("wallet_btc_zero"))
+        .expect("zero-symbol wallet report");
+    assert_eq!(zero_summary["network_id"], json!("bitcoin-mainnet"));
+    assert_eq!(
+        zero_summary["totals_by_quote"],
+        json!([{"quote": "USD", "total_value_dec": "0"}])
+    );
+    let methods = server.methods();
+    assert!(
+        methods.iter().all(|method| !matches!(
+            method.as_str(),
+            "getblockchaininfo" | "getblockhash" | "getblockheader" | "scantxoutset"
+        )),
+        "the zero-symbol Bitcoin wallet must not open a Bitcoin source: {methods:?}"
+    );
+    assert!(
+        methods.iter().any(|method| method == "eth_getBalance"),
+        "the independently demanded EVM wallet still collects normally: {methods:?}"
+    );
+}
+
 /// A conflicting historical fact cannot replace the current receipt's fact identity, even when a
 /// malicious store-facing provider returns the old candidate first.
 #[tokio::test]
@@ -535,6 +614,37 @@ fn snapshot_config(demand: SnapshotDemand) -> PortfolioConfig {
     .into_config()
 }
 
+fn snapshot_config_with_zero_symbol_bitcoin_wallet() -> PortfolioConfig {
+    let mut value =
+        serde_json::to_value(snapshot_config(SnapshotDemand::EvmNative)).expect("portfolio value");
+    value["networks"]
+        .as_array_mut()
+        .expect("portfolio networks")
+        .push(json!({
+            "network_id": "bitcoin-mainnet",
+            "family": "bitcoin",
+            "bitcoin_network": "main",
+            "source_identity": "public-bitcoin-core",
+            "metadata": {}
+        }));
+    value["wallets"]
+        .as_array_mut()
+        .expect("portfolio wallets")
+        .push(json!({
+            "wallet_id": "wallet_btc_zero",
+            "network_id": "bitcoin-mainnet",
+            "symbol_ids": [],
+            "subject": {"kind": "bitcoin_address", "address": BTC_ADDRESS},
+            "implementation": {"kind": "address_only"},
+            "metadata": {}
+        }));
+    ValidatedPortfolioConfig::new(
+        serde_json::from_value(value).expect("zero-symbol wallet portfolio"),
+    )
+    .expect("zero-symbol wallet remains valid with another demanded edge")
+    .into_config()
+}
+
 fn symbol(symbol_id: &str, network_id: &str, source: Value) -> Value {
     json!({
         "symbol_id": symbol_id,
@@ -807,24 +917,32 @@ impl Default for SnapshotRpcConfig {
 struct SnapshotRpcState {
     config: SnapshotRpcConfig,
     calls: Arc<AtomicUsize>,
+    methods: Arc<Mutex<Vec<String>>>,
 }
 
 struct SnapshotRpcServer {
     url: String,
     calls: Arc<AtomicUsize>,
+    methods: Arc<Mutex<Vec<String>>>,
 }
 
 impl SnapshotRpcServer {
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
+
+    fn methods(&self) -> Vec<String> {
+        self.methods.lock().expect("snapshot RPC methods").clone()
+    }
 }
 
 async fn start_snapshot_rpc_mock(config: SnapshotRpcConfig) -> SnapshotRpcServer {
     let calls = Arc::new(AtomicUsize::new(0));
+    let methods = Arc::new(Mutex::new(Vec::new()));
     let state = SnapshotRpcState {
         config,
         calls: Arc::clone(&calls),
+        methods: Arc::clone(&methods),
     };
     let app = Router::new()
         .route("/", axum::routing::post(snapshot_rpc_handler))
@@ -850,6 +968,7 @@ async fn start_snapshot_rpc_mock(config: SnapshotRpcConfig) -> SnapshotRpcServer
     SnapshotRpcServer {
         url: format!("http://{addr}"),
         calls,
+        methods,
     }
 }
 
@@ -863,6 +982,11 @@ async fn snapshot_rpc_handler(
         .get("method")
         .and_then(Value::as_str)
         .expect("snapshot RPC method");
+    state
+        .methods
+        .lock()
+        .expect("snapshot RPC methods")
+        .push(method.to_owned());
     if state.config.failing_method == Some(method) {
         return Json(json!({
             "jsonrpc": "2.0",

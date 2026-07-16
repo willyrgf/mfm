@@ -34,6 +34,9 @@ At admission, the app verifies and normalizes the exact catalog value, records i
 derives only explicit wallet-to-symbol demand, resolves one shared anchor per demanded network,
 collects BTC native, EVM native, and ERC-20 sources as needed, proves an exact collection receipt,
 and selects facts only when their content and anchor match that receipt.
+A wallet with no configured symbols is retained with empty observations and zero quote totals, but
+creates no collector work or network pin; the aggregate remains valid only when another explicit
+wallet-to-symbol edge exists.
 
 The root returns `PortfolioPublicOutputs` with exactly `snapshot` and `report`. It preserves zero
 holdings, exposes direct quote totals, and does not expose receipt entries, source keys, fact

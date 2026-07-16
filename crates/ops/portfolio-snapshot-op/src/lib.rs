@@ -597,8 +597,8 @@ fn compile_collection(portfolio: &PortfolioConfig) -> Result<CompiledCollection,
             .get(wallet.network_id.as_str())
             .copied()
             .ok_or_else(|| ConfigError::new("portfolio wallet referenced an unknown network"))?;
-        let network_demand = demand.entry(wallet.network_id.to_string()).or_default();
         for symbol_id in &wallet.symbol_ids {
+            let network_demand = demand.entry(wallet.network_id.to_string()).or_default();
             let symbol = symbols
                 .get(symbol_id.as_str())
                 .copied()
@@ -816,6 +816,47 @@ mod tests {
         assert_eq!(compiled.evm_collections.len(), 1);
         assert!(compiled.evm_collections[0].native_accounts.is_empty());
         assert_eq!(compiled.evm_collections[0].erc20_sources.len(), 1);
+    }
+
+    #[test]
+    fn compiler_skips_a_zero_symbol_wallet_on_an_undemanded_network() {
+        let mut value =
+            serde_json::to_value(portfolio_config(false, true, false)).expect("portfolio value");
+        value["networks"]
+            .as_array_mut()
+            .expect("portfolio networks")
+            .push(json!({
+                "network_id": "bitcoin-mainnet",
+                "family": "bitcoin",
+                "bitcoin_network": "main",
+                "source_identity": "public-bitcoin-core",
+                "metadata": {}
+            }));
+        value["wallets"]
+            .as_array_mut()
+            .expect("portfolio wallets")
+            .push(json!({
+                "wallet_id": "wallet_btc_zero",
+                "network_id": "bitcoin-mainnet",
+                "symbol_ids": [],
+                "subject": {"kind": "bitcoin_address", "address": BTC_ADDRESS},
+                "implementation": {"kind": "address_only"},
+                "metadata": {}
+            }));
+        let portfolio = ValidatedPortfolioConfig::new(
+            serde_json::from_value(value).expect("zero-symbol wallet portfolio"),
+        )
+        .expect("zero-symbol wallet remains model-valid with another demanded edge")
+        .into_config();
+
+        let compiled = compile_collection(&portfolio).expect("compile explicit demand only");
+        assert_eq!(compiled.manifest.len(), 1);
+        assert!(compiled.bitcoin_collections.is_empty());
+        assert_eq!(compiled.evm_collections.len(), 1);
+        assert!(compiled
+            .manifest
+            .iter()
+            .all(|entry| entry.requirement().network_id != "bitcoin-mainnet"));
     }
 
     #[test]
