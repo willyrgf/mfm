@@ -43,4 +43,5 @@ request or certified-state policy.
 
 After admission the catalog is not run authority. Resume, replay, status, stream inspection, and
 public-output rendering use the certified spec and retained evidence. Live capability routes remain
-process-local runtime configuration; evidence-only replay does not load them.
+process-local runtime configuration. Evidence-only replay does not load them; a live resume loads
+them only when verified unfinished external nodes still require a live capability.

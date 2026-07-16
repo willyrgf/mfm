@@ -194,8 +194,10 @@ operation-local pure fan-in state because its semantics are specific to the comp
 sorted family receipts and exact logical manifest. The app registers its runner, while the
 `mfm-op-portfolio-snapshot` operation owns the receipt node, complete graph topology, and one
 `PortfolioPublicOutputs` root binding. It is not a general portfolio state or an excuse for
-app-owned workflow behavior. The receipt, rather than a count, is the authority consumed by
-holding selection and snapshot assembly.
+app-owned workflow behavior. The app's private replay binding recomputes the operation-local
+fan-in before it calls the portfolio adapter verifier; this is replay dispatch, not operation
+replay policy or app-owned workflow behavior. The receipt, rather than a count, is the authority
+consumed by holding selection and snapshot assembly.
 
 ## Typed Program Authoring
 

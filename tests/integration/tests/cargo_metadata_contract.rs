@@ -525,6 +525,27 @@ fn config_catalog_source_boundaries_are_enforced() {
         composed_source.contains("portfolio_snapshot_program_draft"),
         "the snapshot operation must expose its single production root-draft helper"
     );
+    for forbidden in ["mfm-events", "mfm-replay", "mfm-spec", "mfm-store"] {
+        assert!(
+            path_dependencies(&metadata, "mfm-op-portfolio-snapshot", &by_name)
+                .iter()
+                .all(|dependency| dependency.name != forbidden),
+            "portfolio operation must remain replay/store independent: {forbidden}"
+        );
+    }
+    assert!(
+        !root
+            .join("crates/ops/portfolio-snapshot-op/src/replay.rs")
+            .exists(),
+        "portfolio operation must not retain a replay module"
+    );
+    let app_portfolio_snapshot_source =
+        fs::read_to_string(root.join("crates/app/src/portfolio_snapshot_replay.rs"))
+            .expect("read private app portfolio replay binding");
+    assert!(
+        app_portfolio_snapshot_source.contains("verify_portfolio_collection_receipt_replay"),
+        "app replay dispatch must own the operation-local receipt verification binding"
+    );
     let portfolio_state_root = root.join("crates/states/portfolio/src");
     for path in sources
         .iter()

@@ -50,10 +50,6 @@ use mfm_state_portfolio::{
 use mfm_values::ConfigError;
 use serde::{Deserialize, Serialize};
 
-#[path = "replay.rs"]
-mod replay;
-pub use self::replay::verify_portfolio_collection_receipt_replay;
-
 const OP_NAMESPACE: &str = "mfm.portfolio";
 const OP_KIND_NAME: &str = "snapshot";
 const OP_VERSION: &str = "mfm.portfolio.operation.snapshot.v1";

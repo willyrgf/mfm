@@ -150,7 +150,10 @@ Two v1 decisions are deliberate:
   domain behavior. It proves exact source completion, number/hash anchors, admissible
   status/coverage, and fact-content identities; it does not retain count readiness. The app
   registers its runner, while `mfm-op-portfolio-snapshot` owns receipt assembly semantics, the
-  complete graph topology, and its single root binding.
+  complete graph topology, and its single root binding. Because operations cannot decide replay,
+  the app's private portfolio snapshot replay binding recomputes this fan-in before delegating the
+  receipt-pinned projection to the portfolio adapter; it adds no workflow topology or receipt
+  semantics.
 - Runtime TOML remains a process-local routing and signer boundary rather than semantic catalog
   data. The current loader may parse the whole file when a live capability family is requested, so
   malformed unrelated family data can reject that live request. Read-only paths do not load it, and

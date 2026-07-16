@@ -11,6 +11,10 @@ use mfm_runtime::{
 };
 use mfm_store::v1 as store;
 
+#[path = "portfolio_snapshot_replay.rs"]
+mod replay;
+pub(crate) use self::replay::verify_portfolio_collection_receipt_replay;
+
 const PURE_FACTORY: &str = "pure";
 
 pub(crate) fn register_portfolio_snapshot_runners(

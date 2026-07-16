@@ -1,19 +1,25 @@
-//! Evidence-only replay verification for the operation-local collection receipt.
-
-use super::*;
+//! Private evidence-only replay binding for the operation-local portfolio receipt fan-in.
 
 use mfm_events::v1 as events;
+use mfm_op_btc_collectors::BtcNetworkCollectionReceipt;
+use mfm_op_evm_collectors::EvmNetworkCollectionReceipt;
+use mfm_op_portfolio_snapshot::{
+    assemble_portfolio_collection_receipt, AssemblePortfolioCollectionReceiptConfig,
+    AssemblePortfolioCollectionReceiptInput, AssemblePortfolioCollectionReceiptState,
+};
+use mfm_program::{StateSpec, ValidatedConfig};
 use mfm_replay::v1 as replay;
+use mfm_state_portfolio::PortfolioCollectionReceipt;
 use mfm_store::v1 as store;
 use mfm_values::{MfmConfig, MfmValue};
 use serde::de::DeserializeOwned;
 
 /// Rebuilds and verifies the operation-local exact portfolio collection receipt.
 ///
-/// This stays with the operation because only the operation owns the logical manifest and family
-/// receipt fan-in. The portfolio adapter receives the verified receipt afterward and verifies
-/// receipt-pinned fact selection, snapshot assembly, and report projection.
-pub fn verify_portfolio_collection_receipt_replay(
+/// The app owns this private binding because it dispatches replay verification. The operation
+/// remains planning-only and still owns the pure receipt semantics and graph topology; the
+/// portfolio adapter verifies the receipt-pinned projection after this fan-in is established.
+pub(crate) fn verify_portfolio_collection_receipt_replay(
     broker: &replay::ReplayBroker,
 ) -> replay::Result<PortfolioCollectionReceipt> {
     let frame = replay_single_state_frame::<AssemblePortfolioCollectionReceiptState>(
@@ -30,7 +36,7 @@ pub fn verify_portfolio_collection_receipt_replay(
             evm_receipts,
         },
     )
-    .map_err(replay_operation_error)?;
+    .map_err(replay_binding_error)?;
     verify_replay_output_bytes(&frame, &receipt, "portfolio collection receipt")?;
     Ok(receipt)
 }
@@ -42,8 +48,8 @@ fn replay_single_state_frame<S>(
 where
     S: StateSpec,
 {
-    let kind = S::kind().map_err(replay_operation_error)?;
-    let version = S::version().map_err(replay_operation_error)?;
+    let kind = S::kind().map_err(replay_binding_error)?;
+    let version = S::version().map_err(replay_binding_error)?;
     let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
         Ok(node.state_kind == kind && node.state_version == version)
     })?;
@@ -68,8 +74,8 @@ where
     replay_input_frames(
         broker,
         node,
-        &T::semantic_id().map_err(replay_operation_error)?,
-        &T::schema_id().map_err(replay_operation_error)?,
+        &T::semantic_id().map_err(replay_binding_error)?,
+        &T::schema_id().map_err(replay_binding_error)?,
     )?
     .iter()
     .map(decode_replay_value)
@@ -171,7 +177,7 @@ where
         artifact_id: node.config_ref.artifact_id.clone(),
         evidence_hash: config_evidence
             .evidence_hash()
-            .map_err(replay_operation_error)?,
+            .map_err(replay_binding_error)?,
         digest: Some(node.config_ref.digest.clone()),
         byte_len: Some(node.config_ref.byte_len),
         media_type: Some(node.config_ref.media_type.clone()),
@@ -185,7 +191,7 @@ where
     let config: T = serde_json::from_slice(&artifact.artifact_bytes).map_err(replay_json_error)?;
     ValidatedConfig::new(config)
         .map(ValidatedConfig::into_inner)
-        .map_err(replay_operation_error)
+        .map_err(replay_binding_error)
 }
 
 fn verify_replay_output_bytes<T: serde::Serialize>(
@@ -195,7 +201,7 @@ fn verify_replay_output_bytes<T: serde::Serialize>(
 ) -> replay::Result<()> {
     let json = serde_json::to_string(expected).map_err(replay_json_error)?;
     let bytes = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&json)
-        .map_err(replay_operation_error)?;
+        .map_err(replay_binding_error)?;
     if bytes.as_bytes() != frame.artifact_bytes {
         return Err(replay_mismatch(format!(
             "portfolio {label} output did not match recomputed value"
@@ -211,7 +217,7 @@ fn replay_json_error(error: serde_json::Error) -> replay::ReplayError {
     )
 }
 
-fn replay_operation_error(error: impl std::fmt::Display) -> replay::ReplayError {
+fn replay_binding_error(error: impl std::fmt::Display) -> replay::ReplayError {
     replay::ReplayError::new(
         replay::ReplayErrorKind::CertifiedEvidenceMismatch,
         error.to_string(),
