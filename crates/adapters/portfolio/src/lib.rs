@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! Portfolio adapter runners for fact-backed report-only portfolio snapshots.
+//! Portfolio adapter runners for fact-backed receipt-pinned portfolio snapshots.
 //!
 //! This crate binds certified portfolio state descriptors to typed runners over explicit artifact
 //! and Platform fact-index capability contracts. Live chain transports are not used by the report
@@ -92,7 +92,7 @@ impl PortfolioRunnerCapabilities {
     }
 }
 
-/// Registers typed portfolio runners (report-only; Platform fact-index for SelectHoldings).
+/// Registers typed portfolio runners for receipt-pinned selection and pure snapshot projection.
 pub fn register_portfolio_runners(
     registry: &mut ErasedRunnerRegistry,
     capabilities: PortfolioRunnerCapabilities,

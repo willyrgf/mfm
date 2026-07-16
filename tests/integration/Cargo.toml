@@ -35,7 +35,7 @@ mfm-evm-capabilities = { path = "../../crates/evm-capabilities" }
 mfm-fact-capabilities = { path = "../../crates/fact-capabilities" }
 mfm-op-btc-collectors = { path = "../../crates/ops/btc-collectors-op" }
 mfm-op-evm-collectors = { path = "../../crates/ops/evm-collectors-op" }
-mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
+mfm-op-portfolio-snapshot = { path = "../../crates/ops/portfolio-snapshot-op" }
 mfm-states-btc = { path = "../../crates/states/btc" }
 mfm-states-evm = { path = "../../crates/states/evm" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
@@ -47,5 +47,4 @@ alloy-primitives = { workspace = true }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-state-evm-contracts = { path = "../../crates/states/evm-contracts" }
 mfm-evm-contract-model = { path = "../../crates/evm-contract-model" }
-mfm-op-portfolio-collect-report = { path = "../../crates/ops/portfolio-collect-report-op" }
 tower = "0.5"

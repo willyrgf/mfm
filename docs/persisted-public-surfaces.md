@@ -67,7 +67,7 @@ Authority roles:
 | Manual-resolution evidence input/output | CLI manual resolution commands and REST request/response bodies | No secrets. | public output | Evidence bytes are artifacts only after digest/evidence verification and commit admission. CLI/REST error details must stay redacted. |
 | Keystore list output | `mfm_cli keystore list` | Public addresses and labels only; no private keys, mnemonics, passwords, decrypted bytes, or raw transactions. | public output | Keystore secrets remain below CLI output and typed semantic surfaces. |
 | REST health/readiness | `/v1/health`, `/v1/ready` | No secrets. | operational telemetry | Liveness/readiness only. |
-| Live runtime config | Process-local runtime config file path, indirection paths, resolved RPC URLs/auth, signer paths, and signer unlock files | Secret-bearing; forbidden in CLI/REST output, run events, artifacts, fixtures, replay authority, and public-output rendering. | none | Evidence-only status, stream inspection, list/watch, replay, and public-output paths must not parse or validate live runtime config. Live start/resume may use it only as process-local capability wiring. |
+| Live runtime config | Process-local runtime config file path, indirection paths, resolved RPC URLs/auth, signer paths, and signer unlock files | Secret-bearing; forbidden in CLI/REST output, run events, artifacts, fixtures, replay authority, and public-output rendering. | none | Evidence-only status, stream inspection, list/watch, replay, and public-output paths must not parse or validate live runtime config. Live start validates it for every live node; resume validates it only for nonterminal live nodes that may still execute. |
 
 ## Review Rules
 

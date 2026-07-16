@@ -149,7 +149,6 @@ not current interfaces. During the receipt cutover, the registered public ids ar
 - `mfm.evm.contract/configure@1`
 - `mfm.evm.contract/validate@1`
 - `mfm.evm.contract/lifecycle@1`
-- `mfm.portfolio/collect_then_report@1`
 
 ### Operation-owned config
 
@@ -160,10 +159,11 @@ Current config ownership follows the semantic boundaries:
   collector config.
 - EVM state config/support types are owned by `mfm-state-evm-contracts`; the four lifecycle entry
   configs are owned by `mfm-op-evm-contract-lifecycle`.
-- `mfm-op-portfolio-collect-report` owns exact portfolio-demand derivation, family collection,
-  content-bound receipt assembly, and the explicit composed graph.
+- `mfm-op-portfolio-snapshot` owns exact portfolio-demand derivation, family collection,
+  content-bound receipt assembly, receipt-pinned reporting, and the one internal public-output
+  root binding. The former tracker package is deleted.
 
-The implemented workspace has 52 packages. The relevant configuration boundaries are:
+The implemented workspace has 51 packages. The relevant configuration boundaries are:
 
 | Package | Implementation lines | Direct dependents | Architectural role |
 |---|---:|---:|---|
@@ -224,8 +224,10 @@ indirection. Runtime config parsing validates internal references and redacts va
 Expected EVM chain id and Bitcoin network tag remain semantic config; they are checked against the
 live provider rather than copied into runtime source definitions.
 
-CLI `run start` and `run resume` select the file with `--runtime-config`, falling back to
-`MFM_RUNTIME_CONFIG_FILE`. REST live services use `MFM_RUNTIME_CONFIG_FILE`. Read-only CLI commands,
+CLI `run start` selects the file with `--runtime-config`, falling back to
+`MFM_RUNTIME_CONFIG_FILE`. Resume consults it only when verified history leaves a live source node
+pending; after all live collection nodes are terminal, it proceeds from retained evidence and the
+remaining non-live graph. REST live services use `MFM_RUNTIME_CONFIG_FILE`. Read-only CLI commands,
 REST startup, status, stream inspection, replay, and public-output rendering do not load it.
 
 App assembly builds one `LiveTransportRuntime` shared by all registered live runner families. The
@@ -280,6 +282,12 @@ The dual-mainnet portfolio recipe now has one internal composition authority:
 No caller-authored child policy, count readiness, independent collector/report run, or
 latest-common-anchor selection remains in this workflow. The graph is not published as a portfolio
 entry point until the final public ingress cutover.
+
+The complete internal graph is built only by `mfm-op-portfolio-snapshot` through
+`portfolio_snapshot_program_draft` and `portfolio_snapshot_program_launch_plan`. Both helpers
+exercise the same root: one normalized config, collection, exact receipt, report, and one
+`PortfolioPublicOutputs` binding. `mfm-app` supplies runners and certification descriptors but
+does not publish `mfm.portfolio/snapshot@1` at this stage.
 
 Setup and runtime files are now distinct: setup TOML is published explicitly, request JSON pins
 catalog identities, and only named local setup/runtime files are ignored by the repository.
@@ -929,71 +937,24 @@ An incompatible request or builder change creates another exact entry-point id. 
   file. Remove `mfm-evm-contract-config` in the same manner. Do not keep facade crates or deprecated
   re-exports.
 
-The pre-cutover baseline was 53 workspace packages and 411 unique direct workspace dependency
-pairs. The implemented additions are `mfm-catalog-model` and one collect-then-report operation; the
-implemented deletions are the three intermediary config crates above, for a final package count of
-52.
-Most EVM config implementation moves rather than disappears, so LOC reduction must not be claimed
-for that ownership correction. The authored/portfolio representations, registry/format/latest
-resolution, duplicate evidence paths, and compatibility-only tests produced a meaningful net
-reduction.
+The pre-cutover baseline was 53 workspace packages. The current tree has 51: the three
+intermediary config crates and the tracker operation package are deleted, while the former
+collector/report composition is renamed in place as `mfm-op-portfolio-snapshot`.
 
-#### Verified implementation metrics
+#### Current ownership summary
 
-Measured from the planning baseline commit `bacbb530` and the final cutover tree, using the same
-package, dependency-pair, tracked-Rust-line, and top-level-public-declaration commands:
+- `mfm-op-portfolio-snapshot` is the sole portfolio-operation owner. It depends on the family
+  collector operations, portfolio model/state contracts, and typed program/certification support
+  needed to build the complete internal objective.
+- `mfm-app` depends on that operation only to register certified descriptors and its pure receipt
+  runner; it does not own portfolio graph planning or public portfolio ingress yet.
+- Integration tests may depend directly on the snapshot operation to exercise the exact production
+  draft and launch helper.
 
-| Metric | Baseline | Final | Delta |
-|---|---:|---:|---:|
-| Workspace packages | 53 | 52 | -1 |
-| Unique direct workspace dependency pairs | 411 | 410 | -1 |
-| Tracked Rust lines | 214,392 | 212,999 | -1,393 |
-| Top-level public declarations under `crates` and `bin` | 1,754 | 1,744 | -10 |
-
-The 38 direct workspace dependency pairs present only in the final tree are intentional ownership
-edges, grouped by their reason:
-
-- CLI test fixtures retain operation-owned planning dependencies: `mfm -> mfm-op-btc-collectors`,
-  `mfm -> mfm-op-evm-collectors`, and `mfm -> mfm-op-portfolio-tracker`.
-- App launch assembly owns catalog requests, composed planning, and the concrete store:
-  `mfm-app -> mfm-catalog-model`, `mfm-app -> mfm-op-portfolio-collect-report`, and
-  `mfm-app -> mfm-storage-postgres`.
-- The catalog identity crate uses kernel identities, the typed config contract, and its canonical
-  serialization test: `mfm-catalog-model -> mfm-canonical`, `mfm-catalog-model -> mfm-ids`, and
-  `mfm-catalog-model -> mfm-values`.
-- Integration fixtures use the operation/state/store/value owners directly for catalog-seeded
-  parity: `mfm-integration-tests -> mfm-op-evm-collectors`,
-  `mfm-integration-tests -> mfm-op-portfolio-tracker`,
-  `mfm-integration-tests -> mfm-state-evm-contracts`,
-  `mfm-integration-tests -> mfm-storage-postgres`, and `mfm-integration-tests -> mfm-values`.
-- The composed operation owns its typed graph and request/config boundary:
-  `mfm-op-portfolio-collect-report -> mfm-canonical`,
-  `mfm-op-portfolio-collect-report -> mfm-capabilities`,
-  `mfm-op-portfolio-collect-report -> mfm-catalog-model`,
-  `mfm-op-portfolio-collect-report -> mfm-certify`,
-  `mfm-op-portfolio-collect-report -> mfm-effects`,
-  `mfm-op-portfolio-collect-report -> mfm-ids`,
-  `mfm-op-portfolio-collect-report -> mfm-op-btc-collectors`,
-  `mfm-op-portfolio-collect-report -> mfm-op-evm-collectors`,
-  `mfm-op-portfolio-collect-report -> mfm-op-portfolio-tracker`,
-  `mfm-op-portfolio-collect-report -> mfm-portfolio-model`,
-  `mfm-op-portfolio-collect-report -> mfm-program`,
-  `mfm-op-portfolio-collect-report -> mfm-program-derive`,
-  `mfm-op-portfolio-collect-report -> mfm-state-portfolio`, and
-  `mfm-op-portfolio-collect-report -> mfm-values`.
-- The moved EVM action/state owner uses the EVM core scalar and transaction primitives:
-  `mfm-state-evm-contracts -> mfm-evm-core`.
-- The renamed PostgreSQL package preserves the existing store implementation's kernel and test
-  support edges under its new owner: `mfm-storage-postgres -> mfm-canonical`,
-  `mfm-storage-postgres -> mfm-capabilities`, `mfm-storage-postgres -> mfm-certify`,
-  `mfm-storage-postgres -> mfm-events`, `mfm-storage-postgres -> mfm-facts`,
-  `mfm-storage-postgres -> mfm-ids`, `mfm-storage-postgres -> mfm-manual-auth`,
-  `mfm-storage-postgres -> mfm-spec`, and `mfm-storage-postgres -> mfm-store`.
-
-The final measured pair count is lower because the deleted config crates and their consumers remove
-more pairs than these additions introduce. `registry_digest` occurrences that remain belong to the
-kernel certification registry certificate; launch evidence itself contains only the exact entry-point
-id and catalog sources required by this RFC.
+The crate budget remains strict: no new crate per catalog resource family; concrete resource and
+complete config types remain in their existing model, state, or operation owners; the closed
+setup-import enum remains private to app input assembly; and any additional config crate must
+identify a stable boundary that cannot live with its semantic owner.
 
 The crate budget is strict: no new crate per catalog resource family; concrete resource and complete
 config types remain in their existing model, state, or operation owners; the closed setup-import
@@ -1089,9 +1050,9 @@ The simplified design preserves the essential properties:
   facades. `mfm-runtime-config` remains as the process-local runtime/security boundary.
 - Explicit typed schema migrations append new values and are setup-time tools. They are not generic
   launch-time registration or fallback machinery.
-- The first higher-level workflow is collect-then-report, proving that shared catalog resources can
-  build one composed typed graph while the existing portfolio snapshot entry point remains
-  report-only.
+- The first higher-level workflow is the complete internal portfolio snapshot objective. It proves
+  that one normalized portfolio config can build one composed typed graph while public portfolio
+  ingress remains deliberately unpublished.
 
 Future runtime-profile management, nested values, mutable environment pointers, generic schema
 export, REST onboarding, and fleet controls remain separate proposals. They are not blockers for
@@ -1116,11 +1077,10 @@ The implemented state above is grounded in these repository surfaces:
 - `bin/cli/src/commands/ops.rs`: current public discovery surface;
 - `bin/cli/src/commands/setup.rs`: setup import/list/export commands;
 - `bin/rest-api/src/lib.rs`: strict REST request envelope and launch flow;
-- `crates/portfolio/model` and `crates/ops/portfolio-tracker-op`: direct portfolio config ownership;
+- `crates/portfolio/model`: direct portfolio config ownership;
 - `crates/ops/btc-collectors-op`: BTC collector config;
 - `crates/ops/evm-collectors-op`: EVM collector config;
 - `crates/states/evm-contracts` and `crates/ops/evm-contract-lifecycle-op`: EVM config ownership;
-- `crates/ops/portfolio-collect-report-op`: composed collector/report graph and relational builder;
-- `docs/portfolio-collect-then-report.md`: catalog-backed composed and independent recipes;
+- `crates/ops/portfolio-snapshot-op`: complete collection, receipt-pinned report, and root graph;
 - `docs/evm-rpc-routing.md` and `docs/btc-rpc-routing.md`: runtime routing contracts;
 - `.gitignore` and `nixfied.nix`: explicit local setup/runtime ignores and generated runtime path.

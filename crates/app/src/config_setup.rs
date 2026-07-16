@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use mfm_catalog_model::CatalogName;
 use mfm_evm_contract_model::EvmContractContext;
 use mfm_ids::{ContentDigest, SchemaId};
-use mfm_op_portfolio_tracker::PortfolioConfig;
+use mfm_portfolio_model::portfolio::PortfolioConfig;
 use mfm_state_evm_contracts::{
     ConfigureAction, DeployAction, ImportConfiguredSpec, ImportDeployedSpec, ValidateAction,
 };

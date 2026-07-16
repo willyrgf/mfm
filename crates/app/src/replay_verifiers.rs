@@ -132,8 +132,7 @@ fn replay_registration_error(error: impl std::fmt::Display) -> mfm_replay::v1::R
 }
 
 fn verify_portfolio(broker: &ReplayBroker, _registry: &CertificationRegistry) -> Result<()> {
-    let receipt =
-        mfm_op_portfolio_collect_report::verify_portfolio_collection_receipt_replay(broker)?;
+    let receipt = mfm_op_portfolio_snapshot::verify_portfolio_collection_receipt_replay(broker)?;
     mfm_adapters_portfolio::verify_portfolio_replay(broker, &receipt)
 }
 

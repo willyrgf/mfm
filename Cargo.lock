@@ -2084,7 +2084,6 @@ dependencies = [
  "mfm-manual-auth",
  "mfm-op-btc-collectors",
  "mfm-op-evm-collectors",
- "mfm-op-portfolio-tracker",
  "mfm-op-proof",
  "mfm-program",
  "mfm-rest-api",
@@ -2252,8 +2251,7 @@ dependencies = [
  "mfm-op-btc-collectors",
  "mfm-op-evm-collectors",
  "mfm-op-evm-contract-lifecycle",
- "mfm-op-portfolio-collect-report",
- "mfm-op-portfolio-tracker",
+ "mfm-op-portfolio-snapshot",
  "mfm-op-proof",
  "mfm-portfolio-model",
  "mfm-program",
@@ -2511,8 +2509,7 @@ dependencies = [
  "mfm-ids",
  "mfm-op-btc-collectors",
  "mfm-op-evm-collectors",
- "mfm-op-portfolio-collect-report",
- "mfm-op-portfolio-tracker",
+ "mfm-op-portfolio-snapshot",
  "mfm-portfolio-model",
  "mfm-program",
  "mfm-rest-api",
@@ -2597,7 +2594,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-op-portfolio-collect-report"
+name = "mfm-op-portfolio-snapshot"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
@@ -2609,7 +2606,6 @@ dependencies = [
  "mfm-ids",
  "mfm-op-btc-collectors",
  "mfm-op-evm-collectors",
- "mfm-op-portfolio-tracker",
  "mfm-portfolio-model",
  "mfm-program",
  "mfm-program-derive",
@@ -2622,21 +2618,6 @@ dependencies = [
  "mfm-values",
  "serde",
  "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "mfm-op-portfolio-tracker"
-version = "0.1.0"
-dependencies = [
- "mfm-canonical",
- "mfm-certify",
- "mfm-ids",
- "mfm-portfolio-model",
- "mfm-program",
- "mfm-state-portfolio",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]

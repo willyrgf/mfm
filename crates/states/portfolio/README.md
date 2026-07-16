@@ -1,6 +1,6 @@
 # mfm-state-portfolio
 
-Typed portfolio state contracts for certified **fact-backed, report-only** portfolio snapshots.
+Typed portfolio state contracts for certified **fact-backed, receipt-pinned** portfolio snapshots.
 
 This crate owns portfolio state specs, typed receipt/selection inputs, and hard-fail
 assemble/report projection. Runtime capability execution is supplied by typed runners in
@@ -32,5 +32,6 @@ EVM native, and EVM ERC-20 facts are supported; successful zero balances remain 
 There is no live pin/observe path, no soft-success `errors` / `error_count`, and no view-dependent
 valuation on the cutover surface.
 
-The crate does not own store commits, runner registration, CLI/REST rendering, or collector source
-IO (those live in family collector ops).
+The crate does not own store commits, runner registration, CLI/REST rendering, collector source
+IO, or the complete graph/root binding (those live in adapters, family collector operations, and
+`mfm-op-portfolio-snapshot`).

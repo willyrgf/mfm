@@ -13,9 +13,9 @@ Normative architecture references:
 
 ## Runtime Config File
 
-Live CLI start/resume accepts `--runtime-config <PATH>`. CLI and REST also read
-`MFM_RUNTIME_CONFIG_FILE` when no explicit path is provided. Read-only commands and REST startup do
-not load this file.
+Live CLI start accepts `--runtime-config <PATH>`. A resume needs it only when verified history still
+has a pending Bitcoin live-source node. CLI and REST also read `MFM_RUNTIME_CONFIG_FILE` when no
+explicit path is provided. Read-only commands and REST startup do not load this file.
 
 Example TOML:
 

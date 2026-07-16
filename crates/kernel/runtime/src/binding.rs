@@ -209,6 +209,31 @@ impl BoundRuntimeContext {
         Ok(())
     }
 
+    /// Validates process-local ingress only for domain nodes that may still execute.
+    ///
+    /// Admission validates every domain node before persisting `RunAdmitted`. On recovery, a
+    /// completed node cannot regain work, so revalidating its process-local provider would make
+    /// later deterministic work depend on configuration it no longer needs. Pending domain nodes
+    /// retain the same ingress check before the scheduler acquires a claim.
+    pub(crate) fn validate_pending_launch_ingress(
+        &self,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &mfm_ids::RunId,
+        projection: &mfm_store::v1::ProjectionSnapshot,
+        launch: &RunLaunchEvidence,
+    ) -> Result<()> {
+        for node in runtime_spec.executable_nodes() {
+            if node.framework.is_none()
+                && projection
+                    .cell_terminal_for_run(run_id, &node.output_cell)
+                    .is_none()
+            {
+                self.validate_node_ingress(runtime_spec, node, launch)?;
+            }
+        }
+        Ok(())
+    }
+
     fn require_node_authority(&self, node: &spec::NodeSpec) -> Result<()> {
         self.runner_binding_for(node)?;
         let Some(capabilities) = self.capability_authority_for(&node.node_id) else {

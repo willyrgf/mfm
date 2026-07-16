@@ -181,7 +181,7 @@ fn category_dependency_rules_reject_forbidden_edges() {
         ),
         (
             "operation to runtime config",
-            "mfm-op-portfolio-tracker",
+            "mfm-op-portfolio-snapshot",
             "mfm-runtime-config",
             "crates/runtime-config",
             "operation",
@@ -345,8 +345,8 @@ fn config_catalog_ownership_and_dependency_boundaries_are_explicit() {
     let packages = workspace_packages(&metadata, &root).expect("workspace package categories");
     assert_eq!(
         packages.len(),
-        52,
-        "the reviewed catalog cutover has 52 packages"
+        51,
+        "the consolidated portfolio snapshot workspace has 51 packages"
     );
 
     for removed in [
@@ -354,12 +354,19 @@ fn config_catalog_ownership_and_dependency_boundaries_are_explicit() {
         "mfm-portfolio-config",
         "mfm-evm-contract-config",
         "mfm-stream-store-postgres",
+        "mfm-op-portfolio-tracker",
     ] {
         assert!(
             packages.iter().all(|package| package.name != removed),
             "removed package remains in workspace metadata: {removed}"
         );
     }
+    assert!(
+        packages
+            .iter()
+            .any(|package| package.name == "mfm-op-portfolio-snapshot"),
+        "the complete portfolio snapshot operation must remain a workspace package"
+    );
 
     let by_name = packages
         .iter()
@@ -532,7 +539,7 @@ fn config_catalog_source_boundaries_are_enforced() {
     }
 
     let composed_source =
-        fs::read_to_string(root.join("crates/ops/portfolio-collect-report-op/src/lib.rs"))
+        fs::read_to_string(root.join("crates/ops/portfolio-snapshot-op/src/lib.rs"))
             .expect("read composed operation source");
     assert!(
         !composed_source.contains("CatalogRef"),
@@ -547,8 +554,12 @@ fn config_catalog_source_boundaries_are_enforced() {
         "composition must own its operation-local exact receipt fan-in state"
     );
     assert!(
-        !composed_source.contains("CollectThenReportReadiness"),
-        "count readiness must not survive receipt-pinned portfolio composition"
+        composed_source.contains("struct PortfolioSnapshotOperation"),
+        "one operation must own the complete portfolio snapshot objective"
+    );
+    assert!(
+        composed_source.contains("portfolio_snapshot_program_draft"),
+        "the snapshot operation must expose its single production root-draft helper"
     );
     let portfolio_state_root = root.join("crates/states/portfolio/src");
     for path in sources

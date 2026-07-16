@@ -64,13 +64,13 @@ pub use public_facts::{
 pub(crate) use public_facts::{public_ref_id, query_public_facts, AppFactQueryRow};
 
 mod btc_collector;
-mod composition;
 mod config_setup;
 mod entry_point;
 mod evm_collector;
 mod evm_contracts;
 mod fact_index;
 mod live_transports;
+mod portfolio_snapshot;
 mod public_facts;
 mod replay_verifiers;
 #[path = "responses.rs"]
@@ -222,7 +222,7 @@ pub async fn connect_production_run_read_services(
 /// Builds the production typed runner registry for this process.
 ///
 /// Framework public-output render nodes are resolved by `mfm-runtime` as built-ins. Domain runners
-/// register here as certified typed descriptor bindings. Portfolio report and BTC collectors require
+/// register here as certified typed descriptor bindings. Portfolio snapshots and BTC collectors require
 /// an explicit Platform/Control [`mfm_fact_capabilities::FactIndexReadProvider`] — production wiring
 /// must supply the Postgres implementation from [`production_fact_index_read_provider`].
 pub fn production_runner_registry(
@@ -247,7 +247,7 @@ pub fn production_runner_registry(
         fact_index.clone(),
     );
     mfm_adapters_portfolio::register_portfolio_runners(&mut registry, portfolio_capabilities)?;
-    composition::register_collect_then_report_runners(&mut registry, artifacts.clone())?;
+    portfolio_snapshot::register_portfolio_snapshot_runners(&mut registry, artifacts.clone())?;
     let source_run_registry = production_certification_registry()?;
     evm_contracts::register_contract_lifecycle_runners(
         &mut registry,
@@ -358,8 +358,7 @@ pub fn production_certification_registry() -> Result<CertificationRegistry, AppE
     mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
         &mut registry,
     )?;
-    mfm_op_portfolio_tracker::register_portfolio_certification_descriptors(&mut registry)?;
-    mfm_op_portfolio_collect_report::register_collect_then_report_certification_descriptors(
+    mfm_op_portfolio_snapshot::register_portfolio_snapshot_certification_descriptors(
         &mut registry,
     )?;
     mfm_op_proof::register_proof_certification_descriptors(&mut registry)?;

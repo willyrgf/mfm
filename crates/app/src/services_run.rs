@@ -273,7 +273,12 @@ where
         )
         .await?;
         self.scheduler
-            .validate_admitted_run_ingress(runtime_spec, &launch_evidence)?;
+            .validate_admitted_run_ingress_for_pending_nodes(
+                runtime_spec,
+                run_id,
+                context.read.view().projection_snapshot(),
+                &launch_evidence,
+            )?;
         let mut lease = match self
             .acquire_execution_claim_for_drive(&execution_scope, run_id)
             .await?

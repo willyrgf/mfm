@@ -1,9 +1,21 @@
 #![warn(missing_docs)]
-//! Deterministic portfolio collection and receipt-pinned report composition.
+//! Deterministic end-to-end portfolio snapshot composition.
 //!
 //! The operation accepts exactly one normalized [`PortfolioConfig`] authority. It compiles the
 //! explicit logical wallet-to-symbol demand into family-specific physical work, then proves that
-//! every completed family receipt matches that manifest before report selection may run.
+//! every completed family receipt matches that manifest before receipt-pinned selection, snapshot
+//! assembly, and report projection may run.
+//!
+//! # Examples
+//!
+//! ```no_run
+//! use mfm_op_portfolio_snapshot::portfolio_snapshot_program_draft;
+//! use mfm_portfolio_model::portfolio::PortfolioConfig;
+//!
+//! fn draft(config: PortfolioConfig) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
+//!     portfolio_snapshot_program_draft(config)
+//! }
+//! ```
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -16,20 +28,27 @@ use mfm_op_evm_collectors::{
     EvmErc20BalanceSourceConfig, EvmNetworkCollectionConfig, EvmNetworkCollectionOperation,
     EvmNetworkCollectionReceipt,
 };
-use mfm_op_portfolio_tracker::{PortfolioOperationOutputs, PortfolioTrackerWorkflowOperation};
+use mfm_portfolio_model::domain_key::{
+    HoldingsDomainKey, ReportDomainKey, SubjectDomainKey, ValuationDomainKey,
+};
 use mfm_portfolio_model::ids::NormalizedEvmAddress;
 use mfm_portfolio_model::portfolio::{
     ExecutionAnchor, NetworkConfig, NetworkPin, PortfolioConfig, ValidatedPortfolioConfig,
 };
 use mfm_portfolio_model::symbol::HoldingSourceConfig;
 use mfm_program::{
-    BridgeKey, BridgePolicy, NoContext, Operation, OperationExpansion, OperationKey, PureState,
-    ScopeKey, StateError, StateResult, StateSpec, ValidatedConfig,
+    build_root_with_registries, BridgeKey, BridgePolicy, NoContext, Operation, OperationExpansion,
+    OperationKey, PublicOutputKey, PureState, RootBuilder, ScopeKey, StateError, StateResult,
+    StateSpec, TypedProgramLaunchPlan, ValidatedConfig,
 };
-use mfm_program_derive::{MfmConfig, StateInput};
+use mfm_program_derive::{MfmConfig, OperationOutput, StateInput};
 use mfm_state_portfolio::{
+    AssembleSnapshotConfig, AssembleSnapshotInputHandles, AssembleSnapshotState,
     CollectedHoldingReceipt, HoldingManifestEntry, HoldingRequirementKey, HoldingSourceKey,
     PortfolioCollectionReceipt, PortfolioHoldingErrorCode, PortfolioHoldingSelectionError,
+    PortfolioPublicOutputs, ProjectReportConfig, ProjectReportInputHandles, ProjectReportState,
+    ResolveSubjectsConfig, ResolveSubjectsState, ResolveValuationsConfig, ResolveValuationsState,
+    SelectHoldingsConfig, SelectHoldingsInputHandles, SelectHoldingsState,
 };
 use mfm_values::ConfigError;
 use serde::{Deserialize, Serialize};
@@ -39,8 +58,11 @@ mod replay;
 pub use self::replay::verify_portfolio_collection_receipt_replay;
 
 const OP_NAMESPACE: &str = "mfm.portfolio";
-const OP_KIND_NAME: &str = "collect_then_report";
-const OP_VERSION: &str = "mfm.portfolio.operation.collect_then_report.v1";
+const OP_KIND_NAME: &str = "snapshot";
+const OP_VERSION: &str = "mfm.portfolio.operation.snapshot.v1";
+const ROOT_SCOPE: &str = "portfolio_snapshot";
+const OPERATION_KEY: &str = "portfolio_snapshot";
+const PUBLIC_OUTPUT_KEY: &str = "portfolio_snapshot";
 
 /// Certified manifest config for the operation-local portfolio receipt assembler.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
@@ -345,20 +367,32 @@ fn receipt_state_error(
     )
 }
 
-/// Typed internal collection/report operation.
-pub struct CollectThenReportOperation;
+/// Internal handles produced by the complete portfolio snapshot operation.
+#[derive(OperationOutput)]
+#[mfm(schema = "mfm.portfolio.operation_outputs.snapshot")]
+pub struct PortfolioSnapshotOperationOutputs<'program, 'scope> {
+    /// Fully assembled portfolio snapshot.
+    pub snapshot:
+        mfm_program::Handle<'program, 'scope, mfm_portfolio_model::portfolio::PortfolioSnapshot>,
+    /// Public report projection derived from the snapshot.
+    pub report:
+        mfm_program::Handle<'program, 'scope, mfm_portfolio_model::portfolio::PortfolioReport>,
+}
 
-impl Operation for CollectThenReportOperation {
+/// Deterministic operation for one complete receipt-pinned portfolio snapshot.
+pub struct PortfolioSnapshotOperation;
+
+impl Operation for PortfolioSnapshotOperation {
     type Config = PortfolioConfig;
     type Input<'program, 'scope> = ();
-    type Output<'program, 'scope> = PortfolioOperationOutputs<'program, 'scope>;
+    type Output<'program, 'scope> = PortfolioSnapshotOperationOutputs<'program, 'scope>;
 
     fn kind() -> mfm_program::Result<OperationKind> {
         OperationKind::new(
             OP_NAMESPACE,
             OP_KIND_NAME,
             DigestAlgorithm::Sha256JcsV1,
-            mfm_canonical::sha256_digest_bytes(b"mfm.portfolio.operation:collect_then_report"),
+            mfm_canonical::sha256_digest_bytes(b"mfm.portfolio.operation:snapshot"),
         )
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
     }
@@ -369,7 +403,7 @@ impl Operation for CollectThenReportOperation {
     }
 
     fn name() -> &'static str {
-        "mfm.portfolio.collect_then_report"
+        "mfm.portfolio.snapshot"
     }
 
     fn expand<'program, 'scope>(
@@ -444,13 +478,124 @@ impl Operation for CollectThenReportOperation {
                 evm_receipts,
             },
         )?;
-        builder.call::<PortfolioTrackerWorkflowOperation, _>(
-            OperationKey::new("portfolio_report")?,
-            PortfolioTrackerWorkflowOperation,
-            portfolio,
-            receipt,
-        )
+        expand_receipt_pinned_report(builder, portfolio, receipt)
     }
+}
+
+/// Expands the report half of the portfolio objective after exact collection receipt assembly.
+///
+/// This remains private to the snapshot operation: callers may only plan the complete collection
+/// and reporting objective from one normalized portfolio config.
+fn expand_receipt_pinned_report<'program, 'scope>(
+    builder: &mut OperationExpansion<'program, 'scope>,
+    portfolio: PortfolioConfig,
+    receipt: mfm_program::Handle<'program, 'scope, PortfolioCollectionReceipt>,
+) -> mfm_program::Result<PortfolioSnapshotOperationOutputs<'program, 'scope>> {
+    let normalized = ValidatedPortfolioConfig::new(portfolio.clone())
+        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?
+        .into_config();
+    if normalized != portfolio {
+        return Err(mfm_program::PlanError::Key(
+            "portfolio snapshot config must be normalized before expansion".to_owned(),
+        ));
+    }
+
+    let subject_key = SubjectDomainKey::new("portfolio_subjects")
+        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
+    let holdings_key = HoldingsDomainKey::new("portfolio_holdings")
+        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
+    let valuation_key = ValuationDomainKey::new("portfolio_valuations")
+        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
+    let report_key = ReportDomainKey::new("portfolio_report")
+        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
+
+    let subjects = builder.state_with_domain_keys::<ResolveSubjectsState, _, _>(
+        mfm_program::StateKey::new("resolve_subjects")?,
+        NoContext,
+        ResolveSubjectsConfig::new(portfolio.clone())
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
+        (),
+        vec![subject_key],
+    )?;
+    let holdings = builder.state_with_domain_keys::<SelectHoldingsState, _, _>(
+        mfm_program::StateKey::new("select_holdings")?,
+        NoContext,
+        SelectHoldingsConfig::new(portfolio.clone())
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
+        SelectHoldingsInputHandles {
+            receipt: receipt.clone(),
+        },
+        vec![holdings_key],
+    )?;
+    let valuations = builder.state_with_domain_keys::<ResolveValuationsState, _, _>(
+        mfm_program::StateKey::new("resolve_valuations")?,
+        NoContext,
+        ResolveValuationsConfig::new(portfolio.clone())
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
+        (),
+        vec![valuation_key],
+    )?;
+    let snapshot = builder.state::<AssembleSnapshotState, _>(
+        mfm_program::StateKey::new("assemble_snapshot")?,
+        NoContext,
+        AssembleSnapshotConfig::new(2, portfolio.clone())
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
+        AssembleSnapshotInputHandles {
+            subjects,
+            holdings,
+            valuations,
+            receipt,
+        },
+    )?;
+    let report = builder.state_with_domain_keys::<ProjectReportState, _, _>(
+        mfm_program::StateKey::new("project_report")?,
+        NoContext,
+        ProjectReportConfig::new(2)
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
+        ProjectReportInputHandles {
+            snapshot: snapshot.clone(),
+        },
+        vec![report_key],
+    )?;
+
+    Ok(PortfolioSnapshotOperationOutputs { snapshot, report })
+}
+
+/// Builds one complete typed portfolio snapshot program draft.
+///
+/// The draft binds exactly one [`PortfolioPublicOutputs`] value. It intentionally remains an
+/// internal operation helper until application ingress publishes the portfolio snapshot entry
+/// point in the later ingress phase.
+pub fn portfolio_snapshot_program_draft(
+    config: PortfolioConfig,
+) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
+    build_root_with_registries(
+        ScopeKey::new(ROOT_SCOPE)?,
+        portfolio_snapshot_state_registry()?,
+        portfolio_snapshot_operation_registry()?,
+        |root: &mut RootBuilder<'_, '_>| {
+            let output = root.scope().call::<PortfolioSnapshotOperation, _>(
+                OperationKey::new(OPERATION_KEY)?,
+                PortfolioSnapshotOperation,
+                config,
+                (),
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new(PUBLIC_OUTPUT_KEY)?,
+                &PortfolioPublicOutputs {
+                    snapshot: output.snapshot,
+                    report: output.report,
+                },
+            )
+        },
+    )
+}
+
+/// Builds the launch plan for one complete typed portfolio snapshot program.
+pub fn portfolio_snapshot_program_launch_plan(
+    config: PortfolioConfig,
+) -> mfm_program::Result<TypedProgramLaunchPlan> {
+    TypedProgramLaunchPlan::from_draft(portfolio_snapshot_program_draft(config)?)
 }
 
 struct CompiledCollection {
@@ -634,9 +779,9 @@ fn compile_collection(portfolio: &PortfolioConfig) -> Result<CompiledCollection,
 }
 
 mfm_certify::define_program_descriptor_registry! {
-    state_registry: pub collect_then_report_state_registry,
-    operation_registry: pub collect_then_report_operation_registry,
-    certification: pub register_collect_then_report_certification_descriptors,
+    state_registry: pub portfolio_snapshot_state_registry,
+    operation_registry: pub portfolio_snapshot_operation_registry,
+    certification: pub register_portfolio_snapshot_certification_descriptors,
     states: [
         AssemblePortfolioCollectionReceiptState,
         mfm_state_portfolio::ResolveSubjectsState,
@@ -659,13 +804,12 @@ mfm_certify::define_program_descriptor_registry! {
         mfm_op_evm_collectors::AssembleEvmNetworkCollectionReceiptState,
     ],
     operations: [
-        CollectThenReportOperation,
+        PortfolioSnapshotOperation,
         BtcNetworkCollectionOperation,
         mfm_op_btc_collectors::BtcNativeBalancesAtAnchorOperation,
         EvmNetworkCollectionOperation,
         mfm_op_evm_collectors::EvmNativeBalancesAtAnchorOperation,
         mfm_op_evm_collectors::EvmErc20BalancesAtAnchorOperation,
-        PortfolioTrackerWorkflowOperation,
     ],
 }
 
@@ -707,6 +851,42 @@ mod tests {
         assert_eq!(compiled.evm_collections.len(), 1);
         assert!(compiled.evm_collections[0].native_accounts.is_empty());
         assert_eq!(compiled.evm_collections[0].erc20_sources.len(), 1);
+    }
+
+    #[test]
+    fn snapshot_root_owns_the_complete_objective_and_one_public_output_binding() {
+        let config = ValidatedPortfolioConfig::new(portfolio_config(true, true, true))
+            .expect("normalize portfolio")
+            .into_config();
+        let first = portfolio_snapshot_program_draft(config.clone()).expect("first snapshot draft");
+        let second =
+            portfolio_snapshot_program_draft(config.clone()).expect("second snapshot draft");
+
+        assert_eq!(first, second, "snapshot expansion must be deterministic");
+        assert_eq!(first.root_key().as_str(), ROOT_SCOPE);
+        assert_eq!(first.public_output_spec().key().as_str(), PUBLIC_OUTPUT_KEY);
+        assert_eq!(
+            first
+                .public_output_spec()
+                .outputs()
+                .iter()
+                .map(|output| output.public_field_path().as_str())
+                .collect::<Vec<_>>(),
+            ["snapshot", "report"]
+        );
+        assert!(first
+            .operation_lineage()
+            .iter()
+            .any(|operation| operation.operation_name == "mfm.portfolio.snapshot"));
+        assert!(first.operation_lineage().iter().all(|operation| {
+            !operation.operation_name.contains("tracker")
+                && !operation.operation_name.contains("collect_then_report")
+        }));
+
+        mfm_certify::certify_program_draft(&first).expect("snapshot draft certifies");
+        let launch = portfolio_snapshot_program_launch_plan(config).expect("snapshot launch plan");
+        assert_eq!(launch.draft, first);
+        assert!(!launch.config_material.is_empty());
     }
 
     #[test]

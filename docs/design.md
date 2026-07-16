@@ -191,9 +191,10 @@ future implementation improvement.
 `AssemblePortfolioCollectionReceiptState` is also an accepted placement decision. It remains an
 operation-local pure fan-in state because its semantics are specific to the composed workflow's
 sorted family receipts and exact logical manifest. The app registers its runner, while the
-operation owns the receipt node and the one-parent graph topology. It is not a general portfolio
-state or an excuse for app-owned workflow behavior. The receipt, rather than a count, is the
-authority consumed by holding selection and snapshot assembly.
+`mfm-op-portfolio-snapshot` operation owns the receipt node, complete graph topology, and one
+`PortfolioPublicOutputs` root binding. It is not a general portfolio state or an excuse for
+app-owned workflow behavior. The receipt, rather than a count, is the authority consumed by
+holding selection and snapshot assembly.
 
 ## Typed Program Authoring
 
@@ -267,6 +268,11 @@ certification/replay authority; they do not parse live runtime config, construct
 or construct signer providers. Malformed or missing live capability wiring can block live
 start/resume when that run needs it, but it must not affect evidence-only reads.
 
+Initial admission validates ingress for every domain node. Resume revalidates process-local live
+capability only for nonterminal domain nodes that can still execute in the verified stream; a
+terminal source read must not make downstream deterministic work depend on an unavailable runtime
+configuration.
+
 Runtime admission binds each certified capability descriptor to a registered non-secret
 implementation identity before the run can start or resume. Missing or mismatched implementation
 bindings are deployment/ingress failures, not semantic attempt outcomes.
@@ -282,8 +288,8 @@ Replay and resume semantics follow the effect class:
 
 Portfolio holding intent is direct and aggregate-validated: each symbol is a `Native` source or an
 EVM `Erc20` source with a normalized non-zero contract address, and EVM native scale is owned by
-the semantic network. Collection and reporting remain internal while anchored source receipts are
-being completed. Public-facts CLI/REST is not portfolio selection authority.
+the semantic network. The complete collection-to-report snapshot graph remains internal until its
+public ingress is published. Public-facts CLI/REST is not portfolio selection authority.
 
 ## Certified Saga Semantics
 

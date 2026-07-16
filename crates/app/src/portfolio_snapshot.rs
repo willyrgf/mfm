@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use mfm_op_portfolio_collect_report::{
+use mfm_op_portfolio_snapshot::{
     assemble_portfolio_collection_receipt, AssemblePortfolioCollectionReceiptConfig,
     AssemblePortfolioCollectionReceiptInput, AssemblePortfolioCollectionReceiptState,
 };
@@ -13,14 +13,14 @@ use mfm_store::v1 as store;
 
 const PURE_FACTORY: &str = "pure";
 
-pub(crate) fn register_collect_then_report_runners(
+pub(crate) fn register_portfolio_snapshot_runners(
     registry: &mut ErasedRunnerRegistry,
     artifacts: Arc<dyn store::RetainedArtifactReadProvider>,
 ) -> mfm_runtime::Result<()> {
     let mut registrations = RunnerRegistrationBuilder::new(registry);
     let executable_identities = RunnerExecutableIdentityTemplate::new(
         "mfm-app",
-        "portfolio-collect-report",
+        "portfolio-snapshot",
         env!("CARGO_PKG_VERSION"),
     )?;
     let pure_factory =

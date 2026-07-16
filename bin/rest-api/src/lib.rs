@@ -200,7 +200,7 @@ pub struct AppState<S = PostgresStore> {
     pub catalog_store: Option<PostgresStore>,
     /// Optional runtime configuration file path for live capability-backed runs.
     pub runtime_config_path: Option<PathBuf>,
-    /// Platform/Control fact-index used by portfolio report and collector runners.
+    /// Platform/Control fact-index used by portfolio snapshot and collector runners.
     pub fact_index: Arc<dyn mfm_app::FactIndexReadProvider>,
 }
 

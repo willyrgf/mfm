@@ -120,6 +120,22 @@ impl SerialTypedScheduler {
         bound_context.validate_launch_ingress(runtime_spec, evidence)
     }
 
+    /// Validates resume ingress for domain nodes whose output is not terminal in verified history.
+    ///
+    /// The original admission validates every domain node. Recovery only needs process-local
+    /// capability for work that can still execute; completed nodes must not make later
+    /// deterministic work depend on removed runtime configuration.
+    pub fn validate_admitted_run_ingress_for_pending_nodes(
+        &self,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        projection: &store::ProjectionSnapshot,
+        evidence: &RunLaunchEvidence,
+    ) -> Result<()> {
+        let bound_context = self.run_contexts.load_bound_context(runtime_spec)?;
+        bound_context.validate_pending_launch_ingress(runtime_spec, run_id, projection, evidence)
+    }
+
     /// Appends the prepared typed admission commit through an async typed store.
     pub async fn start_run<S: store::RunEventStore + ?Sized>(
         &self,

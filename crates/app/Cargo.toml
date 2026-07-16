@@ -37,8 +37,8 @@ mfm-ids = { path = "../kernel/ids" }
 mfm-op-btc-collectors = { path = "../ops/btc-collectors-op" }
 mfm-op-evm-collectors = { path = "../ops/evm-collectors-op" }
 mfm-op-evm-contract-lifecycle = { path = "../ops/evm-contract-lifecycle-op" }
-mfm-op-portfolio-collect-report = { path = "../ops/portfolio-collect-report-op" }
-mfm-op-portfolio-tracker = { path = "../ops/portfolio-tracker-op" }
+mfm-op-portfolio-snapshot = { path = "../ops/portfolio-snapshot-op" }
+mfm-portfolio-model = { path = "../portfolio/model" }
 mfm-op-proof = { path = "../ops/proof-op" }
 mfm-program = { path = "../kernel/program" }
 mfm-replay = { path = "../kernel/replay" }

@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! Typed portfolio-domain state contracts for fact-backed report-only snapshots.
+//! Typed portfolio-domain state contracts for fact-backed receipt-pinned snapshots.
 //!
 //! After the collectors cutover, `portfolio_snapshot` is select-centric:
 //! `ResolveSubjects → SelectHoldings → ResolveValuations → AssembleSnapshot → ProjectReport`.
@@ -56,7 +56,7 @@ use mfm_portfolio_model::wallet::{WalletImplementationConfig, WalletSubjectKind}
 use mfm_program::{
     AdapterBindingSpec, NoContext, PureState, ReadState, StateError, StateResult, StateSpec,
 };
-use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs, StateInput};
+use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs, StateInput};
 use mfm_values::ConfigError;
 use serde::{Deserialize, Serialize};
 
@@ -214,20 +214,13 @@ pub struct ProjectReportInput {
     pub snapshot: PortfolioSnapshot,
 }
 
-/// Public output contract for portfolio workflows.
+/// Public output contract for the complete portfolio snapshot root.
+///
+/// It exposes only the snapshot and report projections; collection receipts, fact identities, and
+/// selection evidence remain internal certified graph values.
 #[derive(PublicOutputs)]
 #[mfm(schema = "mfm.portfolio.public_outputs")]
 pub struct PortfolioPublicOutputs<'program, 'scope> {
-    /// Public portfolio snapshot.
-    pub snapshot: mfm_program::Handle<'program, 'scope, PortfolioSnapshot>,
-    /// Projected portfolio report.
-    pub report: mfm_program::Handle<'program, 'scope, PortfolioReport>,
-}
-
-/// Operation output handles produced by the typed portfolio workflow.
-#[derive(OperationOutput)]
-#[mfm(schema = "mfm.portfolio.operation_outputs")]
-pub struct PortfolioOperationOutputs<'program, 'scope> {
     /// Public portfolio snapshot.
     pub snapshot: mfm_program::Handle<'program, 'scope, PortfolioSnapshot>,
     /// Projected portfolio report.

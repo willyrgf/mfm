@@ -37,7 +37,6 @@ mfm-manual-auth = { path = "../../crates/kernel/manual-auth" }
 mfm-op-btc-collectors = { path = "../../crates/ops/btc-collectors-op" }
 mfm-op-evm-collectors = { path = "../../crates/ops/evm-collectors-op" }
 mfm-op-proof = { path = "../../crates/ops/proof-op" }
-mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
 mfm-program = { path = "../../crates/kernel/program" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
 mfm-spec = { path = "../../crates/kernel/spec" }

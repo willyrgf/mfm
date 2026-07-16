@@ -1,6 +1,6 @@
 # mfm-adapters-portfolio
 
-Portfolio adapter runners for **fact-backed, report-only** portfolio snapshots.
+Portfolio adapter runners for **fact-backed, receipt-pinned** portfolio snapshots.
 
 This crate binds certified portfolio state descriptors to executable typed runners. It receives
 store-verified input evidence, artifact-read capabilities, and a Platform `FactIndexReadProvider`

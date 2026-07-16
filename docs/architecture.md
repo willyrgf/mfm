@@ -54,6 +54,12 @@ collector cutover. Internal network coordinators resolve one shared tip per requ
 emit family-specific, content-bound source receipts; only the complete snapshot graph may become a
 public objective.
 
+`mfm-op-portfolio-snapshot` owns that complete internal graph from normalized
+`PortfolioConfig` through family collection, exact receipt assembly, receipt-pinned selection,
+snapshot assembly, and report projection. Its one production draft helper binds exactly one
+`PortfolioPublicOutputs` root. The app registers the needed runners and certification descriptors
+but does not yet expose a portfolio snapshot entry point.
+
 ## Authority Contract
 
 The typed boundary separates data, evidence, authority, and implementation artifacts:
@@ -142,7 +148,8 @@ Two v1 decisions are deliberate:
   for sorted BTC/EVM family receipts and the compiled logical manifest, not reusable portfolio
   domain behavior. It proves exact source completion, number/hash anchors, admissible
   status/coverage, and fact-content identities; it does not retain count readiness. The app
-  registers its runner, while the operation owns receipt assembly semantics and graph topology.
+  registers its runner, while `mfm-op-portfolio-snapshot` owns receipt assembly semantics, the
+  complete graph topology, and its single root binding.
 - Runtime TOML remains a process-local routing and signer boundary rather than semantic catalog
   data. The current loader may parse the whole file when a live capability family is requested, so
   malformed unrelated family data can reject that live request. Read-only paths do not load it, and

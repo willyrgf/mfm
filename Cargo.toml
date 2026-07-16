@@ -52,8 +52,7 @@ members = [
 	"crates/ops/evm-contract-lifecycle-op",
 "crates/ops/evm-collectors-op",
 	"crates/ops/btc-collectors-op",
-	"crates/ops/portfolio-tracker-op",
-	"crates/ops/portfolio-collect-report-op",
+	"crates/ops/portfolio-snapshot-op",
 	"crates/ops/proof-op",
 ]
 
