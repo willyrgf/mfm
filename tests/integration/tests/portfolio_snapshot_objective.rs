@@ -76,6 +76,58 @@ async fn snapshot_root_executes_btc_native_erc20_and_mixed_with_evidence_only_re
     }
 }
 
+/// A complete mixed snapshot replays the family receipts, receipt-pinned queries, hydration,
+/// ordering, and report projection from retained evidence alone. Altering that query evidence is
+/// rejected before it can influence the reconstructed report.
+#[tokio::test]
+async fn snapshot_root_replay_rejects_tampered_receipt_pinned_query_evidence() {
+    let server = start_snapshot_rpc_mock(SnapshotRpcConfig::default()).await;
+    let runtime_dir = tempfile::tempdir().expect("runtime config directory");
+    let runtime_path = write_collectors_runtime_config_for_test(runtime_dir.path(), &server.url);
+    let store = store::AsyncInMemoryRunStore::default();
+    let services = snapshot_services(
+        &store,
+        Arc::new(mfm_app::ProjectionFactIndexProvider::new(store.clone())),
+        Some(&runtime_path),
+    );
+    let run_id = launch_snapshot_completed(
+        &services,
+        &snapshot_config(SnapshotDemand::Mixed),
+        "tampered-receipt-pinned-query-evidence",
+    )
+    .await;
+    let source_calls_before_replay = server.calls();
+    drop(services);
+    std::fs::remove_file(&runtime_path).expect("remove runtime config before replay");
+
+    let replay_services = mfm_app::make_run_read_services(
+        store.clone(),
+        store.clone(),
+        mfm_app::production_certification_registry().expect("snapshot certification registry"),
+    );
+    let replay = replay_services
+        .verify_replay_for_run(&run_id)
+        .await
+        .expect("complete receipt-pinned snapshot replay");
+    assert_eq!(replay.run_mode, mfm_app::RunModeStatus::Completed);
+
+    let tampered_replay_services = mfm_app::make_run_read_services(
+        store.clone(),
+        TamperedSnapshotFactQueryEvidenceProvider::new(store),
+        mfm_app::production_certification_registry().expect("snapshot certification registry"),
+    );
+    let error = tampered_replay_services
+        .verify_replay_for_run(&run_id)
+        .await
+        .expect_err("tampered receipt-pinned query evidence must fail replay");
+    assert_eq!(error.code, "ArtifactEvidenceMismatch");
+    assert_eq!(
+        server.calls(),
+        source_calls_before_replay,
+        "both normal and tampered replay must remain evidence-only"
+    );
+}
+
 /// Zero balances remain successful observations in the complete graph, rather than being
 /// mistaken for absent facts or failed collection.
 #[tokio::test]
@@ -665,6 +717,40 @@ impl FactIndexReadProvider for BlockingSnapshotFactIndex {
                 let _ = entered.send(());
             }
             future::pending().await
+        })
+    }
+}
+
+#[derive(Clone)]
+struct TamperedSnapshotFactQueryEvidenceProvider {
+    inner: store::AsyncInMemoryRunStore,
+}
+
+impl TamperedSnapshotFactQueryEvidenceProvider {
+    fn new(inner: store::AsyncInMemoryRunStore) -> Self {
+        Self { inner }
+    }
+}
+
+impl store::RetainedArtifactReadProvider for TamperedSnapshotFactQueryEvidenceProvider {
+    fn read_retained_artifact<'a>(
+        &'a self,
+        requirement: &'a store::EventArtifactRequirement,
+    ) -> store::RetainedArtifactReadFuture<'a> {
+        Box::pin(async move {
+            let artifact = self.inner.read_retained_artifact(requirement).await?;
+            if artifact.evidence().artifact_role != mfm_events::v1::ArtifactRole::FactQueryEvidence
+            {
+                return Ok(artifact);
+            }
+
+            let mut tampered_bytes = artifact.bytes().to_vec();
+            tampered_bytes.push(b'\n');
+            store::VerifiedRunArtifactBytes::new(
+                tampered_bytes,
+                artifact.evidence().clone(),
+                requirement,
+            )
         })
     }
 }
