@@ -2663,6 +2663,8 @@ dependencies = [
  "mfm-runtime",
  "mfm-spec",
  "mfm-store",
+ "mfm-values",
+ "serde",
  "serde_json",
  "thiserror",
  "trybuild",

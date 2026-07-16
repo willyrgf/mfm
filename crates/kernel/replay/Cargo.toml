@@ -25,7 +25,9 @@ mfm-manual-auth = { path = "../manual-auth" }
 mfm-runtime = { path = "../runtime" }
 mfm-spec = { path = "../spec" }
 mfm-store = { path = "../store" }
+mfm-values = { path = "../values" }
 serde_json = { version = "1.0" }
+serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

@@ -13,7 +13,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use alloy_primitives::{Address, B256};
-use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
     EvmBalanceReadCapability, EvmBalanceReadProvider, EvmBalanceReadRequest,
@@ -23,9 +22,13 @@ use mfm_evm_capabilities::{
     EVM_JSONRPC_CAPABILITY_IMPLEMENTATION_ID,
 };
 use mfm_fact_capabilities::FactRecordCapability;
-use mfm_program::{ManagedWriteState, MfmFactType, StateSpec, ValidatedConfig};
+use mfm_program::{ManagedWriteState, MfmFactType, StateSpec};
 use mfm_program_derive::MfmValue;
-use mfm_replay::v1 as replay;
+use mfm_replay::v1::{
+    self as replay, decode_produced_value as decode_replay_value,
+    external_read_evidence as replay_external_read_evidence,
+    load_node_config as replay_node_config, produced_input_frames as replay_input_frames,
+};
 use mfm_runtime::{
     load_launch_config_for_node, load_materialized_struct_input, load_runner_config_for_node,
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
@@ -54,8 +57,8 @@ use mfm_states_evm::{
     ResolveEvmJointTipState, EVM_JOINT_TIP_SOURCE_READS,
 };
 use mfm_store::v1 as store;
-use mfm_values::{MfmConfig, MfmValue, NonEmpty};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use mfm_values::{MfmValue, NonEmpty};
+use serde::{Deserialize, Serialize};
 
 const PURE_FACTORY: &str = "pure";
 const READ_FACTORY: &str = "read_external";
@@ -115,17 +118,22 @@ impl EvmNativeBalanceReadEvidence {
         verification_request: &EvmBlockReadRequest,
         verification_response: &mfm_evm_capabilities::EvmBlockReadResponse,
     ) -> Result<Self> {
+        let balance_source = source_binding_from_capability(&balance_response.evidence)?;
+        let verification_source = source_binding_from_capability(&verification_response.evidence)?;
+        if balance_source != verification_source {
+            return Err(EvmAdapterError::InvalidCapabilityRequest);
+        }
         Ok(Self {
             balance_request_account: format!("{:#x}", balance_request.account()),
             balance_request_block_selector: evm_block_selector_text(balance_request.block()),
             balance_response_wei: balance_response.balance_wei.to_string(),
-            balance_source: source_binding_from_capability(&balance_response.evidence)?,
+            balance_source,
             verification_request_block_selector: evm_block_selector_text(
                 verification_request.block(),
             ),
             verification_response_block_number: verification_response.block_number,
             verification_response_block_hash: format!("{:#x}", verification_response.block_hash),
-            verification_source: source_binding_from_capability(&verification_response.evidence)?,
+            verification_source,
         })
     }
 }
@@ -191,16 +199,21 @@ impl EvmErc20CallReadEvidence {
         verification_request: &EvmBlockReadRequest,
         verification_response: &mfm_evm_capabilities::EvmBlockReadResponse,
     ) -> Result<Self> {
+        let source = source_binding_from_capability(&response.evidence)?;
+        let verification_source = source_binding_from_capability(&verification_response.evidence)?;
+        if source != verification_source {
+            return Err(EvmAdapterError::InvalidCapabilityRequest);
+        }
         Ok(Self {
             destination: format!("{:#x}", request.to()),
             calldata: mfm_evm_core::hex::bytes_to_hex_prefixed(request.calldata()),
             block_selector: EvmCanonicalHashSelectorEvidence::from_selector(request.block())?,
             return_data: mfm_evm_core::hex::bytes_to_hex_prefixed(&response.return_data),
-            source: source_binding_from_capability(&response.evidence)?,
+            source,
             verification_block_hash: hash_selector_text(verification_request.block())?,
             verification_response_block_number: verification_response.block_number,
             verification_response_block_hash: format!("{:#x}", verification_response.block_hash),
-            verification_source: source_binding_from_capability(&verification_response.evidence)?,
+            verification_source,
         })
     }
 
@@ -212,6 +225,9 @@ impl EvmErc20CallReadEvidence {
         EvmBlockReadRequest,
         mfm_evm_capabilities::EvmBlockReadResponse,
     )> {
+        if self.source != self.verification_source {
+            return Err(EvmAdapterError::InvalidCapabilityRequest);
+        }
         let destination = parse_account(&self.destination)?;
         if format!("{destination:#x}") != self.destination {
             return Err(EvmAdapterError::InvalidCapabilityRequest);
@@ -1214,7 +1230,7 @@ fn verify_evm_native_balance_fact_replay(broker: &replay::ReplayBroker) -> repla
             decode_replay_value(&observation_frames[0])?;
         let fact = observation.to_fact();
         ensure_canonical_value_matches(&fact, &frame.artifact_bytes)?;
-        verify_recorded_fact_evidence(
+        replay::verify_recorded_fact_evidence(
             broker,
             frame,
             &EvmAddressNativeBalanceSnapshotFact::descriptor().map_err(replay_adapter_error)?,
@@ -1243,7 +1259,7 @@ fn verify_erc20_balance_fact_replay(broker: &replay::ReplayBroker) -> replay::Re
             decode_replay_value(&observation_frames[0])?;
         let fact = observation.try_to_fact().map_err(replay_adapter_error)?;
         ensure_canonical_value_matches(&fact, &frame.artifact_bytes)?;
-        verify_recorded_fact_evidence(
+        replay::verify_recorded_fact_evidence(
             broker,
             frame,
             &EvmAddressErc20BalanceSnapshotFact::descriptor().map_err(replay_adapter_error)?,
@@ -1252,88 +1268,6 @@ fn verify_erc20_balance_fact_replay(broker: &replay::ReplayBroker) -> replay::Re
         )?;
     }
     Ok(())
-}
-
-fn verify_recorded_fact_evidence<S: serde::Serialize, R: serde::Serialize>(
-    broker: &replay::ReplayBroker,
-    frame: &replay::ProducedCellReplayFrame,
-    descriptor: &mfm_facts::FactDescriptor,
-    subject: &S,
-    response_value: &R,
-) -> replay::Result<()> {
-    let records = broker
-        .events()
-        .iter()
-        .filter_map(|event| match event.payload() {
-            events::KernelEventPayload::FactRecorded(payload)
-                if payload.node_id == frame.produced.node_id
-                    && payload.attempt_id == frame.produced.attempt_id =>
-            {
-                Some(payload)
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if records.len() != 1 {
-        return Err(replay_evm_mismatch(
-            "EVM fact output did not have exactly one FactRecorded event",
-        ));
-    }
-    let claim = &records[0].claim;
-    let descriptor_hash =
-        mfm_facts::fact_descriptor_hash(descriptor).map_err(replay_adapter_error)?;
-    if claim.fact_descriptor_hash() != &descriptor_hash
-        || claim.fact_kind() != descriptor.fact_kind()
-    {
-        return Err(replay_evm_mismatch(
-            "EVM FactRecorded descriptor authority did not match the recomputed fact",
-        ));
-    }
-    let subject_json = serde_json::to_value(subject).map_err(replay_json_error)?;
-    let expected_subject = mfm_facts::typed_fact_subject_evidence(descriptor, &subject_json)
-        .map_err(replay_adapter_error)?;
-    if claim.subject() != &expected_subject {
-        return Err(replay_evm_mismatch(
-            "EVM FactRecorded subject authority did not match the recomputed fact",
-        ));
-    }
-    let expected_bytes = canonical_json_bytes(response_value)?;
-    let response = claim.response();
-    if response.response_schema_id() != descriptor.response_schema_id()
-        || response.response_hash() != &expected_bytes.content_digest()
-    {
-        return Err(replay_evm_mismatch(
-            "EVM FactRecorded response authority did not match the recomputed fact",
-        ));
-    }
-    let requirement = store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::FactResponse,
-        artifact_id: response.artifact_id().clone(),
-        evidence_hash: response.artifact_evidence_hash().clone(),
-        digest: Some(response.response_hash().clone()),
-        byte_len: Some(
-            u64::try_from(expected_bytes.as_bytes().len())
-                .map_err(|_| replay_evm_mismatch("EVM fact response length overflowed u64"))?,
-        ),
-        media_type: None,
-        schema_id: Some(response.response_schema_id().clone()),
-        semantic_type_id: None,
-        producer_node_id: Some(frame.produced.node_id.clone()),
-        producer_seed_id: None,
-        artifact_role: Some(events::ArtifactRole::FactResponse),
-    };
-    let artifact = broker.retained_artifact(&requirement)?;
-    if artifact.artifact_bytes != expected_bytes.as_bytes() {
-        return Err(replay_evm_mismatch(
-            "EVM FactRecorded response bytes did not match the recomputed fact",
-        ));
-    }
-    Ok(())
-}
-
-fn canonical_json_bytes<T: serde::Serialize>(value: &T) -> replay::Result<PlainCanonicalJsonBytes> {
-    let json = serde_json::to_string(value).map_err(replay_json_error)?;
-    PlainCanonicalJsonBytes::from_json_str(&json).map_err(replay_adapter_error)
 }
 
 fn verify_evm_native_balance_receipt_replay(broker: &replay::ReplayBroker) -> replay::Result<()> {
@@ -1533,183 +1467,16 @@ fn replay_erc20_metadata_input(
     decode_replay_value(&frames[0])
 }
 
-fn replay_input_frames(
-    broker: &replay::ReplayBroker,
-    node: &mfm_spec::v1::NodeSpec,
-    semantic_type_id: &mfm_ids::SemanticTypeId,
-    schema_id: &mfm_ids::SchemaId,
-) -> replay::Result<Vec<replay::ProducedCellReplayFrame>> {
-    let mut cells = Vec::new();
-    collect_input_cells(
-        &node.input_bindings.root,
-        semantic_type_id,
-        schema_id,
-        &mut cells,
-    );
-    let mut frames = Vec::with_capacity(cells.len());
-    for input_cell in cells {
-        let matches = broker.produced_cell_frames_matching(|_node, cell, _produced| {
-            Ok(cell.cell_id == input_cell.cell_id)
-        })?;
-        if matches.len() != 1 {
-            return Err(replay_evm_mismatch(
-                "certified EVM collector input cell did not have exactly one produced value",
-            ));
-        }
-        let frame = matches.into_iter().next().expect("one frame");
-        if frame.cell.semantic_type_id != input_cell.semantic_type_id
-            || frame.cell.schema_id != input_cell.schema_id
-            || frame.cell.value_lineage != input_cell.value_lineage
-        {
-            return Err(replay_evm_mismatch(
-                "EVM collector input cell metadata did not match its produced value",
-            ));
-        }
-        frames.push(frame);
-    }
-    Ok(frames)
-}
-
-fn collect_input_cells<'a>(
-    input: &'a mfm_spec::v1::InputBindingNodeSpec,
-    semantic_type_id: &mfm_ids::SemanticTypeId,
-    schema_id: &mfm_ids::SchemaId,
-    cells: &mut Vec<&'a mfm_spec::v1::InputBindingCellSpec>,
-) {
-    match input {
-        mfm_spec::v1::InputBindingNodeSpec::Unit => {}
-        mfm_spec::v1::InputBindingNodeSpec::Cell(cell) => {
-            if &cell.semantic_type_id == semantic_type_id && &cell.schema_id == schema_id {
-                cells.push(cell);
-            }
-        }
-        mfm_spec::v1::InputBindingNodeSpec::Tuple(elements)
-        | mfm_spec::v1::InputBindingNodeSpec::Vec { elements, .. }
-        | mfm_spec::v1::InputBindingNodeSpec::NonEmptyVec { elements, .. } => {
-            for element in elements {
-                collect_input_cells(element, semantic_type_id, schema_id, cells);
-            }
-        }
-        mfm_spec::v1::InputBindingNodeSpec::Struct(fields) => {
-            for field in fields {
-                collect_input_cells(&field.node, semantic_type_id, schema_id, cells);
-            }
-        }
-    }
-}
-
-fn decode_replay_value<T>(frame: &replay::ProducedCellReplayFrame) -> replay::Result<T>
-where
-    T: DeserializeOwned,
-{
-    serde_json::from_slice(&frame.artifact_bytes).map_err(replay_json_error)
-}
-
-fn replay_external_read_evidence<T>(
-    broker: &replay::ReplayBroker,
-    frame: &replay::ProducedCellReplayFrame,
-) -> replay::Result<T>
-where
-    T: MfmValue + DeserializeOwned,
-{
-    let references = broker
-        .events()
-        .iter()
-        .filter_map(|event| match event.payload() {
-            events::KernelEventPayload::ArtifactReferenced(reference)
-                if reference.node_id.as_ref() == Some(&frame.produced.node_id)
-                    && reference.attempt_id.as_ref() == Some(&frame.produced.attempt_id)
-                    && reference.artifact_ref.role
-                        == events::ArtifactRole::ExternalReadEvidence
-                    && reference.artifact_ref.schema_id == T::schema_id().ok()? =>
-            {
-                Some(reference)
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if references.len() != 1 {
-        return Err(replay_evm_mismatch(
-            "EVM external read did not have exactly one retained evidence artifact",
-        ));
-    }
-    let reference = references[0];
-    let requirement = store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::ArtifactReferenced,
-        artifact_id: reference.artifact_ref.artifact_id.clone(),
-        evidence_hash: reference.artifact_ref.evidence_hash.clone(),
-        digest: Some(reference.artifact_ref.content_digest.clone()),
-        byte_len: Some(reference.artifact_ref.byte_len),
-        media_type: Some(reference.artifact_ref.media_type.clone()),
-        schema_id: Some(reference.artifact_ref.schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: Some(frame.produced.node_id.clone()),
-        producer_seed_id: None,
-        artifact_role: Some(events::ArtifactRole::ExternalReadEvidence),
-    };
-    let artifact = broker.retained_artifact(&requirement)?;
-    serde_json::from_slice(&artifact.artifact_bytes).map_err(replay_json_error)
-}
-
 fn ensure_canonical_value_matches<T: serde::Serialize>(
     expected: &T,
     actual: &[u8],
 ) -> replay::Result<()> {
-    let json = serde_json::to_string(expected).map_err(replay_json_error)?;
-    let canonical = PlainCanonicalJsonBytes::from_json_str(&json).map_err(replay_adapter_error)?;
-    if canonical.as_bytes() != actual {
+    if replay::canonical_value_bytes(expected)?.as_bytes() != actual {
         return Err(replay_evm_mismatch(
             "EVM collector output did not match recomputed state output",
         ));
     }
     Ok(())
-}
-
-fn replay_node_config<T>(
-    broker: &replay::ReplayBroker,
-    node: &mfm_spec::v1::NodeSpec,
-) -> replay::Result<T>
-where
-    T: MfmConfig + DeserializeOwned,
-{
-    let config_evidence = store::ArtifactEvidenceRef {
-        artifact_id: node.config_ref.artifact_id.clone(),
-        digest: node.config_ref.digest.clone(),
-        byte_len: node.config_ref.byte_len,
-        media_type: node.config_ref.media_type.clone(),
-        schema_id: Some(node.config_ref.schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::TypedConfig,
-    };
-    let requirement = store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::RunConfig,
-        artifact_id: node.config_ref.artifact_id.clone(),
-        evidence_hash: config_evidence
-            .evidence_hash()
-            .map_err(replay_adapter_error)?,
-        digest: Some(node.config_ref.digest.clone()),
-        byte_len: Some(node.config_ref.byte_len),
-        media_type: Some(node.config_ref.media_type.clone()),
-        schema_id: Some(node.config_ref.schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: Some(events::ArtifactRole::TypedConfig),
-    };
-    let artifact = broker.retained_artifact(&requirement)?;
-    let config: T = serde_json::from_slice(&artifact.artifact_bytes).map_err(replay_json_error)?;
-    ValidatedConfig::new(config)
-        .map(ValidatedConfig::into_inner)
-        .map_err(replay_adapter_error)
-}
-
-fn replay_json_error(error: serde_json::Error) -> replay::ReplayError {
-    replay::ReplayError::new(
-        replay::ReplayErrorKind::CertifiedEvidenceMismatch,
-        error.to_string(),
-    )
 }
 
 fn replay_adapter_error(error: impl std::fmt::Display) -> replay::ReplayError {
@@ -1732,14 +1499,18 @@ mod tests {
     const TOKEN: &str = "0x0000000000000000000000000000000000000001";
 
     fn source_evidence() -> RedactedEvmSourceEvidence {
+        source_evidence_for("primary", "default")
+    }
+
+    fn source_evidence_for(source_ref: &str, policy_id: &str) -> RedactedEvmSourceEvidence {
         let binding =
             EvmNetworkBinding::new(EvmNetworkId::new("ethereum-mainnet").expect("net"), 1)
                 .expect("binding");
         RedactedEvmSourceEvidence::from_binding(
             &binding,
             1,
-            EvmSourceRef::new("primary").expect("source"),
-            EvmSourcePolicyId::new("default").expect("policy"),
+            EvmSourceRef::new(source_ref).expect("source"),
+            EvmSourcePolicyId::new(policy_id).expect("policy"),
         )
         .expect("source evidence")
     }
@@ -1823,5 +1594,44 @@ mod tests {
         let mut latest_verification = evidence();
         latest_verification.verification_block_hash = "0x".to_owned();
         assert!(latest_verification.replay_material().is_err());
+    }
+
+    #[test]
+    fn erc20_replay_evidence_rejects_provider_source_or_policy_tampering() {
+        let request = EvmCallReadRequest::new(
+            Address::from_str(TOKEN).expect("token"),
+            vec![0x31, 0x3c, 0xe5, 0x67],
+            EvmBlockSelector::Hash(hash()),
+        );
+        let response = EvmCallReadResponse {
+            evidence: source_evidence(),
+            return_data: vec![0; 32],
+        };
+        let verification_request = EvmBlockReadRequest::new(EvmBlockSelector::Hash(hash()));
+        let verification_response = mfm_evm_capabilities::EvmBlockReadResponse {
+            evidence: source_evidence_for("secondary", "default"),
+            block_number: 100,
+            block_hash: hash(),
+        };
+        assert!(EvmErc20CallReadEvidence::from_capability(
+            &request,
+            &response,
+            &verification_request,
+            &verification_response,
+        )
+        .is_err());
+
+        for (field, value) in [("source_ref", "secondary"), ("policy_id", "secondary")] {
+            let mut persisted = serde_json::to_value(evidence()).expect("persisted evidence");
+            persisted["source"][field] = serde_json::json!(value);
+            let tampered: EvmErc20CallReadEvidence =
+                serde_json::from_value(persisted).expect("well-formed tampered evidence");
+            assert!(
+                tampered.replay_material().is_err(),
+                "replay must reject {field} drift"
+            );
+        }
+
+        assert!(evidence().replay_material().is_ok());
     }
 }

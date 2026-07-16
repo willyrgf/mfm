@@ -6,7 +6,7 @@ use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPaylo
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion,
     ContentDigest, DigestAlgorithm, NodeId, RunId, SchemaId, SeedId, SemanticTypeId,
-    SideEffectPairId, SpecHash,
+    SideEffectPairId, SpecHash, StateKind, StateVersion,
 };
 use mfm_manual_auth::{
     manual_authorization_proof_schema_id, ManualResolutionEvidenceRef,
@@ -23,6 +23,13 @@ use mfm_store::v1::{
 #[path = "verification_helpers.rs"]
 mod verification_helpers;
 use self::verification_helpers::*;
+#[path = "value_read.rs"]
+mod value_read;
+pub use self::value_read::{
+    canonical_value_bytes, decode_produced_value, external_read_evidence,
+    fact_query_evidence_for_attempt, load_node_config, produced_input_frames,
+    single_state_output_frame, verify_recorded_fact_evidence,
+};
 #[path = "broker.rs"]
 mod broker;
 #[path = "evidence.rs"]

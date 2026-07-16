@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,13 +17,13 @@ use mfm_evm_capabilities::{
     EvmCapabilityFuture, EvmChainIdentityProvider, EvmChainIdentityRequest,
     EvmChainIdentityResponse, EvmCodeReadProvider, EvmCodeReadRequest, EvmCodeReadResponse,
     EvmFeeReadProvider, EvmFeeReadRequest, EvmFeeReadResponse, EvmGasEstimateProvider,
-    EvmGasEstimateRequest, EvmGasEstimateResponse, EvmLogsReadProvider, EvmLogsReadRequest,
-    EvmLogsReadResponse, EvmNetworkBinding, EvmNetworkId as CapabilityEvmNetworkId,
-    EvmNonceOccupancy, EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest,
-    EvmNonceOccupancyReadResponse, EvmNonceReadProvider, EvmNonceReadRequest, EvmNonceReadResponse,
-    EvmReceiptReadProvider, EvmReceiptReadRequest, EvmReceiptReadResponse, EvmSourcePolicyId,
-    EvmSourceRef, EvmTransactionSubmitProvider, EvmTransactionSubmitRequest,
-    EvmTransactionSubmitResponse, RedactedEvmSourceEvidence,
+    EvmGasEstimateRequest, EvmGasEstimateResponse, EvmLogEntry, EvmLogsReadProvider,
+    EvmLogsReadRequest, EvmLogsReadResponse, EvmNetworkBinding,
+    EvmNetworkId as CapabilityEvmNetworkId, EvmNonceOccupancy, EvmNonceOccupancyReadProvider,
+    EvmNonceOccupancyReadRequest, EvmNonceOccupancyReadResponse, EvmNonceReadProvider,
+    EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider, EvmReceiptReadRequest,
+    EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef, EvmTransactionSubmitProvider,
+    EvmTransactionSubmitRequest, EvmTransactionSubmitResponse, RedactedEvmSourceEvidence,
 };
 use mfm_evm_contract_model::{
     ContractArtifactConfig, ContractProfile, ContractProfileId, EvmCodeHash, EvmContractContext,
@@ -33,7 +33,7 @@ use mfm_evm_contract_model::{
 use mfm_ids::ArtifactId;
 use mfm_program::{
     build_root_with_registries, PublicOutputKey, ScopeKey, SideEffectSagaPolicy,
-    SideEffectVerificationSpec, StateKey,
+    SideEffectVerificationSpec, StateKey, StateSpec,
 };
 use mfm_program_derive::PublicOutputs;
 use mfm_replay::v1::{ReplayBroker, ReplayReadAuthority};
@@ -58,6 +58,7 @@ const RUNTIME_CODE: &[u8] = &[0x60, 0x00];
 const DEPLOY_BLOCK_NUMBER: u64 = 42;
 const LAST_CONFIGURE_BLOCK_NUMBER: u64 = DEPLOY_BLOCK_NUMBER + 2;
 const LATEST_BLOCK_NUMBER: u64 = LAST_CONFIGURE_BLOCK_NUMBER + 1;
+const CONFIGURED_GRAPH_CONFIGURE_CALLS: usize = 2;
 
 fn direct_block_hash(block_number: u64) -> B256 {
     let offset = u8::try_from(
@@ -89,53 +90,58 @@ struct DirectContractStateOutputs<'program, 'scope> {
 /// The contract states remain executable through a direct typed graph. This deliberately bypasses
 /// app entry-point discovery: the app is used only as generic launch/scheduler test support.
 #[tokio::test]
-async fn direct_contract_states_certify_and_run_without_contract_entry_point_registration() {
+async fn direct_contract_configured_graph_reports_true_and_false_with_configured_anchor_replay() {
     assert_contract_entry_points_are_absent();
 
-    let expected_code_hash = expected_runtime_code_hash();
-    let (stream, provider) = run_direct_contract_state_graph(
-        Some(expected_code_hash),
-        "direct-contract-state-graph-with-code",
-        false,
-        true,
-    )
-    .await;
-    assert_eq!(
-        provider.transaction_submission_hashes().len(),
-        3,
-        "the direct graph must submit deployment plus both configure calls"
-    );
-    assert_eq!(provider.code_read_requests().len(), 1);
-    assert_eq!(
-        provider.code_read_requests()[0].block(),
-        &EvmBlockSelector::Hash(direct_block_hash(LAST_CONFIGURE_BLOCK_NUMBER)),
-        "the validation code read must use the last configure receipt anchor"
-    );
-    assert_eq!(
-        provider.call_read_requests().len(),
-        1,
-        "the configured assertion must execute through an EVM call"
-    );
-    assert!(
-        provider.block_read_requests().iter().any(
-            |request| request.block() == &EvmBlockSelector::Number(LAST_CONFIGURE_BLOCK_NUMBER)
-        ),
-        "the last configure receipt anchor must be proven canonical before validation"
-    );
-    assert_eq!(
-        stream
-            .iter()
-            .filter(|event| matches!(
-                event.payload(),
-                events::KernelEventPayload::ArtifactReferenced(reference)
-                    if reference.artifact_ref.role == events::ArtifactRole::ExternalReadEvidence
-                        && reference.artifact_ref.schema_id
-                            == ValidationCodeIdentityEvidence::schema_id().expect("code evidence schema")
-            ))
-            .count(),
-        1,
-        "the hash-bound runtime-code observation must be retained exactly once"
-    );
+    for (label, configured_assertion_value) in [("true", true), ("false", false)] {
+        let (stream, provider) = run_direct_contract_state_graph(
+            Some(expected_runtime_code_hash()),
+            &format!("direct-contract-state-graph-configured-{label}"),
+            false,
+            CONFIGURED_GRAPH_CONFIGURE_CALLS,
+            configured_assertion_value,
+        )
+        .await;
+        assert_eq!(
+            provider.transaction_submission_hashes().len(),
+            3,
+            "{label}: the graph must submit deployment plus both configure calls"
+        );
+        assert_eq!(provider.code_read_requests().len(), 1, "{label}");
+        assert_eq!(
+            provider.code_read_requests()[0].block(),
+            &EvmBlockSelector::Hash(direct_block_hash(LAST_CONFIGURE_BLOCK_NUMBER)),
+            "{label}: validation must use the last configure receipt anchor"
+        );
+        assert_eq!(provider.call_read_requests().len(), 1, "{label}");
+        assert_eq!(
+            provider.log_read_requests(),
+            1,
+            "{label}: event assertion must execute"
+        );
+        assert!(
+            provider
+                .block_read_requests()
+                .iter()
+                .any(|request| request.block()
+                    == &EvmBlockSelector::Number(LAST_CONFIGURE_BLOCK_NUMBER)),
+            "{label}: the last configure receipt anchor must be proven canonical"
+        );
+        assert_eq!(
+            stream
+                .iter()
+                .filter(|event| matches!(
+                    event.payload(),
+                    events::KernelEventPayload::ArtifactReferenced(reference)
+                        if reference.artifact_ref.role == events::ArtifactRole::ExternalReadEvidence
+                            && reference.artifact_ref.schema_id
+                                == ValidationCodeIdentityEvidence::schema_id().expect("code evidence schema")
+                ))
+                .count(),
+            1,
+            "{label}: hash-bound runtime-code observation must be retained once"
+        );
+    }
 }
 
 #[tokio::test]
@@ -144,6 +150,7 @@ async fn direct_contract_validation_skips_code_reads_without_a_profile_hash() {
         None,
         "direct-contract-state-graph-without-code",
         false,
+        CONFIGURED_GRAPH_CONFIGURE_CALLS,
         true,
     )
     .await;
@@ -163,25 +170,38 @@ async fn direct_contract_replay_rejects_tampered_runtime_code_evidence() {
         Some(expected_runtime_code_hash()),
         "direct-contract-state-graph-tampered-code",
         true,
+        CONFIGURED_GRAPH_CONFIGURE_CALLS,
         true,
     )
     .await;
 }
 
 #[tokio::test]
-async fn direct_contract_replays_terminal_failed_configured_assertion() {
+async fn direct_contract_uses_deploy_anchor_without_configure_calls() {
     let (_, provider) = run_direct_contract_state_graph(
         Some(expected_runtime_code_hash()),
-        "direct-contract-state-graph-failed-configured-assertion",
+        "direct-contract-state-graph-deploy-anchor",
         false,
-        false,
+        0,
+        true,
     )
     .await;
     assert_eq!(
+        provider.transaction_submission_hashes().len(),
+        1,
+        "the deploy-only graph must not submit a configure transaction"
+    );
+    assert_eq!(
+        provider.code_read_requests()[0].block(),
+        &EvmBlockSelector::Hash(direct_block_hash(DEPLOY_BLOCK_NUMBER)),
+        "validation must fall back to the deploy receipt anchor"
+    );
+    assert_eq!(
         provider.call_read_requests().len(),
         1,
-        "the failed terminal report must retain an executed configured assertion"
+        "the deploy-anchor validation still executes the configured read assertion"
     );
+    assert_eq!(provider.log_read_requests(), 0);
 }
 
 /// The direct graph resumes both sides of the external side-effect boundary without an app
@@ -193,12 +213,12 @@ async fn direct_contract_states_resume_submission_and_confirmation_boundaries() 
 
     for (boundary, invocation_key) in [
         (
-            DirectContractInterruptionBoundary::Submission,
-            "direct-contract-state-graph-resume-submission",
+            DirectContractInterruptionBoundary::AmbiguousConfigureSubmission,
+            "direct-contract-state-graph-resume-configure-submission",
         ),
         (
-            DirectContractInterruptionBoundary::Confirmation,
-            "direct-contract-state-graph-resume-confirmation",
+            DirectContractInterruptionBoundary::ConfigureConfirmation,
+            "direct-contract-state-graph-resume-configure-confirmation",
         ),
     ] {
         let (interruption, entered) = DirectContractInterruption::new(boundary);
@@ -206,6 +226,7 @@ async fn direct_contract_states_resume_submission_and_confirmation_boundaries() 
             Some(expected_runtime_code_hash()),
             invocation_key,
             Some(interruption),
+            CONFIGURED_GRAPH_CONFIGURE_CALLS,
             true,
         )
         .await;
@@ -282,6 +303,7 @@ async fn run_direct_contract_state_graph(
     deployed_code_hash: Option<EvmCodeHash>,
     invocation_key: &str,
     tamper_code_evidence: bool,
+    configure_call_count: usize,
     configured_assertion_value: bool,
 ) -> (
     Vec<store::KernelEventEnvelope>,
@@ -291,6 +313,7 @@ async fn run_direct_contract_state_graph(
         deployed_code_hash,
         invocation_key,
         None,
+        configure_call_count,
         configured_assertion_value,
     )
     .await;
@@ -363,6 +386,7 @@ async fn direct_contract_state_graph_harness(
     deployed_code_hash: Option<EvmCodeHash>,
     invocation_key: &str,
     interruption: Option<Arc<DirectContractInterruption>>,
+    configure_call_count: usize,
     configured_assertion_value: bool,
 ) -> DirectContractStateGraphHarness {
     let (context, artifact) = direct_contract_context_and_artifact(deployed_code_hash);
@@ -392,8 +416,9 @@ async fn direct_contract_state_graph_harness(
 
     let services =
         mfm_app::make_run_services(runners, store.clone(), artifacts.clone(), certification);
-    let draft = direct_contract_state_graph(context, provider.expected_signer())
-        .expect("direct state graph");
+    let draft =
+        direct_contract_state_graph(context, provider.expected_signer(), configure_call_count)
+            .expect("direct state graph");
     let request = mfm_app::prepare_typed_program_run_launch_for_test(
         draft,
         Default::default(),
@@ -445,64 +470,103 @@ fn assert_interrupted_at_contract_boundary(
     stream: &[store::KernelEventEnvelope],
     boundary: DirectContractInterruptionBoundary,
 ) {
+    let configure_node_id = configure_node_id(stream);
+    let configure_pair_id = stream
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::SideEffectInvocationStarted(payload)
+                if payload.node_id == configure_node_id =>
+            {
+                Some(payload.pair_id.clone())
+            }
+            _ => None,
+        })
+        .expect("configure side effect must start");
     match boundary {
-        DirectContractInterruptionBoundary::Submission => assert!(
+        DirectContractInterruptionBoundary::AmbiguousConfigureSubmission => assert!(
             stream.iter().any(|event| matches!(
                 event.payload(),
-                events::KernelEventPayload::SideEffectInvocationStarted(_)
+                events::KernelEventPayload::SideEffectInvocationStarted(payload)
+                    if payload.node_id == configure_node_id
             )) && !stream.iter().any(|event| matches!(
                 event.payload(),
-                events::KernelEventPayload::SideEffectSubmissionObserved(_)
+                events::KernelEventPayload::SideEffectSubmissionObserved(payload)
+                    if payload.node_id == configure_node_id
             )),
-            "the submission interruption must occur after invocation preparation but before a durable submission result"
+            "the configure submission interruption must occur after invocation preparation but before a durable submission result"
         ),
-        DirectContractInterruptionBoundary::Confirmation => assert!(
+        DirectContractInterruptionBoundary::ConfigureConfirmation => assert!(
             stream.iter().any(|event| matches!(
                 event.payload(),
-                events::KernelEventPayload::SideEffectReceiptObserved(_)
+                events::KernelEventPayload::SideEffectReceiptObserved(payload)
+                    if payload.pair_id == configure_pair_id
             )) && !stream.iter().any(|event| matches!(
                 event.payload(),
-                events::KernelEventPayload::SideEffectConfirmationObserved(_)
+                events::KernelEventPayload::SideEffectConfirmationObserved(payload)
+                    if payload.pair_id == configure_pair_id
             )),
-            "the confirmation interruption must occur after durable receipt evidence but before confirmation"
+            "the configure confirmation interruption must occur after durable receipt evidence but before confirmation"
         ),
     }
+}
+
+fn configure_node_id(stream: &[store::KernelEventEnvelope]) -> mfm_ids::NodeId {
+    let configure_kind = ContextBoundConfigureContractState::kind().expect("configure kind");
+    stream
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::StateAttemptStarted(payload)
+                if payload.state_kind == configure_kind =>
+            {
+                Some(payload.node_id.clone())
+            }
+            _ => None,
+        })
+        .expect("direct graph must start the configure state")
 }
 
 fn assert_contract_resume_preserves_single_submission_and_nonce_lane(
     stream: &[store::KernelEventEnvelope],
     provider: &DirectContractStateProvider,
 ) {
+    let configure_node_id = configure_node_id(stream);
     let submissions = stream
         .iter()
         .filter(|event| {
             matches!(
                 event.payload(),
-                events::KernelEventPayload::SideEffectSubmissionObserved(_)
+                events::KernelEventPayload::SideEffectSubmissionObserved(payload)
+                    if payload.node_id == configure_node_id
             )
         })
         .count();
     assert_eq!(
-        submissions, 2,
-        "resume must retain exactly one durable submission for deploy and configure"
+        submissions, 1,
+        "resume must retain exactly one durable submission for the configure side effect"
     );
+    let transaction_hashes = provider.transaction_submission_hashes();
     assert_eq!(
-        provider.transaction_submission_hashes().len(),
+        transaction_hashes.len(),
         3,
         "resume must not issue duplicate live deployment or configure transactions"
+    );
+    assert_ne!(
+        transaction_hashes[1], transaction_hashes[2],
+        "resume must not duplicate a nonce-lane transaction"
     );
     let claims = stream
         .iter()
         .filter(|event| {
             matches!(
                 event.payload(),
-                events::KernelEventPayload::ResourceLaneClaimed(_)
+                events::KernelEventPayload::ResourceLaneClaimed(payload)
+                    if payload.node_id == configure_node_id
             )
         })
         .count();
     assert_eq!(
-        claims, 2,
-        "resume must not reacquire the exclusive signer/nonce lane"
+        claims, 1,
+        "resume must not reacquire configure's exclusive signer/nonce lane"
     );
 }
 
@@ -525,6 +589,7 @@ fn assert_contract_finality_anchor_reads(provider: &DirectContractStateProvider)
 fn direct_contract_state_graph(
     context: EvmContractContext,
     expected_signer: &str,
+    configure_call_count: usize,
 ) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
     let mut states = mfm_program::StateRegistryBuilder::new();
     states.register::<ContextBoundDeployContractState>()?;
@@ -554,7 +619,7 @@ fn direct_contract_state_graph(
                 .side_effect::<ContextBoundConfigureContractState, _>(
                     StateKey::new("configure")?,
                     &context,
-                    configure_action(expected_signer),
+                    configure_action(expected_signer, configure_call_count),
                     ContextConfigureContractInputHandles { deployed },
                     account_nonce_resource_claim()?,
                     SideEffectVerificationSpec::Finalized { depth: 1 },
@@ -563,7 +628,7 @@ fn direct_contract_state_graph(
             let validation = root.scope().state::<ContextBoundValidateContractState, _>(
                 StateKey::new("validate")?,
                 &context,
-                validate_action(),
+                validate_action(configure_call_count),
                 ContextValidateContractInputHandles { configured },
             )?;
             root.bind_public_outputs(
@@ -585,30 +650,40 @@ fn deploy_action(expected_signer: &str) -> DeployAction {
     .expect("deploy action")
 }
 
-fn configure_action(expected_signer: &str) -> ConfigureAction {
+fn configure_action(expected_signer: &str, configure_call_count: usize) -> ConfigureAction {
     serde_json::from_value(json!({
         "signer": {
             "signer_ref": "deployer",
             "expected_signer_address": expected_signer,
         },
-        "calls": [
-            {"function": "configure", "args": []},
-            {"function": "configure", "args": []},
-        ],
+        "calls": (0..configure_call_count)
+            .map(|_| json!({"function": "configure", "args": []}))
+            .collect::<Vec<_>>(),
         "receipt": {"poll_interval_ms": 1, "max_receipt_polls": 1},
     }))
     .expect("configure action")
 }
 
-fn validate_action() -> ValidateAction {
-    serde_json::from_value(json!({
+fn validate_action(configure_call_count: usize) -> ValidateAction {
+    let mut action = json!({
         "read_assertions": [{
             "function": "configured",
             "args": [],
             "expected": {"json_text": "true"},
         }],
-    }))
-    .expect("validate action")
+    });
+    if configure_call_count > 0 {
+        action["event_assertions"] = json!([{
+            "event": "Configured",
+            "min_count": 1,
+            "from_block": {"kind": "number", "number": DEPLOY_BLOCK_NUMBER},
+            "to_block": {
+                "kind": "number",
+                "number": DEPLOY_BLOCK_NUMBER + configure_call_count as u64,
+            },
+        }]);
+    }
+    serde_json::from_value(action).expect("validate action")
 }
 
 fn direct_contract_context_and_artifact(
@@ -631,6 +706,12 @@ fn direct_contract_context_and_artifact(
                     "inputs": [],
                     "outputs": [{"name": "", "type": "bool"}],
                     "stateMutability": "view",
+                },
+                {
+                    "type": "event",
+                    "name": "Configured",
+                    "inputs": [],
+                    "anonymous": false,
                 },
             ]))
             .expect("ABI JSON")
@@ -861,8 +942,8 @@ impl EvmContractRuntimeFactory for DirectContractStateRuntimeFactory {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DirectContractInterruptionBoundary {
-    Submission,
-    Confirmation,
+    AmbiguousConfigureSubmission,
+    ConfigureConfirmation,
 }
 
 struct DirectContractInterruption {
@@ -902,6 +983,7 @@ struct DirectContractStateProvider {
     block_read_requests: Mutex<Vec<EvmBlockReadRequest>>,
     code_read_requests: Mutex<Vec<EvmCodeReadRequest>>,
     call_read_requests: Mutex<Vec<EvmCallReadRequest>>,
+    log_read_count: AtomicUsize,
     transaction_submission_hashes: Mutex<Vec<B256>>,
     interruption: Option<Arc<DirectContractInterruption>>,
     configured_assertion_value: bool,
@@ -927,6 +1009,7 @@ impl DirectContractStateProvider {
             block_read_requests: Mutex::new(Vec::new()),
             code_read_requests: Mutex::new(Vec::new()),
             call_read_requests: Mutex::new(Vec::new()),
+            log_read_count: AtomicUsize::new(0),
             transaction_submission_hashes: Mutex::new(Vec::new()),
             interruption,
             configured_assertion_value,
@@ -956,6 +1039,10 @@ impl DirectContractStateProvider {
             .lock()
             .expect("call read requests")
             .clone()
+    }
+
+    fn log_read_requests(&self) -> usize {
+        self.log_read_count.load(Ordering::Relaxed)
     }
 
     fn transaction_submission_hashes(&self) -> Vec<B256> {
@@ -992,8 +1079,8 @@ impl EvmBlockReadProvider for DirectContractStateProvider {
             .expect("block read requests")
             .push(request.clone());
         let evidence = self.evidence.clone();
-        let canonical_anchor_read =
-            request.block() == &EvmBlockSelector::Number(DEPLOY_BLOCK_NUMBER);
+        let configure_confirmation_read =
+            request.block() == &EvmBlockSelector::Number(LAST_CONFIGURE_BLOCK_NUMBER);
         let (block_number, block_hash) = match request.block() {
             EvmBlockSelector::Number(number) => (*number, direct_block_hash(*number)),
             EvmBlockSelector::Latest | EvmBlockSelector::Pending => {
@@ -1005,10 +1092,12 @@ impl EvmBlockReadProvider for DirectContractStateProvider {
         };
         let interruption = self.interruption.clone();
         Box::pin(async move {
-            if canonical_anchor_read {
+            if configure_confirmation_read {
                 if let Some(interruption) = interruption {
                     interruption
-                        .pause_if_selected(DirectContractInterruptionBoundary::Confirmation)
+                        .pause_if_selected(
+                            DirectContractInterruptionBoundary::ConfigureConfirmation,
+                        )
                         .await;
                 }
             }
@@ -1071,16 +1160,27 @@ impl EvmTransactionSubmitProvider for DirectContractStateProvider {
     ) -> EvmCapabilityFuture<'a, EvmTransactionSubmitResponse> {
         let evidence = self.evidence.clone();
         let transaction_hash = request.signed_payload().transaction_hash();
-        self.transaction_submission_hashes
-            .lock()
-            .expect("transaction submission hashes")
-            .push(transaction_hash);
+        let submission_index = {
+            let mut submissions = self
+                .transaction_submission_hashes
+                .lock()
+                .expect("transaction submission hashes");
+            let index = submissions.len();
+            submissions.push(transaction_hash);
+            index
+        };
         let interruption = self.interruption.clone();
         Box::pin(async move {
-            if let Some(interruption) = interruption {
-                interruption
-                    .pause_if_selected(DirectContractInterruptionBoundary::Submission)
-                    .await;
+            // Pause after the second configure submission reaches the provider but before the
+            // batch response is persisted. Both configure receipts can then reconcile on resume.
+            if submission_index == 2 {
+                if let Some(interruption) = interruption {
+                    interruption
+                        .pause_if_selected(
+                            DirectContractInterruptionBoundary::AmbiguousConfigureSubmission,
+                        )
+                        .await;
+                }
             }
             Ok(EvmTransactionSubmitResponse {
                 evidence,
@@ -1185,13 +1285,25 @@ impl EvmCallReadProvider for DirectContractStateProvider {
 impl EvmLogsReadProvider for DirectContractStateProvider {
     fn read_logs<'a>(
         &'a self,
-        _request: &'a EvmLogsReadRequest,
+        request: &'a EvmLogsReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmLogsReadResponse> {
+        self.log_read_count.fetch_add(1, Ordering::Relaxed);
         let evidence = self.evidence.clone();
+        let address = request
+            .address()
+            .expect("direct event assertion must bind the deployed address");
+        let topics = request.topics().to_vec();
         Box::pin(async move {
             Ok(EvmLogsReadResponse {
                 evidence,
-                logs: Vec::new(),
+                logs: vec![EvmLogEntry {
+                    address,
+                    topics,
+                    data: Vec::new(),
+                    block_number: Some(LAST_CONFIGURE_BLOCK_NUMBER),
+                    transaction_hash: None,
+                    log_index: Some(0),
+                }],
             })
         })
     }

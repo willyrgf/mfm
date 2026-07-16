@@ -1,6 +1,6 @@
 use super::*;
 
-use mfm_replay::v1 as replay;
+use mfm_replay::v1::{self as replay, load_node_config as replay_node_config};
 
 use super::selection::{
     holding_fact_index_request, hydrate_btc_candidate, hydrate_evm_erc20_candidate,
@@ -42,7 +42,7 @@ pub fn verify_portfolio_replay(
         .iter()
         .map(|entry| holding_fact_index_request(&config, entry).map_err(replay_adapter_error))
         .collect::<replay::Result<Vec<_>>>()?;
-    let query_evidence = replay_fact_query_evidence_for_attempt(
+    let query_evidence = replay::fact_query_evidence_for_attempt(
         broker,
         &select_frame.node.node_id,
         &select_frame.produced.attempt_id,
@@ -264,18 +264,7 @@ where
 {
     let kind = S::kind().map_err(replay_adapter_error)?;
     let version = S::version().map_err(replay_adapter_error)?;
-    let frames = broker.produced_cell_frames_matching(|node, _cell, _produced| {
-        Ok(node.state_kind == kind && node.state_version == version)
-    })?;
-    if frames.len() != 1 {
-        return Err(replay_portfolio_mismatch(format!(
-            "portfolio replay requires exactly one {label} output"
-        )));
-    }
-    Ok(frames
-        .into_iter()
-        .next()
-        .expect("one replay frame was checked"))
+    replay::single_state_output_frame(broker, &kind, &version, label)
 }
 
 fn replay_input_values<T>(
@@ -285,14 +274,14 @@ fn replay_input_values<T>(
 where
     T: MfmValue + DeserializeOwned,
 {
-    replay_input_frames(
+    replay::produced_input_frames(
         broker,
         node,
         &T::semantic_id().map_err(replay_adapter_error)?,
         &T::schema_id().map_err(replay_adapter_error)?,
     )?
     .iter()
-    .map(decode_replay_value)
+    .map(replay::decode_produced_value)
     .collect()
 }
 
@@ -312,181 +301,17 @@ where
     Ok(values.into_iter().next().expect("one input was checked"))
 }
 
-fn replay_input_frames(
-    broker: &replay::ReplayBroker,
-    node: &mfm_spec::v1::NodeSpec,
-    semantic_type_id: &mfm_ids::SemanticTypeId,
-    schema_id: &mfm_ids::SchemaId,
-) -> replay::Result<Vec<replay::ProducedCellReplayFrame>> {
-    let mut cells = Vec::new();
-    collect_input_cells(
-        &node.input_bindings.root,
-        semantic_type_id,
-        schema_id,
-        &mut cells,
-    );
-    let mut frames = Vec::with_capacity(cells.len());
-    for input_cell in cells {
-        let matches = broker.produced_cell_frames_matching(|_node, cell, _produced| {
-            Ok(cell.cell_id == input_cell.cell_id)
-        })?;
-        if matches.len() != 1 {
-            return Err(replay_portfolio_mismatch(
-                "certified portfolio input cell did not have exactly one produced value",
-            ));
-        }
-        let frame = matches.into_iter().next().expect("one replay input frame");
-        if frame.cell.semantic_type_id != input_cell.semantic_type_id
-            || frame.cell.schema_id != input_cell.schema_id
-            || frame.cell.value_lineage != input_cell.value_lineage
-        {
-            return Err(replay_portfolio_mismatch(
-                "portfolio input cell metadata did not match its produced value",
-            ));
-        }
-        frames.push(frame);
-    }
-    Ok(frames)
-}
-
-fn collect_input_cells<'a>(
-    input: &'a mfm_spec::v1::InputBindingNodeSpec,
-    semantic_type_id: &mfm_ids::SemanticTypeId,
-    schema_id: &mfm_ids::SchemaId,
-    cells: &mut Vec<&'a mfm_spec::v1::InputBindingCellSpec>,
-) {
-    match input {
-        mfm_spec::v1::InputBindingNodeSpec::Unit => {}
-        mfm_spec::v1::InputBindingNodeSpec::Cell(cell) => {
-            if &cell.semantic_type_id == semantic_type_id && &cell.schema_id == schema_id {
-                cells.push(cell);
-            }
-        }
-        mfm_spec::v1::InputBindingNodeSpec::Tuple(elements)
-        | mfm_spec::v1::InputBindingNodeSpec::Vec { elements, .. }
-        | mfm_spec::v1::InputBindingNodeSpec::NonEmptyVec { elements, .. } => {
-            for element in elements {
-                collect_input_cells(element, semantic_type_id, schema_id, cells);
-            }
-        }
-        mfm_spec::v1::InputBindingNodeSpec::Struct(fields) => {
-            for field in fields {
-                collect_input_cells(&field.node, semantic_type_id, schema_id, cells);
-            }
-        }
-    }
-}
-
-fn decode_replay_value<T>(frame: &replay::ProducedCellReplayFrame) -> replay::Result<T>
-where
-    T: DeserializeOwned,
-{
-    serde_json::from_slice(&frame.artifact_bytes).map_err(replay_json_error)
-}
-
 fn verify_replay_output_bytes<T: serde::Serialize>(
     frame: &replay::ProducedCellReplayFrame,
     expected: &T,
     label: &'static str,
 ) -> replay::Result<()> {
-    if canonical_value_bytes(expected)? != frame.artifact_bytes {
+    if replay::canonical_value_bytes(expected)?.as_bytes() != frame.artifact_bytes {
         return Err(replay_portfolio_mismatch(format!(
             "portfolio {label} output did not match recomputed value"
         )));
     }
     Ok(())
-}
-
-fn replay_fact_query_evidence_for_attempt(
-    broker: &replay::ReplayBroker,
-    node_id: &mfm_ids::NodeId,
-    attempt_id: &mfm_ids::AttemptId,
-) -> replay::Result<Vec<FactQueryEvidence>> {
-    let mut evidence = Vec::new();
-    for event in broker.events() {
-        let events::KernelEventPayload::ArtifactReferenced(payload) = event.payload() else {
-            continue;
-        };
-        if payload.artifact_ref.role != events::ArtifactRole::FactQueryEvidence
-            || payload.node_id.as_ref() != Some(node_id)
-            || payload.attempt_id.as_ref() != Some(attempt_id)
-        {
-            continue;
-        }
-        let requirement = store::EventArtifactRequirement {
-            source: store::EventArtifactReferenceSource::ArtifactReferenced,
-            artifact_id: payload.artifact_ref.artifact_id.clone(),
-            evidence_hash: payload.artifact_ref.evidence_hash.clone(),
-            digest: Some(payload.artifact_ref.content_digest.clone()),
-            byte_len: Some(payload.artifact_ref.byte_len),
-            media_type: Some(payload.artifact_ref.media_type.clone()),
-            schema_id: Some(payload.artifact_ref.schema_id.clone()),
-            semantic_type_id: payload.artifact_ref.semantic_type_id.clone(),
-            producer_node_id: payload.node_id.clone(),
-            producer_seed_id: None,
-            artifact_role: Some(payload.artifact_ref.role),
-        };
-        let artifact = broker.retained_artifact(&requirement)?;
-        evidence.push(
-            mfm_facts::parse_canonical_fact_query_evidence_bytes(&artifact.artifact_bytes)
-                .map_err(replay_adapter_error)?,
-        );
-    }
-    Ok(evidence)
-}
-
-fn replay_node_config<T>(
-    broker: &replay::ReplayBroker,
-    node: &mfm_spec::v1::NodeSpec,
-) -> replay::Result<T>
-where
-    T: mfm_values::MfmConfig + DeserializeOwned,
-{
-    let config_evidence = store::ArtifactEvidenceRef {
-        artifact_id: node.config_ref.artifact_id.clone(),
-        digest: node.config_ref.digest.clone(),
-        byte_len: node.config_ref.byte_len,
-        media_type: node.config_ref.media_type.clone(),
-        schema_id: Some(node.config_ref.schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::TypedConfig,
-    };
-    let requirement = store::EventArtifactRequirement {
-        source: store::EventArtifactReferenceSource::RunConfig,
-        artifact_id: node.config_ref.artifact_id.clone(),
-        evidence_hash: config_evidence
-            .evidence_hash()
-            .map_err(replay_adapter_error)?,
-        digest: Some(node.config_ref.digest.clone()),
-        byte_len: Some(node.config_ref.byte_len),
-        media_type: Some(node.config_ref.media_type.clone()),
-        schema_id: Some(node.config_ref.schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: Some(events::ArtifactRole::TypedConfig),
-    };
-    let artifact = broker.retained_artifact(&requirement)?;
-    let config: T = serde_json::from_slice(&artifact.artifact_bytes).map_err(replay_json_error)?;
-    ValidatedConfig::new(config)
-        .map(ValidatedConfig::into_inner)
-        .map_err(replay_adapter_error)
-}
-
-fn canonical_value_bytes<T: serde::Serialize>(value: &T) -> replay::Result<Vec<u8>> {
-    let json = serde_json::to_string(value).map_err(replay_json_error)?;
-    PlainCanonicalJsonBytes::from_json_str(&json)
-        .map(|bytes| bytes.as_bytes().to_vec())
-        .map_err(replay_adapter_error)
-}
-
-fn replay_json_error(error: serde_json::Error) -> replay::ReplayError {
-    replay::ReplayError::new(
-        replay::ReplayErrorKind::CertifiedEvidenceMismatch,
-        error.to_string(),
-    )
 }
 
 fn replay_adapter_error(error: impl std::fmt::Display) -> replay::ReplayError {

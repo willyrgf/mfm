@@ -9,7 +9,6 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use mfm_artifact_capabilities::{fact_response_artifact_requirement, hydrate_fact_response_json};
-use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1 as events;
 use mfm_fact_capabilities::{FactIndexReadProvider, FactIndexReadRequest};
 use mfm_facts::{
